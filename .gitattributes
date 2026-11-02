@@ -1,0 +1,8 @@
+* text=auto
+*.rs text eol=lf
+*.dll binary
+*.ttf binary
+*.pdf binary
+*.zip binary
+*.jpg binary
+*.png binary

@@ -1,0 +1,18 @@
+[package]
+name = "vf-fs"
+version.workspace = true
+edition.workspace = true
+license-file.workspace = true
+publish.workspace = true
+
+[dependencies]
+filer-core = { path = "../filer-core" }
+filer-intake = { path = "../filer-intake" }
+vf-core = { path = "../vf-core" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

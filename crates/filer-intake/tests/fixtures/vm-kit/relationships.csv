@@ -1,0 +1,5 @@
+parent_id,child_id,role,note
+4472,2093,partner,
+1234,2093,shareholder,
+1234,1042,shareholder,
+1234,4471,member,

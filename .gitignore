@@ -1,0 +1,7 @@
+/target
+/data
+/dist
+/fixtures/cabinet/
+*.db
+*.db-wal
+*.db-shm
