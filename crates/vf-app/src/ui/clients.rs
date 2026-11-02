@@ -302,12 +302,12 @@ pub struct RelForm {
     pub error: Option<String>,
 }
 
-/// The selected client's details. `others` is `(id, name, ext_id)` for the related-client pick.
+/// The selected client's details. `others` are the clients offered as the related client.
 pub fn client_panel(
     ui: &mut egui::Ui,
     client: &vf_core::browse::ClientRow,
     rels: &[clients::RelRow],
-    others: &[(String, String, String)],
+    others: &[vf_core::browse::ClientRow],
     form: &mut RelForm,
 ) -> Option<ClientEdit> {
     let mut edit = None;
@@ -358,17 +358,21 @@ pub fn client_panel(
     let other_name = form
         .other
         .as_ref()
-        .and_then(|id| others.iter().find(|o| &o.0 == id))
+        .and_then(|id| others.iter().find(|o| &o.id == id))
         .map_or("Related client…".to_owned(), |o| {
-            format!("{} ({})", o.1, o.2)
+            format!("{} ({})", o.name, o.ext_id)
         });
     let lo = ui.label("Related client");
     egui::ComboBox::from_id_salt("rel_other")
         .selected_text(other_name)
         .width(260.0)
         .show_ui(ui, |ui| {
-            for (id, name, ext) in others.iter().filter(|o| o.0 != client.id) {
-                ui.selectable_value(&mut form.other, Some(id.clone()), format!("{name} ({ext})"));
+            for o in others.iter().filter(|o| o.id != client.id) {
+                ui.selectable_value(
+                    &mut form.other,
+                    Some(o.id.clone()),
+                    format!("{} ({})", o.name, o.ext_id),
+                );
             }
         })
         .response

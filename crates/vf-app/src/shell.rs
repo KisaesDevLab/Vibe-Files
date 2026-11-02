@@ -1,6 +1,6 @@
 //! Open-with (PHASES P01 step 8): open a document in its registered app, show it in Explorer.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Opens `path` with the app Windows has registered for it (ShellExecute "open").
 #[cfg(windows)]
@@ -55,7 +55,10 @@ pub fn reveal(path: &Path) -> Result<(), String> {
     Err(format!("showing {} needs Windows", path.display()))
 }
 
-/// Absolute path of a cabinet-relative document path.
-pub fn abs(root: &Path, rel: &str) -> std::path::PathBuf {
-    rel.split('/').fold(root.to_path_buf(), |p, s| p.join(s))
+/// The folder holding `vibe-files.exe` (pdfium.dll and the DLLs live beside it).
+pub fn exe_dir() -> PathBuf {
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(Path::to_path_buf))
+        .unwrap_or_default()
 }

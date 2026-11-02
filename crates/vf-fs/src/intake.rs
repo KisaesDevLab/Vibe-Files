@@ -32,7 +32,8 @@ use vf_core::audit::AuditEntry;
 use vf_core::db::{self, CatalogKey, Connection, Storage};
 use vf_core::tx::{Actor, Committed, FileOp, NoFileOps, Stmt, Transaction};
 
-use crate::cabinet::{self, CabinetFile, VersionSidecar};
+use crate::cabinet::{self, CabinetFile, VersionSidecar, rel};
+use crate::clients::ext_map;
 use crate::fileops::FilerFileOps;
 use crate::rebuild::{mime, year_from_path};
 
@@ -65,19 +66,6 @@ impl CatalogTarget {
     }
 }
 
-fn rel(root: &Path, p: &Path) -> String {
-    p.strip_prefix(root)
-        .unwrap_or(p)
-        .to_string_lossy()
-        .replace('\\', "/")
-}
-
-fn ext_map(conn: &Connection) -> vf_core::Result<HashMap<String, String>> {
-    let mut st = conn.prepare("SELECT ext_id, id FROM client WHERE deleted_at IS NULL")?;
-    let rows = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
-    Ok(rows.collect::<Result<_, _>>()?)
-}
-
 fn doc_type_id(conn: &Connection, name: &str) -> Option<String> {
     conn.query_row(
         "SELECT id FROM doc_type WHERE name = ?1 COLLATE NOCASE AND deleted_at IS NULL",
@@ -93,6 +81,8 @@ struct Written<'a> {
     src: Option<&'a Path>,
     dst: &'a Path,
     client_ext: &'a str,
+    /// `(sha256, bytes)` when Filer already verified them (copies, zip entries).
+    known: Option<(&'a str, u64)>,
 }
 
 /// The catalog Transaction for a batch Filer has just filed. Doc type, source and tax year come
@@ -107,7 +97,17 @@ pub fn record_batch(
     let now = vf_core::now_rfc3339();
     let dev = t.actor.device_id.clone();
     let clients = ext_map(conn)?;
-    let hints = t.hints.lock().map(|h| h.clone()).unwrap_or_default();
+    // Only this batch's hints, not a copy of the whole table.
+    let hints: HashMap<PathBuf, Hint> = {
+        let all = t
+            .hints
+            .lock()
+            .map_err(|_| vf_core::Error::Tx("hint table is poisoned".into()))?;
+        lb.items
+            .iter()
+            .filter_map(|i| all.get(&i.src).map(|h| (i.src.clone(), h.clone())))
+            .collect()
+    };
 
     let mut written: Vec<Written<'_>> = Vec::new();
     for it in &lb.items {
@@ -116,6 +116,7 @@ pub fn record_batch(
             src: Some(&it.src),
             dst: &it.dst,
             client_ext: &it.client_id,
+            known: None,
         });
         for c in &it.copies {
             written.push(Written {
@@ -123,6 +124,7 @@ pub fn record_batch(
                 src: Some(&it.src),
                 dst: &c.dst,
                 client_ext: &c.client_id,
+                known: Some((&c.sha256, c.bytes)),
             });
         }
     }
@@ -132,6 +134,7 @@ pub fn record_batch(
             src: None,
             dst: &z.dst,
             client_ext: &z.client_id,
+            known: Some((&z.sha256, z.bytes)),
         });
     }
 
@@ -143,8 +146,13 @@ pub fn record_batch(
             continue; // Filer reported it, but it is not there (failed later in the batch)
         }
         let rel_path = rel(root, w.dst);
-        let hash = sha256_file(w.dst).map_err(|e| vf_core::Error::Tx(e.to_string()))?;
-        let size = std::fs::metadata(w.dst).map(|m| m.len()).unwrap_or(0) as i64;
+        let (hash, size) = match w.known {
+            Some((h, b)) => (h.to_owned(), b as i64),
+            None => (
+                sha256_file(w.dst).map_err(|e| vf_core::Error::Tx(e.to_string()))?,
+                std::fs::metadata(w.dst).map(|m| m.len()).unwrap_or(0) as i64,
+            ),
+        };
         let client = clients.get(w.client_ext.trim()).cloned();
         let hint = w
             .src
@@ -267,7 +275,21 @@ pub fn record_batch(
         ))
         .extra(json!({"filer_batch": lb.batch.to_string(), "docs": new_ids, "replaced": replaced}));
     let mut fs = FilerFileOps::new(&[root]).map_err(|e| vf_core::Error::Tx(e.to_string()))?;
-    Ok(Some(tx.commit(conn, &mut fs, &t.actor)?))
+    let done = tx.commit(conn, &mut fs, &t.actor)?;
+    if let Ok(mut all) = t.hints.lock() {
+        for src in hints.keys() {
+            all.remove(src);
+        }
+    }
+    after_commit(conn, &t.root);
+    Ok(Some(done))
+}
+
+/// Derived files follow every Intake commit / undo; a failure here is not the batch's.
+fn after_commit(conn: &Connection, root: &Path) {
+    if let Err(e) = cabinet::sync_derived(conn, root) {
+        tracing::warn!(error = %e, "derived files not updated after intake");
+    }
 }
 
 /// After Filer undid `lb`: make the catalog match the disk for that batch.
@@ -310,7 +332,7 @@ pub fn reconcile_undo(
             conn.query_row("SELECT rel_path FROM document WHERE id = ?1", [&id], |r| {
                 r.get(0)
             })?;
-        if !t.root.join(&rel_path).is_file() {
+        if !cabinet::abs(&t.root, &rel_path).is_file() {
             tx = tx
                 .catalog(Stmt::new(
                     "UPDATE document SET deleted_at = ?2, tombstone_reason = 'intake undone', device_id = ?3, updated_at = ?2, rev = rev + 1 WHERE id = ?1",
@@ -329,7 +351,7 @@ pub fn reconcile_undo(
             conn.query_row("SELECT rel_path FROM document WHERE id = ?1", [&id], |r| {
                 r.get(0)
             })?;
-        let p = t.root.join(&rel_path);
+        let p = cabinet::abs(&t.root, &rel_path);
         if let Ok(h) = sha256_file(&p) {
             let size = std::fs::metadata(&p).map(|m| m.len()).unwrap_or(0) as i64;
             tx = tx
@@ -364,7 +386,9 @@ pub fn reconcile_undo(
         None,
         json!({"batch": lb.batch.to_string(), "tx": tx_id, "back": back}),
     ));
-    Ok(Some(tx.commit(conn, &mut NoFileOps, &t.actor)?))
+    let done = tx.commit(conn, &mut NoFileOps, &t.actor)?;
+    after_commit(conn, &t.root);
+    Ok(Some(done))
 }
 
 fn catalog_error_outcome(e: &str) -> String {
@@ -498,6 +522,8 @@ pub fn prepare_filer_dir(
     s.root = Some(root.to_path_buf());
     s.firm_id = Some(Uuid::parse_str(&cab.firm_id).map_err(|e| format!("cabinet firm id: {e}"))?);
     s.csv_path = None; // the client list comes from the catalog
+    // The spec's light theme, so the Intake tab and the Vibe Files chrome around it agree.
+    s.display.theme = filer_core::config::ThemeChoice::Light;
     if s.inboxes.is_empty() {
         std::fs::create_dir_all(default_inbox).map_err(|e| e.to_string())?;
         s.inboxes.push(default_inbox.to_path_buf());
@@ -540,7 +566,7 @@ pub fn prepare_filer_dir(
             }
             tx.commit(conn, &mut NoFileOps, actor)
                 .map_err(|e| e.to_string())?;
-            crate::clients::mirror_relationships(conn, root).map_err(|e| e.to_string())?;
+            cabinet::sync_derived(conn, root)?;
         }
     }
     let ours = crate::clients::to_filer(conn).map_err(|e| e.to_string())?;

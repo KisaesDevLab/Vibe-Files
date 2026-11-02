@@ -22,7 +22,7 @@ use vf_core::audit::AuditEntry;
 use vf_core::db::Connection;
 use vf_core::tx::{Actor, Committed, FileOp, NoFileOps, Stmt, Transaction};
 
-use crate::cabinet::{CabinetFile, VIBE_DIR};
+use crate::cabinet::{CabinetFile, VIBE_DIR, rel};
 use crate::fileops::FilerFileOps;
 
 /// Entity types offered in the client editor: `(stored value, label)`.
@@ -71,13 +71,6 @@ pub fn template(root: &Path) -> TemplateNode {
     template::load_or_seed(&root.join(VIBE_DIR)).0
 }
 
-fn rel(root: &Path, p: &Path) -> String {
-    p.strip_prefix(root)
-        .unwrap_or(p)
-        .to_string_lossy()
-        .replace('\\', "/")
-}
-
 /// Sentinel JSON exactly as Filer's `write_sentinel` produces it.
 fn sentinel_json(client: &Client, firm_id: Uuid) -> String {
     let s = Sentinel {
@@ -92,27 +85,16 @@ fn sentinel_json(client: &Client, firm_id: Uuid) -> String {
     serde_json::to_string_pretty(&s).expect("sentinel serializes")
 }
 
-fn sha256_hex(s: &str) -> String {
-    use sha2::Digest;
-    sha2::Sha256::digest(s.as_bytes())
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
-}
-
 fn firm_uuid(cab: &CabinetFile) -> Result<Uuid> {
     Uuid::parse_str(&cab.firm_id)
         .map_err(|_| ClientError::Invalid("cabinet.json has no valid firm id".into()))
 }
 
-fn live_ext_ids(conn: &Connection) -> Result<HashMap<String, String>> {
-    let mut st = conn.prepare("SELECT ext_id, id FROM client WHERE deleted_at IS NULL")?;
+/// Live clients' CSV ID → catalog id.
+pub(crate) fn ext_map(conn: &Connection) -> vf_core::Result<HashMap<String, String>> {
+    let mut st = conn.prepare_cached("SELECT ext_id, id FROM client WHERE deleted_at IS NULL")?;
     let rows = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
-    Ok(rows.collect::<rusqlite_result::Result<_>>()?)
-}
-
-mod rusqlite_result {
-    pub type Result<T> = std::result::Result<T, vf_core::db::SqlError>;
+    Ok(rows.collect::<std::result::Result<_, _>>()?)
 }
 
 /// File ops creating a client's folder tree (template, year folders left out) and sentinel.
@@ -135,7 +117,7 @@ fn folder_ops(
         ops.push(FileOp::Mkdir { path: full });
     }
     let json = sentinel_json(client, firm);
-    let hash = sha256_hex(&json);
+    let hash = crate::fileops::sha256_hex(json.as_bytes());
     ops.push(FileOp::WriteNew {
         path: sentinel::sentinel_path(&folder),
         contents: json,
@@ -181,7 +163,7 @@ pub fn create_client(
     if ext.is_empty() || name.is_empty() {
         return invalid("Enter the client ID and name.");
     }
-    if live_ext_ids(conn)?.contains_key(ext) {
+    if ext_map(conn)?.contains_key(ext) {
         return invalid(format!("Client ID {ext} is already in the cabinet."));
     }
     let client = Client {
@@ -292,7 +274,7 @@ pub fn plan_import(
         .query_map([], |r| {
             Ok((r.get(0)?, (r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))
         })?
-        .collect::<rusqlite_result::Result<_>>()?;
+        .collect::<std::result::Result<_, _>>()?;
     let mut rows = Vec::new();
     for c in &list.clients {
         let mut c = c.clone();
@@ -375,7 +357,7 @@ pub fn commit_import(
             FolderState::Bound(_) => {}
             FolderState::Discovered(name) => {
                 let json = sentinel_json(&c, firm);
-                sentinel_hash = Some(sha256_hex(&json));
+                sentinel_hash = Some(crate::fileops::sha256_hex(json.as_bytes()));
                 tx = tx.file(FileOp::WriteNew {
                     path: sentinel::sentinel_path(&root.join(name)),
                     contents: json,
@@ -549,7 +531,7 @@ pub fn relationships(conn: &Connection, client_id: &str) -> Result<Vec<RelRow>> 
             child_name: r.get(6)?,
         })
     })?;
-    Ok(rows.collect::<rusqlite_result::Result<_>>()?)
+    Ok(rows.collect::<std::result::Result<_, _>>()?)
 }
 
 type RelState = Option<(Option<f64>, Option<String>, Option<String>)>; // share, note, deleted_at
@@ -712,7 +694,7 @@ pub fn to_filer(conn: &Connection) -> Result<Relationships> {
         })
     })?;
     Ok(Relationships {
-        records: rows.collect::<rusqlite_result::Result<_>>()?,
+        records: rows.collect::<std::result::Result<_, _>>()?,
     })
 }
 

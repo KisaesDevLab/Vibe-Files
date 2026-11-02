@@ -67,6 +67,11 @@ impl Config {
         Ok(cfg)
     }
 
+    /// Reads `config.toml` without creating anything (background workers).
+    pub fn load(data: &Path) -> Option<Config> {
+        toml::from_str(&std::fs::read_to_string(path(data)).ok()?).ok()
+    }
+
     /// Atomic replace (write a temp file, then rename over).
     pub fn save(&self, data: &Path) -> Result<()> {
         let p = path(data);

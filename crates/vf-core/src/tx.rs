@@ -136,6 +136,8 @@ pub struct Transaction {
 #[derive(Debug)]
 pub struct Committed {
     pub tx_id: String,
+    /// The transaction's label (as shown for Undo).
+    pub label: String,
     pub applied: Vec<AppliedOp>,
     pub audit: Vec<AuditRow>,
 }
@@ -179,6 +181,7 @@ impl Transaction {
             return Err(Error::Tx("every transaction needs an audit entry".into()));
         }
         let tx_id = uuid::Uuid::now_v7().to_string();
+        let label = self.label.clone();
         let ts = crate::now_rfc3339();
         let sql_tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         for s in &self.catalog {
@@ -228,7 +231,7 @@ impl Transaction {
                     actor.user,
                     actor.device_id,
                     ts,
-                    self.label,
+                    label,
                     serde_json::to_string(&record).expect("undo record serializes")
                 ],
             )
@@ -243,6 +246,7 @@ impl Transaction {
         }
         Ok(Committed {
             tx_id,
+            label,
             applied,
             audit: rows,
         })

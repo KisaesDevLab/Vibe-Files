@@ -53,6 +53,20 @@ pub fn ready_files(dir: &Path, exts: &[&str]) -> Vec<PathBuf> {
     out
 }
 
+/// Moves a file that could not be processed to `<its folder>/failed/`, so the next pass does not
+/// retry it (and report it) again; the message says where it went. Put it back to retry.
+pub fn set_aside_failed(file: &Path, why: &str) -> String {
+    let dir = file.parent().unwrap_or(Path::new("")).join("failed");
+    let kept = std::fs::create_dir_all(&dir).ok().and_then(|()| {
+        let dst = filer_intake::commit::free_path(&dir.join(file.file_name().unwrap_or_default()));
+        std::fs::rename(file, &dst).ok().map(|()| dst)
+    });
+    match kept {
+        Some(dst) => format!("{}: {why} (moved to {})", file.display(), dst.display()),
+        None => format!("{}: {why}", file.display()),
+    }
+}
+
 /// Moves `file` into `inbox` unchanged (free name).
 pub fn queue_as_is(file: &Path, inbox: &Path) -> Result<PathBuf, String> {
     std::fs::create_dir_all(inbox).map_err(|e| e.to_string())?;
@@ -78,9 +92,9 @@ pub fn process_scans(
             Ok(Some(r)) => pass.routed += r.len(),
             Ok(None) => match queue_as_is(&f, inbox) {
                 Ok(_) => pass.queued += 1,
-                Err(e) => pass.errors.push(e),
+                Err(e) => pass.errors.push(set_aside_failed(&f, &e)),
             },
-            Err(e) => pass.errors.push(format!("{}: {e}", f.display())),
+            Err(e) => pass.errors.push(set_aside_failed(&f, &e)),
         }
     }
     pass
@@ -116,6 +130,7 @@ pub fn process_photos(dirs: &[PathBuf], inbox: &Path) -> Pass {
             let _ = std::fs::remove_dir(&work);
             match r {
                 Ok(()) => pass.queued += 1,
+                Err(e) if f.exists() => pass.errors.push(set_aside_failed(&f, &e)),
                 Err(e) => pass.errors.push(format!("{}: {e}", f.display())),
             }
         }
@@ -156,13 +171,7 @@ mod photo_tests {
     }
 
     fn photo_routes_by_rule(make: &dyn Fn(&Path), ext: &str) {
-        use std::collections::HashMap;
-        use std::sync::Arc;
-
-        use filer_core::rules;
-        use filer_intake::intake::{Kind, QueuedFile, Source};
-        use filer_intake::plan::{self, PlanInput, Rescan, RowStatus};
-        use filer_intake::sentinel::{self, FoldersFile, ScanInput};
+        use filer_intake::plan::RowStatus;
 
         use crate::clients::{NewClient, create_client, template as cab_template};
         use crate::intake::prepare_filer_dir;
@@ -211,48 +220,14 @@ mod photo_tests {
             "photo kept"
         );
 
-        let clients = Arc::new(filer_core::clients::load_cache(&filer).unwrap().unwrap());
-        let bindings = sentinel::scan_root(
-            &ScanInput {
-                root: w.root.clone(),
-                clients: clients.clone(),
-                id_pattern: filer_core::parse::DEFAULT_ID_PATTERN.into(),
-                threshold: 0.85,
-                ignored: vec![],
-            },
-            &Default::default(),
-        )
-        .unwrap();
-        let out = plan::build_plan(&PlanInput {
-            files: vec![QueuedFile {
-                path: pdf.clone(),
-                size: std::fs::metadata(&pdf).unwrap().len(),
-                added: chrono::Local::now(),
-                source: Source::Inbox(inbox.clone()),
-                kind: Kind::Pdf,
-            }],
-            edits: HashMap::new(),
-            batch: Default::default(),
-            clients: Some(clients),
-            rules: rules::load_or_seed(&filer).0.active_rules().to_vec(),
-            template: tpl,
-            folders: Some(FoldersFile {
-                root: w.root.clone(),
-                scanned_at: chrono::Utc::now(),
-                folders: bindings,
-                ignored: vec![],
-            }),
-            root: Some(w.root.clone()),
-            id_pattern: filer_core::parse::DEFAULT_ID_PATTERN.into(),
-            fuzzy_suggest: filer_core::config::DEFAULT_FUZZY_SUGGEST,
-            fuzzy_auto: filer_core::config::DEFAULT_FUZZY_AUTO,
-            current_year: 2026,
-            sniff_enabled: false,
-            sniff: HashMap::new(),
-            rescan: Rescan::Done,
-            partial: vec![],
-            relationships: Arc::new(Default::default()),
-        });
+        let desk = crate::testkit::Desk {
+            root: &w.root,
+            filer: &filer,
+            inbox: &inbox,
+            tpl: &tpl,
+            cab: &w.cab,
+        };
+        let out = desk.plan(std::slice::from_ref(&pdf));
         let p = &out.proposals[0];
         assert_eq!(p.status, RowStatus::Ready, "{:?}", p.dest);
         assert_eq!(p.rule_name, "Payroll");

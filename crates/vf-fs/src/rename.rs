@@ -8,7 +8,7 @@
 //! (` (2)`). The batch is one Transaction.
 
 use std::collections::{BTreeMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use filer_core::parse;
 use filer_core::template::{self, Tokens};
@@ -17,6 +17,7 @@ use vf_core::audit::AuditEntry;
 use vf_core::db::Connection;
 use vf_core::tx::{Actor, Committed, FileOp, Stmt, Transaction};
 
+use crate::cabinet::abs;
 use crate::fileops::FilerFileOps;
 
 /// Default suggestion: Filer's `ClientName_ID_rest.ext` convention.
@@ -113,10 +114,6 @@ fn join_rel(dir: &str, name: &str) -> String {
     } else {
         format!("{dir}/{name}")
     }
-}
-
-fn abs(root: &Path, rel: &str) -> PathBuf {
-    rel.split('/').fold(root.to_path_buf(), |p, s| p.join(s))
 }
 
 /// `name (2).ext`, `name (3).ext`, ... like Filer's `free_path`, also avoiding names other rows

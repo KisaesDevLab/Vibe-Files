@@ -11,6 +11,7 @@ use crate::{Error, Result};
 const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/001_initial.sql"),
     include_str!("../migrations/002_user_views.sql"),
+    include_str!("../migrations/003_audit_doc_index.sql"),
 ];
 
 /// Schema version this build writes.
@@ -184,19 +185,19 @@ mod tests {
         assert_eq!(baks, 0);
     }
 
-    /// A v1 catalog (P00) moves to v2 with a keyed backup first.
+    /// A v1 catalog (P00) migrates to the current schema with a keyed backup first.
     #[test]
-    fn v1_catalog_migrates_to_v2_with_backup() {
+    fn v1_catalog_migrates_forward_with_backup() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("catalog.db");
         let conn = open(&path, &key(7), Storage::Local).unwrap();
         conn.execute_batch(
-            "DROP TABLE user_pin; DROP TABLE user_favorite; DROP TABLE user_recent; PRAGMA user_version = 1;",
+            "DROP TABLE user_pin; DROP TABLE user_favorite; DROP TABLE user_recent; DROP INDEX audit_doc; PRAGMA user_version = 1;",
         )
         .unwrap();
         drop(conn);
         let conn = open(&path, &key(7), Storage::Local).unwrap();
-        assert_eq!(user_version(&conn).unwrap(), 2);
+        assert_eq!(user_version(&conn).unwrap(), SCHEMA_VERSION);
         assert_eq!(tables(&conn), TABLES);
         let baks: Vec<_> = std::fs::read_dir(tmp.path())
             .unwrap()

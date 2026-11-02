@@ -134,23 +134,24 @@ fn rotate(img: &DynamicImage, deg: f32) -> DynamicImage {
 /// Normalizes `img` for filing: deskewed (when the skew is at least 0.3°) and no bigger than
 /// Letter at 300 dpi.
 pub fn normalize(img: DynamicImage) -> DynamicImage {
+    // Measure the skew, downscale, then rotate the smaller image (rotation keeps the canvas size).
     let angle = skew_angle(&img);
-    // `skew_angle` is the rotation that shows the lines straight in its own frame; turning the
-    // image the opposite way straightens it.
-    let img = if angle.abs() >= 0.3 {
-        rotate(&img, -angle)
-    } else {
-        img
-    };
     let (w, h) = (img.width(), img.height());
     let (long, short) = (w.max(h), w.min(h));
     let scale = (MAX_LONG as f32 / long as f32).min(MAX_SHORT as f32 / short as f32);
-    if scale < 1.0 {
+    let img = if scale < 1.0 {
         img.resize(
             (w as f32 * scale).round() as u32,
             (h as f32 * scale).round() as u32,
             image::imageops::FilterType::Lanczos3,
         )
+    } else {
+        img
+    };
+    // `skew_angle` is the rotation that shows the lines straight in its own frame; turning the
+    // image the opposite way straightens it.
+    if angle.abs() >= 0.3 {
+        rotate(&img, -angle)
     } else {
         img
     }
@@ -161,7 +162,7 @@ pub fn write_pdf(img: &DynamicImage, out: &Path) -> Result<(), String> {
     let rgb = img.to_rgb8();
     let mut jpeg = Vec::new();
     image::codecs::jpeg::JpegEncoder::new_with_quality(Cursor::new(&mut jpeg), 85)
-        .encode_image(&DynamicImage::ImageRgb8(rgb.clone()))
+        .encode_image(&rgb)
         .map_err(|e| format!("cannot encode JPEG: {e}"))?;
     let (w, h) = (rgb.width(), rgb.height());
     let (pw, ph) = (w as f32 / DPI * 72.0, h as f32 / DPI * 72.0);

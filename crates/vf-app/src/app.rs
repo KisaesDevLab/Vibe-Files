@@ -46,14 +46,13 @@ impl Tab {
         }
     }
 
+    /// Text for the tabs whose phase has not landed yet (Browse, Intake and Admin draw their own).
     fn placeholder(self) -> &'static str {
         match self {
-            Tab::Browse => "Create your first client or run the import wizard.",
-            Tab::Intake => "Intake mounts the vendored Filer Desktop engine (P02).",
             Tab::Search => "Full-text search arrives with OCR and indexing (P03).",
             Tab::Viewer => "The PDF viewer arrives in P04.",
             Tab::Sync => "B2 sync arrives in P11.",
-            Tab::Admin => "Users, doc types, audit and compliance settings.",
+            Tab::Browse | Tab::Intake | Tab::Admin => "",
         }
     }
 }
@@ -81,6 +80,8 @@ pub struct Workspace {
     pub doc_types: Vec<vf_core::doctype::DocType>,
     doc_types_gen: i64,
     pub meta_form: crate::ui::meta::MetaForm,
+    /// The selected client's relationships, keyed by (catalog generation, client id).
+    rels_cache: Option<((i64, String), Vec<vf_fs::clients::RelRow>)>,
     /// The Intake tab (vendored Filer Desktop), started on the first frame.
     pub intake: Option<crate::ui::intake::IntakeTab>,
     pub intake_error: Option<String>,
@@ -101,7 +102,10 @@ fn pane() -> egui::Frame {
 impl Workspace {
     pub fn new(session: Session) -> Self {
         let mut browse = Browse::for_user(session.actor.user.clone().unwrap_or_default());
-        browse.refresh(&session.conn);
+        browse.refresh(
+            &session.conn,
+            vf_core::browse::generation(&session.conn).unwrap_or(-2),
+        );
         let template = vf_fs::clients::template(&session.root);
         Self {
             session,
@@ -115,6 +119,7 @@ impl Workspace {
             doc_types: Vec::new(),
             doc_types_gen: -1,
             meta_form: Default::default(),
+            rels_cache: None,
             intake: None,
             intake_error: None,
             hints: Default::default(),
@@ -137,7 +142,12 @@ impl Workspace {
             }
         }
         if let Some(t) = &mut self.intake
-            && let Err(e) = t.sync(ctx, &mut self.session, &self.template)
+            && let Err(e) = t.sync(
+                ctx,
+                &mut self.session,
+                &self.template,
+                self.browse.generation(),
+            )
         {
             self.intake_error = Some(e);
         }
@@ -192,10 +202,8 @@ impl Workspace {
             .map_err(|e| vf_core::Error::Tx(e.to_string()))
             .and_then(|mut fs| vf_core::tx::undo(&mut s.conn, &mut fs, &s.actor, &tx));
         match r {
-            Ok(rows) => {
-                let dir = s.root.join(vf_fs::cabinet::VIBE_DIR).join("audit");
-                let _ = vf_core::audit::mirror_append(&dir, &rows);
-                let _ = vf_fs::clients::mirror_relationships(&s.conn, &s.root);
+            Ok(_) => {
+                self.sync_derived();
                 self.notice = Some(format!("Undone: {label}."));
                 self.last_tx = None;
             }
@@ -205,8 +213,9 @@ impl Workspace {
 
     /// Re-reads catalog-derived state when anything changed.
     pub fn refresh(&mut self) {
-        self.browse.refresh(&self.session.conn);
+        // The one catalog-generation read per frame; everything below keys its caches on it.
         let generation = vf_core::browse::generation(&self.session.conn).unwrap_or(-2);
+        self.browse.refresh(&self.session.conn, generation);
         if generation != self.doc_types_gen {
             self.doc_types = vf_core::doctype::list(&self.session.conn, true).unwrap_or_default();
             self.doc_types_gen = generation;
@@ -229,17 +238,15 @@ impl Workspace {
                         let s = &mut self.session;
                         let r = match a {
                             admin::DocTypeAction::Save(e) => {
-                                vf_core::doctype::save(&mut s.conn, &s.actor, &e)
-                                    .map(|(_, d)| (d, "doc type"))
+                                vf_core::doctype::save(&mut s.conn, &s.actor, &e).map(|(_, d)| d)
                             }
                             admin::DocTypeAction::Archive(id, to) => {
                                 vf_core::doctype::set_archived(&mut s.conn, &s.actor, &id, to)
-                                    .map(|d| (d, "archive doc type"))
                             }
                         };
                         match r {
-                            Ok((done, label)) => {
-                                self.committed(&done, label);
+                            Ok(done) => {
+                                self.committed(&done);
                                 self.admin.edit = None;
                                 self.admin.error = None;
                             }
@@ -251,7 +258,6 @@ impl Workspace {
                     let s = &mut self.session;
                     let folder = crate::config::print_capture(&s.data, &s.config);
                     let parsers = vf_fs::capture::parsers_dir(&s.data);
-                    let _ = vf_fs::capture::seed_profiles(&parsers);
                     let is_default = s.config.print_capture.is_none();
                     if let Some(a) = self.admin.capture_ui(ui, &folder, is_default, &parsers) {
                         s.config.print_capture = match a {
@@ -267,20 +273,19 @@ impl Workspace {
             });
     }
 
-    /// Every app-level commit lands here: mirror the audit rows to `_Vibe/audit/*.jsonl` and
-    /// remember the transaction for Undo.
-    pub fn committed(&mut self, c: &vf_core::tx::Committed, label: &str) {
-        let dir = self
-            .session
-            .root
-            .join(vf_fs::cabinet::VIBE_DIR)
-            .join("audit");
-        if let Err(e) = vf_core::audit::mirror_append(&dir, &c.audit) {
+    /// Every app-level commit lands here: bring the cabinet's derived files (audit mirror,
+    /// relationships.json) up to date and remember the transaction for Undo.
+    pub fn committed(&mut self, c: &vf_core::tx::Committed) {
+        self.sync_derived();
+        self.last_tx = Some((c.tx_id.clone(), c.label.clone()));
+    }
+
+    fn sync_derived(&mut self) {
+        if let Err(e) = vf_fs::cabinet::sync_derived(&self.session.conn, &self.session.root) {
             self.notice = Some(format!(
-                "Saved, but the audit mirror could not be written: {e}"
+                "Saved, but the cabinet's derived files were not updated: {e}"
             ));
         }
-        self.last_tx = Some((c.tx_id.clone(), label.to_owned()));
     }
 
     fn toolbar(&mut self, ui: &mut egui::Ui) {
@@ -349,7 +354,7 @@ impl Workspace {
                 .add_enabled(one.is_some(), egui::Button::new("Open in Explorer"))
                 .clicked()
                 && let Some((_, rel)) = &one
-                && let Err(e) = crate::shell::reveal(&crate::shell::abs(&self.session.root, rel))
+                && let Err(e) = crate::shell::reveal(&vf_fs::cabinet::abs(&self.session.root, rel))
             {
                 self.notice = Some(e);
             }
@@ -358,15 +363,11 @@ impl Workspace {
                 .clicked()
                 && let Some((_, rel)) = &one
             {
-                let p = crate::shell::abs(&self.session.root, rel);
+                let p = vf_fs::cabinet::abs(&self.session.root, rel);
                 ui.ctx().copy_text(p.display().to_string());
                 self.notice = Some(format!("Copied {}", p.display()));
             }
-            let user = self.session.actor.user.clone().unwrap_or_default();
-            let all_pinned = !sel.is_empty()
-                && sel.iter().all(|id| {
-                    vf_core::views::is_pinned(&self.session.conn, &user, id).unwrap_or(false)
-                });
+            let all_pinned = !sel.is_empty() && sel.iter().all(|id| self.browse.is_pinned(id));
             let label = if all_pinned { "Unpin" } else { "Pin" };
             if ui
                 .add_enabled(!sel.is_empty(), egui::Button::new(label))
@@ -406,7 +407,7 @@ impl Workspace {
                         &s.actor,
                     ) {
                         Ok((id, done)) => {
-                            self.committed(&done, &format!("new client {}", c.name.trim()));
+                            self.committed(&done);
                             self.dialog = None;
                             self.browse.select_node(browse::Node::Client(id));
                         }
@@ -438,8 +439,7 @@ impl Workspace {
                     let rows = rd.rows.clone().unwrap_or_default();
                     match vf_fs::rename::commit(&mut s.conn, &s.root, &s.actor, &rows) {
                         Ok(Some(done)) => {
-                            let n = rows.iter().filter(|r| r.will_rename()).count();
-                            self.committed(&done, &format!("rename of {n} documents"));
+                            self.committed(&done);
                             self.dialog = None;
                         }
                         Ok(None) => self.dialog = None,
@@ -469,7 +469,7 @@ impl Workspace {
                     ) {
                         Ok((rep, done)) => {
                             if let Some(done) = done {
-                                self.committed(&done, "import clients");
+                                self.committed(&done);
                             }
                             self.notice = Some(format!(
                                 "Clients imported: {} added, {} updated, {} folders bound, {} created, {} without a folder.",
@@ -493,7 +493,6 @@ impl Workspace {
         let r = match e {
             ClientEdit::EntityType(t) => {
                 vf_fs::clients::set_entity_type(&mut s.conn, &s.actor, client_id, t.as_deref())
-                    .map(|d| (d, "entity type"))
             }
             ClientEdit::AddRel {
                 parent,
@@ -510,8 +509,7 @@ impl Workspace {
                 &kind,
                 share,
                 &note,
-            )
-            .map(|d| (d, "add relationship")),
+            ),
             ClientEdit::RemoveRel {
                 parent,
                 child,
@@ -523,12 +521,11 @@ impl Workspace {
                 &parent,
                 &child,
                 &kind,
-            )
-            .map(|d| (d, "remove relationship")),
+            ),
         };
         match r {
-            Ok((done, label)) => {
-                self.committed(&done, label);
+            Ok(done) => {
+                self.committed(&done);
                 self.rel_form = RelForm::default();
             }
             Err(e) => self.rel_form.error = Some(e.to_string()),
@@ -637,7 +634,7 @@ impl Workspace {
             });
         });
         if n > 0 {
-            let generation = vf_core::browse::generation(&self.session.conn).unwrap_or(0);
+            let generation = self.browse.generation();
             let rows: Vec<vf_core::browse::DocRow> =
                 self.browse.selected_rows().into_iter().cloned().collect();
             let refs: Vec<&vf_core::browse::DocRow> = rows.iter().collect();
@@ -646,9 +643,7 @@ impl Workspace {
                 let ids: Vec<String> = rows.iter().map(|r| r.id.clone()).collect();
                 let s = &mut self.session;
                 match vf_core::meta::bulk_edit(&mut s.conn, &s.actor, &ids, &change) {
-                    Ok(Some(done)) => {
-                        self.committed(&done, &format!("edit of {} documents", ids.len()))
-                    }
+                    Ok(Some(done)) => self.committed(&done),
                     Ok(None) => {}
                     Err(e) => self.meta_form.error = Some(e.to_string()),
                 }
@@ -664,16 +659,24 @@ impl Workspace {
                 .map(str::to_owned)
             && let Some(client) = self.browse.clients().iter().find(|c| c.id == cid).cloned()
         {
-            let conn = &self.session.conn;
-            let rels = vf_fs::clients::relationships(conn, &cid).unwrap_or_default();
-            let others: Vec<(String, String, String)> = vf_core::browse::clients(conn, "")
-                .unwrap_or_default()
-                .into_iter()
-                .map(|c| (c.id, c.name, c.ext_id))
-                .collect();
-            if let Some(e) =
-                client_ui::client_panel(ui, &client, &rels, &others, &mut self.rel_form)
-            {
+            let key = (self.browse.generation(), cid.clone());
+            if self.rels_cache.as_ref().map(|(k, _)| k) != Some(&key) {
+                let rels =
+                    vf_fs::clients::relationships(&self.session.conn, &cid).unwrap_or_default();
+                self.rels_cache = Some((key, rels));
+            }
+            let rels = self
+                .rels_cache
+                .as_ref()
+                .map(|(_, r)| r.clone())
+                .unwrap_or_default();
+            if let Some(e) = client_ui::client_panel(
+                ui,
+                &client,
+                &rels,
+                self.browse.all_clients(),
+                &mut self.rel_form,
+            ) {
                 self.client_edit(&cid, e);
             }
         }
@@ -681,7 +684,7 @@ impl Workspace {
 
     fn handle(&mut self, a: browse::Action) {
         let s = &mut self.session;
-        let r: Result<Option<(vf_core::tx::Committed, &str)>, String> = match a {
+        let r: Result<Option<vf_core::tx::Committed>, String> = match a {
             browse::Action::Open(id) => {
                 let rel = self
                     .browse
@@ -692,7 +695,7 @@ impl Workspace {
                 match rel {
                     None => Ok(None),
                     Some(rel) => {
-                        crate::shell::open(&crate::shell::abs(&s.root, &rel)).and_then(|()| {
+                        crate::shell::open(&vf_fs::cabinet::abs(&s.root, &rel)).and_then(|()| {
                             vf_core::views::record_open(&mut s.conn, &s.actor, &id)
                                 .map(|_| None) // an open is not something to undo
                                 .map_err(|e| e.to_string())
@@ -711,7 +714,7 @@ impl Workspace {
                             f.as_deref(),
                             &label,
                         )
-                        .map(|d| Some((d, "add favorite")))
+                        .map(Some)
                         .map_err(|e| e.to_string()),
                         None => Ok(None),
                     },
@@ -720,12 +723,12 @@ impl Workspace {
             }
             browse::Action::RemoveFavorite(id) => {
                 vf_core::views::remove_favorite(&mut s.conn, &s.actor, &id)
-                    .map(|d| Some((d, "remove favorite")))
+                    .map(Some)
                     .map_err(|e| e.to_string())
             }
         };
         match r {
-            Ok(Some((done, label))) => self.committed(&done, label),
+            Ok(Some(done)) => self.committed(&done),
             Ok(None) => {}
             Err(e) => self.notice = Some(e),
         }
@@ -735,7 +738,7 @@ impl Workspace {
         let ids: Vec<String> = self.browse.selected.iter().cloned().collect();
         let s = &mut self.session;
         match vf_core::views::set_pinned(&mut s.conn, &s.actor, &ids, pinned) {
-            Ok(Some(done)) => self.committed(&done, if pinned { "pin" } else { "unpin" }),
+            Ok(Some(done)) => self.committed(&done),
             Ok(None) => {}
             Err(e) => self.notice = Some(e.to_string()),
         }
@@ -921,7 +924,7 @@ mod tests {
         let (_tmp, mut h) = open_fixture();
         let w = h.state_mut().workspace().unwrap();
         assert_eq!(w.browse.totals, (60, 5));
-        let first = w.browse.clients_for_test()[0].clone();
+        let first = w.browse.clients()[0].clone();
         h.run();
         h.get_by_label(&first.name).click();
         h.run();

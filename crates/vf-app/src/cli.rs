@@ -58,7 +58,7 @@ pub fn parse_key(hex: &str) -> Result<CatalogKey> {
 
 /// Runs one subcommand; returns the process exit code.
 pub fn run(cmd: &Command, data: &Path, key: &CatalogKey, out: &mut dyn Write) -> Result<i32> {
-    let catalog = data.join("catalog.db");
+    let catalog = data.join(crate::session::CATALOG_FILE);
     match cmd {
         Command::Audit {
             cmd: AuditCmd::Verify,

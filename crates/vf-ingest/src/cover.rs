@@ -282,14 +282,13 @@ pub fn decode_rgba(rgba: &[u8], width: u32, height: u32) -> Option<Payload> {
         .iter()
         .map(|p| ((p[0] as u32 * 299 + p[1] as u32 * 587 + p[2] as u32 * 114) / 1000) as u8)
         .collect();
-    for format in [BarcodeFormat::QR_CODE, BarcodeFormat::CODE_128] {
-        if let Ok(r) = rxing::helpers::detect_in_luma(luma.clone(), width, height, Some(format))
-            && let Some(p) = Payload::decode(r.getText())
-        {
-            return Some(p);
-        }
-    }
-    None
+    // QR first (a copy of the buffer), then Code128 (the buffer itself).
+    let read = |luma: Vec<u8>, format| {
+        rxing::helpers::detect_in_luma(luma, width, height, Some(format))
+            .ok()
+            .and_then(|r| Payload::decode(r.getText()))
+    };
+    read(luma.clone(), BarcodeFormat::QR_CODE).or_else(|| read(luma, BarcodeFormat::CODE_128))
 }
 
 /// Sheet payload per page of a scanned PDF (`None` = an ordinary page).

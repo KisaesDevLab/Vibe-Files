@@ -29,6 +29,8 @@ pub struct Admin {
     pub error: Option<String>,
     /// Last "Verify chain now" result: `(ok, text)`.
     pub verified: Option<(bool, String)>,
+    /// Parser profiles as last loaded (compiling their regexes is not a per-frame job).
+    profiles: Option<(Vec<vf_fs::capture::Compiled>, Vec<String>)>,
 }
 
 /// Changes the doc type page asks for.
@@ -53,7 +55,12 @@ impl Admin {
             ui.add_enabled(false, egui::Button::new(later).frame(false));
         }
         section(ui, "Intake");
-        ui.selectable_value(&mut self.page, Page::Capture, "Print capture & parsers");
+        if ui
+            .selectable_value(&mut self.page, Page::Capture, "Print capture & parsers")
+            .clicked()
+        {
+            self.profiles = None; // reload on entry
+        }
         ui.add_enabled(
             false,
             egui::Button::new("Scan profiles (P02 step 2)").frame(false),
@@ -237,7 +244,11 @@ impl Admin {
              which profile tries first.",
             parsers.display()
         )));
-        let (profiles, errors) = vf_fs::capture::load_profiles(parsers);
+        if self.profiles.is_none() {
+            let _ = vf_fs::capture::seed_profiles(parsers);
+            self.profiles = Some(vf_fs::capture::load_profiles(parsers));
+        }
+        let (profiles, errors) = self.profiles.clone().unwrap_or_default();
         egui::Grid::new("parsers")
             .num_columns(3)
             .striped(true)
@@ -262,6 +273,9 @@ impl Admin {
             });
         for e in errors {
             banner(ui, &e, true);
+        }
+        if ui.button("Reload profiles").clicked() {
+            self.profiles = None;
         }
         if ui.button("Open profiles folder").clicked()
             && let Err(e) = crate::shell::open(parsers)

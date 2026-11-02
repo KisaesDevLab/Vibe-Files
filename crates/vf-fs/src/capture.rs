@@ -12,7 +12,6 @@ use vf_core::db::Connection;
 
 use crate::incoming::{Pass, queue_as_is, ready_files};
 use crate::intake::{Hint, Hints};
-use crate::stack::MARK;
 
 /// Profiles written on first use (never over a file the firm edited).
 pub const DEFAULTS: [(&str, &str); 5] = [
@@ -192,16 +191,11 @@ pub fn process_capture(
         let matched = named.is_some();
         let (dst, hint) = match named {
             Some((p, client)) => {
-                let mut rest = String::new();
-                if let Some(y) = p.tax_year {
-                    rest.push_str(&format!("{y} "));
-                }
-                rest.push_str(p.doc_type.as_deref().unwrap_or("Document"));
-                let name = format!(
-                    "{}_{}_{} {MARK}.pdf",
-                    filer_core::template::sanitize_value(&client),
-                    filer_core::template::sanitize_value(&p.ext_id),
-                    filer_core::template::sanitize_value(&rest),
+                let name = crate::stack::prepared_name(
+                    &client,
+                    &p.ext_id,
+                    p.tax_year,
+                    p.doc_type.as_deref(),
                 );
                 let _ = std::fs::create_dir_all(inbox);
                 let dst = filer_intake::commit::free_path(&inbox.join(name));
@@ -232,6 +226,7 @@ pub fn process_capture(
                 pass.routed += usize::from(matched);
                 pass.queued += usize::from(!matched);
             }
+            Err(e) if f.exists() => pass.errors.push(crate::incoming::set_aside_failed(&f, &e)),
             Err(e) => pass.errors.push(e),
         }
     }

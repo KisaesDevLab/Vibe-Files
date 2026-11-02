@@ -218,6 +218,46 @@ pub fn mirror_append(dir: &Path, rows: &[AuditRow]) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Name of the file under the mirror folder that records the last mirrored `seq`.
+const MIRRORED_SEQ: &str = ".mirrored-seq";
+
+/// Brings `<dir>/<yyyy-mm>.jsonl` up to date with the catalog: appends every row whose `seq` is
+/// above the last one mirrored, then records it. Idempotent and self-healing, so every commit
+/// path (UI, Intake worker, rebuild) can call it without tracking which rows it wrote.
+pub fn mirror_sync(conn: &Connection, dir: &Path) -> Result<usize> {
+    let mark = dir.join(MIRRORED_SEQ);
+    let last: u64 = std::fs::read_to_string(&mark)
+        .ok()
+        .and_then(|s| s.trim().parse().ok())
+        .unwrap_or(0);
+    let mut st = conn.prepare_cached(
+        "SELECT seq, ts, user, device_id, action, doc_id, detail, prev_hash, hash
+         FROM audit WHERE seq > ?1 ORDER BY seq",
+    )?;
+    let rows: Vec<AuditRow> = st
+        .query_map([last as i64], |r| {
+            Ok(AuditRow {
+                seq: r.get::<_, i64>(0)? as u64,
+                ts: r.get(1)?,
+                user: r.get(2)?,
+                device: r.get(3)?,
+                action: r.get(4)?,
+                doc: r.get(5)?,
+                detail: r.get(6)?,
+                prev_hash: r.get(7)?,
+                hash: r.get(8)?,
+            })
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+    let Some(top) = rows.last().map(|r| r.seq) else {
+        return Ok(0);
+    };
+    let io = |e: std::io::Error| crate::Error::Tx(format!("audit mirror {}: {e}", dir.display()));
+    mirror_append(dir, &rows).map_err(io)?;
+    std::fs::write(&mark, top.to_string()).map_err(io)?;
+    Ok(rows.len())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -282,5 +322,19 @@ mod tests {
         mirror_append(&dir, &[r1, r2]).unwrap();
         assert!(dir.join("2026-10.jsonl").is_file());
         assert!(dir.join("2026-11.jsonl").is_file());
+    }
+
+    #[test]
+    fn mirror_sync_appends_only_new_rows() {
+        let tmp = tempfile::tempdir().unwrap();
+        let c = conn(tmp.path());
+        let dir = tmp.path().join("audit");
+        fill(&c, 3);
+        assert_eq!(mirror_sync(&c, &dir).unwrap(), 3);
+        assert_eq!(mirror_sync(&c, &dir).unwrap(), 0);
+        fill(&c, 2);
+        assert_eq!(mirror_sync(&c, &dir).unwrap(), 2);
+        let lines = std::fs::read_to_string(dir.join("2026-11.jsonl")).unwrap();
+        assert_eq!(lines.lines().count(), 5);
     }
 }

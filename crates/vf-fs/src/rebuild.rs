@@ -12,7 +12,7 @@ use vf_core::audit::AuditEntry;
 use vf_core::db::Connection;
 use vf_core::tx::{Actor, NoFileOps, Stmt, Transaction};
 
-use crate::cabinet::{self, VersionSidecar};
+use crate::cabinet::{self, VersionSidecar, rel};
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct RebuildReport {
@@ -80,14 +80,6 @@ struct Found {
     client_id: Option<String>,
     hash: String,
     size: u64,
-}
-
-/// Cabinet-relative path with forward slashes (stable across Windows/UNC roots).
-fn rel(root: &Path, p: &Path) -> String {
-    p.strip_prefix(root)
-        .unwrap_or(p)
-        .to_string_lossy()
-        .replace('\\', "/")
 }
 
 /// Same rule as Filer's root scan (X28): `_x`, `.x`, `~x` are not client folders.

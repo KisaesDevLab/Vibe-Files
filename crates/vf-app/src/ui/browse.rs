@@ -131,6 +131,12 @@ pub struct Browse {
     pub user: String,
     view_counts: Vec<(View, usize)>,
     favorites: Vec<Favorite>,
+    /// This user's pinned document ids.
+    pinned: HashSet<String>,
+    /// Every live client (the relationship picker), unfiltered.
+    all_clients: Vec<ClientRow>,
+    /// Single-document details: (generation, doc id, versions, last activity).
+    detail: Option<(i64, String, i64, Vec<browse::Activity>)>,
     pub client_filter: String,
     pub grid_filter: String,
     pub expanded: HashSet<Node>,
@@ -165,16 +171,28 @@ impl Browse {
         }
     }
 
-    /// Re-reads whatever the catalog changed. Cheap when nothing did.
-    pub fn refresh(&mut self, conn: &Connection) {
-        let r = self.try_refresh(conn);
+    /// Re-reads whatever the catalog changed since `generation` was last seen (the caller reads
+    /// it once per frame). Cheap when nothing did.
+    pub fn refresh(&mut self, conn: &Connection, generation: i64) {
+        let r = self.try_refresh(conn, generation);
         if let Err(e) = r {
             self.error = Some(e.to_string());
         }
     }
 
-    fn try_refresh(&mut self, conn: &Connection) -> vf_core::Result<()> {
-        let generation = browse::generation(conn)?;
+    pub fn generation(&self) -> i64 {
+        self.generation
+    }
+
+    pub fn is_pinned(&self, doc_id: &str) -> bool {
+        self.pinned.contains(doc_id)
+    }
+
+    pub fn all_clients(&self) -> &[ClientRow] {
+        &self.all_clients
+    }
+
+    fn try_refresh(&mut self, conn: &Connection, generation: i64) -> vf_core::Result<()> {
         if generation != self.generation || self.clients_key.is_none() {
             self.generation = generation;
             self.buckets.clear();
@@ -182,6 +200,10 @@ impl Browse {
             self.totals = browse::totals(conn)?;
             self.view_counts = views::counts(conn, &self.user)?;
             self.favorites = views::favorites(conn, &self.user)?;
+            self.pinned = views::ids(conn, &self.user, View::Pinned)?
+                .into_iter()
+                .collect();
+            self.all_clients = browse::clients(conn, "")?;
             self.unfiled = conn.query_row(
                 "SELECT count(*) FROM document WHERE client_id IS NULL AND deleted_at IS NULL",
                 [],
@@ -190,7 +212,11 @@ impl Browse {
         }
         let ck = (generation, self.client_filter.clone());
         if self.clients_key.as_ref() != Some(&ck) {
-            self.clients = browse::clients(conn, &self.client_filter)?;
+            self.clients = if self.client_filter.trim().is_empty() {
+                self.all_clients.clone()
+            } else {
+                browse::clients(conn, &self.client_filter)?
+            };
             self.clients_key = Some(ck);
         }
         for n in &self.expanded {
@@ -295,11 +321,6 @@ impl Browse {
     }
 
     pub fn clients(&self) -> &[ClientRow] {
-        &self.clients
-    }
-
-    #[cfg(test)]
-    pub fn clients_for_test(&self) -> &[ClientRow] {
         &self.clients
     }
 
@@ -741,11 +762,22 @@ impl Browse {
     }
 
     /// The read-only part of the inspector: details of a single selected document.
-    pub fn detail_ui(&self, ui: &mut egui::Ui, conn: &Connection) {
+    pub fn detail_ui(&mut self, ui: &mut egui::Ui, conn: &Connection) {
         let sel = self.selected_rows();
         let [d] = sel.as_slice() else {
             return;
         };
+        let d = (*d).clone();
+        let fresh = self
+            .detail
+            .as_ref()
+            .is_some_and(|(g, id, _, _)| *g == self.generation && *id == d.id);
+        if !fresh {
+            let versions = browse::version_count(conn, &d.id).unwrap_or(0);
+            let acts = browse::recent_activity(conn, &d.id, 3).unwrap_or_default();
+            self.detail = Some((self.generation, d.id.clone(), versions, acts));
+        }
+        let (_, _, versions, acts) = self.detail.clone().expect("filled above");
         section(ui, "Document");
         ui.label(mono(d.name()).strong());
         egui::Grid::new("detail")
@@ -759,7 +791,6 @@ impl Browse {
                 };
                 kv(ui, "SHA-256", mono(&d.hash).small());
                 kv(ui, "Size", mono(format::size(d.size)));
-                let versions = browse::version_count(conn, &d.id).unwrap_or(0);
                 kv(ui, "Versions", RichText::new(versions.to_string()));
                 kv(
                     ui,
@@ -776,7 +807,6 @@ impl Browse {
                 kv(ui, "Path", mono(&d.rel_path).small());
             });
         section(ui, "Recent activity");
-        let acts = browse::recent_activity(conn, &d.id, 3).unwrap_or_default();
         if acts.is_empty() {
             ui.label(muted("No activity recorded for this document yet."));
         }

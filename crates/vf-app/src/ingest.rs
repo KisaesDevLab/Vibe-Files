@@ -44,13 +44,6 @@ impl Drop for Ingest {
     }
 }
 
-fn exe_dir() -> PathBuf {
-    std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(Path::to_path_buf))
-        .unwrap_or_default()
-}
-
 impl Ingest {
     pub fn start(
         ctx: &egui::Context,
@@ -84,8 +77,8 @@ fn run(
         Ok(c) => c,
         Err(e) => return say(format!("Scan processing is off: {e}")),
     };
-    let pdfium =
-        filer_pdf::pdf::find_pdfium(&exe_dir()).and_then(|d| filer_pdf::pdf::pdfium(&d).ok());
+    let pdfium = filer_pdf::pdf::find_pdfium(&crate::shell::exe_dir())
+        .and_then(|d| filer_pdf::pdf::pdfium(&d).ok());
     let scans = scans_dir(data);
     let photos = photos_dir(data);
     let parsers = vf_fs::capture::parsers_dir(data);
@@ -106,9 +99,9 @@ fn run(
         for e in pass.errors {
             say(format!("Photo could not be converted: {e}"));
         }
-        let capture = crate::config::Config::load_or_create(data)
-            .map(|c| crate::config::print_capture(data, &c))
-            .unwrap_or_else(|_| data.join("Print capture"));
+        let capture = crate::config::Config::load(data)
+            .and_then(|c| c.print_capture)
+            .unwrap_or_else(|| data.join("Print capture"));
         let _ = std::fs::create_dir_all(&capture);
         let pass = vf_fs::capture::process_capture(&conn, &capture, &inbox, &parsers, hints);
         if pass.routed + pass.queued > 0 {

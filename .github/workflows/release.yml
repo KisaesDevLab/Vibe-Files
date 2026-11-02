@@ -84,7 +84,7 @@ jobs:
           Copy-Item packaging/README.txt $root/
           Copy-Item crates/filer-pdf/assets/pdfium-LICENSE "$root/licenses/pdfium/LICENSE.txt"
           Copy-Item crates/filer-pdf/assets/pdfium-licenses/* "$root/licenses/pdfium/"
-          Copy-Item crates/vf-app/assets/fonts/OFL-LICENSE.txt "$root/licenses/fonts/IBM-Plex-OFL.txt"
+          Copy-Item crates/filer-intake/assets/fonts/OFL-LICENSE.txt "$root/licenses/fonts/IBM-Plex-OFL.txt"
           Compress-Archive -Path $root -DestinationPath "dist/$name.zip"
           $sums = foreach ($f in @((Get-ChildItem "$root/*.exe", "$root/*.dll").FullName + "dist/$name.zip")) {
             "{0}  {1}" -f (Get-FileHash -Algorithm SHA256 $f).Hash.ToLower(), (Split-Path $f -Leaf)

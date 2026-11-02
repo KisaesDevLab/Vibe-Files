@@ -24,26 +24,23 @@ pub fn default_inbox(data: &Path) -> PathBuf {
 pub struct IntakeTab {
     pub app: FilerApp,
     pub dir: PathBuf,
-    /// Client and relationship rows the Filer data folder was last written from.
+    /// Client, relationship and doc type rows the Filer data folder was last written from.
     synced: String,
+    /// Catalog generation last checked (the signature is only recomputed when it moves).
+    seen: i64,
 }
 
-/// Changes when any client or relationship row changes.
+/// Changes when any client, relationship or doc type row changes (everything
+/// `prepare_filer_dir` derives Filer's data from).
 fn client_signature(s: &Session) -> String {
     s.conn
         .query_row(
             "SELECT (SELECT count(*) || '/' || coalesce(max(updated_at), '') || '/' || coalesce(sum(rev), 0) FROM client)
-                 || '|' || (SELECT count(*) || '/' || coalesce(max(updated_at), '') || '/' || coalesce(sum(rev), 0) FROM client_relationship)",
+                 || '|' || (SELECT count(*) || '/' || coalesce(max(updated_at), '') || '/' || coalesce(sum(rev), 0) FROM client_relationship)
+                 || '|' || (SELECT count(*) || '/' || coalesce(max(updated_at), '') || '/' || coalesce(sum(rev), 0) FROM doc_type)",
             [],
             |r| r.get(0),
         )
-        .unwrap_or_default()
-}
-
-fn exe_dir() -> PathBuf {
-    std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(Path::to_path_buf))
         .unwrap_or_default()
 }
 
@@ -65,7 +62,7 @@ impl IntakeTab {
             &default_inbox(&s.data),
         )?;
         let (settings, savable) = Settings::load_or_default(&dir);
-        let pdfium = filer_pdf::pdf::find_pdfium(&exe_dir());
+        let pdfium = filer_pdf::pdf::find_pdfium(&crate::shell::exe_dir());
         let mut state = AppState::load(dir.clone(), settings, savable, pdfium);
         state.hooks = vf_fs::intake::hooks(CatalogTarget {
             catalog: s.data.join(CATALOG_FILE),
@@ -81,6 +78,7 @@ impl IntakeTab {
             app,
             dir,
             synced: client_signature(s),
+            seen: vf_core::browse::generation(&s.conn).unwrap_or(-1),
         })
     }
 
@@ -95,7 +93,12 @@ impl IntakeTab {
         ctx: &egui::Context,
         s: &mut Session,
         template: &TemplateNode,
+        generation: i64,
     ) -> Result<(), String> {
+        if generation == self.seen || self.app.state_mut().committing {
+            return Ok(());
+        }
+        self.seen = generation;
         let sig = client_signature(s);
         if sig == self.synced || self.app.state_mut().committing {
             return Ok(());

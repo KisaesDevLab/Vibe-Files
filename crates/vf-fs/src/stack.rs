@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 
 use filer_core::rules::{self, Rule};
 use filer_core::template;
+use filer_intake::commit::free_path;
 use pdfium_render::prelude::Pdfium;
 use vf_core::db::Connection;
 use vf_ingest::cover::{self, Segment};
@@ -22,15 +23,25 @@ pub const RULE_PREFIX: &str = "vf-dt-";
 /// The `{Rest}` suffix that marks a file Vibe Files prepared.
 pub const MARK: &str = "(vf)";
 
-fn regex_escape(s: &str) -> String {
-    let mut out = String::new();
-    for c in s.chars() {
-        if "\\.+*?()|[]{}^$#&-~".contains(c) {
-            out.push('\\');
-        }
-        out.push(c);
+/// The inbox name of a prepared file: `{Client}_{ID}_{[Year ]DocType} (vf).pdf`. The
+/// generated doc type rules ([`doctype_rules`]) match exactly this form; it is built only here.
+pub fn prepared_name(
+    client: &str,
+    ext_id: &str,
+    year: Option<i64>,
+    doc_type: Option<&str>,
+) -> String {
+    let mut rest = String::new();
+    if let Some(y) = year {
+        rest.push_str(&format!("{y} "));
     }
-    out
+    rest.push_str(doc_type.filter(|d| !d.is_empty()).unwrap_or("Document"));
+    format!(
+        "{}_{}_{} {MARK}.pdf",
+        template::sanitize_value(client),
+        template::sanitize_value(ext_id),
+        template::sanitize_value(&rest)
+    )
 }
 
 /// One Filer rule per live doc type with a default folder: matches `[YYYY ]<name> (vf)` and
@@ -49,7 +60,7 @@ pub fn doctype_rules(conn: &Connection) -> vf_core::Result<Vec<Rule>> {
             };
             let mut r = Rule::new(
                 &t.name,
-                &format!(r"^(?:\d{{4}} )?{} \(vf\)$", regex_escape(&t.name)),
+                &format!(r"^(?:\d{{4}} )?{} \(vf\)$", regex::escape(&t.name)),
                 &format!("{{Client}}/{folder}"),
                 filename,
                 requires_year,
@@ -101,10 +112,6 @@ fn client_of(conn: &Connection, id: &str) -> Option<(String, String)> {
     .ok()
 }
 
-fn free(dir: &Path, name: &str) -> PathBuf {
-    filer_intake::commit::free_path(&dir.join(name))
-}
-
 /// Splits `stack` at its cover / separator sheets into the inbox. `Ok(None)` when it has no
 /// sheets (the caller queues it as it is). The stack itself is moved to `processed`, never
 /// deleted.
@@ -136,23 +143,7 @@ pub fn route_scan(
             .then(|| client_of(conn, &p.client_id))
             .flatten();
         let name = match &client {
-            Some((cname, ext)) => {
-                let mut rest = String::new();
-                if let Some(y) = p.tax_year {
-                    rest.push_str(&format!("{y} "));
-                }
-                rest.push_str(if p.doc_type.is_empty() {
-                    "Document"
-                } else {
-                    &p.doc_type
-                });
-                format!(
-                    "{}_{}_{} {MARK}.pdf",
-                    template::sanitize_value(cname),
-                    template::sanitize_value(ext),
-                    template::sanitize_value(&rest)
-                )
-            }
+            Some((cname, ext)) => prepared_name(cname, ext, p.tax_year, Some(&p.doc_type)),
             None => format!("{} part {}.pdf", template::sanitize_value(&stem), n + 1),
         };
         names.push(work.join(&name));
@@ -176,7 +167,7 @@ pub fn route_scan(
         .lock()
         .map_err(|_| "hint table is poisoned".to_string())?;
     for (r, piece) in routed.iter_mut().zip(&names) {
-        let dst = free(inbox, &r.path.to_string_lossy());
+        let dst = free_path(&inbox.join(&r.path));
         std::fs::rename(piece, &dst)
             .map_err(|e| format!("cannot move {} into the inbox: {e}", piece.display()))?;
         map.insert(dst.clone(), r.hint.clone());
@@ -184,10 +175,7 @@ pub fn route_scan(
     }
     drop(map);
     let _ = std::fs::remove_dir(&work);
-    let kept = free(
-        processed,
-        &stack.file_name().unwrap_or_default().to_string_lossy(),
-    );
+    let kept = free_path(&processed.join(stack.file_name().unwrap_or_default()));
     std::fs::rename(stack, &kept)
         .map_err(|e| format!("cannot move {} aside: {e}", stack.display()))?;
     Ok(Some(routed))
@@ -195,21 +183,12 @@ pub fn route_scan(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
-    use std::sync::Arc;
-    use std::sync::atomic::AtomicUsize;
-
-    use filer_core::clients as fclients;
-    use filer_intake::commit::{CommitInput, CommitTarget};
-    use filer_intake::intake::{Kind, QueuedFile, Source};
-    use filer_intake::plan::{self, PlanInput, Rescan, RowStatus};
-    use filer_intake::sentinel::{self, FoldersFile, ScanInput};
-    use uuid::Uuid;
+    use filer_intake::plan::RowStatus;
     use vf_ingest::cover::Sheet;
 
     use super::*;
     use crate::clients::{NewClient, create_client, template as cab_template};
-    use crate::intake::{CatalogTarget, hooks, prepare_filer_dir};
+    use crate::intake::prepare_filer_dir;
 
     fn pdfium() -> &'static Pdfium {
         let dir = filer_pdf::pdf::find_pdfium(Path::new("")).expect("pdfium.dll");
@@ -284,54 +263,16 @@ mod tests {
             assert_eq!(filer_pdf::pdf::page_count(&r.path).unwrap(), 9);
         }
 
-        // Filer's own planner, with its rules (generated per doc type) and folder index.
-        let clients = Arc::new(fclients::load_cache(&filer).unwrap().unwrap());
-        let (rules_file, _, _) = rules::load_or_seed(&filer);
-        let bindings = sentinel::scan_root(
-            &ScanInput {
-                root: w.root.clone(),
-                clients: clients.clone(),
-                id_pattern: filer_core::parse::DEFAULT_ID_PATTERN.into(),
-                threshold: 0.85,
-                ignored: vec![],
-            },
-            &Default::default(),
-        )
-        .unwrap();
-        let input = PlanInput {
-            files: routed
-                .iter()
-                .map(|r| QueuedFile {
-                    path: r.path.clone(),
-                    size: std::fs::metadata(&r.path).unwrap().len(),
-                    added: chrono::Local::now(),
-                    source: Source::Inbox(inbox.clone()),
-                    kind: Kind::Pdf,
-                })
-                .collect(),
-            edits: HashMap::new(),
-            batch: Default::default(),
-            clients: Some(clients),
-            rules: rules_file.active_rules().to_vec(),
-            template: tpl.clone(),
-            folders: Some(FoldersFile {
-                root: w.root.clone(),
-                scanned_at: chrono::Utc::now(),
-                folders: bindings,
-                ignored: vec![],
-            }),
-            root: Some(w.root.clone()),
-            id_pattern: filer_core::parse::DEFAULT_ID_PATTERN.into(),
-            fuzzy_suggest: filer_core::config::DEFAULT_FUZZY_SUGGEST,
-            fuzzy_auto: filer_core::config::DEFAULT_FUZZY_AUTO,
-            current_year: 2026,
-            sniff_enabled: false,
-            sniff: HashMap::new(),
-            rescan: Rescan::Done,
-            partial: vec![],
-            relationships: Arc::new(Default::default()),
+        // Filer's own planner (rules generated per doc type, folder index) and commit.
+        let desk = crate::testkit::Desk {
+            root: &w.root,
+            filer: &filer,
+            inbox: &inbox,
+            tpl: &tpl,
+            cab: &w.cab,
         };
-        let out = plan::build_plan(&input);
+        let files: Vec<PathBuf> = routed.iter().map(|r| r.path.clone()).collect();
+        let out = desk.plan(&files);
         for p in &out.proposals {
             assert_eq!(
                 p.status,
@@ -341,27 +282,7 @@ mod tests {
                 p.dest
             );
         }
-
-        let target = CatalogTarget {
-            catalog: base.join("c.db"),
-            key: vf_core::db::CatalogKey([5; 32]),
-            root: w.root.clone(),
-            actor: w.actor.clone(),
-            hints: hints.clone(),
-        };
-        let commit_input = CommitInput::from_plan(
-            &out.proposals,
-            &HashMap::new(),
-            &[],
-            CommitTarget {
-                root: w.root.clone(),
-                first_inbox: Some(inbox.clone()),
-                data_dir: filer.clone(),
-                firm_id: Uuid::parse_str(&w.cab.firm_id).unwrap(),
-                template: tpl.clone(),
-            },
-        );
-        let report = (hooks(target).commit)(&commit_input, &AtomicUsize::new(0));
+        let report = desk.commit(&out, &base.join("c.db"), &w.actor, &hints);
         assert!(
             report.outcomes.iter().all(|o| o.result.is_ok()),
             "{:?}",

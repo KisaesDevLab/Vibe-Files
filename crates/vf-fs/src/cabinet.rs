@@ -66,6 +66,33 @@ pub struct VersionSidecar {
     pub reason: Option<String>,
 }
 
+/// Cabinet-relative path of `p` with forward slashes: the catalog's `rel_path` form, stable
+/// across local and UNC roots. The one place that form is made.
+pub fn rel(root: &Path, p: &Path) -> String {
+    p.strip_prefix(root)
+        .unwrap_or(p)
+        .to_string_lossy()
+        .replace('\\', "/")
+}
+
+/// Absolute path of a cabinet-relative `rel_path` (inverse of [`rel`]).
+pub fn abs(root: &Path, rel: &str) -> PathBuf {
+    rel.split('/').fold(root.to_path_buf(), |p, s| p.join(s))
+}
+
+/// `<cabinet>/_Vibe/audit`, the on-disk mirror of the audit trail.
+pub fn audit_dir(root: &Path) -> PathBuf {
+    root.join(VIBE_DIR).join("audit")
+}
+
+/// Brings the files derived from the catalog up to date after any change or undo: the audit
+/// mirror (`_Vibe/audit/*.jsonl`, catch-up by seq) and `_Vibe/relationships.json`. Every commit
+/// path calls this, so neither depends on a caller remembering it.
+pub fn sync_derived(conn: &vf_core::db::Connection, root: &Path) -> Result<(), String> {
+    vf_core::audit::mirror_sync(conn, &audit_dir(root)).map_err(|e| e.to_string())?;
+    crate::clients::mirror_relationships(conn, root).map_err(|e| e.to_string())
+}
+
 pub fn version_path(root: &Path, hash: &str) -> PathBuf {
     root.join(VIBE_DIR)
         .join(VERSIONS_DIR)
