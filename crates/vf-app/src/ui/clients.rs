@@ -27,7 +27,7 @@ fn modal<R>(ctx: &egui::Context, id: &str, add: impl FnOnce(&mut egui::Ui) -> R)
         .inner
 }
 
-fn entity_combo(ui: &mut egui::Ui, id: &str, value: &mut Option<String>) -> bool {
+fn entity_combo(ui: &mut egui::Ui, id: &str, label: egui::Id, value: &mut Option<String>) -> bool {
     let before = value.clone();
     let text = value.as_deref().map_or("Not set", clients::entity_label);
     egui::ComboBox::from_id_salt(id)
@@ -37,7 +37,9 @@ fn entity_combo(ui: &mut egui::Ui, id: &str, value: &mut Option<String>) -> bool
             for (k, l) in ENTITY_TYPES {
                 ui.selectable_value(value, Some(k.to_owned()), l);
             }
-        });
+        })
+        .response
+        .labelled_by(label);
     *value != before
 }
 
@@ -69,8 +71,8 @@ impl NewClientDialog {
                 "Client name",
                 egui::TextEdit::singleline(&mut self.client.name).desired_width(f32::INFINITY),
             );
-            ui.label("Entity type");
-            entity_combo(ui, "nc_entity", &mut self.client.entity_type);
+            let l = ui.label("Entity type");
+            entity_combo(ui, "nc_entity", l.id, &mut self.client.entity_type);
             section(ui, "Folders to create");
             let ready =
                 !self.client.ext_id.trim().is_empty() && !self.client.name.trim().is_empty();
@@ -196,14 +198,16 @@ impl ImportDialog {
                     ("ID column", &mut self.map.id),
                     ("Name column", &mut self.map.name),
                 ] {
-                    ui.label(label);
+                    let l = ui.label(label);
                     egui::ComboBox::from_id_salt(label)
                         .selected_text(slot.clone().unwrap_or_else(|| "Choose…".into()))
                         .show_ui(ui, |ui| {
                             for h in &headers {
                                 ui.selectable_value(slot, Some(h.clone()), h);
                             }
-                        });
+                        })
+                        .response
+                        .labelled_by(l.id);
                     ui.end_row();
                 }
             });
@@ -319,9 +323,9 @@ pub fn client_panel(
         ui.label(muted("Documents"));
         ui.label(client.docs.to_string());
         ui.end_row();
-        ui.label(muted("Entity type"));
+        let l = ui.label(muted("Entity type"));
         let mut et = client.entity_type.clone();
-        if entity_combo(ui, "client_entity", &mut et) {
+        if entity_combo(ui, "client_entity", l.id, &mut et) {
             edit = Some(ClientEdit::EntityType(et));
         }
         ui.end_row();
@@ -358,6 +362,7 @@ pub fn client_panel(
         .map_or("Related client…".to_owned(), |o| {
             format!("{} ({})", o.1, o.2)
         });
+    let lo = ui.label("Related client");
     egui::ComboBox::from_id_salt("rel_other")
         .selected_text(other_name)
         .width(260.0)
@@ -365,8 +370,11 @@ pub fn client_panel(
             for (id, name, ext) in others.iter().filter(|o| o.0 != client.id) {
                 ui.selectable_value(&mut form.other, Some(id.clone()), format!("{name} ({ext})"));
             }
-        });
+        })
+        .response
+        .labelled_by(lo.id);
     ui.horizontal(|ui| {
+        let lr = ui.label("Role");
         egui::ComboBox::from_id_salt("rel_role")
             .selected_text(if form.role.is_empty() {
                 "Role…"
@@ -377,7 +385,9 @@ pub fn client_panel(
                 for r in ROLES {
                     ui.selectable_value(&mut form.role, r.to_owned(), r);
                 }
-            });
+            })
+            .response
+            .labelled_by(lr.id);
         let l = ui.label("Share %");
         ui.add(egui::TextEdit::singleline(&mut form.share).desired_width(48.0))
             .labelled_by(l.id);

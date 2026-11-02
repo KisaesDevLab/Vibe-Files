@@ -90,7 +90,7 @@ impl MetaForm {
             .num_columns(2)
             .spacing([8.0, 6.0])
             .show(ui, |ui| {
-                ui.label(muted("Doc type"));
+                let l = ui.label(muted("Doc type"));
                 let text = match &self.fields.doc_type {
                     None => mixed("doc_type"),
                     Some(None) => "None".into(),
@@ -111,10 +111,12 @@ impl MetaForm {
                                 &t.name,
                             );
                         }
-                    });
+                    })
+                    .response
+                    .labelled_by(l.id);
                 ui.end_row();
 
-                ui.label(muted("Tax year"));
+                let l = ui.label(muted("Tax year"));
                 let text = match self.fields.year {
                     None => mixed("year"),
                     Some(None) => "Permanent".into(),
@@ -132,10 +134,12 @@ impl MetaForm {
                                 y.to_string(),
                             );
                         }
-                    });
+                    })
+                    .response
+                    .labelled_by(l.id);
                 ui.end_row();
 
-                ui.label(muted("Status"));
+                let l = ui.label(muted("Status"));
                 let text = self
                     .fields
                     .status
@@ -151,10 +155,12 @@ impl MetaForm {
                                 format::status_label(s),
                             );
                         }
-                    });
+                    })
+                    .response
+                    .labelled_by(l.id);
                 ui.end_row();
 
-                ui.label(muted("Source"));
+                let l = ui.label(muted("Source"));
                 let text = match &self.fields.source {
                     None => mixed("source"),
                     Some(None) => "Not set".into(),
@@ -171,7 +177,9 @@ impl MetaForm {
                                 format::source_label(s),
                             );
                         }
-                    });
+                    })
+                    .response
+                    .labelled_by(l.id);
                 ui.end_row();
 
                 let l = ui.label(muted("Tags"));
