@@ -1,0 +1,29 @@
+# UltraTax CS print-to-PDF file names (QUESTIONS Q-09: primary). Edit to match your print setup.
+# `pattern` runs on the file name without ".pdf". Named groups: `id` (the client ID, required),
+# `year` (optional), and anything else. The first `[[doc_types]]` whose `match` hits the file
+# name gives the doc type; otherwise `default_doc_type`.
+name = "UltraTax CS"
+status = "primary"
+order = 10
+pattern = '^(?P<id>[A-Za-z0-9]{3,12})[ _-]+(?P<year>(?:19|20)\d\d)[ _-]+(?P<rest>.+)$'
+default_doc_type = "Return copy — federal"
+
+[[doc_types]]
+match = '(?i)\b8879\b'
+doc_type = "Form 8879"
+
+[[doc_types]]
+match = '(?i)\b(state|[A-Z]{2}[ -]?\d{2,4}[A-Z]?)\b.*\breturn\b'
+doc_type = "Return copy — state"
+
+[[doc_types]]
+match = '(?i)\b(extension|4868|7004)\b'
+doc_type = "Extension"
+
+[[doc_types]]
+match = '(?i)\b(estimate|1040-?ES|voucher)s?\b'
+doc_type = "Estimate vouchers"
+
+[[doc_types]]
+match = '(?i)\b(federal|fed|1040|1120S?|1065|1041|990)\b'
+doc_type = "Return copy — federal"

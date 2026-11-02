@@ -1,5 +1,5 @@
 //! Background worker for the folders Vibe Files prepares before Intake (PHASES P02): scans
-//! (cover sheets), phone photos (image → PDF), and print capture (step 5). Runs on its own thread
+//! (cover sheets), phone photos (image → PDF), and the print-capture folder (parser profiles). Runs on its own thread
 //! with its own catalog connection and reports what it did.
 
 use std::path::{Path, PathBuf};
@@ -88,6 +88,10 @@ fn run(
         filer_pdf::pdf::find_pdfium(&exe_dir()).and_then(|d| filer_pdf::pdf::pdfium(&d).ok());
     let scans = scans_dir(data);
     let photos = photos_dir(data);
+    let parsers = vf_fs::capture::parsers_dir(data);
+    if let Err(e) = vf_fs::capture::seed_profiles(&parsers) {
+        say(format!("Parser profiles: {e}"));
+    }
     let _ = std::fs::create_dir_all(&scans);
     let _ = std::fs::create_dir_all(&photos);
     while !stop.load(Ordering::Relaxed) {
@@ -101,6 +105,20 @@ fn run(
         }
         for e in pass.errors {
             say(format!("Photo could not be converted: {e}"));
+        }
+        let capture = crate::config::Config::load_or_create(data)
+            .map(|c| crate::config::print_capture(data, &c))
+            .unwrap_or_else(|_| data.join("Print capture"));
+        let _ = std::fs::create_dir_all(&capture);
+        let pass = vf_fs::capture::process_capture(&conn, &capture, &inbox, &parsers, hints);
+        if pass.routed + pass.queued > 0 {
+            say(format!(
+                "Print capture: {} recognized by a parser profile, {} queued as printed.",
+                pass.routed, pass.queued
+            ));
+        }
+        for e in pass.errors {
+            say(format!("Print capture: {e}"));
         }
         if let Some(pdfium) = pdfium {
             let pass = vf_fs::incoming::process_scans(&conn, pdfium, &scans, &inbox, hints);

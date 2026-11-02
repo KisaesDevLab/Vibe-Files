@@ -18,6 +18,16 @@ pub struct Config {
     /// The cabinet this data folder's catalog belongs to.
     #[serde(default)]
     pub cabinet: Option<PathBuf>,
+    /// Folder a PDF printer saves into (P02 step 5); `None` = `<data>/Print capture`.
+    #[serde(default)]
+    pub print_capture: Option<PathBuf>,
+}
+
+/// The print-capture folder in effect.
+pub fn print_capture(data: &Path, cfg: &Config) -> PathBuf {
+    cfg.print_capture
+        .clone()
+        .unwrap_or_else(|| data.join("Print capture"))
 }
 
 pub fn path(data: &Path) -> PathBuf {
@@ -50,6 +60,7 @@ impl Config {
             device_id,
             device_name: computer_name(),
             cabinet: None,
+            print_capture: None,
         };
         cfg.save(data)?;
         let _ = std::fs::remove_file(legacy);

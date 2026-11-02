@@ -2,6 +2,7 @@
 //! vendored `filer-intake::commit` primitives; this crate never reimplements a move.
 
 pub mod cabinet;
+pub mod capture;
 pub mod clients;
 pub mod fileops;
 pub mod incoming;
@@ -9,6 +10,8 @@ pub mod intake;
 pub mod rebuild;
 pub mod rename;
 pub mod stack;
+#[cfg(test)]
+pub(crate) mod testkit;
 
 #[cfg(test)]
 mod tests {

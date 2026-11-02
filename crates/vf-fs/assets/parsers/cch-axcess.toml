@@ -1,0 +1,14 @@
+# CCH Axcess Tax PDF file names (Q-09: secondary): "<client id>_<year>_<return type>..."
+name = "CCH Axcess"
+status = "secondary"
+order = 30
+pattern = '^(?P<id>[A-Za-z0-9]{3,15})_(?P<year>(?:19|20)\d\d)_(?P<rest>.+)$'
+default_doc_type = "Return copy — federal"
+
+[[doc_types]]
+match = '(?i)\b8879\b'
+doc_type = "Form 8879"
+
+[[doc_types]]
+match = '(?i)\bstate\b'
+doc_type = "Return copy — state"

@@ -6,6 +6,8 @@
 #   cargo test --workspace -- --test-threads=2
 set -euo pipefail
 export WINEDEBUG=-all
+# Wine maps non-ASCII file names (e.g. "Return copy — federal") through the locale.
+export LANG=C.UTF-8 LC_ALL=C.UTF-8
 export CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER=x86_64-w64-mingw32-gcc
 export CARGO_TARGET_X86_64_PC_WINDOWS_GNU_RUNNER=wine
 T=--target=x86_64-pc-windows-gnu

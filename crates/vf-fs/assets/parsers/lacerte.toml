@@ -1,0 +1,14 @@
+# Lacerte PDF file names (Q-09: secondary). Lacerte client numbers are usually numeric.
+name = "Lacerte"
+status = "secondary"
+order = 20
+pattern = '^(?P<year>(?:19|20)\d\d)[ _-]+(?P<id>\d{3,10})[ _-]+(?P<rest>.+)$'
+default_doc_type = "Return copy — federal"
+
+[[doc_types]]
+match = '(?i)\b8879\b'
+doc_type = "Form 8879"
+
+[[doc_types]]
+match = '(?i)\bstate\b'
+doc_type = "Return copy — state"

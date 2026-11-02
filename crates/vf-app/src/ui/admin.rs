@@ -11,7 +11,14 @@ use crate::ui::widgets::{banner, field, mono, muted, primary, section};
 pub enum Page {
     #[default]
     DocTypes,
+    Capture,
     Audit,
+}
+
+/// Print-capture changes the page asks for.
+pub enum CaptureAction {
+    Change(std::path::PathBuf),
+    UseDefault,
 }
 
 #[derive(Default)]
@@ -45,6 +52,12 @@ impl Admin {
         ] {
             ui.add_enabled(false, egui::Button::new(later).frame(false));
         }
+        section(ui, "Intake");
+        ui.selectable_value(&mut self.page, Page::Capture, "Print capture & parsers");
+        ui.add_enabled(
+            false,
+            egui::Button::new("Scan profiles (P02 step 2)").frame(false),
+        );
         section(ui, "Compliance");
         ui.selectable_value(&mut self.page, Page::Audit, "Audit trail");
         for later in [
@@ -171,6 +184,93 @@ impl Admin {
                         }
                     });
             });
+        action
+    }
+
+    /// Print capture folder and parser profiles (P02 step 5).
+    pub fn capture_ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        folder: &std::path::Path,
+        is_default: bool,
+        parsers: &std::path::Path,
+    ) -> Option<CaptureAction> {
+        let mut action = None;
+        ui.label(RichText::new("Print capture & parsers").size(16.0).strong());
+        ui.label(muted(
+            "PDFs a PDF printer saves here enter Intake as firm documents. A parser profile reads \
+             the client ID, year and form from the file name and files them with no edits.",
+        ));
+        section(ui, "Capture folder");
+        ui.label(mono(folder.display().to_string()));
+        ui.horizontal(|ui| {
+            if ui.button("Open folder").clicked() {
+                let _ = std::fs::create_dir_all(folder);
+                if let Err(e) = crate::shell::open(folder) {
+                    self.error = Some(e);
+                }
+            }
+            if ui.button("Change…").clicked()
+                && let Some(d) = rfd::FileDialog::new().pick_folder()
+            {
+                action = Some(CaptureAction::Change(d));
+            }
+            if !is_default && ui.button("Use the default").clicked() {
+                action = Some(CaptureAction::UseDefault);
+            }
+        });
+        section(ui, "Set up Microsoft Print to PDF");
+        for (i, step) in [
+            "In your tax software, print the return and choose the printer \"Microsoft Print to PDF\" (or any PDF printer).",
+            "In the Save dialog, open the capture folder above. Pin it to Quick access so it is one click next time.",
+            "Keep the file name your tax software suggests, e.g. 1042_2025_Federal Return.pdf (client ID, year, form).",
+            "Save. Within a few seconds the file is in Intake, Ready to confirm.",
+        ]
+        .iter()
+        .enumerate()
+        {
+            ui.label(format!("{}. {step}", i + 1));
+        }
+        section(ui, "Parser profiles");
+        ui.label(muted(format!(
+            "Editable TOML files in {} (regex on the file name; groups id, year). Order decides \
+             which profile tries first.",
+            parsers.display()
+        )));
+        let (profiles, errors) = vf_fs::capture::load_profiles(parsers);
+        egui::Grid::new("parsers")
+            .num_columns(3)
+            .striped(true)
+            .show(ui, |ui| {
+                for h in ["Profile", "Status", "File"] {
+                    ui.label(
+                        RichText::new(h)
+                            .small()
+                            .strong()
+                            .color(theme::INK_SECONDARY),
+                    );
+                }
+                ui.end_row();
+                for p in &profiles {
+                    ui.label(&p.profile.name);
+                    ui.label(&p.profile.status);
+                    ui.label(
+                        mono(p.file.file_name().unwrap_or_default().to_string_lossy()).small(),
+                    );
+                    ui.end_row();
+                }
+            });
+        for e in errors {
+            banner(ui, &e, true);
+        }
+        if ui.button("Open profiles folder").clicked()
+            && let Err(e) = crate::shell::open(parsers)
+        {
+            self.error = Some(e);
+        }
+        if let Some(e) = &self.error {
+            banner(ui, e, true);
+        }
         action
     }
 

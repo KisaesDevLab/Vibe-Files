@@ -247,6 +247,22 @@ impl Workspace {
                         }
                     }
                 }
+                admin::Page::Capture => {
+                    let s = &mut self.session;
+                    let folder = crate::config::print_capture(&s.data, &s.config);
+                    let parsers = vf_fs::capture::parsers_dir(&s.data);
+                    let _ = vf_fs::capture::seed_profiles(&parsers);
+                    let is_default = s.config.print_capture.is_none();
+                    if let Some(a) = self.admin.capture_ui(ui, &folder, is_default, &parsers) {
+                        s.config.print_capture = match a {
+                            admin::CaptureAction::Change(d) => Some(d),
+                            admin::CaptureAction::UseDefault => None,
+                        };
+                        if let Err(e) = s.config.save(&s.data) {
+                            self.admin.error = Some(e.to_string());
+                        }
+                    }
+                }
                 admin::Page::Audit => self.admin.audit_ui(ui, &self.session.conn),
             });
     }

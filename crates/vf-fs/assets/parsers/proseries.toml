@@ -1,0 +1,6 @@
+# ProSeries (Q-09: untested stub). Adjust `pattern` to your ProSeries PDF naming first.
+name = "ProSeries"
+status = "untested"
+order = 50
+pattern = '^(?P<year>(?:19|20)\d\d)[ _-]+proseries[ _-]+(?P<id>[A-Za-z0-9]{3,12})[ _-]*(?P<rest>.*)$'
+default_doc_type = "Return copy — federal"
