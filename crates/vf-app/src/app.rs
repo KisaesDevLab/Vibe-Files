@@ -63,6 +63,7 @@ pub enum Dialog {
     NewClient(NewClientDialog),
     Import(Box<ImportDialog>),
     Rename(crate::ui::rename::RenameDialog),
+    Cover(crate::ui::sheets::CoverDialog),
 }
 
 pub struct Workspace {
@@ -86,6 +87,8 @@ pub struct Workspace {
     /// What Vibe Files knows about queued files before Filer files them (P02).
     pub hints: vf_fs::intake::Hints,
     last_tab: Option<Tab>,
+    /// Scans / photos / print-capture processing (P02).
+    pub ingest: Option<crate::ingest::Ingest>,
 }
 
 fn pane() -> egui::Frame {
@@ -116,6 +119,7 @@ impl Workspace {
             intake_error: None,
             hints: Default::default(),
             last_tab: None,
+            ingest: None,
         }
     }
 
@@ -136,6 +140,21 @@ impl Workspace {
             && let Err(e) = t.sync(ctx, &mut self.session, &self.template)
         {
             self.intake_error = Some(e);
+        }
+        if self.ingest.is_none() && self.intake.is_some() {
+            let s = &self.session;
+            self.ingest = Some(crate::ingest::Ingest::start(
+                ctx,
+                s.data.join(crate::session::CATALOG_FILE),
+                s.key.clone(),
+                s.data.clone(),
+                self.hints.clone(),
+            ));
+        }
+        if let Some(i) = &self.ingest
+            && let Ok(m) = i.rx.try_recv()
+        {
+            self.notice = Some(m);
         }
     }
 
@@ -263,6 +282,35 @@ impl Workspace {
             {
                 self.dialog = Some(Dialog::Import(Box::new(ImportDialog::new(p))));
             }
+            let client = self
+                .browse
+                .node
+                .as_ref()
+                .and_then(|n| n.client_id())
+                .and_then(|id| self.browse.clients().iter().find(|c| c.id == id).cloned());
+            if ui
+                .add_enabled(client.is_some(), egui::Button::new("Print cover sheet"))
+                .on_disabled_hover_text("Pick a client first.")
+                .clicked()
+                && let Some(c) = client
+            {
+                self.dialog = Some(Dialog::Cover(crate::ui::sheets::CoverDialog {
+                    client_id: c.id,
+                    client_name: c.name,
+                    ext_id: c.ext_id,
+                    doc_type: String::new(),
+                    year: None,
+                    error: None,
+                }));
+            }
+            if ui.button("Print 10 separators").clicked() {
+                let sheets = vec![vf_ingest::cover::Sheet::separator(); 10];
+                if let Err(e) =
+                    crate::ui::sheets::make_and_open(&self.session.data, "separators", &sheets)
+                {
+                    self.notice = Some(e);
+                }
+            }
             ui.separator();
             let sel: Vec<String> = self.browse.selected.iter().cloned().collect();
             let one = (sel.len() == 1)
@@ -347,6 +395,17 @@ impl Workspace {
                             self.browse.select_node(browse::Node::Client(id));
                         }
                         Err(e) => nc.error = Some(e.to_string()),
+                    }
+                }
+            },
+            Dialog::Cover(cd) => match cd.ui(ctx, &self.doc_types) {
+                Outcome::Open => {}
+                Outcome::Cancel => self.dialog = None,
+                Outcome::Done(sheet) => {
+                    let name = format!("{} cover", cd.ext_id);
+                    match crate::ui::sheets::make_and_open(&s.data, &name, &[sheet]) {
+                        Ok(_) => self.dialog = None,
+                        Err(e) => cd.error = Some(e),
                     }
                 }
             },

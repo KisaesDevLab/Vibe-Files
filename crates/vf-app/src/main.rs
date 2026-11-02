@@ -5,6 +5,7 @@
 mod app;
 mod cli;
 mod config;
+mod ingest;
 mod session;
 mod shell;
 mod ui;

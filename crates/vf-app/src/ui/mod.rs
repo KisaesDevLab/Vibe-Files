@@ -6,6 +6,7 @@ pub mod format;
 pub mod intake;
 pub mod meta;
 pub mod rename;
+pub mod sheets;
 pub mod theme;
 pub mod widgets;
 pub mod wizard;

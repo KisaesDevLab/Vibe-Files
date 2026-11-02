@@ -8,6 +8,9 @@ publish.workspace = true
 [dependencies]
 filer-core = { path = "../filer-core" }
 filer-intake = { path = "../filer-intake" }
+filer-pdf = { path = "../filer-pdf" }
+pdfium-render.workspace = true
+vf-ingest = { path = "../vf-ingest" }
 vf-core = { path = "../vf-core" }
 chrono.workspace = true
 regex.workspace = true
@@ -18,4 +21,5 @@ thiserror.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+vf-fixtures = { path = "../vf-fixtures" }
 tempfile.workspace = true

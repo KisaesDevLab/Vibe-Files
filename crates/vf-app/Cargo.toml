@@ -22,6 +22,7 @@ filer-intake = { path = "../filer-intake" }
 filer-pdf = { path = "../filer-pdf" }
 vf-core = { path = "../vf-core" }
 vf-fs = { path = "../vf-fs" }
+vf-ingest = { path = "../vf-ingest" }
 vf-security = { path = "../vf-security" }
 serde.workspace = true
 serde_json.workspace = true

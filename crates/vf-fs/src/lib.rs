@@ -4,9 +4,11 @@
 pub mod cabinet;
 pub mod clients;
 pub mod fileops;
+pub mod incoming;
 pub mod intake;
 pub mod rebuild;
 pub mod rename;
+pub mod stack;
 
 #[cfg(test)]
 mod tests {

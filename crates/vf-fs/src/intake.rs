@@ -12,8 +12,8 @@
 //!   back are tombstoned, overwritten files get their restored hash, removed client folders are
 //!   unbound.
 //! - [`prepare_filer_dir`] writes Filer's data folder (`<data>/filer/`) from the cabinet: root,
-//!   firm id, folder template, client list (with the catalog's ids, so sentinels match) and
-//!   relationships.
+//!   firm id, folder template, client list (with the catalog's ids, so sentinels match), one rule
+//!   per doc type for prepared files (`crate::stack`), and relationships.
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
@@ -506,6 +506,7 @@ pub fn prepare_filer_dir(
     template::save(filer_dir, tpl).map_err(|e| e.to_string())?;
     let list = filer_client_list(conn).map_err(|e| e.to_string())?;
     fclients::save_cache(filer_dir, &list).map_err(|e| e.to_string())?;
+    crate::stack::sync_doctype_rules(conn, filer_dir)?;
 
     // Relationships: additions made in Filer's own Relationships tab → catalog, then
     // catalog → Filer's file.
