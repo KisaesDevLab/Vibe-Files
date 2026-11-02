@@ -6,6 +6,7 @@ mod app;
 mod cli;
 mod config;
 mod session;
+mod shell;
 mod ui;
 
 use std::path::PathBuf;

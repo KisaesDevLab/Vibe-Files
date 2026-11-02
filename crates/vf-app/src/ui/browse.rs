@@ -6,6 +6,7 @@ use egui::{Align, Layout, RichText, Sense};
 use egui_extras::{Column, TableBuilder};
 use vf_core::browse::{self, Bucket, BucketRow, ClientRow, DocRow, FolderRow, Scope};
 use vf_core::db::Connection;
+use vf_core::views::{self, Favorite, View};
 
 use crate::ui::format;
 use crate::ui::theme;
@@ -18,22 +19,41 @@ pub enum Node {
     Bucket(String, Bucket),
     Folder(String, Bucket, String),
     Unfiled,
+    View(View),
 }
 
 impl Node {
-    pub fn scope(&self) -> Scope {
-        match self {
-            Node::Client(c) => Scope::Client(c.clone()),
-            Node::Bucket(c, b) => Scope::Bucket(c.clone(), *b),
-            Node::Folder(c, b, f) => Scope::Folder(c.clone(), *b, f.clone()),
-            Node::Unfiled => Scope::Unfiled,
-        }
-    }
-
     pub fn client_id(&self) -> Option<&str> {
         match self {
             Node::Client(c) | Node::Bucket(c, _) | Node::Folder(c, _, _) => Some(c),
-            Node::Unfiled => None,
+            Node::Unfiled | Node::View(_) => None,
+        }
+    }
+
+    /// A favorite's tree position.
+    pub fn from_favorite(f: &Favorite) -> Node {
+        let bucket = f.bucket.as_deref().map(|b| match b.parse::<i64>() {
+            Ok(y) => Bucket::Year(y),
+            Err(_) => Bucket::Permanent,
+        });
+        match (bucket, &f.folder) {
+            (None, _) => Node::Client(f.client_id.clone()),
+            (Some(b), None) => Node::Bucket(f.client_id.clone(), b),
+            (Some(b), Some(folder)) => Node::Folder(f.client_id.clone(), b, folder.clone()),
+        }
+    }
+
+    /// `(bucket, folder)` as stored in a favorite.
+    pub fn favorite_key(&self) -> Option<(&str, Option<String>, Option<String>)> {
+        let b = |b: &Bucket| match b {
+            Bucket::Permanent => "perm".to_owned(),
+            Bucket::Year(y) => y.to_string(),
+        };
+        match self {
+            Node::Client(c) => Some((c, None, None)),
+            Node::Bucket(c, bk) => Some((c, Some(b(bk)), None)),
+            Node::Folder(c, bk, f) => Some((c, Some(b(bk)), Some(f.clone()))),
+            Node::Unfiled | Node::View(_) => None,
         }
     }
 }
@@ -101,10 +121,16 @@ type ViewKey = (i64, Option<Node>, String, Option<(Col, bool)>);
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
     Open(String),
+    AddFavorite,
+    RemoveFavorite(String),
 }
 
 #[derive(Default)]
 pub struct Browse {
+    /// Whose pins, favorites and recent opens the Views section shows.
+    pub user: String,
+    view_counts: Vec<(View, usize)>,
+    favorites: Vec<Favorite>,
     pub client_filter: String,
     pub grid_filter: String,
     pub expanded: HashSet<Node>,
@@ -132,6 +158,13 @@ pub struct Browse {
 }
 
 impl Browse {
+    pub fn for_user(user: String) -> Self {
+        Self {
+            user,
+            ..Self::default()
+        }
+    }
+
     /// Re-reads whatever the catalog changed. Cheap when nothing did.
     pub fn refresh(&mut self, conn: &Connection) {
         let r = self.try_refresh(conn);
@@ -147,6 +180,8 @@ impl Browse {
             self.buckets.clear();
             self.folders.clear();
             self.totals = browse::totals(conn)?;
+            self.view_counts = views::counts(conn, &self.user)?;
+            self.favorites = views::favorites(conn, &self.user)?;
             self.unfiled = conn.query_row(
                 "SELECT count(*) FROM document WHERE client_id IS NULL AND deleted_at IS NULL",
                 [],
@@ -173,8 +208,25 @@ impl Browse {
         let lk = (generation, self.node.clone());
         if self.loaded.as_ref() != Some(&lk) {
             self.all = match &self.node {
-                Some(n) => browse::documents(conn, &n.scope())?,
                 None => Vec::new(),
+                Some(Node::View(v)) => {
+                    let ids = views::ids(conn, &self.user, *v)?;
+                    let mut docs = browse::documents(conn, &Scope::Ids(ids.clone()))?;
+                    // Keep the view's own order (Recent: newest first).
+                    let pos: HashMap<&str, usize> = ids
+                        .iter()
+                        .enumerate()
+                        .map(|(i, id)| (id.as_str(), i))
+                        .collect();
+                    docs.sort_by_key(|d| pos.get(d.id.as_str()).copied().unwrap_or(usize::MAX));
+                    docs
+                }
+                Some(Node::Client(c)) => browse::documents(conn, &Scope::Client(c.clone()))?,
+                Some(Node::Bucket(c, b)) => browse::documents(conn, &Scope::Bucket(c.clone(), *b))?,
+                Some(Node::Folder(c, b, f)) => {
+                    browse::documents(conn, &Scope::Folder(c.clone(), *b, f.clone()))?
+                }
+                Some(Node::Unfiled) => browse::documents(conn, &Scope::Unfiled)?,
             };
             self.loaded = Some(lk);
         }
@@ -324,7 +376,68 @@ impl Browse {
     }
 
     /// The tree (left pane).
-    pub fn tree_ui(&mut self, ui: &mut egui::Ui) {
+    pub fn tree_ui(&mut self, ui: &mut egui::Ui) -> Option<Action> {
+        let mut action = None;
+        section(ui, "Views");
+        for (v, n) in self.view_counts.clone() {
+            let node = Node::View(v);
+            let selected = self.node.as_ref() == Some(&node);
+            ui.horizontal(|ui| {
+                ui.add_space(14.0);
+                let mut text = RichText::new(v.label());
+                if selected {
+                    text = text.color(theme::ACCENT_DEFAULT);
+                } else if v.is_attention() && n > 0 {
+                    text = text.color(theme::WARN_FG);
+                }
+                if ui
+                    .add(egui::Button::selectable(selected, text).frame(false))
+                    .clicked()
+                {
+                    self.select_node(node.clone());
+                }
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    ui.label(mono(n.to_string()).small().color(theme::INK_MUTED));
+                });
+            });
+        }
+        if !self.favorites.is_empty() {
+            section(ui, "Favorites");
+            for f in self.favorites.clone() {
+                let node = Node::from_favorite(&f);
+                let selected = self.node.as_ref() == Some(&node);
+                ui.horizontal(|ui| {
+                    ui.add_space(14.0);
+                    let text = RichText::new(&f.label);
+                    let text = if selected {
+                        text.color(theme::ACCENT_DEFAULT)
+                    } else {
+                        text
+                    };
+                    if ui
+                        .add(egui::Button::selectable(selected, text).frame(false))
+                        .clicked()
+                    {
+                        if let Some(c) = node.client_id() {
+                            self.expanded.insert(Node::Client(c.to_owned()));
+                        }
+                        if let Node::Folder(c, b, _) = &node {
+                            self.expanded.insert(Node::Bucket(c.clone(), *b));
+                        }
+                        self.select_node(node.clone());
+                    }
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if ui
+                            .small_button("×")
+                            .on_hover_text("Remove from favorites")
+                            .clicked()
+                        {
+                            action = Some(Action::RemoveFavorite(f.id.clone()));
+                        }
+                    });
+                });
+            }
+        }
         section(ui, "Cabinet");
         let l = ui.label(muted(format!("{} clients", self.clients.len())));
         ui.add(
@@ -400,6 +513,7 @@ impl Browse {
                     );
                 }
             });
+        action
     }
 
     /// One tree row; returns true when it should toggle open/closed.
@@ -468,7 +582,23 @@ impl Browse {
             Node::Bucket(c, b) => format!("Cabinet / {} / {}", name(c), b.label()),
             Node::Folder(c, b, f) => format!("Cabinet / {} / {} / {f}", name(c), b.label()),
             Node::Unfiled => "Cabinet / Not in a client folder".into(),
+            Node::View(v) => format!("Views / {}", v.label()),
         }
+    }
+
+    /// Label for a new favorite of the current node.
+    pub fn favorite_label(&self) -> Option<String> {
+        let n = self.node.as_ref()?;
+        n.favorite_key()?;
+        Some(
+            self.breadcrumb()
+                .trim_start_matches("Cabinet / ")
+                .replace(" / ", " · "),
+        )
+    }
+
+    pub fn is_favorite(&self, n: &Node) -> bool {
+        self.favorites.iter().any(|f| Node::from_favorite(f) == *n)
     }
 
     /// The grid (main pane).
@@ -476,6 +606,13 @@ impl Browse {
         let mut action = self.keys(ui);
         ui.horizontal(|ui| {
             ui.label(RichText::new(self.breadcrumb()).color(theme::INK_SECONDARY));
+            if let Some(n) = self.node.clone()
+                && n.favorite_key().is_some()
+                && !self.is_favorite(&n)
+                && ui.small_button("Add to favorites").clicked()
+            {
+                action = Some(Action::AddFavorite);
+            }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 ui.add(
                     egui::TextEdit::singleline(&mut self.grid_filter)

@@ -26,6 +26,9 @@ serde.workspace = true
 serde_json.workspace = true
 toml = "1"
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = ["Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
+
 [dev-dependencies]
 vf-fixtures = { path = "../vf-fixtures" }
 egui_kittest.workspace = true

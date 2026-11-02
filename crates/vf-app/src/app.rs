@@ -91,7 +91,7 @@ fn pane() -> egui::Frame {
 
 impl Workspace {
     pub fn new(session: Session) -> Self {
-        let mut browse = Browse::default();
+        let mut browse = Browse::for_user(session.actor.user.clone().unwrap_or_default());
         browse.refresh(&session.conn);
         let template = vf_fs::clients::template(&session.root);
         Self {
@@ -211,6 +211,52 @@ impl Workspace {
             }
             ui.separator();
             let sel: Vec<String> = self.browse.selected.iter().cloned().collect();
+            let one = (sel.len() == 1)
+                .then(|| {
+                    self.browse
+                        .selected_rows()
+                        .first()
+                        .map(|d| (d.id.clone(), d.rel_path.clone()))
+                })
+                .flatten();
+            if ui
+                .add_enabled(one.is_some(), egui::Button::new("Open"))
+                .on_disabled_hover_text("Select one document.")
+                .clicked()
+                && let Some((id, _)) = &one
+            {
+                self.handle(browse::Action::Open(id.clone()));
+            }
+            if ui
+                .add_enabled(one.is_some(), egui::Button::new("Open in Explorer"))
+                .clicked()
+                && let Some((_, rel)) = &one
+                && let Err(e) = crate::shell::reveal(&crate::shell::abs(&self.session.root, rel))
+            {
+                self.notice = Some(e);
+            }
+            if ui
+                .add_enabled(one.is_some(), egui::Button::new("Copy path"))
+                .clicked()
+                && let Some((_, rel)) = &one
+            {
+                let p = crate::shell::abs(&self.session.root, rel);
+                ui.ctx().copy_text(p.display().to_string());
+                self.notice = Some(format!("Copied {}", p.display()));
+            }
+            let user = self.session.actor.user.clone().unwrap_or_default();
+            let all_pinned = !sel.is_empty()
+                && sel.iter().all(|id| {
+                    vf_core::views::is_pinned(&self.session.conn, &user, id).unwrap_or(false)
+                });
+            let label = if all_pinned { "Unpin" } else { "Pin" };
+            if ui
+                .add_enabled(!sel.is_empty(), egui::Button::new(label))
+                .clicked()
+            {
+                self.pin(!all_pinned);
+            }
+            ui.separator();
             if ui
                 .add_enabled(!sel.is_empty(), egui::Button::new("Rename…"))
                 .on_disabled_hover_text("Select documents first.")
@@ -367,7 +413,22 @@ impl Workspace {
                     "{} documents · {} clients",
                     self.browse.totals.0, self.browse.totals.1
                 ),
-                "Catalog: this PC".into(),
+                format!(
+                    "Catalog: {} · key {}",
+                    self.session.config.device_name, self.session.key_id
+                ),
+            ],
+            Tab::Admin => vec![
+                format!(
+                    "vibe-files {} · portable · {}",
+                    env!("CARGO_PKG_VERSION"),
+                    self.session.data.display()
+                ),
+                format!(
+                    "Catalog schema v{} · layout v{}",
+                    vf_core::db::SCHEMA_VERSION,
+                    self.session.cabinet.layout_version
+                ),
             ],
             _ => vec![format!("vibe-files {}", env!("CARGO_PKG_VERSION"))],
         }
@@ -378,7 +439,11 @@ impl Workspace {
             .resizable(true)
             .default_size(272.0)
             .frame(pane())
-            .show(ui, |ui| self.browse.tree_ui(ui));
+            .show(ui, |ui| {
+                if let Some(a) = self.browse.tree_ui(ui) {
+                    self.handle(a);
+                }
+            });
         egui::Panel::right("inspector")
             .resizable(true)
             .default_size(320.0)
@@ -486,8 +551,64 @@ impl Workspace {
     }
 
     fn handle(&mut self, a: browse::Action) {
-        match a {
-            browse::Action::Open(_) => {}
+        let s = &mut self.session;
+        let r: Result<Option<(vf_core::tx::Committed, &str)>, String> = match a {
+            browse::Action::Open(id) => {
+                let rel = self
+                    .browse
+                    .rows
+                    .iter()
+                    .find(|d| d.id == id)
+                    .map(|d| d.rel_path.clone());
+                match rel {
+                    None => Ok(None),
+                    Some(rel) => {
+                        crate::shell::open(&crate::shell::abs(&s.root, &rel)).and_then(|()| {
+                            vf_core::views::record_open(&mut s.conn, &s.actor, &id)
+                                .map(|_| None) // an open is not something to undo
+                                .map_err(|e| e.to_string())
+                        })
+                    }
+                }
+            }
+            browse::Action::AddFavorite => {
+                match (self.browse.node.clone(), self.browse.favorite_label()) {
+                    (Some(n), Some(label)) => match n.favorite_key() {
+                        Some((c, b, f)) => vf_core::views::add_favorite(
+                            &mut s.conn,
+                            &s.actor,
+                            c,
+                            b.as_deref(),
+                            f.as_deref(),
+                            &label,
+                        )
+                        .map(|d| Some((d, "add favorite")))
+                        .map_err(|e| e.to_string()),
+                        None => Ok(None),
+                    },
+                    _ => Ok(None),
+                }
+            }
+            browse::Action::RemoveFavorite(id) => {
+                vf_core::views::remove_favorite(&mut s.conn, &s.actor, &id)
+                    .map(|d| Some((d, "remove favorite")))
+                    .map_err(|e| e.to_string())
+            }
+        };
+        match r {
+            Ok(Some((done, label))) => self.committed(&done, label),
+            Ok(None) => {}
+            Err(e) => self.notice = Some(e),
+        }
+    }
+
+    fn pin(&mut self, pinned: bool) {
+        let ids: Vec<String> = self.browse.selected.iter().cloned().collect();
+        let s = &mut self.session;
+        match vf_core::views::set_pinned(&mut s.conn, &s.actor, &ids, pinned) {
+            Ok(Some(done)) => self.committed(&done, if pinned { "pin" } else { "unpin" }),
+            Ok(None) => {}
+            Err(e) => self.notice = Some(e.to_string()),
         }
     }
 }

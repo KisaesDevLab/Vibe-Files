@@ -8,7 +8,10 @@ pub use rusqlite::{Connection, Error as SqlError};
 use crate::{Error, Result};
 
 /// Migrations in order; index + 1 is the `user_version` after applying it.
-const MIGRATIONS: &[&str] = &[include_str!("../migrations/001_initial.sql")];
+const MIGRATIONS: &[&str] = &[
+    include_str!("../migrations/001_initial.sql"),
+    include_str!("../migrations/002_user_views.sql"),
+];
 
 /// Schema version this build writes.
 pub const SCHEMA_VERSION: u32 = MIGRATIONS.len() as u32;
@@ -141,6 +144,9 @@ mod tests {
         "undo_record",
         "user",
         "user_client_acl",
+        "user_favorite",
+        "user_pin",
+        "user_recent",
         "version",
     ];
 
@@ -160,7 +166,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("catalog.db");
         let conn = open(&path, &key(7), Storage::Local).unwrap();
-        assert_eq!(user_version(&conn).unwrap(), 1);
+        assert_eq!(user_version(&conn).unwrap(), SCHEMA_VERSION);
         assert_eq!(tables(&conn), TABLES);
         drop(conn);
         // Encrypted on disk: no SQLite header.
@@ -168,12 +174,38 @@ mod tests {
         assert!(!head.starts_with(b"SQLite format 3"));
         // Reopen is a no-op migration and makes no backup.
         let conn = open(&path, &key(7), Storage::Local).unwrap();
-        assert_eq!(user_version(&conn).unwrap(), 1);
+        assert_eq!(user_version(&conn).unwrap(), SCHEMA_VERSION);
         let baks = std::fs::read_dir(tmp.path())
             .unwrap()
             .filter(|e| e.as_ref().unwrap().path().extension() == Some("bak".as_ref()))
             .count();
         assert_eq!(baks, 0);
+    }
+
+    /// A v1 catalog (P00) moves to v2 with a keyed backup first.
+    #[test]
+    fn v1_catalog_migrates_to_v2_with_backup() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("catalog.db");
+        let conn = open(&path, &key(7), Storage::Local).unwrap();
+        conn.execute_batch(
+            "DROP TABLE user_pin; DROP TABLE user_favorite; DROP TABLE user_recent; PRAGMA user_version = 1;",
+        )
+        .unwrap();
+        drop(conn);
+        let conn = open(&path, &key(7), Storage::Local).unwrap();
+        assert_eq!(user_version(&conn).unwrap(), 2);
+        assert_eq!(tables(&conn), TABLES);
+        let baks: Vec<_> = std::fs::read_dir(tmp.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with("catalog.db.v1-") && n.ends_with(".bak"))
+            .collect();
+        assert_eq!(baks.len(), 1);
+        // The backup opens with the same key.
+        let b = Connection::open(tmp.path().join(&baks[0])).unwrap();
+        apply_key(&b, &key(7)).unwrap();
+        assert_eq!(user_version(&b).unwrap(), 1);
     }
 
     #[test]

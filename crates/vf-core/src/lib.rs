@@ -7,6 +7,7 @@ pub mod db;
 pub mod doctype;
 pub mod meta;
 pub mod tx;
+pub mod views;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {

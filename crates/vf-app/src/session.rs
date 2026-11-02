@@ -19,7 +19,6 @@ use crate::config::Config;
 pub const CATALOG_FILE: &str = "catalog.db";
 
 /// An open cabinet.
-#[allow(dead_code)] // `conn`, `data`, `config` are read by the Browse tab (P01 step 2)
 pub struct Session {
     pub root: PathBuf,
     pub data: PathBuf,
