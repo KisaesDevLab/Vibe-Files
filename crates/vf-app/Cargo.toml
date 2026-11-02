@@ -15,6 +15,7 @@ egui.workspace = true
 egui_extras.workspace = true
 rfd.workspace = true
 anyhow.workspace = true
+chrono.workspace = true
 clap.workspace = true
 filer-core = { path = "../filer-core" }
 filer-intake = { path = "../filer-intake" }
@@ -26,6 +27,7 @@ serde_json.workspace = true
 toml = "1"
 
 [dev-dependencies]
+vf-fixtures = { path = "../vf-fixtures" }
 egui_kittest.workspace = true
 tempfile.workspace = true
 serde_json.workspace = true

@@ -6,6 +6,7 @@ use std::path::Path;
 use vf_security::keys::Kdf;
 
 use crate::session::Session;
+use crate::ui::browse::{self, Browse};
 use crate::ui::wizard::Wizard;
 use crate::ui::{chrome, theme};
 
@@ -57,13 +58,89 @@ impl Tab {
 pub struct Workspace {
     pub session: Session,
     pub notice: Option<String>,
+    pub browse: Browse,
+}
+
+fn pane() -> egui::Frame {
+    egui::Frame::new()
+        .fill(theme::PANE)
+        .stroke(egui::Stroke::new(1.0, theme::BORDER_PANE))
+        .inner_margin(egui::Margin::same(10))
 }
 
 impl Workspace {
     pub fn new(session: Session) -> Self {
+        let mut browse = Browse::default();
+        browse.refresh(&session.conn);
         Self {
             session,
             notice: None,
+            browse,
+        }
+    }
+
+    pub fn footer_segments(&self, tab: Tab) -> Vec<String> {
+        match tab {
+            Tab::Browse => vec![
+                format!(
+                    "{} documents · {} clients",
+                    self.browse.totals.0, self.browse.totals.1
+                ),
+                "Catalog: this PC".into(),
+            ],
+            _ => vec![format!("vibe-files {}", env!("CARGO_PKG_VERSION"))],
+        }
+    }
+
+    fn browse_ui(&mut self, ui: &mut egui::Ui) {
+        egui::Panel::left("tree")
+            .resizable(true)
+            .default_size(272.0)
+            .frame(pane())
+            .show(ui, |ui| self.browse.tree_ui(ui));
+        egui::Panel::right("inspector")
+            .resizable(true)
+            .default_size(320.0)
+            .frame(pane())
+            .show(ui, |ui| {
+                egui::ScrollArea::vertical()
+                    .id_salt("inspector")
+                    .show(ui, |ui| self.inspector_ui(ui));
+            });
+        egui::CentralPanel::default().frame(pane()).show(ui, |ui| {
+            if let Some(n) = self.notice.clone() {
+                ui.horizontal(|ui| {
+                    ui.label(crate::ui::widgets::muted(n));
+                    if ui.small_button("Dismiss").clicked() {
+                        self.notice = None;
+                    }
+                });
+            }
+            if let Some(e) = &self.browse.error {
+                crate::ui::widgets::banner(ui, e, true);
+            }
+            if let Some(a) = self.browse.grid_ui(ui) {
+                self.handle(a);
+            }
+        });
+    }
+
+    fn inspector_ui(&mut self, ui: &mut egui::Ui) {
+        let n = self.browse.selected.len();
+        ui.label(
+            egui::RichText::new(match n {
+                0 => "Nothing selected".to_owned(),
+                1 => "1 document selected".to_owned(),
+                n => format!("{n} documents selected"),
+            })
+            .strong(),
+        );
+        self.browse.detail_ui(ui, &self.session.conn);
+    }
+
+    fn handle(&mut self, a: browse::Action) {
+        match a {
+            browse::Action::Open(_) => {}
         }
     }
 }
@@ -106,9 +183,9 @@ impl VibeFilesApp {
 
 impl eframe::App for VibeFilesApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        let version = format!("vibe-files {}", env!("CARGO_PKG_VERSION"));
         match &mut self.screen {
             Screen::Wizard(w) => {
+                let version = format!("vibe-files {}", env!("CARGO_PKG_VERSION"));
                 chrome::header(ui, None, "", "");
                 chrome::footer(ui, &[version], "No cabinet open");
                 if let Some((session, report)) = w.ui(ui) {
@@ -120,24 +197,23 @@ impl eframe::App for VibeFilesApp {
                 }
             }
             Screen::Open(w) => {
+                w.browse.refresh(&w.session.conn);
                 let s = &w.session;
                 let root = s.root.display().to_string();
                 let who = s.actor.user.clone().unwrap_or_default();
                 chrome::header(ui, Some((&s.cabinet.firm_name, &root)), "Local", &who);
                 chrome::tab_bar(ui, &mut self.tab, 0);
-                chrome::footer(
-                    ui,
-                    &[version, format!("Catalog key {}", s.key_id)],
-                    "Catalog open",
-                );
                 let tab = self.tab;
-                egui::CentralPanel::default().show(ui, |ui| {
-                    if let Some(n) = &w.notice {
-                        crate::ui::widgets::banner(ui, n, false);
+                chrome::footer(ui, &w.footer_segments(tab), "Catalog open");
+                match tab {
+                    Tab::Browse => w.browse_ui(ui),
+                    _ => {
+                        egui::CentralPanel::default().show(ui, |ui| {
+                            ui.heading(tab.name());
+                            ui.label(tab.placeholder());
+                        });
                     }
-                    ui.heading(tab.name());
-                    ui.label(tab.placeholder());
-                });
+                }
             }
         }
     }
@@ -209,6 +285,51 @@ mod tests {
             h.run();
             assert_eq!(h.state().tab, t);
         }
+    }
+
+    fn open_fixture() -> (
+        tempfile::TempDir,
+        egui_kittest::Harness<'static, VibeFilesApp>,
+    ) {
+        let (tmp, s) = crate::session::tests::fixture_cabinet();
+        let mut h = harness(&tmp.path().join("unused"));
+        h.state_mut().open(s);
+        h.run();
+        (tmp, h)
+    }
+
+    #[test]
+    fn browse_tree_to_grid_to_inspector() {
+        let (_tmp, mut h) = open_fixture();
+        let w = h.state_mut().workspace().unwrap();
+        assert_eq!(w.browse.totals, (60, 5));
+        let first = w.browse.clients_for_test()[0].clone();
+        h.run();
+        h.get_by_label(&first.name).click();
+        h.run();
+        assert!(h.state_mut().workspace().unwrap().browse.rows.len() == first.docs as usize);
+        h.get_by_role_and_label(egui::accesskit::Role::Button, "2025")
+            .click();
+        h.run();
+        let n2025 = h.state_mut().workspace().unwrap().browse.rows.len();
+        assert!(n2025 > 0);
+        h.get_by_label("Income Tax/2025").click();
+        h.run();
+        // Sort by size, then select a row by keyboard and by click.
+        h.get_by_label("Size").click();
+        h.run();
+        h.key_press(egui::Key::ArrowDown);
+        h.run();
+        assert_eq!(h.state_mut().workspace().unwrap().browse.selected.len(), 1);
+        h.get_by_label("1 document selected");
+        h.get_by_label("SHA-256");
+        h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+        h.run();
+        let w = h.state_mut().workspace().unwrap();
+        let rows = w.browse.rows.clone();
+        assert_eq!(w.browse.selected.len(), rows.len());
+        let sizes: Vec<i64> = rows.iter().map(|d| d.size).collect();
+        assert!(sizes.windows(2).all(|p| p[0] <= p[1]), "sorted by size");
     }
 
     #[test]

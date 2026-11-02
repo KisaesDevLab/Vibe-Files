@@ -4915,6 +4915,7 @@ name = "vf-app"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "clap",
  "eframe",
  "egui",
@@ -4928,6 +4929,7 @@ dependencies = [
  "tempfile",
  "toml",
  "vf-core",
+ "vf-fixtures",
  "vf-fs",
  "vf-security",
 ]

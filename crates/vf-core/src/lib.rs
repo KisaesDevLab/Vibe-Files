@@ -2,6 +2,7 @@
 //! No UI or network dependency (CLAUDE.md §Workspace).
 
 pub mod audit;
+pub mod browse;
 pub mod db;
 pub mod tx;
 

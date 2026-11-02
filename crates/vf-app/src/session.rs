@@ -270,6 +270,16 @@ pub(crate) mod tests {
         (tmp, s)
     }
 
+    /// The P00 fixture cabinet (5 clients, 60 PDFs) attached to a fresh catalog.
+    pub fn fixture_cabinet() -> (tempfile::TempDir, Session) {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("Cabinet");
+        vf_fixtures::generate(&root, 7).unwrap();
+        let (s, rep) = attach_cabinet(&tmp.path().join("data"), &root, PASS, Kdf::FAST).unwrap();
+        assert_eq!((rep.clients, rep.docs_new), (5, 60));
+        (tmp, s)
+    }
+
     #[test]
     fn create_then_unlock() {
         let (tmp, s) = new_cabinet();
