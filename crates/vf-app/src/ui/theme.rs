@@ -2,9 +2,7 @@
 // The full palette from UI_SPEC; tabs pick tokens up as they are built.
 #![allow(dead_code)]
 
-use std::sync::Arc;
-
-use egui::{Color32, FontData, FontDefinitions, FontFamily};
+use egui::Color32;
 
 pub const ACCENT_DEFAULT: Color32 = Color32::from_rgb(0x1F, 0x56, 0xA8);
 pub const INK: Color32 = Color32::from_rgb(0x16, 0x1A, 0x20);
@@ -31,39 +29,15 @@ pub const OK_FG: Color32 = Color32::from_rgb(0x1D, 0x5C, 0x38);
 pub const ERR_BG: Color32 = Color32::from_rgb(0xFB, 0xE3, 0xE3);
 pub const ERR_FG: Color32 = Color32::from_rgb(0x9A, 0x1B, 0x1B);
 
+/// Vibe Files' look on top of Filer Desktop's theme. Filer's fonts are the full set (IBM Plex
+/// Sans / SemiBold / Mono / Mono SemiBold, plus egui's fonts as fallbacks for glyphs Plex lacks)
+/// and the Intake tab's screens need its named families, so they are never replaced; only the
+/// spec's light theme and surfaces are applied over it.
 pub fn install(ctx: &egui::Context) {
-    ctx.set_fonts(fonts());
+    filer_intake::ui::theme::install(ctx);
     ctx.set_theme(egui::Theme::Light);
     ctx.style_mut_of(egui::Theme::Light, |s| {
         s.visuals.panel_fill = APP_BG;
         s.visuals.override_text_color = Some(INK);
     });
-}
-
-fn fonts() -> FontDefinitions {
-    let mut f = FontDefinitions::default();
-    let faces: [(&str, &'static [u8]); 2] = [
-        (
-            "plex-sans",
-            include_bytes!("../../assets/fonts/IBMPlexSans-Regular.ttf"),
-        ),
-        (
-            "plex-mono",
-            include_bytes!("../../assets/fonts/IBMPlexMono-Regular.ttf"),
-        ),
-    ];
-    for (name, bytes) in faces {
-        f.font_data
-            .insert(name.into(), Arc::new(FontData::from_static(bytes)));
-    }
-    for (family, face) in [
-        (FontFamily::Proportional, "plex-sans"),
-        (FontFamily::Monospace, "plex-mono"),
-    ] {
-        f.families
-            .entry(family)
-            .or_default()
-            .insert(0, face.to_owned());
-    }
-    f
 }
