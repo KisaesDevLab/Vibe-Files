@@ -8,7 +8,7 @@ Updated by Claude Code at the end of every session. Human edits welcome.
 
 ## Next step
 
-1. On a Windows PC: `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace -- --test-threads=2`. Confirm `filer-intake` `app::plan_ui_tests::twenty_file_batch_resolves_to_ready` passes there (it fails only under Wine; see debt). Then tick the last P00 box and mark P00 done.
+1. Check the first `CI` run on GitHub (PA-12, `windows-latest`). If it is green, it is the real-Windows run P00 waits on: tick the last P00 box and mark P00 done. If only `twenty_file_batch_resolves_to_ready` fails there, it is not Wine-only after all; record it and look at the upstream inbox watcher. Otherwise, on a Windows PC: `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace -- --test-threads=2`. Confirm `filer-intake` `app::plan_ui_tests::twenty_file_batch_resolves_to_ready` passes there (it fails only under Wine; see debt). Then tick the last P00 box and mark P00 done.
 2. Start P01 step 1: cabinet open/create wizard (pick root, name, recovery passphrase, write `_Vibe/cabinet.json` via `vf_fs::cabinet::create`, run `vf_fs::rebuild`).
 
 ## Built this session (2026-11-02, P00)
@@ -24,6 +24,11 @@ Updated by Claude Code at the end of every session. Human edits welcome.
 | 8 | feat(vf-fixtures) | Deterministic 5-client / 60-PDF fixture cabinet with never-issued SSNs/EINs. |
 
 Dev box: Linux container; gate is `scripts/check-wine.sh` (mingw cross-build, tests under Wine).
+
+## Built this session (2026-11-02, PA-12)
+
+- `.github/workflows/ci.yml`: Windows gate on GitHub Actions (fmt, clippy, test).
+- `.github/workflows/release.yml` + `packaging/README.txt`: portable zip (`vibe-files.exe`, `pdfium.dll`, licenses, SHA-256 sums). Tag `v0.1.0` to publish a pre-release; Actions → release → Run workflow for a test build.
 
 ## Prerequisites before P00 step 2–3 (all answered)
 
@@ -48,6 +53,7 @@ Dev box: Linux container; gate is `scripts/check-wine.sh` (mingw cross-build, te
 | P11 | pending | | | |
 | P12 | pending | | | |
 | P13 | pending | | | |
+| PA-12 | built; first GitHub run pending | 2026-11-02 | | CI + portable release zip |
 
 ## Assumptions taken (from QUESTIONS defaults)
 

@@ -1,0 +1,95 @@
+# Portable Windows build: vibe-files.exe + pdfium.dll + licenses in one zip, with SHA-256 sums.
+#   - Push a tag vX.Y.Z (matching the workspace version) -> GitHub Release with the zip attached.
+#   - Actions tab -> "release" -> Run workflow   -> zip as a downloadable workflow artifact.
+#   - Pull requests touching packaging            -> same build, artifact only (proves it works).
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - ".github/workflows/release.yml"
+      - "packaging/**"
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: portable zip (windows x64)
+    runs-on: windows-latest
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release
+
+      - name: Read version
+        id: ver
+        run: |
+          $meta = cargo metadata --format-version 1 --no-deps --locked | ConvertFrom-Json
+          $v = ($meta.packages | Where-Object name -eq 'vf-app').version
+          if ($env:GITHUB_REF_TYPE -eq 'tag' -and $env:GITHUB_REF_NAME -ne "v$v") {
+            throw "Tag $env:GITHUB_REF_NAME does not match workspace version v$v (Cargo.toml)."
+          }
+          $label = if ($env:GITHUB_REF_TYPE -eq 'tag') { $v } else { "$v-dev.$($env:GITHUB_SHA.Substring(0,7))" }
+          "version=$v" >> $env:GITHUB_OUTPUT
+          "label=$label" >> $env:GITHUB_OUTPUT
+
+      - name: Build (static CRT, release)
+        env:
+          RUSTFLAGS: -C target-feature=+crt-static
+        run: cargo build --release --locked -p vf-app --target x86_64-pc-windows-msvc
+
+      - name: Package
+        id: pkg
+        run: |
+          $name = "vibe-files-${{ steps.ver.outputs.label }}-windows-x64"
+          $root = "dist/$name"
+          New-Item -ItemType Directory -Force "$root/licenses/pdfium", "$root/licenses/fonts" | Out-Null
+          Copy-Item target/x86_64-pc-windows-msvc/release/vibe-files.exe $root/
+          Copy-Item crates/filer-pdf/assets/pdfium.dll $root/
+          Copy-Item LICENSE "$root/LICENSE.txt"
+          Copy-Item packaging/README.txt $root/
+          Copy-Item crates/filer-pdf/assets/pdfium-LICENSE "$root/licenses/pdfium/LICENSE.txt"
+          Copy-Item crates/filer-pdf/assets/pdfium-licenses/* "$root/licenses/pdfium/"
+          Copy-Item crates/vf-app/assets/fonts/OFL-LICENSE.txt "$root/licenses/fonts/IBM-Plex-OFL.txt"
+          Compress-Archive -Path $root -DestinationPath "dist/$name.zip"
+          $sums = foreach ($f in @("$root/vibe-files.exe", "$root/pdfium.dll", "dist/$name.zip")) {
+            "{0}  {1}" -f (Get-FileHash -Algorithm SHA256 $f).Hash.ToLower(), (Split-Path $f -Leaf)
+          }
+          $sums | Set-Content -Encoding ascii "dist/$name.sha256.txt"
+          $sums
+          "name=$name" >> $env:GITHUB_OUTPUT
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.pkg.outputs.name }}
+          path: |
+            dist/${{ steps.pkg.outputs.name }}.zip
+            dist/${{ steps.pkg.outputs.name }}.sha256.txt
+          if-no-files-found: error
+
+      - name: Publish GitHub Release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >
+          gh release create "$env:GITHUB_REF_NAME"
+          "dist/${{ steps.pkg.outputs.name }}.zip"
+          "dist/${{ steps.pkg.outputs.name }}.sha256.txt"
+          --title "Vibe Files $env:GITHUB_REF_NAME"
+          --generate-notes
+          --prerelease
