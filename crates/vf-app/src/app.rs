@@ -78,6 +78,7 @@ pub struct Workspace {
     /// Live doc types (pickers), refreshed with the browse generation.
     pub doc_types: Vec<vf_core::doctype::DocType>,
     doc_types_gen: i64,
+    pub meta_form: crate::ui::meta::MetaForm,
 }
 
 fn pane() -> egui::Frame {
@@ -103,6 +104,28 @@ impl Workspace {
             admin: Admin::default(),
             doc_types: Vec::new(),
             doc_types_gen: -1,
+            meta_form: Default::default(),
+        }
+    }
+
+    /// Undoes the last transaction this session committed (the per-user undo stack is P05).
+    pub fn undo_last(&mut self) {
+        let Some((tx, label)) = self.last_tx.clone() else {
+            return;
+        };
+        let s = &mut self.session;
+        let r = vf_fs::fileops::FilerFileOps::new(&[&s.root])
+            .map_err(|e| vf_core::Error::Tx(e.to_string()))
+            .and_then(|mut fs| vf_core::tx::undo(&mut s.conn, &mut fs, &s.actor, &tx));
+        match r {
+            Ok(rows) => {
+                let dir = s.root.join(vf_fs::cabinet::VIBE_DIR).join("audit");
+                let _ = vf_core::audit::mirror_append(&dir, &rows);
+                let _ = vf_fs::clients::mirror_relationships(&s.conn, &s.root);
+                self.notice = Some(format!("Undone: {label}."));
+                self.last_tx = None;
+            }
+            Err(e) => self.notice = Some(format!("Cannot undo {label}: {e}")),
         }
     }
 
@@ -331,6 +354,12 @@ impl Workspace {
                     .show(ui, |ui| self.inspector_ui(ui));
             });
         self.dialogs(ui.ctx());
+        let undo_key = self.dialog.is_none()
+            && ui.memory(|m| m.focused().is_none())
+            && ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::Z));
+        if undo_key {
+            self.undo_last();
+        }
         egui::CentralPanel::default().frame(pane()).show(ui, |ui| {
             self.toolbar(ui);
             if let Some(n) = self.notice.clone() {
@@ -352,14 +381,50 @@ impl Workspace {
 
     fn inspector_ui(&mut self, ui: &mut egui::Ui) {
         let n = self.browse.selected.len();
-        ui.label(
-            egui::RichText::new(match n {
-                0 => "Nothing selected".to_owned(),
-                1 => "1 document selected".to_owned(),
-                n => format!("{n} documents selected"),
-            })
-            .strong(),
-        );
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new(match n {
+                    0 => "Nothing selected".to_owned(),
+                    1 => "1 document selected".to_owned(),
+                    n => format!("{n} documents selected"),
+                })
+                .strong(),
+            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let tip = self
+                    .last_tx
+                    .as_ref()
+                    .map_or("Nothing to undo".to_owned(), |(_, l)| {
+                        format!("Undo {l} (Ctrl+Z)")
+                    });
+                if ui
+                    .add_enabled(self.last_tx.is_some(), egui::Button::new("Undo last"))
+                    .on_hover_text(&tip)
+                    .on_disabled_hover_text(&tip)
+                    .clicked()
+                {
+                    self.undo_last();
+                }
+            });
+        });
+        if n > 0 {
+            let generation = vf_core::browse::generation(&self.session.conn).unwrap_or(0);
+            let rows: Vec<vf_core::browse::DocRow> =
+                self.browse.selected_rows().into_iter().cloned().collect();
+            let refs: Vec<&vf_core::browse::DocRow> = rows.iter().collect();
+            self.meta_form.sync(generation, &refs);
+            if let Some(change) = self.meta_form.ui(ui, &refs, &self.doc_types) {
+                let ids: Vec<String> = rows.iter().map(|r| r.id.clone()).collect();
+                let s = &mut self.session;
+                match vf_core::meta::bulk_edit(&mut s.conn, &s.actor, &ids, &change) {
+                    Ok(Some(done)) => {
+                        self.committed(&done, &format!("edit of {} documents", ids.len()))
+                    }
+                    Ok(None) => {}
+                    Err(e) => self.meta_form.error = Some(e.to_string()),
+                }
+            }
+        }
         self.browse.detail_ui(ui, &self.session.conn);
         if n == 0
             && let Some(cid) = self

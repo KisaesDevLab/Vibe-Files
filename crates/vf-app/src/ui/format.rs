@@ -29,7 +29,7 @@ pub fn local_hm(rfc3339: &str) -> String {
         .unwrap_or_else(|_| rfc3339.to_owned())
 }
 
-pub const STATUSES: [&str; 4] = ["received", "in_work", "final", "delivered"];
+pub use vf_core::meta::STATUSES;
 
 pub fn status_label(s: &str) -> &'static str {
     match s {
@@ -37,6 +37,16 @@ pub fn status_label(s: &str) -> &'static str {
         "in_work" => "In work",
         "final" => "Final",
         "delivered" => "Delivered",
+        _ => "Unknown",
+    }
+}
+
+pub fn source_label(s: &str) -> &'static str {
+    match s {
+        "client" => "Client",
+        "firm" => "Firm",
+        "government" => "Government",
+        "third_party" => "Third party",
         _ => "Unknown",
     }
 }
