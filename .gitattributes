@@ -9,3 +9,7 @@
 *.zip binary
 *.jpg binary
 *.png binary
+*.heic binary
+*.heif binary
+*.tif binary
+*.tiff binary

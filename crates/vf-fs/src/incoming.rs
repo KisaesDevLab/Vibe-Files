@@ -85,3 +85,184 @@ pub fn process_scans(
     }
     pass
 }
+
+/// One pass over the photo folders: every settled image (JPG / PNG / TIFF / HEIC) becomes a
+/// one-page PDF of the same name in the inbox (`vf_ingest::image_pdf`). Images dropped straight
+/// into the inbox are converted in place. Originals go to `<folder>/processed`.
+pub fn process_photos(dirs: &[PathBuf], inbox: &Path) -> Pass {
+    let mut pass = Pass::default();
+    let exts = vf_ingest::image_pdf::IMAGE_EXTS;
+    for dir in dirs {
+        let processed = dir.join("processed");
+        for f in ready_files(dir, &exts) {
+            let stem = f
+                .file_stem()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned();
+            let work = processed.join(format!("~work-{}", vf_core::new_id()));
+            let pdf = work.join(format!("{stem}.pdf"));
+            let r = std::fs::create_dir_all(&work)
+                .map_err(|e| e.to_string())
+                .and_then(|()| vf_ingest::image_pdf::image_to_pdf(&f, &pdf))
+                .and_then(|()| queue_as_is(&pdf, inbox).map(|_| ()))
+                .and_then(|()| {
+                    let kept = filer_intake::commit::free_path(
+                        &processed.join(f.file_name().unwrap_or_default()),
+                    );
+                    std::fs::rename(&f, &kept)
+                        .map_err(|e| format!("cannot move {} aside: {e}", f.display()))
+                });
+            let _ = std::fs::remove_dir(&work);
+            match r {
+                Ok(()) => pass.queued += 1,
+                Err(e) => pass.errors.push(format!("{}: {e}", f.display())),
+            }
+        }
+    }
+    pass
+}
+
+#[cfg(test)]
+mod photo_tests {
+    use super::*;
+
+    /// P02 done-when: a HEIC phone photo becomes a 1-page PDF and routes by rule.
+    #[cfg(feature = "heic")]
+    #[test]
+    fn heic_photo_becomes_a_one_page_pdf_that_routes_by_rule() {
+        let src = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../fixtures/images/synthetic-page.heic");
+        photo_routes_by_rule(
+            &|p: &Path| {
+                std::fs::copy(&src, p).unwrap();
+            },
+            "heic",
+        );
+    }
+
+    /// The same path with a JPEG (runs on every build, HEIC or not).
+    #[test]
+    fn jpeg_photo_becomes_a_one_page_pdf_that_routes_by_rule() {
+        photo_routes_by_rule(
+            &|p: &Path| {
+                vf_ingest::image_pdf::test_page(900, 1200, 0.0)
+                    .to_rgb8()
+                    .save(p)
+                    .unwrap();
+            },
+            "jpg",
+        );
+    }
+
+    fn photo_routes_by_rule(make: &dyn Fn(&Path), ext: &str) {
+        use std::collections::HashMap;
+        use std::sync::Arc;
+
+        use filer_core::rules;
+        use filer_intake::intake::{Kind, QueuedFile, Source};
+        use filer_intake::plan::{self, PlanInput, Rescan, RowStatus};
+        use filer_intake::sentinel::{self, FoldersFile, ScanInput};
+
+        use crate::clients::{NewClient, create_client, template as cab_template};
+        use crate::intake::prepare_filer_dir;
+
+        let mut w = crate::clients::tests::world();
+        vf_core::doctype::seed(&mut w.conn, &w.actor).unwrap();
+        let tpl = cab_template(&w.root);
+        let nc = NewClient {
+            ext_id: "1042".into(),
+            name: "Anderson Farms LLC".into(),
+            ..NewClient::default()
+        };
+        create_client(&mut w.conn, &w.root, &w.cab, &tpl, &nc, &w.actor).unwrap();
+        let base = w.root.parent().unwrap().to_path_buf();
+        let (filer, inbox, photos) = (
+            base.join("data/filer"),
+            base.join("data/Inbox"),
+            base.join("data/Photos"),
+        );
+        prepare_filer_dir(&mut w.conn, &w.actor, &filer, &w.root, &w.cab, &tpl, &inbox).unwrap();
+        std::fs::create_dir_all(&photos).unwrap();
+        let photo = photos.join(format!("Anderson Farms LLC_1042_2025 Payroll.{ext}"));
+        make(&photo);
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(60);
+        std::fs::File::options()
+            .write(true)
+            .open(&photo)
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+
+        let pass = process_photos(std::slice::from_ref(&photos), &inbox);
+        assert_eq!(
+            (pass.queued, pass.errors.len()),
+            (1, 0),
+            "{:?}",
+            pass.errors
+        );
+        let pdf = inbox.join("Anderson Farms LLC_1042_2025 Payroll.pdf");
+        assert_eq!(filer_pdf::pdf::page_count(&pdf).unwrap(), 1);
+        assert!(
+            photos
+                .join("processed")
+                .join(photo.file_name().unwrap())
+                .is_file(),
+            "photo kept"
+        );
+
+        let clients = Arc::new(filer_core::clients::load_cache(&filer).unwrap().unwrap());
+        let bindings = sentinel::scan_root(
+            &ScanInput {
+                root: w.root.clone(),
+                clients: clients.clone(),
+                id_pattern: filer_core::parse::DEFAULT_ID_PATTERN.into(),
+                threshold: 0.85,
+                ignored: vec![],
+            },
+            &Default::default(),
+        )
+        .unwrap();
+        let out = plan::build_plan(&PlanInput {
+            files: vec![QueuedFile {
+                path: pdf.clone(),
+                size: std::fs::metadata(&pdf).unwrap().len(),
+                added: chrono::Local::now(),
+                source: Source::Inbox(inbox.clone()),
+                kind: Kind::Pdf,
+            }],
+            edits: HashMap::new(),
+            batch: Default::default(),
+            clients: Some(clients),
+            rules: rules::load_or_seed(&filer).0.active_rules().to_vec(),
+            template: tpl,
+            folders: Some(FoldersFile {
+                root: w.root.clone(),
+                scanned_at: chrono::Utc::now(),
+                folders: bindings,
+                ignored: vec![],
+            }),
+            root: Some(w.root.clone()),
+            id_pattern: filer_core::parse::DEFAULT_ID_PATTERN.into(),
+            fuzzy_suggest: filer_core::config::DEFAULT_FUZZY_SUGGEST,
+            fuzzy_auto: filer_core::config::DEFAULT_FUZZY_AUTO,
+            current_year: 2026,
+            sniff_enabled: false,
+            sniff: HashMap::new(),
+            rescan: Rescan::Done,
+            partial: vec![],
+            relationships: Arc::new(Default::default()),
+        });
+        let p = &out.proposals[0];
+        assert_eq!(p.status, RowStatus::Ready, "{:?}", p.dest);
+        assert_eq!(p.rule_name, "Payroll");
+        assert!(
+            p.dest
+                .as_ref()
+                .unwrap()
+                .ends_with("Payroll/2025/Anderson Farms LLC_1042_2025 Payroll.pdf"),
+            "{:?}",
+            p.dest
+        );
+    }
+}

@@ -12,12 +12,16 @@ on:
     paths:
       - ".github/workflows/release.yml"
       - "packaging/**"
+      - "crates/vf-ingest/Cargo.toml"
 
 permissions:
   contents: write
 
 env:
   CARGO_TERM_COLOR: always
+  VCPKG_ROOT: C:\vcpkg
+  VCPKGRS_DYNAMIC: "1"
+  VCPKGRS_TRIPLET: x64-windows
 
 jobs:
   build:
@@ -36,6 +40,14 @@ jobs:
         with:
           key: release
 
+      - name: Cache vcpkg libheif
+        uses: actions/cache@v4
+        with:
+          path: C:\vcpkg\installed
+          key: vcpkg-libheif-core-libde265-x64-windows-v1
+      - name: Install libheif (decoder only; no GPL x265)
+        run: vcpkg install "libheif[core,libde265]:x64-windows"
+
       - name: Read version
         id: ver
         run: |
@@ -51,7 +63,7 @@ jobs:
       - name: Build (static CRT, release)
         env:
           RUSTFLAGS: -C target-feature=+crt-static
-        run: cargo build --release --locked -p vf-app --target x86_64-pc-windows-msvc
+        run: cargo build --release --locked -p vf-app --features heic --target x86_64-pc-windows-msvc
 
       - name: Package
         id: pkg
@@ -61,13 +73,20 @@ jobs:
           New-Item -ItemType Directory -Force "$root/licenses/pdfium", "$root/licenses/fonts" | Out-Null
           Copy-Item target/x86_64-pc-windows-msvc/release/vibe-files.exe $root/
           Copy-Item crates/filer-pdf/assets/pdfium.dll $root/
+          # libheif + libde265 (LGPL-3.0, dynamically linked; replaceable by the user).
+          Copy-Item C:\vcpkg\installed\x64-windows\bin\*.dll $root/
+          New-Item -ItemType Directory -Force "$root/licenses/heif" | Out-Null
+          foreach ($p in Get-ChildItem C:\vcpkg\installed\x64-windows\share -Directory) {
+            $c = Join-Path $p.FullName copyright
+            if (Test-Path $c) { Copy-Item $c "$root/licenses/heif/$($p.Name).txt" }
+          }
           Copy-Item LICENSE "$root/LICENSE.txt"
           Copy-Item packaging/README.txt $root/
           Copy-Item crates/filer-pdf/assets/pdfium-LICENSE "$root/licenses/pdfium/LICENSE.txt"
           Copy-Item crates/filer-pdf/assets/pdfium-licenses/* "$root/licenses/pdfium/"
           Copy-Item crates/vf-app/assets/fonts/OFL-LICENSE.txt "$root/licenses/fonts/IBM-Plex-OFL.txt"
           Compress-Archive -Path $root -DestinationPath "dist/$name.zip"
-          $sums = foreach ($f in @("$root/vibe-files.exe", "$root/pdfium.dll", "dist/$name.zip")) {
+          $sums = foreach ($f in @((Get-ChildItem "$root/*.exe", "$root/*.dll").FullName + "dist/$name.zip")) {
             "{0}  {1}" -f (Get-FileHash -Algorithm SHA256 $f).Hash.ToLower(), (Split-Path $f -Leaf)
           }
           $sums | Set-Content -Encoding ascii "dist/$name.sha256.txt"

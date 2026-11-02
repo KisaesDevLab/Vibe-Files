@@ -11,10 +11,17 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 lopdf.workspace = true
 pdf-writer = "0.14"
 pdfium-render.workspace = true
+imageproc = { version = "0.25", default-features = false }
+libheif-rs = { version = "3", optional = true, default-features = false, features = ["v1_17"] }
 rxing = { version = "0.9", default-features = false, features = ["encoders", "decoders", "qrcode", "oned", "encoding_rs"] }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+
+[features]
+# HEIC/HEIF photos (libheif + libde265, LGPL, linked as DLLs). On in CI and release builds,
+# where vcpkg provides libheif; off on dev boxes without it (HEIC files are then refused).
+heic = ["dep:libheif-rs"]
 
 [dev-dependencies]
 tempfile.workspace = true

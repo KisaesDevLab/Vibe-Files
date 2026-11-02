@@ -1,5 +1,5 @@
 //! Background worker for the folders Vibe Files prepares before Intake (PHASES P02): scans
-//! (cover sheets) now; phone photos and print capture join in steps 4–5. Runs on its own thread
+//! (cover sheets), phone photos (image → PDF), and print capture (step 5). Runs on its own thread
 //! with its own catalog connection and reports what it did.
 
 use std::path::{Path, PathBuf};
@@ -14,6 +14,12 @@ use vf_fs::intake::Hints;
 /// Where a scanner or a "scan to folder" copier should save stacks.
 pub fn scans_dir(data: &Path) -> PathBuf {
     data.join("Scans")
+}
+
+/// Where phone photos (JPG / PNG / TIFF / HEIC) can be dropped; images dropped in the inbox are
+/// converted too.
+pub fn photos_dir(data: &Path) -> PathBuf {
+    data.join("Photos")
 }
 
 /// The Filer inbox processed files go to: Filer's first inbox (Setup), else the default.
@@ -81,10 +87,23 @@ fn run(
     let pdfium =
         filer_pdf::pdf::find_pdfium(&exe_dir()).and_then(|d| filer_pdf::pdf::pdfium(&d).ok());
     let scans = scans_dir(data);
+    let photos = photos_dir(data);
     let _ = std::fs::create_dir_all(&scans);
+    let _ = std::fs::create_dir_all(&photos);
     while !stop.load(Ordering::Relaxed) {
+        let inbox = inbox(data);
+        let pass = vf_fs::incoming::process_photos(&[photos.clone(), inbox.clone()], &inbox);
+        if pass.queued > 0 {
+            say(format!(
+                "Photos: {} converted to PDF and queued.",
+                pass.queued
+            ));
+        }
+        for e in pass.errors {
+            say(format!("Photo could not be converted: {e}"));
+        }
         if let Some(pdfium) = pdfium {
-            let pass = vf_fs::incoming::process_scans(&conn, pdfium, &scans, &inbox(data), hints);
+            let pass = vf_fs::incoming::process_scans(&conn, pdfium, &scans, &inbox, hints);
             if pass.routed + pass.queued > 0 {
                 say(format!(
                     "Scans: {} documents split from cover sheets, {} queued as scanned.",

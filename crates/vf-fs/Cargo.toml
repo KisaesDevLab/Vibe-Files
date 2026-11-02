@@ -20,6 +20,10 @@ serde_json.workspace = true
 thiserror.workspace = true
 uuid.workspace = true
 
+[features]
+# HEIC photos through libheif (see vf-ingest).
+heic = ["vf-ingest/heic"]
+
 [dev-dependencies]
 vf-fixtures = { path = "../vf-fixtures" }
 tempfile.workspace = true

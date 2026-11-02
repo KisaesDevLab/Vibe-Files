@@ -37,6 +37,16 @@ windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Stora
 zip = { version = "9.2.1", default-features = false, features = ["deflate"] }
 tempfile = "3.27.0"
 
+# Image work (deskew, resize, barcode decode) is too slow unoptimized, even in tests.
+[profile.dev.package.image]
+opt-level = 2
+[profile.dev.package.imageproc]
+opt-level = 2
+[profile.dev.package.rxing]
+opt-level = 2
+[profile.dev.package.zune-jpeg]
+opt-level = 2
+
 [profile.release]
 opt-level = "z"
 lto = true

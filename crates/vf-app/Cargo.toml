@@ -28,6 +28,10 @@ serde.workspace = true
 serde_json.workspace = true
 toml = "1"
 
+[features]
+# HEIC photos (libheif + libde265 DLLs from vcpkg). On in CI and release builds.
+heic = ["vf-fs/heic"]
+
 [target.'cfg(windows)'.dependencies]
 windows-sys = { workspace = true, features = ["Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
 

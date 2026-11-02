@@ -2,3 +2,4 @@
 //! (PHASES P02). Scanner (TWAIN/WIA) lands with P02 step 2 on the owner's PC.
 
 pub mod cover;
+pub mod image_pdf;

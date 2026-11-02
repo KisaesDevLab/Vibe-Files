@@ -13,6 +13,11 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  # libheif for HEIC photos (feature `heic`): vcpkg, as DLLs (LGPL). Decoder only — the port's
+  # default `hevc` feature is the GPL x265 encoder and must not be shipped.
+  VCPKG_ROOT: C:\vcpkg
+  VCPKGRS_DYNAMIC: "1"
+  VCPKGRS_TRIPLET: x64-windows
 
 jobs:
   windows:
@@ -25,10 +30,20 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      - name: Cache vcpkg libheif
+        uses: actions/cache@v4
+        with:
+          path: C:\vcpkg\installed
+          key: vcpkg-libheif-core-libde265-x64-windows-v1
+      - name: Install libheif (decoder only)
+        run: |
+          vcpkg install "libheif[core,libde265]:x64-windows"
+          echo "C:\vcpkg\installed\x64-windows\bin" >> $env:GITHUB_PATH
+        shell: pwsh
       - name: cargo fmt
         run: cargo fmt --all --check
       - name: cargo clippy
-        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+        run: cargo clippy --workspace --all-targets --locked --features vf-app/heic -- -D warnings
       - name: cargo test
         # Two threads, as upstream Filer Desktop runs its timing-sensitive egui UI tests.
-        run: cargo test --workspace --locked -- --test-threads=2
+        run: cargo test --workspace --locked --features vf-app/heic -- --test-threads=2
