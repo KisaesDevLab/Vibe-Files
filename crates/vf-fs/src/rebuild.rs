@@ -431,6 +431,7 @@ mod tests {
         crate::cabinet::create(
             &root,
             &CabinetFile {
+                firm_name: String::new(),
                 cabinet_id: vf_core::new_id(),
                 firm_id: firm.to_string(),
                 schema_version: vf_core::db::SCHEMA_VERSION,

@@ -11,6 +11,9 @@ pub const VERSIONS_DIR: &str = "versions";
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CabinetFile {
     pub cabinet_id: String,
+    /// Shown in the header ("Kisaes LLC"). Added in P01; older files read as empty.
+    #[serde(default)]
+    pub firm_name: String,
     /// = SentinelV1 `firm_id` of every client folder in this cabinet.
     pub firm_id: String,
     pub schema_version: u32,

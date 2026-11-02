@@ -27,17 +27,22 @@ pub enum AuditCmd {
     Verify,
 }
 
-/// How the CLI gets the raw catalog key until P06 adds DPAPI and the recovery passphrase:
-/// `--key-file` (64 hex chars) or the `VF_CATALOG_KEY` environment variable.
-pub fn load_key(key_file: Option<&Path>) -> Result<CatalogKey> {
-    let text = match key_file {
-        Some(p) => {
-            std::fs::read_to_string(p).with_context(|| format!("reading {}", p.display()))?
-        }
-        None => std::env::var("VF_CATALOG_KEY")
-            .context("no catalog key: pass --key-file or set VF_CATALOG_KEY (64 hex chars)")?,
-    };
-    parse_key(text.trim())
+/// How the CLI gets the catalog key until P06 adds DPAPI: `--key-file` (raw key, 64 hex chars),
+/// the `VF_CATALOG_KEY` environment variable (same), or `VF_PASSPHRASE` (the recovery
+/// passphrase, unwrapping `<data>/keys.json`).
+pub fn load_key(key_file: Option<&Path>, data: &Path) -> Result<CatalogKey> {
+    if let Some(p) = key_file {
+        let text =
+            std::fs::read_to_string(p).with_context(|| format!("reading {}", p.display()))?;
+        return parse_key(text.trim());
+    }
+    if let Ok(text) = std::env::var("VF_CATALOG_KEY") {
+        return parse_key(text.trim());
+    }
+    if let Ok(pass) = std::env::var("VF_PASSPHRASE") {
+        return crate::session::key_from_passphrase(data, &pass);
+    }
+    bail!("no catalog key: set VF_PASSPHRASE, or pass --key-file / set VF_CATALOG_KEY")
 }
 
 pub fn parse_key(hex: &str) -> Result<CatalogKey> {
@@ -77,23 +82,12 @@ pub fn run(cmd: &Command, data: &Path, key: &CatalogKey, out: &mut dyn Write) ->
         Command::Rebuild { cabinet } => {
             std::fs::create_dir_all(data)?;
             let mut conn = db::open(&catalog, key, Storage::Local)?;
-            let rep = vf_fs::rebuild::rebuild(&mut conn, cabinet, &device_id(data)?)?;
+            let device = crate::config::Config::load_or_create(data)?.device_id;
+            let rep = vf_fs::rebuild::rebuild(&mut conn, cabinet, &device)?;
             writeln!(out, "{rep}")?;
             Ok(0)
         }
     }
-}
-
-/// This workstation's device id (uuid v7), kept in `<data>/device_id` until `config.toml` lands
-/// with P01.
-pub fn device_id(data: &Path) -> Result<String> {
-    let p = data.join("device_id");
-    if let Ok(s) = std::fs::read_to_string(&p) {
-        return Ok(s.trim().to_owned());
-    }
-    let id = vf_core::new_id();
-    std::fs::write(&p, &id)?;
-    Ok(id)
 }
 
 #[cfg(test)]

@@ -151,6 +151,7 @@ pub fn generate(out: &Path, seed: u64) -> Result<Summary> {
     cabinet::create(
         out,
         &CabinetFile {
+            firm_name: String::new(),
             cabinet_id: rng.uuid().to_string(),
             firm_id: firm.to_string(),
             schema_version: vf_core::db::SCHEMA_VERSION,

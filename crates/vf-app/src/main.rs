@@ -4,6 +4,8 @@
 
 mod app;
 mod cli;
+mod config;
+mod session;
 mod ui;
 
 use std::path::PathBuf;
@@ -35,7 +37,7 @@ fn main() -> anyhow::Result<std::process::ExitCode> {
             .unwrap_or_else(|| PathBuf::from("data")),
     };
     if let Some(cmd) = &args.command {
-        let key = cli::load_key(args.key_file.as_deref())?;
+        let key = cli::load_key(args.key_file.as_deref(), &data)?;
         let code = cli::run(cmd, &data, &key, &mut std::io::stdout())?;
         return Ok(std::process::ExitCode::from(code as u8));
     }
@@ -50,7 +52,7 @@ fn main() -> anyhow::Result<std::process::ExitCode> {
     eframe::run_native(
         "Vibe Files",
         options,
-        Box::new(|cc| Ok(Box::new(app::VibeFilesApp::new(&cc.egui_ctx)))),
+        Box::new(move |cc| Ok(Box::new(app::VibeFilesApp::new(&cc.egui_ctx, &data)))),
     )
     .map_err(|e| anyhow::anyhow!("ui failed: {e}"))?;
     Ok(std::process::ExitCode::SUCCESS)

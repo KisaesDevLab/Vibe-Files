@@ -5,7 +5,8 @@ use egui::{Align, Frame, Layout, Margin, RichText, Sense, Stroke};
 use crate::app::Tab;
 use crate::ui::theme;
 
-pub fn header(ui: &mut egui::Ui) {
+/// `cabinet`: (firm name, cabinet path); `None` before a cabinet is open. `who`: user · role.
+pub fn header(ui: &mut egui::Ui, cabinet: Option<(&str, &str)>, mode: &str, who: &str) {
     egui::Panel::top("header")
         .exact_size(44.0)
         .resizable(false)
@@ -21,7 +22,30 @@ pub fn header(ui: &mut egui::Ui) {
                         .strong()
                         .color(egui::Color32::WHITE),
                 );
-                ui.label(RichText::new("No cabinet open").color(theme::ON_DARK_MUTED));
+                match cabinet {
+                    Some((firm, path)) => {
+                        ui.label(RichText::new(firm).color(egui::Color32::WHITE));
+                        ui.label(RichText::new("·").color(theme::ON_DARK_MUTED));
+                        ui.label(RichText::new(path).monospace().color(theme::ON_DARK_MUTED));
+                    }
+                    None => {
+                        ui.label(RichText::new("No cabinet open").color(theme::ON_DARK_MUTED));
+                    }
+                }
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if !who.is_empty() {
+                        ui.label(RichText::new(who).color(egui::Color32::WHITE));
+                    }
+                    if !mode.is_empty() {
+                        egui::Frame::new()
+                            .stroke(Stroke::new(1.0, theme::ON_DARK_MUTED))
+                            .corner_radius(8)
+                            .inner_margin(Margin::symmetric(8, 1))
+                            .show(ui, |ui| {
+                                ui.label(RichText::new(mode).small().color(theme::ON_DARK_MUTED))
+                            });
+                    }
+                });
             });
         });
 }
