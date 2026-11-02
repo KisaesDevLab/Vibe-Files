@@ -40,7 +40,7 @@ Each phase has Goal, Steps, Done when. Work them in order. A phase is complete o
 
 **Done when**
 - [x] `cargo test --workspace` and clippy clean
-- [ ] Vendored crates build with only the mechanical changes listed in step 2, every upstream test passes (193/194 under Wine; `twenty_file_batch_resolves_to_ready` to confirm on Windows), and `VENDORED.md` names the exact Filer commit
+- [x] Vendored crates build with only the mechanical changes listed in step 2, every upstream test passes (193/194 under Wine; `twenty_file_batch_resolves_to_ready` to confirm on Windows), and `VENDORED.md` names the exact Filer commit — *confirmed 2026-11-02: all 194 pass on `windows-latest` (CI run 41506666554)*
 - [x] Commit → undo → commit through `Transaction` leaves the fixture cabinet and inbox byte-identical, for same-volume rename and for forced copy-verify (Filer's own round-trip test, run through the wrapper)
 - [x] Migration 001 applies to an empty SQLCipher DB; `rebuild` on the fixture cabinet produces the expected row counts
 - [x] Audit chain verify passes after 1,000 synthetic rows and fails after one is tampered
@@ -63,10 +63,10 @@ Each phase has Goal, Steps, Done when. Work them in order. A phase is complete o
 8. Open-with: double-click opens in the registered app; "Open folder in Explorer"; copy path.
 
 **Done when**
-- [ ] Fixture cabinet browses with <100 ms tree expansion at 5,000 documents
-- [ ] New client wizard creates a folder tree matching the template and a valid SentinelV1
-- [ ] Bulk edit of 200 docs is one Transaction, one audit batch, one undo
-- [ ] Relationships round-trip through `filer-core`'s existing format
+- [x] Fixture cabinet browses with <100 ms tree expansion at 5,000 documents — *`vf-core` `browse::tree_expansion_is_fast_at_5000_docs` (catalog rows, 50 clients)*
+- [x] New client wizard creates a folder tree matching the template and a valid SentinelV1 — *`vf-fs` `clients::new_client_matches_template_and_sentinel_reads_back`*
+- [x] Bulk edit of 200 docs is one Transaction, one audit batch, one undo — *`vf-core` `meta::bulk_edit_200_docs_is_one_transaction`*
+- [x] Relationships round-trip through `filer-core`'s existing format — *`vf-fs` `clients::relationships_round_trip_through_filer_format`*
 
 ---
 
