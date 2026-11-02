@@ -49,6 +49,8 @@ pub fn open(path: &Path, key: &CatalogKey, storage: Storage) -> Result<Connectio
         OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE,
     )?;
     apply_key(&conn, key)?;
+    // Intake records its batches on a worker thread with its own connection (P02).
+    conn.busy_timeout(std::time::Duration::from_secs(10))?;
     conn.pragma_update(None, "foreign_keys", true)?;
     let mode = match storage {
         Storage::Local => "WAL",

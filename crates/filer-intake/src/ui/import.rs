@@ -13,7 +13,7 @@ use uuid::Uuid;
 
 use crate::app::AppState;
 use crate::clients::Client;
-use crate::commit::{self, CommitTarget, UnpackEntry, UnpackInput, UnpackReport};
+use crate::commit::{CommitTarget, UnpackEntry, UnpackInput, UnpackReport};
 use crate::config::Level;
 use crate::intake::QueuedFile;
 use crate::oplog::{self, Op, OpRecord, OpResult};
@@ -945,8 +945,9 @@ impl ImportScreen {
         let total = input.entries.len();
         let p = progress.clone();
         self.message = None;
+        let unpack = state.hooks.unpack.clone(); // VENDORED.md change 5
         self.job = Some(UnpackJob {
-            rx: worker::background(ctx, move || commit::run_unpack(&input, &p)),
+            rx: worker::background(ctx, move || unpack(&input, &p)),
             progress,
             total,
             zip: path.to_path_buf(),

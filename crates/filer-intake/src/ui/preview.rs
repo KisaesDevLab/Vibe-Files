@@ -611,7 +611,8 @@ impl PreviewScreen {
         let progress = Arc::new(AtomicUsize::new(0));
         let total = input.items.len();
         let p = Arc::clone(&progress);
-        let rx = worker::background(ctx, move || commit::run_commit(&input, &p));
+        let commit = state.hooks.commit.clone(); // VENDORED.md change 5
+        let rx = worker::background(ctx, move || commit(&input, &p));
         ctx.request_repaint_after(std::time::Duration::from_millis(100));
         self.commit_job = Some(CommitJob {
             rx,

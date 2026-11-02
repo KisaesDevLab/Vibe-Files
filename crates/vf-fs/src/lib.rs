@@ -4,6 +4,7 @@
 pub mod cabinet;
 pub mod clients;
 pub mod fileops;
+pub mod intake;
 pub mod rebuild;
 pub mod rename;
 

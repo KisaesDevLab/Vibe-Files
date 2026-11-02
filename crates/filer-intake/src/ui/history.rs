@@ -346,9 +346,8 @@ impl HistoryScreen {
             self.undo_confirm = false;
             self.message = None;
             let data_dir = state.data_dir.clone();
-            self.undo_job = Some(worker::background(ctx, move || {
-                undo::run_undo(&data_dir, lb, false)
-            }));
+            let undo = state.hooks.undo.clone(); // VENDORED.md change 5
+            self.undo_job = Some(worker::background(ctx, move || undo(&data_dir, lb, false)));
         } else if close || modal.should_close() {
             self.undo_confirm = false;
         }

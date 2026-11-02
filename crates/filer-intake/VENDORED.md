@@ -25,9 +25,18 @@ of its `src/` (QUESTIONS Q-16). Upstream `main.rs` is not vendored; `vf-app` is 
 3. Assets moved beside the module that reads them, so `include_bytes!`/`include_str!`/
    `CARGO_MANIFEST_DIR` paths are unchanged.
 4. Package versions kept at `0.2.4` so `CARGO_PKG_VERSION` text is unchanged.
+5. **Host hooks (P02 step 1, owner-approved 2026-11-02).** `app.rs` gains `Hooks`
+   (`commit` / `unpack` / `undo`, each defaulting to Filer's own `commit::run_commit`,
+   `commit::run_unpack`, `undo::run_undo`), an `AppState::hooks` field, and
+   `FilerApp::queue_len` / `FilerApp::state_mut`. The three call sites that started those jobs
+   now call the hook instead: `ui/preview.rs` `start_commit`, `ui/import.rs` (unpack job),
+   `ui/history.rs` (undo job); `ui/import.rs` drops its now-unused `commit::self` import. With the defaults, behavior is exactly upstream's. Vibe Files sets
+   hooks that call the same Filer functions and then record the catalog change
+   (`vf-fs::intake`).
 
 No logic edits. Check with:
-`diff -r <upstream>/src crates/filer-*/src` (only the four attribute lines differ).
+`diff -r <upstream>/src crates/filer-*/src` (only the four attribute lines and the change-5
+hook lines differ).
 
 ## File → crate
 

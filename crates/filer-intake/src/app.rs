@@ -74,8 +74,44 @@ pub struct RoutedZip {
     pub filed: Vec<(uuid::Uuid, PathBuf)>,
 }
 
+/// Vibe Files hook (VENDORED.md change 5): how a batch is filed, a zip unpacked, and a batch
+/// undone. Defaults to Filer Desktop's own `run_commit`, `run_unpack` and `run_undo`; Vibe Files
+/// wraps them so each also records the catalog change in one transaction.
+pub type CommitFn = std::sync::Arc<
+    dyn Fn(&commit::CommitInput, &std::sync::atomic::AtomicUsize) -> commit::CommitReport
+        + Send
+        + Sync,
+>;
+pub type UnpackFn = std::sync::Arc<
+    dyn Fn(&commit::UnpackInput, &std::sync::atomic::AtomicUsize) -> commit::UnpackReport
+        + Send
+        + Sync,
+>;
+pub type UndoFn = std::sync::Arc<
+    dyn Fn(&std::path::Path, LastBatch, bool) -> crate::undo::UndoReport + Send + Sync,
+>;
+
+#[derive(Clone)]
+pub struct Hooks {
+    pub commit: CommitFn,
+    pub unpack: UnpackFn,
+    pub undo: UndoFn,
+}
+
+impl Default for Hooks {
+    fn default() -> Self {
+        Self {
+            commit: std::sync::Arc::new(commit::run_commit),
+            unpack: std::sync::Arc::new(commit::run_unpack),
+            undo: std::sync::Arc::new(crate::undo::run_undo),
+        }
+    }
+}
+
 /// Saved settings and data every screen works with.
 pub struct AppState {
+    /// Vibe Files hook (VENDORED.md change 5).
+    pub hooks: Hooks,
     pub data_dir: PathBuf,
     pub settings: Settings,
     /// False when config.json existed but could not be read; it is then never overwritten
@@ -159,6 +195,7 @@ impl AppState {
             .ok()
             .map(chrono::DateTime::from);
         Self {
+            hooks: Hooks::default(),
             data_dir,
             settings,
             settings_savable,
@@ -828,6 +865,18 @@ impl FilerApp {
         if state.is_some() {
             self.shared.settings.window = state;
         }
+    }
+}
+
+/// Vibe Files hook (VENDORED.md change 5): the host reads the queue size for its tab badge and
+/// refreshes the client list and template when its catalog changes.
+impl FilerApp {
+    pub fn queue_len(&self) -> usize {
+        self.shared.intake.queue().len()
+    }
+
+    pub fn state_mut(&mut self) -> &mut AppState {
+        &mut self.shared
     }
 }
 

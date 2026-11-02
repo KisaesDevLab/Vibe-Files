@@ -3,6 +3,7 @@ pub mod browse;
 pub mod chrome;
 pub mod clients;
 pub mod format;
+pub mod intake;
 pub mod meta;
 pub mod rename;
 pub mod theme;

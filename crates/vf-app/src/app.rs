@@ -80,6 +80,12 @@ pub struct Workspace {
     pub doc_types: Vec<vf_core::doctype::DocType>,
     doc_types_gen: i64,
     pub meta_form: crate::ui::meta::MetaForm,
+    /// The Intake tab (vendored Filer Desktop), started on the first frame.
+    pub intake: Option<crate::ui::intake::IntakeTab>,
+    pub intake_error: Option<String>,
+    /// What Vibe Files knows about queued files before Filer files them (P02).
+    pub hints: vf_fs::intake::Hints,
+    last_tab: Option<Tab>,
 }
 
 fn pane() -> egui::Frame {
@@ -106,6 +112,54 @@ impl Workspace {
             doc_types: Vec::new(),
             doc_types_gen: -1,
             meta_form: Default::default(),
+            intake: None,
+            intake_error: None,
+            hints: Default::default(),
+            last_tab: None,
+        }
+    }
+
+    /// Starts the Intake engine (watcher, queue) once, and keeps its client list in step.
+    pub fn intake_tick(&mut self, ctx: &egui::Context) {
+        if self.intake.is_none() && self.intake_error.is_none() {
+            match crate::ui::intake::IntakeTab::open(
+                ctx,
+                &mut self.session,
+                &self.template,
+                self.hints.clone(),
+            ) {
+                Ok(t) => self.intake = Some(t),
+                Err(e) => self.intake_error = Some(e),
+            }
+        }
+        if let Some(t) = &mut self.intake
+            && let Err(e) = t.sync(ctx, &mut self.session, &self.template)
+        {
+            self.intake_error = Some(e);
+        }
+    }
+
+    pub fn intake_badge(&self) -> usize {
+        self.intake.as_ref().map_or(0, |t| t.queue_len())
+    }
+
+    fn intake_ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        match (&mut self.intake, &self.intake_error) {
+            (_, Some(e)) => {
+                let e = e.clone();
+                egui::CentralPanel::default().frame(pane()).show(ui, |ui| {
+                    crate::ui::widgets::banner(ui, &format!("Intake could not start: {e}"), true);
+                    if ui.button("Try again").clicked() {
+                        self.intake_error = None;
+                    }
+                });
+            }
+            (Some(t), None) => {
+                egui::CentralPanel::default()
+                    .frame(egui::Frame::NONE)
+                    .show(ui, |ui| t.ui(ui, frame));
+            }
+            (None, None) => {}
         }
     }
 
@@ -650,7 +704,15 @@ impl VibeFilesApp {
 }
 
 impl eframe::App for VibeFilesApp {
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    fn on_exit(&mut self) {
+        if let Screen::Open(w) = &mut self.screen
+            && let Some(t) = &mut w.intake
+        {
+            t.on_exit();
+        }
+    }
+
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         match &mut self.screen {
             Screen::Wizard(w) => {
                 let version = format!("vibe-files {}", env!("CARGO_PKG_VERSION"));
@@ -666,16 +728,24 @@ impl eframe::App for VibeFilesApp {
             }
             Screen::Open(w) => {
                 w.refresh();
+                w.intake_tick(ui.ctx());
+                let tab = self.tab;
+                // Filer's screens restyle the context; restore Vibe Files' look on leaving them.
+                if w.last_tab == Some(Tab::Intake) && tab != Tab::Intake {
+                    theme::install(ui.ctx());
+                }
+                w.last_tab = Some(tab);
+                let badge = w.intake_badge();
                 let s = &w.session;
                 let root = s.root.display().to_string();
                 let who = s.actor.user.clone().unwrap_or_default();
                 chrome::header(ui, Some((&s.cabinet.firm_name, &root)), "Local", &who);
-                chrome::tab_bar(ui, &mut self.tab, 0);
-                let tab = self.tab;
+                chrome::tab_bar(ui, &mut self.tab, badge);
                 chrome::footer(ui, &w.footer_segments(tab), "Catalog open");
                 match tab {
                     Tab::Browse => w.browse_ui(ui),
                     Tab::Admin => w.admin_ui(ui),
+                    Tab::Intake => w.intake_ui(ui, frame),
                     _ => {
                         egui::CentralPanel::default().show(ui, |ui| {
                             ui.heading(tab.name());
@@ -748,10 +818,14 @@ mod tests {
         assert!(matches!(h.state().screen, Screen::Open(_)));
         h.run();
         h.get_by_label("Kisaes LLC");
+        // Step, not run: the Intake tab is Filer Desktop, whose background checks keep
+        // repainting (its own tests step the same way).
         for t in Tab::ALL {
             h.get_by_role_and_label(egui::accesskit::Role::Button, t.name())
                 .click();
-            h.run();
+            for _ in 0..3 {
+                h.step();
+            }
             assert_eq!(h.state().tab, t);
         }
     }

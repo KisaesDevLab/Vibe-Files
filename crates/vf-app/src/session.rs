@@ -27,6 +27,9 @@ pub struct Session {
     pub cabinet: CabinetFile,
     pub config: Config,
     pub key_id: String,
+    /// The unwrapped catalog key, kept in memory while the cabinet is open so Intake's worker
+    /// thread can open its own connection (P02).
+    pub key: CatalogKey,
 }
 
 /// What this data folder holds, for the wizard's first screen.
@@ -79,7 +82,11 @@ fn now() -> String {
 }
 
 /// Writes the key file and an empty, migrated catalog. On error nothing is left behind.
-fn new_catalog(data: &Path, passphrase: &str, kdf: Kdf) -> Result<(Connection, String)> {
+fn new_catalog(
+    data: &Path,
+    passphrase: &str,
+    kdf: Kdf,
+) -> Result<(Connection, String, CatalogKey)> {
     keys::check_passphrase(passphrase)?;
     std::fs::create_dir_all(data).with_context(|| format!("creating {}", data.display()))?;
     ensure_empty_data(data)?;
@@ -87,7 +94,7 @@ fn new_catalog(data: &Path, passphrase: &str, kdf: Kdf) -> Result<(Connection, S
     let kf = KeyFile::wrap(&raw, passphrase, kdf)?;
     kf.save_new(&data.join(keys::KEYS_FILE))?;
     match db::open(&data.join(CATALOG_FILE), &CatalogKey(raw), Storage::Local) {
-        Ok(conn) => Ok((conn, kf.key_id)),
+        Ok(conn) => Ok((conn, kf.key_id, CatalogKey(raw))),
         Err(e) => {
             discard_catalog(data);
             Err(e.into())
@@ -129,6 +136,7 @@ fn finish(
     root: &Path,
     mut conn: Connection,
     key_id: String,
+    key: CatalogKey,
     cab: CabinetFile,
 ) -> Result<(Session, RebuildReport)> {
     let mut config = Config::load_or_create(data)?;
@@ -150,6 +158,7 @@ fn finish(
             cabinet: cab,
             config,
             key_id,
+            key,
         },
         rep,
     ))
@@ -175,7 +184,7 @@ pub fn create_cabinet(
             root.display()
         );
     }
-    let (conn, key_id) = new_catalog(data, passphrase, kdf)?;
+    let (conn, key_id, key) = new_catalog(data, passphrase, kdf)?;
     let cab = CabinetFile {
         cabinet_id: vf_core::new_id(),
         firm_name: firm_name.trim().into(),
@@ -189,7 +198,7 @@ pub fn create_cabinet(
         discard_catalog(data);
         bail!(e);
     }
-    finish(data, root, conn, key_id, cab)
+    finish(data, root, conn, key_id, key, cab)
 }
 
 /// Existing cabinet at `root`, new catalog on this PC rebuilt from the folder tree.
@@ -200,8 +209,8 @@ pub fn attach_cabinet(
     kdf: Kdf,
 ) -> Result<(Session, RebuildReport)> {
     let cab = cabinet::read(root).map_err(anyhow::Error::msg)?;
-    let (conn, key_id) = new_catalog(data, passphrase, kdf)?;
-    finish(data, root, conn, key_id, cab)
+    let (conn, key_id, key) = new_catalog(data, passphrase, kdf)?;
+    finish(data, root, conn, key_id, key, cab)
 }
 
 /// Opens the catalog this data folder holds.
@@ -242,6 +251,7 @@ pub fn unlock(data: &Path, passphrase: &str) -> Result<Session> {
         cabinet: cab,
         config,
         key_id: kf.key_id,
+        key: CatalogKey(raw),
     })
 }
 

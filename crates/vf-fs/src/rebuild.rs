@@ -120,7 +120,7 @@ fn files_under(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), RebuildError> {
 }
 
 /// First path segment that is a plausible tax year (1990..=2100); `None` = permanent file.
-fn year_from_path(rel: &str) -> Option<i64> {
+pub(crate) fn year_from_path(rel: &str) -> Option<i64> {
     rel.split('/').find_map(|seg| {
         (seg.len() == 4)
             .then(|| seg.parse::<i64>().ok())
@@ -129,7 +129,7 @@ fn year_from_path(rel: &str) -> Option<i64> {
     })
 }
 
-fn mime(rel: &str) -> &'static str {
+pub(crate) fn mime(rel: &str) -> &'static str {
     let ext = rel.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
     match ext.as_str() {
         "pdf" => "application/pdf",
