@@ -5,6 +5,7 @@ pub mod cabinet;
 pub mod clients;
 pub mod fileops;
 pub mod rebuild;
+pub mod rename;
 
 #[cfg(test)]
 mod tests {

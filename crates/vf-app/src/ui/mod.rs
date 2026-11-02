@@ -4,6 +4,7 @@ pub mod chrome;
 pub mod clients;
 pub mod format;
 pub mod meta;
+pub mod rename;
 pub mod theme;
 pub mod widgets;
 pub mod wizard;

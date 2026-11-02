@@ -62,6 +62,7 @@ impl Tab {
 pub enum Dialog {
     NewClient(NewClientDialog),
     Import(Box<ImportDialog>),
+    Rename(crate::ui::rename::RenameDialog),
 }
 
 pub struct Workspace {
@@ -208,6 +209,18 @@ impl Workspace {
             {
                 self.dialog = Some(Dialog::Import(Box::new(ImportDialog::new(p))));
             }
+            ui.separator();
+            let sel: Vec<String> = self.browse.selected.iter().cloned().collect();
+            if ui
+                .add_enabled(!sel.is_empty(), egui::Button::new("Rename…"))
+                .on_disabled_hover_text("Select documents first.")
+                .clicked()
+            {
+                let extra = vf_fs::rename::extra_tokens(&self.session.conn).unwrap_or_default();
+                self.dialog = Some(Dialog::Rename(crate::ui::rename::RenameDialog::new(
+                    sel, extra,
+                )));
+            }
         });
         ui.add_space(4.0);
     }
@@ -234,6 +247,28 @@ impl Workspace {
                             self.browse.select_node(browse::Node::Client(id));
                         }
                         Err(e) => nc.error = Some(e.to_string()),
+                    }
+                }
+            },
+            Dialog::Rename(rd) => match rd.ui(ctx) {
+                Outcome::Open => {}
+                Outcome::Cancel => self.dialog = None,
+                Outcome::Done(crate::ui::rename::Step::Preview) => {
+                    match vf_fs::rename::plan(&s.conn, &s.root, &rd.template, &rd.ids) {
+                        Ok(rows) => rd.set_preview(rows),
+                        Err(e) => rd.error = Some(e.to_string()),
+                    }
+                }
+                Outcome::Done(crate::ui::rename::Step::Commit) => {
+                    let rows = rd.rows.clone().unwrap_or_default();
+                    match vf_fs::rename::commit(&mut s.conn, &s.root, &s.actor, &rows) {
+                        Ok(Some(done)) => {
+                            let n = rows.iter().filter(|r| r.will_rename()).count();
+                            self.committed(&done, &format!("rename of {n} documents"));
+                            self.dialog = None;
+                        }
+                        Ok(None) => self.dialog = None,
+                        Err(e) => rd.error = Some(e.to_string()),
                     }
                 }
             },

@@ -4979,6 +4979,7 @@ dependencies = [
  "chrono",
  "filer-core",
  "filer-intake",
+ "regex",
  "serde",
  "serde_json",
  "sha2",

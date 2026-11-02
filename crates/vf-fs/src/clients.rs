@@ -766,7 +766,7 @@ pub fn load_mirror(root: &Path) -> Option<Relationships> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use vf_core::db::{CatalogKey, Storage};
 
