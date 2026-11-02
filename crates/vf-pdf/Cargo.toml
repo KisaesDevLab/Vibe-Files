@@ -1,0 +1,8 @@
+[package]
+name = "vf-pdf"
+version.workspace = true
+edition.workspace = true
+license-file.workspace = true
+publish.workspace = true
+
+[dependencies]

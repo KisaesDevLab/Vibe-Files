@@ -1,0 +1,1 @@
+Drop the 11 exported mockup HTML files from the "Vibe Filer Desktop UI" artifact here (Main, Setup, Rules, Import, Relationships, Split, Combine, Commit, Conflicts, CsvWizard, History). Reference only; UI_SPEC.md is the spec.

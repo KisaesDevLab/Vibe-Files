@@ -1,0 +1,21 @@
+{
+  "name": "{Client} ({ID})",
+  "children": [
+    { "name": "Income Tax", "children": [{ "name": "{Year}" }] },
+    { "name": "Bookkeeping", "children": [{ "name": "{Year}" }] },
+    { "name": "Payroll", "children": [{ "name": "{Year}" }] },
+    { "name": "Financials", "children": [{ "name": "{Year}" }] },
+    { "name": "Correspondence", "children": [{ "name": "{Year}" }] },
+    { "name": "Workpapers & Support", "children": [{ "name": "{Year}" }] },
+    { "name": "Sales Tax", "children": [{ "name": "{Year}" }] },
+    {
+      "name": "Permanent",
+      "children": [{ "name": "Setup" }, { "name": "Stock Basis" }]
+    },
+    {
+      "name": "Other",
+      "children": [{ "name": "Practice", "children": [{ "name": "{Year}" }] }, { "name": "{Year}" }]
+    },
+    { "name": "Not Yet Filed" }
+  ]
+}
