@@ -4,14 +4,14 @@ Updated by Claude Code at the end of every session. Human edits welcome.
 
 ## Current phase
 
-**P02 — Intake** — steps 1, 3, 4, 5, 6 built (2026-11-02); all four Done-when boxes are covered by tests. **Step 2 (scanner, TWAIN vs WIA, Q-02) is deferred to a session on Kurt's Windows PC with the office scanner** (owner 2026-11-02), so P02 is not done yet.
+**P02 — Intake** — steps 1, 3, 4, 5, 6 built (2026-11-02); all four Done-when boxes are covered by tests. **Step 2 (TWAIN scanner; Q-02 answered: TWAIN only) is deferred to a session on Kurt's Windows PC with the office scanner** (owner 2026-11-02), so P02 is not done yet.
 
 **P01** — built; waiting on the owner's hands-on UI check on Windows (checklist below). **P00** — done.
 
 ## Next step
 
 1. On Kurt's Windows PC (Claude Code), with the office scanner attached:
-   - P02 step 2: one-day spike each of WIA (COM via `windows`) and TWAIN (`twain` crate); keep the one that drives the scanner with duplex + ADF (Q-02 default). Scan profiles (duplex, dpi, color, deskew, blank-page drop). Output into `<data>/Scans` so cover sheets split it.
+   - P02 step 2: TWAIN backend (owner 2026-11-02: the firm uses only TWAIN scanners; no WIA). Drive the scanner with duplex + ADF; scan profiles (duplex, dpi, color, deskew, blank-page drop). Output into `<data>/Scans` so cover sheets split it.
    - Hands-on UI check of P01 and P02 (lists below), then mark P01 and P02 done.
 2. Start P03 (OCR engine trait, Tesseract, FTS5 search).
 
@@ -117,7 +117,7 @@ Dev box: Linux container; gate is `scripts/check-wine.sh` (mingw cross-build, te
 
 ## Known issues / debt
 
-- **P02 scanner (step 2) not built** — needs the office scanner (Q-02). Scans come in through `<data>/Scans` until then.
+- **P02 scanner (step 2) not built** — TWAIN only (Q-02); needs the office scanner to test. Scans come in through `<data>/Scans` until then.
 - Filer's own Setup tab can change the root, inboxes or CSV; Vibe Files rewrites root, firm id, template, client list and relationships each time the catalog's clients change (its CSV import is not used). Relationship deletions made in Filer's Relationships tab come back on the next sync (additions are merged).
 - Filer's Conflicts tab (bind / rename client folders) writes sentinels and renames folders outside the hooks; the catalog catches up on the next Rebuild.
 - Filer's screens restyle the egui context while the Intake tab is shown; Vibe Files' theme is re-applied when you leave it.

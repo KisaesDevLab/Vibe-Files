@@ -12,7 +12,7 @@ Decisions already locked on 2026-11-01 are at the bottom for reference; do not r
 
 **Q-02 — Scanner API: TWAIN or WIA?**
 Default: one-day spike each in P02; choose WIA if it drives Kurt's office scanner with duplex + ADF; else TWAIN. Record result here.
-**Deferred 2026-11-02 (owner):** the spike needs the office scanner attached, so P02 step 2 runs in a Claude Code session on Kurt's Windows PC. Until then, scans enter through `<data>/Scans` (scan-to-folder from the copier or the scanner's own software); cover sheets, splitting and routing already work on that folder.
+**Answered 2026-11-02 (owner): TWAIN.** The firm uses only TWAIN scanners, so there is no WIA spike; P02 step 2 builds the TWAIN backend (`twain` crate or the TWAIN DSM via FFI) with scan profiles. **Still deferred:** testing it needs the office scanner attached, so P02 step 2 runs in a Claude Code session on Kurt's Windows PC. Until then, scans enter through `<data>/Scans` (scan-to-folder from the copier or the scanner's own software); cover sheets, splitting and routing already work on that folder.
 
 **Q-03 — ~~Practice Manager decryption scheme.~~** Closed 2026-11-02: no PM dependency; only Vibe Files devices decrypt. Revisit under PA-11 if ever needed.
 
