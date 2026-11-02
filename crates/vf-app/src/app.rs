@@ -6,6 +6,7 @@ use std::path::Path;
 use vf_security::keys::Kdf;
 
 use crate::session::Session;
+use crate::ui::admin::{self, Admin};
 use crate::ui::browse::{self, Browse};
 use crate::ui::clients::{
     self as client_ui, ClientEdit, ImportDialog, NewClientDialog, Outcome, RelForm,
@@ -73,6 +74,10 @@ pub struct Workspace {
     pub rel_form: RelForm,
     /// The last transaction this session committed: `(tx id, label)`.
     pub last_tx: Option<(String, String)>,
+    pub admin: Admin,
+    /// Live doc types (pickers), refreshed with the browse generation.
+    pub doc_types: Vec<vf_core::doctype::DocType>,
+    doc_types_gen: i64,
 }
 
 fn pane() -> egui::Frame {
@@ -95,7 +100,58 @@ impl Workspace {
             template,
             rel_form: RelForm::default(),
             last_tx: None,
+            admin: Admin::default(),
+            doc_types: Vec::new(),
+            doc_types_gen: -1,
         }
+    }
+
+    /// Re-reads catalog-derived state when anything changed.
+    pub fn refresh(&mut self) {
+        self.browse.refresh(&self.session.conn);
+        let generation = vf_core::browse::generation(&self.session.conn).unwrap_or(-2);
+        if generation != self.doc_types_gen {
+            self.doc_types = vf_core::doctype::list(&self.session.conn, true).unwrap_or_default();
+            self.doc_types_gen = generation;
+        }
+    }
+
+    fn admin_ui(&mut self, ui: &mut egui::Ui) {
+        let live = self.doc_types.iter().filter(|t| !t.archived).count();
+        egui::Panel::left("admin_nav")
+            .resizable(false)
+            .exact_size(248.0)
+            .frame(pane())
+            .show(ui, |ui| self.admin.nav_ui(ui, live));
+        egui::CentralPanel::default()
+            .frame(pane())
+            .show(ui, |ui| match self.admin.page {
+                admin::Page::DocTypes => {
+                    let types = self.doc_types.clone();
+                    if let Some(a) = self.admin.doc_types_ui(ui, &types) {
+                        let s = &mut self.session;
+                        let r = match a {
+                            admin::DocTypeAction::Save(e) => {
+                                vf_core::doctype::save(&mut s.conn, &s.actor, &e)
+                                    .map(|(_, d)| (d, "doc type"))
+                            }
+                            admin::DocTypeAction::Archive(id, to) => {
+                                vf_core::doctype::set_archived(&mut s.conn, &s.actor, &id, to)
+                                    .map(|d| (d, "archive doc type"))
+                            }
+                        };
+                        match r {
+                            Ok((done, label)) => {
+                                self.committed(&done, label);
+                                self.admin.edit = None;
+                                self.admin.error = None;
+                            }
+                            Err(e) => self.admin.error = Some(e.to_string()),
+                        }
+                    }
+                }
+                admin::Page::Audit => self.admin.audit_ui(ui, &self.session.conn),
+            });
     }
 
     /// Every app-level commit lands here: mirror the audit rows to `_Vibe/audit/*.jsonl` and
@@ -388,7 +444,7 @@ impl eframe::App for VibeFilesApp {
                 }
             }
             Screen::Open(w) => {
-                w.browse.refresh(&w.session.conn);
+                w.refresh();
                 let s = &w.session;
                 let root = s.root.display().to_string();
                 let who = s.actor.user.clone().unwrap_or_default();
@@ -398,6 +454,7 @@ impl eframe::App for VibeFilesApp {
                 chrome::footer(ui, &w.footer_segments(tab), "Catalog open");
                 match tab {
                     Tab::Browse => w.browse_ui(ui),
+                    Tab::Admin => w.admin_ui(ui),
                     _ => {
                         egui::CentralPanel::default().show(ui, |ui| {
                             ui.heading(tab.name());

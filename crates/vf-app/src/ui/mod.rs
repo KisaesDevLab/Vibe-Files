@@ -1,3 +1,4 @@
+pub mod admin;
 pub mod browse;
 pub mod chrome;
 pub mod clients;

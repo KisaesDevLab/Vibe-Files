@@ -138,6 +138,7 @@ fn finish(
         device_id: config.device_id.clone(),
     };
     register_device(&mut conn, &config, &actor)?;
+    vf_core::doctype::seed(&mut conn, &actor)?;
     let rep = vf_fs::rebuild::rebuild(&mut conn, root, &config.device_id)?;
     config.cabinet = Some(root.to_path_buf());
     config.save(data)?;
@@ -212,7 +213,7 @@ pub fn unlock(data: &Path, passphrase: &str) -> Result<Session> {
     };
     let kf = KeyFile::load(&data.join(keys::KEYS_FILE))?;
     let raw = kf.unwrap_key(passphrase)?;
-    let conn = db::open(&data.join(CATALOG_FILE), &CatalogKey(raw), Storage::Local)?;
+    let mut conn = db::open(&data.join(CATALOG_FILE), &CatalogKey(raw), Storage::Local)?;
     let cab = cabinet::read(&root)
         .map_err(|e| anyhow::anyhow!("{e}\nIs the cabinet drive or share connected?"))?;
     let known: Option<String> = conn
@@ -232,6 +233,8 @@ pub fn unlock(data: &Path, passphrase: &str) -> Result<Session> {
         user: Some(os_user()),
         device_id: config.device_id.clone(),
     };
+    // Catalogs from before P01 step 4 have no doc types yet.
+    vf_core::doctype::seed(&mut conn, &actor)?;
     Ok(Session {
         root,
         data: data.to_path_buf(),

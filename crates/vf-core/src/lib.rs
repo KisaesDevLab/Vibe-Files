@@ -4,6 +4,7 @@
 pub mod audit;
 pub mod browse;
 pub mod db;
+pub mod doctype;
 pub mod tx;
 
 #[derive(Debug, thiserror::Error)]
