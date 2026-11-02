@@ -12,6 +12,7 @@ Decisions already locked on 2026-11-01 are at the bottom for reference; do not r
 
 **Q-02 — Scanner API: TWAIN or WIA?**
 Default: one-day spike each in P02; choose WIA if it drives Kurt's office scanner with duplex + ADF; else TWAIN. Record result here.
+**Deferred 2026-11-02 (owner):** the spike needs the office scanner attached, so P02 step 2 runs in a Claude Code session on Kurt's Windows PC. Until then, scans enter through `<data>/Scans` (scan-to-folder from the copier or the scanner's own software); cover sheets, splitting and routing already work on that folder.
 
 **Q-03 — ~~Practice Manager decryption scheme.~~** Closed 2026-11-02: no PM dependency; only Vibe Files devices decrypt. Revisit under PA-11 if ever needed.
 
@@ -59,6 +60,10 @@ Default: in Vibe Files, the wrapper also stores the overwritten content as a ver
 
 **Q-18 — Tracking upstream Filer Desktop.** Upstream is still in 0.2.x pre-release.
 Default: take the newest `master` at P00 step 2; later upstream fixes come in only as a PA-xx re-vendor step with the test suite re-run. Never edit vendored files to "catch up".
+
+**Q-19 — Tying Filer's Confirm to a Vibe Files Transaction.** *Answered 2026-11-02 (owner): a small vendored hook.* `filer-intake` gets `Hooks { commit, unpack, undo }` (VENDORED.md change 5) defaulting to Filer's own functions; Vibe Files wraps them so a batch lands on disk and in the catalog together, or Filer's undo puts it back.
+
+**Q-20 — HEIC decoding.** *Answered 2026-11-02 (owner): bundle libheif.* vcpkg `libheif[core,libde265]` as DLLs (LGPL-3.0, dynamically linked) beside the exe, built in CI and release. Never the port's default `hevc` feature: it is the GPL-2.0 x265 encoder. Dev boxes without libheif build without feature `heic` and refuse HEIC files.
 
 ---
 

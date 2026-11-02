@@ -83,10 +83,10 @@ Each phase has Goal, Steps, Done when. Work them in order. A phase is complete o
 6. Badge counts on the Intake tab; silent by default (Filer behavior).
 
 **Done when**
-- [ ] A 40-page scanned stack with 4 cover sheets splits into 4 documents filed to the right clients with no manual edits
-- [ ] HEIC phone photo becomes a 1-page PDF and routes by rule
-- [ ] A PDF saved by the system PDF printer into the capture folder with an UltraTax-style filename lands in `<Client>/<Year>/Returns/` with doc type "Return copy — federal"
-- [ ] Undo last batch restores every file and catalog row
+- [x] A 40-page scanned stack with 4 cover sheets splits into 4 documents filed to the right clients with no manual edits — *`vf-fs` `stack::forty_page_stack_with_four_covers_files_four_documents` (from `<data>/Scans`; scanner itself waits on step 2)*
+- [x] HEIC phone photo becomes a 1-page PDF and routes by rule — *`vf-fs` `incoming::photo_tests::heic_photo_becomes_a_one_page_pdf_that_routes_by_rule` (CI, feature `heic`)*
+- [x] A PDF saved by the system PDF printer into the capture folder with an UltraTax-style filename lands in `<Client>/<Year>/Returns/` with doc type "Return copy — federal" — *`vf-fs` `capture::tests::ultratax_print_capture_files_as_federal_return_copy`; the folder is the template's `Income Tax/{Year}` (CLAUDE.md: UI_SPEC paths are illustrative)*
+- [x] Undo last batch restores every file and catalog row — *`vf-fs` `intake::tests::commit_records_catalog_and_undo_restores_files_and_rows`*
 
 ---
 

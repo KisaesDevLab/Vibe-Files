@@ -277,7 +277,9 @@ pub fn write_sheets(path: &Path, sheets: &[Sheet]) -> Result<(), String> {
 /// Finds a sheet on one rendered page (RGBA bytes): QR first, Code128 if the QR is unreadable.
 pub fn decode_rgba(rgba: &[u8], width: u32, height: u32) -> Option<Payload> {
     let luma: Vec<u8> = rgba
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .map(|p| ((p[0] as u32 * 299 + p[1] as u32 * 587 + p[2] as u32 * 114) / 1000) as u8)
         .collect();
     for format in [BarcodeFormat::QR_CODE, BarcodeFormat::CODE_128] {

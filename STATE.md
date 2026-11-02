@@ -4,23 +4,43 @@ Updated by Claude Code at the end of every session. Human edits welcome.
 
 ## Current phase
 
-**P01 — Cabinet browse, client master, doc types, tax-year metadata** — all 8 steps built (2026-11-02); every Done-when box is covered by a test. **Waiting on the owner's hands-on UI check on a Windows PC** before P01 is called done (owner 2026-11-02: UI is not tested under Wine; that happens on Kurt's PC through Claude Code).
+**P02 — Intake** — steps 1, 3, 4, 5, 6 built (2026-11-02); all four Done-when boxes are covered by tests. **Step 2 (scanner, TWAIN vs WIA, Q-02) is deferred to a session on Kurt's Windows PC with the office scanner** (owner 2026-11-02), so P02 is not done yet.
 
-P00 is **done**: the last box (all 194 vendored Filer tests on real Windows) passed on GitHub `windows-latest`, CI run 41506666554.
+**P01** — built; waiting on the owner's hands-on UI check on Windows (checklist below). **P00** — done.
 
 ## Next step
 
-1. On Kurt's Windows PC (Claude Code): `cargo test --workspace -- --test-threads=2`, then run `vibe-files.exe` and walk P01 by hand:
-   - Create a cabinet (empty folder, firm name, 12+ char passphrase); quit; relaunch → Unlock.
-   - Open existing cabinet on the fixture (`cargo run -p vf-fixtures -- <dir>`), check the tree, counts, sort, Ctrl/Shift-click, arrows, Space, Ctrl+A.
-   - + New client; Import clients… from a CSV (bind an existing folder, create the rest).
-   - Client panel: entity type, add/remove a relationship with a share %.
-   - Admin → Doc types: add, edit, archive, restore.
-   - Select several documents → inspector fields → Apply to N → Undo last / Ctrl+Z.
-   - Rename… with the default template; check the preview's keep-both rows; undo.
-   - Views counts, Pin / Unpin, Add to favorites, double-click open, Open in Explorer, Copy path.
-   Fix what that finds, then mark P01 done.
-2. Start P02 step 1 (Intake tab mounting the vendored Filer Desktop engine).
+1. On Kurt's Windows PC (Claude Code), with the office scanner attached:
+   - P02 step 2: one-day spike each of WIA (COM via `windows`) and TWAIN (`twain` crate); keep the one that drives the scanner with duplex + ADF (Q-02 default). Scan profiles (duplex, dpi, color, deskew, blank-page drop). Output into `<data>/Scans` so cover sheets split it.
+   - Hands-on UI check of P01 and P02 (lists below), then mark P01 and P02 done.
+2. Start P03 (OCR engine trait, Tesseract, FTS5 search).
+
+### P01 UI check
+- Create a cabinet (empty folder, firm name, 12+ char passphrase); quit; relaunch → Unlock.
+- Open existing cabinet on the fixture (`cargo run -p vf-fixtures -- <dir>`), check the tree, counts, sort, Ctrl/Shift-click, arrows, Space, Ctrl+A.
+- + New client; Import clients… from a CSV (bind an existing folder, create the rest).
+- Client panel: entity type, add/remove a relationship with a share %.
+- Admin → Doc types: add, edit, archive, restore.
+- Select several documents → inspector fields → Apply to N → Undo last / Ctrl+Z.
+- Rename… with the default template; check the preview's keep-both rows; undo.
+- Views counts, Pin / Unpin, Add to favorites, double-click open, Open in Explorer, Copy path.
+
+### P02 UI check
+- Intake tab shows Filer Desktop (Preview, Rules, History, …) on the cabinet; the badge counts the queue.
+- Browse → a client → Print cover sheet (W-2, 2025) and Print 10 separators; print, put on paper, scan the stack into `<data>/Scans` → pieces appear in Intake Ready → Confirm → documents in Browse with doc type and year. Undo last batch in Intake's History → back in the inbox and gone from Browse.
+- Drop a phone photo (JPG / HEIC) in `<data>/Photos` → a one-page PDF in the queue.
+- Admin → Print capture & parsers → print a return to "Microsoft Print to PDF" into the folder with the UltraTax-style name → Ready in Intake as "Return copy — federal".
+
+## Built this session (2026-11-02, P02)
+
+| Step | Commit | What |
+|---|---|---|
+| 1 | feat(vf-app) | Vendored hook (VENDORED.md change 5, owner-approved Q-19): Filer `Hooks { commit, unpack, undo }`. `vf-fs::intake` records every batch in one catalog Transaction after Filer files it (rows, Replace → version per Q-17, folders, audit, sync_pending) and undoes the files if that fails; undo follows the disk. `prepare_filer_dir` feeds Filer the cabinet (root, firm id, template, catalog clients with their ids, relationships). Intake tab mounts FilerApp unchanged; badge = queue. |
+| 3 | feat(vf-ingest) | Cover / separator sheets (QR + Code128 of `VF1|client|doc type|year|split`), pdfium render + rxing decode, split with Filer's `split_pdf`, pieces named `{Client}_{ID}_{Year} {DocType} (vf).pdf`; generated Filer rules per doc type (`vf-dt-*`). `<data>/Scans` processed by a worker thread. Print cover sheet / 10 separators in Browse. |
+| 4 | feat(vf-ingest) | JPG/PNG/TIFF/HEIC → one-page PDF (EXIF orientation, deskew ≤5°, ≤ Letter at 300 dpi); `<data>/Photos` and images in the inbox. libheif from vcpkg (decoder only, Q-20) in CI and release. |
+| 5–6 | feat(vf-fs) | Print-capture folder (config.toml, default `<data>/Print capture`), parser profiles `<data>/config/parsers/*.toml` (UltraTax, Lacerte, CCH Axcess, Drake/ProSeries stubs per Q-09), Admin page with Print to PDF setup; badge from step 1. |
+
+Fixes found by Windows CI this session: Filer's font families must survive the Vibe Files theme (it now builds on Filer's); a newer clippy lint (`chunks_exact` → `as_chunks`) on CI's newer stable.
 
 ## Built this session (2026-11-02, P01)
 
@@ -66,7 +86,7 @@ Dev box: Linux container; gate is `scripts/check-wine.sh` (mingw cross-build, te
 |---|---|---|---|---|
 | P00 | done | 2026-11-02 | 2026-11-02 | last box confirmed on GitHub windows-latest (CI run 41506666554) |
 | P01 | built; owner UI check pending | 2026-11-02 | | all 8 steps; Done-when covered by tests |
-| P02 | pending | | | |
+| P02 | built except step 2 (scanner, on owner's PC) | 2026-11-02 | | Done-when covered by tests; Q-19, Q-20 answered |
 | P03 | pending | | | |
 | P04 | pending | | | |
 | P05 | pending | | | |
@@ -87,6 +107,8 @@ Dev box: Linux container; gate is `scripts/check-wine.sh` (mingw cross-build, te
 - 2026-11-02 (P01): Filer's relationship format has no share field; a share is stored at the end of the note as `[share 40%]`.
 - 2026-11-02 (P01): "Needs tax year" = no tax year, in a client folder, outside the template's `Permanent` folder. "Recent" = this user's last 50 opens.
 - 2026-11-02 (owner): UI is not tested under Wine; the owner runs UI checks on a Windows PC.
+- 2026-11-02 (P02): Vibe Files' pre-intake folders live in the data folder: `Scans`, `Photos`, `Print capture` (configurable), with originals kept under `processed/`. Files Vibe Files prepared carry `(vf)` at the end of their name so only the generated rules route them.
+- 2026-11-02 (P02): a blank separator starts a new document with the client and year of the cover before it and no doc type.
 
 - 2026-11-02 (owner): move/copy/collision/undo behavior comes from Vibe Filer Desktop `KisaesDevLab/Vibe-Filer-Desktop` @ `master` `ea4e7267797ee869f05c3e5745700e13910a2e5b` (v0.2.4, 2026-11-02). See CLAUDE.md §Document moves.
 - Upstream is one binary crate; P00 step 2 is a mechanical split into `filer-core` / `filer-pdf` / `filer-intake` (Q-16 default).
@@ -94,6 +116,15 @@ Dev box: Linux container; gate is `scripts/check-wine.sh` (mingw cross-build, te
 - 2026-11-02 (owner): Practice Manager Filer is ignored. No PM layout, no PM-held key, no portal pull in v1 (moved to PA-11). Q-01, Q-03, Q-11 closed; Q-04 reworded.
 
 ## Known issues / debt
+
+- **P02 scanner (step 2) not built** — needs the office scanner (Q-02). Scans come in through `<data>/Scans` until then.
+- Filer's own Setup tab can change the root, inboxes or CSV; Vibe Files rewrites root, firm id, template, client list and relationships each time the catalog's clients change (its CSV import is not used). Relationship deletions made in Filer's Relationships tab come back on the next sync (additions are merged).
+- Filer's Conflicts tab (bind / rename client folders) writes sentinels and renames folders outside the hooks; the catalog catches up on the next Rebuild.
+- Filer's screens restyle the egui context while the Intake tab is shown; Vibe Files' theme is re-applied when you leave it.
+- Generated doc type rules (`vf-dt-*`) sit at the top of Filer's active rules profile and match only `(vf)` names; renaming a doc type rewrites its rule on the next sync.
+- Multi-page TIFFs: only the first page is converted.
+- Print-capture parser patterns are reasonable defaults, not checked against real UltraTax / Lacerte / CCH output yet — adjust the TOML files on first use.
+- HEIC is tested only in CI (feature `heic`); the dev box has no mingw libheif.
 
 - **Metadata lives only in the catalog** (P01): doc type, status, source, tags, entity type, pins, favorites, recent opens. `rebuild` restores clients, documents, versions and relationships (mirrored to `_Vibe/relationships.json`), not these. Needs an on-disk metadata sidecar before real use beyond one PC — propose as an addendum (PA-13) or fold into P09/P11.
 - CSV import binds existing folders only by the template's exact client-folder name. Filer's fuzzy folder binding (`sentinel::scan_root`) belongs with the Conflicts work.
