@@ -4976,10 +4976,12 @@ dependencies = [
 name = "vf-fs"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "filer-core",
  "filer-intake",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "thiserror 2.0.21",
  "uuid",

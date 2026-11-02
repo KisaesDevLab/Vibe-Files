@@ -1,5 +1,6 @@
 pub mod browse;
 pub mod chrome;
+pub mod clients;
 pub mod format;
 pub mod theme;
 pub mod widgets;

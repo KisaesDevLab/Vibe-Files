@@ -2,6 +2,7 @@
 //! vendored `filer-intake::commit` primitives; this crate never reimplements a move.
 
 pub mod cabinet;
+pub mod clients;
 pub mod fileops;
 pub mod rebuild;
 

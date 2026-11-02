@@ -31,6 +31,9 @@ pub enum FileOp {
     Copy { src: PathBuf, dst: PathBuf },
     /// Create one folder (and missing parents).
     Mkdir { path: PathBuf },
+    /// Write a new small text file (a sentinel, a sidecar); `path` must not exist. Missing parent
+    /// folders are created. Undo removes it only while its content is unchanged.
+    WriteNew { path: PathBuf, contents: String },
 }
 
 /// What applying a [`FileOp`] did, with enough detail to reverse it safely.
@@ -40,7 +43,7 @@ pub struct AppliedOp {
     pub bytes: u64,
     /// SHA-256 of the file written (hex), when known.
     pub sha256: Option<String>,
-    /// `move` or `copy_verify_delete` (Filer `Method`), `copy`, or `mkdir`.
+    /// `move` or `copy_verify_delete` (Filer `Method`), `copy`, `mkdir`, or `write`.
     pub method: String,
     /// Folders this op created, outermost first. Reversal removes them only if empty.
     pub created_dirs: Vec<PathBuf>,

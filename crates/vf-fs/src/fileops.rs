@@ -88,6 +88,31 @@ fn method_name(m: Method) -> &'static str {
     }
 }
 
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::Digest;
+    sha2::Sha256::digest(bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+/// Creates `path` (never replacing a file), writes `bytes`, flushes to disk.
+fn write_new(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    use std::io::Write;
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(|e| format!("cannot create {}: {e}", path.display()))?;
+    let r = f.write_all(bytes).and_then(|()| f.sync_all());
+    if let Err(e) = r {
+        drop(f);
+        let _ = std::fs::remove_file(path);
+        return Err(format!("cannot write {}: {e}", path.display()));
+    }
+    Ok(())
+}
+
 fn size(p: &Path) -> Option<u64> {
     std::fs::metadata(p).ok().map(|m| m.len())
 }
@@ -126,6 +151,22 @@ impl FileOps for FilerFileOps {
                 method: "mkdir".into(),
                 created_dirs: self.make_dirs(path)?,
             }),
+            FileOp::WriteNew { path, contents } => {
+                let created = self.make_parents(path)?;
+                match write_new(path, contents.as_bytes()) {
+                    Ok(()) => Ok(AppliedOp {
+                        op: op.clone(),
+                        bytes: contents.len() as u64,
+                        sha256: Some(sha256_hex(contents.as_bytes())),
+                        method: "write".into(),
+                        created_dirs: created,
+                    }),
+                    Err(e) => {
+                        remove_empty(&created);
+                        Err(e)
+                    }
+                }
+            }
         }
     }
 
@@ -143,13 +184,15 @@ impl FileOps for FilerFileOps {
                 }
                 Ok(())
             }
-            FileOp::Copy { dst, .. } => match (&a.sha256, commit::sha256_file(dst)) {
-                (Some(want), Ok(have)) if *want == have => Ok(()),
-                _ => Err(format!(
-                    "{} was changed after it was copied; it is left as it is",
-                    dst.display()
-                )),
-            },
+            FileOp::Copy { dst, .. } | FileOp::WriteNew { path: dst, .. } => {
+                match (&a.sha256, commit::sha256_file(dst)) {
+                    (Some(want), Ok(have)) if *want == have => Ok(()),
+                    _ => Err(format!(
+                        "{} was changed after it was copied; it is left as it is",
+                        dst.display()
+                    )),
+                }
+            }
             FileOp::Mkdir { .. } => Ok(()),
         }
     }
@@ -160,9 +203,11 @@ impl FileOps for FilerFileOps {
             FileOp::Move { src, dst } => {
                 commit::transfer(dst, src, self.force_copy)?;
             }
-            // Only a copy this op wrote whose hash still matches (checked above).
-            FileOp::Copy { dst, .. } => std::fs::remove_file(dst)
-                .map_err(|e| format!("cannot remove {}: {e}", dst.display()))?,
+            // Only a file this op wrote whose hash still matches (checked above).
+            FileOp::Copy { dst, .. } | FileOp::WriteNew { path: dst, .. } => {
+                std::fs::remove_file(dst)
+                    .map_err(|e| format!("cannot remove {}: {e}", dst.display()))?
+            }
             FileOp::Mkdir { .. } => {}
         }
         remove_empty(&a.created_dirs);
@@ -349,5 +394,39 @@ mod tests {
         assert!(tx.commit(&mut w.conn, &mut fs, &w.actor).is_err());
         assert!(w.inbox.join("w2.pdf").is_file());
         assert!(!outside.parent().unwrap().exists());
+    }
+
+    #[test]
+    fn write_new_never_replaces_and_undo_needs_unchanged_content() {
+        let mut w = world();
+        let mut fs = FilerFileOps::new(&[&w.root, &w.inbox]).unwrap();
+        let p = w.root.join("New Client (2001)/_Vibe/client.json");
+        let write = |contents: &str| {
+            Transaction::new("write")
+                .file(FileOp::WriteNew {
+                    path: p.clone(),
+                    contents: contents.into(),
+                })
+                .audit(AuditEntry::new("write", None, serde_json::json!({})))
+        };
+        let done = write("{}").commit(&mut w.conn, &mut fs, &w.actor).unwrap();
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "{}");
+        assert!(
+            write("{\"x\":1}")
+                .commit(&mut w.conn, &mut fs, &w.actor)
+                .is_err()
+        );
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "{}");
+
+        std::fs::write(&p, "{\"edited\":true}").unwrap();
+        assert!(tx::undo(&mut w.conn, &mut fs, &w.actor, &done.tx_id).is_err());
+        assert!(p.is_file());
+        std::fs::write(&p, "{}").unwrap();
+        tx::undo(&mut w.conn, &mut fs, &w.actor, &done.tx_id).unwrap();
+        assert!(!p.exists());
+        assert!(
+            !w.root.join("New Client (2001)").exists(),
+            "created folders removed"
+        );
     }
 }

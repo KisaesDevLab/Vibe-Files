@@ -184,6 +184,7 @@ pub fn rebuild(
     tops.sort();
     let mut seen_clients: HashSet<String> = HashSet::new();
     let mut seen_ext: HashSet<String> = HashSet::new();
+    let mut ext_to_id: HashMap<String, String> = HashMap::new();
     let mut found: Vec<Found> = Vec::new();
     for folder in &tops {
         let folder_rel = rel(root, folder);
@@ -217,6 +218,7 @@ pub fn rebuild(
                         ],
                     ));
                     rep.clients += 1;
+                    ext_to_id.insert(s.tax_software_id.clone(), id.clone());
                     Some(id)
                 }
             }
@@ -238,6 +240,13 @@ pub fn rebuild(
                 size,
             });
         }
+    }
+
+    // Relationships from the Filer-format mirror (P01 step 3); existing rows are kept.
+    if let Some(rels) = crate::clients::load_mirror(root) {
+        stmts.extend(crate::clients::import_filer_stmts(
+            &rels, &ext_to_id, device_id, &now,
+        ));
     }
 
     // Documents: compare with live catalog rows by path; re-link moves by hash.

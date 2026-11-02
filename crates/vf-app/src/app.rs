@@ -7,6 +7,9 @@ use vf_security::keys::Kdf;
 
 use crate::session::Session;
 use crate::ui::browse::{self, Browse};
+use crate::ui::clients::{
+    self as client_ui, ClientEdit, ImportDialog, NewClientDialog, Outcome, RelForm,
+};
 use crate::ui::wizard::Wizard;
 use crate::ui::{chrome, theme};
 
@@ -55,10 +58,21 @@ impl Tab {
 }
 
 /// An open cabinet and the per-tab state that goes with it.
+pub enum Dialog {
+    NewClient(NewClientDialog),
+    Import(Box<ImportDialog>),
+}
+
 pub struct Workspace {
     pub session: Session,
     pub notice: Option<String>,
     pub browse: Browse,
+    pub dialog: Option<Dialog>,
+    /// The cabinet's folder template (`_Vibe/template.json`, Filer format).
+    pub template: filer_core::template::TemplateNode,
+    pub rel_form: RelForm,
+    /// The last transaction this session committed: `(tx id, label)`.
+    pub last_tx: Option<(String, String)>,
 }
 
 fn pane() -> egui::Frame {
@@ -72,10 +86,163 @@ impl Workspace {
     pub fn new(session: Session) -> Self {
         let mut browse = Browse::default();
         browse.refresh(&session.conn);
+        let template = vf_fs::clients::template(&session.root);
         Self {
             session,
             notice: None,
             browse,
+            dialog: None,
+            template,
+            rel_form: RelForm::default(),
+            last_tx: None,
+        }
+    }
+
+    /// Every app-level commit lands here: mirror the audit rows to `_Vibe/audit/*.jsonl` and
+    /// remember the transaction for Undo.
+    pub fn committed(&mut self, c: &vf_core::tx::Committed, label: &str) {
+        let dir = self
+            .session
+            .root
+            .join(vf_fs::cabinet::VIBE_DIR)
+            .join("audit");
+        if let Err(e) = vf_core::audit::mirror_append(&dir, &c.audit) {
+            self.notice = Some(format!(
+                "Saved, but the audit mirror could not be written: {e}"
+            ));
+        }
+        self.last_tx = Some((c.tx_id.clone(), label.to_owned()));
+    }
+
+    fn toolbar(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            if ui
+                .add(crate::ui::widgets::primary("+ New client"))
+                .clicked()
+            {
+                self.dialog = Some(Dialog::NewClient(NewClientDialog::default()));
+            }
+            if ui.button("Import clients…").clicked()
+                && let Some(p) = rfd::FileDialog::new()
+                    .add_filter("CSV", &["csv", "txt"])
+                    .pick_file()
+            {
+                self.dialog = Some(Dialog::Import(Box::new(ImportDialog::new(p))));
+            }
+        });
+        ui.add_space(4.0);
+    }
+
+    fn dialogs(&mut self, ctx: &egui::Context) {
+        let Some(d) = &mut self.dialog else { return };
+        let s = &mut self.session;
+        match d {
+            Dialog::NewClient(nc) => match nc.ui(ctx, &self.template) {
+                Outcome::Open => {}
+                Outcome::Cancel => self.dialog = None,
+                Outcome::Done(c) => {
+                    match vf_fs::clients::create_client(
+                        &mut s.conn,
+                        &s.root,
+                        &s.cabinet,
+                        &self.template,
+                        &c,
+                        &s.actor,
+                    ) {
+                        Ok((id, done)) => {
+                            self.committed(&done, &format!("new client {}", c.name.trim()));
+                            self.dialog = None;
+                            self.browse.select_node(browse::Node::Client(id));
+                        }
+                        Err(e) => nc.error = Some(e.to_string()),
+                    }
+                }
+            },
+            Dialog::Import(im) => match im.ui(ctx) {
+                Outcome::Open => {}
+                Outcome::Cancel => self.dialog = None,
+                Outcome::Done(client_ui::ImportStep::Preview) => {
+                    im.plan = Some(im.list().and_then(|list| {
+                        vf_fs::clients::plan_import(&s.conn, &s.root, &self.template, &list)
+                            .map_err(|e| e.to_string())
+                    }));
+                }
+                Outcome::Done(client_ui::ImportStep::Commit(create)) => {
+                    let Some(Ok(plan)) = &im.plan else { return };
+                    match vf_fs::clients::commit_import(
+                        &mut s.conn,
+                        &s.root,
+                        &s.cabinet,
+                        &self.template,
+                        plan,
+                        create,
+                        &s.actor,
+                    ) {
+                        Ok((rep, done)) => {
+                            if let Some(done) = done {
+                                self.committed(&done, "import clients");
+                            }
+                            self.notice = Some(format!(
+                                "Clients imported: {} added, {} updated, {} folders bound, {} created, {} without a folder.",
+                                rep.added,
+                                rep.updated,
+                                rep.bound,
+                                rep.created_folders,
+                                rep.without_folder
+                            ));
+                            self.dialog = None;
+                        }
+                        Err(e) => im.error = Some(e.to_string()),
+                    }
+                }
+            },
+        }
+    }
+
+    fn client_edit(&mut self, client_id: &str, e: ClientEdit) {
+        let s = &mut self.session;
+        let r = match e {
+            ClientEdit::EntityType(t) => {
+                vf_fs::clients::set_entity_type(&mut s.conn, &s.actor, client_id, t.as_deref())
+                    .map(|d| (d, "entity type"))
+            }
+            ClientEdit::AddRel {
+                parent,
+                child,
+                kind,
+                share,
+                note,
+            } => vf_fs::clients::add_relationship(
+                &mut s.conn,
+                &s.root,
+                &s.actor,
+                &parent,
+                &child,
+                &kind,
+                share,
+                &note,
+            )
+            .map(|d| (d, "add relationship")),
+            ClientEdit::RemoveRel {
+                parent,
+                child,
+                kind,
+            } => vf_fs::clients::remove_relationship(
+                &mut s.conn,
+                &s.root,
+                &s.actor,
+                &parent,
+                &child,
+                &kind,
+            )
+            .map(|d| (d, "remove relationship")),
+        };
+        match r {
+            Ok((done, label)) => {
+                self.committed(&done, label);
+                self.rel_form = RelForm::default();
+            }
+            Err(e) => self.rel_form.error = Some(e.to_string()),
         }
     }
 
@@ -107,7 +274,9 @@ impl Workspace {
                     .id_salt("inspector")
                     .show(ui, |ui| self.inspector_ui(ui));
             });
+        self.dialogs(ui.ctx());
         egui::CentralPanel::default().frame(pane()).show(ui, |ui| {
+            self.toolbar(ui);
             if let Some(n) = self.notice.clone() {
                 ui.horizontal(|ui| {
                     ui.label(crate::ui::widgets::muted(n));
@@ -136,6 +305,28 @@ impl Workspace {
             .strong(),
         );
         self.browse.detail_ui(ui, &self.session.conn);
+        if n == 0
+            && let Some(cid) = self
+                .browse
+                .node
+                .as_ref()
+                .and_then(|n| n.client_id())
+                .map(str::to_owned)
+            && let Some(client) = self.browse.clients().iter().find(|c| c.id == cid).cloned()
+        {
+            let conn = &self.session.conn;
+            let rels = vf_fs::clients::relationships(conn, &cid).unwrap_or_default();
+            let others: Vec<(String, String, String)> = vf_core::browse::clients(conn, "")
+                .unwrap_or_default()
+                .into_iter()
+                .map(|c| (c.id, c.name, c.ext_id))
+                .collect();
+            if let Some(e) =
+                client_ui::client_panel(ui, &client, &rels, &others, &mut self.rel_form)
+            {
+                self.client_edit(&cid, e);
+            }
+        }
     }
 
     fn handle(&mut self, a: browse::Action) {

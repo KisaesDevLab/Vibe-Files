@@ -29,6 +29,13 @@ impl Node {
             Node::Unfiled => Scope::Unfiled,
         }
     }
+
+    pub fn client_id(&self) -> Option<&str> {
+        match self {
+            Node::Client(c) | Node::Bucket(c, _) | Node::Folder(c, _, _) => Some(c),
+            Node::Unfiled => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -233,6 +240,10 @@ impl Browse {
             .iter()
             .find(|c| c.id == id)
             .map(|c| c.name.as_str())
+    }
+
+    pub fn clients(&self) -> &[ClientRow] {
+        &self.clients
     }
 
     #[cfg(test)]
