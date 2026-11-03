@@ -1,6 +1,6 @@
 # Vibe Files bucket layout — v1
 
-The contract `vf-sync` implements (P11–P12). Vibe Files' own layout; Practice Manager is not
+The contract `vf-sync` implements (P11; remote-mode objects are v2, PA-17). Vibe Files' own layout; Practice Manager is not
 consulted (owner 2026-11-02). Status: **draft until P11 writes the first real bucket**; after
 that, any change bumps `layout_ver` and ships a migration.
 
@@ -24,10 +24,10 @@ Everything below lives under one prefix: `vf/<cabinet_id>/` (`cabinet_id` from `
 | `manifest/clients/<client_id>/<segment_rev>` | yes | One client's segment (below). Immutable; a new rev is a new object. |
 | `manifest/cabinet/<rev>` | yes | Cabinet-level rows: doc types, retention classes, users/roles (no secrets), devices. |
 | `objects/<n[0..2]>/<n>` | yes | File content. `n = hex(HMAC-SHA256(naming_key, sha256(plaintext)))`. Same content → same object (dedupe across clients, versions, devices). |
-| `thumbs/<n[0..2]>/<n>` | yes | Page-1 thumbnail of object `n` (P12 step 6). |
+| `thumbs/<n[0..2]>/<n>` | yes | Page-1 thumbnail of object `n` (remote mode: PA-17, v2). |
 | `locks/<doc_id>` | yes | Check-out lock `{doc_id, user, device_id, since, lease_until}`. Deleted on check-in. |
 | `devices/<device_id>` | yes | `{device_id, name, mode, last_seen, acked_rev}`. Tombstoned objects are removed only when every live device's `acked_rev` ≥ the tombstone's rev (and retention allows). |
-| `catalog/<rev>` | yes | Catalog snapshot for remote mode (P12). Without FTS tables in v1. |
+| `catalog/<rev>` | yes | Catalog snapshot for remote mode (PA-17, v2; not written in v1). Without FTS tables in v1. |
 | `audit/<yyyy-mm>` | yes | Copy of `_Vibe/audit/<yyyy-mm>.jsonl` (append → new object version). |
 
 `client_id` and `doc_id` are UUIDs (not names), and `n` is a keyed hash, so the listing carries no
