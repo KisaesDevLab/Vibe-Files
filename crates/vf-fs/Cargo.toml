@@ -11,6 +11,8 @@ filer-intake = { path = "../filer-intake" }
 vf-core = { path = "../vf-core" }
 vf-security = { path = "../vf-security" }
 vf-pdf = { path = "../vf-pdf" }
+vf-extract = { path = "../vf-extract" }
+regex.workspace = true
 time = { version = "0.3", features = ["formatting", "parsing", "macros"] }
 serde.workspace = true
 serde_json.workspace = true

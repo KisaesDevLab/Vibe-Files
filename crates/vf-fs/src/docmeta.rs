@@ -260,18 +260,33 @@ pub fn edit(
     if edit.is_empty() {
         return Err("Nothing to change.".into());
     }
-    check(conn, edit)?;
+    let items: Vec<(String, MetaEdit)> = ids.iter().map(|i| (i.clone(), edit.clone())).collect();
+    edit_each(conn, root, &items, LABEL, device_id)
+}
+
+/// Applies a different edit to each document, as one Transaction labelled `label` (the folder
+/// import sets each file's own doc type and year). Returns (transaction id, documents changed).
+pub fn edit_each(
+    conn: &mut Connection,
+    root: &Path,
+    items: &[(String, MetaEdit)],
+    label: &str,
+    device_id: &str,
+) -> Result<(String, usize), String> {
+    for (_, e) in items {
+        check(conn, e)?;
+    }
     let type_names: HashMap<String, String> = conn
         .prepare("SELECT id, name FROM doc_type")
         .and_then(|mut st| st.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect())
         .map_err(|e| e.to_string())?;
     let now = vf_core::now_rfc3339();
-    let mut tx = Transaction::new(LABEL);
+    let mut tx = Transaction::new(label);
     // Per file: (new lines, undo lines).
     let mut files: BTreeMap<PathBuf, (Vec<String>, Vec<String>)> = BTreeMap::new();
     let mut undo: Vec<Stmt> = Vec::new();
     let mut changed = 0;
-    for id in ids {
+    for (id, edit) in items {
         let old = load(conn, id)?;
         let new = apply_edit(&old, edit, &type_names);
         if new == old {
@@ -302,20 +317,21 @@ pub fn edit(
             undo_lines,
         });
     }
+    let any = |f: fn(&MetaEdit) -> bool| items.iter().any(|(_, e)| f(e));
     let fields: Vec<&str> = [
-        ("doc_type", edit.doc_type.is_some()),
-        ("tax_year", edit.tax_year.is_some()),
-        ("status", edit.status.is_some()),
-        ("source", edit.source.is_some()),
-        ("tags", edit.tags.is_some()),
+        ("doc_type", any(|e| e.doc_type.is_some())),
+        ("tax_year", any(|e| e.tax_year.is_some())),
+        ("status", any(|e| e.status.is_some())),
+        ("source", any(|e| e.source.is_some())),
+        ("tags", any(|e| e.tags.is_some())),
     ]
     .into_iter()
     .filter_map(|(k, on)| on.then_some(k))
     .collect();
     tx = tx.audit(AuditEntry::new(
-        LABEL,
+        label,
         if changed == 1 {
-            ids.first().map(String::as_str)
+            items.first().map(|(i, _)| i.as_str())
         } else {
             None
         },

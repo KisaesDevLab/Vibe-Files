@@ -12,6 +12,7 @@ pub mod dupes;
 pub mod fileops;
 pub mod hints;
 pub mod holds;
+pub mod import;
 pub mod intake;
 pub mod newclient;
 pub mod rebuild;

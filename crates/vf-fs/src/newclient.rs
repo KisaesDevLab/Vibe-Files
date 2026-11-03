@@ -114,7 +114,7 @@ pub fn plan(conn: &Connection, root: &Path, req: &NewClient) -> Result<Plan, Str
 }
 
 /// A master list for a cabinet that has none yet (no CSV imported).
-fn empty_list() -> ClientList {
+pub(crate) fn empty_list() -> ClientList {
     serde_json::from_value(json!({
         "source": "",
         "source_modified": "1970-01-01T00:00:00Z",

@@ -5073,6 +5073,7 @@ dependencies = [
  "filer-core",
  "filer-intake",
  "lopdf",
+ "regex",
  "serde",
  "serde_json",
  "tempfile",
@@ -5080,6 +5081,7 @@ dependencies = [
  "time",
  "uuid",
  "vf-core",
+ "vf-extract",
  "vf-pdf",
  "vf-security",
 ]

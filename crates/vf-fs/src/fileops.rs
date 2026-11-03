@@ -133,6 +133,9 @@ pub const NOT_ON_UNDO_STACK: &[&str] = &[
     crate::holds::LABEL,
     crate::disposition::DECIDE_LABEL,
     crate::disposition::RUN_LABEL,
+    // The folder import has its own Undo (both of its Transactions and a rebuild together).
+    crate::import::LABEL,
+    crate::import::META_LABEL,
 ];
 
 /// This Windows login's undo stack: its last 20 undoable transactions, newest first.
@@ -276,7 +279,9 @@ impl FileOps for FilerFileOps {
     fn check_reverse(&self, a: &AppliedOp, vacated: &[PathBuf]) -> Result<(), String> {
         match &a.op {
             FileOp::Move { src, dst } => {
-                if size(dst) != Some(a.bytes) {
+                // A moved folder (the folder import's rename) has no size to compare: its
+                // files are checked by the operations that touched them.
+                if !dst.is_dir() && size(dst) != Some(a.bytes) {
                     return Err(format!(
                         "{} has changed or is gone since it was filed",
                         dst.display()

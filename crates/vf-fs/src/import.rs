@@ -1,0 +1,987 @@
+//! Folder-tree import (PHASES P10): adopt an existing tree (a FileCenter cabinet, a legacy firm
+//! tree) in place. Files are not moved.
+//!
+//! The cabinet is opened (or created) over the tree's root first, so the tree's top-level
+//! folders are the candidate client folders (a FileCenter cabinet's drawers). [`plan`] proposes,
+//! with a confidence for each:
+//! - **client folders** with Filer's own root scan (`sentinel::scan_root`: the client ID in the
+//!   folder name, or a close name), confirmed by a word-for-word name comparison
+//!   (`vf_extract::matching::name_score`); an ID in the name with no client in the list proposes
+//!   a new client;
+//! - **tax years** from any year in a folder name (`2023 Tax`, `TY2022`), else the file name;
+//! - **doc types** from keywords of the cabinet's doc types in the file name, else its folders.
+//!
+//! [`apply`] writes sentinels (and, if asked, renames client folders to the firm template) in
+//! one Transaction, runs the rebuild for the catalog rows, sets each file's doc type and year in
+//! one more (`docmeta`, so a rebuild keeps them); the caller then queues the OCR backlog. [`undo`] reverses
+//! both. What is not sure enough is left for the person: [`Plan::remainder`].
+
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::path::{Path, PathBuf};
+
+use filer_core::clients::{Client, ClientList};
+use filer_core::template;
+use serde_json::json;
+use uuid::Uuid;
+use vf_core::audit::AuditEntry;
+use vf_core::db::Connection;
+use vf_core::tx::{FileOp, Transaction};
+
+use crate::clients::{self, master_dir};
+use crate::docmeta::MetaEdit;
+use crate::rebuild::{self, files_under, rel};
+
+/// Label of the bind (and rename) Transaction.
+pub const LABEL: &str = "folder_import";
+/// Label of the doc type / year Transaction.
+pub const META_LABEL: &str = "folder_import_meta";
+/// Proposals at or above this are applied without the person choosing them.
+pub const AUTO: f32 = 0.85;
+
+/// A client a folder is proposed for.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ClientPick {
+    pub ext_id: String,
+    pub uuid: Uuid,
+    pub name: String,
+    /// Not in the client list yet: added to it when applied.
+    pub new: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct FolderRow {
+    /// Folder name (cabinet-relative; top level).
+    pub rel: String,
+    pub files: usize,
+    /// Already has a sentinel: nothing to bind.
+    pub bound: bool,
+    pub client: Option<ClientPick>,
+    /// How the client was found, for the preview.
+    pub how: String,
+    pub confidence: f32,
+    /// The firm template's name for the folder, when different from its name.
+    pub template_name: Option<String>,
+    /// Bound when applied (defaults to confidence ≥ [`AUTO`]; the person can change it).
+    pub include: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct FileRow {
+    pub rel: String,
+    /// Index into [`Plan::folders`]; `None` for files directly in the cabinet root.
+    pub folder: Option<usize>,
+    pub tax_year: Option<i32>,
+    /// `folder`, `file name`, `permanent`, or empty when not found.
+    pub year_from: &'static str,
+    /// (doc type id, name).
+    pub doc_type: Option<(String, String)>,
+    pub type_confidence: f32,
+    /// Why no doc type, or which word decided it.
+    pub type_how: String,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct Plan {
+    pub folders: Vec<FolderRow>,
+    pub files: Vec<FileRow>,
+    /// Every client in the list, for the person to choose from.
+    pub clients: Vec<ClientPick>,
+}
+
+/// Why a file is in the remainder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Gap {
+    Client,
+    DocType,
+    Year,
+}
+
+impl Gap {
+    pub fn label(self) -> &'static str {
+        match self {
+            Gap::Client => "no client",
+            Gap::DocType => "no doc type",
+            Gap::Year => "no tax year",
+        }
+    }
+}
+
+impl Plan {
+    fn folder_ok(&self, f: &FileRow) -> bool {
+        f.folder.is_some_and(|i| {
+            let r = &self.folders[i];
+            (r.include || r.bound) && r.client.is_some()
+        })
+    }
+
+    /// What a file still lacks once the plan is applied (empty: fully mapped).
+    pub fn gaps(&self, f: &FileRow) -> Vec<Gap> {
+        let mut g = vec![];
+        if !self.folder_ok(f) {
+            g.push(Gap::Client);
+        }
+        if f.doc_type.is_none() || f.type_confidence < AUTO {
+            g.push(Gap::DocType);
+        }
+        if f.year_from.is_empty() {
+            g.push(Gap::Year);
+        }
+        g
+    }
+
+    /// Files mapped to a client, a doc type and a tax year (or permanent).
+    pub fn auto_mapped(&self) -> usize {
+        self.files
+            .iter()
+            .filter(|f| self.gaps(f).is_empty())
+            .count()
+    }
+
+    /// Files left for manual handling, with what each lacks.
+    pub fn remainder(&self) -> Vec<(&FileRow, Vec<Gap>)> {
+        self.files
+            .iter()
+            .map(|f| (f, self.gaps(f)))
+            .filter(|(_, g)| !g.is_empty())
+            .collect()
+    }
+
+    /// Folders that will not be bound.
+    pub fn unmapped_folders(&self) -> Vec<&FolderRow> {
+        self.folders
+            .iter()
+            .filter(|r| !r.bound && !(r.include && r.client.is_some()))
+            .collect()
+    }
+
+    /// The remainder as CSV: unmapped folders, then files.
+    pub fn report_csv(&self) -> String {
+        let q = |s: &str| format!("\"{}\"", s.replace('"', "\"\""));
+        let mut out = String::from("kind,path,missing,proposed client,doc type,tax year\n");
+        for r in self.unmapped_folders() {
+            out.push_str(&format!(
+                "folder,{},{},{},,\n",
+                q(&r.rel),
+                q(if r.client.is_some() {
+                    "not chosen"
+                } else {
+                    "no client"
+                }),
+                q(&r.client
+                    .as_ref()
+                    .map(|c| c.name.clone())
+                    .unwrap_or_default())
+            ));
+        }
+        for (f, gaps) in self.remainder() {
+            let missing: Vec<&str> = gaps.iter().map(|g| g.label()).collect();
+            let client = f
+                .folder
+                .and_then(|i| self.folders[i].client.as_ref())
+                .map(|c| c.name.clone())
+                .unwrap_or_default();
+            out.push_str(&format!(
+                "file,{},{},{},{},{}\n",
+                q(&f.rel),
+                q(&missing.join("; ")),
+                q(&client),
+                q(&f.doc_type.as_ref().map(|d| d.1.clone()).unwrap_or_default()),
+                f.tax_year.map(|y| y.to_string()).unwrap_or_default()
+            ));
+        }
+        out
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Years and doc types
+
+/// A plausible tax year: a run of exactly four digits in 1990..=2100.
+pub fn year_in(s: &str) -> Option<i32> {
+    let b = s.as_bytes();
+    let mut i = 0;
+    while i < b.len() {
+        if b[i].is_ascii_digit() {
+            let start = i;
+            while i < b.len() && b[i].is_ascii_digit() {
+                i += 1;
+            }
+            if i - start == 4 {
+                let y: i32 = s[start..i].parse().unwrap_or(0);
+                if (1990..=2100).contains(&y) {
+                    return Some(y);
+                }
+            }
+        } else {
+            i += 1;
+        }
+    }
+    None
+}
+
+/// Words people use for each seeded doc type in folder and file names. `!` marks a word that
+/// only counts in a file name (a `Tax Returns` folder holds the return's source documents too).
+const SYNONYMS: &[(&str, &[&str])] = &[
+    ("W-2", &["W2", "W2C", "wage statement"]),
+    ("1099-INT", &["1099INT", "interest income"]),
+    ("1099-DIV", &["1099DIV", "dividends"]),
+    ("1099-B", &["1099B", "proceeds"]),
+    ("1099-R", &["1099R", "pension", "retirement distribution"]),
+    ("1099-NEC", &["1099NEC", "nonemployee compensation"]),
+    ("1099-MISC", &["1099MISC"]),
+    ("1099-K", &["1099K"]),
+    ("1099-G", &["1099G", "unemployment"]),
+    (
+        "1098",
+        &["1098", "mortgage interest", "1098E", "1098T", "tuition"],
+    ),
+    (
+        "1095",
+        &["1095", "1095A", "1095B", "1095C", "health coverage"],
+    ),
+    ("K-1 (1065)", &["K1", "K1 1065", "partnership K1"]),
+    ("K-1 (1120-S)", &["K1", "K1 1120S", "S corp K1"]),
+    ("K-1 (1041)", &["K1", "K1 1041", "trust K1", "estate K1"]),
+    ("SSA-1099", &["SSA1099", "social security"]),
+    (
+        "Brokerage statement",
+        &["brokerage", "investment statement"],
+    ),
+    (
+        "Property tax statement",
+        &["property tax", "real estate tax"],
+    ),
+    (
+        "Charitable receipt",
+        &["charitable", "donation", "contributions", "charity"],
+    ),
+    ("Organizer", &["organizer", "questionnaire"]),
+    (
+        "8879 e-file authorization",
+        &["8879", "efile authorization", "e file auth"],
+    ),
+    (
+        "Return copy — federal",
+        &[
+            "!1040",
+            "!1120",
+            "!1120S",
+            "!1065",
+            "!1041",
+            "!990",
+            "!tax return",
+            "!federal return",
+            "!return copy",
+            "!client copy",
+            "!filing copy",
+        ],
+    ),
+    ("Return copy — state", &["!state return", "!state copy"]),
+    ("Extension", &["extension", "4868", "7004", "8868"]),
+    (
+        "Estimate vouchers",
+        &["estimates", "estimated tax", "1040ES", "vouchers"],
+    ),
+    ("Engagement letter", &["engagement", "engagement letter"]),
+    (
+        "Notice / correspondence",
+        &[
+            "notice",
+            "IRS letter",
+            "correspondence",
+            "letters",
+            "CP2000",
+        ],
+    ),
+    ("§7216 consent", &["7216", "consent"]),
+    ("Workpaper", &["workpaper", "workpapers", "work papers"]),
+    (
+        "Depreciation schedule",
+        &["depreciation", "4562", "fixed assets"],
+    ),
+    ("Trial balance", &["trial balance", "TB"]),
+    (
+        "Bank statement",
+        &["bank statement", "bank stmt", "bank", "bank recs"],
+    ),
+    (
+        "Financial statements",
+        &[
+            "financial statements",
+            "financials",
+            "balance sheet",
+            "profit and loss",
+            "P&L",
+        ],
+    ),
+    (
+        "Payroll report",
+        &["payroll", "payroll report", "payroll register"],
+    ),
+    ("Payroll tax return", &["941", "940", "W3", "payroll tax"]),
+    ("Sales tax return", &["sales tax", "sales and use"]),
+    (
+        "Formation documents",
+        &[
+            "articles",
+            "formation",
+            "incorporation",
+            "bylaws",
+            "certificate of organization",
+        ],
+    ),
+    ("EIN letter", &["EIN", "SS4", "CP575", "EIN letter"]),
+    ("S election (2553)", &["2553", "S election"]),
+    (
+        "Operating agreement",
+        &["operating agreement", "partnership agreement"],
+    ),
+    ("POA (2848)", &["2848", "POA", "power of attorney"]),
+    ("Tax information authorization (8821)", &["8821"]),
+    ("Stock basis", &["stock basis", "basis"]),
+    ("Invoice", &["invoice", "invoices", "bill"]),
+];
+
+/// Upper-case alphanumeric words of `s` (`&` kept as a word: `P&L`).
+fn words(s: &str) -> Vec<String> {
+    let mut out = vec![];
+    let mut cur = String::new();
+    for ch in s.chars() {
+        if ch.is_alphanumeric() {
+            cur.extend(ch.to_uppercase());
+        } else {
+            if !cur.is_empty() {
+                out.push(std::mem::take(&mut cur));
+            }
+            if ch == '&' {
+                out.push("&".into());
+            }
+        }
+    }
+    if !cur.is_empty() {
+        out.push(cur);
+    }
+    out
+}
+
+struct Keyword {
+    /// The keyword's words joined (`TRIALBALANCE`, `W2`, `1099INT`).
+    compact: String,
+    type_idx: usize,
+    file_only: bool,
+}
+
+/// Doc types and the words that point at them.
+struct Matcher {
+    types: Vec<(String, String, bool)>, // id, name, permanent
+    keywords: Vec<Keyword>,
+}
+
+impl Matcher {
+    fn load(conn: &Connection) -> Result<Matcher, String> {
+        let types: Vec<(String, String, bool)> = conn
+            .prepare(
+                "SELECT id, name, coalesce(default_folder_tpl, '') FROM doc_type
+                 WHERE deleted_at IS NULL ORDER BY sort, name",
+            )
+            .and_then(|mut st| {
+                st.query_map([], |r| {
+                    let tpl: String = r.get(2)?;
+                    Ok((r.get(0)?, r.get(1)?, !tpl.contains("{Year}")))
+                })?
+                .collect()
+            })
+            .map_err(|e| e.to_string())?;
+        let mut keywords = vec![];
+        let mut add = |k: &str, i: usize| {
+            let (file_only, k) = match k.strip_prefix('!') {
+                Some(k) => (true, k),
+                None => (false, k),
+            };
+            let compact = words(k).concat();
+            if !compact.is_empty() {
+                keywords.push(Keyword {
+                    compact,
+                    type_idx: i,
+                    file_only,
+                });
+            }
+        };
+        for (i, (_, name, _)) in types.iter().enumerate() {
+            // The name itself, and its parts (`POA (2848)` → `POA`, `2848`).
+            add(name, i);
+            for part in name.split(['(', ')', '/', '—']) {
+                if part.trim().len() > 2 && !part.trim().eq_ignore_ascii_case("copy") {
+                    add(part.trim(), i);
+                }
+            }
+            if let Some((_, syn)) = SYNONYMS.iter().find(|(n, _)| n == name) {
+                for k in *syn {
+                    add(k, i);
+                }
+            }
+        }
+        Ok(Matcher { types, keywords })
+    }
+
+    /// The doc types `text` names, each with its best keyword's rank (form numbers first, then
+    /// longer keywords).
+    fn hits(&self, text: &str, in_file_name: bool) -> BTreeMap<usize, usize> {
+        let w = words(text);
+        let mut found: BTreeMap<usize, usize> = BTreeMap::new();
+        for k in &self.keywords {
+            if k.file_only && !in_file_name {
+                continue;
+            }
+            let hit = (0..w.len()).any(|i| {
+                let mut joined = String::new();
+                for part in w.iter().skip(i).take(4) {
+                    joined.push_str(part);
+                    if joined == k.compact
+                        || (joined.len() == k.compact.len() + 1
+                            && joined.ends_with('S')
+                            && joined.starts_with(&k.compact))
+                    {
+                        return true;
+                    }
+                    if joined.len() > k.compact.len() + 1 {
+                        break;
+                    }
+                }
+                false
+            });
+            if hit {
+                // A form number (`1099DIV`, `8879`) says more than any word (`BROKERAGE`).
+                let rank = k.compact.len()
+                    + if k.compact.bytes().any(|b| b.is_ascii_digit()) {
+                        100
+                    } else {
+                        0
+                    };
+                let e = found.entry(k.type_idx).or_default();
+                *e = (*e).max(rank);
+            }
+        }
+        found
+    }
+
+    /// The doc type for a file: its name first, then its folders from the deepest.
+    fn decide(&self, file_stem: &str, folders: &[&str]) -> (Option<usize>, f32, String) {
+        let pick = |hits: BTreeMap<usize, usize>| -> Option<Result<usize, Vec<usize>>> {
+            let best = *hits.values().max()?;
+            let top: Vec<usize> = hits
+                .iter()
+                .filter(|(_, l)| **l == best)
+                .map(|(i, _)| *i)
+                .collect();
+            Some(if top.len() == 1 { Ok(top[0]) } else { Err(top) })
+        };
+        let names = |v: &[usize]| {
+            v.iter()
+                .map(|i| self.types[*i].1.as_str())
+                .collect::<Vec<_>>()
+                .join(" or ")
+        };
+        match pick(self.hits(file_stem, true)) {
+            Some(Ok(i)) => return (Some(i), 0.95, "file name".into()),
+            Some(Err(v)) => return (None, 0.5, format!("file name could be {}", names(&v))),
+            None => {}
+        }
+        for f in folders.iter().rev() {
+            match pick(self.hits(f, false)) {
+                Some(Ok(i)) => return (Some(i), 0.88, format!("folder \"{f}\"")),
+                Some(Err(v)) => {
+                    return (None, 0.5, format!("folder \"{f}\" could be {}", names(&v)));
+                }
+                None => {}
+            }
+        }
+        (None, 0.0, "no doc type word".into())
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Client folders
+
+fn pick(c: &Client, new: bool) -> ClientPick {
+    ClientPick {
+        ext_id: c.id.clone(),
+        uuid: c.uuid,
+        name: c.name.clone(),
+        new,
+    }
+}
+
+/// The ID at the end of a folder name the way Filer reads it: `Name (ID)` or `Name_ID`.
+fn id_in_name(id_pattern: &str, name: &str) -> Option<(String, String)> {
+    let re = regex::Regex::new(&format!(
+        r"(?:\s*\((?P<p>{id_pattern})\)\s*$)|(?:_(?P<u>{id_pattern})$)"
+    ))
+    .ok()?;
+    let c = re.captures(name)?;
+    let id = c.name("p").or_else(|| c.name("u"))?.as_str().to_string();
+    let start = c.get(0)?.start();
+    Some((id, name[..start].trim().to_string()))
+}
+
+/// The client a top-level folder is for, with how and how sure.
+fn folder_client(
+    b: &filer_intake::sentinel::FolderBinding,
+    list: &ClientList,
+    id_pattern: &str,
+) -> (Option<ClientPick>, String, f32) {
+    use filer_intake::sentinel::Status;
+    let name = b.name();
+    match b.status {
+        Status::UnboundNamed => {
+            let c = b.client_id.as_deref().and_then(|id| list.match_by_id(id));
+            return match c {
+                Some(c) => (Some(pick(c, false)), "client ID in the name".into(), 0.97),
+                None => (None, String::new(), 0.0),
+            };
+        }
+        Status::Orphan | Status::Unparseable | Status::Duplicate | Status::Ignored => {
+            return (
+                None,
+                b.note
+                    .clone()
+                    .unwrap_or_else(|| format!("{:?}", b.status).to_lowercase()),
+                0.0,
+            );
+        }
+        _ => {}
+    }
+    let (base, id) = match id_in_name(id_pattern, &name) {
+        Some((id, rest)) => (rest, Some(id)),
+        None => (name.clone(), None),
+    };
+    // Word-for-word: every word of the shorter name in the other (`Reyes, Dana` = `Dana Reyes`).
+    let full: Vec<&Client> = list
+        .clients
+        .iter()
+        .filter(|c| vf_extract::matching::name_score(&base, &c.name) >= 0.99)
+        .collect();
+    if full.len() == 1 {
+        let c = full[0];
+        // A one-word folder name (`Smith`) is not enough on its own.
+        let words_in_folder = words(&base).len();
+        let conf = if words_in_folder >= 2 { 0.9 } else { 0.6 };
+        return (Some(pick(c, false)), "same name".into(), conf);
+    }
+    if full.len() > 1 {
+        let c = full[0];
+        return (
+            Some(pick(c, false)),
+            format!("{} clients have this name", full.len()),
+            0.5,
+        );
+    }
+    if let Some(id) = id {
+        // An ID the list does not have: a client to add.
+        let c = Client {
+            id: id.clone(),
+            uuid: list.uuids.get(&id).copied().unwrap_or_else(Uuid::new_v4),
+            name: base.clone(),
+            extra: Default::default(),
+        };
+        return (
+            Some(pick(&c, true)),
+            "new client (ID in the name)".into(),
+            0.9,
+        );
+    }
+    if b.status == Status::UnboundFuzzy
+        && let Some(c) = b.client_id.as_deref().and_then(|id| list.match_by_id(id))
+    {
+        return (
+            Some(pick(c, false)),
+            format!("similar name ({:.0}%)", b.score.unwrap_or_default() * 100.0),
+            0.6,
+        );
+    }
+    (None, "no client matches".into(), 0.0)
+}
+
+/// The cabinet's client list (an empty one when no CSV has been imported).
+fn client_list(root: &Path) -> Result<ClientList, String> {
+    Ok(clients::load(root)?
+        .list
+        .unwrap_or_else(crate::newclient::empty_list))
+}
+
+/// Scans the cabinet's top-level folders and their files, and proposes what each is. Writes
+/// nothing.
+pub fn plan(conn: &Connection, root: &Path) -> Result<Plan, String> {
+    use filer_intake::sentinel::{Progress, ScanInput, Status, scan_root};
+    let list = client_list(root)?;
+    let (settings, _) = filer_core::config::Settings::load_or_default(&master_dir(root));
+    let input = ScanInput {
+        root: root.to_owned(),
+        clients: std::sync::Arc::new(list.clone()),
+        id_pattern: settings.id_pattern.clone(),
+        threshold: settings.fuzzy_suggest,
+        ignored: vec![],
+    };
+    let bindings = scan_root(&input, &Progress::default())?;
+    let (tree, _, err) = template::load_or_seed(&master_dir(root));
+    if let Some(e) = err {
+        return Err(e);
+    }
+    // Clients that already have a folder in the catalog are not proposed again.
+    let bound_ids: HashSet<String> = conn
+        .prepare("SELECT ext_id FROM client WHERE folder_rel IS NOT NULL AND deleted_at IS NULL")
+        .and_then(|mut st| st.query_map([], |r| r.get(0))?.collect())
+        .map_err(|e| e.to_string())?;
+    let matcher = Matcher::load(conn)?;
+
+    let mut p = Plan {
+        clients: list.clients.iter().map(|c| pick(c, false)).collect(),
+        ..Plan::default()
+    };
+    p.clients.sort_by_key(|c| c.name.to_lowercase());
+    for b in &bindings {
+        let folder_rel = rel(root, &b.path);
+        let bound = matches!(b.status, Status::Bound);
+        let (mut client, mut how, mut conf) = if bound {
+            let c = b.client_id.as_deref().and_then(|id| list.match_by_id(id));
+            (c.map(|c| pick(c, false)), "already bound".into(), 1.0)
+        } else {
+            folder_client(b, &list, &settings.id_pattern)
+        };
+        if !bound
+            && let Some(c) = &client
+            && bound_ids.contains(&c.ext_id)
+        {
+            how = format!("{} already has a folder", c.name);
+            conf = conf.min(0.4);
+        }
+        if conf <= 0.0 {
+            client = None;
+        }
+        let template_name = client.as_ref().and_then(|c| {
+            let cl = Client {
+                id: c.ext_id.clone(),
+                uuid: c.uuid,
+                name: c.name.clone(),
+                extra: list
+                    .match_by_id(&c.ext_id)
+                    .map(|l| l.extra.clone())
+                    .unwrap_or_default(),
+            };
+            template::client_folder_name(&tree, &cl)
+                .ok()
+                .filter(|n| *n != folder_rel)
+        });
+        p.folders.push(FolderRow {
+            rel: folder_rel,
+            files: 0,
+            bound,
+            include: !bound && conf >= AUTO,
+            client,
+            how,
+            confidence: conf,
+            template_name,
+        });
+    }
+    // Two folders proposed for the same client: neither goes in on its own.
+    let mut by_client: HashMap<String, Vec<usize>> = HashMap::new();
+    for (i, r) in p.folders.iter().enumerate() {
+        if let Some(c) = &r.client {
+            by_client.entry(c.ext_id.clone()).or_default().push(i);
+        }
+    }
+    for idx in by_client.values().filter(|v| v.len() > 1) {
+        for &i in idx {
+            let r = &mut p.folders[i];
+            if !r.bound {
+                r.include = false;
+                r.confidence = r.confidence.min(0.5);
+                r.how = format!("{} folders point at this client", idx.len());
+            }
+        }
+    }
+    let folder_index: HashMap<String, usize> = p
+        .folders
+        .iter()
+        .enumerate()
+        .map(|(i, r)| (r.rel.clone(), i))
+        .collect();
+
+    let mut paths: Vec<PathBuf> = vec![];
+    collect_files(root, &mut paths)?;
+    for path in paths {
+        let r = rel(root, &path);
+        let segs: Vec<&str> = r.split('/').collect();
+        let (dirs, file) = segs.split_at(segs.len() - 1);
+        let folder = dirs.first().and_then(|d| folder_index.get(*d).copied());
+        if let Some(i) = folder {
+            p.folders[i].files += 1;
+        }
+        let stem = file[0].rsplit_once('.').map_or(file[0], |(s, _)| s);
+        // The client folder's own name says nothing about the doc type or year.
+        let inner: &[&str] = if dirs.is_empty() { &[] } else { &dirs[1..] };
+        let (t, type_conf, type_how) = matcher.decide(stem, inner);
+        let permanent = t.is_some_and(|i| matcher.types[i].2) && type_conf >= AUTO;
+        let (tax_year, year_from) = if permanent {
+            (None, "permanent")
+        } else if let Some(y) = inner.iter().rev().find_map(|d| year_in(d)) {
+            (Some(y), "folder")
+        } else if let Some(y) = year_in(stem) {
+            (Some(y), "file name")
+        } else {
+            (None, "")
+        };
+        p.files.push(FileRow {
+            rel: r,
+            folder,
+            tax_year,
+            year_from,
+            doc_type: t.map(|i| (matcher.types[i].0.clone(), matcher.types[i].1.clone())),
+            type_confidence: type_conf,
+            type_how,
+        });
+    }
+    Ok(p)
+}
+
+/// Every file of the cabinet outside `_x`/`.x`/`~x` top-level folders (Filer's X28 rule) and
+/// `_Vibe`.
+fn collect_files(root: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {
+    let entries = std::fs::read_dir(root).map_err(|e| format!("cannot read the cabinet: {e}"))?;
+    let mut entries: Vec<_> = entries.filter_map(|e| e.ok()).collect();
+    entries.sort_by_key(|e| e.file_name());
+    for e in entries {
+        let name = e.file_name().to_string_lossy().into_owned();
+        let Ok(ft) = e.file_type() else { continue };
+        if crate::cabinet::is_skipped_name(&name) || ft.is_symlink() {
+            continue;
+        }
+        if ft.is_dir() {
+            files_under(&e.path(), out).map_err(|e| e.to_string())?;
+        } else {
+            out.push(e.path());
+        }
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------------------------
+// Apply and undo
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Options {
+    /// Rename bound folders to the firm template's name (`{Client} ({ID})`).
+    pub rename: bool,
+}
+
+/// What [`apply`] did; keep it to [`undo`] the import.
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Applied {
+    pub bind_tx: Option<String>,
+    pub meta_tx: Option<String>,
+    pub bound: usize,
+    pub renamed: usize,
+    pub new_clients: usize,
+    pub documents: usize,
+    pub mapped: usize,
+    /// PDFs queued for OCR (set by the caller: `vf_ocr::queue::enqueue_missing`).
+    pub ocr_queued: usize,
+}
+
+/// `_Vibe/import_last.json`: the last import on this cabinet, for Undo after a restart.
+pub fn last_path(root: &Path) -> PathBuf {
+    root.join(crate::cabinet::VIBE_DIR).join("import_last.json")
+}
+
+pub fn load_last(root: &Path) -> Option<Applied> {
+    serde_json::from_slice(&std::fs::read(last_path(root)).ok()?).ok()
+}
+
+/// Applies `plan`: binds the included folders, catalogs, sets doc types and years, queues OCR.
+pub fn apply(
+    conn: &mut Connection,
+    root: &Path,
+    plan: &Plan,
+    opts: &Options,
+    device_id: &str,
+) -> Result<Applied, String> {
+    let cab = crate::cabinet::read(root)?;
+    let mut out = Applied::default();
+    let chosen: Vec<(usize, &FolderRow, &ClientPick)> = plan
+        .folders
+        .iter()
+        .enumerate()
+        .filter(|(_, r)| r.include && !r.bound)
+        .filter_map(|(i, r)| r.client.as_ref().map(|c| (i, r, c)))
+        .collect();
+
+    // New clients go into the master list first (as `newclient::create` does): a crash before
+    // the Transaction leaves list entries the next rebuild shows, never a folder half-bound.
+    let new: Vec<&ClientPick> = chosen.iter().filter(|c| c.2.new).map(|c| c.2).collect();
+    if !new.is_empty() {
+        let mut list = client_list(root)?;
+        for c in &new {
+            if list.match_by_id(&c.ext_id).is_none() {
+                list.clients.push(Client {
+                    id: c.ext_id.clone(),
+                    uuid: c.uuid,
+                    name: c.name.clone(),
+                    extra: Default::default(),
+                });
+                list.uuids.insert(c.ext_id.clone(), c.uuid);
+                out.new_clients += 1;
+            }
+        }
+        clients::save_list(root, &list)?;
+    }
+
+    // Where each folder ends up.
+    let mut new_rel: HashMap<usize, String> = HashMap::new();
+    let mut taken: HashSet<String> = plan.folders.iter().map(|r| r.rel.to_lowercase()).collect();
+    if !chosen.is_empty() {
+        let mut tx = Transaction::new(LABEL);
+        for (i, r, c) in &chosen {
+            let mut dest = r.rel.clone();
+            if opts.rename
+                && let Some(t) = &r.template_name
+                && !taken.contains(&t.to_lowercase())
+                && !root.join(t).exists()
+            {
+                tx = tx.file(FileOp::Move {
+                    src: root.join(&r.rel),
+                    dst: root.join(t),
+                });
+                taken.insert(t.to_lowercase());
+                dest = t.clone();
+                out.renamed += 1;
+            }
+            tx = tx.file(FileOp::WriteSentinel {
+                root: root.to_owned(),
+                folder: root.join(&dest),
+                client_id: c.uuid.to_string(),
+                ext_id: c.ext_id.clone(),
+                name: c.name.clone(),
+                firm_id: cab.firm_id.clone(),
+            });
+            new_rel.insert(*i, dest);
+            out.bound += 1;
+        }
+        tx = tx.audit(AuditEntry::new(
+            LABEL,
+            None,
+            json!({ "folders": out.bound, "renamed": out.renamed, "new_clients": out.new_clients }),
+        ));
+        out.bind_tx = Some(crate::fileops::commit(conn, root, tx, device_id)?.tx_id);
+    }
+
+    // Catalog rows for every file (the rebuild attaches them to their new clients).
+    rebuild::rebuild(conn, root, device_id).map_err(|e| e.to_string())?;
+
+    // Each file's doc type and year.
+    let mut items: Vec<(String, MetaEdit)> = vec![];
+    for f in &plan.files {
+        let Some(i) = f.folder else { continue };
+        let r = &plan.folders[i];
+        if !(r.bound || new_rel.contains_key(&i)) {
+            continue;
+        }
+        let dest = new_rel.get(&i).unwrap_or(&r.rel);
+        let rel_now = match f.rel.split_once('/') {
+            Some((_, rest)) => format!("{dest}/{rest}"),
+            None => continue,
+        };
+        let id: Option<String> = conn
+            .query_row(
+                "SELECT id FROM document WHERE rel_path = ?1 AND deleted_at IS NULL",
+                [&rel_now],
+                |r| r.get(0),
+            )
+            .ok();
+        let Some(id) = id else { continue };
+        out.documents += 1;
+        let mut e = MetaEdit::default();
+        if let Some((t, _)) = &f.doc_type
+            && f.type_confidence >= AUTO
+        {
+            e.doc_type = Some(Some(t.clone()));
+        }
+        match f.year_from {
+            "permanent" => e.tax_year = Some(None),
+            "" => {}
+            _ => e.tax_year = Some(f.tax_year),
+        }
+        if plan.gaps(f).is_empty() {
+            out.mapped += 1;
+        }
+        if !e.is_empty() {
+            items.push((id, e));
+        }
+    }
+    if !items.is_empty() {
+        match crate::docmeta::edit_each(conn, root, &items, META_LABEL, device_id) {
+            Ok((tx, _)) => out.meta_tx = Some(tx),
+            // Every file already had these values (an import run twice).
+            Err(e) if e.contains("already have") => {}
+            Err(e) => return Err(e),
+        }
+    }
+    let _ = crate::cabinet::write_replace(
+        &last_path(root),
+        &serde_json::to_vec_pretty(&out).expect("serializes"),
+    );
+    Ok(out)
+}
+
+/// Undoes an import: the doc types and years, then the sentinels and renames; the rebuild then
+/// detaches the documents. Clients added to the list stay there (as for a new client's undo).
+pub fn undo(
+    conn: &mut Connection,
+    root: &Path,
+    applied: &Applied,
+    device_id: &str,
+) -> Result<(), String> {
+    if let Some(t) = &applied.meta_tx {
+        crate::fileops::undo(conn, root, t, device_id)?;
+    }
+    if let Some(t) = &applied.bind_tx {
+        crate::fileops::undo(conn, root, t, device_id)?;
+    }
+    rebuild::rebuild(conn, root, device_id).map_err(|e| e.to_string())?;
+    let _ = std::fs::remove_file(last_path(root));
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn years_are_found_inside_words() {
+        assert_eq!(year_in("2023 Tax Return"), Some(2023));
+        assert_eq!(year_in("TY2022"), Some(2022));
+        assert_eq!(year_in("Tax Year 2021"), Some(2021));
+        assert_eq!(year_in("Stmt 202312"), None);
+        assert_eq!(year_in("Box 1234"), None);
+        assert_eq!(year_in("2023-12-31 Bank"), Some(2023));
+    }
+
+    #[test]
+    fn ids_in_folder_names_read_like_filer() {
+        let pat = "[A-Z0-9]{4,}";
+        assert_eq!(
+            id_in_name(pat, "Anderson Farms LLC (ANDE1042)"),
+            Some(("ANDE1042".into(), "Anderson Farms LLC".into()))
+        );
+        assert_eq!(
+            id_in_name(pat, "Reyes, Dana_1001"),
+            Some(("1001".into(), "Reyes, Dana".into()))
+        );
+        assert_eq!(id_in_name(pat, "Reyes, Dana"), None);
+    }
+
+    #[test]
+    fn words_split_on_punctuation() {
+        assert_eq!(words("W-2 Acme, Inc."), ["W", "2", "ACME", "INC"]);
+        assert_eq!(words("P&L 2023"), ["P", "&", "L", "2023"]);
+    }
+}

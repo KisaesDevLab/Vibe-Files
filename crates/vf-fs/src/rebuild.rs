@@ -22,6 +22,9 @@ pub struct RebuildReport {
     pub docs_new: usize,
     pub docs_changed: usize,
     pub docs_moved: usize,
+    /// Same path and content, now in a different client folder binding (a folder bound or
+    /// unbound since, e.g. by the folder import).
+    pub docs_rebound: usize,
     pub docs_unchanged: usize,
     pub docs_tombstoned: usize,
     pub versions_new: usize,
@@ -57,6 +60,9 @@ impl std::fmt::Display for RebuildReport {
             self.docs_tombstoned,
             self.versions_new
         )?;
+        if self.docs_rebound > 0 {
+            write!(f, " · {} now in a client folder binding", self.docs_rebound)?;
+        }
         if self.master_only + self.relationships > 0 {
             write!(
                 f,
@@ -180,6 +186,13 @@ pub(crate) fn files_under(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), Rebu
         }
     }
     Ok(())
+}
+
+/// Every file under `dir` but `_Vibe` folders, in name order (unreadable folders skipped).
+pub fn cabinet_files(dir: &Path) -> Vec<PathBuf> {
+    let mut out = vec![];
+    let _ = files_under(dir, &mut out);
+    out
 }
 
 /// First path segment that is a plausible tax year (1990..=2100); `None` = permanent file.
@@ -537,13 +550,15 @@ pub fn rebuild(
     rep.docmeta_bad_lines = meta.bad_lines;
 
     // Documents: compare with live catalog rows by path; re-link moves by hash.
-    let mut live: HashMap<String, (String, String)> = HashMap::new(); // rel -> (id, hash)
+    // rel -> (id, hash, client)
+    let mut live: HashMap<String, (String, String, Option<String>)> = HashMap::new();
     {
-        let mut st =
-            conn.prepare("SELECT rel_path, id, hash FROM document WHERE deleted_at IS NULL")?;
-        for r in st.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))? {
-            let (p, id, h): (String, String, String) = r?;
-            live.insert(p, (id, h));
+        let mut st = conn.prepare(
+            "SELECT rel_path, id, hash, client_id FROM document WHERE deleted_at IS NULL",
+        )?;
+        for r in st.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))? {
+            let (p, id, h, c): (String, String, String, Option<String>) = r?;
+            live.insert(p, (id, h, c));
         }
     }
     let on_disk: HashSet<&str> = found.iter().map(|f| f.rel.as_str()).collect();
@@ -552,7 +567,7 @@ pub fn rebuild(
     let mut missing_ids: Vec<String> = Vec::new();
     let mut live_paths: Vec<_> = live.iter().collect();
     live_paths.sort();
-    for (p, (id, h)) in live_paths {
+    for (p, (id, h, _)) in live_paths {
         if !on_disk.contains(p.as_str()) {
             missing_by_hash
                 .entry(h.clone())
@@ -567,12 +582,25 @@ pub fn rebuild(
         let year = year_from_path(&f.rel)
             .map(serde_json::Value::from)
             .unwrap_or_default();
+        let rebind = |id: &String, c: &Option<String>, stmts: &mut Vec<Stmt>| {
+            (*c != f.client_id).then(|| {
+                stmts.push(Stmt::new(
+                    "UPDATE document SET client_id = ?2, device_id = ?3, updated_at = ?4, rev = rev + 1 WHERE id = ?1",
+                    vec![id.clone().into(), f.client_id.clone().into(), device_id.into(), now.clone().into()],
+                ));
+            })
+        };
         match live.get(&f.rel) {
-            Some((id, h)) if *h == f.hash => {
-                rep.docs_unchanged += 1;
+            Some((id, h, c)) if *h == f.hash => {
+                if rebind(id, c, &mut stmts).is_some() {
+                    rep.docs_rebound += 1;
+                } else {
+                    rep.docs_unchanged += 1;
+                }
                 doc_id_by_rel.insert(f.rel.clone(), id.clone());
             }
-            Some((id, _)) => {
+            Some((id, _, c)) => {
+                rebind(id, c, &mut stmts);
                 // Changed outside the app: keep the old content's identity as a version row.
                 stmts.push(Stmt::new(
                     "INSERT OR IGNORE INTO version (doc_id, hash, size, created, created_by, device_id, reason)
@@ -692,13 +720,14 @@ pub fn rebuild(
     }
     let before_versions: i64 = conn.query_row("SELECT count(*) FROM version", [], |r| r.get(0))?;
 
-    let changed = rep.docs_new + rep.docs_changed + rep.docs_moved + rep.docs_tombstoned;
+    let changed =
+        rep.docs_new + rep.docs_changed + rep.docs_moved + rep.docs_rebound + rep.docs_tombstoned;
     let mut tx = Transaction::new("rebuild").audit(AuditEntry::new(
         "rebuild",
         None,
         json!({
             "clients": rep.clients, "docs_new": rep.docs_new, "docs_changed": rep.docs_changed,
-            "docs_moved": rep.docs_moved, "docs_tombstoned": rep.docs_tombstoned,
+            "docs_moved": rep.docs_moved, "docs_rebound": rep.docs_rebound, "docs_tombstoned": rep.docs_tombstoned,
             "unbound_folders": rep.unbound_folders.len(), "duplicate_folders": rep.duplicate_folders.len(),
             "documents_changed": changed,
         }),
