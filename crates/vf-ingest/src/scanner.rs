@@ -229,8 +229,10 @@ pub fn devices() -> Devices {
         })),
         Err(e) => d.notes.push(e),
     }
+    // Drivers such as PaperStream IP install both; name the 32-bit ones only when no TWAIN
+    // source could be listed (that is why the scanner is missing).
     let old = crate::twain::thirty_two_bit_only();
-    if !old.is_empty() {
+    if !old.is_empty() && !d.list.iter().any(|x| x.kind == Kind::Twain) {
         d.notes.push(format!(
             "Installed for 32-bit programs only, so Vibe Files (64-bit) cannot use: {}. \
              Install the scanner's 64-bit TWAIN driver.",
@@ -288,7 +290,8 @@ pub fn assemble_twain(
             None => "the scanner returned no pages".into(),
         });
     }
-    let frames = scanned.pages.iter().map(|p| p.to_frame()).collect();
+    // Each packed page is dropped as its frame is built.
+    let frames = scanned.pages.into_iter().map(|p| p.to_frame()).collect();
     let mut a = assemble_frames(frames, profile, out)?;
     a.stopped = scanned.stopped;
     Ok(a)

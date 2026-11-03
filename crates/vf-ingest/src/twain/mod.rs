@@ -71,29 +71,25 @@ pub fn dsm_candidates(exe_dir: &Path) -> Vec<PathBuf> {
     v
 }
 
-static DSM: OnceLock<Result<Dsm, String>> = OnceLock::new();
+static DSM: OnceLock<Dsm> = OnceLock::new();
 
 /// Loads the DSM once per process (it is never unloaded: sources may keep threads in it).
+/// A failure is not remembered: after the DLL is put in place, "Look again" finds it.
 pub fn dsm() -> Result<Dsm, String> {
-    DSM.get_or_init(|| {
-        let exe_dir = std::env::current_exe()
-            .ok()
-            .and_then(|e| e.parent().map(Path::to_path_buf))
-            .unwrap_or_default();
-        let candidates = dsm_candidates(&exe_dir);
-        for path in candidates.iter().filter(|p| p.is_file()) {
-            if let Ok(d) = load(path) {
-                return Ok(d);
-            }
+    if let Some(d) = DSM.get() {
+        return Ok(*d);
+    }
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|e| e.parent().map(Path::to_path_buf))
+        .unwrap_or_default();
+    for path in dsm_candidates(&exe_dir).iter().filter(|p| p.is_file()) {
+        if let Ok(d) = load(path) {
+            return Ok(*DSM.get_or_init(|| d));
         }
-        Err(
-            "TWAINDSM.dll was not found next to the program or in Windows' System32 \
-             folder, so TWAIN scanners cannot be used. Put the 64-bit TWAINDSM.dll beside \
-             vibe-files.exe."
-                .into(),
-        )
-    })
-    .clone()
+    }
+    Err("TWAINDSM.dll was not found next to the program or in Windows' System32          folder, so TWAIN scanners cannot be used. Put the 64-bit TWAINDSM.dll beside          vibe-files.exe."
+        .into())
 }
 
 fn load(path: &Path) -> Result<Dsm, String> {

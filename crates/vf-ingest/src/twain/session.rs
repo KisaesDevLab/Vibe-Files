@@ -212,6 +212,7 @@ impl Ds<'_> {
         if s.show_ui {
             return Ok(()); // the driver's window and its profile decide the rest
         }
+        let _ = self.set_bool(CAP_INDICATORS, false); // no driver progress window
         if let Some(feeder) = s.feeder {
             match self.set_bool(CAP_FEEDERENABLED, feeder) {
                 Ok(()) => {}
@@ -233,7 +234,12 @@ impl Ds<'_> {
         if s.pixel == Pixel::Bw {
             let _ = self.set_u16(ICAP_PIXELFLAVOR, TWPF_CHOCOLATE);
         }
-        let _ = self.set_u16(ICAP_BITDEPTH, if s.pixel == Pixel::Bw { 1 } else { 8 });
+        let depth = match s.pixel {
+            Pixel::Bw => 1,
+            Pixel::Gray => 8,
+            Pixel::Rgb => 24,
+        };
+        let _ = self.set_u16(ICAP_BITDEPTH, depth);
         let _ = self.set_u16(ICAP_UNITS, TWUN_INCHES);
         let res = Fix32::from_f32(s.dpi as f32).to_item();
         self.set(ICAP_XRESOLUTION, TWTY_FIX32, res)
@@ -629,6 +635,8 @@ mod tests {
         assert_eq!(set[&ICAP_PIXELTYPE], TWPT_GRAY as u32);
         assert_eq!(set[&ICAP_XRESOLUTION], 100);
         assert_eq!(set[&ICAP_AUTODISCARDBLANKPAGES], TWBP_AUTO as u32);
+        assert_eq!(set[&CAP_INDICATORS], 0, "no driver progress window");
+        assert_eq!(set[&ICAP_BITDEPTH], 8);
         assert_closed_in_order(&log);
     }
 

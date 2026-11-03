@@ -245,7 +245,11 @@ mod tests {
         i.driver_ui = true;
         assert_eq!(i.scanner_for("ann"), Some("twain:Remote Scan"));
         assert_eq!(i.scanner_for("bob"), Some("twain:fi-7160"));
-        assert_eq!(i.scanner_for("cy"), Some("twain:fi-7160"), "workstation default");
+        assert_eq!(
+            i.scanner_for("cy"),
+            Some("twain:fi-7160"),
+            "workstation default"
+        );
         let back: Ingest = toml::from_str(&toml::to_string(&i).unwrap()).unwrap();
         assert_eq!(back, i);
         let old: Ingest = toml::from_str("scanner = 'wia-1'").unwrap();
