@@ -306,17 +306,17 @@ fn client_stmts(
                   sentinel_hash: Option<&str>,
                   extra: String| {
         Stmt::new(
-            "INSERT INTO client (id, ext_id, name, entity_type, folder_rel, sentinel_hash, extra, device_id, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+            "INSERT INTO client (id, ext_id, name, entity_type, folder_rel, sentinel_hash, extra, device_id, updated_at, tin_last4)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
              ON CONFLICT(id) DO UPDATE SET
                ext_id = excluded.ext_id, name = excluded.name, entity_type = excluded.entity_type,
                folder_rel = excluded.folder_rel, sentinel_hash = excluded.sentinel_hash,
-               extra = excluded.extra, deleted_at = NULL,
+               extra = excluded.extra, tin_last4 = excluded.tin_last4, deleted_at = NULL,
                device_id = excluded.device_id, updated_at = excluded.updated_at, rev = client.rev + 1
              WHERE (client.ext_id, client.name, client.entity_type, client.folder_rel,
-                    client.sentinel_hash, client.extra, client.deleted_at)
+                    client.sentinel_hash, client.extra, client.tin_last4, client.deleted_at)
                IS NOT (excluded.ext_id, excluded.name, excluded.entity_type, excluded.folder_rel,
-                       excluded.sentinel_hash, excluded.extra, NULL)",
+                       excluded.sentinel_hash, excluded.extra, excluded.tin_last4, NULL)",
             vec![
                 id.into(),
                 ext.into(),
@@ -327,6 +327,7 @@ fn client_stmts(
                 extra.into(),
                 device_id.into(),
                 now.into(),
+                m.meta.tin_last4.get(id).cloned().into(),
             ],
         )
     };

@@ -22,6 +22,8 @@ pub struct ImportDialog {
     pub error: Option<String>,
     /// The catalog's `ext_id → uuid` when the dialog opened, so re-imports keep identities.
     known: BTreeMap<String, uuid::Uuid>,
+    /// A taxpayer ID column whose last 4 digits are kept (Q-27, P08).
+    pub tin: Option<String>,
 }
 
 impl ImportDialog {
@@ -32,6 +34,7 @@ impl ImportDialog {
             map: ColumnMap::default(),
             error: None,
             known,
+            tin: None,
         }
     }
 }
@@ -142,12 +145,22 @@ pub fn show(ctx: &egui::Context, d: &mut ImportDialog, env: &mut Env) -> DialogO
                 if Some(h) == d.map.id.as_ref() || Some(h) == d.map.name.as_ref() {
                     continue;
                 }
-                let tin = clients::looks_like_tin(h);
+                if clients::looks_like_tin(h) {
+                    // Only the last 4 digits are kept, for matching forms to clients (P08).
+                    let mut on = d.tin.as_deref() == Some(h.as_str());
+                    let label = format!("{h}: keep the last 4 digits only");
+                    if ui
+                        .checkbox(&mut on, label)
+                        .on_hover_text("Full taxpayer IDs are never copied into the client list. The last 4 digits help match W-2s, 1099s and K-1s to clients.")
+                        .changed()
+                    {
+                        d.tin = on.then(|| h.clone());
+                    }
+                    continue;
+                }
                 let mut on = d.map.extras.contains(h);
-                let r = ui.add_enabled(!tin, egui::Checkbox::new(&mut on, h));
-                if tin {
-                    r.on_disabled_hover_text("Taxpayer IDs are not copied into the client list.");
-                } else if r.changed() {
+                let r = ui.checkbox(&mut on, h);
+                if r.changed() {
                     if on {
                         d.map.extras.push(h.clone());
                     } else {
@@ -180,7 +193,13 @@ pub fn show(ctx: &egui::Context, d: &mut ImportDialog, env: &mut Env) -> DialogO
 }
 
 fn run(d: &ImportDialog, env: &mut Env) -> Result<String, String> {
-    let list = clients::import_csv(env.root, &PathBuf::from(d.path.trim()), &d.map, &d.known)?;
+    let list = clients::import_csv_tin(
+        env.root,
+        &PathBuf::from(d.path.trim()),
+        &d.map,
+        &d.known,
+        d.tin.as_deref(),
+    )?;
     let rep = vf_fs::rebuild::sync_clients(env.conn, env.root, env.device_id, "clients_import")
         .map_err(|e| format!("The client list was saved but the catalog was not updated: {e}"))?;
     let mut msg = format!(

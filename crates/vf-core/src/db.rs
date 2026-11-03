@@ -18,6 +18,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/003_lookup_indexes.sql"),
     include_str!("../migrations/004_local_state.sql"),
     include_str!("../migrations/005_disposition.sql"),
+    include_str!("../migrations/006_extract.sql"),
 ];
 
 /// Schema version this build writes.
@@ -155,6 +156,7 @@ mod tests {
         "doc_fts_idx",
         "doc_type",
         "document",
+        "document_extract",
         "document_tag",
         "legal_hold",
         "local_state",

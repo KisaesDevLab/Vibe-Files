@@ -59,6 +59,10 @@ pub struct ClientMeta {
     pub entity_types: BTreeMap<String, String>,
     #[serde(default)]
     pub shares: Vec<Share>,
+    /// Client uuid → the last 4 digits of its SSN / EIN (Q-27; never the full number), from
+    /// the client CSV's taxpayer ID column. Form recognition (P08) matches on it.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub tin_last4: BTreeMap<String, String>,
 }
 
 impl ClientMeta {
@@ -150,11 +154,31 @@ pub fn save_meta(root: &Path, meta: &ClientMeta) -> Result<(), String> {
 /// Imports the client CSV with `map` and saves it as the master list. Every client keeps the
 /// uuid it already has: from `known` (the catalog's `ext_id → id`, which includes folders bound
 /// by sentinel) first, then from the current list.
+/// The last 4 digits of a taxpayer ID (`123-45-6789` → `6789`, `XX-XXX1234` → `1234`), or
+/// `None` when it has fewer than 4 digits. Only these 4 are ever kept.
+pub fn last4(value: &str) -> Option<String> {
+    let digits: Vec<char> = value.chars().filter(|c| c.is_ascii_digit()).collect();
+    (digits.len() >= 4).then(|| digits[digits.len() - 4..].iter().collect())
+}
+
 pub fn import_csv(
     root: &Path,
     csv: &Path,
     map: &ColumnMap,
     known: &BTreeMap<String, Uuid>,
+) -> Result<ClientList, String> {
+    import_csv_tin(root, csv, map, known, None)
+}
+
+/// [`import_csv`], also keeping the last 4 digits of `tin_column` (a taxpayer ID column) per
+/// client in `clients.vf.json`. The full numbers are read from the CSV and dropped at once;
+/// Filer's client list never gets the column.
+pub fn import_csv_tin(
+    root: &Path,
+    csv: &Path,
+    map: &ColumnMap,
+    known: &BTreeMap<String, Uuid>,
+    tin_column: Option<&str>,
 ) -> Result<ClientList, String> {
     let tins = tin_extras(map);
     if !tins.is_empty() {
@@ -169,6 +193,34 @@ pub fn import_csv(
     all.extend(known.iter().map(|(k, v)| (k.clone(), *v)));
     list.assign_uuids(&all);
     save_list(root, &list)?;
+    if let Some(tc) = tin_column {
+        let col = |h: &str| table.headers.iter().position(|x| x == h);
+        let tin_col = col(tc).ok_or_else(|| format!("no column {tc}"))?;
+        let id_col = map
+            .id
+            .as_deref()
+            .and_then(col)
+            .ok_or("no client ID column")?;
+        let mut meta = load(root)?.meta;
+        for row in &table.rows {
+            let (Some(id), Some(tin)) = (row.get(id_col), row.get(tin_col)) else {
+                continue;
+            };
+            let Some(c) = list.match_by_id(id.trim()) else {
+                continue;
+            };
+            let key = c.uuid.to_string();
+            match last4(tin) {
+                Some(l4) => {
+                    meta.tin_last4.insert(key, l4);
+                }
+                None => {
+                    meta.tin_last4.remove(&key);
+                }
+            }
+        }
+        save_meta(root, &meta)?;
+    }
     // Re-read so the list's lookup index is built.
     load(root)?
         .list
@@ -478,5 +530,53 @@ mod tests {
         let e = import_csv(cab.path(), &csv, &map(&["SSN"]), &BTreeMap::new()).unwrap_err();
         assert!(e.contains("SSN"), "{e}");
         assert!(!clients::cache_path(&master_dir(cab.path())).exists());
+    }
+
+    /// P08 step 0 (Q-27): a taxpayer ID column keeps only its last 4 digits, per client, in
+    /// clients.vf.json and the catalog; the full numbers are nowhere in the cabinet's files.
+    #[test]
+    fn tin_column_keeps_the_last_4_only() {
+        let cab = cabinet();
+        let csv = write_csv(
+            cab.path(),
+            "ClientID,Name,SSN
+1001,Acme,900-12-3456
+1002,Baker Trust,98-7654321
+1003,No TIN,
+",
+        );
+        let list =
+            import_csv_tin(cab.path(), &csv, &map(&[]), &BTreeMap::new(), Some("SSN")).unwrap();
+        let meta = load(cab.path()).unwrap().meta;
+        let uuid = |id: &str| list.match_by_id(id).unwrap().uuid.to_string();
+        assert_eq!(
+            meta.tin_last4.get(&uuid("1001")).map(String::as_str),
+            Some("3456")
+        );
+        assert_eq!(
+            meta.tin_last4.get(&uuid("1002")).map(String::as_str),
+            Some("4321")
+        );
+        assert!(!meta.tin_last4.contains_key(&uuid("1003")));
+        // Nothing in the cabinet's files holds a full TIN.
+        let mut files = Vec::new();
+        fn walk(d: &Path, out: &mut Vec<PathBuf>) {
+            for e in std::fs::read_dir(d).unwrap().flatten() {
+                if e.path().is_dir() {
+                    walk(&e.path(), out);
+                } else {
+                    out.push(e.path());
+                }
+            }
+        }
+        walk(&master_dir(cab.path()), &mut files);
+        for f in files {
+            let t = std::fs::read_to_string(&f).unwrap_or_default();
+            for full in ["900-12-3456", "900123456", "98-7654321", "987654321"] {
+                assert!(!t.contains(full), "{} holds {full}", f.display());
+            }
+        }
+        assert_eq!(last4("XXX-XX-1234").as_deref(), Some("1234"));
+        assert_eq!(last4("12"), None);
     }
 }

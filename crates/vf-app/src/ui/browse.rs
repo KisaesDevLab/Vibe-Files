@@ -2243,7 +2243,7 @@ mod tests {
         p.display().to_string()
     }
 
-    /// P01 step 3: the CSV import keeps the master list, skips TIN columns, reports matching
+    /// P01 step 3: the CSV import keeps the master list, keeps only TIN last-4s, reports matching
     /// folders that have no sentinel.
     #[test]
     fn import_clients_csv() {
@@ -2264,8 +2264,11 @@ mod tests {
             h.run();
         };
         by_label(&mut h, "Partner");
-        by_label(&mut h, "SSN"); // disabled: no effect
-        assert_eq!(h.state().b.import.as_ref().unwrap().map.extras, ["Partner"]);
+        // A TIN column is never an extra; it can only keep its last 4 digits (P08).
+        by_label(&mut h, "SSN: keep the last 4 digits only");
+        let d = h.state().b.import.as_ref().unwrap();
+        assert_eq!(d.map.extras, ["Partner"]);
+        assert_eq!(d.tin.as_deref(), Some("SSN"));
         click(&mut h, "Import 2 rows (one transaction)");
 
         let b = &h.state().b;
