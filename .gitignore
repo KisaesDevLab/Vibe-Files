@@ -1,7 +1,32 @@
+# Build output
 /target
-/data
 /dist
-/fixtures/cabinet/
+
+# Runtime data beside the exe (catalog, config, caches, logs, cover sheets)
+/data
+/sheets
 *.db
 *.db-wal
 *.db-shm
+*.db-journal
+*.bak
+*.log
+
+# Generated fixture cabinet (cargo run -p vf-fixtures); never real client data
+/fixtures/cabinet/
+
+# Portable Tesseract copied beside a local build (QUESTIONS Q-25)
+/tesseract/
+
+# Editors and tools
+.vs/
+.vscode/
+.idea/
+*.swp
+*~
+.claude/settings.local.json
+
+# Windows / macOS
+Thumbs.db
+desktop.ini
+.DS_Store
