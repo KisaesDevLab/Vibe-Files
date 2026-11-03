@@ -5,6 +5,7 @@ pub mod cabinet;
 pub mod clients;
 pub mod docmeta;
 pub mod doctypes;
+pub mod dupes;
 pub mod fileops;
 pub mod hints;
 pub mod intake;

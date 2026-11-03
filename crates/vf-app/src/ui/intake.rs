@@ -35,6 +35,10 @@ pub struct IntakeTab {
     pub message: Option<String>,
     /// Vibe's staging folders and barcode sheets, shown above Filer.
     pub ingest: IngestState,
+    /// Documents Filer just filed whose content was already in the cabinet (Q-27).
+    pub dupes: Vec<vf_fs::dupes::Dup>,
+    /// A choice made on one of `dupes`, applied on the next reconcile (it needs the catalog).
+    dupe_action: Option<(usize, vf_fs::dupes::Choice)>,
 }
 
 /// Filer's settings for this cabinet on this PC: whatever `_Vibe/config.json` holds (rules
@@ -79,14 +83,22 @@ impl IntakeTab {
     /// Records Filer's last batch in the catalog when `last_batch.json` changed since the last
     /// look (a stat per frame otherwise). See `vf_fs::intake`.
     pub fn reconcile(&mut self, conn: &mut Connection, root: &Path, device_id: &str) {
+        self.apply_dupe_action(conn, root, device_id);
         let file = filer_intake::commit::last_batch_path(&vf_fs::clients::master_dir(root));
         let modified = std::fs::metadata(&file).and_then(|m| m.modified()).ok();
         if modified.is_none() || modified == self.seen {
             return;
         }
+        let before = vf_core::now_rfc3339();
         match vf_fs::intake::reconcile(conn, root, device_id) {
             Ok(r) => {
                 self.seen = modified;
+                if r.recorded.is_some() {
+                    match vf_fs::dupes::filed_since(conn, &before) {
+                        Ok(d) => self.dupes.extend(d),
+                        Err(e) => self.message = Some(format!("Duplicate check failed: {e}")),
+                    }
+                }
                 if let Some((_, added, updated)) = r.recorded {
                     self.message = Some(format!(
                         "Intake filed {added} new documents{}.",
@@ -106,6 +118,67 @@ impl IntakeTab {
         }
     }
 
+    fn apply_dupe_action(&mut self, conn: &mut Connection, root: &Path, device_id: &str) {
+        let Some((i, choice)) = self.dupe_action.take() else {
+            return;
+        };
+        if i >= self.dupes.len() {
+            return;
+        }
+        let d = self.dupes.remove(i);
+        match vf_fs::dupes::resolve(conn, root, device_id, &d, choice) {
+            Ok(_) => {
+                self.catalog_changed = true;
+                self.message = Some(match choice {
+                    vf_fs::dupes::Choice::RemoveNew => format!("Moved {} to the trash.", d.new_rel),
+                    vf_fs::dupes::Choice::ReplaceOld => {
+                        format!("Moved {} to the trash.", d.old_rel)
+                    }
+                    vf_fs::dupes::Choice::KeepBoth => format!("Kept both copies of {}.", d.new_rel),
+                });
+            }
+            Err(e) => {
+                self.message = Some(format!("Could not resolve the duplicate: {e}"));
+                self.dupes.insert(i, d);
+            }
+        }
+    }
+
+    /// Filed duplicates, one line each with the three choices.
+    fn dupes_panel(&mut self, ui: &mut egui::Ui) {
+        if self.dupes.is_empty() {
+            return;
+        }
+        egui::Panel::top("vf-dupes")
+            .resizable(false)
+            .frame(
+                egui::Frame::new()
+                    .fill(egui::Color32::from_rgb(0xFF, 0xF6, 0xE0))
+                    .inner_margin(egui::Margin::symmetric(16, 8)),
+            )
+            .show(ui, |ui| {
+                ui.label(egui::RichText::new("Already in the cabinet").strong());
+                for (i, d) in self.dupes.iter().enumerate() {
+                    ui.horizontal(|ui| {
+                        ui.label(format!("{} has the same content as {}.", d.new_rel, d.old_rel));
+                        use vf_fs::dupes::Choice;
+                        for (label, c) in [
+                            ("Remove new copy", Choice::RemoveNew),
+                            ("Keep both", Choice::KeepBoth),
+                            ("Replace old", Choice::ReplaceOld),
+                        ] {
+                            if ui.button(label).clicked() {
+                                self.dupe_action = Some((i, c));
+                            }
+                        }
+                    });
+                }
+                ui.label(crate::ui::widgets::caption(
+                    "Removed copies go to the cabinet trash. Removing a file from Filer's last batch makes that batch's Undo unavailable.",
+                ));
+            });
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn show(
         &mut self,
@@ -118,6 +191,7 @@ impl IntakeTab {
         sheets_dir: &Path,
     ) {
         self.ingest.strip(ui, prefs, snap, sheets_dir, root);
+        self.dupes_panel(ui);
         if self.filer.is_none() && self.error.is_none() {
             match settings_for(root, cabinet) {
                 Ok((settings, savable)) => {

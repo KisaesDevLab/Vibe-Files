@@ -414,6 +414,7 @@ impl eframe::App for VibeFilesApp {
                 &self.config.device_id,
                 &self.config.ingest,
             );
+            o.intake.ingest.check_dupes(&o.opened.conn);
             if let Some(p) = o.intake.ingest.open_request.take()
                 && let Err(e) = (o.browse.shell)(&crate::shell::ShellAction::Open(p))
             {
@@ -836,6 +837,80 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
         h.get_by_label(&format!("Page {} of 3", scan.ein_page + 1));
+    }
+
+    /// PHASES P03 done-when (before filing): a scan whose content is already in the cabinet is
+    /// flagged in the Intake strip once it reaches Filer's inbox, and can be taken out again.
+    #[test]
+    fn scanned_duplicate_is_flagged_before_filer_files_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("Clients");
+        let (scans, inbox) = (tmp.path().join("Scans"), tmp.path().join("Inbox"));
+        std::fs::create_dir_all(root.join("Old")).unwrap();
+        std::fs::create_dir_all(&scans).unwrap();
+        std::fs::create_dir_all(&inbox).unwrap();
+        filer_pdf::pdf::write_test_pdf(&root.join("Old/receipt.pdf"), &["Receipt 42"]);
+        let req = CreateRequest {
+            root: &root,
+            name: "Firm",
+            passphrase: "correct horse battery",
+            confirm: "correct horse battery",
+        };
+        drop(session::create(&tmp.path().join("pc1"), "dev-1", &req, FAST).unwrap());
+        let master = vf_fs::clients::master_dir(&root);
+        let (mut fs, _) = filer_intake::config::Settings::load_or_default(&master);
+        fs.inboxes = vec![inbox.clone()];
+        fs.save(&master).unwrap();
+
+        let mut h = harness(&tmp.path().join("pc1b"));
+        h.state_mut().config.ingest.scans = Some(scans.clone());
+        click(&mut h, "Open existing");
+        type_into(&mut h, "Cabinet folder", &root.display().to_string());
+        type_into(&mut h, "Recovery passphrase", "correct horse battery");
+        click(&mut h, "Open cabinet");
+        settle(&mut h);
+        click(&mut h, "Intake");
+
+        std::fs::copy(root.join("Old/receipt.pdf"), scans.join("receipt scan.pdf")).unwrap();
+        let start = std::time::Instant::now();
+        while h
+            .query_by_label_contains("is already in the cabinet as Old/receipt.pdf")
+            .is_none()
+        {
+            if start.elapsed() > std::time::Duration::from_secs(30) {
+                let Screen::Open(o) = &h.state().screen else {
+                    unreachable!()
+                };
+                let docs: Vec<String> = o
+                    .browse
+                    .snap
+                    .docs
+                    .iter()
+                    .map(|d| d.rel_path.clone())
+                    .collect();
+                panic!(
+                    "never flagged: inbox {:?}, docs {docs:?}, log {:?}, pre {:?}",
+                    std::fs::read_dir(&inbox)
+                        .unwrap()
+                        .map(|e| e.unwrap().file_name())
+                        .collect::<Vec<_>>(),
+                    o.intake.ingest.log,
+                    o.intake.ingest.pre_dupes
+                );
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            h.step();
+        }
+        assert!(inbox.join("receipt scan.pdf").is_file());
+        h.get_by_label("Remove from inbox").click();
+        h.step();
+        h.step();
+        assert!(!inbox.join("receipt scan.pdf").exists());
+        assert!(scans.join("_duplicates/receipt scan.pdf").is_file());
+        assert!(
+            h.query_by_label_contains("is already in the cabinet")
+                .is_none()
+        );
     }
 
     #[test]

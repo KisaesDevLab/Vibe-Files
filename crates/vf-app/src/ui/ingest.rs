@@ -42,8 +42,25 @@ pub struct IngestState {
     /// This PC's scanners, once listed (`None` while listing).
     devices: Option<Result<Vec<Device>, String>>,
     devices_job: Option<Receiver<Result<Vec<Device>, String>>>,
+    /// Files just delivered to Filer's inbox, to check against the catalog: (file, staging
+    /// folder it came from, the original as it arrived — the pipeline may rewrite the PDF).
+    to_check: Vec<(PathBuf, PathBuf, PathBuf)>,
+    /// Delivered files whose content is already in the cabinet (before Filer files them).
+    pub pre_dupes: Vec<PreDup>,
+    /// (index into `pre_dupes`, remove it from the inbox).
+    pre_action: Option<(usize, bool)>,
     /// A scan running on its own thread.
     scan_job: Option<Receiver<Result<(PathBuf, scanner::Assembled), String>>>,
+}
+
+/// A file in Filer's inbox with the same content as a document already filed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreDup {
+    pub path: PathBuf,
+    /// The staging folder it came from (where "Remove" puts it, in `_duplicates`).
+    pub staging: PathBuf,
+    /// Cabinet-relative path of the document already holding the content.
+    pub existing: String,
 }
 
 /// PDFs and zips Filer would queue from `inboxes` (sub-folders too, not `_combined`).
@@ -129,6 +146,12 @@ impl IngestState {
                 let line = match ev {
                     Event::Processed(p) => {
                         self.delivered += p.delivered.len();
+                        let staging = p.staged.parent().map(Path::to_path_buf).unwrap_or_default();
+                        self.to_check.extend(
+                            p.delivered
+                                .iter()
+                                .map(|d| (d.path.clone(), staging.clone(), p.kept.clone())),
+                        );
                         let name = file_name(&p.staged);
                         let parts: Vec<String> = p
                             .delivered
@@ -185,6 +208,42 @@ impl IngestState {
                 self.worker = Some(Worker::start(cfg, move || ctx.request_repaint()));
             }
             None => {}
+        }
+    }
+
+    /// Checks newly delivered files against the catalog (every frame, cheap when nothing
+    /// arrived) and applies a choice made on one.
+    pub fn check_dupes(&mut self, conn: &vf_core::db::Connection) {
+        if let Some((i, remove)) = self.pre_action.take()
+            && i < self.pre_dupes.len()
+        {
+            let d = self.pre_dupes.remove(i);
+            if remove {
+                let dir = d.staging.join("_duplicates");
+                let name = file_name(&d.path);
+                let r = std::fs::create_dir_all(&dir).and_then(|()| {
+                    std::fs::rename(&d.path, vf_ingest::pipeline::free_name(&dir, &name))
+                });
+                let line = match r {
+                    Ok(()) => format!("{name} taken out of Filer's inbox (kept in _duplicates)."),
+                    Err(e) => format!("{name} could not be moved: {e}"),
+                };
+                self.log_line(line);
+            }
+        }
+        for (path, staging, original) in std::mem::take(&mut self.to_check) {
+            let found = [&path, &original].into_iter().find_map(|p| {
+                filer_intake::commit::sha256_file(p)
+                    .ok()
+                    .and_then(|h| vf_fs::dupes::existing(conn, &h))
+            });
+            if let Some(existing) = found {
+                self.pre_dupes.push(PreDup {
+                    path,
+                    staging,
+                    existing,
+                });
+            }
         }
     }
 
@@ -390,6 +449,24 @@ impl IngestState {
                     }
                 });
                 self.scan_row(ui, prefs);
+                for (i, d) in self.pre_dupes.iter().enumerate() {
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            RichText::new(format!(
+                                "{} is already in the cabinet as {}.",
+                                file_name(&d.path),
+                                d.existing
+                            ))
+                            .color(theme::WARN),
+                        );
+                        if ui.button("Remove from inbox").clicked() {
+                            self.pre_action = Some((i, true));
+                        }
+                        if ui.button("Keep it").clicked() {
+                            self.pre_action = Some((i, false));
+                        }
+                    });
+                }
                 if let Some(w) = &self.warning {
                     ui.label(RichText::new(w).color(wizard::ERROR));
                 }

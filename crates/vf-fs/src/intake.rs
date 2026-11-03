@@ -540,6 +540,26 @@ mod tests {
         );
     }
 
+    /// PHASES P03 done-when: exact duplicates are caught on intake. A second Filer batch filing
+    /// content the cabinet already holds is found right after it is recorded.
+    #[test]
+    fn duplicate_content_is_caught_after_filing() {
+        let mut f = fx();
+        let acme = client("1001", "Acme LLC");
+        file(&f, &acme, &["w2.pdf"], false);
+        reconcile(&mut f.conn, &f.root, "dev").unwrap();
+        // The same W-2 arrives again under another name.
+        std::fs::write(f.inbox.join("w2 again.pdf"), "content of w2.pdf").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let before = vf_core::now_rfc3339();
+        file(&f, &acme, &["w2 again.pdf", "k1.pdf"], false);
+        reconcile(&mut f.conn, &f.root, "dev").unwrap();
+        let d = crate::dupes::filed_since(&f.conn, &before).unwrap();
+        assert_eq!(d.len(), 1, "{d:?}");
+        assert!(d[0].new_rel.ends_with("/w2 again.pdf"));
+        assert!(d[0].old_rel.ends_with("/w2.pdf"));
+    }
+
     /// Filer's own Undo moves the files back; reconcile then undoes the catalog side only.
     #[test]
     fn filer_undo_tombstones_the_batch() {
