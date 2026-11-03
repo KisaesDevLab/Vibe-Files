@@ -233,7 +233,9 @@ fn replace_inner(
     }
     tx = tx.audit(AuditEntry::new(change.label, Some(doc_id), detail));
     let c = crate::fileops::commit(conn, root, tx, device_id)?;
-    if kept_at == version {
+    // Every version row has its sidecar entry (rebuild restores rows from them), also when
+    // the content was already kept.
+    {
         let _ = cabinet::add_version_sidecar(
             root,
             &old_hash,

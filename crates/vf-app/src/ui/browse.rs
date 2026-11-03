@@ -93,6 +93,8 @@ pub struct Browse {
     undo_tx: Option<Option<String>>,
     /// Ctrl+Z pressed outside a text field.
     undo_requested: bool,
+    /// The selected document's versions (P05 step 1), for the document they were read for.
+    versions: Option<(String, Vec<vf_fs::versions::Version>)>,
     /// The `Rename…` dialog, while open.
     pub rename: Option<RenameDialog>,
     /// A PDF to show in the Viewer (taken by the app).
@@ -163,6 +165,7 @@ impl Browse {
             meta_form: MetaForm::default(),
             undo_tx: None,
             undo_requested: false,
+            versions: None,
             rename: None,
             prefs: Prefs::default(),
             prefs_dirty: false,
@@ -240,6 +243,7 @@ impl Browse {
         };
         self.expanded.clear();
         self.undo_tx = None;
+        self.versions = None;
         self.recount();
         self.selected = self
             .snap
@@ -1504,6 +1508,112 @@ fn inspector(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env) {
                 );
                 kv(ui, "Path", RichText::new(&d.rel_path).monospace().small());
             });
+        let (id, name) = (d.id.clone(), d.name().to_string());
+        versions_list(ui, b, env, &id, &name);
+    }
+}
+
+/// What a click in the Versions list asks for.
+enum VersionAct {
+    Open(String),
+    Restore(String),
+    SaveCopy(String),
+}
+
+/// P05 step 1: the document's earlier contents, newest first, with Open, Restore and Save a
+/// copy.
+fn versions_list(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env, doc_id: &str, name: &str) {
+    if b.versions.as_ref().is_none_or(|(id, _)| id != doc_id) {
+        match vf_fs::versions::list(env.conn, env.root, doc_id) {
+            Ok(v) => b.versions = Some((doc_id.to_string(), v)),
+            Err(e) => {
+                b.error = Some(e);
+                b.versions = Some((doc_id.to_string(), vec![]));
+            }
+        }
+    }
+    let Some((_, versions)) = &b.versions else {
+        return;
+    };
+    ui.add_space(10.0);
+    ui.label(RichText::new("Earlier versions").strong());
+    if versions.is_empty() {
+        ui.label(widgets::caption(
+            "None yet. Every change of the content keeps the one before it here.",
+        ));
+        return;
+    }
+    let mut act = None;
+    for (i, v) in versions.iter().enumerate() {
+        ui.push_id(("version", i), |ui| {
+            ui.label(format!(
+                "{} · {} · {}",
+                widgets::local_time(&v.created),
+                v.reason.as_deref().unwrap_or("earlier content"),
+                widgets::size(v.size)
+            ));
+            ui.horizontal(|ui| {
+                if !v.kept {
+                    ui.label(widgets::caption("content not kept")).on_hover_text(
+                        "Changed outside Vibe Files: the content before that change was never seen.",
+                    );
+                    return;
+                }
+                if ui
+                    .small_button("Open")
+                    .on_hover_text("Open a read-only copy")
+                    .clicked()
+                {
+                    act = Some(VersionAct::Open(v.hash.clone()));
+                }
+                if ui
+                    .small_button("Restore")
+                    .on_hover_text(
+                        "Make this the current content again (the current one is kept as a version)",
+                    )
+                    .clicked()
+                {
+                    act = Some(VersionAct::Restore(v.hash.clone()));
+                }
+                if ui.small_button("Save a copy…").clicked() {
+                    act = Some(VersionAct::SaveCopy(v.hash.clone()));
+                }
+            });
+        });
+        ui.add_space(4.0);
+    }
+    match act {
+        Some(VersionAct::Open(hash)) => {
+            let dir = std::env::temp_dir().join("Vibe Files versions");
+            let r = vf_fs::versions::open_copy(env.root, &hash, name, &dir)
+                .and_then(|p| (b.shell)(&ShellAction::Open(p)));
+            if let Err(e) = r {
+                b.error = Some(e);
+            }
+        }
+        Some(VersionAct::Restore(hash)) => {
+            match vf_fs::versions::restore(env.conn, env.root, env.device_id, doc_id, &hash) {
+                Ok(Ok(_)) => {
+                    b.reload(env.conn);
+                    b.notice = Some(
+                        "Restored the earlier version; the content it replaced is kept as a version."
+                            .into(),
+                    );
+                }
+                Ok(Err(why)) => b.error = Some(format!("Not restored: {why}.")),
+                Err(e) => b.error = Some(e),
+            }
+            b.versions = None;
+        }
+        Some(VersionAct::SaveCopy(hash)) => {
+            if let Some(dest) = rfd::FileDialog::new().set_file_name(name).save_file() {
+                match vf_fs::versions::save_copy(env.root, &hash, &dest) {
+                    Ok(()) => b.notice = Some(format!("Saved {}", dest.display())),
+                    Err(e) => b.error = Some(e),
+                }
+            }
+        }
+        None => {}
     }
 }
 
@@ -1941,6 +2051,67 @@ mod tests {
     }
 
     /// P01 step 5: bulk edit from the inspector, then Undo last.
+    /// P05 step 1: the inspector lists a document's earlier versions; Restore brings one back
+    /// and keeps the content it replaces.
+    #[test]
+    fn inspector_lists_versions_and_restores_one() {
+        let mut h = harness(1, 1);
+        {
+            let s = h.state_mut();
+            let rel = s.b.snap.docs[0].rel_path.clone();
+            let id = s.b.snap.docs[0].id.clone();
+            let path = s.root.join(&rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, b"first content").unwrap();
+            let hash = filer_intake::commit::sha256_file(&path).unwrap();
+            s.conn
+                .execute(
+                    "UPDATE document SET hash = ?2, size = 13 WHERE id = ?1",
+                    [&id, &hash],
+                )
+                .unwrap();
+            let tmp = vf_fs::content::tmp_file(&s.root, "pdf").unwrap();
+            std::fs::write(&tmp, b"second content").unwrap();
+            vf_fs::content::replace(
+                &mut s.conn,
+                &s.root,
+                "dev-test",
+                &id,
+                &tmp,
+                vf_fs::content::Change {
+                    label: "annotate",
+                    created_by: "annotate",
+                    reason: "before annotations",
+                    detail: serde_json::json!({}),
+                    extra: vec![],
+                },
+            )
+            .unwrap()
+            .unwrap();
+            s.b.reload(&s.conn);
+            s.b.selected = s.b.visible.iter().copied().collect();
+        }
+        h.run();
+        assert!(h.query_by_label("Earlier versions").is_some());
+        assert!(h.query_by_label_contains("before annotations").is_some());
+        h.get_by_role_and_label(Role::Button, "Restore")
+            .scroll_to_me();
+        h.run();
+        click(&mut h, "Restore");
+        let s = h.state();
+        assert!(s.b.error.is_none(), "{:?}", s.b.error);
+        assert!(s.b.notice.is_some(), "restore ran: {:?}", s.b.notice);
+        let path = s.root.join(&s.b.snap.docs[0].rel_path);
+        assert_eq!(std::fs::read(&path).unwrap(), b"first content");
+        assert_eq!(
+            vf_fs::versions::list(&s.conn, &s.root, &s.b.snap.docs[0].id)
+                .unwrap()
+                .len(),
+            2,
+            "the replaced content is a version too"
+        );
+    }
+
     #[test]
     fn inspector_applies_to_the_selection_and_undoes() {
         let mut h = harness(1, 6);

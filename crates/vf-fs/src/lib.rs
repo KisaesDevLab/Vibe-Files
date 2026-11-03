@@ -13,6 +13,7 @@ pub mod intake;
 pub mod newclient;
 pub mod rebuild;
 pub mod rename;
+pub mod versions;
 
 #[cfg(test)]
 mod tests {
