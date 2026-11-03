@@ -1223,7 +1223,19 @@ mod tests {
         let dir = filer_pdf::pdf::find_pdfium(Path::new("")).unwrap();
         let pdfium = filer_pdf::pdf::pdfium(&dir).unwrap();
         let texts = |p: &std::path::Path| -> Vec<String> {
-            let d = pdfium.load_pdf_from_file(p, None).unwrap();
+            // The Viewer's render thread shares pdfium; under a loaded test run an open can
+            // fail for a moment, so try a few times before failing.
+            let mut tries = 0;
+            let d = loop {
+                match pdfium.load_pdf_from_file(p, None) {
+                    Ok(d) => break d,
+                    Err(e) if tries == 50 => panic!("cannot open {}: {e}", p.display()),
+                    Err(_) => {
+                        tries += 1;
+                        std::thread::sleep(std::time::Duration::from_millis(100));
+                    }
+                }
+            };
             d.pages()
                 .iter()
                 .map(|pg| vf_pdf::text::page_text(&pg).trim().to_string())
