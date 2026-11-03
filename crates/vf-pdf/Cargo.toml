@@ -10,6 +10,7 @@ lopdf.workspace = true
 pdfium-render.workspace = true
 image.workspace = true
 regex.workspace = true
+pdf-writer.workspace = true
 serde.workspace = true
 
 [dev-dependencies]

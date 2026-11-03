@@ -1,4 +1,5 @@
 pub mod admin;
+pub mod audit;
 pub mod browse;
 pub mod chrome;
 pub mod client_panel;

@@ -5024,6 +5024,7 @@ dependencies = [
 name = "vf-core"
 version = "0.1.0"
 dependencies = [
+ "csv",
  "rusqlite",
  "serde",
  "serde_json",
@@ -5137,6 +5138,7 @@ dependencies = [
  "filer-pdf",
  "image",
  "lopdf",
+ "pdf-writer",
  "pdfium-render",
  "regex",
  "serde",

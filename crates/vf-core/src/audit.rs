@@ -218,6 +218,147 @@ pub fn mirror_append(dir: &Path, rows: &[AuditRow]) -> std::io::Result<()> {
     Ok(())
 }
 
+/// What the Audit trail page shows (PHASES P05 step 2). Empty fields do not filter.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Filter {
+    /// Part of the Windows login (or device id when no login was recorded).
+    pub user: String,
+    /// Client uuid: rows about its documents or about the client itself.
+    pub client_id: Option<String>,
+    /// Part of the document's cabinet path.
+    pub doc: String,
+    pub action: Option<String>,
+    /// `yyyy-mm-dd` (UTC date of the row), inclusive.
+    pub from: String,
+    pub to: String,
+}
+
+/// An audit row with what it is about.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Listed {
+    pub row: AuditRow,
+    /// The document's cabinet path (now), if the row is about one.
+    pub doc_path: Option<String>,
+    /// The client's name, from the document or the row's detail.
+    pub client: Option<String>,
+}
+
+/// Rows matching `f`, oldest first (by `seq`: the order they happened in). `limit`: the
+/// newest that many.
+pub fn query(conn: &Connection, f: &Filter, limit: Option<usize>) -> Result<Vec<Listed>> {
+    let sql = "SELECT a.seq, a.ts, a.user, a.device_id, a.action, a.doc_id, a.detail,
+                      a.prev_hash, a.hash, d.rel_path,
+                      coalesce(c.name, c2.name)
+               FROM audit a
+               LEFT JOIN document d ON d.id = a.doc_id
+               LEFT JOIN client c ON c.id = d.client_id
+               LEFT JOIN client c2 ON c2.deleted_at IS NULL AND (
+                    c2.id = coalesce(json_extract(a.detail, '$.client'),
+                                     json_extract(a.detail, '$.client_id'))
+                    OR c2.ext_id = json_extract(a.detail, '$.client'))
+               WHERE (?1 = '' OR coalesce(a.user, a.device_id) LIKE '%' || ?1 || '%')
+                 AND (?2 IS NULL OR d.client_id = ?2
+                      OR json_extract(a.detail, '$.client_id') = ?2
+                      OR json_extract(a.detail, '$.client')
+                         IN (?2, (SELECT ext_id FROM client WHERE id = ?2)))
+                 AND (?3 = '' OR d.rel_path LIKE '%' || ?3 || '%')
+                 AND (?4 IS NULL OR a.action = ?4)
+                 AND (?5 = '' OR substr(a.ts, 1, 10) >= ?5)
+                 AND (?6 = '' OR substr(a.ts, 1, 10) <= ?6)
+               ORDER BY a.seq DESC
+               LIMIT ?7";
+    let mut st = conn.prepare(sql)?;
+    let lim = limit.map_or(-1, |l| l as i64);
+    let rows = st.query_map(
+        params![
+            f.user.trim(),
+            f.client_id,
+            f.doc.trim(),
+            f.action,
+            f.from.trim(),
+            f.to.trim(),
+            lim
+        ],
+        |r| {
+            Ok(Listed {
+                row: AuditRow {
+                    seq: r.get(0)?,
+                    ts: r.get(1)?,
+                    user: r.get(2)?,
+                    device: r.get(3)?,
+                    action: r.get(4)?,
+                    doc: r.get(5)?,
+                    detail: r.get(6)?,
+                    prev_hash: r.get(7)?,
+                    hash: r.get(8)?,
+                },
+                doc_path: r.get(9)?,
+                client: r.get(10)?,
+            })
+        },
+    )?;
+    let mut out = rows.collect::<std::result::Result<Vec<_>, _>>()?;
+    out.reverse();
+    Ok(out)
+}
+
+/// The actions and the users (logins, else devices) that occur, sorted, for the filters.
+pub fn choices(conn: &Connection) -> Result<(Vec<String>, Vec<String>)> {
+    let list = |sql: &str| -> Result<Vec<String>> {
+        let mut st = conn.prepare(sql)?;
+        let v = st
+            .query_map([], |r| r.get(0))?
+            .collect::<std::result::Result<Vec<String>, _>>()?;
+        Ok(v)
+    };
+    Ok((
+        list("SELECT DISTINCT action FROM audit ORDER BY action")?,
+        list("SELECT DISTINCT coalesce(user, device_id) FROM audit ORDER BY 1")?,
+    ))
+}
+
+/// The columns of [`to_csv`] and the PDF export.
+pub const COLUMNS: [&str; 9] = [
+    "seq",
+    "time (UTC)",
+    "user",
+    "device",
+    "action",
+    "client",
+    "document",
+    "detail",
+    "hash",
+];
+
+/// One row as the export's cells.
+pub fn cells(l: &Listed) -> [String; 9] {
+    let r = &l.row;
+    [
+        r.seq.to_string(),
+        r.ts.clone(),
+        r.user.clone().unwrap_or_default(),
+        r.device.clone(),
+        r.action.clone(),
+        l.client.clone().unwrap_or_default(),
+        l.doc_path
+            .clone()
+            .or_else(|| r.doc.clone())
+            .unwrap_or_default(),
+        r.detail.clone(),
+        r.hash.clone(),
+    ]
+}
+
+/// The rows as CSV (header first), in the order given.
+pub fn to_csv(rows: &[Listed]) -> String {
+    let mut w = csv::Writer::from_writer(Vec::new());
+    let _ = w.write_record(COLUMNS);
+    for l in rows {
+        let _ = w.write_record(cells(l));
+    }
+    String::from_utf8(w.into_inner().unwrap_or_default()).unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -269,6 +410,139 @@ mod tests {
         c.execute_batch("DROP TRIGGER audit_no_delete").unwrap();
         c.execute("DELETE FROM audit WHERE seq = 4", []).unwrap();
         assert_eq!(verify(&c).unwrap().broken.unwrap().0, 5);
+    }
+
+    /// PHASES P05 done-when: an export for a client reconstructs its full history in order.
+    #[test]
+    fn client_export_has_its_whole_history_in_order() {
+        let tmp = tempfile::tempdir().unwrap();
+        let c = conn(tmp.path());
+        c.execute_batch(
+            "INSERT INTO client (id, ext_id, name, device_id, updated_at)
+               VALUES ('c1', 'ANDE1042', 'Anderson Farms LLC', 'd', 't'),
+                      ('c2', 'BELL2002', 'Bell Ranch', 'd', 't');
+             INSERT INTO document (id, client_id, rel_path, hash, size, filed_at, device_id, updated_at)
+               VALUES ('a', 'c1', 'Anderson Farms LLC (ANDE1042)/w2.pdf', 'h', 1, 't', 'd', 't'),
+                      ('b', 'c2', 'Bell Ranch (BELL2002)/k1.pdf', 'h2', 1, 't', 'd', 't');",
+        )
+        .unwrap();
+        let add = |ts: &str, action: &str, doc: Option<&str>, detail: serde_json::Value| {
+            append(
+                &c,
+                ts,
+                Some("OFFICE\\ann"),
+                "dev",
+                &AuditEntry::new(action, doc, detail),
+            )
+            .unwrap();
+        };
+        add(
+            "2026-01-02T10:00:00Z",
+            "client_create",
+            None,
+            // Client actions and Intake's ops name the client by its CSV ID.
+            serde_json::json!({"client": "ANDE1042"}),
+        );
+        add(
+            "2026-01-03T10:00:00Z",
+            "file",
+            Some("a"),
+            serde_json::json!({}),
+        );
+        add(
+            "2026-01-03T11:00:00Z",
+            "file",
+            Some("b"),
+            serde_json::json!({}),
+        );
+        add(
+            "2026-02-01T09:00:00Z",
+            "meta_edit",
+            Some("a"),
+            serde_json::json!({"status": "final"}),
+        );
+        add(
+            "2026-03-01T09:00:00Z",
+            "annotate",
+            Some("a"),
+            serde_json::json!({}),
+        );
+        add(
+            "2026-03-02T09:00:00Z",
+            "trash",
+            Some("b"),
+            serde_json::json!({}),
+        );
+
+        let f = Filter {
+            client_id: Some("c1".into()),
+            ..Filter::default()
+        };
+        let rows = query(&c, &f, None).unwrap();
+        let actions: Vec<&str> = rows.iter().map(|l| l.row.action.as_str()).collect();
+        assert_eq!(actions, ["client_create", "file", "meta_edit", "annotate"]);
+        assert!(
+            rows.windows(2).all(|w| w[0].row.seq < w[1].row.seq),
+            "in order"
+        );
+        assert!(
+            rows.iter()
+                .all(|l| l.client.as_deref() == Some("Anderson Farms LLC"))
+        );
+        let csv = to_csv(&rows);
+        let lines: Vec<&str> = csv.lines().collect();
+        assert_eq!(lines.len(), 5);
+        assert!(lines[0].starts_with("seq,time (UTC),user"));
+        assert!(lines[2].contains("Anderson Farms LLC (ANDE1042)/w2.pdf"));
+        assert!(
+            lines[3].contains(r#""{""status"":""final""}""#),
+            "{}",
+            lines[3]
+        );
+
+        // Other filters.
+        let by = |f: Filter| query(&c, &f, None).unwrap().len();
+        assert_eq!(
+            by(Filter {
+                action: Some("file".into()),
+                ..Filter::default()
+            }),
+            2
+        );
+        assert_eq!(
+            by(Filter {
+                doc: "k1".into(),
+                ..Filter::default()
+            }),
+            2
+        );
+        assert_eq!(
+            by(Filter {
+                from: "2026-02-01".into(),
+                to: "2026-03-01".into(),
+                ..Filter::default()
+            }),
+            2
+        );
+        assert_eq!(
+            by(Filter {
+                user: "ann".into(),
+                ..Filter::default()
+            }),
+            6
+        );
+        assert_eq!(
+            by(Filter {
+                user: "bob".into(),
+                ..Filter::default()
+            }),
+            0
+        );
+        let newest = query(&c, &Filter::default(), Some(2)).unwrap();
+        assert_eq!(newest.iter().map(|l| l.row.seq).collect::<Vec<_>>(), [5, 6]);
+        let (actions, users) = choices(&c).unwrap();
+        assert_eq!(actions.len(), 5);
+        assert_eq!(users, ["OFFICE\\ann"]);
     }
 
     #[test]

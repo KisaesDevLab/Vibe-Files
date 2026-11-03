@@ -11,5 +11,6 @@ pub mod pdfa;
 pub mod pii;
 pub mod raster;
 pub mod redact;
+pub mod report;
 pub mod text;
 pub mod words;

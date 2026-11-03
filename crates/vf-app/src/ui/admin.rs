@@ -14,6 +14,7 @@ use crate::ui::{theme, wizard::ERROR};
 pub enum Page {
     DocTypes,
     PrintCapture,
+    Audit,
 }
 
 /// UI_SPEC §6 nav, grouped. Only Doc types is built in P01.
@@ -89,6 +90,10 @@ pub struct Admin {
     /// Parser profiles: (name, pattern, doc rules, enabled), and files that did not load.
     profiles: Vec<(String, String, usize, bool)>,
     profile_errors: Vec<String>,
+    /// Audit trail page (P05 step 2).
+    pub audit: crate::ui::audit::AuditPage,
+    /// The app's last chain check, shown on the Audit trail page.
+    pub chain: Option<crate::ui::audit::ChainCheck>,
 }
 
 impl Admin {
@@ -107,6 +112,8 @@ impl Admin {
             open_request: None,
             profiles: Vec::new(),
             profile_errors: Vec::new(),
+            audit: Default::default(),
+            chain: None,
         };
         a.reload(env);
         a
@@ -185,6 +192,7 @@ pub fn show(ui: &mut egui::Ui, a: &mut Admin, env: &mut Env) {
     egui::CentralPanel::default().show(ui, |ui| match a.page {
         Page::DocTypes => doc_types(ui, a, env),
         Page::PrintCapture => print_capture(ui, a, env),
+        Page::Audit => crate::ui::audit::show(ui, &mut a.audit, env, a.chain.as_ref()),
     });
 }
 
@@ -207,6 +215,11 @@ fn nav(ui: &mut egui::Ui, a: &mut Admin) {
                     .clicked()
                 {
                     a.page = Page::PrintCapture;
+                }
+            } else if *item == "Audit trail" {
+                if ui.selectable_label(a.page == Page::Audit, *item).clicked() {
+                    a.page = Page::Audit;
+                    a.audit.refresh();
                 }
             } else {
                 ui.add_enabled(false, egui::Button::selectable(false, *item))
@@ -582,6 +595,39 @@ mod tests {
                 .join("ultratax.toml")
                 .is_file()
         );
+    }
+
+    /// P05 step 2: the Audit trail page lists the rows, filters them, asks for a verify, and
+    /// its PDF export reads back.
+    #[test]
+    fn audit_trail_page_lists_filters_and_exports() {
+        let mut h = harness();
+        click(&mut h, "Audit trail");
+        assert_eq!(h.state().a.page, Page::Audit);
+        let n = h
+            .state()
+            .conn
+            .query_row("SELECT count(*) FROM audit", [], |r| r.get::<_, i64>(0))
+            .unwrap();
+        assert!(n > 0);
+        assert!(h.query_by_label(&format!("{n} rows.")).is_some());
+        h.state_mut().a.audit.filter.action = Some("no-such-action".into());
+        h.state_mut().a.audit.refresh();
+        h.run();
+        assert!(h.query_by_label("0 rows.").is_some());
+        click(&mut h, "Clear");
+        click(&mut h, "Verify now");
+        assert!(h.state().a.audit.verify_requested);
+
+        let s = h.state();
+        let rows = vf_core::audit::query(&s.conn, &Default::default(), None).unwrap();
+        let chain = crate::ui::audit::ChainCheck::run(&s.conn);
+        assert!(chain.problem().is_none(), "{}", chain.summary());
+        let bytes = crate::ui::audit::pdf(&rows, "all rows", Some(&chain));
+        let d = lopdf::Document::load_mem(&bytes).unwrap();
+        let text = d.extract_text(&[1]).unwrap();
+        assert!(text.contains("Vibe Files audit trail"), "{text}");
+        assert!(text.contains("intact"), "{text}");
     }
 
     #[test]

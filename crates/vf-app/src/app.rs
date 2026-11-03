@@ -82,6 +82,8 @@ pub struct OpenCabinet {
     /// OCR's indexed count when Search last re-ran, and when: while OCR works through a
     /// backlog, Search runs again at most every 3 s, not on every document.
     indexed_seen: (usize, Option<std::time::Instant>),
+    /// The audit chain check: on open, then weekly (P05 step 2).
+    pub chain: crate::ui::audit::ChainCheck,
 }
 
 impl OpenCabinet {
@@ -240,7 +242,9 @@ impl VibeFilesApp {
                     &self.config.ocr,
                     &self.config.device_id,
                 );
+                let chain = crate::ui::audit::ChainCheck::run(&opened.conn);
                 self.screen = Screen::Open(Box::new(OpenCabinet {
+                    chain,
                     opened,
                     browse,
                     admin: None,
@@ -277,6 +281,20 @@ impl eframe::App for VibeFilesApp {
             _ => 0,
         };
         chrome::tab_bar(ui, &mut self.tab, badge);
+        if let Screen::Open(o) = &mut self.screen {
+            o.chain.tick(&o.opened.conn);
+            if let Some(problem) = o.chain.problem() {
+                egui::Panel::top("vf-audit-banner")
+                    .frame(
+                        egui::Frame::new()
+                            .fill(egui::Color32::from_rgb(0xfd, 0xec, 0xea))
+                            .inner_margin(egui::Margin::symmetric(16, 8)),
+                    )
+                    .show(ui, |ui| {
+                        ui.label(egui::RichText::new(problem).color(wizard::ERROR).strong());
+                    });
+            }
+        }
         let mut segments = vec![format!("vibe-files {}", env!("CARGO_PKG_VERSION"))];
         if let Screen::Open(o) = &mut self.screen {
             let o = &mut **o;
@@ -370,6 +388,7 @@ impl eframe::App for VibeFilesApp {
                     admin: tab_admin,
                     intake: o_intake,
                     viewer: o_viewer,
+                    chain: o_chain,
                     ..
                 } = &mut **o;
                 let mut env = browse::Env {
@@ -380,7 +399,11 @@ impl eframe::App for VibeFilesApp {
                 if self.tab == Tab::Admin {
                     let a = tab_admin.get_or_insert_with(|| Admin::load(&env));
                     a.capture = self.config.ingest.print_capture.clone();
+                    a.chain = Some(o_chain.clone());
                     admin::show(ui, a, &mut env);
+                    if std::mem::take(&mut a.audit.verify_requested) {
+                        *o_chain = crate::ui::audit::ChainCheck::run(env.conn);
+                    }
                     if let Some(dir) = a.open_request.take()
                         && let Err(e) = (tab_browse.shell)(&crate::shell::ShellAction::Open(dir))
                     {
@@ -1051,11 +1074,16 @@ mod tests {
         h.run();
         click(&mut h, "Save as…");
         h.step();
-        assert_eq!(
-            vf_pdf::annot::read(&path).unwrap().len(),
-            2,
-            "Save as leaves the file just saved alone"
-        );
+        // The OCR worker may be swapping the file in at this moment: read again shortly.
+        let annots = (0..50)
+            .find_map(|_| {
+                vf_pdf::annot::read(&path).ok().or_else(|| {
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                    None
+                })
+            })
+            .expect("the saved file reads");
+        assert_eq!(annots.len(), 2, "Save as leaves the file just saved alone");
         let copy = root.join("Old/letter (2).pdf");
         assert_eq!(
             vf_pdf::annot::read(&copy).unwrap().len(),
@@ -1319,6 +1347,48 @@ mod tests {
             .map(|t| t.toc.len())
             .unwrap_or(0);
         assert_eq!(marks, 2, "a bookmark per source");
+    }
+
+    /// P05 step 2: the chain is checked when the cabinet opens; a tampered row shows a banner on
+    /// every tab until the chain verifies again.
+    #[test]
+    fn tampered_audit_trail_shows_a_banner() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("Clients");
+        let req = CreateRequest {
+            root: &root,
+            name: "Firm",
+        };
+        drop(session::create(&tmp.path().join("pc1"), "dev-1", &req).unwrap());
+        let mut h = harness(&tmp.path().join("pc1"));
+        click(&mut h, "Open existing");
+        type_into(&mut h, "Cabinet folder", &root.display().to_string());
+        click(&mut h, "Open cabinet");
+        settle(&mut h);
+        assert!(h.query_by_label_contains("does not verify").is_none());
+        if let Screen::Open(o) = &mut h.state_mut().screen {
+            let c = &o.opened.conn;
+            c.execute_batch(
+                "DROP TRIGGER audit_no_update;
+                 UPDATE audit SET detail = '{\"edited\":true}' WHERE seq = 1;",
+            )
+            .unwrap();
+            // As if a week had passed since the check at open (or, on a PC up for less than
+            // a week, check again now).
+            match o
+                .chain
+                .at
+                .checked_sub(std::time::Duration::from_secs(8 * 24 * 3600))
+            {
+                Some(t) => o.chain.at = t,
+                None => o.chain = crate::ui::audit::ChainCheck::run(&o.opened.conn),
+            }
+        }
+        h.run();
+        assert!(
+            h.query_by_label_contains("does not verify at row 1")
+                .is_some()
+        );
     }
 
     #[test]
