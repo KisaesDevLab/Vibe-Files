@@ -11,6 +11,7 @@ filer-intake = { path = "../filer-intake" }
 vf-core = { path = "../vf-core" }
 vf-index = { path = "../vf-index" }
 vf-fs = { path = "../vf-fs" }
+vf-pdf = { path = "../vf-pdf" }
 pdfium-render.workspace = true
 lopdf.workspace = true
 image.workspace = true

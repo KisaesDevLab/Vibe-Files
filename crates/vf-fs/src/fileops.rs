@@ -222,7 +222,7 @@ impl FileOps for FilerFileOps {
         }
     }
 
-    fn check_reverse(&self, a: &AppliedOp) -> Result<(), String> {
+    fn check_reverse(&self, a: &AppliedOp, vacated: &[PathBuf]) -> Result<(), String> {
         match &a.op {
             FileOp::Move { src, dst } => {
                 if size(dst) != Some(a.bytes) {
@@ -231,7 +231,7 @@ impl FileOps for FilerFileOps {
                         dst.display()
                     ));
                 }
-                if src.exists() {
+                if src.exists() && !vacated.contains(src) {
                     return Err(format!("{} exists again", src.display()));
                 }
                 Ok(())
@@ -265,7 +265,7 @@ impl FileOps for FilerFileOps {
     }
 
     fn reverse(&mut self, a: &AppliedOp) -> Result<(), String> {
-        self.check_reverse(a)?;
+        self.check_reverse(a, &[])?;
         match &a.op {
             FileOp::Move { src, dst } => {
                 commit::transfer(dst, src, self.force_copy)?;

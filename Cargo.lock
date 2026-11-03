@@ -5124,11 +5124,17 @@ dependencies = [
  "vf-fs",
  "vf-index",
  "vf-ingest",
+ "vf-pdf",
 ]
 
 [[package]]
 name = "vf-pdf"
 version = "0.1.0"
+dependencies = [
+ "lopdf",
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "vf-security"

@@ -11,7 +11,7 @@ use std::path::Path;
 use lopdf::content::{Content, Operation};
 use lopdf::{Dictionary, Document, Object, ObjectId, Stream, StringFormat};
 
-use crate::engine::OcrPage;
+use crate::words::OcrPage;
 
 /// Resource name of the layer's font.
 const FONT: &[u8] = b"VfOcrCourier";

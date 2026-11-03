@@ -6,7 +6,7 @@
 //! the exe (the portable layout), then Program Files, then `PATH`.
 
 pub mod engine;
-pub mod layer;
+pub use vf_pdf::layer;
 pub mod queue;
 pub mod tesseract;
 pub mod writeback;

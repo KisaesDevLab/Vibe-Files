@@ -3,6 +3,7 @@
 
 pub mod cabinet;
 pub mod clients;
+pub mod content;
 pub mod docmeta;
 pub mod doctypes;
 pub mod dupes;

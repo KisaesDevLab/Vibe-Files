@@ -70,8 +70,14 @@ pub trait FileOps {
     fn apply(&mut self, op: &FileOp) -> std::result::Result<AppliedOp, String>;
     fn reverse(&mut self, applied: &AppliedOp) -> std::result::Result<(), String>;
     /// Whether `reverse` would succeed now (the file is still as written, its old place is
-    /// free). Undo checks every op first and changes nothing if any is blocked.
-    fn check_reverse(&self, _applied: &AppliedOp) -> std::result::Result<(), String> {
+    /// free). Undo checks every op first and changes nothing if any is blocked. `vacated`: paths
+    /// that ops reversed before this one move away (a file swapped for new content: undoing
+    /// the swap moves the new file out before the old one moves back).
+    fn check_reverse(
+        &self,
+        _applied: &AppliedOp,
+        _vacated: &[PathBuf],
+    ) -> std::result::Result<(), String> {
         Ok(())
     }
 }
@@ -317,10 +323,22 @@ pub fn undo(
     }
     let record: UndoRecord =
         serde_json::from_str(&record).map_err(|e| Error::Tx(format!("undo record: {e}")))?;
+    // Reversal runs newest first: when op i is reversed, the moves after it have already put
+    // their files back, vacating their destinations.
     let blocked: Vec<String> = record
         .applied
         .iter()
-        .filter_map(|a| fs.check_reverse(a).err())
+        .enumerate()
+        .filter_map(|(i, a)| {
+            let vacated: Vec<PathBuf> = record.applied[i + 1..]
+                .iter()
+                .filter_map(|later| match &later.op {
+                    FileOp::Move { dst, .. } => Some(dst.clone()),
+                    _ => None,
+                })
+                .collect();
+            fs.check_reverse(a, &vacated).err()
+        })
         .collect();
     if !blocked.is_empty() {
         return Err(Error::UndoBlocked(blocked));
