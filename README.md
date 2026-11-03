@@ -90,6 +90,6 @@ assigned.
 
 ## License
 
-[GNU Affero General Public License v3.0 only](LICENSE) (`AGPL-3.0-only`).
+[GNU Affero General Public License v3.0 or later](LICENSE) (`AGPL-3.0-or-later`).
 Third-party components keep their own licenses. pdfium's licenses are in
 `crates/filer-pdf/assets/`. Tesseract is installed separately and is Apache-2.0.
