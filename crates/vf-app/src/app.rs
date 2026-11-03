@@ -225,6 +225,12 @@ impl VibeFilesApp {
                 self.config.last_cabinet = Some(opened.root.clone());
                 // The cabinet is open either way; a settings write failure only loses "last".
                 let _ = config::save(&self.data, &self.config);
+                // Trash older than 90 days empties on its own (Q-15; held documents stay).
+                let emptied = vf_fs::trash::auto_empty(
+                    &mut opened.conn,
+                    &opened.root,
+                    &self.config.device_id,
+                );
                 let mut browse = Browse::load(&opened.conn);
                 browse.sheets_dir = self.data.join("sheets");
                 browse.set_prefs(self.config.prefs.clone());
@@ -236,6 +242,16 @@ impl VibeFilesApp {
                     ),
                     None => format!("Indexed: {r}"),
                 });
+                match emptied {
+                    Ok(0) => {}
+                    Ok(n) => {
+                        browse.notice = Some(format!(
+                            "Emptied {n} documents that were in the trash over {} days.",
+                            vf_fs::trash::AUTO_EMPTY_DAYS
+                        ))
+                    }
+                    Err(e) => browse.error = Some(format!("Emptying old trash: {e}")),
+                }
                 let ocr = crate::ui::ocr::OcrState::start(
                     ctx,
                     &opened,

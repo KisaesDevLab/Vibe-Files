@@ -39,6 +39,13 @@ pub fn windows_login() -> Option<String> {
     })
 }
 
+/// The time `days` days ago, RFC 3339 UTC (for "older than" comparisons with stored times).
+pub fn rfc3339_days_ago(days: i64) -> String {
+    let t = time::OffsetDateTime::now_utc() - time::Duration::days(days);
+    t.format(&time::format_description::well_known::Rfc3339)
+        .expect("RFC 3339 formats")
+}
+
 pub fn now_rfc3339() -> String {
     let now = time::OffsetDateTime::now_utc();
     now.format(&time::format_description::well_known::Rfc3339)

@@ -15,6 +15,7 @@ pub enum Page {
     DocTypes,
     PrintCapture,
     Audit,
+    Trash,
 }
 
 /// UI_SPEC §6 nav, grouped. Only Doc types is built in P01.
@@ -94,6 +95,8 @@ pub struct Admin {
     pub audit: crate::ui::audit::AuditPage,
     /// The app's last chain check, shown on the Audit trail page.
     pub chain: Option<crate::ui::audit::ChainCheck>,
+    /// Trash page (P05 step 3).
+    pub trash: crate::ui::trash::TrashPage,
 }
 
 impl Admin {
@@ -114,6 +117,7 @@ impl Admin {
             profile_errors: Vec::new(),
             audit: Default::default(),
             chain: None,
+            trash: Default::default(),
         };
         a.reload(env);
         a
@@ -193,6 +197,12 @@ pub fn show(ui: &mut egui::Ui, a: &mut Admin, env: &mut Env) {
         Page::DocTypes => doc_types(ui, a, env),
         Page::PrintCapture => print_capture(ui, a, env),
         Page::Audit => crate::ui::audit::show(ui, &mut a.audit, env, a.chain.as_ref()),
+        Page::Trash => {
+            crate::ui::trash::show(ui, &mut a.trash, env);
+            if std::mem::take(&mut a.trash.changed) {
+                a.changed = true;
+            }
+        }
     });
 }
 
@@ -215,6 +225,11 @@ fn nav(ui: &mut egui::Ui, a: &mut Admin) {
                     .clicked()
                 {
                     a.page = Page::PrintCapture;
+                }
+            } else if *item == "Trash" {
+                if ui.selectable_label(a.page == Page::Trash, *item).clicked() {
+                    a.page = Page::Trash;
+                    a.trash.refresh();
                 }
             } else if *item == "Audit trail" {
                 if ui.selectable_label(a.page == Page::Audit, *item).clicked() {
@@ -628,6 +643,67 @@ mod tests {
         let text = d.extract_text(&[1]).unwrap();
         assert!(text.contains("Vibe Files audit trail"), "{text}");
         assert!(text.contains("intact"), "{text}");
+    }
+
+    /// P05 step 3: set the firm PIN, restore from the trash, empty it with the PIN.
+    #[test]
+    fn trash_page_restores_and_empties_with_the_pin() {
+        let mut h = harness();
+        let trash_one = |h: &mut Harness<'static, State>| {
+            let s = h.state_mut();
+            let rel = "A (1)/2025/w2.pdf";
+            if !s.root.join(rel).exists() {
+                std::fs::create_dir_all(s.root.join("A (1)/2025")).unwrap();
+                std::fs::write(s.root.join(rel), b"w2").unwrap();
+                s.conn
+                    .execute(
+                        "INSERT OR IGNORE INTO document (id, tax_year, rel_path, hash, size, filed_at, device_id, updated_at)
+                         VALUES ('d1', 2025, ?1, 'h', 2, 't', 'dev', 't')",
+                        [rel],
+                    )
+                    .unwrap();
+            }
+            vf_fs::trash::delete(&mut s.conn, &s.root, "dev", &["d1".into()], "deleted").unwrap();
+            s.a.trash.refresh();
+        };
+        trash_one(&mut h);
+        click(&mut h, "Trash");
+        assert!(h.query_by_label("A (1)/2025/w2.pdf").is_some());
+        type_into(&mut h, "New PIN", "4821");
+        type_into(&mut h, "Again", "4821");
+        click(&mut h, "Set PIN");
+        assert!(
+            vf_fs::trash::has_pin(&h.state().root),
+            "{:?}",
+            h.state().a.trash.error
+        );
+
+        h.get_by_label("A (1)/2025/w2.pdf").click();
+        h.run();
+        click(&mut h, "Restore 1");
+        assert!(h.state().root.join("A (1)/2025/w2.pdf").is_file());
+        assert!(h.query_by_label("The trash is empty.").is_some());
+
+        trash_one(&mut h);
+        h.run();
+        type_into(&mut h, "Firm PIN", "0000");
+        click(&mut h, "Empty trash");
+        assert_eq!(
+            h.state().a.trash.error.as_deref(),
+            Some("That PIN is not right.")
+        );
+        type_into(&mut h, "Firm PIN", "4821");
+        click(&mut h, "Empty trash");
+        assert_eq!(
+            h.state().a.trash.notice.as_deref(),
+            Some("Emptied 1 documents.")
+        );
+        assert!(h.query_by_label("The trash is empty.").is_some());
+        assert!(
+            !vf_fs::cabinet::trash_dir(&h.state().root)
+                .join("d1")
+                .exists()
+        );
     }
 
     #[test]

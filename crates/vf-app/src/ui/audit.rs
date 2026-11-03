@@ -308,7 +308,7 @@ pub fn show(ui: &mut egui::Ui, p: &mut AuditPage, env: &mut Env, chain: Option<&
     let rows = p.rows.clone().unwrap_or_default();
     ui.add_space(4.0);
     ui.horizontal(|ui| {
-        ui.label(widgets::caption(&if rows.len() == SHOWN {
+        ui.label(widgets::caption(if rows.len() == SHOWN {
             format!("The newest {SHOWN} matching rows (exports include every one).")
         } else {
             format!("{} rows.", rows.len())

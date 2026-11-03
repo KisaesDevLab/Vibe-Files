@@ -95,6 +95,8 @@ pub struct Browse {
     undo_requested: bool,
     /// The selected document's versions (P05 step 1), for the document they were read for.
     versions: Option<(String, Vec<vf_fs::versions::Version>)>,
+    /// "Move to trash" chosen for the selection (P05 step 3).
+    pub trash_requested: bool,
     /// The `Rename…` dialog, while open.
     pub rename: Option<RenameDialog>,
     /// A PDF to show in the Viewer (taken by the app).
@@ -166,6 +168,7 @@ impl Browse {
             undo_tx: None,
             undo_requested: false,
             versions: None,
+            trash_requested: false,
             rename: None,
             prefs: Prefs::default(),
             prefs_dirty: false,
@@ -1238,6 +1241,7 @@ fn grid(ui: &mut egui::Ui, b: &mut Browse, conn: &Connection) {
 
     let mut clicked: Option<(usize, egui::Modifiers)> = None;
     let mut file_req: Option<(usize, FileAct)> = None;
+    let mut trash_row: Option<usize> = None;
     let mut toggled: Option<usize> = None;
     let mut sort: Option<SortCol> = None;
     let mods = ui.input(|i| i.modifiers);
@@ -1366,6 +1370,11 @@ fn grid(ui: &mut egui::Ui, b: &mut Browse, conn: &Connection) {
                             ui.close();
                         }
                     }
+                    ui.separator();
+                    if ui.button("Move to trash").clicked() {
+                        trash_row = Some(di);
+                        ui.close();
+                    }
                 });
             });
         });
@@ -1380,6 +1389,12 @@ fn grid(ui: &mut egui::Ui, b: &mut Browse, conn: &Connection) {
     }
     if file_req.is_some() {
         b.file_request = file_req;
+    }
+    if let Some(di) = trash_row {
+        if !b.selected.contains(&di) {
+            b.selected = [di].into_iter().collect();
+        }
+        b.trash_requested = true;
     }
 }
 
@@ -1456,6 +1471,32 @@ fn inspector(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env) {
     let can_apply = !b.meta_form.to_edit().is_empty();
     let go = widgets::primary_button(format!("Apply to {} (one transaction)", b.selected.len()));
     let apply = ui.add_enabled(can_apply, go).clicked();
+    if ui
+        .button(format!("Move {} to trash", b.selected.len()))
+        .on_hover_text("One transaction: Undo puts them back; Admin › Trash restores them later.")
+        .clicked()
+    {
+        b.trash_requested = true;
+    }
+    if std::mem::take(&mut b.trash_requested) {
+        let ids: Vec<String> = b
+            .selected
+            .iter()
+            .map(|&i| b.snap.docs[i].id.clone())
+            .collect();
+        match vf_fs::trash::delete(env.conn, env.root, env.device_id, &ids, "deleted") {
+            Ok(_) => {
+                b.reload(env.conn);
+                b.selected.clear();
+                b.notice = Some(format!(
+                    "Moved {} documents to the trash (Undo puts them back).",
+                    ids.len()
+                ));
+            }
+            Err(e) => b.error = Some(e),
+        }
+        return;
+    }
     if apply {
         let ids: Vec<String> = b
             .selected
@@ -2110,6 +2151,30 @@ mod tests {
             2,
             "the replaced content is a version too"
         );
+    }
+
+    /// P05 step 3: Move to trash takes the selection out of the cabinet in one transaction.
+    #[test]
+    fn move_to_trash_from_the_inspector() {
+        let mut h = harness(1, 2);
+        let rels: Vec<String> = {
+            let s = h.state_mut();
+            let rels: Vec<String> = s.b.snap.docs.iter().map(|d| d.rel_path.clone()).collect();
+            for r in &rels {
+                let p = s.root.join(r);
+                std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+                std::fs::write(&p, b"x").unwrap();
+            }
+            s.b.selected = s.b.visible.iter().copied().collect();
+            rels
+        };
+        h.run();
+        click(&mut h, "Move 2 to trash");
+        let s = h.state();
+        assert!(s.b.error.is_none(), "{:?}", s.b.error);
+        assert!(s.b.snap.docs.is_empty());
+        assert!(rels.iter().all(|r| !s.root.join(r).exists()));
+        assert_eq!(vf_fs::trash::list(&s.conn, &s.root).unwrap().len(), 2);
     }
 
     #[test]

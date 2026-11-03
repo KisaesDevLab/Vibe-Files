@@ -147,6 +147,6 @@ mod tests {
         assert!(last.contains("row 120"));
         assert_eq!(fit("abcdefghij", 6), "abc...");
         assert_eq!(fit("ab\ncd", 6), "ab cd ");
-        assert!(LINE_CHARS > 150);
+        const { assert!(LINE_CHARS > 150) };
     }
 }

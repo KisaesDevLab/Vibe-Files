@@ -17,6 +17,7 @@ pub mod search;
 #[cfg(test)]
 pub mod test_util;
 pub mod theme;
+pub mod trash;
 pub mod viewer;
 pub mod widgets;
 pub mod wizard;
