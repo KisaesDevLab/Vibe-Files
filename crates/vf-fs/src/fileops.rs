@@ -126,6 +126,41 @@ impl FileOps for FilerFileOps {
                 method: "mkdir".into(),
                 created_dirs: self.make_dirs(path)?,
             }),
+            FileOp::WriteSentinel {
+                root,
+                folder,
+                client_id,
+                ext_id,
+                name,
+                firm_id,
+            } => {
+                self.check_inside(folder, folder)?;
+                let parse = |s: &str, what: &str| {
+                    uuid::Uuid::parse_str(s).map_err(|e| format!("{what} {s} is not a uuid: {e}"))
+                };
+                let client = filer_core::clients::Client {
+                    id: ext_id.clone(),
+                    uuid: parse(client_id, "client id")?,
+                    name: name.clone(),
+                    extra: Default::default(),
+                };
+                let vibe = folder.join(crate::cabinet::VIBE_DIR);
+                let created_dirs = if vibe.exists() { vec![] } else { vec![vibe] };
+                filer_intake::sentinel::write_sentinel(
+                    root,
+                    folder,
+                    &client,
+                    parse(firm_id, "firm id")?,
+                )?;
+                let p = filer_intake::sentinel::sentinel_path(folder);
+                Ok(AppliedOp {
+                    op: op.clone(),
+                    bytes: size(&p).unwrap_or(0),
+                    sha256: Some(commit::sha256_file(&p).map_err(|e| e.to_string())?),
+                    method: "sentinel".into(),
+                    created_dirs,
+                })
+            }
         }
     }
 
@@ -151,6 +186,16 @@ impl FileOps for FilerFileOps {
                 )),
             },
             FileOp::Mkdir { .. } => Ok(()),
+            FileOp::WriteSentinel { folder, .. } => {
+                let p = filer_intake::sentinel::sentinel_path(folder);
+                match (&a.sha256, commit::sha256_file(&p)) {
+                    (Some(want), Ok(have)) if *want == have => Ok(()),
+                    _ => Err(format!(
+                        "{} was changed or removed; it is left as it is",
+                        p.display()
+                    )),
+                }
+            }
         }
     }
 
@@ -164,6 +209,11 @@ impl FileOps for FilerFileOps {
             FileOp::Copy { dst, .. } => std::fs::remove_file(dst)
                 .map_err(|e| format!("cannot remove {}: {e}", dst.display()))?,
             FileOp::Mkdir { .. } => {}
+            FileOp::WriteSentinel { folder, .. } => {
+                let p = filer_intake::sentinel::sentinel_path(folder);
+                std::fs::remove_file(&p)
+                    .map_err(|e| format!("cannot remove {}: {e}", p.display()))?
+            }
         }
         remove_empty(&a.created_dirs);
         Ok(())

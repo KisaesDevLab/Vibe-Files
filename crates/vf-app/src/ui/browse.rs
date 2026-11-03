@@ -4,13 +4,22 @@
 //! on it in memory. [`Browse::reload`] re-reads after anything changes the catalog.
 
 use std::collections::{BTreeSet, HashSet};
+use std::path::Path;
 
 use egui::{Align, Key, Layout, RichText, Sense};
 use egui_extras::{Column, TableBuilder};
 use vf_core::browse::{DocRow, Index, Scope, Snapshot};
 use vf_core::db::Connection;
 
+use crate::ui::new_client::{self, NewClientDialog, Outcome};
 use crate::ui::{theme, widgets};
+
+/// What Browse needs from the open cabinet to change things.
+pub struct Env<'a> {
+    pub conn: &'a mut Connection,
+    pub root: &'a Path,
+    pub device_id: &'a str,
+}
 
 pub const ROW_H: f32 = 32.0;
 
@@ -64,6 +73,8 @@ pub struct Browse {
     pub error: Option<String>,
     /// Shown above the grid until dismissed (the rebuild report after create/first open).
     pub notice: Option<String>,
+    /// The `+ New client` dialog, while open.
+    pub new_client: Option<NewClientDialog>,
 }
 
 impl Browse {
@@ -84,6 +95,7 @@ impl Browse {
             scroll_to: None,
             error: None,
             notice: None,
+            new_client: None,
         };
         b.refresh();
         b
@@ -311,7 +323,7 @@ fn folder_label(f: &str) -> &str {
 }
 
 /// Draws the whole tab (three panes). Call where the central panel would go.
-pub fn show(ui: &mut egui::Ui, b: &mut Browse, conn: &Connection) {
+pub fn show(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env) {
     b.keys(ui.ctx());
     egui::Panel::left("browse-tree")
         .default_size(272.0)
@@ -323,7 +335,32 @@ pub fn show(ui: &mut egui::Ui, b: &mut Browse, conn: &Connection) {
         .resizable(false)
         .frame(egui::Frame::new().fill(theme::PANE).inner_margin(12))
         .show(ui, |ui| inspector(ui, b));
-    egui::CentralPanel::default().show(ui, |ui| grid(ui, b, conn));
+    egui::CentralPanel::default().show(ui, |ui| grid(ui, b, env.conn));
+    if let Some(d) = &mut b.new_client {
+        match new_client::show(ui.ctx(), d, env) {
+            Outcome::Open => {}
+            Outcome::Cancelled => b.new_client = None,
+            Outcome::Created { client_id, folder } => {
+                b.new_client = None;
+                b.reload(env.conn);
+                if let Some(c) = b.snap.clients.iter().position(|c| c.id == client_id) {
+                    b.set_scope(Scope::Client(c));
+                    b.expanded.insert(Node::Client(c));
+                }
+                b.notice = Some(format!("Created {folder}."));
+            }
+        }
+    }
+}
+
+/// The ID to prefill in `+ New client`: the selected client when it has no folder yet.
+fn folderless_selected(b: &Browse) -> Option<String> {
+    match b.scope {
+        Scope::Client(c) if b.snap.clients[c].folder_rel.is_none() => {
+            Some(b.snap.clients[c].ext_id.clone())
+        }
+        _ => None,
+    }
 }
 
 fn tree(ui: &mut egui::Ui, b: &mut Browse) {
@@ -566,6 +603,14 @@ fn grid(ui: &mut egui::Ui, b: &mut Browse, conn: &Connection) {
     if dismiss {
         b.notice = None;
     }
+    ui.horizontal(|ui| {
+        let new = egui::Button::new(RichText::new("+ New client").color(egui::Color32::WHITE))
+            .fill(theme::ACCENT_DEFAULT);
+        if ui.add(new).clicked() {
+            b.new_client = Some(NewClientDialog::new(folderless_selected(b)));
+        }
+    });
+    ui.add_space(6.0);
     ui.horizontal(|ui| {
         ui.label(RichText::new(breadcrumb(b)).monospace());
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -900,6 +945,7 @@ mod tests {
     struct State {
         b: Browse,
         conn: Connection,
+        root: std::path::PathBuf,
         _tmp: tempfile::TempDir,
     }
 
@@ -909,8 +955,20 @@ mod tests {
         let mut h = HarnessBuilder::default()
             .with_size([1440.0, 900.0])
             .build_ui_state(
-                |ui, s: &mut State| show(ui, &mut s.b, &s.conn),
-                State { b, conn, _tmp: tmp },
+                |ui, s: &mut State| {
+                    let mut env = Env {
+                        conn: &mut s.conn,
+                        root: &s.root,
+                        device_id: "dev-test",
+                    };
+                    show(ui, &mut s.b, &mut env)
+                },
+                State {
+                    b,
+                    conn,
+                    root: tmp.path().join("cabinet"),
+                    _tmp: tmp,
+                },
             );
         // The app's fonts, so a glyph they lack fails here as it would in the app.
         crate::ui::theme::install(&h.ctx);
@@ -1046,6 +1104,67 @@ mod tests {
                 .collect();
         assert_eq!(sel, [id]);
         assert_eq!(s.b.snap.docs.len(), 7);
+    }
+
+    fn type_into(h: &mut Harness<'static, State>, label: &str, text: &str) {
+        h.get_by_label(label).click();
+        h.step();
+        h.get_by_label(label).type_text(text);
+        h.step();
+    }
+
+    /// P01 step 3: `+ New client` previews the template folders, then creates them.
+    #[test]
+    fn new_client_dialog_previews_and_creates() {
+        let mut h = harness(0, 0);
+        let root = h.state().root.clone();
+        vf_fs::cabinet::create(
+            &root,
+            &vf_fs::cabinet::CabinetFile {
+                cabinet_id: vf_core::new_id(),
+                firm_id: vf_core::new_id(),
+                schema_version: vf_core::db::SCHEMA_VERSION,
+                layout_version: 1,
+                created: vf_core::now_rfc3339(),
+                name: None,
+            },
+        )
+        .unwrap();
+        click(&mut h, "+ New client");
+        type_into(&mut h, "Client ID", "1042");
+        type_into(&mut h, "Client name", "Anderson Farms LLC");
+        h.run();
+        assert!(
+            h.query_by_label("Anderson Farms LLC (1042)/Permanent/Setup")
+                .is_some(),
+            "preview lists the template folders"
+        );
+        assert!(
+            !root.join("Anderson Farms LLC (1042)").exists(),
+            "nothing yet"
+        );
+        // The dialog holds still: the button is where it was a frame ago.
+        let at = |h: &Harness<'static, State>| {
+            h.get_by_role_and_label(Role::Button, "Create client (one transaction)")
+                .rect()
+        };
+        let before = at(&h);
+        h.step();
+        assert_eq!(at(&h), before, "dialog moved between frames");
+        click(&mut h, "Create client (one transaction)");
+
+        let b = &h.state().b;
+        assert!(b.new_client.is_none(), "dialog closed");
+        assert_eq!(b.snap.clients.len(), 1);
+        assert_eq!(b.scope, Scope::Client(0));
+        assert_eq!(
+            b.notice.as_deref(),
+            Some("Created Anderson Farms LLC (1042).")
+        );
+        assert!(
+            root.join("Anderson Farms LLC (1042)/_Vibe/client.json")
+                .is_file()
+        );
     }
 
     /// P01 done-when: tree expansion under 100 ms at 5,000 documents (50 clients x 100).

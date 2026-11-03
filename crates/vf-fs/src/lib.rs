@@ -4,6 +4,7 @@
 pub mod cabinet;
 pub mod clients;
 pub mod fileops;
+pub mod newclient;
 pub mod rebuild;
 
 #[cfg(test)]

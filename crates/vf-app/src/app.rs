@@ -218,7 +218,13 @@ impl eframe::App for VibeFilesApp {
         let mut submit = None;
         match &mut self.screen {
             Screen::Open(o) if self.tab == Tab::Browse => {
-                browse::show(ui, &mut o.browse, &o.opened.conn)
+                let o = &mut **o;
+                let mut env = browse::Env {
+                    conn: &mut o.opened.conn,
+                    root: &o.opened.root,
+                    device_id: &self.config.device_id,
+                };
+                browse::show(ui, &mut o.browse, &mut env)
             }
             screen => {
                 egui::CentralPanel::default().show(ui, |ui| match screen {

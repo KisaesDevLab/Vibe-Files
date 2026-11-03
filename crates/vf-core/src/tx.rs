@@ -31,6 +31,18 @@ pub enum FileOp {
     Copy { src: PathBuf, dst: PathBuf },
     /// Create one folder (and missing parents).
     Mkdir { path: PathBuf },
+    /// Bind `folder` (which must exist, inside `root`) to a client by writing its SentinelV1
+    /// `_Vibe/client.json`; never replaces one. Undo removes it only if its bytes are unchanged.
+    WriteSentinel {
+        root: PathBuf,
+        folder: PathBuf,
+        /// Client uuid (sentinel `client_id`).
+        client_id: String,
+        /// CSV / tax-software ID.
+        ext_id: String,
+        name: String,
+        firm_id: String,
+    },
 }
 
 /// What applying a [`FileOp`] did, with enough detail to reverse it safely.
