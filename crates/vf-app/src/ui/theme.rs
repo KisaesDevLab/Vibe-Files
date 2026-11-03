@@ -1,8 +1,6 @@
 //! Type and color tokens from UI_SPEC "Global chrome".
 
-use std::sync::Arc;
-
-use egui::{Color32, FontData, FontDefinitions, FontFamily};
+use egui::Color32;
 
 pub const ACCENT_DEFAULT: Color32 = Color32::from_rgb(0x1F, 0x56, 0xA8);
 pub const INK: Color32 = Color32::from_rgb(0x16, 0x1A, 0x20);
@@ -17,39 +15,14 @@ pub const HEALTH_OK: Color32 = Color32::from_rgb(0x2E, 0x7D, 0x4F);
 /// Health "warn" dot / text that needs attention.
 pub const WARN: Color32 = Color32::from_rgb(0xB7, 0x79, 0x1F);
 
+/// Filer Desktop's theme (fonts incl. the semibold faces its Intake screens use, text sizes,
+/// spacing, both palettes) as the base, so the mounted Intake tab and Vibe's own tabs look the
+/// same; then Vibe's tweaks, light only.
 pub fn install(ctx: &egui::Context) {
-    ctx.set_fonts(fonts());
+    filer_intake::ui::theme::install(ctx);
     ctx.set_theme(egui::Theme::Light);
     ctx.style_mut_of(egui::Theme::Light, |s| {
         s.visuals.panel_fill = APP_BG;
         s.visuals.override_text_color = Some(INK);
     });
-}
-
-fn fonts() -> FontDefinitions {
-    let mut f = FontDefinitions::default();
-    let faces: [(&str, &'static [u8]); 2] = [
-        (
-            "plex-sans",
-            include_bytes!("../../assets/fonts/IBMPlexSans-Regular.ttf"),
-        ),
-        (
-            "plex-mono",
-            include_bytes!("../../assets/fonts/IBMPlexMono-Regular.ttf"),
-        ),
-    ];
-    for (name, bytes) in faces {
-        f.font_data
-            .insert(name.into(), Arc::new(FontData::from_static(bytes)));
-    }
-    for (family, face) in [
-        (FontFamily::Proportional, "plex-sans"),
-        (FontFamily::Monospace, "plex-mono"),
-    ] {
-        f.families
-            .entry(family)
-            .or_default()
-            .insert(0, face.to_owned());
-    }
-    f
 }

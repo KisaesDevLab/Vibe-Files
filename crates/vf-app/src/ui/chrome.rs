@@ -6,7 +6,7 @@ use crate::app::Tab;
 use crate::ui::theme;
 
 pub fn header(ui: &mut egui::Ui, cabinet: Option<&str>) {
-    egui::Panel::top("header")
+    egui::Panel::top("vf-header")
         .exact_size(44.0)
         .resizable(false)
         .frame(
@@ -30,7 +30,7 @@ pub fn header(ui: &mut egui::Ui, cabinet: Option<&str>) {
 
 /// Tab bar in the fixed order Browse · Intake · Search · Viewer · Sync · Admin.
 pub fn tab_bar(ui: &mut egui::Ui, current: &mut Tab, intake_badge: usize) {
-    egui::Panel::top("tabs")
+    egui::Panel::top("vf-tabs")
         .exact_size(44.0)
         .resizable(false)
         .frame(
@@ -71,7 +71,7 @@ pub fn tab_bar(ui: &mut egui::Ui, current: &mut Tab, intake_badge: usize) {
 }
 
 pub fn footer(ui: &mut egui::Ui, segments: &[String], health: &str) {
-    egui::Panel::bottom("footer")
+    egui::Panel::bottom("vf-footer")
         .exact_size(28.0)
         .resizable(false)
         .frame(

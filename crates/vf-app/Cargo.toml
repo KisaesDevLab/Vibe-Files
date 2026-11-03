@@ -25,6 +25,9 @@ toml.workspace = true
 uuid.workspace = true
 windows.workspace = true
 filer-core = { path = "../filer-core" }
+filer-intake = { path = "../filer-intake" }
+filer-pdf = { path = "../filer-pdf" }
+serde_json.workspace = true
 
 [dev-dependencies]
 egui_kittest.workspace = true

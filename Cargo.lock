@@ -4922,6 +4922,8 @@ dependencies = [
  "egui_extras",
  "egui_kittest",
  "filer-core",
+ "filer-intake",
+ "filer-pdf",
  "rfd",
  "serde",
  "serde_json",

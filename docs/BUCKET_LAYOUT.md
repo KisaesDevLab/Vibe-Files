@@ -33,7 +33,9 @@ Everything below lives under one prefix: `vf/<cabinet_id>/` (`cabinet_id` from `
 `client_id` and `doc_id` are UUIDs (not names), and `n` is a keyed hash, so the listing carries no
 client information.
 
-**Never uploaded:** `_Vibe/keys/` (the passphrase-wrapped catalog key, P01) and `_Vibe/locks/`
+**Never uploaded:** `_Vibe/keys/` (the passphrase-wrapped catalog key, P01), Filer's working folders
+`_Vibe/tmp/`, `_Vibe/overwritten/`, `_Vibe/undo_zips/`, `_Vibe/split_originals/` (P02; their content
+reaches the bucket as documents or versions, never as Filer scratch), and `_Vibe/locks/`
 (LAN locks; the bucket has its own `locks/`). No server holds a key, wrapped or not.
 
 ## Client segment

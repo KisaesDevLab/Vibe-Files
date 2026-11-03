@@ -9,6 +9,7 @@ use crate::config::{self, Config};
 use crate::session::{self, CreateRequest, Opened};
 use crate::ui::admin::{self, Admin};
 use crate::ui::browse::{self, Browse};
+use crate::ui::intake::IntakeTab;
 use crate::ui::wizard::{self, Mode, Wizard};
 use crate::ui::{chrome, theme};
 
@@ -47,7 +48,7 @@ impl Tab {
     fn placeholder(self) -> &'static str {
         match self {
             Tab::Browse => "Browse shows the client tree once a cabinet is open.",
-            Tab::Intake => "Intake mounts the vendored Filer Desktop engine (P02).",
+            Tab::Intake => "Intake files documents into the open cabinet.",
             Tab::Search => "Full-text search arrives with OCR and indexing (P03).",
             Tab::Viewer => "The PDF viewer arrives in P04.",
             Tab::Sync => "B2 sync arrives in P11.",
@@ -74,6 +75,8 @@ pub struct OpenCabinet {
     pub browse: Browse,
     /// Built the first time the Admin tab is shown.
     pub admin: Option<Admin>,
+    /// The mounted Filer Desktop app, built the first time Intake is shown.
+    pub intake: IntakeTab,
 }
 
 pub struct VibeFilesApp {
@@ -187,6 +190,7 @@ impl VibeFilesApp {
                     opened,
                     browse,
                     admin: None,
+                    intake: IntakeTab::default(),
                 }));
             }
             Err(e) => {
@@ -206,7 +210,7 @@ impl VibeFilesApp {
 }
 
 impl eframe::App for VibeFilesApp {
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         self.poll();
         let name = self.cabinet_name();
         chrome::header(ui, name.as_deref());
@@ -226,11 +230,15 @@ impl eframe::App for VibeFilesApp {
         let ctx = ui.ctx().clone();
         let mut submit = None;
         match &mut self.screen {
+            Screen::Open(o) if self.tab == Tab::Intake => {
+                o.intake.show(ui, frame, &o.opened.root, &o.opened.cabinet);
+            }
             Screen::Open(o) if matches!(self.tab, Tab::Browse | Tab::Admin) => {
                 let OpenCabinet {
                     opened,
                     browse: tab_browse,
                     admin: tab_admin,
+                    ..
                 } = &mut **o;
                 let mut env = browse::Env {
                     conn: &mut opened.conn,
@@ -391,6 +399,50 @@ mod tests {
         // The passphrase alone opens it from an empty data folder.
         let other = tmp.path().join("pc2");
         assert!(session::open(&other, "dev-2", &root, "correct horse battery").is_ok());
+    }
+
+    /// P02 step 1: the Intake tab mounts Filer Desktop on the open cabinet: its data folder is
+    /// `<cabinet>/_Vibe/` (Q-19), and its settings carry this cabinet's root and firm id.
+    #[test]
+    fn intake_tab_mounts_filer_on_the_cabinet() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("Clients");
+        let req = CreateRequest {
+            root: &root,
+            name: "Firm",
+            passphrase: "correct horse battery",
+            confirm: "correct horse battery",
+        };
+        drop(session::create(&tmp.path().join("pc1"), "dev-1", &req, FAST).unwrap());
+        let mut h = harness(&tmp.path().join("pc1b"));
+        click(&mut h, "Open existing");
+        type_into(&mut h, "Cabinet folder", &root.display().to_string());
+        type_into(&mut h, "Recovery passphrase", "correct horse battery");
+        click(&mut h, "Open cabinet");
+        settle(&mut h);
+
+        click(&mut h, "Intake");
+        for _ in 0..10 {
+            h.step();
+        }
+        // Filer's own tabs are there (it opens on Preview once a root is set).
+        for t in ["Preview", "Setup", "Rules", "Relationships"] {
+            assert!(
+                h.query_by_label(t).is_some(),
+                "Filer tab {t} mounted in Intake"
+            );
+        }
+        let (s, savable) =
+            filer_intake::config::Settings::load_or_default(&vf_fs::clients::master_dir(&root));
+        assert!(savable);
+        assert_eq!(s.root.as_deref(), Some(root.as_path()));
+        let cab = vf_fs::cabinet::read(&root).unwrap();
+        assert_eq!(s.firm_id.map(|u| u.to_string()), Some(cab.firm_id));
+        assert!(root.join("_Vibe/config.json").is_file());
+        // Back to Browse: Vibe's own tabs still work after Filer's theme and panels.
+        click(&mut h, "Browse");
+        h.step();
+        assert_eq!(h.state().tab, Tab::Browse);
     }
 
     #[test]
