@@ -184,3 +184,87 @@ fn compress_downsamples_a_high_resolution_scan() {
         1
     );
 }
+
+/// PHASES P04 done-when (optional outside step): veraPDF accepts the conversions as PDF/A-2b,
+/// the fixture set included.
+/// Runs when `VERAPDF` names `verapdf.bat` (veraPDF needs Java: set `JAVA_HOME` too);
+/// otherwise says so and passes.
+#[test]
+fn verapdf_accepts_the_conversions_when_available() {
+    let Some(cli) = std::env::var_os("VERAPDF") else {
+        eprintln!("VERAPDF not set: veraPDF check skipped");
+        return;
+    };
+    let t = tempfile::tempdir().unwrap();
+    let mut outs = Vec::new();
+    // A text PDF with a stamp (fonts not embedded: rebuilt), a scan, a scan with an OCR layer.
+    let text = t.path().join("text.pdf");
+    filer_pdf::pdf::write_test_pdf(&text, &["Engagement letter page one", "Page two"]);
+    let stamped = t.path().join("stamped.pdf");
+    vf_pdf::annot::add(
+        &text,
+        &stamped,
+        &[vf_pdf::annot::Annotation {
+            page: 0,
+            kind: vf_pdf::annot::Kind::Stamp {
+                text: "FILED 11/03/2026".into(),
+                at: [300.0, 400.0],
+                size: 16.0,
+            },
+            color: vf_pdf::annot::ACCENT,
+            author: "KWK".into(),
+        }],
+        "2026-11-03T10:00:00Z",
+    )
+    .unwrap();
+    let scan = t.path().join("scan.pdf");
+    vf_fixtures::write_scanned_pdf(pdfium(), &scan, &[vec!["Scanned page".into()]]).unwrap();
+    let layered = t.path().join("layered.pdf");
+    let ocr = vf_pdf::words::OcrPage {
+        width: 1700,
+        height: 2200,
+        words: vec![vf_pdf::words::Word {
+            bbox: [200, 300, 400, 40],
+            text: "Scanned".into(),
+            conf: 95.0,
+            line: 0,
+        }],
+    };
+    vf_pdf::layer::add_text_layer(
+        &scan,
+        &layered,
+        &[vf_pdf::layer::PageWords { page: 0, ocr: &ocr }],
+    )
+    .unwrap();
+    let mut sources: Vec<std::path::PathBuf> = vec![stamped, scan, layered];
+    // And the whole fixture cabinet (text documents and image-only scans).
+    let cab = t.path().join("cab");
+    let mut fx = vf_fixtures::generate(&cab, 9).unwrap();
+    vf_fixtures::add_scans(&cab, &mut fx, pdfium(), 9).unwrap();
+    sources.extend(fx.docs.iter().map(|d| cab.join(&d.rel_path)));
+    sources.extend(fx.scans.iter().map(|s| cab.join(&s.rel_path)));
+    for (i, src) in sources.iter().enumerate() {
+        let out = t.path().join(format!("pdfa-{i}.pdf"));
+        pdfa::convert(pdfium(), src, &out, "Test", "2026-11-03T10:00:00Z").unwrap();
+        outs.push(out);
+    }
+    assert!(outs.len() > 60);
+    let out = std::process::Command::new(cli)
+        .args(["--flavour", "2b", "--format", "text"])
+        .args(&outs)
+        .output()
+        .expect("run veraPDF");
+    let report = String::from_utf8_lossy(&out.stdout);
+    eprintln!("{report}");
+    for o in &outs {
+        let name = o.file_name().unwrap().to_string_lossy();
+        assert!(
+            report.lines().any(|l| l.starts_with("PASS")
+                && l.split_whitespace()
+                    .nth(1)
+                    .is_some_and(|p| p.ends_with(name.as_ref()))),
+            "veraPDF did not pass {name}:\n{report}\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+}
