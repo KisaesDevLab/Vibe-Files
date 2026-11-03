@@ -20,6 +20,8 @@ pub struct Config {
     pub folders: Vec<(PathBuf, Origin)>,
     pub device_id: String,
     pub pdfium_dir: Option<PathBuf>,
+    /// Tesseract as configured (`config.toml [ocr]`), for recognizing scanned forms.
+    pub tesseract: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -114,11 +116,13 @@ fn run(config: Arc<Mutex<Config>>, waiting: Arc<AtomicUsize>, tx: Sender<Event>,
                 .pdfium_dir
                 .as_deref()
                 .and_then(|d| filer_pdf::pdf::pdfium(d).ok());
+            let tesseract = vf_ocr::Tesseract::locate(cfg.tesseract.as_deref()).ok();
             let ctx = Context {
                 root: &cfg.root,
                 inbox,
                 device_id: &cfg.device_id,
                 pdfium,
+                ocr: tesseract.as_ref().map(|t| t as &dyn vf_ocr::OcrEngine),
             };
             for (p, origin) in ready {
                 let ev = match pipeline::process(&ctx, &p, origin) {

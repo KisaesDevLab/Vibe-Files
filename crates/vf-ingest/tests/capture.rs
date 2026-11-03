@@ -51,6 +51,7 @@ fn ultratax_print_lands_as_a_federal_return_copy() {
         inbox: &inbox,
         device_id: "dev",
         pdfium: None,
+        ocr: None,
     };
     let done = pipeline::process(&ctx, &printed, Origin::PrintCapture).unwrap();
     let name = "Anderson Farms LLC_ANDE1042_2025 UltraTax CS Return copy — federal 1040 Government Copy Tax Return.pdf";

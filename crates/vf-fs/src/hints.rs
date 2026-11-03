@@ -36,8 +36,34 @@ pub struct Hint {
     /// `client` / `firm` / `government` / `third_party`.
     #[serde(default)]
     pub source: Option<String>,
-    /// `barcode`, `image`, `print_capture:<profile>`.
+    /// `barcode`, `image`, `print_capture:<profile>`, `recognized`.
     pub origin: String,
+    /// What a form recognizer read (P08), when one did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extract: Option<Recognized>,
+}
+
+/// A recognized form, as the pipeline saw it (TINs last 4 only).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Recognized {
+    /// `w2`, `1099-int`, `k1-1065`, …
+    pub form: String,
+    #[serde(default)]
+    pub payer_name: Option<String>,
+    #[serde(default)]
+    pub payer_tin4: Option<String>,
+    #[serde(default)]
+    pub recipient_name: Option<String>,
+    #[serde(default)]
+    pub recipient_tin4: Option<String>,
+    /// Client uuid proposed, and how sure (percent).
+    #[serde(default)]
+    pub proposed_client: Option<String>,
+    #[serde(default)]
+    pub confidence: u8,
+    /// Client uuids proposed for copies (a K-1's partner).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub copies: Vec<String>,
 }
 
 impl Hint {
@@ -53,6 +79,7 @@ impl Hint {
             permanent: false,
             source: None,
             origin: origin.into(),
+            extract: None,
         }
     }
 
@@ -62,6 +89,7 @@ impl Hint {
             || self.tax_year.is_some()
             || self.permanent
             || self.source.is_some()
+            || self.extract.is_some()
     }
 }
 

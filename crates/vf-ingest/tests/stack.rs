@@ -142,6 +142,7 @@ fn forty_page_stack_with_four_cover_sheets_splits_into_four_documents() {
         inbox: &inbox,
         device_id: "dev",
         pdfium: Some(pdfium),
+        ocr: None,
     };
     let done = pipeline::process(&ctx, &scan, Origin::Scans).unwrap();
     let names: Vec<String> = done
@@ -212,6 +213,7 @@ fn a_pdf_without_sheets_goes_through_unchanged() {
         inbox: &inbox,
         device_id: "dev",
         pdfium: Some(pdfium),
+        ocr: None,
     };
     let done = pipeline::process(&ctx, &scan, Origin::Scans).unwrap();
     assert_eq!(done.delivered.len(), 1);

@@ -11,6 +11,9 @@ filer-intake = { path = "../filer-intake" }
 filer-pdf = { path = "../filer-pdf" }
 vf-core = { path = "../vf-core" }
 vf-fs = { path = "../vf-fs" }
+vf-pdf = { path = "../vf-pdf" }
+vf-ocr = { path = "../vf-ocr" }
+vf-extract = { path = "../vf-extract" }
 pdf-writer.workspace = true
 pdfium-render.workspace = true
 rxing.workspace = true
@@ -23,6 +26,7 @@ uuid.workspace = true
 windows.workspace = true
 
 [dev-dependencies]
+vf-extract = { path = "../vf-extract", features = ["test-support"] }
 filer-pdf = { path = "../filer-pdf", features = ["test-support"] }
 tempfile.workspace = true
 lopdf.workspace = true

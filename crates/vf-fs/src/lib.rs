@@ -1,6 +1,7 @@
 //! Tree walker, rebuild, LAN lock protocol, trash, secure delete. Every document move calls the
 //! vendored `filer-intake::commit` primitives; this crate never reimplements a move.
 
+pub mod aliases;
 pub mod cabinet;
 pub mod clients;
 pub mod content;

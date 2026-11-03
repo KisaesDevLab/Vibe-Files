@@ -1,0 +1,244 @@
+//! Auto-file (PHASES P08 steps 1–3) in front of Filer: a file that reaches Intake with no
+//! client in its name (no barcode sheet, no print-capture profile) has its first page read.
+//! A recognized form whose client is sure (`vf_extract::matching::THRESHOLD`) goes to Filer
+//! as `<Client>_<ID>_<year> <doc type> <payer>.pdf` with a hint (doc type, year, the
+//! proposal), so Filer's preview shows it matched; the person still confirms there. Below the
+//! threshold it keeps its name and only the doc type and year are hinted: never auto-filed on
+//! a guess.
+//!
+//! Only page 1 is read: its text layer, or OCR when it has none (a scan).
+
+use std::path::Path;
+
+use pdfium_render::prelude::*;
+use vf_extract::matching::{self, ClientRef, Proposal};
+use vf_fs::hints::{Hint, Recognized};
+
+use crate::pipeline::{Lookup, clean};
+
+/// Characters a page needs before its own text is used rather than OCR.
+const TEXT_MIN: usize = 40;
+/// Resolution page 1 is read at when it needs OCR.
+const DPI: f32 = 300.0;
+
+/// Page 1's text: its own text layer, else OCR (when an engine is given).
+pub fn page_one_text(
+    pdfium: &Pdfium,
+    pdf: &Path,
+    ocr: Option<&dyn vf_ocr::OcrEngine>,
+) -> Option<String> {
+    let doc = pdfium.load_pdf_from_file(pdf, None).ok()?;
+    let page = doc.pages().get(0).ok()?;
+    let own = vf_pdf::text::page_text(&page);
+    if own.chars().filter(|c| !c.is_whitespace()).count() >= TEXT_MIN {
+        return Some(own);
+    }
+    let engine = ocr?;
+    let (w, h) = (page.width().value, page.height().value);
+    let scale = (DPI / 72.0).min(4200.0 / w.max(h).max(1.0));
+    let config = PdfRenderConfig::new().set_target_width((w * scale) as i32);
+    let img = page
+        .render_with_config(&config)
+        .and_then(|b| b.as_image())
+        .ok()?
+        .to_luma8();
+    let read = engine.recognize(&img, (scale * 72.0).round() as u32).ok()?;
+    // Words back into lines, in reading order.
+    let mut lines: Vec<(u32, Vec<String>)> = Vec::new();
+    for w in read.words {
+        match lines.last_mut() {
+            Some((n, ws)) if *n == w.line => ws.push(w.text),
+            _ => lines.push((w.line, vec![w.text])),
+        }
+    }
+    Some(
+        lines
+            .into_iter()
+            .map(|(_, ws)| ws.join(" "))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    )
+}
+
+/// The client list as the matcher sees it: from the cabinet's client master and its last-4s.
+pub fn client_refs(root: &Path) -> Vec<ClientRef> {
+    let Ok(m) = vf_fs::clients::load(root) else {
+        return vec![];
+    };
+    m.list
+        .map(|l| {
+            l.clients
+                .into_iter()
+                .map(|c| {
+                    let id = c.uuid.to_string();
+                    ClientRef {
+                        tin4: m.meta.tin_last4.get(&id).cloned(),
+                        id,
+                        ext_id: c.id,
+                        name: c.name,
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// What recognition decided for one file.
+pub struct Outcome {
+    /// The name to deliver it under (the original's when the client is not sure).
+    pub file: String,
+    pub hint: Hint,
+    /// For the Intake strip.
+    pub note: String,
+    pub proposal: Proposal,
+}
+
+/// Reads `text` (page 1) and decides the file's name and hint. `None`: not a form.
+pub fn decide(root: &Path, lookup: &Lookup, text: &str, original: &str) -> Option<Outcome> {
+    let e = vf_extract::recognize(text)?;
+    let clients = client_refs(root);
+    let aliases: Vec<matching::Alias> = vf_fs::aliases::load(root)
+        .into_iter()
+        .map(|a| matching::Alias {
+            payer: a.payer,
+            client_id: a.client_id,
+        })
+        .collect();
+    let p = matching::propose(&e, &clients, &aliases);
+    let mut hint = Hint::new("", original, "recognized", "");
+    hint.tax_year = e.tax_year;
+    hint.doc_type = lookup
+        .doc_types
+        .iter()
+        .find(|(_, n)| n.as_str() == p.doc_type)
+        .map(|(id, _)| id.clone());
+    hint.source = Some("third_party".into());
+    hint.extract = Some(Recognized {
+        form: e.form.key().into(),
+        payer_name: e.payer_name.clone(),
+        payer_tin4: e.payer_tin4.as_ref().map(|l| l.as_str().to_string()),
+        recipient_name: e.recipient_name.clone(),
+        recipient_tin4: e.recipient_tin4.as_ref().map(|l| l.as_str().to_string()),
+        proposed_client: p.primary.as_ref().map(|m| m.client_id.clone()),
+        confidence: p
+            .primary
+            .as_ref()
+            .map_or(0, |m| (m.confidence * 100.0).round() as u8),
+        copies: p.copies.iter().map(|m| m.client_id.clone()).collect(),
+    });
+    let what = format!(
+        "{}{}",
+        p.doc_type,
+        e.tax_year.map(|y| format!(" {y}")).unwrap_or_default()
+    );
+    let (file, note) = match &p.primary {
+        Some(m) if p.confident() => {
+            let rest = [
+                e.tax_year.map(|y| y.to_string()),
+                Some(p.doc_type.to_string()),
+                e.payer_name.clone(),
+            ]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join(" ");
+            let mut note = format!(
+                "recognized {what} for {} ({}, {:.0}%)",
+                m.name,
+                m.why,
+                m.confidence * 100.0
+            );
+            for c in &p.copies {
+                note.push_str(&format!(" · also for {} ({})", c.name, c.why));
+            }
+            (
+                format!("{}_{}_{}.pdf", clean(&m.name), m.ext_id, clean(&rest)),
+                note,
+            )
+        }
+        Some(m) => (
+            original.to_string(),
+            format!(
+                "recognized {what}; client not sure ({} for {}, {:.0}%): choose it in the preview",
+                m.why,
+                m.name,
+                m.confidence * 100.0
+            ),
+        ),
+        None => (
+            original.to_string(),
+            format!("recognized {what}; no client matched: choose it in the preview"),
+        ),
+    };
+    Some(Outcome {
+        file,
+        hint,
+        note,
+        proposal: p,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cabinet() -> tempfile::TempDir {
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path();
+        std::fs::create_dir_all(root.join("_Vibe")).unwrap();
+        vf_fs::doctypes::seed_if_missing(root).unwrap();
+        let csv = root.join("clients.csv");
+        let mut text = String::from("ID,Name,TIN\n");
+        for (ext, name, tin) in vf_extract::synthetic::CLIENTS {
+            text.push_str(&format!("{ext},\"{name}\",{tin}\n"));
+        }
+        std::fs::write(&csv, text).unwrap();
+        let map = filer_core::config::ColumnMap {
+            id: Some("ID".into()),
+            name: Some("Name".into()),
+            extras: vec![],
+        };
+        vf_fs::clients::import_csv_tin(root, &csv, &map, &Default::default(), Some("TIN")).unwrap();
+        t
+    }
+
+    #[test]
+    fn a_sure_match_is_named_for_its_client_and_a_k1_names_both() {
+        let t = cabinet();
+        let lookup = Lookup::load(t.path()).unwrap();
+        let cases = vf_extract::synthetic::cases();
+        let w2 = cases
+            .iter()
+            .find(|c| c.name.starts_with("w2 2025 REYE5521"))
+            .unwrap();
+        let o = decide(t.path(), &lookup, &w2.text, "scan0001.pdf").unwrap();
+        assert!(
+            o.file.starts_with("Reyes, Dana & Lee_REYE5521_2025 W-2"),
+            "{}",
+            o.file
+        );
+        assert!(o.note.contains("TIN and name"), "{}", o.note);
+        assert!(o.hint.doc_type.is_some() && o.hint.tax_year == Some(2025));
+        let k1 = cases
+            .iter()
+            .find(|c| c.name.starts_with("k1-1120s"))
+            .unwrap();
+        let o = decide(t.path(), &lookup, &k1.text, "scan0002.pdf").unwrap();
+        assert!(o.file.contains("_BELL2002_"), "{}", o.file);
+        assert!(o.note.contains("also for Wagner, Pat"), "{}", o.note);
+        assert_eq!(o.hint.extract.as_ref().unwrap().copies.len(), 1);
+        // Not a form: nothing to decide.
+        assert!(decide(t.path(), &lookup, "Engagement letter", "x.pdf").is_none());
+    }
+
+    #[test]
+    fn an_unsure_match_keeps_its_name() {
+        let t = cabinet();
+        let lookup = Lookup::load(t.path()).unwrap();
+        let text = "Form 1099-INT Interest Income\n2025\nRECIPIENT'S name\nPat Wagner";
+        let o = decide(t.path(), &lookup, text, "scan0003.pdf").unwrap();
+        assert_eq!(o.file, "scan0003.pdf");
+        assert!(o.note.contains("client not sure"), "{}", o.note);
+        assert_eq!(o.hint.tax_year, Some(2025), "the year is still hinted");
+    }
+}

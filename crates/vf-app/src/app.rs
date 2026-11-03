@@ -535,6 +535,7 @@ impl eframe::App for VibeFilesApp {
         }
         if let Screen::Open(o) = &mut self.screen {
             let o = &mut **o;
+            o.intake.ingest.tesseract = self.config.ocr.tesseract.clone();
             o.intake.ingest.tick(
                 &ctx,
                 &o.opened.root,

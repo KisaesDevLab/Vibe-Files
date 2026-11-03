@@ -18,5 +18,8 @@ uuid.workspace = true
 anyhow.workspace = true
 
 [dev-dependencies]
+vf-extract = { path = "../vf-extract", features = ["test-support"] }
+vf-ocr = { path = "../vf-ocr" }
+filer-pdf = { path = "../filer-pdf", features = ["test-support"] }
 lopdf.workspace = true
 tempfile.workspace = true

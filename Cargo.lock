@@ -5060,8 +5060,10 @@ dependencies = [
  "tempfile",
  "uuid",
  "vf-core",
+ "vf-extract",
  "vf-fs",
  "vf-ingest",
+ "vf-ocr",
 ]
 
 [[package]]
@@ -5112,7 +5114,10 @@ dependencies = [
  "toml",
  "uuid",
  "vf-core",
+ "vf-extract",
  "vf-fs",
+ "vf-ocr",
+ "vf-pdf",
  "windows",
 ]
 

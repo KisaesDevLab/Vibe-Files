@@ -5,6 +5,7 @@
 pub mod images;
 pub mod parsers;
 pub mod pipeline;
+pub mod recognize;
 pub mod scanner;
 pub mod sheet;
 pub mod stack;

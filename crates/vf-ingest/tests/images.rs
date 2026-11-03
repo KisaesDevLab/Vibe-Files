@@ -45,6 +45,7 @@ fn process(f: &Fx, staged: &Path) -> pipeline::Processed {
         inbox: &f.inbox,
         device_id: "dev",
         pdfium: Some(filer_pdf::pdf::pdfium(&dir).unwrap()),
+        ocr: None,
     };
     pipeline::process(&ctx, staged, Origin::Scans).unwrap()
 }
@@ -133,6 +134,7 @@ fn unreadable_image_is_an_error_and_nothing_is_delivered() {
         inbox: &f.inbox,
         device_id: "dev",
         pdfium: Some(filer_pdf::pdf::pdfium(&dir).unwrap()),
+        ocr: None,
     };
     let e = pipeline::process(&ctx, &bad, Origin::Scans).unwrap_err();
     assert!(e.contains("broken.heic"), "{e}");

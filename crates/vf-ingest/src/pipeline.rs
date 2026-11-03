@@ -43,6 +43,34 @@ pub struct Context<'a> {
     pub device_id: &'a str,
     /// `None`: barcodes are not looked for (no pdfium.dll).
     pub pdfium: Option<&'a Pdfium>,
+    /// Reads a scanned page 1 for form recognition (P08); `None`: only pages with their own
+    /// text are recognized.
+    pub ocr: Option<&'a dyn vf_ocr::OcrEngine>,
+}
+
+/// Form recognition (P08) for a file with no client in its name.
+fn recognized(
+    ctx: &Context<'_>,
+    lookup: &Lookup,
+    pdf: &Path,
+    original: &str,
+) -> Option<crate::recognize::Outcome> {
+    let text = crate::recognize::page_one_text(ctx.pdfium?, pdf, ctx.ocr)?;
+    crate::recognize::decide(ctx.root, lookup, &text, original)
+}
+
+/// Delivers `tmp` under `file` with `note`, unless recognition knows better.
+fn deliver_or_recognized(
+    ctx: &Context<'_>,
+    lookup: &Lookup,
+    tmp: &Path,
+    file: &str,
+    note: String,
+) -> Result<Delivered, String> {
+    match recognized(ctx, lookup, tmp, file) {
+        Some(o) => deliver(ctx, tmp, &o.file, Some(o.hint), format!("{note} · {}", o.note)),
+        None => deliver(ctx, tmp, file, None, note),
+    }
 }
 
 /// One file handed to Filer.
@@ -108,7 +136,14 @@ pub fn process(ctx: &Context<'_>, staged: &Path, origin: Origin) -> Result<Proce
         let tmp = tmp_in(ctx.inbox);
         copy_to(staged, &tmp)?;
         let (file, hint, note) = capture_name(ctx.root, &lookup, &name);
-        let d = deliver(ctx, &tmp, &file, Some(hint), note).inspect_err(|_| {
+        let profiled = hint.origin.starts_with("print_capture:");
+        let r = if profiled {
+            deliver(ctx, &tmp, &file, Some(hint), note)
+        } else {
+            // No parser profile read the name: perhaps the form itself says who it is for.
+            deliver_or_recognized(ctx, &lookup, &tmp, &file, note)
+        };
+        let d = r.inspect_err(|_| {
             let _ = std::fs::remove_file(&tmp);
         })?;
         let kept = keep_original(staged)?;
@@ -173,7 +208,7 @@ fn split_and_deliver(
             Some((_, note)) => (format!("{stem}.pdf"), note.clone()),
             None => (name.to_string(), "no barcode sheet".into()),
         };
-        out.push(deliver(ctx, &tmp, &file, None, note)?);
+        out.push(deliver_or_recognized(ctx, lookup, &tmp, &file, note)?);
     } else {
         let tmps: Vec<PathBuf> = segments.iter().map(|_| tmp_in(ctx.inbox)).collect();
         let ranges: Vec<_> = segments.iter().map(|s| s.pages.clone()).collect();
@@ -191,18 +226,18 @@ fn split_and_deliver(
                         format!("{pages} · barcode cover sheet"),
                     )
                 }
-                Some(None) => deliver(
+                Some(None) => deliver_or_recognized(
                     ctx,
+                    lookup,
                     tmp,
                     &format!("{stem} part {}.pdf", i + 1),
-                    None,
                     format!("{pages} · separator sheet"),
                 ),
-                None => deliver(
+                None => deliver_or_recognized(
                     ctx,
+                    lookup,
                     tmp,
                     &format!("{stem} part {}.pdf", i + 1),
-                    None,
                     format!("{pages} · before the first sheet"),
                 ),
             };

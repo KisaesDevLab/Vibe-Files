@@ -23,6 +23,8 @@ const LOG_MAX: usize = 6;
 #[derive(Default)]
 pub struct IngestState {
     worker: Option<Worker>,
+    /// This PC's Tesseract setting (`config.toml [ocr]`), for reading scanned forms (P08).
+    pub tesseract: Option<PathBuf>,
     checked: Option<Instant>,
     /// Filer's first inbox, where processed files go.
     pub inbox: Option<PathBuf>,
@@ -202,6 +204,7 @@ impl IngestState {
             folders,
             device_id: device_id.into(),
             pdfium_dir: crate::ui::intake::pdfium_dir(),
+            tesseract: self.tesseract.clone(),
         };
         match &self.worker {
             Some(w) => w.set_config(cfg),
