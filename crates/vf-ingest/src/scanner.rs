@@ -1,10 +1,12 @@
-//! Scanner (P02 step 2). WIA, through Windows' own scanner API (`Windows.Devices.Scanners`,
-//! which drives WIA 2.0 drivers): no TWAIN data-source manager to ship, works from a 64-bit
-//! exe, and the feeder, duplex, resolution and color settings are typed. QUESTIONS Q-02.
+//! Scanner (P02 step 2, PA-19). Two ways in, listed together:
+//! - **TWAIN** ([`crate::twain`]): the office's Fujitsu fi-7160 through PaperStream IP, or a
+//!   remote-scanning utility's virtual source in a server session (QUESTIONS Q-02).
+//! - **WIA**, through Windows' own scanner API (`Windows.Devices.Scanners`, which drives WIA
+//!   2.0 drivers), for scanners whose driver offers it.
 //!
-//! A scan writes raw page images into a hidden work folder inside the Scans folder, then
-//! [`assemble`] turns them into one PDF there (blank pages dropped by ink coverage, deskewed,
-//! at most 300 dpi). The Scans folder worker takes it from there: barcode split, Filer's inbox.
+//! A scan's pages become one PDF in the Scans folder through [`assemble_frames`] (blank pages
+//! dropped by ink coverage, deskewed, at most 300 dpi). The Scans folder worker takes it from
+//! there: barcode split, Filer's inbox.
 
 use std::path::{Path, PathBuf};
 
@@ -119,6 +121,8 @@ pub struct Assembled {
     /// Pages dropped as blank.
     pub blank: usize,
     pub normalized: Normalized,
+    /// Why the scanner stopped early (paper jam …); the pages before it are in the PDF.
+    pub stopped: Option<String>,
 }
 
 impl Assembled {
@@ -126,6 +130,11 @@ impl Assembled {
         let mut s = self.normalized.note();
         if self.blank > 0 {
             s.push_str(&format!(" · {} blank dropped", self.blank));
+        }
+        if let Some(why) = &self.stopped {
+            s.push_str(&format!(
+                " · the scanner stopped: {why} (the pages before it are kept; scan the rest)"
+            ));
         }
         s
     }
@@ -151,6 +160,15 @@ pub fn assemble(pages: &[PathBuf], profile: &Profile, out: &Path) -> Result<Asse
     for p in pages {
         frames.extend(images::decode(p)?);
     }
+    assemble_frames(frames, profile, out)
+}
+
+/// Turns the pages of one scan, in order, into one PDF at `out`.
+pub fn assemble_frames(
+    mut frames: Vec<Frame>,
+    profile: &Profile,
+    out: &Path,
+) -> Result<Assembled, String> {
     let scanned = frames.len();
     if profile.drop_blank {
         frames.retain(|f| page_ink(&f.rgb) >= profile.blank_ink);
@@ -164,25 +182,127 @@ pub fn assemble(pages: &[PathBuf], profile: &Profile, out: &Path) -> Result<Asse
         scanned,
         blank,
         normalized,
+        stopped: None,
     })
+}
+
+// ---------------------------------------------------------------------------------------------
+// Devices: TWAIN sources and WIA scanners
+
+/// How a scanner is driven.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    Twain,
+    Wia,
+}
+
+/// A scanner this workstation can use.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Device {
+    /// `twain:<product name>` or the WIA device id. What `config.toml` remembers.
+    pub id: String,
+    /// Shown in the Scanner row, with the kind marked.
+    pub name: String,
+    pub kind: Kind,
+}
+
+const TWAIN_PREFIX: &str = "twain:";
+
+/// What [`devices`] found.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Devices {
+    /// TWAIN sources first (the office's scanners), then WIA scanners.
+    pub list: Vec<Device>,
+    /// Why a kind is missing or a scanner cannot be used (no TWAIN manager, 32-bit-only
+    /// sources, WIA failed). Shown under the Scanner row.
+    pub notes: Vec<String>,
+}
+
+/// The scanners on this workstation: TWAIN sources (64-bit) and WIA scanners.
+pub fn devices() -> Devices {
+    let mut d = Devices::default();
+    match crate::twain::sources() {
+        Ok(sources) => d.list.extend(sources.into_iter().map(|s| Device {
+            id: format!("{TWAIN_PREFIX}{}", s.name),
+            name: format!("{} (TWAIN)", s.name),
+            kind: Kind::Twain,
+        })),
+        Err(e) => d.notes.push(e),
+    }
+    let old = crate::twain::thirty_two_bit_only();
+    if !old.is_empty() {
+        d.notes.push(format!(
+            "Installed for 32-bit programs only, so Vibe Files (64-bit) cannot use: {}. \
+             Install the scanner's 64-bit TWAIN driver.",
+            old.join(", ")
+        ));
+    }
+    match wia_devices() {
+        Ok(w) => d.list.extend(w),
+        Err(e) => d.notes.push(e),
+    }
+    d
+}
+
+/// The device `remembered` names, found again by its name after the list changed (a remote
+/// session reconnects and its virtual source comes back), else the first one.
+pub fn pick<'a>(list: &'a [Device], remembered: Option<&str>) -> Option<&'a Device> {
+    remembered
+        .and_then(|id| list.iter().find(|d| d.id == id))
+        .or_else(|| list.first())
+}
+
+/// Profile → TWAIN settings. `driver_ui`: the driver's own window decides instead.
+pub fn twain_settings(profile: &Profile, driver_ui: bool) -> crate::twain::Settings {
+    use crate::twain::Pixel;
+    crate::twain::Settings {
+        feeder: match profile.source {
+            Source::Feeder => Some(true),
+            Source::Flatbed => Some(false),
+            Source::Auto => None,
+        },
+        duplex: profile.duplex,
+        dpi: profile.dpi,
+        pixel: match profile.color {
+            Color::Color => Pixel::Rgb,
+            Color::Gray => Pixel::Gray,
+            Color::Mono => Pixel::Bw,
+        },
+        discard_blank: profile.drop_blank,
+        show_ui: driver_ui,
+    }
+}
+
+/// The pages of one TWAIN scan as one PDF at `out`.
+pub fn assemble_twain(
+    scanned: crate::twain::Scanned,
+    profile: &Profile,
+    out: &Path,
+) -> Result<Assembled, String> {
+    if scanned.cancelled {
+        return Err("scan cancelled".into());
+    }
+    if scanned.pages.is_empty() {
+        return Err(match scanned.stopped {
+            Some(why) => format!("the scanner stopped before the first page: {why}"),
+            None => "the scanner returned no pages".into(),
+        });
+    }
+    let frames = scanned.pages.iter().map(|p| p.to_frame()).collect();
+    let mut a = assemble_frames(frames, profile, out)?;
+    a.stopped = scanned.stopped;
+    Ok(a)
 }
 
 // ---------------------------------------------------------------------------------------------
 // WIA
 
-/// A scanner Windows knows about.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Device {
-    pub id: String,
-    pub name: String,
-}
-
 fn err(what: &str) -> impl Fn(windows::core::Error) -> String + '_ {
     move |e| format!("{what}: {}", e.message())
 }
 
-/// The scanners on this workstation (WIA drivers).
-pub fn devices() -> Result<Vec<Device>, String> {
+/// The WIA scanners on this workstation.
+pub fn wia_devices() -> Result<Vec<Device>, String> {
     use windows::Devices::Enumeration::DeviceInformation;
     use windows::Devices::Scanners::ImageScanner;
     let selector = ImageScanner::GetDeviceSelector().map_err(err("scanner query"))?;
@@ -194,7 +314,8 @@ pub fn devices() -> Result<Vec<Device>, String> {
         let d = all.GetAt(i).map_err(err("cannot list scanners"))?;
         out.push(Device {
             id: d.Id().map_err(err("scanner id"))?.to_string(),
-            name: d.Name().map_err(err("scanner name"))?.to_string(),
+            name: format!("{} (WIA)", d.Name().map_err(err("scanner name"))?),
+            kind: Kind::Wia,
         });
     }
     Ok(out)
@@ -304,26 +425,41 @@ pub fn scan_pages(device_id: &str, profile: &Profile, dir: &Path) -> Result<Vec<
 }
 
 /// Scans with `profile` and leaves one PDF in `scans_dir` for the Scans folder worker.
-/// Returns its path and what was done.
+/// Returns its path and what was done. `driver_ui`: for a TWAIN source, show the driver's
+/// own window and let its settings and profiles drive the scan.
 pub fn scan_to(
     device_id: &str,
     profile: &Profile,
+    driver_ui: bool,
     scans_dir: &Path,
 ) -> Result<(PathBuf, Assembled), String> {
+    if let Some(source) = device_id.strip_prefix(TWAIN_PREFIX) {
+        let scanned = crate::twain::scan(source, &twain_settings(profile, driver_ui))?;
+        return deliver(scans_dir, |tmp| assemble_twain(scanned, profile, tmp));
+    }
     // Hidden from the worker (it skips dot names and folders).
     let work = scans_dir.join(format!(".scan-{}", uuid::Uuid::now_v7().simple()));
-    let r = scan_pages(device_id, profile, &work).and_then(|pages| {
-        let out = crate::pipeline::free_name(scans_dir, &format!("Scan {}.pdf", stamp()));
-        let tmp = scans_dir.join(format!(".scan-{}.pdf.tmp", uuid::Uuid::now_v7().simple()));
-        let a = assemble(&pages, profile, &tmp)?;
-        std::fs::rename(&tmp, &out).map_err(|e| {
-            let _ = std::fs::remove_file(&tmp);
-            format!("cannot write {}: {e}", out.display())
-        })?;
-        Ok((out, a))
-    });
+    let r = scan_pages(device_id, profile, &work)
+        .and_then(|pages| deliver(scans_dir, |tmp| assemble(&pages, profile, tmp)));
     let _ = std::fs::remove_dir_all(&work);
     r
+}
+
+/// Writes the scan's PDF under a hidden name, then gives it its `Scan <date>.pdf` name.
+pub fn deliver(
+    scans_dir: &Path,
+    make: impl FnOnce(&Path) -> Result<Assembled, String>,
+) -> Result<(PathBuf, Assembled), String> {
+    let out = crate::pipeline::free_name(scans_dir, &format!("Scan {}.pdf", stamp()));
+    let tmp = scans_dir.join(format!(".scan-{}.pdf.tmp", uuid::Uuid::now_v7().simple()));
+    let a = make(&tmp).inspect_err(|_| {
+        let _ = std::fs::remove_file(&tmp);
+    })?;
+    std::fs::rename(&tmp, &out).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        format!("cannot write {}: {e}", out.display())
+    })?;
+    Ok((out, a))
 }
 
 /// Date and time (UTC) for a file name, `2026-11-03 141502`.
@@ -405,7 +541,90 @@ mod tests {
     /// Lists this workstation's scanners without failing when there are none (CI, laptops).
     #[test]
     fn device_list_works_with_or_without_a_scanner() {
-        let d = devices().unwrap();
-        assert!(d.iter().all(|d| !d.id.is_empty()));
+        let d = devices();
+        assert!(d.list.iter().all(|d| !d.id.is_empty()), "{d:?}");
+        // The shipped TWAIN manager loads in debug builds: no note about it missing.
+        assert!(
+            !d.notes.iter().any(|n| n.contains("TWAINDSM")),
+            "{:?}",
+            d.notes
+        );
+    }
+
+    #[test]
+    fn a_remembered_scanner_is_found_by_id_else_the_first() {
+        let dev = |id: &str, kind| Device {
+            id: id.into(),
+            name: id.into(),
+            kind,
+        };
+        let list = [dev("twain:fi-7160", Kind::Twain), dev("wia-1", Kind::Wia)];
+        assert_eq!(pick(&list, Some("wia-1")).unwrap().id, "wia-1");
+        assert_eq!(pick(&list, Some("twain:gone")).unwrap().id, "twain:fi-7160");
+        assert_eq!(pick(&list, None).unwrap().id, "twain:fi-7160");
+        assert!(pick(&[], None).is_none());
+    }
+
+    /// PA-19 step 3: a TWAIN batch from the fake fi-7160 (duplex, blank backs) becomes one PDF
+    /// through the same assembly as every other scan, blank backs dropped.
+    #[test]
+    fn twain_batch_becomes_one_pdf_with_blank_backs_dropped() {
+        use crate::twain::fake::{Fake, Scanner};
+        use crate::twain::{Entry, on_twain_thread};
+        let profile = default_profiles()[0].clone(); // stack, both sides, gray 300
+        assert!(profile.duplex && profile.drop_blank);
+        let s = twain_settings(&profile, false);
+        let fake = Fake::new(vec![Scanner {
+            pages: 6,
+            blank: vec![1, 3, 5],
+            ..Scanner::fi7160()
+        }]);
+        let scanned = on_twain_thread(
+            move || Ok(Box::new(fake) as Box<dyn Entry>),
+            move |m| m.scan("fi-7160", &s),
+        )
+        .unwrap();
+        assert_eq!(scanned.pages.len(), 6);
+        let t = tempfile::tempdir().unwrap();
+        let (out, a) = deliver(t.path(), |tmp| assemble_twain(scanned, &profile, tmp)).unwrap();
+        assert!(
+            out.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("Scan ")
+        );
+        assert_eq!((a.scanned, a.blank, a.normalized.pages), (6, 3, 3));
+        assert_eq!(lopdf::Document::load(&out).unwrap().get_pages().len(), 3);
+        // Nothing hidden left behind.
+        assert_eq!(std::fs::read_dir(t.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn twain_cancel_and_jam_are_reported() {
+        use crate::twain::Scanned;
+        let profile = &default_profiles()[0];
+        let t = tempfile::tempdir().unwrap();
+        let out = t.path().join("x.pdf");
+        let cancelled = Scanned {
+            cancelled: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            assemble_twain(cancelled, profile, &out).unwrap_err(),
+            "scan cancelled"
+        );
+        let jammed = Scanned {
+            stopped: Some("paper jam".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            assemble_twain(jammed, profile, &out).unwrap_err(),
+            "the scanner stopped before the first page: paper jam"
+        );
+        let a = Assembled {
+            stopped: Some("paper jam".into()),
+            ..Default::default()
+        };
+        assert!(a.note().contains("the scanner stopped: paper jam"));
     }
 }

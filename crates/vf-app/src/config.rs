@@ -80,9 +80,18 @@ pub struct Ingest {
     /// Where a PDF printer saves (step 5).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub print_capture: Option<PathBuf>,
-    /// This PC's scanner (WIA device id, step 2).
+    /// This PC's scanner: `twain:<source name>` or a WIA device id (P02 step 2, PA-19). The
+    /// workstation's default; [`Ingest::scanner_by_user`] wins for a user who chose one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scanner: Option<String>,
+    /// Scanner chosen by each Windows user (several people in sessions on one server share
+    /// this `config.toml`; each session's remote-scanning source is its own).
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub scanner_by_user: std::collections::BTreeMap<String, String>,
+    /// TWAIN: show the driver's own window, so its settings and profiles (PaperStream IP)
+    /// drive the scan instead of the Vibe Files profile.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub driver_ui: bool,
     /// Last scan profile used, by name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scan_profile: Option<String>,
@@ -91,7 +100,29 @@ pub struct Ingest {
     pub scan_profiles: Vec<vf_ingest::scanner::Profile>,
 }
 
+/// The Windows user name (`USERNAME`), or "" when unset.
+pub fn windows_user() -> String {
+    std::env::var("USERNAME").unwrap_or_default()
+}
+
 impl Ingest {
+    /// The scanner `user` chose, else this workstation's.
+    pub fn scanner_for(&self, user: &str) -> Option<&str> {
+        self.scanner_by_user
+            .get(user)
+            .or(self.scanner.as_ref())
+            .map(String::as_str)
+    }
+
+    /// Remembers `id` for `user` and as the workstation's default.
+    pub fn choose_scanner(&mut self, user: &str, id: &str) {
+        self.scanner = Some(id.to_string());
+        if !user.is_empty() {
+            self.scanner_by_user
+                .insert(user.to_string(), id.to_string());
+        }
+    }
+
     pub fn profiles(&self) -> Vec<vf_ingest::scanner::Profile> {
         if self.scan_profiles.is_empty() {
             vf_ingest::scanner::default_profiles()
@@ -202,6 +233,25 @@ pub fn save(data: &Path, c: &Config) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// PA-19 step 4: on a server, each session user keeps their own scanner (their own
+    /// remote-scanning source); a user who never chose one gets the workstation's.
+    #[test]
+    fn scanner_choice_is_kept_per_windows_user() {
+        let mut i = Ingest::default();
+        assert_eq!(i.scanner_for("ann"), None);
+        i.choose_scanner("ann", "twain:Remote Scan");
+        i.choose_scanner("bob", "twain:fi-7160");
+        i.driver_ui = true;
+        assert_eq!(i.scanner_for("ann"), Some("twain:Remote Scan"));
+        assert_eq!(i.scanner_for("bob"), Some("twain:fi-7160"));
+        assert_eq!(i.scanner_for("cy"), Some("twain:fi-7160"), "workstation default");
+        let back: Ingest = toml::from_str(&toml::to_string(&i).unwrap()).unwrap();
+        assert_eq!(back, i);
+        let old: Ingest = toml::from_str("scanner = 'wia-1'").unwrap();
+        assert_eq!(old.scanner_for("ann"), Some("wia-1"));
+        assert!(!old.driver_ui);
+    }
 
     #[test]
     fn first_load_creates_and_keeps_the_device_id() {

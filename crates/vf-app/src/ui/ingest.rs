@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use egui::RichText;
 use vf_core::browse::Snapshot;
 use vf_ingest::pipeline::Origin;
-use vf_ingest::scanner::{self, Device};
+use vf_ingest::scanner::{self, Devices, Kind};
 use vf_ingest::worker::{self, Event, Worker};
 
 use crate::config::Ingest;
@@ -40,8 +40,8 @@ pub struct IngestState {
     /// PDFs and zips in Filer's inboxes (what its queue holds), at the last check.
     in_inboxes: usize,
     /// This PC's scanners, once listed (`None` while listing).
-    devices: Option<Result<Vec<Device>, String>>,
-    devices_job: Option<Receiver<Result<Vec<Device>, String>>>,
+    devices: Option<Devices>,
+    devices_job: Option<Receiver<Devices>>,
     /// Files just delivered to Filer's inbox, to check against the catalog: (file, staging
     /// folder it came from, hashes to look up: as delivered and as it arrived).
     to_check: Vec<(PathBuf, PathBuf, [String; 2])>,
@@ -276,7 +276,7 @@ impl IngestState {
         }
     }
 
-    /// Lists the scanners on a thread (WIA enumeration can take a moment).
+    /// Lists the scanners on a thread (TWAIN and WIA enumeration can take a moment).
     fn list_devices(&mut self, ctx: &egui::Context) {
         let (tx, rx) = std::sync::mpsc::channel();
         let ctx = ctx.clone();
@@ -300,41 +300,45 @@ impl IngestState {
         }
         ui.horizontal(|ui| {
             ui.label(RichText::new("Scanner").strong());
-            let devices = match &self.devices {
-                None => {
-                    ui.spinner();
-                    return;
-                }
-                Some(Err(e)) => {
-                    ui.label(RichText::new(e).color(wizard::ERROR));
-                    return;
-                }
-                Some(Ok(d)) => d.clone(),
+            let Some(found) = self.devices.clone() else {
+                ui.spinner();
+                return;
             };
-            if devices.is_empty() {
+            let devices = found.list;
+            let user = crate::config::windows_user();
+            let Some(current) = scanner::pick(&devices, prefs.scanner_for(&user)).cloned() else {
                 ui.label(widgets::caption(
-                    "No scanner on this PC (Windows › Settings › Printers & scanners). Scans saved into the Scans folder are still processed.",
+                    "No scanner on this PC (a TWAIN driver such as PaperStream IP, or Windows › Settings › Printers & scanners). Scans saved into the Scans folder are still processed.",
                 ));
                 if ui.small_button("Look again").clicked() {
                     self.list_devices(ui.ctx());
                 }
+                for n in &found.notes {
+                    ui.label(widgets::caption(n));
+                }
                 return;
-            }
+            };
             let mut p = prefs.clone();
-            let current = prefs
-                .scanner
-                .as_ref()
-                .and_then(|id| devices.iter().find(|d| &d.id == id))
-                .unwrap_or(&devices[0]);
             egui::ComboBox::from_id_salt("vf-scanner")
                 .selected_text(&current.name)
                 .show_ui(ui, |ui| {
                     for d in &devices {
                         if ui.selectable_label(d.id == current.id, &d.name).clicked() {
-                            p.scanner = Some(d.id.clone());
+                            p.choose_scanner(&user, &d.id);
                         }
                     }
                 });
+            if ui
+                .small_button("Look again")
+                .on_hover_text("List the scanners again (after plugging one in or reconnecting a session).")
+                .clicked()
+            {
+                self.list_devices(ui.ctx());
+            }
+            if current.kind == Kind::Twain {
+                ui.checkbox(&mut p.driver_ui, "Use the driver's own window")
+                    .on_hover_text("The scanner driver's window opens and its settings and profiles (PaperStream IP) are used instead of the profile here.");
+            }
             let profiles = prefs.profiles();
             let profile = prefs
                 .scan_profile
@@ -342,15 +346,18 @@ impl IngestState {
                 .and_then(|n| profiles.iter().find(|x| &x.name == n))
                 .unwrap_or(&profiles[0])
                 .clone();
-            egui::ComboBox::from_id_salt("vf-scan-profile")
-                .selected_text(&profile.name)
+            let profile_box = egui::ComboBox::from_id_salt("vf-scan-profile")
+                .selected_text(&profile.name);
+            ui.add_enabled_ui(!(current.kind == Kind::Twain && prefs.driver_ui), |ui| {
+                profile_box
                 .show_ui(ui, |ui| {
                     for x in &profiles {
                         if ui.selectable_label(x.name == profile.name, &x.name).clicked() {
                             p.scan_profile = Some(x.name.clone());
                         }
                     }
-                });
+                })
+            });
             if p != *prefs {
                 self.changed = Some(p);
             }
@@ -371,11 +378,15 @@ impl IngestState {
             {
                 let (tx, rx) = std::sync::mpsc::channel();
                 let (ctx, id) = (ui.ctx().clone(), current.id.clone());
+                let driver_ui = current.kind == Kind::Twain && prefs.driver_ui;
                 std::thread::spawn(move || {
-                    let _ = tx.send(scanner::scan_to(&id, &profile, &dir));
+                    let _ = tx.send(scanner::scan_to(&id, &profile, driver_ui, &dir));
                     ctx.request_repaint();
                 });
                 self.scan_job = Some(rx);
+            }
+            for n in &found.notes {
+                ui.label(widgets::caption(n));
             }
         });
     }
