@@ -8,6 +8,7 @@ pub mod ingest;
 pub mod intake;
 pub mod meta_editor;
 pub mod new_client;
+pub mod ocr;
 pub mod rename;
 #[cfg(test)]
 pub mod test_util;

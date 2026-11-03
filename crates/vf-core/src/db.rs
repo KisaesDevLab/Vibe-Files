@@ -3,12 +3,15 @@
 use std::path::{Path, PathBuf};
 
 use rusqlite::OpenFlags;
-pub use rusqlite::{Connection, Error as SqlError};
+pub use rusqlite::{Connection, Error as SqlError, OptionalExtension, params};
 
 use crate::{Error, Result};
 
 /// Migrations in order; index + 1 is the `user_version` after applying it.
-const MIGRATIONS: &[&str] = &[include_str!("../migrations/001_initial.sql")];
+const MIGRATIONS: &[&str] = &[
+    include_str!("../migrations/001_initial.sql"),
+    include_str!("../migrations/002_ocr_search.sql"),
+];
 
 /// Schema version this build writes.
 pub const SCHEMA_VERSION: u32 = MIGRATIONS.len() as u32;
@@ -46,6 +49,8 @@ pub fn open(path: &Path, key: &CatalogKey, storage: Storage) -> Result<Connectio
         OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE,
     )?;
     apply_key(&conn, key)?;
+    // OCR workers hold their own connections (P03); wait for a writer rather than fail.
+    conn.busy_timeout(std::time::Duration::from_secs(10))?;
     conn.pragma_update(None, "foreign_keys", true)?;
     let mode = match storage {
         Storage::Local => "WAL",
@@ -129,11 +134,19 @@ mod tests {
         "client_relationship",
         "consent_7216",
         "device",
+        "doc_fts",
+        "doc_fts_config",
+        "doc_fts_content",
+        "doc_fts_data",
+        "doc_fts_docsize",
+        "doc_fts_idx",
         "doc_type",
         "document",
         "document_tag",
         "legal_hold",
         "lock",
+        "ocr_job",
+        "page_text",
         "retention_class",
         "saved_search",
         "sync_pending",
@@ -160,7 +173,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("catalog.db");
         let conn = open(&path, &key(7), Storage::Local).unwrap();
-        assert_eq!(user_version(&conn).unwrap(), 1);
+        assert_eq!(user_version(&conn).unwrap(), SCHEMA_VERSION);
         assert_eq!(tables(&conn), TABLES);
         drop(conn);
         // Encrypted on disk: no SQLite header.
@@ -168,12 +181,33 @@ mod tests {
         assert!(!head.starts_with(b"SQLite format 3"));
         // Reopen is a no-op migration and makes no backup.
         let conn = open(&path, &key(7), Storage::Local).unwrap();
-        assert_eq!(user_version(&conn).unwrap(), 1);
+        assert_eq!(user_version(&conn).unwrap(), SCHEMA_VERSION);
         let baks = std::fs::read_dir(tmp.path())
             .unwrap()
             .filter(|e| e.as_ref().unwrap().path().extension() == Some("bak".as_ref()))
             .count();
         assert_eq!(baks, 0);
+    }
+
+    /// P03: a P00–P02 catalog (version 1) gains the OCR and search tables, after a backup.
+    #[test]
+    fn migration_002_upgrades_a_version_1_catalog() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("catalog.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            apply_key(&conn, &key(3)).unwrap();
+            conn.execute_batch(MIGRATIONS[0]).unwrap();
+            conn.pragma_update(None, "user_version", 1).unwrap();
+        }
+        let conn = open(&path, &key(3), Storage::Local).unwrap();
+        assert_eq!(user_version(&conn).unwrap(), 2);
+        assert!(tables(&conn).contains(&"ocr_job".to_string()));
+        let baks = std::fs::read_dir(tmp.path())
+            .unwrap()
+            .filter(|e| e.as_ref().unwrap().path().extension() == Some("bak".as_ref()))
+            .count();
+        assert_eq!(baks, 1);
     }
 
     #[test]

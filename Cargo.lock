@@ -5093,6 +5093,12 @@ dependencies = [
 [[package]]
 name = "vf-index"
 version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tempfile",
+ "vf-core",
+]
 
 [[package]]
 name = "vf-ingest"
@@ -5121,12 +5127,18 @@ dependencies = [
 name = "vf-ocr"
 version = "0.1.0"
 dependencies = [
+ "filer-pdf",
  "image",
+ "pdf-writer",
+ "pdfium-render",
  "serde",
  "serde_json",
  "tempfile",
  "thiserror 2.0.21",
  "uuid",
+ "vf-core",
+ "vf-index",
+ "vf-ingest",
 ]
 
 [[package]]

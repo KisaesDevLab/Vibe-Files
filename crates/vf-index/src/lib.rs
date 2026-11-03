@@ -1,3 +1,4 @@
-//! FTS5 full-text + metadata search, saved searches.
-//!
-//! Stub: filled in by its phase in PHASES.md.
+//! Full-text + metadata search (P03): the FTS5 page index, search with filters, saved
+//! searches.
+
+pub mod fts;

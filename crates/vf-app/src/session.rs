@@ -19,6 +19,9 @@ pub struct Opened {
     pub root: PathBuf,
     pub cabinet: CabinetFile,
     pub conn: Connection,
+    /// The catalog file and its key, for workers that open their own connection (OCR, P03).
+    pub catalog: PathBuf,
+    pub key: CatalogKey,
     /// Set when this open ran a rebuild (new cabinet, or a catalog that had never seen it).
     pub rebuild: Option<RebuildReport>,
 }
@@ -94,6 +97,8 @@ pub fn create(data: &Path, device_id: &str, r: &CreateRequest, kdf: KdfParams) -
         root: r.root.to_owned(),
         cabinet: cab,
         conn,
+        catalog,
+        key: CatalogKey(raw),
         rebuild: Some(rep),
     })
 }
@@ -140,6 +145,8 @@ pub fn open(data: &Path, device_id: &str, root: &Path, passphrase: &str) -> Resu
         root: root.to_owned(),
         cabinet: cab,
         conn,
+        catalog: data.join(CATALOG_FILE),
+        key: CatalogKey(raw),
         rebuild,
     })
 }

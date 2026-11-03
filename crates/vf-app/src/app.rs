@@ -77,6 +77,8 @@ pub struct OpenCabinet {
     pub admin: Option<Admin>,
     /// The mounted Filer Desktop app, built the first time Intake is shown.
     pub intake: IntakeTab,
+    /// OCR workers (P03).
+    pub ocr: crate::ui::ocr::OcrState,
 }
 
 pub struct VibeFilesApp {
@@ -171,7 +173,7 @@ impl VibeFilesApp {
     }
 
     /// Picks up a finished create/open.
-    fn poll(&mut self) {
+    fn poll(&mut self, ctx: &egui::Context) {
         let Screen::Busy { rx, back, .. } = &mut self.screen else {
             return;
         };
@@ -193,11 +195,13 @@ impl VibeFilesApp {
                 browse.sheets_dir = self.data.join("sheets");
                 browse.set_prefs(self.config.prefs.clone());
                 browse.notice = opened.rebuild.as_ref().map(|r| format!("Indexed: {r}"));
+                let ocr = crate::ui::ocr::OcrState::start(ctx, &opened, &self.config.ocr);
                 self.screen = Screen::Open(Box::new(OpenCabinet {
                     opened,
                     browse,
                     admin: None,
                     intake,
+                    ocr,
                 }));
             }
             Err(e) => {
@@ -218,7 +222,7 @@ impl VibeFilesApp {
 
 impl eframe::App for VibeFilesApp {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
-        self.poll();
+        self.poll(ui.ctx());
         let name = self.cabinet_name();
         chrome::header(ui, name.as_deref());
         let badge = match &self.screen {
@@ -227,7 +231,9 @@ impl eframe::App for VibeFilesApp {
         };
         chrome::tab_bar(ui, &mut self.tab, badge);
         let mut segments = vec![format!("vibe-files {}", env!("CARGO_PKG_VERSION"))];
-        if let Screen::Open(o) = &self.screen {
+        if let Screen::Open(o) = &mut self.screen {
+            let o = &mut **o;
+            segments.insert(0, o.ocr.footer(&o.opened.conn));
             segments.insert(
                 0,
                 format!(
@@ -261,6 +267,7 @@ impl eframe::App for VibeFilesApp {
                     browse: tab_browse,
                     admin: tab_admin,
                     intake: o_intake,
+                    ..
                 } = &mut **o;
                 let mut env = browse::Env {
                     conn: &mut opened.conn,
