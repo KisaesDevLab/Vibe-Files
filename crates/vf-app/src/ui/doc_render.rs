@@ -11,12 +11,7 @@ use vf_pdf::layer::Geometry;
 
 use crate::ui::pages::{Rendered, render_doc};
 
-/// A word on a page: its box in user space and its text.
-#[derive(Debug, Clone, PartialEq)]
-pub struct WordBox {
-    pub rect: [f32; 4],
-    pub text: String,
-}
+pub use vf_pdf::text::WordBox;
 
 /// What an opened document is.
 #[derive(Debug, Clone)]
@@ -45,6 +40,10 @@ pub enum Job {
         generation: u64,
         page: usize,
     },
+    Pii {
+        generation: u64,
+        kinds: Vec<vf_pdf::pii::Kind>,
+    },
 }
 
 pub enum Done {
@@ -69,6 +68,10 @@ pub enum Done {
         generation: u64,
         page: usize,
         words: Vec<WordBox>,
+    },
+    Pii {
+        generation: u64,
+        found: Vec<vf_pdf::pii::Found>,
     },
 }
 
@@ -171,6 +174,16 @@ fn run(jobs: &Receiver<Job>, out: &Sender<Done>, ctx: &egui::Context) {
                     text,
                 }
             }
+            Job::Pii { generation, kinds } => {
+                let Some((g, d)) = &doc else { continue };
+                if *g != generation {
+                    continue;
+                }
+                Done::Pii {
+                    generation,
+                    found: pii(d, &kinds),
+                }
+            }
             Job::Words { generation, page } => {
                 let Some((g, d)) = &doc else { continue };
                 if *g != generation {
@@ -213,46 +226,19 @@ fn find(doc: &PdfDocument<'_>, text: &str) -> Vec<(usize, usize)> {
 
 /// The page's words with their boxes (user space), in reading order.
 pub fn words(doc: &PdfDocument<'_>, page: usize) -> Vec<WordBox> {
-    let Ok(p) = doc.pages().get(page as i32) else {
-        return vec![];
-    };
-    let Ok(text) = p.text() else { return vec![] };
-    let mut out: Vec<WordBox> = Vec::new();
-    let mut cur: Option<WordBox> = None;
-    for ch in text.chars().iter() {
-        let c = ch.unicode_char().unwrap_or(' ');
-        let bounds = ch.loose_bounds().ok();
-        match (c.is_whitespace(), bounds) {
-            (false, Some(b)) => {
-                let r = [
-                    b.left().value,
-                    b.bottom().value,
-                    b.right().value,
-                    b.top().value,
-                ];
-                match &mut cur {
-                    Some(w) => {
-                        w.text.push(c);
-                        w.rect = [
-                            w.rect[0].min(r[0]),
-                            w.rect[1].min(r[1]),
-                            w.rect[2].max(r[2]),
-                            w.rect[3].max(r[3]),
-                        ];
-                    }
-                    None => {
-                        cur = Some(WordBox {
-                            rect: r,
-                            text: c.to_string(),
-                        })
-                    }
-                }
-            }
-            _ => out.extend(cur.take()),
-        }
-    }
-    out.extend(cur);
-    out
+    doc.pages()
+        .get(page as i32)
+        .map(|p| vf_pdf::text::words(&p))
+        .unwrap_or_default()
+}
+
+/// Every page's PII matches of `kinds`.
+pub fn pii(doc: &PdfDocument<'_>, kinds: &[vf_pdf::pii::Kind]) -> Vec<vf_pdf::pii::Found> {
+    doc.pages()
+        .iter()
+        .enumerate()
+        .flat_map(|(i, p)| vf_pdf::pii::find_on_page(i, &vf_pdf::text::chars(&p), kinds))
+        .collect()
 }
 
 #[cfg(test)]

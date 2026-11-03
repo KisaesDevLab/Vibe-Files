@@ -15,6 +15,8 @@ use egui::{Color32, Pos2, Rect, RichText, Sense, Stroke, Vec2, pos2, vec2};
 use vf_core::db::Connection;
 use vf_pdf::annot::{self, Annotation, Kind, Placement, Preset, Tick};
 use vf_pdf::layer::Geometry;
+use vf_pdf::pii::{self, Kind as Pii};
+use vf_pdf::redact::Redaction;
 
 use crate::ui::doc_render::{DocInfo, DocRenderer, Done, Job, WordBox};
 use crate::ui::{theme, widgets};
@@ -65,6 +67,10 @@ pub enum Tool {
     Freehand,
     Arrow,
     Tickmark(Tick),
+    /// Redact: draw a box.
+    RedactBox,
+    /// Redact: drag across words.
+    RedactText,
 }
 
 impl Tool {
@@ -159,6 +165,12 @@ pub struct Viewer {
     pub open_request: Option<PathBuf>,
     /// A save changed the catalog: Browse reloads.
     pub catalog_changed: bool,
+    /// Patterns auto-find looks for.
+    pub pii_kinds: Vec<Pii>,
+    /// Auto-find results, each with its checkbox.
+    pub pii_found: Option<Vec<(pii::Found, bool)>>,
+    /// Boxes drawn (or words selected) to redact.
+    pub drawn: Vec<Redaction>,
 }
 
 impl Default for Viewer {
@@ -197,6 +209,9 @@ impl Default for Viewer {
             placement: Placement::TopRight,
             open_request: None,
             catalog_changed: false,
+            pii_kinds: vec![Pii::Ssn, Pii::Ein],
+            pii_found: None,
+            drawn: Vec::new(),
         }
     }
 }
@@ -214,6 +229,8 @@ impl Viewer {
         }
         self.scroll_to = Some(doc.page);
         self.find = doc.terms.join(" ");
+        self.pii_found = None;
+        self.drawn.clear();
         self.doc = Some(doc);
         self.reload();
     }
@@ -339,6 +356,17 @@ impl Viewer {
                     words,
                 } if generation == self.generation => {
                     self.words.insert(page, words);
+                }
+                Done::Pii { generation, found } if generation == self.generation => {
+                    self.pii_found = Some(
+                        found
+                            .into_iter()
+                            .map(|f| {
+                                let on = crate::redact::default_on(f.kind);
+                                (f, on)
+                            })
+                            .collect(),
+                    );
                 }
                 _ => {}
             }
@@ -895,6 +923,39 @@ fn draw_pending(ui: &egui::Ui, v: &Viewer, page: usize, rect: Rect, s: f32, g: &
             }
         }
     }
+    // Redactions waiting: solid black, red outline, label (UI_SPEC §4).
+    let mut redactions: Vec<([f32; 4], String)> = v
+        .drawn
+        .iter()
+        .filter(|r| r.page == page)
+        .map(|r| (r.rect, "redact".to_string()))
+        .collect();
+    for (f, on) in v.pii_found.iter().flatten() {
+        if *on && f.page == page {
+            redactions.extend(
+                f.rects
+                    .iter()
+                    .map(|r| (*r, format!("{} · redact", f.kind.label()))),
+            );
+        }
+    }
+    for (r, label) in redactions {
+        let sr = user_rect_to_screen(rect, s, g, r).expand(1.0);
+        p.rect(
+            sr,
+            0.0,
+            Color32::BLACK,
+            Stroke::new(2.0, Color32::from_rgb(0xC0, 0x1E, 0x1E)),
+            egui::StrokeKind::Outside,
+        );
+        p.text(
+            sr.right_top() + vec2(4.0, -2.0),
+            egui::Align2::LEFT_BOTTOM,
+            label,
+            egui::FontId::proportional(10.0),
+            Color32::from_rgb(0x9A, 0x1B, 0x1B),
+        );
+    }
     // The drag in progress.
     if let Some(d) = v.drag.as_ref().filter(|d| d.page == page)
         && let Some(last) = d.points.last()
@@ -982,7 +1043,7 @@ fn interact(
     let to_user = |d: [f32; 2]| g.to_user(d[0], d[1]);
     if matches!(
         v.tool,
-        Tool::Select | Tool::Highlight | Tool::Underline | Tool::StrikeOut
+        Tool::Select | Tool::Highlight | Tool::Underline | Tool::StrikeOut | Tool::RedactText
     ) {
         v.request_words(page);
     }
@@ -1089,6 +1150,13 @@ fn interact(
                 push(v, Kind::Ink(vec![stroke]))
             }
             Tool::Arrow => push(v, Kind::Arrow { from: a, to: b }),
+            Tool::RedactBox if box_user[2] - box_user[0] > 2.0 => v.drawn.push(Redaction {
+                page,
+                rect: box_user,
+            }),
+            Tool::RedactText => v
+                .drawn
+                .extend(quads.iter().map(|r| Redaction { page, rect: *r })),
             _ => {}
         }
     }
@@ -1149,7 +1217,7 @@ fn typing_window(ctx: &egui::Context, v: &mut Viewer, initials: &str) {
     }
 }
 
-fn tool_panel(ui: &mut egui::Ui, v: &mut Viewer, env: &Env<'_>) {
+fn tool_panel(ui: &mut egui::Ui, v: &mut Viewer, env: &mut Env<'_>) {
     egui::Panel::right("vf-viewer-tools")
         .exact_size(320.0)
         .resizable(false)
@@ -1164,9 +1232,7 @@ fn tool_panel(ui: &mut egui::Ui, v: &mut Viewer, env: &Env<'_>) {
             match v.panel {
                 Panel::Annotate => annotate_panel(ui, v, env),
                 Panel::Stamps => stamps_panel(ui, v, env),
-                Panel::Redact => {
-                    ui.label(widgets::caption("Redaction arrives in the next step."));
-                }
+                Panel::Redact => redact_panel(ui, v, env),
             }
             if !v.pending.is_empty() {
                 ui.separator();
@@ -1237,6 +1303,125 @@ fn annotate_panel(ui: &mut egui::Ui, v: &mut Viewer, env: &Env<'_>) {
     ui.label(widgets::caption(
         "Stamped as real PDF annotations with author and date.",
     ));
+}
+
+const DANGER: Color32 = Color32::from_rgb(0x9A, 0x1B, 0x1B);
+
+/// The Redact tab: modes, auto-find results with checkboxes, Apply & verify.
+fn redact_panel(ui: &mut egui::Ui, v: &mut Viewer, env: &mut Env<'_>) {
+    ui.label(RichText::new("Mode").strong());
+    ui.radio_value(&mut v.tool, Tool::RedactBox, "Draw box");
+    ui.radio_value(&mut v.tool, Tool::RedactText, "Select text");
+    ui.add_space(6.0);
+    ui.horizontal_wrapped(|ui| {
+        if ui.button("Auto-find patterns").clicked()
+            && let Some(r) = &v.renderer
+        {
+            r.send(Job::Pii {
+                generation: v.generation,
+                kinds: v.pii_kinds.clone(),
+            });
+        }
+        for (k, label) in [
+            (Pii::Account, "+ Account numbers"),
+            (Pii::Dob, "+ Dates of birth"),
+        ] {
+            let mut on = v.pii_kinds.contains(&k);
+            if ui.toggle_value(&mut on, label).changed() {
+                v.pii_kinds.retain(|x| *x != k);
+                if on {
+                    v.pii_kinds.push(k);
+                }
+                v.pii_found = None;
+            }
+        }
+    });
+    if let Some(found) = &mut v.pii_found {
+        ui.label(RichText::new(format!("Auto-find results ({})", found.len())).strong());
+        if found.is_empty() {
+            ui.label(widgets::caption("No SSN, EIN or other pattern found."));
+        }
+        egui::ScrollArea::vertical()
+            .id_salt("vfound")
+            .max_height(220.0)
+            .show(ui, |ui| {
+                for (f, on) in found.iter_mut() {
+                    let text = format!("{} · page {}  {}", f.kind.label(), f.page + 1, f.masked());
+                    let r = ui.checkbox(on, text);
+                    if f.kind == Pii::Ein {
+                        r.on_hover_text("(payer — usually keep)");
+                    }
+                }
+            });
+    }
+    let n = v.drawn.len() + v.pii_found.iter().flatten().filter(|(_, on)| *on).count();
+    ui.add_space(6.0);
+    egui::Frame::new()
+        .fill(theme::APP_BG)
+        .inner_margin(8)
+        .corner_radius(4)
+        .show(ui, |ui| {
+            ui.label(widgets::caption(
+                "Apply removes the text and image content under the boxes, strips the metadata and saves \"… (redacted).pdf\" beside this document, which is not changed. It then re-reads the result and refuses to save if anything removed is still there. Counts go to the audit trail.",
+            ));
+        });
+    let apply = ui.add_enabled(
+        n > 0,
+        egui::Button::new(
+            RichText::new(format!(
+                "Apply {n} {} & verify",
+                if n == 1 { "redaction" } else { "redactions" }
+            ))
+            .color(Color32::WHITE)
+            .strong(),
+        )
+        .fill(DANGER)
+        .min_size(vec2(ui.available_width(), 40.0)),
+    );
+    if !v.drawn.is_empty() && ui.small_button("Clear drawn boxes").clicked() {
+        v.drawn.clear();
+    }
+    if apply.clicked() {
+        apply_redactions(v, env);
+    }
+}
+
+fn apply_redactions(v: &mut Viewer, env: &mut Env<'_>) {
+    let Some(doc) = v.doc.clone() else { return };
+    let plan = crate::redact::Plan {
+        found: v
+            .pii_found
+            .iter()
+            .flatten()
+            .filter(|(_, on)| *on)
+            .map(|(f, _)| f.clone())
+            .collect(),
+        drawn: v.drawn.clone(),
+    };
+    let pdfium = crate::ui::intake::pdfium_dir()
+        .ok_or_else(|| "pdfium.dll not found".to_string())
+        .and_then(|d| filer_pdf::pdf::pdfium(&d));
+    let r = pdfium.and_then(|p| {
+        crate::redact::redact_document(env.conn, env.root, env.device_id, p, &doc.doc_id, &plan)
+    });
+    match r {
+        Ok(added) => {
+            v.catalog_changed = true;
+            let counts = plan
+                .counts()
+                .iter()
+                .map(|(k, n)| format!("{n} {k}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let d = Doc::at(env.root, &added.doc_id, &added.rel_path, doc.page, vec![]);
+            let name = d.name.clone();
+            v.open(d);
+            v.notice = Some(format!(
+                "Redacted and verified ({counts}): saved as {name}. The original is not changed."
+            ));
+        }
+        Err(e) => v.error = Some(e),
+    }
 }
 
 /// Palette label without symbol glyphs (the bundled fonts lack ✓ ✗ ⊘ ƒ).

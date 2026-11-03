@@ -7,10 +7,13 @@ publish.workspace = true
 
 [dependencies]
 lopdf.workspace = true
+pdfium-render.workspace = true
+image.workspace = true
+regex.workspace = true
 serde.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true
 filer-pdf = { path = "../filer-pdf", features = ["test-support"] }
-pdfium-render.workspace = true
 tempfile.workspace = true
+vf-fixtures = { path = "../vf-fixtures" }

@@ -1078,6 +1078,93 @@ mod tests {
         );
     }
 
+    /// P04 step 5 through the Viewer: auto-find, apply & verify, the redacted copy opens.
+    #[test]
+    fn viewer_redacts_an_ssn_into_a_new_document() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("Clients");
+        std::fs::create_dir_all(root.join("Old")).unwrap();
+        vf_fixtures::write_pdf(
+            &root.join("Old/W-2.pdf"),
+            &[
+                "W-2 - tax year 2025".into(),
+                "Payer EIN: 07-1234567".into(),
+                "Recipient SSN: 987-65-4321".into(),
+            ],
+        )
+        .unwrap();
+        let req = CreateRequest {
+            root: &root,
+            name: "Firm",
+        };
+        drop(session::create(&tmp.path().join("pc1"), "dev-1", &req).unwrap());
+        let mut h = harness(&tmp.path().join("pc1"));
+        click(&mut h, "Open existing");
+        type_into(&mut h, "Cabinet folder", &root.display().to_string());
+        click(&mut h, "Open cabinet");
+        settle(&mut h);
+        h.get_by_label("W-2.pdf").click();
+        h.run();
+        h.key_press(egui::Key::Enter);
+        let wait = |h: &mut egui_kittest::Harness<'static, VibeFilesApp>,
+                    what: &str,
+                    done: &dyn Fn(&crate::ui::viewer::Viewer) -> bool| {
+            let start = std::time::Instant::now();
+            loop {
+                h.step();
+                if let Screen::Open(o) = &h.state().screen
+                    && done(&o.viewer)
+                {
+                    return;
+                }
+                assert!(
+                    start.elapsed() < std::time::Duration::from_secs(20),
+                    "never: {what}"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+        };
+        wait(&mut h, "rendered", &|v| v.ready());
+        h.get_by_label("Redact").click();
+        h.step();
+        h.get_by_label("Auto-find patterns").click();
+        wait(&mut h, "auto-find results", &|v| v.pii_found.is_some());
+        {
+            let Screen::Open(o) = &h.state().screen else {
+                unreachable!()
+            };
+            let f = o.viewer.pii_found.as_ref().unwrap();
+            let picked: Vec<(vf_pdf::pii::Kind, bool)> =
+                f.iter().map(|(f, on)| (f.kind, *on)).collect();
+            assert_eq!(
+                picked,
+                [
+                    (vf_pdf::pii::Kind::Ssn, true),
+                    (vf_pdf::pii::Kind::Ein, false)
+                ],
+                "SSN checked, EIN left off"
+            );
+        }
+        h.step();
+        h.get_by_label("Apply 1 redaction & verify").click();
+        h.step();
+        h.step();
+        let Screen::Open(o) = &h.state().screen else {
+            unreachable!()
+        };
+        assert_eq!(o.viewer.error, None);
+        assert_eq!(o.viewer.doc.as_ref().unwrap().name, "W-2 (redacted).pdf");
+        let out = root.join("Old/W-2 (redacted).pdf");
+        let dir = filer_pdf::pdf::find_pdfium(Path::new("")).unwrap();
+        let text = filer_pdf::pdf::page_texts(filer_pdf::pdf::pdfium(&dir).unwrap(), &out)
+            .unwrap()
+            .join(" ");
+        assert!(
+            !text.contains("987-65-4321") && text.contains("07-1234567"),
+            "{text}"
+        );
+    }
+
     #[test]
     fn wizard_checks_fields_before_any_work() {
         let tmp = tempfile::tempdir().unwrap();

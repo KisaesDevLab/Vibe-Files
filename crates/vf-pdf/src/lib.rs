@@ -4,4 +4,7 @@
 
 pub mod annot;
 pub mod layer;
+pub mod pii;
+pub mod redact;
+pub mod text;
 pub mod words;
