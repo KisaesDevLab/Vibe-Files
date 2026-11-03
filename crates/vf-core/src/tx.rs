@@ -31,6 +31,13 @@ pub enum FileOp {
     Copy { src: PathBuf, dst: PathBuf },
     /// Create one folder (and missing parents).
     Mkdir { path: PathBuf },
+    /// Append `lines` to an append-only JSONL file (created with its folders if missing).
+    /// Undo appends `undo_lines` instead of cutting the file, so the file only ever grows.
+    AppendLines {
+        path: PathBuf,
+        lines: Vec<String>,
+        undo_lines: Vec<String>,
+    },
     /// Bind `folder` (which must exist, inside `root`) to a client by writing its SentinelV1
     /// `_Vibe/client.json`; never replaces one. Undo removes it only if its bytes are unchanged.
     WriteSentinel {

@@ -34,6 +34,8 @@ pub struct RelRow {
 pub struct DocRow {
     pub id: String,
     pub client_id: Option<String>,
+    pub doc_type_id: Option<String>,
+    /// Doc type name.
     pub doc_type: Option<String>,
     /// `None` = permanent file.
     pub tax_year: Option<i32>,
@@ -46,6 +48,8 @@ pub struct DocRow {
     pub updated_at: String,
     pub locked_by: Option<String>,
     pub versions: i64,
+    /// Sorted.
+    pub tags: Vec<String>,
 }
 
 impl DocRow {
@@ -61,6 +65,8 @@ pub struct Snapshot {
     pub clients: Vec<ClientRow>,
     pub docs: Vec<DocRow>,
     pub relationships: Vec<RelRow>,
+    /// Live doc types (id, name) in list order.
+    pub doc_types: Vec<(String, String)>,
 }
 
 pub fn load(conn: &Connection) -> Result<Snapshot> {
@@ -82,7 +88,10 @@ pub fn load(conn: &Connection) -> Result<Snapshot> {
     let mut st = conn.prepare(
         "SELECT d.id, d.client_id, t.name, d.tax_year, d.rel_path, d.hash, d.size, d.status,
                 d.source, d.filed_by, d.updated_at, l.user,
-                (SELECT count(*) FROM version v WHERE v.doc_id = d.id)
+                (SELECT count(*) FROM version v WHERE v.doc_id = d.id),
+                d.doc_type_id,
+                (SELECT group_concat(tag, char(31)) FROM
+                   (SELECT tag FROM document_tag g WHERE g.doc_id = d.id ORDER BY tag COLLATE NOCASE))
          FROM document d
          LEFT JOIN doc_type t ON t.id = d.doc_type_id
          LEFT JOIN lock l ON l.doc_id = d.id
@@ -105,6 +114,11 @@ pub fn load(conn: &Connection) -> Result<Snapshot> {
                 updated_at: r.get(10)?,
                 locked_by: r.get(11)?,
                 versions: r.get(12)?,
+                doc_type_id: r.get(13)?,
+                tags: r
+                    .get::<_, Option<String>>(14)?
+                    .map(|t| t.split('\u{1f}').map(str::to_owned).collect())
+                    .unwrap_or_default(),
             })
         })?
         .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -123,10 +137,16 @@ pub fn load(conn: &Connection) -> Result<Snapshot> {
             })
         })?
         .collect::<std::result::Result<Vec<_>, _>>()?;
+    let mut st =
+        conn.prepare("SELECT id, name FROM doc_type WHERE deleted_at IS NULL ORDER BY sort, name")?;
+    let doc_types = st
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
     Ok(Snapshot {
         clients,
         docs,
         relationships,
+        doc_types,
     })
 }
 
@@ -296,6 +316,7 @@ mod tests {
         DocRow {
             id: rel.into(),
             client_id: client.map(Into::into),
+            doc_type_id: None,
             doc_type: None,
             tax_year: year,
             rel_path: rel.into(),
@@ -307,6 +328,7 @@ mod tests {
             updated_at: "2026-11-02T00:00:00Z".into(),
             locked_by: None,
             versions: 0,
+            tags: vec![],
         }
     }
 
@@ -324,6 +346,7 @@ mod tests {
                 doc(None, None, "Loose/h.pdf"),
             ],
             relationships: vec![],
+            doc_types: vec![],
         }
     }
 

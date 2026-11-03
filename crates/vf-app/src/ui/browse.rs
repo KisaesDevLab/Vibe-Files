@@ -13,6 +13,7 @@ use vf_core::db::Connection;
 
 use crate::ui::client_panel::{self, RelForm};
 use crate::ui::import_csv::{self, ImportDialog};
+use crate::ui::meta_editor::{self, MetaForm};
 use crate::ui::new_client::{self, NewClientDialog, Outcome};
 use crate::ui::{theme, widgets};
 
@@ -81,6 +82,12 @@ pub struct Browse {
     pub import: Option<ImportDialog>,
     /// The client inspector's add-relationship form.
     pub rel_form: RelForm,
+    /// The document inspector's metadata form (reset when the selection changes).
+    pub meta_form: MetaForm,
+    /// Newest undoable metadata edit by this device; `None` = not looked up yet.
+    undo_tx: Option<Option<String>>,
+    /// Ctrl+Z pressed outside a text field.
+    undo_requested: bool,
 }
 
 impl Browse {
@@ -104,6 +111,9 @@ impl Browse {
             new_client: None,
             import: None,
             rel_form: RelForm::new(),
+            meta_form: MetaForm::default(),
+            undo_tx: None,
+            undo_requested: false,
         };
         b.refresh();
         b
@@ -156,6 +166,7 @@ impl Browse {
             _ => Scope::Cabinet,
         };
         self.expanded.clear();
+        self.undo_tx = None;
         self.selected = self
             .snap
             .docs
@@ -266,12 +277,13 @@ impl Browse {
             return;
         }
         let last = self.visible.len() - 1;
-        let (down, up, space, all, esc, home, end, m) = ctx.input(|i| {
+        let (down, up, space, all, undo, esc, home, end, m) = ctx.input(|i| {
             (
                 i.key_pressed(Key::ArrowDown),
                 i.key_pressed(Key::ArrowUp),
                 i.key_pressed(Key::Space),
                 i.modifiers.command && i.key_pressed(Key::A),
+                i.modifiers.command && i.key_pressed(Key::Z),
                 i.key_pressed(Key::Escape),
                 i.key_pressed(Key::Home),
                 i.key_pressed(Key::End),
@@ -303,6 +315,9 @@ impl Browse {
         }
         if esc {
             self.selected.clear();
+        }
+        if undo {
+            self.undo_requested = true;
         }
     }
 
@@ -815,16 +830,6 @@ fn sort_arrow(ui: &mut egui::Ui, asc: bool) {
     ));
 }
 
-/// One value when all agree, else `Mixed (n)`.
-fn summary<'a>(vals: impl Iterator<Item = &'a str>) -> String {
-    let set: BTreeSet<&str> = vals.collect();
-    match set.len() {
-        0 => "—".into(),
-        1 => set.into_iter().next().unwrap().to_owned(),
-        n => format!("Mixed ({n})"),
-    }
-}
-
 fn inspector(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env) {
     if b.selected.is_empty()
         && let Some(c) = b.scope_client()
@@ -832,47 +837,81 @@ fn inspector(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env) {
         client_panel::show(ui, b, env, c);
         return;
     }
-    let docs = b.selected_docs();
-    ui.label(
-        RichText::new(format!("{} documents selected", docs.len()))
-            .strong()
-            .size(14.0),
-    );
+    if b.meta_form.for_selection != b.selected {
+        let docs = b.selected_docs();
+        b.meta_form = MetaForm::for_docs(&b.selected, &docs);
+    }
+    if b.undo_tx.is_none() {
+        b.undo_tx = Some(vf_fs::docmeta::last_undoable(env.conn, env.device_id).map(|(t, _)| t));
+    }
+    let mut undo = std::mem::take(&mut b.undo_requested);
+    ui.horizontal(|ui| {
+        ui.label(
+            RichText::new(format!("{} documents selected", b.selected.len()))
+                .strong()
+                .size(14.0),
+        );
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            let can = matches!(b.undo_tx, Some(Some(_)));
+            if ui
+                .add_enabled(can, egui::Button::new("Undo last"))
+                .on_hover_text("Undo the last metadata change made on this PC (Ctrl+Z)")
+                .clicked()
+            {
+                undo = true;
+            }
+        });
+    });
+    if undo && let Some(Some(tx)) = b.undo_tx.clone() {
+        match vf_fs::docmeta::undo(env.conn, env.root, &tx, env.device_id) {
+            Ok(()) => {
+                b.reload(env.conn);
+                b.notice = Some("Undid the last metadata change.".into());
+            }
+            Err(e) => b.error = Some(format!("Undo failed: {e}")),
+        }
+        b.meta_form.for_selection.clear();
+        return;
+    }
     ui.add_space(8.0);
-    if docs.is_empty() {
+    if b.selected.is_empty() {
         ui.label(RichText::new("Select documents to see their details.").color(theme::INK_MUTED));
         return;
     }
-    let years: Vec<String> = docs.iter().map(|d| year_label(d.tax_year)).collect();
-    let fields = [
-        (
-            "DOC TYPE",
-            summary(docs.iter().map(|d| d.doc_type.as_deref().unwrap_or("—"))),
-        ),
-        ("TAX YEAR", summary(years.iter().map(String::as_str))),
-        (
-            "STATUS",
-            summary(docs.iter().map(|d| widgets::status_style(&d.status).0)),
-        ),
-        (
-            "SOURCE",
-            summary(docs.iter().map(|d| source_label(d.source.as_deref()))),
-        ),
-    ];
-    egui::Grid::new("inspector-fields")
-        .num_columns(2)
-        .spacing([16.0, 8.0])
-        .show(ui, |ui| {
-            for pair in fields.chunks(2) {
-                for (k, v) in pair {
-                    ui.vertical(|ui| {
-                        ui.label(RichText::new(*k).small().color(theme::INK_MUTED));
-                        ui.label(v);
-                    });
-                }
-                ui.end_row();
+    let doc_types = b.snap.doc_types.clone();
+    let mut apply = false;
+    {
+        let docs: Vec<&DocRow> = b.selected.iter().map(|&i| &b.snap.docs[i]).collect();
+        meta_editor::fields(ui, &mut b.meta_form, &docs, &doc_types);
+        ui.add_space(10.0);
+        let edit = b.meta_form.to_edit();
+        let n = docs.len();
+        let go = egui::Button::new(
+            RichText::new(format!("Apply to {n} (one transaction)")).color(egui::Color32::WHITE),
+        )
+        .fill(theme::ACCENT_DEFAULT);
+        if ui.add_enabled(!edit.is_empty(), go).clicked() {
+            apply = true;
+        }
+    }
+    if apply {
+        let ids: Vec<String> = b
+            .selected
+            .iter()
+            .map(|&i| b.snap.docs[i].id.clone())
+            .collect();
+        let edit = b.meta_form.to_edit();
+        match vf_fs::docmeta::edit(env.conn, env.root, &ids, &edit, env.device_id) {
+            Ok((_, n)) => {
+                b.reload(env.conn);
+                b.notice = Some(format!("Updated {n} documents (one transaction)."));
+                b.meta_form.for_selection.clear();
             }
-        });
+            Err(e) => b.error = Some(e),
+        }
+        return;
+    }
+    let docs = b.selected_docs();
     if let [d] = docs.as_slice() {
         ui.add_space(12.0);
         ui.separator();
@@ -905,16 +944,6 @@ fn inspector(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env) {
                 );
                 kv(ui, "Path", RichText::new(&d.rel_path).monospace().small());
             });
-    }
-}
-
-fn source_label(s: Option<&str>) -> &'static str {
-    match s {
-        Some("client") => "Client",
-        Some("firm") => "Firm",
-        Some("government") => "Government",
-        Some("third_party") => "Third party",
-        _ => "—",
     }
 }
 
@@ -1116,7 +1145,12 @@ mod tests {
         h.run();
         assert!(h.query_by_label("4 documents selected").is_some());
         // Permanent, 2025, 2023.
-        assert!(h.query_by_label("Mixed (3)").is_some());
+        let year = h.get_by_role_and_label(Role::ComboBox, "TAX YEAR");
+        assert!(
+            year.value().as_deref() == Some("Mixed (3)") || h.query_by_label("Mixed (3)").is_some(),
+            "tax year shows Mixed (3): {:?}",
+            year.value()
+        );
     }
 
     #[test]
@@ -1326,6 +1360,41 @@ mod tests {
                 .records
                 .is_empty()
         );
+    }
+
+    /// P01 step 5: bulk edit from the inspector, then Undo last.
+    #[test]
+    fn inspector_applies_to_the_selection_and_undoes() {
+        let mut h = harness(1, 6);
+        {
+            let s = h.state_mut();
+            std::fs::create_dir_all(&s.root).unwrap();
+            vf_fs::doctypes::seed_if_missing(&s.root).unwrap();
+            vf_fs::doctypes::sync(&mut s.conn, &s.root, "dev-test", "seed").unwrap();
+            s.b.reload(&s.conn);
+            s.b.selected = s.b.visible.iter().copied().collect();
+        }
+        h.run();
+        h.get_by_role_and_label(Role::ComboBox, "STATUS").click();
+        h.run();
+        click(&mut h, "Final");
+        click(&mut h, "Apply to 6 (one transaction)");
+        let finals = |h: &Harness<'static, State>| {
+            h.state()
+                .b
+                .snap
+                .docs
+                .iter()
+                .filter(|d| d.status == "final")
+                .count()
+        };
+        assert_eq!(finals(&h), 6, "{:?}", h.state().b.error);
+        assert_eq!(
+            h.state().b.notice.as_deref(),
+            Some("Updated 6 documents (one transaction).")
+        );
+        click(&mut h, "Undo last");
+        assert_eq!(finals(&h), 0, "{:?}", h.state().b.error);
     }
 
     /// P01 done-when: tree expansion under 100 ms at 5,000 documents (50 clients x 100).

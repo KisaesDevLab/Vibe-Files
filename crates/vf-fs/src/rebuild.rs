@@ -38,6 +38,10 @@ pub struct RebuildReport {
     pub doc_types: usize,
     /// `doc_types.json` could not be read; the catalog's doc types were left as they are.
     pub doc_types_error: Option<String>,
+    /// New document rows whose metadata came from a `docmeta.jsonl` record.
+    pub docmeta_restored: usize,
+    /// `docmeta.jsonl` lines that could not be read (skipped).
+    pub docmeta_bad_lines: usize,
 }
 
 impl std::fmt::Display for RebuildReport {
@@ -58,6 +62,20 @@ impl std::fmt::Display for RebuildReport {
                 f,
                 " · {} clients without a folder · {} relationships",
                 self.master_only, self.relationships
+            )?;
+        }
+        if self.docmeta_restored > 0 {
+            write!(
+                f,
+                " · metadata restored for {} documents",
+                self.docmeta_restored
+            )?;
+        }
+        if self.docmeta_bad_lines > 0 {
+            write!(
+                f,
+                "\ndocmeta.jsonl lines that could not be read (skipped): {}",
+                self.docmeta_bad_lines
             )?;
         }
         if let Some(e) = &self.doc_types_error {
@@ -499,8 +517,15 @@ pub fn rebuild(
     }
 
     stmts.extend(client_stmts(conn, root, &bound, &now, device_id, &mut rep)?);
+    // Doc types the restored metadata may point at: id -> id, lower-case name -> id.
+    let mut type_ids: HashMap<String, String> = HashMap::new();
+    let mut type_names: HashMap<String, String> = HashMap::new();
     match crate::doctypes::load(root) {
         Ok(Some(types)) => {
+            for t in &types {
+                type_ids.insert(t.id.clone(), t.id.clone());
+                type_names.insert(t.name.trim().to_lowercase(), t.id.clone());
+            }
             rep.doc_types = types.len();
             stmts.extend(
                 crate::doctypes::catalog_stmts(conn, &types, &now, device_id)
@@ -510,6 +535,10 @@ pub fn rebuild(
         Ok(None) => {}
         Err(e) => rep.doc_types_error = Some(e),
     }
+
+    let folder_rels: Vec<String> = bound.iter().map(|b| b.folder_rel.clone()).collect();
+    let meta = crate::docmeta::Index::load(root, &folder_rels);
+    rep.docmeta_bad_lines = meta.bad_lines;
 
     // Documents: compare with live catalog rows by path; re-link moves by hash.
     let mut live: HashMap<String, (String, String)> = HashMap::new(); // rel -> (id, hash)
@@ -572,14 +601,47 @@ pub fn rebuild(
                     doc_id_by_rel.insert(f.rel.clone(), id);
                 } else {
                     let id = vf_core::new_id();
+                    // Q-22: metadata kept on disk wins over what the path suggests.
+                    let m = meta.get(&f.rel, &f.hash);
+                    let (year, status, source, doc_type, tags) = match m {
+                        Some(m) => {
+                            rep.docmeta_restored += 1;
+                            let dt = m
+                                .doc_type
+                                .as_ref()
+                                .and_then(|t| type_ids.get(t))
+                                .or_else(|| {
+                                    m.doc_type_name
+                                        .as_ref()
+                                        .and_then(|n| type_names.get(&n.trim().to_lowercase()))
+                                })
+                                .cloned();
+                            (
+                                serde_json::Value::from(m.tax_year),
+                                m.status.clone(),
+                                m.source.clone(),
+                                dt,
+                                m.tags.clone(),
+                            )
+                        }
+                        None => (year, "received".to_string(), None, None, vec![]),
+                    };
                     stmts.push(Stmt::new(
-                        "INSERT INTO document (id, client_id, tax_year, rel_path, hash, size, mime, status, filed_by, filed_at, device_id, updated_at)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'received', 'rebuild', ?8, ?9, ?8)",
+                        "INSERT INTO document (id, client_id, doc_type_id, tax_year, rel_path, hash, size, mime, status, source, filed_by, filed_at, device_id, updated_at)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'rebuild', ?11, ?12, ?11)",
                         vec![
-                            id.clone().into(), f.client_id.clone().into(), year, f.rel.clone().into(),
-                            f.hash.clone().into(), f.size.into(), mime(&f.rel).into(), now.clone().into(), device_id.into(),
+                            id.clone().into(), f.client_id.clone().into(), doc_type.into(), year,
+                            f.rel.clone().into(), f.hash.clone().into(), f.size.into(),
+                            mime(&f.rel).into(), status.into(), source.into(), now.clone().into(),
+                            device_id.into(),
                         ],
                     ));
+                    for t in tags {
+                        stmts.push(Stmt::new(
+                            "INSERT OR IGNORE INTO document_tag (doc_id, tag) VALUES (?1, ?2)",
+                            vec![id.clone().into(), t.into()],
+                        ));
+                    }
                     rep.docs_new += 1;
                     doc_id_by_rel.insert(f.rel.clone(), id);
                 }
@@ -1106,6 +1168,72 @@ mod tests {
                 &format!("SELECT count(*) FROM client WHERE id = '{s}'")
             ),
             1
+        );
+    }
+
+    /// Q-22: metadata edits come back from the client folder's `_Vibe/docmeta.jsonl`, also for
+    /// a file renamed on disk (matched by content hash).
+    #[test]
+    fn rebuild_restores_document_metadata() {
+        let c = cab();
+        crate::doctypes::seed_if_missing(&c.root).unwrap();
+        let mut conn = open(&c);
+        rebuild(&mut conn, &c.root, "dev-1").unwrap();
+        let w2_type: String = conn
+            .query_row("SELECT id FROM doc_type WHERE name = 'W-2'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        let ids: Vec<String> = conn
+            .prepare("SELECT id FROM document WHERE rel_path LIKE '%/w2.pdf'")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        assert_eq!(ids.len(), 2);
+        crate::docmeta::edit(
+            &mut conn,
+            &c.root,
+            &ids,
+            &crate::docmeta::MetaEdit {
+                doc_type: Some(Some(w2_type.clone())),
+                status: Some("final".into()),
+                source: Some(Some("client".into())),
+                tags: Some(vec!["scanned".into()]),
+                ..Default::default()
+            },
+            "dev-1",
+        )
+        .unwrap();
+        // Renamed by hand outside the app.
+        let a = c.root.join("Smith, John (1001)/Income Tax/2025");
+        std::fs::rename(a.join("w2.pdf"), a.join("W-2 employer.pdf")).unwrap();
+
+        let mut fresh = vf_core::db::open(
+            &c.data.join("fresh.db"),
+            &CatalogKey([5; 32]),
+            Storage::Local,
+        )
+        .unwrap();
+        let rep = rebuild(&mut fresh, &c.root, "dev-2").unwrap();
+        assert_eq!(rep.docmeta_restored, 2, "{rep}");
+        assert_eq!(
+            n(
+                &fresh,
+                &format!(
+                    "SELECT count(*) FROM document WHERE doc_type_id = '{w2_type}'
+                     AND status = 'final' AND source = 'client'"
+                )
+            ),
+            2
+        );
+        assert_eq!(
+            n(
+                &fresh,
+                "SELECT count(*) FROM document_tag WHERE tag = 'scanned'"
+            ),
+            2
         );
     }
 

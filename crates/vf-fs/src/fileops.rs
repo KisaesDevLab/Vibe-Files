@@ -81,6 +81,24 @@ fn remove_empty(created: &[PathBuf]) {
     }
 }
 
+/// Appends one line per item, flushed to disk.
+fn append(path: &Path, lines: &[String]) -> Result<(), String> {
+    use std::io::Write;
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .map_err(|e| format!("cannot open {}: {e}", path.display()))?;
+    let mut buf = String::new();
+    for l in lines {
+        buf.push_str(l);
+        buf.push('\n');
+    }
+    f.write_all(buf.as_bytes())
+        .and_then(|()| f.sync_all())
+        .map_err(|e| format!("cannot write {}: {e}", path.display()))
+}
+
 fn method_name(m: Method) -> &'static str {
     match m {
         Method::Move => "move",
@@ -126,6 +144,21 @@ impl FileOps for FilerFileOps {
                 method: "mkdir".into(),
                 created_dirs: self.make_dirs(path)?,
             }),
+            FileOp::AppendLines { path, lines, .. } => {
+                let created = self.make_parents(path)?;
+                if let Err(e) = append(path, lines) {
+                    remove_empty(&created);
+                    return Err(e);
+                }
+                Ok(AppliedOp {
+                    op: op.clone(),
+                    bytes: lines.iter().map(|l| l.len() as u64 + 1).sum(),
+                    sha256: None,
+                    method: "append".into(),
+                    // Never removed on undo: undo appends, the file stays.
+                    created_dirs: vec![],
+                })
+            }
             FileOp::WriteSentinel {
                 root,
                 folder,
@@ -186,6 +219,13 @@ impl FileOps for FilerFileOps {
                 )),
             },
             FileOp::Mkdir { .. } => Ok(()),
+            FileOp::AppendLines { path, .. } => {
+                if path.is_file() {
+                    Ok(())
+                } else {
+                    Err(format!("{} is gone", path.display()))
+                }
+            }
             FileOp::WriteSentinel { folder, .. } => {
                 let p = filer_intake::sentinel::sentinel_path(folder);
                 match (&a.sha256, commit::sha256_file(&p)) {
@@ -209,6 +249,9 @@ impl FileOps for FilerFileOps {
             FileOp::Copy { dst, .. } => std::fs::remove_file(dst)
                 .map_err(|e| format!("cannot remove {}: {e}", dst.display()))?,
             FileOp::Mkdir { .. } => {}
+            FileOp::AppendLines {
+                path, undo_lines, ..
+            } => append(path, undo_lines)?,
             FileOp::WriteSentinel { folder, .. } => {
                 let p = filer_intake::sentinel::sentinel_path(folder);
                 std::fs::remove_file(&p)
