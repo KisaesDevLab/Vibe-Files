@@ -5103,6 +5103,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "vf-core",
+ "vf-fs",
 ]
 
 [[package]]

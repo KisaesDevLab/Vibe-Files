@@ -53,6 +53,11 @@ pub struct SearchTab {
     requested: HashSet<String>,
     /// A result to open in the Viewer (taken by the app).
     pub open: Option<Doc>,
+    /// The "Save search" name being typed.
+    save_name: Option<String>,
+    /// A search was saved: the app reloads Browse's Saved searches.
+    pub saved_changed: bool,
+    pub notice: Option<String>,
 }
 
 impl SearchTab {
@@ -123,6 +128,7 @@ pub fn show(
     root: &Path,
     snap: &Snapshot,
     ctx: &Context,
+    device_id: &str,
 ) {
     pump_thumbs(ui.ctx(), s);
     egui::Panel::top("vf-search-box")
@@ -155,6 +161,7 @@ pub fn show(
                 });
             });
             filters(ui, s, snap);
+            save_row(ui, s, root, ctx, device_id);
         });
     s.run_if_changed(conn, ctx);
     egui::CentralPanel::default().show(ui, |ui| {
@@ -206,6 +213,53 @@ pub fn show(
                 }
             },
         );
+    });
+}
+
+/// `Save search…`: names the current query; Browse lists it under Saved searches for the
+/// whole firm.
+fn save_row(ui: &mut egui::Ui, s: &mut SearchTab, root: &Path, ctx: &Context, device_id: &str) {
+    let q = s.query(ctx);
+    ui.horizontal(|ui| {
+        match &mut s.save_name {
+            None => {
+                if ui
+                    .add_enabled(!q.is_empty(), egui::Button::new("Save search…"))
+                    .on_hover_text("Saved searches appear in Browse for everyone in the firm.")
+                    .clicked()
+                {
+                    s.save_name = Some(String::new());
+                    s.notice = None;
+                }
+            }
+            Some(name) => {
+                let l = ui.label("Name");
+                ui.add(
+                    egui::TextEdit::singleline(name)
+                        .hint_text("e.g. 1099s received 2025")
+                        .desired_width(220.0),
+                )
+                .labelled_by(l.id);
+                if ui.add(widgets::primary_button("Save")).clicked() {
+                    match vf_index::saved::add(root, name, &q, device_id) {
+                        Ok(_) => {
+                            s.notice = Some(format!(
+                                "Saved \"{}\". It is in Browse under Saved searches.",
+                                name.trim()
+                            ));
+                            s.saved_changed = true;
+                            s.save_name = None;
+                        }
+                        Err(e) => s.notice = Some(e),
+                    }
+                } else if ui.button("Cancel").clicked() {
+                    s.save_name = None;
+                }
+            }
+        }
+        if let Some(n) = &s.notice {
+            ui.label(widgets::caption(n));
+        }
     });
 }
 

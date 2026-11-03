@@ -2,4 +2,5 @@
 //! searches.
 
 pub mod fts;
+pub mod saved;
 pub mod search;

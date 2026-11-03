@@ -182,6 +182,11 @@ pub enum Scope {
         list: IdList,
         ids: Vec<String>,
     },
+    /// A saved search (P03 step 6): the documents it found when it was opened.
+    Saved {
+        name: String,
+        ids: Vec<String>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -283,7 +288,9 @@ impl Index {
     /// Indices into `Snapshot::docs` inside `scope`, in path order.
     pub fn docs_in(&self, s: &Snapshot, scope: &Scope) -> Vec<usize> {
         let ids: std::collections::HashSet<&str> = match scope {
-            Scope::Ids { ids, .. } => ids.iter().map(String::as_str).collect(),
+            Scope::Ids { ids, .. } | Scope::Saved { ids, .. } => {
+                ids.iter().map(String::as_str).collect()
+            }
             _ => Default::default(),
         };
         (0..s.docs.len())
@@ -309,7 +316,7 @@ impl Index {
                         d.tax_year.is_none() && !permanent(folder) && !permanent(&d.rel_path)
                     }
                     Scope::ReceivedSince(t) => d.filed_at.as_str() >= t.as_str(),
-                    Scope::Ids { .. } => ids.contains(d.id.as_str()),
+                    Scope::Ids { .. } | Scope::Saved { .. } => ids.contains(d.id.as_str()),
                 }
             })
             .collect()

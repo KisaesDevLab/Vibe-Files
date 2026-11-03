@@ -102,6 +102,12 @@ pub struct Browse {
     /// "this week"; recomputed by `recount` when the catalog or the lists change.
     view_counts: [usize; 5],
     fav_counts: Vec<usize>,
+    /// The firm's saved searches (`_Vibe/saved_searches.json`), set by the app.
+    pub saved: Vec<vf_index::saved::SavedSearch>,
+    /// A saved search clicked in the tree: run on the next frame (needs the catalog).
+    saved_open: Option<usize>,
+    /// A saved search to delete (needs the cabinet root).
+    saved_delete: Option<String>,
     week_start: String,
     /// Hands files to Windows; tests replace it to record instead of launching apps.
     pub shell: ShellFn,
@@ -156,6 +162,9 @@ impl Browse {
             prefs_dirty: false,
             view_counts: [0; 5],
             fav_counts: Vec::new(),
+            saved: Vec::new(),
+            saved_open: None,
+            saved_delete: None,
             week_start: week_start_utc(),
             shell: Box::new(shell::run),
             file_request: None,
@@ -215,7 +224,8 @@ impl Browse {
                 s @ (Scope::NeedsDocType
                 | Scope::NeedsTaxYear
                 | Scope::ReceivedSince(_)
-                | Scope::Ids { .. }),
+                | Scope::Ids { .. }
+                | Scope::Saved { .. }),
                 _,
             ) => s.clone(),
             _ => Scope::Cabinet,
@@ -351,6 +361,28 @@ impl Browse {
             IdList::Recent => self.prefs.recent.clone(),
         };
         Scope::Ids { list, ids }
+    }
+
+    /// Runs a saved search clicked in the tree (its results become the grid) and deletes one
+    /// asked for.
+    fn saved_requests(&mut self, env: &Env) {
+        if let Some(i) = self.saved_open.take()
+            && let Some(s) = self.saved.get(i).cloned()
+        {
+            match vf_index::search::search(env.conn, &s.query, 100_000) {
+                Ok(hits) => self.set_scope(Scope::Saved {
+                    name: s.name,
+                    ids: hits.into_iter().map(|h| h.doc_id).collect(),
+                }),
+                Err(e) => self.error = Some(format!("The saved search did not run: {e}")),
+            }
+        }
+        if let Some(id) = self.saved_delete.take() {
+            match vf_index::saved::remove(env.root, &id) {
+                Ok(()) => self.saved = vf_index::saved::load(env.root),
+                Err(e) => self.error = Some(format!("Could not delete the saved search: {e}")),
+            }
+        }
     }
 
     /// Sets the Pinned / Recent / Favorites lists (from config) and recounts.
@@ -596,6 +628,7 @@ fn folder_label(f: &str) -> &str {
 /// Draws the whole tab (three panes). Call where the central panel would go.
 pub fn show(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env) {
     b.keys(ui.ctx());
+    b.saved_requests(env);
     egui::Panel::left("browse-tree")
         .default_size(272.0)
         .size_range(200.0..=480.0)
@@ -711,6 +744,28 @@ fn tree(ui: &mut egui::Ui, b: &mut Browse) {
             resp.context_menu(|ui| {
                 if ui.button("Remove from favorites").clicked() {
                     fav_remove = Some(i);
+                    ui.close();
+                }
+            });
+        }
+    }
+    if !b.saved.is_empty() {
+        ui.label(widgets::caption("SAVED SEARCHES"));
+        for i in 0..b.saved.len() {
+            let name = b.saved[i].name.clone();
+            let sel = matches!(&b.scope, Scope::Saved { name: n, .. } if *n == name);
+            let n = match &b.scope {
+                Scope::Saved { name: cur, ids } if *cur == name => ids.len(),
+                _ => 0,
+            };
+            let (_, resp) = tree_row(ui, 0, None, false, &name, n, sel);
+            if resp.clicked() {
+                b.saved_open = Some(i);
+            }
+            let id = b.saved[i].id.clone();
+            resp.context_menu(|ui| {
+                if ui.button("Delete saved search").clicked() {
+                    b.saved_delete = Some(id.clone());
                     ui.close();
                 }
             });
@@ -934,6 +989,7 @@ fn breadcrumb(b: &Browse) -> String {
         Scope::NeedsTaxYear => "Views / Needs tax year".into(),
         Scope::ReceivedSince(_) => "Views / Received this week".into(),
         Scope::Ids { list, .. } => format!("Views / {}", list.label()),
+        Scope::Saved { name, .. } => format!("Saved searches / {name}"),
         Scope::Client(c) => format!("Cabinet / {}", client(*c)),
         Scope::Year { client: c, year } => {
             format!("Cabinet / {} / {}", client(*c), year_label(*year))
@@ -1440,6 +1496,38 @@ mod tests {
         crate::ui::theme::install(&h.ctx);
         h.run();
         h
+    }
+
+    /// P03 step 6: a saved search is a virtual folder in the tree, shared through the cabinet.
+    #[test]
+    fn saved_search_is_a_virtual_folder() {
+        use vf_index::search::{Query, Year};
+        let mut h = harness(3, 8);
+        let root = h.state().root.clone();
+        std::fs::create_dir_all(&root).unwrap();
+        vf_index::saved::add(
+            &root,
+            "Everything 2025",
+            &Query {
+                year: Some(Year::Year(2025)),
+                ..Query::default()
+            },
+            "dev-test",
+        )
+        .unwrap();
+        h.state_mut().b.saved = vf_index::saved::load(&root);
+        h.run();
+        click(&mut h, "Everything 2025");
+        h.run();
+        let b = &h.state().b;
+        assert!(matches!(&b.scope, Scope::Saved { name, .. } if name == "Everything 2025"));
+        assert_eq!(b.visible.len(), 12, "half of 3 × 8 are 2025");
+        assert!(
+            b.visible
+                .iter()
+                .all(|&i| b.snap.docs[i].tax_year == Some(2025))
+        );
+        assert_eq!(breadcrumb(b), "Saved searches / Everything 2025");
     }
 
     #[test]

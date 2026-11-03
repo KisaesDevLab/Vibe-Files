@@ -235,6 +235,7 @@ impl VibeFilesApp {
                 let mut browse = Browse::load(&opened.conn);
                 browse.sheets_dir = self.data.join("sheets");
                 browse.set_prefs(self.config.prefs.clone());
+                browse.saved = vf_index::saved::load(&opened.root);
                 browse.notice = opened.rebuild.as_ref().map(|r| format!("Indexed: {r}"));
                 let ocr = crate::ui::ocr::OcrState::start(
                     ctx,
@@ -328,7 +329,11 @@ impl eframe::App for VibeFilesApp {
                     &o.opened.root,
                     &o.browse.snap,
                     &cx,
+                    &self.config.device_id,
                 );
+                if std::mem::take(&mut o.search.saved_changed) {
+                    o.browse.saved = vf_index::saved::load(&o.opened.root);
+                }
                 if let Some(doc) = o.search.open.take() {
                     o.viewer.open(doc);
                     self.tab = Tab::Viewer;
