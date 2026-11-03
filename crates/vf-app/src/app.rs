@@ -7,6 +7,7 @@ use vf_security::keys::KdfParams;
 
 use crate::config::{self, Config};
 use crate::session::{self, CreateRequest, Opened};
+use crate::ui::admin::{self, Admin};
 use crate::ui::browse::{self, Browse};
 use crate::ui::wizard::{self, Mode, Wizard};
 use crate::ui::{chrome, theme};
@@ -71,6 +72,8 @@ pub enum Screen {
 pub struct OpenCabinet {
     pub opened: Opened,
     pub browse: Browse,
+    /// Built the first time the Admin tab is shown.
+    pub admin: Option<Admin>,
 }
 
 pub struct VibeFilesApp {
@@ -178,7 +181,11 @@ impl VibeFilesApp {
                 let _ = config::save(&self.data, &self.config);
                 let mut browse = Browse::load(&opened.conn);
                 browse.notice = opened.rebuild.as_ref().map(|r| format!("Indexed: {r}"));
-                self.screen = Screen::Open(Box::new(OpenCabinet { opened, browse }));
+                self.screen = Screen::Open(Box::new(OpenCabinet {
+                    opened,
+                    browse,
+                    admin: None,
+                }));
             }
             Err(e) => {
                 let mut w = back.clone();
@@ -224,7 +231,23 @@ impl eframe::App for VibeFilesApp {
                     root: &o.opened.root,
                     device_id: &self.config.device_id,
                 };
+                if o.admin
+                    .as_mut()
+                    .is_some_and(|a| std::mem::take(&mut a.changed))
+                {
+                    o.browse.reload(env.conn);
+                }
                 browse::show(ui, &mut o.browse, &mut env)
+            }
+            Screen::Open(o) if self.tab == Tab::Admin => {
+                let o = &mut **o;
+                let mut env = browse::Env {
+                    conn: &mut o.opened.conn,
+                    root: &o.opened.root,
+                    device_id: &self.config.device_id,
+                };
+                let a = o.admin.get_or_insert_with(|| Admin::load(&env));
+                admin::show(ui, a, &mut env)
             }
             screen => {
                 egui::CentralPanel::default().show(ui, |ui| match screen {
@@ -335,6 +358,20 @@ mod tests {
         let cab = vf_fs::cabinet::read(&root).unwrap();
         assert_eq!(cab.name.as_deref(), Some("Kisaes Clients"));
         assert!(vf_fs::cabinet::recovery_key_file(&root).is_file());
+        assert!(vf_fs::doctypes::path(&root).is_file(), "doc types seeded");
+        let Screen::Open(o) = &h.state().screen else {
+            unreachable!()
+        };
+        let n: i64 = o
+            .opened
+            .conn
+            .query_row(
+                "SELECT count(*) FROM doc_type WHERE deleted_at IS NULL",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n as usize, vf_fs::doctypes::SEED.len());
         assert!(data.join(session::CATALOG_FILE).is_file());
         assert_eq!(
             config::load(&data).unwrap().last_cabinet.as_deref(),

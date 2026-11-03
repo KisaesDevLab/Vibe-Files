@@ -85,6 +85,8 @@ pub fn create(data: &Path, device_id: &str, r: &CreateRequest, kdf: KdfParams) -
         bail!(e);
     }
 
+    // The seeded doc-type list (Q-21); rebuild reads it into the catalog.
+    vf_fs::doctypes::seed_if_missing(r.root).map_err(anyhow::Error::msg)?;
     std::fs::create_dir_all(data).with_context(|| format!("creating {}", data.display()))?;
     let mut conn = db::open(&catalog, &CatalogKey(raw), Storage::Local)?;
     let rep = vf_fs::rebuild::rebuild(&mut conn, r.root, device_id)?;
@@ -123,6 +125,12 @@ pub fn open(data: &Path, device_id: &str, root: &Path, passphrase: &str) -> Resu
         [&cab.cabinet_id],
         |r| r.get(0),
     )?;
+    // Cabinets made before doc types existed get the seeded list now.
+    let seeded = vf_fs::doctypes::seed_if_missing(root).map_err(anyhow::Error::msg)?;
+    if seeded && known > 0 {
+        vf_fs::doctypes::sync(&mut conn, root, device_id, "doc_types_seed")
+            .map_err(anyhow::Error::msg)?;
+    }
     let rebuild = if known == 0 {
         Some(vf_fs::rebuild::rebuild(&mut conn, root, device_id)?)
     } else {

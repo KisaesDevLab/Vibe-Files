@@ -34,6 +34,10 @@ pub struct RebuildReport {
     pub uuid_mismatches: Vec<String>,
     /// The client master could not be read; clients came from sentinels only.
     pub master_error: Option<String>,
+    /// Doc types restored from `_Vibe/doc_types.json`.
+    pub doc_types: usize,
+    /// `doc_types.json` could not be read; the catalog's doc types were left as they are.
+    pub doc_types_error: Option<String>,
 }
 
 impl std::fmt::Display for RebuildReport {
@@ -54,6 +58,13 @@ impl std::fmt::Display for RebuildReport {
                 f,
                 " · {} clients without a folder · {} relationships",
                 self.master_only, self.relationships
+            )?;
+        }
+        if let Some(e) = &self.doc_types_error {
+            write!(
+                f,
+                "
+doc types not read (left as they were): {e}"
             )?;
         }
         if let Some(e) = &self.master_error {
@@ -488,6 +499,17 @@ pub fn rebuild(
     }
 
     stmts.extend(client_stmts(conn, root, &bound, &now, device_id, &mut rep)?);
+    match crate::doctypes::load(root) {
+        Ok(Some(types)) => {
+            rep.doc_types = types.len();
+            stmts.extend(
+                crate::doctypes::catalog_stmts(conn, &types, &now, device_id)
+                    .map_err(RebuildError::Io)?,
+            );
+        }
+        Ok(None) => {}
+        Err(e) => rep.doc_types_error = Some(e),
+    }
 
     // Documents: compare with live catalog rows by path; re-link moves by hash.
     let mut live: HashMap<String, (String, String)> = HashMap::new(); // rel -> (id, hash)
@@ -1082,6 +1104,32 @@ mod tests {
             n(
                 &conn,
                 &format!("SELECT count(*) FROM client WHERE id = '{s}'")
+            ),
+            1
+        );
+    }
+
+    /// Q-21: the doc-type list (with firm edits) comes back from `_Vibe/doc_types.json`.
+    #[test]
+    fn rebuild_restores_doc_types_from_the_cabinet() {
+        let c = cab();
+        crate::doctypes::seed_if_missing(&c.root).unwrap();
+        crate::doctypes::apply(
+            &c.root,
+            crate::doctypes::Edit::Add {
+                name: "Crypto statement".into(),
+                default_folder: "Income Tax/{Year}".into(),
+                client_visible: false,
+            },
+        )
+        .unwrap();
+        let mut conn = open(&c);
+        let rep = rebuild(&mut conn, &c.root, "dev-1").unwrap();
+        assert_eq!(rep.doc_types, crate::doctypes::SEED.len() + 1);
+        assert_eq!(
+            n(
+                &conn,
+                "SELECT count(*) FROM doc_type WHERE name = 'Crypto statement' AND deleted_at IS NULL"
             ),
             1
         );

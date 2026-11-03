@@ -1,0 +1,504 @@
+//! Admin tab (UI_SPEC §6). P01 step 4 builds the nav and the Doc types page; the other pages
+//! arrive with their phases.
+
+use std::collections::HashMap;
+
+use egui::{RichText, TextEdit};
+use vf_fs::doctypes::{self, DocType, Edit};
+
+use crate::ui::browse::Env;
+use crate::ui::{theme, wizard::ERROR};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Page {
+    DocTypes,
+}
+
+/// UI_SPEC §6 nav, grouped. Only Doc types is built in P01.
+const NAV: &[(&str, &[&str])] = &[
+    (
+        "FIRM",
+        &[
+            "Users & roles",
+            "Client access (ACL)",
+            "Devices",
+            "Doc types",
+            "Folder templates",
+        ],
+    ),
+    ("INTAKE", &["Print capture & parsers", "Scan profiles"]),
+    (
+        "COMPLIANCE",
+        &[
+            "Audit trail",
+            "Retention classes",
+            "Disposition",
+            "Legal holds",
+            "§7216 consents",
+            "Safeguards appendix",
+        ],
+    ),
+    ("SECURITY", &["Keys & recovery", "Integrity sweep", "Trash"]),
+];
+
+#[derive(Debug, Clone, Default)]
+struct Form {
+    name: String,
+    folder: String,
+    visible: bool,
+}
+
+pub struct Admin {
+    pub page: Page,
+    pub types: Vec<DocType>,
+    /// Live documents per doc type id.
+    usage: HashMap<String, i64>,
+    /// Template folders below the client folder (`Income Tax/{Year}`, …) for the folder picker.
+    folders: Vec<String>,
+    /// Selected type id, or `None` with `adding` for a new one.
+    pub selected: Option<String>,
+    pub adding: bool,
+    form: Form,
+    pub error: Option<String>,
+    /// Set when the catalog changed; Browse re-reads before it next draws.
+    pub changed: bool,
+}
+
+impl Admin {
+    pub fn load(env: &Env) -> Self {
+        let mut a = Admin {
+            page: Page::DocTypes,
+            types: Vec::new(),
+            usage: HashMap::new(),
+            folders: Vec::new(),
+            selected: None,
+            adding: false,
+            form: Form::default(),
+            error: None,
+            changed: false,
+        };
+        a.reload(env);
+        a
+    }
+
+    fn reload(&mut self, env: &Env) {
+        match doctypes::load(env.root) {
+            Ok(t) => self.types = t.unwrap_or_default(),
+            Err(e) => self.error = Some(e),
+        }
+        self.usage.clear();
+        if let Ok(mut st) = env.conn.prepare(
+            "SELECT doc_type_id, count(*) FROM document
+             WHERE deleted_at IS NULL AND doc_type_id IS NOT NULL GROUP BY doc_type_id",
+        ) && let Ok(rows) = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        {
+            self.usage.extend(rows.flatten());
+        }
+        let (tree, _, _) =
+            filer_core::template::load_or_seed(&vf_fs::clients::master_dir(env.root));
+        self.folders = filer_core::template::folder_templates(&tree);
+    }
+
+    fn select(&mut self, id: Option<String>) {
+        self.adding = id.is_none();
+        self.form = id
+            .as_ref()
+            .and_then(|id| self.types.iter().find(|t| &t.id == id))
+            .map(|t| Form {
+                name: t.name.clone(),
+                folder: t.default_folder.clone(),
+                visible: t.client_visible,
+            })
+            .unwrap_or_default();
+        self.selected = id;
+        self.error = None;
+    }
+
+    /// Saves one edit to `doc_types.json`, then the catalog (one Transaction).
+    fn run(&mut self, env: &mut Env, edit: Edit) -> bool {
+        let r = doctypes::apply(env.root, edit)
+            .and_then(|()| doctypes::sync(env.conn, env.root, env.device_id, "doc_types_edit"));
+        match r {
+            Ok(_) => {
+                self.changed = true;
+                self.reload(env);
+                true
+            }
+            Err(e) => {
+                self.error = Some(e);
+                false
+            }
+        }
+    }
+}
+
+pub fn show(ui: &mut egui::Ui, a: &mut Admin, env: &mut Env) {
+    egui::Panel::left("admin-nav")
+        .exact_size(248.0)
+        .resizable(false)
+        .frame(egui::Frame::new().fill(theme::PANE).inner_margin(10))
+        .show(ui, |ui| nav(ui, a));
+    egui::CentralPanel::default().show(ui, |ui| match a.page {
+        Page::DocTypes => doc_types(ui, a, env),
+    });
+}
+
+fn nav(ui: &mut egui::Ui, a: &mut Admin) {
+    for (group, items) in NAV {
+        ui.add_space(6.0);
+        ui.label(RichText::new(*group).small().color(theme::INK_MUTED));
+        for item in *items {
+            if *item == "Doc types" {
+                let label = format!("Doc types ({})", a.types.len());
+                if ui
+                    .selectable_label(a.page == Page::DocTypes, label)
+                    .clicked()
+                {
+                    a.page = Page::DocTypes;
+                }
+            } else {
+                ui.add_enabled(false, egui::Button::selectable(false, *item))
+                    .on_disabled_hover_text("Not built yet: arrives with its phase.");
+            }
+        }
+    }
+}
+
+fn doc_types(ui: &mut egui::Ui, a: &mut Admin, env: &mut Env) {
+    ui.horizontal(|ui| {
+        ui.label(RichText::new("Doc types").strong().size(16.0));
+        ui.label(
+            RichText::new("Kept in _Vibe\\doc_types.json and the catalog; rebuild restores it.")
+                .small()
+                .color(theme::INK_MUTED),
+        );
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let add = egui::Button::new(RichText::new("Add doc type").color(egui::Color32::WHITE))
+                .fill(theme::ACCENT_DEFAULT);
+            if ui.add(add).clicked() {
+                a.select(None);
+            }
+        });
+    });
+    ui.add_space(8.0);
+
+    // Editor first so the table below can take the rest of the height.
+    if a.adding || a.selected.is_some() {
+        editor(ui, a, env);
+        ui.add_space(8.0);
+        ui.separator();
+    }
+
+    let mut pick: Option<String> = None;
+    let mut mv: Option<(String, i32)> = None;
+    egui::ScrollArea::vertical()
+        .id_salt("doc-types")
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            egui::Grid::new("doc-type-grid")
+                .num_columns(5)
+                .striped(true)
+                .spacing([16.0, 6.0])
+                .show(ui, |ui| {
+                    for h in [
+                        "NAME",
+                        "DEFAULT FOLDER",
+                        "CLIENT-VISIBLE",
+                        "DOCUMENTS",
+                        "ORDER",
+                    ] {
+                        ui.label(RichText::new(h).small().color(theme::INK_MUTED));
+                    }
+                    ui.end_row();
+                    let n = a.types.len();
+                    for (i, t) in a.types.iter().enumerate() {
+                        let sel = a.selected.as_deref() == Some(t.id.as_str());
+                        if ui.selectable_label(sel, &t.name).clicked() {
+                            pick = Some(t.id.clone());
+                        }
+                        let folder = if t.default_folder.is_empty() {
+                            "—"
+                        } else {
+                            &t.default_folder
+                        };
+                        ui.label(RichText::new(folder).monospace().small());
+                        ui.label(if t.client_visible { "Yes" } else { "" });
+                        ui.label(a.usage.get(&t.id).copied().unwrap_or(0).to_string());
+                        ui.horizontal(|ui| {
+                            if order_button(ui, i > 0, "Up", &format!("Move {} up", t.name)) {
+                                mv = Some((t.id.clone(), -1));
+                            }
+                            if order_button(ui, i + 1 < n, "Down", &format!("Move {} down", t.name))
+                            {
+                                mv = Some((t.id.clone(), 1));
+                            }
+                        });
+                        ui.end_row();
+                    }
+                });
+        });
+    if let Some(id) = pick {
+        a.select(Some(id));
+    }
+    if let Some((id, by)) = mv {
+        a.run(env, Edit::Move(id, by));
+    }
+}
+
+/// A small button whose accessible name says which row it acts on.
+fn order_button(ui: &mut egui::Ui, enabled: bool, text: &str, name: &str) -> bool {
+    let r = ui.add_enabled(enabled, egui::Button::new(text).small());
+    let name = name.to_owned();
+    r.widget_info(|| egui::WidgetInfo::labeled(egui::accesskit::Role::Button, enabled, &name));
+    r.on_hover_text(name.clone()).clicked()
+}
+
+fn editor(ui: &mut egui::Ui, a: &mut Admin, env: &mut Env) {
+    ui.label(
+        RichText::new(if a.adding {
+            "New doc type"
+        } else {
+            "Edit doc type"
+        })
+        .strong()
+        .size(14.0),
+    );
+    egui::Grid::new("doc-type-form")
+        .num_columns(2)
+        .spacing([12.0, 6.0])
+        .show(ui, |ui| {
+            let l = ui.label("Doc type name");
+            ui.add(TextEdit::singleline(&mut a.form.name).desired_width(280.0))
+                .labelled_by(l.id);
+            ui.end_row();
+            let l = ui.label("Default folder");
+            ui.horizontal(|ui| {
+                ui.add(
+                    TextEdit::singleline(&mut a.form.folder)
+                        .hint_text("e.g. Income Tax/{Year}")
+                        .desired_width(220.0)
+                        .font(egui::TextStyle::Monospace),
+                )
+                .labelled_by(l.id);
+                let pick = ui.label(RichText::new("or").color(theme::INK_MUTED));
+                egui::ComboBox::from_id_salt("doc-type-folder-pick")
+                    .selected_text("Pick from template")
+                    .show_ui(ui, |ui| {
+                        if ui.selectable_label(false, "No default").clicked() {
+                            a.form.folder.clear();
+                        }
+                        for f in &a.folders {
+                            if ui.selectable_label(a.form.folder == *f, f).clicked() {
+                                a.form.folder = f.clone();
+                            }
+                        }
+                    })
+                    .response
+                    .labelled_by(pick.id)
+                    .on_hover_text("Folders of the cabinet template");
+            });
+            ui.end_row();
+            ui.label("");
+            ui.checkbox(&mut a.form.visible, "Client-visible");
+            ui.end_row();
+        });
+    if let Err(e) = doctypes::check_fields(&a.form.name, &a.form.folder) {
+        ui.label(RichText::new(e).color(theme::INK_MUTED));
+    }
+    let used = a
+        .selected
+        .as_ref()
+        .and_then(|id| a.usage.get(id).copied())
+        .unwrap_or(0);
+    if let Some(e) = &a.error {
+        ui.label(RichText::new(e).color(ERROR));
+    }
+    ui.horizontal(|ui| {
+        let ok = doctypes::check_fields(&a.form.name, &a.form.folder).is_ok();
+        if a.adding {
+            if ui.add_enabled(ok, egui::Button::new("Add")).clicked() {
+                let f = a.form.clone();
+                if a.run(
+                    env,
+                    Edit::Add {
+                        name: f.name,
+                        default_folder: f.folder,
+                        client_visible: f.visible,
+                    },
+                ) {
+                    let id = a.types.last().map(|t| t.id.clone());
+                    a.select(id);
+                }
+            }
+        } else if let Some(id) = a.selected.clone() {
+            if ui
+                .add_enabled(ok, egui::Button::new("Save changes"))
+                .clicked()
+            {
+                let f = a.form.clone();
+                a.run(
+                    env,
+                    Edit::Update(DocType {
+                        id,
+                        name: f.name,
+                        default_folder: f.folder,
+                        client_visible: f.visible,
+                    }),
+                );
+            }
+            let remove = ui.button("Remove");
+            let remove = if used > 0 {
+                remove.on_hover_text(format!(
+                    "{used} documents use it; they keep it, shown as deleted."
+                ))
+            } else {
+                remove
+            };
+            if remove.clicked() && a.run(env, Edit::Remove(a.selected.clone().unwrap_or_default()))
+            {
+                a.selected = None;
+            }
+        }
+        if ui.button("Close").clicked() {
+            a.selected = None;
+            a.adding = false;
+            a.error = None;
+        }
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use egui::accesskit::Role;
+    use egui_kittest::kittest::Queryable;
+    use egui_kittest::{Harness, HarnessBuilder};
+    use vf_core::db::{CatalogKey, Connection, Storage};
+
+    use super::*;
+
+    struct State {
+        a: Admin,
+        conn: Connection,
+        root: std::path::PathBuf,
+        _tmp: tempfile::TempDir,
+    }
+
+    fn harness() -> Harness<'static, State> {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("cabinet");
+        std::fs::create_dir_all(&root).unwrap();
+        let mut conn = vf_core::db::open(
+            &tmp.path().join("c.db"),
+            &CatalogKey([8; 32]),
+            Storage::Local,
+        )
+        .unwrap();
+        doctypes::seed_if_missing(&root).unwrap();
+        doctypes::sync(&mut conn, &root, "dev", "doc_types_seed").unwrap();
+        let a = {
+            let env = Env {
+                conn: &mut conn,
+                root: &root,
+                device_id: "dev",
+            };
+            Admin::load(&env)
+        };
+        let mut h = HarnessBuilder::default()
+            .with_size([1440.0, 900.0])
+            .build_ui_state(
+                |ui, s: &mut State| {
+                    let mut env = Env {
+                        conn: &mut s.conn,
+                        root: &s.root,
+                        device_id: "dev",
+                    };
+                    show(ui, &mut s.a, &mut env)
+                },
+                State {
+                    a,
+                    conn,
+                    root,
+                    _tmp: tmp,
+                },
+            );
+        crate::ui::theme::install(&h.ctx);
+        h.run();
+        h
+    }
+
+    fn click(h: &mut Harness<'static, State>, label: &str) {
+        h.get_by_role_and_label(Role::Button, label).click();
+        h.run();
+    }
+
+    fn type_into(h: &mut Harness<'static, State>, label: &str, text: &str) {
+        h.get_by_label(label).click();
+        h.step();
+        h.get_by_label(label).type_text(text);
+        h.step();
+    }
+
+    fn live(h: &Harness<'static, State>, name: &str) -> i64 {
+        h.state()
+            .conn
+            .query_row(
+                "SELECT count(*) FROM doc_type WHERE name = ?1 AND deleted_at IS NULL",
+                [name],
+                |r| r.get(0),
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn nav_shows_the_seeded_count() {
+        let h = harness();
+        let label = format!("Doc types ({})", doctypes::SEED.len());
+        assert!(h.query_by_label(&label).is_some());
+        assert!(h.query_by_label("8879 e-file authorization").is_some());
+    }
+
+    #[test]
+    fn add_edit_and_remove_a_doc_type() {
+        let mut h = harness();
+        click(&mut h, "Add doc type");
+        type_into(&mut h, "Doc type name", "Crypto statement");
+        type_into(&mut h, "Default folder", "Income Tax/{Year}");
+        click(&mut h, "Add");
+        assert_eq!(live(&h, "Crypto statement"), 1, "{:?}", h.state().a.error);
+        let file = std::fs::read_to_string(doctypes::path(&h.state().root)).unwrap();
+        assert!(file.contains("Crypto statement"));
+
+        // Selected after adding: rename it.
+        type_into(&mut h, "Doc type name", " (1099-DA)");
+        click(&mut h, "Save changes");
+        assert_eq!(
+            live(&h, "Crypto statement (1099-DA)"),
+            1,
+            "{:?}",
+            h.state().a.error
+        );
+
+        click(&mut h, "Remove");
+        assert_eq!(live(&h, "Crypto statement (1099-DA)"), 0);
+        assert!(h.state().a.changed);
+    }
+
+    #[test]
+    fn duplicate_name_is_refused() {
+        let mut h = harness();
+        click(&mut h, "Add doc type");
+        type_into(&mut h, "Doc type name", "W-2");
+        click(&mut h, "Add");
+        let e = h.state().a.error.clone().unwrap();
+        assert!(e.contains("two doc types"), "{e}");
+    }
+
+    #[test]
+    fn reorder_moves_one_place() {
+        let mut h = harness();
+        h.get_by_label("Move W-2 down").click();
+        h.run();
+        assert_eq!(h.state().a.types[1].name, "W-2");
+        assert_eq!(h.state().a.types[0].name, "1099-INT");
+    }
+}

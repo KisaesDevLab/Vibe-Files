@@ -3,6 +3,7 @@
 
 pub mod cabinet;
 pub mod clients;
+pub mod doctypes;
 pub mod fileops;
 pub mod newclient;
 pub mod rebuild;
