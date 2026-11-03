@@ -8,6 +8,7 @@ mod config;
 mod logging;
 mod perf;
 mod redact;
+mod screens;
 mod selfcheck;
 mod session;
 mod shell;

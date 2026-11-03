@@ -410,8 +410,10 @@ impl Matcher {
         for (i, (_, name, _)) in types.iter().enumerate() {
             // The name itself, and its parts (`POA (2848)` → `POA`, `2848`).
             add(name, i);
+            // A K-1's part is the return it comes from (`K-1 (1065)`): `1065` alone is the return.
+            let k1 = name.starts_with("K-1");
             for part in name.split(['(', ')', '/', '—']) {
-                if part.trim().len() > 2 && !part.trim().eq_ignore_ascii_case("copy") {
+                if !k1 && part.trim().len() > 2 && !part.trim().eq_ignore_ascii_case("copy") {
                     add(part.trim(), i);
                 }
             }
@@ -641,10 +643,28 @@ pub fn plan(conn: &Connection, root: &Path) -> Result<Plan, String> {
     p.clients.sort_by_key(|c| c.name.to_lowercase());
     for b in &bindings {
         let folder_rel = rel(root, &b.path);
-        let bound = matches!(b.status, Status::Bound);
+        // A readable sentinel binds the folder whether or not its client is in the CSV list
+        // (Filer's "orphan": a Filer Desktop tree before the list was imported); the rebuild
+        // treats it the same way.
+        let bound = matches!(b.status, Status::Bound | Status::Orphan);
         let (mut client, mut how, mut conf) = if bound {
-            let c = b.client_id.as_deref().and_then(|id| list.match_by_id(id));
-            (c.map(|c| pick(c, false)), "already bound".into(), 1.0)
+            let c = b
+                .client_id
+                .as_deref()
+                .and_then(|id| list.match_by_id(id))
+                .map(|c| pick(c, false))
+                .or_else(|| {
+                    filer_intake::sentinel::read_sentinel(&b.path)
+                        .ok()
+                        .flatten()
+                        .map(|s| ClientPick {
+                            ext_id: s.tax_software_id,
+                            uuid: s.client_id,
+                            name: s.display_name_at_creation,
+                            new: false,
+                        })
+                });
+            (c, "already bound".into(), 1.0)
         } else {
             folder_client(b, &list, &settings.id_pattern)
         };

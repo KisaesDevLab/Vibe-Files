@@ -183,6 +183,18 @@ pub fn show(ui: &mut egui::Ui, p: &mut ImportPage, env: &mut Env, catalog: &Path
         .iter()
         .filter(|r| r.include && !r.bound && r.client.is_some())
         .count();
+    // Files in bound (or to-be-bound) folders with a doc type or year to set.
+    let to_type = plan
+        .files
+        .iter()
+        .filter(|f| {
+            f.folder.is_some_and(|i| {
+                let r = &plan.folders[i];
+                r.bound || (r.include && r.client.is_some())
+            }) && ((f.doc_type.is_some() && f.type_confidence >= import::AUTO)
+                || !f.year_from.is_empty())
+        })
+        .count();
     ui.label(format!(
         "{} folders ({} already bound, {} to bind) · {} files · {} fully mapped ({:.0}%) · {} for manual handling",
         plan.folders.len(),
@@ -285,9 +297,14 @@ pub fn show(ui: &mut egui::Ui, p: &mut ImportPage, env: &mut Env, catalog: &Path
         "Rename bound folders to the firm template's name (\"{Client} ({ID})\"); files inside are not moved",
     );
     ui.horizontal(|ui| {
+        let label = if to_bind > 0 {
+            format!("Import {to_bind} folders")
+        } else {
+            format!("Set doc types and years ({to_type} files)")
+        };
         let go = ui.add_enabled(
-            to_bind > 0 && !p.running(),
-            widgets::primary_button(format!("Import {to_bind} folders")),
+            (to_bind > 0 || to_type > 0) && !p.running(),
+            widgets::primary_button(label),
         );
         if go.clicked() {
             p.start(ui.ctx(), catalog, env.root, env.device_id);

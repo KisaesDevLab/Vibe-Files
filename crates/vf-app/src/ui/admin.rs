@@ -338,7 +338,7 @@ fn nav(ui: &mut egui::Ui, a: &mut Admin) {
                 }
             } else {
                 ui.add_enabled(false, egui::Button::selectable(false, *item))
-                    .on_disabled_hover_text("Not built yet: arrives with its phase.");
+                    .on_disabled_hover_text("Planned for version 2.");
             }
         }
     }

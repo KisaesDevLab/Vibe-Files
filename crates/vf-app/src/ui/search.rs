@@ -352,37 +352,44 @@ fn filters(ui: &mut egui::Ui, s: &mut SearchTab, snap: &Snapshot) {
             .map_or("Any client".to_string(), |c| {
                 format!("{} ({})", c.name, c.ext_id)
             });
-        egui::ComboBox::new("search-client", "Client")
-            .selected_text(client_name)
-            .width(180.0)
-            .show_ui(ui, |ui| {
-                ui.selectable_value(&mut f.client, None, "Any client");
-                for c in &snap.clients {
-                    ui.selectable_value(
-                        &mut f.client,
-                        Some(c.id.clone()),
-                        format!("{} ({})", c.name, c.ext_id),
-                    );
-                }
-            });
-        let yl = ui.label("Year");
-        if ui
-            .add(
-                egui::TextEdit::singleline(&mut s.year_text)
-                    .hint_text("any")
-                    .desired_width(70.0),
-            )
-            .labelled_by(yl.id)
-            .on_hover_text("2025, Permanent, or empty for any year")
-            .changed()
-        {
-            let t = s.year_text.trim();
-            f.year = if t.eq_ignore_ascii_case("permanent") || t.eq_ignore_ascii_case("p") {
-                Some(Year::Permanent)
-            } else {
-                t.parse().ok().map(Year::Year)
-            };
-        }
+        ui.horizontal(|ui| {
+            let l = ui.label("Client");
+            egui::ComboBox::from_id_salt("search-client")
+                .selected_text(client_name)
+                .width(180.0)
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut f.client, None, "Any client");
+                    for c in &snap.clients {
+                        ui.selectable_value(
+                            &mut f.client,
+                            Some(c.id.clone()),
+                            format!("{} ({})", c.name, c.ext_id),
+                        );
+                    }
+                })
+                .response
+                .labelled_by(l.id);
+        });
+        ui.horizontal(|ui| {
+            let yl = ui.label("Year");
+            if ui
+                .add(
+                    egui::TextEdit::singleline(&mut s.year_text)
+                        .hint_text("any")
+                        .desired_width(70.0),
+                )
+                .labelled_by(yl.id)
+                .on_hover_text("2025, Permanent, or empty for any year")
+                .changed()
+            {
+                let t = s.year_text.trim();
+                f.year = if t.eq_ignore_ascii_case("permanent") || t.eq_ignore_ascii_case("p") {
+                    Some(Year::Permanent)
+                } else {
+                    t.parse().ok().map(Year::Year)
+                };
+            }
+        });
         let dt_name = match &f.doc_type {
             None => "Any doc type".to_string(),
             Some(DocType::Needed) => "Needs doc type".to_string(),
@@ -392,16 +399,21 @@ fn filters(ui: &mut egui::Ui, s: &mut SearchTab, snap: &Snapshot) {
                 .find(|(i, _)| i == id)
                 .map_or("?".into(), |(_, n)| n.clone()),
         };
-        egui::ComboBox::new("search-doctype", "Doc type")
-            .selected_text(dt_name)
-            .width(160.0)
-            .show_ui(ui, |ui| {
-                ui.selectable_value(&mut f.doc_type, None, "Any doc type");
-                ui.selectable_value(&mut f.doc_type, Some(DocType::Needed), "Needs doc type");
-                for (id, name) in &snap.doc_types {
-                    ui.selectable_value(&mut f.doc_type, Some(DocType::Is(id.clone())), name);
-                }
-            });
+        ui.horizontal(|ui| {
+            let l = ui.label("Doc type");
+            egui::ComboBox::from_id_salt("search-doctype")
+                .selected_text(dt_name)
+                .width(160.0)
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut f.doc_type, None, "Any doc type");
+                    ui.selectable_value(&mut f.doc_type, Some(DocType::Needed), "Needs doc type");
+                    for (id, name) in &snap.doc_types {
+                        ui.selectable_value(&mut f.doc_type, Some(DocType::Is(id.clone())), name);
+                    }
+                })
+                .response
+                .labelled_by(l.id);
+        });
         combo(
             ui,
             "search-status",
@@ -438,30 +450,37 @@ fn combo(
     v: &mut Option<String>,
     opts: &[(&str, &'static str)],
 ) {
-    egui::ComboBox::new(id, label)
-        .selected_text(widgets::label_of(opts, v.as_deref(), any))
-        .show_ui(ui, |ui| {
-            ui.selectable_value(v, None, any);
-            for (key, name) in opts {
-                ui.selectable_value(v, Some((*key).to_string()), *name);
-            }
-        });
+    ui.horizontal(|ui| {
+        let l = ui.label(label);
+        egui::ComboBox::from_id_salt(id)
+            .selected_text(widgets::label_of(opts, v.as_deref(), any))
+            .show_ui(ui, |ui| {
+                ui.selectable_value(v, None, any);
+                for (key, name) in opts {
+                    ui.selectable_value(v, Some((*key).to_string()), *name);
+                }
+            })
+            .response
+            .labelled_by(l.id);
+    });
 }
 
 fn text_filter(ui: &mut egui::Ui, label: &str, v: &mut Option<String>, hint: &str) {
-    let l = ui.label(label);
-    let mut t = v.clone().unwrap_or_default();
-    if ui
-        .add(
-            egui::TextEdit::singleline(&mut t)
-                .hint_text(hint)
-                .desired_width(90.0),
-        )
-        .labelled_by(l.id)
-        .changed()
-    {
-        *v = (!t.trim().is_empty()).then(|| t.trim().to_string());
-    }
+    ui.horizontal(|ui| {
+        let l = ui.label(label);
+        let mut t = v.clone().unwrap_or_default();
+        if ui
+            .add(
+                egui::TextEdit::singleline(&mut t)
+                    .hint_text(hint)
+                    .desired_width(100.0),
+            )
+            .labelled_by(l.id)
+            .changed()
+        {
+            *v = (!t.trim().is_empty()).then(|| t.trim().to_string());
+        }
+    });
 }
 
 fn thumb_key(h: &Hit) -> String {

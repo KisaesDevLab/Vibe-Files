@@ -1272,7 +1272,7 @@ fn grid(ui: &mut egui::Ui, b: &mut Browse, conn: &Connection) {
     if dismiss {
         b.notice = None;
     }
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         if ui.add(widgets::primary_button("+ New client")).clicked() {
             b.new_client = Some(NewClientDialog::new(folderless_selected(b)));
         }
@@ -1580,12 +1580,16 @@ fn inspector(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env) {
     }
     let top = b.undo_stack.as_ref().and_then(|s| s.first()).cloned();
     let mut undo = std::mem::take(&mut b.undo_requested);
+    let n = b.selected.len();
+    ui.label(
+        RichText::new(format!(
+            "{n} document{} selected",
+            if n == 1 { "" } else { "s" }
+        ))
+        .strong()
+        .size(14.0),
+    );
     ui.horizontal(|ui| {
-        ui.label(
-            RichText::new(format!("{} documents selected", b.selected.len()))
-                .strong()
-                .size(14.0),
-        );
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             let stack = b.undo_stack.clone().unwrap_or_default();
             ui.add_enabled_ui(!stack.is_empty(), |ui| {

@@ -449,3 +449,31 @@ fn rename_to_the_template_moves_folders_and_undo_puts_them_back() {
     import::undo(&mut f.conn, &f.root, &applied, "dev").unwrap();
     assert_eq!(snapshot(&f.root), before);
 }
+
+/// QA 2026-11-03: a Filer Desktop tree with sentinels but no client list imported yet. Its
+/// folders are bound already (as the rebuild treats them); the import types their files.
+#[test]
+fn sentinel_folders_without_a_client_list_count_as_bound() {
+    let t = tempfile::tempdir().unwrap();
+    let root = t.path().join("Clients");
+    vf_fixtures::generate(&root, 3).unwrap();
+    let mut conn = vf_core::db::open(&t.path().join("c.db"), Storage::Local).unwrap();
+    vf_fs::doctypes::seed_if_missing(&root).unwrap();
+    vf_fs::doctypes::sync(&mut conn, &root, "dev", "seed").unwrap();
+    vf_fs::rebuild::rebuild(&mut conn, &root, "dev").unwrap();
+    let plan = import::plan(&conn, &root).unwrap();
+    assert_eq!(plan.folders.len(), 5);
+    assert!(
+        plan.folders.iter().all(|r| r.bound && r.client.is_some()),
+        "{:?}",
+        plan.folders
+    );
+    assert!(
+        plan.files
+            .iter()
+            .all(|f| !plan.gaps(f).contains(&Gap::Client))
+    );
+    let applied = import::apply(&mut conn, &root, &plan, &Options::default(), "dev").unwrap();
+    assert_eq!(applied.bound, 0, "nothing to bind");
+    assert!(applied.mapped > 0, "files got their doc types and years");
+}
