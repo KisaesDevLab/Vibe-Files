@@ -43,6 +43,14 @@ fn main() -> anyhow::Result<std::process::ExitCode> {
     };
     let _log = logging::init(&data);
     if let Some(cmd) = &args.command {
+        // The release exe is a windowed program: typed in a console, its output goes there.
+        // SAFETY: plain Win32 call; fails harmlessly when there is no parent console.
+        #[cfg(not(debug_assertions))]
+        unsafe {
+            let _ = windows::Win32::System::Console::AttachConsole(
+                windows::Win32::System::Console::ATTACH_PARENT_PROCESS,
+            );
+        }
         let code = cli::run(cmd, &data, &mut std::io::stdout())?;
         return Ok(std::process::ExitCode::from(code as u8));
     }
