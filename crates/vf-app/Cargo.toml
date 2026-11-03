@@ -31,6 +31,7 @@ filer-pdf = { path = "../filer-pdf" }
 serde_json.workspace = true
 
 [dev-dependencies]
+filer-pdf = { path = "../filer-pdf", features = ["test-support"] }
 egui_kittest.workspace = true
 tempfile.workspace = true
 serde_json.workspace = true

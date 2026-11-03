@@ -220,7 +220,11 @@ impl eframe::App for VibeFilesApp {
         self.poll();
         let name = self.cabinet_name();
         chrome::header(ui, name.as_deref());
-        chrome::tab_bar(ui, &mut self.tab, 0);
+        let badge = match &self.screen {
+            Screen::Open(o) => o.intake.ingest.badge(),
+            _ => 0,
+        };
+        chrome::tab_bar(ui, &mut self.tab, badge);
         let mut segments = vec![format!("vibe-files {}", env!("CARGO_PKG_VERSION"))];
         if let Screen::Open(o) = &self.screen {
             segments.insert(
@@ -587,6 +591,60 @@ mod tests {
         click(&mut h, "Browse");
         h.step();
         assert_eq!(h.state().tab, Tab::Browse);
+    }
+
+    /// P02 steps 3 and 6: a file dropped in this PC's Scans folder is processed in the
+    /// background and handed to Filer's inbox; the Intake tab counts it, silently.
+    #[test]
+    fn scans_folder_feeds_filers_inbox_and_the_badge_counts() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("Clients");
+        let (scans, inbox) = (tmp.path().join("Scans"), tmp.path().join("Inbox"));
+        std::fs::create_dir_all(&scans).unwrap();
+        std::fs::create_dir_all(&inbox).unwrap();
+        let req = CreateRequest {
+            root: &root,
+            name: "Firm",
+            passphrase: "correct horse battery",
+            confirm: "correct horse battery",
+        };
+        drop(session::create(&tmp.path().join("pc1"), "dev-1", &req, FAST).unwrap());
+        let master = vf_fs::clients::master_dir(&root);
+        let (mut fs, _) = filer_intake::config::Settings::load_or_default(&master);
+        fs.inboxes = vec![inbox.clone()];
+        fs.save(&master).unwrap();
+
+        let data = tmp.path().join("pc1b");
+        let mut h = harness(&data);
+        h.state_mut().config.ingest.scans = Some(scans.clone());
+        click(&mut h, "Open existing");
+        type_into(&mut h, "Cabinet folder", &root.display().to_string());
+        type_into(&mut h, "Recovery passphrase", "correct horse battery");
+        click(&mut h, "Open cabinet");
+        settle(&mut h);
+
+        filer_pdf::pdf::write_test_pdf(&scans.join("Acme_1001_2025 W-2.pdf"), &["W-2 2025"]);
+        let start = std::time::Instant::now();
+        let delivered = inbox.join("Acme_1001_2025 W-2.pdf");
+        // Counted while it waits in Scans, and again once it is in Filer's inbox.
+        while !(delivered.is_file() && h.query_by_label("Intake (1)").is_some()) {
+            assert!(
+                start.elapsed() < std::time::Duration::from_secs(30),
+                "the badge never showed the delivered file"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            h.step();
+        }
+        assert!(
+            !scans.join("Acme_1001_2025 W-2.pdf").exists(),
+            "original kept aside"
+        );
+        assert!(scans.join(vf_ingest::pipeline::PROCESSED_DIR).is_dir());
+        let Screen::Open(o) = &h.state().screen else {
+            unreachable!()
+        };
+        assert_eq!(o.intake.ingest.delivered, 1);
+        assert!(o.intake.ingest.log[0].starts_with("Acme_1001_2025 W-2.pdf →"));
     }
 
     #[test]

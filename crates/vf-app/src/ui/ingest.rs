@@ -35,6 +35,38 @@ pub struct IngestState {
     pub changed: Option<Ingest>,
     /// Files delivered to Filer's inbox since the cabinet opened.
     pub delivered: usize,
+    /// PDFs and zips in Filer's inboxes (what its queue holds), at the last check.
+    in_inboxes: usize,
+}
+
+/// PDFs and zips Filer would queue from `inboxes` (sub-folders too, not `_combined`).
+pub fn count_queued(inboxes: &[PathBuf]) -> usize {
+    fn walk(dir: &Path, depth: usize) -> usize {
+        let Ok(rd) = std::fs::read_dir(dir) else {
+            return 0;
+        };
+        rd.filter_map(Result::ok)
+            .map(|e| {
+                let p = e.path();
+                let name = e.file_name().to_string_lossy().to_lowercase();
+                if name.starts_with('.') || name.starts_with("~$") {
+                    0
+                } else if p.is_dir() {
+                    if depth < 4 && !filer_intake::intake::in_combined_dir(&p) {
+                        walk(&p, depth + 1)
+                    } else {
+                        0
+                    }
+                } else {
+                    usize::from(
+                        filer_intake::intake::kind_of(&p)
+                            != filer_intake::intake::Kind::Unsupported,
+                    )
+                }
+            })
+            .sum()
+    }
+    inboxes.iter().map(|i| walk(i, 0)).sum()
 }
 
 /// A staging folder must exist, be outside the cabinet, and not be one of Filer's inboxes
@@ -75,6 +107,12 @@ impl IngestState {
         self.worker.as_ref().map_or(0, Worker::waiting)
     }
 
+    /// The Intake tab badge: files waiting to be processed or filed (UI_SPEC: silent, a count
+    /// only).
+    pub fn badge(&self) -> usize {
+        self.waiting() + self.in_inboxes
+    }
+
     /// Keeps the worker pointed at this PC's folders and collects what it did. Every frame,
     /// whatever tab is showing.
     pub fn tick(&mut self, ctx: &egui::Context, root: &Path, device_id: &str, prefs: &Ingest) {
@@ -105,6 +143,7 @@ impl IngestState {
         self.checked = Some(Instant::now());
         let inboxes = filer_inboxes(root);
         self.inbox = inboxes.first().cloned();
+        self.in_inboxes = count_queued(&inboxes);
         let mut warnings = Vec::new();
         let mut folders = Vec::new();
         for (dir, origin) in [
@@ -233,4 +272,28 @@ fn file_name(p: &Path) -> String {
     p.file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn counts_what_filer_would_queue() {
+        let t = tempfile::tempdir().unwrap();
+        let a = t.path().join("a");
+        std::fs::create_dir_all(a.join("sub")).unwrap();
+        std::fs::create_dir_all(a.join("_combined")).unwrap();
+        for f in [
+            "x.pdf",
+            "y.zip",
+            "notes.txt",
+            ".hidden.pdf",
+            "sub/z.PDF",
+            "_combined/c.pdf",
+        ] {
+            std::fs::write(a.join(f), b"x").unwrap();
+        }
+        assert_eq!(count_queued(&[a, t.path().join("missing")]), 3);
+    }
 }
