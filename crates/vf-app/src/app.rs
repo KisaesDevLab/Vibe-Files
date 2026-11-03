@@ -1040,7 +1040,7 @@ mod tests {
         }
 
         // Save as: a new document, the file just saved untouched.
-        let before = std::fs::read(&path).unwrap();
+        // (Not compared byte for byte: the OCR worker may add its text layer meanwhile.)
         pend(
             &mut h,
             Kind::Note {
@@ -1051,7 +1051,11 @@ mod tests {
         h.run();
         click(&mut h, "Save as…");
         h.step();
-        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert_eq!(
+            vf_pdf::annot::read(&path).unwrap().len(),
+            2,
+            "Save as leaves the file just saved alone"
+        );
         let copy = root.join("Old/letter (2).pdf");
         assert_eq!(
             vf_pdf::annot::read(&copy).unwrap().len(),
