@@ -84,6 +84,8 @@ pub struct OpenCabinet {
     indexed_seen: (usize, Option<std::time::Instant>),
     /// The audit chain check: on open, then weekly (P05 step 2).
     pub chain: crate::ui::audit::ChainCheck,
+    /// When new audit rows were last copied to `_Vibe/audit/<month>.jsonl`.
+    mirrored_at: Option<std::time::Instant>,
 }
 
 impl OpenCabinet {
@@ -261,6 +263,7 @@ impl VibeFilesApp {
                 let chain = crate::ui::audit::ChainCheck::run(&opened.conn);
                 self.screen = Screen::Open(Box::new(OpenCabinet {
                     chain,
+                    mirrored_at: None,
                     opened,
                     browse,
                     admin: None,
@@ -299,6 +302,18 @@ impl eframe::App for VibeFilesApp {
         chrome::tab_bar(ui, &mut self.tab, badge);
         if let Screen::Open(o) = &mut self.screen {
             o.chain.tick(&o.opened.conn);
+            // The audit trail's copy in the cabinet (CLAUDE.md layout: _Vibe/audit/*.jsonl).
+            if o.mirrored_at
+                .is_none_or(|t| t.elapsed() >= std::time::Duration::from_secs(2))
+            {
+                o.mirrored_at = Some(std::time::Instant::now());
+                let dir = o.opened.root.join("_Vibe").join("audit");
+                if let Err(e) = vf_core::audit::mirror_pending(&o.opened.conn, &dir) {
+                    o.browse.error = Some(format!(
+                        "The audit trail's copy in the cabinet could not be written: {e}"
+                    ));
+                }
+            }
             if let Some(problem) = o.chain.problem() {
                 egui::Panel::top("vf-audit-banner")
                     .frame(
@@ -1382,6 +1397,11 @@ mod tests {
         click(&mut h, "Open cabinet");
         settle(&mut h);
         assert!(h.query_by_label_contains("does not verify").is_none());
+        // The rows so far are copied to the cabinet's audit folder.
+        let mirrored = std::fs::read_dir(root.join("_Vibe/audit"))
+            .map(|d| d.flatten().count())
+            .unwrap_or(0);
+        assert!(mirrored > 0, "audit JSONL mirror written");
         if let Screen::Open(o) = &mut h.state_mut().screen {
             let c = &o.opened.conn;
             c.execute_batch(

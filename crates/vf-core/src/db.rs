@@ -16,6 +16,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/001_initial.sql"),
     include_str!("../migrations/002_ocr_search.sql"),
     include_str!("../migrations/003_lookup_indexes.sql"),
+    include_str!("../migrations/004_local_state.sql"),
 ];
 
 /// Schema version this build writes.
@@ -153,6 +154,7 @@ mod tests {
         "document",
         "document_tag",
         "legal_hold",
+        "local_state",
         "lock",
         "ocr_job",
         "page_text",

@@ -218,6 +218,51 @@ pub fn mirror_append(dir: &Path, rows: &[AuditRow]) -> std::io::Result<()> {
     Ok(())
 }
 
+/// `local_state` key: the last `seq` written to the JSONL mirror.
+const MIRRORED: &str = "audit_mirrored_seq";
+
+/// Appends to `<dir>/<yyyy-mm>.jsonl` every row not mirrored yet, and remembers how far it got.
+/// Run after changes (the app calls it every few seconds); returns how many rows it wrote.
+pub fn mirror_pending(conn: &Connection, dir: &Path) -> Result<usize> {
+    let done: u64 = conn
+        .query_row("SELECT v FROM local_state WHERE k = ?1", [MIRRORED], |r| {
+            r.get::<_, String>(0)
+        })
+        .optional()?
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+    let last: u64 = conn.query_row("SELECT coalesce(max(seq), 0) FROM audit", [], |r| r.get(0))?;
+    if last <= done {
+        return Ok(0);
+    }
+    let mut st = conn.prepare(
+        "SELECT seq, ts, user, device_id, action, doc_id, detail, prev_hash, hash
+         FROM audit WHERE seq > ?1 ORDER BY seq",
+    )?;
+    let rows = st
+        .query_map([done], |r| {
+            Ok(AuditRow {
+                seq: r.get(0)?,
+                ts: r.get(1)?,
+                user: r.get(2)?,
+                device: r.get(3)?,
+                action: r.get(4)?,
+                doc: r.get(5)?,
+                detail: r.get(6)?,
+                prev_hash: r.get(7)?,
+                hash: r.get(8)?,
+            })
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    mirror_append(dir, &rows).map_err(|e| crate::Error::Tx(format!("audit mirror: {e}")))?;
+    conn.execute(
+        "INSERT INTO local_state (k, v) VALUES (?1, ?2)
+         ON CONFLICT(k) DO UPDATE SET v = excluded.v",
+        params![MIRRORED, last.to_string()],
+    )?;
+    Ok(rows.len())
+}
+
 /// What the Audit trail page shows (PHASES P05 step 2). Empty fields do not filter.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Filter {
@@ -543,6 +588,30 @@ mod tests {
         let (actions, users) = choices(&c).unwrap();
         assert_eq!(actions.len(), 5);
         assert_eq!(users, ["OFFICE\\ann"]);
+    }
+
+    /// Rows reach the JSONL mirror once each, however often it runs.
+    #[test]
+    fn mirror_pending_writes_each_row_once() {
+        let tmp = tempfile::tempdir().unwrap();
+        let c = conn(tmp.path());
+        let dir = tmp.path().join("audit");
+        fill(&c, 3);
+        assert_eq!(mirror_pending(&c, &dir).unwrap(), 3);
+        assert_eq!(mirror_pending(&c, &dir).unwrap(), 0);
+        fill(&c, 2);
+        assert_eq!(mirror_pending(&c, &dir).unwrap(), 2);
+        let text = std::fs::read_to_string(dir.join("2026-11.jsonl")).unwrap();
+        assert_eq!(text.lines().count(), 5);
+        let seqs: Vec<u64> = text
+            .lines()
+            .map(|l| {
+                serde_json::from_str::<serde_json::Value>(l).unwrap()["seq"]
+                    .as_u64()
+                    .unwrap()
+            })
+            .collect();
+        assert_eq!(seqs, [1, 2, 3, 4, 5]);
     }
 
     #[test]
