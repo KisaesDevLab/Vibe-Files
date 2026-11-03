@@ -23,17 +23,6 @@ pub struct Opened {
     pub rebuild: Option<RebuildReport>,
 }
 
-impl Opened {
-    /// Live (not tombstoned) client and document counts in the catalog.
-    pub fn counts(&self) -> Result<(i64, i64)> {
-        let n = |sql: &str| self.conn.query_row(sql, [], |r| r.get::<_, i64>(0));
-        Ok((
-            n("SELECT count(*) FROM client WHERE deleted_at IS NULL")?,
-            n("SELECT count(*) FROM document WHERE deleted_at IS NULL")?,
-        ))
-    }
-}
-
 /// What the wizard asks for when creating.
 pub struct CreateRequest<'a> {
     pub root: &'a Path,
@@ -199,9 +188,10 @@ pub(crate) mod tests {
         std::fs::remove_dir_all(root.join(cabinet::VIBE_DIR)).unwrap();
         let a = create(&tmp.path().join("d"), "dev", &req(&root, PASS), FAST).unwrap();
         assert_eq!(a.cabinet.firm_id, fixture_cab.firm_id);
+        let snap = vf_core::browse::load(&a.conn).unwrap();
         assert_eq!(
-            a.counts().unwrap(),
-            (fx.clients as i64, fx.docs.len() as i64)
+            (snap.clients.len(), snap.docs.len()),
+            (fx.clients, fx.docs.len())
         );
         let rep = a.rebuild.unwrap();
         assert_eq!(rep.clients, fx.clients);

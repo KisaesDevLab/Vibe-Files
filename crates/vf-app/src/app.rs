@@ -7,6 +7,7 @@ use vf_security::keys::KdfParams;
 
 use crate::config::{self, Config};
 use crate::session::{self, CreateRequest, Opened};
+use crate::ui::browse::{self, Browse};
 use crate::ui::wizard::{self, Mode, Wizard};
 use crate::ui::{chrome, theme};
 
@@ -44,7 +45,7 @@ impl Tab {
 
     fn placeholder(self) -> &'static str {
         match self {
-            Tab::Browse => "The client tree and document list arrive in P01 step 2.",
+            Tab::Browse => "Browse shows the client tree once a cabinet is open.",
             Tab::Intake => "Intake mounts the vendored Filer Desktop engine (P02).",
             Tab::Search => "Full-text search arrives with OCR and indexing (P03).",
             Tab::Viewer => "The PDF viewer arrives in P04.",
@@ -63,7 +64,13 @@ pub enum Screen {
         rx: mpsc::Receiver<Result<Opened, String>>,
         back: Wizard,
     },
-    Open(Opened),
+    Open(Box<OpenCabinet>),
+}
+
+/// An open cabinet and its tab state.
+pub struct OpenCabinet {
+    pub opened: Opened,
+    pub browse: Browse,
 }
 
 pub struct VibeFilesApp {
@@ -169,7 +176,9 @@ impl VibeFilesApp {
                 self.config.last_cabinet = Some(opened.root.clone());
                 // The cabinet is open either way; a settings write failure only loses "last".
                 let _ = config::save(&self.data, &self.config);
-                self.screen = Screen::Open(opened);
+                let mut browse = Browse::load(&opened.conn);
+                browse.notice = opened.rebuild.as_ref().map(|r| format!("Indexed: {r}"));
+                self.screen = Screen::Open(Box::new(OpenCabinet { opened, browse }));
             }
             Err(e) => {
                 let mut w = back.clone();
@@ -181,7 +190,7 @@ impl VibeFilesApp {
 
     pub fn cabinet_name(&self) -> Option<String> {
         match &self.screen {
-            Screen::Open(o) => Some(o.cabinet.display_name(&o.root)),
+            Screen::Open(o) => Some(o.opened.cabinet.display_name(&o.opened.root)),
             _ => None,
         }
     }
@@ -193,36 +202,40 @@ impl eframe::App for VibeFilesApp {
         let name = self.cabinet_name();
         chrome::header(ui, name.as_deref());
         chrome::tab_bar(ui, &mut self.tab, 0);
-        chrome::footer(
-            ui,
-            &[format!("vibe-files {}", env!("CARGO_PKG_VERSION"))],
-            name.as_deref().unwrap_or("No cabinet open"),
-        );
+        let mut segments = vec![format!("vibe-files {}", env!("CARGO_PKG_VERSION"))];
+        if let Screen::Open(o) = &self.screen {
+            segments.insert(
+                0,
+                format!(
+                    "{} documents · {} clients",
+                    o.browse.snap.docs.len(),
+                    o.browse.snap.clients.len()
+                ),
+            );
+        }
+        chrome::footer(ui, &segments, name.as_deref().unwrap_or("No cabinet open"));
         let ctx = ui.ctx().clone();
         let mut submit = None;
-        egui::CentralPanel::default().show(ui, |ui| match &mut self.screen {
-            Screen::Wizard(w) => submit = wizard::show(ui, w),
-            Screen::Busy { what, .. } => {
-                ui.horizontal(|ui| {
-                    ui.spinner();
-                    ui.label(*what);
+        match &mut self.screen {
+            Screen::Open(o) if self.tab == Tab::Browse => {
+                browse::show(ui, &mut o.browse, &o.opened.conn)
+            }
+            screen => {
+                egui::CentralPanel::default().show(ui, |ui| match screen {
+                    Screen::Wizard(w) => submit = wizard::show(ui, w),
+                    Screen::Busy { what, .. } => {
+                        ui.horizontal(|ui| {
+                            ui.spinner();
+                            ui.label(*what);
+                        });
+                    }
+                    Screen::Open(_) => {
+                        ui.heading(self.tab.name());
+                        ui.label(self.tab.placeholder());
+                    }
                 });
             }
-            Screen::Open(o) => {
-                ui.heading(self.tab.name());
-                if self.tab == Tab::Browse {
-                    ui.label(format!("Cabinet folder: {}", o.root.display()));
-                    match o.counts() {
-                        Ok((c, d)) => ui.label(format!("{c} clients · {d} documents")),
-                        Err(e) => ui.label(format!("Catalog could not be read: {e:#}")),
-                    };
-                    if let Some(rep) = &o.rebuild {
-                        ui.label(format!("Indexed: {rep}"));
-                    }
-                }
-                ui.label(self.tab.placeholder());
-            }
-        });
+        }
         if let Some(mode) = submit {
             self.start(mode, &ctx);
         }

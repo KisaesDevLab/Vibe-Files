@@ -1,0 +1,381 @@
+//! Read model for the Browse tab: one load of the live catalog rows, then the client tree and
+//! folder filters are built in memory (tree expansion never touches SQLite).
+//!
+//! Tree shape (UI_SPEC §1): Cabinet → client → `Permanent` / tax years (descending) → folders.
+//! A folder is the document's directory inside its client folder with the `{Year}` segment
+//! removed, so `Income Tax/2025/x.pdf` sits under year 2025 as `Income Tax`.
+
+use std::collections::BTreeMap;
+
+use rusqlite::Connection;
+
+use crate::Result;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClientRow {
+    pub id: String,
+    pub ext_id: String,
+    pub name: String,
+    pub folder_rel: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DocRow {
+    pub id: String,
+    pub client_id: Option<String>,
+    pub doc_type: Option<String>,
+    /// `None` = permanent file.
+    pub tax_year: Option<i32>,
+    pub rel_path: String,
+    pub hash: String,
+    pub size: i64,
+    pub status: String,
+    pub source: Option<String>,
+    pub filed_by: Option<String>,
+    pub updated_at: String,
+    pub locked_by: Option<String>,
+    pub versions: i64,
+}
+
+impl DocRow {
+    /// File name (last path segment).
+    pub fn name(&self) -> &str {
+        self.rel_path.rsplit('/').next().unwrap_or(&self.rel_path)
+    }
+}
+
+/// Live clients (by name) and documents (by path).
+#[derive(Debug, Clone, Default)]
+pub struct Snapshot {
+    pub clients: Vec<ClientRow>,
+    pub docs: Vec<DocRow>,
+}
+
+pub fn load(conn: &Connection) -> Result<Snapshot> {
+    let mut st = conn.prepare(
+        "SELECT id, ext_id, name, folder_rel FROM client
+         WHERE deleted_at IS NULL ORDER BY name COLLATE NOCASE, ext_id",
+    )?;
+    let clients = st
+        .query_map([], |r| {
+            Ok(ClientRow {
+                id: r.get(0)?,
+                ext_id: r.get(1)?,
+                name: r.get(2)?,
+                folder_rel: r.get(3)?,
+            })
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let mut st = conn.prepare(
+        "SELECT d.id, d.client_id, t.name, d.tax_year, d.rel_path, d.hash, d.size, d.status,
+                d.source, d.filed_by, d.updated_at, l.user,
+                (SELECT count(*) FROM version v WHERE v.doc_id = d.id)
+         FROM document d
+         LEFT JOIN doc_type t ON t.id = d.doc_type_id
+         LEFT JOIN lock l ON l.doc_id = d.id
+         WHERE d.deleted_at IS NULL
+         ORDER BY d.rel_path",
+    )?;
+    let docs = st
+        .query_map([], |r| {
+            Ok(DocRow {
+                id: r.get(0)?,
+                client_id: r.get(1)?,
+                doc_type: r.get(2)?,
+                tax_year: r.get(3)?,
+                rel_path: r.get(4)?,
+                hash: r.get(5)?,
+                size: r.get(6)?,
+                status: r.get(7)?,
+                source: r.get(8)?,
+                filed_by: r.get(9)?,
+                updated_at: r.get(10)?,
+                locked_by: r.get(11)?,
+                versions: r.get(12)?,
+            })
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(Snapshot { clients, docs })
+}
+
+/// A tree node the grid can show. `year: None` is the Permanent node.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum Scope {
+    /// Every document in the cabinet.
+    Cabinet,
+    Client(usize),
+    Year {
+        client: usize,
+        year: Option<i32>,
+    },
+    Folder {
+        client: usize,
+        year: Option<i32>,
+        folder: String,
+    },
+    /// Documents with no client (outside any bound client folder).
+    Unassigned,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct YearNode {
+    pub year: Option<i32>,
+    pub count: usize,
+    /// (folder, count), by folder name. `""` = directly in the client folder.
+    pub folders: Vec<(String, usize)>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ClientNode {
+    pub count: usize,
+    /// Permanent first (when present), then years descending.
+    pub years: Vec<YearNode>,
+}
+
+/// The tree plus each document's place in it. Indices refer to `Snapshot::clients` / `docs`.
+#[derive(Debug, Clone, Default)]
+pub struct Index {
+    pub clients: Vec<ClientNode>,
+    pub unassigned: usize,
+    /// Per document: (client index, folder key).
+    pub place: Vec<(Option<usize>, String)>,
+}
+
+impl Index {
+    pub fn build(s: &Snapshot) -> Index {
+        let by_id: BTreeMap<&str, usize> = s
+            .clients
+            .iter()
+            .enumerate()
+            .map(|(i, c)| (c.id.as_str(), i))
+            .collect();
+        // client → year → folder → count
+        let mut acc: Vec<BTreeMap<Option<i32>, BTreeMap<String, usize>>> =
+            vec![BTreeMap::new(); s.clients.len()];
+        let mut place = Vec::with_capacity(s.docs.len());
+        let mut unassigned = 0;
+        for d in &s.docs {
+            let ci = d.client_id.as_deref().and_then(|id| by_id.get(id).copied());
+            let folder = match ci {
+                Some(ci) => folder_key(&s.clients[ci], d),
+                None => String::new(),
+            };
+            match ci {
+                Some(ci) => {
+                    *acc[ci]
+                        .entry(d.tax_year)
+                        .or_default()
+                        .entry(folder.clone())
+                        .or_default() += 1
+                }
+                None => unassigned += 1,
+            }
+            place.push((ci, folder));
+        }
+        let clients = acc
+            .into_iter()
+            .map(|years| {
+                let mut ys: Vec<YearNode> = years
+                    .into_iter()
+                    .map(|(year, folders)| YearNode {
+                        year,
+                        count: folders.values().sum(),
+                        folders: folders.into_iter().collect(),
+                    })
+                    .collect();
+                // None (Permanent) first, then years descending.
+                ys.sort_by_key(|y| (y.year.is_some(), std::cmp::Reverse(y.year)));
+                ClientNode {
+                    count: ys.iter().map(|y| y.count).sum(),
+                    years: ys,
+                }
+            })
+            .collect();
+        Index {
+            clients,
+            unassigned,
+            place,
+        }
+    }
+
+    /// Indices into `Snapshot::docs` inside `scope`, in path order.
+    pub fn docs_in(&self, s: &Snapshot, scope: &Scope) -> Vec<usize> {
+        (0..s.docs.len())
+            .filter(|&i| {
+                let (ci, folder) = &self.place[i];
+                let d = &s.docs[i];
+                match scope {
+                    Scope::Cabinet => true,
+                    Scope::Unassigned => ci.is_none(),
+                    Scope::Client(c) => *ci == Some(*c),
+                    Scope::Year { client, year } => *ci == Some(*client) && d.tax_year == *year,
+                    Scope::Folder {
+                        client,
+                        year,
+                        folder: f,
+                    } => *ci == Some(*client) && d.tax_year == *year && folder == f,
+                }
+            })
+            .collect()
+    }
+}
+
+/// The document's directory inside its client folder, minus the segment naming its tax year.
+fn folder_key(c: &ClientRow, d: &DocRow) -> String {
+    let inner = match c.folder_rel.as_deref() {
+        Some(f) if !f.is_empty() => d
+            .rel_path
+            .strip_prefix(f)
+            .and_then(|r| r.strip_prefix('/'))
+            .unwrap_or(&d.rel_path),
+        _ => &d.rel_path,
+    };
+    let dir = inner.rsplit_once('/').map(|(dir, _)| dir).unwrap_or("");
+    let year = d.tax_year.map(|y| y.to_string());
+    let mut dropped = false;
+    dir.split('/')
+        .filter(|seg| {
+            if !dropped && year.as_deref() == Some(*seg) {
+                dropped = true;
+                false
+            } else {
+                !seg.is_empty()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn client(id: &str, name: &str) -> ClientRow {
+        ClientRow {
+            id: id.into(),
+            ext_id: id.into(),
+            name: name.into(),
+            folder_rel: Some(format!("{name} ({id})")),
+        }
+    }
+
+    fn doc(client: Option<&str>, year: Option<i32>, rel: &str) -> DocRow {
+        DocRow {
+            id: rel.into(),
+            client_id: client.map(Into::into),
+            doc_type: None,
+            tax_year: year,
+            rel_path: rel.into(),
+            hash: "ab".repeat(32),
+            size: 1,
+            status: "received".into(),
+            source: None,
+            filed_by: None,
+            updated_at: "2026-11-02T00:00:00Z".into(),
+            locked_by: None,
+            versions: 0,
+        }
+    }
+
+    fn snap() -> Snapshot {
+        Snapshot {
+            clients: vec![client("1", "Acme"), client("2", "Baker")],
+            docs: vec![
+                doc(Some("1"), Some(2024), "Acme (1)/Income Tax/2024/a.pdf"),
+                doc(Some("1"), Some(2025), "Acme (1)/Income Tax/2025/b.pdf"),
+                doc(Some("1"), Some(2025), "Acme (1)/Income Tax/2025/c.pdf"),
+                doc(Some("1"), Some(2025), "Acme (1)/Other/Practice/2025/d.pdf"),
+                doc(Some("1"), None, "Acme (1)/Permanent/Setup/e.pdf"),
+                doc(Some("1"), None, "Acme (1)/f.pdf"),
+                doc(Some("2"), Some(2025), "Baker (2)/Payroll/2025/g.pdf"),
+                doc(None, None, "Loose/h.pdf"),
+            ],
+        }
+    }
+
+    #[test]
+    fn tree_groups_permanent_then_years_descending() {
+        let s = snap();
+        let ix = Index::build(&s);
+        let acme = &ix.clients[0];
+        assert_eq!(acme.count, 6);
+        let years: Vec<_> = acme.years.iter().map(|y| (y.year, y.count)).collect();
+        assert_eq!(years, [(None, 2), (Some(2025), 3), (Some(2024), 1)]);
+        assert_eq!(
+            acme.years[1].folders,
+            [
+                ("Income Tax".to_string(), 2),
+                ("Other/Practice".to_string(), 1)
+            ]
+        );
+        assert_eq!(
+            acme.years[0].folders,
+            [(String::new(), 1), ("Permanent/Setup".to_string(), 1)]
+        );
+        assert_eq!(ix.clients[1].count, 1);
+        assert_eq!(ix.unassigned, 1);
+    }
+
+    #[test]
+    fn scopes_filter_documents() {
+        let s = snap();
+        let ix = Index::build(&s);
+        let names = |sc: Scope| -> Vec<String> {
+            ix.docs_in(&s, &sc)
+                .into_iter()
+                .map(|i| s.docs[i].name().to_owned())
+                .collect()
+        };
+        assert_eq!(names(Scope::Cabinet).len(), 8);
+        assert_eq!(names(Scope::Client(1)), ["g.pdf"]);
+        assert_eq!(
+            names(Scope::Year {
+                client: 0,
+                year: Some(2025)
+            }),
+            ["b.pdf", "c.pdf", "d.pdf"]
+        );
+        assert_eq!(
+            names(Scope::Folder {
+                client: 0,
+                year: Some(2025),
+                folder: "Income Tax".into()
+            }),
+            ["b.pdf", "c.pdf"]
+        );
+        assert_eq!(names(Scope::Unassigned), ["h.pdf"]);
+    }
+
+    #[test]
+    fn year_segment_dropped_once_only() {
+        let c = client("1", "Acme");
+        let d = doc(Some("1"), Some(2025), "Acme (1)/Income Tax/2025/2025/x.pdf");
+        assert_eq!(folder_key(&c, &d), "Income Tax/2025");
+    }
+
+    #[test]
+    fn loads_live_rows_from_the_catalog() {
+        let tmp = tempfile::tempdir().unwrap();
+        let conn = crate::db::open(
+            &tmp.path().join("c.db"),
+            &crate::db::CatalogKey([7; 32]),
+            crate::db::Storage::Local,
+        )
+        .unwrap();
+        conn.execute_batch(
+            "INSERT INTO client (id, ext_id, name, folder_rel, device_id, updated_at)
+               VALUES ('c1', '1001', 'Acme', 'Acme (1001)', 'd', 't');
+             INSERT INTO document (id, client_id, tax_year, rel_path, hash, size, filed_at, device_id, updated_at)
+               VALUES ('d1', 'c1', 2025, 'Acme (1001)/Income Tax/2025/a.pdf', 'h', 10, 't', 'd', 't'),
+                      ('d2', 'c1', 2025, 'Acme (1001)/Income Tax/2025/b.pdf', 'h', 10, 't', 'd', 't');
+             UPDATE document SET deleted_at = 't' WHERE id = 'd2';
+             INSERT INTO lock (doc_id, user, device_id, since) VALUES ('d1', 'kwk', 'd', 't');",
+        )
+        .unwrap();
+        let s = load(&conn).unwrap();
+        assert_eq!(s.clients.len(), 1);
+        assert_eq!(s.docs.len(), 1, "tombstoned document left out");
+        assert_eq!(s.docs[0].locked_by.as_deref(), Some("kwk"));
+        assert_eq!(s.docs[0].status, "received");
+    }
+}
