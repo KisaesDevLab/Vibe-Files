@@ -3,7 +3,8 @@
 use std::path::{Path, PathBuf};
 
 use rusqlite::OpenFlags;
-pub use rusqlite::{Connection, Error as SqlError, OptionalExtension, params};
+pub use rusqlite::types::Value as SqlValue;
+pub use rusqlite::{Connection, Error as SqlError, OptionalExtension, params, params_from_iter};
 
 use crate::{Error, Result};
 
