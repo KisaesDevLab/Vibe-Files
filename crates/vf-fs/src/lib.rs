@@ -6,6 +6,7 @@ pub mod clients;
 pub mod docmeta;
 pub mod doctypes;
 pub mod fileops;
+pub mod intake;
 pub mod newclient;
 pub mod rebuild;
 pub mod rename;

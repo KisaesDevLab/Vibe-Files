@@ -179,7 +179,11 @@ impl VibeFilesApp {
             Err(mpsc::TryRecvError::Disconnected) => Err("The work stopped unexpectedly.".into()),
         };
         match result {
-            Ok(opened) => {
+            Ok(mut opened) => {
+                // A crash between Filer's commit and the catalog write is caught up here.
+                let mut intake = IntakeTab::default();
+                let root = opened.root.clone();
+                intake.reconcile(&mut opened.conn, &root, &self.config.device_id);
                 self.config.last_cabinet = Some(opened.root.clone());
                 // The cabinet is open either way; a settings write failure only loses "last".
                 let _ = config::save(&self.data, &self.config);
@@ -190,7 +194,7 @@ impl VibeFilesApp {
                     opened,
                     browse,
                     admin: None,
-                    intake: IntakeTab::default(),
+                    intake,
                 }));
             }
             Err(e) => {
@@ -231,14 +235,17 @@ impl eframe::App for VibeFilesApp {
         let mut submit = None;
         match &mut self.screen {
             Screen::Open(o) if self.tab == Tab::Intake => {
+                let o = &mut **o;
                 o.intake.show(ui, frame, &o.opened.root, &o.opened.cabinet);
+                o.intake
+                    .reconcile(&mut o.opened.conn, &o.opened.root, &self.config.device_id);
             }
             Screen::Open(o) if matches!(self.tab, Tab::Browse | Tab::Admin) => {
                 let OpenCabinet {
                     opened,
                     browse: tab_browse,
                     admin: tab_admin,
-                    ..
+                    intake: o_intake,
                 } = &mut **o;
                 let mut env = browse::Env {
                     conn: &mut opened.conn,
@@ -249,11 +256,16 @@ impl eframe::App for VibeFilesApp {
                     let a = tab_admin.get_or_insert_with(|| Admin::load(&env));
                     admin::show(ui, a, &mut env);
                 } else {
-                    if tab_admin
-                        .as_mut()
-                        .is_some_and(|a| std::mem::take(&mut a.changed))
+                    let intake_changed = std::mem::take(&mut o_intake.catalog_changed);
+                    if intake_changed
+                        || tab_admin
+                            .as_mut()
+                            .is_some_and(|a| std::mem::take(&mut a.changed))
                     {
                         tab_browse.reload(env.conn);
+                    }
+                    if let Some(m) = o_intake.message.take() {
+                        tab_browse.notice = Some(m);
                     }
                     browse::show(ui, tab_browse, &mut env);
                 }
@@ -399,6 +411,97 @@ mod tests {
         // The passphrase alone opens it from an empty data folder.
         let other = tmp.path().join("pc2");
         assert!(session::open(&other, "dev-2", &root, "correct horse battery").is_ok());
+    }
+
+    /// P02 step 1 end to end: a batch Filer commits while Intake is open is recorded in the
+    /// catalog and shows in Browse; Filer's Undo takes it out again. Filer's own commit and undo
+    /// run here directly (what its Confirm and Undo buttons call; its Preview screen is covered by
+    /// filer-intake's own tests).
+    #[test]
+    fn intake_batches_reach_the_catalog_and_undo() {
+        use std::sync::atomic::AtomicUsize;
+
+        use filer_intake::commit::{CommitInput, CommitItem, run_commit};
+        use filer_intake::plan::FolderAction;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("Clients");
+        let inbox = tmp.path().join("Scans");
+        std::fs::create_dir_all(&inbox).unwrap();
+        let req = CreateRequest {
+            root: &root,
+            name: "Firm",
+            passphrase: "correct horse battery",
+            confirm: "correct horse battery",
+        };
+        drop(session::create(&tmp.path().join("pc1"), "dev-1", &req, FAST).unwrap());
+        let mut h = harness(&tmp.path().join("pc1b"));
+        click(&mut h, "Open existing");
+        type_into(&mut h, "Cabinet folder", &root.display().to_string());
+        type_into(&mut h, "Recovery passphrase", "correct horse battery");
+        click(&mut h, "Open cabinet");
+        settle(&mut h);
+        click(&mut h, "Intake");
+        h.step();
+
+        // Filer files one scan for a new client.
+        let client = filer_core::clients::Client {
+            id: "1042".into(),
+            uuid: uuid::Uuid::new_v4(),
+            name: "Anderson Farms LLC".into(),
+            extra: Default::default(),
+        };
+        let folder = root.join("Anderson Farms LLC (1042)");
+        let src = inbox.join("w2.pdf");
+        std::fs::write(&src, "W-2 2025").unwrap();
+        let cab = vf_fs::cabinet::read(&root).unwrap();
+        let input = CommitInput {
+            batch: uuid::Uuid::new_v4(),
+            items: vec![CommitItem {
+                src,
+                dest: folder.join("Income Tax/2025/w2.pdf"),
+                folder: FolderAction::WillCreate(folder.clone()),
+                client,
+                overwrite: false,
+                source: filer_intake::intake::Source::Inbox(inbox.clone()),
+                merged_from: vec![],
+                split_of: None,
+                copies: vec![],
+                kept_both: false,
+                also_dirs: vec![],
+            }],
+            skipped: vec![],
+            root: root.clone(),
+            first_inbox: Some(inbox.clone()),
+            data_dir: vf_fs::clients::master_dir(&root),
+            firm_id: uuid::Uuid::parse_str(&cab.firm_id).unwrap(),
+            template: filer_core::template::default_tree(),
+            splits: vec![],
+            force_copy: false,
+        };
+        let rep = run_commit(&input, &AtomicUsize::new(0));
+        assert!(rep.warnings.is_empty(), "{:?}", rep.warnings);
+        h.step();
+        click(&mut h, "Browse");
+        h.step();
+        let docs = |h: &egui_kittest::Harness<'static, VibeFilesApp>| match &h.state().screen {
+            Screen::Open(o) => (o.browse.snap.docs.len(), o.browse.notice.clone()),
+            _ => unreachable!(),
+        };
+        let (n, notice) = docs(&h);
+        assert_eq!(n, 1, "the filed W-2 is in the catalog");
+        assert_eq!(notice.as_deref(), Some("Intake filed 1 new documents."));
+
+        // Filer's Undo; the catalog follows when Intake next looks.
+        filer_intake::undo::run_undo(&vf_fs::clients::master_dir(&root), rep.last_batch, false);
+        click(&mut h, "Intake");
+        h.step();
+        click(&mut h, "Browse");
+        h.step();
+        let (n, notice) = docs(&h);
+        assert_eq!(n, 0, "undone batch tombstoned");
+        assert_eq!(notice.as_deref(), Some("Intake's last batch was undone."));
+        assert!(inbox.join("w2.pdf").exists());
     }
 
     /// P02 step 1: the Intake tab mounts Filer Desktop on the open cabinet: its data folder is

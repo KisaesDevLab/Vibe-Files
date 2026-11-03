@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 
 use filer_intake::app::{AppState, FilerApp};
 use filer_intake::config::{Settings, ThemeChoice};
+use vf_core::db::Connection;
 use vf_fs::cabinet::CabinetFile;
 
 use crate::ui::theme;
@@ -23,6 +24,12 @@ pub struct IntakeTab {
     /// first-page sniffer threads).
     filer: Option<FilerApp>,
     error: Option<String>,
+    /// `last_batch.json`'s modification time when the catalog was last brought in line with it.
+    seen: Option<std::time::SystemTime>,
+    /// The catalog changed (a batch was recorded or undone): Browse re-reads it.
+    pub catalog_changed: bool,
+    /// What the last reconcile did or why it failed, for Browse's notice.
+    pub message: Option<String>,
 }
 
 /// Filer's settings for this cabinet on this PC: whatever `_Vibe/config.json` holds (rules
@@ -64,6 +71,36 @@ fn pdfium_dir() -> Option<PathBuf> {
 }
 
 impl IntakeTab {
+    /// Records Filer's last batch in the catalog when `last_batch.json` changed since the last
+    /// look (a stat per frame otherwise). See `vf_fs::intake`.
+    pub fn reconcile(&mut self, conn: &mut Connection, root: &Path, device_id: &str) {
+        let file = filer_intake::commit::last_batch_path(&vf_fs::clients::master_dir(root));
+        let modified = std::fs::metadata(&file).and_then(|m| m.modified()).ok();
+        if modified.is_none() || modified == self.seen {
+            return;
+        }
+        match vf_fs::intake::reconcile(conn, root, device_id) {
+            Ok(r) => {
+                self.seen = modified;
+                if let Some((_, added, updated)) = r.recorded {
+                    self.message = Some(format!(
+                        "Intake filed {added} new documents{}.",
+                        if updated > 0 {
+                            format!(" and replaced {updated}")
+                        } else {
+                            String::new()
+                        }
+                    ));
+                } else if r.undone.is_some() {
+                    self.message = Some("Intake's last batch was undone.".into());
+                }
+                self.catalog_changed |= r.changed();
+            }
+            // Try again next frame (e.g. a file still being written); keep the message.
+            Err(e) => self.message = Some(format!("Intake batch not recorded yet: {e}")),
+        }
+    }
+
     pub fn show(
         &mut self,
         ui: &mut egui::Ui,
