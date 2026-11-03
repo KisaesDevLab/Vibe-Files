@@ -8,10 +8,7 @@ pub fn replace_doc(
     doc_id: &str,
     pages: &[(u32, String)],
 ) -> vf_core::Result<()> {
-    // Write lock up front: a read-then-write transaction cannot wait for another connection
-    // (SQLITE_BUSY_SNAPSHOT); OCR workers each hold one.
-    let tx =
-        vf_core::db::Transaction::new_unchecked(conn, vf_core::db::TransactionBehavior::Immediate)?;
+    let tx = vf_core::db::begin_write(conn)?;
     tx.execute("DELETE FROM doc_fts WHERE doc_id = ?1", [doc_id])?;
     {
         let mut ins = tx.prepare("INSERT INTO doc_fts (text, doc_id, page) VALUES (?1, ?2, ?3)")?;
@@ -22,12 +19,6 @@ pub fn replace_doc(
         }
     }
     tx.commit()?;
-    Ok(())
-}
-
-/// Drops `doc_id` from the index.
-pub fn remove_doc(conn: &Connection, doc_id: &str) -> vf_core::Result<()> {
-    conn.execute("DELETE FROM doc_fts WHERE doc_id = ?1", [doc_id])?;
     Ok(())
 }
 

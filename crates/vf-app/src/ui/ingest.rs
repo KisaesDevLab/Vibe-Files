@@ -43,8 +43,8 @@ pub struct IngestState {
     devices: Option<Result<Vec<Device>, String>>,
     devices_job: Option<Receiver<Result<Vec<Device>, String>>>,
     /// Files just delivered to Filer's inbox, to check against the catalog: (file, staging
-    /// folder it came from, the original as it arrived — the pipeline may rewrite the PDF).
-    to_check: Vec<(PathBuf, PathBuf, PathBuf)>,
+    /// folder it came from, hashes to look up: as delivered and as it arrived).
+    to_check: Vec<(PathBuf, PathBuf, [String; 2])>,
     /// Delivered files whose content is already in the cabinet (before Filer files them).
     pub pre_dupes: Vec<PreDup>,
     /// (index into `pre_dupes`, remove it from the inbox).
@@ -147,11 +147,13 @@ impl IngestState {
                     Event::Processed(p) => {
                         self.delivered += p.delivered.len();
                         let staging = p.staged.parent().map(Path::to_path_buf).unwrap_or_default();
-                        self.to_check.extend(
-                            p.delivered
-                                .iter()
-                                .map(|d| (d.path.clone(), staging.clone(), p.kept.clone())),
-                        );
+                        self.to_check.extend(p.delivered.iter().map(|d| {
+                            (
+                                d.path.clone(),
+                                staging.clone(),
+                                [d.sha256.clone(), p.original_sha256.clone()],
+                            )
+                        }));
                         let name = file_name(&p.staged);
                         let parts: Vec<String> = p
                             .delivered
@@ -219,24 +221,21 @@ impl IngestState {
         {
             let d = self.pre_dupes.remove(i);
             if remove {
-                let dir = d.staging.join("_duplicates");
                 let name = file_name(&d.path);
-                let r = std::fs::create_dir_all(&dir).and_then(|()| {
-                    std::fs::rename(&d.path, vf_ingest::pipeline::free_name(&dir, &name))
-                });
-                let line = match r {
-                    Ok(()) => format!("{name} taken out of Filer's inbox (kept in _duplicates)."),
-                    Err(e) => format!("{name} could not be moved: {e}"),
+                let line = match vf_ingest::pipeline::move_aside(
+                    &d.path,
+                    &d.staging,
+                    vf_ingest::pipeline::DUPLICATES_DIR,
+                ) {
+                    Ok(_) => format!("{name} taken out of Filer's inbox (kept in _duplicates)."),
+                    Err(e) => format!("{name}: {e}"),
                 };
                 self.log_line(line);
             }
         }
-        for (path, staging, original) in std::mem::take(&mut self.to_check) {
-            let found = [&path, &original].into_iter().find_map(|p| {
-                filer_intake::commit::sha256_file(p)
-                    .ok()
-                    .and_then(|h| vf_fs::dupes::existing(conn, &h))
-            });
+        // Hashes come from the pipeline thread: only catalog lookups here.
+        for (path, staging, hashes) in std::mem::take(&mut self.to_check) {
+            let found = hashes.iter().find_map(|h| vf_fs::dupes::existing(conn, h));
             if let Some(existing) = found {
                 self.pre_dupes.push(PreDup {
                     path,

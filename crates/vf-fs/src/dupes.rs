@@ -21,53 +21,63 @@ pub struct Dup {
     pub old_rel: String,
 }
 
-/// Live documents filed at or after `since` (RFC 3339) whose content another live document
+/// Live documents holding content `hash`, oldest first: (id, cabinet path, filed at). A
+/// document whose file OCR gave a text layer still answers to its original scan (that content
+/// is kept as a version, P03 step 3). Both branches use an index on `hash`.
+fn holders(conn: &Connection, hash: &str) -> Result<Vec<(String, String, String)>, String> {
+    let mut st = conn
+        .prepare_cached(
+            "SELECT id, rel_path, filed_at FROM document WHERE hash = ?1 AND deleted_at IS NULL
+             UNION
+             SELECT d.id, d.rel_path, d.filed_at FROM version v JOIN document d ON d.id = v.doc_id
+              WHERE v.hash = ?1 AND v.created_by = ?2 AND d.deleted_at IS NULL
+             ORDER BY 3, 1",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = st
+        .query_map([hash, crate::cabinet::TEXT_LAYER_VERSION_BY], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+        })
+        .map_err(|e| e.to_string())?;
+    rows.collect::<Result<_, _>>().map_err(|e| e.to_string())
+}
+
+/// Live documents filed at or after `since` (RFC 3339) whose content an older live document
 /// already has (the oldest such document is named).
 pub fn filed_since(conn: &Connection, since: &str) -> Result<Vec<Dup>, String> {
     let mut st = conn
         .prepare(
-            "SELECT n.id, n.rel_path, o.id, o.rel_path FROM document n
-             JOIN document o ON o.id <> n.id AND o.deleted_at IS NULL
-                AND (o.filed_at < n.filed_at OR (o.filed_at = n.filed_at AND o.id < n.id))
-                AND (o.hash = n.hash OR EXISTS (SELECT 1 FROM version v WHERE v.doc_id = o.id
-                     AND v.hash = n.hash AND v.created_by = 'ocr'))
-             WHERE n.deleted_at IS NULL AND n.filed_at >= ?1
-             ORDER BY n.rel_path, o.filed_at",
+            "SELECT id, rel_path, hash, filed_at FROM document
+             WHERE deleted_at IS NULL AND filed_at >= ?1 ORDER BY rel_path",
         )
         .map_err(|e| e.to_string())?;
-    let rows = st
+    let new: Vec<(String, String, String, String)> = st
         .query_map([since], |r| {
-            Ok(Dup {
-                new_id: r.get(0)?,
-                new_rel: r.get(1)?,
-                old_id: r.get(2)?,
-                old_rel: r.get(3)?,
-            })
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
         })
+        .map_err(|e| e.to_string())?
+        .collect::<Result<_, _>>()
         .map_err(|e| e.to_string())?;
-    let mut out: Vec<Dup> = Vec::new();
-    for d in rows {
-        let d = d.map_err(|e| e.to_string())?;
-        if !out.iter().any(|x| x.new_id == d.new_id) {
-            out.push(d);
+    let mut out = Vec::new();
+    for (new_id, new_rel, hash, filed) in new {
+        let older = holders(conn, &hash)?.into_iter().find(|(id, _, at)| {
+            *id != new_id && (at.as_str(), id.as_str()) < (filed.as_str(), new_id.as_str())
+        });
+        if let Some((old_id, old_rel, _)) = older {
+            out.push(Dup {
+                new_id,
+                new_rel,
+                old_id,
+                old_rel,
+            });
         }
     }
     Ok(out)
 }
 
-/// The live document holding content `hash`, if any (cabinet-relative path). A document
-/// whose file OCR gave a text layer still matches its original scan (the pre-OCR content is
-/// kept as a version, P03 step 3).
+/// The live document holding content `hash`, if any (cabinet-relative path; see [`holders`]).
 pub fn existing(conn: &Connection, hash: &str) -> Option<String> {
-    conn.query_row(
-        "SELECT d.rel_path FROM document d WHERE d.deleted_at IS NULL AND (d.hash = ?1
-           OR EXISTS (SELECT 1 FROM version v WHERE v.doc_id = d.id AND v.hash = ?1
-                      AND v.created_by = 'ocr'))
-         ORDER BY d.filed_at LIMIT 1",
-        [hash],
-        |r| r.get(0),
-    )
-    .ok()
+    holders(conn, hash).ok()?.into_iter().next().map(|h| h.1)
 }
 
 /// Moves document `doc_id`'s file to `_Vibe/trash/<id>/<name>` and tombstones it, as one
@@ -91,11 +101,7 @@ pub fn trash(
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| "file".into());
-    let dst = root
-        .join(crate::cabinet::VIBE_DIR)
-        .join("trash")
-        .join(doc_id)
-        .join(name);
+    let dst = crate::cabinet::trash_dir(root).join(doc_id).join(name);
     let now = vf_core::now_rfc3339();
     let tx = Transaction::new(TRASH_LABEL)
         .file(FileOp::Move { src, dst })
@@ -163,16 +169,6 @@ pub fn resolve(
             trash(conn, root, device_id, &d.old_id, "replaced by duplicate").map(Some)
         }
     }
-}
-
-/// Undoes a [`trash`].
-pub fn untrash(
-    conn: &mut Connection,
-    root: &Path,
-    device_id: &str,
-    tx_id: &str,
-) -> Result<(), String> {
-    crate::fileops::undo(conn, root, tx_id, device_id)
 }
 
 #[cfg(test)]
@@ -261,7 +257,7 @@ mod tests {
                 .is_empty()
         );
 
-        untrash(&mut conn, &root, "dev", &tx).unwrap();
+        crate::fileops::undo(&mut conn, &root, &tx, "dev").unwrap();
         assert!(root.join(&d.new_rel).is_file());
         let deleted: Option<String> = conn
             .query_row(

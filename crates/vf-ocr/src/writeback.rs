@@ -34,37 +34,21 @@ pub enum Held {
     Changed,
 }
 
-/// Cabinet-relative paths (forward slashes, lower case) Filer's Undo would check.
+/// Paths Filer's "Undo last batch" would check (see `vf_fs::intake::undoable_paths`).
 pub fn filer_undoable(root: &Path) -> HashSet<String> {
-    let Some(lb) = filer_intake::commit::load_last_batch(&vf_fs::clients::master_dir(root)) else {
-        return HashSet::new();
-    };
-    if lb.undone {
-        return HashSet::new();
-    }
-    let mut paths: Vec<&Path> = Vec::new();
-    for it in &lb.items {
-        paths.push(&it.dst);
-        paths.extend(it.copies.iter().map(|c| c.dst.as_path()));
-    }
-    paths.extend(lb.zip_entries.iter().map(|c| c.dst.as_path()));
-    paths.into_iter().filter_map(|p| rel_key(root, p)).collect()
-}
-
-fn rel_key(root: &Path, p: &Path) -> Option<String> {
-    let r = p.strip_prefix(root).ok()?;
-    Some(r.to_string_lossy().replace('\\', "/").to_lowercase())
+    vf_fs::intake::undoable_paths(root)
 }
 
 /// Documents read by OCR and waiting for their text layer.
-pub fn pending(conn: &Connection) -> vf_core::Result<Vec<(String, String, String)>> {
+/// (document id, cabinet path).
+pub fn pending(conn: &Connection) -> vf_core::Result<Vec<(String, String)>> {
     let mut st = conn.prepare(
-        "SELECT j.doc_id, j.hash, d.rel_path FROM ocr_job j
+        "SELECT j.doc_id, d.rel_path FROM ocr_job j
          JOIN document d ON d.id = j.doc_id AND d.deleted_at IS NULL
          WHERE j.state = 'indexed' ORDER BY j.priority, j.queued_at",
     )?;
     let v = st
-        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
         .collect::<Result<Vec<_>, _>>()?;
     Ok(v)
 }
@@ -72,7 +56,7 @@ pub fn pending(conn: &Connection) -> vf_core::Result<Vec<(String, String, String
 /// What [`write`] did.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Written {
-    Done { new_hash: String, pages: usize },
+    Done,
     Held(Held),
 }
 
@@ -113,6 +97,13 @@ pub fn write(
     let path = root.join(&rel_path);
     let on_disk = filer_intake::commit::sha256_file(&path).map_err(|e| e.to_string())?;
     if on_disk != old_hash {
+        // Edited outside Vibe Files: nothing to layer until the file is adopted again (P05's
+        // integrity sweep updates the row, and the new content is queued then).
+        finish(
+            conn,
+            doc_id,
+            "file changed outside Vibe Files; text layer not written",
+        );
         return Ok(Written::Held(Held::Changed));
     }
 
@@ -138,12 +129,15 @@ pub fn write(
         .collect();
 
     // The new file, next to the cabinet's working files.
-    let tmp_dir = root.join(vf_fs::cabinet::VIBE_DIR).join("tmp");
+    let tmp_dir = vf_fs::cabinet::tmp_dir(root);
     std::fs::create_dir_all(&tmp_dir)
         .map_err(|e| format!("cannot create {}: {e}", tmp_dir.display()))?;
     let tmp = tmp_dir.join(format!("vf-ocr-{}.pdf", uuid::Uuid::now_v7().simple()));
     if let Err(e) = layer::add_text_layer(&path, &tmp, &words) {
         let _ = std::fs::remove_file(&tmp);
+        // The same PDF fails the same way next time (password, damaged): stop retrying. The
+        // document stays searchable from the catalog.
+        finish(conn, doc_id, &format!("text layer not written: {e}"));
         return Err(e);
     }
     let new_hash = filer_intake::commit::sha256_file(&tmp).map_err(|e| e.to_string())?;
@@ -152,13 +146,11 @@ pub fn write(
     // The original is kept as a version; if those bytes are already kept, it goes to trash.
     let version = vf_fs::cabinet::version_path(root, &old_hash);
     let kept_at: PathBuf = if version.exists() {
-        root.join(vf_fs::cabinet::VIBE_DIR)
-            .join("trash")
-            .join(format!(
-                "ocr-{}-{}",
-                uuid::Uuid::now_v7().simple(),
-                file_name(&path)
-            ))
+        vf_fs::cabinet::trash_dir(root).join(format!(
+            "ocr-{}-{}",
+            uuid::Uuid::now_v7().simple(),
+            file_name(&path)
+        ))
     } else {
         version.clone()
     };
@@ -199,13 +191,14 @@ pub fn write(
         ))
         .catalog(Stmt::new(
             "INSERT OR IGNORE INTO version (doc_id, hash, size, created, created_by, device_id, reason)
-             VALUES (?1, ?2, ?3, ?4, 'ocr', ?5, 'before OCR text layer')",
+             VALUES (?1, ?2, ?3, ?4, ?6, ?5, 'before OCR text layer')",
             vec![
                 doc_id.into(),
                 old_hash.clone().into(),
                 old_size.into(),
                 now.clone().into(),
                 device_id.into(),
+                vf_fs::cabinet::TEXT_LAYER_VERSION_BY.into(),
             ],
         ))
         .catalog_undo(Stmt::new(
@@ -232,7 +225,7 @@ pub fn write(
             vec![doc_id.into(), old_hash.clone().into()],
         ))
         .audit(AuditEntry::new(
-            "ocr_text_layer",
+            LABEL,
             Some(doc_id),
             json!({
                 "pages": words.len(),
@@ -251,16 +244,13 @@ pub fn write(
             vf_fs::cabinet::VersionSidecar {
                 rel_path: rel_path.replace('\\', "/"),
                 created: now,
-                created_by: Some("ocr".into()),
+                created_by: Some(vf_fs::cabinet::TEXT_LAYER_VERSION_BY.into()),
                 device_id: device_id.into(),
                 reason: Some("before OCR text layer".into()),
             },
         );
     }
-    Ok(Written::Done {
-        new_hash,
-        pages: words.len(),
-    })
+    Ok(Written::Done)
 }
 
 /// Writes every waiting document that can be written now. Returns how many were written and
@@ -269,9 +259,9 @@ pub fn write_ready(conn: &mut Connection, root: &Path, device_id: &str) -> (usiz
     let undoable = filer_undoable(root);
     let mut written = 0;
     let mut errors = Vec::new();
-    for (doc_id, _, rel) in pending(conn).unwrap_or_default() {
+    for (doc_id, rel) in pending(conn).unwrap_or_default() {
         match write(conn, root, device_id, &doc_id, &undoable) {
-            Ok(Written::Done { .. }) => written += 1,
+            Ok(Written::Done) => written += 1,
             Ok(Written::Held(_)) => {}
             Err(e) => {
                 let _ = conn.execute(
@@ -283,6 +273,14 @@ pub fn write_ready(conn: &mut Connection, root: &Path, device_id: &str) -> (usiz
         }
     }
     (written, errors)
+}
+
+/// Leaves the job `done` with `why`: its text is indexed, its file will not get a layer.
+fn finish(conn: &Connection, doc_id: &str, why: &str) {
+    let _ = conn.execute(
+        "UPDATE ocr_job SET state = 'done', error = ?2, updated_at = ?3 WHERE doc_id = ?1",
+        params![doc_id, why, vf_core::now_rfc3339()],
+    );
 }
 
 fn file_name(p: &Path) -> String {

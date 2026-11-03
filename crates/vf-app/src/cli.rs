@@ -3,7 +3,7 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 use clap::Subcommand;
 use vf_core::db::{self, Storage};
 
@@ -90,28 +90,21 @@ fn ocr_backlog(
     threads: Option<usize>,
     out: &mut dyn Write,
 ) -> Result<i32> {
-    use vf_ocr::queue::{self, Counts, Queue};
+    use vf_ocr::queue::{self, Counts};
     if !catalog.is_file() {
         bail!("no catalog at {}", catalog.display());
     }
     let config = crate::config::load(data)?;
-    let exe_dir = std::env::current_exe()?
-        .parent()
-        .map(Path::to_path_buf)
-        .unwrap_or_default();
-    let pdfium_dir = filer_pdf::pdf::find_pdfium(&exe_dir)
-        .context("pdfium.dll not found beside vibe-files.exe")?;
-    let conn = db::open(catalog, Storage::Local)?;
-    let q = Queue::start(
-        queue::Config {
-            catalog: catalog.to_path_buf(),
-            root: cabinet.to_path_buf(),
-            pdfium_dir,
-            tesseract: config.ocr.tesseract.clone(),
-            threads: threads.unwrap_or_else(queue::default_threads),
-            device_id: config.device_id.clone(),
-        },
-        queue::tesseract_factory(config.ocr.tesseract.clone()),
+    let mut conn = db::open(catalog, Storage::Local)?;
+    // Queue the backlog here, so the first count already sees it.
+    queue::recover(&conn)?;
+    queue::enqueue_missing(&conn, queue::BACKLOG)?;
+    let q = crate::ui::ocr::start_queue(
+        catalog,
+        cabinet,
+        &config.ocr,
+        &config.device_id,
+        threads.unwrap_or_else(queue::default_threads),
         || {},
     )
     .map_err(anyhow::Error::msg)?;
@@ -132,14 +125,7 @@ fn ocr_backlog(
             idle_since = None;
         }
         if c.queued + c.running == 0 {
-            // Text layers: worker 0 writes ready ones within 30 s; stop once nothing moves.
-            if c.indexed == 0 {
-                break c;
-            }
-            let t = *idle_since.get_or_insert_with(std::time::Instant::now);
-            if t.elapsed() > std::time::Duration::from_secs(40) {
-                break c;
-            }
+            break c;
         }
         if let Err(why) = &status.engine
             && c.running == 0
@@ -153,11 +139,18 @@ fn ocr_backlog(
         }
     };
     q.stop_and_wait(std::time::Duration::from_secs(60));
+    // Text layers still waiting (the workers write theirs as they go): write them now, then
+    // count again. Ones Filer's undoable batch holds stay waiting (exit 3).
+    let (written, errors) = vf_ocr::writeback::write_ready(&mut conn, cabinet, &config.device_id);
+    for e in errors {
+        writeln!(out, "text layer: {e}")?;
+    }
+    let c = if written > 0 { Counts::load(&conn)? } else { c };
     writeln!(
         out,
         "{} documents searchable, {} text layers written, {} failed ({} s)",
         c.done,
-        q.status().written,
+        q.status().written + written,
         c.failed,
         start.elapsed().as_secs()
     )?;

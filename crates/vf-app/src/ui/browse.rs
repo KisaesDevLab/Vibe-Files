@@ -753,11 +753,12 @@ fn tree(ui: &mut egui::Ui, b: &mut Browse) {
         ui.label(widgets::caption("SAVED SEARCHES"));
         for i in 0..b.saved.len() {
             let name = b.saved[i].name.clone();
-            let sel = matches!(&b.scope, Scope::Saved { name: n, .. } if *n == name);
-            let n = match &b.scope {
-                Scope::Saved { name: cur, ids } if *cur == name => ids.len(),
-                _ => 0,
+            // Selected: its hit count (the grid shows its results).
+            let shown = match &b.scope {
+                Scope::Saved { name: cur, ids } if *cur == name => Some(ids.len()),
+                _ => None,
             };
+            let (sel, n) = (shown.is_some(), shown.unwrap_or(0));
             let (_, resp) = tree_row(ui, 0, None, false, &name, n, sel);
             if resp.clicked() {
                 b.saved_open = Some(i);

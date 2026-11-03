@@ -76,12 +76,7 @@ pub struct Query {
 
 impl Query {
     pub fn is_empty(&self) -> bool {
-        *self
-            == Query {
-                scope: self.scope.clone(),
-                ..Query::default()
-            }
-            && self.scope == Scope::Cabinet
+        *self == Query::default()
     }
 }
 
@@ -120,12 +115,15 @@ fn terms(text: &str) -> (Vec<String>, Vec<String>) {
     (long, short)
 }
 
-fn like(s: &str) -> String {
-    let esc = s
-        .replace('\\', "\\\\")
+/// `s` with LIKE's wildcards and the escape character escaped (for `ESCAPE '\'`).
+fn escape_like(s: &str) -> String {
+    s.replace('\\', "\\\\")
         .replace('%', "\\%")
-        .replace('_', "\\_");
-    format!("%{esc}%")
+        .replace('_', "\\_")
+}
+
+fn like(s: &str) -> String {
+    format!("%{}%", escape_like(s))
 }
 
 /// Runs `q`, best first, at most `limit` documents.
@@ -199,12 +197,7 @@ pub fn search(conn: &Connection, q: &Query, limit: usize) -> vf_core::Result<Vec
             let f = f.trim_end_matches('/');
             wh.push(format!(
                 "d.rel_path LIKE {} ESCAPE '\\'",
-                p(V::Text(format!(
-                    "{}/%",
-                    f.replace('\\', "\\\\")
-                        .replace('%', "\\%")
-                        .replace('_', "\\_")
-                )))
+                p(V::Text(format!("{}/%", escape_like(f))))
             ));
         }
     }

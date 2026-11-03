@@ -58,8 +58,6 @@ pub struct SearchTab {
     /// A search was saved: the app reloads Browse's Saved searches.
     pub saved_changed: bool,
     pub notice: Option<String>,
-    /// The catalog file, for the near-duplicate report's own connection.
-    pub catalog: Option<std::path::PathBuf>,
     near_job: Option<std::sync::mpsc::Receiver<Result<Vec<vf_index::neardup::Pair>, String>>>,
     /// The last near-duplicate report.
     pub near: Option<Result<Vec<vf_index::neardup::Pair>, String>>,
@@ -126,10 +124,12 @@ impl SearchTab {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn show(
     ui: &mut egui::Ui,
     s: &mut SearchTab,
     conn: &Connection,
+    catalog: &Path,
     root: &Path,
     snap: &Snapshot,
     ctx: &Context,
@@ -167,7 +167,7 @@ pub fn show(
             });
             filters(ui, s, snap);
             save_row(ui, s, root, ctx, device_id);
-            near_row(ui, s, root);
+            near_row(ui, s, catalog, root);
         });
     s.run_if_changed(conn, ctx);
     egui::CentralPanel::default().show(ui, |ui| {
@@ -208,13 +208,13 @@ pub fn show(
                         });
                     }
                     if row(ui, &hit, s.thumbs.get(&key)).clicked() {
-                        s.open = Some(Doc {
-                            doc_id: hit.doc_id.clone(),
-                            path: root.join(&hit.rel_path),
-                            name: file_name(&hit.rel_path),
-                            page: hit.page.unwrap_or(0) as usize,
-                            terms: terms.clone(),
-                        });
+                        s.open = Some(Doc::at(
+                            root,
+                            &hit.doc_id,
+                            &hit.rel_path,
+                            hit.page.unwrap_or(0) as usize,
+                            terms.clone(),
+                        ));
                     }
                 }
             },
@@ -274,7 +274,7 @@ const NEAR: f32 = 0.8;
 
 /// `Near-duplicate report`: documents whose text is almost the same but whose files differ
 /// (a rescan, a printed and a scanned copy). Runs on its own thread and catalog connection.
-fn near_row(ui: &mut egui::Ui, s: &mut SearchTab, root: &Path) {
+fn near_row(ui: &mut egui::Ui, s: &mut SearchTab, catalog: &Path, root: &Path) {
     if let Some(rx) = &s.near_job
         && let Ok(r) = rx.try_recv()
     {
@@ -284,14 +284,11 @@ fn near_row(ui: &mut egui::Ui, s: &mut SearchTab, root: &Path) {
     ui.horizontal(|ui| {
         let busy = s.near_job.is_some();
         if ui
-            .add_enabled(
-                !busy && s.catalog.is_some(),
-                egui::Button::new("Near-duplicate report"),
-            )
+            .add_enabled(!busy, egui::Button::new("Near-duplicate report"))
             .on_hover_text("Documents whose text is at least 80 % the same but whose files differ.")
             .clicked()
-            && let Some(catalog) = s.catalog.clone()
         {
+            let catalog = catalog.to_path_buf();
             let (tx, rx) = std::sync::mpsc::channel();
             let ctx = ui.ctx().clone();
             std::thread::spawn(move || {
@@ -333,13 +330,7 @@ fn near_row(ui: &mut egui::Ui, s: &mut SearchTab, root: &Path) {
                         ui.label(format!("{:.0} %", p.similarity * 100.0));
                         for (id, path) in [(&p.a, &p.a_path), (&p.b, &p.b_path)] {
                             if ui.link(path).clicked() {
-                                open = Some(Doc {
-                                    doc_id: id.clone(),
-                                    path: root.join(path),
-                                    name: file_name(path),
-                                    page: 0,
-                                    terms: vec![],
-                                });
+                                open = Some(Doc::at(root, id, path, 0, vec![]));
                             }
                         }
                     });
@@ -417,7 +408,7 @@ fn filters(ui: &mut egui::Ui, s: &mut SearchTab, snap: &Snapshot) {
             "Status",
             "Any status",
             &mut f.status,
-            &["received", "in_work", "final", "delivered"],
+            &vf_fs::docmeta::STATUSES,
         );
         combo(
             ui,
@@ -425,7 +416,7 @@ fn filters(ui: &mut egui::Ui, s: &mut SearchTab, snap: &Snapshot) {
             "Source",
             "Any source",
             &mut f.source,
-            &["client", "firm", "government", "third_party"],
+            &vf_fs::docmeta::SOURCES,
         );
         text_filter(ui, "Filed from", &mut f.filed_from, "YYYY-MM-DD");
         text_filter(ui, "to", &mut f.filed_to, "YYYY-MM-DD");
@@ -443,19 +434,16 @@ fn combo(
     ui: &mut egui::Ui,
     id: &str,
     label: &str,
-    any: &str,
+    any: &'static str,
     v: &mut Option<String>,
-    opts: &[&str],
+    opts: &[(&str, &'static str)],
 ) {
     egui::ComboBox::new(id, label)
-        .selected_text(
-            v.as_deref()
-                .map_or(any.to_string(), |s| s.replace('_', " ")),
-        )
+        .selected_text(widgets::label_of(opts, v.as_deref(), any))
         .show_ui(ui, |ui| {
             ui.selectable_value(v, None, any);
-            for o in opts {
-                ui.selectable_value(v, Some((*o).to_string()), o.replace('_', " "));
+            for (key, name) in opts {
+                ui.selectable_value(v, Some((*key).to_string()), *name);
             }
         });
 }
@@ -483,7 +471,7 @@ fn thumb_key(h: &Hit) -> String {
 fn pump_thumbs(ctx: &egui::Context, s: &mut SearchTab) {
     let r = s
         .renderer
-        .get_or_insert_with(|| Renderer::new(ctx, crate::ui::intake::pdfium_dir()));
+        .get_or_insert_with(|| Renderer::new(ctx, crate::ui::intake::pdfium_dir(), false));
     for (key, res) in r.finished() {
         if let Ok(p) = res {
             let tex = ctx.load_texture(
@@ -529,7 +517,8 @@ fn row(ui: &mut egui::Ui, h: &Hit, thumb: Option<&egui::TextureHandle>) -> egui:
         }
         ui.vertical(|ui| {
             ui.add(
-                egui::Label::new(RichText::new(file_name(&h.rel_path)).strong()).selectable(false),
+                egui::Label::new(RichText::new(widgets::file_name(&h.rel_path)).strong())
+                    .selectable(false),
             );
             let mut meta = vec![
                 h.client.clone().unwrap_or_else(|| "No client".into()),
@@ -575,8 +564,4 @@ fn row(ui: &mut egui::Ui, h: &Hit, thumb: Option<&egui::TextureHandle>) -> egui:
     }
     ui.separator();
     resp.on_hover_text("Open in the Viewer at this page")
-}
-
-fn file_name(rel: &str) -> String {
-    rel.rsplit('/').next().unwrap_or(rel).to_string()
 }

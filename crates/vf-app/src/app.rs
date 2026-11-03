@@ -79,8 +79,9 @@ pub struct OpenCabinet {
     pub ocr: crate::ui::ocr::OcrState,
     pub search: crate::ui::search::SearchTab,
     pub viewer: crate::ui::viewer::Viewer,
-    /// OCR's indexed count at the last look: Search runs again when it moves.
-    indexed_seen: usize,
+    /// OCR's indexed count when Search last re-ran, and when: while OCR works through a
+    /// backlog, Search runs again at most every 3 s, not on every document.
+    indexed_seen: (usize, Option<std::time::Instant>),
 }
 
 impl OpenCabinet {
@@ -232,8 +233,6 @@ impl VibeFilesApp {
                     ),
                     None => format!("Indexed: {r}"),
                 });
-                let mut search = crate::ui::search::SearchTab::default();
-                search.catalog = Some(opened.catalog.clone());
                 let ocr = crate::ui::ocr::OcrState::start(
                     ctx,
                     &opened,
@@ -246,9 +245,9 @@ impl VibeFilesApp {
                     admin: None,
                     intake,
                     ocr,
-                    search,
+                    search: Default::default(),
                     viewer: Default::default(),
-                    indexed_seen: 0,
+                    indexed_seen: (0, None),
                 }));
             }
             Err(e) => {
@@ -315,14 +314,18 @@ impl eframe::App for VibeFilesApp {
                     let s = q.status();
                     s.indexed + s.written
                 });
-                if indexed != o.indexed_seen {
-                    o.indexed_seen = indexed;
+                let (seen, at) = o.indexed_seen;
+                if indexed != seen
+                    && at.is_none_or(|t| t.elapsed() >= std::time::Duration::from_secs(3))
+                {
+                    o.indexed_seen = (indexed, Some(std::time::Instant::now()));
                     o.search.refresh();
                 }
                 crate::ui::search::show(
                     ui,
                     &mut o.search,
                     &o.opened.conn,
+                    &o.opened.catalog,
                     &o.opened.root,
                     &o.browse.snap,
                     &cx,
@@ -816,7 +819,7 @@ mod tests {
             assert!(start.elapsed() < std::time::Duration::from_secs(20));
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
-        h.get_by_label(&format!("Page {} of 3", scan.ein_page + 1));
+        h.get_by_label(&format!("Page {} of {}", scan.ein_page + 1, scan.pages));
     }
 
     /// PHASES P03 done-when (before filing): a scan whose content is already in the cabinet is
@@ -883,7 +886,11 @@ mod tests {
         h.step();
         h.step();
         assert!(!inbox.join("receipt scan.pdf").exists());
-        assert!(scans.join("_duplicates/receipt scan.pdf").is_file());
+        let kept: Vec<_> = std::fs::read_dir(scans.join("_duplicates"))
+            .unwrap()
+            .map(|d| d.unwrap().path().join("receipt scan.pdf"))
+            .collect();
+        assert!(kept.len() == 1 && kept[0].is_file(), "{kept:?}");
         assert!(
             h.query_by_label_contains("is already in the cabinet")
                 .is_none()

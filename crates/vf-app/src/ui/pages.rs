@@ -1,10 +1,10 @@
 //! Page images for the Search results and the Viewer, rendered by pdfium on one worker
 //! thread, with the places where the search words are on the page.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender, channel};
 
-use pdfium_render::prelude::{PdfDocument, PdfPoints, PdfRenderConfig, PdfSearchOptions, Pdfium};
+use pdfium_render::prelude::{PdfDocument, PdfPoints, PdfRenderConfig, PdfSearchOptions};
 
 /// A rendered page.
 pub struct Rendered {
@@ -32,7 +32,9 @@ pub struct Renderer {
 }
 
 impl Renderer {
-    pub fn new(ctx: &egui::Context, pdfium_dir: Option<PathBuf>) -> Renderer {
+    /// `latest_only`: when requests pile up, render only the newest (the Viewer stepping
+    /// through pages); otherwise every request (Search thumbnails).
+    pub fn new(ctx: &egui::Context, pdfium_dir: Option<PathBuf>, latest_only: bool) -> Renderer {
         let (tx, jobs) = channel::<Request>();
         let (out, rx) = channel();
         let ctx = ctx.clone();
@@ -42,15 +44,40 @@ impl Renderer {
                 let pdfium = pdfium_dir
                     .ok_or_else(|| "pdfium.dll not found".to_string())
                     .and_then(|d| filer_pdf::pdf::pdfium(&d));
-                for req in jobs {
+                // The document stays open while requests keep coming (stepping pages, a
+                // results list), and is closed when the queue runs dry: an open PDF would stop
+                // Windows from moving or renaming the file (Browse rename, OCR write-back).
+                let mut open: Option<(PathBuf, PdfDocument<'static>)> = None;
+                let mut next: Option<Request> = None;
+                while let Some(mut req) = next.take().or_else(|| jobs.recv().ok()) {
+                    if latest_only {
+                        while let Ok(newer) = jobs.try_recv() {
+                            req = newer;
+                        }
+                    }
                     let r = match &pdfium {
-                        Ok(p) => render(p, &req.path, req.page, req.width, &req.terms),
+                        Ok(p) => {
+                            if open.as_ref().is_none_or(|(path, _)| *path != req.path) {
+                                open = p
+                                    .load_pdf_from_file(&req.path, None)
+                                    .ok()
+                                    .map(|d| (req.path.clone(), d));
+                            }
+                            match &open {
+                                Some((_, doc)) => render_doc(doc, req.page, req.width, &req.terms),
+                                None => Err(format!("cannot open {}", req.path.display())),
+                            }
+                        }
                         Err(e) => Err(e.clone()),
                     };
                     if out.send((req.key, r)).is_err() {
                         break;
                     }
                     ctx.request_repaint();
+                    next = jobs.try_recv().ok();
+                    if next.is_none() {
+                        open = None;
+                    }
                 }
             })
             .expect("spawn page renderer");
@@ -66,20 +93,7 @@ impl Renderer {
     }
 }
 
-/// Renders page `page` (0-based) of `path`, `width` pixels wide, and finds `terms` on it.
-pub fn render(
-    pdfium: &Pdfium,
-    path: &Path,
-    page: usize,
-    width: u32,
-    terms: &[String],
-) -> Result<Rendered, String> {
-    let doc = pdfium
-        .load_pdf_from_file(path, None)
-        .map_err(|e| format!("cannot open the PDF: {e}"))?;
-    render_doc(&doc, page, width, terms)
-}
-
+/// Renders page `page` (0-based) of `doc`, `width` pixels wide, and finds `terms` on it.
 fn render_doc(
     doc: &PdfDocument<'_>,
     page: usize,
@@ -143,9 +157,12 @@ mod tests {
         let t = tempfile::tempdir().unwrap();
         let pdf = t.path().join("a.pdf");
         filer_pdf::pdf::write_test_pdf(&pdf, &["Cover", "Payer EIN 12-3456789"]);
-        let dir = filer_pdf::pdf::find_pdfium(Path::new("")).unwrap();
-        let p = filer_pdf::pdf::pdfium(&dir).unwrap();
-        let r = render(p, &pdf, 1, 400, &["3456789".into()]).unwrap();
+        let dir = filer_pdf::pdf::find_pdfium(std::path::Path::new("")).unwrap();
+        let doc = filer_pdf::pdf::pdfium(&dir)
+            .unwrap()
+            .load_pdf_from_file(&pdf, None)
+            .unwrap();
+        let r = render_doc(&doc, 1, 400, &["3456789".into()]).unwrap();
         assert_eq!(r.pages, 2);
         assert_eq!(r.image.size[0], 400);
         assert_eq!(r.hits.len(), 1);
@@ -156,7 +173,7 @@ mod tests {
         );
         assert!(h.width() > 0.0 && h.height() > 0.0);
         assert!(
-            render(p, &pdf, 0, 400, &["3456789".into()])
+            render_doc(&doc, 0, 400, &["3456789".into()])
                 .unwrap()
                 .hits
                 .is_empty()

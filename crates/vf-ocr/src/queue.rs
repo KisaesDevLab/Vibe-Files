@@ -65,6 +65,27 @@ pub fn recover(conn: &Connection) -> vf_core::Result<usize> {
     )?)
 }
 
+/// Whether any job is queued (a read: idle workers ask this before taking the write lock).
+pub fn any_queued(conn: &Connection) -> vf_core::Result<bool> {
+    Ok(conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM ocr_job WHERE state = 'queued')",
+        [],
+        |r| r.get(0),
+    )?)
+}
+
+/// A cheap fingerprint of the document table (rows, last change, last filing): when it has
+/// not moved, [`enqueue_missing`] has nothing to find. Indexed reads only.
+pub fn documents_stamp(
+    conn: &Connection,
+) -> vf_core::Result<(i64, Option<String>, Option<String>)> {
+    Ok(conn.query_row(
+        "SELECT count(*), max(updated_at), max(filed_at) FROM document",
+        [],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+    )?)
+}
+
 /// Takes the next job (intake first, then oldest).
 pub fn claim(conn: &Connection) -> vf_core::Result<Option<Job>> {
     let now = vf_core::now_rfc3339();
@@ -131,7 +152,28 @@ pub enum Outcome {
 }
 
 /// Reads every page of the job's PDF that has no saved text yet, then indexes the document.
+/// Every way out leaves the job in a settled state: a catalog error puts it back in the queue
+/// (pages already read are kept); only [`Outcome::Stopped`] leaves it running, for [`recover`].
 pub fn run_job(
+    conn: &Connection,
+    root: &Path,
+    pdfium: &Pdfium,
+    engine: Option<&dyn OcrEngine>,
+    job: &Job,
+    stop: &AtomicBool,
+) -> vf_core::Result<Outcome> {
+    let r = settle(conn, root, pdfium, engine, job, stop);
+    if r.is_err() {
+        let _ = conn.execute(
+            "UPDATE ocr_job SET state = 'queued', updated_at = ?2
+             WHERE doc_id = ?1 AND state = 'running'",
+            params![job.doc_id, vf_core::now_rfc3339()],
+        );
+    }
+    r
+}
+
+fn settle(
     conn: &Connection,
     root: &Path,
     pdfium: &Pdfium,
@@ -320,8 +362,6 @@ pub struct Config {
     pub catalog: PathBuf,
     pub root: PathBuf,
     pub pdfium_dir: PathBuf,
-    /// Configured `tesseract.exe` (or folder).
-    pub tesseract: Option<PathBuf>,
     pub threads: usize,
     /// This workstation, for the write-back Transactions.
     pub device_id: String,
@@ -371,16 +411,13 @@ pub fn tesseract_factory(configured: Option<PathBuf>) -> MakeEngine {
 }
 
 impl Queue {
-    /// Recovers interrupted jobs, queues the backlog, and starts the workers.
+    /// Starts the workers. Worker 0 first recovers interrupted jobs and queues the backlog (off
+    /// the caller's thread: an imported cabinet can mean tens of thousands of rows).
     pub fn start(
         config: Config,
         make_engine: MakeEngine,
         wake: impl Fn() + Send + Sync + 'static,
     ) -> Result<Queue, String> {
-        let conn = open(&config)?;
-        recover(&conn).map_err(|e| e.to_string())?;
-        enqueue_missing(&conn, BACKLOG).map_err(|e| e.to_string())?;
-        drop(conn);
         let pdfium = filer_pdf::pdf::pdfium(&config.pdfium_dir)?;
         let stop = Arc::new(AtomicBool::new(false));
         let status = Arc::new(Mutex::new(Status::default()));
@@ -484,13 +521,25 @@ fn worker(
             return;
         }
     };
+    if n == 0 {
+        let r = recover(&conn).and_then(|_| enqueue_missing(&conn, BACKLOG));
+        if let (Err(e), Ok(mut s)) = (r, status.lock()) {
+            s.last_error = Some(e.to_string());
+        }
+        wake();
+    }
     let mut last_scan = Instant::now();
+    let mut stamp = documents_stamp(&conn).ok();
     let mut last_writeback: Option<Instant> = None;
     while !stop.load(Ordering::Relaxed) {
-        // New arrivals: worker 0 looks every 2 s.
+        // New arrivals: worker 0 looks every 2 s, and queues only when the documents moved.
         if n == 0 && last_scan.elapsed() >= Duration::from_secs(2) {
             last_scan = Instant::now();
-            let _ = enqueue_missing(&conn, INTAKE);
+            let now = documents_stamp(&conn).ok();
+            if now != stamp {
+                stamp = now;
+                let _ = enqueue_missing(&conn, INTAKE);
+            }
         }
         // Text layers held back (Filer's undoable batch, a lock): worker 0 retries every 30 s.
         if n == 0 && last_writeback.is_none_or(|t| t.elapsed() >= Duration::from_secs(30)) {
@@ -530,6 +579,11 @@ fn worker(
             }
             g.0.clone()
         };
+        // Idle: a read, not a write-lock attempt, twice a second.
+        if !any_queued(&conn).unwrap_or(true) {
+            std::thread::sleep(Duration::from_millis(500));
+            continue;
+        }
         let job = match claim(&conn) {
             Ok(Some(j)) => j,
             Ok(None) => {
@@ -558,7 +612,7 @@ fn worker(
             );
             if let Ok(mut s) = status.lock() {
                 match w {
-                    Ok(crate::writeback::Written::Done { .. }) => s.written += 1,
+                    Ok(crate::writeback::Written::Done) => s.written += 1,
                     Ok(crate::writeback::Written::Held(_)) => {}
                     Err(e) => s.last_error = Some(format!("{}: text layer: {e}", job.rel_path)),
                 }
@@ -573,11 +627,6 @@ fn worker(
             }
         }
         if r.is_err() {
-            // A catalog error mid-job (busy, disk): back to the queue, finished pages kept.
-            let _ = conn.execute(
-                "UPDATE ocr_job SET state = 'queued', updated_at = ?2 WHERE doc_id = ?1 AND state = 'running'",
-                params![job.doc_id, vf_core::now_rfc3339()],
-            );
             std::thread::sleep(Duration::from_millis(500));
         }
         wake();

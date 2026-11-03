@@ -31,6 +31,8 @@ pub enum Origin {
 pub const PROCESSED_DIR: &str = "_processed";
 /// Files that could not be processed are moved here, with `<name>.error.txt` beside them.
 pub const FAILED_DIR: &str = "_failed";
+/// Where "Remove from inbox" puts a duplicate (Q-27).
+pub const DUPLICATES_DIR: &str = "_duplicates";
 
 /// What a processor needs to know.
 pub struct Context<'a> {
@@ -49,6 +51,8 @@ pub struct Delivered {
     pub path: PathBuf,
     /// For the Intake strip: `pages 1–3 · barcode cover sheet`.
     pub note: String,
+    /// SHA-256 of the delivered file (hints, and the duplicate check before filing).
+    pub sha256: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -57,6 +61,8 @@ pub struct Processed {
     pub delivered: Vec<Delivered>,
     /// Where the original went.
     pub kept: PathBuf,
+    /// SHA-256 of the original as it arrived (the delivered file may be rewritten).
+    pub original_sha256: String,
 }
 
 /// Names and labels the processors look up.
@@ -93,6 +99,8 @@ pub fn process(ctx: &Context<'_>, staged: &Path, origin: Origin) -> Result<Proce
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| name.clone());
     let lookup = Lookup::load(ctx.root)?;
+    let original_sha256 = filer_intake::commit::sha256_file(staged)
+        .map_err(|e| format!("cannot hash {name}: {e}"))?;
     if origin == Origin::PrintCapture {
         if !is_pdf(staged) {
             return Err(format!("{name}: the print capture folder takes PDFs"));
@@ -108,6 +116,7 @@ pub fn process(ctx: &Context<'_>, staged: &Path, origin: Origin) -> Result<Proce
             staged: staged.to_path_buf(),
             delivered: vec![d],
             kept,
+            original_sha256,
         });
     }
     // Images become a PDF first (step 4); it is then handled like a scanned PDF.
@@ -135,6 +144,7 @@ pub fn process(ctx: &Context<'_>, staged: &Path, origin: Origin) -> Result<Proce
         staged: staged.to_path_buf(),
         delivered: out,
         kept,
+        original_sha256,
     })
 }
 
@@ -369,9 +379,10 @@ fn deliver(
     note: String,
 ) -> Result<Delivered, String> {
     let dst = free_name(ctx.inbox, name);
+    let sha256 = filer_intake::commit::sha256_file(tmp)
+        .map_err(|e| format!("cannot hash {}: {e}", tmp.display()))?;
     if let Some(mut h) = hint.filter(Hint::is_useful) {
-        h.sha256 = filer_intake::commit::sha256_file(tmp)
-            .map_err(|e| format!("cannot hash {}: {e}", tmp.display()))?;
+        h.sha256 = sha256.clone();
         h.name = dst
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
@@ -384,13 +395,22 @@ fn deliver(
         let _ = std::fs::remove_file(tmp);
         format!("cannot deliver {name} to {}: {e}", ctx.inbox.display())
     })?;
-    Ok(Delivered { path: dst, note })
+    Ok(Delivered {
+        path: dst,
+        note,
+        sha256,
+    })
 }
 
-fn dated_dir(staged: &Path, sub: &str) -> Result<PathBuf, String> {
-    let dir = staged.parent().ok_or("no folder")?.join(sub).join(today());
+/// Moves `file` into `<staging>/<sub>/<date>/` under a free name. Returns where it went.
+pub fn move_aside(file: &Path, staging: &Path, sub: &str) -> Result<PathBuf, String> {
+    let dir = staging.join(sub).join(today());
     std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
-    Ok(dir)
+    let name = file.file_name().ok_or("no file name")?.to_string_lossy();
+    let dst = free_name(&dir, &name);
+    std::fs::rename(file, &dst)
+        .map_err(|e| format!("cannot move {} aside: {e}", file.display()))?;
+    Ok(dst)
 }
 
 fn today() -> String {
@@ -400,21 +420,12 @@ fn today() -> String {
 
 /// Moves the staged original to `_processed/<date>/`.
 fn keep_original(staged: &Path) -> Result<PathBuf, String> {
-    let dir = dated_dir(staged, PROCESSED_DIR)?;
-    let name = staged.file_name().ok_or("no file name")?.to_string_lossy();
-    let dst = free_name(&dir, &name);
-    std::fs::rename(staged, &dst)
-        .map_err(|e| format!("cannot move {} aside: {e}", staged.display()))?;
-    Ok(dst)
+    move_aside(staged, staged.parent().ok_or("no folder")?, PROCESSED_DIR)
 }
 
 /// Moves a file that failed to `_failed/<date>/` with the error beside it.
 pub fn set_aside(staged: &Path, error: &str) -> Result<PathBuf, String> {
-    let dir = dated_dir(staged, FAILED_DIR)?;
-    let name = staged.file_name().ok_or("no file name")?.to_string_lossy();
-    let dst = free_name(&dir, &name);
-    std::fs::rename(staged, &dst)
-        .map_err(|e| format!("cannot move {} aside: {e}", staged.display()))?;
+    let dst = move_aside(staged, staged.parent().ok_or("no folder")?, FAILED_DIR)?;
     let _ = std::fs::write(
         dst.with_file_name(format!(
             "{}.error.txt",

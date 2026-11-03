@@ -93,12 +93,6 @@ impl IntakeTab {
         match vf_fs::intake::reconcile(conn, root, device_id) {
             Ok(r) => {
                 self.seen = modified;
-                if r.recorded.is_some() {
-                    match vf_fs::dupes::filed_since(conn, &before) {
-                        Ok(d) => self.dupes.extend(d),
-                        Err(e) => self.message = Some(format!("Duplicate check failed: {e}")),
-                    }
-                }
                 if let Some((_, added, updated)) = r.recorded {
                     self.message = Some(format!(
                         "Intake filed {added} new documents{}.",
@@ -108,6 +102,10 @@ impl IntakeTab {
                             String::new()
                         }
                     ));
+                    match vf_fs::dupes::filed_since(conn, &before) {
+                        Ok(d) => self.dupes.extend(d),
+                        Err(e) => self.message = Some(format!("Duplicate check failed: {e}")),
+                    }
                 } else if r.undone.is_some() {
                     self.message = Some("Intake's last batch was undone.".into());
                 }

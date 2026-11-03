@@ -45,6 +45,11 @@ pub fn label_of(
         .unwrap_or(none)
 }
 
+/// The file name of a cabinet-relative path (forward slashes).
+pub fn file_name(rel: &str) -> &str {
+    rel.rsplit('/').next().unwrap_or(rel)
+}
+
 /// A tax year for display; `None` is a permanent file.
 pub fn year_label(y: Option<i32>) -> String {
     y.map(|y| y.to_string())

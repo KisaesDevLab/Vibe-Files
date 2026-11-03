@@ -1,5 +1,6 @@
 //! OCR workers for the open cabinet (P03) and their footer status.
 
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 use vf_core::db::Connection;
@@ -19,6 +20,30 @@ pub struct OcrState {
     counted: Option<Instant>,
 }
 
+/// Starts the OCR workers for a cabinet with this PC's settings (the app and the CLI).
+pub fn start_queue(
+    catalog: &Path,
+    root: &Path,
+    prefs: &Ocr,
+    device_id: &str,
+    threads: usize,
+    wake: impl Fn() + Send + Sync + 'static,
+) -> Result<Queue, String> {
+    let pdfium_dir = crate::ui::intake::pdfium_dir()
+        .ok_or_else(|| "pdfium.dll not found beside vibe-files.exe".to_string())?;
+    Queue::start(
+        queue::Config {
+            catalog: catalog.to_path_buf(),
+            root: root.to_path_buf(),
+            pdfium_dir,
+            threads,
+            device_id: device_id.into(),
+        },
+        queue::tesseract_factory(prefs.tesseract.clone()),
+        wake,
+    )
+}
+
 impl OcrState {
     /// Starts the workers for `opened`, unless paused on this PC.
     pub fn start(ctx: &egui::Context, opened: &Opened, prefs: &Ocr, device_id: &str) -> OcrState {
@@ -26,21 +51,13 @@ impl OcrState {
         if prefs.paused {
             return s;
         }
-        let Some(pdfium_dir) = crate::ui::intake::pdfium_dir() else {
-            s.error = Some("pdfium.dll not found beside the exe".into());
-            return s;
-        };
         let ctx = ctx.clone();
-        match Queue::start(
-            queue::Config {
-                catalog: opened.catalog.clone(),
-                root: opened.root.clone(),
-                pdfium_dir,
-                tesseract: prefs.tesseract.clone(),
-                threads: queue::default_threads(),
-                device_id: device_id.into(),
-            },
-            queue::tesseract_factory(prefs.tesseract.clone()),
+        match start_queue(
+            &opened.catalog,
+            &opened.root,
+            prefs,
+            device_id,
+            queue::default_threads(),
             move || ctx.request_repaint_after(Duration::from_millis(500)),
         ) {
             Ok(q) => s.queue = Some(q),

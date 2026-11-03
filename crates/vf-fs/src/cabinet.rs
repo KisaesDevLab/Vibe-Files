@@ -148,6 +148,20 @@ pub fn version_path(root: &Path, hash: &str) -> PathBuf {
         .join(hash)
 }
 
+/// `created_by` of a version kept when OCR wrote a text layer into the file (P03). Content
+/// matching treats that version as the same document (the original scan).
+pub const TEXT_LAYER_VERSION_BY: &str = "ocr";
+
+/// `_Vibe/trash/`: soft-deleted files (P05 adds the Trash view).
+pub fn trash_dir(root: &Path) -> PathBuf {
+    root.join(VIBE_DIR).join("trash")
+}
+
+/// `_Vibe/tmp/`: a new file being prepared before a Transaction moves it into place.
+pub fn tmp_dir(root: &Path) -> PathBuf {
+    root.join(VIBE_DIR).join("tmp")
+}
+
 /// Adds `entry` to the sidecar of the kept version `hash` (`<hash>.json`, a JSON array).
 pub fn add_version_sidecar(root: &Path, hash: &str, entry: VersionSidecar) -> Result<(), String> {
     let sidecar = version_path(root, hash).with_extension("json");

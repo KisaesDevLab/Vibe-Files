@@ -6,8 +6,7 @@ use std::path::{Path, PathBuf};
 use rusqlite::OpenFlags;
 pub use rusqlite::types::Value as SqlValue;
 pub use rusqlite::{
-    Connection, Error as SqlError, OptionalExtension, Transaction, TransactionBehavior, params,
-    params_from_iter,
+    Connection, Error as SqlError, OptionalExtension, Transaction, params, params_from_iter,
 };
 
 use crate::{Error, Result};
@@ -16,6 +15,7 @@ use crate::{Error, Result};
 const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/001_initial.sql"),
     include_str!("../migrations/002_ocr_search.sql"),
+    include_str!("../migrations/003_lookup_indexes.sql"),
 ];
 
 /// Schema version this build writes.
@@ -27,6 +27,17 @@ pub const SCHEMA_VERSION: u32 = MIGRATIONS.len() as u32;
 pub enum Storage {
     Local,
     Network,
+}
+
+/// Starts a transaction that takes the write lock at once. Use it for every multi-statement
+/// write through a shared `&Connection`: OCR workers hold their own connections (P03), and a
+/// deferred transaction that reads before it writes cannot wait for them (SQLITE_BUSY_SNAPSHOT
+/// fails at once instead of honouring the busy timeout).
+pub fn begin_write(conn: &Connection) -> Result<Transaction<'_>> {
+    Ok(Transaction::new_unchecked(
+        conn,
+        rusqlite::TransactionBehavior::Immediate,
+    )?)
 }
 
 /// The first 16 bytes of every SQLite database file.
@@ -91,7 +102,7 @@ fn migrate(conn: &Connection, path: &Path) -> Result<()> {
     }
     for (i, sql) in MIGRATIONS.iter().enumerate().skip(current as usize) {
         let to = i as u32 + 1;
-        let tx = conn.unchecked_transaction()?;
+        let tx = begin_write(conn)?;
         tx.execute_batch(sql)?;
         tx.pragma_update(None, "user_version", to)?;
         tx.commit()?;
@@ -198,7 +209,7 @@ mod tests {
             conn.pragma_update(None, "user_version", 1).unwrap();
         }
         let conn = open(&path, Storage::Local).unwrap();
-        assert_eq!(user_version(&conn).unwrap(), 2);
+        assert_eq!(user_version(&conn).unwrap(), SCHEMA_VERSION);
         assert!(tables(&conn).contains(&"ocr_job".to_string()));
         let baks = std::fs::read_dir(tmp.path())
             .unwrap()

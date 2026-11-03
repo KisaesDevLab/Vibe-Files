@@ -68,18 +68,6 @@ impl Tesseract {
         }
         c
     }
-
-    /// First line of `tesseract --version`, for Admin.
-    pub fn version(&self) -> Result<String, OcrError> {
-        let out = self
-            .command()
-            .arg("--version")
-            .output()
-            .map_err(|e| OcrError::Unavailable(format!("{}: {e}", self.exe.display())))?;
-        let text = String::from_utf8_lossy(&out.stdout).into_owned()
-            + &String::from_utf8_lossy(&out.stderr);
-        Ok(text.lines().next().unwrap_or("").trim().to_string())
-    }
 }
 
 impl OcrEngine for Tesseract {

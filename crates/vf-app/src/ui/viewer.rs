@@ -24,6 +24,25 @@ pub struct Doc {
     pub terms: Vec<String>,
 }
 
+impl Doc {
+    /// Document `doc_id` at cabinet path `rel`, opened at `page` with `terms` highlighted.
+    pub fn at(
+        root: &std::path::Path,
+        doc_id: &str,
+        rel: &str,
+        page: usize,
+        terms: Vec<String>,
+    ) -> Doc {
+        Doc {
+            doc_id: doc_id.into(),
+            path: root.join(rel),
+            name: widgets::file_name(rel).into(),
+            page,
+            terms,
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct Viewer {
     pub doc: Option<Doc>,
@@ -57,7 +76,7 @@ impl Viewer {
         let Some(d) = &self.doc else { return };
         let r = self
             .renderer
-            .get_or_insert_with(|| Renderer::new(ctx, crate::ui::intake::pdfium_dir()));
+            .get_or_insert_with(|| Renderer::new(ctx, crate::ui::intake::pdfium_dir(), true));
         let key = Self::key(d);
         for (k, res) in r.finished() {
             if k != key {

@@ -52,6 +52,29 @@ fn recorded(conn: &Connection, batch: &str) -> Option<(String, bool)> {
 
 /// Brings the catalog in line with Filer's last batch: records a finished batch not recorded
 /// yet, or undoes the catalog side of a batch Filer undid. Cheap when there is nothing to do.
+/// Cabinet-relative paths (forward slashes, lower case) of the files Filer's "Undo last batch"
+/// would check: a file there must keep its bytes (Filer refuses to undo a changed size). Empty
+/// when the last batch was undone; a batch still being written counts.
+pub fn undoable_paths(root: &Path) -> std::collections::HashSet<String> {
+    let Some(lb) = load_last_batch(&crate::clients::master_dir(root)) else {
+        return Default::default();
+    };
+    if lb.undone {
+        return Default::default();
+    }
+    let mut paths: Vec<&Path> = Vec::new();
+    for it in &lb.items {
+        paths.push(&it.dst);
+        paths.extend(it.copies.iter().map(|c| c.dst.as_path()));
+    }
+    paths.extend(lb.zip_entries.iter().map(|c| c.dst.as_path()));
+    paths
+        .into_iter()
+        .filter_map(|p| p.strip_prefix(root).ok())
+        .map(|r| r.to_string_lossy().replace('\\', "/").to_lowercase())
+        .collect()
+}
+
 pub fn reconcile(
     conn: &mut Connection,
     root: &Path,

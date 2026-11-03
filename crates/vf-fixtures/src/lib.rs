@@ -85,7 +85,6 @@ pub struct FixtureDoc {
 #[derive(Debug, Clone)]
 pub struct FixtureScan {
     pub rel_path: String,
-    pub client_id: String,
     pub ein: String,
     /// 0-based page carrying the EIN.
     pub ein_page: usize,
@@ -299,7 +298,6 @@ pub fn add_scans(
         write_scanned_pdf(pdfium, &out.join(&rel), &pages)?;
         summary.scans.push(FixtureScan {
             rel_path: rel,
-            client_id: id.to_string(),
             ein,
             ein_page: 1,
             pages: pages.len(),

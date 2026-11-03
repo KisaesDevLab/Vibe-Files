@@ -31,10 +31,6 @@ impl RenameDialog {
     }
 }
 
-fn file_name(rel: &str) -> &str {
-    rel.rsplit('/').next().unwrap_or(rel)
-}
-
 fn note(o: &Outcome) -> String {
     match o {
         Outcome::Rename(_) => String::new(),
@@ -102,9 +98,10 @@ pub fn show(ctx: &egui::Context, d: &mut RenameDialog, env: &mut Env) -> DialogO
                                 let mono = |t: &str| RichText::new(t).monospace().small();
                                 ui.add_sized(
                                     [250.0, ROW_H],
-                                    egui::Label::new(mono(file_name(&r.old_rel))).truncate(),
+                                    egui::Label::new(mono(widgets::file_name(&r.old_rel)))
+                                        .truncate(),
                                 );
-                                let new = r.new_rel().map(file_name).unwrap_or("—");
+                                let new = r.new_rel().map(widgets::file_name).unwrap_or("—");
                                 ui.add_sized(
                                     [250.0, ROW_H],
                                     egui::Label::new(mono(new)).truncate(),
