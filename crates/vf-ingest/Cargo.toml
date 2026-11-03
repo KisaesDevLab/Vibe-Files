@@ -26,3 +26,7 @@ windows.workspace = true
 filer-pdf = { path = "../filer-pdf", features = ["test-support"] }
 tempfile.workspace = true
 lopdf.workspace = true
+
+[features]
+# The in-process fake TWAIN source (`twain::fake`) for other crates' tests.
+test-support = []
