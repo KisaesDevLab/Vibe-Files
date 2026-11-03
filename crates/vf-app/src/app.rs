@@ -229,6 +229,13 @@ impl VibeFilesApp {
                 self.config.last_cabinet = Some(opened.root.clone());
                 // The cabinet is open either way; a settings write failure only loses "last".
                 let _ = config::save(&self.data, &self.config);
+                // Legal holds placed on other workstations first (P07): nothing they cover may
+                // be emptied below.
+                if let Err(e) =
+                    vf_fs::holds::sync(&mut opened.conn, &opened.root, &self.config.device_id)
+                {
+                    tracing::warn!(kind = crate::logging::kind(&e), "legal holds not synced");
+                }
                 // Trash older than 90 days empties on its own (Q-15; held documents stay).
                 let emptied = vf_fs::trash::auto_empty(
                     &mut opened.conn,

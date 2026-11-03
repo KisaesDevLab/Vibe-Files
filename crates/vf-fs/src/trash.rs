@@ -117,6 +117,18 @@ pub fn held(conn: &Connection, doc_id: &str) -> bool {
     .is_ok()
 }
 
+/// Whether the cabinet's hold file covers a trashed document.
+fn held_in_cabinet(conn: &Connection, root: &Path, t: &Trashed) -> bool {
+    let (client, hash): (Option<String>, String) = conn
+        .query_row(
+            "SELECT client_id, hash FROM document WHERE id = ?1",
+            [&t.doc_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap_or((None, String::new()));
+    crate::holds::covers(root, client.as_deref(), &t.rel_path, &hash)
+}
+
 /// What is in the trash, newest first: tombstoned documents whose file is there.
 pub fn list(conn: &Connection, root: &Path) -> Result<Vec<Trashed>, String> {
     let mut st = conn
@@ -247,11 +259,16 @@ pub fn restore(
 /// marked `purged`, one audit row each. Held documents are skipped. Returns how many went.
 pub fn purge(
     conn: &mut Connection,
+    root: &Path,
     device_id: &str,
     items: &[Trashed],
     why: &str,
 ) -> Result<usize, String> {
-    let go: Vec<&Trashed> = items.iter().filter(|t| !held(conn, &t.doc_id)).collect();
+    // Held in this catalog, or in the cabinet's hold file (a hold placed on another PC).
+    let go: Vec<&Trashed> = items
+        .iter()
+        .filter(|t| !held(conn, &t.doc_id) && !held_in_cabinet(conn, root, t))
+        .collect();
     if go.is_empty() {
         return Ok(0);
     }
@@ -296,7 +313,7 @@ pub fn auto_empty(conn: &mut Connection, root: &Path, device_id: &str) -> Result
         .into_iter()
         .filter(|t| t.deleted_at < cutoff)
         .collect();
-    purge(conn, device_id, &old, "in the trash over 90 days")
+    purge(conn, root, device_id, &old, "in the trash over 90 days")
 }
 
 /// `_Vibe/trash_pin.json`: the firm PIN's hash (Q-29).

@@ -113,7 +113,13 @@ pub fn show(ui: &mut egui::Ui, p: &mut TrashPage, env: &mut Env) {
                         .cloned()
                         .collect();
                     let held = chosen.iter().filter(|t| t.held).count();
-                    match trash::purge(env.conn, env.device_id, &chosen, "emptied by hand") {
+                    match trash::purge(
+                        env.conn,
+                        env.root,
+                        env.device_id,
+                        &chosen,
+                        "emptied by hand",
+                    ) {
                         Ok(n) => {
                             tracing::info!(documents = n, held, "trash emptied by hand");
                             p.notice = Some(if held > 0 {

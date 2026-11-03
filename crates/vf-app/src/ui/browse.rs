@@ -97,6 +97,11 @@ pub struct Browse {
     versions: Option<(String, Vec<vf_fs::versions::Version>)>,
     /// "Move to trash" chosen for the selection (P05 step 3).
     pub trash_requested: bool,
+    /// Legal holds covering what is shown (P07 step 4), for the selection / client they were
+    /// read for.
+    holds_seen: Option<(String, Vec<vf_fs::holds::Hold>)>,
+    /// The reason typed for a new hold, while the form is open.
+    hold_reason: Option<String>,
     /// The `Rename…` dialog, while open.
     pub rename: Option<RenameDialog>,
     /// A PDF to show in the Viewer (taken by the app).
@@ -169,6 +174,8 @@ impl Browse {
             undo_requested: false,
             versions: None,
             trash_requested: false,
+            holds_seen: None,
+            hold_reason: None,
             rename: None,
             prefs: Prefs::default(),
             prefs_dirty: false,
@@ -247,6 +254,7 @@ impl Browse {
         self.expanded.clear();
         self.undo_stack = None;
         self.versions = None;
+        self.holds_seen = None;
         self.recount();
         self.selected = self
             .snap
@@ -1415,6 +1423,7 @@ fn sort_arrow(ui: &mut egui::Ui, asc: bool) {
 }
 
 fn inspector(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env) {
+    legal_holds(ui, b, env);
     if b.selected.is_empty()
         && let Some(c) = b.scope_client()
     {
@@ -1572,6 +1581,117 @@ fn inspector(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env) {
         let (id, name) = (d.id.clone(), d.name().to_string());
         versions_list(ui, b, env, &id, &name);
     }
+}
+
+/// P07 step 4: the legal holds covering the client in view or the selected documents, as a
+/// banner with Release, and "Place legal hold…" for them.
+fn legal_holds(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env) {
+    let client = if b.selected.is_empty() {
+        b.scope_client().map(|c| b.snap.clients[c].id.clone())
+    } else {
+        None
+    };
+    let docs: Vec<String> = b
+        .selected
+        .iter()
+        .map(|&i| b.snap.docs[i].id.clone())
+        .collect();
+    if client.is_none() && docs.is_empty() {
+        return;
+    }
+    let key = format!("{client:?}{docs:?}");
+    if b.holds_seen.as_ref().is_none_or(|(k, _)| *k != key) {
+        let found = vf_fs::holds::active_for(env.root, env.conn, client.as_deref(), &docs);
+        b.holds_seen = Some((key, found));
+    }
+    let holds = b
+        .holds_seen
+        .as_ref()
+        .map(|(_, h)| h.clone())
+        .unwrap_or_default();
+    let mut release = None;
+    for h in &holds {
+        egui::Frame::new()
+            .fill(egui::Color32::from_rgb(0xfd, 0xec, 0xea))
+            .inner_margin(egui::Margin::symmetric(10, 6))
+            .show(ui, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(
+                        RichText::new(format!(
+                            "Legal hold: {} (since {})",
+                            h.reason,
+                            widgets::local_time(&h.since)
+                        ))
+                        .color(crate::ui::wizard::ERROR)
+                        .strong(),
+                    );
+                    ui.label(widgets::caption(
+                        "Nothing here is disposed of or emptied from the trash while it holds.",
+                    ));
+                    if ui.small_button("Release hold").clicked() {
+                        release = Some(h.id.clone());
+                    }
+                });
+            });
+        ui.add_space(4.0);
+    }
+    if let Some(id) = release {
+        match vf_fs::holds::release(env.conn, env.root, env.device_id, &id) {
+            Ok(()) => b.notice = Some("Legal hold released.".into()),
+            Err(e) => b.error = Some(e),
+        }
+        b.holds_seen = None;
+    }
+    let what = match (&client, docs.len()) {
+        (Some(_), _) => "this client".to_string(),
+        (None, 1) => "this document".to_string(),
+        (None, n) => format!("these {n} documents"),
+    };
+    match b.hold_reason.as_mut() {
+        None => {
+            if ui
+                .small_button(format!("Place legal hold on {what}…"))
+                .clicked()
+            {
+                b.hold_reason = Some(String::new());
+            }
+        }
+        Some(reason) => {
+            let mut place = false;
+            let mut cancel = false;
+            ui.horizontal(|ui| {
+                let l = ui.label("Hold reason");
+                ui.add(
+                    egui::TextEdit::singleline(reason)
+                        .hint_text("matter, examination, request")
+                        .desired_width(200.0),
+                )
+                .labelled_by(l.id);
+            });
+            ui.horizontal(|ui| {
+                place = ui.button("Place hold").clicked();
+                cancel = ui.button("Cancel").clicked();
+            });
+            if place {
+                let target = match &client {
+                    Some(c) => vf_fs::holds::Target::Client(c.clone()),
+                    None => vf_fs::holds::Target::Docs(docs.clone()),
+                };
+                let reason = reason.clone();
+                match vf_fs::holds::place(env.conn, env.root, env.device_id, target, &reason) {
+                    Ok(_) => {
+                        b.notice = Some(format!("Legal hold placed on {what}."));
+                        b.hold_reason = None;
+                        b.holds_seen = None;
+                    }
+                    Err(e) => b.error = Some(e),
+                }
+            } else if cancel {
+                b.hold_reason = None;
+            }
+        }
+    }
+    ui.add_space(6.0);
 }
 
 /// An undo stack entry in words.
@@ -2238,6 +2358,32 @@ mod tests {
         );
         assert_eq!(s.b.snap.docs.len(), 2);
         assert!(rels.iter().all(|r| s.root.join(r).is_file()));
+    }
+
+    /// P07 step 4: a hold placed on the selection shows as a banner and can be released.
+    #[test]
+    fn legal_hold_banner_on_the_selection() {
+        let mut h = harness(1, 2);
+        {
+            let s = h.state_mut();
+            std::fs::create_dir_all(s.root.join("_Vibe")).unwrap();
+            s.b.selected = s.b.visible.iter().copied().collect();
+        }
+        h.run();
+        click(&mut h, "Place legal hold on these 2 documents…");
+        type_into(&mut h, "Hold reason", "IRS exam 2023");
+        click(&mut h, "Place hold");
+        assert!(h.state().b.error.is_none(), "{:?}", h.state().b.error);
+        assert!(
+            h.query_by_label_contains("Legal hold: IRS exam 2023")
+                .is_some()
+        );
+        let s = h.state();
+        let d = &s.b.snap.docs[0];
+        assert!(vf_fs::holds::covers(&s.root, None, &d.rel_path, &d.hash));
+        click(&mut h, "Release hold");
+        assert!(h.query_by_label_contains("Legal hold:").is_none());
+        assert_eq!(h.state().b.notice.as_deref(), Some("Legal hold released."));
     }
 
     #[test]

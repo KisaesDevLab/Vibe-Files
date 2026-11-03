@@ -130,6 +130,7 @@ pub const NOT_ON_UNDO_STACK: &[&str] = &[
     "intake_clients",
     "external_modify",
     crate::trash::PIN_LABEL,
+    crate::holds::LABEL,
 ];
 
 /// This Windows login's undo stack: its last 20 undoable transactions, newest first.
