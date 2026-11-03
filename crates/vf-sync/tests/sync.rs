@@ -474,3 +474,27 @@ fn round_trip_on_a_real_endpoint_when_configured() {
     let b = pc_b(t.path(), store, &a);
     assert_eq!(snapshot(&b.root), snapshot(&a.root));
 }
+
+/// Q-38: the key remembered for this Windows login unlocks without the passphrase, and is the
+/// same key; forgetting removes it.
+#[test]
+fn remembered_key_unlocks_without_the_passphrase() {
+    let t = tempfile::tempdir().unwrap();
+    let a = pc_a(t.path(), Remote::memory());
+    let data = t.path().join("data");
+    let firm = vf_sync::setup::firm_key_local(&a.root, &a.sync.cabinet_id, PASS).unwrap();
+    assert!(vf_sync::setup::recall(&data, &a.sync.cabinet_id).is_none());
+    vf_sync::setup::remember(&data, &a.sync.cabinet_id, &firm).unwrap();
+    let k = vf_sync::setup::recall(&data, &a.sync.cabinet_id).unwrap();
+    let h = vf_sync::crypto::sha256(b"x");
+    assert_eq!(k.object_name(&h), a.sync.keys.object_name(&h));
+    // Bound to its cabinet: another cabinet id does not open it.
+    std::fs::copy(
+        vf_sync::setup::remembered_file(&data, &a.sync.cabinet_id),
+        vf_sync::setup::remembered_file(&data, "other"),
+    )
+    .unwrap();
+    assert!(vf_sync::setup::recall(&data, "other").is_none());
+    vf_sync::setup::forget(&data, &a.sync.cabinet_id);
+    assert!(vf_sync::setup::recall(&data, &a.sync.cabinet_id).is_none());
+}

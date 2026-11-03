@@ -41,7 +41,6 @@ pub enum Op {
     Export(String, PathBuf),
 }
 
-#[derive(Default)]
 struct Form {
     endpoint: String,
     region: String,
@@ -51,6 +50,24 @@ struct Form {
     pass: String,
     pass2: String,
     unlock: String,
+    /// Remember the key on this PC for this Windows login (Q-38).
+    remember: bool,
+}
+
+impl Default for Form {
+    fn default() -> Self {
+        Form {
+            endpoint: String::new(),
+            region: String::new(),
+            bucket: String::new(),
+            key_id: String::new(),
+            app_key: String::new(),
+            pass: String::new(),
+            pass2: String::new(),
+            unlock: String::new(),
+            remember: true,
+        }
+    }
 }
 
 #[derive(Default)]
@@ -76,6 +93,17 @@ pub struct SyncTab {
     form: Form,
     refreshed: Option<Instant>,
     last_auto: Option<Instant>,
+    /// The remembered key was tried once this session.
+    recall_tried: bool,
+}
+
+const REMEMBER_HELP: &str = "The key is sealed with Windows (DPAPI) for your login on this \
+computer and kept in this PC's data folder: sync unlocks itself when you start Vibe Files. Another \
+login or another computer cannot open it. The passphrase stays the way back in.";
+
+/// This PC's data folder (the catalog's).
+fn data_dir(catalog: &Path) -> &Path {
+    catalog.parent().unwrap_or(Path::new("."))
 }
 
 fn computer_name() -> String {
@@ -126,6 +154,10 @@ impl SyncTab {
     /// Every frame (whatever the tab): picks up finished work, refreshes the counts, and starts
     /// the automatic push when it is due.
     pub fn tick(&mut self, ctx: &egui::Context, env: &Env, catalog: &Path, cfg: &SyncConfig) {
+        if self.session.is_none() && !self.recall_tried {
+            self.recall_tried = true;
+            self.recall(env.root, data_dir(catalog), cfg, env.device_id);
+        }
         if let Some((_, rx)) = &self.job {
             match rx.try_recv() {
                 Err(TryRecvError::Empty) => {}
@@ -263,36 +295,79 @@ impl SyncTab {
         }
     }
 
-    /// Opens sync with the passphrase (no network: the key and the sealed application key are
-    /// local).
-    fn unlock(&mut self, root: &Path, cfg: &SyncConfig, device_id: &str) {
+    /// The session from keys (no network: the sealed application key is local).
+    fn session_from(
+        keys: vf_sync::Keys,
+        cfg: &SyncConfig,
+        device_id: &str,
+    ) -> Result<Sync, String> {
+        let app_key =
+            vf_sync::setup::open_secret(&keys, &cfg.app_key_sealed).map_err(|e| e.to_string())?;
+        let store = vf_sync::Remote::s3(&cfg.s3(), &app_key).map_err(|e| e.to_string())?;
+        Ok(Sync {
+            remote: vf_sync::Remote::new(store, &cfg.cabinet_id),
+            keys,
+            cabinet_id: cfg.cabinet_id.clone(),
+            device_id: device_id.into(),
+            device_name: computer_name(),
+        })
+    }
+
+    /// Unlocks with the key this Windows login remembered on this PC, when there is one.
+    fn recall(&mut self, root: &Path, data: &Path, cfg: &SyncConfig, device_id: &str) {
+        let Ok(cab) = vf_fs::cabinet::read(root) else {
+            return;
+        };
+        if !cfg.configured_for(&cab.cabinet_id) {
+            return;
+        }
+        if let Some(keys) = vf_sync::setup::recall(data, &cab.cabinet_id) {
+            match Self::session_from(keys, cfg, device_id) {
+                Ok(s) => self.session = Some(s),
+                Err(e) => tracing::warn!(kind = crate::logging::kind(&e), "remembered sync key"),
+            }
+        }
+    }
+
+    /// Opens sync with the passphrase; remembers the key on this PC when asked.
+    fn unlock(&mut self, root: &Path, data: &Path, cfg: &SyncConfig, device_id: &str) {
         let pass = std::mem::take(&mut self.form.unlock);
+        let remember = self.form.remember;
         let r = (|| -> Result<Sync, String> {
-            let keys = vf_sync::setup::unlock_local(root, &cfg.cabinet_id, &pass)
+            let firm = vf_sync::setup::firm_key_local(root, &cfg.cabinet_id, &pass)
                 .map_err(|e| e.to_string())?;
-            let app_key = vf_sync::setup::open_secret(&keys, &cfg.app_key_sealed)
-                .map_err(|e| e.to_string())?;
-            let store = vf_sync::Remote::s3(&cfg.s3(), &app_key).map_err(|e| e.to_string())?;
-            Ok(Sync {
-                remote: vf_sync::Remote::new(store, &cfg.cabinet_id),
-                keys,
-                cabinet_id: cfg.cabinet_id.clone(),
-                device_id: device_id.into(),
-                device_name: computer_name(),
-            })
+            let keys = vf_sync::Keys::derive(vf_sync::setup::KEY_ID, &firm);
+            let s = Self::session_from(keys, cfg, device_id)?;
+            if remember {
+                vf_sync::setup::remember(data, &cfg.cabinet_id, &firm)
+                    .map_err(|e| e.to_string())?;
+            }
+            Ok(s)
         })();
         match r {
             Ok(s) => {
                 self.session = Some(s);
                 self.error = None;
-                self.notice = Some("Sync unlocked for this session.".into());
+                self.notice = Some(if remember {
+                    "Sync unlocked, and remembered on this PC for your Windows login.".into()
+                } else {
+                    "Sync unlocked for this session.".into()
+                });
             }
             Err(e) => self.error = Some(e),
         }
     }
 
-    fn setup(&mut self, ctx: &egui::Context, root: &Path, device_id: &str, cabinet_id: &str) {
+    fn setup(
+        &mut self,
+        ctx: &egui::Context,
+        root: &Path,
+        data: &Path,
+        device_id: &str,
+        cabinet_id: &str,
+    ) {
         let f = &mut self.form;
+        let (remember, data) = (f.remember, data.to_path_buf());
         if f.pass != f.pass2 {
             self.error = Some("The two passphrases differ.".into());
             return;
@@ -322,6 +397,11 @@ impl SyncTab {
                         vf_sync::setup::init(&root, &remote, &pass, vf_sync::setup::DEFAULT_KDF)
                             .map_err(|e| e.to_string())?;
                     let sealed = vf_sync::setup::seal_secret(&keys, &app_key);
+                    if remember {
+                        let firm = vf_sync::setup::firm_key_local(&root, &cab, &pass)
+                            .map_err(|e| e.to_string())?;
+                        vf_sync::setup::remember(&data, &cab, &firm).map_err(|e| e.to_string())?;
+                    }
                     Ok(Done::Setup(
                         Sync {
                             remote,
@@ -428,8 +508,10 @@ pub fn show(ui: &mut egui::Ui, t: &mut SyncTab, env: &mut Env, v: View<'_>) {
         } else if t.session.is_none() {
             ui.label("Sync is set up for this cabinet. Unlock it for this session:");
             field(ui, "Sync passphrase", &mut t.form.unlock, true, "");
+            ui.checkbox(&mut t.form.remember, "Remember on this PC for my Windows login")
+                .on_hover_text(REMEMBER_HELP);
             if ui.add(widgets::primary_button("Unlock")).clicked() {
-                t.unlock(env.root, v.cfg, env.device_id);
+                t.unlock(env.root, data_dir(v.catalog), v.cfg, env.device_id);
             }
         } else {
             unlocked(ui, t, env, &v);
@@ -463,6 +545,8 @@ fn setup_form(ui: &mut egui::Ui, t: &mut SyncTab, env: &Env, v: &View<'_>) {
         "at least 12 characters",
     );
     field(ui, "Passphrase again", &mut f.pass2, true, "");
+    ui.checkbox(&mut f.remember, "Remember on this PC for my Windows login")
+        .on_hover_text(REMEMBER_HELP);
     let ready = !f.endpoint.trim().is_empty()
         && !f.bucket.trim().is_empty()
         && !f.key_id.trim().is_empty()
@@ -472,7 +556,13 @@ fn setup_form(ui: &mut egui::Ui, t: &mut SyncTab, env: &Env, v: &View<'_>) {
         .add_enabled(ready && !t.running(), widgets::primary_button("Connect"))
         .clicked()
     {
-        t.setup(ui.ctx(), env.root, env.device_id, v.cabinet_id);
+        t.setup(
+            ui.ctx(),
+            env.root,
+            data_dir(v.catalog),
+            env.device_id,
+            v.cabinet_id,
+        );
     }
 }
 
@@ -562,8 +652,23 @@ fn unlocked(ui: &mut egui::Ui, t: &mut SyncTab, env: &mut Env, v: &View<'_>) {
         {
             t.start(ui.ctx(), v.catalog, env.root, Op::Restore(p));
         }
-        if ui.button("Lock").on_hover_text("Forget the key until unlocked again.").clicked() {
+        if ui
+            .button("Lock")
+            .on_hover_text("Close sync until unlocked again (a remembered key unlocks it at the next start).")
+            .clicked()
+        {
             t.session = None;
+            t.recall_tried = true;
+        }
+        let data = data_dir(v.catalog);
+        if vf_sync::setup::remembered_file(data, v.cabinet_id).exists()
+            && ui
+                .button("Forget on this PC")
+                .on_hover_text("Sync will ask for the passphrase again on this PC.")
+                .clicked()
+        {
+            vf_sync::setup::forget(data, v.cabinet_id);
+            t.notice = Some("The key is no longer remembered on this PC.".into());
         }
     });
     ui.add_space(8.0);

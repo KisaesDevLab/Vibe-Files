@@ -252,6 +252,18 @@ fn sync_session(cabinet: &Path, data: &Path) -> Result<vf_sync::Sync> {
     if !config.sync.configured_for(&cab.cabinet_id) {
         bail!("sync is not set up for this cabinet on this PC (Sync tab)");
     }
+    let data_keys = vf_sync::setup::recall(data, &cab.cabinet_id);
+    if let Some(keys) = data_keys {
+        let app_key = vf_sync::setup::open_secret(&keys, &config.sync.app_key_sealed)?;
+        let store = vf_sync::Remote::s3(&config.sync.s3(), &app_key)?;
+        return Ok(vf_sync::Sync {
+            remote: vf_sync::Remote::new(store, &cab.cabinet_id),
+            keys,
+            cabinet_id: cab.cabinet_id,
+            device_id: config.device_id,
+            device_name: std::env::var("COMPUTERNAME").unwrap_or_else(|_| "this PC".into()),
+        });
+    }
     let pass = match std::env::var("VF_SYNC_PASSPHRASE") {
         Ok(p) => p,
         Err(_) => {

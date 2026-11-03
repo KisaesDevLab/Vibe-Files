@@ -138,3 +138,42 @@ pub fn set_object_lock(remote: &Remote, days: Option<u32>) -> Result<()> {
     )?;
     Ok(())
 }
+
+/// The firm sync key itself from the passphrase and the local wrapped copy (to remember it).
+pub fn firm_key_local(root: &Path, cabinet_id: &str, passphrase: &str) -> Result<[u8; 32]> {
+    let b = std::fs::read(key_file(root)).map_err(|_| SyncError::NotSetUp)?;
+    let w = WrappedKey::from_json(&b).map_err(|e| SyncError::Local(e.to_string()))?;
+    keys::unwrap_with_passphrase(&w, passphrase, cabinet_id).map_err(|e| match e {
+        KeyError::WrongPassphrase => SyncError::WrongPassphrase,
+        e => SyncError::Local(e.to_string()),
+    })
+}
+
+/// Where this PC keeps the firm key sealed for the Windows login (QUESTIONS Q-38): in the
+/// workstation's data folder, never in the cabinet or the bucket.
+pub fn remembered_file(data: &Path, cabinet_id: &str) -> PathBuf {
+    data.join(format!("sync-key-{cabinet_id}.dpapi"))
+}
+
+/// Remembers the firm key on this PC for this Windows login (DPAPI), so sync unlocks itself.
+pub fn remember(data: &Path, cabinet_id: &str, firm: &[u8; 32]) -> Result<()> {
+    let sealed = vf_security::dpapi::protect(firm, cabinet_id.as_bytes())?;
+    std::fs::create_dir_all(data).map_err(|e| SyncError::Local(e.to_string()))?;
+    vf_fs::cabinet::write_replace(&remembered_file(data, cabinet_id), &sealed)?;
+    Ok(())
+}
+
+/// The remembered keys, when this login on this PC has them.
+pub fn recall(data: &Path, cabinet_id: &str) -> Option<Keys> {
+    let sealed = std::fs::read(remembered_file(data, cabinet_id)).ok()?;
+    let firm: [u8; 32] = vf_security::dpapi::unprotect(&sealed, cabinet_id.as_bytes())
+        .ok()?
+        .try_into()
+        .ok()?;
+    Some(Keys::derive(KEY_ID, &firm))
+}
+
+/// Forgets the remembered key on this PC.
+pub fn forget(data: &Path, cabinet_id: &str) {
+    let _ = std::fs::remove_file(remembered_file(data, cabinet_id));
+}

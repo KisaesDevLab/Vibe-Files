@@ -2,6 +2,7 @@
 //!
 //! P01 step 1 brought in [`keys`] (recovery-passphrase wrapping); the rest lands in P06.
 
+pub mod dpapi;
 pub mod keys;
 
 pub mod pin;

@@ -74,8 +74,11 @@ Set up once per cabinet, then joined on each workstation that syncs:
 2. Vibe Files › Sync › Set up sync: the bucket's S3 endpoint (`https://s3.<region>.backblazeb2.com`),
    region, bucket name, key ID, application key, and a **sync passphrase** (12+ characters).
 3. On another workstation: the same form with the same bucket and the **same passphrase** joins.
-4. Each session: Sync › Unlock with the passphrase. While unlocked, Vibe Files pushes every 15
-   minutes (setting; optionally only within an hour window) and on Push now.
+4. Unlock: with "Remember on this PC for my Windows login" ticked (the default), the key is
+   sealed with Windows DPAPI for that login on that PC and sync unlocks itself every time Vibe
+   Files starts; untick it to type the passphrase each session. Sync › Forget on this PC undoes
+   it (do that before a PC leaves the firm). While unlocked, Vibe Files pushes every 15 minutes
+   (setting; optionally only within an hour window) and on Push now.
 
 Everything is encrypted on the workstation before upload (XChaCha20-Poly1305 with the firm sync
 key); object names reveal no client, file or hash (docs/BUCKET_LAYOUT.md).
@@ -89,8 +92,10 @@ key); object names reveal no client, file or hash (docs/BUCKET_LAYOUT.md).
 - Changing staff does not require a new passphrase unless one of them knew it and left; then set
   up a new bucket with a new passphrase and push again.
 
-The B2 application key is stored in `config.toml` sealed with the firm key (opened by the
-passphrase), never in the clear.
+The B2 application key is stored in `config.toml` sealed with the firm key, never in the clear.
+A remembered key (`<data>\sync-key-<cabinet id>.dpapi`) opens only for the Windows login that
+saved it on that PC; anyone who can sign in as that login can sync, so keep Windows logins
+personal and locked.
 
 ## 5. Disaster recovery from the bucket
 
