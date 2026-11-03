@@ -59,8 +59,9 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo run -p vf-fixtures                    # synthetic test cabinet in fixtures\cabinet\
 ```
 
-`pdfium.dll` ships in `crates/filer-pdf/assets/`. Copy it beside the exe for a portable
-build.
+`pdfium.dll` ships in `crates/filer-pdf/assets/` and the 64-bit TWAIN manager
+`TWAINDSM.dll` in `crates/vf-ingest/assets/`. Copy both beside the exe for a portable build
+(TWAINDSM.dll is also found in Windows' System32 when a scanner driver installed it).
 
 ## Repository layout
 
@@ -90,4 +91,6 @@ assigned.
 
 [GNU Affero General Public License v3.0 or later](LICENSE) (`AGPL-3.0-or-later`).
 Third-party components keep their own licenses. pdfium's licenses are in
-`crates/filer-pdf/assets/`. Tesseract is installed separately and is Apache-2.0.
+`crates/filer-pdf/assets/`. The TWAIN Data Source Manager (TWAIN Working Group, 2.5.1) is
+LGPL-2.1-or-later, licence in `crates/vf-ingest/assets/`. Tesseract is installed separately
+and is Apache-2.0.
