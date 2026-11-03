@@ -97,6 +97,38 @@ pub fn undo(
         .map_err(|e| e.to_string())
 }
 
+/// Transactions the undo stack leaves out (P05 step 4): Intake batches (Filer's own Undo),
+/// work done in the background (OCR, rebuild), catalog rows that follow files edited elsewhere
+/// (client master, doc types), records with nothing to undo, and emptying the trash (the
+/// bytes are gone).
+pub const NOT_ON_UNDO_STACK: &[&str] = &[
+    crate::intake::LABEL,
+    "intake batch",
+    "rebuild",
+    crate::trash::PURGE_LABEL,
+    "ocr_text_layer",
+    "doc_types_seed",
+    "doc_types_edit",
+    "seed",
+    "duplicate_kept",
+    "clients_edit",
+    "clients_import",
+    "intake_clients",
+];
+
+/// This Windows login's undo stack: its last 20 undoable transactions, newest first.
+pub fn undo_stack(
+    conn: &vf_core::db::Connection,
+    device_id: &str,
+) -> Result<Vec<vf_core::tx::Undoable>, String> {
+    vf_core::tx::undo_stack(
+        conn,
+        &vf_core::tx::Actor::device(device_id),
+        NOT_ON_UNDO_STACK,
+    )
+    .map_err(|e| e.to_string())
+}
+
 /// Removes folders this op created, innermost first, only while they are empty.
 fn remove_empty(created: &[PathBuf]) {
     for d in created.iter().rev() {

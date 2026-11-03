@@ -89,8 +89,8 @@ pub struct Browse {
     pub rel_form: RelForm,
     /// The document inspector's metadata form (reset when the selection changes).
     pub meta_form: MetaForm,
-    /// Newest undoable metadata edit by this device; `None` = not looked up yet.
-    undo_tx: Option<Option<String>>,
+    /// This Windows login's undo stack, newest first (P05 step 4); `None` = not read yet.
+    undo_stack: Option<Vec<vf_core::tx::Undoable>>,
     /// Ctrl+Z pressed outside a text field.
     undo_requested: bool,
     /// The selected document's versions (P05 step 1), for the document they were read for.
@@ -165,7 +165,7 @@ impl Browse {
             import: None,
             rel_form: RelForm::new(),
             meta_form: MetaForm::default(),
-            undo_tx: None,
+            undo_stack: None,
             undo_requested: false,
             versions: None,
             trash_requested: false,
@@ -245,7 +245,7 @@ impl Browse {
             _ => Scope::Cabinet,
         };
         self.expanded.clear();
-        self.undo_tx = None;
+        self.undo_stack = None;
         self.versions = None;
         self.recount();
         self.selected = self
@@ -1425,13 +1425,11 @@ fn inspector(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env) {
         let docs = b.selected_docs();
         b.meta_form = MetaForm::for_docs(&b.selected, &docs, &b.snap.doc_types);
     }
-    if b.undo_tx.is_none() {
-        b.undo_tx = Some(vf_core::tx::last_undoable(
-            env.conn,
-            env.device_id,
-            &vf_fs::docmeta::UNDOABLE,
-        ));
+    if b.undo_stack.is_none() {
+        b.undo_stack =
+            Some(vf_fs::fileops::undo_stack(env.conn, env.device_id).unwrap_or_default());
     }
+    let top = b.undo_stack.as_ref().and_then(|s| s.first()).cloned();
     let mut undo = std::mem::take(&mut b.undo_requested);
     ui.horizontal(|ui| {
         ui.label(
@@ -1440,21 +1438,43 @@ fn inspector(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env) {
                 .size(14.0),
         );
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            let can = matches!(b.undo_tx, Some(Some(_)));
+            let stack = b.undo_stack.clone().unwrap_or_default();
+            ui.add_enabled_ui(!stack.is_empty(), |ui| {
+                ui.menu_button(format!("History ({})", stack.len()), |ui| {
+                    ui.label(widgets::caption(
+                        "Your last changes, newest first. Undo takes back the newest.",
+                    ));
+                    for (i, u) in stack.iter().enumerate() {
+                        let text = format!("{} · {}", widgets::local_time(&u.ts), undo_label(u));
+                        if i == 0 {
+                            if ui.button(format!("Undo: {text}")).clicked() {
+                                undo = true;
+                                ui.close();
+                            }
+                        } else {
+                            ui.label(RichText::new(text).color(theme::INK_MUTED));
+                        }
+                    }
+                });
+            });
+            let hover = match &top {
+                Some(u) => format!("Undo {} (Ctrl+Z)", undo_label(u)),
+                None => "Nothing to undo".into(),
+            };
             if ui
-                .add_enabled(can, egui::Button::new("Undo last"))
-                .on_hover_text("Undo the last edit or rename made on this PC (Ctrl+Z)")
+                .add_enabled(top.is_some(), egui::Button::new("Undo last"))
+                .on_hover_text(hover)
                 .clicked()
             {
                 undo = true;
             }
         });
     });
-    if undo && let Some(Some(tx)) = b.undo_tx.clone() {
-        match vf_fs::fileops::undo(env.conn, env.root, &tx, env.device_id) {
+    if undo && let Some(u) = top {
+        match vf_fs::fileops::undo(env.conn, env.root, &u.tx_id, env.device_id) {
             Ok(()) => {
                 b.reload(env.conn);
-                b.notice = Some("Undid the last change.".into());
+                b.notice = Some(format!("Undid {}.", undo_label(&u)));
             }
             Err(e) => b.error = Some(format!("Undo failed: {e}")),
         }
@@ -1551,6 +1571,30 @@ fn inspector(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env) {
             });
         let (id, name) = (d.id.clone(), d.name().to_string());
         versions_list(ui, b, env, &id, &name);
+    }
+}
+
+/// An undo stack entry in words.
+fn undo_label(u: &vf_core::tx::Undoable) -> String {
+    let what = match u.label.as_str() {
+        "doc_meta_edit" => "metadata edit",
+        "doc_rename" => "rename",
+        "trash" | "trash_duplicate" => "move to trash",
+        "trash_restore" => "restore from trash",
+        "restore_version" => "version restore",
+        "annotate" => "annotations",
+        "stamp" => "stamp",
+        "pages" => "page edit",
+        "redact" => "redaction",
+        "flatten" => "flatten",
+        "pdfa" => "PDF/A conversion",
+        "compress" => "compression",
+        "client_create" => "new client",
+        other => other,
+    };
+    match u.summary.split_once(" · ") {
+        Some((_, docs)) => format!("{what} ({docs})"),
+        None => what.to_string(),
     }
 }
 
@@ -2175,6 +2219,25 @@ mod tests {
         assert!(s.b.snap.docs.is_empty());
         assert!(rels.iter().all(|r| !s.root.join(r).exists()));
         assert_eq!(vf_fs::trash::list(&s.conn, &s.root).unwrap().len(), 2);
+
+        // P05 step 4: the undo stack holds it; Undo last puts both back.
+        h.run();
+        click(&mut h, "History (1)");
+        assert!(
+            h.query_by_label_contains("move to trash (2 documents)")
+                .is_some()
+        );
+        h.key_press(egui::Key::Escape);
+        h.run();
+        click(&mut h, "Undo last");
+        let s = h.state();
+        assert!(s.b.error.is_none(), "{:?}", s.b.error);
+        assert_eq!(
+            s.b.notice.as_deref(),
+            Some("Undid move to trash (2 documents).")
+        );
+        assert_eq!(s.b.snap.docs.len(), 2);
+        assert!(rels.iter().all(|r| s.root.join(r).is_file()));
     }
 
     #[test]
