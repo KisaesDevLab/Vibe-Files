@@ -5033,6 +5033,7 @@ dependencies = [
  "vf-fixtures",
  "vf-fs",
  "vf-ingest",
+ "vf-ocr",
  "vf-security",
  "windows",
 ]
@@ -5119,6 +5120,14 @@ dependencies = [
 [[package]]
 name = "vf-ocr"
 version = "0.1.0"
+dependencies = [
+ "image",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "uuid",
+]
 
 [[package]]
 name = "vf-pdf"

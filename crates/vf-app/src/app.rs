@@ -99,6 +99,7 @@ impl VibeFilesApp {
                     last_cabinet: None,
                     prefs: Default::default(),
                     ingest: Default::default(),
+                    ocr: Default::default(),
                 },
                 Some(format!("Settings could not be read: {e:#}")),
             ),

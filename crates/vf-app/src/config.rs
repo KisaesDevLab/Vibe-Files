@@ -22,6 +22,20 @@ pub struct Config {
     /// This PC's intake staging folders (P02).
     #[serde(default)]
     pub ingest: Ingest,
+    /// This PC's OCR engine (P03).
+    #[serde(default)]
+    pub ocr: Ocr,
+}
+
+/// OCR settings of this workstation.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Ocr {
+    /// `tesseract.exe` or its folder; empty = beside the exe, Program Files, `PATH` (Q-25).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tesseract: Option<PathBuf>,
+    /// Pause OCR on this PC.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub paused: bool,
 }
 
 /// Folders Vibe Files processes before Filer sees the files (`vf_ingest::pipeline`). Outside
@@ -133,6 +147,7 @@ pub fn load(data: &Path) -> Result<Config> {
                 last_cabinet: None,
                 prefs: Prefs::default(),
                 ingest: Ingest::default(),
+                ocr: Ocr::default(),
             };
             save(data, &c)?;
             let _ = std::fs::remove_file(legacy);
