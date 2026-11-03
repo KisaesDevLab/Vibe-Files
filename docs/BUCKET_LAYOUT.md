@@ -33,6 +33,9 @@ Everything below lives under one prefix: `vf/<cabinet_id>/` (`cabinet_id` from `
 `client_id` and `doc_id` are UUIDs (not names), and `n` is a keyed hash, so the listing carries no
 client information.
 
+**Never uploaded:** `_Vibe/keys/` (the passphrase-wrapped catalog key, P01) and `_Vibe/locks/`
+(LAN locks; the bucket has its own `locks/`). No server holds a key, wrapped or not.
+
 ## Client segment
 
 ```json

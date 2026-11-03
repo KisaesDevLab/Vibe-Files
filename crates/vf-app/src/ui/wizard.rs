@@ -15,7 +15,8 @@ pub enum Mode {
     Create,
 }
 
-#[derive(Debug, Clone)]
+/// No `Debug`: it holds the recovery passphrase, which must never reach a log.
+#[derive(Clone)]
 pub struct Wizard {
     pub mode: Mode,
     pub root: String,
