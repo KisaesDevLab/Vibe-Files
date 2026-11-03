@@ -2,11 +2,13 @@
 //! folders and what the `vf_ingest` worker did with their files, plus the barcode sheets.
 
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::{Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 
 use egui::RichText;
 use vf_core::browse::Snapshot;
 use vf_ingest::pipeline::Origin;
+use vf_ingest::scanner::{self, Device};
 use vf_ingest::worker::{self, Event, Worker};
 
 use crate::config::Ingest;
@@ -37,6 +39,11 @@ pub struct IngestState {
     pub delivered: usize,
     /// PDFs and zips in Filer's inboxes (what its queue holds), at the last check.
     in_inboxes: usize,
+    /// This PC's scanners, once listed (`None` while listing).
+    devices: Option<Result<Vec<Device>, String>>,
+    devices_job: Option<Receiver<Result<Vec<Device>, String>>>,
+    /// A scan running on its own thread.
+    scan_job: Option<Receiver<Result<(PathBuf, scanner::Assembled), String>>>,
 }
 
 /// PDFs and zips Filer would queue from `inboxes` (sub-folders too, not `_combined`).
@@ -116,6 +123,7 @@ impl IngestState {
     /// Keeps the worker pointed at this PC's folders and collects what it did. Every frame,
     /// whatever tab is showing.
     pub fn tick(&mut self, ctx: &egui::Context, root: &Path, device_id: &str, prefs: &Ingest) {
+        self.poll_jobs();
         if let Some(w) = &self.worker {
             for ev in w.events() {
                 let line = match ev {
@@ -133,8 +141,7 @@ impl IngestState {
                         format!("{} set aside in _failed: {error}", file_name(&staged))
                     }
                 };
-                self.log.insert(0, line);
-                self.log.truncate(LOG_MAX);
+                self.log_line(line);
             }
         }
         if self.checked.is_some_and(|t| t.elapsed() < RECHECK) {
@@ -179,6 +186,140 @@ impl IngestState {
             }
             None => {}
         }
+    }
+
+    fn log_line(&mut self, line: String) {
+        self.log.insert(0, line);
+        self.log.truncate(LOG_MAX);
+    }
+
+    fn poll_jobs(&mut self) {
+        if let Some(rx) = &self.devices_job {
+            match rx.try_recv() {
+                Ok(d) => {
+                    self.devices = Some(d);
+                    self.devices_job = None;
+                }
+                Err(TryRecvError::Disconnected) => self.devices_job = None,
+                Err(TryRecvError::Empty) => {}
+            }
+        }
+        if let Some(rx) = &self.scan_job {
+            let line = match rx.try_recv() {
+                Ok(Ok((pdf, a))) => Some(format!("Scanned {} ({})", file_name(&pdf), a.note())),
+                Ok(Err(e)) => Some(format!("Scan failed: {e}")),
+                Err(TryRecvError::Disconnected) => Some("Scan stopped.".into()),
+                Err(TryRecvError::Empty) => None,
+            };
+            if let Some(l) = line {
+                self.scan_job = None;
+                self.log_line(l);
+            }
+        }
+    }
+
+    /// Lists the scanners on a thread (WIA enumeration can take a moment).
+    fn list_devices(&mut self, ctx: &egui::Context) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(scanner::devices());
+            ctx.request_repaint();
+        });
+        self.devices = None;
+        self.devices_job = Some(rx);
+    }
+
+    pub fn scanning(&self) -> bool {
+        self.scan_job.is_some()
+    }
+
+    /// Scan row: scanner, profile, Scan. The PDF lands in the Scans folder; the worker splits
+    /// and delivers it like any other file there.
+    fn scan_row(&mut self, ui: &mut egui::Ui, prefs: &Ingest) {
+        if self.devices.is_none() && self.devices_job.is_none() {
+            self.list_devices(ui.ctx());
+        }
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Scanner").strong());
+            let devices = match &self.devices {
+                None => {
+                    ui.spinner();
+                    return;
+                }
+                Some(Err(e)) => {
+                    ui.label(RichText::new(e).color(wizard::ERROR));
+                    return;
+                }
+                Some(Ok(d)) => d.clone(),
+            };
+            if devices.is_empty() {
+                ui.label(widgets::caption(
+                    "No scanner on this PC (Windows › Settings › Printers & scanners). Scans saved into the Scans folder are still processed.",
+                ));
+                if ui.small_button("Look again").clicked() {
+                    self.list_devices(ui.ctx());
+                }
+                return;
+            }
+            let mut p = prefs.clone();
+            let current = prefs
+                .scanner
+                .as_ref()
+                .and_then(|id| devices.iter().find(|d| &d.id == id))
+                .unwrap_or(&devices[0]);
+            egui::ComboBox::from_id_salt("vf-scanner")
+                .selected_text(&current.name)
+                .show_ui(ui, |ui| {
+                    for d in &devices {
+                        if ui.selectable_label(d.id == current.id, &d.name).clicked() {
+                            p.scanner = Some(d.id.clone());
+                        }
+                    }
+                });
+            let profiles = prefs.profiles();
+            let profile = prefs
+                .scan_profile
+                .as_ref()
+                .and_then(|n| profiles.iter().find(|x| &x.name == n))
+                .unwrap_or(&profiles[0])
+                .clone();
+            egui::ComboBox::from_id_salt("vf-scan-profile")
+                .selected_text(&profile.name)
+                .show_ui(ui, |ui| {
+                    for x in &profiles {
+                        if ui.selectable_label(x.name == profile.name, &x.name).clicked() {
+                            p.scan_profile = Some(x.name.clone());
+                        }
+                    }
+                });
+            if p != *prefs {
+                self.changed = Some(p);
+            }
+            let scans = prefs.scans.clone();
+            let busy = self.scanning();
+            let go = ui
+                .add_enabled(scans.is_some() && !busy, egui::Button::new("Scan"))
+                .on_disabled_hover_text(if busy {
+                    "Scanning…"
+                } else {
+                    "Choose a Scans folder first."
+                });
+            if busy {
+                ui.spinner();
+            }
+            if go.clicked()
+                && let Some(dir) = scans
+            {
+                let (tx, rx) = std::sync::mpsc::channel();
+                let (ctx, id) = (ui.ctx().clone(), current.id.clone());
+                std::thread::spawn(move || {
+                    let _ = tx.send(scanner::scan_to(&id, &profile, &dir));
+                    ctx.request_repaint();
+                });
+                self.scan_job = Some(rx);
+            }
+        });
     }
 
     /// Looks again at the next tick (a folder was chosen).
@@ -248,6 +389,7 @@ impl IngestState {
                         }
                     }
                 });
+                self.scan_row(ui, prefs);
                 if let Some(w) = &self.warning {
                     ui.label(RichText::new(w).color(wizard::ERROR));
                 }

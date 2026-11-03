@@ -68,7 +68,18 @@ impl Normalized {
 
 /// Converts the image at `src` into a PDF at `out` (replaced if it exists).
 pub fn to_pdf(src: &Path, out: &Path) -> Result<Normalized, String> {
-    let frames = decode(src)?;
+    frames_to_pdf(decode(src)?, true, out)
+}
+
+/// One page per frame: optionally deskewed, at most 300 dpi, written to `out`.
+pub fn frames_to_pdf(
+    frames: Vec<Frame>,
+    straighten: bool,
+    out: &Path,
+) -> Result<Normalized, String> {
+    if frames.is_empty() {
+        return Err("no pages".into());
+    }
     let mut n = Normalized {
         pages: frames.len(),
         ..Default::default()
@@ -76,7 +87,11 @@ pub fn to_pdf(src: &Path, out: &Path) -> Result<Normalized, String> {
     let mut pages = Vec::new();
     for f in frames {
         n.rotated |= f.orientation > 1;
-        let (rgb, deskewed) = deskew(f.rgb);
+        let (rgb, deskewed) = if straighten {
+            deskew(f.rgb)
+        } else {
+            (f.rgb, false)
+        };
         n.deskewed |= deskewed;
         let (w_in, h_in) = page_inches(rgb.width(), rgb.height(), f.dpi);
         let cap = ((w_in * MAX_DPI) as u32, (h_in * MAX_DPI) as u32);

@@ -9,7 +9,7 @@ pub const CONFIG_FILE: &str = "config.toml";
 /// P00 kept the device id alone in this file; [`load`] moves it into `config.toml`.
 const LEGACY_DEVICE_ID: &str = "device_id";
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Config {
     /// This workstation's id (uuid v7). Every changeable catalog row carries it.
     pub device_id: String,
@@ -26,7 +26,7 @@ pub struct Config {
 
 /// Folders Vibe Files processes before Filer sees the files (`vf_ingest::pipeline`). Outside
 /// the cabinet and not one of Filer's inboxes.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Ingest {
     /// Scanner output, phone photos, barcode-sheet stacks.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -34,6 +34,25 @@ pub struct Ingest {
     /// Where a PDF printer saves (step 5).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub print_capture: Option<PathBuf>,
+    /// This PC's scanner (WIA device id, step 2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scanner: Option<String>,
+    /// Last scan profile used, by name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scan_profile: Option<String>,
+    /// This PC's scan profiles; empty = `vf_ingest::scanner::default_profiles()`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scan_profiles: Vec<vf_ingest::scanner::Profile>,
+}
+
+impl Ingest {
+    pub fn profiles(&self) -> Vec<vf_ingest::scanner::Profile> {
+        if self.scan_profiles.is_empty() {
+            vf_ingest::scanner::default_profiles()
+        } else {
+            self.scan_profiles.clone()
+        }
+    }
 }
 
 /// Pinned documents, recent documents and favorite places in the tree.
