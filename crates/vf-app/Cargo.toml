@@ -2,7 +2,7 @@
 name = "vf-app"
 version.workspace = true
 edition.workspace = true
-license-file.workspace = true
+license.workspace = true
 publish.workspace = true
 
 [[bin]]
@@ -29,6 +29,9 @@ windows.workspace = true
 filer-core = { path = "../filer-core" }
 filer-intake = { path = "../filer-intake" }
 filer-pdf = { path = "../filer-pdf" }
+pdfium-render.workspace = true
+image.workspace = true
+vf-index = { path = "../vf-index" }
 serde_json.workspace = true
 
 [dev-dependencies]

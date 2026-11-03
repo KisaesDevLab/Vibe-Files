@@ -5023,6 +5023,8 @@ dependencies = [
  "filer-core",
  "filer-intake",
  "filer-pdf",
+ "image",
+ "pdfium-render",
  "rfd",
  "serde",
  "serde_json",
@@ -5032,6 +5034,7 @@ dependencies = [
  "vf-core",
  "vf-fixtures",
  "vf-fs",
+ "vf-index",
  "vf-ingest",
  "vf-ocr",
  "vf-security",
@@ -5070,10 +5073,12 @@ dependencies = [
  "filer-pdf",
  "lopdf",
  "pdf-writer",
+ "pdfium-render",
  "tempfile",
  "uuid",
  "vf-core",
  "vf-fs",
+ "vf-ingest",
 ]
 
 [[package]]

@@ -4,7 +4,7 @@ name = "filer-intake"
 version = "0.2.4"
 edition.workspace = true
 publish.workspace = true
-license-file.workspace = true
+license.workspace = true
 
 [features]
 # Turns on the upstream `#[cfg(test)]` helpers that other vendored crates' tests use.
