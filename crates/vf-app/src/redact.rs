@@ -178,7 +178,7 @@ mod tests {
         let doc = pdfium()
             .load_pdf_from_file(&root.join(&added.rel_path), None)
             .unwrap();
-        let text = doc.pages().first().unwrap().text().unwrap().all();
+        let text = vf_pdf::text::page_text(&doc.pages().first().unwrap());
         assert!(!text.contains("987-65-432"), "{text}");
         assert!(text.contains("07-1234567"), "EIN kept by default: {text}");
         let detail: String = conn

@@ -296,3 +296,52 @@ fn flatten_burns_annotations_in() {
     let (_, _, bare) = render(&src, 0);
     assert_ne!(bare, flattened);
 }
+
+/// Step 6: rotate, delete and reorder keep each page's look and text.
+#[test]
+fn page_edits() {
+    use vf_pdf::pages;
+    let t = tempfile::tempdir().unwrap();
+    let src = t.path().join("src.pdf");
+    filer_pdf::pdf::write_test_pdf(&src, &["Alpha", "Bravo", "Charlie", "Delta"]);
+    let texts = |p: &Path| -> Vec<String> {
+        let d = pdfium().load_pdf_from_file(p, None).unwrap();
+        d.pages()
+            .iter()
+            .map(|pg| vf_pdf::text::page_text(&pg))
+            .collect()
+    };
+
+    let r = t.path().join("rotated.pdf");
+    pages::rotate(&src, &r, &[1], 90).unwrap();
+    assert_eq!(texts(&r)[1].trim(), "Bravo", "a turned page keeps its text");
+    let d = lopdf::Document::load(&r).unwrap();
+    let ids: Vec<_> = d.get_pages().values().copied().collect();
+    assert_eq!(vf_pdf::layer::page_rotate(&d, ids[1]), 90);
+    assert_eq!(vf_pdf::layer::page_rotate(&d, ids[0]), 0);
+
+    let o = t.path().join("reordered.pdf");
+    pages::reorder(&r, &o, &[3, 0, 2, 1]).unwrap();
+    let got = texts(&o);
+    let first_words: Vec<&str> = got.iter().map(|t| t.trim()).collect();
+    assert_eq!(first_words, ["Delta", "Alpha", "Charlie", "Bravo"]);
+    let d = lopdf::Document::load(&o).unwrap();
+    let ids: Vec<_> = d.get_pages().values().copied().collect();
+    assert_eq!(
+        vf_pdf::layer::page_rotate(&d, ids[3]),
+        90,
+        "Bravo kept its turn"
+    );
+
+    let x = t.path().join("deleted.pdf");
+    pages::delete(&o, &x, &[0, 2]).unwrap();
+    assert_eq!(
+        texts(&x)
+            .iter()
+            .map(|t| t.trim().to_string())
+            .collect::<Vec<_>>(),
+        ["Alpha", "Bravo"]
+    );
+    assert!(pages::delete(&x, &t.path().join("none.pdf"), &[0, 1]).is_err());
+    assert!(pages::reorder(&x, &t.path().join("bad.pdf"), &[0, 0]).is_err());
+}

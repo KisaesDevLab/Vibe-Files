@@ -97,6 +97,8 @@ pub struct Browse {
     pub rename: Option<RenameDialog>,
     /// A PDF to show in the Viewer (taken by the app).
     pub view_request: Option<crate::ui::viewer::Doc>,
+    /// `Combine` pressed: merged on the next frame (needs the catalog).
+    combine_request: bool,
     /// Pinned / Recent / Favorites, from this PC's config; `prefs_dirty` asks the app to save.
     pub prefs: Prefs,
     pub prefs_dirty: bool,
@@ -168,6 +170,7 @@ impl Browse {
             fav_counts: Vec::new(),
             saved: Vec::new(),
             view_request: None,
+            combine_request: false,
             saved_open: None,
             saved_delete: None,
             week_start: week_start_utc(),
@@ -366,6 +369,75 @@ impl Browse {
             IdList::Recent => self.prefs.recent.clone(),
         };
         Scope::Ids { list, ids }
+    }
+
+    /// The selected PDFs, in grid order, merged into one new document beside the first (one
+    /// bookmark per source; Filer's `merge_pdfs`). The sources are not changed.
+    fn combine_requested(&mut self, env: &mut Env) {
+        if !std::mem::take(&mut self.combine_request) {
+            return;
+        }
+        let docs: Vec<DocRow> = self
+            .visible
+            .iter()
+            .filter(|i| self.selected.contains(i))
+            .map(|&i| self.snap.docs[i].clone())
+            .collect();
+        let r = (|| -> Result<vf_fs::content::Added, String> {
+            let first = docs.first().ok_or("select the documents to combine")?;
+            let inputs: Vec<(std::path::PathBuf, String)> = docs
+                .iter()
+                .map(|d| {
+                    (
+                        env.root.join(&d.rel_path),
+                        d.name().trim_end_matches(".pdf").to_string(),
+                    )
+                })
+                .collect();
+            let tmp = vf_fs::content::tmp_file(env.root, "pdf")?;
+            filer_pdf::pdf::merge_pdfs(&inputs, &tmp).inspect_err(|_| {
+                let _ = std::fs::remove_file(&tmp);
+            })?;
+            let dir = first
+                .rel_path
+                .rsplit_once('/')
+                .map(|(d, _)| d)
+                .unwrap_or("");
+            let name = format!("Combined {}.pdf", first.name().trim_end_matches(".pdf"));
+            vf_fs::content::add(
+                env.conn,
+                env.root,
+                env.device_id,
+                &tmp,
+                vf_fs::content::NewDoc {
+                    rel_path: if dir.is_empty() {
+                        name
+                    } else {
+                        format!("{dir}/{name}")
+                    },
+                    client_id: first.client_id.clone(),
+                    doc_type_id: None,
+                    tax_year: first.tax_year,
+                    source: None,
+                    tags: vec!["combined".into()],
+                    label: "combine".into(),
+                    detail: serde_json::json!({
+                        "sources": docs.iter().map(|d| d.id.clone()).collect::<Vec<_>>(),
+                    }),
+                },
+            )
+        })();
+        match r {
+            Ok(added) => {
+                self.reload(env.conn);
+                self.notice = Some(format!(
+                    "Combined {} documents into {} (one bookmark each); the originals are not changed.",
+                    docs.len(),
+                    added.rel_path
+                ));
+            }
+            Err(e) => self.error = Some(format!("Not combined: {e}")),
+        }
     }
 
     /// Runs a saved search clicked in the tree (its results become the grid) and deletes one
@@ -644,6 +716,7 @@ fn folder_label(f: &str) -> &str {
 pub fn show(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env) {
     b.keys(ui.ctx());
     b.saved_requests(env);
+    b.combine_requested(env);
     egui::Panel::left("browse-tree")
         .default_size(272.0)
         .size_range(200.0..=480.0)
@@ -1071,6 +1144,24 @@ fn grid(ui: &mut egui::Ui, b: &mut Browse, conn: &Connection) {
         let rename = ui
             .add_enabled(!b.selected.is_empty(), egui::Button::new("Rename…"))
             .on_disabled_hover_text("Select the documents to rename first.");
+        let pdfs = b
+            .selected
+            .iter()
+            .filter(|&&i| b.snap.docs[i].rel_path.to_lowercase().ends_with(".pdf"))
+            .count();
+        if ui
+            .add_enabled(
+                pdfs >= 2 && pdfs == b.selected.len(),
+                egui::Button::new("Combine"),
+            )
+            .on_hover_text(
+                "One new PDF of the selected ones, in grid order, a bookmark per document.",
+            )
+            .on_disabled_hover_text("Select two or more PDFs.")
+            .clicked()
+        {
+            b.combine_request = true;
+        }
         if rename.clicked() {
             b.rename = Some(RenameDialog::new(b.selected_ids()));
         }

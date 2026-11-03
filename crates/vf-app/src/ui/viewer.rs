@@ -123,6 +123,8 @@ pub struct Env<'a> {
     pub root: &'a Path,
     pub device_id: &'a str,
     pub initials: &'a str,
+    /// For "extract to another client".
+    pub clients: &'a [vf_core::browse::ClientRow],
 }
 
 pub struct Viewer {
@@ -171,6 +173,21 @@ pub struct Viewer {
     pub pii_found: Option<Vec<(pii::Found, bool)>>,
     /// Boxes drawn (or words selected) to redact.
     pub drawn: Vec<Redaction>,
+    /// The "Pages…" window, while open.
+    pub pages_dialog: Option<PagesDialog>,
+}
+
+/// The "Pages…" window's fields.
+#[derive(Debug, Clone, Default)]
+pub struct PagesDialog {
+    /// Pages to act on, `1-3, 5`.
+    pub pages: String,
+    /// New order, `3, 1, 2`.
+    pub order: String,
+    /// Extract target: client id (`None` = this document's client).
+    pub client: Option<String>,
+    /// Extract target year: `2025`, `Permanent`, or empty for this document's.
+    pub year: String,
 }
 
 impl Default for Viewer {
@@ -212,6 +229,7 @@ impl Default for Viewer {
             pii_kinds: vec![Pii::Ssn, Pii::Ein],
             pii_found: None,
             drawn: Vec::new(),
+            pages_dialog: None,
         }
     }
 }
@@ -468,6 +486,345 @@ pub fn show(ui: &mut egui::Ui, v: &mut Viewer, env: &mut Env<'_>) {
             canvas(ui, v, &initials);
         });
     typing_window(ui.ctx(), v, &initials);
+    pages_window(ui.ctx(), v, env);
+}
+
+/// What the "Pages…" window asked for.
+enum PageOp {
+    Rotate(i64),
+    Delete,
+    Reorder,
+    Extract,
+    Split,
+}
+
+fn pages_window(ctx: &egui::Context, v: &mut Viewer, env: &mut Env<'_>) {
+    let Some(d) = &mut v.pages_dialog else { return };
+    let mut op = None;
+    let mut close = false;
+    let count = v.info.as_ref().map_or(0, |i| i.geoms.len());
+    egui::Window::new("Pages")
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
+        .show(ctx, |ui| {
+            ui.label(widgets::caption(format!("{count} pages. Pages like 1-3, 5.")));
+            let l = ui.label("Pages");
+            ui.add(egui::TextEdit::singleline(&mut d.pages).desired_width(200.0))
+                .labelled_by(l.id);
+            ui.horizontal(|ui| {
+                if ui.button("Rotate left").clicked() {
+                    op = Some(PageOp::Rotate(-90));
+                }
+                if ui.button("Rotate right").clicked() {
+                    op = Some(PageOp::Rotate(90));
+                }
+                if ui.button("Delete pages").clicked() {
+                    op = Some(PageOp::Delete);
+                }
+            });
+            ui.separator();
+            let l = ui.label("New order");
+            ui.add(
+                egui::TextEdit::singleline(&mut d.order)
+                    .hint_text("e.g. 3, 1, 2")
+                    .desired_width(200.0),
+            )
+            .labelled_by(l.id);
+            if ui.button("Reorder").clicked() {
+                op = Some(PageOp::Reorder);
+            }
+            ui.separator();
+            ui.label(RichText::new("Extract the pages to a new document").strong());
+            let name = |id: &Option<String>| {
+                id.as_ref()
+                    .and_then(|id| env.clients.iter().find(|c| &c.id == id))
+                    .map_or("This document's client".to_string(), |c| {
+                        format!("{} ({})", c.name, c.ext_id)
+                    })
+            };
+            egui::ComboBox::new("vx-client", "Client")
+                .selected_text(name(&d.client))
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut d.client, None, "This document's client");
+                    for c in env.clients {
+                        ui.selectable_value(
+                            &mut d.client,
+                            Some(c.id.clone()),
+                            format!("{} ({})", c.name, c.ext_id),
+                        );
+                    }
+                });
+            let l = ui.label("Year");
+            ui.add(
+                egui::TextEdit::singleline(&mut d.year)
+                    .hint_text("this document's")
+                    .desired_width(100.0),
+            )
+            .labelled_by(l.id);
+            ui.horizontal(|ui| {
+                if ui.button("Extract").clicked() {
+                    op = Some(PageOp::Extract);
+                }
+                if ui
+                    .button("Split into documents")
+                    .on_hover_text("Each range in Pages becomes its own document (1-2, 3-5); this one is kept.")
+                    .clicked()
+                {
+                    op = Some(PageOp::Split);
+                }
+            });
+            ui.separator();
+            if ui.button("Close").clicked() {
+                close = true;
+            }
+        });
+    if close {
+        v.pages_dialog = None;
+        return;
+    }
+    if let Some(op) = op {
+        let d = v.pages_dialog.clone().unwrap_or_default();
+        match run_page_op(v, env, &d, op, count) {
+            Ok(msg) => {
+                v.notice = Some(msg);
+                v.catalog_changed = true;
+                v.pages_dialog = None;
+            }
+            Err(e) => v.error = Some(e),
+        }
+    }
+}
+
+fn run_page_op(
+    v: &mut Viewer,
+    env: &mut Env<'_>,
+    d: &PagesDialog,
+    op: PageOp,
+    count: usize,
+) -> Result<String, String> {
+    let doc = v.doc.clone().ok_or("no document")?;
+    let pages = || vf_pdf::pages::parse_ranges(&d.pages, count);
+    // Edits of this document: a new version.
+    let edit = |v: &mut Viewer,
+                env: &mut Env<'_>,
+                what: &str,
+                f: &dyn Fn(&Path, &Path) -> Result<(), String>|
+     -> Result<String, String> {
+        let tmp = vf_fs::content::tmp_file(env.root, "pdf")?;
+        f(&doc.path, &tmp).inspect_err(|_| {
+            let _ = std::fs::remove_file(&tmp);
+        })?;
+        let change = vf_fs::content::Change {
+            label: "pages",
+            created_by: "pages",
+            reason: "before page edit",
+            detail: serde_json::json!({ "edit": what }),
+            extra: vec![],
+        };
+        match vf_fs::content::replace(env.conn, env.root, env.device_id, &doc.doc_id, &tmp, change)?
+        {
+            Ok(_) => {
+                v.reload();
+                Ok(format!("{what}; the previous version is kept."))
+            }
+            Err(why) => Err(format!("Not changed: {why}.")),
+        }
+    };
+    match op {
+        PageOp::Rotate(deg) => {
+            let p = pages()?;
+            edit(v, env, &format!("Turned {} pages", p.len()), &|a, b| {
+                vf_pdf::pages::rotate(a, b, &p, deg)
+            })
+        }
+        PageOp::Delete => {
+            let p = pages()?;
+            edit(v, env, &format!("Deleted {} pages", p.len()), &|a, b| {
+                vf_pdf::pages::delete(a, b, &p)
+            })
+        }
+        PageOp::Reorder => {
+            let order = vf_pdf::pages::parse_ranges(&d.order, count)?;
+            if order.len() != count {
+                return Err(format!("List all {count} pages in their new order."));
+            }
+            edit(v, env, "Pages reordered", &|a, b| {
+                vf_pdf::pages::reorder(a, b, &order)
+            })
+        }
+        PageOp::Extract => {
+            let p = pages()?;
+            let added = extract(env, &doc, &[p], d)?;
+            Ok(format!("Extracted to {}.", added.join(", ")))
+        }
+        PageOp::Split => {
+            let ranges: Vec<Vec<usize>> = d
+                .pages
+                .split(',')
+                .filter(|r| !r.trim().is_empty())
+                .map(|r| vf_pdf::pages::parse_ranges(r, count))
+                .collect::<Result<_, _>>()?;
+            let added = extract(env, &doc, &ranges, d)?;
+            Ok(format!(
+                "Split into {} documents: {}.",
+                added.len(),
+                added.join(", ")
+            ))
+        }
+    }
+}
+
+/// Each page list in `parts` becomes a new document (Filer's `split_pdf`), in the chosen
+/// client's folder (`Other/<year>`) or beside this one. This document is not changed.
+fn extract(
+    env: &mut Env<'_>,
+    doc: &Doc,
+    parts: &[Vec<usize>],
+    d: &PagesDialog,
+) -> Result<Vec<String>, String> {
+    let row: (
+        String,
+        Option<String>,
+        Option<String>,
+        Option<i32>,
+        Option<String>,
+    ) = env
+        .conn
+        .query_row(
+            "SELECT rel_path, client_id, doc_type_id, tax_year, source FROM document WHERE id = ?1",
+            [&doc.doc_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+        )
+        .map_err(|e| e.to_string())?;
+    let (rel, own_client, doc_type, own_year, source) = row;
+    let year = match d.year.trim() {
+        "" => own_year,
+        t if t.eq_ignore_ascii_case("permanent") => None,
+        t => Some(
+            t.parse::<i32>()
+                .map_err(|_| format!("\"{t}\" is not a year"))?,
+        ),
+    };
+    let client = d.client.clone().or(own_client.clone());
+    let stem = doc.name.trim_end_matches(".pdf").to_string();
+    // Same client and year: beside this one; otherwise that client's Other/<year> folder.
+    let dir = if client == own_client && d.year.trim().is_empty() {
+        rel.rsplit_once('/')
+            .map(|(dir, _)| dir.to_string())
+            .unwrap_or_default()
+    } else {
+        let base = client
+            .as_ref()
+            .and_then(|c| env.clients.iter().find(|x| &x.id == c))
+            .and_then(|c| c.folder_rel.clone())
+            .unwrap_or_default();
+        let sub = year.map_or("Other".to_string(), |y| format!("Other/{y}"));
+        if base.is_empty() {
+            sub
+        } else {
+            format!("{base}/{sub}")
+        }
+    };
+    let mut names = Vec::new();
+    for (n, pages) in parts.iter().enumerate() {
+        let tmp = vf_fs::content::tmp_file(env.root, "pdf")?;
+        cut(&doc.path, pages, &tmp, env.root)?;
+        let label = if parts.len() > 1 {
+            format!("{stem} (part {})", n + 1)
+        } else {
+            format!("{stem} p{}", page_label(pages))
+        };
+        let rel_path = if dir.is_empty() {
+            format!("{label}.pdf")
+        } else {
+            format!("{dir}/{label}.pdf")
+        };
+        let added = vf_fs::content::add(
+            env.conn,
+            env.root,
+            env.device_id,
+            &tmp,
+            vf_fs::content::NewDoc {
+                rel_path,
+                client_id: client.clone(),
+                doc_type_id: doc_type.clone(),
+                tax_year: year,
+                source: source.clone(),
+                tags: vec![format!("extracted-from:{}", doc.doc_id)],
+                label: "extract_pages".into(),
+                detail: serde_json::json!({ "from": doc.doc_id, "pages": pages.iter().map(|p| p + 1).collect::<Vec<_>>() }),
+            },
+        )?;
+        names.push(widgets::file_name(&added.rel_path).to_string());
+    }
+    Ok(names)
+}
+
+/// Pages `order` (0-based, in that order) of `src` into `out`: Filer's `split_pdf` keeps only
+/// what those pages use; a reorder puts them in the order asked.
+fn cut(src: &Path, order: &[usize], out: &Path, root: &Path) -> Result<(), String> {
+    let mut sorted = order.to_vec();
+    sorted.sort_unstable();
+    let lo = *sorted.first().ok_or("no pages")?;
+    let hi = *sorted.last().ok_or("no pages")?;
+    let span = vf_fs::content::tmp_file(root, "pdf")?;
+    filer_pdf::pdf::split_pdf(
+        src,
+        std::slice::from_ref(&(lo..hi + 1)),
+        std::slice::from_ref(&span),
+    )?;
+    let n = hi + 1 - lo;
+    let keep: Vec<usize> = order.iter().map(|p| p - lo).collect();
+    let r = if keep == (0..n).collect::<Vec<_>>() {
+        std::fs::rename(&span, out).map_err(|e| e.to_string())
+    } else {
+        // Drop the pages in the span that were not asked for, then put the rest in order.
+        let tmp2 = vf_fs::content::tmp_file(root, "pdf")?;
+        let gone: Vec<usize> = (0..n).filter(|p| !keep.contains(p)).collect();
+        let r = if gone.is_empty() {
+            std::fs::copy(&span, &tmp2)
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+        } else {
+            vf_pdf::pages::delete(&span, &tmp2, &gone)
+        };
+        let r = r.and_then(|()| {
+            // After deleting, page i of tmp2 is the i-th kept page in original order.
+            let mut kept_sorted: Vec<usize> = keep.clone();
+            kept_sorted.sort_unstable();
+            let new_order: Vec<usize> = keep
+                .iter()
+                .map(|k| kept_sorted.iter().position(|x| x == k).unwrap_or(0))
+                .collect();
+            vf_pdf::pages::reorder(&tmp2, out, &new_order)
+        });
+        let _ = std::fs::remove_file(&tmp2);
+        r
+    };
+    let _ = std::fs::remove_file(&span);
+    r
+}
+
+/// `1-3` / `2` / `1-2,5` for a file name.
+fn page_label(pages: &[usize]) -> String {
+    let mut runs: Vec<(usize, usize)> = Vec::new();
+    for &p in pages {
+        match runs.last_mut() {
+            Some((_, b)) if *b + 1 == p => *b = p,
+            _ => runs.push((p, p)),
+        }
+    }
+    runs.iter()
+        .map(|(a, b)| {
+            if a == b {
+                format!("{}", a + 1)
+            } else {
+                format!("{}-{}", a + 1, b + 1)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 fn toolbar(ui: &mut egui::Ui, v: &mut Viewer, env: &mut Env<'_>, doc: &Doc) {
@@ -581,6 +938,17 @@ fn toolbar(ui: &mut egui::Ui, v: &mut Viewer, env: &mut Env<'_>, doc: &Doc) {
                     .clicked()
                 {
                     convert(v, env, Convert::PdfA);
+                }
+                if ui
+                    .add_enabled(clean, egui::Button::new("Pages…"))
+                    .on_hover_text("Rotate, delete, reorder, extract or split pages.")
+                    .on_disabled_hover_text("Save or discard the unsaved annotations first.")
+                    .clicked()
+                {
+                    v.pages_dialog = Some(PagesDialog {
+                        pages: (doc.page + 1).to_string(),
+                        ..PagesDialog::default()
+                    });
                 }
                 if ui.button("Open in PDF app").clicked() {
                     v.open_request = Some(doc.path.clone());

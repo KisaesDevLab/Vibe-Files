@@ -351,6 +351,7 @@ impl eframe::App for VibeFilesApp {
                         root: &o.opened.root,
                         device_id: &self.config.device_id,
                         initials: &initials,
+                        clients: &o.browse.snap.clients,
                     },
                 );
                 if std::mem::take(&mut o.viewer.catalog_changed) {
@@ -1191,6 +1192,117 @@ mod tests {
             !text.contains("987-65-4321") && text.contains("07-1234567"),
             "{text}"
         );
+    }
+
+    /// P04 step 6: rotate, extract and split from the Viewer's Pages window, Combine from
+    /// Browse; originals untouched except the rotate (a new version).
+    #[test]
+    fn page_tools_in_the_viewer_and_combine_in_browse() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("Clients");
+        std::fs::create_dir_all(root.join("Old")).unwrap();
+        filer_pdf::pdf::write_test_pdf(
+            &root.join("Old/a.pdf"),
+            &["Alpha one", "Alpha two", "Alpha three"],
+        );
+        filer_pdf::pdf::write_test_pdf(&root.join("Old/b.pdf"), &["Bravo one"]);
+        let req = CreateRequest {
+            root: &root,
+            name: "Firm",
+        };
+        drop(session::create(&tmp.path().join("pc1"), "dev-1", &req).unwrap());
+        let mut h = harness(&tmp.path().join("pc1"));
+        click(&mut h, "Open existing");
+        type_into(&mut h, "Cabinet folder", &root.display().to_string());
+        click(&mut h, "Open cabinet");
+        settle(&mut h);
+        let dir = filer_pdf::pdf::find_pdfium(Path::new("")).unwrap();
+        let pdfium = filer_pdf::pdf::pdfium(&dir).unwrap();
+        let texts = |p: &std::path::Path| -> Vec<String> {
+            let d = pdfium.load_pdf_from_file(p, None).unwrap();
+            d.pages()
+                .iter()
+                .map(|pg| vf_pdf::text::page_text(&pg).trim().to_string())
+                .collect()
+        };
+
+        h.get_by_label("a.pdf").click();
+        h.run();
+        h.key_press(egui::Key::Enter);
+        let start = std::time::Instant::now();
+        loop {
+            h.step();
+            if let Screen::Open(o) = &h.state().screen
+                && o.viewer.ready()
+            {
+                break;
+            }
+            assert!(start.elapsed() < std::time::Duration::from_secs(20));
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let open_pages = |h: &mut egui_kittest::Harness<'static, VibeFilesApp>, pages: &str| {
+            if let Screen::Open(o) = &mut h.state_mut().screen {
+                o.viewer.pages_dialog = Some(crate::ui::viewer::PagesDialog {
+                    pages: pages.into(),
+                    ..Default::default()
+                });
+            }
+            // A new window takes a frame to size itself.
+            h.step();
+            h.step();
+        };
+        open_pages(&mut h, "2");
+        click(&mut h, "Rotate right");
+        h.step();
+        let d = lopdf::Document::load(root.join("Old/a.pdf")).unwrap();
+        let ids: Vec<_> = d.get_pages().values().copied().collect();
+        assert_eq!(vf_pdf::layer::page_rotate(&d, ids[1]), 90);
+
+        open_pages(&mut h, "2-3");
+        click(&mut h, "Extract");
+        h.step();
+        assert_eq!(
+            texts(&root.join("Old/a p2-3.pdf")),
+            ["Alpha two", "Alpha three"]
+        );
+
+        open_pages(&mut h, "3, 1-2");
+        click(&mut h, "Split into documents");
+        h.step();
+        assert_eq!(texts(&root.join("Old/a (part 1).pdf")), ["Alpha three"]);
+        assert_eq!(
+            texts(&root.join("Old/a (part 2).pdf")),
+            ["Alpha one", "Alpha two"]
+        );
+        assert_eq!(texts(&root.join("Old/a.pdf")).len(), 3, "kept whole");
+
+        // Browse: select a.pdf and b.pdf, Combine.
+        click(&mut h, "Browse");
+        h.run();
+        if let Screen::Open(o) = &mut h.state_mut().screen {
+            let b = &mut o.browse;
+            let pick: Vec<usize> = b
+                .visible
+                .iter()
+                .copied()
+                .filter(|&i| ["Old/a.pdf", "Old/b.pdf"].contains(&b.snap.docs[i].rel_path.as_str()))
+                .collect();
+            b.selected = pick.into_iter().collect();
+        }
+        h.run();
+        click(&mut h, "Combine");
+        h.run();
+        let combined = root.join("Old/Combined a.pdf");
+        assert_eq!(
+            texts(&combined),
+            ["Alpha one", "Alpha two", "Alpha three", "Bravo one"]
+        );
+        let marks = lopdf::Document::load(&combined)
+            .unwrap()
+            .get_toc()
+            .map(|t| t.toc.len())
+            .unwrap_or(0);
+        assert_eq!(marks, 2, "a bookmark per source");
     }
 
     #[test]

@@ -5,6 +5,7 @@
 pub mod annot;
 pub mod flatten;
 pub mod layer;
+pub mod pages;
 pub mod pdfa;
 pub mod pii;
 pub mod raster;

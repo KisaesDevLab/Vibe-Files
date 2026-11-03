@@ -100,7 +100,10 @@ fn scanned(dir: &Path, rotate: i64) -> std::path::PathBuf {
 fn read(engine: &Tesseract, pdf: &Path) -> vf_ocr::OcrPage {
     let doc = pdfium().load_pdf_from_file(pdf, None).unwrap();
     let page = doc.pages().first().unwrap();
-    assert!(page.text().unwrap().all().trim().is_empty(), "image only");
+    assert!(
+        vf_pdf::text::page_text(&page).trim().is_empty(),
+        "image only"
+    );
     let w = page.width().value * 300.0 / 72.0;
     let img = page
         .render_with_config(&PdfRenderConfig::new().set_target_width(w as i32))
@@ -124,7 +127,7 @@ fn check(rotate: i64) {
     layer::add_text_layer(&scan, &out, &[PageWords { page: 0, ocr: &ocr }]).unwrap();
     let doc = pdfium().load_pdf_from_file(&out, None).unwrap();
     let page = doc.pages().first().unwrap();
-    let all = page.text().unwrap().all();
+    let all = vf_pdf::text::page_text(&page);
     assert!(all.contains("12-3456789"), "{all}");
     // Where it is printed: on the displayed page x 72–260 pt from the left, 172–192 pt from
     // the top. In user space that is y 600–620 upright; turned, x 172–192 and y 72–260.

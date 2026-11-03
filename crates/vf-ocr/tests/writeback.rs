@@ -141,7 +141,7 @@ fn text_layer_is_written_and_the_original_kept_as_a_version() {
 
     // The text is in the file.
     let doc = pdfium().load_pdf_from_file(&path, None).unwrap();
-    let text = doc.pages().first().unwrap().text().unwrap().all();
+    let text = vf_pdf::text::page_text(&doc.pages().first().unwrap());
     assert!(text.contains("EIN 12-3456789"), "{text}");
     drop(doc);
 

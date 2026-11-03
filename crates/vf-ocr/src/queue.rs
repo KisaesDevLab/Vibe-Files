@@ -262,7 +262,7 @@ fn read_pages(
         if stop.load(Ordering::Relaxed) {
             return Ok(Outcome::Stopped);
         }
-        let own = page.text().map(|t| t.all()).unwrap_or_default();
+        let own = vf_pdf::text::page_text(&page);
         if own.chars().filter(|c| !c.is_whitespace()).count() >= TEXT_MIN_CHARS {
             save_page(conn, &job.hash, i, "pdf", &own, None)?;
             continue;

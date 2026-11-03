@@ -15,7 +15,7 @@ fn text_of(p: &Path) -> String {
     let doc = pdfium().load_pdf_from_file(p, None).unwrap();
     doc.pages()
         .iter()
-        .map(|pg| pg.text().unwrap().all())
+        .map(|pg| vf_pdf::text::page_text(&pg))
         .collect::<Vec<_>>()
         .join("\n")
 }

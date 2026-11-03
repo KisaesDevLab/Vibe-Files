@@ -107,7 +107,7 @@ pub fn verify(pdfium: &Pdfium, path: &Path, values: &[String]) -> Result<(), Str
         .load_pdf_from_file(path, None)
         .map_err(|e| format!("cannot open the redacted PDF: {e}"))?;
     for (i, p) in doc.pages().iter().enumerate() {
-        let t = p.text().map(|t| t.all()).unwrap_or_default();
+        let t = text::page_text(&p);
         if let Some(e) = found(&format!("the text of page {}", i + 1), &t) {
             return Err(e);
         }

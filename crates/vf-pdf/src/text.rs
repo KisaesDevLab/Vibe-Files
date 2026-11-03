@@ -10,6 +10,20 @@ pub struct WordBox {
     pub text: String,
 }
 
+/// All of the page's text. pdfium-render's `PdfPageText::all` only reads text inside the
+/// page's *unrotated* size, so on a page with `/Rotate 90` it misses text; this reads every
+/// character pdfium knows.
+pub fn page_text(page: &PdfPage<'_>) -> String {
+    page.text()
+        .map(|t| {
+            t.chars()
+                .iter()
+                .filter_map(|c| c.unicode_char())
+                .collect::<String>()
+        })
+        .unwrap_or_default()
+}
+
 /// The page's characters in reading order, each with its box in user space (`None` for
 /// generated spaces and line breaks).
 pub fn chars(page: &PdfPage<'_>) -> Vec<(char, Option<[f32; 4]>)> {
