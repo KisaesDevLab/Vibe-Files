@@ -58,6 +58,11 @@ pub struct SearchTab {
     /// A search was saved: the app reloads Browse's Saved searches.
     pub saved_changed: bool,
     pub notice: Option<String>,
+    /// The catalog (path, key), for the near-duplicate report's own connection.
+    pub catalog: Option<(std::path::PathBuf, vf_core::db::CatalogKey)>,
+    near_job: Option<std::sync::mpsc::Receiver<Result<Vec<vf_index::neardup::Pair>, String>>>,
+    /// The last near-duplicate report.
+    pub near: Option<Result<Vec<vf_index::neardup::Pair>, String>>,
 }
 
 impl SearchTab {
@@ -162,6 +167,7 @@ pub fn show(
             });
             filters(ui, s, snap);
             save_row(ui, s, root, ctx, device_id);
+            near_row(ui, s, root);
         });
     s.run_if_changed(conn, ctx);
     egui::CentralPanel::default().show(ui, |ui| {
@@ -261,6 +267,88 @@ fn save_row(ui: &mut egui::Ui, s: &mut SearchTab, root: &Path, ctx: &Context, de
             ui.label(widgets::caption(n));
         }
     });
+}
+
+/// Similarity at or above which two documents are reported as near duplicates.
+const NEAR: f32 = 0.8;
+
+/// `Near-duplicate report`: documents whose text is almost the same but whose files differ
+/// (a rescan, a printed and a scanned copy). Runs on its own thread and catalog connection.
+fn near_row(ui: &mut egui::Ui, s: &mut SearchTab, root: &Path) {
+    if let Some(rx) = &s.near_job
+        && let Ok(r) = rx.try_recv()
+    {
+        s.near = Some(r);
+        s.near_job = None;
+    }
+    ui.horizontal(|ui| {
+        let busy = s.near_job.is_some();
+        if ui
+            .add_enabled(
+                !busy && s.catalog.is_some(),
+                egui::Button::new("Near-duplicate report"),
+            )
+            .on_hover_text("Documents whose text is at least 80 % the same but whose files differ.")
+            .clicked()
+            && let Some((catalog, key)) = s.catalog.clone()
+        {
+            let (tx, rx) = std::sync::mpsc::channel();
+            let ctx = ui.ctx().clone();
+            std::thread::spawn(move || {
+                let r = vf_core::db::open(&catalog, &key, vf_core::db::Storage::Local)
+                    .and_then(|c| vf_index::neardup::report(&c, NEAR))
+                    .map_err(|e| e.to_string());
+                let _ = tx.send(r);
+                ctx.request_repaint();
+            });
+            s.near_job = Some(rx);
+        }
+        if busy {
+            ui.spinner();
+        }
+        match &s.near {
+            Some(Ok(p)) if p.is_empty() => {
+                ui.label(widgets::caption("No near duplicates."));
+            }
+            Some(Ok(p)) => {
+                ui.label(widgets::caption(format!("{} pairs", p.len())));
+            }
+            Some(Err(e)) => {
+                ui.label(widgets::caption(format!("Report failed: {e}")));
+            }
+            None => {}
+        }
+        if s.near.is_some() && ui.small_button("Close report").clicked() {
+            s.near = None;
+        }
+    });
+    let mut open = None;
+    if let Some(Ok(pairs)) = &s.near {
+        egui::ScrollArea::vertical()
+            .id_salt("near-dups")
+            .max_height(180.0)
+            .show(ui, |ui| {
+                for p in pairs {
+                    ui.horizontal(|ui| {
+                        ui.label(format!("{:.0} %", p.similarity * 100.0));
+                        for (id, path) in [(&p.a, &p.a_path), (&p.b, &p.b_path)] {
+                            if ui.link(path).clicked() {
+                                open = Some(Doc {
+                                    doc_id: id.clone(),
+                                    path: root.join(path),
+                                    name: file_name(path),
+                                    page: 0,
+                                    terms: vec![],
+                                });
+                            }
+                        }
+                    });
+                }
+            });
+    }
+    if open.is_some() {
+        s.open = open;
+    }
 }
 
 fn filters(ui: &mut egui::Ui, s: &mut SearchTab, snap: &Snapshot) {

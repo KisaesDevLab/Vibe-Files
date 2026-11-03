@@ -237,6 +237,8 @@ impl VibeFilesApp {
                 browse.set_prefs(self.config.prefs.clone());
                 browse.saved = vf_index::saved::load(&opened.root);
                 browse.notice = opened.rebuild.as_ref().map(|r| format!("Indexed: {r}"));
+                let mut search = crate::ui::search::SearchTab::default();
+                search.catalog = Some((opened.catalog.clone(), opened.key.clone()));
                 let ocr = crate::ui::ocr::OcrState::start(
                     ctx,
                     &opened,
@@ -249,7 +251,7 @@ impl VibeFilesApp {
                     admin: None,
                     intake,
                     ocr,
-                    search: Default::default(),
+                    search,
                     viewer: Default::default(),
                     indexed_seen: 0,
                 }));
