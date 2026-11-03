@@ -17,6 +17,17 @@ pub struct ClientRow {
     pub ext_id: String,
     pub name: String,
     pub folder_rel: Option<String>,
+    pub entity_type: Option<String>,
+}
+
+/// A live `client_relationship` row (ids are client uuids).
+#[derive(Debug, Clone, PartialEq)]
+pub struct RelRow {
+    pub parent_id: String,
+    pub child_id: String,
+    pub kind: String,
+    pub share_pct: Option<f64>,
+    pub note: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -49,11 +60,12 @@ impl DocRow {
 pub struct Snapshot {
     pub clients: Vec<ClientRow>,
     pub docs: Vec<DocRow>,
+    pub relationships: Vec<RelRow>,
 }
 
 pub fn load(conn: &Connection) -> Result<Snapshot> {
     let mut st = conn.prepare(
-        "SELECT id, ext_id, name, folder_rel FROM client
+        "SELECT id, ext_id, name, folder_rel, entity_type FROM client
          WHERE deleted_at IS NULL ORDER BY name COLLATE NOCASE, ext_id",
     )?;
     let clients = st
@@ -63,6 +75,7 @@ pub fn load(conn: &Connection) -> Result<Snapshot> {
                 ext_id: r.get(1)?,
                 name: r.get(2)?,
                 folder_rel: r.get(3)?,
+                entity_type: r.get(4)?,
             })
         })?
         .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -95,7 +108,26 @@ pub fn load(conn: &Connection) -> Result<Snapshot> {
             })
         })?
         .collect::<std::result::Result<Vec<_>, _>>()?;
-    Ok(Snapshot { clients, docs })
+    let mut st = conn.prepare(
+        "SELECT parent_id, child_id, kind, share_pct, note FROM client_relationship
+         WHERE deleted_at IS NULL ORDER BY parent_id, child_id, kind",
+    )?;
+    let relationships = st
+        .query_map([], |r| {
+            Ok(RelRow {
+                parent_id: r.get(0)?,
+                child_id: r.get(1)?,
+                kind: r.get(2)?,
+                share_pct: r.get(3)?,
+                note: r.get(4)?,
+            })
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(Snapshot {
+        clients,
+        docs,
+        relationships,
+    })
 }
 
 /// A tree node the grid can show. `year: None` is the Permanent node.
@@ -256,6 +288,7 @@ mod tests {
             ext_id: id.into(),
             name: name.into(),
             folder_rel: Some(format!("{name} ({id})")),
+            entity_type: None,
         }
     }
 
@@ -290,6 +323,7 @@ mod tests {
                 doc(Some("2"), Some(2025), "Baker (2)/Payroll/2025/g.pdf"),
                 doc(None, None, "Loose/h.pdf"),
             ],
+            relationships: vec![],
         }
     }
 

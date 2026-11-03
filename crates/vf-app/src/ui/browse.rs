@@ -11,6 +11,8 @@ use egui_extras::{Column, TableBuilder};
 use vf_core::browse::{DocRow, Index, Scope, Snapshot};
 use vf_core::db::Connection;
 
+use crate::ui::client_panel::{self, RelForm};
+use crate::ui::import_csv::{self, ImportDialog};
 use crate::ui::new_client::{self, NewClientDialog, Outcome};
 use crate::ui::{theme, widgets};
 
@@ -75,6 +77,10 @@ pub struct Browse {
     pub notice: Option<String>,
     /// The `+ New client` dialog, while open.
     pub new_client: Option<NewClientDialog>,
+    /// The "Import clients CSV…" dialog, while open.
+    pub import: Option<ImportDialog>,
+    /// The client inspector's add-relationship form.
+    pub rel_form: RelForm,
 }
 
 impl Browse {
@@ -96,6 +102,8 @@ impl Browse {
             error: None,
             notice: None,
             new_client: None,
+            import: None,
+            rel_form: RelForm::new(),
         };
         b.refresh();
         b
@@ -334,7 +342,11 @@ pub fn show(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env) {
         .exact_size(320.0)
         .resizable(false)
         .frame(egui::Frame::new().fill(theme::PANE).inner_margin(12))
-        .show(ui, |ui| inspector(ui, b));
+        .show(ui, |ui| {
+            egui::ScrollArea::vertical()
+                .id_salt("inspector-scroll")
+                .show(ui, |ui| inspector(ui, b, env))
+        });
     egui::CentralPanel::default().show(ui, |ui| grid(ui, b, env.conn));
     if let Some(d) = &mut b.new_client {
         match new_client::show(ui.ctx(), d, env) {
@@ -348,6 +360,23 @@ pub fn show(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env) {
                     b.expanded.insert(Node::Client(c));
                 }
                 b.notice = Some(format!("Created {folder}."));
+            }
+        }
+    }
+    if let Some(d) = &mut b.import {
+        let known = b
+            .snap
+            .clients
+            .iter()
+            .filter_map(|c| Some((c.ext_id.clone(), uuid::Uuid::parse_str(&c.id).ok()?)))
+            .collect();
+        match import_csv::show(ui.ctx(), d, env, &known) {
+            import_csv::Outcome::Open => {}
+            import_csv::Outcome::Cancelled => b.import = None,
+            import_csv::Outcome::Imported(msg) => {
+                b.import = None;
+                b.reload(env.conn);
+                b.notice = Some(msg);
             }
         }
     }
@@ -609,6 +638,9 @@ fn grid(ui: &mut egui::Ui, b: &mut Browse, conn: &Connection) {
         if ui.add(new).clicked() {
             b.new_client = Some(NewClientDialog::new(folderless_selected(b)));
         }
+        if ui.button("Import clients CSV…").clicked() {
+            b.import = Some(ImportDialog::default());
+        }
     });
     ui.add_space(6.0);
     ui.horizontal(|ui| {
@@ -793,7 +825,13 @@ fn summary<'a>(vals: impl Iterator<Item = &'a str>) -> String {
     }
 }
 
-fn inspector(ui: &mut egui::Ui, b: &Browse) {
+fn inspector(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env) {
+    if b.selected.is_empty()
+        && let Some(c) = b.scope_client()
+    {
+        client_panel::show(ui, b, env, c);
+        return;
+    }
     let docs = b.selected_docs();
     ui.label(
         RichText::new(format!("{} documents selected", docs.len()))
@@ -1164,6 +1202,129 @@ mod tests {
         assert!(
             root.join("Anderson Farms LLC (1042)/_Vibe/client.json")
                 .is_file()
+        );
+    }
+
+    /// An empty catalog over a real (empty) cabinet folder.
+    fn cabinet_harness() -> Harness<'static, State> {
+        let h = harness(0, 0);
+        vf_fs::cabinet::create(
+            &h.state().root,
+            &vf_fs::cabinet::CabinetFile {
+                cabinet_id: vf_core::new_id(),
+                firm_id: vf_core::new_id(),
+                schema_version: vf_core::db::SCHEMA_VERSION,
+                layout_version: 1,
+                created: vf_core::now_rfc3339(),
+                name: None,
+            },
+        )
+        .unwrap();
+        h
+    }
+
+    fn write_csv(h: &Harness<'static, State>, text: &str) -> String {
+        let p = h.state().root.parent().unwrap().join("clients.csv");
+        std::fs::write(&p, text).unwrap();
+        p.display().to_string()
+    }
+
+    /// P01 step 3: the CSV import keeps the master list, skips TIN columns, reports matching
+    /// folders that have no sentinel.
+    #[test]
+    fn import_clients_csv() {
+        let mut h = cabinet_harness();
+        std::fs::create_dir(h.state().root.join("Acme LLC (1001)")).unwrap();
+        let csv = write_csv(
+            &h,
+            "ClientID,Name,Partner,SSN\n1001,Acme LLC,KW,000-00-0001\n1002,Baker Trust,AB,000-00-0002\n",
+        );
+        click(&mut h, "Import clients CSV…");
+        type_into(&mut h, "CSV file", &csv);
+        click(&mut h, "Read");
+        let d = h.state().b.import.as_ref().unwrap();
+        assert_eq!(d.map.id.as_deref(), Some("ClientID"), "guessed");
+        assert_eq!(d.map.name.as_deref(), Some("Name"));
+        let by_label = |h: &mut Harness<'static, State>, l: &str| {
+            h.get_by_label(l).click();
+            h.run();
+        };
+        by_label(&mut h, "Partner");
+        by_label(&mut h, "SSN"); // disabled: no effect
+        assert_eq!(h.state().b.import.as_ref().unwrap().map.extras, ["Partner"]);
+        click(&mut h, "Import 2 rows (one transaction)");
+
+        let b = &h.state().b;
+        assert!(b.import.is_none(), "dialog closed");
+        let n = b.notice.as_deref().unwrap();
+        assert!(
+            n.contains("Imported 2 clients (2 without a folder yet)"),
+            "{n}"
+        );
+        assert!(n.contains("Acme LLC (1001) (ID 1001)"), "{n}");
+        assert_eq!(b.snap.clients.len(), 2);
+        let raw = std::fs::read_to_string(h.state().root.join("_Vibe/clients.json")).unwrap();
+        assert!(
+            raw.contains("Partner") && !raw.contains("000-00-0001"),
+            "no TINs"
+        );
+    }
+
+    /// P01 step 3: entity type and relationships from the client inspector.
+    #[test]
+    fn client_inspector_edits_entity_type_and_relationships() {
+        let mut h = cabinet_harness();
+        let csv = write_csv(&h, "ClientID,Name\n1001,Acme LLC\n1002,Baker Trust\n");
+        click(&mut h, "Import clients CSV…");
+        type_into(&mut h, "CSV file", &csv);
+        click(&mut h, "Read");
+        click(&mut h, "Import 2 rows (one transaction)");
+        click(&mut h, "Acme LLC  1001");
+        assert!(
+            h.query_by_label("No folder yet (from the client list).")
+                .is_some()
+        );
+
+        h.get_by_label("ENTITY TYPE").click();
+        h.run();
+        click(&mut h, "S corporation");
+        let acme = |h: &Harness<'static, State>| {
+            h.state()
+                .b
+                .snap
+                .clients
+                .iter()
+                .find(|c| c.ext_id == "1001")
+                .unwrap()
+                .clone()
+        };
+        assert_eq!(acme(&h).entity_type.as_deref(), Some("s_corp"));
+
+        h.get_by_label("New relationship…").click();
+        h.run();
+        type_into(&mut h, "Owner client ID", "1002");
+        type_into(&mut h, "Role", "shareholder");
+        type_into(&mut h, "Share %", "40");
+        click(&mut h, "Add relationship");
+        let b = &h.state().b;
+        assert_eq!(b.snap.relationships.len(), 1, "{:?}", b.rel_form.error);
+        assert_eq!(b.snap.relationships[0].share_pct, Some(40.0));
+        assert!(
+            h.query_by_label("Baker Trust (1002) is shareholder · 40%")
+                .is_some()
+        );
+        let m = vf_fs::clients::load(&h.state().root).unwrap();
+        assert_eq!(m.rels.records[0].parent_id, "1001");
+        assert_eq!(m.rels.records[0].child_id, "1002");
+
+        click(&mut h, "Remove");
+        assert!(h.state().b.snap.relationships.is_empty());
+        assert!(
+            vf_fs::clients::load(&h.state().root)
+                .unwrap()
+                .rels
+                .records
+                .is_empty()
         );
     }
 
