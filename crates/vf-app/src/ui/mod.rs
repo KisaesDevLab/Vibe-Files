@@ -3,6 +3,7 @@ pub mod browse;
 pub mod chrome;
 pub mod client_panel;
 pub mod cover_sheet;
+pub mod doc_render;
 pub mod import_csv;
 pub mod ingest;
 pub mod intake;

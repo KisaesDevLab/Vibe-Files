@@ -31,9 +31,12 @@ filer-pdf = { path = "../filer-pdf" }
 pdfium-render.workspace = true
 image.workspace = true
 vf-index = { path = "../vf-index" }
+vf-pdf = { path = "../vf-pdf" }
+lopdf.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]
+pdf-writer.workspace = true
 filer-pdf = { path = "../filer-pdf", features = ["test-support"] }
 egui_kittest.workspace = true
 tempfile.workspace = true

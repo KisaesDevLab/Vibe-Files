@@ -140,6 +140,7 @@ impl VibeFilesApp {
                     prefs: Default::default(),
                     ingest: Default::default(),
                     ocr: Default::default(),
+                    viewer: Default::default(),
                 },
                 Some(format!("Settings could not be read: {e:#}")),
             ),
@@ -341,7 +342,20 @@ impl eframe::App for VibeFilesApp {
             }
             Screen::Open(o) if self.tab == Tab::Viewer => {
                 let o = &mut **o;
-                crate::ui::viewer::show(ui, &mut o.viewer);
+                let initials = self.config.viewer.initials();
+                crate::ui::viewer::show(
+                    ui,
+                    &mut o.viewer,
+                    &mut crate::ui::viewer::Env {
+                        conn: &mut o.opened.conn,
+                        root: &o.opened.root,
+                        device_id: &self.config.device_id,
+                        initials: &initials,
+                    },
+                );
+                if std::mem::take(&mut o.viewer.catalog_changed) {
+                    o.browse.reload(&o.opened.conn);
+                }
                 if let Some(p) = o.viewer.open_request.take()
                     && let Err(e) = (o.browse.shell)(&crate::shell::ShellAction::Open(p))
                 {
@@ -354,6 +368,7 @@ impl eframe::App for VibeFilesApp {
                     browse: tab_browse,
                     admin: tab_admin,
                     intake: o_intake,
+                    viewer: o_viewer,
                     ..
                 } = &mut **o;
                 let mut env = browse::Env {
@@ -388,6 +403,10 @@ impl eframe::App for VibeFilesApp {
                         tab_browse.notice = Some(m);
                     }
                     browse::show(ui, tab_browse, &mut env);
+                    if let Some(d) = tab_browse.view_request.take() {
+                        o_viewer.open(d);
+                        self.tab = Tab::Viewer;
+                    }
                 }
             }
             screen => {
@@ -709,7 +728,12 @@ mod tests {
         let start = std::time::Instant::now();
         let delivered = inbox.join("Acme_1001_2025 W-2.pdf");
         // Counted while it waits in Scans, and again once it is in Filer's inbox.
-        while !(delivered.is_file() && h.query_by_label("Intake (1)").is_some()) {
+        // The original is moved aside just after the file reaches the inbox.
+        let original = scans.join("Acme_1001_2025 W-2.pdf");
+        while !(delivered.is_file()
+            && !original.exists()
+            && h.query_by_label("Intake (1)").is_some())
+        {
             assert!(
                 start.elapsed() < std::time::Duration::from_secs(30),
                 "the badge never showed the delivered file"
@@ -894,6 +918,163 @@ mod tests {
         assert!(
             h.query_by_label_contains("is already in the cabinet")
                 .is_none()
+        );
+    }
+
+    /// P04 steps 1-3: a PDF opened from Browse shows in the Viewer; Save writes pending
+    /// annotations as a new version (old kept); Save as files a new document beside it.
+    #[test]
+    fn viewer_saves_annotations_as_a_version_and_as_a_new_document() {
+        use vf_pdf::annot::{Annotation, Kind, Tick};
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("Clients");
+        std::fs::create_dir_all(root.join("Old")).unwrap();
+        filer_pdf::pdf::write_test_pdf(
+            &root.join("Old/letter.pdf"),
+            &["Engagement letter page one"],
+        );
+        let req = CreateRequest {
+            root: &root,
+            name: "Firm",
+        };
+        drop(session::create(&tmp.path().join("pc1"), "dev-1", &req).unwrap());
+        let mut h = harness(&tmp.path().join("pc1"));
+        click(&mut h, "Open existing");
+        type_into(&mut h, "Cabinet folder", &root.display().to_string());
+        click(&mut h, "Open cabinet");
+        settle(&mut h);
+
+        // Browse: select the document, Enter opens it in the Viewer.
+        h.get_by_label("letter.pdf").click();
+        h.run();
+        h.key_press(egui::Key::Enter);
+        // The Viewer keeps repainting while it loads: steps, not `run`.
+        h.step();
+        h.step();
+        assert_eq!(h.state().tab, Tab::Viewer);
+        let start = std::time::Instant::now();
+        loop {
+            h.step();
+            let Screen::Open(o) = &h.state().screen else {
+                unreachable!()
+            };
+            if o.viewer.ready() {
+                break;
+            }
+            assert!(
+                start.elapsed() < std::time::Duration::from_secs(20),
+                "never rendered"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let (doc_id, old_hash) = {
+            let Screen::Open(o) = &h.state().screen else {
+                unreachable!()
+            };
+            let id = o.viewer.doc.as_ref().unwrap().doc_id.clone();
+            let hash: String = o
+                .opened
+                .conn
+                .query_row("SELECT hash FROM document WHERE id = ?1", [&id], |r| {
+                    r.get(0)
+                })
+                .unwrap();
+            (id, hash)
+        };
+        let pend = |h: &mut egui_kittest::Harness<'static, VibeFilesApp>, kind| {
+            if let Screen::Open(o) = &mut h.state_mut().screen {
+                o.viewer.pending.push(Annotation {
+                    page: 0,
+                    kind,
+                    color: vf_pdf::annot::ACCENT,
+                    author: "KWK".into(),
+                });
+            }
+        };
+        pend(
+            &mut h,
+            Kind::Tickmark {
+                tick: Tick::Check,
+                at: [100.0, 600.0],
+                size: 28.0,
+            },
+        );
+        pend(
+            &mut h,
+            Kind::Stamp {
+                text: "CLIENT COPY".into(),
+                at: [300.0, 700.0],
+                size: 16.0,
+            },
+        );
+        h.run();
+        h.get_by_label("2 unsaved");
+        click(&mut h, "Save");
+        h.step();
+        let path = root.join("Old/letter.pdf");
+        let found = vf_pdf::annot::read(&path).unwrap();
+        assert_eq!(found.len(), 2, "written into the file");
+        {
+            let Screen::Open(o) = &h.state().screen else {
+                unreachable!()
+            };
+            let (hash, kept): (String, i64) = o
+                .opened
+                .conn
+                .query_row(
+                    "SELECT d.hash, (SELECT count(*) FROM version v WHERE v.doc_id = d.id
+                       AND v.hash = ?2 AND v.created_by = 'annotate')
+                     FROM document d WHERE d.id = ?1",
+                    [&doc_id, &old_hash],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap();
+            assert_ne!(hash, old_hash);
+            assert_eq!(kept, 1, "the previous content is a version");
+            assert!(o.viewer.pending.is_empty());
+            assert!(
+                vf_fs::cabinet::version_path(&root, &old_hash).is_file(),
+                "old bytes kept"
+            );
+        }
+
+        // Save as: a new document, the file just saved untouched.
+        let before = std::fs::read(&path).unwrap();
+        pend(
+            &mut h,
+            Kind::Note {
+                at: [72.0, 500.0],
+                text: "Signed copy".into(),
+            },
+        );
+        h.run();
+        click(&mut h, "Save as…");
+        h.step();
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        let copy = root.join("Old/letter (2).pdf");
+        assert_eq!(
+            vf_pdf::annot::read(&copy).unwrap().len(),
+            3,
+            "2 saved + the note"
+        );
+        let Screen::Open(o) = &h.state().screen else {
+            unreachable!()
+        };
+        let tag: String = o
+            .opened
+            .conn
+            .query_row(
+                "SELECT t.tag FROM document d JOIN document_tag t ON t.doc_id = d.id
+                 WHERE d.rel_path = 'Old/letter (2).pdf'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(tag, format!("copy-of:{doc_id}"));
+        assert_eq!(
+            o.viewer.doc.as_ref().unwrap().name,
+            "letter (2).pdf",
+            "the copy is open"
         );
     }
 

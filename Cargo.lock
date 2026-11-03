@@ -5001,6 +5001,8 @@ dependencies = [
  "filer-intake",
  "filer-pdf",
  "image",
+ "lopdf",
+ "pdf-writer",
  "pdfium-render",
  "rfd",
  "serde",
@@ -5014,6 +5016,7 @@ dependencies = [
  "vf-index",
  "vf-ingest",
  "vf-ocr",
+ "vf-pdf",
  "windows",
 ]
 

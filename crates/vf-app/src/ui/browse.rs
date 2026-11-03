@@ -95,6 +95,8 @@ pub struct Browse {
     undo_requested: bool,
     /// The `Rename…` dialog, while open.
     pub rename: Option<RenameDialog>,
+    /// A PDF to show in the Viewer (taken by the app).
+    pub view_request: Option<crate::ui::viewer::Doc>,
     /// Pinned / Recent / Favorites, from this PC's config; `prefs_dirty` asks the app to save.
     pub prefs: Prefs,
     pub prefs_dirty: bool,
@@ -125,8 +127,10 @@ pub type ShellFn = Box<dyn FnMut(&ShellAction) -> Result<(), String>>;
 /// What to do with one document's file (P01 step 8).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FileAct {
-    /// Open in its registered app (the Viewer tab takes PDFs from P04).
+    /// PDFs in the Viewer tab (P04); other files in their registered app.
     Open,
+    /// In the app Windows has for its type (a PDF in Acrobat, …).
+    OpenExternal,
     /// Show it in Explorer.
     Reveal,
     /// Put its full path on the clipboard.
@@ -163,6 +167,7 @@ impl Browse {
             view_counts: [0; 5],
             fav_counts: Vec::new(),
             saved: Vec::new(),
+            view_request: None,
             saved_open: None,
             saved_delete: None,
             week_start: week_start_utc(),
@@ -414,7 +419,17 @@ impl Browse {
         let path = shell::full_path(root, &d.rel_path);
         let id = d.id.clone();
         let result = match act {
-            FileAct::Open => (self.shell)(&ShellAction::Open(path)),
+            FileAct::Open if d.rel_path.to_lowercase().ends_with(".pdf") => {
+                self.view_request = Some(crate::ui::viewer::Doc::at(
+                    root,
+                    &d.id,
+                    &d.rel_path,
+                    0,
+                    vec![],
+                ));
+                Ok(())
+            }
+            FileAct::Open | FileAct::OpenExternal => (self.shell)(&ShellAction::Open(path)),
             FileAct::Reveal => (self.shell)(&ShellAction::Reveal(path)),
             FileAct::CopyPath => {
                 ctx.copy_text(path.display().to_string());
@@ -423,7 +438,7 @@ impl Browse {
             }
         };
         match result {
-            Ok(()) if act == FileAct::Open => {
+            Ok(()) if matches!(act, FileAct::Open | FileAct::OpenExternal) => {
                 self.prefs.touch(&[id]);
                 self.prefs_changed();
             }
@@ -1247,6 +1262,7 @@ fn grid(ui: &mut egui::Ui, b: &mut Browse, conn: &Connection) {
                 resp.context_menu(|ui| {
                     for (label, act) in [
                         ("Open", FileAct::Open),
+                        ("Open in PDF app", FileAct::OpenExternal),
                         ("Open in Explorer", FileAct::Reveal),
                         ("Copy path", FileAct::CopyPath),
                     ] {
@@ -2057,7 +2073,13 @@ mod tests {
             .expect("grid row still there")
             .click();
         h.run();
-        assert_eq!(calls.borrow().as_slice(), [ShellAction::Open(full.clone())]);
+        // A PDF opens in the Viewer (P04), not in Windows' app.
+        assert!(calls.borrow().is_empty());
+        let v = h.state_mut().b.view_request.take().expect("viewer asked");
+        assert_eq!(
+            (v.path.as_path(), v.doc_id.as_str()),
+            (full.as_path(), id.as_str())
+        );
         assert_eq!(
             h.state().b.prefs.recent,
             std::slice::from_ref(&id),
@@ -2068,7 +2090,8 @@ mod tests {
         // Enter on the cursor row opens it too.
         h.key_press(Key::Enter);
         h.run();
-        assert_eq!(calls.borrow().len(), 2);
+        assert!(h.state_mut().b.view_request.take().is_some());
+        assert!(calls.borrow().is_empty());
 
         click(&mut h, "Open in Explorer");
         assert_eq!(

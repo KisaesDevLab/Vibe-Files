@@ -25,6 +25,38 @@ pub struct Config {
     /// This PC's OCR engine (P03).
     #[serde(default)]
     pub ocr: Ocr,
+    /// Viewer settings (P04).
+    #[serde(default)]
+    pub viewer: ViewerPrefs,
+}
+
+/// Viewer settings of this workstation.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ViewerPrefs {
+    /// Author on annotations, stamps and tickmarks; empty = from the Windows user name. Until
+    /// users exist (PA-15) this is per workstation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initials: Option<String>,
+}
+
+impl ViewerPrefs {
+    /// The initials to sign with: the setting, else the Windows user name's (`kwkcpa` → `KWK`).
+    pub fn initials(&self) -> String {
+        if let Some(i) = self.initials.as_ref().filter(|i| !i.trim().is_empty()) {
+            return i.trim().to_string();
+        }
+        std::env::var("USERNAME")
+            .ok()
+            .map(|u| {
+                u.chars()
+                    .filter(|c| c.is_alphanumeric())
+                    .take(3)
+                    .collect::<String>()
+            })
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_uppercase())
+            .unwrap_or_else(|| "VF".into())
+    }
 }
 
 /// OCR settings of this workstation.
@@ -148,6 +180,7 @@ pub fn load(data: &Path) -> Result<Config> {
                 prefs: Prefs::default(),
                 ingest: Ingest::default(),
                 ocr: Ocr::default(),
+                viewer: ViewerPrefs::default(),
             };
             save(data, &c)?;
             let _ = std::fs::remove_file(legacy);

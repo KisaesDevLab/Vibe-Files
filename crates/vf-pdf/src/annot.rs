@@ -157,6 +157,32 @@ impl Placement {
     }
 }
 
+/// Where a stamp of `text` at `size` goes on a page with geometry `g` (user space centre).
+pub fn placed(g: &crate::layer::Geometry, text: &str, size: f32, placement: Placement) -> [f32; 2] {
+    let (w, h) = stamp_size(text, size);
+    let (dw, dh) = g.display();
+    let m = 24.0;
+    let u = match placement {
+        Placement::TopLeft | Placement::BottomLeft => m + w / 2.0,
+        Placement::TopRight | Placement::BottomRight => dw - m - w / 2.0,
+        _ => dw / 2.0,
+    };
+    let v = match placement {
+        Placement::TopLeft | Placement::TopCenter | Placement::TopRight => m + h / 2.0,
+        Placement::Center => dh / 2.0,
+        _ => dh - m - h / 2.0,
+    };
+    g.to_user(u, v)
+}
+
+/// A stamp's box on screen (display orientation), points.
+pub fn stamp_size(text: &str, size: f32) -> (f32, f32) {
+    (
+        text.chars().count() as f32 * size * BOLD_EM + size * 1.2,
+        size * 1.9,
+    )
+}
+
 /// A stamp to put on several pages.
 #[derive(Debug, Clone, PartialEq)]
 pub struct StampSpec {
@@ -187,30 +213,18 @@ pub fn stamp_pages(src: &Path, out: &Path, spec: &StampSpec, now: &str) -> Resul
     } else {
         pages.to_vec()
     };
-    let (w, h) = stamp_size(text, size);
     let mut annots = Vec::new();
     for p in chosen {
         let Some(&id) = ids.get(p as usize) else {
             return Err(format!("page {} is not in the PDF", p + 1));
         };
         let g = crate::layer::Geometry::of(&doc, id)?;
-        let (dw, dh) = g.display();
-        let m = 24.0;
-        let u = match placement {
-            Placement::TopLeft | Placement::BottomLeft => m + w / 2.0,
-            Placement::TopRight | Placement::BottomRight => dw - m - w / 2.0,
-            _ => dw / 2.0,
-        };
-        let v = match placement {
-            Placement::TopLeft | Placement::TopCenter | Placement::TopRight => m + h / 2.0,
-            Placement::Center => dh / 2.0,
-            _ => dh - m - h / 2.0,
-        };
+        let at = placed(&g, text, size, placement);
         annots.push(Annotation {
             page: p,
             kind: Kind::Stamp {
                 text: text.clone(),
-                at: g.to_user(u, v),
+                at,
                 size,
             },
             color,
@@ -791,14 +805,6 @@ fn tick_ops(t: Tick, size: f32) -> Vec<Operation> {
     }
     v.push(op("Q", vec![]));
     v
-}
-
-/// Stamp box size in display orientation.
-fn stamp_size(text: &str, size: f32) -> (f32, f32) {
-    (
-        text.chars().count() as f32 * size * BOLD_EM + size * 1.2,
-        size * 1.9,
-    )
 }
 
 fn stamp_ops(text: &str, size: f32, c: Rgb, w: f32, h: f32) -> Vec<Operation> {

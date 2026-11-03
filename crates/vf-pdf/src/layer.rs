@@ -105,6 +105,18 @@ impl Geometry {
         }
     }
 
+    /// The display point (points, origin top left) showing user-space point (x, y): the
+    /// inverse of [`Geometry::to_user`].
+    pub fn to_display(&self, x: f32, y: f32) -> [f32; 2] {
+        let [x0, y0, x1, y1] = self.cbox;
+        match self.rotate {
+            90 => [y - y0, x - x0],
+            180 => [x1 - x, y - y0],
+            270 => [y1 - y, x1 - x],
+            _ => [x - x0, y1 - y],
+        }
+    }
+
     /// The user-space point shown at display point (u, v) (points, origin top left).
     pub fn to_user(&self, u: f32, v: f32) -> [f32; 2] {
         let m = self.text_matrix(u, v);
@@ -122,6 +134,19 @@ impl Geometry {
             _ => [1.0, 0.0, 0.0, 1.0, x0 + u, y1 - v],
         }
     }
+}
+
+/// Every page's geometry, in page order.
+pub fn geometries(doc: &Document) -> Vec<Geometry> {
+    doc.get_pages()
+        .values()
+        .map(|id| {
+            Geometry::of(doc, *id).unwrap_or(Geometry {
+                cbox: [0.0, 0.0, 612.0, 792.0],
+                rotate: 0,
+            })
+        })
+        .collect()
 }
 
 /// The page's `/Rotate` (inherited), normalized to 0, 90, 180 or 270.
@@ -279,6 +304,20 @@ fn wrap_contents(doc: &mut Document, page: ObjectId, ops: Vec<Operation>) -> Res
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn display_and_user_points_round_trip() {
+        for rotate in [0, 90, 180, 270] {
+            let g = Geometry {
+                cbox: [10.0, 20.0, 622.0, 812.0],
+                rotate,
+            };
+            for (u, v) in [(0.0, 0.0), (100.0, 250.0), (300.5, 12.0)] {
+                let [x, y] = g.to_user(u, v);
+                assert_eq!(g.to_display(x, y), [u, v], "rotate {rotate}");
+            }
+        }
+    }
 
     #[test]
     fn text_matrix_follows_rotation() {

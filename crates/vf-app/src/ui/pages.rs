@@ -4,15 +4,15 @@
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender, channel};
 
-use pdfium_render::prelude::{PdfDocument, PdfPoints, PdfRenderConfig, PdfSearchOptions};
+use pdfium_render::prelude::{
+    PdfDocument, PdfPageRenderRotation, PdfPoints, PdfRenderConfig, PdfSearchOptions,
+};
 
 /// A rendered page.
 pub struct Rendered {
     pub image: egui::ColorImage,
     /// Where the search words are, as fractions of the image (0–1), top left origin.
     pub hits: Vec<egui::Rect>,
-    /// Pages in the document.
-    pub pages: usize,
 }
 
 /// One page to render. `key` comes back with the result.
@@ -64,7 +64,9 @@ impl Renderer {
                                     .map(|d| (req.path.clone(), d));
                             }
                             match &open {
-                                Some((_, doc)) => render_doc(doc, req.page, req.width, &req.terms),
+                                Some((_, doc)) => {
+                                    render_doc(doc, req.page, req.width, 0, &req.terms)
+                                }
                                 None => Err(format!("cannot open {}", req.path.display())),
                             }
                         }
@@ -93,11 +95,14 @@ impl Renderer {
     }
 }
 
-/// Renders page `page` (0-based) of `doc`, `width` pixels wide, and finds `terms` on it.
-fn render_doc(
+/// Renders page `page` (0-based) of `doc`, `width` pixels wide, turned `rotate` degrees
+/// clockwise (0, 90, 180, 270: the Viewer's rotate view), with its annotations, and finds
+/// `terms` on it.
+pub fn render_doc(
     doc: &PdfDocument<'_>,
     page: usize,
     width: u32,
+    rotate: u16,
     terms: &[String],
 ) -> Result<Rendered, String> {
     let pages = doc.pages().len() as usize;
@@ -106,7 +111,16 @@ fn render_doc(
         .pages()
         .get(index)
         .map_err(|e| format!("no page {}: {e}", page + 1))?;
-    let config = PdfRenderConfig::new().set_target_width(width as i32);
+    let turn = match rotate {
+        90 => PdfPageRenderRotation::Degrees90,
+        180 => PdfPageRenderRotation::Degrees180,
+        270 => PdfPageRenderRotation::Degrees270,
+        _ => PdfPageRenderRotation::None,
+    };
+    let config = PdfRenderConfig::new()
+        .set_target_width(width as i32)
+        .rotate(turn, true)
+        .render_annotations(true);
     let img = p
         .render_with_config(&config)
         .and_then(|b| b.as_image())
@@ -144,7 +158,6 @@ fn render_doc(
             img.as_raw(),
         ),
         hits,
-        pages,
     })
 }
 
@@ -162,8 +175,7 @@ mod tests {
             .unwrap()
             .load_pdf_from_file(&pdf, None)
             .unwrap();
-        let r = render_doc(&doc, 1, 400, &["3456789".into()]).unwrap();
-        assert_eq!(r.pages, 2);
+        let r = render_doc(&doc, 1, 400, 0, &["3456789".into()]).unwrap();
         assert_eq!(r.image.size[0], 400);
         assert_eq!(r.hits.len(), 1);
         let h = r.hits[0];
@@ -173,7 +185,7 @@ mod tests {
         );
         assert!(h.width() > 0.0 && h.height() > 0.0);
         assert!(
-            render_doc(&doc, 0, 400, &["3456789".into()])
+            render_doc(&doc, 0, 400, 0, &["3456789".into()])
                 .unwrap()
                 .hits
                 .is_empty()
