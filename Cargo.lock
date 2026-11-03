@@ -5723,6 +5723,8 @@ dependencies = [
  "vf-fs",
  "vf-ingest",
  "vf-ocr",
+ "vf-security",
+ "vf-sync",
 ]
 
 [[package]]
