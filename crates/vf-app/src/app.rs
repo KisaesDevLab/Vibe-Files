@@ -86,6 +86,8 @@ pub struct OpenCabinet {
     pub chain: crate::ui::audit::ChainCheck,
     /// When new audit rows were last copied to `_Vibe/audit/<month>.jsonl`.
     mirrored_at: Option<std::time::Instant>,
+    /// The integrity sweep (P05 step 5): weekly, and from Admin.
+    pub sweep: crate::ui::sweep::SweepState,
 }
 
 impl OpenCabinet {
@@ -261,9 +263,14 @@ impl VibeFilesApp {
                     &self.config.device_id,
                 );
                 let chain = crate::ui::audit::ChainCheck::run(&opened.conn);
+                let mut sweep = crate::ui::sweep::SweepState::default();
+                if vf_fs::sweep::due(&opened.conn) {
+                    sweep.start(ctx, &opened.catalog, &opened.root);
+                }
                 self.screen = Screen::Open(Box::new(OpenCabinet {
                     chain,
                     mirrored_at: None,
+                    sweep,
                     opened,
                     browse,
                     admin: None,
@@ -302,6 +309,15 @@ impl eframe::App for VibeFilesApp {
         chrome::tab_bar(ui, &mut self.tab, badge);
         if let Screen::Open(o) = &mut self.screen {
             o.chain.tick(&o.opened.conn);
+            if let Some(line) =
+                o.sweep
+                    .poll(&mut o.opened.conn, &o.opened.root, &self.config.device_id)
+            {
+                o.browse.notice = Some(line);
+            }
+            if std::mem::take(&mut o.sweep.changed) {
+                o.browse.reload(&o.opened.conn);
+            }
             // The audit trail's copy in the cabinet (CLAUDE.md layout: _Vibe/audit/*.jsonl).
             if o.mirrored_at
                 .is_none_or(|t| t.elapsed() >= std::time::Duration::from_secs(2))
@@ -420,6 +436,7 @@ impl eframe::App for VibeFilesApp {
                     intake: o_intake,
                     viewer: o_viewer,
                     chain: o_chain,
+                    sweep: o_sweep,
                     ..
                 } = &mut **o;
                 let mut env = browse::Env {
@@ -431,7 +448,15 @@ impl eframe::App for VibeFilesApp {
                     let a = tab_admin.get_or_insert_with(|| Admin::load(&env));
                     a.capture = self.config.ingest.print_capture.clone();
                     a.chain = Some(o_chain.clone());
-                    admin::show(ui, a, &mut env);
+                    admin::show(
+                        ui,
+                        a,
+                        &mut env,
+                        admin::SweepEnv {
+                            state: o_sweep,
+                            catalog: &opened.catalog,
+                        },
+                    );
                     if std::mem::take(&mut a.audit.verify_requested) {
                         *o_chain = crate::ui::audit::ChainCheck::run(env.conn);
                     }

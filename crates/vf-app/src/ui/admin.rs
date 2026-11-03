@@ -16,6 +16,7 @@ pub enum Page {
     PrintCapture,
     Audit,
     Trash,
+    Sweep,
 }
 
 /// UI_SPEC §6 nav, grouped. Only Doc types is built in P01.
@@ -187,7 +188,14 @@ impl Admin {
     }
 }
 
-pub fn show(ui: &mut egui::Ui, a: &mut Admin, env: &mut Env) {
+/// The app's integrity sweep (it runs on a schedule, so it lives with the open cabinet) and the
+/// catalog file its thread opens.
+pub struct SweepEnv<'a> {
+    pub state: &'a mut crate::ui::sweep::SweepState,
+    pub catalog: &'a std::path::Path,
+}
+
+pub fn show(ui: &mut egui::Ui, a: &mut Admin, env: &mut Env, sweep: SweepEnv) {
     egui::Panel::left("admin-nav")
         .exact_size(248.0)
         .resizable(false)
@@ -197,6 +205,7 @@ pub fn show(ui: &mut egui::Ui, a: &mut Admin, env: &mut Env) {
         Page::DocTypes => doc_types(ui, a, env),
         Page::PrintCapture => print_capture(ui, a, env),
         Page::Audit => crate::ui::audit::show(ui, &mut a.audit, env, a.chain.as_ref()),
+        Page::Sweep => crate::ui::sweep::show(ui, sweep.state, env, sweep.catalog),
         Page::Trash => {
             crate::ui::trash::show(ui, &mut a.trash, env);
             if std::mem::take(&mut a.trash.changed) {
@@ -225,6 +234,10 @@ fn nav(ui: &mut egui::Ui, a: &mut Admin) {
                     .clicked()
                 {
                     a.page = Page::PrintCapture;
+                }
+            } else if *item == "Integrity sweep" {
+                if ui.selectable_label(a.page == Page::Sweep, *item).clicked() {
+                    a.page = Page::Sweep;
                 }
             } else if *item == "Trash" {
                 if ui.selectable_label(a.page == Page::Trash, *item).clicked() {
@@ -534,6 +547,8 @@ mod tests {
         a: Admin,
         conn: Connection,
         root: std::path::PathBuf,
+        sweep: crate::ui::sweep::SweepState,
+        catalog: std::path::PathBuf,
         _tmp: tempfile::TempDir,
     }
 
@@ -561,12 +576,22 @@ mod tests {
                         root: &s.root,
                         device_id: "dev",
                     };
-                    show(ui, &mut s.a, &mut env)
+                    show(
+                        ui,
+                        &mut s.a,
+                        &mut env,
+                        SweepEnv {
+                            state: &mut s.sweep,
+                            catalog: &s.catalog,
+                        },
+                    )
                 },
                 State {
                     a,
                     conn,
                     root,
+                    sweep: Default::default(),
+                    catalog: tmp.path().join("c.db"),
                     _tmp: tmp,
                 },
             );
@@ -704,6 +729,87 @@ mod tests {
                 .join("d1")
                 .exists()
         );
+    }
+
+    /// P05 step 5: Sweep now finds a file edited outside Vibe Files and keeps it as a new
+    /// version; an unknown file waits for a click.
+    #[test]
+    fn integrity_sweep_page_adopts_an_outside_edit() {
+        let mut h = harness();
+        let w2 = {
+            let s = h.state_mut();
+            let folder = s.root.join("Anderson Farms LLC (ANDE1042)");
+            std::fs::create_dir_all(folder.join("Income Tax/2025")).unwrap();
+            filer_intake::sentinel::write_sentinel(
+                &s.root,
+                &folder,
+                &filer_core::clients::Client {
+                    id: "ANDE1042".into(),
+                    uuid: uuid::Uuid::new_v4(),
+                    name: "Anderson Farms LLC".into(),
+                    extra: Default::default(),
+                },
+                uuid::Uuid::new_v4(),
+            )
+            .unwrap();
+            let w2 = folder.join("Income Tax/2025/w2.pdf");
+            std::fs::write(&w2, b"w2").unwrap();
+            let hash = filer_intake::commit::sha256_file(&w2).unwrap();
+            s.conn
+                .execute(
+                    "INSERT INTO document (id, tax_year, rel_path, hash, size, filed_at, device_id, updated_at)
+                     VALUES ('d1', 2025, 'Anderson Farms LLC (ANDE1042)/Income Tax/2025/w2.pdf', ?1, 2, 't', 'dev', 't')",
+                    [hash],
+                )
+                .unwrap();
+            std::fs::write(&w2, b"w2 signed elsewhere").unwrap();
+            std::fs::write(folder.join("Income Tax/2025/notice.pdf"), b"notice").unwrap();
+            w2
+        };
+        click(&mut h, "Integrity sweep");
+        assert!(h.query_by_label("No sweep yet.").is_some());
+        h.get_by_role_and_label(egui::accesskit::Role::Button, "Sweep now")
+            .click();
+        h.step(); // the spinner keeps repainting: step, do not run
+        let start = std::time::Instant::now();
+        loop {
+            h.step();
+            let s = h.state_mut();
+            let (conn, root) = (&mut s.conn, s.root.clone());
+            if s.sweep.poll(conn, &root, "dev").is_some() || s.sweep.drift.is_some() {
+                break;
+            }
+            assert!(
+                start.elapsed() < std::time::Duration::from_secs(20),
+                "{:?}",
+                s.sweep.error
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        h.run();
+        assert!(
+            h.query_by_label("Edited outside Vibe Files, kept as new versions (1)")
+                .is_some()
+        );
+        assert!(h.query_by_label("Not in the catalog (1)").is_some());
+        let s = h.state();
+        let hash: String = s
+            .conn
+            .query_row("SELECT hash FROM document WHERE id = 'd1'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(hash, filer_intake::commit::sha256_file(&w2).unwrap());
+        let n: i64 = s
+            .conn
+            .query_row(
+                "SELECT count(*) FROM audit WHERE action = 'external_modify' AND doc_id = 'd1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 1);
+        assert!(!vf_fs::sweep::due(&s.conn), "the sweep time is recorded");
     }
 
     #[test]

@@ -159,7 +159,7 @@ pub(crate) fn rel(root: &Path, p: &Path) -> String {
 }
 
 /// Files under `dir`, skipping `_Vibe` folders and Filer's partial-copy temp files.
-fn files_under(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), RebuildError> {
+pub(crate) fn files_under(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), RebuildError> {
     let mut entries: Vec<_> = std::fs::read_dir(dir)
         .map_err(|e| RebuildError::Io(format!("cannot read {}: {e}", dir.display())))?
         .filter_map(|e| e.ok())
@@ -212,7 +212,7 @@ pub(crate) fn mime(rel: &str) -> &'static str {
 }
 
 /// A client folder bound by a readable, non-duplicate sentinel.
-struct Bound {
+pub(crate) struct Bound {
     id: String,
     ext_id: String,
     name: String,
@@ -223,7 +223,7 @@ struct Bound {
 /// Top-level folders of `root` in name order, each with its client id when bound. Bound
 /// clients are returned once; duplicate and unbound folders go to the report.
 #[allow(clippy::type_complexity)]
-fn scan_folders(
+pub(crate) fn scan_folders(
     root: &Path,
     rep: &mut RebuildReport,
 ) -> Result<(Vec<Bound>, Vec<(PathBuf, Option<String>)>), RebuildError> {

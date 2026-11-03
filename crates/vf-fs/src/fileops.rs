@@ -84,6 +84,18 @@ pub fn commit(
         .map_err(|e| e.to_string())
 }
 
+/// Like [`commit`], with file ops allowed under each of `allowed` (the cabinet and an inbox).
+pub fn commit_in(
+    conn: &mut vf_core::db::Connection,
+    allowed: &[&Path],
+    tx: vf_core::tx::Transaction,
+    device_id: &str,
+) -> Result<vf_core::tx::Committed, String> {
+    let mut fs = FilerFileOps::new(allowed).map_err(|e| format!("cannot open the cabinet: {e}"))?;
+    tx.commit(conn, &mut fs, &vf_core::tx::Actor::device(device_id))
+        .map_err(|e| e.to_string())
+}
+
 /// Undoes the transaction `tx_id` against the cabinet at `root`, as this device.
 pub fn undo(
     conn: &mut vf_core::db::Connection,
@@ -114,6 +126,7 @@ pub const NOT_ON_UNDO_STACK: &[&str] = &[
     "clients_edit",
     "clients_import",
     "intake_clients",
+    "external_modify",
 ];
 
 /// This Windows login's undo stack: its last 20 undoable transactions, newest first.

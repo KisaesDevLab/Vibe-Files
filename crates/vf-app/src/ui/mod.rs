@@ -14,6 +14,7 @@ pub mod ocr;
 pub mod pages;
 pub mod rename;
 pub mod search;
+pub mod sweep;
 #[cfg(test)]
 pub mod test_util;
 pub mod theme;
