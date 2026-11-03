@@ -5,7 +5,7 @@ use egui::{Align, Frame, Layout, Margin, RichText, Sense, Stroke};
 use crate::app::Tab;
 use crate::ui::theme;
 
-pub fn header(ui: &mut egui::Ui) {
+pub fn header(ui: &mut egui::Ui, cabinet: Option<&str>) {
     egui::Panel::top("header")
         .exact_size(44.0)
         .resizable(false)
@@ -21,7 +21,9 @@ pub fn header(ui: &mut egui::Ui) {
                         .strong()
                         .color(egui::Color32::WHITE),
                 );
-                ui.label(RichText::new("No cabinet open").color(theme::ON_DARK_MUTED));
+                ui.label(
+                    RichText::new(cabinet.unwrap_or("No cabinet open")).color(theme::ON_DARK_MUTED),
+                );
             });
         });
 }

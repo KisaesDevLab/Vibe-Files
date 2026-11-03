@@ -1,3 +1,5 @@
 //! Users, roles, local auth, Windows auto-login, DPAPI, PII detectors, section 7216.
 //!
-//! Stub: filled in by its phase in PHASES.md.
+//! P01 step 1 brought in [`keys`] (recovery-passphrase wrapping); the rest lands in P06.
+
+pub mod keys;

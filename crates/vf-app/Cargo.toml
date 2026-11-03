@@ -16,8 +16,13 @@ anyhow.workspace = true
 clap.workspace = true
 vf-core = { path = "../vf-core" }
 vf-fs = { path = "../vf-fs" }
+vf-security = { path = "../vf-security" }
+rfd.workspace = true
+serde.workspace = true
+toml.workspace = true
 
 [dev-dependencies]
 egui_kittest.workspace = true
 tempfile.workspace = true
 serde_json.workspace = true
+vf-fixtures = { path = "../vf-fixtures" }

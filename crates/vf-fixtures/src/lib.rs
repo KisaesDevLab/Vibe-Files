@@ -156,6 +156,7 @@ pub fn generate(out: &Path, seed: u64) -> Result<Summary> {
             schema_version: vf_core::db::SCHEMA_VERSION,
             layout_version: 1,
             created: "2026-11-02T00:00:00Z".into(),
+            name: None,
         },
     )
     .map_err(anyhow::Error::msg)?;

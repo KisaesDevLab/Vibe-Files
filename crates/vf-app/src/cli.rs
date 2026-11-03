@@ -84,16 +84,9 @@ pub fn run(cmd: &Command, data: &Path, key: &CatalogKey, out: &mut dyn Write) ->
     }
 }
 
-/// This workstation's device id (uuid v7), kept in `<data>/device_id` until `config.toml` lands
-/// with P01.
+/// This workstation's device id, from `<data>/config.toml`.
 pub fn device_id(data: &Path) -> Result<String> {
-    let p = data.join("device_id");
-    if let Ok(s) = std::fs::read_to_string(&p) {
-        return Ok(s.trim().to_owned());
-    }
-    let id = vf_core::new_id();
-    std::fs::write(&p, &id)?;
-    Ok(id)
+    Ok(crate::config::load(data)?.device_id)
 }
 
 #[cfg(test)]

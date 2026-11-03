@@ -4,6 +4,8 @@
 
 mod app;
 mod cli;
+mod config;
+mod session;
 mod ui;
 
 use std::path::PathBuf;
@@ -50,7 +52,7 @@ fn main() -> anyhow::Result<std::process::ExitCode> {
     eframe::run_native(
         "Vibe Files",
         options,
-        Box::new(|cc| Ok(Box::new(app::VibeFilesApp::new(&cc.egui_ctx)))),
+        Box::new(|cc| Ok(Box::new(app::VibeFilesApp::new(&cc.egui_ctx, data)))),
     )
     .map_err(|e| anyhow::anyhow!("ui failed: {e}"))?;
     Ok(std::process::ExitCode::SUCCESS)

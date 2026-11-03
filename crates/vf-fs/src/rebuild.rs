@@ -436,6 +436,7 @@ mod tests {
                 schema_version: vf_core::db::SCHEMA_VERSION,
                 layout_version: 1,
                 created: vf_core::now_rfc3339(),
+                name: None,
             },
         )
         .unwrap();

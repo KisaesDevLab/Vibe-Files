@@ -1,5 +1,13 @@
 //! Top-level app: tab routing over the shared chrome. Each tab is a stub until its phase.
 
+use std::path::PathBuf;
+use std::sync::mpsc;
+
+use vf_security::keys::KdfParams;
+
+use crate::config::{self, Config};
+use crate::session::{self, CreateRequest, Opened};
+use crate::ui::wizard::{self, Mode, Wizard};
 use crate::ui::{chrome, theme};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -36,7 +44,7 @@ impl Tab {
 
     fn placeholder(self) -> &'static str {
         match self {
-            Tab::Browse => "Create your first client or run the import wizard.",
+            Tab::Browse => "The client tree and document list arrive in P01 step 2.",
             Tab::Intake => "Intake mounts the vendored Filer Desktop engine (P02).",
             Tab::Search => "Full-text search arrives with OCR and indexing (P03).",
             Tab::Viewer => "The PDF viewer arrives in P04.",
@@ -46,44 +54,225 @@ impl Tab {
     }
 }
 
+/// What the central area shows: the wizard until a cabinet is open.
+pub enum Screen {
+    Wizard(Wizard),
+    /// Create/open runs off the UI thread (Argon2 and the first rebuild take a while).
+    Busy {
+        what: &'static str,
+        rx: mpsc::Receiver<Result<Opened, String>>,
+        back: Wizard,
+    },
+    Open(Opened),
+}
+
 pub struct VibeFilesApp {
     pub tab: Tab,
+    pub data: PathBuf,
+    pub config: Config,
+    pub screen: Screen,
+    /// Argon2id cost for new cabinets (tests lower it).
+    pub kdf: KdfParams,
 }
 
 impl VibeFilesApp {
-    pub fn new(ctx: &egui::Context) -> Self {
+    pub fn new(ctx: &egui::Context, data: PathBuf) -> Self {
         theme::install(ctx);
-        Self { tab: Tab::Browse }
+        let (config, error) = match config::load(&data) {
+            Ok(c) => (c, None),
+            Err(e) => (
+                Config {
+                    device_id: vf_core::new_id(),
+                    last_cabinet: None,
+                },
+                Some(format!("Settings could not be read: {e:#}")),
+            ),
+        };
+        let mut w = Wizard::new(config.last_cabinet.as_deref());
+        w.error = error;
+        Self {
+            tab: Tab::Browse,
+            data,
+            config,
+            screen: Screen::Wizard(w),
+            kdf: KdfParams::DEFAULT,
+        }
+    }
+
+    fn start(&mut self, mode: Mode, ctx: &egui::Context) {
+        let Screen::Wizard(w) = &mut self.screen else {
+            return;
+        };
+        let root = PathBuf::from(w.root.trim());
+        if mode == Mode::Create {
+            let req = CreateRequest {
+                root: &root,
+                name: &w.name,
+                passphrase: &w.passphrase,
+                confirm: &w.confirm,
+            };
+            if let Err(e) = session::check_create(&req) {
+                w.error = Some(e);
+                return;
+            }
+        } else if root.as_os_str().is_empty() {
+            w.error = Some("Choose the cabinet folder.".into());
+            return;
+        }
+        let (tx, rx) = mpsc::channel();
+        let (data, device, kdf) = (self.data.clone(), self.config.device_id.clone(), self.kdf);
+        let (name, pass, confirm) = (w.name.clone(), w.passphrase.clone(), w.confirm.clone());
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let r = match mode {
+                Mode::Create => session::create(
+                    &data,
+                    &device,
+                    &CreateRequest {
+                        root: &root,
+                        name: &name,
+                        passphrase: &pass,
+                        confirm: &confirm,
+                    },
+                    kdf,
+                ),
+                Mode::Open => session::open(&data, &device, &root, &pass),
+            };
+            let _ = tx.send(r.map_err(|e| format!("{e:#}")));
+            ctx.request_repaint();
+        });
+        let mut back = w.clone();
+        back.clear_secrets();
+        back.error = None;
+        self.screen = Screen::Busy {
+            what: match mode {
+                Mode::Create => "Creating the cabinet and indexing its folders…",
+                Mode::Open => "Opening the cabinet…",
+            },
+            rx,
+            back,
+        };
+    }
+
+    /// Picks up a finished create/open.
+    fn poll(&mut self) {
+        let Screen::Busy { rx, back, .. } = &mut self.screen else {
+            return;
+        };
+        let result = match rx.try_recv() {
+            Ok(r) => r,
+            Err(mpsc::TryRecvError::Empty) => return,
+            Err(mpsc::TryRecvError::Disconnected) => Err("The work stopped unexpectedly.".into()),
+        };
+        match result {
+            Ok(opened) => {
+                self.config.last_cabinet = Some(opened.root.clone());
+                // The cabinet is open either way; a settings write failure only loses "last".
+                let _ = config::save(&self.data, &self.config);
+                self.screen = Screen::Open(opened);
+            }
+            Err(e) => {
+                let mut w = back.clone();
+                w.error = Some(e);
+                self.screen = Screen::Wizard(w);
+            }
+        }
+    }
+
+    pub fn cabinet_name(&self) -> Option<String> {
+        match &self.screen {
+            Screen::Open(o) => Some(o.cabinet.display_name(&o.root)),
+            _ => None,
+        }
     }
 }
 
 impl eframe::App for VibeFilesApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        chrome::header(ui);
+        self.poll();
+        let name = self.cabinet_name();
+        chrome::header(ui, name.as_deref());
         chrome::tab_bar(ui, &mut self.tab, 0);
         chrome::footer(
             ui,
             &[format!("vibe-files {}", env!("CARGO_PKG_VERSION"))],
-            "No cabinet open",
+            name.as_deref().unwrap_or("No cabinet open"),
         );
-        egui::CentralPanel::default().show(ui, |ui| {
-            ui.heading(self.tab.name());
-            ui.label(self.tab.placeholder());
+        let ctx = ui.ctx().clone();
+        let mut submit = None;
+        egui::CentralPanel::default().show(ui, |ui| match &mut self.screen {
+            Screen::Wizard(w) => submit = wizard::show(ui, w),
+            Screen::Busy { what, .. } => {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label(*what);
+                });
+            }
+            Screen::Open(o) => {
+                ui.heading(self.tab.name());
+                if self.tab == Tab::Browse {
+                    ui.label(format!("Cabinet folder: {}", o.root.display()));
+                    match o.counts() {
+                        Ok((c, d)) => ui.label(format!("{c} clients · {d} documents")),
+                        Err(e) => ui.label(format!("Catalog could not be read: {e:#}")),
+                    };
+                    if let Some(rep) = &o.rebuild {
+                        ui.label(format!("Indexed: {rep}"));
+                    }
+                }
+                ui.label(self.tab.placeholder());
+            }
         });
+        if let Some(mode) = submit {
+            self.start(mode, &ctx);
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use super::*;
+    use crate::session::tests::FAST;
+    use egui::accesskit::Role;
     use egui_kittest::HarnessBuilder;
     use egui_kittest::kittest::Queryable;
 
-    fn harness() -> egui_kittest::Harness<'static, VibeFilesApp> {
-        HarnessBuilder::default()
+    fn harness(data: &Path) -> egui_kittest::Harness<'static, VibeFilesApp> {
+        let data = data.to_owned();
+        let mut h = HarnessBuilder::default()
             .with_theme(egui::Theme::Light)
             .with_size([1440.0, 900.0])
-            .build_eframe(|cc| VibeFilesApp::new(&cc.egui_ctx))
+            .build_eframe(move |cc| VibeFilesApp::new(&cc.egui_ctx, data.clone()));
+        h.state_mut().kdf = FAST;
+        h.run();
+        h
+    }
+
+    fn type_into(h: &mut egui_kittest::Harness<'static, VibeFilesApp>, label: &str, text: &str) {
+        h.get_by_label(label).click();
+        h.step();
+        h.get_by_label(label).type_text(text);
+        h.step();
+    }
+
+    fn click(h: &mut egui_kittest::Harness<'static, VibeFilesApp>, label: &str) {
+        h.get_by_role_and_label(Role::Button, label).click();
+        h.step();
+    }
+
+    /// Steps until the background create/open is done.
+    fn settle(h: &mut egui_kittest::Harness<'static, VibeFilesApp>) {
+        for _ in 0..3000 {
+            h.step();
+            if !matches!(h.state().screen, Screen::Busy { .. }) {
+                h.run();
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        panic!("create/open never finished");
     }
 
     #[test]
@@ -97,14 +286,93 @@ mod tests {
 
     #[test]
     fn opens_on_browse_and_every_tab_switches() {
-        let mut h = harness();
-        h.run();
+        let tmp = tempfile::tempdir().unwrap();
+        let mut h = harness(tmp.path());
         assert_eq!(h.state().tab, Tab::Browse);
         for t in Tab::ALL {
-            h.get_by_role_and_label(egui::accesskit::Role::Button, t.name())
-                .click();
+            h.get_by_role_and_label(Role::Button, t.name()).click();
             h.run();
             assert_eq!(h.state().tab, t);
         }
+    }
+
+    /// P01 step 1: the wizard creates a cabinet whose passphrase opens it on another PC.
+    #[test]
+    fn wizard_creates_a_cabinet() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (data, root) = (tmp.path().join("data"), tmp.path().join("Clients"));
+        let mut h = harness(&data);
+        click(&mut h, "Create new");
+        type_into(&mut h, "Cabinet folder", &root.display().to_string());
+        type_into(&mut h, "Cabinet name", "Kisaes Clients");
+        type_into(&mut h, "Recovery passphrase", "correct horse battery");
+        type_into(&mut h, "Confirm passphrase", "correct horse battery");
+        click(&mut h, "Create cabinet");
+        settle(&mut h);
+
+        assert!(matches!(h.state().screen, Screen::Open(_)), "cabinet open");
+        assert_eq!(h.state().cabinet_name().as_deref(), Some("Kisaes Clients"));
+        assert!(h.query_all_by_label("Kisaes Clients").count() >= 1);
+        let cab = vf_fs::cabinet::read(&root).unwrap();
+        assert_eq!(cab.name.as_deref(), Some("Kisaes Clients"));
+        assert!(vf_fs::cabinet::recovery_key_file(&root).is_file());
+        assert!(data.join(session::CATALOG_FILE).is_file());
+        assert_eq!(
+            config::load(&data).unwrap().last_cabinet.as_deref(),
+            Some(root.as_path())
+        );
+        drop(h);
+        // The passphrase alone opens it from an empty data folder.
+        let other = tmp.path().join("pc2");
+        assert!(session::open(&other, "dev-2", &root, "correct horse battery").is_ok());
+    }
+
+    #[test]
+    fn wizard_reports_a_wrong_passphrase_then_opens() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("Clients");
+        let req = CreateRequest {
+            root: &root,
+            name: "Firm",
+            passphrase: "correct horse battery",
+            confirm: "correct horse battery",
+        };
+        drop(session::create(&tmp.path().join("pc1"), "dev-1", &req, FAST).unwrap());
+
+        let mut h = harness(&tmp.path().join("pc2"));
+        click(&mut h, "Open existing");
+        type_into(&mut h, "Cabinet folder", &root.display().to_string());
+        type_into(&mut h, "Recovery passphrase", "not the passphrase");
+        click(&mut h, "Open cabinet");
+        settle(&mut h);
+        let Screen::Wizard(w) = &h.state().screen else {
+            panic!("should stay on the wizard");
+        };
+        assert!(w.error.as_deref().unwrap().contains("passphrase is wrong"));
+        assert!(w.passphrase.is_empty(), "passphrase cleared after use");
+
+        type_into(&mut h, "Recovery passphrase", "correct horse battery");
+        click(&mut h, "Open cabinet");
+        settle(&mut h);
+        assert_eq!(h.state().cabinet_name().as_deref(), Some("Firm"));
+    }
+
+    #[test]
+    fn wizard_checks_fields_before_any_work() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("Clients");
+        let mut h = harness(&tmp.path().join("data"));
+        click(&mut h, "Create new");
+        type_into(&mut h, "Cabinet folder", &root.display().to_string());
+        type_into(&mut h, "Cabinet name", "Firm");
+        type_into(&mut h, "Recovery passphrase", "short");
+        type_into(&mut h, "Confirm passphrase", "short");
+        click(&mut h, "Create cabinet");
+        h.run();
+        let Screen::Wizard(w) = &h.state().screen else {
+            panic!("should stay on the wizard");
+        };
+        assert!(w.error.as_deref().unwrap().contains("at least 12"));
+        assert!(!root.exists(), "nothing written");
     }
 }
