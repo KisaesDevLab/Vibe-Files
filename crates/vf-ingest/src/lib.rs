@@ -3,6 +3,7 @@
 //! image→PDF and the PDF-printer watcher arrive with their steps.
 
 pub mod images;
+pub mod parsers;
 pub mod pipeline;
 pub mod sheet;
 pub mod stack;

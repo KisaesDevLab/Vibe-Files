@@ -83,7 +83,7 @@ impl Lookup {
 }
 
 /// Processes one staged file. On error nothing was delivered and the file is where it was.
-pub fn process(ctx: &Context<'_>, staged: &Path, _origin: Origin) -> Result<Processed, String> {
+pub fn process(ctx: &Context<'_>, staged: &Path, origin: Origin) -> Result<Processed, String> {
     let name = staged
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
@@ -93,6 +93,23 @@ pub fn process(ctx: &Context<'_>, staged: &Path, _origin: Origin) -> Result<Proc
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| name.clone());
     let lookup = Lookup::load(ctx.root)?;
+    if origin == Origin::PrintCapture {
+        if !is_pdf(staged) {
+            return Err(format!("{name}: the print capture folder takes PDFs"));
+        }
+        let tmp = tmp_in(ctx.inbox);
+        copy_to(staged, &tmp)?;
+        let (file, hint, note) = capture_name(ctx.root, &lookup, &name);
+        let d = deliver(ctx, &tmp, &file, Some(hint), note).inspect_err(|_| {
+            let _ = std::fs::remove_file(&tmp);
+        })?;
+        let kept = keep_original(staged)?;
+        return Ok(Processed {
+            staged: staged.to_path_buf(),
+            delivered: vec![d],
+            kept,
+        });
+    }
     // Images become a PDF first (step 4); it is then handled like a scanned PDF.
     let image = if images::is_image(staged) {
         let tmp = tmp_in(ctx.inbox);
@@ -242,6 +259,60 @@ fn cover_name(cover: &Cover, lookup: &Lookup, stem: &str, part: usize) -> (Strin
         None => {}
     }
     (file, hint)
+}
+
+/// Print capture (step 5): the name a parser profile reads, as Filer's `Name_ID_rest.pdf`, and
+/// a hint with the profile's doc type, year and source (`firm`). A name no profile reads goes
+/// through as it is, still marked as the firm's.
+fn capture_name(root: &Path, lookup: &Lookup, name: &str) -> (String, Hint, String) {
+    let _ = crate::parsers::seed_if_missing(root);
+    let (profiles, _) = crate::parsers::load(root);
+    let Some(p) = crate::parsers::parse(&profiles, name) else {
+        let mut h = Hint::new("", name, "print_capture", "");
+        h.source = Some("firm".into());
+        return (
+            name.to_string(),
+            h,
+            "print capture · no parser profile matched".into(),
+        );
+    };
+    let client = lookup
+        .clients
+        .get(&p.client_id)
+        .cloned()
+        .unwrap_or_else(|| "Client".into());
+    // `<year> <profile> <doc type or document name>`: Filer's rules match words in it (the
+    // firm's rules send "UltraTax" to `Income Tax/{Year}`; the tax rules match "Return",
+    // "Organizer", …).
+    let rest: Vec<String> = p
+        .year
+        .map(|y| y.to_string())
+        .into_iter()
+        .chain([p.profile.clone()])
+        .chain(p.doc_type.clone().or(p.doc.clone()))
+        .collect();
+    let rest = if rest.is_empty() {
+        "print".to_string()
+    } else {
+        rest.join(" ")
+    };
+    let file = format!("{}_{}_{}.pdf", clean(&client), p.client_id, clean(&rest));
+    let mut h = Hint::new("", &file, &format!("print_capture:{}", p.profile), "");
+    h.tax_year = p.year;
+    h.source = Some(p.source.clone());
+    h.doc_type = p.doc_type.as_ref().and_then(|t| {
+        lookup
+            .doc_types
+            .iter()
+            .find(|(_, n)| *n == t)
+            .map(|(id, _)| id.clone())
+    });
+    let note = format!(
+        "{} filename profile{}",
+        p.profile,
+        p.doc_type.map(|t| format!(" · {t}")).unwrap_or_default()
+    );
+    (file, h, note)
 }
 
 /// A file-name part without characters Windows refuses.

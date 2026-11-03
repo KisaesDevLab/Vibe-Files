@@ -191,6 +191,14 @@ impl IngestState {
                     }
                     ui.label(widgets::caption(format!("{} waiting", self.waiting())));
                     ui.separator();
+                    ui.label(RichText::new("Print capture").strong());
+                    let shown = prefs
+                        .print_capture
+                        .as_ref()
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_else(|| "off (Admin › Print capture & parsers)".into());
+                    ui.label(RichText::new(shown).monospace());
+                    ui.separator();
                     if ui.button("Cover sheet for client…").clicked() {
                         self.cover = Some(CoverSheetDialog::new(snap, None));
                     }

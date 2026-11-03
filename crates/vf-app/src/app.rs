@@ -264,7 +264,18 @@ impl eframe::App for VibeFilesApp {
                 };
                 if self.tab == Tab::Admin {
                     let a = tab_admin.get_or_insert_with(|| Admin::load(&env));
+                    a.capture = self.config.ingest.print_capture.clone();
                     admin::show(ui, a, &mut env);
+                    if let Some(dir) = a.open_request.take()
+                        && let Err(e) = (tab_browse.shell)(&crate::shell::ShellAction::Open(dir))
+                    {
+                        a.error = Some(e);
+                    }
+                    if let Some(c) = a.capture_changed.take() {
+                        let mut ingest = self.config.ingest.clone();
+                        ingest.print_capture = c;
+                        o_intake.ingest.changed = Some(ingest);
+                    }
                 } else {
                     let intake_changed = std::mem::take(&mut o_intake.catalog_changed);
                     if intake_changed

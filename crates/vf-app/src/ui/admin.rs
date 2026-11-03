@@ -13,6 +13,7 @@ use crate::ui::{theme, wizard::ERROR};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Page {
     DocTypes,
+    PrintCapture,
 }
 
 /// UI_SPEC §6 nav, grouped. Only Doc types is built in P01.
@@ -79,6 +80,15 @@ pub struct Admin {
     pub error: Option<String>,
     /// Set when the catalog changed; Browse re-reads before it next draws.
     pub changed: bool,
+    /// This PC's print capture folder (the app fills it from `config.toml` each frame).
+    pub capture: Option<std::path::PathBuf>,
+    /// A new capture folder chosen here; the app saves it.
+    pub capture_changed: Option<Option<std::path::PathBuf>>,
+    /// A folder to open in Explorer (the app runs it through Browse's shell).
+    pub open_request: Option<std::path::PathBuf>,
+    /// Parser profiles: (name, pattern, doc rules, enabled), and files that did not load.
+    profiles: Vec<(String, String, usize, bool)>,
+    profile_errors: Vec<String>,
 }
 
 impl Admin {
@@ -92,6 +102,11 @@ impl Admin {
             form: Form::default(),
             error: None,
             changed: false,
+            capture: None,
+            capture_changed: None,
+            open_request: None,
+            profiles: Vec::new(),
+            profile_errors: Vec::new(),
         };
         a.reload(env);
         a
@@ -113,6 +128,16 @@ impl Admin {
         let (tree, _, _) =
             filer_core::template::load_or_seed(&vf_fs::clients::master_dir(env.root));
         self.folders = filer_core::template::folder_templates(&tree);
+        let _ = vf_ingest::parsers::seed_if_missing(env.root);
+        let (profiles, errors) = vf_ingest::parsers::load(env.root);
+        self.profiles = profiles
+            .iter()
+            .map(|c| {
+                let p = &c.profile;
+                (p.name.clone(), p.pattern.clone(), p.doc.len(), p.enabled)
+            })
+            .collect();
+        self.profile_errors = errors;
     }
 
     /// Opens the editor on `id`, or on a new doc type.
@@ -159,6 +184,7 @@ pub fn show(ui: &mut egui::Ui, a: &mut Admin, env: &mut Env) {
         .show(ui, |ui| nav(ui, a));
     egui::CentralPanel::default().show(ui, |ui| match a.page {
         Page::DocTypes => doc_types(ui, a, env),
+        Page::PrintCapture => print_capture(ui, a, env),
     });
 }
 
@@ -174,6 +200,13 @@ fn nav(ui: &mut egui::Ui, a: &mut Admin) {
                     .clicked()
                 {
                     a.page = Page::DocTypes;
+                }
+            } else if *item == "Print capture & parsers" {
+                if ui
+                    .selectable_label(a.page == Page::PrintCapture, *item)
+                    .clicked()
+                {
+                    a.page = Page::PrintCapture;
                 }
             } else {
                 ui.add_enabled(false, egui::Button::selectable(false, *item))
@@ -380,6 +413,86 @@ fn editor(ui: &mut egui::Ui, a: &mut Admin, env: &mut Env) {
     });
 }
 
+/// Admin › Print capture & parsers (P02 step 5).
+fn print_capture(ui: &mut egui::Ui, a: &mut Admin, env: &mut Env) {
+    ui.label(RichText::new("Print capture & parsers").strong().size(16.0));
+    ui.add_space(8.0);
+    ui.label(
+        "Anything a PDF printer saves into the print capture folder goes to Intake as the firm's          document. A file name a parser profile reads (UltraTax CS: <Client ID>_<Tax year>_<Document>.pdf)          is filed to that client with the profile's doc type and year.",
+    );
+    ui.add_space(8.0);
+    ui.horizontal(|ui| {
+        let l = ui.label(RichText::new("Print capture folder (this PC)").strong());
+        let shown = a
+            .capture
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "not set".into());
+        ui.label(RichText::new(shown).monospace()).labelled_by(l.id);
+        if ui.button("Choose…").clicked()
+            && let Some(dir) = rfd::FileDialog::new().pick_folder()
+        {
+            let inboxes = filer_intake::config::Settings::load_or_default(
+                &vf_fs::clients::master_dir(env.root),
+            )
+            .0
+            .inboxes;
+            match crate::ui::ingest::check_staging(&dir, env.root, &inboxes) {
+                Ok(()) => a.capture_changed = Some(Some(dir)),
+                Err(e) => a.error = Some(e),
+            }
+        }
+        if a.capture.is_some() && ui.button("Stop capturing").clicked() {
+            a.capture_changed = Some(None);
+        }
+    });
+    if let Some(e) = &a.error {
+        ui.label(RichText::new(e).color(ERROR));
+    }
+    ui.add_space(8.0);
+    ui.label(RichText::new("Setting up the printer").strong());
+    for step in [
+        "1. Make a folder for captures on this PC, outside the cabinet and outside Filer's inboxes, and choose it above.",
+        "2. UltraTax CS: Setup › Office Configuration › Print Options › PDF File Options: save PDFs to that folder, file name Client ID, Tax Year, Document Name (the default order).",
+        "3. Any other program: print to \"Microsoft Print to PDF\" (or any PDF printer) and save into that folder. Without a parser match the file still goes to Intake, marked as the firm's.",
+    ] {
+        ui.label(widgets::caption(step));
+    }
+    ui.add_space(12.0);
+    ui.horizontal(|ui| {
+        ui.label(RichText::new("Parser profiles").strong());
+        ui.label(widgets::caption(
+            r"_Vibe\parsers\*.toml in the cabinet, shared by every PC. Edit the files; they are read when a capture arrives.",
+        ));
+        if ui.button("Open parsers folder").clicked() {
+            a.open_request = Some(vf_ingest::parsers::dir(env.root));
+        }
+        if ui.button("Reload").clicked() {
+            a.reload(env);
+        }
+    });
+    egui::Grid::new("parsers")
+        .num_columns(4)
+        .spacing([16.0, 6.0])
+        .striped(true)
+        .show(ui, |ui| {
+            for h in ["Profile", "Pattern", "Doc rules", "On"] {
+                ui.label(RichText::new(h).color(theme::INK_MUTED));
+            }
+            ui.end_row();
+            for (name, pattern, rules, on) in &a.profiles {
+                ui.label(name);
+                ui.label(RichText::new(pattern).monospace());
+                ui.label(rules.to_string());
+                ui.label(if *on { "yes" } else { "off" });
+                ui.end_row();
+            }
+        });
+    for e in &a.profile_errors {
+        ui.label(RichText::new(e).color(ERROR));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::ui::test_util::{click, type_into};
@@ -456,6 +569,24 @@ mod tests {
         let label = format!("Doc types ({})", doctypes::SEED.len());
         assert!(h.query_by_label(&label).is_some());
         assert!(h.query_by_label("8879 e-file authorization").is_some());
+    }
+
+    /// P02 step 5: the Print capture page lists the seeded UltraTax CS profile.
+    #[test]
+    fn print_capture_page_lists_the_ultratax_profile() {
+        let mut h = harness();
+        click(&mut h, "Print capture & parsers");
+        assert_eq!(h.state().a.page, Page::PrintCapture);
+        assert!(h.query_by_label("UltraTax CS").is_some());
+        assert!(
+            h.query_by_label("not set").is_some(),
+            "no capture folder yet"
+        );
+        assert!(
+            vf_ingest::parsers::dir(&h.state().root)
+                .join("ultratax.toml")
+                .is_file()
+        );
     }
 
     #[test]
