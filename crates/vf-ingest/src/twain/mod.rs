@@ -303,6 +303,8 @@ pub fn condition(cc: u16) -> String {
     }
 }
 
+static SESSION: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// Runs `f` on a new thread that owns a hidden window (the sources' parent) with an open DSM
 /// from `entry`, and returns its result. Every TWAIN call of `f` happens on that thread.
 pub fn on_twain_thread<R, F>(
@@ -316,6 +318,10 @@ where
     std::thread::Builder::new()
         .name("twain".into())
         .spawn(move || {
+            // One TWAIN session per process at a time: the DSM keeps process-wide state and
+            // is not made for two threads opening it together (listing while scanning, or
+            // parallel callers).
+            let _one = SESSION.lock().unwrap_or_else(|e| e.into_inner());
             let window = HiddenWindow::new()?;
             let mut m = Manager::open(entry()?, window.0)?;
             let r = f(&mut m);

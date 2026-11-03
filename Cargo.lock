@@ -5070,12 +5070,15 @@ version = "0.1.0"
 dependencies = [
  "filer-core",
  "filer-intake",
+ "lopdf",
  "serde",
  "serde_json",
  "tempfile",
  "thiserror 2.0.21",
+ "time",
  "uuid",
  "vf-core",
+ "vf-pdf",
  "vf-security",
 ]
 

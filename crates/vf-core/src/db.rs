@@ -17,6 +17,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/002_ocr_search.sql"),
     include_str!("../migrations/003_lookup_indexes.sql"),
     include_str!("../migrations/004_local_state.sql"),
+    include_str!("../migrations/005_disposition.sql"),
 ];
 
 /// Schema version this build writes.
@@ -144,6 +145,8 @@ mod tests {
         "client_relationship",
         "consent_7216",
         "device",
+        "disposition",
+        "disposition_run",
         "doc_fts",
         "doc_fts_config",
         "doc_fts_content",

@@ -131,6 +131,8 @@ pub const NOT_ON_UNDO_STACK: &[&str] = &[
     "external_modify",
     crate::trash::PIN_LABEL,
     crate::holds::LABEL,
+    crate::disposition::DECIDE_LABEL,
+    crate::disposition::RUN_LABEL,
 ];
 
 /// This Windows login's undo stack: its last 20 undoable transactions, newest first.

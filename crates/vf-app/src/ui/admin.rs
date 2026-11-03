@@ -18,6 +18,8 @@ pub enum Page {
     Trash,
     Sweep,
     Retention,
+    Disposition,
+    Holds,
 }
 
 /// UI_SPEC §6 nav, grouped. Only Doc types is built in P01.
@@ -84,6 +86,9 @@ pub struct Admin {
     pub classes: Vec<vf_fs::retention::Class>,
     /// Retention classes page (P07 step 1).
     pub retention: crate::ui::retention::RetentionPage,
+    /// Disposition and Legal holds pages (P07 steps 2-4).
+    pub disposition: crate::ui::disposition::DispositionPage,
+    pub holds: crate::ui::disposition::HoldsPage,
     /// The editor above the table.
     pub editing: Editing,
     form: Form,
@@ -116,6 +121,8 @@ impl Admin {
             folders: Vec::new(),
             classes: Vec::new(),
             retention: Default::default(),
+            disposition: Default::default(),
+            holds: Default::default(),
             editing: Editing::Closed,
             form: Form::default(),
             error: None,
@@ -220,6 +227,16 @@ pub fn show(ui: &mut egui::Ui, a: &mut Admin, env: &mut Env, sweep: SweepEnv) {
         Page::PrintCapture => print_capture(ui, a, env),
         Page::Audit => crate::ui::audit::show(ui, &mut a.audit, env, a.chain.as_ref()),
         Page::Sweep => crate::ui::sweep::show(ui, sweep.state, env, sweep.catalog),
+        Page::Disposition => {
+            crate::ui::disposition::show(ui, &mut a.disposition, env);
+            if std::mem::take(&mut a.disposition.changed) {
+                a.changed = true;
+            }
+            if let Some(p) = a.disposition.open_request.take() {
+                a.open_request = Some(p);
+            }
+        }
+        Page::Holds => crate::ui::disposition::holds(ui, &mut a.holds, env),
         Page::Retention => {
             if crate::ui::retention::show(ui, &mut a.retention, &a.classes, &a.types, env) {
                 a.changed = true;
@@ -254,6 +271,18 @@ fn nav(ui: &mut egui::Ui, a: &mut Admin) {
                     .clicked()
                 {
                     a.page = Page::PrintCapture;
+                }
+            } else if *item == "Disposition" {
+                if ui
+                    .selectable_label(a.page == Page::Disposition, *item)
+                    .clicked()
+                {
+                    a.page = Page::Disposition;
+                    a.disposition.refresh();
+                }
+            } else if *item == "Legal holds" {
+                if ui.selectable_label(a.page == Page::Holds, *item).clicked() {
+                    a.page = Page::Holds;
                 }
             } else if *item == "Retention classes" {
                 if ui
@@ -900,6 +929,62 @@ mod tests {
         assert_eq!(n, 7);
         let w2 = h.state().a.types.iter().find(|t| t.name == "W-2").unwrap();
         assert!(w2.retention.is_some(), "seeded doc types have their class");
+    }
+
+    /// P07 steps 2-4: an old W-2 is on the report; approving it puts it in the wait list;
+    /// the hold page lists a hold.
+    #[test]
+    fn disposition_page_approves_and_holds_page_lists() {
+        let mut h = harness();
+        {
+            let s = h.state_mut();
+            s.conn
+                .execute(
+                    "INSERT INTO document (id, doc_type_id, tax_year, rel_path, hash, size, filed_at, device_id, updated_at)
+                     VALUES ('d1', (SELECT id FROM doc_type WHERE name = 'W-2'), 2015, 'B/2015/w2.pdf', 'h', 2,
+                             '2016-02-01T00:00:00Z', 'dev', 't')",
+                    [],
+                )
+                .unwrap();
+        }
+        click(&mut h, "Disposition");
+        h.get_by_label("B/2015/w2.pdf").click();
+        h.run();
+        click(&mut h, "Approve 1");
+        let s = h.state();
+        assert!(
+            s.a.disposition.error.is_none(),
+            "{:?}",
+            s.a.disposition.error
+        );
+        let pending = vf_fs::disposition::pending(&s.conn).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert!(
+            h.query_by_label("Nothing has reached the end of its retention.")
+                .is_some()
+        );
+
+        {
+            let s = h.state_mut();
+            vf_fs::holds::place(
+                &mut s.conn,
+                &s.root,
+                "dev",
+                vf_fs::holds::Target::Docs(vec!["d1".into()]),
+                "subpoena",
+            )
+            .unwrap();
+        }
+        click(&mut h, "Legal holds");
+        assert!(
+            h.query_by_label_contains("1 documents · subpoena")
+                .is_some()
+        );
+        click(&mut h, "Release");
+        assert_eq!(
+            h.state().a.holds.notice.as_deref(),
+            Some("Legal hold released.")
+        );
     }
 
     #[test]

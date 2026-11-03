@@ -4,6 +4,7 @@
 pub mod cabinet;
 pub mod clients;
 pub mod content;
+pub mod disposition;
 pub mod docmeta;
 pub mod doctypes;
 pub mod dupes;
