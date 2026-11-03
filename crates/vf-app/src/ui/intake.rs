@@ -41,6 +41,9 @@ pub struct IntakeTab {
     dupe_action: Option<(usize, vf_fs::dupes::Choice)>,
 }
 
+/// Filer's ID pattern for client IDs of letters and/or digits (`STOC1234`, `1042`).
+pub const ID_PATTERN: &str = r"[A-Z0-9]{4,}";
+
 /// Filer's settings for this cabinet on this PC: whatever `_Vibe/config.json` holds (rules
 /// profile, inboxes, column map, …), with the cabinet's own facts written over it.
 pub fn settings_for(root: &Path, cabinet: &CabinetFile) -> Result<(Settings, bool), String> {
@@ -56,6 +59,11 @@ pub fn settings_for(root: &Path, cabinet: &CabinetFile) -> Result<(Settings, boo
     );
     // Vibe Files is light-only until it has a dark theme; Filer would otherwise follow Windows.
     s.display.theme = ThemeChoice::Light;
+    // The office's UltraTax client IDs are letters and digits; Filer's default ID pattern is
+    // digits only. A pattern the firm chose is kept (owner 2026-11-03).
+    if s.id_pattern == filer_core::parse::DEFAULT_ID_PATTERN {
+        s.id_pattern = ID_PATTERN.into();
+    }
     // Filer re-imports the client CSV on launch when it changed; point it at the one the master
     // list came from.
     if let Ok(Some(list)) = filer_core::clients::load_cache(&dir)
@@ -217,5 +225,46 @@ impl IntakeTab {
             }
             (None, None) => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Client IDs of letters and digits match; Filer's digits-only default is replaced once,
+    /// a pattern the firm set is kept.
+    #[test]
+    fn id_pattern_takes_letters_and_digits_unless_the_firm_set_one() {
+        assert!(filer_core::parse::validate_id_pattern(ID_PATTERN).is_ok());
+        let re = filer_core::parse::filename_regex(ID_PATTERN).unwrap();
+        let c = re
+            .captures("Anderson Farms LLC_ANDE1042_2025 UltraTax CS Return.pdf")
+            .unwrap();
+        assert_eq!(&c["id"], "ANDE1042");
+        assert_eq!(
+            &re.captures("Smith John_1042_2025 1040.pdf").unwrap()["id"],
+            "1042"
+        );
+
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path();
+        let cabinet = CabinetFile {
+            cabinet_id: vf_core::new_id(),
+            firm_id: uuid::Uuid::new_v4().to_string(),
+            schema_version: vf_core::db::SCHEMA_VERSION,
+            layout_version: 1,
+            created: vf_core::now_rfc3339(),
+            name: None,
+        };
+        vf_fs::cabinet::create(root, &cabinet).unwrap();
+        let (s, _) = settings_for(root, &cabinet).unwrap();
+        assert_eq!(s.id_pattern, ID_PATTERN);
+        let dir = vf_fs::clients::master_dir(root);
+        let (mut own, _) = Settings::load_or_default(&dir);
+        assert_eq!(own.id_pattern, ID_PATTERN, "saved");
+        own.id_pattern = r"\d{5}".into();
+        own.save(&dir).unwrap();
+        assert_eq!(settings_for(root, &cabinet).unwrap().0.id_pattern, r"\d{5}");
     }
 }
