@@ -3,6 +3,7 @@
 //! callers file the result through `vf_fs::content`.
 
 pub mod annot;
+pub mod compress;
 pub mod flatten;
 pub mod layer;
 pub mod pages;

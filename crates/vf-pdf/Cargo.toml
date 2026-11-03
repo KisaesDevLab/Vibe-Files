@@ -17,3 +17,4 @@ serde_json.workspace = true
 filer-pdf = { path = "../filer-pdf", features = ["test-support"] }
 tempfile.workspace = true
 vf-fixtures = { path = "../vf-fixtures" }
+vf-ingest = { path = "../vf-ingest" }

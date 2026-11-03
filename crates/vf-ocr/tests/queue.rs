@@ -328,3 +328,54 @@ fn workers_index_the_backlog() {
     assert_eq!(f.hits("12-3456789").len(), 8);
     assert_eq!(q.status().engine.as_deref(), Ok("fake"));
 }
+
+/// A page with a few words of its own is read by OCR (too little text to trust), but the text
+/// layer never repeats the words it already has.
+#[test]
+fn short_own_text_is_not_repeated_by_ocr() {
+    let Ok(engine) = vf_ocr::Tesseract::locate(None) else {
+        assert!(
+            std::env::var_os("VF_SKIP_TESSERACT").is_some(),
+            "tesseract.exe not found"
+        );
+        return;
+    };
+    let f = fx();
+    filer_pdf::pdf::write_test_pdf(&f.root.join("cover.pdf"), &["Bravo one"]);
+    f.conn
+        .execute(
+            "INSERT INTO document (id, rel_path, hash, size, filed_at, device_id, updated_at)
+             VALUES ('c', 'cover.pdf', 'hash-c', 1, 't', 'dev', 't')",
+            [],
+        )
+        .unwrap();
+    queue::enqueue_missing(&f.conn, queue::INTAKE).unwrap();
+    let job = queue::claim(&f.conn).unwrap().unwrap();
+    let r = queue::run_job(
+        &f.conn,
+        &f.root,
+        pdfium(),
+        Some(&engine),
+        &job,
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    assert_eq!(
+        r,
+        Outcome::Indexed {
+            pages: 1,
+            ocr_pages: 0
+        },
+        "nothing new to layer"
+    );
+    let (source, text): (String, String) = f
+        .conn
+        .query_row(
+            "SELECT source, text FROM page_text WHERE hash = 'hash-c'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(source, "pdf");
+    assert_eq!(text.trim(), "Bravo one");
+}

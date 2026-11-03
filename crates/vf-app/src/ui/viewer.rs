@@ -950,6 +950,14 @@ fn toolbar(ui: &mut egui::Ui, v: &mut Viewer, env: &mut Env<'_>, doc: &Doc) {
                         ..PagesDialog::default()
                     });
                 }
+                if ui
+                    .add_enabled(clean, egui::Button::new("Compress"))
+                    .on_hover_text("Bring scanned images down to 200 dpi and re-encode them (a new version; the current one is kept).")
+                    .on_disabled_hover_text("Save or discard the unsaved annotations first.")
+                    .clicked()
+                {
+                    convert(v, env, Convert::Compress);
+                }
                 if ui.button("Open in PDF app").clicked() {
                     v.open_request = Some(doc.path.clone());
                 }
@@ -1876,6 +1884,7 @@ fn stamps_panel(ui: &mut egui::Ui, v: &mut Viewer, env: &Env<'_>) {
 enum Convert {
     Flatten,
     PdfA,
+    Compress,
 }
 
 /// Flatten or PDF/A: the result is a new version of this document (current one kept).
@@ -1892,6 +1901,17 @@ fn convert(v: &mut Viewer, env: &mut Env<'_>, what: Convert) {
                     "flatten",
                     "before flatten",
                     serde_json::json!({ "annotations": n }),
+                )
+            }
+            Convert::Compress => {
+                let r =
+                    vf_pdf::compress::compress(&doc.path, &tmp, 200.0, 70).inspect_err(|_| {
+                        let _ = std::fs::remove_file(&tmp);
+                    })?;
+                (
+                    "compress",
+                    "before compress",
+                    serde_json::json!({ "images": r.images, "before": r.before, "after": r.after }),
                 )
             }
             Convert::PdfA => {
@@ -1914,6 +1934,10 @@ fn convert(v: &mut Viewer, env: &mut Env<'_>, what: Convert) {
                 )
             }
         };
+        if what == Convert::Compress && detail["after"].as_u64() >= detail["before"].as_u64() {
+            let _ = std::fs::remove_file(&tmp);
+            return Ok("Already compact: nothing to gain, the file is not changed.".into());
+        }
         let change = vf_fs::content::Change {
             label,
             created_by: label,
@@ -1931,6 +1955,12 @@ fn convert(v: &mut Viewer, env: &mut Env<'_>, what: Convert) {
                 Convert::PdfA => format!(
                     "Saved as PDF/A-2b ({} pages rebuilt as images with a text layer); the previous version is kept.",
                     detail["rasterized_pages"]
+                ),
+                Convert::Compress => format!(
+                    "Compressed {} images: {} → {}; the previous version is kept.",
+                    detail["images"],
+                    widgets::size(detail["before"].as_i64().unwrap_or(0)),
+                    widgets::size(detail["after"].as_i64().unwrap_or(0))
                 ),
             }),
             Err(why) => Err(format!("Not changed: {why}.")),

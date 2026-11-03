@@ -59,6 +59,14 @@ opt-level = 3
 [profile.dev.package.rxing]
 opt-level = 3
 
+# Image decode / resize / encode (P02 image normalization, P04 redaction, PDF/A, compress):
+# unoptimized they make tests and debug builds crawl.
+[profile.dev.package.image]
+opt-level = 3
+
+[profile.dev.package.zune-jpeg]
+opt-level = 3
+
 [profile.release]
 opt-level = "z"
 lto = true

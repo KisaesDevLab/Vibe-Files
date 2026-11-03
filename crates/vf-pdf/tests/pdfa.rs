@@ -136,3 +136,51 @@ fn ocr_layer_font_is_exempt() {
     assert_eq!(pdfa::check(&out).unwrap(), Vec::<String>::new());
     assert!(text_of(&out).contains("07-1234567"));
 }
+
+/// Step 7: a 400 dpi scan is brought down to 200 dpi and gets smaller; it still renders.
+#[test]
+fn compress_downsamples_a_high_resolution_scan() {
+    let t = tempfile::tempdir().unwrap();
+    let src = t.path().join("scan.pdf");
+    // 400 dpi on Letter: 3400 x 4400, with some structure.
+    let img = image::RgbImage::from_fn(3400, 4400, |x, y| {
+        let v = if (x / 60 + y / 37) % 5 == 0 { 40 } else { 235 };
+        image::Rgb([v, v, (v as u16 * 9 / 10) as u8])
+    });
+    vf_ingest::images::frames_to_pdf(
+        vec![vf_ingest::images::Frame {
+            rgb: img,
+            dpi: Some(400.0),
+            orientation: 1,
+        }],
+        false,
+        &src,
+    )
+    .unwrap();
+    let out = t.path().join("small.pdf");
+    let r = vf_pdf::compress::compress(&src, &out, 200.0, 70).unwrap();
+    assert_eq!(r.images, 1);
+    assert!(r.after < r.before, "{r:?}");
+    let d = lopdf::Document::load(&out).unwrap();
+    let w = d
+        .objects
+        .values()
+        .find_map(|o| match o {
+            lopdf::Object::Stream(s)
+                if s.dict.get(b"Subtype").and_then(|n| n.as_name()).ok() == Some(b"Image") =>
+            {
+                s.dict.get(b"Width").and_then(|w| w.as_i64()).ok()
+            }
+            _ => None,
+        })
+        .unwrap();
+    assert!((1600..=2200).contains(&w), "width {w}");
+    assert_eq!(
+        pdfium()
+            .load_pdf_from_file(&out, None)
+            .unwrap()
+            .pages()
+            .len(),
+        1
+    );
+}

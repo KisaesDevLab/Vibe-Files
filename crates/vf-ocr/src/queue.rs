@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use pdfium_render::prelude::{PdfRenderConfig, Pdfium};
+use pdfium_render::prelude::{PdfPoints, PdfRenderConfig, Pdfium};
 use vf_core::db::{Connection, OptionalExtension, Storage, params};
 
 use crate::engine::{OcrEngine, OcrError};
@@ -273,10 +273,8 @@ fn read_pages(
         let (w, h) = (page.width().value, page.height().value);
         let scale = (DPI as f32 / 72.0).min(MAX_SIDE / w.max(h).max(1.0));
         let dpi = (scale * 72.0).round() as u32;
-        let img = match page
-            .render_with_config(&PdfRenderConfig::new().set_target_width((w * scale) as i32))
-            .and_then(|b| b.as_image())
-        {
+        let config = PdfRenderConfig::new().set_target_width((w * scale) as i32);
+        let img = match page.render_with_config(&config).and_then(|b| b.as_image()) {
             Ok(i) => i.to_luma8(),
             Err(e) => {
                 return Ok(Outcome::Failed(format!(
@@ -286,10 +284,52 @@ fn read_pages(
             }
         };
         match engine.recognize(&img, dpi) {
-            Ok(p) => {
+            Ok(mut p) => {
+                // A page with a little text of its own (a cover line, a stamp) keeps it: OCR
+                // words on top of its own words are dropped, so the text layer never repeats
+                // what the page already says.
+                let own_px: Vec<[f32; 4]> = vf_pdf::text::words(&page)
+                    .iter()
+                    .filter_map(|wd| {
+                        let corner = |x: f32, y: f32| {
+                            page.points_to_pixels(PdfPoints::new(x), PdfPoints::new(y), &config)
+                                .ok()
+                                .map(|(px, py)| (px as f32, py as f32))
+                        };
+                        let (a, b) = (
+                            corner(wd.rect[0], wd.rect[1])?,
+                            corner(wd.rect[2], wd.rect[3])?,
+                        );
+                        Some([a.0.min(b.0), a.1.min(b.1), a.0.max(b.0), a.1.max(b.1)])
+                    })
+                    .collect();
+                p.words.retain(|wd| {
+                    let r = [
+                        wd.bbox[0] as f32,
+                        wd.bbox[1] as f32,
+                        (wd.bbox[0] + wd.bbox[2]) as f32,
+                        (wd.bbox[1] + wd.bbox[3]) as f32,
+                    ];
+                    !own_px.iter().any(|o| vf_pdf::text::overlaps(*o, r))
+                });
+                let ocr_text = p.text();
+                let text = match (own.trim().is_empty(), ocr_text.is_empty()) {
+                    (true, _) => ocr_text,
+                    (false, true) => own.clone(),
+                    (false, false) => format!(
+                        "{}
+{ocr_text}",
+                        own.trim()
+                    ),
+                };
                 let words = serde_json::to_string(&p).unwrap_or_default();
-                save_page(conn, &job.hash, i, "ocr", &p.text(), Some((&words, dpi)))?;
-                ocr_pages += 1;
+                if p.words.is_empty() {
+                    // Nothing new: the page's own text is all there is.
+                    save_page(conn, &job.hash, i, "pdf", &text, None)?;
+                } else {
+                    save_page(conn, &job.hash, i, "ocr", &text, Some((&words, dpi)))?;
+                    ocr_pages += 1;
+                }
             }
             Err(OcrError::Unavailable(e)) => return Ok(Outcome::Waiting(e)),
             Err(OcrError::Failed(e)) => {
