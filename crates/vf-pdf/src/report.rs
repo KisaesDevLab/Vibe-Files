@@ -114,12 +114,168 @@ pub fn table(title: &str, subtitle: &str, cols: &[Column], rows: &[Vec<String>])
     pdf.finish()
 }
 
+/// One section of a [`document`]: a heading, lines of text (wrapped), and an optional table.
+pub struct Section<'a> {
+    pub heading: &'a str,
+    pub lines: Vec<String>,
+    pub table: Option<(Vec<Column<'a>>, Vec<Vec<String>>)>,
+}
+
+/// A line of the laid-out document: (bold, size, text).
+type Item = (bool, f32, String);
+
+/// `text` cut into lines of at most `width` characters, at spaces where possible.
+fn wrap(text: &str, width: usize) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    for word in text.split(' ') {
+        let fits = cur.chars().count() + 1 + word.chars().count() <= width;
+        if !cur.is_empty() && !fits {
+            out.push(std::mem::take(&mut cur));
+        }
+        if !cur.is_empty() {
+            cur.push(' ');
+        }
+        cur.push_str(word);
+        while cur.chars().count() > width {
+            let head: String = cur.chars().take(width).collect();
+            cur = cur.chars().skip(width).collect();
+            out.push(head);
+        }
+    }
+    if !cur.is_empty() || out.is_empty() {
+        out.push(cur);
+    }
+    out
+}
+
+/// A sectioned report (the Safeguards appendix): title and subtitle, then each section's
+/// heading, lines and table, flowing over landscape Letter pages with page numbers.
+pub fn document(title: &str, subtitle: &str, sections: &[Section]) -> Vec<u8> {
+    let body = 8.0_f32;
+    let chars = |size: f32| ((W - 2.0 * MARGIN) / (size * 0.6)) as usize;
+    let mut items: Vec<Item> = vec![(true, 14.0, title.to_string())];
+    for l in wrap(subtitle, chars(body)) {
+        items.push((false, body, l));
+    }
+    for s in sections {
+        items.push((false, body, String::new()));
+        items.push((true, 10.0, s.heading.to_string()));
+        for l in &s.lines {
+            for w in wrap(l, chars(body)) {
+                items.push((false, body, w));
+            }
+        }
+        if let Some((cols, rows)) = &s.table {
+            let header: Vec<String> = cols.iter().map(|c| c.heading.to_string()).collect();
+            items.push((true, SIZE, line(cols, &header)));
+            for r in rows {
+                items.push((false, SIZE, line(cols, r)));
+            }
+        }
+    }
+    // Paginate.
+    let mut pages: Vec<Vec<(Item, f32)>> = vec![vec![]];
+    let mut y = H - MARGIN;
+    for it in items {
+        let lead = it.1 * 1.35;
+        if y - lead < MARGIN {
+            pages.push(vec![]);
+            y = H - MARGIN;
+        }
+        y -= lead;
+        pages.last_mut().expect("one page").push((it, y));
+    }
+    let total = pages.len();
+    let mut pdf = Pdf::new();
+    let (catalog, tree, font, bold) = (Ref::new(1), Ref::new(2), Ref::new(3), Ref::new(4));
+    let page_ids: Vec<Ref> = (0..total).map(|i| Ref::new(5 + 2 * i as i32)).collect();
+    pdf.catalog(catalog).pages(tree);
+    pdf.pages(tree)
+        .kids(page_ids.iter().copied())
+        .count(total as i32);
+    for (i, items) in pages.iter().enumerate() {
+        let mut c = Content::new();
+        for ((b, size, text), y) in items {
+            if text.is_empty() {
+                continue;
+            }
+            c.begin_text();
+            c.set_font(Name(if *b { b"F2" } else { b"F1" }), *size);
+            c.next_line(MARGIN, *y);
+            c.show(Str(&win_ansi(text)));
+            c.end_text();
+        }
+        let foot = format!("Page {} of {total}", i + 1);
+        c.begin_text();
+        c.set_font(Name(b"F1"), SIZE);
+        c.next_line(W - MARGIN - foot.len() as f32 * CHAR, MARGIN / 2.0);
+        c.show(Str(&win_ansi(&foot)));
+        c.end_text();
+        let content = Ref::new(6 + 2 * i as i32);
+        let mut p = pdf.page(page_ids[i]);
+        p.media_box(Rect::new(0.0, 0.0, W, H));
+        p.parent(tree);
+        p.contents(content);
+        let mut res = p.resources();
+        let mut fonts = res.fonts();
+        fonts.pair(Name(b"F1"), font);
+        fonts.pair(Name(b"F2"), bold);
+        drop(fonts);
+        drop(res);
+        drop(p);
+        pdf.stream(content, &c.finish());
+    }
+    pdf.type1_font(font)
+        .base_font(Name(b"Courier"))
+        .encoding_predefined(Name(b"WinAnsiEncoding"));
+    pdf.type1_font(bold)
+        .base_font(Name(b"Courier-Bold"))
+        .encoding_predefined(Name(b"WinAnsiEncoding"));
+    pdf.finish()
+}
+
 /// Characters that fit across a page.
 pub const LINE_CHARS: usize = ((W - 2.0 * MARGIN) / CHAR) as usize;
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sections_flow_over_pages() {
+        let rows: Vec<Vec<String>> = (1..=90).map(|i| vec![format!("row {i}")]).collect();
+        let bytes = document(
+            "Safeguards appendix",
+            "Firm cabinet",
+            &[
+                Section {
+                    heading: "Inventory",
+                    lines: vec!["Clients: 3".into(), "x ".repeat(200)],
+                    table: None,
+                },
+                Section {
+                    heading: "Workstations",
+                    lines: vec![],
+                    table: Some((
+                        vec![Column {
+                            heading: "name",
+                            width: 20,
+                        }],
+                        rows,
+                    )),
+                },
+            ],
+        );
+        let d = lopdf::Document::load_mem(&bytes).unwrap();
+        let n = d.get_pages().len();
+        assert!(n >= 2, "{n}");
+        let first = d.extract_text(&[1]).unwrap();
+        assert!(first.contains("Safeguards appendix") && first.contains("Inventory"));
+        assert!(d.extract_text(&[n as u32]).unwrap().contains("row 90"));
+        assert_eq!(wrap("aa bb cc", 5), ["aa bb", "cc"]);
+        assert_eq!(wrap("abcdefgh", 3), ["abc", "def", "gh"]);
+    }
 
     #[test]
     fn rows_flow_over_pages_with_the_header_on_each() {

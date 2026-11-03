@@ -229,6 +229,15 @@ impl VibeFilesApp {
                 self.config.last_cabinet = Some(opened.root.clone());
                 // The cabinet is open either way; a settings write failure only loses "last".
                 let _ = config::save(&self.data, &self.config);
+                // This workstation in the cabinet's list (the Safeguards appendix lists them).
+                if let Err(e) =
+                    vf_fs::safeguards::register_device(&opened.root, &self.config.device_id)
+                {
+                    tracing::warn!(
+                        kind = crate::logging::kind(&e),
+                        "workstation not registered"
+                    );
+                }
                 // Legal holds placed on other workstations first (P07): nothing they cover may
                 // be emptied below.
                 if let Err(e) =

@@ -365,8 +365,14 @@ mod tests {
         assert_eq!(d.get_pages().len(), 3);
         // The client and folder are printed for people on the cover and client separator.
         let first = d.extract_text(&[1]).unwrap();
-        assert!(first.contains("Folder:") && first.contains("Income Tax"), "{first}");
+        assert!(
+            first.contains("Folder:") && first.contains("Income Tax"),
+            "{first}"
+        );
         let third = d.extract_text(&[3]).unwrap();
-        assert!(third.contains("Client:") && third.contains("Anderson Farms LLC"), "{third}");
+        assert!(
+            third.contains("Client:") && third.contains("Anderson Farms LLC"),
+            "{third}"
+        );
     }
 }

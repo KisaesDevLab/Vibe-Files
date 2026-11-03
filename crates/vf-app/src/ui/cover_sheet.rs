@@ -251,7 +251,11 @@ mod folder_tests {
     fn folder_on_the_sheet() {
         let tpl = "Income Tax/{Year}".to_string();
         assert_eq!(
-            folder_label("Bell Ranch (BELL2002)", Some(&tpl), Some(TaxYear::Year(2025))),
+            folder_label(
+                "Bell Ranch (BELL2002)",
+                Some(&tpl),
+                Some(TaxYear::Year(2025))
+            ),
             r"Bell Ranch (BELL2002)\Income Tax\2025"
         );
         assert_eq!(

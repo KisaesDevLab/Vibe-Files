@@ -346,3 +346,72 @@ pub fn holds(ui: &mut egui::Ui, p: &mut HoldsPage, env: &mut Env) {
         }
     }
 }
+
+/// Admin › Safeguards appendix (P07 step 5).
+#[derive(Default)]
+pub struct SafeguardsPage {
+    /// Start of the period (yyyy-mm-dd); empty = a year ago.
+    pub from: String,
+    pub notice: Option<String>,
+    pub error: Option<String>,
+    /// The PDF just written, to open.
+    pub open_request: Option<PathBuf>,
+}
+
+pub fn safeguards(ui: &mut egui::Ui, p: &mut SafeguardsPage, env: &mut Env) {
+    if p.from.is_empty() {
+        p.from = vf_core::rfc3339_days_ago(365)[..10].to_string();
+    }
+    ui.horizontal(|ui| {
+        ui.label(RichText::new("Safeguards appendix").strong().size(16.0));
+        ui.label(widgets::caption(
+            "One PDF for the WISP: inventory, encryption, workstations, retention and holds, integrity, backup, disposition runs.",
+        ));
+    });
+    ui.add_space(6.0);
+    ui.horizontal(|ui| {
+        let l = ui.label("Period from");
+        ui.add(
+            TextEdit::singleline(&mut p.from)
+                .hint_text("yyyy-mm-dd")
+                .desired_width(100.0),
+        )
+        .labelled_by(l.id);
+        if ui
+            .add(widgets::primary_button("Export appendix…"))
+            .clicked()
+            && let Some(dest) = rfd::FileDialog::new()
+                .set_file_name("Safeguards appendix.pdf")
+                .add_filter("PDF", &["pdf"])
+                .save_file()
+        {
+            let name = vf_fs::cabinet::read(env.root)
+                .map(|c| c.display_name(env.root))
+                .unwrap_or_default();
+            let from = format!("{}T00:00:00Z", p.from.trim());
+            let r = vf_fs::safeguards::appendix(
+                env.conn,
+                env.root,
+                &vf_fs::safeguards::Inputs {
+                    cabinet_name: &name,
+                    period_from: &from,
+                },
+            )
+            .and_then(|bytes| std::fs::write(&dest, bytes).map_err(|e| e.to_string()));
+            match r {
+                Ok(()) => {
+                    p.notice = Some(format!("Saved {}", dest.display()));
+                    p.error = None;
+                    p.open_request = Some(dest);
+                }
+                Err(e) => p.error = Some(e),
+            }
+        }
+    });
+    if let Some(n) = &p.notice {
+        ui.label(RichText::new(n).color(theme::INK_SECONDARY));
+    }
+    if let Some(e) = &p.error {
+        ui.label(RichText::new(e).color(ERROR));
+    }
+}

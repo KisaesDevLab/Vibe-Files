@@ -20,6 +20,7 @@ pub enum Page {
     Retention,
     Disposition,
     Holds,
+    Safeguards,
 }
 
 /// UI_SPEC §6 nav, grouped. Only Doc types is built in P01.
@@ -89,6 +90,7 @@ pub struct Admin {
     /// Disposition and Legal holds pages (P07 steps 2-4).
     pub disposition: crate::ui::disposition::DispositionPage,
     pub holds: crate::ui::disposition::HoldsPage,
+    pub safeguards: crate::ui::disposition::SafeguardsPage,
     /// The editor above the table.
     pub editing: Editing,
     form: Form,
@@ -123,6 +125,7 @@ impl Admin {
             retention: Default::default(),
             disposition: Default::default(),
             holds: Default::default(),
+            safeguards: Default::default(),
             editing: Editing::Closed,
             form: Form::default(),
             error: None,
@@ -237,6 +240,12 @@ pub fn show(ui: &mut egui::Ui, a: &mut Admin, env: &mut Env, sweep: SweepEnv) {
             }
         }
         Page::Holds => crate::ui::disposition::holds(ui, &mut a.holds, env),
+        Page::Safeguards => {
+            crate::ui::disposition::safeguards(ui, &mut a.safeguards, env);
+            if let Some(p) = a.safeguards.open_request.take() {
+                a.open_request = Some(p);
+            }
+        }
         Page::Retention => {
             if crate::ui::retention::show(ui, &mut a.retention, &a.classes, &a.types, env) {
                 a.changed = true;
@@ -279,6 +288,13 @@ fn nav(ui: &mut egui::Ui, a: &mut Admin) {
                 {
                     a.page = Page::Disposition;
                     a.disposition.refresh();
+                }
+            } else if *item == "Safeguards appendix" {
+                if ui
+                    .selectable_label(a.page == Page::Safeguards, *item)
+                    .clicked()
+                {
+                    a.page = Page::Safeguards;
                 }
             } else if *item == "Legal holds" {
                 if ui.selectable_label(a.page == Page::Holds, *item).clicked() {
