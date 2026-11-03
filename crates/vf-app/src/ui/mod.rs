@@ -6,6 +6,8 @@ pub mod import_csv;
 pub mod meta_editor;
 pub mod new_client;
 pub mod rename;
+#[cfg(test)]
+pub mod test_util;
 pub mod theme;
 pub mod widgets;
 pub mod wizard;

@@ -2,16 +2,20 @@
 //! preview of every new name before one Transaction renames them (`vf_fs::rename`).
 
 use egui::{RichText, TextEdit};
-use vf_fs::rename::{self, DEFAULT_TEMPLATE, Outcome, Row};
+use vf_fs::rename::{DEFAULT_TEMPLATE, Outcome, Planner, Row};
 
 use crate::ui::browse::Env;
-use crate::ui::{theme, wizard::ERROR};
+use crate::ui::widgets::{self, DialogOutcome};
+
+const ROW_H: f32 = 18.0;
 
 pub struct RenameDialog {
     pub ids: Vec<String>,
     pub template: String,
-    /// Recomputed when the template changes.
-    preview: Option<Result<Vec<Row>, String>>,
+    /// Documents, tokens and folder listings, read once when the dialog first draws.
+    planner: Option<Result<Planner, String>>,
+    /// Rows for the current template and how many of them rename; recomputed when it changes.
+    preview: Option<Result<(Vec<Row>, usize), String>>,
     pub error: Option<String>,
 }
 
@@ -20,26 +24,40 @@ impl RenameDialog {
         Self {
             ids,
             template: DEFAULT_TEMPLATE.into(),
+            planner: None,
             preview: None,
             error: None,
         }
     }
 }
 
-pub enum DialogOutcome {
-    Open,
-    Cancelled,
-    Renamed(usize),
-}
-
 fn file_name(rel: &str) -> &str {
     rel.rsplit('/').next().unwrap_or(rel)
 }
 
-pub fn show(ctx: &egui::Context, d: &mut RenameDialog, env: &mut Env) -> DialogOutcome {
-    if d.preview.is_none() {
+fn note(o: &Outcome) -> String {
+    match o {
+        Outcome::Rename(_) => String::new(),
+        Outcome::KeepBoth(_) => "name taken: keep both".into(),
+        Outcome::Same => "no change".into(),
+        Outcome::Skip(why) => format!("skipped: {why}"),
+    }
+}
+
+/// Returns the number of files renamed when done.
+pub fn show(ctx: &egui::Context, d: &mut RenameDialog, env: &mut Env) -> DialogOutcome<usize> {
+    if d.planner.is_none() {
         let year = chrono::Datelike::year(&chrono::Local::now());
-        d.preview = Some(rename::plan(env.conn, env.root, &d.ids, &d.template, year));
+        d.planner = Some(Planner::load(env.conn, env.root, &d.ids, year));
+    }
+    if d.preview.is_none() {
+        d.preview = Some(match d.planner.as_ref().expect("loaded above") {
+            Ok(p) => p.plan(env.root, &d.template).map(|rows| {
+                let n = rows.iter().filter(|r| r.renames()).count();
+                (rows, n)
+            }),
+            Err(e) => Err(e.clone()),
+        });
     }
     let mut out = DialogOutcome::Open;
     egui::Modal::new(egui::Id::unique("rename-docs")).show(ctx, |ui| {
@@ -60,79 +78,71 @@ pub fn show(ctx: &egui::Context, d: &mut RenameDialog, env: &mut Env) -> DialogO
                 d.error = None;
             }
         });
-        ui.label(
-            RichText::new(
-                "Tokens: {Client} {ID} {Year} {DocType} {Rest} {Original} {Ext}, and the client \
-                 list's columns. Files stay in their folders; a taken name gets \" (2)\".",
-            )
-            .small()
-            .color(theme::INK_MUTED),
-        );
+        ui.label(widgets::caption(
+            "Tokens: {Client} {ID} {Year} {DocType} {Rest} {Original} {Ext}, and the client \
+             list's columns. Files stay in their folders; a taken name gets \" (2)\".",
+        ));
         ui.add_space(8.0);
-        let mut renames = 0;
-        // Fixed size: an auto-sized modal re-centers and moves its buttons.
-        egui::ScrollArea::vertical()
-            .id_salt("rename-preview")
-            .min_scrolled_height(300.0)
-            .max_height(300.0)
-            .auto_shrink([false, false])
-            .show(ui, |ui| match &d.preview {
-                Some(Ok(rows)) => {
-                    egui::Grid::new("rename-rows")
-                        .num_columns(3)
-                        .striped(true)
-                        .spacing([12.0, 4.0])
-                        .show(ui, |ui| {
-                            for h in ["NOW", "NEW NAME", ""] {
-                                ui.label(RichText::new(h).small().color(theme::INK_MUTED));
-                            }
-                            ui.end_row();
-                            for r in rows {
-                                ui.label(RichText::new(file_name(&r.old_rel)).monospace().small());
-                                let new = r.new_rel.as_deref().map(file_name).unwrap_or("—");
-                                ui.label(RichText::new(new).monospace().small());
-                                let note = match &r.outcome {
-                                    Outcome::Rename => String::new(),
-                                    Outcome::KeepBoth => "name taken: keep both".into(),
-                                    Outcome::Same => "no change".into(),
-                                    Outcome::Skip(why) => format!("skipped: {why}"),
-                                };
-                                ui.label(RichText::new(note).small().color(theme::INK_MUTED));
-                                ui.end_row();
-                                if r.renames() {
-                                    renames += 1;
-                                }
-                            }
-                        });
-                }
-                Some(Err(e)) => {
-                    ui.label(RichText::new(e).color(theme::INK_MUTED));
-                }
-                None => {}
-            });
+        ui.horizontal(|ui| {
+            for (h, w) in [("NOW", 250.0), ("NEW NAME", 250.0), ("", 180.0)] {
+                ui.add_sized([w, ROW_H], egui::Label::new(widgets::caption(h)));
+            }
+        });
+        let renames = match &d.preview {
+            Some(Ok((rows, n))) => {
+                // Only the visible rows are laid out (a selection can be the whole cabinet).
+                egui::ScrollArea::vertical()
+                    .id_salt("rename-preview")
+                    .min_scrolled_height(300.0)
+                    .max_height(300.0)
+                    .auto_shrink([false, false])
+                    .show_rows(ui, ROW_H, rows.len(), |ui, range| {
+                        for r in &rows[range] {
+                            ui.horizontal(|ui| {
+                                let mono = |t: &str| RichText::new(t).monospace().small();
+                                ui.add_sized(
+                                    [250.0, ROW_H],
+                                    egui::Label::new(mono(file_name(&r.old_rel))).truncate(),
+                                );
+                                let new = r.new_rel().map(file_name).unwrap_or("—");
+                                ui.add_sized(
+                                    [250.0, ROW_H],
+                                    egui::Label::new(mono(new)).truncate(),
+                                );
+                                ui.add_sized(
+                                    [180.0, ROW_H],
+                                    egui::Label::new(widgets::caption(note(&r.outcome))).truncate(),
+                                );
+                            });
+                        }
+                    });
+                *n
+            }
+            Some(Err(e)) => {
+                widgets::fixed_body(ui, "rename-preview", 300.0, |ui| {
+                    ui.label(widgets::caption(e.as_str()));
+                });
+                0
+            }
+            None => 0,
+        };
         ui.add_space(6.0);
-        let msg = d.error.as_deref().unwrap_or("");
-        ui.add_sized(
-            [ui.available_width(), 36.0],
-            egui::Label::new(RichText::new(msg).color(ERROR)).wrap(),
-        );
+        widgets::message_line(ui, d.error.as_deref());
         ui.horizontal(|ui| {
             let go = ui.add_enabled(
                 renames > 0,
-                egui::Button::new(
-                    RichText::new(format!("Rename {renames} files (one transaction)"))
-                        .color(egui::Color32::WHITE),
-                )
-                .fill(theme::ACCENT_DEFAULT),
+                widgets::primary_button(format!("Rename {renames} files (one transaction)")),
             );
             if go.clicked()
-                && let Some(Ok(rows)) = &d.preview
+                && let Some(Ok((rows, _))) = &d.preview
             {
-                match rename::commit(env.conn, env.root, rows, env.device_id) {
-                    Ok((_, n)) => out = DialogOutcome::Renamed(n),
+                match vf_fs::rename::commit(env.conn, env.root, rows, env.device_id) {
+                    Ok((_, n)) => out = DialogOutcome::Done(n),
                     Err(e) => {
                         d.error = Some(e);
-                        d.preview = None; // the disk may have changed: preview again
+                        // The disk may have changed: read it again.
+                        d.planner = None;
+                        d.preview = None;
                     }
                 }
             }

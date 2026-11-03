@@ -177,11 +177,26 @@ pub enum Scope {
     NeedsTaxYear,
     /// Filed at or after this RFC 3339 UTC time.
     ReceivedSince(String),
-    /// A named list of document ids (Pinned, Recent).
+    /// A list of document ids kept outside the catalog (Pinned, Recent).
     Ids {
-        view: String,
+        list: IdList,
         ids: Vec<String>,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum IdList {
+    Recent,
+    Pinned,
+}
+
+impl IdList {
+    pub fn label(self) -> &'static str {
+        match self {
+            IdList::Recent => "Recent",
+            IdList::Pinned => "Pinned",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -454,7 +469,7 @@ mod tests {
         );
         assert_eq!(
             names(Scope::Ids {
-                view: "Pinned".into(),
+                list: IdList::Pinned,
                 ids: vec!["Acme (1)/Income Tax/2025/c.pdf".into(), "gone".into()],
             }),
             ["c.pdf"]

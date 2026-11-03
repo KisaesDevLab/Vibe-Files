@@ -12,21 +12,28 @@ use filer_core::config::ColumnMap;
 use vf_fs::clients;
 
 use crate::ui::browse::Env;
-use crate::ui::{theme, wizard::ERROR};
+use crate::ui::theme;
+use crate::ui::widgets::{self, DialogOutcome};
 
-#[derive(Default)]
 pub struct ImportDialog {
     pub path: String,
     table: Option<CsvTable>,
     pub map: ColumnMap,
     pub error: Option<String>,
+    /// The catalog's `ext_id → uuid` when the dialog opened, so re-imports keep identities.
+    known: BTreeMap<String, uuid::Uuid>,
 }
 
-pub enum Outcome {
-    Open,
-    Cancelled,
-    /// Message for the Browse notice.
-    Imported(String),
+impl ImportDialog {
+    pub fn new(known: BTreeMap<String, uuid::Uuid>) -> Self {
+        Self {
+            path: String::new(),
+            table: None,
+            map: ColumnMap::default(),
+            error: None,
+            known,
+        }
+    }
 }
 
 /// Guesses the ID and name columns from usual header names.
@@ -69,21 +76,14 @@ fn column_combo(
         .labelled_by(label);
 }
 
-pub fn show(
-    ctx: &egui::Context,
-    d: &mut ImportDialog,
-    env: &mut Env,
-    known: &BTreeMap<String, uuid::Uuid>,
-) -> Outcome {
-    let mut out = Outcome::Open;
+pub fn show(ctx: &egui::Context, d: &mut ImportDialog, env: &mut Env) -> DialogOutcome<String> {
+    let mut out = DialogOutcome::Open;
     egui::Modal::new(egui::Id::unique("import-clients")).show(ctx, |ui| {
         ui.set_width(560.0);
         ui.heading("Import clients CSV");
-        ui.label(
-            RichText::new("The client list from your tax software. Re-importing keeps every client's identity.")
-                .small()
-                .color(theme::INK_MUTED),
-        );
+        ui.label(widgets::caption(
+            "The client list from your tax software. Re-importing keeps every client's identity.",
+        ));
         ui.add_space(8.0);
         ui.horizontal(|ui| {
             let l = ui.label("CSV file");
@@ -111,20 +111,22 @@ pub fn show(
             }
         });
         ui.add_space(8.0);
-        // Fixed-size body: an auto-sized modal re-centers and moves its buttons.
         let mut ready = false;
-        egui::ScrollArea::vertical()
-            .id_salt("import-body")
-            .min_scrolled_height(260.0)
-            .max_height(260.0)
-            .auto_shrink([false, false])
-            .show(ui, |ui| {
-                let Some(t) = &d.table else {
-                    ui.label(RichText::new("Choose the CSV, then Read.").color(theme::INK_MUTED));
-                    return;
-                };
-                ui.label(format!("{} rows · {} columns · {}", t.rows.len(), t.headers.len(), t.encoding.label()));
-                egui::Grid::new("import-map").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
+        widgets::fixed_body(ui, "import-body", 260.0, |ui| {
+            let Some(t) = &d.table else {
+                ui.label(RichText::new("Choose the CSV, then Read.").color(theme::INK_MUTED));
+                return;
+            };
+            ui.label(format!(
+                "{} rows · {} columns · {}",
+                t.rows.len(),
+                t.headers.len(),
+                t.encoding.label()
+            ));
+            egui::Grid::new("import-map")
+                .num_columns(2)
+                .spacing([12.0, 6.0])
+                .show(ui, |ui| {
                     let l = ui.label("Client ID column");
                     column_combo(ui, "import-id", l.id, &t.headers, &mut d.map.id);
                     ui.end_row();
@@ -132,57 +134,53 @@ pub fn show(
                     column_combo(ui, "import-name", l.id, &t.headers, &mut d.map.name);
                     ui.end_row();
                 });
-                ui.add_space(6.0);
-                ui.label(RichText::new("Other columns to keep (folder-name tokens)").small().color(theme::INK_MUTED));
-                for h in &t.headers {
-                    if Some(h) == d.map.id.as_ref() || Some(h) == d.map.name.as_ref() {
-                        continue;
-                    }
-                    let tin = clients::looks_like_tin(h);
-                    let mut on = d.map.extras.contains(h);
-                    let r = ui.add_enabled(!tin, egui::Checkbox::new(&mut on, h));
-                    if tin {
-                        r.on_disabled_hover_text("Taxpayer IDs are not copied into the client list.");
-                    } else if r.changed() {
-                        if on {
-                            d.map.extras.push(h.clone());
-                        } else {
-                            d.map.extras.retain(|x| x != h);
-                        }
+            ui.add_space(6.0);
+            ui.label(widgets::caption(
+                "Other columns to keep (folder-name tokens)",
+            ));
+            for h in &t.headers {
+                if Some(h) == d.map.id.as_ref() || Some(h) == d.map.name.as_ref() {
+                    continue;
+                }
+                let tin = clients::looks_like_tin(h);
+                let mut on = d.map.extras.contains(h);
+                let r = ui.add_enabled(!tin, egui::Checkbox::new(&mut on, h));
+                if tin {
+                    r.on_disabled_hover_text("Taxpayer IDs are not copied into the client list.");
+                } else if r.changed() {
+                    if on {
+                        d.map.extras.push(h.clone());
+                    } else {
+                        d.map.extras.retain(|x| x != h);
                     }
                 }
-                ready = d.map.id.is_some() && d.map.name.is_some();
-            });
+            }
+            ready = d.map.id.is_some() && d.map.name.is_some();
+        });
         ui.add_space(6.0);
-        let msg = d.error.as_deref().unwrap_or("");
-        ui.add_sized([ui.available_width(), 36.0], egui::Label::new(RichText::new(msg).color(ERROR)).wrap());
+        widgets::message_line(ui, d.error.as_deref());
         ui.horizontal(|ui| {
             let n = d.table.as_ref().map(|t| t.rows.len()).unwrap_or(0);
             let go = ui.add_enabled(
                 ready,
-                egui::Button::new(RichText::new(format!("Import {n} rows (one transaction)")).color(egui::Color32::WHITE))
-                    .fill(theme::ACCENT_DEFAULT),
+                widgets::primary_button(format!("Import {n} rows (one transaction)")),
             );
             if go.clicked() {
-                match run(d, env, known) {
-                    Ok(msg) => out = Outcome::Imported(msg),
+                match run(d, env) {
+                    Ok(msg) => out = DialogOutcome::Done(msg),
                     Err(e) => d.error = Some(e),
                 }
             }
             if ui.button("Cancel").clicked() {
-                out = Outcome::Cancelled;
+                out = DialogOutcome::Cancelled;
             }
         });
     });
     out
 }
 
-fn run(
-    d: &ImportDialog,
-    env: &mut Env,
-    known: &BTreeMap<String, uuid::Uuid>,
-) -> Result<String, String> {
-    let list = clients::import_csv(env.root, &PathBuf::from(d.path.trim()), &d.map, known)?;
+fn run(d: &ImportDialog, env: &mut Env) -> Result<String, String> {
+    let list = clients::import_csv(env.root, &PathBuf::from(d.path.trim()), &d.map, &d.known)?;
     let rep = vf_fs::rebuild::sync_clients(env.conn, env.root, env.device_id, "clients_import")
         .map_err(|e| format!("The client list was saved but the catalog was not updated: {e}"))?;
     let mut msg = format!(

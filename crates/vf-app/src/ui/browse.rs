@@ -8,15 +8,16 @@ use std::path::Path;
 
 use egui::{Align, Key, Layout, RichText, Sense};
 use egui_extras::{Column, TableBuilder};
-use vf_core::browse::{DocRow, Index, Scope, Snapshot};
+use vf_core::browse::{DocRow, IdList, Index, Scope, Snapshot};
 use vf_core::db::Connection;
 
 use crate::config::{Favorite, Prefs};
 use crate::ui::client_panel::{self, RelForm};
 use crate::ui::import_csv::{self, ImportDialog};
 use crate::ui::meta_editor::{self, MetaForm};
-use crate::ui::new_client::{self, NewClientDialog, Outcome};
-use crate::ui::rename::{self as rename_ui, DialogOutcome, RenameDialog};
+use crate::ui::new_client::{self, NewClientDialog};
+use crate::ui::rename::{self as rename_ui, RenameDialog};
+use crate::ui::widgets::{DialogOutcome, status_rank, year_label};
 use crate::ui::{theme, widgets};
 
 /// What Browse needs from the open cabinet to change things.
@@ -95,8 +96,11 @@ pub struct Browse {
     /// Pinned / Recent / Favorites, from this PC's config; `prefs_dirty` asks the app to save.
     pub prefs: Prefs,
     pub prefs_dirty: bool,
-    /// Counts for the Views section: Recent, Pinned, Needs doc type, Needs tax year, This week.
+    /// Document counts per entry of [`Browse::views`] and per favorite, and the start of
+    /// "this week"; recomputed by `recount` when the catalog or the lists change.
     view_counts: [usize; 5],
+    fav_counts: Vec<usize>,
+    week_start: String,
 }
 
 impl Browse {
@@ -127,7 +131,10 @@ impl Browse {
             prefs: Prefs::default(),
             prefs_dirty: false,
             view_counts: [0; 5],
+            fav_counts: Vec::new(),
+            week_start: week_start_utc(),
         };
+        b.recount();
         b.refresh();
         b
     }
@@ -187,6 +194,7 @@ impl Browse {
         };
         self.expanded.clear();
         self.undo_tx = None;
+        self.recount();
         self.selected = self
             .snap
             .docs
@@ -218,22 +226,54 @@ impl Browse {
         }
     }
 
-    /// Recomputes `visible` from scope, name filter and sort, and the Views counts.
-    pub fn refresh(&mut self) {
-        if let Scope::Ids { view, .. } = &self.scope {
-            // Pinned / Recent follow the lists as they change.
-            let view = view.clone();
-            self.scope = self.ids_scope(&view);
-        }
-        let views = [
-            self.ids_scope(VIEW_RECENT),
-            self.ids_scope(VIEW_PINNED),
-            Scope::NeedsDocType,
-            Scope::NeedsTaxYear,
-            Scope::ReceivedSince(week_start_utc()),
-        ];
-        for (i, v) in views.iter().enumerate() {
+    /// The Views section: (label, scope, warn when non-zero), in display order.
+    fn views(&self) -> [(&'static str, Scope, bool); 5] {
+        [
+            (
+                IdList::Recent.label(),
+                self.ids_scope(IdList::Recent),
+                false,
+            ),
+            (
+                IdList::Pinned.label(),
+                self.ids_scope(IdList::Pinned),
+                false,
+            ),
+            ("Needs doc type", Scope::NeedsDocType, true),
+            ("Needs tax year", Scope::NeedsTaxYear, true),
+            (
+                "Received this week",
+                Scope::ReceivedSince(self.week_start.clone()),
+                false,
+            ),
+        ]
+    }
+
+    /// Recounts the Views and Favorites (full scans: only when the catalog or lists change,
+    /// not per sort or filter keystroke).
+    fn recount(&mut self) {
+        self.week_start = week_start_utc();
+        let views = self.views();
+        for (i, (_, v, _)) in views.iter().enumerate() {
             self.view_counts[i] = self.ix.docs_in(&self.snap, v).len();
+        }
+        self.fav_counts = self
+            .prefs
+            .favorites
+            .iter()
+            .map(|f| {
+                self.favorite_scope(f)
+                    .map(|t| self.ix.docs_in(&self.snap, &t).len())
+                    .unwrap_or(0)
+            })
+            .collect();
+    }
+
+    /// Recomputes `visible` from scope, name filter and sort.
+    pub fn refresh(&mut self) {
+        if let Scope::Ids { list, .. } = &self.scope {
+            // Pinned / Recent follow the lists as they change.
+            self.scope = self.ids_scope(*list);
         }
         let needle = self.name_filter.trim().to_lowercase();
         let mut v = self.ix.docs_in(&self.snap, &self.scope);
@@ -242,50 +282,69 @@ impl Browse {
         }
         let docs = &self.snap.docs;
         let (col, asc) = self.sort;
-        v.sort_by(|&a, &b| {
-            let (a, b) = (&docs[a], &docs[b]);
-            let o = match col {
-                SortCol::Name => a.name().to_lowercase().cmp(&b.name().to_lowercase()),
-                SortCol::DocType => a.doc_type.cmp(&b.doc_type),
-                SortCol::Year => a.tax_year.cmp(&b.tax_year),
-                SortCol::Status => status_rank(&a.status).cmp(&status_rank(&b.status)),
-                SortCol::Size => a.size.cmp(&b.size),
-                SortCol::Modified => a.updated_at.cmp(&b.updated_at),
-                SortCol::FiledBy => a.filed_by.cmp(&b.filed_by),
-                SortCol::Hash => a.hash.cmp(&b.hash),
+        if col == SortCol::Name {
+            // One lower-case key per row, not two allocations per comparison.
+            v.sort_by_cached_key(|&i| (docs[i].name().to_lowercase(), docs[i].rel_path.clone()));
+            if !asc {
+                v.reverse();
             }
-            .then_with(|| a.rel_path.cmp(&b.rel_path));
-            if asc { o } else { o.reverse() }
-        });
+        } else {
+            v.sort_by(|&a, &b| {
+                let (a, b) = (&docs[a], &docs[b]);
+                let o = match col {
+                    SortCol::Name => unreachable!("sorted above"),
+                    SortCol::DocType => a.doc_type.cmp(&b.doc_type),
+                    SortCol::Year => a.tax_year.cmp(&b.tax_year),
+                    SortCol::Status => status_rank(&a.status).cmp(&status_rank(&b.status)),
+                    SortCol::Size => a.size.cmp(&b.size),
+                    SortCol::Modified => a.updated_at.cmp(&b.updated_at),
+                    SortCol::FiledBy => a.filed_by.cmp(&b.filed_by),
+                    SortCol::Hash => a.hash.cmp(&b.hash),
+                }
+                .then_with(|| a.rel_path.cmp(&b.rel_path));
+                if asc { o } else { o.reverse() }
+            });
+        }
         self.visible = v;
-        self.selected.retain(|i| self.visible.contains(i));
+        let mut shown = vec![false; self.snap.docs.len()];
+        for &i in &self.visible {
+            shown[i] = true;
+        }
+        self.selected.retain(|&i| shown[i]);
         if self.cursor.is_some_and(|c| c >= self.visible.len()) {
             self.cursor = None;
             self.anchor = None;
         }
     }
 
-    fn ids_scope(&self, view: &str) -> Scope {
-        let ids = if view == VIEW_PINNED {
-            self.prefs.pinned.clone()
-        } else {
-            self.prefs.recent.clone()
+    fn ids_scope(&self, list: IdList) -> Scope {
+        let ids = match list {
+            IdList::Pinned => self.prefs.pinned.clone(),
+            IdList::Recent => self.prefs.recent.clone(),
         };
-        Scope::Ids {
-            view: view.into(),
-            ids,
-        }
+        Scope::Ids { list, ids }
     }
 
     /// Sets the Pinned / Recent / Favorites lists (from config) and recounts.
     pub fn set_prefs(&mut self, prefs: Prefs) {
         self.prefs = prefs;
+        self.recount();
         self.refresh();
     }
 
+    /// After any change to `prefs`: asks the app to save, recounts, refreshes.
     fn prefs_changed(&mut self) {
         self.prefs_dirty = true;
+        self.recount();
         self.refresh();
+    }
+
+    /// Ids of the selected documents.
+    pub fn selected_ids(&self) -> Vec<String> {
+        self.selected
+            .iter()
+            .map(|&i| self.snap.docs[i].id.clone())
+            .collect()
     }
 
     /// The tree scope a favorite points at, when its client is still here.
@@ -449,9 +508,6 @@ impl Browse {
     }
 }
 
-pub const VIEW_RECENT: &str = "Recent";
-pub const VIEW_PINNED: &str = "Pinned";
-
 /// Monday 00:00 this week, local time, as RFC 3339 UTC ("Received this week").
 pub fn week_start_utc() -> String {
     use chrono::{Datelike, Local, TimeZone};
@@ -465,21 +521,6 @@ pub fn week_start_utc() -> String {
         .with_timezone(&chrono::Utc)
         .format("%Y-%m-%dT%H:%M:%SZ")
         .to_string()
-}
-
-fn status_rank(s: &str) -> u8 {
-    match s {
-        "received" => 0,
-        "in_work" => 1,
-        "final" => 2,
-        "delivered" => 3,
-        _ => 4,
-    }
-}
-
-fn year_label(y: Option<i32>) -> String {
-    y.map(|y| y.to_string())
-        .unwrap_or_else(|| "Permanent".into())
 }
 
 fn folder_label(f: &str) -> &str {
@@ -506,9 +547,9 @@ pub fn show(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env) {
     egui::CentralPanel::default().show(ui, |ui| grid(ui, b, env.conn));
     if let Some(d) = &mut b.new_client {
         match new_client::show(ui.ctx(), d, env) {
-            Outcome::Open => {}
-            Outcome::Cancelled => b.new_client = None,
-            Outcome::Created { client_id, folder } => {
+            DialogOutcome::Open => {}
+            DialogOutcome::Cancelled => b.new_client = None,
+            DialogOutcome::Done(new_client::Created { client_id, folder }) => {
                 b.new_client = None;
                 b.reload(env.conn);
                 if let Some(c) = b.snap.clients.iter().position(|c| c.id == client_id) {
@@ -523,7 +564,7 @@ pub fn show(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env) {
         match rename_ui::show(ui.ctx(), d, env) {
             DialogOutcome::Open => {}
             DialogOutcome::Cancelled => b.rename = None,
-            DialogOutcome::Renamed(n) => {
+            DialogOutcome::Done(n) => {
                 b.prefs.touch(&d.ids);
                 b.prefs_dirty = true;
                 b.rename = None;
@@ -533,16 +574,10 @@ pub fn show(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env) {
         }
     }
     if let Some(d) = &mut b.import {
-        let known = b
-            .snap
-            .clients
-            .iter()
-            .filter_map(|c| Some((c.ext_id.clone(), uuid::Uuid::parse_str(&c.id).ok()?)))
-            .collect();
-        match import_csv::show(ui.ctx(), d, env, &known) {
-            import_csv::Outcome::Open => {}
-            import_csv::Outcome::Cancelled => b.import = None,
-            import_csv::Outcome::Imported(msg) => {
+        match import_csv::show(ui.ctx(), d, env) {
+            DialogOutcome::Open => {}
+            DialogOutcome::Cancelled => b.import = None,
+            DialogOutcome::Done(msg) => {
                 b.import = None;
                 b.reload(env.conn);
                 b.notice = Some(msg);
@@ -563,41 +598,29 @@ fn folderless_selected(b: &Browse) -> Option<String> {
 
 fn tree(ui: &mut egui::Ui, b: &mut Browse) {
     let mut pick: Option<Scope> = None;
-    let mut fav_add: Option<Favorite> = None;
     let mut fav_remove: Option<usize> = None;
-    ui.label(RichText::new("VIEWS").small().color(theme::INK_MUTED));
-    let views = [
-        (VIEW_RECENT, b.ids_scope(VIEW_RECENT), false),
-        (VIEW_PINNED, b.ids_scope(VIEW_PINNED), false),
-        ("Needs doc type", Scope::NeedsDocType, true),
-        ("Needs tax year", Scope::NeedsTaxYear, true),
-        (
-            "Received this week",
-            Scope::ReceivedSince(week_start_utc()),
-            false,
-        ),
-    ];
-    for (i, (label, scope, warn)) in views.into_iter().enumerate() {
-        let sel = match (&b.scope, &scope) {
-            (Scope::Ids { view: a, .. }, Scope::Ids { view: c, .. }) => a == c,
-            (Scope::ReceivedSince(_), Scope::ReceivedSince(_)) => true,
-            (a, c) => a == c,
-        };
-        if row(ui, 0, warn, label, b.view_counts[i], sel).clicked() {
+    ui.label(widgets::caption("VIEWS"));
+    for (i, (label, scope, warn)) in b.views().into_iter().enumerate() {
+        let sel = std::mem::discriminant(&b.scope) == std::mem::discriminant(&scope)
+            && match (&b.scope, &scope) {
+                (Scope::Ids { list: a, .. }, Scope::Ids { list: c, .. }) => a == c,
+                _ => true,
+            };
+        if tree_row(ui, 0, None, warn, label, b.view_counts[i], sel)
+            .1
+            .clicked()
+        {
             pick = Some(scope);
         }
     }
     if !b.prefs.favorites.is_empty() {
-        ui.label(RichText::new("FAVORITES").small().color(theme::INK_MUTED));
+        ui.label(widgets::caption("FAVORITES"));
         for (i, f) in b.prefs.favorites.iter().enumerate() {
             let target = b.favorite_scope(f);
             let label = b.favorite_label(f);
             let sel = target.as_ref() == Some(&b.scope);
-            let n = target
-                .as_ref()
-                .map(|t| b.ix.docs_in(&b.snap, t).len())
-                .unwrap_or(0);
-            let resp = row(ui, 0, false, &label, n, sel);
+            let n = b.fav_counts.get(i).copied().unwrap_or(0);
+            let (_, resp) = tree_row(ui, 0, None, false, &label, n, sel);
             if resp.clicked()
                 && let Some(t) = target
             {
@@ -647,14 +670,16 @@ fn tree(ui: &mut egui::Ui, b: &mut Browse) {
     egui::ScrollArea::vertical()
         .auto_shrink(false)
         .show(ui, |ui| {
-            if row(
+            if tree_row(
                 ui,
                 0,
+                None,
                 false,
                 "All documents",
                 b.snap.docs.len(),
                 b.scope == Scope::Cabinet,
             )
+            .1
             .clicked()
             {
                 pick = Some(Scope::Cabinet);
@@ -664,10 +689,11 @@ fn tree(ui: &mut egui::Ui, b: &mut Browse) {
                 let node = &b.ix.clients[ci];
                 let open = b.expanded.contains(&Node::Client(ci));
                 let label = format!("{}  {}", c.name, c.ext_id);
-                let (chev, resp) = row_with_chevron(
+                let (chev, resp) = tree_row(
                     ui,
                     0,
-                    open,
+                    Some(open),
+                    false,
                     &label,
                     node.count,
                     b.scope == Scope::Client(ci),
@@ -692,10 +718,11 @@ fn tree(ui: &mut egui::Ui, b: &mut Browse) {
                         client: ci,
                         year: y.year,
                     };
-                    let (chev, resp) = row_with_chevron(
+                    let (chev, resp) = tree_row(
                         ui,
                         1,
-                        yopen,
+                        Some(yopen),
+                        false,
                         &year_label(y.year),
                         y.count,
                         b.scope == here,
@@ -719,7 +746,8 @@ fn tree(ui: &mut egui::Ui, b: &mut Browse) {
                             year: y.year,
                             folder: f.clone(),
                         };
-                        let resp = row(ui, 2, false, folder_label(f), *n, b.scope == here);
+                        let (_, resp) =
+                            tree_row(ui, 2, None, false, folder_label(f), *n, b.scope == here);
                         fav_menu(&resp, here.clone(), &mut fav_scope);
                         if resp.clicked() {
                             pick = Some(here);
@@ -728,14 +756,16 @@ fn tree(ui: &mut egui::Ui, b: &mut Browse) {
                 }
             }
             if b.ix.unassigned > 0
-                && row(
+                && tree_row(
                     ui,
                     0,
+                    None,
                     false,
                     "Not in a client folder",
                     b.ix.unassigned,
                     b.scope == Scope::Unassigned,
                 )
+                .1
                 .clicked()
             {
                 pick = Some(Scope::Unassigned);
@@ -746,10 +776,7 @@ fn tree(ui: &mut egui::Ui, b: &mut Browse) {
     {
         b.expanded.insert(n);
     }
-    if let Some(s) = fav_scope {
-        fav_add = b.as_favorite(&s);
-    }
-    if let Some(f) = fav_add
+    if let Some(f) = fav_scope.and_then(|s| b.as_favorite(&s))
         && !b.prefs.favorites.contains(&f)
     {
         b.prefs.favorites.push(f);
@@ -764,71 +791,51 @@ fn tree(ui: &mut egui::Ui, b: &mut Browse) {
     }
 }
 
-/// A tree row without a chevron. `warn` colors the count (a view that needs work).
-fn row(
+/// One tree row: indent, an expand chevron when `chevron` is `Some(open)`, the label, and the
+/// count right-aligned (`warn` colors a non-zero count). Returns (chevron clicked, label).
+fn tree_row(
     ui: &mut egui::Ui,
     depth: usize,
+    chevron: Option<bool>,
     warn: bool,
-    label: &str,
-    count: usize,
-    sel: bool,
-) -> egui::Response {
-    ui.horizontal(|ui| {
-        ui.add_space(depth as f32 * 16.0 + 18.0);
-        let resp = ui.selectable_label(sel, label);
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            let c = if warn && count > 0 {
-                widgets::rgb(0xB7791F)
-            } else {
-                theme::INK_MUTED
-            };
-            ui.label(RichText::new(count.to_string()).small().color(c));
-        });
-        resp
-    })
-    .inner
-}
-
-/// A tree row with an expand chevron. Returns (chevron clicked, label response).
-fn row_with_chevron(
-    ui: &mut egui::Ui,
-    depth: usize,
-    open: bool,
     label: &str,
     count: usize,
     sel: bool,
 ) -> (bool, egui::Response) {
     ui.horizontal(|ui| {
         ui.add_space(depth as f32 * 16.0);
-        let (rect, resp) = ui.allocate_exact_size(egui::vec2(14.0, 14.0), Sense::click());
-        let c = rect.center();
-        let pts = if open {
-            vec![
-                c + egui::vec2(-4.0, -2.0),
-                c + egui::vec2(4.0, -2.0),
-                c + egui::vec2(0.0, 3.0),
-            ]
-        } else {
-            vec![
-                c + egui::vec2(-2.0, -4.0),
-                c + egui::vec2(3.0, 0.0),
-                c + egui::vec2(-2.0, 4.0),
-            ]
-        };
-        ui.painter().add(egui::Shape::convex_polygon(
-            pts,
-            theme::INK_MUTED,
-            egui::Stroke::NONE,
-        ));
-        let label = ui.selectable_label(sel, label);
+        let (rect, chev) = ui.allocate_exact_size(egui::vec2(14.0, 14.0), Sense::click());
+        if let Some(open) = chevron {
+            let c = rect.center();
+            let pts = if open {
+                vec![
+                    c + egui::vec2(-4.0, -2.0),
+                    c + egui::vec2(4.0, -2.0),
+                    c + egui::vec2(0.0, 3.0),
+                ]
+            } else {
+                vec![
+                    c + egui::vec2(-2.0, -4.0),
+                    c + egui::vec2(3.0, 0.0),
+                    c + egui::vec2(-2.0, 4.0),
+                ]
+            };
+            ui.painter().add(egui::Shape::convex_polygon(
+                pts,
+                theme::INK_MUTED,
+                egui::Stroke::NONE,
+            ));
+        }
+        let resp = ui.selectable_label(sel, label);
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            ui.label(
-                RichText::new(count.to_string())
-                    .small()
-                    .color(theme::INK_MUTED),
-            );
+            let c = if warn && count > 0 {
+                theme::WARN
+            } else {
+                theme::INK_MUTED
+            };
+            ui.label(RichText::new(count.to_string()).small().color(c));
         });
-        (resp.clicked(), label)
+        (chevron.is_some() && chev.clicked(), resp)
     })
     .inner
 }
@@ -844,7 +851,7 @@ fn breadcrumb(b: &Browse) -> String {
         Scope::NeedsDocType => "Views / Needs doc type".into(),
         Scope::NeedsTaxYear => "Views / Needs tax year".into(),
         Scope::ReceivedSince(_) => "Views / Received this week".into(),
-        Scope::Ids { view, .. } => format!("Views / {view}"),
+        Scope::Ids { list, .. } => format!("Views / {}", list.label()),
         Scope::Client(c) => format!("Cabinet / {}", client(*c)),
         Scope::Year { client: c, year } => {
             format!("Cabinet / {} / {}", client(*c), year_label(*year))
@@ -886,39 +893,38 @@ fn grid(ui: &mut egui::Ui, b: &mut Browse, conn: &Connection) {
         b.notice = None;
     }
     ui.horizontal(|ui| {
-        let new = egui::Button::new(RichText::new("+ New client").color(egui::Color32::WHITE))
-            .fill(theme::ACCENT_DEFAULT);
-        if ui.add(new).clicked() {
+        if ui.add(widgets::primary_button("+ New client")).clicked() {
             b.new_client = Some(NewClientDialog::new(folderless_selected(b)));
         }
         if ui.button("Import clients CSV…").clicked() {
-            b.import = Some(ImportDialog::default());
+            let known = b
+                .snap
+                .clients
+                .iter()
+                .filter_map(|c| Some((c.ext_id.clone(), uuid::Uuid::parse_str(&c.id).ok()?)))
+                .collect();
+            b.import = Some(ImportDialog::new(known));
         }
         ui.separator();
         let rename = ui
             .add_enabled(!b.selected.is_empty(), egui::Button::new("Rename…"))
             .on_disabled_hover_text("Select the documents to rename first.");
         if rename.clicked() {
-            let ids = b
-                .selected
-                .iter()
-                .map(|&i| b.snap.docs[i].id.clone())
-                .collect();
-            b.rename = Some(RenameDialog::new(ids));
+            b.rename = Some(RenameDialog::new(b.selected_ids()));
         }
-        let ids: Vec<String> = b
-            .selected
-            .iter()
-            .map(|&i| b.snap.docs[i].id.clone())
-            .collect();
-        let all_pinned = !ids.is_empty() && ids.iter().all(|i| b.prefs.pinned.contains(i));
+        let pinned: HashSet<&str> = b.prefs.pinned.iter().map(String::as_str).collect();
+        let all_pinned = !b.selected.is_empty()
+            && b.selected
+                .iter()
+                .all(|&i| pinned.contains(b.snap.docs[i].id.as_str()));
         let pin = ui
             .add_enabled(
-                !ids.is_empty(),
+                !b.selected.is_empty(),
                 egui::Button::new(if all_pinned { "Unpin" } else { "Pin" }),
             )
             .on_hover_text("Pinned documents are listed under Views on this PC.");
         if pin.clicked() {
+            let ids = b.selected_ids();
             b.prefs.toggle_pins(&ids);
             b.prefs_changed();
         }
@@ -1025,7 +1031,7 @@ fn grid(ui: &mut egui::Ui, b: &mut Browse, conn: &Connection) {
                 row.col(|ui| {
                     let mut t = RichText::new(d.name()).monospace();
                     if d.doc_type.is_none() {
-                        t = t.color(widgets::rgb(0xB7791F));
+                        t = t.color(theme::WARN);
                     }
                     ui.label(t);
                     if let Some(u) = &d.locked_by {
@@ -1105,10 +1111,14 @@ fn inspector(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env) {
     }
     if b.meta_form.for_selection != b.selected {
         let docs = b.selected_docs();
-        b.meta_form = MetaForm::for_docs(&b.selected, &docs);
+        b.meta_form = MetaForm::for_docs(&b.selected, &docs, &b.snap.doc_types);
     }
     if b.undo_tx.is_none() {
-        b.undo_tx = Some(vf_fs::docmeta::last_undoable(env.conn, env.device_id).map(|(t, _)| t));
+        b.undo_tx = Some(vf_core::tx::last_undoable(
+            env.conn,
+            env.device_id,
+            &vf_fs::docmeta::UNDOABLE,
+        ));
     }
     let mut undo = std::mem::take(&mut b.undo_requested);
     ui.horizontal(|ui| {
@@ -1129,7 +1139,7 @@ fn inspector(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env) {
         });
     });
     if undo && let Some(Some(tx)) = b.undo_tx.clone() {
-        match vf_fs::docmeta::undo(env.conn, env.root, &tx, env.device_id) {
+        match vf_fs::fileops::undo(env.conn, env.root, &tx, env.device_id) {
             Ok(()) => {
                 b.reload(env.conn);
                 b.notice = Some("Undid the last change.".into());
@@ -1144,22 +1154,11 @@ fn inspector(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env) {
         ui.label(RichText::new("Select documents to see their details.").color(theme::INK_MUTED));
         return;
     }
-    let doc_types = b.snap.doc_types.clone();
-    let mut apply = false;
-    {
-        let docs: Vec<&DocRow> = b.selected.iter().map(|&i| &b.snap.docs[i]).collect();
-        meta_editor::fields(ui, &mut b.meta_form, &docs, &doc_types);
-        ui.add_space(10.0);
-        let edit = b.meta_form.to_edit();
-        let n = docs.len();
-        let go = egui::Button::new(
-            RichText::new(format!("Apply to {n} (one transaction)")).color(egui::Color32::WHITE),
-        )
-        .fill(theme::ACCENT_DEFAULT);
-        if ui.add_enabled(!edit.is_empty(), go).clicked() {
-            apply = true;
-        }
-    }
+    meta_editor::fields(ui, &mut b.meta_form, &b.snap.doc_types);
+    ui.add_space(10.0);
+    let can_apply = !b.meta_form.to_edit().is_empty();
+    let go = widgets::primary_button(format!("Apply to {} (one transaction)", b.selected.len()));
+    let apply = ui.add_enabled(can_apply, go).clicked();
     if apply {
         let ids: Vec<String> = b
             .selected
@@ -1217,6 +1216,7 @@ fn inspector(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env) {
 
 #[cfg(test)]
 mod tests {
+    use crate::ui::test_util::{click, type_into};
     use std::time::{Duration, Instant};
 
     use super::*;
@@ -1309,11 +1309,6 @@ mod tests {
         crate::ui::theme::install(&h.ctx);
         h.run();
         h
-    }
-
-    fn click(h: &mut Harness<'static, State>, label: &str) {
-        h.get_by_role_and_label(Role::Button, label).click();
-        h.run();
     }
 
     #[test]
@@ -1444,13 +1439,6 @@ mod tests {
                 .collect();
         assert_eq!(sel, [id]);
         assert_eq!(s.b.snap.docs.len(), 7);
-    }
-
-    fn type_into(h: &mut Harness<'static, State>, label: &str, text: &str) {
-        h.get_by_label(label).click();
-        h.step();
-        h.get_by_label(label).type_text(text);
-        h.step();
     }
 
     /// P01 step 3: `+ New client` previews the template folders, then creates them.

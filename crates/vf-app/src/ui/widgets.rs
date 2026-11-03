@@ -1,6 +1,7 @@
 //! Small shared widgets (UI_SPEC "egui mapping notes": implement once, reuse everywhere).
 
 use egui::{Color32, CornerRadius, RichText};
+use vf_fs::docmeta::STATUSES;
 
 /// A rounded status pill.
 pub fn pill(ui: &mut egui::Ui, text: &str, bg: Color32, fg: Color32) -> egui::Response {
@@ -12,14 +13,89 @@ pub fn pill(ui: &mut egui::Ui, text: &str, bg: Color32, fg: Color32) -> egui::Re
         .response
 }
 
-/// Document status: catalog value → (label, bg, fg) per UI_SPEC status pills.
+/// Document status: catalog value → (label, bg, fg). Labels come from
+/// `vf_fs::docmeta::STATUSES`; colors are UI_SPEC's status pills.
 pub fn status_style(status: &str) -> (&'static str, Color32, Color32) {
-    match status {
-        "in_work" => ("In work", rgb(0xFBEFD5), rgb(0x7A4F07)),
-        "final" => ("Final", rgb(0xDDF2E4), rgb(0x1D5C38)),
-        "delivered" => ("Delivered", rgb(0xE6EEF9), rgb(0x1F56A8)),
-        _ => ("Received", rgb(0xEEF0F3), rgb(0x3F4753)),
-    }
+    let label = label_of(&STATUSES, Some(status), "Received");
+    let (bg, fg) = match status {
+        "in_work" => (rgb(0xFBEFD5), rgb(0x7A4F07)),
+        "final" => (rgb(0xDDF2E4), rgb(0x1D5C38)),
+        "delivered" => (rgb(0xE6EEF9), rgb(0x1F56A8)),
+        _ => (rgb(0xEEF0F3), rgb(0x3F4753)),
+    };
+    (label, bg, fg)
+}
+
+/// Sort order of a status: its place in `STATUSES` (unknown values last).
+pub fn status_rank(status: &str) -> usize {
+    STATUSES
+        .iter()
+        .position(|(k, _)| *k == status)
+        .unwrap_or(STATUSES.len())
+}
+
+/// The label for `key` in a `(key, label)` table, or `none`.
+pub fn label_of(
+    table: &[(&str, &'static str)],
+    key: Option<&str>,
+    none: &'static str,
+) -> &'static str {
+    key.and_then(|k| table.iter().find(|(kk, _)| *kk == k))
+        .map(|(_, l)| *l)
+        .unwrap_or(none)
+}
+
+/// A tax year for display; `None` is a permanent file.
+pub fn year_label(y: Option<i32>) -> String {
+    y.map(|y| y.to_string())
+        .unwrap_or_else(|| "Permanent".into())
+}
+
+/// Small muted text: field captions, column headers, hints (UI_SPEC "labels 11px").
+pub fn caption(text: impl Into<String>) -> RichText {
+    RichText::new(text)
+        .small()
+        .color(crate::ui::theme::INK_MUTED)
+}
+
+/// The accent-filled primary button.
+pub fn primary_button(text: impl Into<String>) -> egui::Button<'static> {
+    egui::Button::new(RichText::new(text).color(Color32::WHITE))
+        .fill(crate::ui::theme::ACCENT_DEFAULT)
+}
+
+/// A fixed-size scrolling body for a modal. A modal that sizes itself to its content re-centers
+/// over several frames and moves its buttons from under the pointer, so dialog bodies whose
+/// content changes (previews, messages) must not change the modal's size.
+pub fn fixed_body<R>(
+    ui: &mut egui::Ui,
+    id: &str,
+    height: f32,
+    add: impl FnOnce(&mut egui::Ui) -> R,
+) -> R {
+    egui::ScrollArea::vertical()
+        .id_salt(id)
+        .min_scrolled_height(height)
+        .max_height(height)
+        .auto_shrink([false, false])
+        .show(ui, add)
+        .inner
+}
+
+/// A fixed-height error line for a modal (empty when there is no message), for the same reason
+/// as [`fixed_body`].
+pub fn message_line(ui: &mut egui::Ui, msg: Option<&str>) {
+    ui.add_sized(
+        [ui.available_width(), 36.0],
+        egui::Label::new(RichText::new(msg.unwrap_or("")).color(crate::ui::wizard::ERROR)).wrap(),
+    );
+}
+
+/// What a modal dialog did this frame.
+pub enum DialogOutcome<T> {
+    Open,
+    Cancelled,
+    Done(T),
 }
 
 pub fn status_pill(ui: &mut egui::Ui, status: &str) -> egui::Response {

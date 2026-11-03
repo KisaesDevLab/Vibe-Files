@@ -121,16 +121,15 @@ pub fn load(root: &Path) -> Result<Option<Vec<DocType>>, String> {
 /// Temp file + rename. Checks the list first.
 pub fn save(root: &Path, types: &[DocType]) -> Result<(), String> {
     check(types)?;
-    let p = path(root);
-    let tmp = p.with_extension("json.tmp");
     let f = FileV1 {
         version: 1,
         types: types.to_vec(),
     };
-    std::fs::create_dir_all(master_dir(root)).map_err(|e| e.to_string())?;
-    std::fs::write(&tmp, serde_json::to_vec_pretty(&f).expect("serializes"))
-        .and_then(|()| std::fs::rename(&tmp, &p))
-        .map_err(|e| format!("saving {FILE}: {e}"))
+    crate::cabinet::write_replace(
+        &path(root),
+        &serde_json::to_vec_pretty(&f).expect("serializes"),
+    )
+    .map_err(|e| format!("saving {FILE}: {e}"))
 }
 
 /// Writes the seeded list when the cabinet has none. Returns whether it did.
@@ -265,10 +264,7 @@ pub fn sync(
     for s in stmts {
         tx = tx.catalog(s);
     }
-    let actor = Actor {
-        user: None,
-        device_id: device_id.into(),
-    };
+    let actor = Actor::device(device_id);
     tx.commit(conn, &mut NoFileOps, &actor)
         .map_err(|e| e.to_string())?;
     Ok(types.len())

@@ -158,11 +158,6 @@ fn rel(root: &Path, p: &Path) -> String {
         .replace('\\', "/")
 }
 
-/// Same rule as Filer's root scan (X28): `_x`, `.x`, `~x` are not client folders.
-fn skipped(name: &str) -> bool {
-    name.starts_with(['_', '.', '~'])
-}
-
 /// Files under `dir`, skipping `_Vibe` folders and Filer's partial-copy temp files.
 fn files_under(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), RebuildError> {
     let mut entries: Vec<_> = std::fs::read_dir(dir)
@@ -232,14 +227,8 @@ fn scan_folders(
     root: &Path,
     rep: &mut RebuildReport,
 ) -> Result<(Vec<Bound>, Vec<(PathBuf, Option<String>)>), RebuildError> {
-    let mut tops: Vec<_> = std::fs::read_dir(root)
-        .map_err(|e| RebuildError::Io(format!("cannot read {}: {e}", root.display())))?
-        .filter_map(|e| e.ok())
-        .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
-        .filter(|e| !skipped(&e.file_name().to_string_lossy()))
-        .map(|e| e.path())
-        .collect();
-    tops.sort();
+    let tops = cabinet::client_folders(root)
+        .map_err(|e| RebuildError::Io(format!("cannot read {}: {e}", root.display())))?;
     let mut bound: Vec<Bound> = Vec::new();
     let mut folders = Vec::with_capacity(tops.len());
     let mut seen_clients: HashSet<String> = HashSet::new();
@@ -465,10 +454,7 @@ pub fn sync_clients(
     for s in stmts {
         tx = tx.catalog(s);
     }
-    let actor = Actor {
-        user: None,
-        device_id: device_id.into(),
-    };
+    let actor = Actor::device(device_id);
     tx.commit(conn, &mut NoFileOps, &actor)?;
     Ok(rep)
 }
@@ -710,10 +696,7 @@ pub fn rebuild(
     for s in stmts {
         tx = tx.catalog(s);
     }
-    let actor = Actor {
-        user: None,
-        device_id: device_id.into(),
-    };
+    let actor = Actor::device(device_id);
     tx.commit(conn, &mut NoFileOps, &actor)?;
     let after_versions: i64 = conn.query_row("SELECT count(*) FROM version", [], |r| r.get(0))?;
     rep.versions_new = (after_versions - before_versions).max(0) as usize;

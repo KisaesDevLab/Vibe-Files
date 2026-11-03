@@ -15,10 +15,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use vf_core::audit::AuditEntry;
 use vf_core::db::Connection;
-use vf_core::tx::{Actor, FileOp, Stmt, Transaction};
+use vf_core::tx::{FileOp, Stmt, Transaction};
 
 use crate::cabinet::VIBE_DIR;
-use crate::fileops::FilerFileOps;
 
 pub const FILE: &str = "docmeta.jsonl";
 pub const LABEL: &str = "doc_meta_edit";
@@ -117,7 +116,7 @@ pub fn load(conn: &Connection, id: &str) -> Result<Meta, String> {
         )
         .map_err(|e| format!("document {id}: {e}"))?;
     let mut st = conn
-        .prepare("SELECT tag FROM document_tag WHERE doc_id = ?1 ORDER BY tag")
+        .prepare_cached("SELECT tag FROM document_tag WHERE doc_id = ?1 ORDER BY tag")
         .map_err(|e| e.to_string())?;
     m.tags = st
         .query_map([id], |r| r.get(0))
@@ -322,45 +321,12 @@ pub fn edit(
         },
         json!({ "documents": changed, "fields": fields }),
     ));
-    let mut fs = FilerFileOps::new(&[root]).map_err(|e| format!("cannot open the cabinet: {e}"))?;
-    let actor = Actor {
-        user: None,
-        device_id: device_id.into(),
-    };
-    let c = tx
-        .commit(conn, &mut fs, &actor)
-        .map_err(|e| e.to_string())?;
+    let c = crate::fileops::commit(conn, root, tx, device_id)?;
     Ok((c.tx_id, changed))
 }
 
-/// The newest Browse change (metadata edit or rename) by this device that is not undone yet:
-/// (tx id, label).
-pub fn last_undoable(conn: &Connection, device_id: &str) -> Option<(String, String)> {
-    conn.query_row(
-        "SELECT tx_id, label FROM undo_record
-         WHERE label IN (?1, ?3) AND device_id = ?2 AND undone = 0
-         ORDER BY ts DESC, rowid DESC LIMIT 1",
-        [LABEL, device_id, crate::rename::LABEL],
-        |r| Ok((r.get(0)?, r.get(1)?)),
-    )
-    .ok()
-}
-
-pub fn undo(
-    conn: &mut Connection,
-    root: &Path,
-    tx_id: &str,
-    device_id: &str,
-) -> Result<(), String> {
-    let mut fs = FilerFileOps::new(&[root]).map_err(|e| format!("cannot open the cabinet: {e}"))?;
-    let actor = Actor {
-        user: None,
-        device_id: device_id.into(),
-    };
-    vf_core::tx::undo(conn, &mut fs, &actor, tx_id)
-        .map(|_| ())
-        .map_err(|e| e.to_string())
-}
+/// Labels of the Browse changes "Undo last" offers (metadata edits and renames).
+pub const UNDOABLE: [&str; 2] = [LABEL, crate::rename::LABEL];
 
 /// Every `docmeta.jsonl` record of the cabinet, for rebuild: the latest per (cabinet path, hash)
 /// and per hash.
@@ -514,8 +480,11 @@ mod tests {
         let file = f.root.join("Acme LLC (1001)/_Vibe/docmeta.jsonl");
         assert_eq!(std::fs::read_to_string(&file).unwrap().lines().count(), 200);
 
-        assert_eq!(last_undoable(&f.conn, "dev").unwrap().0, tx_id);
-        undo(&mut f.conn, &f.root, &tx_id, "dev").unwrap();
+        assert_eq!(
+            vf_core::tx::last_undoable(&f.conn, "dev", &UNDOABLE).unwrap(),
+            tx_id
+        );
+        crate::fileops::undo(&mut f.conn, &f.root, &tx_id, "dev").unwrap();
         assert_eq!(
             n(
                 &f.conn,
@@ -529,7 +498,7 @@ mod tests {
             400,
             "undo appends the old values"
         );
-        assert!(last_undoable(&f.conn, "dev").is_none());
+        assert!(vf_core::tx::last_undoable(&f.conn, "dev", &UNDOABLE).is_none());
         // And the file's last word is the old state.
         let ix = Index::load(&f.root, &["Acme LLC (1001)".into()]);
         let r = ix

@@ -72,6 +72,31 @@ impl FilerFileOps {
     }
 }
 
+/// Commits `tx` against the cabinet at `root` with Filer's file primitives, as this device.
+pub fn commit(
+    conn: &mut vf_core::db::Connection,
+    root: &Path,
+    tx: vf_core::tx::Transaction,
+    device_id: &str,
+) -> Result<vf_core::tx::Committed, String> {
+    let mut fs = FilerFileOps::new(&[root]).map_err(|e| format!("cannot open the cabinet: {e}"))?;
+    tx.commit(conn, &mut fs, &vf_core::tx::Actor::device(device_id))
+        .map_err(|e| e.to_string())
+}
+
+/// Undoes the transaction `tx_id` against the cabinet at `root`, as this device.
+pub fn undo(
+    conn: &mut vf_core::db::Connection,
+    root: &Path,
+    tx_id: &str,
+    device_id: &str,
+) -> Result<(), String> {
+    let mut fs = FilerFileOps::new(&[root]).map_err(|e| format!("cannot open the cabinet: {e}"))?;
+    vf_core::tx::undo(conn, &mut fs, &vf_core::tx::Actor::device(device_id), tx_id)
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
 /// Removes folders this op created, innermost first, only while they are empty.
 fn remove_empty(created: &[PathBuf]) {
     for d in created.iter().rev() {

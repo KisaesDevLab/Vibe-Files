@@ -7,7 +7,7 @@
 //! [`plan`] is the preview; [`commit`] renames in one Transaction (`FileOp::Move`, Filer
 //! `transfer`, never replacing a file), updates the catalog, and moves `docmeta.jsonl` keys.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use filer_core::clients::Client;
@@ -15,10 +15,9 @@ use filer_core::template::{self, Tokens};
 use serde_json::json;
 use vf_core::audit::AuditEntry;
 use vf_core::db::Connection;
-use vf_core::tx::{Actor, FileOp, Stmt, Transaction};
+use vf_core::tx::{FileOp, Stmt, Transaction};
 
 use crate::docmeta;
-use crate::fileops::FilerFileOps;
 
 pub const LABEL: &str = "doc_rename";
 pub const DEFAULT_TEMPLATE: &str = "{Rest}.{Ext}";
@@ -29,15 +28,15 @@ pub struct Row {
     pub doc_id: String,
     /// Cabinet-relative, forward slashes.
     pub old_rel: String,
-    pub new_rel: Option<String>,
     pub outcome: Outcome,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Outcome {
-    Rename,
-    /// The name was taken; Filer's Keep both gives it a ` (2)` suffix.
-    KeepBoth,
+    /// Renamed to this cabinet-relative path.
+    Rename(String),
+    /// The name was taken; Filer's Keep both gives it this ` (2)` path.
+    KeepBoth(String),
     /// Already has this name.
     Same,
     /// Not renamed, with why.
@@ -45,8 +44,16 @@ pub enum Outcome {
 }
 
 impl Row {
+    /// The new cabinet-relative path, when this row renames.
+    pub fn new_rel(&self) -> Option<&str> {
+        match &self.outcome {
+            Outcome::Rename(p) | Outcome::KeepBoth(p) => Some(p),
+            Outcome::Same | Outcome::Skip(_) => None,
+        }
+    }
+
     pub fn renames(&self) -> bool {
-        matches!(self.outcome, Outcome::Rename | Outcome::KeepBoth)
+        self.new_rel().is_some()
     }
 }
 
@@ -75,78 +82,188 @@ pub fn check_template(t: &str, extra_tokens: &[String]) -> Result<(), String> {
 struct DocInfo {
     id: String,
     rel: String,
-    tax_year: Option<i32>,
-    doc_type: Option<String>,
     locked_by: Option<String>,
-    client: Option<Client>,
+    /// Every token except the template-independent ones are filled here, once.
+    tokens: Tokens,
 }
 
-fn doc_info(conn: &Connection, id: &str) -> Result<DocInfo, String> {
-    conn.query_row(
-        "SELECT d.id, d.rel_path, d.tax_year, t.name, l.user,
-                c.ext_id, c.id, c.name, c.extra
-         FROM document d
-         LEFT JOIN doc_type t ON t.id = d.doc_type_id
-         LEFT JOIN lock l ON l.doc_id = d.id
-         LEFT JOIN client c ON c.id = d.client_id
-         WHERE d.id = ?1 AND d.deleted_at IS NULL",
-        [id],
-        |r| {
-            let ext: Option<String> = r.get(5)?;
-            let client = match ext {
-                Some(ext) => {
-                    let extra: String = r.get(8)?;
-                    Some(Client {
-                        id: ext,
-                        uuid: uuid::Uuid::parse_str(&r.get::<_, String>(6)?).unwrap_or_default(),
-                        name: r.get(7)?,
-                        extra: serde_json::from_str(&extra).unwrap_or_default(),
+/// Everything a rename preview needs, read once when the dialog opens; [`Planner::plan`] then
+/// only renders names (it is re-run on every keystroke in the template box).
+pub struct Planner {
+    docs: Vec<DocInfo>,
+    /// CSV columns of the documents' clients (allowed tokens).
+    extras: Vec<String>,
+    /// Lower-case file names per cabinet-relative folder, as on disk now.
+    on_disk: HashMap<String, HashSet<String>>,
+}
+
+impl Planner {
+    pub fn load(
+        conn: &Connection,
+        root: &Path,
+        ids: &[String],
+        current_year: i32,
+    ) -> Result<Self, String> {
+        let re = filer_core::parse::filename_regex(filer_core::parse::DEFAULT_ID_PATTERN)
+            .expect("Filer's default ID pattern compiles");
+        let mut st = conn
+            .prepare_cached(
+                "SELECT d.id, d.rel_path, d.tax_year, t.name, l.user,
+                        c.ext_id, c.id, c.name, c.extra
+                 FROM document d
+                 LEFT JOIN doc_type t ON t.id = d.doc_type_id
+                 LEFT JOIN lock l ON l.doc_id = d.id
+                 LEFT JOIN client c ON c.id = d.client_id
+                 WHERE d.id = ?1 AND d.deleted_at IS NULL",
+            )
+            .map_err(|e| e.to_string())?;
+        // Client tokens are the same for every document of a client: parse `extra` once.
+        let mut clients: HashMap<String, Tokens> = HashMap::new();
+        let mut extras = std::collections::BTreeSet::new();
+        let mut docs = Vec::with_capacity(ids.len());
+        for id in ids {
+            type Raw = (
+                String,
+                String,
+                Option<i32>,
+                Option<String>,
+                Option<String>,
+                Option<String>,
+                Option<String>,
+                Option<String>,
+                Option<String>,
+            );
+            let r: Raw = st
+                .query_row([id], |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                        r.get(5)?,
+                        r.get(6)?,
+                        r.get(7)?,
+                        r.get(8)?,
+                    ))
+                })
+                .map_err(|e| format!("document {id}: {e}"))?;
+            let (id, rel, year, doc_type, locked_by, ext, client_id, name, extra) = r;
+            let mut tokens = match (ext, client_id, name) {
+                (Some(ext), Some(cid), Some(name)) => clients
+                    .entry(cid.clone())
+                    .or_insert_with(|| {
+                        let c = Client {
+                            id: ext,
+                            uuid: uuid::Uuid::parse_str(&cid).unwrap_or_default(),
+                            name,
+                            extra: extra
+                                .and_then(|e| serde_json::from_str(&e).ok())
+                                .unwrap_or_default(),
+                        };
+                        extras.extend(c.extra.keys().cloned());
+                        template::client_tokens(&c)
                     })
-                }
-                None => None,
+                    .clone(),
+                _ => Tokens::new(),
             };
-            Ok(DocInfo {
-                id: r.get(0)?,
-                rel: r.get(1)?,
-                tax_year: r.get(2)?,
-                doc_type: r.get(3)?,
-                locked_by: r.get(4)?,
-                client,
-            })
-        },
-    )
-    .map_err(|e| format!("document {id}: {e}"))
+            if let Some(y) = year {
+                tokens.insert("Year".into(), y.to_string());
+            }
+            if let Some(dt) = doc_type {
+                tokens.insert("DocType".into(), dt);
+            }
+            // The tokens Filer's rule engine gives a file name.
+            let file = rel.rsplit('/').next().unwrap_or(&rel);
+            let parsed = filer_core::parse::parse_filename(file, &re, current_year);
+            tokens.insert("Rest".into(), parsed.rest);
+            tokens.insert("Original".into(), parsed.stem);
+            tokens.insert("Ext".into(), parsed.ext);
+            docs.push(DocInfo {
+                id,
+                rel,
+                locked_by,
+                tokens,
+            });
+        }
+        let mut on_disk: HashMap<String, HashSet<String>> = HashMap::new();
+        for d in &docs {
+            let dir = d.rel.rsplit_once('/').map(|(d, _)| d).unwrap_or("");
+            on_disk.entry(dir.to_owned()).or_insert_with(|| {
+                std::fs::read_dir(root.join(dir))
+                    .map(|rd| {
+                        rd.filter_map(|e| e.ok())
+                            .map(|e| e.file_name().to_string_lossy().to_lowercase())
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            });
+        }
+        Ok(Planner {
+            docs,
+            extras: extras.into_iter().collect(),
+            on_disk,
+        })
+    }
+
+    /// The preview: what each document would be called with `tpl`.
+    pub fn plan(&self, root: &Path, tpl: &str) -> Result<Vec<Row>, String> {
+        check_template(tpl, &self.extras)?;
+        // Names taken in this batch (lower-case cabinet paths): renamed-to paths, and the paths
+        // of documents that keep their name.
+        let mut claimed: HashSet<String> = HashSet::new();
+        let mut rows = Vec::with_capacity(self.docs.len());
+        for d in &self.docs {
+            let outcome = self.plan_one(root, d, tpl, &claimed);
+            let keeps = match &outcome {
+                Outcome::Rename(p) | Outcome::KeepBoth(p) => p,
+                Outcome::Same | Outcome::Skip(_) => &d.rel,
+            };
+            claimed.insert(keeps.to_lowercase());
+            rows.push(Row {
+                doc_id: d.id.clone(),
+                old_rel: d.rel.clone(),
+                outcome,
+            });
+        }
+        Ok(rows)
+    }
+
+    fn plan_one(&self, root: &Path, d: &DocInfo, tpl: &str, claimed: &HashSet<String>) -> Outcome {
+        let (dir, old_name) = d.rel.rsplit_once('/').unwrap_or(("", &d.rel));
+        if let Some(u) = &d.locked_by {
+            return Outcome::Skip(format!("checked out by {u}"));
+        }
+        let name = match template::render_segment(tpl, &d.tokens) {
+            Ok(n) => n,
+            Err(e) => return Outcome::Skip(e.to_string()),
+        };
+        if name == old_name {
+            return Outcome::Same;
+        }
+        if name.eq_ignore_ascii_case(old_name) {
+            return Outcome::Skip("only the letter case changes; rename it in Explorer".into());
+        }
+        let on_disk = self.on_disk.get(dir);
+        let taken = |n: &str| {
+            claimed.contains(&join(dir, n).to_lowercase())
+                || on_disk.is_some_and(|s| s.contains(&n.to_lowercase()))
+        };
+        let free = free_name(&name, taken);
+        let new_rel = join(dir, &free);
+        if let Err(e) = template::checked_join(root, Path::new(&new_rel)) {
+            return Outcome::Skip(e.to_string());
+        }
+        if free == name {
+            Outcome::Rename(new_rel)
+        } else {
+            Outcome::KeepBoth(new_rel)
+        }
+    }
 }
 
-/// The tokens Filer's rule engine would give this document.
-fn tokens_for(d: &DocInfo, current_year: i32) -> Tokens {
-    let name = d.rel.rsplit('/').next().unwrap_or(&d.rel);
-    let re = filer_core::parse::filename_regex(filer_core::parse::DEFAULT_ID_PATTERN)
-        .expect("Filer's default ID pattern compiles");
-    let parsed = filer_core::parse::parse_filename(name, &re, current_year);
-    let mut t = match &d.client {
-        Some(c) => template::client_tokens(c),
-        None => Tokens::new(),
-    };
-    if let Some(y) = d.tax_year {
-        t.insert("Year".into(), y.to_string());
-    }
-    if let Some(dt) = &d.doc_type {
-        t.insert("DocType".into(), dt.clone());
-    }
-    t.insert("Rest".into(), parsed.rest);
-    t.insert("Original".into(), parsed.stem);
-    t.insert("Ext".into(), parsed.ext);
-    t
-}
-
-/// `name` in `dir`, or Filer's ` (2)`, ` (3)`… form (as `commit::free_path`), avoiding files on
-/// disk and names this batch already claimed (lower-case: Windows names ignore case).
-fn free_name(root: &Path, dir: &str, name: &str, claimed: &HashSet<String>) -> String {
-    let taken = |n: &str| {
-        let rel = join(dir, n);
-        claimed.contains(&rel.to_lowercase()) || root.join(&rel).exists()
-    };
+/// `name`, or Filer's ` (2)`, ` (3)`… form (as `commit::free_path`) when `taken`.
+fn free_name(name: &str, taken: impl Fn(&str) -> bool) -> String {
     if !taken(name) {
         return name.to_owned();
     }
@@ -171,7 +288,7 @@ fn join(dir: &str, name: &str) -> String {
     }
 }
 
-/// The preview: what each document would be called.
+/// Preview in one call (tests, small batches): [`Planner::load`] then [`Planner::plan`].
 pub fn plan(
     conn: &Connection,
     root: &Path,
@@ -179,80 +296,7 @@ pub fn plan(
     tpl: &str,
     current_year: i32,
 ) -> Result<Vec<Row>, String> {
-    let infos: Vec<DocInfo> = ids
-        .iter()
-        .map(|id| doc_info(conn, id))
-        .collect::<Result<_, _>>()?;
-    let extras: Vec<String> = infos
-        .iter()
-        .filter_map(|d| d.client.as_ref())
-        .flat_map(|c| c.extra.keys().cloned())
-        .collect::<std::collections::BTreeSet<_>>()
-        .into_iter()
-        .collect();
-    check_template(tpl, &extras)?;
-    // Names leaving the folder are free for others in the same batch only after the move; keep
-    // it simple and treat every current name of the batch as taken except a row's own.
-    let mut claimed: HashSet<String> = HashSet::new();
-    let mut rows = Vec::with_capacity(infos.len());
-    for d in &infos {
-        let (dir, old_name) = d.rel.rsplit_once('/').unwrap_or(("", &d.rel));
-        let skip = |why: String| Row {
-            doc_id: d.id.clone(),
-            old_rel: d.rel.clone(),
-            new_rel: None,
-            outcome: Outcome::Skip(why),
-        };
-        if let Some(u) = &d.locked_by {
-            rows.push(skip(format!("checked out by {u}")));
-            claimed.insert(d.rel.to_lowercase());
-            continue;
-        }
-        let name = match template::render_segment(tpl, &tokens_for(d, current_year)) {
-            Ok(n) => n,
-            Err(e) => {
-                rows.push(skip(e.to_string()));
-                claimed.insert(d.rel.to_lowercase());
-                continue;
-            }
-        };
-        if name == old_name {
-            rows.push(Row {
-                doc_id: d.id.clone(),
-                old_rel: d.rel.clone(),
-                new_rel: Some(d.rel.clone()),
-                outcome: Outcome::Same,
-            });
-            claimed.insert(d.rel.to_lowercase());
-            continue;
-        }
-        if name.eq_ignore_ascii_case(old_name) {
-            rows.push(skip(
-                "only the letter case changes; rename it in Explorer".into(),
-            ));
-            claimed.insert(d.rel.to_lowercase());
-            continue;
-        }
-        let free = free_name(root, dir, &name, &claimed);
-        let new_rel = join(dir, &free);
-        if let Err(e) = template::checked_join(root, Path::new(&new_rel)) {
-            rows.push(skip(e.to_string()));
-            claimed.insert(d.rel.to_lowercase());
-            continue;
-        }
-        claimed.insert(new_rel.to_lowercase());
-        rows.push(Row {
-            doc_id: d.id.clone(),
-            old_rel: d.rel.clone(),
-            new_rel: Some(new_rel),
-            outcome: if free == name {
-                Outcome::Rename
-            } else {
-                Outcome::KeepBoth
-            },
-        });
-    }
-    Ok(rows)
+    Planner::load(conn, root, ids, current_year)?.plan(root, tpl)
 }
 
 /// Renames the rows that rename, in one Transaction. Returns (transaction id, files renamed).
@@ -270,13 +314,26 @@ pub fn commit(
     let mut tx = Transaction::new(LABEL);
     // docmeta keys: append a record at the new path for documents that have one.
     let mut meta_lines: BTreeMap<PathBuf, (Vec<String>, Vec<String>)> = BTreeMap::new();
-    let mut indexes: BTreeMap<String, docmeta::Index> = BTreeMap::new();
-    for r in &go {
-        let new_rel = r.new_rel.as_ref().expect("renames have a new name");
+    let metas: Vec<docmeta::Meta> = go
+        .iter()
+        .map(|r| docmeta::load(conn, &r.doc_id))
+        .collect::<Result<_, _>>()?;
+    let folders: Vec<String> = metas
+        .iter()
+        .filter_map(|m| m.folder_rel.clone())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let ix = docmeta::Index::load(root, &folders);
+    for (r, m) in go.iter().zip(&metas) {
+        let new_rel = r
+            .new_rel()
+            .expect("filtered to rows that rename")
+            .to_owned();
         tx = tx
             .file(FileOp::Move {
                 src: root.join(&r.old_rel),
-                dst: root.join(new_rel),
+                dst: root.join(&new_rel),
             })
             .catalog(Stmt::new(
                 "UPDATE document SET rel_path = ?2, device_id = ?3, updated_at = ?4, rev = rev + 1
@@ -298,25 +355,13 @@ pub fn commit(
                     now.clone().into(),
                 ],
             ));
-        let m = docmeta::load(conn, &r.doc_id)?;
-        let folder = m.folder_rel.clone().unwrap_or_default();
-        let ix = indexes.entry(folder.clone()).or_insert_with(|| {
-            docmeta::Index::load(
-                root,
-                &if folder.is_empty() {
-                    vec![]
-                } else {
-                    vec![folder.clone()]
-                },
-            )
-        });
         if ix.get(&r.old_rel, &m.hash).is_some() {
             let moved = docmeta::Meta {
                 rel_path: new_rel.clone(),
                 ..m.clone()
             };
             let (file, line) = docmeta::record_line(root, &moved, &now, device_id);
-            let (_, back) = docmeta::record_line(root, &m, &now, device_id);
+            let (_, back) = docmeta::record_line(root, m, &now, device_id);
             let e = meta_lines.entry(file).or_default();
             e.0.push(line);
             e.1.push(back);
@@ -338,14 +383,7 @@ pub fn commit(
         },
         json!({ "documents": go.len() }),
     ));
-    let mut fs = FilerFileOps::new(&[root]).map_err(|e| format!("cannot open the cabinet: {e}"))?;
-    let actor = Actor {
-        user: None,
-        device_id: device_id.into(),
-    };
-    let c = tx
-        .commit(conn, &mut fs, &actor)
-        .map_err(|e| e.to_string())?;
+    let c = crate::fileops::commit(conn, root, tx, device_id)?;
     Ok((c.tx_id, go.len()))
 }
 
@@ -425,7 +463,10 @@ mod tests {
             2026,
         )
         .unwrap();
-        let new: Vec<_> = rows.iter().map(|r| r.new_rel.clone().unwrap()).collect();
+        let new: Vec<_> = rows
+            .iter()
+            .map(|r| r.new_rel().unwrap().to_owned())
+            .collect();
         assert_eq!(
             new,
             [
@@ -444,8 +485,7 @@ mod tests {
         .unwrap();
         assert!(
             rows[0]
-                .new_rel
-                .as_ref()
+                .new_rel()
                 .unwrap()
                 .ends_with("/KW Acme LLC_1001_W2 from employer.pdf")
         );
@@ -467,15 +507,9 @@ mod tests {
             .unwrap();
         let rows = plan(&f.conn, &f.root, &ids(3), "Taken {Year}.{Ext}", 2026).unwrap();
         // d0 and d1 both render "Taken 2025.pdf": the second keeps both.
-        assert_eq!(rows[0].outcome, Outcome::Rename);
-        assert_eq!(rows[1].outcome, Outcome::KeepBoth);
-        assert!(
-            rows[1]
-                .new_rel
-                .as_ref()
-                .unwrap()
-                .ends_with("Taken 2025 (2).pdf")
-        );
+        assert!(matches!(rows[0].outcome, Outcome::Rename(_)));
+        assert!(matches!(rows[1].outcome, Outcome::KeepBoth(_)));
+        assert!(rows[1].new_rel().unwrap().ends_with("Taken 2025 (2).pdf"));
         assert!(matches!(&rows[2].outcome, Outcome::Skip(why) if why.contains("{Year}")));
     }
 
@@ -522,12 +556,7 @@ mod tests {
             .unwrap();
         assert_eq!(audits, 1);
 
-        let mut fs = FilerFileOps::new(&[&f.root]).unwrap();
-        let actor = Actor {
-            user: None,
-            device_id: "dev".into(),
-        };
-        vf_core::tx::undo(&mut f.conn, &mut fs, &actor, &tx).unwrap();
+        crate::fileops::undo(&mut f.conn, &f.root, &tx, "dev").unwrap();
         assert_eq!(names(&f), before);
         let rel: String = f
             .conn

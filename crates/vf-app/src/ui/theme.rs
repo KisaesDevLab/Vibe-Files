@@ -14,6 +14,8 @@ pub const PANE: Color32 = Color32::WHITE;
 pub const FOOTER: Color32 = Color32::from_rgb(0xF4, 0xF6, 0xF9);
 pub const BORDER_PANE: Color32 = Color32::from_rgb(0xD5, 0xD9, 0xE0);
 pub const HEALTH_OK: Color32 = Color32::from_rgb(0x2E, 0x7D, 0x4F);
+/// Health "warn" dot / text that needs attention.
+pub const WARN: Color32 = Color32::from_rgb(0xB7, 0x79, 0x1F);
 
 pub fn install(ctx: &egui::Context) {
     ctx.set_fonts(fonts());

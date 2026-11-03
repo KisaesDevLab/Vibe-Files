@@ -5,11 +5,11 @@
 
 use std::collections::BTreeSet;
 
-use egui::{RichText, TextEdit};
+use egui::TextEdit;
 use vf_core::browse::DocRow;
 use vf_fs::docmeta::{MetaEdit, SOURCES, STATUSES, parse_tags};
 
-use crate::ui::theme;
+use crate::ui::widgets::{self, label_of, year_label};
 
 /// The fields being edited. `None` = keep each document's value.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -20,19 +20,54 @@ pub struct MetaForm {
     /// Tags as typed; applied when `tags_touched`.
     pub tags_text: String,
     pub tags_touched: bool,
+    /// What each field shows while kept (the value, or `Mixed (n)`), worked out once per
+    /// selection: doc type, tax year, status, source.
+    shown: [String; 4],
+    tags_mixed: bool,
+}
+
+/// One value when all agree, else `Mixed (n)`.
+fn summary<T: Ord>(vals: impl Iterator<Item = T>, label: impl Fn(&T) -> String) -> String {
+    let set: BTreeSet<T> = vals.collect();
+    match set.len() {
+        0 => "—".into(),
+        1 => label(set.iter().next().expect("one")),
+        n => format!("Mixed ({n})"),
+    }
 }
 
 impl MetaForm {
-    pub fn for_docs(sel: &BTreeSet<usize>, docs: &[&DocRow]) -> Self {
-        let tags: BTreeSet<Vec<String>> = docs.iter().map(|d| d.tags.clone()).collect();
+    pub fn for_docs(
+        sel: &BTreeSet<usize>,
+        docs: &[&DocRow],
+        doc_types: &[(String, String)],
+    ) -> Self {
+        let tags: BTreeSet<&Vec<String>> = docs.iter().map(|d| &d.tags).collect();
         MetaForm {
             for_selection: sel.clone(),
             edit: MetaEdit::default(),
             tags_text: match tags.len() {
-                1 => tags.into_iter().next().unwrap_or_default().join(", "),
+                1 => tags
+                    .into_iter()
+                    .next()
+                    .map(|t| t.join(", "))
+                    .unwrap_or_default(),
                 _ => String::new(),
             },
             tags_touched: false,
+            shown: [
+                summary(docs.iter().map(|d| d.doc_type_id.as_deref()), |t| {
+                    type_name(doc_types, *t)
+                }),
+                summary(docs.iter().map(|d| d.tax_year), |y| year_label(*y)),
+                summary(docs.iter().map(|d| d.status.as_str()), |s| {
+                    label_of(&STATUSES, Some(s), "—").to_owned()
+                }),
+                summary(docs.iter().map(|d| d.source.as_deref()), |s| {
+                    label_of(&SOURCES, *s, "—").to_owned()
+                }),
+            ],
+            tags_mixed: docs.iter().map(|d| &d.tags).collect::<BTreeSet<_>>().len() > 1,
         }
     }
 
@@ -46,188 +81,120 @@ impl MetaForm {
     }
 }
 
-/// One value when all agree, else `Mixed (n)`.
-fn summary<T: Ord + Clone>(vals: impl Iterator<Item = T>, label: impl Fn(&T) -> String) -> String {
-    let set: BTreeSet<T> = vals.collect();
-    match set.len() {
-        0 => "—".into(),
-        1 => label(set.iter().next().expect("one")),
-        n => format!("Mixed ({n})"),
-    }
-}
-
-fn year_label(y: Option<i32>) -> String {
-    y.map(|y| y.to_string())
-        .unwrap_or_else(|| "Permanent".into())
-}
-
-fn label_of(table: &[(&str, &'static str)], k: Option<&str>) -> String {
-    k.and_then(|k| table.iter().find(|(kk, _)| *kk == k))
-        .map(|(_, l)| (*l).to_owned())
+fn type_name(doc_types: &[(String, String)], id: Option<&str>) -> String {
+    id.and_then(|id| doc_types.iter().find(|(i, _)| i == id))
+        .map(|(_, n)| n.clone())
         .unwrap_or_else(|| "—".into())
 }
 
-/// Draws the four fields + tags. `doc_types`: (id, name) in list order.
-pub fn fields(
+/// A captioned dropdown for one field: "Keep" (shows `kept`, the current value or `Mixed (n)`),
+/// then `choices`. `slot` is the field of the edit (`None` = keep).
+fn keep_combo<T: PartialEq + Clone>(
     ui: &mut egui::Ui,
-    f: &mut MetaForm,
-    docs: &[&DocRow],
-    doc_types: &[(String, String)],
+    caption: &str,
+    width: f32,
+    kept: &str,
+    slot: &mut Option<T>,
+    choices: &[(T, String)],
 ) {
+    ui.vertical(|ui| {
+        let l = ui.label(widgets::caption(caption));
+        let shown = match slot {
+            Some(v) => choices
+                .iter()
+                .find(|(c, _)| c == v)
+                .map(|(_, l)| l.clone())
+                .unwrap_or_default(),
+            None => kept.to_owned(),
+        };
+        egui::ComboBox::from_id_salt(caption)
+            .selected_text(shown)
+            .width(width)
+            .height(320.0)
+            .show_ui(ui, |ui| {
+                ui.selectable_value(slot, None, "Keep");
+                for (v, label) in choices {
+                    ui.selectable_value(slot, Some(v.clone()), label);
+                }
+            })
+            .response
+            .labelled_by(l.id);
+    });
+}
+
+/// Draws the four fields + tags. `doc_types`: (id, name) in list order.
+pub fn fields(ui: &mut egui::Ui, f: &mut MetaForm, doc_types: &[(String, String)]) {
     let this_year = chrono::Datelike::year(&chrono::Local::now());
-    let type_name = |id: &Option<String>| {
-        id.as_ref()
-            .and_then(|id| doc_types.iter().find(|(i, _)| i == id))
-            .map(|(_, n)| n.clone())
-            .unwrap_or_else(|| "—".into())
-    };
+    let types: Vec<(Option<String>, String)> = std::iter::once((None, "None".to_owned()))
+        .chain(
+            doc_types
+                .iter()
+                .map(|(id, n)| (Some(id.clone()), n.clone())),
+        )
+        .collect();
+    let years: Vec<(Option<i32>, String)> = std::iter::once((None, "Permanent".to_owned()))
+        .chain(
+            (this_year - 15..=this_year + 1)
+                .rev()
+                .map(|y| (Some(y), y.to_string())),
+        )
+        .collect();
+    let statuses: Vec<(String, String)> = STATUSES
+        .iter()
+        .map(|(k, l)| (k.to_string(), l.to_string()))
+        .collect();
+    let sources: Vec<(Option<String>, String)> = std::iter::once((None, "Not set".to_owned()))
+        .chain(
+            SOURCES
+                .iter()
+                .map(|(k, l)| (Some(k.to_string()), l.to_string())),
+        )
+        .collect();
     egui::Grid::new("meta-fields")
         .num_columns(2)
         .spacing([12.0, 10.0])
         .show(ui, |ui| {
-            // Doc type
-            ui.vertical(|ui| {
-                let l = ui.label(RichText::new("DOC TYPE").small().color(theme::INK_MUTED));
-                let shown = match &f.edit.doc_type {
-                    Some(t) => type_name(t),
-                    None => summary(docs.iter().map(|d| d.doc_type_id.clone()), |t| type_name(t)),
-                };
-                egui::ComboBox::from_id_salt("meta-doc-type")
-                    .selected_text(shown)
-                    .width(130.0)
-                    .height(320.0)
-                    .show_ui(ui, |ui| {
-                        if ui
-                            .selectable_label(f.edit.doc_type.is_none(), "Keep")
-                            .clicked()
-                        {
-                            f.edit.doc_type = None;
-                        }
-                        if ui
-                            .selectable_label(f.edit.doc_type == Some(None), "None")
-                            .clicked()
-                        {
-                            f.edit.doc_type = Some(None);
-                        }
-                        for (id, name) in doc_types {
-                            let on = f.edit.doc_type.as_ref() == Some(&Some(id.clone()));
-                            if ui.selectable_label(on, name).clicked() {
-                                f.edit.doc_type = Some(Some(id.clone()));
-                            }
-                        }
-                    })
-                    .response
-                    .labelled_by(l.id);
-            });
-            // Tax year
-            ui.vertical(|ui| {
-                let l = ui.label(RichText::new("TAX YEAR").small().color(theme::INK_MUTED));
-                let shown = match f.edit.tax_year {
-                    Some(y) => year_label(y),
-                    None => summary(docs.iter().map(|d| d.tax_year), |y| year_label(*y)),
-                };
-                egui::ComboBox::from_id_salt("meta-year")
-                    .selected_text(shown)
-                    .width(110.0)
-                    .show_ui(ui, |ui| {
-                        if ui
-                            .selectable_label(f.edit.tax_year.is_none(), "Keep")
-                            .clicked()
-                        {
-                            f.edit.tax_year = None;
-                        }
-                        if ui
-                            .selectable_label(f.edit.tax_year == Some(None), "Permanent")
-                            .clicked()
-                        {
-                            f.edit.tax_year = Some(None);
-                        }
-                        for y in (this_year - 15..=this_year + 1).rev() {
-                            if ui
-                                .selectable_label(f.edit.tax_year == Some(Some(y)), y.to_string())
-                                .clicked()
-                            {
-                                f.edit.tax_year = Some(Some(y));
-                            }
-                        }
-                    })
-                    .response
-                    .labelled_by(l.id);
-            });
+            keep_combo(
+                ui,
+                "DOC TYPE",
+                130.0,
+                &f.shown[0],
+                &mut f.edit.doc_type,
+                &types,
+            );
+            keep_combo(
+                ui,
+                "TAX YEAR",
+                110.0,
+                &f.shown[1],
+                &mut f.edit.tax_year,
+                &years,
+            );
             ui.end_row();
-            // Status
-            ui.vertical(|ui| {
-                let l = ui.label(RichText::new("STATUS").small().color(theme::INK_MUTED));
-                let shown = match &f.edit.status {
-                    Some(s) => label_of(&STATUSES, Some(s)),
-                    None => summary(docs.iter().map(|d| d.status.clone()), |s| {
-                        label_of(&STATUSES, Some(s))
-                    }),
-                };
-                egui::ComboBox::from_id_salt("meta-status")
-                    .selected_text(shown)
-                    .width(130.0)
-                    .show_ui(ui, |ui| {
-                        if ui
-                            .selectable_label(f.edit.status.is_none(), "Keep")
-                            .clicked()
-                        {
-                            f.edit.status = None;
-                        }
-                        for (k, lbl) in STATUSES {
-                            let on = f.edit.status.as_deref() == Some(k);
-                            if ui.selectable_label(on, lbl).clicked() {
-                                f.edit.status = Some(k.into());
-                            }
-                        }
-                    })
-                    .response
-                    .labelled_by(l.id);
-            });
-            // Source
-            ui.vertical(|ui| {
-                let l = ui.label(RichText::new("SOURCE").small().color(theme::INK_MUTED));
-                let shown = match &f.edit.source {
-                    Some(s) => label_of(&SOURCES, s.as_deref()),
-                    None => summary(docs.iter().map(|d| d.source.clone()), |s| {
-                        label_of(&SOURCES, s.as_deref())
-                    }),
-                };
-                egui::ComboBox::from_id_salt("meta-source")
-                    .selected_text(shown)
-                    .width(110.0)
-                    .show_ui(ui, |ui| {
-                        if ui
-                            .selectable_label(f.edit.source.is_none(), "Keep")
-                            .clicked()
-                        {
-                            f.edit.source = None;
-                        }
-                        if ui
-                            .selectable_label(f.edit.source == Some(None), "Not set")
-                            .clicked()
-                        {
-                            f.edit.source = Some(None);
-                        }
-                        for (k, lbl) in SOURCES {
-                            let on = f.edit.source.as_ref() == Some(&Some(k.to_string()));
-                            if ui.selectable_label(on, lbl).clicked() {
-                                f.edit.source = Some(Some(k.into()));
-                            }
-                        }
-                    })
-                    .response
-                    .labelled_by(l.id);
-            });
+            keep_combo(
+                ui,
+                "STATUS",
+                130.0,
+                &f.shown[2],
+                &mut f.edit.status,
+                &statuses,
+            );
+            keep_combo(
+                ui,
+                "SOURCE",
+                110.0,
+                &f.shown[3],
+                &mut f.edit.source,
+                &sources,
+            );
             ui.end_row();
         });
     ui.add_space(6.0);
-    let l = ui.label(RichText::new("TAGS").small().color(theme::INK_MUTED));
-    let mixed = docs.iter().map(|d| &d.tags).collect::<BTreeSet<_>>().len() > 1;
+    let l = ui.label(widgets::caption("TAGS"));
     let r = ui
         .add(
             TextEdit::singleline(&mut f.tags_text)
-                .hint_text(if mixed {
+                .hint_text(if f.tags_mixed {
                     "Mixed: typing here replaces every selected document's tags"
                 } else {
                     "Comma separated"

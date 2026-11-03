@@ -7,6 +7,7 @@ use egui::{RichText, TextEdit};
 use vf_fs::doctypes::{self, DocType, Edit};
 
 use crate::ui::browse::Env;
+use crate::ui::widgets;
 use crate::ui::{theme, wizard::ERROR};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -41,6 +42,23 @@ const NAV: &[(&str, &[&str])] = &[
     ("SECURITY", &["Keys & recovery", "Integrity sweep", "Trash"]),
 ];
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Editing {
+    Closed,
+    New,
+    /// The doc type id.
+    Existing(String),
+}
+
+impl Editing {
+    fn id(&self) -> Option<&str> {
+        match self {
+            Editing::Existing(id) => Some(id),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 struct Form {
     name: String,
@@ -55,9 +73,8 @@ pub struct Admin {
     usage: HashMap<String, i64>,
     /// Template folders below the client folder (`Income Tax/{Year}`, …) for the folder picker.
     folders: Vec<String>,
-    /// Selected type id, or `None` with `adding` for a new one.
-    pub selected: Option<String>,
-    pub adding: bool,
+    /// The editor above the table.
+    pub editing: Editing,
     form: Form,
     pub error: Option<String>,
     /// Set when the catalog changed; Browse re-reads before it next draws.
@@ -71,8 +88,7 @@ impl Admin {
             types: Vec::new(),
             usage: HashMap::new(),
             folders: Vec::new(),
-            selected: None,
-            adding: false,
+            editing: Editing::Closed,
             form: Form::default(),
             error: None,
             changed: false,
@@ -99,8 +115,8 @@ impl Admin {
         self.folders = filer_core::template::folder_templates(&tree);
     }
 
+    /// Opens the editor on `id`, or on a new doc type.
     fn select(&mut self, id: Option<String>) {
-        self.adding = id.is_none();
         self.form = id
             .as_ref()
             .and_then(|id| self.types.iter().find(|t| &t.id == id))
@@ -110,7 +126,10 @@ impl Admin {
                 visible: t.client_visible,
             })
             .unwrap_or_default();
-        self.selected = id;
+        self.editing = match id {
+            Some(id) => Editing::Existing(id),
+            None => Editing::New,
+        };
         self.error = None;
     }
 
@@ -167,15 +186,11 @@ fn nav(ui: &mut egui::Ui, a: &mut Admin) {
 fn doc_types(ui: &mut egui::Ui, a: &mut Admin, env: &mut Env) {
     ui.horizontal(|ui| {
         ui.label(RichText::new("Doc types").strong().size(16.0));
-        ui.label(
-            RichText::new("Kept in _Vibe\\doc_types.json and the catalog; rebuild restores it.")
-                .small()
-                .color(theme::INK_MUTED),
-        );
+        ui.label(widgets::caption(
+            "Kept in _Vibe\\doc_types.json and the catalog; rebuild restores it.",
+        ));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            let add = egui::Button::new(RichText::new("Add doc type").color(egui::Color32::WHITE))
-                .fill(theme::ACCENT_DEFAULT);
-            if ui.add(add).clicked() {
+            if ui.add(widgets::primary_button("Add doc type")).clicked() {
                 a.select(None);
             }
         });
@@ -183,7 +198,7 @@ fn doc_types(ui: &mut egui::Ui, a: &mut Admin, env: &mut Env) {
     ui.add_space(8.0);
 
     // Editor first so the table below can take the rest of the height.
-    if a.adding || a.selected.is_some() {
+    if a.editing != Editing::Closed {
         editor(ui, a, env);
         ui.add_space(8.0);
         ui.separator();
@@ -212,7 +227,7 @@ fn doc_types(ui: &mut egui::Ui, a: &mut Admin, env: &mut Env) {
                     ui.end_row();
                     let n = a.types.len();
                     for (i, t) in a.types.iter().enumerate() {
-                        let sel = a.selected.as_deref() == Some(t.id.as_str());
+                        let sel = a.editing.id() == Some(t.id.as_str());
                         if ui.selectable_label(sel, &t.name).clicked() {
                             pick = Some(t.id.clone());
                         }
@@ -255,7 +270,7 @@ fn order_button(ui: &mut egui::Ui, enabled: bool, text: &str, name: &str) -> boo
 
 fn editor(ui: &mut egui::Ui, a: &mut Admin, env: &mut Env) {
     ui.label(
-        RichText::new(if a.adding {
+        RichText::new(if a.editing == Editing::New {
             "New doc type"
         } else {
             "Edit doc type"
@@ -306,8 +321,8 @@ fn editor(ui: &mut egui::Ui, a: &mut Admin, env: &mut Env) {
         ui.label(RichText::new(e).color(theme::INK_MUTED));
     }
     let used = a
-        .selected
-        .as_ref()
+        .editing
+        .id()
         .and_then(|id| a.usage.get(id).copied())
         .unwrap_or(0);
     if let Some(e) = &a.error {
@@ -315,7 +330,7 @@ fn editor(ui: &mut egui::Ui, a: &mut Admin, env: &mut Env) {
     }
     ui.horizontal(|ui| {
         let ok = doctypes::check_fields(&a.form.name, &a.form.folder).is_ok();
-        if a.adding {
+        if a.editing == Editing::New {
             if ui.add_enabled(ok, egui::Button::new("Add")).clicked() {
                 let f = a.form.clone();
                 if a.run(
@@ -330,7 +345,7 @@ fn editor(ui: &mut egui::Ui, a: &mut Admin, env: &mut Env) {
                     a.select(id);
                 }
             }
-        } else if let Some(id) = a.selected.clone() {
+        } else if let Some(id) = a.editing.id().map(str::to_owned) {
             if ui
                 .add_enabled(ok, egui::Button::new("Save changes"))
                 .clicked()
@@ -339,7 +354,7 @@ fn editor(ui: &mut egui::Ui, a: &mut Admin, env: &mut Env) {
                 a.run(
                     env,
                     Edit::Update(DocType {
-                        id,
+                        id: id.clone(),
                         name: f.name,
                         default_folder: f.folder,
                         client_visible: f.visible,
@@ -354,14 +369,12 @@ fn editor(ui: &mut egui::Ui, a: &mut Admin, env: &mut Env) {
             } else {
                 remove
             };
-            if remove.clicked() && a.run(env, Edit::Remove(a.selected.clone().unwrap_or_default()))
-            {
-                a.selected = None;
+            if remove.clicked() && a.run(env, Edit::Remove(id)) {
+                a.editing = Editing::Closed;
             }
         }
         if ui.button("Close").clicked() {
-            a.selected = None;
-            a.adding = false;
+            a.editing = Editing::Closed;
             a.error = None;
         }
     });
@@ -369,7 +382,7 @@ fn editor(ui: &mut egui::Ui, a: &mut Admin, env: &mut Env) {
 
 #[cfg(test)]
 mod tests {
-    use egui::accesskit::Role;
+    use crate::ui::test_util::{click, type_into};
     use egui_kittest::kittest::Queryable;
     use egui_kittest::{Harness, HarnessBuilder};
     use vf_core::db::{CatalogKey, Connection, Storage};
@@ -424,18 +437,6 @@ mod tests {
         crate::ui::theme::install(&h.ctx);
         h.run();
         h
-    }
-
-    fn click(h: &mut Harness<'static, State>, label: &str) {
-        h.get_by_role_and_label(Role::Button, label).click();
-        h.run();
-    }
-
-    fn type_into(h: &mut Harness<'static, State>, label: &str, text: &str) {
-        h.get_by_label(label).click();
-        h.step();
-        h.get_by_label(label).type_text(text);
-        h.step();
     }
 
     fn live(h: &Harness<'static, State>, name: &str) -> i64 {

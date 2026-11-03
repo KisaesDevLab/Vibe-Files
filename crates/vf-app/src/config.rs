@@ -109,11 +109,11 @@ pub fn load(data: &Path) -> Result<Config> {
 
 /// Writes `config.toml` through a temp file so a crash never leaves it half-written.
 pub fn save(data: &Path, c: &Config) -> Result<()> {
-    let p = data.join(CONFIG_FILE);
-    let tmp = data.join(format!("{CONFIG_FILE}.tmp"));
-    std::fs::write(&tmp, toml::to_string(c).expect("serializes"))
-        .with_context(|| format!("writing {}", tmp.display()))?;
-    std::fs::rename(&tmp, &p).with_context(|| format!("writing {}", p.display()))
+    vf_fs::cabinet::write_replace(
+        &data.join(CONFIG_FILE),
+        toml::to_string(c).expect("serializes").as_bytes(),
+    )
+    .map_err(anyhow::Error::msg)
 }
 
 #[cfg(test)]

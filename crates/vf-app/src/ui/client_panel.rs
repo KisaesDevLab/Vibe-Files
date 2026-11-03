@@ -31,12 +31,6 @@ impl RelForm {
     }
 }
 
-fn entity_label(key: Option<&str>) -> &'static str {
-    key.and_then(|k| ENTITY_TYPES.iter().find(|(kk, _)| *kk == k))
-        .map(|(_, l)| *l)
-        .unwrap_or("Not set")
-}
-
 /// Writes the catalog after a master-file change and re-reads Browse.
 fn synced(b: &mut Browse, env: &mut Env, action: &str) {
     match vf_fs::rebuild::sync_clients(env.conn, env.root, env.device_id, action) {
@@ -81,7 +75,11 @@ pub fn show(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env, ci: usize) {
     let l = ui.label(RichText::new("ENTITY TYPE").small().color(theme::INK_MUTED));
     let mut et = c.entity_type.clone();
     egui::ComboBox::from_id_salt("client-entity-type")
-        .selected_text(entity_label(et.as_deref()))
+        .selected_text(crate::ui::widgets::label_of(
+            &ENTITY_TYPES,
+            et.as_deref(),
+            "Not set",
+        ))
         .show_ui(ui, |ui| {
             ui.selectable_value(&mut et, None, "Not set");
             for (k, lbl) in ENTITY_TYPES {

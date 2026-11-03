@@ -11,11 +11,10 @@ use serde_json::json;
 use uuid::Uuid;
 use vf_core::audit::AuditEntry;
 use vf_core::db::Connection;
-use vf_core::tx::{Actor, FileOp, Stmt, Transaction};
+use vf_core::tx::{FileOp, Stmt, Transaction};
 
 use crate::cabinet;
 use crate::clients::{self, master_dir};
-use crate::fileops::FilerFileOps;
 
 /// What the user asks for.
 #[derive(Debug, Clone, Default)]
@@ -210,14 +209,7 @@ pub fn create(
             None,
             json!({ "client": c.id, "folder": plan.folder_rel, "dirs": plan.dirs.len() }),
         ));
-    let mut fs = FilerFileOps::new(&[root]).map_err(|e| format!("cannot open the cabinet: {e}"))?;
-    let actor = Actor {
-        user: None,
-        device_id: device_id.into(),
-    };
-    tx.commit(conn, &mut fs, &actor)
-        .map(|c| c.tx_id)
-        .map_err(|e| e.to_string())
+    crate::fileops::commit(conn, root, tx, device_id).map(|c| c.tx_id)
 }
 
 #[cfg(test)]
@@ -352,12 +344,7 @@ mod tests {
         let mut c = cab();
         let p = plan(&c.conn, &c.root, &req("2001", "Baker Trust")).unwrap();
         let tx_id = create(&mut c.conn, &c.root, &p, "dev-1").unwrap();
-        let mut fs = FilerFileOps::new(&[&c.root]).unwrap();
-        let actor = Actor {
-            user: None,
-            device_id: "dev-1".into(),
-        };
-        vf_core::tx::undo(&mut c.conn, &mut fs, &actor, &tx_id).unwrap();
+        crate::fileops::undo(&mut c.conn, &c.root, &tx_id, "dev-1").unwrap();
         assert!(!p.folder.exists(), "folders the transaction made are gone");
         let folder: Option<String> = c
             .conn

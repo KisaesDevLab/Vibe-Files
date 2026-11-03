@@ -82,19 +82,45 @@ pub fn write_new(p: &Path, bytes: &[u8]) -> Result<(), String> {
         .map_err(|e| format!("cannot write {}: {e}", p.display()))
 }
 
+/// Replaces `p` with `bytes` through a temp file beside it, flushed to disk before the rename,
+/// so a crash leaves the old file or the new one, never half of one.
+pub fn write_replace(p: &Path, bytes: &[u8]) -> Result<(), String> {
+    use std::io::Write;
+    if let Some(dir) = p.parent() {
+        std::fs::create_dir_all(dir)
+            .map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+    }
+    let mut name = p.file_name().unwrap_or_default().to_os_string();
+    name.push(".tmp");
+    let tmp = p.with_file_name(name);
+    std::fs::File::create(&tmp)
+        .and_then(|mut f| f.write_all(bytes).and_then(|()| f.sync_all()))
+        .and_then(|()| std::fs::rename(&tmp, p))
+        .map_err(|e| format!("cannot write {}: {e}", p.display()))
+}
+
+/// Same rule as Filer's root scan (X28): `_x`, `.x`, `~x` are not client folders.
+pub fn is_skipped_name(name: &str) -> bool {
+    name.starts_with(['_', '.', '~'])
+}
+
+/// The folders directly under `root` that can be client folders, in name order.
+pub fn client_folders(root: &Path) -> std::io::Result<Vec<PathBuf>> {
+    let mut tops: Vec<PathBuf> = std::fs::read_dir(root)?
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+        .filter(|e| !is_skipped_name(&e.file_name().to_string_lossy()))
+        .map(|e| e.path())
+        .collect();
+    tops.sort();
+    Ok(tops)
+}
+
 /// The `firm_id` of the first readable client sentinel directly under `root` (folders in name
 /// order), so a cabinet created over an existing Filer Desktop tree keeps the firm id its
 /// sentinels already carry. `None` when there are no sentinels.
 pub fn discover_firm_id(root: &Path) -> Option<String> {
-    let mut tops: Vec<PathBuf> = std::fs::read_dir(root)
-        .ok()?
-        .filter_map(|e| e.ok())
-        .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
-        .filter(|e| !e.file_name().to_string_lossy().starts_with(['_', '.', '~']))
-        .map(|e| e.path())
-        .collect();
-    tops.sort();
-    tops.iter().find_map(|f| {
+    client_folders(root).ok()?.iter().find_map(|f| {
         filer_intake::sentinel::read_sentinel(f)
             .ok()
             .flatten()

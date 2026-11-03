@@ -226,30 +226,29 @@ impl eframe::App for VibeFilesApp {
         let ctx = ui.ctx().clone();
         let mut submit = None;
         match &mut self.screen {
-            Screen::Open(o) if self.tab == Tab::Browse => {
-                let o = &mut **o;
+            Screen::Open(o) if matches!(self.tab, Tab::Browse | Tab::Admin) => {
+                let OpenCabinet {
+                    opened,
+                    browse: tab_browse,
+                    admin: tab_admin,
+                } = &mut **o;
                 let mut env = browse::Env {
-                    conn: &mut o.opened.conn,
-                    root: &o.opened.root,
+                    conn: &mut opened.conn,
+                    root: &opened.root,
                     device_id: &self.config.device_id,
                 };
-                if o.admin
-                    .as_mut()
-                    .is_some_and(|a| std::mem::take(&mut a.changed))
-                {
-                    o.browse.reload(env.conn);
+                if self.tab == Tab::Admin {
+                    let a = tab_admin.get_or_insert_with(|| Admin::load(&env));
+                    admin::show(ui, a, &mut env);
+                } else {
+                    if tab_admin
+                        .as_mut()
+                        .is_some_and(|a| std::mem::take(&mut a.changed))
+                    {
+                        tab_browse.reload(env.conn);
+                    }
+                    browse::show(ui, tab_browse, &mut env);
                 }
-                browse::show(ui, &mut o.browse, &mut env)
-            }
-            Screen::Open(o) if self.tab == Tab::Admin => {
-                let o = &mut **o;
-                let mut env = browse::Env {
-                    conn: &mut o.opened.conn,
-                    root: &o.opened.root,
-                    device_id: &self.config.device_id,
-                };
-                let a = o.admin.get_or_insert_with(|| Admin::load(&env));
-                admin::show(ui, a, &mut env)
             }
             screen => {
                 egui::CentralPanel::default().show(ui, |ui| match screen {
@@ -283,6 +282,7 @@ impl eframe::App for VibeFilesApp {
 
 #[cfg(test)]
 mod tests {
+    use crate::ui::test_util::type_into;
     use std::path::Path;
 
     use super::*;
@@ -300,13 +300,6 @@ mod tests {
         h.state_mut().kdf = FAST;
         h.run();
         h
-    }
-
-    fn type_into(h: &mut egui_kittest::Harness<'static, VibeFilesApp>, label: &str, text: &str) {
-        h.get_by_label(label).click();
-        h.step();
-        h.get_by_label(label).type_text(text);
-        h.step();
     }
 
     fn click(h: &mut egui_kittest::Harness<'static, VibeFilesApp>, label: &str) {

@@ -140,12 +140,11 @@ pub fn save_rels(root: &Path, rels: &Relationships) -> Result<(), String> {
 }
 
 pub fn save_meta(root: &Path, meta: &ClientMeta) -> Result<(), String> {
-    let dir = master_dir(root);
-    let p = dir.join(SIDECAR_FILE);
-    let tmp = dir.join(format!("{SIDECAR_FILE}.tmp"));
-    std::fs::write(&tmp, serde_json::to_vec_pretty(meta).expect("serializes"))
-        .and_then(|()| std::fs::rename(&tmp, &p))
-        .map_err(|e| format!("saving {SIDECAR_FILE}: {e}"))
+    crate::cabinet::write_replace(
+        &master_dir(root).join(SIDECAR_FILE),
+        &serde_json::to_vec_pretty(meta).expect("serializes"),
+    )
+    .map_err(|e| format!("saving {SIDECAR_FILE}: {e}"))
 }
 
 /// Imports the client CSV with `map` and saves it as the master list. Every client keeps the

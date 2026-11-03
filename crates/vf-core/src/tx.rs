@@ -130,6 +130,29 @@ pub struct Actor {
     pub device_id: String,
 }
 
+impl Actor {
+    /// This workstation, no signed-in user (until P06 adds users).
+    pub fn device(device_id: &str) -> Self {
+        Actor {
+            user: None,
+            device_id: device_id.into(),
+        }
+    }
+}
+
+/// The newest transaction by `device_id` with one of `labels` that is not undone yet.
+pub fn last_undoable(conn: &Connection, device_id: &str, labels: &[&str]) -> Option<String> {
+    let marks = vec!["?"; labels.len()].join(", ");
+    let sql = format!(
+        "SELECT tx_id FROM undo_record WHERE device_id = ? AND undone = 0 AND label IN ({marks})
+         ORDER BY ts DESC, rowid DESC LIMIT 1"
+    );
+    let params: Vec<&dyn rusqlite::ToSql> = std::iter::once(&device_id as &dyn rusqlite::ToSql)
+        .chain(labels.iter().map(|l| l as &dyn rusqlite::ToSql))
+        .collect();
+    conn.query_row(&sql, params.as_slice(), |r| r.get(0)).ok()
+}
+
 /// Stored in `undo_record.record`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct UndoRecord {
