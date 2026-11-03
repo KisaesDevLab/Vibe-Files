@@ -389,7 +389,7 @@ pub fn commit(
 
 #[cfg(test)]
 mod tests {
-    use vf_core::db::{CatalogKey, Storage};
+    use vf_core::db::Storage;
 
     use super::*;
 
@@ -405,9 +405,7 @@ mod tests {
         let t = tempfile::tempdir().unwrap();
         let root = t.path().join("cab");
         std::fs::create_dir_all(root.join(FOLDER).join("Income Tax/2025")).unwrap();
-        let mut conn =
-            vf_core::db::open(&t.path().join("c.db"), &CatalogKey([1; 32]), Storage::Local)
-                .unwrap();
+        let mut conn = vf_core::db::open(&t.path().join("c.db"), Storage::Local).unwrap();
         crate::doctypes::seed_if_missing(&root).unwrap();
         crate::doctypes::sync(&mut conn, &root, "dev", "seed").unwrap();
         conn.execute(

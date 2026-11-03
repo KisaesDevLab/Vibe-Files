@@ -15,7 +15,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use pdfium_render::prelude::{PdfRenderConfig, Pdfium};
-use vf_core::db::{CatalogKey, Connection, OptionalExtension, Storage, params};
+use vf_core::db::{Connection, OptionalExtension, Storage, params};
 
 use crate::engine::{OcrEngine, OcrError};
 
@@ -318,7 +318,6 @@ impl Counts {
 
 pub struct Config {
     pub catalog: PathBuf,
-    pub key: CatalogKey,
     pub root: PathBuf,
     pub pdfium_dir: PathBuf,
     /// Configured `tesseract.exe` (or folder).
@@ -454,7 +453,7 @@ impl Drop for Queue {
 }
 
 fn open(config: &Config) -> Result<Connection, String> {
-    vf_core::db::open(&config.catalog, &config.key, Storage::Local).map_err(|e| e.to_string())
+    vf_core::db::open(&config.catalog, Storage::Local).map_err(|e| e.to_string())
 }
 
 /// Default worker count: cores − 1, at least 1.

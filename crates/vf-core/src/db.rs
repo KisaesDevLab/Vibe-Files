@@ -1,4 +1,5 @@
-//! Opening the SQLCipher catalog and forward-only migrations by `PRAGMA user_version`.
+//! Opening the catalog (plain SQLite since PA-18, QUESTIONS Q-27) and forward-only migrations
+//! by `PRAGMA user_version`.
 
 use std::path::{Path, PathBuf};
 
@@ -20,23 +21,6 @@ const MIGRATIONS: &[&str] = &[
 /// Schema version this build writes.
 pub const SCHEMA_VERSION: u32 = MIGRATIONS.len() as u32;
 
-/// Raw 32-byte catalog key. Wrapping (DPAPI, recovery passphrase) is `vf-security::keys` (P06).
-#[derive(Clone)]
-pub struct CatalogKey(pub [u8; 32]);
-
-impl std::fmt::Debug for CatalogKey {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("CatalogKey(..)")
-    }
-}
-
-impl CatalogKey {
-    fn pragma(&self) -> String {
-        let hex: String = self.0.iter().map(|b| format!("{b:02x}")).collect();
-        format!("x'{hex}'")
-    }
-}
-
 /// Where the catalog lives. WAL only on local disk (CLAUDE.md §Stack); the LAN tier (P09) opens
 /// with `Storage::Network`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,14 +29,36 @@ pub enum Storage {
     Network,
 }
 
-/// Opens (creating if needed) the catalog at `path`, checks the key, and migrates it to
-/// [`SCHEMA_VERSION`]. Before migrating a non-empty catalog, a keyed backup is written beside it.
-pub fn open(path: &Path, key: &CatalogKey, storage: Storage) -> Result<Connection> {
+/// The first 16 bytes of every SQLite database file.
+const SQLITE_HEADER: &[u8; 16] = b"SQLite format 3\0";
+
+/// Whether `path` is missing, empty, or a plain SQLite file. An encrypted catalog from before
+/// PA-18 (SQLCipher) starts with random salt instead.
+pub fn is_plain_or_missing(path: &Path) -> bool {
+    use std::io::Read;
+    let Ok(mut f) = std::fs::File::open(path) else {
+        return true;
+    };
+    let mut head = [0u8; 16];
+    match f.read(&mut head) {
+        Ok(0) => true,
+        Ok(16) => &head == SQLITE_HEADER,
+        _ => false,
+    }
+}
+
+/// Opens (creating if needed) the catalog at `path` and migrates it to [`SCHEMA_VERSION`].
+/// Before migrating a non-empty catalog, a backup is written beside it.
+pub fn open(path: &Path, storage: Storage) -> Result<Connection> {
+    if !is_plain_or_missing(path) {
+        return Err(Error::NotACatalog);
+    }
     let conn = Connection::open_with_flags(
         path,
         OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE,
     )?;
-    apply_key(&conn, key)?;
+    conn.query_row("SELECT count(*) FROM sqlite_master", [], |_| Ok(()))
+        .map_err(|_| Error::NotACatalog)?;
     // OCR workers hold their own connections (P03); wait for a writer rather than fail.
     conn.busy_timeout(std::time::Duration::from_secs(10))?;
     conn.pragma_update(None, "foreign_keys", true)?;
@@ -61,22 +67,15 @@ pub fn open(path: &Path, key: &CatalogKey, storage: Storage) -> Result<Connectio
         Storage::Network => "DELETE",
     };
     conn.pragma_update(None, "journal_mode", mode)?;
-    migrate(&conn, path, key)?;
+    migrate(&conn, path)?;
     Ok(conn)
-}
-
-fn apply_key(conn: &Connection, key: &CatalogKey) -> Result<()> {
-    conn.execute_batch(&format!("PRAGMA key = \"{}\";", key.pragma()))?;
-    // Wrong key or not a SQLCipher file: the first read fails.
-    conn.query_row("SELECT count(*) FROM sqlite_master", [], |_| Ok(()))
-        .map_err(|_| Error::BadKey)
 }
 
 pub fn user_version(conn: &Connection) -> Result<u32> {
     Ok(conn.query_row("PRAGMA user_version", [], |r| r.get(0))?)
 }
 
-fn migrate(conn: &Connection, path: &Path, key: &CatalogKey) -> Result<()> {
+fn migrate(conn: &Connection, path: &Path) -> Result<()> {
     let current = user_version(conn)?;
     if current > SCHEMA_VERSION {
         return Err(Error::NewerSchema {
@@ -88,7 +87,7 @@ fn migrate(conn: &Connection, path: &Path, key: &CatalogKey) -> Result<()> {
         return Ok(());
     }
     if current > 0 {
-        backup(conn, path, key, current)?;
+        backup(conn, path, current)?;
     }
     for (i, sql) in MIGRATIONS.iter().enumerate().skip(current as usize) {
         let to = i as u32 + 1;
@@ -100,8 +99,8 @@ fn migrate(conn: &Connection, path: &Path, key: &CatalogKey) -> Result<()> {
     Ok(())
 }
 
-/// `catalog.db.v<from>-<unix secs>.bak`, encrypted with the same key.
-fn backup(conn: &Connection, path: &Path, key: &CatalogKey, from: u32) -> Result<PathBuf> {
+/// `catalog.db.v<from>-<unix secs>.bak`.
+fn backup(conn: &Connection, path: &Path, from: u32) -> Result<PathBuf> {
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -114,7 +113,6 @@ fn backup(conn: &Connection, path: &Path, key: &CatalogKey, from: u32) -> Result
     );
     let dst_path = path.with_file_name(name);
     let mut dst = Connection::open(&dst_path)?;
-    apply_key(&dst, key)?;
     rusqlite::backup::Backup::new(conn, &mut dst)?.run_to_completion(
         256,
         std::time::Duration::ZERO,
@@ -126,10 +124,6 @@ fn backup(conn: &Connection, path: &Path, key: &CatalogKey, from: u32) -> Result
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn key(b: u8) -> CatalogKey {
-        CatalogKey([b; 32])
-    }
 
     const TABLES: &[&str] = &[
         "audit",
@@ -171,20 +165,20 @@ mod tests {
             .collect()
     }
 
-    /// P00 done-when: migration 001 applies to an empty SQLCipher DB.
+    /// P00 done-when (PA-18: a plain SQLite file now): the migrations apply to an empty DB.
     #[test]
-    fn migration_001_applies_to_empty_sqlcipher_db() {
+    fn migrations_apply_to_an_empty_db() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("catalog.db");
-        let conn = open(&path, &key(7), Storage::Local).unwrap();
+        let conn = open(&path, Storage::Local).unwrap();
         assert_eq!(user_version(&conn).unwrap(), SCHEMA_VERSION);
         assert_eq!(tables(&conn), TABLES);
         drop(conn);
-        // Encrypted on disk: no SQLite header.
+        // PA-18 done-when: a plain SQLite file.
         let head = std::fs::read(&path).unwrap();
-        assert!(!head.starts_with(b"SQLite format 3"));
+        assert!(head.starts_with(b"SQLite format 3\0"));
         // Reopen is a no-op migration and makes no backup.
-        let conn = open(&path, &key(7), Storage::Local).unwrap();
+        let conn = open(&path, Storage::Local).unwrap();
         assert_eq!(user_version(&conn).unwrap(), SCHEMA_VERSION);
         let baks = std::fs::read_dir(tmp.path())
             .unwrap()
@@ -200,11 +194,10 @@ mod tests {
         let path = tmp.path().join("catalog.db");
         {
             let conn = Connection::open(&path).unwrap();
-            apply_key(&conn, &key(3)).unwrap();
             conn.execute_batch(MIGRATIONS[0]).unwrap();
             conn.pragma_update(None, "user_version", 1).unwrap();
         }
-        let conn = open(&path, &key(3), Storage::Local).unwrap();
+        let conn = open(&path, Storage::Local).unwrap();
         assert_eq!(user_version(&conn).unwrap(), 2);
         assert!(tables(&conn).contains(&"ocr_job".to_string()));
         let baks = std::fs::read_dir(tmp.path())
@@ -214,26 +207,30 @@ mod tests {
         assert_eq!(baks, 1);
     }
 
+    /// An encrypted catalog from before PA-18 (or any other file) is refused, not overwritten.
     #[test]
-    fn wrong_key_is_refused() {
+    fn a_file_that_is_not_sqlite_is_refused() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("catalog.db");
-        drop(open(&path, &key(1), Storage::Local).unwrap());
+        std::fs::write(&path, vec![0x5a; 4096]).unwrap();
+        assert!(!is_plain_or_missing(&path));
         assert!(matches!(
-            open(&path, &key(2), Storage::Local),
-            Err(Error::BadKey)
+            open(&path, Storage::Local),
+            Err(Error::NotACatalog)
         ));
+        assert_eq!(std::fs::read(&path).unwrap(), vec![0x5a; 4096]);
+        assert!(is_plain_or_missing(&tmp.path().join("missing.db")));
     }
 
     #[test]
     fn newer_schema_is_refused() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("catalog.db");
-        let conn = open(&path, &key(1), Storage::Local).unwrap();
+        let conn = open(&path, Storage::Local).unwrap();
         conn.pragma_update(None, "user_version", 99).unwrap();
         drop(conn);
         assert!(matches!(
-            open(&path, &key(1), Storage::Local),
+            open(&path, Storage::Local),
             Err(Error::NewerSchema { found: 99, .. })
         ));
     }
@@ -241,7 +238,7 @@ mod tests {
     #[test]
     fn audit_is_append_only() {
         let tmp = tempfile::tempdir().unwrap();
-        let conn = open(&tmp.path().join("c.db"), &key(1), Storage::Local).unwrap();
+        let conn = open(&tmp.path().join("c.db"), Storage::Local).unwrap();
         conn.execute(
             "INSERT INTO audit (seq, ts, device_id, action, prev_hash, hash) VALUES (1, 't', 'd', 'a', 'p', 'h')",
             [],

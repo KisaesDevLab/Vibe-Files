@@ -709,7 +709,7 @@ mod tests {
 
     use filer_core::clients::Client;
     use uuid::Uuid;
-    use vf_core::db::{CatalogKey, Storage};
+    use vf_core::db::Storage;
 
     use super::*;
     use crate::cabinet::CabinetFile;
@@ -773,12 +773,7 @@ mod tests {
     }
 
     fn open(c: &Cab) -> Connection {
-        vf_core::db::open(
-            &c.data.join("catalog.db"),
-            &CatalogKey([4; 32]),
-            Storage::Local,
-        )
-        .unwrap()
+        vf_core::db::open(&c.data.join("catalog.db"), Storage::Local).unwrap()
     }
 
     fn n(conn: &Connection, sql: &str) -> i64 {
@@ -907,12 +902,7 @@ mod tests {
     #[test]
     fn not_a_cabinet_is_refused() {
         let tmp = tempfile::tempdir().unwrap();
-        let mut conn = vf_core::db::open(
-            &tmp.path().join("c.db"),
-            &CatalogKey([1; 32]),
-            Storage::Local,
-        )
-        .unwrap();
+        let mut conn = vf_core::db::open(&tmp.path().join("c.db"), Storage::Local).unwrap();
         assert!(matches!(
             rebuild(&mut conn, tmp.path(), "d"),
             Err(RebuildError::Cabinet(_))
@@ -1068,12 +1058,7 @@ mod tests {
         );
 
         // Principle 2: an empty catalog rebuilt from disk has the same rows.
-        let fresh = vf_core::db::open(
-            &c.data.join("fresh.db"),
-            &CatalogKey([5; 32]),
-            Storage::Local,
-        )
-        .unwrap();
+        let fresh = vf_core::db::open(&c.data.join("fresh.db"), Storage::Local).unwrap();
         let mut fresh = fresh;
         rebuild(&mut fresh, &c.root, "dev-2").unwrap();
         assert_eq!(client_rows(&fresh), client_rows(&conn));
@@ -1193,12 +1178,7 @@ mod tests {
         let a = c.root.join("Smith, John (1001)/Income Tax/2025");
         std::fs::rename(a.join("w2.pdf"), a.join("W-2 employer.pdf")).unwrap();
 
-        let mut fresh = vf_core::db::open(
-            &c.data.join("fresh.db"),
-            &CatalogKey([5; 32]),
-            Storage::Local,
-        )
-        .unwrap();
+        let mut fresh = vf_core::db::open(&c.data.join("fresh.db"), Storage::Local).unwrap();
         let rep = rebuild(&mut fresh, &c.root, "dev-2").unwrap();
         assert_eq!(rep.docmeta_restored, 2, "{rep}");
         assert_eq!(

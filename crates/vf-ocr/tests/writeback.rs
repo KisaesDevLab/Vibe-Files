@@ -6,7 +6,7 @@ use std::sync::atomic::AtomicBool;
 
 use image::GrayImage;
 use pdf_writer::{Content, Pdf, Rect, Ref};
-use vf_core::db::{CatalogKey, Connection, Storage};
+use vf_core::db::{Connection, Storage};
 use vf_ocr::queue::{self, Outcome};
 use vf_ocr::writeback::{self, Held, Written};
 use vf_ocr::{OcrEngine, OcrError, OcrPage, Word};
@@ -66,8 +66,7 @@ fn fx() -> Fx {
     let t = tempfile::tempdir().unwrap();
     let root = t.path().join("cab");
     std::fs::create_dir_all(root.join("_Vibe")).unwrap();
-    let conn =
-        vf_core::db::open(&t.path().join("c.db"), &CatalogKey([4; 32]), Storage::Local).unwrap();
+    let conn = vf_core::db::open(&t.path().join("c.db"), Storage::Local).unwrap();
     scan(&root.join(REL));
     let hash = filer_intake::commit::sha256_file(&root.join(REL)).unwrap();
     conn.execute(

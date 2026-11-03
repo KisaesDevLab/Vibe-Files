@@ -360,7 +360,7 @@ pub fn undo(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::{CatalogKey, Storage, open};
+    use crate::db::{Storage, open};
     use std::collections::HashSet;
 
     /// In-memory file system double: a set of paths.
@@ -400,12 +400,7 @@ mod tests {
 
     fn setup() -> (tempfile::TempDir, Connection, Actor) {
         let tmp = tempfile::tempdir().unwrap();
-        let conn = open(
-            &tmp.path().join("c.db"),
-            &CatalogKey([9; 32]),
-            Storage::Local,
-        )
-        .unwrap();
+        let conn = open(&tmp.path().join("c.db"), Storage::Local).unwrap();
         let actor = Actor {
             user: Some("kwk".into()),
             device_id: "dev-1".into(),

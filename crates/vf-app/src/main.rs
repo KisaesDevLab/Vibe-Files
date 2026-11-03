@@ -20,9 +20,6 @@ struct Args {
     /// Data folder (catalog, config, caches, logs). Defaults to `data` next to the exe.
     #[arg(long, global = true)]
     data: Option<PathBuf>,
-    /// File holding the raw catalog key as 64 hex chars (until P06 key handling).
-    #[arg(long, global = true)]
-    key_file: Option<PathBuf>,
     #[command(subcommand)]
     command: Option<cli::Command>,
 }
@@ -38,8 +35,7 @@ fn main() -> anyhow::Result<std::process::ExitCode> {
             .unwrap_or_else(|| PathBuf::from("data")),
     };
     if let Some(cmd) = &args.command {
-        let key = cli::load_key(args.key_file.as_deref())?;
-        let code = cli::run(cmd, &data, &key, &mut std::io::stdout())?;
+        let code = cli::run(cmd, &data, &mut std::io::stdout())?;
         return Ok(std::process::ExitCode::from(code as u8));
     }
     let options = eframe::NativeOptions {

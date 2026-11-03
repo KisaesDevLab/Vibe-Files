@@ -134,7 +134,7 @@ pub fn report(conn: &Connection, threshold: f32) -> vf_core::Result<Vec<Pair>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use vf_core::db::{CatalogKey, Storage};
+    use vf_core::db::Storage;
 
     const LETTER: &str = "Dear client, thank you for choosing our firm to prepare your 2025 \
         individual income tax return. This letter confirms the scope of the engagement, the \
@@ -143,8 +143,7 @@ mod tests {
     #[test]
     fn rescans_are_near_duplicates_and_other_letters_are_not() {
         let t = tempfile::tempdir().unwrap();
-        let c = vf_core::db::open(&t.path().join("c.db"), &CatalogKey([8; 32]), Storage::Local)
-            .unwrap();
+        let c = vf_core::db::open(&t.path().join("c.db"), Storage::Local).unwrap();
         // A rescan: OCR misread two words. A different letter. An exact copy.
         let rescan = LETTER
             .replace("choosing", "chooslng")

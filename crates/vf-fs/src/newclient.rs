@@ -217,7 +217,7 @@ mod tests {
     use std::collections::BTreeSet;
 
     use filer_intake::sentinel;
-    use vf_core::db::{CatalogKey, Storage};
+    use vf_core::db::Storage;
 
     use super::*;
     use crate::cabinet::CabinetFile;
@@ -243,12 +243,7 @@ mod tests {
             },
         )
         .unwrap();
-        let conn = vf_core::db::open(
-            &tmp.path().join("catalog.db"),
-            &CatalogKey([3; 32]),
-            Storage::Local,
-        )
-        .unwrap();
+        let conn = vf_core::db::open(&tmp.path().join("catalog.db"), Storage::Local).unwrap();
         Cab {
             _tmp: tmp,
             root,

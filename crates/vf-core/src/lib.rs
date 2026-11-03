@@ -10,8 +10,8 @@ pub mod tx;
 pub enum Error {
     #[error("catalog: {0}")]
     Sql(#[from] rusqlite::Error),
-    #[error("the catalog key is wrong, or this is not a Vibe Files catalog")]
-    BadKey,
+    #[error("this is not a Vibe Files catalog (an encrypted catalog from before PA-18?)")]
+    NotACatalog,
     #[error("catalog schema v{found} is newer than this build supports (v{supported})")]
     NewerSchema { found: u32, supported: u32 },
     #[error("{0}")]

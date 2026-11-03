@@ -58,8 +58,8 @@ pub struct SearchTab {
     /// A search was saved: the app reloads Browse's Saved searches.
     pub saved_changed: bool,
     pub notice: Option<String>,
-    /// The catalog (path, key), for the near-duplicate report's own connection.
-    pub catalog: Option<(std::path::PathBuf, vf_core::db::CatalogKey)>,
+    /// The catalog file, for the near-duplicate report's own connection.
+    pub catalog: Option<std::path::PathBuf>,
     near_job: Option<std::sync::mpsc::Receiver<Result<Vec<vf_index::neardup::Pair>, String>>>,
     /// The last near-duplicate report.
     pub near: Option<Result<Vec<vf_index::neardup::Pair>, String>>,
@@ -290,12 +290,12 @@ fn near_row(ui: &mut egui::Ui, s: &mut SearchTab, root: &Path) {
             )
             .on_hover_text("Documents whose text is at least 80 % the same but whose files differ.")
             .clicked()
-            && let Some((catalog, key)) = s.catalog.clone()
+            && let Some(catalog) = s.catalog.clone()
         {
             let (tx, rx) = std::sync::mpsc::channel();
             let ctx = ui.ctx().clone();
             std::thread::spawn(move || {
-                let r = vf_core::db::open(&catalog, &key, vf_core::db::Storage::Local)
+                let r = vf_core::db::open(&catalog, vf_core::db::Storage::Local)
                     .and_then(|c| vf_index::neardup::report(&c, NEAR))
                     .map_err(|e| e.to_string());
                 let _ = tx.send(r);

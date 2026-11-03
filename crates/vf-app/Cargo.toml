@@ -20,7 +20,6 @@ vf-core = { path = "../vf-core" }
 vf-fs = { path = "../vf-fs" }
 vf-ocr = { path = "../vf-ocr" }
 vf-ingest = { path = "../vf-ingest" }
-vf-security = { path = "../vf-security" }
 rfd.workspace = true
 serde.workspace = true
 toml.workspace = true

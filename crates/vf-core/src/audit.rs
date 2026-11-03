@@ -221,10 +221,10 @@ pub fn mirror_append(dir: &Path, rows: &[AuditRow]) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::{CatalogKey, Storage, open};
+    use crate::db::{Storage, open};
 
     fn conn(dir: &Path) -> Connection {
-        open(&dir.join("c.db"), &CatalogKey([3; 32]), Storage::Local).unwrap()
+        open(&dir.join("c.db"), Storage::Local).unwrap()
     }
 
     fn fill(conn: &Connection, n: u64) {

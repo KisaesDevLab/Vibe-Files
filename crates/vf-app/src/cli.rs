@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use clap::Subcommand;
-use vf_core::db::{self, CatalogKey, Storage};
+use vf_core::db::{self, Storage};
 
 #[derive(Subcommand, Debug)]
 pub enum Command {
@@ -46,32 +46,8 @@ pub enum AuditCmd {
     Verify,
 }
 
-/// How the CLI gets the raw catalog key until P06 adds DPAPI and the recovery passphrase:
-/// `--key-file` (64 hex chars) or the `VF_CATALOG_KEY` environment variable.
-pub fn load_key(key_file: Option<&Path>) -> Result<CatalogKey> {
-    let text = match key_file {
-        Some(p) => {
-            std::fs::read_to_string(p).with_context(|| format!("reading {}", p.display()))?
-        }
-        None => std::env::var("VF_CATALOG_KEY")
-            .context("no catalog key: pass --key-file or set VF_CATALOG_KEY (64 hex chars)")?,
-    };
-    parse_key(text.trim())
-}
-
-pub fn parse_key(hex: &str) -> Result<CatalogKey> {
-    if hex.len() != 64 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
-        bail!("the catalog key must be 64 hex characters");
-    }
-    let mut k = [0u8; 32];
-    for (i, b) in k.iter_mut().enumerate() {
-        *b = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).expect("checked hex");
-    }
-    Ok(CatalogKey(k))
-}
-
 /// Runs one subcommand; returns the process exit code.
-pub fn run(cmd: &Command, data: &Path, key: &CatalogKey, out: &mut dyn Write) -> Result<i32> {
+pub fn run(cmd: &Command, data: &Path, out: &mut dyn Write) -> Result<i32> {
     let catalog = data.join("catalog.db");
     match cmd {
         Command::Audit {
@@ -80,7 +56,7 @@ pub fn run(cmd: &Command, data: &Path, key: &CatalogKey, out: &mut dyn Write) ->
             if !catalog.is_file() {
                 bail!("no catalog at {}", catalog.display());
             }
-            let conn = db::open(&catalog, key, Storage::Local)?;
+            let conn = db::open(&catalog, Storage::Local)?;
             let rep = vf_core::audit::verify(&conn)?;
             match rep.broken {
                 None => {
@@ -95,21 +71,20 @@ pub fn run(cmd: &Command, data: &Path, key: &CatalogKey, out: &mut dyn Write) ->
         }
         Command::Rebuild { cabinet } => {
             std::fs::create_dir_all(data)?;
-            let mut conn = db::open(&catalog, key, Storage::Local)?;
+            let mut conn = db::open(&catalog, Storage::Local)?;
             let rep = vf_fs::rebuild::rebuild(&mut conn, cabinet, &device_id(data)?)?;
             writeln!(out, "{rep}")?;
             Ok(0)
         }
         Command::Ocr {
             cmd: OcrCmd::Backlog { cabinet, threads },
-        } => ocr_backlog(&catalog, key, cabinet, data, *threads, out),
+        } => ocr_backlog(&catalog, cabinet, data, *threads, out),
     }
 }
 
 /// `ocr backlog`: queue everything not yet read, run the workers until the queue is empty.
 fn ocr_backlog(
     catalog: &Path,
-    key: &CatalogKey,
     cabinet: &Path,
     data: &Path,
     threads: Option<usize>,
@@ -126,11 +101,10 @@ fn ocr_backlog(
         .unwrap_or_default();
     let pdfium_dir = filer_pdf::pdf::find_pdfium(&exe_dir)
         .context("pdfium.dll not found beside vibe-files.exe")?;
-    let conn = db::open(catalog, key, Storage::Local)?;
+    let conn = db::open(catalog, Storage::Local)?;
     let q = Queue::start(
         queue::Config {
             catalog: catalog.to_path_buf(),
-            key: key.clone(),
             root: cabinet.to_path_buf(),
             pdfium_dir,
             tesseract: config.ocr.tesseract.clone(),
@@ -209,8 +183,7 @@ mod tests {
     #[test]
     fn audit_verify_reports_intact_then_broken() {
         let tmp = tempfile::tempdir().unwrap();
-        let key = parse_key(&"ab".repeat(32)).unwrap();
-        let conn = db::open(&tmp.path().join("catalog.db"), &key, Storage::Local).unwrap();
+        let conn = db::open(&tmp.path().join("catalog.db"), Storage::Local).unwrap();
         for i in 0..5 {
             let e = AuditEntry::new("file", None, serde_json::json!({ "i": i }));
             append(&conn, "2026-11-02T00:00:00Z", None, "d", &e).unwrap();
@@ -219,7 +192,7 @@ mod tests {
             cmd: AuditCmd::Verify,
         };
         let mut out = Vec::new();
-        assert_eq!(run(&cmd, tmp.path(), &key, &mut out).unwrap(), 0);
+        assert_eq!(run(&cmd, tmp.path(), &mut out).unwrap(), 0);
         assert_eq!(
             String::from_utf8(out).unwrap(),
             "audit chain intact: 5 rows\n"
@@ -230,7 +203,7 @@ mod tests {
         )
         .unwrap();
         let mut out = Vec::new();
-        assert_eq!(run(&cmd, tmp.path(), &key, &mut out).unwrap(), 2);
+        assert_eq!(run(&cmd, tmp.path(), &mut out).unwrap(), 2);
         assert!(String::from_utf8(out).unwrap().contains("seq 3"));
     }
 
@@ -260,7 +233,6 @@ mod tests {
             },
         )
         .unwrap();
-        let key = parse_key(&"cd".repeat(32)).unwrap();
         let data = tmp.path().join("data");
         let mut out = Vec::new();
         run(
@@ -268,7 +240,6 @@ mod tests {
                 cabinet: cab.clone(),
             },
             &data,
-            &key,
             &mut out,
         )
         .unwrap();
@@ -281,14 +252,13 @@ mod tests {
                 },
             },
             &data,
-            &key,
             &mut out,
         )
         .unwrap();
         let text = String::from_utf8(out).unwrap();
         assert_eq!(code, 0, "{text}");
         assert!(text.contains("1 documents searchable"), "{text}");
-        let conn = db::open(&data.join("catalog.db"), &key, Storage::Local).unwrap();
+        let conn = db::open(&data.join("catalog.db"), Storage::Local).unwrap();
         let hits = vf_index::search::search(
             &conn,
             &vf_index::search::Query {
@@ -300,12 +270,5 @@ mod tests {
         .unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].page, Some(1));
-    }
-
-    #[test]
-    fn key_must_be_64_hex() {
-        assert!(parse_key("abc").is_err());
-        assert!(parse_key(&"zz".repeat(32)).is_err());
-        assert!(parse_key(&"0F".repeat(32)).is_ok());
     }
 }

@@ -34,7 +34,6 @@ impl OcrState {
         match Queue::start(
             queue::Config {
                 catalog: opened.catalog.clone(),
-                key: opened.key.clone(),
                 root: opened.root.clone(),
                 pdfium_dir,
                 tesseract: prefs.tesseract.clone(),

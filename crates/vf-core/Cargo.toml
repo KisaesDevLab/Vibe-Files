@@ -6,7 +6,7 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
-rusqlite = { version = "0.37", features = ["bundled-sqlcipher-vendored-openssl", "backup"] }
+rusqlite = { version = "0.37", features = ["bundled", "backup"] }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

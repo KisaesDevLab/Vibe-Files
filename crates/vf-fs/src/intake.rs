@@ -370,7 +370,7 @@ mod tests {
     use filer_intake::commit::{CommitInput, CommitItem, CommitReport, run_commit};
     use filer_intake::intake::Source;
     use filer_intake::plan::FolderAction;
-    use vf_core::db::{CatalogKey, Storage};
+    use vf_core::db::Storage;
 
     use super::*;
     use crate::cabinet::{self, CabinetFile};
@@ -401,8 +401,7 @@ mod tests {
             },
         )
         .unwrap();
-        let conn = vf_core::db::open(&t.path().join("c.db"), &CatalogKey([7; 32]), Storage::Local)
-            .unwrap();
+        let conn = vf_core::db::open(&t.path().join("c.db"), Storage::Local).unwrap();
         Fx {
             _t: t,
             root,

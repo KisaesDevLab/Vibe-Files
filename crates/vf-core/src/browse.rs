@@ -493,12 +493,7 @@ mod tests {
     #[test]
     fn loads_live_rows_from_the_catalog() {
         let tmp = tempfile::tempdir().unwrap();
-        let conn = crate::db::open(
-            &tmp.path().join("c.db"),
-            &crate::db::CatalogKey([7; 32]),
-            crate::db::Storage::Local,
-        )
-        .unwrap();
+        let conn = crate::db::open(&tmp.path().join("c.db"), crate::db::Storage::Local).unwrap();
         conn.execute_batch(
             "INSERT INTO client (id, ext_id, name, folder_rel, device_id, updated_at)
                VALUES ('c1', '1001', 'Acme', 'Acme (1001)', 'd', 't');

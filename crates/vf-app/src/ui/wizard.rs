@@ -3,8 +3,6 @@
 
 use egui::{Color32, RichText, TextEdit};
 
-use vf_security::keys::MIN_PASSPHRASE_LEN;
-
 use crate::ui::theme;
 
 pub const ERROR: Color32 = Color32::from_rgb(0xB4, 0x23, 0x18);
@@ -15,14 +13,11 @@ pub enum Mode {
     Create,
 }
 
-/// No `Debug`: it holds the recovery passphrase, which must never reach a log.
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct Wizard {
     pub mode: Mode,
     pub root: String,
     pub name: String,
-    pub passphrase: String,
-    pub confirm: String,
     pub error: Option<String>,
 }
 
@@ -39,16 +34,8 @@ impl Wizard {
                 .map(|p| p.display().to_string())
                 .unwrap_or_default(),
             name: String::new(),
-            passphrase: String::new(),
-            confirm: String::new(),
             error: None,
         }
-    }
-
-    /// Drops the passphrases from memory once they have been used.
-    pub fn clear_secrets(&mut self) {
-        self.passphrase.clear();
-        self.confirm.clear();
     }
 }
 
@@ -91,32 +78,7 @@ pub fn show(ui: &mut egui::Ui, w: &mut Wizard) -> Option<Mode> {
                         .labelled_by(label);
                 });
             }
-            field(ui, "Recovery passphrase", |ui, label| {
-                ui.add(
-                    TextEdit::singleline(&mut w.passphrase)
-                        .password(true)
-                        .desired_width(400.0),
-                )
-                .labelled_by(label);
-            });
             if w.mode == Mode::Create {
-                field(ui, "Confirm passphrase", |ui, label| {
-                    ui.add(
-                        TextEdit::singleline(&mut w.confirm)
-                            .password(true)
-                            .desired_width(400.0),
-                    )
-                    .labelled_by(label);
-                });
-                ui.label(
-                    RichText::new(format!(
-                        "At least {MIN_PASSPHRASE_LEN} characters. The passphrase opens this \
-                         cabinet on any PC. It cannot be recovered if lost: keep it with the \
-                         firm's records."
-                    ))
-                    .small()
-                    .color(theme::INK_MUTED),
-                );
                 ui.label(
                     RichText::new(
                         "The folder may already hold client folders; they are indexed, not moved.",

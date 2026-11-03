@@ -1408,18 +1408,13 @@ mod tests {
     use egui::accesskit::Role;
     use egui_kittest::kittest::Queryable;
     use egui_kittest::{Harness, HarnessBuilder};
-    use vf_core::db::{CatalogKey, Storage};
+    use vf_core::db::Storage;
 
     /// A catalog with `clients` clients x `per` documents spread over 2023-2025 and Permanent,
     /// in the Filer template folders. Rows only (no files): Browse reads the catalog.
     fn seed(clients: usize, per: usize) -> (tempfile::TempDir, Connection) {
         let tmp = tempfile::tempdir().unwrap();
-        let mut conn = vf_core::db::open(
-            &tmp.path().join("c.db"),
-            &CatalogKey([9; 32]),
-            Storage::Local,
-        )
-        .unwrap();
+        let mut conn = vf_core::db::open(&tmp.path().join("c.db"), Storage::Local).unwrap();
         let tx = conn.transaction().unwrap();
         for c in 0..clients {
             let (id, ext) = (format!("c{c:04}"), format!("{}", 1000 + c));

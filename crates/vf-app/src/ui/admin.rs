@@ -498,7 +498,7 @@ mod tests {
     use crate::ui::test_util::{click, type_into};
     use egui_kittest::kittest::Queryable;
     use egui_kittest::{Harness, HarnessBuilder};
-    use vf_core::db::{CatalogKey, Connection, Storage};
+    use vf_core::db::{Connection, Storage};
 
     use super::*;
 
@@ -513,12 +513,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().join("cabinet");
         std::fs::create_dir_all(&root).unwrap();
-        let mut conn = vf_core::db::open(
-            &tmp.path().join("c.db"),
-            &CatalogKey([8; 32]),
-            Storage::Local,
-        )
-        .unwrap();
+        let mut conn = vf_core::db::open(&tmp.path().join("c.db"), Storage::Local).unwrap();
         doctypes::seed_if_missing(&root).unwrap();
         doctypes::sync(&mut conn, &root, "dev", "doc_types_seed").unwrap();
         let a = {

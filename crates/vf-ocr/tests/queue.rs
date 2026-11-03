@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use image::GrayImage;
 use pdf_writer::{Content, Name, Pdf, Rect, Ref};
-use vf_core::db::{CatalogKey, Connection, Storage};
+use vf_core::db::{Connection, Storage};
 use vf_ocr::queue::{self, Counts, Job, Outcome};
 use vf_ocr::{OcrEngine, OcrError, OcrPage, Word};
 
@@ -101,14 +101,12 @@ struct Fx {
     conn: Connection,
 }
 
-const KEY: CatalogKey = CatalogKey([9; 32]);
-
 fn fx() -> Fx {
     let t = tempfile::tempdir().unwrap();
     let root = t.path().join("cab");
     std::fs::create_dir_all(&root).unwrap();
     let catalog = t.path().join("catalog.db");
-    let conn = vf_core::db::open(&catalog, &KEY, Storage::Local).unwrap();
+    let conn = vf_core::db::open(&catalog, Storage::Local).unwrap();
     Fx {
         _t: t,
         root,
@@ -304,7 +302,6 @@ fn workers_index_the_backlog() {
     let q = queue::Queue::start(
         queue::Config {
             catalog: f.catalog.clone(),
-            key: KEY,
             root: f.root.clone(),
             pdfium_dir: filer_pdf::pdf::find_pdfium(Path::new("")).unwrap(),
             tesseract: None,

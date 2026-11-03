@@ -17,7 +17,7 @@ vendored here, and Filer itself runs as the Intake tab.
 
 - **Files stay plain files.** Every PDF or Office file in the cabinet opens in Explorer without
   Vibe Files. Vibe Files never uses a blob store or a proprietary container.
-- **The catalog is a rebuildable index.** It is an encrypted SQLite database (SQLCipher).
+- **The catalog is a rebuildable index.** It is a SQLite database beside the exe.
   `vibe-files rebuild` recreates it from the folder tree, the client sentinels and the
   `_Vibe/` sidecar files.
 - **Offline first.** Every v1 feature works with no network. B2 sync is additive.
@@ -31,7 +31,7 @@ vendored here, and Filer itself runs as the Intake tab.
 
 | Area | |
 |---|---|
-| Cabinet | Create or open a cabinet over an existing Filer client tree. The catalog key is protected by a recovery passphrase. |
+| Cabinet | Create or open a cabinet over an existing Filer client tree, with nothing to type but the folder. |
 | Browse | Client, year and folder tree, views (Recent, Pinned, Needs doc type, …), metadata editing, bulk edit, rename, undo. |
 | Clients | Filer client master, CSV import, relationships, doc types and tax years. |
 | Intake | The Filer Desktop app mounted unchanged: rules, preview and confirm, collisions, undo of the last batch. Every batch is recorded in the catalog. |
@@ -49,8 +49,6 @@ Requirements:
 
 - Windows 10 or 11, x64
 - Rust stable (2024 edition) with the MSVC toolchain
-- [Strawberry Perl](https://strawberryperl.com/), needed to build the vendored OpenSSL for
-  SQLCipher
 - For OCR: Tesseract 5 with English data. Install it with
   `winget install UB-Mannheim.TesseractOCR`, or put a `tesseract\` folder beside `vibe-files.exe`.
 

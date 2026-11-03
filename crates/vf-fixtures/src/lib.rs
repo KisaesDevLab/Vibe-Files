@@ -390,7 +390,7 @@ pub fn write_pdf(path: &Path, lines: &[String]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use vf_core::db::{CatalogKey, Storage};
+    use vf_core::db::Storage;
 
     fn tree(dir: &Path) -> Vec<(String, Vec<u8>)> {
         fn walk(base: &Path, d: &Path, out: &mut Vec<(String, Vec<u8>)>) {
@@ -470,12 +470,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().join("cabinet");
         let s = generate(&root, 42).unwrap();
-        let mut conn = vf_core::db::open(
-            &tmp.path().join("catalog.db"),
-            &CatalogKey([8; 32]),
-            Storage::Local,
-        )
-        .unwrap();
+        let mut conn = vf_core::db::open(&tmp.path().join("catalog.db"), Storage::Local).unwrap();
         let rep = vf_fs::rebuild::rebuild(&mut conn, &root, "dev-fixture").unwrap();
         assert_eq!(rep.clients, 5);
         assert_eq!(rep.docs_new, 60);

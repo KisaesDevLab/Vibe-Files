@@ -59,8 +59,9 @@ pub fn create(root: &Path, file: &CabinetFile) -> Result<(), String> {
     )
 }
 
-/// `<cabinet>/_Vibe/keys/recovery.json`: the catalog key wrapped by the recovery passphrase
-/// (`vf_security::keys::WrappedKey`). Kept in the cabinet so every workstation can open it.
+/// `<cabinet>/_Vibe/keys/recovery.json`: written by cabinets created before PA-18 (the catalog
+/// key wrapped by the recovery passphrase). No longer read or written; P11 keeps its sync key
+/// under `_Vibe/keys/` too.
 pub fn recovery_key_file(root: &Path) -> PathBuf {
     root.join(VIBE_DIR).join(KEYS_DIR).join(RECOVERY_KEY_FILE)
 }

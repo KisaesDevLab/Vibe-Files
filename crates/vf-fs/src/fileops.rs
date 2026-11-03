@@ -293,7 +293,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     use vf_core::audit::AuditEntry;
-    use vf_core::db::{CatalogKey, Storage};
+    use vf_core::db::Storage;
     use vf_core::tx::{self, Actor, Stmt, Transaction};
 
     use super::*;
@@ -344,12 +344,7 @@ mod tests {
             )
             .unwrap();
         }
-        let conn = vf_core::db::open(
-            &tmp.path().join("catalog.db"),
-            &CatalogKey([5; 32]),
-            Storage::Local,
-        )
-        .unwrap();
+        let conn = vf_core::db::open(&tmp.path().join("catalog.db"), Storage::Local).unwrap();
         World {
             _tmp: tmp,
             cab,

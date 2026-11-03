@@ -177,7 +177,7 @@ pub fn untrash(
 
 #[cfg(test)]
 mod tests {
-    use vf_core::db::{CatalogKey, Storage};
+    use vf_core::db::Storage;
 
     use super::*;
 
@@ -185,8 +185,7 @@ mod tests {
         let t = tempfile::tempdir().unwrap();
         let root = t.path().join("cab");
         std::fs::create_dir_all(root.join("A (1)/2025")).unwrap();
-        let conn = vf_core::db::open(&t.path().join("c.db"), &CatalogKey([5; 32]), Storage::Local)
-            .unwrap();
+        let conn = vf_core::db::open(&t.path().join("c.db"), Storage::Local).unwrap();
         for (id, rel, hash, filed) in [
             ("old", "A (1)/2025/w2.pdf", "h1", "2026-01-01T00:00:00Z"),
             ("other", "A (1)/2025/k1.pdf", "h2", "2026-01-01T00:00:00Z"),

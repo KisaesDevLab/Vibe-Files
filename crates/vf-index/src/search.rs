@@ -303,12 +303,11 @@ pub fn runs(snippet: &str) -> Vec<(String, bool)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use vf_core::db::{CatalogKey, Storage};
+    use vf_core::db::Storage;
 
     fn db() -> (tempfile::TempDir, Connection) {
         let t = tempfile::tempdir().unwrap();
-        let c = vf_core::db::open(&t.path().join("c.db"), &CatalogKey([2; 32]), Storage::Local)
-            .unwrap();
+        let c = vf_core::db::open(&t.path().join("c.db"), Storage::Local).unwrap();
         c.execute_batch(
             "INSERT INTO client (id, ext_id, name, device_id, updated_at) VALUES
                ('c1', '1001', 'Acme LLC', 'd', 't'), ('c2', '1002', 'Smith, John', 'd', 't');

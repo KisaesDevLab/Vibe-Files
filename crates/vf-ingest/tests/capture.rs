@@ -7,7 +7,7 @@ use std::sync::atomic::AtomicUsize;
 
 use filer_intake::commit::{CommitInput, CommitItem, run_commit};
 use filer_intake::plan::FolderAction;
-use vf_core::db::{CatalogKey, Storage};
+use vf_core::db::Storage;
 use vf_ingest::pipeline::{self, Context, Origin};
 
 #[test]
@@ -27,8 +27,7 @@ fn ultratax_print_lands_as_a_federal_return_copy() {
         },
     )
     .unwrap();
-    let mut conn =
-        vf_core::db::open(&t.path().join("c.db"), &CatalogKey([7; 32]), Storage::Local).unwrap();
+    let mut conn = vf_core::db::open(&t.path().join("c.db"), Storage::Local).unwrap();
     vf_fs::doctypes::seed_if_missing(&root).unwrap();
     vf_fs::doctypes::sync(&mut conn, &root, "dev", "seed").unwrap();
     let csv = t.path().join("clients.csv");

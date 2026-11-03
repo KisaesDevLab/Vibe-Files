@@ -328,7 +328,7 @@ pub fn apply(root: &Path, edit: Edit) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use vf_core::db::{CatalogKey, Storage};
+    use vf_core::db::Storage;
 
     use super::*;
 
@@ -336,8 +336,7 @@ mod tests {
         let t = tempfile::tempdir().unwrap();
         let root = t.path().join("cab");
         std::fs::create_dir_all(&root).unwrap();
-        let conn = vf_core::db::open(&t.path().join("c.db"), &CatalogKey([2; 32]), Storage::Local)
-            .unwrap();
+        let conn = vf_core::db::open(&t.path().join("c.db"), Storage::Local).unwrap();
         (t, root, conn)
     }
 

@@ -3,8 +3,6 @@
 use std::path::PathBuf;
 use std::sync::mpsc;
 
-use vf_security::keys::KdfParams;
-
 use crate::config::{self, Config};
 use crate::session::{self, CreateRequest, Opened};
 use crate::ui::admin::{self, Admin};
@@ -127,8 +125,6 @@ pub struct VibeFilesApp {
     pub data: PathBuf,
     pub config: Config,
     pub screen: Screen,
-    /// Argon2id cost for new cabinets (tests lower it).
-    pub kdf: KdfParams,
 }
 
 impl VibeFilesApp {
@@ -154,7 +150,6 @@ impl VibeFilesApp {
             data,
             config,
             screen: Screen::Wizard(w),
-            kdf: KdfParams::DEFAULT,
         }
     }
 
@@ -167,8 +162,6 @@ impl VibeFilesApp {
             let req = CreateRequest {
                 root: &root,
                 name: &w.name,
-                passphrase: &w.passphrase,
-                confirm: &w.confirm,
             };
             if let Err(e) = session::check_create(&req) {
                 w.error = Some(e);
@@ -179,8 +172,8 @@ impl VibeFilesApp {
             return;
         }
         let (tx, rx) = mpsc::channel();
-        let (data, device, kdf) = (self.data.clone(), self.config.device_id.clone(), self.kdf);
-        let (name, pass, confirm) = (w.name.clone(), w.passphrase.clone(), w.confirm.clone());
+        let (data, device) = (self.data.clone(), self.config.device_id.clone());
+        let name = w.name.clone();
         let ctx = ctx.clone();
         std::thread::spawn(move || {
             let r = match mode {
@@ -190,18 +183,14 @@ impl VibeFilesApp {
                     &CreateRequest {
                         root: &root,
                         name: &name,
-                        passphrase: &pass,
-                        confirm: &confirm,
                     },
-                    kdf,
                 ),
-                Mode::Open => session::open(&data, &device, &root, &pass),
+                Mode::Open => session::open(&data, &device, &root),
             };
             let _ = tx.send(r.map_err(|e| format!("{e:#}")));
             ctx.request_repaint();
         });
         let mut back = w.clone();
-        back.clear_secrets();
         back.error = None;
         self.screen = Screen::Busy {
             what: match mode {
@@ -236,9 +225,15 @@ impl VibeFilesApp {
                 browse.sheets_dir = self.data.join("sheets");
                 browse.set_prefs(self.config.prefs.clone());
                 browse.saved = vf_index::saved::load(&opened.root);
-                browse.notice = opened.rebuild.as_ref().map(|r| format!("Indexed: {r}"));
+                browse.notice = opened.rebuild.as_ref().map(|r| match &opened.set_aside {
+                    Some(old) => format!(
+                        "The catalog is no longer encrypted: the old one was kept as {} and the cabinet indexed again. {r}",
+                        old.display()
+                    ),
+                    None => format!("Indexed: {r}"),
+                });
                 let mut search = crate::ui::search::SearchTab::default();
-                search.catalog = Some((opened.catalog.clone(), opened.key.clone()));
+                search.catalog = Some(opened.catalog.clone());
                 let ocr = crate::ui::ocr::OcrState::start(
                     ctx,
                     &opened,
@@ -449,7 +444,6 @@ mod tests {
     use std::path::Path;
 
     use super::*;
-    use crate::session::tests::FAST;
     use egui::accesskit::Role;
     use egui_kittest::HarnessBuilder;
     use egui_kittest::kittest::Queryable;
@@ -460,7 +454,6 @@ mod tests {
             .with_theme(egui::Theme::Light)
             .with_size([1440.0, 900.0])
             .build_eframe(move |cc| VibeFilesApp::new(&cc.egui_ctx, data.clone()));
-        h.state_mut().kdf = FAST;
         h.run();
         h
     }
@@ -504,7 +497,7 @@ mod tests {
         }
     }
 
-    /// P01 step 1: the wizard creates a cabinet whose passphrase opens it on another PC.
+    /// P01 step 1 (PA-18: no passphrase): the wizard creates a cabinet another PC can open.
     #[test]
     fn wizard_creates_a_cabinet() {
         let tmp = tempfile::tempdir().unwrap();
@@ -513,8 +506,6 @@ mod tests {
         click(&mut h, "Create new");
         type_into(&mut h, "Cabinet folder", &root.display().to_string());
         type_into(&mut h, "Cabinet name", "Kisaes Clients");
-        type_into(&mut h, "Recovery passphrase", "correct horse battery");
-        type_into(&mut h, "Confirm passphrase", "correct horse battery");
         click(&mut h, "Create cabinet");
         settle(&mut h);
 
@@ -523,7 +514,6 @@ mod tests {
         assert!(h.query_all_by_label("Kisaes Clients").count() >= 1);
         let cab = vf_fs::cabinet::read(&root).unwrap();
         assert_eq!(cab.name.as_deref(), Some("Kisaes Clients"));
-        assert!(vf_fs::cabinet::recovery_key_file(&root).is_file());
         assert!(vf_fs::doctypes::path(&root).is_file(), "doc types seeded");
         let Screen::Open(o) = &h.state().screen else {
             unreachable!()
@@ -551,9 +541,9 @@ mod tests {
             Some(root.as_path())
         );
         drop(h);
-        // The passphrase alone opens it from an empty data folder.
+        // Another PC opens it from an empty data folder, no passphrase.
         let other = tmp.path().join("pc2");
-        assert!(session::open(&other, "dev-2", &root, "correct horse battery").is_ok());
+        assert!(session::open(&other, "dev-2", &root).is_ok());
     }
 
     /// P02 step 1 end to end: a batch Filer commits while Intake is open is recorded in the
@@ -574,14 +564,11 @@ mod tests {
         let req = CreateRequest {
             root: &root,
             name: "Firm",
-            passphrase: "correct horse battery",
-            confirm: "correct horse battery",
         };
-        drop(session::create(&tmp.path().join("pc1"), "dev-1", &req, FAST).unwrap());
+        drop(session::create(&tmp.path().join("pc1"), "dev-1", &req).unwrap());
         let mut h = harness(&tmp.path().join("pc1b"));
         click(&mut h, "Open existing");
         type_into(&mut h, "Cabinet folder", &root.display().to_string());
-        type_into(&mut h, "Recovery passphrase", "correct horse battery");
         click(&mut h, "Open cabinet");
         settle(&mut h);
         click(&mut h, "Intake");
@@ -656,14 +643,11 @@ mod tests {
         let req = CreateRequest {
             root: &root,
             name: "Firm",
-            passphrase: "correct horse battery",
-            confirm: "correct horse battery",
         };
-        drop(session::create(&tmp.path().join("pc1"), "dev-1", &req, FAST).unwrap());
+        drop(session::create(&tmp.path().join("pc1"), "dev-1", &req).unwrap());
         let mut h = harness(&tmp.path().join("pc1b"));
         click(&mut h, "Open existing");
         type_into(&mut h, "Cabinet folder", &root.display().to_string());
-        type_into(&mut h, "Recovery passphrase", "correct horse battery");
         click(&mut h, "Open cabinet");
         settle(&mut h);
 
@@ -703,10 +687,8 @@ mod tests {
         let req = CreateRequest {
             root: &root,
             name: "Firm",
-            passphrase: "correct horse battery",
-            confirm: "correct horse battery",
         };
-        drop(session::create(&tmp.path().join("pc1"), "dev-1", &req, FAST).unwrap());
+        drop(session::create(&tmp.path().join("pc1"), "dev-1", &req).unwrap());
         let master = vf_fs::clients::master_dir(&root);
         let (mut fs, _) = filer_intake::config::Settings::load_or_default(&master);
         fs.inboxes = vec![inbox.clone()];
@@ -717,7 +699,6 @@ mod tests {
         h.state_mut().config.ingest.scans = Some(scans.clone());
         click(&mut h, "Open existing");
         type_into(&mut h, "Cabinet folder", &root.display().to_string());
-        type_into(&mut h, "Recovery passphrase", "correct horse battery");
         click(&mut h, "Open cabinet");
         settle(&mut h);
 
@@ -759,15 +740,12 @@ mod tests {
         let req = CreateRequest {
             root: &root,
             name: "Firm",
-            passphrase: "correct horse battery",
-            confirm: "correct horse battery",
         };
-        drop(session::create(&tmp.path().join("pc1"), "dev-1", &req, FAST).unwrap());
+        drop(session::create(&tmp.path().join("pc1"), "dev-1", &req).unwrap());
 
         let mut h = harness(&tmp.path().join("pc1b"));
         click(&mut h, "Open existing");
         type_into(&mut h, "Cabinet folder", &root.display().to_string());
-        type_into(&mut h, "Recovery passphrase", "correct horse battery");
         click(&mut h, "Open cabinet");
         settle(&mut h);
 
@@ -855,10 +833,8 @@ mod tests {
         let req = CreateRequest {
             root: &root,
             name: "Firm",
-            passphrase: "correct horse battery",
-            confirm: "correct horse battery",
         };
-        drop(session::create(&tmp.path().join("pc1"), "dev-1", &req, FAST).unwrap());
+        drop(session::create(&tmp.path().join("pc1"), "dev-1", &req).unwrap());
         let master = vf_fs::clients::master_dir(&root);
         let (mut fs, _) = filer_intake::config::Settings::load_or_default(&master);
         fs.inboxes = vec![inbox.clone()];
@@ -868,7 +844,6 @@ mod tests {
         h.state_mut().config.ingest.scans = Some(scans.clone());
         click(&mut h, "Open existing");
         type_into(&mut h, "Cabinet folder", &root.display().to_string());
-        type_into(&mut h, "Recovery passphrase", "correct horse battery");
         click(&mut h, "Open cabinet");
         settle(&mut h);
         click(&mut h, "Intake");
@@ -916,51 +891,23 @@ mod tests {
     }
 
     #[test]
-    fn wizard_reports_a_wrong_passphrase_then_opens() {
-        let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path().join("Clients");
-        let req = CreateRequest {
-            root: &root,
-            name: "Firm",
-            passphrase: "correct horse battery",
-            confirm: "correct horse battery",
-        };
-        drop(session::create(&tmp.path().join("pc1"), "dev-1", &req, FAST).unwrap());
-
-        let mut h = harness(&tmp.path().join("pc2"));
-        click(&mut h, "Open existing");
-        type_into(&mut h, "Cabinet folder", &root.display().to_string());
-        type_into(&mut h, "Recovery passphrase", "not the passphrase");
-        click(&mut h, "Open cabinet");
-        settle(&mut h);
-        let Screen::Wizard(w) = &h.state().screen else {
-            panic!("should stay on the wizard");
-        };
-        assert!(w.error.as_deref().unwrap().contains("passphrase is wrong"));
-        assert!(w.passphrase.is_empty(), "passphrase cleared after use");
-
-        type_into(&mut h, "Recovery passphrase", "correct horse battery");
-        click(&mut h, "Open cabinet");
-        settle(&mut h);
-        assert_eq!(h.state().cabinet_name().as_deref(), Some("Firm"));
-    }
-
-    #[test]
     fn wizard_checks_fields_before_any_work() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().join("Clients");
         let mut h = harness(&tmp.path().join("data"));
         click(&mut h, "Create new");
         type_into(&mut h, "Cabinet folder", &root.display().to_string());
-        type_into(&mut h, "Cabinet name", "Firm");
-        type_into(&mut h, "Recovery passphrase", "short");
-        type_into(&mut h, "Confirm passphrase", "short");
         click(&mut h, "Create cabinet");
         h.run();
         let Screen::Wizard(w) = &h.state().screen else {
             panic!("should stay on the wizard");
         };
-        assert!(w.error.as_deref().unwrap().contains("at least 12"));
+        assert!(
+            w.error
+                .as_deref()
+                .unwrap()
+                .contains("Give the cabinet a name")
+        );
         assert!(!root.exists(), "nothing written");
     }
 }

@@ -379,7 +379,7 @@ impl Index {
 
 #[cfg(test)]
 mod tests {
-    use vf_core::db::{CatalogKey, Storage};
+    use vf_core::db::Storage;
 
     use super::*;
 
@@ -397,9 +397,7 @@ mod tests {
         let root = t.path().join("cab");
         let folder = "Acme LLC (1001)";
         std::fs::create_dir_all(root.join(folder).join("Income Tax/2025")).unwrap();
-        let mut conn =
-            vf_core::db::open(&t.path().join("c.db"), &CatalogKey([6; 32]), Storage::Local)
-                .unwrap();
+        let mut conn = vf_core::db::open(&t.path().join("c.db"), Storage::Local).unwrap();
         crate::doctypes::seed_if_missing(&root).unwrap();
         crate::doctypes::sync(&mut conn, &root, "dev", "seed").unwrap();
         conn.execute(
