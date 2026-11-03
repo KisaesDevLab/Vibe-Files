@@ -82,6 +82,15 @@ impl Remote {
         Arc::new(object_store::memory::InMemory::new())
     }
 
+    /// A bucket in a local folder (the soak test: the in-memory store keeps every object in
+    /// the process's own memory, which would read as a leak).
+    pub fn folder(dir: &std::path::Path) -> Result<Arc<dyn ObjectStore>, RemoteError> {
+        std::fs::create_dir_all(dir).map_err(|e| RemoteError::Store(e.to_string()))?;
+        Ok(Arc::new(
+            object_store::local::LocalFileSystem::new_with_prefix(dir)?,
+        ))
+    }
+
     /// B2 (or any S3 endpoint).
     pub fn s3(c: &S3Config, app_key: &str) -> Result<Arc<dyn ObjectStore>, RemoteError> {
         let s = object_store::aws::AmazonS3Builder::new()

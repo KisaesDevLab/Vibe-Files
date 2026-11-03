@@ -143,9 +143,12 @@ impl SyncTab {
                 }
             }
         }
-        if self
-            .refreshed
-            .is_none_or(|t| t.elapsed() >= Duration::from_secs(3))
+        // The pending count reads every document: only while sync is unlocked (Browse's pill
+        // and this tab's tables are hidden otherwise).
+        if self.session.is_some()
+            && self
+                .refreshed
+                .is_none_or(|t| t.elapsed() >= Duration::from_secs(3))
         {
             self.refresh(env);
         }

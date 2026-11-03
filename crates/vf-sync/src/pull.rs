@@ -628,6 +628,15 @@ fn apply_docs(
                     }
                 }
             } else {
+                // In Intake's last batch: wait, before making the copy (a retry makes one).
+                if matches!(
+                    vf_fs::content::check(conn, root, &e.doc_id)?,
+                    Err(vf_fs::content::Refused::FilerUndo)
+                ) {
+                    deferred = true;
+                    rep.deferred += 1;
+                    continue;
+                }
                 // Both changed: keep this workstation's bytes beside, the bucket's take the path.
                 let copy_rel = conflict_name(&l.rel_path, &s.device_name);
                 let tmp = vf_fs::content::tmp_file(root, "part")?;

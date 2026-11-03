@@ -75,7 +75,11 @@ pub fn run(dir: &Path, hours: f64, out: &mut dyn Write) -> Result<i32> {
         vf_fs::rebuild::rebuild(&mut o.conn, &root, "soak")?;
     }
     let cab = vf_fs::cabinet::read(&root).map_err(anyhow::Error::msg)?;
-    let remote = vf_sync::Remote::new(vf_sync::Remote::memory(), &cab.cabinet_id);
+    // A bucket on disk: an in-memory one would grow the process with every push.
+    let remote = vf_sync::Remote::new(
+        vf_sync::Remote::folder(&dir.join("bucket"))?,
+        &cab.cabinet_id,
+    );
     let keys = vf_sync::setup::init(
         &root,
         &remote,
