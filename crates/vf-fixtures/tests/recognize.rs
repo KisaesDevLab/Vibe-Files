@@ -82,7 +82,11 @@ fn a_w2_with_a_text_layer_files_itself_and_no_full_tin_is_written() {
         delivered_name(&done),
         "Reyes, Dana & Lee_REYE5521_2025 W-2 Anderson Farms LLC.pdf"
     );
-    assert!(done.delivered[0].note.contains("recognized W-2 2025"), "{}", done.delivered[0].note);
+    assert!(
+        done.delivered[0].note.contains("recognized W-2 2025"),
+        "{}",
+        done.delivered[0].note
+    );
     let hints = vf_fs::hints::load(&root);
     let h = &hints[&done.delivered[0].sha256];
     assert_eq!(h.tax_year, Some(2025));
@@ -90,11 +94,18 @@ fn a_w2_with_a_text_layer_files_itself_and_no_full_tin_is_written() {
     assert_eq!(x.recipient_tin4.as_deref(), Some("4321"));
 
     // A K-1 too: entity primary, partner named in the note.
-    let k1 = cases.iter().find(|c| c.name.starts_with("k1-1065 2025 ORTI3300")).unwrap();
+    let k1 = cases
+        .iter()
+        .find(|c| c.name.starts_with("k1-1065 2025 ORTI3300"))
+        .unwrap();
     let scan = staging.join("scan0002.pdf");
     vf_fixtures::write_pdf(&scan, &lines(&k1.text)).unwrap();
     let done = pipeline::process(&ctx, &scan, Origin::Scans).unwrap();
-    assert!(delivered_name(&done).contains("_CEDA7788_"), "{}", delivered_name(&done));
+    assert!(
+        delivered_name(&done).contains("_CEDA7788_"),
+        "{}",
+        delivered_name(&done)
+    );
     assert!(done.delivered[0].note.contains("also for Ortiz, Sam"));
 
     // PHASES P08 done-when 3: no full TIN anywhere the pipeline or the import wrote.

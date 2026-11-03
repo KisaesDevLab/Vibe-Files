@@ -133,6 +133,8 @@ fn record(
         .and_then(|mut st| st.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect())
         .map_err(|e| e.to_string())?;
     let hints = crate::hints::load(root);
+    // Payer → client corrections to learn once the batch is recorded (P08 step 4).
+    let mut learned: Vec<(String, String)> = Vec::new();
 
     // Every file the batch put in the cabinet: each item's destination and its copies.
     struct Filed<'a> {
@@ -240,6 +242,22 @@ fn record(
                 let source = hint
                     .and_then(|h| h.source.clone())
                     .unwrap_or_else(|| "client".into());
+                // What a form recognizer read (P08): kept with the document, and a correction
+                // (filed to another client than proposed) teaches the payer's client.
+                let extract = hint.and_then(|h| h.extract.clone());
+                if let Some(x) = &extract {
+                    let filed = f.client.map(|c| c.0.clone());
+                    if let (Some(payer), Some(filed)) = (&x.payer_name, &filed)
+                        && x.proposed_client.as_ref() != Some(filed)
+                    {
+                        learned.push((payer.clone(), filed.clone()));
+                        tx = tx.audit(AuditEntry::new(
+                            "extract_corrected",
+                            Some(&id),
+                            json!({ "form": x.form, "proposed": x.proposed_client, "filed": filed }),
+                        ));
+                    }
+                }
                 if hint.is_some_and(Hint::is_useful) {
                     let meta = crate::docmeta::Meta {
                         id: id.clone(),
@@ -279,13 +297,39 @@ fn record(
                             doc_type.into(),
                         ],
                     ))
-                    .catalog(sync_put(&id, &now))
-                    .catalog_undo(Stmt::new(
-                        "UPDATE document SET deleted_at = ?2, tombstone_reason = 'intake undone',
+                    .catalog(sync_put(&id, &now));
+                if let Some(x) = extract {
+                    tx = tx
+                        .catalog(Stmt::new(
+                            "INSERT OR REPLACE INTO document_extract (doc_id, hash, form, tax_year,
+                               payer_name, payer_tin4, recipient_name, recipient_tin4, confidence,
+                               proposed_client, read_at)
+                             VALUES (?1, (SELECT hash FROM document WHERE id = ?1), ?2, ?3, ?4, ?5,
+                               ?6, ?7, ?8, ?9, ?10)",
+                            vec![
+                                id.clone().into(),
+                                x.form.into(),
+                                tax_year.into(),
+                                x.payer_name.into(),
+                                x.payer_tin4.into(),
+                                x.recipient_name.into(),
+                                x.recipient_tin4.into(),
+                                (f64::from(x.confidence) / 100.0).into(),
+                                x.proposed_client.into(),
+                                now.clone().into(),
+                            ],
+                        ))
+                        .catalog_undo(Stmt::new(
+                            "DELETE FROM document_extract WHERE doc_id = ?1",
+                            vec![id.clone().into()],
+                        ));
+                }
+                tx = tx.catalog_undo(Stmt::new(
+                    "UPDATE document SET deleted_at = ?2, tombstone_reason = 'intake undone',
                            device_id = ?3, updated_at = ?2, rev = rev + 1
                          WHERE id = ?1",
-                        vec![id.clone().into(), now.clone().into(), device_id.into()],
-                    ));
+                    vec![id.clone().into(), now.clone().into(), device_id.into()],
+                ));
                 added += 1;
             }
         }
@@ -336,6 +380,9 @@ fn record(
     ));
     // The only file operations are docmeta lines for hinted documents (Filer moved the files).
     crate::fileops::commit(conn, root, tx, device_id)?;
+    for (payer, client) in learned {
+        let _ = crate::aliases::learn(root, &payer, &client);
+    }
 
     // Q-17: keep overwritten content as versions in `_Vibe/versions/` (content-addressed, with a
     // sidecar so rebuild restores the version rows). Filer's own copy stays for its undo.
@@ -654,6 +701,54 @@ mod tests {
             std::fs::read_to_string(f.root.join("Acme LLC (1001)/_Vibe/docmeta.jsonl")).unwrap();
         assert_eq!(meta.lines().count(), 1);
         assert!(meta.contains(&w2_type.id) && meta.contains("\"firm\""));
+    }
+
+    /// P08 steps 2 and 4: a recognized form's reading is kept with the document; filed to a
+    /// different client than proposed, the payer's client is learned for next time.
+    #[test]
+    fn recognized_forms_keep_their_reading_and_corrections_are_learned() {
+        let mut f = fx();
+        std::fs::write(f.inbox.join("1099.pdf"), "content of 1099.pdf").unwrap();
+        let hash = filer_intake::commit::sha256_file(&f.inbox.join("1099.pdf")).unwrap();
+        let mut h = crate::hints::Hint::new(&hash, "1099.pdf", "recognized", "dev");
+        h.tax_year = Some(2025);
+        h.extract = Some(crate::hints::Recognized {
+            form: "1099-nec".into(),
+            payer_name: Some("Summit Brokerage LLC".into()),
+            payer_tin4: Some("2222".into()),
+            recipient_name: Some("Bell Ranch".into()),
+            recipient_tin4: None,
+            proposed_client: Some("someone-else".into()),
+            confidence: 70,
+            copies: vec![],
+        });
+        crate::hints::append(&f.root, &h).unwrap();
+        let bell = client("2002", "Bell Ranch Inc");
+        file(&f, &bell, &["1099.pdf"], false);
+        reconcile(&mut f.conn, &f.root, "dev").unwrap();
+        let (form, payer, conf): (String, String, f64) = f
+            .conn
+            .query_row(
+                "SELECT form, payer_name, confidence FROM document_extract",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            (form.as_str(), payer.as_str()),
+            ("1099-nec", "Summit Brokerage LLC")
+        );
+        assert!((conf - 0.7).abs() < 1e-6);
+        let learned = crate::aliases::load(&f.root);
+        assert_eq!(learned.len(), 1);
+        assert_eq!(learned[0].client_id, bell.uuid.to_string());
+        assert_eq!(
+            n(
+                &f.conn,
+                "SELECT count(*) FROM audit WHERE action = 'extract_corrected'"
+            ),
+            1
+        );
     }
 
     /// Overwrite: the cataloged document gets the new content; the old content becomes a

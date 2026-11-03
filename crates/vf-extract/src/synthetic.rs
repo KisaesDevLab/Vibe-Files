@@ -97,7 +97,7 @@ impl Style {
             inline: i % 2 == 1,
             swapped: i % 3 == 2,
             two_column: i % 4 == 3,
-            masked: i % 2 == 0,
+            masked: i.is_multiple_of(2),
             corrected: i % 7 == 5,
             noisy: i % 5 == 4,
         }
@@ -253,7 +253,8 @@ fn render(form: Form, year: i32, payer: (&str, &str), recip: (&str, &str), s: St
         lines.push(format!("{}, street address", p.recip_name_label));
         lines.push(recip.0.to_string());
     } else {
-        let mut blocks: Vec<Box<dyn Fn(&mut Vec<String>)>> = vec![];
+        type Block = Box<dyn Fn(&mut Vec<String>)>;
+        let mut blocks: Vec<Block> = vec![];
         if has_payer {
             let (l1, l2, n) = (p.payer_tin_label, p.payer_name_label, payer.0.to_string());
             let t = ptin.clone();

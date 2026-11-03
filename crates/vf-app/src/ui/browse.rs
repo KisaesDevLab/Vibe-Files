@@ -1604,6 +1604,39 @@ fn inspector(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env) {
                     RichText::new(widgets::local_time(&d.updated_at)),
                 );
                 kv(ui, "Path", RichText::new(&d.rel_path).monospace().small());
+                // P08: what the form recognizer read (TINs last 4 only).
+                let party = |n: Option<String>, t: Option<String>| -> String {
+                    match (n, t) {
+                        (Some(n), Some(t)) => format!("{n} (…{t})"),
+                        (Some(n), None) => n,
+                        (None, Some(t)) => format!("…{t}"),
+                        (None, None) => "—".into(),
+                    }
+                };
+                let read: Option<String> = env
+                    .conn
+                    .query_row(
+                        "SELECT form, tax_year, payer_name, payer_tin4, recipient_name,
+                                recipient_tin4, confidence
+                         FROM document_extract WHERE doc_id = ?1",
+                        [&d.id],
+                        |r| {
+                            let year: Option<i64> = r.get(1)?;
+                            let conf: f64 = r.get(6)?;
+                            Ok(format!(
+                                "{}{} · from {} · for {} · {:.0}% sure",
+                                r.get::<_, String>(0)?.to_uppercase(),
+                                year.map(|y| format!(" {y}")).unwrap_or_default(),
+                                party(r.get(2)?, r.get(3)?),
+                                party(r.get(4)?, r.get(5)?),
+                                conf * 100.0
+                            ))
+                        },
+                    )
+                    .ok();
+                if let Some(line) = read {
+                    kv(ui, "Recognized", RichText::new(line));
+                }
             });
         let (id, name) = (d.id.clone(), d.name().to_string());
         versions_list(ui, b, env, &id, &name);

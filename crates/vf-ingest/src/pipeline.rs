@@ -68,7 +68,13 @@ fn deliver_or_recognized(
     note: String,
 ) -> Result<Delivered, String> {
     match recognized(ctx, lookup, tmp, file) {
-        Some(o) => deliver(ctx, tmp, &o.file, Some(o.hint), format!("{note} · {}", o.note)),
+        Some(o) => deliver(
+            ctx,
+            tmp,
+            &o.file,
+            Some(o.hint),
+            format!("{note} · {}", o.note),
+        ),
         None => deliver(ctx, tmp, file, None, note),
     }
 }
