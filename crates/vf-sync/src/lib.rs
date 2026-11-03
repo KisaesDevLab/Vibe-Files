@@ -19,6 +19,7 @@ pub mod push;
 pub mod remote;
 pub mod restore;
 pub mod setup;
+pub mod update;
 
 use std::path::Path;
 

@@ -24,6 +24,67 @@ pub enum Command {
         #[command(subcommand)]
         cmd: OcrCmd,
     },
+    /// The startup self-checks: catalog integrity, audit chain, cabinet reachable, interrupted
+    /// changes, sync. Exit code 0 = all OK, 5 = something failed.
+    Check {
+        /// Cabinet root folder.
+        cabinet: PathBuf,
+    },
+    /// B2 sync of the cabinet (set it up in the app first). The sync passphrase is read from
+    /// `VF_SYNC_PASSPHRASE`, else from one line on stdin.
+    Sync {
+        /// Cabinet root folder.
+        cabinet: PathBuf,
+        #[command(subcommand)]
+        cmd: SyncCmd,
+    },
+    /// One client's documents, its audit trail extract (CSV) and a manifest (paths, SHA-256,
+    /// doc types, years) in one zip.
+    ExportClient {
+        /// Cabinet root folder.
+        cabinet: PathBuf,
+        /// The client's ID (tax software / CSV ID).
+        id: String,
+        /// The zip to write.
+        out: PathBuf,
+    },
+    /// Restore a cabinet from its B2 bucket onto this PC (disaster recovery). The application
+    /// key comes from `VF_S3_APP_KEY` and the sync passphrase from `VF_SYNC_PASSPHRASE` (else one
+    /// line each on stdin). Without `--cabinet-id`, lists the cabinets in the bucket.
+    Restore {
+        /// New, empty folder for the cabinet.
+        folder: PathBuf,
+        #[arg(long)]
+        endpoint: String,
+        #[arg(long)]
+        region: String,
+        #[arg(long)]
+        bucket: String,
+        #[arg(long)]
+        key_id: String,
+        #[arg(long)]
+        cabinet_id: Option<String>,
+    },
+    /// Memory and handle soak test on a synthetic cabinet in a new folder (P13 step 3). Exit
+    /// code 0 = steady, 6 = kept growing.
+    Soak {
+        /// How long to run.
+        #[arg(long, default_value_t = 8.0)]
+        hours: f64,
+        /// Working folder (new); default: `<data>/soak-<time>`.
+        #[arg(long)]
+        dir: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum SyncCmd {
+    /// Pull what other workstations sent, then send what changed here.
+    Push,
+    /// Bring in what other workstations sent.
+    Pull,
+    /// Pending documents, conflicts, last exchange.
+    Status,
 }
 
 #[derive(Subcommand, Debug)]
@@ -79,7 +140,284 @@ pub fn run(cmd: &Command, data: &Path, out: &mut dyn Write) -> Result<i32> {
         Command::Ocr {
             cmd: OcrCmd::Backlog { cabinet, threads },
         } => ocr_backlog(&catalog, cabinet, data, *threads, out),
+        Command::Check { cabinet } => {
+            if !catalog.is_file() {
+                bail!("no catalog at {}", catalog.display());
+            }
+            let conn = db::open(&catalog, Storage::Local)?;
+            let rec = vf_fs::fileops::recover(&conn).map_err(anyhow::Error::msg)?;
+            if rec.transactions > 0 {
+                writeln!(out, "put back {} interrupted changes", rec.transactions)?;
+            }
+            let config = crate::config::load(data)?;
+            let cab = vf_fs::cabinet::read(cabinet).map_err(anyhow::Error::msg);
+            let synced = cab
+                .as_ref()
+                .is_ok_and(|c| config.sync.configured_for(&c.cabinet_id));
+            let checks = crate::selfcheck::run(&conn, cabinet, synced);
+            for c in &checks {
+                writeln!(
+                    out,
+                    "{} {}: {}",
+                    if c.ok { "ok  " } else { "FAIL" },
+                    c.name,
+                    c.detail
+                )?;
+            }
+            Ok(if checks.iter().all(|c| c.ok) { 0 } else { 5 })
+        }
+        Command::Sync { cabinet, cmd } => sync(&catalog, cabinet, data, cmd, out),
+        Command::ExportClient {
+            cabinet,
+            id,
+            out: zip,
+        } => export_client(&catalog, cabinet, id, zip, out),
+        Command::Restore {
+            folder,
+            endpoint,
+            region,
+            bucket,
+            key_id,
+            cabinet_id,
+        } => {
+            let secret = |var: &str| -> Result<String> {
+                Ok(match std::env::var(var) {
+                    Ok(v) => v,
+                    Err(_) => {
+                        let mut l = String::new();
+                        std::io::stdin().read_line(&mut l)?;
+                        l.trim_end_matches(['\r', '\n']).to_string()
+                    }
+                })
+            };
+            let store = vf_sync::Remote::s3(
+                &vf_sync::remote::S3Config {
+                    endpoint: endpoint.clone(),
+                    region: region.clone(),
+                    bucket: bucket.clone(),
+                    key_id: key_id.clone(),
+                },
+                &secret("VF_S3_APP_KEY")?,
+            )?;
+            let Some(id) = cabinet_id else {
+                for c in vf_sync::restore::cabinets(store)? {
+                    writeln!(out, "{c}")?;
+                }
+                return Ok(0);
+            };
+            if catalog.exists() {
+                bail!(
+                    "{} already holds a catalog: use a new --data folder",
+                    data.display()
+                );
+            }
+            std::fs::create_dir_all(data)?;
+            let mut conn = db::open(&catalog, Storage::Local)?;
+            let device = vf_core::new_id();
+            let r = vf_sync::restore::restore(
+                &mut conn,
+                folder,
+                store,
+                id,
+                &secret("VF_SYNC_PASSPHRASE")?,
+                &device,
+                &std::env::var("COMPUTERNAME").unwrap_or_else(|_| "restore".into()),
+            )?;
+            writeln!(
+                out,
+                "restored {} clients, {} documents, {} months of audit trail into {}; open it with Cabinet › Open existing",
+                r.clients,
+                r.documents,
+                r.audit_months,
+                folder.display()
+            )?;
+            Ok(0)
+        }
+        Command::Soak { hours, dir } => {
+            let dir = dir.clone().unwrap_or_else(|| {
+                data.join(format!(
+                    "soak-{}",
+                    chrono::Local::now().format("%Y%m%d-%H%M%S")
+                ))
+            });
+            crate::soak::run(&dir, *hours, out)
+        }
     }
+}
+
+/// An unlocked sync session from `config.toml [sync]` and the passphrase.
+fn sync_session(cabinet: &Path, data: &Path) -> Result<vf_sync::Sync> {
+    let config = crate::config::load(data)?;
+    let cab = vf_fs::cabinet::read(cabinet).map_err(anyhow::Error::msg)?;
+    if !config.sync.configured_for(&cab.cabinet_id) {
+        bail!("sync is not set up for this cabinet on this PC (Sync tab)");
+    }
+    let pass = match std::env::var("VF_SYNC_PASSPHRASE") {
+        Ok(p) => p,
+        Err(_) => {
+            let mut l = String::new();
+            std::io::stdin().read_line(&mut l)?;
+            l.trim_end_matches(['\r', '\n']).to_string()
+        }
+    };
+    let keys = vf_sync::setup::unlock_local(cabinet, &cab.cabinet_id, &pass)?;
+    let app_key = vf_sync::setup::open_secret(&keys, &config.sync.app_key_sealed)?;
+    let store = vf_sync::Remote::s3(&config.sync.s3(), &app_key)?;
+    Ok(vf_sync::Sync {
+        remote: vf_sync::Remote::new(store, &cab.cabinet_id),
+        keys,
+        cabinet_id: cab.cabinet_id,
+        device_id: config.device_id,
+        device_name: std::env::var("COMPUTERNAME").unwrap_or_else(|_| "this PC".into()),
+    })
+}
+
+fn sync(
+    catalog: &Path,
+    cabinet: &Path,
+    data: &Path,
+    cmd: &SyncCmd,
+    out: &mut dyn Write,
+) -> Result<i32> {
+    if !catalog.is_file() {
+        bail!("no catalog at {}", catalog.display());
+    }
+    let mut conn = db::open(catalog, Storage::Local)?;
+    match cmd {
+        SyncCmd::Status => {
+            let pending = vf_sync::catalog::pending(&conn)?;
+            let conflicts = vf_sync::restore::conflicts(&conn)?;
+            let (rev, push, pull): (i64, Option<String>, Option<String>) = conn
+                .query_row(
+                    "SELECT last_manifest_rev, last_push, last_pull FROM sync_state LIMIT 1",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .unwrap_or((0, None, None));
+            writeln!(
+                out,
+                "{} documents pending in {} segments · {} conflicts · manifest rev {rev} · last push {} · last pull {}",
+                pending.values().sum::<usize>(),
+                pending.len(),
+                conflicts.len(),
+                push.as_deref().unwrap_or("never"),
+                pull.as_deref().unwrap_or("never"),
+            )?;
+            Ok(0)
+        }
+        SyncCmd::Push => {
+            let s = sync_session(cabinet, data)?;
+            let r = vf_sync::push::push(&mut conn, cabinet, &s, None)?;
+            writeln!(
+                out,
+                "pushed {} documents ({} objects, {} bytes) · rev {}",
+                r.documents, r.objects, r.bytes, r.head_rev
+            )?;
+            Ok(0)
+        }
+        SyncCmd::Pull => {
+            let s = sync_session(cabinet, data)?;
+            let r = vf_sync::pull::pull(&mut conn, cabinet, &s)?;
+            writeln!(
+                out,
+                "pulled: {} new, {} updated, {} moved, {} re-typed, {} deleted, {} conflicts · rev {}",
+                r.new, r.updated, r.moved, r.meta, r.deleted, r.conflicts, r.head_rev
+            )?;
+            Ok(0)
+        }
+    }
+}
+
+/// `export-client`: `files/<cabinet path>`, `audit.csv`, `manifest.json`.
+fn export_client(
+    catalog: &Path,
+    cabinet: &Path,
+    ext_id: &str,
+    zip_path: &Path,
+    out: &mut dyn Write,
+) -> Result<i32> {
+    use std::io::Write as _;
+    if !catalog.is_file() {
+        bail!("no catalog at {}", catalog.display());
+    }
+    let conn = db::open(catalog, Storage::Local)?;
+    let (client_id, name): (String, String) = conn
+        .query_row(
+            "SELECT id, name FROM client WHERE ext_id = ?1 AND deleted_at IS NULL",
+            [ext_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .map_err(|_| anyhow::anyhow!("no client with ID {ext_id}"))?;
+    let mut st = conn.prepare(
+        "SELECT d.rel_path, d.hash, d.size, t.name, d.tax_year, d.status FROM document d
+         LEFT JOIN doc_type t ON t.id = d.doc_type_id
+         WHERE d.client_id = ?1 AND d.deleted_at IS NULL ORDER BY d.rel_path",
+    )?;
+    type Row = (String, String, i64, Option<String>, Option<i64>, String);
+    let docs: Vec<Row> = st
+        .query_map([&client_id], |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+            ))
+        })?
+        .collect::<std::result::Result<_, _>>()?;
+    if zip_path.exists() {
+        bail!("{} exists already", zip_path.display());
+    }
+    let f = std::fs::File::create(zip_path)?;
+    let mut z = zip::ZipWriter::new(f);
+    let opts = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated);
+    let mut manifest = vec![];
+    for (rel, hash, size, ty, year, status) in &docs {
+        let bytes = std::fs::read(cabinet.join(rel))?;
+        let have = vf_sync::crypto::sha256(&bytes);
+        if &have != hash {
+            bail!(
+                "{rel} does not match the catalog (changed outside Vibe Files?): run the integrity sweep first"
+            );
+        }
+        z.start_file(format!("files/{rel}"), opts)?;
+        z.write_all(&bytes)?;
+        manifest.push(serde_json::json!({
+            "path": rel, "sha256": hash, "size": size, "doc_type": ty, "tax_year": year,
+            "status": status,
+        }));
+    }
+    let audit = vf_core::audit::query(
+        &conn,
+        &vf_core::audit::Filter {
+            client_id: Some(client_id.clone()),
+            ..Default::default()
+        },
+        None,
+    )?;
+    z.start_file("audit.csv", opts)?;
+    z.write_all(vf_core::audit::to_csv(&audit).as_bytes())?;
+    z.start_file("manifest.json", opts)?;
+    z.write_all(
+        serde_json::to_string_pretty(&serde_json::json!({
+            "client": {"id": ext_id, "uuid": client_id, "name": name},
+            "exported_at": vf_core::now_rfc3339(),
+            "documents": manifest,
+            "audit_rows": audit.len(),
+        }))?
+        .as_bytes(),
+    )?;
+    z.finish()?;
+    writeln!(
+        out,
+        "{} documents and {} audit rows written to {}",
+        docs.len(),
+        audit.len(),
+        zip_path.display()
+    )?;
+    Ok(0)
 }
 
 /// `ocr backlog`: queue everything not yet read, run the workers until the queue is empty.
@@ -263,5 +601,99 @@ mod tests {
         .unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].page, Some(1));
+    }
+
+    /// P13 step 5: `check` passes on a healthy cabinet; `export-client` writes the client's
+    /// files, its audit extract and a manifest.
+    #[test]
+    fn check_and_export_client() {
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path().join("Clients");
+        let data = t.path().join("data");
+        let req = crate::session::CreateRequest {
+            root: &root,
+            name: "Firm",
+        };
+        {
+            let mut o = crate::session::create(&data, "dev", &req).unwrap();
+            let p = vf_fs::newclient::plan(
+                &o.conn,
+                &root,
+                &vf_fs::newclient::NewClient {
+                    ext_id: "1042".into(),
+                    name: "Anderson Farms LLC".into(),
+                    entity_type: None,
+                },
+            )
+            .unwrap();
+            vf_fs::newclient::create(&mut o.conn, &root, &p, "dev").unwrap();
+            let f = root.join("Anderson Farms LLC (1042)/Income Tax/2025/w2.pdf");
+            std::fs::create_dir_all(f.parent().unwrap()).unwrap();
+            std::fs::write(&f, "invented").unwrap();
+            vf_fs::rebuild::rebuild(&mut o.conn, &root, "dev").unwrap();
+        }
+        crate::config::save(
+            &data,
+            &crate::config::Config {
+                device_id: "dev".into(),
+                last_cabinet: None,
+                prefs: Default::default(),
+                ingest: Default::default(),
+                ocr: Default::default(),
+                viewer: Default::default(),
+                sync: Default::default(),
+                update_check: false,
+            },
+        )
+        .unwrap();
+        let mut out = Vec::new();
+        let code = run(
+            &Command::Check {
+                cabinet: root.clone(),
+            },
+            &data,
+            &mut out,
+        )
+        .unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert_eq!(code, 0, "{text}");
+        assert!(text.contains("ok   Audit chain"), "{text}");
+
+        let zip_path = t.path().join("anderson.zip");
+        let mut out = Vec::new();
+        let code = run(
+            &Command::ExportClient {
+                cabinet: root.clone(),
+                id: "1042".into(),
+                out: zip_path.clone(),
+            },
+            &data,
+            &mut out,
+        )
+        .unwrap();
+        assert_eq!(code, 0);
+        let mut z = zip::ZipArchive::new(std::fs::File::open(&zip_path).unwrap()).unwrap();
+        let names: Vec<String> = (0..z.len())
+            .map(|i| z.by_index(i).unwrap().name().unwrap().to_string())
+            .collect();
+        assert!(
+            names.contains(&"files/Anderson Farms LLC (1042)/Income Tax/2025/w2.pdf".to_string())
+        );
+        assert!(names.contains(&"audit.csv".to_string()));
+        let mut m = String::new();
+        std::io::Read::read_to_string(&mut z.by_name("manifest.json").unwrap(), &mut m).unwrap();
+        assert!(m.contains("\"sha256\""), "{m}");
+    }
+
+    /// P13 step 3: the soak loop runs (a few seconds here; 8 hours with `vibe-files soak`).
+    #[test]
+    fn soak_runs_briefly() {
+        let t = tempfile::tempdir().unwrap();
+        let mut out = Vec::new();
+        let code = crate::soak::run(&t.path().join("soak"), 0.001, &mut out).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("iterations"), "{text}");
+        assert!(code == 0 || code == 6);
+        assert!(t.path().join("soak/soak.csv").is_file());
     }
 }

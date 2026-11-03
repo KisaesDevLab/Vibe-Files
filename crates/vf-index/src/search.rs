@@ -148,28 +148,6 @@ pub fn search(conn: &Connection, q: &Query, limit: usize) -> vf_core::Result<Vec
             .join(" AND ");
         Some(p(V::Text(phrase)))
     };
-    sql.push_str("WITH m AS (");
-    match &text_match {
-        Some(m) => sql.push_str(&format!(
-            "SELECT doc_id, page, rank, snippet(doc_fts, 0, char(2), char(3), '…', 12) AS snip
-             FROM doc_fts WHERE doc_fts MATCH {m}"
-        )),
-        None => {
-            sql.push_str("SELECT NULL AS doc_id, NULL AS page, NULL AS rank, NULL AS snip WHERE 0")
-        }
-    }
-    sql.push_str(
-        "), best AS (
-            SELECT doc_id, page, rank, snip, count(*) OVER (PARTITION BY doc_id) AS n,
-                   row_number() OVER (PARTITION BY doc_id ORDER BY rank, page) AS rn FROM m)
-         SELECT d.id, d.rel_path, c.name, d.tax_year, t.name, b.page, coalesce(b.n, 0),
-                coalesce(b.snip, '')
-         FROM document d
-         LEFT JOIN best b ON b.doc_id = d.id AND b.rn = 1
-         LEFT JOIN client c ON c.id = d.client_id
-         LEFT JOIN doc_type t ON t.id = d.doc_type_id
-         WHERE d.deleted_at IS NULL",
-    );
     let mut wh: Vec<String> = Vec::new();
     // Long words: a text hit, or every long word in the file name.
     if !long.is_empty() {
@@ -190,28 +168,31 @@ pub fn search(conn: &Connection, q: &Query, limit: usize) -> vf_core::Result<Vec
               WHERE f.doc_id = d.id AND f.text LIKE {l} ESCAPE '\\'))"
         ));
     }
+    // Document filters: also applied inside the text match, so a narrowed search only ranks
+    // its own pages (P13).
+    let mut docf: Vec<String> = Vec::new();
     match &q.scope {
         Scope::Cabinet => {}
-        Scope::Client(id) => wh.push(format!("d.client_id = {}", p(V::Text(id.clone())))),
+        Scope::Client(id) => docf.push(format!("d.client_id = {}", p(V::Text(id.clone())))),
         Scope::Folder(f) => {
             let f = f.trim_end_matches('/');
-            wh.push(format!(
+            docf.push(format!(
                 "d.rel_path LIKE {} ESCAPE '\\'",
                 p(V::Text(format!("{}/%", escape_like(f))))
             ));
         }
     }
     if let Some(c) = &q.client {
-        wh.push(format!("d.client_id = {}", p(V::Text(c.clone()))));
+        docf.push(format!("d.client_id = {}", p(V::Text(c.clone()))));
     }
     match &q.year {
-        Some(Year::Year(y)) => wh.push(format!("d.tax_year = {}", p(V::Integer(i64::from(*y))))),
-        Some(Year::Permanent) => wh.push("d.tax_year IS NULL".into()),
+        Some(Year::Year(y)) => docf.push(format!("d.tax_year = {}", p(V::Integer(i64::from(*y))))),
+        Some(Year::Permanent) => docf.push("d.tax_year IS NULL".into()),
         None => {}
     }
     match &q.doc_type {
-        Some(DocType::Is(t)) => wh.push(format!("d.doc_type_id = {}", p(V::Text(t.clone())))),
-        Some(DocType::Needed) => wh.push("d.doc_type_id IS NULL".into()),
+        Some(DocType::Is(t)) => docf.push(format!("d.doc_type_id = {}", p(V::Text(t.clone())))),
+        Some(DocType::Needed) => docf.push("d.doc_type_id IS NULL".into()),
         None => {}
     }
     for (col, v) in [
@@ -220,34 +201,65 @@ pub fn search(conn: &Connection, q: &Query, limit: usize) -> vf_core::Result<Vec
         ("d.filed_by", &q.filed_by),
     ] {
         if let Some(v) = v {
-            wh.push(format!("{col} = {}", p(V::Text(v.clone()))));
+            docf.push(format!("{col} = {}", p(V::Text(v.clone()))));
         }
     }
     if let Some(f) = &q.filed_from {
-        wh.push(format!(
+        docf.push(format!(
             "substr(d.filed_at, 1, 10) >= {}",
             p(V::Text(f.clone()))
         ));
     }
     if let Some(t) = &q.filed_to {
-        wh.push(format!(
+        docf.push(format!(
             "substr(d.filed_at, 1, 10) <= {}",
             p(V::Text(t.clone()))
         ));
     }
     if let Some(t) = &q.tag {
-        wh.push(format!(
+        docf.push(format!(
             "EXISTS (SELECT 1 FROM document_tag g WHERE g.doc_id = d.id AND g.tag = {})",
             p(V::Text(t.clone()))
         ));
     }
     if q.has_ssn {
-        wh.push(
+        docf.push(
             "EXISTS (SELECT 1 FROM page_text x WHERE x.hash = d.hash AND x.text GLOB
               '*[0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9][0-9][0-9]*')"
                 .into(),
         );
     }
+    let cand = if docf.is_empty() {
+        String::new()
+    } else {
+        format!(
+            " AND doc_id IN (SELECT d.id FROM document d WHERE d.deleted_at IS NULL AND {})",
+            docf.join(" AND ")
+        )
+    };
+    wh.extend(docf);
+    sql.push_str("WITH m AS (");
+    match &text_match {
+        // Snippets are made afterwards, for the hits returned only (P13: a common word
+        // matches every page of a 50,000-document cabinet).
+        Some(m) => sql.push_str(&format!(
+            "SELECT doc_id, page, rank, rowid AS fts_row FROM doc_fts WHERE doc_fts MATCH {m}{cand}"
+        )),
+        None => sql
+            .push_str("SELECT NULL AS doc_id, NULL AS page, NULL AS rank, NULL AS fts_row WHERE 0"),
+    }
+    // Per document: its best page (SQLite takes `page`, `fts_row` from the min-rank row).
+    sql.push_str(
+        "), best AS (
+            SELECT doc_id, min(rank) AS rank, page, fts_row, count(*) AS n FROM m GROUP BY doc_id)
+         SELECT d.id, d.rel_path, c.name, d.tax_year, t.name, b.page, coalesce(b.n, 0),
+                b.fts_row
+         FROM document d
+         LEFT JOIN best b ON b.doc_id = d.id
+         LEFT JOIN client c ON c.id = d.client_id
+         LEFT JOIN doc_type t ON t.id = d.doc_type_id
+         WHERE d.deleted_at IS NULL",
+    );
     for w in wh {
         sql.push_str(" AND ");
         sql.push_str(&w);
@@ -256,20 +268,44 @@ pub fn search(conn: &Connection, q: &Query, limit: usize) -> vf_core::Result<Vec
     let lim = p(V::Integer(limit as i64));
     sql.push_str(&format!(" LIMIT {lim}"));
 
+    let phrase = match &text_match {
+        Some(_) => match &params[0] {
+            V::Text(t) => Some(t.clone()),
+            _ => None,
+        },
+        None => None,
+    };
     let mut st = conn.prepare(&sql)?;
     let rows = st.query_map(vf_core::db::params_from_iter(params), |r| {
-        Ok(Hit {
-            doc_id: r.get(0)?,
-            rel_path: r.get(1)?,
-            client: r.get(2)?,
-            tax_year: r.get(3)?,
-            doc_type: r.get(4)?,
-            page: r.get(5)?,
-            pages: r.get::<_, i64>(6)? as usize,
-            snippet: r.get(7)?,
-        })
+        Ok((
+            Hit {
+                doc_id: r.get(0)?,
+                rel_path: r.get(1)?,
+                client: r.get(2)?,
+                tax_year: r.get(3)?,
+                doc_type: r.get(4)?,
+                page: r.get(5)?,
+                pages: r.get::<_, i64>(6)? as usize,
+                snippet: String::new(),
+            },
+            r.get::<_, Option<i64>>(7)?,
+        ))
     })?;
-    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    let mut hits = rows.collect::<Result<Vec<_>, _>>()?;
+    if let Some(phrase) = phrase {
+        let mut snip = conn.prepare_cached(
+            "SELECT snippet(doc_fts, 0, char(2), char(3), '…', 12) FROM doc_fts
+             WHERE doc_fts MATCH ?1 AND rowid = ?2",
+        )?;
+        for (h, row) in &mut hits {
+            if let Some(row) = row {
+                h.snippet = snip
+                    .query_row(vf_core::db::params![phrase, *row], |r| r.get(0))
+                    .unwrap_or_default();
+            }
+        }
+    }
+    Ok(hits.into_iter().map(|(h, _)| h).collect())
 }
 
 /// `snippet` split into (text, highlighted) runs.

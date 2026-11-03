@@ -83,7 +83,7 @@ pub fn settings_for(root: &Path, cabinet: &CabinetFile) -> Result<(Settings, boo
 /// The folder holding a `pdfium.dll` that binds (next to the exe; debug builds also find the
 /// vendored copy), or `None` (Filer's PDF features off).
 pub(crate) fn pdfium_dir() -> Option<PathBuf> {
-    let exe_dir = std::env::current_exe().ok()?.parent()?.to_path_buf();
+    let exe_dir = vf_core::exe_dir()?;
     filer_pdf::pdf::find_pdfium(&exe_dir)
 }
 

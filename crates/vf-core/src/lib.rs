@@ -57,3 +57,17 @@ pub fn now_rfc3339() -> String {
 pub fn new_id() -> String {
     uuid::Uuid::now_v7().to_string()
 }
+
+/// The folder the running program's file is really in: through a symlink (a winget portable
+/// install is started from `WinGet\Links`), without the `\?\` prefix. `pdfium.dll`,
+/// `TWAINDSM.dll` and `tesseract\` are looked for here.
+pub fn exe_dir() -> Option<std::path::PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let real = std::fs::canonicalize(&exe).unwrap_or(exe);
+    let s = real.to_string_lossy();
+    let plain = match s.strip_prefix(r"\?\UNC\") {
+        Some(rest) => std::path::PathBuf::from(format!(r"\{rest}")),
+        None => std::path::PathBuf::from(s.strip_prefix(r"\?\").unwrap_or(&s)),
+    };
+    plain.parent().map(std::path::Path::to_path_buf)
+}

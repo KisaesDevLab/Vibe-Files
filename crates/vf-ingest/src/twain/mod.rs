@@ -79,10 +79,7 @@ pub fn dsm() -> Result<Dsm, String> {
     if let Some(d) = DSM.get() {
         return Ok(*d);
     }
-    let exe_dir = std::env::current_exe()
-        .ok()
-        .and_then(|e| e.parent().map(Path::to_path_buf))
-        .unwrap_or_default();
+    let exe_dir = vf_core::exe_dir().unwrap_or_default();
     for path in dsm_candidates(&exe_dir).iter().filter(|p| p.is_file()) {
         if let Ok(d) = load(path) {
             return Ok(*DSM.get_or_init(|| d));

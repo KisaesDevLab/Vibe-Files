@@ -29,6 +29,7 @@ serde.workspace = true
 toml.workspace = true
 uuid.workspace = true
 windows.workspace = true
+zip.workspace = true
 filer-core = { path = "../filer-core" }
 filer-intake = { path = "../filer-intake" }
 filer-pdf = { path = "../filer-pdf" }

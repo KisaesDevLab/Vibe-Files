@@ -90,6 +90,8 @@ pub struct OpenCabinet {
     pub sweep: crate::ui::sweep::SweepState,
     /// B2 sync (P11).
     pub sync: crate::ui::sync::SyncTab,
+    /// Startup self-checks (P13 step 4), while they run.
+    checks: Option<mpsc::Receiver<Vec<crate::selfcheck::Check>>>,
 }
 
 impl OpenCabinet {
@@ -134,6 +136,32 @@ pub struct VibeFilesApp {
     pub data: PathBuf,
     pub config: Config,
     pub screen: Screen,
+    /// The update check (P13 step 6), while it runs.
+    update: Option<mpsc::Receiver<Option<vf_sync::update::Release>>>,
+    /// A newer release, shown on Browse once.
+    update_notice: Option<String>,
+}
+
+/// Asks GitHub for the latest release, once per start, on a thread (never in tests: no network).
+fn check_for_update(enabled: bool) -> Option<mpsc::Receiver<Option<vf_sync::update::Release>>> {
+    if !enabled || cfg!(test) {
+        return None;
+    }
+    let (tx, rx) = mpsc::channel();
+    std::thread::Builder::new()
+        .name("update-check".into())
+        .spawn(move || {
+            let r = match vf_sync::update::check(env!("CARGO_PKG_VERSION")) {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::info!(kind = crate::logging::kind(&e), "update check failed");
+                    None
+                }
+            };
+            let _ = tx.send(r);
+        })
+        .ok();
+    Some(rx)
 }
 
 impl VibeFilesApp {
@@ -150,17 +178,21 @@ impl VibeFilesApp {
                     ocr: Default::default(),
                     viewer: Default::default(),
                     sync: Default::default(),
+                    update_check: true,
                 },
                 Some(format!("Settings could not be read: {e:#}")),
             ),
         };
         let mut w = Wizard::new(config.last_cabinet.as_deref());
         w.error = error;
+        let update = check_for_update(config.update_check);
         Self {
             tab: Tab::Browse,
             data,
             config,
             screen: Screen::Wizard(w),
+            update,
+            update_notice: None,
         }
     }
 
@@ -290,6 +322,29 @@ impl VibeFilesApp {
                     &self.config.device_id,
                 );
                 let chain = crate::ui::audit::ChainCheck::run(&opened.conn);
+                let checks = {
+                    let (tx, rx) = mpsc::channel();
+                    let (catalog, root, ctx) =
+                        (opened.catalog.clone(), opened.root.clone(), ctx.clone());
+                    let synced = self.config.sync.configured_for(&opened.cabinet.cabinet_id);
+                    std::thread::Builder::new()
+                        .name("self-check".into())
+                        .spawn(move || {
+                            let r = vf_core::db::open(&catalog, vf_core::db::Storage::Local)
+                                .map(|c| crate::selfcheck::run(&c, &root, synced))
+                                .unwrap_or_else(|e| {
+                                    vec![crate::selfcheck::Check {
+                                        name: "Catalog integrity",
+                                        ok: false,
+                                        detail: e.to_string(),
+                                    }]
+                                });
+                            let _ = tx.send(r);
+                            ctx.request_repaint();
+                        })
+                        .ok();
+                    Some(rx)
+                };
                 let mut sweep = crate::ui::sweep::SweepState::default();
                 if vf_fs::sweep::due(&opened.conn) {
                     sweep.start(ctx, &opened.catalog, &opened.root);
@@ -299,6 +354,7 @@ impl VibeFilesApp {
                     mirrored_at: None,
                     sweep,
                     sync: Default::default(),
+                    checks,
                     opened,
                     browse,
                     admin: None,
@@ -612,6 +668,25 @@ impl eframe::App for VibeFilesApp {
                 }
             }
         }
+        if let Some(rx) = &self.update
+            && let Ok(r) = rx.try_recv()
+        {
+            self.update = None;
+            self.update_notice = r.map(|r| {
+                format!(
+                    "Vibe Files {} is available (this is {}): {} — check the download against the release's SHA256SUMS.txt, or `winget upgrade Kisaes.VibeFiles`.",
+                    r.version,
+                    env!("CARGO_PKG_VERSION"),
+                    r.url
+                )
+            });
+        }
+        if let Screen::Open(o) = &mut self.screen
+            && o.browse.notice.is_none()
+            && let Some(n) = self.update_notice.take()
+        {
+            o.browse.notice = Some(n);
+        }
         if let Screen::Open(o) = &mut self.screen {
             let o = &mut **o;
             o.sync.tick(
@@ -626,6 +701,22 @@ impl eframe::App for VibeFilesApp {
             );
             if std::mem::take(&mut o.sync.changed) {
                 o.browse.reload(&o.opened.conn);
+            }
+            if let Some(rx) = &o.checks
+                && let Ok(checks) = rx.try_recv()
+            {
+                o.checks = None;
+                let failed: Vec<String> = checks
+                    .iter()
+                    .filter(|c| !c.ok)
+                    .map(|c| format!("{}: {}", c.name, c.detail))
+                    .collect();
+                for c in &checks {
+                    tracing::info!(check = c.name, ok = c.ok, "startup self-check");
+                }
+                if !failed.is_empty() {
+                    o.browse.error = Some(format!("Startup check: {}", failed.join(" · ")));
+                }
             }
             if let Some(c) = o.sync.config_changed.take() {
                 self.config.sync = c;

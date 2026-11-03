@@ -31,6 +31,13 @@ pub struct Config {
     /// B2 sync (P11).
     #[serde(default)]
     pub sync: SyncConfig,
+    /// Ask GitHub for a newer release at start (P13; QUESTIONS Q-30). Nothing is installed.
+    #[serde(default = "yes")]
+    pub update_check: bool,
+}
+
+fn yes() -> bool {
+    true
 }
 
 /// B2 sync of the open cabinet from this workstation (P11). The application key is sealed with
@@ -295,6 +302,7 @@ pub fn load(data: &Path) -> Result<Config> {
                 ocr: Ocr::default(),
                 viewer: ViewerPrefs::default(),
                 sync: SyncConfig::default(),
+                update_check: true,
             };
             save(data, &c)?;
             let _ = std::fs::remove_file(legacy);

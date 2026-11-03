@@ -5680,6 +5680,7 @@ dependencies = [
  "vf-pdf",
  "vf-sync",
  "windows",
+ "zip",
 ]
 
 [[package]]

@@ -32,10 +32,7 @@ impl Tesseract {
                 c.to_path_buf()
             });
         }
-        if let Some(dir) = std::env::current_exe()
-            .ok()
-            .and_then(|e| e.parent().map(Path::to_path_buf))
-        {
+        if let Some(dir) = vf_core::exe_dir() {
             candidates.push(dir.join("tesseract").join("tesseract.exe"));
         }
         candidates.push(PathBuf::from(PROGRAM_FILES));

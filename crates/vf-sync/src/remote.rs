@@ -38,6 +38,11 @@ fn rt() -> &'static tokio::runtime::Runtime {
     })
 }
 
+/// Runs a future on the sync runtime (for the update check).
+pub(crate) fn block_on<F: std::future::Future>(f: F) -> F::Output {
+    rt().block_on(f)
+}
+
 /// Where a cabinet's bucket is (from `config.toml [sync]`; the application key is sealed).
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct S3Config {
