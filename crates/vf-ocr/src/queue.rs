@@ -573,6 +573,14 @@ fn worker(
                 _ => {}
             }
         }
+        if r.is_err() {
+            // A catalog error mid-job (busy, disk): back to the queue, finished pages kept.
+            let _ = conn.execute(
+                "UPDATE ocr_job SET state = 'queued', updated_at = ?2 WHERE doc_id = ?1 AND state = 'running'",
+                params![job.doc_id, vf_core::now_rfc3339()],
+            );
+            std::thread::sleep(Duration::from_millis(500));
+        }
         wake();
         if let Ok(Outcome::Waiting(_)) = r {
             // Nothing can be read without the engine; don't spin over the queue.

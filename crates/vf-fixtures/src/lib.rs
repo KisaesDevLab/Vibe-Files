@@ -80,10 +80,24 @@ pub struct FixtureDoc {
     pub ein: Option<String>,
 }
 
+/// A scanned document (P03): image-only pages, no text layer. Its EIN is printed on one page
+/// only and appears nowhere else in the cabinet.
+#[derive(Debug, Clone)]
+pub struct FixtureScan {
+    pub rel_path: String,
+    pub client_id: String,
+    pub ein: String,
+    /// 0-based page carrying the EIN.
+    pub ein_page: usize,
+    pub pages: usize,
+}
+
 #[derive(Debug, Default)]
 pub struct Summary {
     pub clients: usize,
     pub docs: Vec<FixtureDoc>,
+    /// Added by [`add_scans`].
+    pub scans: Vec<FixtureScan>,
 }
 
 const FIRST: &[&str] = &[
@@ -238,6 +252,102 @@ pub fn generate(out: &Path, seed: u64) -> Result<Summary> {
         }
     }
     Ok(summary)
+}
+
+/// Adds one three-page scanned 1099-MISC (2025) to each client folder of a generated cabinet:
+/// image-only pages rendered from text at 200 dpi, the payer EIN on page 2 only.
+pub fn add_scans(
+    out: &Path,
+    summary: &mut Summary,
+    pdfium: &pdfium_render::prelude::Pdfium,
+    seed: u64,
+) -> Result<()> {
+    let mut rng = Rng::new(seed ^ 0x5CA4_5CA4);
+    let mut folders: Vec<(String, &'static str)> = Vec::new();
+    for d in &summary.docs {
+        let folder = d.rel_path.split('/').next().unwrap_or_default().to_string();
+        if !folders.iter().any(|(f, _)| *f == folder) {
+            folders.push((folder, d.client_id));
+        }
+    }
+    let used: std::collections::HashSet<String> =
+        summary.docs.iter().filter_map(|d| d.ein.clone()).collect();
+    for (folder, id) in folders {
+        let ein = loop {
+            let e = synthetic_ein(&mut rng);
+            if !used.contains(&e) && !summary.scans.iter().any(|s| s.ein == e) {
+                break e;
+            }
+        };
+        let rel = format!("{folder}/Income Tax/2025/Scanned 1099-MISC 2025.pdf");
+        let pages = vec![
+            vec![
+                "1099-MISC - tax year 2025 (scanned)".to_string(),
+                "SYNTHETIC TEST DOCUMENT - NOT REAL DATA".into(),
+                format!("Client ID {id}"),
+            ],
+            vec![
+                "Payer information".to_string(),
+                format!("Payer EIN: {ein}"),
+                format!("Payer: {}", rng.pick(PAYERS)),
+            ],
+            vec![
+                "Totals".to_string(),
+                format!("Other income: {}.00", 500 + rng.next_u64() % 9000),
+            ],
+        ];
+        write_scanned_pdf(pdfium, &out.join(&rel), &pages)?;
+        summary.scans.push(FixtureScan {
+            rel_path: rel,
+            client_id: id.to_string(),
+            ein,
+            ein_page: 1,
+            pages: pages.len(),
+        });
+    }
+    Ok(())
+}
+
+/// A PDF whose pages are pictures of text (as a scanner makes): each page's lines are
+/// rendered at 200 dpi and placed as an image. No text layer.
+pub fn write_scanned_pdf(
+    pdfium: &pdfium_render::prelude::Pdfium,
+    path: &Path,
+    pages: &[Vec<String>],
+) -> Result<()> {
+    use pdfium_render::prelude::PdfRenderConfig;
+    let tmp = tempfile_path();
+    let mut frames = Vec::new();
+    for lines in pages {
+        write_pdf(&tmp, lines)?;
+        let doc = pdfium
+            .load_pdf_from_file(&tmp, None)
+            .map_err(|e| anyhow::anyhow!("render: {e}"))?;
+        let page = doc
+            .pages()
+            .first()
+            .map_err(|e| anyhow::anyhow!("render: {e}"))?;
+        let img = page
+            .render_with_config(&PdfRenderConfig::new().set_target_width(1700))
+            .and_then(|b| b.as_image())
+            .map_err(|e| anyhow::anyhow!("render: {e}"))?
+            .to_rgb8();
+        frames.push(vf_ingest::images::Frame {
+            rgb: img,
+            dpi: Some(200.0),
+            orientation: 1,
+        });
+    }
+    let _ = std::fs::remove_file(&tmp);
+    if let Some(d) = path.parent() {
+        std::fs::create_dir_all(d)?;
+    }
+    vf_ingest::images::frames_to_pdf(frames, false, path).map_err(anyhow::Error::msg)?;
+    Ok(())
+}
+
+fn tempfile_path() -> PathBuf {
+    std::env::temp_dir().join(format!("vf-fixture-{}.pdf", Uuid::now_v7().simple()))
 }
 
 /// One-page PDF (US Letter, Helvetica) with a text layer, one line per entry.

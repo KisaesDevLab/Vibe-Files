@@ -4,7 +4,10 @@ use std::path::{Path, PathBuf};
 
 use rusqlite::OpenFlags;
 pub use rusqlite::types::Value as SqlValue;
-pub use rusqlite::{Connection, Error as SqlError, OptionalExtension, params, params_from_iter};
+pub use rusqlite::{
+    Connection, Error as SqlError, OptionalExtension, Transaction, TransactionBehavior, params,
+    params_from_iter,
+};
 
 use crate::{Error, Result};
 

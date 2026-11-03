@@ -9,9 +9,12 @@ pub mod intake;
 pub mod meta_editor;
 pub mod new_client;
 pub mod ocr;
+pub mod pages;
 pub mod rename;
+pub mod search;
 #[cfg(test)]
 pub mod test_util;
 pub mod theme;
+pub mod viewer;
 pub mod widgets;
 pub mod wizard;

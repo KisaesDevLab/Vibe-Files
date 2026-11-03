@@ -49,8 +49,8 @@ impl Tab {
         match self {
             Tab::Browse => "Browse shows the client tree once a cabinet is open.",
             Tab::Intake => "Intake files documents into the open cabinet.",
-            Tab::Search => "Full-text search arrives with OCR and indexing (P03).",
-            Tab::Viewer => "The PDF viewer arrives in P04.",
+            Tab::Search => "Search the text of every document.",
+            Tab::Viewer => "Open a document from Search.",
             Tab::Sync => "B2 sync arrives in P11.",
             Tab::Admin => "Users, doc types, audit and compliance settings.",
         }
@@ -79,6 +79,47 @@ pub struct OpenCabinet {
     pub intake: IntakeTab,
     /// OCR workers (P03).
     pub ocr: crate::ui::ocr::OcrState,
+    pub search: crate::ui::search::SearchTab,
+    pub viewer: crate::ui::viewer::Viewer,
+    /// OCR's indexed count at the last look: Search runs again when it moves.
+    indexed_seen: usize,
+}
+
+impl OpenCabinet {
+    /// What Search's "This client" / "This folder" mean: Browse's selected node.
+    pub fn search_context(&self) -> crate::ui::search::Context {
+        use vf_core::browse::Scope as B;
+        let snap = &self.browse.snap;
+        let label = |ci: usize| {
+            let c = &snap.clients[ci];
+            (c.id.clone(), format!("{} ({})", c.name, c.ext_id))
+        };
+        let mut cx = crate::ui::search::Context::default();
+        match &self.browse.scope {
+            B::Client(ci) | B::Year { client: ci, .. } if *ci < snap.clients.len() => {
+                cx.client = Some(label(*ci));
+            }
+            B::Folder {
+                client,
+                year,
+                folder,
+            } if *client < snap.clients.len() => {
+                cx.client = Some(label(*client));
+                let base = snap.clients[*client].folder_rel.clone().unwrap_or_default();
+                cx.folder = Some((
+                    if base.is_empty() {
+                        folder.clone()
+                    } else {
+                        format!("{base}/{folder}")
+                    },
+                    *year,
+                    format!("{folder} · {}", crate::ui::widgets::year_label(*year)),
+                ));
+            }
+            _ => {}
+        }
+        cx
+    }
 }
 
 pub struct VibeFilesApp {
@@ -207,6 +248,9 @@ impl VibeFilesApp {
                     admin: None,
                     intake,
                     ocr,
+                    search: Default::default(),
+                    viewer: Default::default(),
+                    indexed_seen: 0,
                 }));
             }
             Err(e) => {
@@ -265,6 +309,39 @@ impl eframe::App for VibeFilesApp {
                 );
                 o.intake
                     .reconcile(&mut o.opened.conn, &o.opened.root, &self.config.device_id);
+            }
+            Screen::Open(o) if self.tab == Tab::Search => {
+                let o = &mut **o;
+                let cx = o.search_context();
+                let indexed = o.ocr.queue.as_ref().map_or(0, |q| {
+                    let s = q.status();
+                    s.indexed + s.written
+                });
+                if indexed != o.indexed_seen {
+                    o.indexed_seen = indexed;
+                    o.search.refresh();
+                }
+                crate::ui::search::show(
+                    ui,
+                    &mut o.search,
+                    &o.opened.conn,
+                    &o.opened.root,
+                    &o.browse.snap,
+                    &cx,
+                );
+                if let Some(doc) = o.search.open.take() {
+                    o.viewer.open(doc);
+                    self.tab = Tab::Viewer;
+                }
+            }
+            Screen::Open(o) if self.tab == Tab::Viewer => {
+                let o = &mut **o;
+                crate::ui::viewer::show(ui, &mut o.viewer);
+                if let Some(p) = o.viewer.open_request.take()
+                    && let Err(e) = (o.browse.shell)(&crate::shell::ShellAction::Open(p))
+                {
+                    o.viewer.error = Some(e);
+                }
             }
             Screen::Open(o) if matches!(self.tab, Tab::Browse | Tab::Admin) => {
                 let OpenCabinet {
@@ -658,6 +735,102 @@ mod tests {
         };
         assert_eq!(o.intake.ingest.delivered, 1);
         assert!(o.intake.ingest.log[0].starts_with("Acme_1001_2025 W-2.pdf →"));
+    }
+
+    /// PHASES P03 done-when: the fixture cabinet is fully indexed (scans read by Tesseract) and
+    /// a query returns in under 50 ms; an EIN that appears only in a scanned image finds its
+    /// document, which opens in the Viewer at that page with the EIN highlighted.
+    #[test]
+    fn ein_only_in_a_scan_is_found_and_opens_at_its_page() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("Clients");
+        let mut fx = vf_fixtures::generate(&root, 11).unwrap();
+        let dir = filer_pdf::pdf::find_pdfium(Path::new("")).unwrap();
+        vf_fixtures::add_scans(&root, &mut fx, filer_pdf::pdf::pdfium(&dir).unwrap(), 11).unwrap();
+        std::fs::remove_dir_all(root.join(vf_fs::cabinet::VIBE_DIR)).unwrap();
+        let req = CreateRequest {
+            root: &root,
+            name: "Firm",
+            passphrase: "correct horse battery",
+            confirm: "correct horse battery",
+        };
+        drop(session::create(&tmp.path().join("pc1"), "dev-1", &req, FAST).unwrap());
+
+        let mut h = harness(&tmp.path().join("pc1b"));
+        click(&mut h, "Open existing");
+        type_into(&mut h, "Cabinet folder", &root.display().to_string());
+        type_into(&mut h, "Recovery passphrase", "correct horse battery");
+        click(&mut h, "Open cabinet");
+        settle(&mut h);
+
+        // Every document indexed; the scans read by OCR and given their text layer.
+        let total = fx.docs.len() + fx.scans.len();
+        let start = std::time::Instant::now();
+        loop {
+            let Screen::Open(o) = &h.state().screen else {
+                unreachable!()
+            };
+            let c = vf_ocr::queue::Counts::load(&o.opened.conn).unwrap();
+            if c.done == total {
+                assert_eq!((c.failed, c.indexed), (0, 0));
+                break;
+            }
+            assert!(
+                start.elapsed() < std::time::Duration::from_secs(300),
+                "OCR never finished: {c:?} {:?}",
+                o.ocr.queue.as_ref().map(|q| q.status())
+            );
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            h.step();
+        }
+        let scan = fx.scans[2].clone();
+        {
+            let Screen::Open(o) = &h.state().screen else {
+                unreachable!()
+            };
+            let q = vf_index::search::Query {
+                text: scan.ein.clone(),
+                ..Default::default()
+            };
+            vf_index::search::search(&o.opened.conn, &q, 200).unwrap();
+            let t = std::time::Instant::now();
+            let hits = vf_index::search::search(&o.opened.conn, &q, 200).unwrap();
+            let ms = t.elapsed().as_millis();
+            assert!(ms < 50, "query took {ms} ms");
+            assert_eq!(hits.len(), 1, "{hits:?}");
+            assert_eq!(hits[0].rel_path, scan.rel_path);
+            assert_eq!(hits[0].page, Some(scan.ein_page as u32));
+        }
+        click(&mut h, "Search");
+        type_into(&mut h, "Search for", &scan.ein);
+        h.run();
+        {
+            let Screen::Open(o) = &h.state().screen else {
+                unreachable!()
+            };
+            assert_eq!(o.search.results.len(), 1);
+            assert_eq!(o.search.results[0].page, Some(scan.ein_page as u32));
+        }
+        h.get_by_label("Scanned 1099-MISC 2025.pdf").click();
+        h.step();
+        assert_eq!(h.state().tab, Tab::Viewer);
+        let start = std::time::Instant::now();
+        loop {
+            h.step();
+            let Screen::Open(o) = &h.state().screen else {
+                unreachable!()
+            };
+            if o.viewer.ready() {
+                let d = o.viewer.doc.as_ref().unwrap();
+                assert_eq!(d.page, scan.ein_page);
+                assert_eq!(d.path, root.join(&scan.rel_path));
+                assert!(!o.viewer.hits().is_empty(), "the EIN is highlighted");
+                break;
+            }
+            assert!(start.elapsed() < std::time::Duration::from_secs(20));
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        h.get_by_label(&format!("Page {} of 3", scan.ein_page + 1));
     }
 
     #[test]

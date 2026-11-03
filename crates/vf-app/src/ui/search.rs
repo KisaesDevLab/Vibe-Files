@@ -1,0 +1,440 @@
+//! The Search tab (P03 step 5): one box, filters, results with a thumbnail of the matching
+//! page and a snippet; a result opens in the Viewer at that page.
+
+use std::collections::{HashMap, HashSet};
+use std::path::Path;
+use std::time::{Duration, Instant};
+
+use egui::{Color32, RichText};
+use vf_core::browse::Snapshot;
+use vf_core::db::Connection;
+use vf_index::search::{self, DocType, Hit, Query, Scope, Year};
+
+use crate::ui::pages::{Renderer, Request};
+use crate::ui::viewer::Doc;
+use crate::ui::{theme, widgets};
+
+const LIMIT: usize = 200;
+const THUMB_WIDTH: u32 = 96;
+const ROW_HEIGHT: f32 = 132.0;
+const MARK_BG: Color32 = Color32::from_rgb(0xFF, 0xE8, 0x8A);
+
+/// What "This client" and "This folder" mean: the node selected in Browse.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Context {
+    /// (client id, label).
+    pub client: Option<(String, String)>,
+    /// (cabinet-relative folder, its year, label).
+    pub folder: Option<(String, Option<i32>, String)>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Where {
+    #[default]
+    Cabinet,
+    Client,
+    Folder,
+}
+
+#[derive(Default)]
+pub struct SearchTab {
+    pub text: String,
+    pub scope: Where,
+    /// Filters (the query's metadata fields; text and scope are filled in when it runs).
+    pub filters: Query,
+    year_text: String,
+    pub results: Vec<Hit>,
+    pub elapsed: Option<Duration>,
+    pub error: Option<String>,
+    /// The query the results are for.
+    ran: Option<Query>,
+    renderer: Option<Renderer>,
+    thumbs: HashMap<String, egui::TextureHandle>,
+    requested: HashSet<String>,
+    /// A result to open in the Viewer (taken by the app).
+    pub open: Option<Doc>,
+}
+
+impl SearchTab {
+    /// The query as the box, scope and filters say.
+    pub fn query(&self, ctx: &Context) -> Query {
+        let mut q = self.filters.clone();
+        q.text = self.text.trim().to_string();
+        q.scope = Scope::Cabinet;
+        match self.scope {
+            Where::Cabinet => {}
+            Where::Client => {
+                if let Some((id, _)) = &ctx.client {
+                    q.scope = Scope::Client(id.clone());
+                }
+            }
+            Where::Folder => {
+                if let Some((f, year, _)) = &ctx.folder {
+                    q.scope = Scope::Folder(f.clone());
+                    if q.year.is_none() {
+                        q.year = Some(year.map_or(Year::Permanent, Year::Year));
+                    }
+                }
+            }
+        }
+        q
+    }
+
+    /// Runs the query when it changed since the last run.
+    pub fn run_if_changed(&mut self, conn: &Connection, ctx: &Context) {
+        let q = self.query(ctx);
+        if self.ran.as_ref() == Some(&q) {
+            return;
+        }
+        self.ran = Some(q.clone());
+        if q.is_empty() {
+            self.results.clear();
+            self.elapsed = None;
+            return;
+        }
+        let t = Instant::now();
+        match search::search(conn, &q, LIMIT) {
+            Ok(r) => {
+                self.results = r;
+                self.error = None;
+            }
+            Err(e) => {
+                self.results.clear();
+                self.error = Some(format!("Search failed: {e}"));
+            }
+        }
+        self.elapsed = Some(t.elapsed());
+    }
+
+    /// Searches again on the next frame (the catalog changed).
+    pub fn refresh(&mut self) {
+        self.ran = None;
+    }
+
+    fn terms(&self) -> Vec<String> {
+        self.text.split_whitespace().map(str::to_string).collect()
+    }
+}
+
+pub fn show(
+    ui: &mut egui::Ui,
+    s: &mut SearchTab,
+    conn: &Connection,
+    root: &Path,
+    snap: &Snapshot,
+    ctx: &Context,
+) {
+    pump_thumbs(ui.ctx(), s);
+    egui::Panel::top("vf-search-box")
+        .resizable(false)
+        .frame(
+            egui::Frame::new()
+                .fill(theme::PANE)
+                .inner_margin(egui::Margin::symmetric(16, 10)),
+        )
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                let label = ui.label("Search for");
+                ui.add(
+                    egui::TextEdit::singleline(&mut s.text)
+                        .hint_text("text, names, EINs…")
+                        .desired_width(420.0),
+                )
+                .labelled_by(label.id);
+                ui.separator();
+                ui.radio_value(&mut s.scope, Where::Cabinet, "Cabinet");
+                let client = ctx.client.as_ref().map(|c| c.1.as_str());
+                ui.add_enabled_ui(client.is_some(), |ui| {
+                    ui.radio_value(&mut s.scope, Where::Client, "This client")
+                        .on_hover_text(client.unwrap_or("Select a client in Browse"));
+                });
+                let folder = ctx.folder.as_ref().map(|f| f.2.as_str());
+                ui.add_enabled_ui(folder.is_some(), |ui| {
+                    ui.radio_value(&mut s.scope, Where::Folder, "This folder")
+                        .on_hover_text(folder.unwrap_or("Select a folder in Browse"));
+                });
+            });
+            filters(ui, s, snap);
+        });
+    s.run_if_changed(conn, ctx);
+    egui::CentralPanel::default().show(ui, |ui| {
+        widgets::message_line(ui, s.error.as_deref());
+        if s.ran.as_ref().is_none_or(Query::is_empty) {
+            ui.label(widgets::caption(
+                "Type to search the text of every document (scans too, once OCR has read them), file names and metadata.",
+            ));
+            return;
+        }
+        ui.label(widgets::caption(format!(
+            "{} documents{}{}",
+            s.results.len(),
+            if s.results.len() == LIMIT { " (first 200)" } else { "" },
+            s.elapsed
+                .map(|d| format!(" · {} ms", d.as_millis()))
+                .unwrap_or_default()
+        )));
+        let terms = s.terms();
+        egui::ScrollArea::vertical().auto_shrink(false).show_rows(
+            ui,
+            ROW_HEIGHT,
+            s.results.len(),
+            |ui, range| {
+                for i in range {
+                    let hit = s.results[i].clone();
+                    let key = thumb_key(&hit);
+                    if !s.requested.contains(&key)
+                        && let Some(r) = &s.renderer
+                    {
+                        s.requested.insert(key.clone());
+                        r.request(Request {
+                            key: key.clone(),
+                            path: root.join(&hit.rel_path),
+                            page: hit.page.unwrap_or(0) as usize,
+                            width: THUMB_WIDTH,
+                            terms: vec![],
+                        });
+                    }
+                    if row(ui, &hit, s.thumbs.get(&key)).clicked() {
+                        s.open = Some(Doc {
+                            doc_id: hit.doc_id.clone(),
+                            path: root.join(&hit.rel_path),
+                            name: file_name(&hit.rel_path),
+                            page: hit.page.unwrap_or(0) as usize,
+                            terms: terms.clone(),
+                        });
+                    }
+                }
+            },
+        );
+    });
+}
+
+fn filters(ui: &mut egui::Ui, s: &mut SearchTab, snap: &Snapshot) {
+    let f = &mut s.filters;
+    ui.horizontal_wrapped(|ui| {
+        let client_name = f
+            .client
+            .as_ref()
+            .and_then(|id| snap.clients.iter().find(|c| &c.id == id))
+            .map_or("Any client".to_string(), |c| {
+                format!("{} ({})", c.name, c.ext_id)
+            });
+        egui::ComboBox::new("search-client", "Client")
+            .selected_text(client_name)
+            .width(180.0)
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut f.client, None, "Any client");
+                for c in &snap.clients {
+                    ui.selectable_value(
+                        &mut f.client,
+                        Some(c.id.clone()),
+                        format!("{} ({})", c.name, c.ext_id),
+                    );
+                }
+            });
+        let yl = ui.label("Year");
+        if ui
+            .add(
+                egui::TextEdit::singleline(&mut s.year_text)
+                    .hint_text("any")
+                    .desired_width(70.0),
+            )
+            .labelled_by(yl.id)
+            .on_hover_text("2025, Permanent, or empty for any year")
+            .changed()
+        {
+            let t = s.year_text.trim();
+            f.year = if t.eq_ignore_ascii_case("permanent") || t.eq_ignore_ascii_case("p") {
+                Some(Year::Permanent)
+            } else {
+                t.parse().ok().map(Year::Year)
+            };
+        }
+        let dt_name = match &f.doc_type {
+            None => "Any doc type".to_string(),
+            Some(DocType::Needed) => "Needs doc type".to_string(),
+            Some(DocType::Is(id)) => snap
+                .doc_types
+                .iter()
+                .find(|(i, _)| i == id)
+                .map_or("?".into(), |(_, n)| n.clone()),
+        };
+        egui::ComboBox::new("search-doctype", "Doc type")
+            .selected_text(dt_name)
+            .width(160.0)
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut f.doc_type, None, "Any doc type");
+                ui.selectable_value(&mut f.doc_type, Some(DocType::Needed), "Needs doc type");
+                for (id, name) in &snap.doc_types {
+                    ui.selectable_value(&mut f.doc_type, Some(DocType::Is(id.clone())), name);
+                }
+            });
+        combo(
+            ui,
+            "search-status",
+            "Status",
+            "Any status",
+            &mut f.status,
+            &["received", "in_work", "final", "delivered"],
+        );
+        combo(
+            ui,
+            "search-source",
+            "Source",
+            "Any source",
+            &mut f.source,
+            &["client", "firm", "government", "third_party"],
+        );
+        text_filter(ui, "Filed from", &mut f.filed_from, "YYYY-MM-DD");
+        text_filter(ui, "to", &mut f.filed_to, "YYYY-MM-DD");
+        text_filter(ui, "Filed by", &mut f.filed_by, "anyone");
+        text_filter(ui, "Tag", &mut f.tag, "any");
+        ui.checkbox(&mut f.has_ssn, "Has SSN");
+        if *f != Query::default() && ui.small_button("Clear filters").clicked() {
+            *f = Query::default();
+            s.year_text.clear();
+        }
+    });
+}
+
+fn combo(
+    ui: &mut egui::Ui,
+    id: &str,
+    label: &str,
+    any: &str,
+    v: &mut Option<String>,
+    opts: &[&str],
+) {
+    egui::ComboBox::new(id, label)
+        .selected_text(
+            v.as_deref()
+                .map_or(any.to_string(), |s| s.replace('_', " ")),
+        )
+        .show_ui(ui, |ui| {
+            ui.selectable_value(v, None, any);
+            for o in opts {
+                ui.selectable_value(v, Some((*o).to_string()), o.replace('_', " "));
+            }
+        });
+}
+
+fn text_filter(ui: &mut egui::Ui, label: &str, v: &mut Option<String>, hint: &str) {
+    let l = ui.label(label);
+    let mut t = v.clone().unwrap_or_default();
+    if ui
+        .add(
+            egui::TextEdit::singleline(&mut t)
+                .hint_text(hint)
+                .desired_width(90.0),
+        )
+        .labelled_by(l.id)
+        .changed()
+    {
+        *v = (!t.trim().is_empty()).then(|| t.trim().to_string());
+    }
+}
+
+fn thumb_key(h: &Hit) -> String {
+    format!("{}#{}", h.doc_id, h.page.unwrap_or(0))
+}
+
+fn pump_thumbs(ctx: &egui::Context, s: &mut SearchTab) {
+    let r = s
+        .renderer
+        .get_or_insert_with(|| Renderer::new(ctx, crate::ui::intake::pdfium_dir()));
+    for (key, res) in r.finished() {
+        if let Ok(p) = res {
+            let tex = ctx.load_texture(
+                format!("search-{key}"),
+                p.image,
+                egui::TextureOptions::LINEAR,
+            );
+            s.thumbs.insert(key, tex);
+        }
+    }
+    if s.thumbs.len() > 400 {
+        s.thumbs.clear();
+        s.requested.clear();
+    }
+}
+
+/// One result: thumbnail, name, metadata, snippet. The whole row clicks.
+fn row(ui: &mut egui::Ui, h: &Hit, thumb: Option<&egui::TextureHandle>) -> egui::Response {
+    let inner = ui.horizontal(|ui| {
+        ui.set_min_height(ROW_HEIGHT - 8.0);
+        let (rect, _) =
+            ui.allocate_exact_size(egui::vec2(THUMB_WIDTH as f32, 124.0), egui::Sense::hover());
+        match thumb {
+            Some(t) => {
+                let size = t.size_vec2() * (THUMB_WIDTH as f32 / t.size_vec2().x);
+                let r = egui::Rect::from_min_size(rect.min, size.min(rect.size()));
+                ui.painter().image(
+                    t.id(),
+                    r,
+                    egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                    Color32::WHITE,
+                );
+                ui.painter().rect_stroke(
+                    r,
+                    0.0,
+                    (1.0, theme::BORDER_PANE),
+                    egui::StrokeKind::Outside,
+                );
+            }
+            None => {
+                ui.painter().rect_filled(rect, 2.0, theme::APP_BG);
+            }
+        }
+        ui.vertical(|ui| {
+            ui.add(
+                egui::Label::new(RichText::new(file_name(&h.rel_path)).strong()).selectable(false),
+            );
+            let mut meta = vec![
+                h.client.clone().unwrap_or_else(|| "No client".into()),
+                widgets::year_label(h.tax_year),
+                h.doc_type
+                    .clone()
+                    .unwrap_or_else(|| "Needs doc type".into()),
+            ];
+            match h.page {
+                Some(p) if h.pages > 1 => {
+                    meta.push(format!("page {} ({} pages match)", p + 1, h.pages))
+                }
+                Some(p) => meta.push(format!("page {}", p + 1)),
+                None => meta.push("name or details match".into()),
+            }
+            ui.add(egui::Label::new(widgets::caption(meta.join(" · "))).selectable(false));
+            ui.add(egui::Label::new(widgets::caption(&h.rel_path).small()).selectable(false));
+            if !h.snippet.is_empty() {
+                let mut job = egui::text::LayoutJob::default();
+                for (text, on) in search::runs(&h.snippet) {
+                    let mut fmt = egui::TextFormat {
+                        color: theme::INK,
+                        ..Default::default()
+                    };
+                    if on {
+                        fmt.background = MARK_BG;
+                    }
+                    job.append(&text, 0.0, fmt);
+                }
+                job.wrap.max_width = ui.available_width();
+                ui.add(egui::Label::new(job).selectable(false));
+            }
+        });
+    });
+    let resp = inner.response.interact(egui::Sense::click());
+    if resp.hovered() {
+        ui.painter().rect_stroke(
+            resp.rect,
+            4.0,
+            (1.0, theme::ACCENT_DEFAULT),
+            egui::StrokeKind::Inside,
+        );
+    }
+    ui.separator();
+    resp.on_hover_text("Open in the Viewer at this page")
+}
+
+fn file_name(rel: &str) -> String {
+    rel.rsplit('/').next().unwrap_or(rel).to_string()
+}
