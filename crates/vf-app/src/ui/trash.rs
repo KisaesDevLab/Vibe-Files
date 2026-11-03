@@ -105,7 +105,10 @@ pub fn show(ui: &mut egui::Ui, p: &mut TrashPage, env: &mut Env) {
                 );
             if go.clicked() {
                 if !trash::check_pin(env.root, &p.pin) {
-                    p.error = Some("That PIN is not right.".into());
+                    p.error = Some(match vf_fs::trash::pin_wait() {
+                        0 => "That PIN is not right.".to_string(),
+                        w => format!("Too many wrong PINs: try again in {w} s."),
+                    });
                 } else {
                     let chosen: Vec<Trashed> = items
                         .iter()

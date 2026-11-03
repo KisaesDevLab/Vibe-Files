@@ -810,8 +810,8 @@ mod tests {
         trash_one(&mut h);
         click(&mut h, "Trash");
         assert!(h.query_by_label("A (1)/2025/w2.pdf").is_some());
-        type_into(&mut h, "New PIN", "4821");
-        type_into(&mut h, "Again", "4821");
+        type_into(&mut h, "New PIN", "482193");
+        type_into(&mut h, "Again", "482193");
         click(&mut h, "Set PIN");
         assert!(
             vf_fs::trash::has_pin(&h.state().root),
@@ -827,13 +827,13 @@ mod tests {
 
         trash_one(&mut h);
         h.run();
-        type_into(&mut h, "Firm PIN", "0000");
+        type_into(&mut h, "Firm PIN", "000000");
         click(&mut h, "Empty trash");
         assert_eq!(
             h.state().a.trash.error.as_deref(),
             Some("That PIN is not right.")
         );
-        type_into(&mut h, "Firm PIN", "4821");
+        type_into(&mut h, "Firm PIN", "482193");
         click(&mut h, "Empty trash");
         assert_eq!(
             h.state().a.trash.notice.as_deref(),

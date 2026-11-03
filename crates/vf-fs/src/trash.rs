@@ -331,8 +331,15 @@ pub fn has_pin(root: &Path) -> bool {
     stored_pin(root).is_some()
 }
 
+/// Whether `pin` is the firm PIN. After three wrong tries in a row it is not checked for a while
+/// ([`pin_wait`]) and this is `false`.
 pub fn check_pin(root: &Path, pin: &str) -> bool {
-    stored_pin(root).is_some_and(|h| vf_security::pin::verify(pin, &h))
+    stored_pin(root).is_some_and(|h| vf_security::pin::check(pin, &h).unwrap_or(false))
+}
+
+/// Seconds before the PIN is checked again (after wrong tries).
+pub fn pin_wait() -> u64 {
+    vf_security::pin::wait_secs()
 }
 
 /// Transaction label of a PIN change (left off the undo stack).
@@ -498,17 +505,17 @@ mod tests {
         let (_t, root, mut conn) = fx();
         std::fs::create_dir_all(root.join(cabinet::VIBE_DIR)).unwrap();
         assert!(!has_pin(&root));
-        set_pin(&mut conn, &root, "dev", None, "4821").unwrap();
-        assert!(has_pin(&root) && check_pin(&root, "4821") && !check_pin(&root, "0000"));
+        set_pin(&mut conn, &root, "dev", None, "482193").unwrap();
+        assert!(has_pin(&root) && check_pin(&root, "482193") && !check_pin(&root, "000000"));
         let stored = std::fs::read_to_string(pin_file(&root)).unwrap();
-        assert!(!stored.contains("4821"), "only a hash is stored");
-        assert!(set_pin(&mut conn, &root, "dev", None, "1111").is_err());
-        assert!(set_pin(&mut conn, &root, "dev", Some("0000"), "1111").is_err());
-        set_pin(&mut conn, &root, "dev", Some("4821"), "1111").unwrap();
-        assert!(check_pin(&root, "1111"));
+        assert!(!stored.contains("482193"), "only a hash is stored");
+        assert!(set_pin(&mut conn, &root, "dev", None, "111111").is_err());
+        assert!(set_pin(&mut conn, &root, "dev", Some("000000"), "111111").is_err());
+        set_pin(&mut conn, &root, "dev", Some("482193"), "111111").unwrap();
+        assert!(check_pin(&root, "111111"));
         // Someone deletes the PIN file and sets their own: recorded as a reset.
         std::fs::remove_file(pin_file(&root)).unwrap();
-        set_pin(&mut conn, &root, "dev", None, "2222").unwrap();
+        set_pin(&mut conn, &root, "dev", None, "222222").unwrap();
         let hows: Vec<String> = conn
             .prepare("SELECT json_extract(detail, '$.how') FROM audit WHERE action = 'firm_pin_set' ORDER BY seq")
             .unwrap()

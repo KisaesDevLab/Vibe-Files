@@ -190,7 +190,10 @@ pub fn show(ui: &mut egui::Ui, p: &mut DispositionPage, env: &mut Env) {
                         .on_hover_text("Overwrites and deletes every copy; files a certificate. Cannot be undone.");
                     if go.clicked() {
                         if !vf_fs::trash::check_pin(env.root, &p.pin) {
-                            p.error = Some("That PIN is not right.".into());
+                            p.error = Some(match vf_fs::trash::pin_wait() {
+                                0 => "That PIN is not right.".to_string(),
+                                w => format!("Too many wrong PINs: try again in {w} s."),
+                            });
                         } else {
                             let name = vf_fs::cabinet::read(env.root)
                                 .map(|c| c.display_name(env.root))

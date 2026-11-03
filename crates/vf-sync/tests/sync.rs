@@ -498,3 +498,56 @@ fn remembered_key_unlocks_without_the_passphrase() {
     vf_sync::setup::forget(&data, &a.sync.cabinet_id);
     assert!(vf_sync::setup::recall(&data, &a.sync.cabinet_id).is_none());
 }
+
+/// QA S3 / X4: a manifest naming a path outside the cabinet is refused before anything is
+/// written; a HEAD older than one already seen is refused.
+#[test]
+fn hostile_manifests_are_refused() {
+    let t = tempfile::tempdir().unwrap();
+    let store = Remote::memory();
+    let mut a = pc_a(t.path(), store.clone());
+    vf_sync::push::push(&mut a.conn, &a.root, &a.sync, None).unwrap();
+    let mut b = pc_b(t.path(), store.clone(), &a);
+    let head = a.sync.head().unwrap().unwrap();
+    let evil = t.path().join("evil.txt");
+    let mut seg = vf_sync::layout::CabinetSegment {
+        segment_rev: head.cabinet_segment_rev + 1,
+        ..Default::default()
+    };
+    seg.files.insert("../../../evil.txt".into(), "x".into());
+    a.sync
+        .remote
+        .put(
+            &vf_sync::layout::cabinet_segment_key(seg.segment_rev),
+            a.sync.keys.seal(
+                &serde_json::to_vec(&seg).unwrap(),
+                &vf_sync::layout::cabinet_segment_key(seg.segment_rev),
+            ),
+        )
+        .unwrap();
+    let mut h2 = head.clone();
+    h2.rev += 1;
+    h2.cabinet_segment_rev = seg.segment_rev;
+    let k = vf_sync::layout::HEAD;
+    a.sync
+        .remote
+        .put(k, a.sync.keys.seal(&serde_json::to_vec(&h2).unwrap(), k))
+        .unwrap();
+    let r = vf_sync::pull::pull(&mut b.conn, &b.root, &b.sync);
+    assert!(matches!(r, Err(vf_sync::SyncError::Format(_))), "{r:?}");
+    assert!(!evil.exists());
+    assert!(!vf_sync::layout::safe_rel("C:/x") && !vf_sync::layout::safe_rel("a/../b"));
+    assert!(vf_sync::layout::safe_rel("Income Tax/2025/W-2.pdf"));
+
+    // Put the first HEAD back (as deleting the newest B2 file version would): refused.
+    vf_sync::catalog::set_state(&b.conn, "dev-b", h2.rev, "pull").unwrap();
+    a.sync
+        .remote
+        .put(k, a.sync.keys.seal(&serde_json::to_vec(&head).unwrap(), k))
+        .unwrap();
+    let r = vf_sync::pull::pull(&mut b.conn, &b.root, &b.sync);
+    assert!(
+        matches!(&r, Err(vf_sync::SyncError::Format(m)) if m.contains("went back")),
+        "{r:?}"
+    );
+}

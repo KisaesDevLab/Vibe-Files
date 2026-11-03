@@ -104,6 +104,9 @@ pub fn restore_session(conn: &mut Connection, root: &Path, s: &Sync) -> Result<R
     let cab_seg: CabinetSegment = s
         .get_json(&layout::cabinet_segment_key(head.cabinet_segment_rev))?
         .ok_or_else(|| SyncError::Format("the cabinet segment is missing".into()))?;
+    cab_seg
+        .check()
+        .map_err(|what| SyncError::Format(format!("the cabinet segment: refused {what}")))?;
     let cab_text = cab_seg
         .files
         .get("cabinet.json")
@@ -125,7 +128,10 @@ pub fn restore_session(conn: &mut Connection, root: &Path, s: &Sync) -> Result<R
     };
     let dir = vibe.join("audit");
     for key in s.remote.list("audit/")? {
-        let Some(month) = key.strip_prefix("audit/") else {
+        let Some(month) = key
+            .strip_prefix("audit/")
+            .filter(|m| crate::layout::safe_month(m))
+        else {
             continue;
         };
         let Some(body) = s.remote.get(&key)? else {
@@ -388,6 +394,8 @@ pub fn export_client(s: &Sync, client_id: &str, dest: &Path) -> Result<usize> {
     let seg: ClientSegment = s
         .get_json(&layout::segment_key(client_id, *rev))?
         .ok_or_else(|| SyncError::Format("the client segment is missing".into()))?;
+    seg.check()
+        .map_err(|what| SyncError::Format(format!("the client segment: refused {what}")))?;
     let base = dest.join(&seg.folder_rel);
     let mut n = 0;
     for d in seg.documents.iter().filter(|d| d.deleted_at.is_none()) {

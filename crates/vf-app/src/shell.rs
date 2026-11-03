@@ -23,7 +23,60 @@ fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
+/// File types Open refuses to launch: programs, scripts, shortcuts and installers. A file like
+/// this in a client folder (from a sync, an import, an inbox) is shown in Explorer instead.
+const NEVER_RUN: &[&str] = &[
+    "exe",
+    "com",
+    "bat",
+    "cmd",
+    "scr",
+    "pif",
+    "lnk",
+    "url",
+    "hta",
+    "js",
+    "jse",
+    "vbs",
+    "vbe",
+    "wsf",
+    "wsh",
+    "ps1",
+    "psm1",
+    "msi",
+    "msp",
+    "msc",
+    "cpl",
+    "reg",
+    "jar",
+    "dll",
+    "sys",
+    "inf",
+    "application",
+    "appref-ms",
+    "gadget",
+    "scf",
+    "library-ms",
+    "settingcontent-ms",
+    "chm",
+];
+
+/// Whether Open refuses `p` (by its extension).
+pub fn never_run(p: &Path) -> bool {
+    p.extension()
+        .map(|e| e.to_string_lossy().to_ascii_lowercase())
+        .is_some_and(|e| NEVER_RUN.contains(&e.as_str()))
+}
+
 fn open(p: &Path) -> Result<(), String> {
+    if never_run(p) {
+        return Err(format!(
+            "{} is a program or shortcut, not a document: Vibe Files does not start it. Use Open in Explorer if you trust it.",
+            p.file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default()
+        ));
+    }
     use windows::Win32::UI::Shell::ShellExecuteW;
     use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
     use windows::core::PCWSTR;

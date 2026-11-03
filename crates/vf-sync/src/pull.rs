@@ -56,6 +56,15 @@ pub fn pull(conn: &mut Connection, root: &Path, s: &Sync) -> Result<PullReport> 
     let Some(head) = s.head()? else {
         return Ok(rep);
     };
+    // The bucket's manifest never goes back: an older HEAD put back (a deleted object version,
+    // a restored bucket) would quietly take back newer documents.
+    let seen = catalog::last_rev(conn, &s.device_id)?;
+    if head.rev < seen {
+        return Err(SyncError::Format(format!(
+            "the bucket's manifest is at rev {} but this PC has seen rev {seen}: it went back. Nothing was changed here; check the bucket (B2 file versions, a restore) before syncing again.",
+            head.rev
+        )));
+    }
     rep.head_rev = head.rev;
     apply_head(conn, root, s, &head, &mut rep)?;
     catalog::set_state(conn, &s.device_id, head.rev, "pull")?;
@@ -96,6 +105,8 @@ pub(crate) fn apply_head(
         let seg: CabinetSegment = s
             .get_json(&key)?
             .ok_or_else(|| SyncError::Format(format!("{key} is missing")))?;
+        seg.check()
+            .map_err(|what| SyncError::Format(format!("{key}: refused {what}")))?;
         let merged = apply_files(conn, root, s, &seg.files)?;
         let deferred = apply_docs(conn, root, s, None, "", &seg.documents, rep)?;
         if !deferred {
@@ -112,6 +123,11 @@ pub(crate) fn apply_head(
         let seg: ClientSegment = s
             .get_json(&key)?
             .ok_or_else(|| SyncError::Format(format!("{key} is missing")))?;
+        if seg.client_id != *client {
+            return Err(SyncError::Format(format!("{key}: names another client")));
+        }
+        seg.check()
+            .map_err(|what| SyncError::Format(format!("{key}: refused {what}")))?;
         let folder = ensure_folder(conn, root, s, &seg)?;
         let deferred = apply_docs(conn, root, s, Some(client), &folder, &seg.documents, rep)?;
         if !deferred {

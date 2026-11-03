@@ -399,7 +399,14 @@ pub fn to_csv(rows: &[Listed]) -> String {
     let mut w = csv::Writer::from_writer(Vec::new());
     let _ = w.write_record(COLUMNS);
     for l in rows {
-        let _ = w.write_record(cells(l));
+        // A cell starting with = + - @ (or a tab / CR) would run as a formula in Excel.
+        let _ = w.write_record(cells(l).iter().map(|c| {
+            if c.starts_with(['=', '+', '-', '@', '\t', '\r']) {
+                format!("'{c}")
+            } else {
+                c.clone()
+            }
+        }));
     }
     String::from_utf8(w.into_inner().unwrap_or_default()).unwrap_or_default()
 }

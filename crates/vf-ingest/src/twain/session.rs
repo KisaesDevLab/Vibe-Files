@@ -171,6 +171,10 @@ impl Ds<'_> {
         }
         unsafe {
             let p = lock(h) as *mut OneValue;
+            if p.is_null() {
+                free(h);
+                return Err(TWCC_LOWMEMORY);
+            }
             p.write_unaligned(OneValue { item_type, item });
             unlock(h);
         }
@@ -393,16 +397,24 @@ impl Ds<'_> {
                         Pixel::Rgb => x.x_offset as usize * 3,
                     };
                     let take = bpr.min(row.saturating_sub(x0));
-                    let need = (x.y_offset + x.rows) as usize * row;
+                    // The driver's sizes are checked, not trusted: a strip must fit the buffer
+                    // it was written to, and the page may not grow past 100,000 rows.
+                    let (y0, rows) = (x.y_offset as usize, x.rows as usize);
+                    let fits = rows.checked_mul(bpr).is_some_and(|n| n <= buf.len())
+                        && y0.checked_add(rows).is_some_and(|e| e <= 100_000);
+                    if !fits {
+                        return Err(TWCC_BADVALUE);
+                    }
+                    let need = (y0 + rows) * row;
                     if data.len() < need {
                         data.resize(need, 0);
                     }
-                    for r in 0..x.rows as usize {
+                    for r in 0..rows {
                         let src = &buf[r * bpr..r * bpr + take];
-                        let at = (x.y_offset as usize + r) * row + x0;
+                        let at = (y0 + r) * row + x0;
                         data[at..at + take].copy_from_slice(src);
                     }
-                    rows_seen = rows_seen.max(x.y_offset + x.rows);
+                    rows_seen = rows_seen.max((y0 + rows) as u32);
                     if rc == TWRC_XFERDONE {
                         break;
                     }

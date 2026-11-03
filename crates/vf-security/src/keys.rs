@@ -145,6 +145,12 @@ pub fn unwrap_with_passphrase(
 }
 
 fn derive(passphrase: &str, salt: &[u8], p: KdfParams) -> Result<[u8; 32], KeyError> {
+    // A key file (or the bucket's cabinet.json) asking for absurd cost is refused, not run.
+    if p.m_kib > 1024 * 1024 || p.t > 16 || p.p > 16 || p.m_kib < 8 {
+        return Err(KeyError::BadFile(
+            "unreasonable key derivation settings".into(),
+        ));
+    }
     let params =
         Params::new(p.m_kib, p.t, p.p, Some(32)).map_err(|e| KeyError::BadFile(e.to_string()))?;
     let mut out = [0u8; 32];

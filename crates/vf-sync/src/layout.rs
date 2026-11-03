@@ -9,6 +9,92 @@ pub const LAYOUT_VER: u32 = 1;
 pub const CABINET: &str = "cabinet.json";
 pub const HEAD: &str = "manifest/HEAD";
 
+/// A path a manifest names (relative, `/`-separated): no root, drive, `..`, `.`, empty part,
+/// backslash or character Windows forbids. Anything else is refused before a byte is written
+/// (a corrupted or malicious manifest must not write outside the cabinet).
+pub fn safe_rel(p: &str) -> bool {
+    !p.is_empty()
+        && p.len() < 1024
+        && !p.starts_with('/')
+        && !p.contains('\\')
+        && !p
+            .chars()
+            .any(|c| (c as u32) < 32 || r#"<>:"|?*"#.contains(c))
+        && p.split('/').all(|seg| {
+            !seg.is_empty()
+                && seg != "."
+                && seg != ".."
+                && !seg.ends_with(' ')
+                && !seg.ends_with('.')
+        })
+}
+
+/// A SHA-256 or object name: 64 lowercase hex characters.
+pub fn safe_hex(h: &str) -> bool {
+    h.len() == 64
+        && h.bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+/// The cabinet master files a segment may carry (`parsers/<name>.toml` included).
+pub fn master_file_allowed(rel: &str) -> bool {
+    MASTER_FILES.contains(&rel)
+        || rel
+            .strip_prefix("parsers/")
+            .is_some_and(|n| n.ends_with(".toml") && safe_rel(n) && !n.contains('/'))
+}
+
+fn check_doc(d: &DocEntry) -> Result<(), String> {
+    if !safe_rel(&d.rel_path) {
+        return Err("a document path".into());
+    }
+    if !safe_hex(&d.hash) || !safe_hex(&d.object) {
+        return Err("a document hash".into());
+    }
+    if d.versions
+        .iter()
+        .any(|v| !safe_hex(&v.hash) || !safe_hex(&v.object))
+    {
+        return Err("a version hash".into());
+    }
+    Ok(())
+}
+
+impl ClientSegment {
+    /// Refuses a segment naming anything outside its folder.
+    pub fn check(&self) -> Result<(), String> {
+        if !safe_rel(&self.folder_rel) || self.folder_rel.contains('/') {
+            return Err("the client folder".into());
+        }
+        if self.empty_dirs.iter().any(|d| !safe_rel(d)) {
+            return Err("a template folder".into());
+        }
+        self.documents.iter().try_for_each(check_doc)
+    }
+}
+
+impl CabinetSegment {
+    pub fn check(&self) -> Result<(), String> {
+        if let Some(k) = self.files.keys().find(|k| !master_file_allowed(k)) {
+            return Err(format!(
+                "an unexpected master file ({} characters)",
+                k.len()
+            ));
+        }
+        self.documents.iter().try_for_each(check_doc)
+    }
+}
+
+/// An audit month key: `yyyy-mm`.
+pub fn safe_month(m: &str) -> bool {
+    let b = m.as_bytes();
+    b.len() == 7
+        && b[4] == b'-'
+        && b.iter()
+            .enumerate()
+            .all(|(i, c)| i == 4 || c.is_ascii_digit())
+}
+
 pub fn object_key(name: &str) -> String {
     format!("objects/{}/{name}", &name[..2])
 }

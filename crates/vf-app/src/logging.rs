@@ -24,8 +24,18 @@ pub fn init(data: &Path) -> Option<tracing_appender::non_blocking::WorkerGuard> 
         .build(&dir)
         .ok()?;
     let (writer, guard) = tracing_appender::non_blocking(appender);
+    // The vendored Filer crates log file paths and client folder names (INFO and WARN): only
+    // their errors reach this log, so it stays free of client data (CLAUDE.md conventions).
+    let filter = tracing_subscriber::filter::Targets::new()
+        .with_default(tracing_subscriber::filter::LevelFilter::INFO)
+        .with_target(
+            "filer_intake",
+            tracing_subscriber::filter::LevelFilter::ERROR,
+        )
+        .with_target("filer_core", tracing_subscriber::filter::LevelFilter::ERROR)
+        .with_target("filer_pdf", tracing_subscriber::filter::LevelFilter::ERROR);
     tracing_subscriber::registry()
-        .with(tracing_subscriber::filter::LevelFilter::INFO)
+        .with(filter)
         .with(
             tracing_subscriber::fmt::layer()
                 .with_writer(writer)
