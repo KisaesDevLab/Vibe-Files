@@ -344,9 +344,32 @@ fn client_stmts(
             ],
         )
     };
+    // Taxpayer-ID columns never reach the catalog (a list from Filer's own wizard may have them).
+    let tin_cols: std::collections::BTreeSet<String> = {
+        let mut l = m.list.clone().unwrap_or_else(crate::newclient::empty_list);
+        let before: std::collections::BTreeSet<String> = l
+            .clients
+            .iter()
+            .flat_map(|c| c.extra.keys().cloned())
+            .collect();
+        crate::clients::strip_tins(&mut l);
+        let after: std::collections::BTreeSet<String> = l
+            .clients
+            .iter()
+            .flat_map(|c| c.extra.keys().cloned())
+            .collect();
+        before.difference(&after).cloned().collect()
+    };
     let extras = |c: Option<&filer_core::clients::Client>| {
-        c.map(|c| serde_json::to_string(&c.extra).expect("serializes"))
-            .unwrap_or_else(|| "{}".into())
+        c.map(|c| {
+            let kept: std::collections::BTreeMap<&String, &String> = c
+                .extra
+                .iter()
+                .filter(|(k, _)| !tin_cols.contains(*k))
+                .collect();
+            serde_json::to_string(&kept).expect("serializes")
+        })
+        .unwrap_or_else(|| "{}".into())
     };
 
     let mut stmts = Vec::new();

@@ -46,6 +46,12 @@ pub fn plan(conn: &Connection, root: &Path, req: &NewClient) -> Result<Plan, Str
     if ext.is_empty() {
         return Err("Enter the client ID.".into());
     }
+    if clients::is_tin_value(ext) {
+        return Err(
+            "That ID looks like an SSN or EIN. Use the tax software's client ID: the ID goes into folder names, the audit trail and the bucket."
+                .into(),
+        );
+    }
     let cab = cabinet::read(root)?;
     let master = clients::load(root)?;
     let listed = master

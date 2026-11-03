@@ -121,6 +121,15 @@ pub fn open(data: &Path, device_id: &str, root: &Path) -> Result<Opened> {
     let catalog = data.join(CATALOG_FILE);
     let set_aside = set_aside_encrypted(&catalog)?;
     let mut conn = db::open(&catalog, Storage::Local)?;
+    // Taxpayer-ID columns a client list may carry (Filer's own wizard) are removed first.
+    if let Ok(bad) = vf_fs::clients::strip_tins_on_disk(root)
+        && !bad.is_empty()
+    {
+        tracing::warn!(
+            columns = bad.len(),
+            "taxpayer ID columns removed from the client list"
+        );
+    }
     // A change cut short by a crash is put back before anything else reads the cabinet.
     let rec = vf_fs::fileops::recover(&conn).map_err(anyhow::Error::msg)?;
     if rec.transactions > 0 {

@@ -264,7 +264,9 @@ fn title(head: &str) -> Option<Form> {
 /// / `***-**-1234`, or 9 digits run together.
 fn tins(line: &str) -> Vec<String> {
     let mut out = Vec::new();
-    for tok in line.split(|c: char| c.is_whitespace() || c == ',' || c == ';') {
+    for tok in line.split(|c: char| {
+        c.is_whitespace() || matches!(c, ',' | ';' | ':' | '#' | '=' | '(' | ')' | '/')
+    }) {
         let t = tok.trim_matches(|c: char| !(c.is_ascii_alphanumeric() || c == '*'));
         let shape: String = t
             .chars()
@@ -354,22 +356,32 @@ fn name_for(lines: &[String], originals: &[String], labels: &[&str]) -> Option<S
     if let Some(rest) = originals[i].get(col..)
         && let Some(p) = rest.find(':')
     {
-        let v = rest[p + 1..].trim();
-        if v.len() > 1 && tins(v).is_empty() {
-            return Some(clean_name(v));
+        let v = clean_name(rest[p + 1..].trim());
+        if v.len() > 1 {
+            return Some(v);
         }
     }
     for (l, o) in lines.iter().zip(originals).skip(i + 1).take(2) {
         let looks_label = l.contains("'S ") || l.contains("NUMBER") || l.ends_with(':');
-        if !l.is_empty() && !looks_label && tins(l).is_empty() {
-            return Some(clean_name(o));
+        let n = clean_name(o);
+        if !l.is_empty() && !looks_label && tins(l).is_empty() && n.len() > 1 {
+            return Some(n);
         }
     }
     None
 }
 
+/// A name as printed, without any word carrying 5+ digits or a TIN label: a number glued to
+/// its label (`SSN:900-12-4321`) can never ride along into a file name or the catalog.
 fn clean_name(s: &str) -> String {
-    s.split_whitespace().collect::<Vec<_>>().join(" ")
+    s.split_whitespace()
+        .filter(|w| w.chars().filter(|c| c.is_ascii_digit()).count() < 5)
+        .filter(|w| {
+            let u = w.trim_end_matches([':', '#', '.']).to_ascii_uppercase();
+            !matches!(u.as_str(), "SSN" | "EIN" | "TIN" | "FEIN" | "ITIN")
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// The tax year: after "calendar year" / "tax year" / "for", else the most common 20xx in the
@@ -462,6 +474,23 @@ mod tests {
         );
         assert_eq!(tins("900123456"), ["900123456"]);
         assert!(tins("2025 12345 555-1234").is_empty());
+    }
+
+    /// QA I2: a TIN glued to its label never reaches a name.
+    #[test]
+    fn glued_tins_stay_out_of_names() {
+        assert_eq!(
+            tins("SSN:900-12-4321 EIN#41-1234567"),
+            ["900-12-4321", "41-1234567"]
+        );
+        let t = "Form W-2 Wage and Tax Statement 2025
+Employee's name: Dana Reyes SSN:900-12-4321
+Employer's name: Harbor Point Farms EIN:41-1234567";
+        let e = recognize(t).unwrap();
+        for n in [&e.payer_name, &e.recipient_name].into_iter().flatten() {
+            assert!(!n.contains("4321") && !n.contains("1234567"), "{n}");
+            assert!(!n.contains("SSN") && !n.contains("EIN"), "{n}");
+        }
     }
 
     #[test]

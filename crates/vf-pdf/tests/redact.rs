@@ -235,3 +235,50 @@ fn verify_refuses_an_ssn_left_in_a_note() {
     let e = redact::verify(pdfium(), &out, &["987-65-4321".into()]).unwrap_err();
     assert!(e.contains("•••-••-4321"), "{e}");
 }
+
+/// QA I1: a fillable form keeps each field's value in /AcroForm, outside the page. A box drawn
+/// over the field: the redacted copy has no form left, and the value is nowhere in the file.
+#[test]
+fn form_field_values_go_with_the_redaction() {
+    use lopdf::{Dictionary, Object, StringFormat};
+    let t = tempfile::tempdir().unwrap();
+    let src = t.path().join("form.pdf");
+    let out = t.path().join("out.pdf");
+    filer_pdf::pdf::write_test_pdf(&src, &["Form W-2 Employee SSN field below"]);
+    let mut doc = lopdf::Document::load(&src).unwrap();
+    let mut field = Dictionary::new();
+    field.set("FT", Object::Name(b"Tx".to_vec()));
+    field.set("T", Object::String(b"ssn".to_vec(), StringFormat::Literal));
+    field.set(
+        "V",
+        Object::String(b"987-65-4321".to_vec(), StringFormat::Literal),
+    );
+    let fid = doc.add_object(field);
+    let mut form = Dictionary::new();
+    form.set("Fields", Object::Array(vec![Object::Reference(fid)]));
+    let form_id = doc.add_object(form);
+    doc.catalog_mut()
+        .unwrap()
+        .set("AcroForm", Object::Reference(form_id));
+    doc.save(&src).unwrap();
+    assert!(
+        std::fs::read(&src)
+            .unwrap()
+            .windows(11)
+            .any(|w| w == b"987-65-4321")
+    );
+
+    let drawn = [Redaction {
+        page: 0,
+        rect: [72.0, 600.0, 300.0, 700.0],
+    }];
+    redact::apply(pdfium(), &src, &out, &drawn).unwrap();
+    let bytes = std::fs::read(&out).unwrap();
+    assert!(
+        !bytes.windows(11).any(|w| w == b"987-65-4321"),
+        "the field value survived"
+    );
+    let d = lopdf::Document::load(&out).unwrap();
+    assert!(d.catalog().unwrap().get(b"AcroForm").is_err());
+    redact::verify(pdfium(), &out, &["987-65-4321".to_string()]).unwrap();
+}

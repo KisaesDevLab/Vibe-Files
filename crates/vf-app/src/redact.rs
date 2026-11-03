@@ -82,8 +82,14 @@ pub fn redact_document(
         )
         .map_err(|_| "the document is not in the catalog".to_string())?;
     let tmp = content::tmp_file(root, "pdf")?;
+    let under = redact::text_under(pdfium, &root.join(&rel), &plan.drawn);
     let r = redact::apply(pdfium, &root.join(&rel), &tmp, &plan.boxes()).and_then(|_| {
-        let values: Vec<String> = plan.found.iter().map(|f| f.value.clone()).collect();
+        let values: Vec<String> = plan
+            .found
+            .iter()
+            .map(|f| f.value.clone())
+            .chain(under)
+            .collect();
         redact::verify(pdfium, &tmp, &values)
             .map_err(|e| format!("Not saved: the check after redaction found {e}."))
     });
@@ -115,8 +121,21 @@ pub fn redact_document(
     )
 }
 
-/// `Folder/W-2.pdf` → `Folder/W-2 (redacted).pdf`.
+/// `Folder/W-2.pdf` → `Folder/W-2 (redacted).pdf`; an SSN, EIN or account number in the
+/// name is masked (`W-2 ***-**-6789 (redacted).pdf`).
 pub fn redacted_name(rel: &str) -> String {
+    let (dir, file) = rel.rsplit_once('/').map_or(("", rel), |(d, f)| (d, f));
+    let chars: Vec<(char, Option<[f32; 4]>)> = file.chars().map(|c| (c, None)).collect();
+    let mut file = file.to_string();
+    for f in vf_pdf::pii::find_on_page(0, &chars, &[Kind::Ssn, Kind::Ein, Kind::Account]) {
+        file = file.replace(&f.value, &vf_pdf::pii::mask(&f.value));
+    }
+    let rel = if dir.is_empty() {
+        file
+    } else {
+        format!("{dir}/{file}")
+    };
+    let rel = rel.as_str();
     match rel.rsplit_once('.') {
         Some((stem, ext)) if !stem.ends_with('/') => format!("{stem} (redacted).{ext}"),
         _ => format!("{rel} (redacted)"),
@@ -134,6 +153,17 @@ mod tests {
     use vf_core::db::Storage;
 
     use super::*;
+
+    /// QA I13: the redacted copy's name does not keep the number either.
+    #[test]
+    fn redacted_name_masks_numbers() {
+        let n = redacted_name("Smith/W-2 987-65-4321.pdf");
+        assert!(!n.contains("987-65"), "{n}");
+        assert!(
+            n.ends_with("(redacted).pdf") && n.starts_with("Smith/"),
+            "{n}"
+        );
+    }
 
     fn pdfium() -> &'static Pdfium {
         let dir = filer_pdf::pdf::find_pdfium(Path::new("")).unwrap();

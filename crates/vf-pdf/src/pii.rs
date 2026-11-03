@@ -91,6 +91,12 @@ fn patterns() -> &'static [(Kind, Regex, usize)] {
             // 123-45-6789 / 123 45 6789 (not part of a longer number).
             (Kind::Ssn, r(r"(?:^|[^\d-])(\d{3}[- ]\d{2}[- ]\d{4})(?:$|[^\d-])"), 1),
             (Kind::Ein, r(r"(?:^|[^\d-])(\d{2}-\d{7})(?:$|[^\d-])"), 1),
+            // 123456789 right after an SSN label (no separators; QA I11).
+            (
+                Kind::Ssn,
+                r(r"(?i)(?:ssn|social\s+security(?:\s+(?:no\.?|number|#))?|soc\.?\s*sec\.?(?:\s*(?:no\.?|#))?)\W{0,12}(\d{9})(?:$|\D)"),
+                1,
+            ),
             (
                 Kind::Account,
                 r(r"(?i)(?:account|acct|a/c)\.?\s*(?:no\.?|number|#)?\s*[:#]?\s*([0-9][0-9 -]{4,}[0-9])"),
@@ -158,6 +164,16 @@ pub fn still_contains(text: &str, value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// QA I11: nine digits after an SSN label, without separators.
+    #[test]
+    fn ssn_without_separators_after_a_label() {
+        let chars = |t: &str| t.chars().map(|c| (c, None)).collect::<Vec<_>>();
+        let f = find_on_page(0, &chars("Employee SSN: 987654321"), &[Kind::Ssn]);
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].value, "987654321");
+        assert!(find_on_page(0, &chars("Invoice 987654321"), &[Kind::Ssn]).is_empty());
+    }
 
     fn run(text: &str) -> Vec<(char, Option<[f32; 4]>)> {
         text.chars()

@@ -38,6 +38,8 @@ pub struct PushReport {
 pub fn master_files(root: &Path) -> BTreeMap<String, String> {
     let vibe = root.join(vf_fs::cabinet::VIBE_DIR);
     let mut out = BTreeMap::new();
+    // Taxpayer-ID columns are stripped from the client list on disk before it is sent.
+    let _ = vf_fs::clients::strip_tins_on_disk(root);
     for f in layout::MASTER_FILES {
         if let Ok(t) = std::fs::read_to_string(vibe.join(f)) {
             out.insert((*f).to_string(), t);

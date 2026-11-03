@@ -66,10 +66,21 @@ pub fn apply(
     }
     drop(pdf);
 
-    // Metadata goes; unreferenced objects (old content, images, annotations) are dropped.
+    // Metadata goes, and so do form fields (a fillable form keeps each field's value in
+    // `/AcroForm`, outside the page), bookmarks and attached files: a redacted copy is a flat
+    // document. Unreferenced objects (old content, images, annotations) are dropped.
     doc.trailer.remove(b"Info");
     if let Ok(cat) = doc.catalog_mut() {
-        cat.remove(b"Metadata");
+        for k in [
+            &b"Metadata"[..],
+            b"AcroForm",
+            b"Outlines",
+            b"Names",
+            b"OpenAction",
+            b"AA",
+        ] {
+            cat.remove(k);
+        }
     }
     doc.prune_objects();
     let tmp = out.with_extension("redact.tmp");
@@ -85,6 +96,41 @@ pub fn apply(
     let _ = std::fs::remove_file(&tmp);
     r?;
     Ok(pages)
+}
+
+/// Numbers (4+ digits) under boxes drawn by hand, from the original: `verify` then checks they
+/// are gone too (a box over a field or over text the finder did not flag).
+pub fn text_under(pdfium: &Pdfium, path: &Path, boxes: &[Redaction]) -> Vec<String> {
+    use pdfium_render::prelude::{PdfPoints, PdfRect};
+    let Ok(doc) = pdfium.load_pdf_from_file(path, None) else {
+        return vec![];
+    };
+    let mut out = vec![];
+    for b in boxes {
+        let Ok(page) = doc.pages().get(b.page as i32) else {
+            continue;
+        };
+        let Ok(t) = page.text() else { continue };
+        let [x0, y0, x1, y1] = b.rect;
+        let r = PdfRect::new(
+            PdfPoints::new(y0.min(y1)),
+            PdfPoints::new(x0.min(x1)),
+            PdfPoints::new(y0.max(y1)),
+            PdfPoints::new(x0.max(x1)),
+        );
+        for w in t
+            .inside_rect(r)
+            .split(|c: char| c.is_whitespace() || c == ':' || c == '#')
+        {
+            let w = w.trim_matches(|c: char| !c.is_ascii_alphanumeric());
+            if w.chars().filter(|c| c.is_ascii_digit()).count() >= 4 {
+                out.push(w.to_string());
+            }
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
 }
 
 fn pad(r: [f32; 4], d: f32) -> [f32; 4] {

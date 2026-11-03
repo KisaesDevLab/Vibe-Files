@@ -127,7 +127,9 @@ fn best(
                 (Some(true), true, _) => (0.97, "TIN and name"),
                 (Some(true), false, true) => (0.95, "TIN and learned payer"),
                 (None, true, true) => (0.9, "name and learned payer"),
-                (None, false, true) => (0.86, "learned payer"),
+                // A learned payer alone stays below the threshold: one correction for a bank
+                // must not file every client's form from that bank to one client (QA I3).
+                (None, false, true) => (0.75, "learned payer"),
                 (Some(true), false, false) => (0.6, "TIN only"),
                 (None, true, false) if ns >= 0.99 => (0.8, "name only"),
                 (None, true, false) => (0.65, "name only"),

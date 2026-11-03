@@ -188,6 +188,27 @@ pub fn import_csv_tin(
         ));
     }
     let table = clients::read_csv(csv).map_err(|e| e.to_string())?;
+    // By the values too: an ID, name or kept column holding SSNs / EINs is refused.
+    let col = |h: &str| table.headers.iter().position(|x| x == h);
+    for h in map
+        .id
+        .iter()
+        .chain(map.name.iter())
+        .chain(map.extras.iter())
+    {
+        if let Some(i) = col(h)
+            && values_look_like_tins(
+                table
+                    .rows
+                    .iter()
+                    .filter_map(|r| r.get(i).map(String::as_str)),
+            )
+        {
+            return Err(format!(
+                "The column {h} holds taxpayer IDs (SSNs or EINs): it cannot be the client ID, the name or a kept column. Full TINs stay in the documents only."
+            ));
+        }
+    }
     let mut list = clients::apply_mapping(&table, map).map_err(|e| e.to_string())?;
     let mut all = load(root)?.list.map(|l| l.uuids).unwrap_or_default();
     all.extend(known.iter().map(|(k, v)| (k.clone(), *v)));
@@ -315,22 +336,95 @@ pub fn looks_like_tin(header: &str) -> bool {
         .chars()
         .filter(|c| c.is_ascii_alphanumeric())
         .collect();
-    [
-        "ssn",
-        "ein",
-        "tin",
-        "itin",
-        "fein",
-        "taxid",
-        "socialsecurity",
-        "taxpayerid",
-    ]
-    .iter()
-    .any(|k| h == *k || h.starts_with(k) || h.ends_with(k))
+    h == "ss"
+        || [
+            "ssn",
+            "ein",
+            "tin",
+            "itin",
+            "fein",
+            "taxid",
+            "socialsecurity",
+            "socsec",
+            "taxpayerid",
+            "taxidentification",
+            "fedid",
+            "federalid",
+            "employerid",
+        ]
+        .iter()
+        .any(|k| h == *k || h.starts_with(k) || h.ends_with(k))
+}
+
+/// Whether `v` is shaped like a full SSN or EIN (`123-45-6789`, `12-3456789`, 9 digits).
+pub fn is_tin_value(v: &str) -> bool {
+    let t = v.trim();
+    let digits = t.chars().filter(|c| c.is_ascii_digit()).count();
+    let others_ok = t
+        .chars()
+        .all(|c| c.is_ascii_digit() || c == '-' || c == ' ');
+    others_ok && digits == 9 && t.len() <= 11
+}
+
+/// Whether a column's values are taxpayer IDs: a third or more of its non-empty values look
+/// like full SSNs / EINs.
+pub fn values_look_like_tins<'a>(values: impl Iterator<Item = &'a str>) -> bool {
+    let (mut n, mut tin) = (0usize, 0usize);
+    for v in values.filter(|v| !v.trim().is_empty()) {
+        n += 1;
+        if is_tin_value(v) {
+            tin += 1;
+        }
+    }
+    n > 0 && tin * 3 >= n
+}
+
+/// Removes taxpayer-ID columns from a client list (by header, or by values that look like full
+/// TINs) wherever they came from: Filer's own CSV wizard (Intake › Setup) keeps whatever the
+/// person ticks. Returns the columns removed (only their headers).
+pub fn strip_tins(list: &mut ClientList) -> Vec<String> {
+    let mut keys: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for c in &list.clients {
+        keys.extend(c.extra.keys().cloned());
+    }
+    let bad: Vec<String> = keys
+        .into_iter()
+        .filter(|k| {
+            looks_like_tin(k)
+                || values_look_like_tins(
+                    list.clients
+                        .iter()
+                        .filter_map(|c| c.extra.get(k).map(String::as_str)),
+                )
+        })
+        .collect();
+    if !bad.is_empty() {
+        for c in &mut list.clients {
+            for k in &bad {
+                c.extra.remove(k);
+            }
+        }
+        list.column_map.extras.retain(|e| !bad.contains(e));
+    }
+    bad
+}
+
+/// [`strip_tins`] on the cabinet's `clients.json`, saving it when anything was removed. Run when
+/// a cabinet opens and before the catalog or the bucket gets the list.
+pub fn strip_tins_on_disk(root: &Path) -> Result<Vec<String>, String> {
+    let Some(mut list) = load(root)?.list else {
+        return Ok(vec![]);
+    };
+    let bad = strip_tins(&mut list);
+    if !bad.is_empty() {
+        save_list(root, &list)?;
+    }
+    Ok(bad)
 }
 
 /// Extras in `map` that look like taxpayer IDs.
 pub fn tin_extras(map: &ColumnMap) -> Vec<String> {
+    // (headers only; the import also checks the values)
     map.extras
         .iter()
         .filter(|h| looks_like_tin(h))
@@ -360,6 +454,70 @@ mod tests {
         let t = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(master_dir(t.path())).unwrap();
         t
+    }
+
+    /// QA P1/P2: TIN columns are refused by header or values, wherever they are mapped, and
+    /// stripped from a list written by Filer's own wizard.
+    #[test]
+    fn taxpayer_ids_never_enter_the_client_list() {
+        for h in [
+            "SSN",
+            "Fed ID",
+            "Federal ID Number",
+            "SS #",
+            "Soc Sec No",
+            "EIN",
+        ] {
+            assert!(looks_like_tin(h), "{h}");
+        }
+        assert!(!looks_like_tin("Partner") && !looks_like_tin("Status"));
+        assert!(
+            is_tin_value("900-12-4321") && is_tin_value("41-1234567") && is_tin_value("900124321")
+        );
+        assert!(!is_tin_value("1001") && !is_tin_value("ANDE1042"));
+
+        let cab = cabinet();
+        // Taxpayer IDs as the client ID column: refused.
+        let csv = write_csv(
+            cab.path(),
+            "ClientID,Name
+900-12-4321,Acme
+900-12-4322,Baker
+",
+        );
+        assert!(import_csv(cab.path(), &csv, &map(&[]), &Default::default()).is_err());
+        // A kept column of TINs with an innocent header: refused by its values.
+        let csv = write_csv(
+            cab.path(),
+            "ClientID,Name,Number
+1001,Acme,900-12-4321
+1002,Baker,41-1234567
+",
+        );
+        assert!(import_csv(cab.path(), &csv, &map(&["Number"]), &Default::default()).is_err());
+
+        // A list as Filer's own wizard writes it, with an SSN column kept: stripped.
+        let csv = write_csv(
+            cab.path(),
+            "ClientID,Name,Partner
+1001,Acme,KW
+",
+        );
+        let mut list =
+            import_csv(cab.path(), &csv, &map(&["Partner"]), &Default::default()).unwrap();
+        for c in &mut list.clients {
+            c.extra.insert("Fed ID".into(), "41-1234567".into());
+            c.extra.insert("Ref".into(), "900-12-4321".into());
+        }
+        save_list(cab.path(), &list).unwrap();
+        let bad = strip_tins_on_disk(cab.path()).unwrap();
+        assert_eq!(bad, ["Fed ID", "Ref"]);
+        let text = std::fs::read_to_string(master_dir(cab.path()).join("clients.json")).unwrap();
+        assert!(
+            !text.contains("1234567") && !text.contains("12-4321"),
+            "{text}"
+        );
+        assert!(text.contains("Partner"));
     }
 
     #[test]
