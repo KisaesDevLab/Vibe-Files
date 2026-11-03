@@ -18,7 +18,7 @@ use pdfium_render::prelude::Pdfium;
 use vf_fs::hints::Hint;
 
 use crate::sheet::{Cover, TaxYear};
-use crate::stack;
+use crate::{images, stack};
 
 /// Where a staged file came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -92,13 +92,48 @@ pub fn process(ctx: &Context<'_>, staged: &Path, _origin: Origin) -> Result<Proc
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| name.clone());
-    if !is_pdf(staged) {
-        return Err(format!("{name}: not a PDF"));
-    }
     let lookup = Lookup::load(ctx.root)?;
+    // Images become a PDF first (step 4); it is then handled like a scanned PDF.
+    let image = if images::is_image(staged) {
+        let tmp = tmp_in(ctx.inbox);
+        let n = images::to_pdf(staged, &tmp).inspect_err(|_| {
+            let _ = std::fs::remove_file(&tmp);
+        })?;
+        Some((tmp, n.note()))
+    } else if is_pdf(staged) {
+        None
+    } else {
+        return Err(format!(
+            "{name}: not a PDF or an image ({})",
+            images::EXTENSIONS.join(", ")
+        ));
+    };
+    let result = split_and_deliver(ctx, &lookup, staged, image.as_ref(), &name, &stem);
+    if let Some((tmp, _)) = &image {
+        let _ = std::fs::remove_file(tmp);
+    }
+    let out = result?;
+    let kept = keep_original(staged)?;
+    Ok(Processed {
+        staged: staged.to_path_buf(),
+        delivered: out,
+        kept,
+    })
+}
 
+/// Splits the PDF (the staged file, or the PDF made from a staged image) at its sheets and
+/// delivers the pieces.
+fn split_and_deliver(
+    ctx: &Context<'_>,
+    lookup: &Lookup,
+    staged: &Path,
+    image: Option<&(PathBuf, String)>,
+    name: &str,
+    stem: &str,
+) -> Result<Vec<Delivered>, String> {
+    let pdf = image.map_or(staged, |(p, _)| p.as_path());
     let pages = match ctx.pdfium {
-        Some(p) => stack::scan_pages(p, staged)?,
+        Some(p) => stack::scan_pages(p, pdf)?,
         None => vec![],
     };
     let segments = stack::segments(&pages);
@@ -106,17 +141,21 @@ pub fn process(ctx: &Context<'_>, staged: &Path, _origin: Origin) -> Result<Proc
     if segments.len() <= 1 && segments.first().is_none_or(|s| s.sheet.is_none()) {
         // No sheet (or no pdfium): the file goes to Filer as it is.
         let tmp = tmp_in(ctx.inbox);
-        copy_to(staged, &tmp)?;
-        out.push(deliver(ctx, &tmp, &name, None, "no barcode sheet".into())?);
+        copy_to(pdf, &tmp)?;
+        let (file, note) = match image {
+            Some((_, note)) => (format!("{stem}.pdf"), note.clone()),
+            None => (name.to_string(), "no barcode sheet".into()),
+        };
+        out.push(deliver(ctx, &tmp, &file, None, note)?);
     } else {
         let tmps: Vec<PathBuf> = segments.iter().map(|_| tmp_in(ctx.inbox)).collect();
         let ranges: Vec<_> = segments.iter().map(|s| s.pages.clone()).collect();
-        filer_pdf::pdf::split_pdf(staged, &ranges, &tmps)?;
+        filer_pdf::pdf::split_pdf(pdf, &ranges, &tmps)?;
         for (i, (seg, tmp)) in segments.iter().zip(&tmps).enumerate() {
             let pages = page_note(&seg.pages);
             let r = match &seg.sheet {
                 Some(Some(cover)) => {
-                    let (file, hint) = cover_name(cover, &lookup, &stem, i + 1);
+                    let (file, hint) = cover_name(cover, lookup, stem, i + 1);
                     deliver(
                         ctx,
                         tmp,
@@ -151,12 +190,7 @@ pub fn process(ctx: &Context<'_>, staged: &Path, _origin: Origin) -> Result<Proc
             }
         }
     }
-    let kept = keep_original(staged)?;
-    Ok(Processed {
-        staged: staged.to_path_buf(),
-        delivered: out,
-        kept,
-    })
+    Ok(out)
 }
 
 pub fn is_pdf(p: &Path) -> bool {
