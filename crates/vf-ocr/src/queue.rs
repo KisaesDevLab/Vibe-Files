@@ -324,6 +324,8 @@ pub struct Config {
     /// Configured `tesseract.exe` (or folder).
     pub tesseract: Option<PathBuf>,
     pub threads: usize,
+    /// This workstation, for the write-back Transactions.
+    pub device_id: String,
 }
 
 /// What the workers are doing, for the UI.
@@ -333,6 +335,8 @@ pub struct Status {
     pub engine: Result<String, String>,
     /// Documents indexed since the queue started.
     pub indexed: usize,
+    /// Text layers written since the queue started.
+    pub written: usize,
     pub last_error: Option<String>,
 }
 
@@ -341,6 +345,7 @@ impl Default for Status {
         Status {
             engine: Err("not started".into()),
             indexed: 0,
+            written: 0,
             last_error: None,
         }
     }
@@ -471,7 +476,7 @@ fn worker(
     status: &Mutex<Status>,
     wake: &(dyn Fn() + Send + Sync),
 ) {
-    let conn = match open(config) {
+    let mut conn = match open(config) {
         Ok(c) => c,
         Err(e) => {
             if let Ok(mut s) = status.lock() {
@@ -481,11 +486,24 @@ fn worker(
         }
     };
     let mut last_scan = Instant::now();
+    let mut last_writeback: Option<Instant> = None;
     while !stop.load(Ordering::Relaxed) {
         // New arrivals: worker 0 looks every 2 s.
         if n == 0 && last_scan.elapsed() >= Duration::from_secs(2) {
             last_scan = Instant::now();
             let _ = enqueue_missing(&conn, INTAKE);
+        }
+        // Text layers held back (Filer's undoable batch, a lock): worker 0 retries every 30 s.
+        if n == 0 && last_writeback.is_none_or(|t| t.elapsed() >= Duration::from_secs(30)) {
+            last_writeback = Some(Instant::now());
+            let (written, errors) =
+                crate::writeback::write_ready(&mut conn, &config.root, &config.device_id);
+            if let Ok(mut s) = status.lock() {
+                s.written += written;
+                if let Some(e) = errors.into_iter().last() {
+                    s.last_error = Some(e);
+                }
+            }
         }
         let eng = {
             let mut g = match engine.lock() {
@@ -528,6 +546,25 @@ fn worker(
             }
         };
         let r = run_job(&conn, &config.root, pdfium, eng.as_deref(), &job, stop);
+        if let Ok(Outcome::Indexed { ocr_pages, .. }) = &r
+            && *ocr_pages > 0
+        {
+            let undoable = crate::writeback::filer_undoable(&config.root);
+            let w = crate::writeback::write(
+                &mut conn,
+                &config.root,
+                &config.device_id,
+                &job.doc_id,
+                &undoable,
+            );
+            if let Ok(mut s) = status.lock() {
+                match w {
+                    Ok(crate::writeback::Written::Done { .. }) => s.written += 1,
+                    Ok(crate::writeback::Written::Held(_)) => {}
+                    Err(e) => s.last_error = Some(format!("{}: text layer: {e}", job.rel_path)),
+                }
+            }
+        }
         if let Ok(mut s) = status.lock() {
             match &r {
                 Ok(Outcome::Indexed { .. }) => s.indexed += 1,

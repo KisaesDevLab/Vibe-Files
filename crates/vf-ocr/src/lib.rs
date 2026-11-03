@@ -6,8 +6,10 @@
 //! the exe (the portable layout), then Program Files, then `PATH`.
 
 pub mod engine;
+pub mod layer;
 pub mod queue;
 pub mod tesseract;
+pub mod writeback;
 
 pub use engine::{OcrEngine, OcrError, OcrPage, Word};
 pub use tesseract::Tesseract;

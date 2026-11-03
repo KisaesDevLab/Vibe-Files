@@ -5127,8 +5127,10 @@ dependencies = [
 name = "vf-ocr"
 version = "0.1.0"
 dependencies = [
+ "filer-intake",
  "filer-pdf",
  "image",
+ "lopdf",
  "pdf-writer",
  "pdfium-render",
  "serde",
@@ -5137,6 +5139,7 @@ dependencies = [
  "thiserror 2.0.21",
  "uuid",
  "vf-core",
+ "vf-fs",
  "vf-index",
  "vf-ingest",
 ]

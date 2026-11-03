@@ -347,21 +347,16 @@ fn keep_overwritten(
         }
         filer_intake::commit::copy_verified(kept, &dst)?;
     }
-    let sidecar = dst.with_extension("json");
-    let mut entries: Vec<crate::cabinet::VersionSidecar> = std::fs::read_to_string(&sidecar)
-        .ok()
-        .and_then(|t| serde_json::from_str(&t).ok())
-        .unwrap_or_default();
-    entries.push(crate::cabinet::VersionSidecar {
-        rel_path: rel(root, original),
-        created: now.into(),
-        created_by: Some("intake".into()),
-        device_id: device_id.into(),
-        reason: Some("overwritten by intake".into()),
-    });
-    crate::cabinet::write_replace(
-        &sidecar,
-        &serde_json::to_vec_pretty(&entries).expect("serializes"),
+    crate::cabinet::add_version_sidecar(
+        root,
+        &hash,
+        crate::cabinet::VersionSidecar {
+            rel_path: rel(root, original),
+            created: now.into(),
+            created_by: Some("intake".into()),
+            device_id: device_id.into(),
+            reason: Some("overwritten by intake".into()),
+        },
     )
 }
 

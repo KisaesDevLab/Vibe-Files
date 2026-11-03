@@ -21,7 +21,7 @@ pub struct OcrState {
 
 impl OcrState {
     /// Starts the workers for `opened`, unless paused on this PC.
-    pub fn start(ctx: &egui::Context, opened: &Opened, prefs: &Ocr) -> OcrState {
+    pub fn start(ctx: &egui::Context, opened: &Opened, prefs: &Ocr, device_id: &str) -> OcrState {
         let mut s = OcrState::default();
         if prefs.paused {
             return s;
@@ -39,6 +39,7 @@ impl OcrState {
                 pdfium_dir,
                 tesseract: prefs.tesseract.clone(),
                 threads: queue::default_threads(),
+                device_id: device_id.into(),
             },
             queue::tesseract_factory(prefs.tesseract.clone()),
             move || ctx.request_repaint_after(Duration::from_millis(500)),

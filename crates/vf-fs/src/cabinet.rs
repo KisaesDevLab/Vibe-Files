@@ -147,6 +147,20 @@ pub fn version_path(root: &Path, hash: &str) -> PathBuf {
         .join(hash)
 }
 
+/// Adds `entry` to the sidecar of the kept version `hash` (`<hash>.json`, a JSON array).
+pub fn add_version_sidecar(root: &Path, hash: &str, entry: VersionSidecar) -> Result<(), String> {
+    let sidecar = version_path(root, hash).with_extension("json");
+    let mut entries: Vec<VersionSidecar> = std::fs::read_to_string(&sidecar)
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or_default();
+    entries.push(entry);
+    write_replace(
+        &sidecar,
+        &serde_json::to_vec_pretty(&entries).expect("serializes"),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;

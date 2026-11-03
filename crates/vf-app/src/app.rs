@@ -195,7 +195,12 @@ impl VibeFilesApp {
                 browse.sheets_dir = self.data.join("sheets");
                 browse.set_prefs(self.config.prefs.clone());
                 browse.notice = opened.rebuild.as_ref().map(|r| format!("Indexed: {r}"));
-                let ocr = crate::ui::ocr::OcrState::start(ctx, &opened, &self.config.ocr);
+                let ocr = crate::ui::ocr::OcrState::start(
+                    ctx,
+                    &opened,
+                    &self.config.ocr,
+                    &self.config.device_id,
+                );
                 self.screen = Screen::Open(Box::new(OpenCabinet {
                     opened,
                     browse,

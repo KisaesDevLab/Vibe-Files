@@ -309,6 +309,7 @@ fn workers_index_the_backlog() {
             pdfium_dir: filer_pdf::pdf::find_pdfium(Path::new("")).unwrap(),
             tesseract: None,
             threads: 3,
+            device_id: "dev".into(),
         },
         Arc::new(move || Ok(e2.clone() as Arc<dyn OcrEngine>)),
         || {},
