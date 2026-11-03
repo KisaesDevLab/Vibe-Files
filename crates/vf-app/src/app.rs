@@ -1076,6 +1076,34 @@ mod tests {
             "letter (2).pdf",
             "the copy is open"
         );
+
+        // Step 4 on the copy: Flatten, then PDF/A (each a new version).
+        click(&mut h, "Flatten");
+        h.step();
+        assert!(vf_pdf::annot::read(&copy).unwrap().is_empty(), "burnt in");
+        click(&mut h, "PDF/A");
+        h.step();
+        {
+            let Screen::Open(o) = &h.state().screen else {
+                unreachable!()
+            };
+            assert_eq!(o.viewer.error, None);
+        }
+        assert_eq!(vf_pdf::pdfa::check(&copy).unwrap(), Vec::<String>::new());
+        let Screen::Open(o) = &h.state().screen else {
+            unreachable!()
+        };
+        let kept: i64 = o
+            .opened
+            .conn
+            .query_row(
+                "SELECT count(*) FROM version v JOIN document d ON d.id = v.doc_id
+                 WHERE d.rel_path = 'Old/letter (2).pdf' AND v.created_by IN ('flatten', 'pdfa')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(kept, 2, "each step kept the previous version");
     }
 
     /// P04 step 5 through the Viewer: auto-find, apply & verify, the redacted copy opens.

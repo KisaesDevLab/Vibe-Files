@@ -232,15 +232,21 @@ pub fn win_ansi(s: &str) -> Vec<u8> {
 
 /// Adds the layer font to the page's own resources (copying inherited ones down first, so
 /// nothing the page used is lost).
+/// The resources a page inherits from the page tree (a copy, to set on the page itself before
+/// adding to them), or an empty dictionary.
+pub fn inherited_resources(doc: &Document, page: ObjectId) -> Object {
+    inherited(doc, page, b"Resources")
+        .and_then(|r| doc.dereference(&r).ok().map(|(_, o)| o.clone()))
+        .unwrap_or_else(|| Object::Dictionary(Dictionary::new()))
+}
+
 fn add_font(doc: &mut Document, page: ObjectId, font: ObjectId) -> Result<(), String> {
     let own = doc
         .get_dictionary(page)
         .map_err(|e| e.to_string())?
         .has(b"Resources");
     if !own {
-        let inherited = inherited(doc, page, b"Resources")
-            .and_then(|r| doc.dereference(&r).ok().map(|(_, o)| o.clone()))
-            .unwrap_or_else(|| Object::Dictionary(Dictionary::new()));
+        let inherited = inherited_resources(doc, page);
         doc.get_dictionary_mut(page)
             .map_err(|e| e.to_string())?
             .set("Resources", inherited);

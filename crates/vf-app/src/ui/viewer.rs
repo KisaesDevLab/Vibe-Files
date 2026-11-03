@@ -565,6 +565,23 @@ fn toolbar(ui: &mut egui::Ui, v: &mut Viewer, env: &mut Env<'_>, doc: &Doc) {
                     v.goto_page(doc.page + 1);
                 }
                 ui.separator();
+                let clean = v.pending.is_empty();
+                if ui
+                    .add_enabled(clean, egui::Button::new("Flatten"))
+                    .on_hover_text("Burn annotations and form fields into the pages (a new version; the current one is kept).")
+                    .on_disabled_hover_text("Save or discard the unsaved annotations first.")
+                    .clicked()
+                {
+                    convert(v, env, Convert::Flatten);
+                }
+                if ui
+                    .add_enabled(clean, egui::Button::new("PDF/A"))
+                    .on_hover_text("Make this file PDF/A-2b for archiving (a new version; the current one is kept). Pages whose fonts are not embedded become images with a searchable text layer.")
+                    .on_disabled_hover_text("Save or discard the unsaved annotations first.")
+                    .clicked()
+                {
+                    convert(v, env, Convert::PdfA);
+                }
                 if ui.button("Open in PDF app").clicked() {
                     v.open_request = Some(doc.path.clone());
                 }
@@ -1484,6 +1501,80 @@ fn stamps_panel(ui: &mut egui::Ui, v: &mut Viewer, env: &Env<'_>) {
             })
             .collect();
         v.pending.extend(stamps);
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Convert {
+    Flatten,
+    PdfA,
+}
+
+/// Flatten or PDF/A: the result is a new version of this document (current one kept).
+fn convert(v: &mut Viewer, env: &mut Env<'_>, what: Convert) {
+    let Some(doc) = v.doc.clone() else { return };
+    let r = (|| -> Result<String, String> {
+        let tmp = vf_fs::content::tmp_file(env.root, "pdf")?;
+        let (label, reason, detail) = match what {
+            Convert::Flatten => {
+                let n = vf_pdf::flatten::flatten(&doc.path, &tmp).inspect_err(|_| {
+                    let _ = std::fs::remove_file(&tmp);
+                })?;
+                (
+                    "flatten",
+                    "before flatten",
+                    serde_json::json!({ "annotations": n }),
+                )
+            }
+            Convert::PdfA => {
+                let pdfium = crate::ui::intake::pdfium_dir()
+                    .ok_or_else(|| "pdfium.dll not found".to_string())
+                    .and_then(|d| filer_pdf::pdf::pdfium(&d))?;
+                let title = doc.name.trim_end_matches(".pdf").to_string();
+                let rep =
+                    vf_pdf::pdfa::convert(pdfium, &doc.path, &tmp, &title, &vf_core::now_rfc3339())
+                        .inspect_err(|_| {
+                            let _ = std::fs::remove_file(&tmp);
+                        })?;
+                (
+                    "pdfa",
+                    "before PDF/A",
+                    serde_json::json!({
+                        "rasterized_pages": rep.rasterized.len(),
+                        "flattened": rep.flattened,
+                    }),
+                )
+            }
+        };
+        let change = vf_fs::content::Change {
+            label,
+            created_by: label,
+            reason,
+            detail: detail.clone(),
+            extra: vec![],
+        };
+        match vf_fs::content::replace(env.conn, env.root, env.device_id, &doc.doc_id, &tmp, change)?
+        {
+            Ok(_) => Ok(match what {
+                Convert::Flatten => format!(
+                    "Flattened {} annotations into the pages; the previous version is kept.",
+                    detail["annotations"]
+                ),
+                Convert::PdfA => format!(
+                    "Saved as PDF/A-2b ({} pages rebuilt as images with a text layer); the previous version is kept.",
+                    detail["rasterized_pages"]
+                ),
+            }),
+            Err(why) => Err(format!("Not changed: {why}.")),
+        }
+    })();
+    match r {
+        Ok(msg) => {
+            v.catalog_changed = true;
+            v.reload();
+            v.notice = Some(msg);
+        }
+        Err(e) => v.error = Some(e),
     }
 }
 

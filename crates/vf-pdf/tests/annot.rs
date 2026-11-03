@@ -258,3 +258,41 @@ fn stamp_all_pages_top_right() {
         );
     }
 }
+
+/// Step 4: flatten burns every annotation into the page; the page looks the same and has no
+/// annotations left.
+#[test]
+fn flatten_burns_annotations_in() {
+    let t = tempfile::tempdir().unwrap();
+    let src = t.path().join("src.pdf");
+    filer_pdf::pdf::write_test_pdf(&src, &["Page one", "Page two"]);
+    let annotated = t.path().join("annotated.pdf");
+    annot::add(&src, &annotated, &every_kind(), "2026-11-03T14:05:09Z").unwrap();
+    let flat = t.path().join("flat.pdf");
+    let n = vf_pdf::flatten::flatten(&annotated, &flat).unwrap();
+    assert_eq!(n, every_kind().len());
+    assert!(
+        annot::read(&flat).unwrap().is_empty(),
+        "no annotations left"
+    );
+
+    let (w, h, with) = render(&annotated, 0);
+    let (_, _, flattened) = render(&flat, 0);
+    let differ = with
+        .chunks(4)
+        .zip(flattened.chunks(4))
+        .filter(|(a, b)| {
+            a.iter()
+                .zip(b.iter())
+                .take(3)
+                .any(|(x, y)| x.abs_diff(*y) > 40)
+        })
+        .count();
+    assert!(
+        differ < (w * h) as usize / 200,
+        "{differ} pixels differ after flattening"
+    );
+    // And it did draw something: the flattened page is not the bare page.
+    let (_, _, bare) = render(&src, 0);
+    assert_ne!(bare, flattened);
+}

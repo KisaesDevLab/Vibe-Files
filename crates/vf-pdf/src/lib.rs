@@ -3,8 +3,11 @@
 //! callers file the result through `vf_fs::content`.
 
 pub mod annot;
+pub mod flatten;
 pub mod layer;
+pub mod pdfa;
 pub mod pii;
+pub mod raster;
 pub mod redact;
 pub mod text;
 pub mod words;
