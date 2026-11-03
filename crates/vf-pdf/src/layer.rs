@@ -65,7 +65,7 @@ pub struct Geometry {
 }
 
 impl Geometry {
-    fn of(doc: &Document, page: ObjectId) -> Result<Geometry, String> {
+    pub fn of(doc: &Document, page: ObjectId) -> Result<Geometry, String> {
         let rect = |key: &[u8]| -> Option<[f32; 4]> {
             let arr = inherited(doc, page, key)?;
             let arr = doc.dereference(&arr).ok()?.1.as_array().ok()?.clone();
@@ -105,6 +105,12 @@ impl Geometry {
         }
     }
 
+    /// The user-space point shown at display point (u, v) (points, origin top left).
+    pub fn to_user(&self, u: f32, v: f32) -> [f32; 2] {
+        let m = self.text_matrix(u, v);
+        [m[4], m[5]]
+    }
+
     /// Text matrix for a run starting at display point (u, v) (points, origin top left):
     /// the run reads left to right on the displayed page.
     pub fn text_matrix(&self, u: f32, v: f32) -> [f32; 6] {
@@ -116,6 +122,15 @@ impl Geometry {
             _ => [1.0, 0.0, 0.0, 1.0, x0 + u, y1 - v],
         }
     }
+}
+
+/// The page's `/Rotate` (inherited), normalized to 0, 90, 180 or 270.
+pub fn page_rotate(doc: &Document, page: ObjectId) -> i64 {
+    let r = inherited(doc, page, b"Rotate")
+        .and_then(|o| doc.dereference(&o).ok()?.1.as_i64().ok())
+        .unwrap_or(0)
+        .rem_euclid(360);
+    r - r % 90
 }
 
 /// A page attribute, looked up through the page tree (MediaBox, CropBox, Rotate, Resources
@@ -178,7 +193,7 @@ pub fn text_ops(geo: &Geometry, ocr: &OcrPage) -> Vec<Operation> {
 }
 
 /// The word in WinAnsi (Latin-1 range kept, anything else `?`).
-fn win_ansi(s: &str) -> Vec<u8> {
+pub fn win_ansi(s: &str) -> Vec<u8> {
     s.chars()
         .map(|c| match c as u32 {
             0x20..=0x7e | 0xa0..=0xff => c as u32 as u8,

@@ -2,5 +2,6 @@
 //! flatten, PDF/A, redaction, page operations, compression. Paths in, a new file out; the
 //! callers file the result through `vf_fs::content`.
 
+pub mod annot;
 pub mod layer;
 pub mod words;

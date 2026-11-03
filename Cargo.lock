@@ -5131,9 +5131,12 @@ dependencies = [
 name = "vf-pdf"
 version = "0.1.0"
 dependencies = [
+ "filer-pdf",
  "lopdf",
+ "pdfium-render",
  "serde",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]
