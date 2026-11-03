@@ -25,8 +25,8 @@ fn the_fixture_cabinet_restores_byte_for_byte() {
     let t = tempfile::tempdir().unwrap();
     let a = t.path().join("office").join("Clients");
     let summary = vf_fixtures::generate(&a, 7).unwrap();
-    let mut conn = vf_core::db::open(&t.path().join("office").join("catalog.db"), Storage::Local)
-        .unwrap();
+    let mut conn =
+        vf_core::db::open(&t.path().join("office").join("catalog.db"), Storage::Local).unwrap();
     vf_fs::rebuild::rebuild(&mut conn, &a, "dev-a").unwrap();
     let cab = vf_fs::cabinet::read(&a).unwrap();
     let store = vf_sync::Remote::memory();

@@ -121,6 +121,16 @@ pub fn open(data: &Path, device_id: &str, root: &Path) -> Result<Opened> {
     let catalog = data.join(CATALOG_FILE);
     let set_aside = set_aside_encrypted(&catalog)?;
     let mut conn = db::open(&catalog, Storage::Local)?;
+    // A change cut short by a crash is put back before anything else reads the cabinet.
+    let rec = vf_fs::fileops::recover(&conn).map_err(anyhow::Error::msg)?;
+    if rec.transactions > 0 {
+        tracing::warn!(
+            transactions = rec.transactions,
+            reversed = rec.reversed,
+            problems = rec.problems.len(),
+            "recovered interrupted changes"
+        );
+    }
     let (cabinets, known): (i64, i64) = conn.query_row(
         "SELECT count(*), coalesce(sum(id = ?1), 0) FROM cabinet",
         [&cab.cabinet_id],

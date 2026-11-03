@@ -155,6 +155,100 @@ pub fn undo_stack(
     .map_err(|e| e.to_string())
 }
 
+/// What [`recover`] did.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Recovered {
+    /// Transactions found half done.
+    pub transactions: usize,
+    /// File changes put back.
+    pub reversed: usize,
+    /// Changes that could not be put back (described; the files stay where they are).
+    pub problems: Vec<String>,
+}
+
+/// Leftover `~vfd-partial-<id>-<name>` copies of `dst` (a copy cut short).
+fn remove_partials(dst: &Path) -> usize {
+    let (Some(dir), Some(name)) = (dst.parent(), dst.file_name()) else {
+        return 0;
+    };
+    let suffix = format!("-{}", name.to_string_lossy());
+    std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| {
+            let n = e.file_name().to_string_lossy().into_owned();
+            n.starts_with("~vfd-partial-") && n.ends_with(&suffix)
+        })
+        .filter(|e| std::fs::remove_file(e.path()).is_ok())
+        .count()
+}
+
+/// Puts back the file changes of transactions the process died in the middle of (P13 step 2):
+/// each one's `tx_journal` row lists its ops and whether their targets existed before. Their
+/// catalog changes never committed. Run at open, before anything else touches the cabinet.
+pub fn recover(conn: &vf_core::db::Connection) -> Result<Recovered, String> {
+    let mut out = Recovered::default();
+    for e in vf_core::tx::journal(conn).map_err(|e| e.to_string())? {
+        out.transactions += 1;
+        for j in e.ops.iter().rev() {
+            let r: Result<bool, String> = match &j.op {
+                FileOp::Move { src, dst } => {
+                    remove_partials(dst);
+                    // By what is on disk now, not `existed`: a swap moves the old file out and
+                    // the new one into the same path (which existed when it was planned).
+                    if dst.exists() && !src.exists() {
+                        commit::transfer(dst, src, false).map(|_| true)
+                    } else {
+                        Ok(false)
+                    }
+                }
+                FileOp::Copy { dst, .. } => {
+                    remove_partials(dst);
+                    if !j.existed && dst.is_file() {
+                        std::fs::remove_file(dst)
+                            .map(|()| true)
+                            .map_err(|err| format!("cannot remove {}: {err}", dst.display()))
+                    } else {
+                        Ok(false)
+                    }
+                }
+                FileOp::Mkdir { path } => Ok(!j.existed && std::fs::remove_dir(path).is_ok()),
+                FileOp::AppendLines {
+                    path,
+                    lines,
+                    undo_lines,
+                } => {
+                    let mut tail = String::new();
+                    for l in lines {
+                        tail.push_str(l);
+                        tail.push('\n');
+                    }
+                    let landed = std::fs::read_to_string(path)
+                        .map(|t| !tail.is_empty() && t.ends_with(&tail))
+                        .unwrap_or(false);
+                    if landed {
+                        append(path, undo_lines).map(|()| true)
+                    } else {
+                        Ok(false)
+                    }
+                }
+                FileOp::WriteSentinel { folder, .. } => {
+                    let p = filer_intake::sentinel::sentinel_path(folder);
+                    Ok(!j.existed && p.is_file() && std::fs::remove_file(&p).is_ok())
+                }
+            };
+            match r {
+                Ok(true) => out.reversed += 1,
+                Ok(false) => {}
+                Err(err) => out.problems.push(err),
+            }
+        }
+        vf_core::tx::clear_journal(conn, &e.tx_id).map_err(|e| e.to_string())?;
+    }
+    Ok(out)
+}
+
 /// Removes folders this op created, innermost first, only while they are empty.
 fn remove_empty(created: &[PathBuf]) {
     for d in created.iter().rev() {

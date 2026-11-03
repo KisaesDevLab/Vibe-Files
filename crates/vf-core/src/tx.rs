@@ -10,7 +10,12 @@
 //! 3. commits SQLite.
 //!
 //! If a file op fails, the ones already applied are reversed newest first and SQLite rolls back.
-//! If the SQLite commit itself fails, the file ops are reversed too. Statements are stored as SQL
+//! If the SQLite commit itself fails, the file ops are reversed too.
+//!
+//! Crash safety (P13): before step 1, a transaction with file ops writes its plan to
+//! `tx_journal` (committed on its own); step 3 deletes that row in the same SQLite commit. A row
+//! left by a killed process is reversed at the next open ([`journal`];
+//! `vf_fs::fileops::recover`). Statements are stored as SQL
 //! text + JSON params so the undo record is plain data (per-user undo stack in P05).
 
 use std::path::PathBuf;
@@ -50,6 +55,65 @@ pub enum FileOp {
         name: String,
         firm_id: String,
     },
+}
+
+/// One planned file op in `tx_journal`, with whether its target existed before.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JournalOp {
+    pub op: FileOp,
+    pub existed: bool,
+}
+
+/// A transaction that started changing files and never committed (the process died).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JournalEntry {
+    pub tx_id: String,
+    pub ts: String,
+    pub label: String,
+    pub ops: Vec<JournalOp>,
+}
+
+impl FileOp {
+    /// The path this op creates or changes.
+    pub fn target(&self) -> PathBuf {
+        match self {
+            FileOp::Move { dst, .. } | FileOp::Copy { dst, .. } => dst.clone(),
+            FileOp::Mkdir { path } | FileOp::AppendLines { path, .. } => path.clone(),
+            FileOp::WriteSentinel { folder, .. } => folder.join("_Vibe").join("client.json"),
+        }
+    }
+}
+
+/// Transactions killed between their file changes and their catalog commit.
+pub fn journal(conn: &Connection) -> Result<Vec<JournalEntry>> {
+    let mut st = conn.prepare("SELECT tx_id, ts, label, ops FROM tx_journal ORDER BY tx_id")?;
+    let rows = st.query_map([], |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, String>(2)?,
+            r.get::<_, String>(3)?,
+        ))
+    })?;
+    let mut out = vec![];
+    for r in rows {
+        let (tx_id, ts, label, ops) = r?;
+        let ops = serde_json::from_str(&ops)
+            .map_err(|e| Error::Tx(format!("tx_journal {tx_id}: {e}")))?;
+        out.push(JournalEntry {
+            tx_id,
+            ts,
+            label,
+            ops,
+        });
+    }
+    Ok(out)
+}
+
+/// Forgets a journal entry (after recovery).
+pub fn clear_journal(conn: &Connection, tx_id: &str) -> Result<()> {
+    conn.execute("DELETE FROM tx_journal WHERE tx_id = ?1", [tx_id])?;
+    Ok(())
 }
 
 /// What applying a [`FileOp`] did, with enough detail to reverse it safely.
@@ -283,24 +347,62 @@ impl Transaction {
         }
         let tx_id = uuid::Uuid::now_v7().to_string();
         let ts = crate::now_rfc3339();
-        let sql_tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        for s in &self.catalog {
-            s.run(&sql_tx)?;
+        let journaled = !self.files.is_empty();
+        if journaled {
+            let ops: Vec<JournalOp> = self
+                .files
+                .iter()
+                .map(|op| JournalOp {
+                    existed: op.target().exists(),
+                    op: op.clone(),
+                })
+                .collect();
+            conn.execute(
+                "INSERT INTO tx_journal (tx_id, ts, label, ops) VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![
+                    tx_id,
+                    ts,
+                    self.label,
+                    serde_json::to_string(&ops).expect("journal serializes")
+                ],
+            )?;
         }
-        let mut rows = Vec::with_capacity(self.audit.len());
-        for e in &self.audit {
-            let mut e = e.clone();
-            if let serde_json::Value::Object(m) = &mut e.detail {
-                m.insert("tx".into(), tx_id.clone().into());
+        let forget = |conn: &Connection| {
+            if journaled {
+                let _ = clear_journal(conn, &tx_id);
             }
-            rows.push(audit::append(
-                &sql_tx,
-                &ts,
-                actor.user.as_deref(),
-                &actor.device_id,
-                &e,
-            )?);
-        }
+        };
+        // If even this fails (the catalog is busy), the journal row stays and recovery finds
+        // nothing landed: it only clears the row.
+        let sql_tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let prepared = (|| -> Result<Vec<AuditRow>> {
+            for s in &self.catalog {
+                s.run(&sql_tx)?;
+            }
+            let mut rows = Vec::with_capacity(self.audit.len());
+            for e in &self.audit {
+                let mut e = e.clone();
+                if let serde_json::Value::Object(m) = &mut e.detail {
+                    m.insert("tx".into(), tx_id.clone().into());
+                }
+                rows.push(audit::append(
+                    &sql_tx,
+                    &ts,
+                    actor.user.as_deref(),
+                    &actor.device_id,
+                    &e,
+                )?);
+            }
+            Ok(rows)
+        })();
+        let rows = match prepared {
+            Ok(r) => r,
+            Err(e) => {
+                drop(sql_tx);
+                forget(conn);
+                return Err(e);
+            }
+        };
 
         let mut applied: Vec<AppliedOp> = Vec::with_capacity(self.files.len());
         for op in &self.files {
@@ -309,6 +411,7 @@ impl Transaction {
                 Err(e) => {
                     let leftovers = reverse_all(fs, &applied);
                     drop(sql_tx); // rollback
+                    forget(conn);
                     return Err(Error::FileOp {
                         error: e,
                         not_reversed: leftovers,
@@ -335,10 +438,12 @@ impl Transaction {
                     serde_json::to_string(&record).expect("undo record serializes")
                 ],
             )
+            .and_then(|_| sql_tx.execute("DELETE FROM tx_journal WHERE tx_id = ?1", [&tx_id]))
             .map_err(Error::from)
             .and_then(|_| sql_tx.commit().map_err(Error::from));
         if let Err(e) = stored {
             let leftovers = reverse_all(fs, &applied);
+            forget(conn);
             return Err(Error::FileOp {
                 error: format!("catalog commit failed ({e}); file changes reversed"),
                 not_reversed: leftovers,
