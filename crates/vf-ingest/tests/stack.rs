@@ -119,6 +119,7 @@ fn forty_page_stack_with_four_cover_sheets_splits_into_four_documents() {
                     client: format!("{name} ({id})"),
                     doc_type: ty.into(),
                     tax_year: "2025".into(),
+                    folder: String::new(),
                 },
             )],
         )

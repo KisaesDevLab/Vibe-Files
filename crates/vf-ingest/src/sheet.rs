@@ -110,6 +110,9 @@ pub struct Labels {
     pub client: String,
     pub doc_type: String,
     pub tax_year: String,
+    /// The client's folder, and below it the doc type's folder when known
+    /// (`Stockton Family Seed (STOC3812)\Income Tax\2025`).
+    pub folder: String,
 }
 
 const W: f32 = 612.0;
@@ -176,13 +179,22 @@ fn draw(sheet: &Sheet, labels: &Labels) -> Result<Vec<u8>, String> {
             "COVER SHEET",
             vec![
                 format!("Client:  {}", labels.client),
+                format!("Folder:  {}", or_dash(&labels.folder)),
                 format!("Doc type:  {}", or_dash(&labels.doc_type)),
                 format!("Tax year:  {}", or_dash(&labels.tax_year)),
             ],
         ),
         None => (
             "SEPARATOR SHEET",
-            vec!["A new document starts after this sheet.".into()],
+            if labels.client.is_empty() {
+                vec!["A new document starts after this sheet.".into()]
+            } else {
+                vec![
+                    format!("Client:  {}", labels.client),
+                    format!("Folder:  {}", or_dash(&labels.folder)),
+                    "A new document starts after this sheet.".into(),
+                ]
+            },
         ),
     };
     text(&mut c, b"F2", 30.0, 72.0, 700.0, title);
@@ -333,12 +345,28 @@ mod tests {
             client: "Anderson Farms LLC (1042)".into(),
             doc_type: "Return copy — federal".into(),
             tax_year: "2025".into(),
+            folder: r"Anderson Farms LLC (1042)\Income Tax\2025".into(),
+        };
+        let client_separator = Labels {
+            client: "Anderson Farms LLC (1042)".into(),
+            folder: "Anderson Farms LLC (1042)".into(),
+            ..Labels::default()
         };
         write_pdf(
             &p,
-            &[(cover(), labels), (Sheet::separator(), Labels::default())],
+            &[
+                (cover(), labels),
+                (Sheet::separator(), Labels::default()),
+                (Sheet::separator(), client_separator),
+            ],
         )
         .unwrap();
-        assert_eq!(lopdf::Document::load(&p).unwrap().get_pages().len(), 2);
+        let d = lopdf::Document::load(&p).unwrap();
+        assert_eq!(d.get_pages().len(), 3);
+        // The client and folder are printed for people on the cover and client separator.
+        let first = d.extract_text(&[1]).unwrap();
+        assert!(first.contains("Folder:") && first.contains("Income Tax"), "{first}");
+        let third = d.extract_text(&[3]).unwrap();
+        assert!(third.contains("Client:") && third.contains("Anderson Farms LLC"), "{third}");
     }
 }

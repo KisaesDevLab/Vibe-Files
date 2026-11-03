@@ -243,6 +243,7 @@ impl VibeFilesApp {
                     &self.config.device_id,
                 );
                 let mut browse = Browse::load(&opened.conn);
+                browse.set_root(&opened.root);
                 browse.sheets_dir = self.data.join("sheets");
                 browse.set_prefs(self.config.prefs.clone());
                 browse.saved = vf_index::saved::load(&opened.root);

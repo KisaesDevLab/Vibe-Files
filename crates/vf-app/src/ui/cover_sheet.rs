@@ -10,10 +10,14 @@ use vf_ingest::sheet::{self, Cover, Labels, Sheet, TaxYear};
 use crate::ui::widgets::{self, DialogOutcome};
 
 pub struct CoverSheetDialog {
-    /// (CSV ID, name) of every client with an ID.
-    clients: Vec<(String, String)>,
+    /// (CSV ID, name, client folder) of every client with an ID.
+    clients: Vec<(String, String, String)>,
     /// (id, name).
     doc_types: Vec<(String, String)>,
+    /// Doc type id → default folder template.
+    doc_type_folders: std::collections::HashMap<String, String>,
+    /// How many sheets to print (one per document in the stack).
+    pub copies: String,
     pub client: Option<usize>,
     pub doc_type: Option<usize>,
     /// A year, `Permanent`, or empty.
@@ -24,19 +28,27 @@ pub struct CoverSheetDialog {
 impl CoverSheetDialog {
     /// `client`: the client uuid to start with.
     pub fn new(snap: &Snapshot, client: Option<&str>) -> Self {
-        let clients: Vec<(String, String)> = snap
+        let clients: Vec<(String, String, String)> = snap
             .clients
             .iter()
             .filter(|c| !c.ext_id.is_empty())
-            .map(|c| (c.ext_id.clone(), c.name.clone()))
+            .map(|c| {
+                (
+                    c.ext_id.clone(),
+                    c.name.clone(),
+                    c.folder_rel.clone().unwrap_or_default(),
+                )
+            })
             .collect();
         let start = client.and_then(|id| {
             let c = snap.clients.iter().find(|c| c.id == id)?;
-            clients.iter().position(|(e, _)| *e == c.ext_id)
+            clients.iter().position(|(e, _, _)| *e == c.ext_id)
         });
         CoverSheetDialog {
             clients,
             doc_types: snap.doc_types.clone(),
+            doc_type_folders: snap.doc_type_folders.clone(),
+            copies: "1".into(),
             client: start,
             doc_type: None,
             year: String::new(),
@@ -45,7 +57,7 @@ impl CoverSheetDialog {
     }
 
     fn sheet(&self) -> Result<(Sheet, Labels), String> {
-        let (id, name) = self
+        let (id, name, client_folder) = self
             .client
             .and_then(|i| self.clients.get(i))
             .ok_or("Choose the client.")?;
@@ -73,6 +85,11 @@ impl CoverSheetDialog {
             })),
             Labels {
                 client: format!("{name} ({id})"),
+                folder: folder_label(
+                    client_folder,
+                    doc_type.and_then(|t| self.doc_type_folders.get(&t.0)),
+                    tax_year,
+                ),
                 doc_type: doc_type.map(|t| t.1.clone()).unwrap_or_default(),
                 tax_year: match tax_year {
                     Some(TaxYear::Year(n)) => n.to_string(),
@@ -82,6 +99,27 @@ impl CoverSheetDialog {
             },
         ))
     }
+}
+
+/// The folder printed on a sheet: the client's folder, then the doc type's folder with the
+/// year filled in (a `{Year}` with no year given stays as it is).
+pub fn folder_label(
+    client_folder: &str,
+    template: Option<&String>,
+    year: Option<TaxYear>,
+) -> String {
+    let mut parts: Vec<String> = vec![];
+    if !client_folder.is_empty() {
+        parts.push(client_folder.to_string());
+    }
+    if let Some(t) = template.filter(|t| !t.trim().is_empty()) {
+        let t = match year {
+            Some(TaxYear::Year(y)) => t.replace("{Year}", &y.to_string()),
+            _ => t.clone(),
+        };
+        parts.extend(t.split('/').map(str::to_string));
+    }
+    parts.join("\\")
 }
 
 /// `<data>/sheets/<name>` (folder created).
@@ -118,13 +156,13 @@ pub fn show(ctx: &egui::Context, d: &mut CoverSheetDialog, dir: &Path) -> Dialog
                 let current = d
                     .client
                     .and_then(|i| d.clients.get(i))
-                    .map(|(id, n)| format!("{n} ({id})"))
+                    .map(|(id, n, _)| format!("{n} ({id})"))
                     .unwrap_or_else(|| "Choose…".into());
                 egui::ComboBox::from_id_salt("cover-client")
                     .width(300.0)
                     .selected_text(current)
                     .show_ui(ui, |ui| {
-                        for (i, (id, n)) in d.clients.iter().enumerate() {
+                        for (i, (id, n, _)) in d.clients.iter().enumerate() {
                             ui.selectable_value(&mut d.client, Some(i), format!("{n} ({id})"));
                         }
                     })
@@ -157,7 +195,17 @@ pub fn show(ctx: &egui::Context, d: &mut CoverSheetDialog, dir: &Path) -> Dialog
                 )
                 .labelled_by(l.id);
                 ui.end_row();
+                let l = ui.label("Sheets");
+                ui.add(egui::TextEdit::singleline(&mut d.copies).desired_width(60.0))
+                    .labelled_by(l.id)
+                    .on_hover_text("One per document in the stack (each starts a new document).");
+                ui.end_row();
             });
+        if let Ok((_, l)) = d.sheet()
+            && !l.folder.is_empty()
+        {
+            ui.label(widgets::caption(format!("Folder on the sheet: {}", l.folder)));
+        }
         ui.add_space(4.0);
         widgets::message_line(ui, d.error.as_deref());
         ui.horizontal(|ui| {
@@ -171,7 +219,15 @@ pub fn show(ctx: &egui::Context, d: &mut CoverSheetDialog, dir: &Path) -> Dialog
                         dir,
                         &format!("cover sheet {}.pdf", vf_ingest::pipeline::clean(&id)),
                     )?;
-                    sheet::write_pdf(&p, &[(s, l)])?;
+                    let n: usize = match d.copies.trim() {
+                        "" => 1,
+                        c => c
+                            .parse()
+                            .ok()
+                            .filter(|n| (1..=50).contains(n))
+                            .ok_or("Sheets: a number from 1 to 50.")?,
+                    };
+                    sheet::write_pdf(&p, &vec![(s, l); n])?;
                     Ok(p)
                 });
                 match r {
@@ -185,4 +241,26 @@ pub fn show(ctx: &egui::Context, d: &mut CoverSheetDialog, dir: &Path) -> Dialog
         });
     });
     out
+}
+
+#[cfg(test)]
+mod folder_tests {
+    use super::*;
+
+    #[test]
+    fn folder_on_the_sheet() {
+        let tpl = "Income Tax/{Year}".to_string();
+        assert_eq!(
+            folder_label("Bell Ranch (BELL2002)", Some(&tpl), Some(TaxYear::Year(2025))),
+            r"Bell Ranch (BELL2002)\Income Tax\2025"
+        );
+        assert_eq!(
+            folder_label("Bell Ranch (BELL2002)", None, None),
+            "Bell Ranch (BELL2002)"
+        );
+        assert_eq!(
+            folder_label("Bell Ranch (BELL2002)", Some(&tpl), None),
+            r"Bell Ranch (BELL2002)\Income Tax\{Year}"
+        );
+    }
 }

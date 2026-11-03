@@ -69,6 +69,8 @@ pub struct Snapshot {
     pub relationships: Vec<RelRow>,
     /// Live doc types (id, name) in list order.
     pub doc_types: Vec<(String, String)>,
+    /// Doc type id → its default folder below the client folder (`Income Tax/{Year}`).
+    pub doc_type_folders: std::collections::HashMap<String, String>,
 }
 
 pub fn load(conn: &Connection) -> Result<Snapshot> {
@@ -141,16 +143,30 @@ pub fn load(conn: &Connection) -> Result<Snapshot> {
             })
         })?
         .collect::<std::result::Result<Vec<_>, _>>()?;
-    let mut st =
-        conn.prepare("SELECT id, name FROM doc_type WHERE deleted_at IS NULL ORDER BY sort, name")?;
-    let doc_types = st
-        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+    let mut st = conn.prepare(
+        "SELECT id, name, default_folder_tpl FROM doc_type WHERE deleted_at IS NULL
+         ORDER BY sort, name",
+    )?;
+    let rows = st
+        .query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, Option<String>>(2)?,
+            ))
+        })?
         .collect::<std::result::Result<Vec<_>, _>>()?;
+    let doc_type_folders = rows
+        .iter()
+        .filter_map(|(id, _, f)| f.clone().map(|f| (id.clone(), f)))
+        .collect();
+    let doc_types = rows.into_iter().map(|(id, n, _)| (id, n)).collect();
     Ok(Snapshot {
         clients,
         docs,
         relationships,
         doc_types,
+        doc_type_folders,
     })
 }
 
@@ -285,6 +301,47 @@ impl Index {
         }
     }
 
+    /// Adds client `ci`'s folders that exist on disk (`dirs`: leaf folders relative to the
+    /// client folder, `/`-separated), so the template's folders show before anything is filed in
+    /// them. A folder's first segment that is a tax year (1990..=2100) puts it under that year,
+    /// the way filed documents are placed; folders with no year go under Permanent / no year.
+    pub fn add_folders(&mut self, ci: usize, dirs: &[String]) {
+        let Some(node) = self.clients.get_mut(ci) else {
+            return;
+        };
+        for dir in dirs {
+            let segs: Vec<&str> = dir.split('/').filter(|s| !s.is_empty()).collect();
+            let year_at = segs.iter().position(|s| {
+                s.len() == 4 && s.parse::<i32>().is_ok_and(|y| (1990..=2100).contains(&y))
+            });
+            let year = year_at.map(|i| segs[i].parse::<i32>().expect("checked"));
+            let folder: String = segs
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| Some(*i) != year_at)
+                .map(|(_, s)| *s)
+                .collect::<Vec<_>>()
+                .join("/");
+            let y = match node.years.iter_mut().position(|y| y.year == year) {
+                Some(i) => &mut node.years[i],
+                None => {
+                    node.years.push(YearNode {
+                        year,
+                        count: 0,
+                        folders: vec![],
+                    });
+                    node.years.last_mut().expect("just pushed")
+                }
+            };
+            if !y.folders.iter().any(|(f, _)| *f == folder) {
+                y.folders.push((folder, 0));
+                y.folders.sort();
+            }
+        }
+        node.years
+            .sort_by_key(|y| (y.year.is_some(), std::cmp::Reverse(y.year)));
+    }
+
     /// Indices into `Snapshot::docs` inside `scope`, in path order.
     pub fn docs_in(&self, s: &Snapshot, scope: &Scope) -> Vec<usize> {
         let ids: std::collections::HashSet<&str> = match scope {
@@ -399,7 +456,46 @@ mod tests {
             ],
             relationships: vec![],
             doc_types: vec![],
+            doc_type_folders: Default::default(),
         }
+    }
+
+    /// Folders on disk show under the client before anything is filed in them.
+    #[test]
+    fn empty_template_folders_join_the_tree() {
+        let s = Snapshot {
+            clients: vec![client("c1", "Stockton Family Seed")],
+            ..Default::default()
+        };
+        let mut ix = Index::build(&s);
+        assert!(ix.clients[0].years.is_empty());
+        ix.add_folders(
+            0,
+            &[
+                "Income Tax/2025".into(),
+                "Income Tax/2024".into(),
+                "Bookkeeping/2025".into(),
+                "Permanent/Setup".into(),
+                "Not Yet Filed".into(),
+                "Other/Practice/2025".into(),
+            ],
+        );
+        let years: Vec<_> = ix.clients[0].years.iter().map(|y| y.year).collect();
+        assert_eq!(years, [None, Some(2025), Some(2024)]);
+        let folders = |i: usize| -> Vec<&str> {
+            ix.clients[0].years[i]
+                .folders
+                .iter()
+                .map(|(f, _)| f.as_str())
+                .collect()
+        };
+        assert_eq!(folders(0), ["Not Yet Filed", "Permanent/Setup"]);
+        assert_eq!(folders(1), ["Bookkeeping", "Income Tax", "Other/Practice"]);
+        assert_eq!(ix.clients[0].count, 0);
+        // Adding again changes nothing.
+        let before = ix.clients[0].clone();
+        ix.add_folders(0, &["Income Tax/2025".into()]);
+        assert_eq!(ix.clients[0], before);
     }
 
     #[test]

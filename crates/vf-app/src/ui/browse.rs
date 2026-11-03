@@ -4,7 +4,7 @@
 //! on it in memory. [`Browse::reload`] re-reads after anything changes the catalog.
 
 use std::collections::{BTreeSet, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use egui::{Align, Key, Layout, RichText, Sense};
 use egui_extras::{Column, TableBuilder};
@@ -97,6 +97,8 @@ pub struct Browse {
     versions: Option<(String, Vec<vf_fs::versions::Version>)>,
     /// "Move to trash" chosen for the selection (P05 step 3).
     pub trash_requested: bool,
+    /// The cabinet root, for the folders on disk in the tree (`set_root`).
+    root: Option<PathBuf>,
     /// Legal holds covering what is shown (P07 step 4), for the selection / client they were
     /// read for.
     holds_seen: Option<(String, Vec<vf_fs::holds::Hold>)>,
@@ -174,6 +176,7 @@ impl Browse {
             undo_requested: false,
             versions: None,
             trash_requested: false,
+            root: None,
             holds_seen: None,
             hold_reason: None,
             rename: None,
@@ -208,6 +211,29 @@ impl Browse {
         }
     }
 
+    /// Adds each client's folders on disk to the tree (empty template folders included), when
+    /// Browse knows the cabinet root.
+    fn add_disk_folders(&mut self) {
+        let Some(root) = self.root.clone() else {
+            return;
+        };
+        for (ci, c) in self.snap.clients.iter().enumerate() {
+            let Some(rel) = c.folder_rel.as_deref().filter(|r| !r.is_empty()) else {
+                continue;
+            };
+            let mut dirs = Vec::new();
+            leaf_dirs(&root.join(rel), "", 0, &mut dirs);
+            self.ix.add_folders(ci, &dirs);
+        }
+    }
+
+    /// Sets the cabinet root (the tree then shows folders on disk too) and re-reads the tree.
+    pub fn set_root(&mut self, root: &Path) {
+        self.root = Some(root.to_path_buf());
+        self.ix = Index::build(&self.snap);
+        self.add_disk_folders();
+    }
+
     /// Re-reads the catalog, keeping scope (when it still exists) and selection by document id.
     pub fn reload(&mut self, conn: &Connection) {
         let keep: HashSet<String> = self
@@ -220,6 +246,7 @@ impl Browse {
             Ok(s) => {
                 self.snap = s;
                 self.ix = Index::build(&self.snap);
+                self.add_disk_folders();
                 self.error = None;
             }
             Err(e) => {
@@ -1694,6 +1721,36 @@ fn legal_holds(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env) {
     ui.add_space(6.0);
 }
 
+/// Leaf folders under `dir` (relative, `/`-separated), skipping `_Vibe` and hidden or
+/// temporary ones, at most 4 levels deep.
+fn leaf_dirs(dir: &Path, prefix: &str, depth: usize, out: &mut Vec<String>) {
+    if depth > 4 {
+        return;
+    }
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut any = false;
+    for e in rd.flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        if name.starts_with('.') || name.starts_with('~') || name == vf_fs::cabinet::VIBE_DIR {
+            continue;
+        }
+        if e.file_type().is_ok_and(|t| t.is_dir()) {
+            any = true;
+            let rel = if prefix.is_empty() {
+                name
+            } else {
+                format!("{prefix}/{name}")
+            };
+            leaf_dirs(&e.path(), &rel, depth + 1, out);
+        }
+    }
+    if !any && !prefix.is_empty() {
+        out.push(prefix.to_string());
+    }
+}
+
 /// An undo stack entry in words.
 fn undo_label(u: &vf_core::tx::Undoable) -> String {
     let what = match u.label.as_str() {
@@ -1946,6 +2003,36 @@ mod tests {
                 .all(|&i| b.snap.docs[i].tax_year == Some(2025))
         );
         assert_eq!(breadcrumb(b), "Saved searches / Everything 2025");
+    }
+
+    /// A client with nothing filed yet shows its template folders from disk.
+    #[test]
+    fn tree_shows_empty_template_folders() {
+        let mut h = harness(1, 0);
+        {
+            let s = h.state_mut();
+            let folder = s.root.join("Client 0000 (1000)");
+            for d in [
+                "Income Tax/2025",
+                "Bookkeeping/2025",
+                "Permanent/Setup",
+                "_Vibe",
+            ] {
+                std::fs::create_dir_all(folder.join(d)).unwrap();
+            }
+            let root = s.root.clone();
+            s.b.set_root(&root);
+        }
+        h.run();
+        click(&mut h, "Client 0000  1000");
+        click(&mut h, "2025");
+        assert!(h.query_by_label("Income Tax").is_some());
+        assert!(h.query_by_label("Bookkeeping").is_some());
+        click(&mut h, "Permanent");
+        assert!(
+            h.query_by_label("Permanent/Setup").is_some() || h.query_by_label("Setup").is_some()
+        );
+        assert!(h.query_by_label("_Vibe").is_none());
     }
 
     #[test]
