@@ -121,6 +121,8 @@ pub const NOT_ON_UNDO_STACK: &[&str] = &[
     "ocr_text_layer",
     "doc_types_seed",
     "doc_types_edit",
+    "retention_seed",
+    "retention_edit",
     "seed",
     "duplicate_kept",
     "clients_edit",

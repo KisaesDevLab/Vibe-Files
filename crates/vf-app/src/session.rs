@@ -70,6 +70,7 @@ pub fn create(data: &Path, device_id: &str, r: &CreateRequest) -> Result<Opened>
     cabinet::create(r.root, &cab).map_err(anyhow::Error::msg)?;
     // The seeded doc-type list (Q-21); rebuild reads it into the catalog.
     vf_fs::doctypes::seed_if_missing(r.root).map_err(anyhow::Error::msg)?;
+    vf_fs::retention::seed_if_missing(r.root).map_err(anyhow::Error::msg)?;
     std::fs::create_dir_all(data).with_context(|| format!("creating {}", data.display()))?;
     let mut conn = db::open(&catalog, Storage::Local)?;
     let rep = vf_fs::rebuild::rebuild(&mut conn, r.root, device_id)?;
@@ -134,8 +135,10 @@ pub fn open(data: &Path, device_id: &str, root: &Path) -> Result<Opened> {
     }
     // Cabinets made before doc types existed get the seeded list now.
     let seeded = vf_fs::doctypes::seed_if_missing(root).map_err(anyhow::Error::msg)?;
-    if seeded && known > 0 {
-        vf_fs::doctypes::sync(&mut conn, root, device_id, "doc_types_seed")
+    // P07: the seeded retention schedule, and the doc types' default classes (once).
+    let retention = vf_fs::retention::seed_if_missing(root).map_err(anyhow::Error::msg)?;
+    if (seeded || retention) && known > 0 {
+        vf_fs::retention::sync(&mut conn, root, device_id, "retention_seed")
             .map_err(anyhow::Error::msg)?;
     }
     let rebuild = if known == 0 {

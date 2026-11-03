@@ -13,6 +13,7 @@ pub mod intake;
 pub mod newclient;
 pub mod rebuild;
 pub mod rename;
+pub mod retention;
 pub mod sweep;
 pub mod trash;
 pub mod versions;

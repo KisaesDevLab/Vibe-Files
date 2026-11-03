@@ -506,6 +506,15 @@ pub fn rebuild(
     // Doc types the restored metadata may point at: id -> id, lower-case name -> id.
     let mut type_ids: HashMap<String, String> = HashMap::new();
     let mut type_names: HashMap<String, String> = HashMap::new();
+    // Retention classes first: doc types point at them.
+    match crate::retention::load(root) {
+        Ok(Some(classes)) => stmts.extend(
+            crate::retention::catalog_stmts(conn, &classes, &now, device_id)
+                .map_err(RebuildError::Io)?,
+        ),
+        Ok(None) => {}
+        Err(e) => rep.doc_types_error = Some(e),
+    }
     match crate::doctypes::load(root) {
         Ok(Some(types)) => {
             for t in &types {
@@ -1211,6 +1220,7 @@ mod tests {
                 name: "Crypto statement".into(),
                 default_folder: "Income Tax/{Year}".into(),
                 client_visible: false,
+                retention: None,
             },
         )
         .unwrap();

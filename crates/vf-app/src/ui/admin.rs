@@ -17,6 +17,7 @@ pub enum Page {
     Audit,
     Trash,
     Sweep,
+    Retention,
 }
 
 /// UI_SPEC §6 nav, grouped. Only Doc types is built in P01.
@@ -68,6 +69,8 @@ struct Form {
     name: String,
     folder: String,
     visible: bool,
+    /// Retention class id.
+    retention: Option<String>,
 }
 
 pub struct Admin {
@@ -77,6 +80,10 @@ pub struct Admin {
     usage: HashMap<String, i64>,
     /// Template folders below the client folder (`Income Tax/{Year}`, …) for the folder picker.
     folders: Vec<String>,
+    /// Retention classes, for the doc type editor and the Retention classes page.
+    pub classes: Vec<vf_fs::retention::Class>,
+    /// Retention classes page (P07 step 1).
+    pub retention: crate::ui::retention::RetentionPage,
     /// The editor above the table.
     pub editing: Editing,
     form: Form,
@@ -107,6 +114,8 @@ impl Admin {
             types: Vec::new(),
             usage: HashMap::new(),
             folders: Vec::new(),
+            classes: Vec::new(),
+            retention: Default::default(),
             editing: Editing::Closed,
             form: Form::default(),
             error: None,
@@ -124,9 +133,13 @@ impl Admin {
         a
     }
 
-    fn reload(&mut self, env: &Env) {
+    pub(crate) fn reload(&mut self, env: &Env) {
         match doctypes::load(env.root) {
             Ok(t) => self.types = t.unwrap_or_default(),
+            Err(e) => self.error = Some(e),
+        }
+        match vf_fs::retention::load(env.root) {
+            Ok(c) => self.classes = c.unwrap_or_default(),
             Err(e) => self.error = Some(e),
         }
         self.usage.clear();
@@ -161,6 +174,7 @@ impl Admin {
                 name: t.name.clone(),
                 folder: t.default_folder.clone(),
                 visible: t.client_visible,
+                retention: t.retention.clone(),
             })
             .unwrap_or_default();
         self.editing = match id {
@@ -206,6 +220,12 @@ pub fn show(ui: &mut egui::Ui, a: &mut Admin, env: &mut Env, sweep: SweepEnv) {
         Page::PrintCapture => print_capture(ui, a, env),
         Page::Audit => crate::ui::audit::show(ui, &mut a.audit, env, a.chain.as_ref()),
         Page::Sweep => crate::ui::sweep::show(ui, sweep.state, env, sweep.catalog),
+        Page::Retention => {
+            if crate::ui::retention::show(ui, &mut a.retention, &a.classes, &a.types, env) {
+                a.changed = true;
+                a.reload(env);
+            }
+        }
         Page::Trash => {
             crate::ui::trash::show(ui, &mut a.trash, env);
             if std::mem::take(&mut a.trash.changed) {
@@ -234,6 +254,13 @@ fn nav(ui: &mut egui::Ui, a: &mut Admin) {
                     .clicked()
                 {
                     a.page = Page::PrintCapture;
+                }
+            } else if *item == "Retention classes" {
+                if ui
+                    .selectable_label(a.page == Page::Retention, *item)
+                    .clicked()
+                {
+                    a.page = Page::Retention;
                 }
             } else if *item == "Integrity sweep" {
                 if ui.selectable_label(a.page == Page::Sweep, *item).clicked() {
@@ -390,6 +417,31 @@ fn editor(ui: &mut egui::Ui, a: &mut Admin, env: &mut Env) {
             ui.label("");
             ui.checkbox(&mut a.form.visible, "Client-visible");
             ui.end_row();
+            let l = ui.label("Retention");
+            let shown = a
+                .form
+                .retention
+                .as_ref()
+                .and_then(|id| a.classes.iter().find(|c| &c.id == id))
+                .map_or("None (never disposed)".to_string(), |c| {
+                    format!("{} · {}", c.name, c.describe())
+                });
+            egui::ComboBox::from_id_salt("doc-type-retention")
+                .selected_text(shown)
+                .width(320.0)
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut a.form.retention, None, "None (never disposed)");
+                    for c in &a.classes {
+                        ui.selectable_value(
+                            &mut a.form.retention,
+                            Some(c.id.clone()),
+                            format!("{} · {}", c.name, c.describe()),
+                        );
+                    }
+                })
+                .response
+                .labelled_by(l.id);
+            ui.end_row();
         });
     if let Err(e) = doctypes::check_fields(&a.form.name, &a.form.folder) {
         ui.label(RichText::new(e).color(theme::INK_MUTED));
@@ -413,6 +465,7 @@ fn editor(ui: &mut egui::Ui, a: &mut Admin, env: &mut Env) {
                         name: f.name,
                         default_folder: f.folder,
                         client_visible: f.visible,
+                        retention: f.retention,
                     },
                 ) {
                     let id = a.types.last().map(|t| t.id.clone());
@@ -432,6 +485,7 @@ fn editor(ui: &mut egui::Ui, a: &mut Admin, env: &mut Env) {
                         name: f.name,
                         default_folder: f.folder,
                         client_visible: f.visible,
+                        retention: f.retention,
                     }),
                 );
             }
@@ -558,7 +612,8 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         let mut conn = vf_core::db::open(&tmp.path().join("c.db"), Storage::Local).unwrap();
         doctypes::seed_if_missing(&root).unwrap();
-        doctypes::sync(&mut conn, &root, "dev", "doc_types_seed").unwrap();
+        vf_fs::retention::seed_if_missing(&root).unwrap();
+        vf_fs::retention::sync(&mut conn, &root, "dev", "retention_seed").unwrap();
         let a = {
             let env = Env {
                 conn: &mut conn,
@@ -810,6 +865,41 @@ mod tests {
             .unwrap();
         assert_eq!(n, 1);
         assert!(!vf_fs::sweep::due(&s.conn), "the sweep time is recorded");
+    }
+
+    /// P07 step 1: the seeded schedule is listed and editable; a doc type picks its class.
+    #[test]
+    fn retention_classes_page_lists_and_edits_the_schedule() {
+        let mut h = harness();
+        click(&mut h, "Retention classes");
+        assert!(h.query_by_label("Returns & workpapers").is_some());
+        assert_eq!(
+            h.query_all_by_label("7 years from the end of the tax year")
+                .count(),
+            2,
+            "returns and notices"
+        );
+        click(&mut h, "Add class");
+        type_into(&mut h, "Class name", "Payroll records");
+        click(&mut h, "Add");
+        assert!(
+            h.state().a.retention.error.is_none(),
+            "{:?}",
+            h.state().a.retention.error
+        );
+        assert!(h.query_by_label("Payroll records").is_some());
+        let n: i64 = h
+            .state()
+            .conn
+            .query_row(
+                "SELECT count(*) FROM retention_class WHERE deleted_at IS NULL",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 7);
+        let w2 = h.state().a.types.iter().find(|t| t.name == "W-2").unwrap();
+        assert!(w2.retention.is_some(), "seeded doc types have their class");
     }
 
     #[test]

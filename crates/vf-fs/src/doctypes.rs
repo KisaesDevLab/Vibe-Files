@@ -85,6 +85,9 @@ pub struct DocType {
     pub default_folder: String,
     #[serde(default)]
     pub client_visible: bool,
+    /// Retention class id (`crate::retention`); `None`: never disposed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retention: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -144,6 +147,7 @@ pub fn seed_if_missing(root: &Path) -> Result<bool, String> {
             name: (*n).into(),
             default_folder: (*f).into(),
             client_visible: *v,
+            retention: None,
         })
         .collect();
     save(root, &types)?;
@@ -211,17 +215,19 @@ pub fn catalog_stmts(
     for (i, t) in types.iter().enumerate() {
         let folder = Some(t.default_folder.trim()).filter(|f| !f.is_empty());
         stmts.push(Stmt::new(
-            "INSERT INTO doc_type (id, name, default_folder_tpl, client_visible, sort, device_id, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            "INSERT INTO doc_type (id, name, default_folder_tpl, client_visible, sort, device_id,
+               updated_at, retention_class_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
              ON CONFLICT(id) DO UPDATE SET
                name = excluded.name, default_folder_tpl = excluded.default_folder_tpl,
                client_visible = excluded.client_visible, sort = excluded.sort, deleted_at = NULL,
+               retention_class_id = excluded.retention_class_id,
                device_id = excluded.device_id, updated_at = excluded.updated_at,
                rev = doc_type.rev + 1
              WHERE (doc_type.name, doc_type.default_folder_tpl, doc_type.client_visible,
-                    doc_type.sort, doc_type.deleted_at)
+                    doc_type.sort, doc_type.deleted_at, doc_type.retention_class_id)
                IS NOT (excluded.name, excluded.default_folder_tpl, excluded.client_visible,
-                       excluded.sort, NULL)",
+                       excluded.sort, NULL, excluded.retention_class_id)",
             vec![
                 t.id.clone().into(),
                 t.name.trim().into(),
@@ -230,6 +236,7 @@ pub fn catalog_stmts(
                 ((i as i64 + 1) * 10).into(),
                 device_id.into(),
                 now.into(),
+                t.retention.clone().into(),
             ],
         ));
     }
@@ -276,6 +283,8 @@ pub enum Edit {
         name: String,
         default_folder: String,
         client_visible: bool,
+        /// Retention class id.
+        retention: Option<String>,
     },
     Update(DocType),
     Remove(String),
@@ -296,11 +305,13 @@ pub fn apply(root: &Path, edit: Edit) -> Result<(), String> {
             name,
             default_folder,
             client_visible,
+            retention,
         } => types.push(DocType {
             id: vf_core::new_id(),
             name: name.trim().into(),
             default_folder: default_folder.trim().into(),
             client_visible,
+            retention,
         }),
         Edit::Update(t) => {
             let i = pos(&types, &t.id)?;
@@ -383,6 +394,7 @@ mod tests {
                 name: "Crypto statement".into(),
                 default_folder: "Income Tax/{Year}".into(),
                 client_visible: false,
+                retention: None,
             },
         )
         .unwrap();
@@ -436,6 +448,7 @@ mod tests {
                 name: "Misc".into(),
                 default_folder: String::new(),
                 client_visible: false,
+                retention: None,
             },
         )
         .unwrap();
@@ -458,6 +471,7 @@ mod tests {
                     name: name.into(),
                     default_folder: folder.into(),
                     client_visible: false,
+                    retention: None,
                 },
             )
         };
