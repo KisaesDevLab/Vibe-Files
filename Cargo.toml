@@ -42,6 +42,7 @@ argon2 = "0.5.3"
 chacha20poly1305 = "0.10.1"
 getrandom = "0.3.4"
 toml = "1.1.8"
+windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
 
 # Argon2id is unusably slow unoptimized; tests and debug builds unwrap keys.
 [profile.dev.package.argon2]

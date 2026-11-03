@@ -23,6 +23,7 @@ rfd.workspace = true
 serde.workspace = true
 toml.workspace = true
 uuid.workspace = true
+windows.workspace = true
 filer-core = { path = "../filer-core" }
 
 [dev-dependencies]

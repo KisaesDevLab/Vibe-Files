@@ -4932,6 +4932,7 @@ dependencies = [
  "vf-fixtures",
  "vf-fs",
  "vf-security",
+ "windows",
 ]
 
 [[package]]

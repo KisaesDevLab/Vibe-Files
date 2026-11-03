@@ -12,6 +12,7 @@ use vf_core::browse::{DocRow, IdList, Index, Scope, Snapshot};
 use vf_core::db::Connection;
 
 use crate::config::{Favorite, Prefs};
+use crate::shell::{self, ShellAction};
 use crate::ui::client_panel::{self, RelForm};
 use crate::ui::import_csv::{self, ImportDialog};
 use crate::ui::meta_editor::{self, MetaForm};
@@ -101,6 +102,24 @@ pub struct Browse {
     view_counts: [usize; 5],
     fav_counts: Vec<usize>,
     week_start: String,
+    /// Hands files to Windows; tests replace it to record instead of launching apps.
+    pub shell: ShellFn,
+    /// A file action asked for this frame (doc index), run where the cabinet root is known.
+    file_request: Option<(usize, FileAct)>,
+}
+
+/// How Browse hands files to Windows ([`shell::run`], or a recorder in tests).
+pub type ShellFn = Box<dyn FnMut(&ShellAction) -> Result<(), String>>;
+
+/// What to do with one document's file (P01 step 8).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileAct {
+    /// Open in its registered app (the Viewer tab takes PDFs from P04).
+    Open,
+    /// Show it in Explorer.
+    Reveal,
+    /// Put its full path on the clipboard.
+    CopyPath,
 }
 
 impl Browse {
@@ -133,6 +152,8 @@ impl Browse {
             view_counts: [0; 5],
             fav_counts: Vec::new(),
             week_start: week_start_utc(),
+            shell: Box::new(shell::run),
+            file_request: None,
         };
         b.recount();
         b.refresh();
@@ -339,6 +360,39 @@ impl Browse {
         self.refresh();
     }
 
+    /// The document toolbar file actions act on: the cursor row when it is selected, else the
+    /// first selected one.
+    fn target_doc(&self) -> Option<usize> {
+        self.cursor
+            .and_then(|c| self.visible.get(c).copied())
+            .filter(|i| self.selected.contains(i))
+            .or_else(|| self.selected.iter().next().copied())
+    }
+
+    /// Runs a file action on document `di`.
+    fn run_file_act(&mut self, ctx: &egui::Context, root: &Path, di: usize, act: FileAct) {
+        let d = &self.snap.docs[di];
+        let path = shell::full_path(root, &d.rel_path);
+        let id = d.id.clone();
+        let result = match act {
+            FileAct::Open => (self.shell)(&ShellAction::Open(path)),
+            FileAct::Reveal => (self.shell)(&ShellAction::Reveal(path)),
+            FileAct::CopyPath => {
+                ctx.copy_text(path.display().to_string());
+                self.notice = Some(format!("Copied {}", path.display()));
+                Ok(())
+            }
+        };
+        match result {
+            Ok(()) if act == FileAct::Open => {
+                self.prefs.touch(&[id]);
+                self.prefs_changed();
+            }
+            Ok(()) => {}
+            Err(e) => self.error = Some(e),
+        }
+    }
+
     /// Ids of the selected documents.
     pub fn selected_ids(&self) -> Vec<String> {
         self.selected
@@ -459,6 +513,11 @@ impl Browse {
             return;
         }
         let last = self.visible.len() - 1;
+        if ctx.input(|i| i.key_pressed(Key::Enter))
+            && let Some(c) = self.cursor
+        {
+            self.file_request = Some((self.visible[c], FileAct::Open));
+        }
         let (down, up, space, all, undo, esc, home, end, m) = ctx.input(|i| {
             (
                 i.key_pressed(Key::ArrowDown),
@@ -559,6 +618,9 @@ pub fn show(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env) {
                 b.notice = Some(format!("Created {folder}."));
             }
         }
+    }
+    if let Some((di, act)) = b.file_request.take() {
+        b.run_file_act(ui.ctx(), env.root, di, act);
     }
     if let Some(d) = &mut b.rename {
         match rename_ui::show(ui.ctx(), d, env) {
@@ -928,6 +990,21 @@ fn grid(ui: &mut egui::Ui, b: &mut Browse, conn: &Connection) {
             b.prefs.toggle_pins(&ids);
             b.prefs_changed();
         }
+        ui.separator();
+        let target = b.target_doc();
+        for (label, act) in [
+            ("Open in Explorer", FileAct::Reveal),
+            ("Copy path", FileAct::CopyPath),
+        ] {
+            let r = ui
+                .add_enabled(target.is_some(), egui::Button::new(label))
+                .on_disabled_hover_text("Select a document first.");
+            if r.clicked()
+                && let Some(di) = target
+            {
+                b.file_request = Some((di, act));
+            }
+        }
     });
     ui.add_space(6.0);
     ui.horizontal(|ui| {
@@ -965,9 +1042,14 @@ fn grid(ui: &mut egui::Ui, b: &mut Browse, conn: &Connection) {
     }
 
     let mut clicked: Option<(usize, egui::Modifiers)> = None;
+    let mut file_req: Option<(usize, FileAct)> = None;
     let mut toggled: Option<usize> = None;
     let mut sort: Option<SortCol> = None;
     let mods = ui.input(|i| i.modifiers);
+    // Cell text must not be selectable: a selectable label takes the click (to select text)
+    // and the row never sees it, so double-click-to-open would not work on the file name.
+    let selectable = ui.style().interaction.selectable_labels;
+    ui.style_mut().interaction.selectable_labels = false;
     let mut table = TableBuilder::new(ui)
         .striped(false)
         .sense(Sense::click())
@@ -1071,11 +1153,27 @@ fn grid(ui: &mut egui::Ui, b: &mut Browse, conn: &Connection) {
                             .color(theme::INK_MUTED),
                     );
                 });
-                if row.response().clicked() {
+                let resp = row.response();
+                if resp.double_clicked() {
+                    file_req = Some((di, FileAct::Open));
+                } else if resp.clicked() {
                     clicked = Some((pos, mods));
                 }
+                resp.context_menu(|ui| {
+                    for (label, act) in [
+                        ("Open", FileAct::Open),
+                        ("Open in Explorer", FileAct::Reveal),
+                        ("Copy path", FileAct::CopyPath),
+                    ] {
+                        if ui.button(label).clicked() {
+                            file_req = Some((di, act));
+                            ui.close();
+                        }
+                    }
+                });
             });
         });
+    ui.style_mut().interaction.selectable_labels = selectable;
     if let Some(c) = sort {
         b.sort_by(c);
     }
@@ -1083,6 +1181,9 @@ fn grid(ui: &mut egui::Ui, b: &mut Browse, conn: &Connection) {
         b.toggle_row(p);
     } else if let Some((p, m)) = clicked {
         b.click_row(p, m);
+    }
+    if file_req.is_some() {
+        b.file_request = file_req;
     }
 }
 
@@ -1289,6 +1390,8 @@ mod tests {
         let b = Browse::load(&conn);
         let mut h = HarnessBuilder::default()
             .with_size([1440.0, 900.0])
+            // Real frame times: double-clicks need two clicks within 0.3 s of simulated time.
+            .with_step_dt(1.0 / 60.0)
             .build_ui_state(
                 |ui, s: &mut State| {
                     let mut env = Env {
@@ -1769,6 +1872,65 @@ mod tests {
         h.run();
         click(&mut h, "Remove from favorites");
         assert!(h.state().b.prefs.favorites.is_empty());
+    }
+
+    /// P01 step 8: double-click / Enter open the file, Open in Explorer reveals it, Copy path
+    /// copies it; opening adds the document to Recent. The shell is recorded, nothing launches.
+    #[test]
+    fn open_reveal_and_copy_path() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+        let mut h = harness(1, 3);
+        let calls: Rc<RefCell<Vec<ShellAction>>> = Rc::default();
+        {
+            let rec = calls.clone();
+            h.state_mut().b.shell = Box::new(move |a| {
+                rec.borrow_mut().push(a.clone());
+                Ok(())
+            });
+        }
+        h.run();
+        let (name, rel, id) = {
+            let b = &h.state().b;
+            let d = &b.snap.docs[b.visible[0]];
+            (d.name().to_owned(), d.rel_path.clone(), d.id.clone())
+        };
+        let full = shell::full_path(&h.state().root, &rel);
+
+        // Double-click the first row's file name (once selected, the inspector shows the name
+        // too: click the grid's copy, found by where it was).
+        let at = h.get_by_label(&name).rect();
+        h.get_by_label(&name).click();
+        h.step();
+        h.get_all_by_label(&name)
+            .find(|n| n.rect() == at)
+            .expect("grid row still there")
+            .click();
+        h.run();
+        assert_eq!(calls.borrow().as_slice(), [ShellAction::Open(full.clone())]);
+        assert_eq!(
+            h.state().b.prefs.recent,
+            std::slice::from_ref(&id),
+            "opened → Recent"
+        );
+        assert!(h.state().b.prefs_dirty);
+
+        // Enter on the cursor row opens it too.
+        h.key_press(Key::Enter);
+        h.run();
+        assert_eq!(calls.borrow().len(), 2);
+
+        click(&mut h, "Open in Explorer");
+        assert_eq!(
+            calls.borrow().last(),
+            Some(&ShellAction::Reveal(full.clone()))
+        );
+        click(&mut h, "Copy path");
+        assert_eq!(
+            h.state().b.notice.as_deref(),
+            Some(format!("Copied {}", full.display()).as_str())
+        );
+        assert!(full.to_string_lossy().contains('\\'), "Windows separators");
     }
 
     /// P01 done-when: tree expansion under 100 ms at 5,000 documents (50 clients x 100).
