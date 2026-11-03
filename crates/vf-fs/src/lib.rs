@@ -16,7 +16,9 @@ mod tests {
     /// The JSON example in docs/SENTINEL_V1.md.
     fn doc_example() -> serde_json::Value {
         let doc = include_str!("../../../docs/SENTINEL_V1.md");
-        let start = doc.find("```json\n").expect("json block") + "```json\n".len();
+        // Line-ending agnostic: a Windows checkout (autocrlf) has CRLF.
+        let fence = doc.find("```json").expect("json block");
+        let start = fence + doc[fence..].find('\n').expect("fence line end") + 1;
         let end = start + doc[start..].find("```").expect("block end");
         serde_json::from_str(&doc[start..end]).expect("example is valid JSON")
     }
