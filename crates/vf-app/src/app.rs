@@ -98,6 +98,7 @@ impl VibeFilesApp {
                     device_id: vf_core::new_id(),
                     last_cabinet: None,
                     prefs: Default::default(),
+                    ingest: Default::default(),
                 },
                 Some(format!("Settings could not be read: {e:#}")),
             ),
@@ -188,6 +189,7 @@ impl VibeFilesApp {
                 // The cabinet is open either way; a settings write failure only loses "last".
                 let _ = config::save(&self.data, &self.config);
                 let mut browse = Browse::load(&opened.conn);
+                browse.sheets_dir = self.data.join("sheets");
                 browse.set_prefs(self.config.prefs.clone());
                 browse.notice = opened.rebuild.as_ref().map(|r| format!("Indexed: {r}"));
                 self.screen = Screen::Open(Box::new(OpenCabinet {
@@ -236,7 +238,15 @@ impl eframe::App for VibeFilesApp {
         match &mut self.screen {
             Screen::Open(o) if self.tab == Tab::Intake => {
                 let o = &mut **o;
-                o.intake.show(ui, frame, &o.opened.root, &o.opened.cabinet);
+                o.intake.show(
+                    ui,
+                    frame,
+                    &o.opened.root,
+                    &o.opened.cabinet,
+                    &self.config.ingest,
+                    &o.browse.snap,
+                    &o.browse.sheets_dir,
+                );
                 o.intake
                     .reconcile(&mut o.opened.conn, &o.opened.root, &self.config.device_id);
             }
@@ -284,6 +294,26 @@ impl eframe::App for VibeFilesApp {
                         ui.label(self.tab.placeholder());
                     }
                 });
+            }
+        }
+        if let Screen::Open(o) = &mut self.screen {
+            let o = &mut **o;
+            o.intake.ingest.tick(
+                &ctx,
+                &o.opened.root,
+                &self.config.device_id,
+                &self.config.ingest,
+            );
+            if let Some(p) = o.intake.ingest.open_request.take()
+                && let Err(e) = (o.browse.shell)(&crate::shell::ShellAction::Open(p))
+            {
+                o.intake.ingest.warning = Some(format!("The sheet did not open: {e}"));
+            }
+            if let Some(ingest) = o.intake.ingest.changed.take() {
+                self.config.ingest = ingest;
+                if let Err(e) = config::save(&self.data, &self.config) {
+                    o.intake.ingest.warning = Some(format!("Settings could not be saved: {e:#}"));
+                }
             }
         }
         if let Screen::Open(o) = &mut self.screen

@@ -14,6 +14,7 @@ use vf_core::db::Connection;
 use crate::config::{Favorite, Prefs};
 use crate::shell::{self, ShellAction};
 use crate::ui::client_panel::{self, RelForm};
+use crate::ui::cover_sheet::{self, CoverSheetDialog};
 use crate::ui::import_csv::{self, ImportDialog};
 use crate::ui::meta_editor::{self, MetaForm};
 use crate::ui::new_client::{self, NewClientDialog};
@@ -106,6 +107,10 @@ pub struct Browse {
     pub shell: ShellFn,
     /// A file action asked for this frame (doc index), run where the cabinet root is known.
     file_request: Option<(usize, FileAct)>,
+    /// The `Print cover sheet` dialog, while open.
+    pub cover: Option<CoverSheetDialog>,
+    /// Where cover sheets are written (`<data>/sheets`).
+    pub sheets_dir: std::path::PathBuf,
 }
 
 /// How Browse hands files to Windows ([`shell::run`], or a recorder in tests).
@@ -154,6 +159,8 @@ impl Browse {
             week_start: week_start_utc(),
             shell: Box::new(shell::run),
             file_request: None,
+            cover: None,
+            sheets_dir: std::path::PathBuf::new(),
         };
         b.recount();
         b.refresh();
@@ -635,6 +642,19 @@ pub fn show(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env) {
             }
         }
     }
+    if let Some(d) = &mut b.cover {
+        match cover_sheet::show(ui.ctx(), d, &b.sheets_dir) {
+            DialogOutcome::Open => {}
+            DialogOutcome::Cancelled => b.cover = None,
+            DialogOutcome::Done(p) => {
+                b.cover = None;
+                b.notice = Some(match (b.shell)(&ShellAction::Open(p.clone())) {
+                    Ok(()) => format!("Cover sheet opened to print ({}).", p.display()),
+                    Err(e) => format!("Cover sheet saved to {} but did not open: {e}", p.display()),
+                });
+            }
+        }
+    }
     if let Some(d) = &mut b.import {
         match import_csv::show(ui.ctx(), d, env) {
             DialogOutcome::Open => {}
@@ -966,6 +986,14 @@ fn grid(ui: &mut egui::Ui, b: &mut Browse, conn: &Connection) {
                 .filter_map(|c| Some((c.ext_id.clone(), uuid::Uuid::parse_str(&c.id).ok()?)))
                 .collect();
             b.import = Some(ImportDialog::new(known));
+        }
+        if ui
+            .button("Print cover sheet")
+            .on_hover_text("A barcode sheet that files the scanned document after it to a client.")
+            .clicked()
+        {
+            let client = b.scope_client().map(|c| b.snap.clients[c].id.clone());
+            b.cover = Some(CoverSheetDialog::new(&b.snap, client.as_deref()));
         }
         ui.separator();
         let rename = ui
@@ -1872,6 +1900,44 @@ mod tests {
         h.run();
         click(&mut h, "Remove from favorites");
         assert!(h.state().b.prefs.favorites.is_empty());
+    }
+
+    /// P02 step 3: `Print cover sheet` for the client in view writes a sheet whose barcode
+    /// names that client and year, and opens it to print.
+    #[test]
+    fn print_cover_sheet_for_the_client_in_view() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+        let mut h = harness(2, 1);
+        let calls: Rc<RefCell<Vec<ShellAction>>> = Rc::default();
+        {
+            let rec = calls.clone();
+            let s = h.state_mut();
+            s.b.shell = Box::new(move |a| {
+                rec.borrow_mut().push(a.clone());
+                Ok(())
+            });
+            s.b.sheets_dir = s._tmp.path().join("sheets");
+        }
+        click(&mut h, "Client 0001  1001");
+        click(&mut h, "Print cover sheet");
+        type_into(&mut h, "Tax year", "2025");
+        click(&mut h, "Create cover sheet");
+        assert!(h.state().b.cover.is_none(), "dialog closed");
+        let ShellAction::Open(pdf) = calls.borrow()[0].clone() else {
+            panic!("opened the sheet");
+        };
+        assert!(pdf.starts_with(h.state()._tmp.path().join("sheets")));
+        let dir = filer_pdf::pdf::find_pdfium(std::path::Path::new("")).expect("pdfium");
+        let pdfium = filer_pdf::pdf::pdfium(&dir).unwrap();
+        let pages = vf_ingest::stack::scan_pages(pdfium, &pdf).unwrap();
+        let cover = pages[0]
+            .sheet
+            .clone()
+            .and_then(|s| s.0)
+            .expect("a cover sheet");
+        assert_eq!(cover.client_id, "1001");
+        assert_eq!(cover.tax_year, Some(vf_ingest::sheet::TaxYear::Year(2025)));
     }
 
     /// P01 step 8: double-click / Enter open the file, Open in Explorer reveals it, Copy path

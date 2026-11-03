@@ -19,6 +19,21 @@ pub struct Config {
     /// Browse views kept on this PC until users exist (QUESTIONS Q-23; per-user rows in P06).
     #[serde(default)]
     pub prefs: Prefs,
+    /// This PC's intake staging folders (P02).
+    #[serde(default)]
+    pub ingest: Ingest,
+}
+
+/// Folders Vibe Files processes before Filer sees the files (`vf_ingest::pipeline`). Outside
+/// the cabinet and not one of Filer's inboxes.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Ingest {
+    /// Scanner output, phone photos, barcode-sheet stacks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scans: Option<PathBuf>,
+    /// Where a PDF printer saves (step 5).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub print_capture: Option<PathBuf>,
 }
 
 /// Pinned documents, recent documents and favorite places in the tree.
@@ -98,6 +113,7 @@ pub fn load(data: &Path) -> Result<Config> {
                 device_id,
                 last_cabinet: None,
                 prefs: Prefs::default(),
+                ingest: Ingest::default(),
             };
             save(data, &c)?;
             let _ = std::fs::remove_file(legacy);

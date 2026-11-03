@@ -16,7 +16,10 @@ use filer_intake::config::{Settings, ThemeChoice};
 use vf_core::db::Connection;
 use vf_fs::cabinet::CabinetFile;
 
+use crate::config::Ingest;
+use crate::ui::ingest::IngestState;
 use crate::ui::theme;
+use vf_core::browse::Snapshot;
 
 #[derive(Default)]
 pub struct IntakeTab {
@@ -30,6 +33,8 @@ pub struct IntakeTab {
     pub catalog_changed: bool,
     /// What the last reconcile did or why it failed, for Browse's notice.
     pub message: Option<String>,
+    /// Vibe's staging folders and barcode sheets, shown above Filer.
+    pub ingest: IngestState,
 }
 
 /// Filer's settings for this cabinet on this PC: whatever `_Vibe/config.json` holds (rules
@@ -65,7 +70,7 @@ pub fn settings_for(root: &Path, cabinet: &CabinetFile) -> Result<(Settings, boo
 
 /// The folder holding a `pdfium.dll` that binds (next to the exe; debug builds also find the
 /// vendored copy), or `None` (Filer's PDF features off).
-fn pdfium_dir() -> Option<PathBuf> {
+pub(crate) fn pdfium_dir() -> Option<PathBuf> {
     let exe_dir = std::env::current_exe().ok()?.parent()?.to_path_buf();
     filer_pdf::pdf::find_pdfium(&exe_dir)
 }
@@ -101,13 +106,18 @@ impl IntakeTab {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn show(
         &mut self,
         ui: &mut egui::Ui,
         frame: &mut eframe::Frame,
         root: &Path,
         cabinet: &CabinetFile,
+        prefs: &Ingest,
+        snap: &Snapshot,
+        sheets_dir: &Path,
     ) {
+        self.ingest.strip(ui, prefs, snap, sheets_dir, root);
         if self.filer.is_none() && self.error.is_none() {
             match settings_for(root, cabinet) {
                 Ok((settings, savable)) => {

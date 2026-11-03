@@ -16,7 +16,9 @@ use filer_intake::oplog::{self, OpResult};
 use serde_json::json;
 use vf_core::audit::AuditEntry;
 use vf_core::db::Connection;
-use vf_core::tx::{Actor, NoFileOps, Stmt, Transaction};
+use vf_core::tx::{Actor, FileOp, NoFileOps, Stmt, Transaction};
+
+use crate::hints::Hint;
 
 use crate::rebuild::{mime, rel, year_from_path};
 
@@ -95,15 +97,24 @@ fn record(
     // A batch can create client folders and sentinels: catalog clients first.
     crate::rebuild::sync_clients(conn, root, device_id, "intake_clients")
         .map_err(|e| e.to_string())?;
-    let clients: HashMap<String, String> = conn
-        .prepare("SELECT ext_id, id FROM client WHERE deleted_at IS NULL")
+    // CSV ID → (client id, client folder).
+    let clients: HashMap<String, (String, Option<String>)> = conn
+        .prepare("SELECT ext_id, id, folder_rel FROM client WHERE deleted_at IS NULL")
+        .and_then(|mut st| {
+            st.query_map([], |r| Ok((r.get(0)?, (r.get(1)?, r.get(2)?))))?
+                .collect()
+        })
+        .map_err(|e| e.to_string())?;
+    let doc_types: HashMap<String, String> = conn
+        .prepare("SELECT id, name FROM doc_type WHERE deleted_at IS NULL")
         .and_then(|mut st| st.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect())
         .map_err(|e| e.to_string())?;
+    let hints = crate::hints::load(root);
 
     // Every file the batch put in the cabinet: each item's destination and its copies.
-    struct Filed {
+    struct Filed<'a> {
         rel: String,
-        client: Option<String>,
+        client: Option<&'a (String, Option<String>)>,
         bytes: u64,
         sha256: Option<String>,
     }
@@ -111,14 +122,14 @@ fn record(
     for it in &lb.items {
         filed.push(Filed {
             rel: rel(root, &it.dst),
-            client: clients.get(&it.client_id).cloned(),
+            client: clients.get(&it.client_id),
             bytes: it.bytes,
             sha256: None,
         });
         for c in &it.copies {
             filed.push(Filed {
                 rel: rel(root, &c.dst),
-                client: clients.get(&c.client_id).cloned(),
+                client: clients.get(&c.client_id),
                 bytes: c.bytes,
                 sha256: Some(c.sha256.clone()),
             });
@@ -189,21 +200,60 @@ fn record(
             }
             None => {
                 let id = vf_core::new_id();
+                // What a Vibe intake processor knew about the file (barcode cover sheet, print
+                // capture parser): doc type, tax year, source. Kept in docmeta.jsonl too, so
+                // rebuild restores it (Q-22).
+                let hint = hints.get(&hash);
+                let doc_type = hint
+                    .and_then(|h| h.doc_type.clone())
+                    .filter(|t| doc_types.contains_key(t));
+                let tax_year = match hint {
+                    Some(h) if h.permanent => None,
+                    Some(Hint {
+                        tax_year: Some(y), ..
+                    }) => Some(i64::from(*y)),
+                    _ => year_from_path(&f.rel),
+                };
+                let source = hint
+                    .and_then(|h| h.source.clone())
+                    .unwrap_or_else(|| "client".into());
+                if hint.is_some_and(Hint::is_useful) {
+                    let meta = crate::docmeta::Meta {
+                        id: id.clone(),
+                        rel_path: f.rel.clone(),
+                        hash: hash.clone(),
+                        folder_rel: f.client.and_then(|c| c.1.clone()),
+                        doc_type_name: doc_type.as_ref().and_then(|t| doc_types.get(t).cloned()),
+                        doc_type: doc_type.clone(),
+                        tax_year: tax_year.map(|y| y as i32),
+                        status: "received".into(),
+                        source: Some(source.clone()),
+                        tags: vec![],
+                    };
+                    let (path, line) = crate::docmeta::record_line(root, &meta, &now, device_id);
+                    tx = tx.file(FileOp::AppendLines {
+                        path,
+                        lines: vec![line],
+                        undo_lines: vec![],
+                    });
+                }
                 tx = tx
                     .catalog(Stmt::new(
                         "INSERT INTO document (id, client_id, tax_year, rel_path, hash, size, mime, status, source,
-                                               filed_by, filed_at, device_id, updated_at)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'received', 'client', 'intake', ?8, ?9, ?8)",
+                                               filed_by, filed_at, device_id, updated_at, doc_type_id)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'received', ?10, 'intake', ?8, ?9, ?8, ?11)",
                         vec![
                             id.clone().into(),
-                            f.client.clone().into(),
-                            year_from_path(&f.rel).into(),
+                            f.client.map(|c| c.0.clone()).into(),
+                            tax_year.into(),
                             f.rel.clone().into(),
                             hash.into(),
                             (f.bytes as i64).into(),
                             mime(&f.rel).into(),
                             now.clone().into(),
                             device_id.into(),
+                            source.into(),
+                            doc_type.into(),
                         ],
                     ))
                     .catalog(sync_put(&id, &now))
@@ -261,8 +311,8 @@ fn record(
             "op_records": audited,
         }),
     ));
-    tx.commit(conn, &mut NoFileOps, &Actor::device(device_id))
-        .map_err(|e| e.to_string())?;
+    // The only file operations are docmeta lines for hinted documents (Filer moved the files).
+    crate::fileops::commit(conn, root, tx, device_id)?;
 
     // Q-17: keep overwritten content as versions in `_Vibe/versions/` (content-addressed, with a
     // sidecar so rebuild restores the version rows). Filer's own copy stays for its undo.
@@ -527,6 +577,46 @@ mod tests {
             1
         );
         assert!(!reconcile(&mut f.conn, &f.root, "dev").unwrap().changed());
+    }
+
+    /// A hint from a Vibe intake processor (barcode cover sheet, print capture) sets the doc
+    /// type, year and source of the document it names by hash, and is kept in docmeta.jsonl.
+    #[test]
+    fn hints_set_doc_type_year_and_source() {
+        let mut f = fx();
+        crate::doctypes::seed_if_missing(&f.root).unwrap();
+        crate::doctypes::sync(&mut f.conn, &f.root, "dev", "seed").unwrap();
+        let w2_type = crate::doctypes::load(&f.root).unwrap().unwrap()[0].clone();
+        assert_eq!(w2_type.name, "W-2");
+        std::fs::write(f.inbox.join("w2.pdf"), "content of w2.pdf").unwrap();
+        let hash = filer_intake::commit::sha256_file(&f.inbox.join("w2.pdf")).unwrap();
+        let mut h = crate::hints::Hint::new(&hash, "w2.pdf", "print_capture:test", "dev");
+        h.doc_type = Some(w2_type.id.clone());
+        h.tax_year = Some(2024);
+        h.source = Some("firm".into());
+        crate::hints::append(&f.root, &h).unwrap();
+
+        let acme = client("1001", "Acme LLC");
+        file(&f, &acme, &["w2.pdf", "other.pdf"], false);
+        reconcile(&mut f.conn, &f.root, "dev").unwrap();
+        let row = |name: &str| -> (Option<String>, Option<i64>, String) {
+            f.conn
+                .query_row(
+                    "SELECT doc_type_id, tax_year, source FROM document WHERE rel_path LIKE ?1",
+                    [format!("%/{name}")],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .unwrap()
+        };
+        assert_eq!(
+            row("w2.pdf"),
+            (Some(w2_type.id.clone()), Some(2024), "firm".into())
+        );
+        assert_eq!(row("other.pdf"), (None, Some(2025), "client".into()));
+        let meta =
+            std::fs::read_to_string(f.root.join("Acme LLC (1001)/_Vibe/docmeta.jsonl")).unwrap();
+        assert_eq!(meta.lines().count(), 1);
+        assert!(meta.contains(&w2_type.id) && meta.contains("\"firm\""));
     }
 
     /// Overwrite: the cataloged document gets the new content; the old content becomes a

@@ -42,13 +42,21 @@ argon2 = "0.5.3"
 chacha20poly1305 = "0.10.1"
 getrandom = "0.3.4"
 toml = "1.1.8"
-windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
+pdf-writer = "0.14.0"
+# Barcodes: no image feature (it pins an older `image`), no client/URI parsing.
+rxing = { version = "0.9.3", default-features = false, features = ["encoders", "decoders", "qrcode", "oned", "encoding_rs"] }
+image = { version = "0.25.10", default-features = false, features = ["jpeg"] }
+windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging", "Win32_Graphics_Imaging", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_Variant"] }
 
 # Argon2id is unusably slow unoptimized; tests and debug builds unwrap keys.
 [profile.dev.package.argon2]
 opt-level = 3
 
 [profile.dev.package.blake2]
+opt-level = 3
+
+# Barcode search over every scanned page is unusably slow unoptimized.
+[profile.dev.package.rxing]
 opt-level = 3
 
 [profile.release]
