@@ -580,6 +580,7 @@ mod tests {
     use egui_kittest::kittest::Queryable;
 
     fn harness(data: &Path) -> egui_kittest::Harness<'static, VibeFilesApp> {
+        crate::ui::test_util::pdfium_first();
         let data = data.to_owned();
         let mut h = HarnessBuilder::default()
             .with_theme(egui::Theme::Light)

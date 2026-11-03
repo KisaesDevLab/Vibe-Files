@@ -1978,6 +1978,7 @@ mod tests {
     }
 
     fn harness(clients: usize, per: usize) -> Harness<'static, State> {
+        crate::ui::test_util::pdfium_first();
         let (tmp, conn) = seed(clients, per);
         let b = Browse::load(&conn);
         let mut h = HarnessBuilder::default()

@@ -21,6 +21,7 @@ pub enum Page {
     Disposition,
     Holds,
     Safeguards,
+    Import,
 }
 
 /// UI_SPEC §6 nav, grouped. Only Doc types is built in P01.
@@ -33,6 +34,7 @@ const NAV: &[(&str, &[&str])] = &[
             "Devices",
             "Doc types",
             "Folder templates",
+            "Folder import",
         ],
     ),
     ("INTAKE", &["Print capture & parsers", "Scan profiles"]),
@@ -91,6 +93,8 @@ pub struct Admin {
     pub disposition: crate::ui::disposition::DispositionPage,
     pub holds: crate::ui::disposition::HoldsPage,
     pub safeguards: crate::ui::disposition::SafeguardsPage,
+    /// Folder import (P10).
+    pub import: crate::ui::import_tree::ImportPage,
     /// The editor above the table.
     pub editing: Editing,
     form: Form,
@@ -126,6 +130,7 @@ impl Admin {
             disposition: Default::default(),
             holds: Default::default(),
             safeguards: Default::default(),
+            import: Default::default(),
             editing: Editing::Closed,
             form: Form::default(),
             error: None,
@@ -240,6 +245,12 @@ pub fn show(ui: &mut egui::Ui, a: &mut Admin, env: &mut Env, sweep: SweepEnv) {
             }
         }
         Page::Holds => crate::ui::disposition::holds(ui, &mut a.holds, env),
+        Page::Import => {
+            crate::ui::import_tree::show(ui, &mut a.import, env, sweep.catalog);
+            if std::mem::take(&mut a.import.changed) {
+                a.changed = true;
+            }
+        }
         Page::Safeguards => {
             crate::ui::disposition::safeguards(ui, &mut a.safeguards, env);
             if let Some(p) = a.safeguards.open_request.take() {
@@ -295,6 +306,10 @@ fn nav(ui: &mut egui::Ui, a: &mut Admin) {
                     .clicked()
                 {
                     a.page = Page::Safeguards;
+                }
+            } else if *item == "Folder import" {
+                if ui.selectable_label(a.page == Page::Import, *item).clicked() {
+                    a.page = Page::Import;
                 }
             } else if *item == "Legal holds" {
                 if ui.selectable_label(a.page == Page::Holds, *item).clicked() {
@@ -652,6 +667,7 @@ mod tests {
     }
 
     fn harness() -> Harness<'static, State> {
+        crate::ui::test_util::pdfium_first();
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().join("cabinet");
         std::fs::create_dir_all(&root).unwrap();
@@ -910,6 +926,82 @@ mod tests {
             .unwrap();
         assert_eq!(n, 1);
         assert!(!vf_fs::sweep::due(&s.conn), "the sweep time is recorded");
+    }
+
+    /// P10: Scan proposes the folder's client, Import binds it on its own thread, Undo reverses.
+    #[test]
+    fn folder_import_binds_and_undoes() {
+        let mut h = harness();
+        {
+            let s = h.state_mut();
+            vf_fs::cabinet::create(
+                &s.root,
+                &vf_fs::cabinet::CabinetFile {
+                    cabinet_id: vf_core::new_id(),
+                    firm_id: uuid::Uuid::new_v4().to_string(),
+                    schema_version: vf_core::db::SCHEMA_VERSION,
+                    layout_version: 1,
+                    created: vf_core::now_rfc3339(),
+                    name: None,
+                },
+            )
+            .unwrap();
+            let csv = s.root.parent().unwrap().join("clients.csv");
+            std::fs::write(
+                &csv,
+                "ID,Name
+HALV1001,\"Halvorsen, Dana\"
+",
+            )
+            .unwrap();
+            let map = filer_core::config::ColumnMap {
+                id: Some("ID".into()),
+                name: Some("Name".into()),
+                extras: vec![],
+            };
+            vf_fs::clients::import_csv(&s.root, &csv, &map, &Default::default()).unwrap();
+            let d = s.root.join("Dana Halvorsen").join("TY2023");
+            std::fs::create_dir_all(&d).unwrap();
+            std::fs::write(d.join("W2 Acme.pdf"), b"invented").unwrap();
+            vf_fs::doctypes::sync(&mut s.conn, &s.root, "dev", "seed").unwrap();
+        }
+        click(&mut h, "Folder import");
+        click(&mut h, "Scan the cabinet");
+        assert!(h.query_by_label_contains("1 fully mapped (100%)").is_some());
+        h.get_by_role_and_label(egui::accesskit::Role::Button, "Import 1 folders")
+            .click();
+        h.step();
+        let start = std::time::Instant::now();
+        while h.state().a.import.last.is_none() {
+            h.step();
+            assert!(
+                start.elapsed() < std::time::Duration::from_secs(20),
+                "{:?}",
+                h.state().a.import.error
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        h.run();
+        assert!(
+            h.query_by_label_contains("Imported: 1 folders bound")
+                .is_some()
+        );
+        let s = h.state();
+        assert!(s.root.join("Dana Halvorsen/_Vibe/client.json").is_file());
+        let (t, y): (String, i64) = s
+            .conn
+            .query_row(
+                "SELECT t.name, d.tax_year FROM document d JOIN doc_type t ON t.id = d.doc_type_id",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((t.as_str(), y), ("W-2", 2023));
+        click(&mut h, "Undo the last import");
+        assert!(h.query_by_label("The import was undone.").is_some());
+        let s = h.state();
+        assert!(!s.root.join("Dana Halvorsen/_Vibe/client.json").exists());
+        assert!(s.root.join("Dana Halvorsen/TY2023/W2 Acme.pdf").is_file());
     }
 
     /// P07 step 1: the seeded schedule is listed and editable; a doc type picks its class.
