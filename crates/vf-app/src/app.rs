@@ -246,6 +246,13 @@ impl VibeFilesApp {
                     ),
                     None => format!("Indexed: {r}"),
                 });
+                match &emptied {
+                    Ok(n) if *n > 0 => tracing::info!(documents = n, "old trash emptied"),
+                    Err(e) => {
+                        tracing::warn!(kind = crate::logging::kind(e), "emptying old trash failed")
+                    }
+                    _ => {}
+                }
                 match emptied {
                     Ok(0) => {}
                     Ok(n) => {
@@ -325,6 +332,10 @@ impl eframe::App for VibeFilesApp {
                 o.mirrored_at = Some(std::time::Instant::now());
                 let dir = o.opened.root.join("_Vibe").join("audit");
                 if let Err(e) = vf_core::audit::mirror_pending(&o.opened.conn, &dir) {
+                    tracing::warn!(
+                        kind = crate::logging::kind(&e.to_string()),
+                        "audit mirror not written"
+                    );
                     o.browse.error = Some(format!(
                         "The audit trail's copy in the cabinet could not be written: {e}"
                     ));

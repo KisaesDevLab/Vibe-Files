@@ -5,6 +5,7 @@
 mod app;
 mod cli;
 mod config;
+mod logging;
 mod redact;
 mod session;
 mod shell;
@@ -35,6 +36,7 @@ fn main() -> anyhow::Result<std::process::ExitCode> {
             .map(|p| p.join("data"))
             .unwrap_or_else(|| PathBuf::from("data")),
     };
+    let _log = logging::init(&data);
     if let Some(cmd) = &args.command {
         let code = cli::run(cmd, &data, &mut std::io::stdout())?;
         return Ok(std::process::ExitCode::from(code as u8));

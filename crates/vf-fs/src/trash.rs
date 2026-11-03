@@ -318,17 +318,47 @@ pub fn check_pin(root: &Path, pin: &str) -> bool {
     stored_pin(root).is_some_and(|h| vf_security::pin::verify(pin, &h))
 }
 
-/// Sets the firm PIN; changing one needs the current PIN.
-pub fn set_pin(root: &Path, current: Option<&str>, new: &str) -> Result<(), String> {
-    if has_pin(root) && !current.is_some_and(|c| check_pin(root, c)) {
+/// Transaction label of a PIN change (left off the undo stack).
+pub const PIN_LABEL: &str = "firm_pin";
+
+/// Sets the firm PIN; changing one needs the current PIN. Audited (`firm_pin_set`): a PIN set
+/// again after its file was deleted is recorded as a reset, so going around the PIN shows.
+pub fn set_pin(
+    conn: &mut Connection,
+    root: &Path,
+    device_id: &str,
+    current: Option<&str>,
+    new: &str,
+) -> Result<(), String> {
+    let had = has_pin(root);
+    if had && !current.is_some_and(|c| check_pin(root, c)) {
         return Err("the current PIN is not right".into());
     }
+    let set_before = conn
+        .query_row(
+            "SELECT 1 FROM audit WHERE action = 'firm_pin_set' LIMIT 1",
+            [],
+            |_| Ok(()),
+        )
+        .is_ok();
     let hash = vf_security::pin::hash(new)?;
     let body = json!({ "hash": hash, "set": vf_core::now_rfc3339() });
     cabinet::write_replace(
         &pin_file(root),
         &serde_json::to_vec_pretty(&body).expect("serializes"),
-    )
+    )?;
+    let how = if had {
+        "changed"
+    } else if set_before {
+        "reset (the PIN file had been removed)"
+    } else {
+        "first set"
+    };
+    Transaction::new(PIN_LABEL)
+        .audit(AuditEntry::new("firm_pin_set", None, json!({ "how": how })))
+        .commit(conn, &mut NoFileOps, &Actor::device(device_id))
+        .map(|_| ())
+        .map_err(|e| e.to_string())
 }
 
 #[cfg(test)]
@@ -447,17 +477,45 @@ mod tests {
     }
 
     #[test]
-    fn firm_pin_is_set_checked_and_changed() {
-        let (_t, root, _conn) = fx();
+    fn firm_pin_is_set_checked_changed_and_audited() {
+        let (_t, root, mut conn) = fx();
         std::fs::create_dir_all(root.join(cabinet::VIBE_DIR)).unwrap();
         assert!(!has_pin(&root));
-        set_pin(&root, None, "4821").unwrap();
+        set_pin(&mut conn, &root, "dev", None, "4821").unwrap();
         assert!(has_pin(&root) && check_pin(&root, "4821") && !check_pin(&root, "0000"));
         let stored = std::fs::read_to_string(pin_file(&root)).unwrap();
         assert!(!stored.contains("4821"), "only a hash is stored");
-        assert!(set_pin(&root, None, "1111").is_err());
-        assert!(set_pin(&root, Some("0000"), "1111").is_err());
-        set_pin(&root, Some("4821"), "1111").unwrap();
+        assert!(set_pin(&mut conn, &root, "dev", None, "1111").is_err());
+        assert!(set_pin(&mut conn, &root, "dev", Some("0000"), "1111").is_err());
+        set_pin(&mut conn, &root, "dev", Some("4821"), "1111").unwrap();
         assert!(check_pin(&root, "1111"));
+        // Someone deletes the PIN file and sets their own: recorded as a reset.
+        std::fs::remove_file(pin_file(&root)).unwrap();
+        set_pin(&mut conn, &root, "dev", None, "2222").unwrap();
+        let hows: Vec<String> = conn
+            .prepare("SELECT json_extract(detail, '$.how') FROM audit WHERE action = 'firm_pin_set' ORDER BY seq")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(
+            hows,
+            [
+                "first set",
+                "changed",
+                "reset (the PIN file had been removed)"
+            ]
+        );
+        let dump = format!(
+            "{:?}",
+            conn.query_row("SELECT group_concat(detail) FROM audit", [], |r| r
+                .get::<_, String>(0))
+                .unwrap()
+        );
+        assert!(
+            !dump.contains("2222"),
+            "the PIN is never in the audit trail"
+        );
     }
 }

@@ -115,6 +115,7 @@ pub fn show(ui: &mut egui::Ui, p: &mut TrashPage, env: &mut Env) {
                     let held = chosen.iter().filter(|t| t.held).count();
                     match trash::purge(env.conn, env.device_id, &chosen, "emptied by hand") {
                         Ok(n) => {
+                            tracing::info!(documents = n, held, "trash emptied by hand");
                             p.notice = Some(if held > 0 {
                                 format!("Emptied {n} documents; {held} under a legal hold stay.")
                             } else {
@@ -169,8 +170,9 @@ pub fn show(ui: &mut egui::Ui, p: &mut TrashPage, env: &mut Env) {
                     p.error = Some("The two PINs differ.".into());
                 } else {
                     let current = has_pin.then_some(p.pin.as_str());
-                    match trash::set_pin(env.root, current, &p.new_pin) {
+                    match trash::set_pin(env.conn, env.root, env.device_id, current, &p.new_pin) {
                         Ok(()) => {
+                            tracing::info!("firm PIN set");
                             p.notice = Some("The firm PIN is set.".into());
                             p.error = None;
                             p.changing = false;

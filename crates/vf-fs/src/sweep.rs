@@ -336,6 +336,10 @@ pub fn mark_missing(
                  ON CONFLICT(doc_id, op) DO NOTHING",
                 vec![m.doc_id.clone().into(), now.clone().into()],
             ))
+            .catalog_undo(Stmt::new(
+                "DELETE FROM sync_pending WHERE doc_id = ?1 AND op = 'delete'",
+                vec![m.doc_id.clone().into()],
+            ))
             .audit(AuditEntry::new(
                 "missing",
                 Some(&m.doc_id),
@@ -575,6 +579,24 @@ mod tests {
         assert!(unknown[0].ends_with("notice.pdf") && unknown[1].ends_with("scan.pdf"));
 
         follow_moves(&mut conn, &root, "dev", &d.moved).unwrap();
+        mark_missing(&mut conn, &root, "dev", &d.missing).unwrap();
+        // Undoing it takes the queued sync delete back too.
+        let undo_id: String = conn
+            .query_row(
+                "SELECT tx_id FROM undo_record WHERE label = 'missing'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        crate::fileops::undo(&mut conn, &root, &undo_id, "dev").unwrap();
+        let pending: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM sync_pending WHERE op = 'delete'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(pending, 0);
         mark_missing(&mut conn, &root, "dev", &d.missing).unwrap();
         let notice: Vec<Unknown> = d
             .unknown

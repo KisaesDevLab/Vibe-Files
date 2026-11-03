@@ -69,6 +69,7 @@ impl SweepState {
         let mut d = match r {
             Ok(d) => d,
             Err(e) => {
+                tracing::warn!(kind = crate::logging::kind(&e), "integrity sweep failed");
                 self.error = Some(format!("Integrity sweep failed: {e}"));
                 return None;
             }
@@ -88,6 +89,15 @@ impl SweepState {
             }
         }
         self.picked.clear();
+        tracing::info!(
+            checked = d.checked,
+            adopted = self.adopted.len(),
+            moved = d.moved.len(),
+            missing = d.missing.len(),
+            unknown = d.unknown.len(),
+            unreadable = d.unreadable.len(),
+            "integrity sweep"
+        );
         let open = d.moved.len() + d.missing.len() + d.unknown.len();
         let line = match (self.adopted.len(), open) {
             (0, 0) => None,

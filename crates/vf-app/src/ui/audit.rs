@@ -27,10 +27,18 @@ pub struct ChainCheck {
 
 impl ChainCheck {
     pub fn run(conn: &Connection) -> Self {
+        let result = audit::verify(conn).map_err(|e| e.to_string());
+        match &result {
+            Ok(r) => match &r.broken {
+                None => tracing::info!(rows = r.rows, "audit chain verified"),
+                Some((seq, why)) => tracing::error!(seq, why, "audit chain broken"),
+            },
+            Err(e) => tracing::warn!(kind = crate::logging::kind(e), "audit chain not checked"),
+        }
         ChainCheck {
             at: Instant::now(),
             when: widgets::local_time(&vf_core::now_rfc3339()),
-            result: audit::verify(conn).map_err(|e| e.to_string()),
+            result,
         }
     }
 
