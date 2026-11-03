@@ -157,7 +157,7 @@ struct Found {
 }
 
 /// Cabinet-relative path with forward slashes (stable across Windows/UNC roots).
-pub(crate) fn rel(root: &Path, p: &Path) -> String {
+pub fn rel(root: &Path, p: &Path) -> String {
     p.strip_prefix(root)
         .unwrap_or(p)
         .to_string_lossy()

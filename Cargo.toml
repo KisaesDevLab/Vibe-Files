@@ -40,6 +40,13 @@ tempfile = "3.27.0"
 # New crates (not used by the vendored code).
 argon2 = "0.5.3"
 chacha20poly1305 = "0.10.1"
+hkdf = "0.12.4"
+hmac = "0.12.1"
+# B2 through its S3-compatible API (P11). tokio stays inside vf-sync (and vf-ocr's workers).
+object_store = { version = "0.12", default-features = false, features = ["aws"] }
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "time"] }
+futures = "0.3"
+bytes = "1"
 getrandom = "0.3.4"
 toml = "1.1.8"
 pdf-writer = "0.14.0"

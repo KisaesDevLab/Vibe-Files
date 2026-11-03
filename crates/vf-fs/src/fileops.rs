@@ -136,6 +136,10 @@ pub const NOT_ON_UNDO_STACK: &[&str] = &[
     // The folder import has its own Undo (both of its Transactions and a rebuild together).
     crate::import::LABEL,
     crate::import::META_LABEL,
+    // B2 sync (P11) applies other workstations' work and records exchanges: not this login's.
+    "sync_push",
+    "sync_pull",
+    "sync_restore",
 ];
 
 /// This Windows login's undo stack: its last 20 undoable transactions, newest first.

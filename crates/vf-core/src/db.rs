@@ -19,6 +19,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/004_local_state.sql"),
     include_str!("../migrations/005_disposition.sql"),
     include_str!("../migrations/006_extract.sql"),
+    include_str!("../migrations/007_sync.sql"),
 ];
 
 /// Schema version this build writes.
@@ -165,7 +166,11 @@ mod tests {
         "page_text",
         "retention_class",
         "saved_search",
+        "sync_base",
+        "sync_conflict",
+        "sync_object",
         "sync_pending",
+        "sync_segment",
         "sync_state",
         "undo_record",
         "user",
