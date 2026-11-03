@@ -137,13 +137,71 @@ pub struct Actor {
 }
 
 impl Actor {
-    /// This workstation, no signed-in user (until P06 adds users).
+    /// This workstation and the Windows login running it (Q-29: no sign-in in v1; users
+    /// arrive with PA-15).
     pub fn device(device_id: &str) -> Self {
         Actor {
-            user: None,
+            user: crate::windows_login(),
             device_id: device_id.into(),
         }
     }
+}
+
+/// How many transactions the undo stack shows (PHASES P05 step 4).
+pub const UNDO_DEPTH: usize = 20;
+
+/// One entry of the undo stack.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Undoable {
+    pub tx_id: String,
+    pub ts: String,
+    pub label: String,
+    /// What the audit rows say it did (first row's action and document count).
+    pub summary: String,
+}
+
+/// The last [`UNDO_DEPTH`] transactions `actor` made that are not undone, newest first,
+/// leaving out `except` labels (Intake batches are undone by Filer's own Undo). Per Windows
+/// login on any workstation (Q-29); rows written before logins were recorded fall back to
+/// this workstation.
+pub fn undo_stack(conn: &Connection, actor: &Actor, except: &[&str]) -> Result<Vec<Undoable>> {
+    let mut st = conn.prepare(
+        "SELECT u.tx_id, u.ts, u.label,
+                (SELECT a.action FROM audit a WHERE json_extract(a.detail, '$.tx') = u.tx_id
+                 ORDER BY a.seq LIMIT 1),
+                (SELECT count(DISTINCT a.doc_id) FROM audit a
+                 WHERE json_extract(a.detail, '$.tx') = u.tx_id)
+         FROM undo_record u
+         WHERE u.undone = 0
+           AND (u.user = ?1 OR (u.user IS NULL AND u.device_id = ?2))
+         ORDER BY u.ts DESC, u.rowid DESC",
+    )?;
+    let rows = st.query_map(rusqlite::params![actor.user, actor.device_id], |r| {
+        let action: Option<String> = r.get(3)?;
+        let docs: i64 = r.get(4)?;
+        Ok(Undoable {
+            tx_id: r.get(0)?,
+            ts: r.get(1)?,
+            label: r.get(2)?,
+            summary: match (action, docs) {
+                (Some(a), 0) => a,
+                (Some(a), 1) => format!("{a} · 1 document"),
+                (Some(a), n) => format!("{a} · {n} documents"),
+                (None, _) => String::new(),
+            },
+        })
+    })?;
+    let mut out = Vec::new();
+    for r in rows {
+        let r = r?;
+        if !except.contains(&r.label.as_str()) {
+            out.push(r);
+            if out.len() == UNDO_DEPTH {
+                break;
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// The newest transaction by `device_id` with one of `labels` that is not undone yet.
@@ -498,6 +556,40 @@ mod tests {
             .audit(AuditEntry::new("file", None, serde_json::json!({})));
         assert!(tx.commit(&mut c, &mut fs, &actor).is_err());
         assert!(fs.files.contains(&PathBuf::from("/in/a.pdf")));
+    }
+
+    /// P05 step 4: each Windows login sees its own last 20, newest first, undone ones gone.
+    #[test]
+    fn undo_stack_is_per_login_newest_first_and_capped() {
+        let (_t, mut c, ann) = setup();
+        let bob = Actor {
+            user: Some("OFFICE\\bob".into()),
+            device_id: "dev-1".into(),
+        };
+        let edit = |n: usize| {
+            Transaction::new("edit").audit(AuditEntry::new(
+                "meta_edit",
+                Some(&format!("doc-{n}")),
+                serde_json::json!({}),
+            ))
+        };
+        let mut ids = Vec::new();
+        for n in 0..25 {
+            ids.push(edit(n).commit(&mut c, &mut NoFileOps, &ann).unwrap().tx_id);
+        }
+        edit(99).commit(&mut c, &mut NoFileOps, &bob).unwrap();
+        Transaction::new("intake")
+            .audit(AuditEntry::new("file", None, serde_json::json!({})))
+            .commit(&mut c, &mut NoFileOps, &ann)
+            .unwrap();
+        let stack = undo_stack(&c, &ann, &["intake"]).unwrap();
+        assert_eq!(stack.len(), UNDO_DEPTH);
+        assert_eq!(stack[0].tx_id, ids[24]);
+        assert_eq!(stack[0].summary, "meta_edit · 1 document");
+        undo(&mut c, &mut NoFileOps, &ann, &ids[24]).unwrap();
+        assert_eq!(undo_stack(&c, &ann, &["intake"]).unwrap()[0].tx_id, ids[23]);
+        let theirs = undo_stack(&c, &bob, &[]).unwrap();
+        assert_eq!(theirs.len(), 1);
     }
 
     #[test]

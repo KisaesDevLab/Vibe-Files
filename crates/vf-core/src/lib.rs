@@ -29,6 +29,16 @@ pub enum Error {
 pub type Result<T> = std::result::Result<T, Error>;
 
 /// Current UTC time, RFC 3339 with microseconds (storage format for every timestamp).
+/// The Windows login of this process, `DOMAIN\user` (or `user` when there is no domain
+/// variable). Recorded in audit rows and undo records (QUESTIONS Q-29); no sign-in in v1.
+pub fn windows_login() -> Option<String> {
+    let user = std::env::var("USERNAME").ok().filter(|u| !u.is_empty())?;
+    Some(match std::env::var("USERDOMAIN") {
+        Ok(d) if !d.is_empty() => format!("{d}\\{user}"),
+        _ => user,
+    })
+}
+
 pub fn now_rfc3339() -> String {
     let now = time::OffsetDateTime::now_utc();
     now.format(&time::format_description::well_known::Rfc3339)
