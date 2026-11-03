@@ -23,7 +23,8 @@ use crate::ui::{theme, widgets, wizard::ERROR};
 pub const VERIFY_SAMPLE: usize = 20;
 
 pub enum Done {
-    Setup(Sync, String),
+    /// (firm key, session, sealed application key).
+    Setup([u8; 32], Sync, String),
     Push(vf_sync::push::PushReport),
     Pull(vf_sync::pull::PullReport),
     Verify(usize, usize),
@@ -93,8 +94,15 @@ pub struct SyncTab {
     form: Form,
     refreshed: Option<Instant>,
     last_auto: Option<Instant>,
-    /// The remembered key was tried once this session.
-    recall_tried: bool,
+    /// When the remembered key was last tried.
+    recall_at: Option<Instant>,
+    /// Locked by the person: no automatic unlock until they unlock again.
+    locked_by_user: bool,
+    /// This login has a remembered key on this PC (for the Forget button; no file check per
+    /// frame).
+    remembered: bool,
+    /// This PC's data folder, for a set-up running on its thread.
+    setup_data: PathBuf,
 }
 
 const REMEMBER_HELP: &str = "The key is sealed with Windows (DPAPI) for your login on this \
@@ -107,7 +115,7 @@ fn data_dir(catalog: &Path) -> &Path {
 }
 
 fn computer_name() -> String {
-    std::env::var("COMPUTERNAME").unwrap_or_else(|_| "this PC".into())
+    vf_sync::computer_name()
 }
 
 impl SyncTab {
@@ -154,10 +162,7 @@ impl SyncTab {
     /// Every frame (whatever the tab): picks up finished work, refreshes the counts, and starts
     /// the automatic push when it is due.
     pub fn tick(&mut self, ctx: &egui::Context, env: &Env, catalog: &Path, cfg: &SyncConfig) {
-        if self.session.is_none() && !self.recall_tried {
-            self.recall_tried = true;
-            self.recall(env.root, data_dir(catalog), cfg, env.device_id);
-        }
+        self.recall(env.root, data_dir(catalog), cfg, env.device_id);
         if let Some((_, rx)) = &self.job {
             match rx.try_recv() {
                 Err(TryRecvError::Empty) => {}
@@ -225,8 +230,12 @@ impl SyncTab {
 
     fn finished(&mut self, d: Done, cfg: &SyncConfig) {
         match d {
-            Done::Setup(s, sealed) => {
+            Done::Setup(firm, s, sealed) => {
+                let cab = s.cabinet_id.clone();
                 self.session = Some(s);
+                if let Some(w) = self.apply_remember(&self.setup_data.clone(), &cab, Some(&firm)) {
+                    self.error = Some(w);
+                }
                 let mut c = cfg.clone();
                 c.app_key_sealed = sealed;
                 self.config_changed = Some(c);
@@ -301,58 +310,102 @@ impl SyncTab {
         cfg: &SyncConfig,
         device_id: &str,
     ) -> Result<Sync, String> {
-        let app_key =
-            vf_sync::setup::open_secret(&keys, &cfg.app_key_sealed).map_err(|e| e.to_string())?;
-        let store = vf_sync::Remote::s3(&cfg.s3(), &app_key).map_err(|e| e.to_string())?;
-        Ok(Sync {
-            remote: vf_sync::Remote::new(store, &cfg.cabinet_id),
+        Sync::connect(
             keys,
-            cabinet_id: cfg.cabinet_id.clone(),
-            device_id: device_id.into(),
-            device_name: computer_name(),
-        })
+            &cfg.s3(),
+            &cfg.app_key_sealed,
+            &cfg.cabinet_id,
+            device_id,
+        )
+        .map_err(|e| e.to_string())
     }
 
-    /// Unlocks with the key this Windows login remembered on this PC, when there is one.
+    /// Unlocks with the key this Windows login remembered on this PC, when there is one. Tried
+    /// again every 30 s while locked (a share that answers late, sync set up meanwhile), never
+    /// after the person locked it.
     fn recall(&mut self, root: &Path, data: &Path, cfg: &SyncConfig, device_id: &str) {
+        if self.session.is_some()
+            || self.locked_by_user
+            || self
+                .recall_at
+                .is_some_and(|t| t.elapsed() < Duration::from_secs(30))
+        {
+            return;
+        }
+        self.recall_at = Some(Instant::now());
         let Ok(cab) = vf_fs::cabinet::read(root) else {
             return;
         };
         if !cfg.configured_for(&cab.cabinet_id) {
             return;
         }
+        self.remembered = vf_sync::setup::remembered_file(data, &cab.cabinet_id).exists();
         if let Some(keys) = vf_sync::setup::recall(data, &cab.cabinet_id) {
             match Self::session_from(keys, cfg, device_id) {
                 Ok(s) => self.session = Some(s),
-                Err(e) => tracing::warn!(kind = crate::logging::kind(&e), "remembered sync key"),
+                // A key from an earlier set-up: forget it, the passphrase opens the new one.
+                Err(e) => {
+                    tracing::warn!(
+                        kind = crate::logging::kind(&e),
+                        "remembered sync key is stale"
+                    );
+                    vf_sync::setup::forget(data, &cab.cabinet_id);
+                    self.remembered = false;
+                }
             }
         }
     }
 
-    /// Opens sync with the passphrase; remembers the key on this PC when asked.
+    /// Remembers or forgets the key on this PC as the checkbox says. Best effort: sync stays
+    /// unlocked either way; a failure is a warning.
+    fn apply_remember(
+        &mut self,
+        data: &Path,
+        cabinet_id: &str,
+        firm: Option<&[u8; 32]>,
+    ) -> Option<String> {
+        match (self.form.remember, firm) {
+            (true, Some(firm)) => match vf_sync::setup::remember(data, cabinet_id, firm) {
+                Ok(()) => {
+                    self.remembered = true;
+                    None
+                }
+                Err(e) => Some(format!(
+                    "Sync is unlocked, but the key could not be remembered on this PC ({e}): you will be asked for the passphrase next time."
+                )),
+            },
+            (true, None) => None,
+            (false, _) => {
+                vf_sync::setup::forget(data, cabinet_id);
+                self.remembered = false;
+                None
+            }
+        }
+    }
+
+    /// Opens sync with the passphrase; remembers (or forgets) the key on this PC as asked.
     fn unlock(&mut self, root: &Path, data: &Path, cfg: &SyncConfig, device_id: &str) {
         let pass = std::mem::take(&mut self.form.unlock);
-        let remember = self.form.remember;
-        let r = (|| -> Result<Sync, String> {
+        let r = (|| -> Result<([u8; 32], Sync), String> {
             let firm = vf_sync::setup::firm_key_local(root, &cfg.cabinet_id, &pass)
                 .map_err(|e| e.to_string())?;
             let keys = vf_sync::Keys::derive(vf_sync::setup::KEY_ID, &firm);
-            let s = Self::session_from(keys, cfg, device_id)?;
-            if remember {
-                vf_sync::setup::remember(data, &cfg.cabinet_id, &firm)
-                    .map_err(|e| e.to_string())?;
-            }
-            Ok(s)
+            Ok((firm, Self::session_from(keys, cfg, device_id)?))
         })();
         match r {
-            Ok(s) => {
+            Ok((firm, s)) => {
                 self.session = Some(s);
+                self.locked_by_user = false;
                 self.error = None;
-                self.notice = Some(if remember {
+                let warn = self.apply_remember(data, &cfg.cabinet_id, Some(&firm));
+                self.notice = Some(if self.remembered {
                     "Sync unlocked, and remembered on this PC for your Windows login.".into()
                 } else {
                     "Sync unlocked for this session.".into()
                 });
+                if warn.is_some() {
+                    self.error = warn;
+                }
             }
             Err(e) => self.error = Some(e),
         }
@@ -366,8 +419,8 @@ impl SyncTab {
         device_id: &str,
         cabinet_id: &str,
     ) {
+        self.setup_data = data.to_path_buf();
         let f = &mut self.form;
-        let (remember, data) = (f.remember, data.to_path_buf());
         if f.pass != f.pass2 {
             self.error = Some("The two passphrases differ.".into());
             return;
@@ -393,16 +446,16 @@ impl SyncTab {
                     let store =
                         vf_sync::Remote::s3(&cfg.s3(), &app_key).map_err(|e| e.to_string())?;
                     let remote = vf_sync::Remote::new(store, &cab);
-                    let keys =
-                        vf_sync::setup::init(&root, &remote, &pass, vf_sync::setup::DEFAULT_KDF)
-                            .map_err(|e| e.to_string())?;
+                    let (firm, keys) = vf_sync::setup::init_with_firm(
+                        &root,
+                        &remote,
+                        &pass,
+                        vf_sync::setup::DEFAULT_KDF,
+                    )
+                    .map_err(|e| e.to_string())?;
                     let sealed = vf_sync::setup::seal_secret(&keys, &app_key);
-                    if remember {
-                        let firm = vf_sync::setup::firm_key_local(&root, &cab, &pass)
-                            .map_err(|e| e.to_string())?;
-                        vf_sync::setup::remember(&data, &cab, &firm).map_err(|e| e.to_string())?;
-                    }
                     Ok(Done::Setup(
+                        firm,
                         Sync {
                             remote,
                             keys,
@@ -658,16 +711,17 @@ fn unlocked(ui: &mut egui::Ui, t: &mut SyncTab, env: &mut Env, v: &View<'_>) {
             .clicked()
         {
             t.session = None;
-            t.recall_tried = true;
+            t.locked_by_user = true;
         }
         let data = data_dir(v.catalog);
-        if vf_sync::setup::remembered_file(data, v.cabinet_id).exists()
+        if t.remembered
             && ui
                 .button("Forget on this PC")
                 .on_hover_text("Sync will ask for the passphrase again on this PC.")
                 .clicked()
         {
             vf_sync::setup::forget(data, v.cabinet_id);
+            t.remembered = false;
             t.notice = Some("The key is no longer remembered on this PC.".into());
         }
     });
@@ -847,5 +901,26 @@ fn unlocked(ui: &mut egui::Ui, t: &mut SyncTab, env: &mut Env, v: &View<'_>) {
             });
         }
         t.config_changed = Some(cfg);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// PA-20: the checkbox decides; unticked forgets a key remembered earlier.
+    #[test]
+    fn remember_box_remembers_and_unticked_forgets() {
+        let t = tempfile::tempdir().unwrap();
+        let mut tab = SyncTab::default();
+        let firm = [9u8; 32];
+        assert!(tab.form.remember, "ticked by default");
+        assert_eq!(tab.apply_remember(t.path(), "cab-1", Some(&firm)), None);
+        assert!(tab.remembered);
+        assert!(vf_sync::setup::recall(t.path(), "cab-1").is_some());
+        tab.form.remember = false;
+        tab.apply_remember(t.path(), "cab-1", Some(&firm));
+        assert!(!tab.remembered);
+        assert!(vf_sync::setup::recall(t.path(), "cab-1").is_none());
     }
 }

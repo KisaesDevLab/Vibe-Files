@@ -252,17 +252,21 @@ fn sync_session(cabinet: &Path, data: &Path) -> Result<vf_sync::Sync> {
     if !config.sync.configured_for(&cab.cabinet_id) {
         bail!("sync is not set up for this cabinet on this PC (Sync tab)");
     }
-    let data_keys = vf_sync::setup::recall(data, &cab.cabinet_id);
-    if let Some(keys) = data_keys {
-        let app_key = vf_sync::setup::open_secret(&keys, &config.sync.app_key_sealed)?;
-        let store = vf_sync::Remote::s3(&config.sync.s3(), &app_key)?;
-        return Ok(vf_sync::Sync {
-            remote: vf_sync::Remote::new(store, &cab.cabinet_id),
+    let connect = |keys| {
+        vf_sync::Sync::connect(
             keys,
-            cabinet_id: cab.cabinet_id,
-            device_id: config.device_id,
-            device_name: std::env::var("COMPUTERNAME").unwrap_or_else(|_| "this PC".into()),
-        });
+            &config.sync.s3(),
+            &config.sync.app_key_sealed,
+            &cab.cabinet_id,
+            &config.device_id,
+        )
+    };
+    // The key this login remembered on this PC (Q-38); a stale one (sync set up again since)
+    // falls back to the passphrase.
+    if let Some(keys) = vf_sync::setup::recall(data, &cab.cabinet_id)
+        && let Ok(s) = connect(keys)
+    {
+        return Ok(s);
     }
     let pass = match std::env::var("VF_SYNC_PASSPHRASE") {
         Ok(p) => p,
@@ -273,15 +277,7 @@ fn sync_session(cabinet: &Path, data: &Path) -> Result<vf_sync::Sync> {
         }
     };
     let keys = vf_sync::setup::unlock_local(cabinet, &cab.cabinet_id, &pass)?;
-    let app_key = vf_sync::setup::open_secret(&keys, &config.sync.app_key_sealed)?;
-    let store = vf_sync::Remote::s3(&config.sync.s3(), &app_key)?;
-    Ok(vf_sync::Sync {
-        remote: vf_sync::Remote::new(store, &cab.cabinet_id),
-        keys,
-        cabinet_id: cab.cabinet_id,
-        device_id: config.device_id,
-        device_name: std::env::var("COMPUTERNAME").unwrap_or_else(|_| "this PC".into()),
-    })
+    Ok(connect(keys)?)
 }
 
 fn sync(

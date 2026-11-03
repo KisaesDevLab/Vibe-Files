@@ -7,6 +7,15 @@ use windows::Win32::Security::Cryptography::{
     CRYPT_INTEGER_BLOB, CRYPTPROTECT_UI_FORBIDDEN, CryptProtectData, CryptUnprotectData,
 };
 
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum DpapiError {
+    #[error("Windows could not seal the key for this login: {0}")]
+    Seal(String),
+    /// Another Windows login, another computer, other entropy, or a changed blob.
+    #[error("Windows could not open the remembered key (another login or computer?): {0}")]
+    Open(String),
+}
+
 fn blob(b: &[u8]) -> CRYPT_INTEGER_BLOB {
     CRYPT_INTEGER_BLOB {
         cbData: b.len() as u32,
@@ -26,7 +35,7 @@ unsafe fn take(out: CRYPT_INTEGER_BLOB) -> Vec<u8> {
 }
 
 /// Seals `data` for this Windows login on this computer.
-pub fn protect(data: &[u8], entropy: &[u8]) -> Result<Vec<u8>, String> {
+pub fn protect(data: &[u8], entropy: &[u8]) -> Result<Vec<u8>, DpapiError> {
     let (inp, ent) = (blob(data), blob(entropy));
     let mut out = CRYPT_INTEGER_BLOB::default();
     // SAFETY: the input blobs point at live slices for the duration of the call.
@@ -40,13 +49,13 @@ pub fn protect(data: &[u8], entropy: &[u8]) -> Result<Vec<u8>, String> {
             CRYPTPROTECT_UI_FORBIDDEN,
             &mut out,
         )
-        .map_err(|e| format!("DPAPI could not seal: {e}"))?;
+        .map_err(|e| DpapiError::Seal(e.to_string()))?;
         Ok(take(out))
     }
 }
 
 /// Opens a blob from [`protect`] (fails for another login, computer or `entropy`).
-pub fn unprotect(sealed: &[u8], entropy: &[u8]) -> Result<Vec<u8>, String> {
+pub fn unprotect(sealed: &[u8], entropy: &[u8]) -> Result<Vec<u8>, DpapiError> {
     let (inp, ent) = (blob(sealed), blob(entropy));
     let mut out = CRYPT_INTEGER_BLOB::default();
     // SAFETY: as in `protect`.
@@ -60,7 +69,7 @@ pub fn unprotect(sealed: &[u8], entropy: &[u8]) -> Result<Vec<u8>, String> {
             CRYPTPROTECT_UI_FORBIDDEN,
             &mut out,
         )
-        .map_err(|e| format!("DPAPI could not open: {e}"))?;
+        .map_err(|e| DpapiError::Open(e.to_string()))?;
         Ok(take(out))
     }
 }
@@ -74,6 +83,9 @@ mod tests {
         let sealed = protect(b"firm key bytes", b"cab-1").unwrap();
         assert!(!sealed.windows(4).any(|w| w == b"firm"));
         assert_eq!(unprotect(&sealed, b"cab-1").unwrap(), b"firm key bytes");
-        assert!(unprotect(&sealed, b"cab-2").is_err());
+        assert!(matches!(
+            unprotect(&sealed, b"cab-2"),
+            Err(DpapiError::Open(_))
+        ));
     }
 }

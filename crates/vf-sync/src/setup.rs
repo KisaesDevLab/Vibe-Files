@@ -46,6 +46,16 @@ fn unwrap(w: &WrappedKey, passphrase: &str, cabinet_id: &str) -> Result<Keys> {
 /// Sets up sync for the cabinet at `root`: joins the bucket's existing key when there is one
 /// (the passphrase must open it), else makes the key and writes both wrapped copies.
 pub fn init(root: &Path, remote: &Remote, passphrase: &str, params: KdfParams) -> Result<Keys> {
+    init_with_firm(root, remote, passphrase, params).map(|(_, k)| k)
+}
+
+/// [`init`], also returning the firm key itself (to remember it without a second Argon2 run).
+pub fn init_with_firm(
+    root: &Path,
+    remote: &Remote,
+    passphrase: &str,
+    params: KdfParams,
+) -> Result<([u8; 32], Keys)> {
     if passphrase.chars().count() < keys::MIN_PASSPHRASE_LEN {
         return Err(SyncError::Local(format!(
             "The sync passphrase needs at least {} characters.",
@@ -58,9 +68,13 @@ pub fn init(root: &Path, remote: &Remote, passphrase: &str, params: KdfParams) -
             .wrapped
             .get(KEY_ID)
             .ok_or_else(|| SyncError::Format("cabinet.json has no key".into()))?;
-        let k = unwrap(w, passphrase, &cab.cabinet_id)?;
+        let firm =
+            keys::unwrap_with_passphrase(w, passphrase, &cab.cabinet_id).map_err(|e| match e {
+                KeyError::WrongPassphrase => SyncError::WrongPassphrase,
+                e => SyncError::Local(e.to_string()),
+            })?;
         write_local(root, w)?;
-        return Ok(k);
+        return Ok((firm, Keys::derive(KEY_ID, &firm)));
     }
     let firm = keys::generate_key().map_err(|e| SyncError::Local(e.to_string()))?;
     let w = keys::wrap_with_passphrase(&firm, passphrase, &cab.cabinet_id, params)
@@ -79,7 +93,7 @@ pub fn init(root: &Path, remote: &Remote, passphrase: &str, params: KdfParams) -
         serde_json::to_vec_pretty(&b).expect("serializes"),
     )?;
     write_local(root, &w)?;
-    Ok(Keys::derive(KEY_ID, &firm))
+    Ok((firm, Keys::derive(KEY_ID, &firm)))
 }
 
 fn write_local(root: &Path, w: &WrappedKey) -> Result<()> {

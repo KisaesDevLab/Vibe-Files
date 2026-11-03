@@ -56,6 +56,12 @@ impl From<vf_core::db::SqlError> for SyncError {
     }
 }
 
+impl From<vf_security::dpapi::DpapiError> for SyncError {
+    fn from(e: vf_security::dpapi::DpapiError) -> Self {
+        SyncError::Local(e.to_string())
+    }
+}
+
 impl From<String> for SyncError {
     fn from(e: String) -> Self {
         SyncError::Local(e)
@@ -75,7 +81,32 @@ pub struct Sync {
     pub device_name: String,
 }
 
+/// This computer's name (`COMPUTERNAME`), for conflict copies and the manifest.
+pub fn computer_name() -> String {
+    std::env::var("COMPUTERNAME").unwrap_or_else(|_| "this PC".into())
+}
+
 impl Sync {
+    /// The session from the firm keys and this PC's bucket settings. The application key is
+    /// sealed with the keys, so this needs no network.
+    pub fn connect(
+        keys: Keys,
+        s3: &remote::S3Config,
+        app_key_sealed: &str,
+        cabinet_id: &str,
+        device_id: &str,
+    ) -> Result<Sync> {
+        let app_key = setup::open_secret(&keys, app_key_sealed)?;
+        let store = Remote::s3(s3, &app_key)?;
+        Ok(Sync {
+            remote: Remote::new(store, cabinet_id),
+            keys,
+            cabinet_id: cabinet_id.into(),
+            device_id: device_id.into(),
+            device_name: computer_name(),
+        })
+    }
+
     /// Opens the session with the sync passphrase (the wrapped key from `_Vibe/keys/sync.json`,
     /// else from the bucket).
     pub fn unlock(
