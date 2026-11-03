@@ -11,6 +11,7 @@ use egui_extras::{Column, TableBuilder};
 use vf_core::browse::{DocRow, Index, Scope, Snapshot};
 use vf_core::db::Connection;
 
+use crate::config::{Favorite, Prefs};
 use crate::ui::client_panel::{self, RelForm};
 use crate::ui::import_csv::{self, ImportDialog};
 use crate::ui::meta_editor::{self, MetaForm};
@@ -91,6 +92,11 @@ pub struct Browse {
     undo_requested: bool,
     /// The `Rename…` dialog, while open.
     pub rename: Option<RenameDialog>,
+    /// Pinned / Recent / Favorites, from this PC's config; `prefs_dirty` asks the app to save.
+    pub prefs: Prefs,
+    pub prefs_dirty: bool,
+    /// Counts for the Views section: Recent, Pinned, Needs doc type, Needs tax year, This week.
+    view_counts: [usize; 5],
 }
 
 impl Browse {
@@ -118,6 +124,9 @@ impl Browse {
             undo_tx: None,
             undo_requested: false,
             rename: None,
+            prefs: Prefs::default(),
+            prefs_dirty: false,
+            view_counts: [0; 5],
         };
         b.refresh();
         b
@@ -167,6 +176,13 @@ impl Browse {
                 folder: folder.clone(),
             },
             (Scope::Unassigned, _) => Scope::Unassigned,
+            (
+                s @ (Scope::NeedsDocType
+                | Scope::NeedsTaxYear
+                | Scope::ReceivedSince(_)
+                | Scope::Ids { .. }),
+                _,
+            ) => s.clone(),
             _ => Scope::Cabinet,
         };
         self.expanded.clear();
@@ -202,8 +218,23 @@ impl Browse {
         }
     }
 
-    /// Recomputes `visible` from scope, name filter and sort.
+    /// Recomputes `visible` from scope, name filter and sort, and the Views counts.
     pub fn refresh(&mut self) {
+        if let Scope::Ids { view, .. } = &self.scope {
+            // Pinned / Recent follow the lists as they change.
+            let view = view.clone();
+            self.scope = self.ids_scope(&view);
+        }
+        let views = [
+            self.ids_scope(VIEW_RECENT),
+            self.ids_scope(VIEW_PINNED),
+            Scope::NeedsDocType,
+            Scope::NeedsTaxYear,
+            Scope::ReceivedSince(week_start_utc()),
+        ];
+        for (i, v) in views.iter().enumerate() {
+            self.view_counts[i] = self.ix.docs_in(&self.snap, v).len();
+        }
         let needle = self.name_filter.trim().to_lowercase();
         let mut v = self.ix.docs_in(&self.snap, &self.scope);
         if !needle.is_empty() {
@@ -231,6 +262,94 @@ impl Browse {
         if self.cursor.is_some_and(|c| c >= self.visible.len()) {
             self.cursor = None;
             self.anchor = None;
+        }
+    }
+
+    fn ids_scope(&self, view: &str) -> Scope {
+        let ids = if view == VIEW_PINNED {
+            self.prefs.pinned.clone()
+        } else {
+            self.prefs.recent.clone()
+        };
+        Scope::Ids {
+            view: view.into(),
+            ids,
+        }
+    }
+
+    /// Sets the Pinned / Recent / Favorites lists (from config) and recounts.
+    pub fn set_prefs(&mut self, prefs: Prefs) {
+        self.prefs = prefs;
+        self.refresh();
+    }
+
+    fn prefs_changed(&mut self) {
+        self.prefs_dirty = true;
+        self.refresh();
+    }
+
+    /// The tree scope a favorite points at, when its client is still here.
+    fn favorite_scope(&self, f: &Favorite) -> Option<Scope> {
+        let ci = |id: &str| self.snap.clients.iter().position(|c| c.id == id);
+        Some(match f {
+            Favorite::Client { client } => Scope::Client(ci(client)?),
+            Favorite::Year { client, year } => Scope::Year {
+                client: ci(client)?,
+                year: *year,
+            },
+            Favorite::Folder {
+                client,
+                year,
+                folder,
+            } => Scope::Folder {
+                client: ci(client)?,
+                year: *year,
+                folder: folder.clone(),
+            },
+        })
+    }
+
+    /// The favorite for a tree scope (client, year or folder).
+    fn as_favorite(&self, s: &Scope) -> Option<Favorite> {
+        let id = |c: usize| self.snap.clients[c].id.clone();
+        Some(match s {
+            Scope::Client(c) => Favorite::Client { client: id(*c) },
+            Scope::Year { client, year } => Favorite::Year {
+                client: id(*client),
+                year: *year,
+            },
+            Scope::Folder {
+                client,
+                year,
+                folder,
+            } => Favorite::Folder {
+                client: id(*client),
+                year: *year,
+                folder: folder.clone(),
+            },
+            _ => return None,
+        })
+    }
+
+    fn favorite_label(&self, f: &Favorite) -> String {
+        let Some(s) = self.favorite_scope(f) else {
+            return "(client no longer in the cabinet)".into();
+        };
+        let name = |c: usize| self.snap.clients[c].name.clone();
+        match s {
+            Scope::Client(c) => name(c),
+            Scope::Year { client, year } => format!("{} · {}", name(client), year_label(year)),
+            Scope::Folder {
+                client,
+                year,
+                folder,
+            } => format!(
+                "{} · {} · {}",
+                name(client),
+                year_label(year),
+                folder_label(&folder)
+            ),
+            _ => String::new(),
         }
     }
 
@@ -330,6 +449,24 @@ impl Browse {
     }
 }
 
+pub const VIEW_RECENT: &str = "Recent";
+pub const VIEW_PINNED: &str = "Pinned";
+
+/// Monday 00:00 this week, local time, as RFC 3339 UTC ("Received this week").
+pub fn week_start_utc() -> String {
+    use chrono::{Datelike, Local, TimeZone};
+    let today = Local::now().date_naive();
+    let monday = today - chrono::Duration::days(today.weekday().num_days_from_monday() as i64);
+    let start = Local
+        .from_local_datetime(&monday.and_hms_opt(0, 0, 0).expect("midnight"))
+        .earliest()
+        .unwrap_or_else(Local::now);
+    start
+        .with_timezone(&chrono::Utc)
+        .format("%Y-%m-%dT%H:%M:%SZ")
+        .to_string()
+}
+
 fn status_rank(s: &str) -> u8 {
     match s {
         "received" => 0,
@@ -387,6 +524,8 @@ pub fn show(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env) {
             DialogOutcome::Open => {}
             DialogOutcome::Cancelled => b.rename = None,
             DialogOutcome::Renamed(n) => {
+                b.prefs.touch(&d.ids);
+                b.prefs_dirty = true;
                 b.rename = None;
                 b.reload(env.conn);
                 b.notice = Some(format!("Renamed {n} files (one transaction)."));
@@ -423,6 +562,56 @@ fn folderless_selected(b: &Browse) -> Option<String> {
 }
 
 fn tree(ui: &mut egui::Ui, b: &mut Browse) {
+    let mut pick: Option<Scope> = None;
+    let mut fav_add: Option<Favorite> = None;
+    let mut fav_remove: Option<usize> = None;
+    ui.label(RichText::new("VIEWS").small().color(theme::INK_MUTED));
+    let views = [
+        (VIEW_RECENT, b.ids_scope(VIEW_RECENT), false),
+        (VIEW_PINNED, b.ids_scope(VIEW_PINNED), false),
+        ("Needs doc type", Scope::NeedsDocType, true),
+        ("Needs tax year", Scope::NeedsTaxYear, true),
+        (
+            "Received this week",
+            Scope::ReceivedSince(week_start_utc()),
+            false,
+        ),
+    ];
+    for (i, (label, scope, warn)) in views.into_iter().enumerate() {
+        let sel = match (&b.scope, &scope) {
+            (Scope::Ids { view: a, .. }, Scope::Ids { view: c, .. }) => a == c,
+            (Scope::ReceivedSince(_), Scope::ReceivedSince(_)) => true,
+            (a, c) => a == c,
+        };
+        if row(ui, 0, warn, label, b.view_counts[i], sel).clicked() {
+            pick = Some(scope);
+        }
+    }
+    if !b.prefs.favorites.is_empty() {
+        ui.label(RichText::new("FAVORITES").small().color(theme::INK_MUTED));
+        for (i, f) in b.prefs.favorites.iter().enumerate() {
+            let target = b.favorite_scope(f);
+            let label = b.favorite_label(f);
+            let sel = target.as_ref() == Some(&b.scope);
+            let n = target
+                .as_ref()
+                .map(|t| b.ix.docs_in(&b.snap, t).len())
+                .unwrap_or(0);
+            let resp = row(ui, 0, false, &label, n, sel);
+            if resp.clicked()
+                && let Some(t) = target
+            {
+                pick = Some(t);
+            }
+            resp.context_menu(|ui| {
+                if ui.button("Remove from favorites").clicked() {
+                    fav_remove = Some(i);
+                    ui.close();
+                }
+            });
+        }
+    }
+    ui.add_space(8.0);
     ui.label(RichText::new("CABINET").small().color(theme::INK_MUTED));
     ui.add(
         egui::TextEdit::singleline(&mut b.client_filter)
@@ -444,19 +633,30 @@ fn tree(ui: &mut egui::Ui, b: &mut Browse) {
             .color(theme::INK_MUTED),
     );
     ui.add_space(4.0);
-    let mut pick: Option<Scope> = None;
     let mut toggle: Option<Node> = None;
+    // Right-click on a client, year or folder: add it to favorites.
+    let fav_menu = |resp: &egui::Response, scope: Scope, out: &mut Option<Scope>| {
+        resp.context_menu(|ui| {
+            if ui.button("Add to favorites").clicked() {
+                *out = Some(scope);
+                ui.close();
+            }
+        });
+    };
+    let mut fav_scope: Option<Scope> = None;
     egui::ScrollArea::vertical()
         .auto_shrink(false)
         .show(ui, |ui| {
             if row(
                 ui,
                 0,
-                None,
+                false,
                 "All documents",
                 b.snap.docs.len(),
                 b.scope == Scope::Cabinet,
-            ) {
+            )
+            .clicked()
+            {
                 pick = Some(Scope::Cabinet);
             }
             for &ci in &shown {
@@ -464,7 +664,7 @@ fn tree(ui: &mut egui::Ui, b: &mut Browse) {
                 let node = &b.ix.clients[ci];
                 let open = b.expanded.contains(&Node::Client(ci));
                 let label = format!("{}  {}", c.name, c.ext_id);
-                let (chev, clicked) = row_with_chevron(
+                let (chev, resp) = row_with_chevron(
                     ui,
                     0,
                     open,
@@ -472,10 +672,11 @@ fn tree(ui: &mut egui::Ui, b: &mut Browse) {
                     node.count,
                     b.scope == Scope::Client(ci),
                 );
+                fav_menu(&resp, Scope::Client(ci), &mut fav_scope);
                 if chev {
                     toggle = Some(Node::Client(ci));
                 }
-                if clicked {
+                if resp.clicked() {
                     pick = Some(Scope::Client(ci));
                     if !open {
                         toggle = Some(Node::Client(ci));
@@ -491,7 +692,7 @@ fn tree(ui: &mut egui::Ui, b: &mut Browse) {
                         client: ci,
                         year: y.year,
                     };
-                    let (chev, clicked) = row_with_chevron(
+                    let (chev, resp) = row_with_chevron(
                         ui,
                         1,
                         yopen,
@@ -499,10 +700,11 @@ fn tree(ui: &mut egui::Ui, b: &mut Browse) {
                         y.count,
                         b.scope == here,
                     );
+                    fav_menu(&resp, here.clone(), &mut fav_scope);
                     if chev {
                         toggle = Some(ynode.clone());
                     }
-                    if clicked {
+                    if resp.clicked() {
                         pick = Some(here);
                         if !yopen {
                             toggle = Some(ynode.clone());
@@ -517,7 +719,9 @@ fn tree(ui: &mut egui::Ui, b: &mut Browse) {
                             year: y.year,
                             folder: f.clone(),
                         };
-                        if row(ui, 2, None, folder_label(f), *n, b.scope == here) {
+                        let resp = row(ui, 2, false, folder_label(f), *n, b.scope == here);
+                        fav_menu(&resp, here.clone(), &mut fav_scope);
+                        if resp.clicked() {
                             pick = Some(here);
                         }
                     }
@@ -527,11 +731,12 @@ fn tree(ui: &mut egui::Ui, b: &mut Browse) {
                 && row(
                     ui,
                     0,
-                    None,
+                    false,
                     "Not in a client folder",
                     b.ix.unassigned,
                     b.scope == Scope::Unassigned,
                 )
+                .clicked()
             {
                 pick = Some(Scope::Unassigned);
             }
@@ -541,36 +746,50 @@ fn tree(ui: &mut egui::Ui, b: &mut Browse) {
     {
         b.expanded.insert(n);
     }
+    if let Some(s) = fav_scope {
+        fav_add = b.as_favorite(&s);
+    }
+    if let Some(f) = fav_add
+        && !b.prefs.favorites.contains(&f)
+    {
+        b.prefs.favorites.push(f);
+        b.prefs_changed();
+    }
+    if let Some(i) = fav_remove {
+        b.prefs.favorites.remove(i);
+        b.prefs_changed();
+    }
     if let Some(s) = pick {
         b.set_scope(s);
     }
 }
 
-/// A tree row without a chevron. Returns true when clicked.
+/// A tree row without a chevron. `warn` colors the count (a view that needs work).
 fn row(
     ui: &mut egui::Ui,
     depth: usize,
-    _chev: Option<bool>,
+    warn: bool,
     label: &str,
     count: usize,
     sel: bool,
-) -> bool {
+) -> egui::Response {
     ui.horizontal(|ui| {
         ui.add_space(depth as f32 * 16.0 + 18.0);
-        let clicked = ui.selectable_label(sel, label).clicked();
+        let resp = ui.selectable_label(sel, label);
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            ui.label(
-                RichText::new(count.to_string())
-                    .small()
-                    .color(theme::INK_MUTED),
-            );
+            let c = if warn && count > 0 {
+                widgets::rgb(0xB7791F)
+            } else {
+                theme::INK_MUTED
+            };
+            ui.label(RichText::new(count.to_string()).small().color(c));
         });
-        clicked
+        resp
     })
     .inner
 }
 
-/// A tree row with an expand chevron. Returns (chevron clicked, label clicked).
+/// A tree row with an expand chevron. Returns (chevron clicked, label response).
 fn row_with_chevron(
     ui: &mut egui::Ui,
     depth: usize,
@@ -578,7 +797,7 @@ fn row_with_chevron(
     label: &str,
     count: usize,
     sel: bool,
-) -> (bool, bool) {
+) -> (bool, egui::Response) {
     ui.horizontal(|ui| {
         ui.add_space(depth as f32 * 16.0);
         let (rect, resp) = ui.allocate_exact_size(egui::vec2(14.0, 14.0), Sense::click());
@@ -601,7 +820,7 @@ fn row_with_chevron(
             theme::INK_MUTED,
             egui::Stroke::NONE,
         ));
-        let clicked = ui.selectable_label(sel, label).clicked();
+        let label = ui.selectable_label(sel, label);
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             ui.label(
                 RichText::new(count.to_string())
@@ -609,7 +828,7 @@ fn row_with_chevron(
                     .color(theme::INK_MUTED),
             );
         });
-        (resp.clicked(), clicked)
+        (resp.clicked(), label)
     })
     .inner
 }
@@ -622,6 +841,10 @@ fn breadcrumb(b: &Browse) -> String {
     match &b.scope {
         Scope::Cabinet => "Cabinet".into(),
         Scope::Unassigned => "Cabinet / Not in a client folder".into(),
+        Scope::NeedsDocType => "Views / Needs doc type".into(),
+        Scope::NeedsTaxYear => "Views / Needs tax year".into(),
+        Scope::ReceivedSince(_) => "Views / Received this week".into(),
+        Scope::Ids { view, .. } => format!("Views / {view}"),
         Scope::Client(c) => format!("Cabinet / {}", client(*c)),
         Scope::Year { client: c, year } => {
             format!("Cabinet / {} / {}", client(*c), year_label(*year))
@@ -682,6 +905,22 @@ fn grid(ui: &mut egui::Ui, b: &mut Browse, conn: &Connection) {
                 .map(|&i| b.snap.docs[i].id.clone())
                 .collect();
             b.rename = Some(RenameDialog::new(ids));
+        }
+        let ids: Vec<String> = b
+            .selected
+            .iter()
+            .map(|&i| b.snap.docs[i].id.clone())
+            .collect();
+        let all_pinned = !ids.is_empty() && ids.iter().all(|i| b.prefs.pinned.contains(i));
+        let pin = ui
+            .add_enabled(
+                !ids.is_empty(),
+                egui::Button::new(if all_pinned { "Unpin" } else { "Pin" }),
+            )
+            .on_hover_text("Pinned documents are listed under Views on this PC.");
+        if pin.clicked() {
+            b.prefs.toggle_pins(&ids);
+            b.prefs_changed();
         }
     });
     ui.add_space(6.0);
@@ -930,6 +1169,8 @@ fn inspector(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env) {
         let edit = b.meta_form.to_edit();
         match vf_fs::docmeta::edit(env.conn, env.root, &ids, &edit, env.device_id) {
             Ok((_, n)) => {
+                b.prefs.touch(&ids);
+                b.prefs_dirty = true;
                 b.reload(env.conn);
                 b.notice = Some(format!("Updated {n} documents (one transaction)."));
                 b.meta_form.for_selection.clear();
@@ -1474,6 +1715,72 @@ mod tests {
             h.state().root.join(&rels[0]).exists(),
             "file back under its old name"
         );
+    }
+
+    /// P01 step 7: Views (Needs doc type / tax year, Received this week, Pinned) and favorites.
+    #[test]
+    fn views_pins_and_favorites() {
+        let mut h = harness(2, 8);
+        {
+            let s = h.state_mut();
+            // One document with no year outside a Permanent folder; three filed just now.
+            s.conn
+                .execute(
+                    "UPDATE document SET tax_year = NULL WHERE id = 'c0000-1'",
+                    [],
+                )
+                .unwrap();
+            s.conn
+                .execute(
+                    "UPDATE document SET filed_at = ?1 WHERE id IN ('c0001-1', 'c0001-2', 'c0001-3')",
+                    [vf_core::now_rfc3339()],
+                )
+                .unwrap();
+            s.b.reload(&s.conn);
+        }
+        h.run();
+        click(&mut h, "Needs doc type");
+        assert_eq!(h.state().b.visible.len(), 16, "no doc types yet");
+        click(&mut h, "Needs tax year");
+        assert_eq!(h.state().b.visible.len(), 1);
+        click(&mut h, "Received this week");
+        assert_eq!(h.state().b.visible.len(), 3);
+
+        // Pin two, see them under Pinned, unpin.
+        click(&mut h, "All documents");
+        {
+            let b = &mut h.state_mut().b;
+            b.selected = b.visible[..2].iter().copied().collect();
+        }
+        h.run();
+        click(&mut h, "Pin");
+        assert_eq!(h.state().b.prefs.pinned.len(), 2);
+        click(&mut h, "Pinned");
+        assert_eq!(h.state().b.visible.len(), 2);
+        {
+            let b = &mut h.state_mut().b;
+            b.selected = b.visible.iter().copied().collect();
+        }
+        h.run();
+        click(&mut h, "Unpin");
+        assert!(h.state().b.prefs.pinned.is_empty());
+        assert_eq!(h.state().b.visible.len(), 0, "Pinned view follows the list");
+
+        // Right-click a client: add to favorites; it appears under FAVORITES and opens it.
+        h.get_by_role_and_label(Role::Button, "Client 0001  1001")
+            .click_secondary();
+        h.run();
+        click(&mut h, "Add to favorites");
+        assert_eq!(h.state().b.prefs.favorites.len(), 1);
+        assert!(h.state().b.prefs_dirty, "asks the app to save config");
+        click(&mut h, "All documents");
+        click(&mut h, "Client 0001");
+        assert_eq!(h.state().b.scope, Scope::Client(1));
+        h.get_by_role_and_label(Role::Button, "Client 0001")
+            .click_secondary();
+        h.run();
+        click(&mut h, "Remove from favorites");
+        assert!(h.state().b.prefs.favorites.is_empty());
     }
 
     /// P01 done-when: tree expansion under 100 ms at 5,000 documents (50 clients x 100).

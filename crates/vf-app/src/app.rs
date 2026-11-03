@@ -94,6 +94,7 @@ impl VibeFilesApp {
                 Config {
                     device_id: vf_core::new_id(),
                     last_cabinet: None,
+                    prefs: Default::default(),
                 },
                 Some(format!("Settings could not be read: {e:#}")),
             ),
@@ -180,6 +181,7 @@ impl VibeFilesApp {
                 // The cabinet is open either way; a settings write failure only loses "last".
                 let _ = config::save(&self.data, &self.config);
                 let mut browse = Browse::load(&opened.conn);
+                browse.set_prefs(self.config.prefs.clone());
                 browse.notice = opened.rebuild.as_ref().map(|r| format!("Indexed: {r}"));
                 self.screen = Screen::Open(Box::new(OpenCabinet {
                     opened,
@@ -263,6 +265,14 @@ impl eframe::App for VibeFilesApp {
                         ui.label(self.tab.placeholder());
                     }
                 });
+            }
+        }
+        if let Screen::Open(o) = &mut self.screen
+            && std::mem::take(&mut o.browse.prefs_dirty)
+        {
+            self.config.prefs = o.browse.prefs.clone();
+            if let Err(e) = config::save(&self.data, &self.config) {
+                o.browse.error = Some(format!("Pinned/Favorites could not be saved: {e:#}"));
             }
         }
         if let Some(mode) = submit {
@@ -372,6 +382,13 @@ mod tests {
             )
             .unwrap();
         assert_eq!(n as usize, vf_fs::doctypes::SEED.len());
+        // Pins made in Browse are saved to this PC's config.toml.
+        if let Screen::Open(o) = &mut h.state_mut().screen {
+            o.browse.prefs.pinned.push("doc-1".into());
+            o.browse.prefs_dirty = true;
+        }
+        h.run();
+        assert_eq!(config::load(&data).unwrap().prefs.pinned, ["doc-1"]);
         assert!(data.join(session::CATALOG_FILE).is_file());
         assert_eq!(
             config::load(&data).unwrap().last_cabinet.as_deref(),

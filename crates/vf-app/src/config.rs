@@ -16,6 +16,68 @@ pub struct Config {
     /// The cabinet opened last; the wizard offers it first.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_cabinet: Option<PathBuf>,
+    /// Browse views kept on this PC until users exist (QUESTIONS Q-23; per-user rows in P06).
+    #[serde(default)]
+    pub prefs: Prefs,
+}
+
+/// Pinned documents, recent documents and favorite places in the tree.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Prefs {
+    /// Document ids.
+    #[serde(default)]
+    pub pinned: Vec<String>,
+    /// Document ids, newest first, at most [`RECENT_MAX`].
+    #[serde(default)]
+    pub recent: Vec<String>,
+    #[serde(default)]
+    pub favorites: Vec<Favorite>,
+}
+
+pub const RECENT_MAX: usize = 50;
+
+/// A place in the Browse tree. `client` is the client uuid; `year: None` is Permanent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Favorite {
+    Client {
+        client: String,
+    },
+    Year {
+        client: String,
+        year: Option<i32>,
+    },
+    Folder {
+        client: String,
+        year: Option<i32>,
+        folder: String,
+    },
+}
+
+impl Prefs {
+    /// Puts `ids` at the front of Recent (newest first, no repeats, capped).
+    pub fn touch(&mut self, ids: &[String]) {
+        self.recent.retain(|r| !ids.contains(r));
+        let mut v: Vec<String> = ids.iter().take(RECENT_MAX).cloned().collect();
+        v.append(&mut self.recent);
+        v.truncate(RECENT_MAX);
+        self.recent = v;
+    }
+
+    /// Pins `ids`, or unpins them when all are pinned already. Returns whether they are pinned now.
+    pub fn toggle_pins(&mut self, ids: &[String]) -> bool {
+        if ids.iter().all(|i| self.pinned.contains(i)) {
+            self.pinned.retain(|p| !ids.contains(p));
+            false
+        } else {
+            for i in ids {
+                if !self.pinned.contains(i) {
+                    self.pinned.push(i.clone());
+                }
+            }
+            true
+        }
+    }
 }
 
 /// Reads `<data>/config.toml`, creating `<data>` and the file on first run.
@@ -35,6 +97,7 @@ pub fn load(data: &Path) -> Result<Config> {
             let c = Config {
                 device_id,
                 last_cabinet: None,
+                prefs: Prefs::default(),
             };
             save(data, &c)?;
             let _ = std::fs::remove_file(legacy);
@@ -72,6 +135,45 @@ mod tests {
         std::fs::write(tmp.path().join(LEGACY_DEVICE_ID), "0192-legacy\n").unwrap();
         assert_eq!(load(tmp.path()).unwrap().device_id, "0192-legacy");
         assert!(!tmp.path().join(LEGACY_DEVICE_ID).exists());
+    }
+
+    #[test]
+    fn prefs_round_trip_and_rules() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut c = load(tmp.path()).unwrap();
+        c.prefs.favorites = vec![
+            Favorite::Client {
+                client: "c1".into(),
+            },
+            Favorite::Year {
+                client: "c1".into(),
+                year: None,
+            },
+            Favorite::Folder {
+                client: "c1".into(),
+                year: Some(2025),
+                folder: "Income Tax".into(),
+            },
+        ];
+        assert!(c.prefs.toggle_pins(&["d1".into(), "d2".into()]));
+        assert!(
+            c.prefs.toggle_pins(&["d2".into(), "d3".into()]),
+            "not all pinned: pin"
+        );
+        assert_eq!(c.prefs.pinned, ["d1", "d2", "d3"]);
+        assert!(
+            !c.prefs.toggle_pins(&["d1".into(), "d3".into()]),
+            "all pinned: unpin"
+        );
+        assert_eq!(c.prefs.pinned, ["d2"]);
+        c.prefs.touch(&["a".into(), "b".into()]);
+        c.prefs.touch(&["b".into(), "c".into()]);
+        assert_eq!(c.prefs.recent, ["b", "c", "a"]);
+        let many: Vec<String> = (0..80).map(|i| i.to_string()).collect();
+        c.prefs.touch(&many);
+        assert_eq!(c.prefs.recent.len(), RECENT_MAX);
+        save(tmp.path(), &c).unwrap();
+        assert_eq!(load(tmp.path()).unwrap(), c);
     }
 
     #[test]

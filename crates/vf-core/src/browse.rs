@@ -45,6 +45,8 @@ pub struct DocRow {
     pub status: String,
     pub source: Option<String>,
     pub filed_by: Option<String>,
+    /// When it entered the cabinet (RFC 3339 UTC).
+    pub filed_at: String,
     pub updated_at: String,
     pub locked_by: Option<String>,
     pub versions: i64,
@@ -91,7 +93,8 @@ pub fn load(conn: &Connection) -> Result<Snapshot> {
                 (SELECT count(*) FROM version v WHERE v.doc_id = d.id),
                 d.doc_type_id,
                 (SELECT group_concat(tag, char(31)) FROM
-                   (SELECT tag FROM document_tag g WHERE g.doc_id = d.id ORDER BY tag COLLATE NOCASE))
+                   (SELECT tag FROM document_tag g WHERE g.doc_id = d.id ORDER BY tag COLLATE NOCASE)),
+                d.filed_at
          FROM document d
          LEFT JOIN doc_type t ON t.id = d.doc_type_id
          LEFT JOIN lock l ON l.doc_id = d.id
@@ -119,6 +122,7 @@ pub fn load(conn: &Connection) -> Result<Snapshot> {
                     .get::<_, Option<String>>(14)?
                     .map(|t| t.split('\u{1f}').map(str::to_owned).collect())
                     .unwrap_or_default(),
+                filed_at: r.get(15)?,
             })
         })?
         .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -167,6 +171,17 @@ pub enum Scope {
     },
     /// Documents with no client (outside any bound client folder).
     Unassigned,
+    /// No doc type yet.
+    NeedsDocType,
+    /// No tax year, and not under a `Permanent` folder (where no year is expected).
+    NeedsTaxYear,
+    /// Filed at or after this RFC 3339 UTC time.
+    ReceivedSince(String),
+    /// A named list of document ids (Pinned, Recent).
+    Ids {
+        view: String,
+        ids: Vec<String>,
+    },
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -252,6 +267,10 @@ impl Index {
 
     /// Indices into `Snapshot::docs` inside `scope`, in path order.
     pub fn docs_in(&self, s: &Snapshot, scope: &Scope) -> Vec<usize> {
+        let ids: std::collections::HashSet<&str> = match scope {
+            Scope::Ids { ids, .. } => ids.iter().map(String::as_str).collect(),
+            _ => Default::default(),
+        };
         (0..s.docs.len())
             .filter(|&i| {
                 let (ci, folder) = &self.place[i];
@@ -266,6 +285,16 @@ impl Index {
                         year,
                         folder: f,
                     } => *ci == Some(*client) && d.tax_year == *year && folder == f,
+                    Scope::NeedsDocType => d.doc_type_id.is_none(),
+                    Scope::NeedsTaxYear => {
+                        let permanent = |p: &str| {
+                            p.split('/')
+                                .any(|seg| seg.eq_ignore_ascii_case("permanent"))
+                        };
+                        d.tax_year.is_none() && !permanent(folder) && !permanent(&d.rel_path)
+                    }
+                    Scope::ReceivedSince(t) => d.filed_at.as_str() >= t.as_str(),
+                    Scope::Ids { .. } => ids.contains(d.id.as_str()),
                 }
             })
             .collect()
@@ -325,6 +354,7 @@ mod tests {
             status: "received".into(),
             source: None,
             filed_by: None,
+            filed_at: "2026-11-02T00:00:00Z".into(),
             updated_at: "2026-11-02T00:00:00Z".into(),
             locked_by: None,
             versions: 0,
@@ -401,6 +431,34 @@ mod tests {
             ["b.pdf", "c.pdf"]
         );
         assert_eq!(names(Scope::Unassigned), ["h.pdf"]);
+    }
+
+    #[test]
+    fn view_scopes() {
+        let mut s = snap();
+        s.docs[0].doc_type_id = Some("w2".into());
+        s.docs[1].filed_at = "2026-11-05T09:00:00Z".into();
+        let ix = Index::build(&s);
+        let names = |sc: Scope| -> Vec<String> {
+            ix.docs_in(&s, &sc)
+                .into_iter()
+                .map(|i| s.docs[i].name().to_owned())
+                .collect()
+        };
+        assert_eq!(names(Scope::NeedsDocType).len(), 7);
+        // f.pdf (client folder root) and h.pdf (loose) have no year and are not Permanent.
+        assert_eq!(names(Scope::NeedsTaxYear), ["f.pdf", "h.pdf"]);
+        assert_eq!(
+            names(Scope::ReceivedSince("2026-11-03T00:00:00Z".into())),
+            ["b.pdf"]
+        );
+        assert_eq!(
+            names(Scope::Ids {
+                view: "Pinned".into(),
+                ids: vec!["Acme (1)/Income Tax/2025/c.pdf".into(), "gone".into()],
+            }),
+            ["c.pdf"]
+        );
     }
 
     #[test]
