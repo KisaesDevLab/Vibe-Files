@@ -15,6 +15,7 @@ use crate::ui::client_panel::{self, RelForm};
 use crate::ui::import_csv::{self, ImportDialog};
 use crate::ui::meta_editor::{self, MetaForm};
 use crate::ui::new_client::{self, NewClientDialog, Outcome};
+use crate::ui::rename::{self as rename_ui, DialogOutcome, RenameDialog};
 use crate::ui::{theme, widgets};
 
 /// What Browse needs from the open cabinet to change things.
@@ -88,6 +89,8 @@ pub struct Browse {
     undo_tx: Option<Option<String>>,
     /// Ctrl+Z pressed outside a text field.
     undo_requested: bool,
+    /// The `Rename…` dialog, while open.
+    pub rename: Option<RenameDialog>,
 }
 
 impl Browse {
@@ -114,6 +117,7 @@ impl Browse {
             meta_form: MetaForm::default(),
             undo_tx: None,
             undo_requested: false,
+            rename: None,
         };
         b.refresh();
         b
@@ -375,6 +379,17 @@ pub fn show(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env) {
                     b.expanded.insert(Node::Client(c));
                 }
                 b.notice = Some(format!("Created {folder}."));
+            }
+        }
+    }
+    if let Some(d) = &mut b.rename {
+        match rename_ui::show(ui.ctx(), d, env) {
+            DialogOutcome::Open => {}
+            DialogOutcome::Cancelled => b.rename = None,
+            DialogOutcome::Renamed(n) => {
+                b.rename = None;
+                b.reload(env.conn);
+                b.notice = Some(format!("Renamed {n} files (one transaction)."));
             }
         }
     }
@@ -656,6 +671,18 @@ fn grid(ui: &mut egui::Ui, b: &mut Browse, conn: &Connection) {
         if ui.button("Import clients CSV…").clicked() {
             b.import = Some(ImportDialog::default());
         }
+        ui.separator();
+        let rename = ui
+            .add_enabled(!b.selected.is_empty(), egui::Button::new("Rename…"))
+            .on_disabled_hover_text("Select the documents to rename first.");
+        if rename.clicked() {
+            let ids = b
+                .selected
+                .iter()
+                .map(|&i| b.snap.docs[i].id.clone())
+                .collect();
+            b.rename = Some(RenameDialog::new(ids));
+        }
     });
     ui.add_space(6.0);
     ui.horizontal(|ui| {
@@ -855,7 +882,7 @@ fn inspector(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env) {
             let can = matches!(b.undo_tx, Some(Some(_)));
             if ui
                 .add_enabled(can, egui::Button::new("Undo last"))
-                .on_hover_text("Undo the last metadata change made on this PC (Ctrl+Z)")
+                .on_hover_text("Undo the last edit or rename made on this PC (Ctrl+Z)")
                 .clicked()
             {
                 undo = true;
@@ -866,7 +893,7 @@ fn inspector(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env) {
         match vf_fs::docmeta::undo(env.conn, env.root, &tx, env.device_id) {
             Ok(()) => {
                 b.reload(env.conn);
-                b.notice = Some("Undid the last metadata change.".into());
+                b.notice = Some("Undid the last change.".into());
             }
             Err(e) => b.error = Some(format!("Undo failed: {e}")),
         }
@@ -1395,6 +1422,58 @@ mod tests {
         );
         click(&mut h, "Undo last");
         assert_eq!(finals(&h), 0, "{:?}", h.state().b.error);
+    }
+
+    /// P01 step 6: `Rename…` previews Filer-template names, renames in one transaction, undoes.
+    #[test]
+    fn rename_dialog_previews_renames_and_undoes() {
+        let mut h = harness(1, 3);
+        let rels: Vec<String> = {
+            let s = h.state_mut();
+            for d in &s.b.snap.docs {
+                let p = s.root.join(&d.rel_path);
+                std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+                std::fs::write(&p, &d.id).unwrap();
+            }
+            s.b.selected = s.b.visible.iter().copied().collect();
+            s.b.snap.docs.iter().map(|d| d.rel_path.clone()).collect()
+        };
+        h.run();
+        click(&mut h, "Rename…");
+        h.get_by_label("File name template").click();
+        h.step();
+        h.key_press_modifiers(egui::Modifiers::COMMAND, Key::A);
+        h.get_by_label("File name template")
+            .type_text("Acme {Rest}.{Ext}");
+        h.run();
+        assert!(h.query_by_label("Acme doc 000.pdf").is_some(), "preview");
+        assert!(
+            std::path::Path::new(&h.state().root.join(&rels[0])).exists(),
+            "not yet"
+        );
+        click(&mut h, "Rename 3 files (one transaction)");
+        assert_eq!(
+            h.state().b.notice.as_deref(),
+            Some("Renamed 3 files (one transaction)."),
+            "{:?}",
+            h.state().b.rename.as_ref().and_then(|d| d.error.clone())
+        );
+        let renamed = |h: &Harness<'static, State>| {
+            h.state()
+                .b
+                .snap
+                .docs
+                .iter()
+                .filter(|d| d.name().starts_with("Acme "))
+                .count()
+        };
+        assert_eq!(renamed(&h), 3);
+        click(&mut h, "Undo last");
+        assert_eq!(renamed(&h), 0, "{:?}", h.state().b.error);
+        assert!(
+            h.state().root.join(&rels[0]).exists(),
+            "file back under its old name"
+        );
     }
 
     /// P01 done-when: tree expansion under 100 ms at 5,000 documents (50 clients x 100).

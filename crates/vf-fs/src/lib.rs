@@ -8,6 +8,7 @@ pub mod doctypes;
 pub mod fileops;
 pub mod newclient;
 pub mod rebuild;
+pub mod rename;
 
 #[cfg(test)]
 mod tests {

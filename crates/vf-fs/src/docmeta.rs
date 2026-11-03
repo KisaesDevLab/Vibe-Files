@@ -200,7 +200,8 @@ fn file_for(root: &Path, m: &Meta) -> (PathBuf, String) {
     (root.join(VIBE_DIR).join(FILE), m.rel_path.clone())
 }
 
-fn record(root: &Path, m: &Meta, ts: &str, device: &str) -> (PathBuf, String) {
+/// The `docmeta.jsonl` file for `m` and the line recording its current metadata.
+pub fn record_line(root: &Path, m: &Meta, ts: &str, device: &str) -> (PathBuf, String) {
     let (file, path) = file_for(root, m);
     let r = Record {
         v: 1,
@@ -283,8 +284,8 @@ pub fn edit(
         }
         // Undo runs its statements newest first: push them in reverse.
         undo.extend(set_stmts(&old, device_id, &now).into_iter().rev());
-        let (file, line) = record(root, &new, &now, device_id);
-        let (_, undo_line) = record(root, &old, &now, device_id);
+        let (file, line) = record_line(root, &new, &now, device_id);
+        let (_, undo_line) = record_line(root, &old, &now, device_id);
         let e = files.entry(file).or_default();
         e.0.push(line);
         e.1.push(undo_line);
@@ -332,13 +333,14 @@ pub fn edit(
     Ok((c.tx_id, changed))
 }
 
-/// The newest metadata edit by this device that is not undone yet: (tx id, ts).
+/// The newest Browse change (metadata edit or rename) by this device that is not undone yet:
+/// (tx id, label).
 pub fn last_undoable(conn: &Connection, device_id: &str) -> Option<(String, String)> {
     conn.query_row(
-        "SELECT tx_id, ts FROM undo_record
-         WHERE label = ?1 AND device_id = ?2 AND undone = 0
+        "SELECT tx_id, label FROM undo_record
+         WHERE label IN (?1, ?3) AND device_id = ?2 AND undone = 0
          ORDER BY ts DESC, rowid DESC LIMIT 1",
-        [LABEL, device_id],
+        [LABEL, device_id, crate::rename::LABEL],
         |r| Ok((r.get(0)?, r.get(1)?)),
     )
     .ok()
