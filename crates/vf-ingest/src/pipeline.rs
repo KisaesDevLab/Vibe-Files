@@ -291,15 +291,18 @@ fn capture_name(root: &Path, lookup: &Lookup, name: &str) -> (String, Hint, Stri
         .get(&p.client_id)
         .cloned()
         .unwrap_or_else(|| "Client".into());
-    // `<year> <profile> <doc type or document name>`: Filer's rules match words in it (the
-    // firm's rules send "UltraTax" to `Income Tax/{Year}`; the tax rules match "Return",
-    // "Organizer", …).
+    // `<year> <profile> <doc type> <document name> <recipient>`: Filer's rules match words in
+    // it (the firm's rules send "UltraTax" to `Income Tax/{Year}`; the tax rules match
+    // "Return", "Organizer", …). The program's own document name stays so a government copy,
+    // a preparer copy and the client's copy keep different names.
     let rest: Vec<String> = p
         .year
         .map(|y| y.to_string())
         .into_iter()
         .chain([p.profile.clone()])
-        .chain(p.doc_type.clone().or(p.doc.clone()))
+        .chain(p.doc_type.clone())
+        .chain(p.doc.as_deref().map(words))
+        .chain(p.recipient.clone())
         .collect();
     let rest = if rest.is_empty() {
         "print".to_string()
@@ -323,6 +326,28 @@ fn capture_name(root: &Path, lookup: &Lookup, name: &str) -> (String, Hint, Stri
         p.doc_type.map(|t| format!(" · {t}")).unwrap_or_default()
     );
     (file, h, note)
+}
+
+/// A program's document name as words: `1120S_GovernmentCopyK1Package` →
+/// `1120S Government Copy K1 Package`.
+pub fn words(s: &str) -> String {
+    let c: Vec<char> = s.chars().collect();
+    let mut out = String::new();
+    for (i, &ch) in c.iter().enumerate() {
+        if ch == '_' {
+            out.push(' ');
+            continue;
+        }
+        if i > 0 && ch.is_uppercase() {
+            let prev = c[i - 1];
+            let next_lower = c.get(i + 1).is_some_and(|n| n.is_lowercase());
+            if prev.is_lowercase() || (prev.is_ascii_digit() && next_lower) {
+                out.push(' ');
+            }
+        }
+        out.push(ch);
+    }
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// A file-name part without characters Windows refuses.

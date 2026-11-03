@@ -31,7 +31,7 @@ fn ultratax_print_lands_as_a_federal_return_copy() {
     vf_fs::doctypes::seed_if_missing(&root).unwrap();
     vf_fs::doctypes::sync(&mut conn, &root, "dev", "seed").unwrap();
     let csv = t.path().join("clients.csv");
-    std::fs::write(&csv, "ID,Name\n1042,Anderson Farms LLC\n").unwrap();
+    std::fs::write(&csv, "ID,Name\nANDE1042,Anderson Farms LLC\n").unwrap();
     let map = filer_core::config::ColumnMap {
         id: Some("ID".into()),
         name: Some("Name".into()),
@@ -42,7 +42,8 @@ fn ultratax_print_lands_as_a_federal_return_copy() {
     let (inbox, capture) = (t.path().join("inbox"), t.path().join("capture"));
     std::fs::create_dir_all(&inbox).unwrap();
     std::fs::create_dir_all(&capture).unwrap();
-    let printed = capture.join("1042_2025_Client Copy.pdf");
+    // The office's UltraTax shape (owner, 2026-11-03), with an invented client.
+    let printed = capture.join("Anderson Farms LLC_2025_1040_GovernmentCopyTaxReturn_ANDE1042.pdf");
     filer_pdf::pdf::write_test_pdf(&printed, &["Form 1040 2025 synthetic return"]);
 
     let ctx = Context {
@@ -52,7 +53,7 @@ fn ultratax_print_lands_as_a_federal_return_copy() {
         pdfium: None,
     };
     let done = pipeline::process(&ctx, &printed, Origin::PrintCapture).unwrap();
-    let name = "Anderson Farms LLC_1042_2025 UltraTax CS Return copy — federal.pdf";
+    let name = "Anderson Farms LLC_ANDE1042_2025 UltraTax CS Return copy — federal 1040 Government Copy Tax Return.pdf";
     assert_eq!(done.delivered[0].path, inbox.join(name));
     assert_eq!(
         done.delivered[0].note,
@@ -69,7 +70,8 @@ fn ultratax_print_lands_as_a_federal_return_copy() {
     let master = vf_fs::clients::master_dir(&root);
     let (rules, _, _) = filer_core::rules::load_or_seed(&master);
     let compiled = filer_core::rules::CompiledRules::new(rules.active_rules()).unwrap();
-    let re = filer_core::parse::filename_regex(filer_core::parse::DEFAULT_ID_PATTERN).unwrap();
+    // UltraTax IDs here are letters + digits: Filer's ID pattern is set to match them.
+    let re = filer_core::parse::filename_regex(r"[A-Z]{4}\d{4}").unwrap();
     let parsed = filer_core::parse::parse_filename(name, &re, 2026);
     let client = list
         .match_by_id(parsed.id.as_deref().unwrap())
@@ -78,7 +80,7 @@ fn ultratax_print_lands_as_a_federal_return_copy() {
     let hit = filer_core::rules::evaluate(&compiled, &parsed, &client, parsed.year);
     assert_eq!(hit.rule_name, "UltraTax");
     let rendered = hit.outcome.unwrap();
-    let folder = root.join("Anderson Farms LLC (1042)");
+    let folder = root.join("Anderson Farms LLC (ANDE1042)");
     let dest = folder.join(&rendered.dest_rel).join(&rendered.filename);
     let rep = run_commit(
         &CommitInput {
@@ -121,7 +123,7 @@ fn ultratax_print_lands_as_a_federal_return_copy() {
         .unwrap();
     assert_eq!(doc_type, "Return copy — federal");
     assert_eq!((year, source.as_str()), (2025, "firm"));
-    assert!(rel.starts_with("Anderson Farms LLC (1042)/"), "{rel}");
+    assert!(rel.starts_with("Anderson Farms LLC (ANDE1042)/"), "{rel}");
     assert!(rel.contains("/Income Tax/2025/"), "year folder: {rel}");
     let _ = Path::new(&rel);
 }
