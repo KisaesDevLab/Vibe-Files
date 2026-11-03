@@ -132,6 +132,30 @@ pub struct Browse {
     pub cover: Option<CoverSheetDialog>,
     /// Where cover sheets are written (`<data>/sheets`).
     pub sheets_dir: std::path::PathBuf,
+    /// B2 sync state for the `Sync to B2 ▾` menu and the client's pill (P11 step 10); `None`
+    /// when sync is not set up or not unlocked: both are hidden.
+    pub sync: Option<SyncView>,
+    /// A sync action chosen here (taken by the app).
+    pub sync_request: Option<SyncRequest>,
+}
+
+/// What Browse shows of sync.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SyncView {
+    /// Pending documents per client id.
+    pub pending: std::collections::BTreeMap<String, usize>,
+    pub conflicts: usize,
+    /// The client a running push or pull is for (`Some("")` = all).
+    pub running_for: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum SyncRequest {
+    Push(String),
+    Pull,
+    Verify,
+    /// Open the Sync tab, filtered to this client.
+    Show(Option<String>),
 }
 
 /// How Browse hands files to Windows ([`shell::run`], or a recorder in tests).
@@ -194,6 +218,8 @@ impl Browse {
             file_request: None,
             cover: None,
             sheets_dir: std::path::PathBuf::new(),
+            sync: None,
+            sync_request: None,
         };
         b.recount();
         b.refresh();
@@ -1108,6 +1134,91 @@ fn tree_row(
     .inner
 }
 
+/// `Sync to B2 ▾` (P11 step 10), scoped to the current client. Hidden without sync.
+fn sync_menu(ui: &mut egui::Ui, b: &mut Browse) {
+    let Some(v) = &b.sync else { return };
+    let client = b.scope_client().map(|c| b.snap.clients[c].id.clone());
+    let idle = v.running_for.is_none();
+    let mut req = None;
+    ui.separator();
+    // `Sync to B2 ▾`: the fonts have no ▾, so it is painted (as the tree's chevrons are).
+    let menu = ui.menu_button("Sync to B2    ", |ui| {
+        if ui
+            .add_enabled(
+                idle && client.is_some(),
+                egui::Button::new("Push this client now"),
+            )
+            .on_disabled_hover_text("Choose a client in the tree (or wait for the running sync).")
+            .clicked()
+        {
+            req = client.clone().map(SyncRequest::Push);
+            ui.close();
+        }
+        if ui
+            .add_enabled(idle, egui::Button::new("Pull latest"))
+            .clicked()
+        {
+            req = Some(SyncRequest::Pull);
+            ui.close();
+        }
+        if ui
+            .add_enabled(idle, egui::Button::new("Verify (sampled)"))
+            .clicked()
+        {
+            req = Some(SyncRequest::Verify);
+            ui.close();
+        }
+        if ui.button("Show in Sync tab").clicked() {
+            req = Some(SyncRequest::Show(client.clone()));
+            ui.close();
+        }
+    });
+    let r = menu.response.rect;
+    let c = egui::pos2(r.right() - 10.0, r.center().y);
+    ui.painter().add(egui::Shape::convex_polygon(
+        vec![
+            c + egui::vec2(-4.0, -2.0),
+            c + egui::vec2(4.0, -2.0),
+            c + egui::vec2(0.0, 3.0),
+        ],
+        theme::INK_SECONDARY,
+        egui::Stroke::NONE,
+    ));
+    if req.is_some() {
+        b.sync_request = req;
+    }
+}
+
+/// The current client's sync state beside the breadcrumb: `4 pending` / `in sync` /
+/// `conflict` / `pushing` / `pulling`; a click opens the Sync tab on that client.
+fn sync_pill(ui: &mut egui::Ui, b: &mut Browse) {
+    let (Some(v), Some(c)) = (&b.sync, b.scope_client()) else {
+        return;
+    };
+    let id = b.snap.clients[c].id.clone();
+    let n = v.pending.get(&id).copied().unwrap_or(0);
+    let rgb = |c: u32| egui::Color32::from_rgb((c >> 16) as u8, (c >> 8) as u8, c as u8);
+    let (blue, amber, green) = (
+        (rgb(0xE6EEF9), rgb(0x1F56A8)),
+        (rgb(0xFBEFD5), rgb(0x7A4F07)),
+        (rgb(0xDDF2E4), rgb(0x1D5C38)),
+    );
+    let (text, (bg, fg)) = match v.running_for.as_deref() {
+        Some(r) if r == id => ("pushing".to_string(), blue),
+        Some("") => ("pulling".to_string(), blue),
+        _ if v.conflicts > 0 => ("conflict".to_string(), amber),
+        _ if n > 0 => (format!("{n} pending"), amber),
+        _ => ("in sync".to_string(), green),
+    };
+    if crate::ui::widgets::pill(ui, &text, bg, fg)
+        .on_hover_text("B2 sync of this client: click for the Sync tab")
+        .interact(Sense::click())
+        .clicked()
+    {
+        b.sync_request = Some(SyncRequest::Show(Some(id)));
+    }
+}
+
 fn breadcrumb(b: &Browse) -> String {
     let client = |c: usize| {
         let c = &b.snap.clients[c];
@@ -1182,6 +1293,7 @@ fn grid(ui: &mut egui::Ui, b: &mut Browse, conn: &Connection) {
             let client = b.scope_client().map(|c| b.snap.clients[c].id.clone());
             b.cover = Some(CoverSheetDialog::new(&b.snap, client.as_deref()));
         }
+        sync_menu(ui, b);
         ui.separator();
         let rename = ui
             .add_enabled(!b.selected.is_empty(), egui::Button::new("Rename…"))
@@ -1242,6 +1354,7 @@ fn grid(ui: &mut egui::Ui, b: &mut Browse, conn: &Connection) {
     ui.add_space(6.0);
     ui.horizontal(|ui| {
         ui.label(RichText::new(breadcrumb(b)).monospace());
+        sync_pill(ui, b);
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             let r = ui.add(
                 egui::TextEdit::singleline(&mut b.name_filter)

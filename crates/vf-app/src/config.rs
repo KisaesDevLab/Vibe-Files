@@ -28,6 +28,88 @@ pub struct Config {
     /// Viewer settings (P04).
     #[serde(default)]
     pub viewer: ViewerPrefs,
+    /// B2 sync (P11).
+    #[serde(default)]
+    pub sync: SyncConfig,
+}
+
+/// B2 sync of the open cabinet from this workstation (P11). The application key is sealed with
+/// the firm sync key (opened by the sync passphrase), never kept in the clear.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SyncConfig {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub endpoint: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub region: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub bucket: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub key_id: String,
+    /// Hex: the application key sealed by `vf_sync::setup::seal_secret`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub app_key_sealed: String,
+    /// The cabinet these settings are for.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub cabinet_id: String,
+    /// Push (after a pull) every this many minutes while unlocked; 0 = only by hand.
+    #[serde(default = "default_auto")]
+    pub auto_minutes: u32,
+    /// Automatic pushes only from this hour to this hour (local time, 0-23); `None` = any time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window: Option<(u8, u8)>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub paused: bool,
+    /// B2 Object Lock days the firm set on the bucket (QUESTIONS Q-10: off by default; 30
+    /// suggested).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub object_lock_days: Option<u32>,
+}
+
+fn default_auto() -> u32 {
+    15
+}
+
+impl Default for SyncConfig {
+    fn default() -> Self {
+        SyncConfig {
+            endpoint: String::new(),
+            region: String::new(),
+            bucket: String::new(),
+            key_id: String::new(),
+            app_key_sealed: String::new(),
+            cabinet_id: String::new(),
+            auto_minutes: default_auto(),
+            window: None,
+            paused: false,
+            object_lock_days: None,
+        }
+    }
+}
+
+impl SyncConfig {
+    pub fn configured_for(&self, cabinet_id: &str) -> bool {
+        !self.endpoint.is_empty()
+            && !self.app_key_sealed.is_empty()
+            && self.cabinet_id == cabinet_id
+    }
+
+    pub fn s3(&self) -> vf_sync::remote::S3Config {
+        vf_sync::remote::S3Config {
+            endpoint: self.endpoint.clone(),
+            region: self.region.clone(),
+            bucket: self.bucket.clone(),
+            key_id: self.key_id.clone(),
+        }
+    }
+
+    /// Whether `hour` (local) is inside the window.
+    pub fn in_window(&self, hour: u8) -> bool {
+        match self.window {
+            None => true,
+            Some((a, b)) if a <= b => (a..b).contains(&hour),
+            Some((a, b)) => hour >= a || hour < b,
+        }
+    }
 }
 
 /// Viewer settings of this workstation.
@@ -212,6 +294,7 @@ pub fn load(data: &Path) -> Result<Config> {
                 ingest: Ingest::default(),
                 ocr: Ocr::default(),
                 viewer: ViewerPrefs::default(),
+                sync: SyncConfig::default(),
             };
             save(data, &c)?;
             let _ = std::fs::remove_file(legacy);

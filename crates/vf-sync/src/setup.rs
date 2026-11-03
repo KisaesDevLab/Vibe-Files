@@ -16,6 +16,8 @@ use crate::{Result, SyncError};
 
 pub const KEY_ID: &str = "k-01";
 pub const KEY_FILE: &str = "sync.json";
+/// Argon2id cost for new sync keys.
+pub const DEFAULT_KDF: KdfParams = KdfParams::DEFAULT;
 
 pub fn key_file(root: &Path) -> PathBuf {
     root.join(vf_fs::cabinet::VIBE_DIR)
@@ -115,4 +117,24 @@ pub fn open_secret(k: &Keys, sealed: &str) -> Result<String> {
         .collect();
     let p = k.open(&b, "secret")?;
     String::from_utf8(p).map_err(|e| SyncError::Local(e.to_string()))
+}
+
+/// The keys from the passphrase and the local wrapped copy only (no network), so the sealed
+/// application key can be opened before the bucket is reached.
+pub fn unlock_local(root: &Path, cabinet_id: &str, passphrase: &str) -> Result<Keys> {
+    let b = std::fs::read(key_file(root)).map_err(|_| SyncError::NotSetUp)?;
+    let w = WrappedKey::from_json(&b).map_err(|e| SyncError::Local(e.to_string()))?;
+    unwrap(&w, passphrase, cabinet_id)
+}
+
+/// Records the firm's Object Lock choice in the bucket's `cabinet.json` (display only: the lock
+/// is set on the bucket in B2).
+pub fn set_object_lock(remote: &Remote, days: Option<u32>) -> Result<()> {
+    let mut b = bucket_cabinet(remote)?.ok_or(SyncError::NotSetUp)?;
+    b.object_lock_days = days;
+    remote.put(
+        layout::CABINET,
+        serde_json::to_vec_pretty(&b).expect("serializes"),
+    )?;
+    Ok(())
 }

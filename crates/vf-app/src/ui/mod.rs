@@ -18,6 +18,7 @@ pub mod rename;
 pub mod retention;
 pub mod search;
 pub mod sweep;
+pub mod sync;
 #[cfg(test)]
 pub mod test_util;
 pub mod theme;

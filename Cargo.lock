@@ -5678,6 +5678,7 @@ dependencies = [
  "vf-ingest",
  "vf-ocr",
  "vf-pdf",
+ "vf-sync",
  "windows",
 ]
 

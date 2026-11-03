@@ -22,6 +22,7 @@ clap.workspace = true
 vf-core = { path = "../vf-core" }
 vf-fs = { path = "../vf-fs" }
 vf-ocr = { path = "../vf-ocr" }
+vf-sync = { path = "../vf-sync" }
 vf-ingest = { path = "../vf-ingest" }
 rfd.workspace = true
 serde.workspace = true

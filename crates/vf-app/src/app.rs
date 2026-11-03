@@ -49,7 +49,7 @@ impl Tab {
             Tab::Intake => "Intake files documents into the open cabinet.",
             Tab::Search => "Search the text of every document.",
             Tab::Viewer => "Open a document from Search.",
-            Tab::Sync => "B2 sync arrives in P11.",
+            Tab::Sync => "Two-way sync with B2.",
             Tab::Admin => "Users, doc types, audit and compliance settings.",
         }
     }
@@ -88,6 +88,8 @@ pub struct OpenCabinet {
     mirrored_at: Option<std::time::Instant>,
     /// The integrity sweep (P05 step 5): weekly, and from Admin.
     pub sweep: crate::ui::sweep::SweepState,
+    /// B2 sync (P11).
+    pub sync: crate::ui::sync::SyncTab,
 }
 
 impl OpenCabinet {
@@ -147,6 +149,7 @@ impl VibeFilesApp {
                     ingest: Default::default(),
                     ocr: Default::default(),
                     viewer: Default::default(),
+                    sync: Default::default(),
                 },
                 Some(format!("Settings could not be read: {e:#}")),
             ),
@@ -295,6 +298,7 @@ impl VibeFilesApp {
                     chain,
                     mirrored_at: None,
                     sweep,
+                    sync: Default::default(),
                     opened,
                     browse,
                     admin: None,
@@ -456,6 +460,32 @@ impl eframe::App for VibeFilesApp {
                     o.viewer.error = Some(e);
                 }
             }
+            Screen::Open(o) if self.tab == Tab::Sync => {
+                let o = &mut **o;
+                let clients: Vec<(String, String)> = o
+                    .browse
+                    .snap
+                    .clients
+                    .iter()
+                    .map(|c| (c.id.clone(), c.name.clone()))
+                    .collect();
+                let cabinet_id = o.opened.cabinet.cabinet_id.clone();
+                crate::ui::sync::show(
+                    ui,
+                    &mut o.sync,
+                    &mut browse::Env {
+                        conn: &mut o.opened.conn,
+                        root: &o.opened.root,
+                        device_id: &self.config.device_id,
+                    },
+                    crate::ui::sync::View {
+                        catalog: &o.opened.catalog,
+                        cabinet_id: &cabinet_id,
+                        cfg: &self.config.sync,
+                        clients: &clients,
+                    },
+                );
+            }
             Screen::Open(o) if matches!(self.tab, Tab::Browse | Tab::Admin) => {
                 let OpenCabinet {
                     opened,
@@ -465,6 +495,7 @@ impl eframe::App for VibeFilesApp {
                     viewer: o_viewer,
                     chain: o_chain,
                     sweep: o_sweep,
+                    sync: o_sync,
                     ..
                 } = &mut **o;
                 let mut env = browse::Env {
@@ -510,10 +541,36 @@ impl eframe::App for VibeFilesApp {
                     if let Some(m) = o_intake.message.take() {
                         tab_browse.notice = Some(m);
                     }
+                    tab_browse.sync = o_sync.session.is_some().then(|| browse::SyncView {
+                        pending: o_sync.pending.clone(),
+                        conflicts: o_sync.conflicts.len(),
+                        running_for: o_sync.running_for.clone(),
+                    });
                     browse::show(ui, tab_browse, &mut env);
                     if let Some(d) = tab_browse.view_request.take() {
                         o_viewer.open(d);
                         self.tab = Tab::Viewer;
+                    }
+                    if let Some(r) = tab_browse.sync_request.take() {
+                        use crate::ui::sync::Op;
+                        match r {
+                            browse::SyncRequest::Push(c) => o_sync.start(
+                                ui.ctx(),
+                                &opened.catalog,
+                                &opened.root,
+                                Op::Push(Some(c)),
+                            ),
+                            browse::SyncRequest::Pull => {
+                                o_sync.start(ui.ctx(), &opened.catalog, &opened.root, Op::Pull)
+                            }
+                            browse::SyncRequest::Verify => {
+                                o_sync.start(ui.ctx(), &opened.catalog, &opened.root, Op::Verify)
+                            }
+                            browse::SyncRequest::Show(c) => {
+                                o_sync.filter_client = c;
+                                self.tab = Tab::Sync;
+                            }
+                        }
                     }
                 }
             }
@@ -552,6 +609,28 @@ impl eframe::App for VibeFilesApp {
                 self.config.ingest = ingest;
                 if let Err(e) = config::save(&self.data, &self.config) {
                     o.intake.ingest.warning = Some(format!("Settings could not be saved: {e:#}"));
+                }
+            }
+        }
+        if let Screen::Open(o) = &mut self.screen {
+            let o = &mut **o;
+            o.sync.tick(
+                &ctx,
+                &browse::Env {
+                    conn: &mut o.opened.conn,
+                    root: &o.opened.root,
+                    device_id: &self.config.device_id,
+                },
+                &o.opened.catalog,
+                &self.config.sync,
+            );
+            if std::mem::take(&mut o.sync.changed) {
+                o.browse.reload(&o.opened.conn);
+            }
+            if let Some(c) = o.sync.config_changed.take() {
+                self.config.sync = c;
+                if let Err(e) = config::save(&self.data, &self.config) {
+                    o.sync.error = Some(format!("Settings could not be saved: {e:#}"));
                 }
             }
         }
@@ -764,6 +843,189 @@ mod tests {
         assert_eq!(n, 0, "undone batch tombstoned");
         assert_eq!(notice.as_deref(), Some("Intake's last batch was undone."));
         assert!(inbox.join("w2.pdf").exists());
+    }
+
+    /// P11 done-when 5: from Browse, `Sync to B2 ▾ → Push this client now` pushes only that
+    /// client's pending documents and the breadcrumb pill goes from `4 pending` to `in sync`
+    /// without leaving the tab. (An in-memory bucket stands in for B2.)
+    #[test]
+    fn push_this_client_from_browse_turns_the_pill_in_sync() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("Clients");
+        let req = CreateRequest {
+            root: &root,
+            name: "Firm",
+        };
+        let data = tmp.path().join("pc1");
+        {
+            let mut o = session::create(&data, "dev-1", &req).unwrap();
+            for (id, name) in [("1042", "Anderson Farms LLC"), ("2002", "Bell Ranch Inc")] {
+                let p = vf_fs::newclient::plan(
+                    &o.conn,
+                    &root,
+                    &vf_fs::newclient::NewClient {
+                        ext_id: id.into(),
+                        name: name.into(),
+                        entity_type: None,
+                    },
+                )
+                .unwrap();
+                vf_fs::newclient::create(&mut o.conn, &root, &p, "dev-1").unwrap();
+            }
+            let put = |rel: &str, body: &str| {
+                let p = root.join(rel);
+                std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+                std::fs::write(p, body).unwrap();
+            };
+            for n in 0..4 {
+                put(
+                    &format!("Anderson Farms LLC (1042)/Income Tax/2025/doc {n}.pdf"),
+                    &format!("invented {n}"),
+                );
+            }
+            put("Bell Ranch Inc (2002)/Payroll/2025/941.pdf", "b");
+            vf_fs::rebuild::rebuild(&mut o.conn, &root, "dev-1").unwrap();
+        }
+        let mut h = harness(&data);
+        click(&mut h, "Open existing");
+        type_into(&mut h, "Cabinet folder", &root.display().to_string());
+        click(&mut h, "Open cabinet");
+        settle(&mut h);
+        // Sync hidden until it is set up and unlocked.
+        assert!(h.query_by_label_contains("Sync to B2").is_none());
+        let (anderson, cabinet_id) = {
+            let Screen::Open(o) = &mut h.state_mut().screen else {
+                panic!("open")
+            };
+            let remote =
+                vf_sync::Remote::new(vf_sync::Remote::memory(), &o.opened.cabinet.cabinet_id);
+            let keys = vf_sync::setup::init(
+                &o.opened.root,
+                &remote,
+                "correct horse battery staple",
+                vf_sync::setup::DEFAULT_KDF,
+            )
+            .unwrap();
+            o.sync.session = Some(vf_sync::Sync {
+                remote,
+                keys,
+                cabinet_id: o.opened.cabinet.cabinet_id.clone(),
+                device_id: "dev-1".into(),
+                device_name: "OFFICE-PC".into(),
+            });
+            let i = o
+                .browse
+                .snap
+                .clients
+                .iter()
+                .position(|c| c.ext_id == "1042")
+                .unwrap();
+            o.browse.set_scope(vf_core::browse::Scope::Client(i));
+            (
+                o.browse.snap.clients[i].id.clone(),
+                o.opened.cabinet.cabinet_id.clone(),
+            )
+        };
+        let _ = cabinet_id;
+        for _ in 0..3 {
+            h.step();
+        }
+        h.run();
+        assert!(
+            h.query_by_label("4 pending").is_some(),
+            "the pill counts the client's documents"
+        );
+        h.get_by_role_and_label(Role::Button, "Sync to B2    ")
+            .click();
+        h.run();
+        h.get_by_role_and_label(Role::Button, "Push this client now")
+            .click();
+        h.step();
+        let start = std::time::Instant::now();
+        while h.query_by_label("in sync").is_none() {
+            h.step();
+            assert!(
+                start.elapsed() < std::time::Duration::from_secs(30),
+                "push did not finish"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert_eq!(h.state().tab, Tab::Browse, "without leaving the tab");
+        let Screen::Open(o) = &h.state().screen else {
+            panic!("open")
+        };
+        let pending = vf_sync::catalog::pending(&o.opened.conn).unwrap();
+        assert_eq!(pending.get(&anderson), None);
+        assert_eq!(
+            pending.values().sum::<usize>(),
+            1,
+            "Bell Ranch's document still waits"
+        );
+    }
+
+    /// P11 step 8: the Sync tab offers set-up until sync is configured; unlocked, it pushes and
+    /// shows the result.
+    #[test]
+    fn sync_tab_sets_up_and_pushes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("Clients");
+        std::fs::create_dir_all(root.join("Loose")).unwrap();
+        std::fs::write(root.join("Loose/a.pdf"), "invented").unwrap();
+        let req = CreateRequest {
+            root: &root,
+            name: "Firm",
+        };
+        let data = tmp.path().join("pc1");
+        drop(session::create(&data, "dev-1", &req).unwrap());
+        let mut h = harness(&data);
+        click(&mut h, "Open existing");
+        type_into(&mut h, "Cabinet folder", &root.display().to_string());
+        click(&mut h, "Open cabinet");
+        settle(&mut h);
+        click(&mut h, "Sync");
+        h.run();
+        assert!(h.query_by_label("Set up sync").is_some());
+        assert!(h.query_by_label("Connect").is_some());
+        {
+            let app = h.state_mut();
+            let Screen::Open(o) = &mut app.screen else {
+                panic!("open")
+            };
+            let id = o.opened.cabinet.cabinet_id.clone();
+            let remote = vf_sync::Remote::new(vf_sync::Remote::memory(), &id);
+            let keys = vf_sync::setup::init(
+                &o.opened.root,
+                &remote,
+                "correct horse battery staple",
+                vf_sync::setup::DEFAULT_KDF,
+            )
+            .unwrap();
+            app.config.sync.endpoint = "https://s3.example.invalid".into();
+            app.config.sync.bucket = "firm".into();
+            app.config.sync.cabinet_id = id.clone();
+            app.config.sync.app_key_sealed = vf_sync::setup::seal_secret(&keys, "app-key");
+            o.sync.session = Some(vf_sync::Sync {
+                remote,
+                keys,
+                cabinet_id: id,
+                device_id: "dev-1".into(),
+                device_name: "OFFICE-PC".into(),
+            });
+        }
+        h.run();
+        click(&mut h, "Push now");
+        let start = std::time::Instant::now();
+        while h.query_by_label_contains("Pushed 1 documents").is_none() {
+            h.step();
+            assert!(start.elapsed() < std::time::Duration::from_secs(30));
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        h.run();
+        assert!(h.query_by_label("in sync").is_some());
+        assert!(
+            h.query_by_label("Nothing waiting: this PC and the bucket agree.")
+                .is_some()
+        );
     }
 
     /// P02 step 1: the Intake tab mounts Filer Desktop on the open cabinet: its data folder is

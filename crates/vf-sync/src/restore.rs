@@ -67,8 +67,6 @@ pub fn restore(
     let firm = vf_security::keys::unwrap_with_passphrase(w, passphrase, cabinet_id)
         .map_err(|_| SyncError::WrongPassphrase)?;
     let keys = crate::Keys::derive(crate::setup::KEY_ID, &firm);
-    let vibe = root.join(vf_fs::cabinet::VIBE_DIR);
-    std::fs::create_dir_all(&vibe).map_err(|e| SyncError::Local(e.to_string()))?;
     let s = Sync {
         remote,
         keys,
@@ -76,6 +74,30 @@ pub fn restore(
         device_id: device_id.into(),
         device_name: device_name.into(),
     };
+    restore_session(conn, root, &s)
+}
+
+/// [`restore`] with an unlocked session (Sync tab › Restore cabinet to a folder).
+pub fn restore_session(conn: &mut Connection, root: &Path, s: &Sync) -> Result<RestoreReport> {
+    if root.exists()
+        && std::fs::read_dir(root)
+            .map_err(|e| SyncError::Local(e.to_string()))?
+            .next()
+            .is_some()
+    {
+        return Err(SyncError::Local(format!(
+            "{} is not empty: restore into a new folder",
+            root.display()
+        )));
+    }
+    let device_id = s.device_id.as_str();
+    let b = crate::setup::bucket_cabinet(&s.remote)?.ok_or(SyncError::NotSetUp)?;
+    let w = b
+        .wrapped
+        .get(crate::setup::KEY_ID)
+        .ok_or(SyncError::NotSetUp)?;
+    let vibe = root.join(vf_fs::cabinet::VIBE_DIR);
+    std::fs::create_dir_all(&vibe).map_err(|e| SyncError::Local(e.to_string()))?;
     let head = s.head()?.ok_or(SyncError::NotSetUp)?;
 
     // The cabinet file first: everything else reads it.
@@ -93,7 +115,7 @@ pub fn restore(
     vf_fs::cabinet::write_replace(&crate::setup::key_file(root), &w.to_json())?;
 
     let mut rep = crate::pull::PullReport::default();
-    crate::pull::apply_head(conn, root, &s, &head, &mut rep)?;
+    crate::pull::apply_head(conn, root, s, &head, &mut rep)?;
     crate::catalog::set_state(conn, device_id, head.rev, "pull")?;
 
     let mut out = RestoreReport {
@@ -117,7 +139,7 @@ pub fn restore(
     }
     // Rows the folders imply (the cabinet row, versions from sidecars).
     vf_fs::rebuild::rebuild(conn, root, device_id).map_err(|e| e.to_string())?;
-    crate::push::write_device(&s, head.rev)?;
+    crate::push::write_device(s, head.rev)?;
     Transaction::new("sync_restore")
         .audit(AuditEntry::new(
             "sync_restore",
@@ -302,6 +324,90 @@ pub fn remove_disposed(s: &Sync) -> Result<usize> {
             s.remote.delete(&key)?;
             n += 1;
         }
+    }
+    Ok(n)
+}
+
+/// Every live document in the current manifest, with its folder (cabinet-relative path, entry).
+fn current_docs(s: &Sync) -> Result<Vec<(String, crate::layout::DocEntry)>> {
+    let Some(head) = s.head()? else {
+        return Ok(vec![]);
+    };
+    let mut out = vec![];
+    if head.cabinet_segment_rev > 0
+        && let Some(c) =
+            s.get_json::<CabinetSegment>(&layout::cabinet_segment_key(head.cabinet_segment_rev))?
+    {
+        out.extend(c.documents.into_iter().map(|d| (String::new(), d)));
+    }
+    for (client, rev) in &head.segments {
+        if let Some(c) = s.get_json::<ClientSegment>(&layout::segment_key(client, *rev))? {
+            let f = c.folder_rel.clone();
+            out.extend(c.documents.into_iter().map(|d| (f.clone(), d)));
+        }
+    }
+    out.retain(|(_, d)| d.deleted_at.is_none());
+    Ok(out)
+}
+
+/// Verify now (P11 step 8): downloads up to `sample` documents spread over the manifest and
+/// checks each against its SHA-256. Returns (checked, failed).
+pub fn verify(s: &Sync, sample: usize) -> Result<(usize, usize)> {
+    let docs = current_docs(s)?;
+    if docs.is_empty() || sample == 0 {
+        return Ok((0, 0));
+    }
+    let step = docs.len().div_ceil(sample).max(1);
+    let mut start = [0u8; 2];
+    getrandom::fill(&mut start).map_err(|e| SyncError::Local(e.to_string()))?;
+    let offset = u16::from_le_bytes(start) as usize % step;
+    let (mut checked, mut bad) = (0, 0);
+    for (_, d) in docs.iter().skip(offset).step_by(step).take(sample) {
+        let key = layout::object_key(&d.object);
+        checked += 1;
+        let ok = s
+            .remote
+            .get(&key)?
+            .and_then(|b| s.keys.open(&b, &key).ok())
+            .is_some_and(|p| crate::crypto::sha256(&p) == d.hash);
+        if !ok {
+            bad += 1;
+        }
+    }
+    Ok((checked, bad))
+}
+
+/// Restore one client to a folder (P11 step 8): its current documents, as plain files under
+/// `dest/<client folder>/`, each checked against its SHA-256. Returns how many.
+pub fn export_client(s: &Sync, client_id: &str, dest: &Path) -> Result<usize> {
+    let head = s.head()?.ok_or(SyncError::NotSetUp)?;
+    let rev = head
+        .segments
+        .get(client_id)
+        .ok_or_else(|| SyncError::Local("this client is not in the bucket".into()))?;
+    let seg: ClientSegment = s
+        .get_json(&layout::segment_key(client_id, *rev))?
+        .ok_or_else(|| SyncError::Format("the client segment is missing".into()))?;
+    let base = dest.join(&seg.folder_rel);
+    let mut n = 0;
+    for d in seg.documents.iter().filter(|d| d.deleted_at.is_none()) {
+        let key = layout::object_key(&d.object);
+        let body = s
+            .remote
+            .get(&key)?
+            .ok_or_else(|| SyncError::Format(format!("{key} is missing")))?;
+        let plain = s.keys.open(&body, &key)?;
+        if crate::crypto::sha256(&plain) != d.hash {
+            return Err(SyncError::Format(format!(
+                "{key} does not match its SHA-256"
+            )));
+        }
+        let p = filer_intake::commit::free_path(&base.join(&d.rel_path));
+        if let Some(parent) = p.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| SyncError::Local(e.to_string()))?;
+        }
+        std::fs::write(&p, plain).map_err(|e| SyncError::Local(e.to_string()))?;
+        n += 1;
     }
     Ok(n)
 }
