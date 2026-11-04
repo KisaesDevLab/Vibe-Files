@@ -732,6 +732,7 @@ impl RelationshipsScreen {
         match client_picker(ctx, &title, old, list) {
             PickerOutcome::Open => {}
             PickerOutcome::Cancel => self.relink = None,
+            PickerOutcome::NewClient(_) => {}
             PickerOutcome::Chosen(c) => {
                 let (i, side) = (*i, *side);
                 self.relink = None;

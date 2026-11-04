@@ -32,7 +32,7 @@ use crate::ui::theme::{
     self, PillKind, banner, file_name, human_size, label_caps, mono, pal, pill, plural,
     primary_button, strong,
 };
-use crate::ui::widgets::{PickerOutcome, client_picker};
+use crate::ui::widgets::{PickerOutcome, client_picker_or_new};
 use crate::worker;
 
 /// The side pane opens by itself in a window at least this wide, so the table keeps the room its
@@ -1005,6 +1005,13 @@ impl PreviewScreen {
         }
     }
 
+    /// The row for `file` gets client `client_id` (the host created it, "New client…").
+    // Used by a host that embeds Filer (Vibe Files), not by this program.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn set_client(&mut self, file: &Path, client_id: &str) {
+        self.edit(file).client_id = Some(client_id.to_string());
+    }
+
     /// The pane's row: the one last clicked while it is in the batch, else the first row.
     fn keep_focus(&mut self) {
         let listed = |f: &PathBuf| self.proposals.iter().any(|p| &p.file.path == f);
@@ -1777,6 +1784,7 @@ impl PreviewScreen {
                     folded: &self.folded,
                     page_counts: &self.page_counts,
                     renaming: self.renaming.as_ref(),
+                    host_new_client: state.host_new_client,
                 };
                 for (i, pr) in self.proposals.iter().enumerate() {
                     let edits = self.edits.get(&pr.file.path);
@@ -1909,6 +1917,10 @@ impl PreviewScreen {
                 }
                 RowAction::SetRule(path, id) => self.edit(&path).rule_id = Some(id),
                 RowAction::Focus(path) => self.focused = Some(path),
+                RowAction::NewClient(file, name, id) => {
+                    state.new_client_request =
+                        Some(crate::app::NewClientRequest { file, name, id });
+                }
                 RowAction::SetYear(path, y) => self.set_row_year(&path, y),
                 RowAction::AllMissingYear(y) => self.batch.year = Some(y),
                 RowAction::SetCollision(path, c) => self.edit(&path).collision = Some(c),
@@ -2157,7 +2169,7 @@ impl PreviewScreen {
         }
     }
 
-    fn picker_ui(&mut self, ctx: &egui::Context, state: &AppState) {
+    fn picker_ui(&mut self, ctx: &egui::Context, state: &mut AppState) {
         let Some((path, query, target)) = &mut self.picker else {
             return;
         };
@@ -2171,9 +2183,24 @@ impl PreviewScreen {
         } else {
             format!("Client for \"{}\"", file_name(path))
         };
-        match client_picker(ctx, &title, query, &list) {
+        let offer_new = state.host_new_client && *target == PickFor::Primary;
+        match client_picker_or_new(ctx, &title, query, &list, offer_new) {
             PickerOutcome::Open => {}
             PickerOutcome::Cancel => self.picker = None,
+            PickerOutcome::NewClient(typed) => {
+                let file = path.clone();
+                let id = self
+                    .proposals
+                    .iter()
+                    .find(|p| p.file.path == file)
+                    .and_then(|p| p.parsed.id.clone());
+                state.new_client_request = Some(crate::app::NewClientRequest {
+                    file,
+                    name: typed,
+                    id,
+                });
+                self.picker = None;
+            }
             PickerOutcome::Chosen(c) => {
                 let (path, target) = (path.clone(), target.clone());
                 match target {
@@ -2588,6 +2615,8 @@ struct RowCtx<'a> {
     folded: &'a [PathBuf],
     page_counts: &'a HashMap<PathBuf, (u64, Option<usize>)>,
     renaming: Option<&'a Renaming>,
+    /// The host can create clients ("New client…").
+    host_new_client: bool,
 }
 
 /// The file name being edited in a row's Destination cell (V5).
@@ -2650,6 +2679,8 @@ enum RowAction {
     BuildRule(String),
     /// Show this row's pages in the side pane.
     Focus(PathBuf),
+    /// "New client…": (file, name in the file name, ID in the file name) for the host.
+    NewClient(PathBuf, String, Option<String>),
 }
 
 /// One table row. Cells are top-aligned; text cells start a little lower so their first line sits
@@ -2905,6 +2936,22 @@ fn row_ui(
                 }
                 if ui.small_button("Choose client…").clicked() {
                     actions.push(RowAction::PickClient(path.clone(), p.parsed.name.clone()));
+                }
+                if ctx.host_new_client {
+                    let b = ui
+                        .small_button("New client…")
+                        .on_hover_text("Not in the client list: create the client for this file");
+                    let name = format!("New client for {}", file_name(path));
+                    b.widget_info(|| {
+                        egui::WidgetInfo::labeled(egui::Role::Button, true, name.clone())
+                    });
+                    if b.clicked() {
+                        actions.push(RowAction::NewClient(
+                            path.clone(),
+                            p.parsed.name.clone(),
+                            p.parsed.id.clone(),
+                        ));
+                    }
                 }
             }
         }

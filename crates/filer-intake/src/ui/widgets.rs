@@ -28,6 +28,8 @@ pub enum PickerOutcome {
     Open,
     Cancel,
     Chosen(Client),
+    /// "New client…" (only from [`client_picker_or_new`]), with the search text.
+    NewClient(String),
 }
 
 /// Clients matching `query`: an exact ID first (score `None`), then the best name matches.
@@ -59,6 +61,17 @@ pub fn client_picker(
     query: &mut String,
     clients: &ClientList,
 ) -> PickerOutcome {
+    client_picker_or_new(ctx, title, query, clients, false)
+}
+
+/// [`client_picker`], with "New client…" when `offer_new` (a host that creates clients).
+pub fn client_picker_or_new(
+    ctx: &egui::Context,
+    title: &str,
+    query: &mut String,
+    clients: &ClientList,
+    offer_new: bool,
+) -> PickerOutcome {
     let mut outcome = PickerOutcome::Open;
     let modal = egui::Modal::new(egui::Id::unique("client_picker")).show(ctx, |ui| {
         ui.set_width(460.0);
@@ -83,9 +96,19 @@ pub fn client_picker(
             }
         }
         ui.add_space(6.0);
-        if ui.button("Cancel").clicked() {
-            outcome = PickerOutcome::Cancel;
-        }
+        ui.horizontal(|ui| {
+            if offer_new
+                && ui
+                    .button("New client…")
+                    .on_hover_text("Not in the list: create the client")
+                    .clicked()
+            {
+                outcome = PickerOutcome::NewClient(query.trim().to_string());
+            }
+            if ui.button("Cancel").clicked() {
+                outcome = PickerOutcome::Cancel;
+            }
+        });
     });
     if matches!(outcome, PickerOutcome::Open) && modal.should_close() {
         outcome = PickerOutcome::Cancel;

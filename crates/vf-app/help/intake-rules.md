@@ -6,6 +6,8 @@ How Intake decides where a file goes: the Setup screen (cabinet, inboxes, client
 
 Open **Intake** › **Setup**. Change what you need, then press **Save** (or **Revert** to drop your changes).
 
+> When the cabinet has an [admin password](help:admin-password), Setup is read-only until Admin is unlocked on this PC: its settings change every PC's filing.
+
 - **Client root**: the cabinet. Vibe Files sets it to the cabinet you opened, so leave it as it is.
 - **Inboxes**: the folders Intake watches. Press **Add inbox…** to add one, **Remove** to drop one. An inbox cannot be inside the cabinet. Zips dropped in an inbox go to the **Import** screen.
 - **Client master list**: the client CSV. **Choose CSV…** picks the file and maps its columns; **Refresh clients** reads it again; **Re-map columns…** changes which column is the ID and which the name. Clients added in Browse are in the same list (see [clients](help:clients)).

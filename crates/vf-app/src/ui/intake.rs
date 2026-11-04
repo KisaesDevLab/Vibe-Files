@@ -55,6 +55,9 @@ pub struct IntakeTab {
     want_details: bool,
     /// Filer's client list changed after Intake loaded it (a new client): reload offered.
     clients_stale: bool,
+    /// "New client…" pressed on a row Filer found no client for: Vibe's New client dialog, for
+    /// that file (owner 2026-11-04).
+    new_client: Option<(crate::ui::new_client::NewClientDialog, PathBuf)>,
     /// `clients.json`'s modified time when Filer loaded it.
     clients_at: Option<std::time::SystemTime>,
     /// rules.json's modified time when last brought in line, and when it was last looked at:
@@ -332,6 +335,56 @@ impl IntakeTab {
         }
     }
 
+    /// The New client dialog opened from an Intake row: the client is created as from Browse
+    /// (folder from the template, sentinel, client list, catalog), and the row gets it.
+    fn new_client_dialog(
+        &mut self,
+        ctx: &egui::Context,
+        root: &Path,
+        conn: &mut vf_core::db::Connection,
+        device_id: &str,
+    ) {
+        use crate::ui::widgets::DialogOutcome;
+        let Some((d, file)) = &mut self.new_client else {
+            return;
+        };
+        let mut env = crate::ui::browse::Env {
+            conn,
+            root,
+            device_id,
+        };
+        match crate::ui::new_client::show(ctx, d, &mut env) {
+            DialogOutcome::Open => {}
+            DialogOutcome::Cancelled => self.new_client = None,
+            DialogOutcome::Done(created) => {
+                let file = file.clone();
+                self.new_client = None;
+                let ext: Option<String> = conn
+                    .query_row(
+                        "SELECT ext_id FROM client WHERE id = ?1",
+                        [&created.client_id],
+                        |r| r.get(0),
+                    )
+                    .ok();
+                // This PC's Intake folder gets the new client list now (not at the next poll),
+                // and it is the list Filer is about to load: no "Reload Intake" for it.
+                if let Some(pc) = self.pc.clone() {
+                    let _ = self.shared.poll(root, &pc);
+                }
+                self.clients_at = std::fs::metadata(filer_core::clients::cache_path(
+                    &vf_fs::clients::master_dir(root),
+                ))
+                .and_then(|m| m.modified())
+                .ok();
+                if let (Some(f), Some(ext)) = (&mut self.filer, ext) {
+                    f.client_created(ctx, &file, &ext);
+                }
+                self.catalog_changed = true;
+                self.message = Some(format!("Created {}.", created.folder));
+            }
+        }
+    }
+
     /// Admin rewrote Filer's rules: a loaded Filer must reload them (offered on the tab).
     pub fn rules_changed(&mut self) {
         self.rules_stale = self.filer.is_some();
@@ -472,6 +525,7 @@ impl IntakeTab {
         sheets_dir: &Path,
         conn: &mut vf_core::db::Connection,
         device_id: &str,
+        setup_locked: bool,
     ) {
         self.ingest.strip(ui, prefs, snap, sheets_dir, root);
         if std::mem::take(&mut self.want_details) {
@@ -579,6 +633,21 @@ impl IntakeTab {
                 Err(e) => self.error = Some(e),
             }
         }
+        if let Some(f) = &mut self.filer {
+            // Intake › Setup changes the cabinet's shared settings and folder template: behind
+            // the admin password like Admin's pages (owner 2026-11-04).
+            f.set_setup_lock(setup_locked.then(|| {
+                "Intake's Setup is locked by the admin password. Unlock it on the Admin tab to change these settings."
+                    .to_string()
+            }));
+            f.offer_new_client(true);
+            if let Some(req) = f.take_new_client_request() {
+                let mut d = crate::ui::new_client::NewClientDialog::new(req.id.clone());
+                d.req.name = req.name.trim().to_string();
+                self.new_client = Some((d, req.file));
+            }
+        }
+        self.new_client_dialog(ui.ctx(), root, conn, device_id);
         match (&mut self.filer, &self.error) {
             (Some(f), _) => eframe::App::ui(f, ui, frame),
             (None, Some(e)) => {

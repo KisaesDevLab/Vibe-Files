@@ -5,6 +5,7 @@ One password for the whole cabinet: what it protects, how to set, change, remove
 ## What it protects
 
 - The whole Admin tab, on every PC that opens the cabinet.
+- **Intake** › **Setup**: shown, but read-only until Admin is unlocked on this PC.
 - The Sync tab's set-up and **Settings**, plus **Pause**, **Restore cabinet to a folder…**, **Forget on this PC**, **Stop sharing the key** and the box that shares the key. Anyone can still push, pull and verify once sync is unlocked.
 - Emptying the trash by hand, destroying approved documents, and releasing legal holds: these ask for it again.
 

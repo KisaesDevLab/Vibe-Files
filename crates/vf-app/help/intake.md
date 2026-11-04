@@ -2,6 +2,10 @@
 
 How the Intake tab files the PDFs that land in your inbox folders: reading the queue, fixing a row, committing a batch, undoing it, and what Vibe Files adds on top.
 
+## A client that is not in the list
+
+When a row says its client was not found, **New client…** beside **Choose client…** (also at the bottom of the client picker) opens the New client dialog with the name and ID from the file name. Check them, choose **Create client (one transaction)**, and the row is given the new client: its folder is made from the folder template, as from Browse. See [adding clients](help:new-files).
+
 ## Looking at a file, and fixing several rows at once
 
 **Preview pane** in the queue's toolbar shows the pages of the file whose name you last clicked, beside the list, with **Previous** and **Next** (it opens by itself on a wide screen). Tick rows to fix them together: **Set client…** gives every ticked file one client, **Apply rule…** files every ticked file by the rule you choose, and **Untick all** clears the ticks.

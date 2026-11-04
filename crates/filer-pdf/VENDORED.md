@@ -6,9 +6,9 @@
 |---|---|
 | Repo | `KisaesDevLab/Vibe-Filer-Desktop` (private) |
 | Branch | `master` |
-| Commit | `f0a3e28` (`f0a3e28` on `master`: "feat(preview): side pane with the clicked file's pages; one client or rule for ticked rows", 0.2.6 + the Intake preview pane and ticked-row actions, 2026-11-04) |
+| Commit | `6433c04` on `master` ("feat(host): Setup lock and \"New client…\" for a program that embeds Filer", 0.2.6 + the Intake preview pane, ticked-row actions and host hooks, 2026-11-04) |
 | Vendored | 2026-11-02, P00 step 2 at `ea4e726` (0.2.4); re-vendored 2026-11-04, PHASES PA-26 |
-| Upstream tests | 205 at this commit; all pass after the split (filer-core 64 · filer-pdf 13 · filer-intake 128) |
+| Upstream tests | 206 at this commit; all pass after the split (filer-core 64 · filer-pdf 13 · filer-intake 129) |
 
 Upstream is one binary crate with no `lib.rs`. The three `filer-*` crates are a mechanical split
 of its `src/` (QUESTIONS Q-16). Upstream `main.rs` is not vendored; `vf-app` is the entry point.

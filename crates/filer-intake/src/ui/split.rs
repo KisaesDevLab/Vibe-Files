@@ -977,6 +977,7 @@ impl SplitDialog {
         match client_picker(ctx, &title, query, &clients) {
             PickerOutcome::Open => {}
             PickerOutcome::Cancel => self.picker = None,
+            PickerOutcome::NewClient(_) => {}
             PickerOutcome::Chosen(c) => {
                 let start = *start;
                 self.chosen.insert(start, c.id);

@@ -615,6 +615,7 @@ impl eframe::App for VibeFilesApp {
         match &mut self.screen {
             Screen::Open(o) if self.tab == Tab::Intake => {
                 let o = &mut **o;
+                let setup_locked = !o.admin_unlocked && vf_fs::trash::has_pin(&o.opened.root);
                 o.intake.show(
                     ui,
                     frame,
@@ -625,6 +626,7 @@ impl eframe::App for VibeFilesApp {
                     &o.browse.sheets_dir,
                     &mut o.opened.conn,
                     &self.config.device_id,
+                    setup_locked,
                 );
                 o.intake.reconcile(
                     &mut o.opened.conn,
@@ -1708,6 +1710,85 @@ mod tests {
         click(&mut h, "Help");
         h.run_steps(3);
         assert_eq!(h.state().help.current, Some("viewer"));
+    }
+
+    /// Intake › Setup is behind the admin password (owner 2026-11-04); a file whose client is
+    /// not found offers "New client…": Vibe's New client dialog creates the client and the row
+    /// gets it.
+    #[test]
+    fn intake_setup_locks_and_a_missing_client_is_created_from_the_row() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("Clients");
+        let inbox = tmp.path().join("Inbox");
+        std::fs::create_dir_all(&inbox).unwrap();
+        let req = CreateRequest {
+            root: &root,
+            name: "Firm",
+        };
+        drop(session::create(&tmp.path().join("pc1"), "dev-1", &req).unwrap());
+        let master = vf_fs::clients::master_dir(&root);
+        let (mut fs, _) = filer_intake::config::Settings::load_or_default(&master);
+        fs.inboxes = vec![inbox.clone()];
+        fs.save(&master).unwrap();
+        filer_pdf::pdf::write_test_pdf(&inbox.join("Newco LLC_NEWC2002_2025 W-2.pdf"), &["W-2"]);
+        let mut h = harness(&tmp.path().join("pc1b"));
+        click(&mut h, "Open existing");
+        type_into(&mut h, "Cabinet folder", &root.display().to_string());
+        click(&mut h, "Open cabinet");
+        settle(&mut h);
+        if let Screen::Open(o) = &mut h.state_mut().screen {
+            vf_fs::trash::set_pin(&mut o.opened.conn, &root, "dev-1", None, "482193").unwrap();
+        }
+        h.state_mut().tab = Tab::Intake;
+        h.run_steps(10);
+        h.get_by_label("Setup").click();
+        h.run_steps(4);
+        assert!(
+            h.query_by_label_contains("locked by the admin password")
+                .is_some(),
+            "Setup locked"
+        );
+        // The row with no client: New client… opens Vibe's dialog, filled from the name.
+        h.get_by_label("Preview").click();
+        let label = "New client for Newco LLC_NEWC2002_2025 W-2.pdf";
+        let start = std::time::Instant::now();
+        while h.query_by_label(label).is_none() {
+            assert!(
+                start.elapsed() < std::time::Duration::from_secs(20),
+                "row planned"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(30));
+            h.step();
+        }
+        h.get_by_label(label).click();
+        h.run_steps(4);
+        h.get_by_label("Create client (one transaction)").click();
+        h.run_steps(4);
+        let start = std::time::Instant::now();
+        loop {
+            h.step();
+            let Screen::Open(o) = &h.state().screen else {
+                unreachable!()
+            };
+            let made: Option<String> = o
+                .opened
+                .conn
+                .query_row(
+                    "SELECT folder_rel FROM client WHERE ext_id = 'NEWC2002'",
+                    [],
+                    |r| r.get(0),
+                )
+                .ok();
+            if made.is_some() && h.query_by_label(label).is_none() {
+                assert!(root.join(made.unwrap()).is_dir(), "the client's folder");
+                break;
+            }
+            assert!(
+                start.elapsed() < std::time::Duration::from_secs(20),
+                "the row got its new client"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(30));
+        }
     }
 
     /// P02 step 1: the Intake tab mounts Filer Desktop on the open cabinet: its data folder is

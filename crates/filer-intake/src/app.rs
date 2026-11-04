@@ -128,6 +128,25 @@ pub struct AppState {
     routed_seen: Option<(uuid::Uuid, bool)>,
     /// Folder of a pdfium.dll that bound at startup; `None` disables PDF features.
     pub pdfium_dir: Option<PathBuf>,
+    /// Set by a host that keeps its own settings lock (Vibe Files' admin password): Setup is
+    /// shown read-only with this reason. `None`: Setup works as always.
+    pub setup_locked: Option<String>,
+    /// A host that can create clients (Vibe Files): rows whose client is not found offer
+    /// "New client…", which hands the host a [`NewClientRequest`]. Off on its own.
+    pub host_new_client: bool,
+    /// The row a "New client…" was pressed on, for the host to take.
+    pub new_client_request: Option<NewClientRequest>,
+}
+
+/// "New client…" pressed on a row (host only, [`AppState::host_new_client`]): the file, and
+/// what its name says about the client.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewClientRequest {
+    pub file: PathBuf,
+    /// The client name part of the file name (or what was typed in the picker).
+    pub name: String,
+    /// The client ID in the file name, when there is one.
+    pub id: Option<String>,
 }
 
 impl AppState {
@@ -189,6 +208,9 @@ impl AppState {
             routed: Vec::new(),
             routed_seen: None,
             pdfium_dir,
+            setup_locked: None,
+            host_new_client: false,
+            new_client_request: None,
         }
     }
 
@@ -418,6 +440,43 @@ pub struct FilerApp {
 }
 
 impl FilerApp {
+    /// Locks Setup (shown read-only with `reason`) or unlocks it (`None`): for a host that keeps
+    /// its own settings lock.
+    // Used by a host that embeds Filer (Vibe Files), not by this program.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn set_setup_lock(&mut self, reason: Option<String>) {
+        self.shared.setup_locked = reason;
+    }
+
+    /// Lets rows whose client is not found offer "New client…" (see [`Self::take_new_client_request`]).
+    // Used by a host that embeds Filer (Vibe Files), not by this program.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn offer_new_client(&mut self, on: bool) {
+        self.shared.host_new_client = on;
+    }
+
+    /// The row whose "New client…" was pressed, once.
+    // Used by a host that embeds Filer (Vibe Files), not by this program.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn take_new_client_request(&mut self) -> Option<NewClientRequest> {
+        self.shared.new_client_request.take()
+    }
+
+    /// The host created client `client_id` (in `clients.json`) for `file`: the client list is
+    /// read again and the row gets that client.
+    // Used by a host that embeds Filer (Vibe Files), not by this program.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn client_created(&mut self, ctx: &egui::Context, file: &std::path::Path, client_id: &str) {
+        let s = &self.shared;
+        self.shared.clients.load(
+            ctx,
+            s.data_dir.clone(),
+            s.settings.csv_path.clone(),
+            s.settings.column_map.clone(),
+        );
+        self.preview.set_client(file, client_id);
+    }
+
     pub fn new(ctx: &egui::Context, mut shared: AppState) -> Self {
         crate::ui::theme::install(ctx);
         let setup = SetupScreen::new(&shared);
@@ -891,7 +950,14 @@ impl eframe::App for FilerApp {
             self.shared.finish_routed_zips();
         }
         egui::CentralPanel::default().show(ui, |ui| match self.tab {
-            Tab::Setup => self.setup.show(ui, &mut self.shared),
+            Tab::Setup => match self.shared.setup_locked.clone() {
+                // Locked by the host: shown, nothing can be changed.
+                Some(why) => {
+                    crate::ui::theme::banner(ui, crate::config::Level::Info, &why);
+                    ui.add_enabled_ui(false, |ui| self.setup.show(ui, &mut self.shared));
+                }
+                None => self.setup.show(ui, &mut self.shared),
+            },
             Tab::Rules => self.rules.show(ui, &mut self.shared),
             Tab::Preview => self.preview.show(ui, &mut self.shared),
             Tab::History => self.history.show(ui, &mut self.shared),
@@ -2526,6 +2592,90 @@ mod combine_ui_tests {
             !h.state().preview.can_commit_for_test(),
             "nothing ticked: W-2 blocks again"
         );
+    }
+
+    /// Host hooks (owner 2026-11-04, for Vibe Files): Setup locked by the host is read-only with
+    /// the reason shown; with "New client…" offered, a row whose client is not found hands the
+    /// host a request, and `client_created` gives the row that client.
+    #[test]
+    fn host_locks_setup_and_creates_a_missing_client() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data = tmp.path().join("data");
+        let root = tmp.path().join("root");
+        let inbox = tmp.path().join("inbox");
+        for d in [&data, &root, &inbox] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let csv = tmp.path().join("clients.csv");
+        std::fs::write(
+            &csv,
+            "id,name
+1001,\"Smith, John\"
+",
+        )
+        .unwrap();
+        crate::pdf::write_test_pdf(&inbox.join("Newco LLC_2002_2025 W-2.pdf"), &["x"]);
+        let settings = Settings {
+            root: Some(root.clone()),
+            inboxes: vec![inbox.clone()],
+            csv_path: Some(csv.clone()),
+            column_map: ColumnMap {
+                id: Some("id".into()),
+                name: Some("name".into()),
+                extras: vec![],
+            },
+            ..Settings::default()
+        };
+        let d = data.clone();
+        let mut h = HarnessBuilder::default()
+            .with_theme(egui::Theme::Light)
+            .with_size([1600.0, 1000.0])
+            .build_eframe(move |cc| {
+                crate::rules::seed_tax(&d);
+                let mut app = FilerApp::new(&cc.egui_ctx, AppState::load(d, settings, true, None));
+                app.set_setup_lock(Some("Locked by the admin password.".into()));
+                app.offer_new_client(true);
+                app
+            });
+        settle(&mut h, "queue", |a| {
+            a.shared.intake.queue().len() == 1 && a.shared.clients.list().is_some()
+        });
+        h.get_by_label("Setup").click();
+        h.step();
+        h.step();
+        assert!(h.query_by_label("Locked by the admin password.").is_some());
+        h.get_by_label("Preview").click();
+        settle(&mut h, "plan", |a| plan_ready(a, 1));
+        h.step();
+        let file = inbox.join("Newco LLC_2002_2025 W-2.pdf");
+        h.get_by_label("New client for Newco LLC_2002_2025 W-2.pdf")
+            .click();
+        h.step();
+        let req = h.state_mut().take_new_client_request().expect("asked");
+        assert_eq!(req.file, file);
+        assert_eq!(
+            (req.name.as_str(), req.id.as_deref()),
+            ("Newco LLC", Some("2002"))
+        );
+        // The host adds the client to clients.json (here: the CSV, re-imported), then says so.
+        std::fs::write(
+            &csv,
+            "id,name
+1001,\"Smith, John\"
+2002,Newco LLC
+",
+        )
+        .unwrap();
+        let ctx = h.ctx.clone();
+        h.state_mut().client_created(&ctx, &file, "2002");
+        settle(&mut h, "client found", |a| {
+            a.preview.plan_idle()
+                && a.preview
+                    .proposals()
+                    .first()
+                    .and_then(|p| p.client.as_ref())
+                    .is_some_and(|c| c.id == "2002")
+        });
     }
 
     /// The side pane shows the row last clicked; ticked rows get one client and one rule at once

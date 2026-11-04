@@ -760,6 +760,7 @@ impl ConflictsScreen {
         match client_picker(ctx, &title, &mut picker.query, &clients) {
             PickerOutcome::Open => {}
             PickerOutcome::Cancel => self.picker = None,
+            PickerOutcome::NewClient(_) => {}
             PickerOutcome::Chosen(client) => {
                 let (folder, rebind) = (picker.folder.clone(), picker.rebind);
                 self.picker = None;
