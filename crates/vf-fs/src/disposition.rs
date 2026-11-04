@@ -1166,6 +1166,7 @@ mod tests {
                 reason: "before annotations",
                 detail: json!({}),
                 extra: vec![],
+                based_on: None,
             },
         )
         .unwrap()

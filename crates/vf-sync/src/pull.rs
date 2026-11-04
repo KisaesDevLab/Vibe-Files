@@ -879,6 +879,7 @@ fn replace_with(conn: &mut Connection, root: &Path, s: &Sync, e: &DocEntry) -> R
             reason: "replaced by a newer version from another workstation",
             detail: json!({}),
             extra: vec![],
+            based_on: None,
         },
     )? {
         Ok(_) => Ok(true),

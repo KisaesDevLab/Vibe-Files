@@ -174,18 +174,36 @@ pub fn scan(conn: &Connection, root: &Path) -> Result<Drift, String> {
 /// Makes each modified file's content current (Q-29): version row for the old hash (content
 /// not kept), new hash on the document, docmeta line, `sync_pending`, audit `external_modify`.
 /// One Transaction; undo puts the catalog back (the file itself stays as edited).
+///
+/// The sweep's findings can be minutes old: only items whose catalog row still has the old
+/// content at the same path, and whose file still has the new content, are adopted (QA A8).
+/// Returns the paths adopted.
 pub fn adopt_modified(
     conn: &mut Connection,
     root: &Path,
     device_id: &str,
     items: &[Modified],
-) -> Result<usize, String> {
+) -> Result<Vec<String>, String> {
+    let items: Vec<&Modified> = items
+        .iter()
+        .filter(|m| {
+            let row: Option<(String, String)> = conn
+                .query_row(
+                    "SELECT hash, rel_path FROM document WHERE id = ?1 AND deleted_at IS NULL",
+                    [&m.doc_id],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .ok();
+            row.is_some_and(|(h, p)| h == m.old_hash && p == m.rel_path)
+                && sha256_file(&root.join(&m.rel_path)).is_ok_and(|h| h == m.new_hash)
+        })
+        .collect();
     if items.is_empty() {
-        return Ok(0);
+        return Ok(vec![]);
     }
     let now = vf_core::now_rfc3339();
     let mut tx = Transaction::new("external_modify");
-    for m in items {
+    for m in &items {
         let mut meta = crate::docmeta::load(conn, &m.doc_id)?;
         meta.hash = m.new_hash.clone();
         let (file, line) = crate::docmeta::record_line(root, &meta, &now, device_id);
@@ -245,7 +263,7 @@ pub fn adopt_modified(
             ));
     }
     crate::fileops::commit(conn, root, tx, device_id)?;
-    Ok(items.len())
+    Ok(items.iter().map(|m| m.rel_path.clone()).collect())
 }
 
 /// Follows moves made outside the app: each document's path becomes where its content is now.
@@ -528,8 +546,16 @@ mod tests {
         let m = &d.modified[0];
         assert!(m.rel_path.ends_with("w2.pdf"));
         assert_eq!(
-            adopt_modified(&mut conn, &root, "dev", &d.modified).unwrap(),
+            adopt_modified(&mut conn, &root, "dev", &d.modified)
+                .unwrap()
+                .len(),
             1
+        );
+        // A second look at the same (now stale) findings adopts nothing.
+        assert!(
+            adopt_modified(&mut conn, &root, "dev", &d.modified)
+                .unwrap()
+                .is_empty()
         );
         assert!(scan(&conn, &root).unwrap().is_clean());
         let new_hash = sha256_file(&w2).unwrap();

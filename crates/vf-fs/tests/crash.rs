@@ -95,6 +95,7 @@ fn crash_child() {
                         reason: "before redaction",
                         detail: serde_json::json!({}),
                         extra: vec![],
+                        based_on: None,
                     },
                 );
             }

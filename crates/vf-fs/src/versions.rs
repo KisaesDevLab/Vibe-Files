@@ -152,6 +152,7 @@ pub fn restore(
             reason: "before restoring an earlier version",
             detail: serde_json::json!({ "restored": hash }),
             extra: vec![],
+            based_on: None,
         },
     )
 }
@@ -193,6 +194,7 @@ mod tests {
                 reason: "before annotations",
                 detail: serde_json::json!({}),
                 extra: vec![],
+                based_on: None,
             },
         )
         .unwrap()

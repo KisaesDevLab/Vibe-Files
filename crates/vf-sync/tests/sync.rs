@@ -309,6 +309,7 @@ fn a_forced_collision_keeps_both_and_raises_a_conflict() {
                 reason: "before annotations",
                 detail: serde_json::json!({}),
                 extra: vec![],
+                based_on: None,
             },
         )
         .unwrap()
@@ -818,6 +819,7 @@ fn a_local_metadata_edit_survives_remote_content() {
             reason: "x",
             detail: serde_json::json!({}),
             extra: vec![],
+            based_on: None,
         },
     )
     .unwrap()

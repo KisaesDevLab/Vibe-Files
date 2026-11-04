@@ -652,6 +652,7 @@ fn run_page_op(
                 what: &str,
                 f: &dyn Fn(&Path, &Path) -> Result<(), String>|
      -> Result<String, String> {
+        let based_on = source_hash(env, &doc)?;
         let tmp = vf_fs::content::tmp_file(env.root, "pdf")?;
         f(&doc.path, &tmp).inspect_err(|_| {
             let _ = std::fs::remove_file(&tmp);
@@ -662,6 +663,7 @@ fn run_page_op(
             reason: "before page edit",
             detail: serde_json::json!({ "edit": what }),
             extra: vec![],
+            based_on: Some(based_on),
         };
         match vf_fs::content::replace(env.conn, env.root, env.device_id, &doc.doc_id, &tmp, change)?
         {
@@ -1928,10 +1930,32 @@ enum Convert {
     Compress,
 }
 
+/// The catalog hash of the open document, after checking it is still at the path it was opened
+/// from: a document renamed or moved meanwhile is never edited from its old path, where another
+/// file may sit now (QA A11).
+fn source_hash(env: &Env<'_>, doc: &Doc) -> Result<String, String> {
+    let (rel, hash): (String, String) = env
+        .conn
+        .query_row(
+            "SELECT rel_path, hash FROM document WHERE id = ?1 AND deleted_at IS NULL",
+            [&doc.doc_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .map_err(|_| format!("{} is no longer in the cabinet.", doc.name))?;
+    if env.root.join(&rel) != doc.path {
+        return Err(format!(
+            "{} was renamed or moved since it was opened: open it again from Browse.",
+            doc.name
+        ));
+    }
+    Ok(hash)
+}
+
 /// Flatten or PDF/A: the result is a new version of this document (current one kept).
 fn convert(v: &mut Viewer, env: &mut Env<'_>, what: Convert) {
     let Some(doc) = v.doc.clone() else { return };
     let r = (|| -> Result<String, String> {
+        let based_on = source_hash(env, &doc)?;
         let tmp = vf_fs::content::tmp_file(env.root, "pdf")?;
         let (label, reason, detail) = match what {
             Convert::Flatten => {
@@ -1985,6 +2009,7 @@ fn convert(v: &mut Viewer, env: &mut Env<'_>, what: Convert) {
             reason,
             detail: detail.clone(),
             extra: vec![],
+            based_on: Some(based_on),
         };
         match vf_fs::content::replace(env.conn, env.root, env.device_id, &doc.doc_id, &tmp, change)?
         {
@@ -2052,6 +2077,7 @@ fn save_pending(
     as_new: bool,
 ) -> Result<Option<Doc>, String> {
     let n = v.pending.len();
+    let based_on = source_hash(env, doc)?;
     let tmp = vf_fs::content::tmp_file(env.root, "pdf")?;
     let now = vf_core::now_rfc3339();
     if let Err(e) = annot::add(&doc.path, &tmp, &v.pending, &now) {
@@ -2105,6 +2131,7 @@ fn save_pending(
         reason: "before annotations",
         detail: serde_json::json!({ "annotations": n }),
         extra: vec![],
+        based_on: Some(based_on),
     };
     match vf_fs::content::replace(env.conn, env.root, env.device_id, &doc.doc_id, &tmp, change)? {
         Ok(_) => Ok(None),

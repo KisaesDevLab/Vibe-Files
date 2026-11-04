@@ -239,6 +239,7 @@ pub fn resolve(
                         reason: "the other workstation's version, replaced in a conflict",
                         detail: json!({}),
                         extra: vec![],
+                        based_on: None,
                     },
                 )? {
                     Ok(_) => {}

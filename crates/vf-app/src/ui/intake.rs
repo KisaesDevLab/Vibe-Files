@@ -29,6 +29,10 @@ pub struct IntakeTab {
     error: Option<String>,
     /// `last_batch.json`'s modification time when the catalog was last brought in line with it.
     seen: Option<std::time::SystemTime>,
+    /// After a failed reconcile: not tried again before this, and the wait so far (doubling to a
+    /// minute), so a share that is gone does not stall every frame (QA A5).
+    retry_at: Option<std::time::Instant>,
+    backoff: std::time::Duration,
     /// The catalog changed (a batch was recorded or undone): Browse re-reads it.
     pub catalog_changed: bool,
     /// What the last reconcile did or why it failed, for Browse's notice.
@@ -97,10 +101,15 @@ impl IntakeTab {
         if modified.is_none() || modified == self.seen {
             return;
         }
+        if self.retry_at.is_some_and(|t| std::time::Instant::now() < t) {
+            return;
+        }
         let before = vf_core::now_rfc3339();
         match vf_fs::intake::reconcile(conn, root, device_id) {
             Ok(r) => {
                 self.seen = modified;
+                self.retry_at = None;
+                self.backoff = std::time::Duration::ZERO;
                 if let Some((_, added, updated)) = r.recorded {
                     self.message = Some(format!(
                         "Intake filed {added} new documents{}.",
@@ -120,7 +129,17 @@ impl IntakeTab {
                 self.catalog_changed |= r.changed();
             }
             // Try again next frame (e.g. a file still being written); keep the message.
-            Err(e) => self.message = Some(format!("Intake batch not recorded yet: {e}")),
+            Err(e) => {
+                self.backoff = (self.backoff * 2).clamp(
+                    std::time::Duration::from_secs(2),
+                    std::time::Duration::from_secs(60),
+                );
+                self.retry_at = Some(std::time::Instant::now() + self.backoff);
+                self.message = Some(format!(
+                    "Intake batch not recorded yet (trying again in {} s): {e}",
+                    self.backoff.as_secs()
+                ));
+            }
         }
     }
 

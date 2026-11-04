@@ -86,6 +86,9 @@ pub struct OpenCabinet {
     pub chain: crate::ui::audit::ChainCheck,
     /// When new audit rows were last copied to `_Vibe/audit/<month>.jsonl`.
     mirrored_at: Option<std::time::Instant>,
+    /// Wait before the next mirror write: 2 s, doubling to 2 min after failures, so a share
+    /// that went away is not waited on every 2 s (QA A7).
+    mirror_wait: std::time::Duration,
     /// The integrity sweep (P05 step 5): weekly, and from Admin.
     pub sweep: crate::ui::sweep::SweepState,
     /// B2 sync (P11).
@@ -370,6 +373,7 @@ impl VibeFilesApp {
                 self.screen = Screen::Open(Box::new(OpenCabinet {
                     chain,
                     mirrored_at: None,
+                    mirror_wait: std::time::Duration::from_secs(2),
                     sweep,
                     sync: Default::default(),
                     checks,
@@ -421,12 +425,15 @@ impl eframe::App for VibeFilesApp {
                 o.browse.reload(&o.opened.conn);
             }
             // The audit trail's copy in the cabinet (CLAUDE.md layout: _Vibe/audit/*.jsonl).
-            if o.mirrored_at
-                .is_none_or(|t| t.elapsed() >= std::time::Duration::from_secs(2))
-            {
+            if o.mirrored_at.is_none_or(|t| t.elapsed() >= o.mirror_wait) {
                 o.mirrored_at = Some(std::time::Instant::now());
                 let dir = o.opened.root.join("_Vibe").join("audit");
-                if let Err(e) = vf_core::audit::mirror_pending(&o.opened.conn, &dir) {
+                let r = vf_core::audit::mirror_pending(&o.opened.conn, &dir);
+                o.mirror_wait = match r {
+                    Ok(_) => std::time::Duration::from_secs(2),
+                    Err(_) => (o.mirror_wait * 2).min(std::time::Duration::from_secs(120)),
+                };
+                if let Err(e) = r {
                     tracing::warn!(
                         kind = crate::logging::kind(&e.to_string()),
                         "audit mirror not written"
@@ -486,12 +493,23 @@ impl eframe::App for VibeFilesApp {
                     let s = q.status();
                     s.indexed + s.written
                 });
+                // New OCR text, or any change to the catalog (every change writes an audit
+                // row): the results are run again, so a renamed or trashed document is never
+                // shown at its old place (QA A11). Looked at once a second.
                 let (seen, at) = o.indexed_seen;
-                if indexed != seen
-                    && at.is_none_or(|t| t.elapsed() >= std::time::Duration::from_secs(3))
-                {
-                    o.indexed_seen = (indexed, Some(std::time::Instant::now()));
-                    o.search.refresh();
+                if at.is_none_or(|t| t.elapsed() >= std::time::Duration::from_secs(1)) {
+                    let changes: usize = o
+                        .opened
+                        .conn
+                        .query_row("SELECT coalesce(max(seq), 0) FROM audit", [], |r| {
+                            r.get::<_, i64>(0)
+                        })
+                        .map_or(0, |n| n as usize);
+                    let generation = indexed.wrapping_add(changes);
+                    if generation != seen && at.is_some() {
+                        o.search.refresh();
+                    }
+                    o.indexed_seen = (generation, Some(std::time::Instant::now()));
                 }
                 crate::ui::search::show(
                     ui,
@@ -1044,8 +1062,7 @@ mod tests {
             h.query_by_label("4 pending").is_some(),
             "the pill counts the client's documents"
         );
-        h.get_by_role_and_label(Role::Button, "Sync to B2    ")
-            .click();
+        h.get_by_role_and_label(Role::Button, "Sync to B2").click();
         h.run();
         h.get_by_role_and_label(Role::Button, "Push this client now")
             .click();

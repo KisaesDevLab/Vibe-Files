@@ -144,6 +144,7 @@ pub fn write(
                 )),
             ),
         ],
+        based_on: None,
     };
     match content::replace(conn, root, device_id, doc_id, &tmp, change)? {
         Ok(_) => Ok(Written::Done),

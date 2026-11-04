@@ -39,7 +39,7 @@ impl std::fmt::Display for Refused {
                 "the file is in Intake's last batch; it can be changed once that batch can no longer be undone"
             }
             Refused::Locked => "the document is checked out",
-            Refused::Changed => "the file was changed outside Vibe Files",
+            Refused::Changed => "the file changed since it was read (outside Vibe Files or by another task)",
         })
     }
 }
@@ -65,6 +65,10 @@ pub struct Change<'a> {
     /// Further catalog statements in the same Transaction, with their inverses. They may use
     /// `?OLD` / `?NEW` placeholders for the old and new hashes.
     pub extra: Vec<(Stmt, Option<Stmt>)>,
+    /// The content the new file was made from (catalog hash when the caller read the file).
+    /// When it is no longer the document's content, the replace is refused as
+    /// [`Refused::Changed`]: an edit made on an older copy never lands on newer content (QA A11).
+    pub based_on: Option<String>,
 }
 
 /// What [`replace`] did.
@@ -135,6 +139,9 @@ fn replace_inner(
         Ok(v) => v,
         Err(why) => return Ok(Err(why)),
     };
+    if change.based_on.as_ref().is_some_and(|b| *b != old_hash) {
+        return Ok(Err(Refused::Changed));
+    }
     let path = root.join(&rel);
     let new_hash = filer_intake::commit::sha256_file(new_file).map_err(|e| e.to_string())?;
     let new_size = std::fs::metadata(new_file)
@@ -452,7 +459,25 @@ mod tests {
             reason: "before annotations",
             detail: json!({ "annotations": 2 }),
             extra: vec![],
+            based_on: None,
         }
+    }
+
+    /// QA A11: an edit made from older content is refused, and nothing changes.
+    #[test]
+    fn replace_based_on_older_content_is_refused() {
+        let (_t, root, mut conn) = fx();
+        let tmp = tmp_file(&root, "pdf").unwrap();
+        std::fs::write(&tmp, b"new bytes").unwrap();
+        let mut c = change();
+        c.based_on = Some("0".repeat(64));
+        let r = replace(&mut conn, &root, "dev", "d1", &tmp, c).unwrap();
+        assert_eq!(r, Err(Refused::Changed));
+        assert_eq!(
+            std::fs::read(root.join("A (1)/2025/doc.pdf")).unwrap(),
+            b"old bytes"
+        );
+        assert!(!tmp.exists());
     }
 
     #[test]

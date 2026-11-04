@@ -80,8 +80,8 @@ impl SweepState {
         self.adopted.clear();
         if !d.modified.is_empty() {
             match sweep::adopt_modified(conn, root, device_id, &d.modified) {
-                Ok(_) => {
-                    self.adopted = d.modified.iter().map(|m| m.rel_path.clone()).collect();
+                Ok(adopted) => {
+                    self.adopted = adopted;
                     d.modified.clear();
                     self.changed = true;
                 }

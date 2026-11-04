@@ -136,6 +136,7 @@ pub fn run(dir: &Path, hours: f64, out: &mut dyn Write) -> Result<i32> {
                 reason: "soak test",
                 detail: serde_json::json!({}),
                 extra: vec![],
+                based_on: None,
             },
         );
         if i.is_multiple_of(10) {

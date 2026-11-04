@@ -1118,6 +1118,11 @@ fn tree_row(
         ui.add_space(depth as f32 * 16.0);
         let (rect, chev) = ui.allocate_exact_size(egui::vec2(14.0, 14.0), Sense::click());
         if let Some(open) = chevron {
+            // Painted, so it says what it is for screen readers (QA A15).
+            let name = format!("{} {label}", if open { "Collapse" } else { "Expand" });
+            chev.widget_info(|| {
+                egui::WidgetInfo::labeled(egui::accesskit::Role::Button, true, &name)
+            });
             let c = rect.center();
             let pts = if open {
                 vec![
@@ -1191,6 +1196,10 @@ fn sync_menu(ui: &mut egui::Ui, b: &mut Browse) {
             ui.close();
         }
     });
+    // The spaces leave room for the painted ▾; the name read out has none (QA A15).
+    menu.response.widget_info(|| {
+        egui::WidgetInfo::labeled(egui::accesskit::Role::Button, true, "Sync to B2")
+    });
     let r = menu.response.rect;
     let c = egui::pos2(r.right() - 10.0, r.center().y);
     ui.painter().add(egui::Shape::convex_polygon(
@@ -1228,11 +1237,17 @@ fn sync_pill(ui: &mut egui::Ui, b: &mut Browse) {
         _ if n > 0 => (format!("{n} pending"), amber),
         _ => ("in sync".to_string(), green),
     };
-    if crate::ui::widgets::pill(ui, &text, bg, fg)
+    let pill = crate::ui::widgets::pill(ui, &text, bg, fg)
         .on_hover_text("B2 sync of this client: click for the Sync tab")
-        .interact(Sense::click())
-        .clicked()
-    {
+        .interact(Sense::click());
+    pill.widget_info(|| {
+        egui::WidgetInfo::labeled(
+            egui::accesskit::Role::Button,
+            true,
+            format!("B2 sync: {text}"),
+        )
+    });
+    if pill.clicked() {
         b.sync_request = Some(SyncRequest::Show(Some(id)));
     }
 }
@@ -2633,6 +2648,7 @@ mod tests {
                     reason: "before annotations",
                     detail: serde_json::json!({}),
                     extra: vec![],
+                    based_on: None,
                 },
             )
             .unwrap()

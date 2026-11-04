@@ -26,6 +26,8 @@ pub struct IngestState {
     /// This PC's Tesseract setting (`config.toml [ocr]`), for reading scanned forms (P08).
     pub tesseract: Option<PathBuf>,
     checked: Option<Instant>,
+    /// Extra wait after a slow look at the inboxes.
+    slow_wait: Duration,
     /// Filer's first inbox, where processed files go.
     pub inbox: Option<PathBuf>,
     /// Why a staging folder is not watched.
@@ -176,13 +178,25 @@ impl IngestState {
                 self.log_line(line);
             }
         }
-        if self.checked.is_some_and(|t| t.elapsed() < RECHECK) {
+        // A slow look (a share that went away waits out its timeout) spaces the next one out,
+        // up to a minute, so the window is not stalled every few seconds (QA A7).
+        if self
+            .checked
+            .is_some_and(|t| t.elapsed() < RECHECK.max(self.slow_wait))
+        {
             return;
         }
-        self.checked = Some(Instant::now());
+        let started = Instant::now();
+        self.checked = Some(started);
         let inboxes = filer_inboxes(root);
         self.inbox = inboxes.first().cloned();
         self.in_inboxes = count_queued(&inboxes);
+        let took = started.elapsed();
+        self.slow_wait = if took > Duration::from_millis(500) {
+            (took * 20).min(Duration::from_secs(60))
+        } else {
+            Duration::ZERO
+        };
         let mut warnings = Vec::new();
         let mut folders = Vec::new();
         for (dir, origin) in [
