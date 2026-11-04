@@ -18,6 +18,7 @@ pub mod meta_editor;
 pub mod new_client;
 pub mod ocr;
 pub mod pages;
+pub mod preview;
 pub mod rename;
 pub mod retention;
 pub mod search;

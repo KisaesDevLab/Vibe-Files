@@ -171,6 +171,8 @@ pub struct Browse {
     pub rename: Option<RenameDialog>,
     /// A PDF to show in the Viewer (taken by the app).
     pub view_request: Option<crate::ui::viewer::Doc>,
+    /// The preview pane at the top of the inspector (PA-12).
+    pub preview: crate::ui::preview::Preview,
     /// `Combine` pressed: merged on the next frame (needs the catalog).
     combine_request: bool,
     /// Pinned / Recent / Favorites, from this PC's config; `prefs_dirty` asks the app to save.
@@ -278,6 +280,7 @@ impl Browse {
             root: None,
             drop_request: None,
             scan_request: false,
+            preview: Default::default(),
             scan_watching: false,
             holds_seen: None,
             hold_reason: None,
@@ -1145,7 +1148,7 @@ pub fn show(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env) {
         .frame(egui::Frame::new().fill(theme::pane()).inner_margin(8))
         .show(ui, |ui| tree(ui, b));
     egui::Panel::right("browse-inspector")
-        .exact_size(320.0)
+        .exact_size(400.0)
         .resizable(false)
         .frame(egui::Frame::new().fill(theme::pane()).inner_margin(12))
         .show(ui, |ui| {
@@ -2136,6 +2139,33 @@ fn inspector(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env) {
     }
     let top = b.undo_stack.as_ref().and_then(|s| s.first()).cloned();
     let mut undo = std::mem::take(&mut b.undo_requested);
+    // The focused document's pages (PA-12).
+    if let Some(di) = b.target_doc() {
+        let d = b.snap.docs[di].clone();
+        b.preview
+            .set(ui.ctx(), env.root, &d.id, &d.rel_path, &d.hash);
+        let pos = b.visible.iter().position(|&i| i == di).unwrap_or(0);
+        match crate::ui::preview::show(ui, &mut b.preview, &d.rel_path, (pos, b.visible.len())) {
+            crate::ui::preview::Act::None => {}
+            crate::ui::preview::Act::Open(page) => {
+                b.view_request = Some(crate::ui::viewer::Doc::at(
+                    env.root,
+                    &d.id,
+                    &d.rel_path,
+                    page,
+                    vec![],
+                ));
+            }
+            crate::ui::preview::Act::Step(by) => {
+                let to = (pos as i64 + i64::from(by)).clamp(0, b.visible.len() as i64 - 1);
+                b.click_row(to as usize, egui::Modifiers::NONE);
+                b.scroll_to = Some(to as usize);
+            }
+        }
+        ui.add_space(6.0);
+    } else {
+        b.preview.clear();
+    }
     let n = b.selected.len();
     ui.label(
         RichText::new(format!(
@@ -2807,7 +2837,8 @@ mod tests {
         let (tmp, conn) = seed(clients, per);
         let b = Browse::load(&conn);
         let mut h = HarnessBuilder::default()
-            .with_size([1440.0, 900.0])
+            // Wide enough for every grid column beside the 400 px inspector (PA-12).
+            .with_size([1600.0, 900.0])
             // Real frame times: double-clicks need two clicks within 0.3 s of simulated time.
             .with_step_dt(1.0 / 60.0)
             .build_ui_state(
@@ -2957,6 +2988,54 @@ mod tests {
         click(&mut h, "Folders");
         assert!(!h.state().b.prefs.tree_by_year);
         assert!(h.query_by_label("Income Tax").is_some());
+    }
+
+    /// PA-12: the focused document's page shows in the preview pane; Next steps to the next
+    /// document; Open in Viewer opens it at the page shown.
+    #[test]
+    fn preview_pane_shows_the_focused_document() {
+        let mut h = harness(1, 2);
+        let ctx = h.ctx.clone();
+        {
+            let s = h.state_mut();
+            for d in &s.b.snap.docs {
+                let p = s.root.join(&d.rel_path);
+                std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+                filer_pdf::pdf::write_test_pdf(&p, &["Invented page one", "Invented page two"]);
+            }
+            s.b.egui_ctx = Some(ctx);
+        }
+        h.get_by_label("doc 000.pdf").click();
+        h.run_steps(3);
+        assert!(h.query_by_label("1 of 2").is_some());
+        let start = std::time::Instant::now();
+        while h.query_by_label("Page 1 / 2").is_none() {
+            assert!(
+                start.elapsed() < std::time::Duration::from_secs(20),
+                "never opened"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            h.step();
+        }
+        h.get_by_role_and_label(Role::Button, "Next").click();
+        h.run_steps(3);
+        assert!(h.query_by_label("2 of 2").is_some());
+        let start = std::time::Instant::now();
+        while h.query_by_label("Open in Viewer").is_none() {
+            assert!(start.elapsed() < std::time::Duration::from_secs(20));
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            h.step();
+        }
+        h.get_by_role_and_label(Role::Button, "Open in Viewer")
+            .click();
+        h.run_steps(2);
+        let req = h
+            .state_mut()
+            .b
+            .view_request
+            .take()
+            .expect("open in the Viewer");
+        assert!(req.path.ends_with("doc 001.pdf"));
     }
 
     /// The grid has a Client column (owner 2026-11-04: Views mix clients), and sorts by it.
