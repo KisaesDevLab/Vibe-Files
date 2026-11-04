@@ -67,6 +67,39 @@ pub fn devices(root: &Path) -> Vec<Device> {
     out
 }
 
+/// Takes a workstation that is gone off the list (Admin › Devices, PA-24). It comes back if it
+/// opens the cabinet again. Audited `device_removed`.
+pub fn remove_device(
+    conn: &mut Connection,
+    root: &Path,
+    device_id: &str,
+    gone: &str,
+) -> Result<(), String> {
+    if gone == device_id {
+        return Err("This PC cannot remove itself.".into());
+    }
+    let file = devices_dir(root).join(format!("{gone}.json"));
+    let name = std::fs::read_to_string(&file)
+        .ok()
+        .and_then(|t| serde_json::from_str::<Device>(&t).ok())
+        .map(|d| d.name)
+        .ok_or("That workstation is not on the list.")?;
+    std::fs::remove_file(&file).map_err(|e| e.to_string())?;
+    vf_core::tx::Transaction::new("device_removed")
+        .audit(vf_core::audit::AuditEntry::new(
+            "device_removed",
+            None,
+            serde_json::json!({ "device": gone, "name": name }),
+        ))
+        .commit(
+            conn,
+            &mut vf_core::tx::NoFileOps,
+            &vf_core::tx::Actor::device(device_id),
+        )
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
 /// What the app adds that the catalog cannot say.
 pub struct Inputs<'a> {
     pub cabinet_name: &'a str,

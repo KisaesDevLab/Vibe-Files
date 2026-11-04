@@ -6,6 +6,7 @@ pub mod capture;
 pub mod chrome;
 pub mod client_panel;
 pub mod cover_sheet;
+pub mod devices;
 pub mod disposition;
 pub mod doc_render;
 pub mod filed_details;

@@ -24,6 +24,8 @@ pub enum Page {
     Import,
     /// Admin › Admin password (PA-24).
     Password,
+    /// Admin › Devices (PA-24).
+    Devices,
 }
 
 /// UI_SPEC §6 nav, grouped. Only Doc types is built in P01.
@@ -135,6 +137,7 @@ pub struct Admin {
     pub password: crate::ui::admin_password::PasswordPage,
     /// "Lock Admin" pressed (the app ends the unlocked session).
     pub lock_requested: bool,
+    pub devices: crate::ui::devices::DevicesPage,
 }
 
 impl Admin {
@@ -165,6 +168,7 @@ impl Admin {
             trash: Default::default(),
             password: Default::default(),
             lock_requested: false,
+            devices: Default::default(),
         };
         a.reload(env);
         a
@@ -345,6 +349,7 @@ pub fn show(ui: &mut egui::Ui, a: &mut Admin, env: &mut Env, sweep: SweepEnv) {
             }
         }
         Page::Password => crate::ui::admin_password::show(ui, &mut a.password, env),
+        Page::Devices => crate::ui::devices::show(ui, &mut a.devices, env),
         Page::Trash => {
             crate::ui::trash::show(ui, &mut a.trash, env);
             if std::mem::take(&mut a.trash.changed) {
@@ -424,6 +429,13 @@ fn nav(ui: &mut egui::Ui, a: &mut Admin, has_password: bool) {
             } else if *item == "Integrity sweep" {
                 if ui.selectable_label(a.page == Page::Sweep, *item).clicked() {
                     a.page = Page::Sweep;
+                }
+            } else if *item == "Devices" {
+                if ui
+                    .selectable_label(a.page == Page::Devices, *item)
+                    .clicked()
+                {
+                    a.page = Page::Devices;
                 }
             } else if *item == "Admin password" {
                 if ui
@@ -977,6 +989,34 @@ ANDE1042,Anderson Farms LLC
         let text = d.extract_text(&[1]).unwrap();
         assert!(text.contains("Vibe Files audit trail"), "{text}");
         assert!(text.contains("intact"), "{text}");
+    }
+
+    /// PA-24: Devices lists the workstations; this PC is marked and cannot be removed; another
+    /// can, and is audited.
+    #[test]
+    fn devices_page_lists_and_removes() {
+        let mut h = harness();
+        {
+            let s = h.state_mut();
+            vf_fs::safeguards::register_device(&s.root, "dev").unwrap();
+            vf_fs::safeguards::register_device(&s.root, "old-pc").unwrap();
+        }
+        click(&mut h, "Devices");
+        let both = vf_fs::safeguards::devices(&h.state().root).len();
+        assert_eq!(both, 2);
+        assert!(h.query_all_by_label("Remove").count() == 1, "not this PC");
+        click(&mut h, "Remove");
+        assert_eq!(vf_fs::safeguards::devices(&h.state().root).len(), 1);
+        let n: i64 = h
+            .state()
+            .conn
+            .query_row(
+                "SELECT count(*) FROM audit WHERE action = 'device_removed'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 1);
     }
 
     /// P05 step 3: set the admin password, restore from the trash, empty it with the password.
