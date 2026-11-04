@@ -5658,7 +5658,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "vf-app"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "chrono",
@@ -5699,7 +5699,7 @@ dependencies = [
 
 [[package]]
 name = "vf-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "csv",
  "rusqlite",
@@ -5714,15 +5714,15 @@ dependencies = [
 
 [[package]]
 name = "vf-events"
-version = "0.1.0"
+version = "0.1.1"
 
 [[package]]
 name = "vf-extract"
-version = "0.1.0"
+version = "0.1.1"
 
 [[package]]
 name = "vf-fixtures"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "filer-core",
@@ -5745,7 +5745,7 @@ dependencies = [
 
 [[package]]
 name = "vf-fs"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "filer-core",
  "filer-intake",
@@ -5765,7 +5765,7 @@ dependencies = [
 
 [[package]]
 name = "vf-index"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -5776,7 +5776,7 @@ dependencies = [
 
 [[package]]
 name = "vf-ingest"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "filer-core",
  "filer-intake",
@@ -5803,7 +5803,7 @@ dependencies = [
 
 [[package]]
 name = "vf-ocr"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "filer-intake",
  "filer-pdf",
@@ -5825,7 +5825,7 @@ dependencies = [
 
 [[package]]
 name = "vf-pdf"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "filer-pdf",
  "image",
@@ -5842,7 +5842,7 @@ dependencies = [
 
 [[package]]
 name = "vf-security"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "argon2",
  "chacha20poly1305",
@@ -5856,7 +5856,7 @@ dependencies = [
 
 [[package]]
 name = "vf-sync"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "bytes",
