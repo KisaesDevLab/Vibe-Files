@@ -275,6 +275,15 @@ impl VibeFilesApp {
                 let root = opened.root.clone();
                 let catalog = opened.catalog.clone();
                 intake.reconcile(&mut opened.conn, &catalog, &root, &self.config.device_id);
+                // Print captures are filed by their doc types' folders (Admin › Print capture):
+                // Filer's rules are brought in line before Intake first loads them.
+                let _ = vf_ingest::parsers::seed_if_missing(&root);
+                if let Err(e) = vf_ingest::parsers::sync_filer_rules(&root) {
+                    tracing::warn!(
+                        kind = crate::logging::kind(&e),
+                        "print capture rules not written"
+                    );
+                }
                 self.config.last_cabinet = Some(opened.root.clone());
                 // The cabinet is open either way; a settings write failure only loses "last".
                 let _ = config::save(&self.data, &self.config);
@@ -625,6 +634,9 @@ impl eframe::App for VibeFilesApp {
                         && let Err(e) = (tab_browse.shell)(&crate::shell::ShellAction::Open(dir))
                     {
                         a.error = Some(e);
+                    }
+                    if std::mem::take(&mut a.rules_changed) {
+                        o_intake.rules_changed();
                     }
                     if let Some(c) = a.capture_changed.take() {
                         let mut ingest = self.config.ingest.clone();

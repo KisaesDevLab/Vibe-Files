@@ -339,7 +339,7 @@ fn cover_name(cover: &Cover, lookup: &Lookup, stem: &str, part: usize) -> (Strin
 /// Print capture (step 5): the name a parser profile reads, as Filer's `Name_ID_rest.pdf`, and
 /// a hint with the profile's doc type, year and source (`firm`). A name no profile reads goes
 /// through as it is, still marked as the firm's.
-fn capture_name(root: &Path, lookup: &Lookup, name: &str) -> (String, Hint, String) {
+pub fn capture_name(root: &Path, lookup: &Lookup, name: &str) -> (String, Hint, String) {
     let _ = crate::parsers::seed_if_missing(root);
     let (profiles, _) = crate::parsers::load(root);
     let Some(p) = crate::parsers::parse(&profiles, name) else {

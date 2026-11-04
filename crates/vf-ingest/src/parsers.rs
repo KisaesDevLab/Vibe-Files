@@ -7,6 +7,7 @@
 //! `<Client name>_<Tax year>_<Form>_<Document>[_<K-1 recipient>]_<Client ID>.pdf` (owner's
 //! sample names, 2026-11-03; only their shape is kept here).
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use regex::Regex;
@@ -28,6 +29,10 @@ pub struct Profile {
     /// First match wins.
     #[serde(default)]
     pub doc: Vec<DocRule>,
+    /// Where a doc type's prints are filed, below the client folder (`Correspondence/{Year}`),
+    /// when not the doc type's own default folder (Admin › Doc types). By doc type name.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub folders: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -138,6 +143,253 @@ doc_type = "Estimate vouchers"
 match = '(?i)engagement'
 doc_type = "Engagement letter"
 "#;
+
+/// Every profile file with its path, for the editor. Files that do not read are reported.
+pub fn load_files(root: &Path) -> (Vec<(PathBuf, Profile)>, Vec<String>) {
+    let mut files: Vec<PathBuf> = std::fs::read_dir(dir(root))
+        .map(|rd| {
+            rd.filter_map(Result::ok)
+                .map(|e| e.path())
+                .filter(|p| p.extension().is_some_and(|x| x == "toml"))
+                .collect()
+        })
+        .unwrap_or_default();
+    files.sort();
+    let (mut out, mut errors) = (Vec::new(), Vec::new());
+    for f in files {
+        match std::fs::read_to_string(&f)
+            .map_err(|e| e.to_string())
+            .and_then(|t| toml::from_str::<Profile>(&t).map_err(|e| e.to_string()))
+        {
+            Ok(p) => out.push((f, p)),
+            Err(e) => errors.push(format!("{}: {e}", f.display())),
+        }
+    }
+    (out, errors)
+}
+
+/// Writes `profile` to `path` (in the parsers folder) after checking it compiles. The file's
+/// comments are replaced by a header: the editor in Admin is the way to change it.
+pub fn save_profile(path: &Path, profile: &Profile) -> Result<(), String> {
+    let body = toml::to_string_pretty(profile).map_err(|e| e.to_string())?;
+    compile(&body)?;
+    let text = format!(
+        "# Print capture parser profile. Edited in Vibe Files: Admin › Print capture & parsers.\n\
+         # `pattern` reads the printed file name (groups id, year, doc, recipient); the first\n\
+         # [[doc]] whose `match` finds the document name sets the doc type; [folders] files a doc\n\
+         # type's prints somewhere other than its default folder.\n{body}"
+    );
+    vf_fs::cabinet::write_replace(path, text.as_bytes())
+}
+
+/// Filer rules Vibe Files writes for print captures carry this id prefix; they are rewritten
+/// from the parser profiles and doc types, never edited by hand.
+pub const MANAGED_PREFIX: &str = "vf-capture-";
+
+/// Where each doc type of `profile` is filed: its override in `[folders]`, else the doc type's
+/// default folder. Doc types with neither are left to Filer's own rules.
+pub fn folder_for(profile: &Profile, doc_type: &str, types: &[vf_fs::doctypes::DocType]) -> String {
+    profile
+        .folders
+        .get(doc_type)
+        .filter(|f| !f.trim().is_empty())
+        .cloned()
+        .or_else(|| {
+            types
+                .iter()
+                .find(|t| t.name == doc_type)
+                .map(|t| t.default_folder.clone())
+        })
+        .unwrap_or_default()
+        .trim()
+        .trim_matches('/')
+        .to_string()
+}
+
+/// The Filer rules that file each mapped doc type of the enabled profiles in its folder.
+/// A capture's delivered name reads `<year> <profile> <doc type> …` (see the pipeline), so each
+/// rule matches its profile and doc type there. File name and next-year folder follow Filer's
+/// `UltraTax` rule when the profile has one.
+pub fn filer_rules(
+    profiles: &[Profile],
+    types: &[vf_fs::doctypes::DocType],
+    like: Option<&filer_core::rules::Rule>,
+) -> Vec<filer_core::rules::Rule> {
+    use filer_core::rules::Rule;
+    let mut out: Vec<Rule> = Vec::new();
+    for p in profiles.iter().filter(|p| p.enabled) {
+        let mut seen = std::collections::HashSet::new();
+        for d in &p.doc {
+            if !seen.insert(d.doc_type.clone()) {
+                continue;
+            }
+            let folder = folder_for(p, &d.doc_type, types);
+            if folder.is_empty() {
+                continue;
+            }
+            let by_year = folder.contains("{Year}");
+            let words = crate::pipeline::clean(&format!("{} {}", p.name, d.doc_type));
+            let pattern = words
+                .split_whitespace()
+                .map(regex::escape)
+                .collect::<Vec<_>>()
+                .join(r"\s+");
+            // Rule names are unique in a profile (Filer has its own "Engagement Letter").
+            let mut r = Rule::new(
+                &format!("{} · {}", d.doc_type, p.name),
+                &pattern,
+                &format!("{{Client}}/{folder}"),
+                like.map_or("{Original}.{Ext}", |l| l.filename_template.as_str()),
+                by_year,
+            );
+            r.id = format!("{MANAGED_PREFIX}{}", stable_id(&p.name, &d.doc_type));
+            r.next_year_folder = by_year && like.is_some_and(|l| l.next_year_folder);
+            out.push(r);
+        }
+    }
+    out
+}
+
+/// A stable id from the profile and doc type (so an unchanged mapping rewrites nothing).
+fn stable_id(profile: &str, doc_type: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let h = Sha256::digest(format!("{profile}\u{0}{doc_type}").as_bytes());
+    h[..8].iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Brings Filer's `rules.json` in line with the parser profiles and doc types: the managed rules
+/// are removed from every profile and written again into the active one, just before its
+/// `UltraTax` rule (else before the catch-all). Filer's own rules are never touched. Returns
+/// whether the file changed (Intake must then reload its rules).
+pub fn sync_filer_rules(root: &Path) -> Result<bool, String> {
+    let master = vf_fs::clients::master_dir(root);
+    let (mut file, savable, err) = filer_core::rules::load_or_seed(&master);
+    if !savable {
+        return Err(err.unwrap_or_else(|| "rules.json cannot be read".into()));
+    }
+    let before = file.clone();
+    let (profiles, _) = load_files(root);
+    let profiles: Vec<Profile> = profiles.into_iter().map(|(_, p)| p).collect();
+    let types = vf_fs::doctypes::load(root)?.unwrap_or_default();
+    for rules in file.profiles.values_mut() {
+        rules.retain(|r| !r.id.starts_with(MANAGED_PREFIX));
+    }
+    let active = file.active_rules_mut();
+    let ut = active
+        .iter()
+        .position(|r| r.name.eq_ignore_ascii_case("UltraTax"));
+    let made = filer_rules(&profiles, &types, ut.map(|i| &active[i]));
+    let at = ut.unwrap_or_else(|| {
+        active
+            .iter()
+            .position(|r| r.catch_all)
+            .unwrap_or(active.len())
+    });
+    for (k, r) in made.into_iter().enumerate() {
+        active.insert(at + k, r);
+    }
+    if file == before {
+        return Ok(false);
+    }
+    let errors = filer_core::rules::validate_file(&file, &[]);
+    if !errors.is_empty() {
+        return Err(format!(
+            "the folders give Filer rules it refuses: {}",
+            errors.join("; ")
+        ));
+    }
+    filer_core::rules::save(&master, &file).map_err(|e| format!("saving rules.json: {e}"))?;
+    Ok(true)
+}
+
+/// Where a printed file would go, for the editor's test box: what the profile reads, and the
+/// folder and name Filer's rules give it (or why not).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Trial {
+    pub parsed: Option<Parsed>,
+    /// The name it reaches Filer's inbox under.
+    pub delivered: String,
+    /// Filer's rule, and the folder below the client folder plus the file name.
+    pub rule: String,
+    pub destination: Result<String, String>,
+}
+
+/// [`Trial`] for `file_name` with the profiles as saved and Filer's rules as saved.
+pub fn trial(root: &Path, file_name: &str) -> Trial {
+    let lookup = crate::pipeline::Lookup::load(root).unwrap_or(crate::pipeline::Lookup {
+        clients: Default::default(),
+        doc_types: Default::default(),
+    });
+    let (profiles, _) = load(root);
+    let parsed = parse(&profiles, file_name);
+    let (delivered, _, _) = crate::pipeline::capture_name(root, &lookup, file_name);
+    let master = vf_fs::clients::master_dir(root);
+    let (rules, _, _) = filer_core::rules::load_or_seed(&master);
+    let settings = filer_intake::config::Settings::load_or_default(&master).0;
+    let id_pattern = if settings.id_pattern.is_empty() {
+        filer_core::parse::DEFAULT_ID_PATTERN.to_string()
+    } else {
+        settings.id_pattern.clone()
+    };
+    let year: i32 = vf_core::now_rfc3339()
+        .get(..4)
+        .and_then(|y| y.parse().ok())
+        .unwrap_or(2026);
+    let fail = |rule: String, e: String| Trial {
+        parsed: parsed.clone(),
+        delivered: delivered.clone(),
+        rule,
+        destination: Err(e),
+    };
+    let re = match filer_core::parse::filename_regex(&id_pattern) {
+        Ok(r) => r,
+        Err(e) => return fail(String::new(), format!("Filer's ID pattern: {e}")),
+    };
+    let fp = filer_core::parse::parse_filename(&delivered, &re, year);
+    let compiled = match filer_core::rules::CompiledRules::new(rules.active_rules()) {
+        Ok(c) => c,
+        Err(e) => return fail(String::new(), format!("Filer's rules: {e}")),
+    };
+    let rule = compiled.first_match(&fp.rest).name.clone();
+    let Some(id) = fp.id.clone() else {
+        return fail(
+            rule,
+            "no client ID in the name: Intake asks which client".into(),
+        );
+    };
+    let client = filer_core::clients::Client {
+        uuid: uuid::Uuid::nil(),
+        id: id.clone(),
+        name: lookup
+            .clients
+            .get(&id)
+            .cloned()
+            .unwrap_or_else(|| fp.name.clone()),
+        extra: Default::default(),
+    };
+    if !lookup.clients.contains_key(&id) {
+        return fail(rule, format!("client ID {id} is not in the client list"));
+    }
+    let hit = filer_core::rules::evaluate(&compiled, &fp, &client, fp.year);
+    Trial {
+        parsed: parsed.clone(),
+        delivered: delivered.clone(),
+        rule: hit.rule_name,
+        destination: match hit.outcome {
+            Ok(r) => {
+                let mut d = r.dest_rel.to_string_lossy().replace('\\', "/");
+                if !d.is_empty() {
+                    d.push('/');
+                }
+                Ok(format!("{d}{}", r.filename))
+            }
+            Err(filer_core::rules::HitProblem::NeedsYear) => {
+                Err("no tax year in the name: Intake asks for one".into())
+            }
+            Err(e) => Err(format!("{e:?}")),
+        },
+    }
+}
 
 pub fn dir(root: &Path) -> PathBuf {
     vf_fs::clients::master_dir(root).join(DIR)

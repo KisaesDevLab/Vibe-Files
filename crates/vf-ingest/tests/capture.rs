@@ -128,3 +128,97 @@ fn ultratax_print_lands_as_a_federal_return_copy() {
     assert!(rel.contains("/Income Tax/2025/"), "year folder: {rel}");
     let _ = Path::new(&rel);
 }
+
+/// Admin › Print capture (option 3, owner 2026-11-03): each mapped doc type's prints are filed
+/// in its own folder: the doc type's default, or the profile's override.
+#[test]
+fn ultratax_prints_go_to_their_doc_types_folder() {
+    let t = tempfile::tempdir().unwrap();
+    let root = t.path().join("cabinet");
+    vf_fs::cabinet::create(
+        &root,
+        &vf_fs::cabinet::CabinetFile {
+            cabinet_id: vf_core::new_id(),
+            firm_id: uuid::Uuid::new_v4().to_string(),
+            schema_version: vf_core::db::SCHEMA_VERSION,
+            layout_version: 1,
+            created: vf_core::now_rfc3339(),
+            name: None,
+        },
+    )
+    .unwrap();
+    vf_fs::doctypes::seed_if_missing(&root).unwrap();
+    let csv = t.path().join("clients.csv");
+    std::fs::write(&csv, "ID,Name\nANDE1042,Anderson Farms LLC\n").unwrap();
+    let map = filer_core::config::ColumnMap {
+        id: Some("ID".into()),
+        name: Some("Name".into()),
+        extras: vec![],
+    };
+    vf_fs::clients::import_csv(&root, &csv, &map, &Default::default()).unwrap();
+    let master = vf_fs::clients::master_dir(&root);
+    let mut s = filer_intake::config::Settings::load_or_default(&master).0;
+    s.id_pattern = "[A-Z0-9]{4,}".into();
+    s.save(&master).unwrap();
+    vf_ingest::parsers::seed_if_missing(&root).unwrap();
+
+    let engagement = "Anderson Farms LLC_2025_1040_Engagement Letter_ANDE1042.pdf";
+    let federal = "Anderson Farms LLC_2025_1040_GovernmentCopyTaxReturn_ANDE1042.pdf";
+    let dest = |n: &str| vf_ingest::parsers::trial(&root, n).destination.unwrap();
+    // Before: Filer's UltraTax rule sends everything to Income Tax.
+    assert!(
+        dest(engagement).starts_with("Income Tax/2025/"),
+        "{}",
+        dest(engagement)
+    );
+
+    assert!(vf_ingest::parsers::sync_filer_rules(&root).unwrap());
+    assert!(
+        !vf_ingest::parsers::sync_filer_rules(&root).unwrap(),
+        "stable"
+    );
+    let tr = vf_ingest::parsers::trial(&root, engagement);
+    assert_eq!(tr.rule, "Engagement letter · UltraTax CS");
+    assert!(
+        dest(engagement).starts_with("Correspondence/2025/"),
+        "{}",
+        dest(engagement)
+    );
+    assert!(
+        dest(federal).starts_with("Income Tax/2025/"),
+        "{}",
+        dest(federal)
+    );
+
+    // An override in the profile wins over the doc type's folder.
+    let (files, errors) = vf_ingest::parsers::load_files(&root);
+    assert!(errors.is_empty(), "{errors:?}");
+    let (path, mut p) = files.into_iter().next().unwrap();
+    p.folders
+        .insert("Return copy — federal".into(), "Other/{Year}".into());
+    vf_ingest::parsers::save_profile(&path, &p).unwrap();
+    assert_eq!(
+        vf_ingest::parsers::load_files(&root).0[0].1,
+        p,
+        "round trip"
+    );
+    assert!(vf_ingest::parsers::sync_filer_rules(&root).unwrap());
+    assert!(
+        dest(federal).starts_with("Other/2025/"),
+        "{}",
+        dest(federal)
+    );
+
+    // Filer's own rules stay; a disabled profile takes its rules out again.
+    p.enabled = false;
+    vf_ingest::parsers::save_profile(&path, &p).unwrap();
+    assert!(vf_ingest::parsers::sync_filer_rules(&root).unwrap());
+    let (rules, _, _) = filer_core::rules::load_or_seed(&master);
+    assert!(
+        rules
+            .active_rules()
+            .iter()
+            .all(|r| !r.id.starts_with(vf_ingest::parsers::MANAGED_PREFIX))
+    );
+    assert!(rules.active_rules().iter().any(|r| r.name == "UltraTax"));
+}

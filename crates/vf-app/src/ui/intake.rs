@@ -35,6 +35,9 @@ pub struct IntakeTab {
     backoff: std::time::Duration,
     /// A reconcile running on its thread: the `last_batch.json` time it started from.
     reconciling: Option<(Option<std::time::SystemTime>, ReconcileRx)>,
+    /// Filer's rules.json was rewritten from Admin (print capture folders) while Filer had
+    /// its rules loaded: Intake offers to reload.
+    rules_stale: bool,
     /// The catalog changed (a batch was recorded or undone): Browse re-reads it.
     pub catalog_changed: bool,
     /// What the last reconcile did or why it failed, for Browse's notice.
@@ -162,6 +165,11 @@ impl IntakeTab {
             Ok(_) => self.reconciling = Some((modified, rx)),
             Err(e) => self.reconciled(modified, Err(e.to_string())),
         }
+    }
+
+    /// Admin rewrote Filer's rules: a loaded Filer must reload them (offered on the tab).
+    pub fn rules_changed(&mut self) {
+        self.rules_stale = self.filer.is_some();
     }
 
     /// Takes a finished reconcile's result (every frame, whatever tab shows). Returns whether
@@ -298,6 +306,21 @@ impl IntakeTab {
         sheets_dir: &Path,
     ) {
         self.ingest.strip(ui, prefs, snap, sheets_dir, root);
+        if self.rules_stale {
+            let mut reload = false;
+            egui::Panel::top("vf-intake-rules-stale").show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(
+                        "Where print captures are filed changed (Admin › Print capture). Reload Intake to use it; changes not yet confirmed in Intake's review are read again from the inbox.",
+                    );
+                    reload = ui.button("Reload Intake").clicked();
+                });
+            });
+            if reload {
+                self.filer = None;
+                self.rules_stale = false;
+            }
+        }
         self.dupes_panel(ui);
         if self.filer.is_none() && self.error.is_none() {
             match settings_for(root, cabinet) {
