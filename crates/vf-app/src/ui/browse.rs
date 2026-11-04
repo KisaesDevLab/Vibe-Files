@@ -177,6 +177,13 @@ pub struct Browse {
     pub print: crate::ui::print_ui::PrintState,
     /// "Print…" pressed: the selection is printed from `show` (it needs the catalog).
     print_request: bool,
+    /// The admin password was given this session (the app sets it every frame); with no
+    /// password set, breaking a check-out is open too.
+    pub admin_unlocked: bool,
+    /// Copy the other PCs' check-outs into the catalog on the next frame (after a listing).
+    locks_due: bool,
+    /// Check-out holder of the focused document, for the document it was read for.
+    lock_seen: Option<(String, Option<vf_fs::locks::Held>)>,
     /// `Combine` pressed: merged on the next frame (needs the catalog).
     combine_request: bool,
     /// Pinned / Recent / Favorites, from this PC's config; `prefs_dirty` asks the app to save.
@@ -287,6 +294,9 @@ impl Browse {
             preview: Default::default(),
             print: Default::default(),
             print_request: false,
+            admin_unlocked: false,
+            locks_due: true,
+            lock_seen: None,
             scan_watching: false,
             holds_seen: None,
             hold_reason: None,
@@ -404,6 +414,7 @@ impl Browse {
     }
 
     fn take_listing(&mut self, got: Listing) {
+        self.locks_due = true;
         self.disk_dirs = got.dirs.into_iter().collect();
         self.disk_listed = Some(std::time::Instant::now());
         self.new_files = got.new_files;
@@ -1144,6 +1155,17 @@ pub fn show(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env) {
     }
     b.poll_disk();
     b.add_new_files(env);
+    // Check-outs on other PCs (PA-16): into the catalog, so Browse shows them and edits refuse.
+    if std::mem::take(&mut b.locks_due) {
+        match vf_fs::locks::sync(env.conn, env.root, env.device_id) {
+            Ok(true) => {
+                b.lock_seen = None;
+                b.reload(env.conn);
+            }
+            Ok(false) => {}
+            Err(e) => tracing::warn!(kind = crate::logging::kind(&e), "check-outs not read"),
+        }
+    }
     if std::mem::take(&mut b.print_request) {
         let docs: Vec<crate::ui::print_ui::PrintDoc> = b
             .visible
@@ -1749,6 +1771,62 @@ fn sync_pill(ui: &mut egui::Ui, b: &mut Browse) {
     }
 }
 
+/// Check out / check in the focused document, or who has it (PA-16).
+fn checkout_row(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env, doc_id: &str) {
+    if b.lock_seen.as_ref().is_none_or(|(id, _)| id != doc_id) {
+        b.lock_seen = Some((doc_id.to_string(), vf_fs::locks::holder(env.root, doc_id)));
+    }
+    let held = b.lock_seen.as_ref().and_then(|(_, h)| h.clone());
+    let user = crate::config::windows_user();
+    let mut act: Option<&str> = None;
+    ui.horizontal_wrapped(|ui| match &held {
+        None => {
+            if ui
+                .button("Check out")
+                .on_hover_text("Others see that you have it and cannot change it until you check it in.")
+                .clicked()
+            {
+                act = Some("out");
+            }
+        }
+        Some(h) if h.device_id == env.device_id => {
+            widgets::pill(ui, "Checked out by you", widgets::rgb(0xE6EEF9), widgets::rgb(0x1F56A8));
+            if ui.button("Check in").clicked() {
+                act = Some("in");
+            }
+        }
+        Some(h) => {
+            widgets::lock_pill(ui, &h.who());
+            ui.label(widgets::caption(format!(
+                "since {}",
+                widgets::local_time(&h.since)
+            )));
+            let admin = b.admin_unlocked || !vf_fs::trash::has_pin(env.root);
+            if ui
+                .add_enabled(admin, egui::Button::new("Break lock"))
+                .on_disabled_hover_text("Needs the admin password (Admin tab).")
+                .on_hover_text("For a check-out left behind (the PC is gone or the person is away). Recorded in the audit trail.")
+                .clicked()
+            {
+                act = Some("break");
+            }
+        }
+    });
+    let r = match act {
+        Some("out") => vf_fs::locks::checkout(env.conn, env.root, env.device_id, &user, doc_id),
+        Some("in") => vf_fs::locks::checkin(env.conn, env.root, env.device_id, doc_id),
+        Some(_) => vf_fs::locks::break_lock(env.conn, env.root, env.device_id, doc_id).map(|_| ()),
+        None => return,
+    };
+    match r {
+        Ok(()) => {
+            b.lock_seen = None;
+            b.locks_due = true;
+        }
+        Err(e) => b.error = Some(format!("Not done: {e}")),
+    }
+}
+
 /// Undoes this login's newest change (Ctrl+Z with the client panel showing).
 fn undo_newest(b: &mut Browse, env: &mut Env) {
     let top = vf_fs::fileops::undo_stack(env.conn, env.device_id)
@@ -2209,6 +2287,7 @@ fn inspector(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env) {
                 b.scroll_to = Some(to as usize);
             }
         }
+        checkout_row(ui, b, env, &d.id);
         ui.add_space(6.0);
     } else {
         b.preview.clear();
@@ -3083,6 +3162,55 @@ mod tests {
             .take()
             .expect("open in the Viewer");
         assert!(req.path.ends_with("doc 001.pdf"));
+    }
+
+    /// PA-16: check out and in from the inspector; another PC's check-out shows with its
+    /// holder.
+    #[test]
+    fn check_out_and_in_and_others_locks_show() {
+        let mut h = harness(1, 2);
+        std::fs::create_dir_all(h.state().root.join("_Vibe")).unwrap();
+        h.get_by_label("doc 000.pdf").click();
+        h.run_steps(3);
+        h.get_by_role_and_label(Role::Button, "Check out").click();
+        h.run_steps(3);
+        let id0 = {
+            let b = &h.state().b;
+            b.snap.docs[*b.selected.iter().next().unwrap()].id.clone()
+        };
+        let held = vf_fs::locks::holder(&h.state().root, &id0).unwrap_or_else(|| {
+            panic!(
+                "not checked out: {:?} {:?}",
+                h.state().b.error,
+                h.state().b.selected
+            )
+        });
+        assert_eq!(held.device_id, "dev-test");
+        assert!(h.query_by_label("Checked out by you").is_some());
+        h.get_by_role_and_label(Role::Button, "Check in").click();
+        h.run_steps(3);
+        assert!(vf_fs::locks::holder(&h.state().root, &id0).is_none());
+        // Another PC checks out the second document.
+        let id1 = h
+            .state()
+            .b
+            .snap
+            .docs
+            .iter()
+            .find(|d| d.id != id0)
+            .unwrap()
+            .id
+            .clone();
+        {
+            let s = h.state_mut();
+            let mut other =
+                vf_core::db::open(&s._tmp.path().join("other.db"), Storage::Local).unwrap();
+            vf_fs::locks::checkout(&mut other, &s.root, "other-pc", "anna", &id1).unwrap();
+            s.b.locks_due = true;
+        }
+        h.run_steps(3);
+        let d1 = h.state().b.snap.docs.iter().find(|d| d.id == id1).unwrap();
+        assert!(d1.locked_by.as_deref().unwrap_or("").contains("anna"));
     }
 
     /// The grid has a Client column (owner 2026-11-04: Views mix clients), and sorts by it.

@@ -194,6 +194,8 @@ pub struct Viewer {
     pub tape: TapeState,
     /// Print (PA-13).
     pub print: crate::ui::print_ui::PrintState,
+    /// Checked out on another PC (PA-16): who, read with the document's content.
+    pub locked_by: Option<String>,
 }
 
 /// A tape in the History menu: (menu label, tape name, lines).
@@ -304,6 +306,7 @@ impl Default for Viewer {
             pages_dialog: None,
             tape: TapeState::default(),
             print: Default::default(),
+            locked_by: None,
         }
     }
 }
@@ -598,6 +601,14 @@ pub fn show(ui: &mut egui::Ui, v: &mut Viewer, env: &mut Env<'_>) {
             )
             .ok();
         v.seen = hash.map(|h| (v.generation, h));
+        v.locked_by = env
+            .conn
+            .query_row(
+                "SELECT user FROM lock WHERE doc_id = ?1",
+                [&doc.doc_id],
+                |r| r.get(0),
+            )
+            .ok();
     }
     if let Some(next) = v.ask_open.clone() {
         let mut answer = None;
@@ -1175,7 +1186,11 @@ fn toolbar(ui: &mut egui::Ui, v: &mut Viewer, env: &mut Env<'_>, doc: &Doc) {
                 if ui.button("Open in PDF app").clicked() {
                     v.open_request = Some(doc.path.clone());
                 }
-                let can = !v.pending.is_empty();
+                if let Some(who) = &v.locked_by {
+                    widgets::lock_pill(ui, who)
+                        .on_hover_text("Checked out on another PC: read-only here until it is checked in.");
+                }
+                let can = !v.pending.is_empty() && v.locked_by.is_none();
                 if ui
                     .add_enabled(can, egui::Button::new("Save as…"))
                     .on_hover_text("A new document beside this one; this file is not changed.")

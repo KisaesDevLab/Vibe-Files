@@ -772,6 +772,7 @@ impl eframe::App for VibeFilesApp {
                         conflicts: o_sync.conflicts.len(),
                         running_for: o_sync.running_for.clone(),
                     });
+                    tab_browse.admin_unlocked = *admin_unlocked;
                     browse::show(ui, tab_browse, &mut env);
                     // Browse's Scan: Intake's scanner, profile and Scans folder (owner
                     // 2026-11-04); the outcome lands in Intake's log and on Browse.
@@ -1677,7 +1678,7 @@ mod tests {
         click(&mut h, "Open cabinet");
         settle(&mut h);
         h.get_by_label("interest.pdf").click();
-        h.run();
+        h.run_steps(4); // the preview pane renders on its own thread
         h.key_press(egui::Key::Enter);
         h.step();
         h.step();
@@ -1786,7 +1787,7 @@ mod tests {
 
         // Browse: select the document, Enter opens it in the Viewer.
         h.get_by_label("letter.pdf").click();
-        h.run();
+        h.run_steps(4); // the preview pane renders on its own thread
         h.key_press(egui::Key::Enter);
         // The Viewer keeps repainting while it loads: steps, not `run`.
         h.step();
@@ -2031,7 +2032,7 @@ mod tests {
         click(&mut h, "Open cabinet");
         settle(&mut h);
         h.get_by_label("W-2.pdf").click();
-        h.run();
+        h.run_steps(4); // the preview pane renders on its own thread
         h.key_press(egui::Key::Enter);
         let wait = |h: &mut egui_kittest::Harness<'static, VibeFilesApp>,
                     what: &str,
@@ -2137,7 +2138,7 @@ mod tests {
         };
 
         h.get_by_label("a.pdf").click();
-        h.run();
+        h.run_steps(4); // the preview pane renders on its own thread
         h.key_press(egui::Key::Enter);
         let start = std::time::Instant::now();
         loop {
@@ -2339,6 +2340,45 @@ mod tests {
             h.ctx.options(|o| o.theme_preference),
             egui::ThemePreference::System
         );
+    }
+
+    /// PA-16: while another PC has Intake, this one says who and does not load Filer.
+    #[test]
+    fn intake_waits_while_another_pc_has_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("Clients");
+        let req = CreateRequest {
+            root: &root,
+            name: "Firm",
+        };
+        let mut o = session::create(&tmp.path().join("pc1"), "dev-1", &req).unwrap();
+        assert_eq!(
+            vf_fs::locks::take_intake(&mut o.conn, &root, "other-pc", "anna").unwrap(),
+            vf_fs::locks::IntakeLock::Mine
+        );
+        drop(o);
+        let mut h = harness(&tmp.path().join("pc1"));
+        click(&mut h, "Open existing");
+        type_into(&mut h, "Cabinet folder", &root.display().to_string());
+        click(&mut h, "Open cabinet");
+        settle(&mut h);
+        click(&mut h, "Intake");
+        h.run_steps(3);
+        assert!(h.query_by_label("Intake is in use on another PC").is_some());
+        // Freed: this PC takes it (looked at again within a few seconds).
+        vf_fs::locks::release_intake(&root, "other-pc");
+        if let Screen::Open(o) = &mut h.state_mut().screen {
+            o.intake.look_again_now();
+        }
+        h.run_steps(3);
+        assert!(h.query_by_label("Intake is in use on another PC").is_none());
+        h.run_steps(6);
+        let Screen::Open(o) = &h.state().screen else {
+            unreachable!()
+        };
+        // Filer's screen loads once, not on every frame (regression found 2026-11-04).
+        assert_eq!(o.intake.mounts, 1, "{}", o.intake.debug_state());
+        assert!(h.query_by_label("Let another PC use Intake").is_some());
     }
 
     /// PA-24: with an admin password set, Admin and the Sync settings wait for it (wrong ones
