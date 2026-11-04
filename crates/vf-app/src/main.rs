@@ -6,6 +6,7 @@ mod app;
 mod cli;
 mod config;
 mod datalock;
+mod help;
 mod logging;
 mod perf;
 mod print;

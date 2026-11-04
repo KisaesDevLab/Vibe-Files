@@ -5,8 +5,15 @@ use egui::{Align, Frame, Layout, Margin, RichText, Sense, Stroke};
 use crate::app::Tab;
 use crate::ui::theme;
 
-/// The header; `text_size` is this PC's text size in percent, changed by its − / + buttons.
-pub fn header(ui: &mut egui::Ui, cabinet: Option<&str>, text_size: &mut u16, dark: &mut bool) {
+/// The header; `text_size` is this PC's text size in percent, changed by its − / + buttons;
+/// `help` is set when its **Help** button is pressed.
+pub fn header(
+    ui: &mut egui::Ui,
+    cabinet: Option<&str>,
+    text_size: &mut u16,
+    dark: &mut bool,
+    help: &mut bool,
+) {
     egui::Panel::top("vf-header")
         .exact_size(44.0)
         .resizable(false)
@@ -39,6 +46,15 @@ pub fn header(ui: &mut egui::Ui, cabinet: Option<&str>, text_size: &mut u16, dar
                             .fill(egui::Color32::from_rgb(0x2A, 0x30, 0x37))
                             .stroke(Stroke::new(1.0, theme::ON_DARK_MUTED))
                     };
+                    // Help (PA-25): the article about the tab shown; F1 too.
+                    if ui
+                        .add(header_button(white("Help")))
+                        .on_hover_text("Help articles (F1)")
+                        .clicked()
+                    {
+                        *help = true;
+                    }
+                    ui.add_space(8.0);
                     // Light / dark (owner 2026-11-04), kept on this PC.
                     if ui
                         .add(header_button(white(if *dark { "Light" } else { "Dark" })))

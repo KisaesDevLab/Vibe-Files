@@ -334,7 +334,10 @@ fn run(config: Arc<Mutex<Config>>, waiting: Arc<AtomicUsize>, tx: Sender<Event>,
                     Ok(done) => Event::Processed(done),
                     Err(error) => {
                         let _ = pipeline::set_aside(&p, &error);
-                        Event::Failed { staged: p.clone(), error }
+                        Event::Failed {
+                            staged: p.clone(),
+                            error,
+                        }
                     }
                 };
                 if matches!(ev, Event::Processed(_)) && p.is_file() {

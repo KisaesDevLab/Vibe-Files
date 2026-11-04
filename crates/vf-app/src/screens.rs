@@ -127,5 +127,11 @@ mod tests {
         h.get_by_label("Document Names").click();
         h.run_steps(12);
         shot(&mut h, "31-admin-ultratax-documents");
+        // Help (PA-25), on the ten-key article.
+        h.key_press(egui::Key::F1);
+        h.run_steps(4);
+        h.state_mut().help.open_at("ten-key");
+        h.run_steps(8);
+        shot(&mut h, "40-help");
     }
 }

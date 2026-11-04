@@ -149,6 +149,8 @@ pub struct VibeFilesApp {
     update_notice: Option<String>,
     /// This PC's text size has been applied to the window.
     zoom_applied: bool,
+    /// The Help window (PA-25).
+    pub help: crate::ui::help::HelpState,
 }
 
 /// Asks GitHub for the latest release, once per start, on a thread (never in tests: no network).
@@ -216,6 +218,7 @@ impl VibeFilesApp {
             update,
             update_notice: None,
             zoom_applied: false,
+            help: Default::default(),
         };
         // Tests drive the wizard themselves; `open_last` has its own test.
         if !cfg!(test) {
@@ -457,7 +460,13 @@ impl eframe::App for VibeFilesApp {
         }
         crate::ui::theme::set_dark(dark);
         let shown = dark;
-        chrome::header(ui, name.as_deref(), &mut size, &mut dark);
+        let mut help = ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::F1));
+        chrome::header(ui, name.as_deref(), &mut size, &mut dark, &mut help);
+        if help {
+            let tab = matches!(self.screen, Screen::Open(_)).then_some(self.tab);
+            self.help.open_at(crate::help::for_tab(tab));
+        }
+        crate::ui::help::show(ui.ctx(), &mut self.help);
         if dark != shown {
             system = false; // the header's button chooses explicitly
         }
@@ -1529,6 +1538,51 @@ mod tests {
             h.query_by_label("Nothing waiting: this PC and the bucket agree.")
                 .is_some()
         );
+    }
+
+    /// PA-25: F1 (or Help) opens the article about the tab shown; searching and links move
+    /// between articles, Back returns.
+    #[test]
+    fn help_opens_on_the_tab_and_moves_between_articles() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("Clients");
+        let req = CreateRequest {
+            root: &root,
+            name: "Firm",
+        };
+        drop(session::create(&tmp.path().join("pc1"), "dev-1", &req).unwrap());
+        let mut h = harness(&tmp.path().join("pc1b"));
+        click(&mut h, "Open existing");
+        type_into(&mut h, "Cabinet folder", &root.display().to_string());
+        click(&mut h, "Open cabinet");
+        settle(&mut h);
+
+        h.key_press(egui::Key::F1);
+        h.run_steps(3);
+        assert!(h.state().help.open);
+        assert_eq!(h.state().help.current, Some("browse"));
+        let title = crate::help::article("browse").unwrap().title();
+        assert!(h.query_all_by_label(title).count() >= 1);
+
+        // Search, then open the ten-key article from the results.
+        h.get_by_label("Search help").click();
+        h.run_steps(2);
+        h.get_by_label("Search help").type_text("tape");
+        h.run_steps(2);
+        let tape = crate::help::article("ten-key").unwrap().title();
+        h.get_all_by_label(tape).next().unwrap().click();
+        h.run_steps(3);
+        assert_eq!(h.state().help.current, Some("ten-key"));
+        click(&mut h, "Back");
+        h.run_steps(2);
+        assert_eq!(h.state().help.current, Some("browse"));
+
+        // On another tab, the Help button opens that tab's article.
+        h.state_mut().help.open = false;
+        click(&mut h, "Viewer");
+        click(&mut h, "Help");
+        h.run_steps(3);
+        assert_eq!(h.state().help.current, Some("viewer"));
     }
 
     /// P02 step 1: the Intake tab mounts Filer Desktop on the open cabinet: its data folder is

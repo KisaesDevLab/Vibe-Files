@@ -92,7 +92,9 @@ impl OcrState {
                         format!("Search index up to date · {} could not be read", c.failed)
                     }
                     (0, _) => "Search index up to date".into(),
-                    (n, true) => format!("OCR waiting: {n} documents, no OCR engine (Admin › OCR)"),
+                    (n, true) => format!(
+                        "OCR waiting: {n} documents, no OCR engine (see Help › Text recognition)"
+                    ),
                     (n, false) => format!("OCR: {n} documents to read"),
                 }
             }

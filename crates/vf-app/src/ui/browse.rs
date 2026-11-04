@@ -86,6 +86,111 @@ struct Listing {
     new_files: Vec<vf_fs::sweep::Unknown>,
 }
 
+/// Files dragged in from Explorer (owner 2026-11-04): while they are over the window a hint
+/// says where they will go; dropped, each is copied into the client folder shown and cataloged
+/// (the original stays where it was). Folders are not taken.
+fn take_dropped_files(ctx: &egui::Context, b: &mut Browse, env: &mut Env) {
+    let (hovering, dropped) = ctx.input(|i| {
+        (
+            !i.raw.hovered_files.is_empty(),
+            i.raw
+                .dropped_files
+                .iter()
+                .map(|f| f.path().to_path_buf())
+                .filter(|p| !p.as_os_str().is_empty())
+                .collect::<Vec<_>>(),
+        )
+    });
+    let target = b.files_target();
+    if hovering {
+        let painter = ctx.layer_painter(egui::LayerId::new(
+            egui::Order::Foreground,
+            egui::Id::new("browse-drop-hint"),
+        ));
+        let rect = ctx.content_rect();
+        painter.rect_filled(rect, 0.0, egui::Color32::from_black_alpha(160));
+        let text = match &target {
+            Some(t) => format!("Drop to add to {}", t.folder.replace('/', " / ")),
+            None => "Open a client's folder first, then drop the files on it".to_string(),
+        };
+        painter.text(
+            rect.center(),
+            egui::Align2::CENTER_CENTER,
+            text,
+            egui::FontId::proportional(22.0),
+            egui::Color32::WHITE,
+        );
+    }
+    if dropped.is_empty() {
+        return;
+    }
+    let Some(t) = target else {
+        b.error = Some(
+            "Not added: open a client's folder in the tree first, then drop the files on it. \
+             (To file them by the rules instead, drop them on the Intake tab.)"
+                .into(),
+        );
+        return;
+    };
+    let mut added: Vec<String> = Vec::new();
+    let mut failed: Vec<String> = Vec::new();
+    for p in dropped {
+        let name = p
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        if !p.is_file() {
+            failed.push(format!("{name}: only files can be dropped, not folders"));
+            continue;
+        }
+        let ext = p
+            .extension()
+            .map(|e| e.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        // A copy is what is added (content::add moves its input into the cabinet).
+        let r = vf_fs::content::tmp_file(env.root, if ext.is_empty() { "bin" } else { &ext })
+            .and_then(|tmp| {
+                std::fs::copy(&p, &tmp).map_err(|e| e.to_string())?;
+                vf_fs::content::add(
+                    env.conn,
+                    env.root,
+                    env.device_id,
+                    &tmp,
+                    vf_fs::content::NewDoc {
+                        rel_path: format!("{}/{name}", t.folder),
+                        client_id: Some(t.client_id.clone()),
+                        doc_type_id: None,
+                        tax_year: t.tax_year,
+                        source: None,
+                        tags: vec![],
+                        label: "add_file".into(),
+                        detail: serde_json::json!({ "dropped_into": t.folder }),
+                    },
+                )
+            });
+        match r {
+            Ok(a) => added.push(a.rel_path.rsplit('/').next().unwrap_or(&name).to_string()),
+            Err(e) => failed.push(format!("{name}: {e}")),
+        }
+    }
+    if !added.is_empty() {
+        b.reload(env.conn);
+        b.notice = Some(format!(
+            "Added {} to {}: {}. Set doc types in the details.",
+            if added.len() == 1 {
+                "1 file".to_string()
+            } else {
+                format!("{} files", added.len())
+            },
+            t.folder.replace('/', " / "),
+            added.join(", ")
+        ));
+    }
+    if !failed.is_empty() {
+        b.error = Some(format!("Not added: {}", failed.join("; ")));
+    }
+}
+
 /// A folder a Browse scan is filed into.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScanTarget {
@@ -626,6 +731,24 @@ impl Browse {
             client_id: c.id.clone(),
             folder: format!("{base}/{inner}"),
             tax_year: year,
+        })
+    }
+
+    /// Where files dropped from Explorer go (owner 2026-11-04): the client folder shown (a
+    /// folder in it, a year folder, or the client's own top folder).
+    pub fn files_target(&self) -> Option<ScanTarget> {
+        if let Some(t) = self.scan_target() {
+            return Some(t);
+        }
+        let Scope::Client(ci) = self.scope else {
+            return None;
+        };
+        let c = self.snap.clients.get(ci)?;
+        let base = c.folder_rel.as_deref().filter(|b| !b.is_empty())?;
+        Some(ScanTarget {
+            client_id: c.id.clone(),
+            folder: base.to_string(),
+            tax_year: None,
         })
     }
 
@@ -1204,6 +1327,7 @@ pub fn show(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env) {
     }
     b.poll_disk();
     b.add_new_files(env);
+    take_dropped_files(ui.ctx(), b, env);
     if std::mem::take(&mut b.print_request) {
         let docs: Vec<crate::ui::print_ui::PrintDoc> = b
             .visible
@@ -3188,6 +3312,70 @@ mod tests {
         let t = b.scan_target().unwrap();
         assert_eq!(t.folder, "Client 0000 (1000)/Income Tax/2025");
         assert_eq!(t.tax_year, Some(2025));
+    }
+
+    #[derive(Debug)]
+    struct TestDrop(std::path::PathBuf);
+
+    impl egui::DroppedFile for TestDrop {
+        fn path(&self) -> &std::path::Path {
+            &self.0
+        }
+        fn bytes(&self) -> Result<Vec<u8>, String> {
+            std::fs::read(&self.0).map_err(|e| e.to_string())
+        }
+    }
+
+    /// Files dropped from Explorer are copied into the folder shown and cataloged; the
+    /// originals stay; with no client folder shown nothing is added (owner 2026-11-04).
+    #[test]
+    fn files_dropped_from_explorer_go_into_the_folder_shown() {
+        let mut h = harness(1, 0);
+        let outside = tempfile::tempdir().unwrap();
+        let src = outside.path().join("Invented bank statement.pdf");
+        std::fs::write(&src, b"%PDF-1.4 invented").unwrap();
+        let drop = |h: &mut Harness<'static, State>| {
+            h.input_mut()
+                .dropped_files
+                .push(std::sync::Arc::new(TestDrop(src.clone())));
+            h.run();
+        };
+        // The whole cabinet shown: refused.
+        drop(&mut h);
+        assert!(
+            h.state()
+                .b
+                .error
+                .as_deref()
+                .unwrap()
+                .contains("open a client's folder")
+        );
+        h.state_mut().b.error = None;
+        h.state_mut().b.set_scope(Scope::Folder {
+            client: 0,
+            folder: "Income Tax/2025".into(),
+        });
+        drop(&mut h);
+        let s = h.state();
+        assert_eq!(s.b.error, None);
+        let rel = "Client 0000 (1000)/Income Tax/2025/Invented bank statement.pdf";
+        assert!(s.root.join(rel).is_file(), "copied in");
+        assert!(src.is_file(), "the original stays");
+        let d =
+            s.b.snap
+                .docs
+                .iter()
+                .find(|d| d.rel_path == rel)
+                .expect("cataloged");
+        assert_eq!(d.tax_year, Some(2025));
+        // Dropped again: kept both.
+        drop(&mut h);
+        assert!(
+            h.state()
+                .root
+                .join("Client 0000 (1000)/Income Tax/2025/Invented bank statement (2).pdf")
+                .is_file()
+        );
     }
 
     /// Browse has a Scan button (owner 2026-11-04); the app starts it with Intake's scanner.

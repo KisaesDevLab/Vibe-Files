@@ -1,0 +1,42 @@
+# Several people filing at once
+
+Anyone can file from Intake on any PC at the same time. This article explains what each PC keeps to itself, what the PCs share, and the few things to watch for.
+
+## Each PC has its own Intake folder
+
+When you open the **Intake** tab, Vibe Files gives this PC its own working folder in the cabinet, `_Vibe\intake\<PC>`. In it are this PC's:
+
+- last batch, and so its own **Undo last batch** on the **History** screen
+- record of each step a batch took
+- working PDFs (split pieces, combined files, files kept for undo)
+
+So when Ann on one PC and Bob on another both file a batch, each can undo only their own last batch. Neither undoes the other's. Every PC's batches are recorded in every PC's catalog, so Browse on any PC shows what anyone filed.
+
+## What the PCs share
+
+These Intake files are shared by every PC:
+
+- settings (inboxes, client CSV, ID pattern)
+- rules
+- client list
+- relationships
+- folder template
+- the folder list of the cabinet
+
+Intake reads a copy of each when it loads. Every few seconds, a change saved on this PC is copied to the cabinet, and a change saved on another PC is copied here. Light or dark theme and text size are each PC's own and never travel.
+
+## Reload Intake
+
+When the client list, settings, rules or template change somewhere else (another PC, or Admin on this one), a banner appears above Intake, for example: "The client list or Intake's settings changed (another PC, or Admin). Reload Intake to use them…". Press **Reload Intake** to load the new ones.
+
+- The button is greyed out while this PC is filing a batch. Wait for it to finish.
+- Reloading reads the inbox again. Changes you made on rows in **Preview** and did not commit (a client you chose, a rename, a skip) are lost, so commit first if you can.
+
+A new client added in Browse also shows this banner: Intake offers the new client after the reload.
+
+## Things to watch for
+
+- Two people change the same setting or rule at the same moment: the last save wins; the other person's change is lost. Agree who edits the rules, or check them after a reload.
+- Two people file the same inbox file: if two PCs watch the same inbox, both see the same files. The first to commit files it; the second gets a "file not found" error for that row. Nothing is lost or filed twice. Separate inbox folders for each person avoid this.
+
+> See [Filing documents with Intake](help:intake) for the queue and commit, and [rules and Setup](help:intake-rules) for the shared settings.
