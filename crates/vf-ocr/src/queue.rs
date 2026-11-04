@@ -185,7 +185,7 @@ pub fn run_job(
     };
     if r.is_err() {
         let _ = conn.execute(
-            "UPDATE ocr_job SET state = 'queued', updated_at = ?2
+            "UPDATE ocr_job SET state = 'queued', attempts = max(attempts - 1, 0), updated_at = ?2
              WHERE doc_id = ?1 AND state = 'running'",
             params![job.doc_id, vf_core::now_rfc3339()],
         );
@@ -551,8 +551,11 @@ impl Queue {
 }
 
 impl Drop for Queue {
+    /// At quit: the workers stop after their page and put their job back without counting an
+    /// attempt (QA2 #2). A page still running after 5 s (a slow Tesseract) counts as one; three
+    /// in a row fail the document.
     fn drop(&mut self) {
-        self.stop();
+        self.stop_and_wait(Duration::from_secs(5));
     }
 }
 

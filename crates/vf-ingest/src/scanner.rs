@@ -451,13 +451,23 @@ pub fn scan_to(
         Err(e) => {
             // Scanned pages are paper someone fed: never thrown away because the PDF could not
             // be built. They go to `_failed/<date>/` with the error (QA I8).
-            if let Some(kept) = keep_failed_pages(&work, scans_dir, e) {
+            let has_pages = std::fs::read_dir(&work)
+                .map(|mut d| d.next().is_some())
+                .unwrap_or(false);
+            if !has_pages {
+                let _ = std::fs::remove_dir_all(&work);
+            } else if let Some(kept) = keep_failed_pages(&work, scans_dir, e) {
                 return Err(format!(
                     "{e} (the scanned pages are kept in {})",
                     kept.display()
                 ));
+            } else {
+                // Could not be moved: the pages stay where they are, never deleted (QA2 #7).
+                return Err(format!(
+                    "{e} (the scanned pages are kept in {})",
+                    work.display()
+                ));
             }
-            let _ = std::fs::remove_dir_all(&work);
         }
     }
     r

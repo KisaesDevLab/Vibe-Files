@@ -277,6 +277,9 @@ pub fn rotate(img: &RgbImage, deg: f32) -> RgbImage {
 /// Every frame of the image file, upright.
 /// The largest page taken (120 MP: a 600 dpi 11 × 17 page is 67 MP).
 pub const MAX_PIXELS: u64 = 120_000_000;
+/// The most pixels taken from one file, all pages together (every page is held until the PDF
+/// is written: 1.5 GP is about 4.5 GB; QA2 #4).
+pub const MAX_TOTAL_PIXELS: u64 = 1_500_000_000;
 /// The most pages taken from one image file.
 pub const MAX_FRAMES: u32 = 500;
 
@@ -321,6 +324,7 @@ pub fn decode(path: &Path) -> Result<Vec<Frame>, String> {
             ));
         }
         let mut out = Vec::new();
+        let mut total: u64 = 0;
         for i in 0..count {
             let frame = decoder.GetFrame(i).map_err(|e| e.to_string())?;
             let orientation = frame
@@ -352,6 +356,14 @@ pub fn decode(path: &Path) -> Result<Vec<Frame>, String> {
                     "{name}: page {} is {w} × {h} pixels; at most {} megapixels are taken",
                     i + 1,
                     MAX_PIXELS / 1_000_000
+                ));
+            }
+            total += u64::from(w) * u64::from(h);
+            if total > MAX_TOTAL_PIXELS {
+                return Err(format!(
+                    "{name}: too large to convert ({} pages so far, over {} megapixels in all); split it or scan at a lower resolution",
+                    i + 1,
+                    MAX_TOTAL_PIXELS / 1_000_000
                 ));
             }
             let mut buf = vec![0u8; w as usize * h as usize * 3];

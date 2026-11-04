@@ -113,9 +113,12 @@ When the server or the cabinet folder is lost:
    or taken from `VF_S3_APP_KEY` / `VF_SYNC_PASSPHRASE`):
 
    ```
-   vibe-files restore D:\Clients --endpoint https://s3.us-west-004.backblazeb2.com ^
+   start /wait vibe-files restore D:\Clients --endpoint https://s3.us-west-004.backblazeb2.com ^
      --region us-west-004 --bucket firm-vibe --key-id <key id>
    ```
+
+   (`start /wait`: cmd waits for the program, so what you type goes to it and not to cmd. The
+   safest is to set `VF_S3_APP_KEY` and `VF_SYNC_PASSPHRASE` first, so nothing is typed.)
 
    lists the cabinet ids in the bucket; run it again with `--cabinet-id <id>`. `D:\Clients`
    must be new or empty. From a workstation that still has sync unlocked: Sync › Restore cabinet

@@ -18,17 +18,28 @@ fn rename_free_never_replaces() {
     assert!(!a.exists());
 }
 
-/// QA I4: the marker left by a run that died on a file sets that file aside once.
+/// QA I4 / QA2 #1: one stop on a file (a quit) tries it again; two in a row set it aside.
 #[test]
-fn a_file_the_app_stopped_on_is_set_aside() {
+fn a_file_the_app_stopped_on_twice_is_set_aside() {
     let t = tempfile::tempdir().unwrap();
     let dir = t.path();
+    let m = worker::marker(dir, "dev-1");
     std::fs::write(dir.join("bad.pdf"), "x").unwrap();
-    std::fs::write(dir.join(worker::MARKER), "bad.pdf").unwrap();
-    let ev = worker::recover_marker(dir).expect("set aside");
+    std::fs::write(&m, "bad.pdf	1").unwrap();
+    assert!(
+        worker::recover_marker(dir, "dev-1").is_none(),
+        "one stop: tried again"
+    );
+    assert!(dir.join("bad.pdf").exists());
+    assert!(
+        worker::recover_marker(dir, "dev-2").is_none(),
+        "another PC's marker"
+    );
+    std::fs::write(&m, "bad.pdf	2").unwrap();
+    let ev = worker::recover_marker(dir, "dev-1").expect("set aside");
     assert!(matches!(ev, Event::Failed { .. }));
     assert!(!dir.join("bad.pdf").exists());
-    assert!(!dir.join(worker::MARKER).exists());
+    assert!(!m.exists());
     let failed = dir.join(pipeline::FAILED_DIR);
     let day = std::fs::read_dir(&failed)
         .unwrap()
@@ -38,10 +49,32 @@ fn a_file_the_app_stopped_on_is_set_aside() {
         .path();
     assert!(day.join("bad.pdf").is_file());
     assert!(day.join("bad.pdf.error.txt").is_file());
-    // Nothing named: nothing happens.
-    assert!(worker::recover_marker(dir).is_none());
     // A marker whose file is gone is just removed.
-    std::fs::write(dir.join(worker::MARKER), "gone.pdf").unwrap();
-    assert!(worker::recover_marker(dir).is_none());
-    assert!(!dir.join(worker::MARKER).exists());
+    std::fs::write(&m, "gone.pdf	3").unwrap();
+    assert!(worker::recover_marker(dir, "dev-1").is_none());
+    assert!(!m.exists());
+}
+
+/// QA2 #3: the handled list survives a restart while the file is unchanged.
+#[test]
+fn handled_files_stay_handled_until_they_change() {
+    let t = tempfile::tempdir().unwrap();
+    let dir = t.path();
+    let f = dir.join("open.pdf");
+    std::fs::write(&f, "x").unwrap();
+    let m = std::fs::metadata(&f).unwrap();
+    let secs = m
+        .modified()
+        .unwrap()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    std::fs::write(
+        dir.join(worker::HANDLED),
+        format!("open.pdf	{}	{secs}", m.len()),
+    )
+    .unwrap();
+    assert!(worker::load_handled(dir).contains_key(&f));
+    std::fs::write(&f, "changed").unwrap();
+    assert!(worker::load_handled(dir).is_empty());
 }

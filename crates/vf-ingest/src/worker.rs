@@ -90,21 +90,42 @@ pub fn staged_files(dir: &Path) -> Vec<(PathBuf, u64)> {
         .collect()
 }
 
-/// Names the staged file being processed, in its staging folder. Still there at the next start
-/// means the app stopped (crashed, was killed) on that file: it is set aside rather than tried
-/// again on every start (QA I4).
-pub const MARKER: &str = ".vf-processing.txt";
+/// Names the staged file being processed, in its staging folder, with how many runs in a row
+/// stopped on it: `<name>\t<count>`. One marker per PC (`<device id>`), so PCs sharing a folder
+/// never act on each other's. A run that stops on the same file twice in a row (a crash it
+/// causes, not a quit) has it set aside rather than tried on every start (QA I4, QA2 #1/#13).
+pub fn marker(dir: &Path, device_id: &str) -> PathBuf {
+    let id: String = device_id
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
+        .collect();
+    dir.join(format!(".vf-processing-{id}.txt"))
+}
 
-/// Sets aside the file a previous run stopped on, if any.
-pub fn recover_marker(dir: &Path) -> Option<Event> {
-    let marker = dir.join(MARKER);
-    let name = std::fs::read_to_string(&marker).ok()?;
-    let staged = dir.join(name.trim());
-    let _ = std::fs::remove_file(&marker);
-    if name.trim().is_empty() || !staged.is_file() {
+/// Runs in a row that stopped on a file before it is set aside.
+pub const STOPS_TO_SET_ASIDE: u32 = 2;
+
+fn read_marker(m: &Path) -> Option<(String, u32)> {
+    let t = std::fs::read_to_string(m).ok()?;
+    let (name, n) = t.trim().split_once('\t').unwrap_or((t.trim(), "1"));
+    Some((name.to_string(), n.trim().parse().unwrap_or(1)))
+}
+
+/// At start: the file earlier runs stopped on is set aside once they did so
+/// [`STOPS_TO_SET_ASIDE`] times in a row; after one stop (a quit mid-file) it is tried again.
+pub fn recover_marker(dir: &Path, device_id: &str) -> Option<Event> {
+    let m = marker(dir, device_id);
+    let (name, count) = read_marker(&m)?;
+    let staged = dir.join(&name);
+    if name.is_empty() || !staged.is_file() {
+        let _ = std::fs::remove_file(&m);
         return None;
     }
-    let error = "Vibe Files stopped while processing this file; it was set aside so it is not tried again. Open it to check it, then put it back in the folder to retry.".to_string();
+    if count < STOPS_TO_SET_ASIDE {
+        return None; // kept: the next run counts on from it
+    }
+    let _ = std::fs::remove_file(&m);
+    let error = "Vibe Files stopped while processing this file more than once; it was set aside so it is not tried again. Open it to check it, then put it back in the folder to retry.".to_string();
     pipeline::set_aside(&staged, &error).ok()?;
     Some(Event::Failed { staged, error })
 }
@@ -115,17 +136,63 @@ fn stamp(p: &Path) -> Option<(u64, std::time::SystemTime)> {
     Some((m.len(), m.modified().ok()?))
 }
 
+/// Files handled but left in a staging folder (open in another program), kept across restarts
+/// so a restart does not deliver them again (QA2 #3): `<name>\t<size>\t<mtime secs>` lines.
+pub const HANDLED: &str = ".vf-handled.txt";
+
+fn secs(t: std::time::SystemTime) -> u64 {
+    t.duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
+/// The handled list of `dir`, for entries whose file is still there unchanged.
+pub fn load_handled(dir: &Path) -> HashMap<PathBuf, (u64, u64)> {
+    std::fs::read_to_string(dir.join(HANDLED))
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|l| {
+            let mut it = l.split('\t');
+            let (n, len, t) = (
+                it.next()?,
+                it.next()?.parse().ok()?,
+                it.next()?.parse().ok()?,
+            );
+            Some((dir.join(n), (len, t)))
+        })
+        .filter(|(p, s)| stamp(p).map(|(l, t)| (l, secs(t))) == Some(*s))
+        .collect()
+}
+
+fn save_handled(dir: &Path, all: &HashMap<PathBuf, (u64, u64)>) {
+    let mut lines: Vec<String> = all
+        .iter()
+        .filter(|(p, _)| p.parent() == Some(dir))
+        .filter_map(|(p, (l, t))| Some(format!("{}\t{l}\t{t}", p.file_name()?.to_string_lossy())))
+        .collect();
+    lines.sort();
+    let f = dir.join(HANDLED);
+    if lines.is_empty() {
+        let _ = std::fs::remove_file(f);
+    } else {
+        let _ = std::fs::write(f, lines.join("\n"));
+    }
+}
+
 /// [`pipeline::process`] with the marker written around it and a panic turned into an error.
 fn process_guarded(ctx: &Context<'_>, p: &Path, origin: Origin) -> Result<Processed, String> {
-    let marker = p.parent().map(|d| d.join(MARKER));
-    if let (Some(m), Some(n)) = (&marker, p.file_name()) {
-        let _ = std::fs::write(m, n.to_string_lossy().as_bytes());
+    let m = p.parent().map(|d| marker(d, ctx.device_id));
+    if let (Some(m), Some(n)) = (&m, p.file_name()) {
+        let n = n.to_string_lossy().into_owned();
+        let count = read_marker(m)
+            .filter(|(name, _)| *name == n)
+            .map_or(1, |(_, c)| c + 1);
+        let _ = std::fs::write(m, format!("{n}\t{count}"));
     }
     let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         pipeline::process(ctx, p, origin)
     }))
     .unwrap_or_else(|_| Err("processing failed unexpectedly (internal error)".into()));
-    if let Some(m) = &marker {
+    if let Some(m) = &m {
         let _ = std::fs::remove_file(m);
     }
     r
@@ -137,7 +204,7 @@ fn run(config: Arc<Mutex<Config>>, waiting: Arc<AtomicUsize>, tx: Sender<Event>,
     let mut sizes: HashMap<PathBuf, u64> = HashMap::new();
     // Handled, but could not be moved out of the folder (open in another program): not handled
     // again until it changes (QA I5).
-    let mut stuck: HashMap<PathBuf, (u64, std::time::SystemTime)> = HashMap::new();
+    let mut stuck: HashMap<PathBuf, (u64, u64)> = HashMap::new();
     let mut checked: std::collections::HashSet<PathBuf> = Default::default();
     loop {
         if Arc::strong_count(&config) == 1 {
@@ -145,16 +212,23 @@ fn run(config: Arc<Mutex<Config>>, waiting: Arc<AtomicUsize>, tx: Sender<Event>,
         }
         let cfg = config.lock().expect("config lock").clone();
         for (dir, _) in &cfg.folders {
-            if checked.insert(dir.clone())
-                && let Some(ev) = recover_marker(dir)
-            {
-                if tx.send(ev).is_err() {
-                    return;
+            if checked.insert(dir.clone()) {
+                stuck.extend(load_handled(dir));
+                if let Some(ev) = recover_marker(dir, &cfg.device_id) {
+                    if tx.send(ev).is_err() {
+                        return;
+                    }
+                    wake();
                 }
-                wake();
             }
         }
-        stuck.retain(|p, s| stamp(p).as_ref() == Some(s));
+        let before = stuck.len();
+        stuck.retain(|p, s| stamp(p).map(|(l, t)| (l, secs(t))) == Some(*s));
+        if stuck.len() != before {
+            for (dir, _) in &cfg.folders {
+                save_handled(dir, &stuck);
+            }
+        }
         let mut seen: HashMap<PathBuf, u64> = HashMap::new();
         let mut ready: Vec<(PathBuf, Origin)> = Vec::new();
         for (dir, origin) in &cfg.folders {
@@ -191,8 +265,11 @@ fn run(config: Arc<Mutex<Config>>, waiting: Arc<AtomicUsize>, tx: Sender<Event>,
                 };
                 let (Event::Processed(Processed { staged, .. }) | Event::Failed { staged, .. }) =
                     &ev;
-                if let Some(s) = stamp(staged) {
-                    stuck.insert(staged.clone(), s);
+                if let Some((l, t)) = stamp(staged) {
+                    stuck.insert(staged.clone(), (l, secs(t)));
+                    if let Some(dir) = staged.parent() {
+                        save_handled(dir, &stuck);
+                    }
                 }
                 sizes.retain(|k, _| k.exists());
                 if tx.send(ev).is_err() {

@@ -1,7 +1,7 @@
 # Portable release of Vibe Files (PHASES P13 step 6; QUESTIONS Q-30..Q-34).
 #
 #   pwsh scripts/release.ps1            # build, stage, zip, hash, winget manifests
-#   pwsh scripts/release.ps1 -SkipBuild # reuse the last release build
+#   pwsh scripts/release.ps1 -SkipBuild # reuse the last release build (a trial: not for publishing)
 #
 # Output in <target>/dist/:
 #   vibe-files-<ver>-win64/      the portable folder: vibe-files.exe (static CRT), pdfium.dll,
@@ -35,7 +35,8 @@ if (-not $ver) { throw 'no vf-app package version' }
 if (-not $SkipBuild) {
     # Static C runtime: the exe runs on a PC without the VC++ redistributable.
     $env:RUSTFLAGS = '-C target-feature=+crt-static'
-    try { cargo build --release -p vf-app; if ($LASTEXITCODE) { throw 'build failed' } }
+    # --locked: the build never rewrites Cargo.lock after the clean-tree check (QA2 #8).
+    try { cargo build --release --locked -p vf-app; if ($LASTEXITCODE) { throw 'build failed' } }
     finally { Remove-Item Env:RUSTFLAGS -ErrorAction SilentlyContinue }
 }
 $target = $meta.target_directory
@@ -77,7 +78,7 @@ $zipHash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower()
 $exeHash = (Get-FileHash (Join-Path $stage 'vibe-files.exe') -Algorithm SHA256).Hash.ToLower()
 @(
     "$zipHash  $name.zip",
-    "$exeHash  vibe-files.exe"
+    "$exeHash  $name/vibe-files.exe"
 ) | Set-Content -Encoding ascii (Join-Path $dist 'SHA256SUMS.txt')
 
 # winget manifests (portable zip; the data folder then lives in %LOCALAPPDATA%\Vibe Files).
@@ -127,7 +128,11 @@ ManifestVersion: 1.6.0
 "@ | Set-Content -Encoding utf8 (Join-Path $w 'Kisaes.VibeFiles.locale.en-US.yaml')
 
 $mb = [math]::Round((Get-Item $zip).Length / 1MB, 1)
-"Release $ver staged from $commit$(if ($dirty) { ' (UNCOMMITTED CHANGES: trial only)' }): $zip ($mb MB)"
+# The exe must come from this commit: a reused build (-SkipBuild) or changes left after the build
+# make it a trial (QA2 #8).
+$after = git status --porcelain
+$trial = if ($dirty -or $after) { ' (UNCOMMITTED CHANGES: trial only)' } elseif ($SkipBuild) { ' (REUSED BUILD, not checked against the commit: trial only)' } else { '' }
+"Release $ver staged from $commit${trial}: $zip ($mb MB)"
 "SHA-256 zip $zipHash"
 "SHA-256 exe $exeHash"
 "winget manifests: $w"
