@@ -137,8 +137,15 @@ fn stamp(p: &Path) -> Option<(u64, std::time::SystemTime)> {
 }
 
 /// Files handled but left in a staging folder (open in another program), kept across restarts
-/// so a restart does not deliver them again (QA2 #3): `<name>\t<size>\t<mtime secs>` lines.
-pub const HANDLED: &str = ".vf-handled.txt";
+/// so a restart does not deliver them again (QA2 #3): `<name>\t<size>\t<mtime secs>` lines,
+/// one file per PC (QA3 E8).
+pub fn handled_file(dir: &Path, device_id: &str) -> PathBuf {
+    let id: String = device_id
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
+        .collect();
+    dir.join(format!(".vf-handled-{id}.txt"))
+}
 
 fn secs(t: std::time::SystemTime) -> u64 {
     t.duration_since(std::time::UNIX_EPOCH)
@@ -146,8 +153,8 @@ fn secs(t: std::time::SystemTime) -> u64 {
 }
 
 /// The handled list of `dir`, for entries whose file is still there unchanged.
-pub fn load_handled(dir: &Path) -> HashMap<PathBuf, (u64, u64)> {
-    std::fs::read_to_string(dir.join(HANDLED))
+pub fn load_handled(dir: &Path, device_id: &str) -> HashMap<PathBuf, (u64, u64)> {
+    std::fs::read_to_string(handled_file(dir, device_id))
         .unwrap_or_default()
         .lines()
         .filter_map(|l| {
@@ -163,14 +170,14 @@ pub fn load_handled(dir: &Path) -> HashMap<PathBuf, (u64, u64)> {
         .collect()
 }
 
-fn save_handled(dir: &Path, all: &HashMap<PathBuf, (u64, u64)>) {
+fn save_handled(dir: &Path, device_id: &str, all: &HashMap<PathBuf, (u64, u64)>) {
     let mut lines: Vec<String> = all
         .iter()
         .filter(|(p, _)| p.parent() == Some(dir))
         .filter_map(|(p, (l, t))| Some(format!("{}\t{l}\t{t}", p.file_name()?.to_string_lossy())))
         .collect();
     lines.sort();
-    let f = dir.join(HANDLED);
+    let f = handled_file(dir, device_id);
     if lines.is_empty() {
         let _ = std::fs::remove_file(f);
     } else {
@@ -213,7 +220,7 @@ fn run(config: Arc<Mutex<Config>>, waiting: Arc<AtomicUsize>, tx: Sender<Event>,
         let cfg = config.lock().expect("config lock").clone();
         for (dir, _) in &cfg.folders {
             if checked.insert(dir.clone()) {
-                stuck.extend(load_handled(dir));
+                stuck.extend(load_handled(dir, &cfg.device_id));
                 if let Some(ev) = recover_marker(dir, &cfg.device_id) {
                     if tx.send(ev).is_err() {
                         return;
@@ -226,7 +233,7 @@ fn run(config: Arc<Mutex<Config>>, waiting: Arc<AtomicUsize>, tx: Sender<Event>,
         stuck.retain(|p, s| stamp(p).map(|(l, t)| (l, secs(t))) == Some(*s));
         if stuck.len() != before {
             for (dir, _) in &cfg.folders {
-                save_handled(dir, &stuck);
+                save_handled(dir, &cfg.device_id, &stuck);
             }
         }
         let mut seen: HashMap<PathBuf, u64> = HashMap::new();
@@ -268,7 +275,7 @@ fn run(config: Arc<Mutex<Config>>, waiting: Arc<AtomicUsize>, tx: Sender<Event>,
                 if let Some((l, t)) = stamp(staged) {
                     stuck.insert(staged.clone(), (l, secs(t)));
                     if let Some(dir) = staged.parent() {
-                        save_handled(dir, &stuck);
+                        save_handled(dir, &cfg.device_id, &stuck);
                     }
                 }
                 sizes.retain(|k, _| k.exists());

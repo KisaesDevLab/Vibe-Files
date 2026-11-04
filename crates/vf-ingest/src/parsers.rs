@@ -289,7 +289,7 @@ pub fn table_rules(
     types: &[vf_fs::doctypes::DocType],
     like_k1: Option<&filer_core::rules::Rule>,
     extra_tokens: &[String],
-) -> (Vec<filer_core::rules::Rule>, Vec<String>) {
+) -> (Vec<filer_core::rules::Rule>, Vec<(String, String)>) {
     use crate::ultratax::{Action, K1_BY_FORM, label_of};
     use filer_core::rules::{CopyDest, OnSplit, Resolver, Rule};
     let default_of = |name: &str| {
@@ -309,7 +309,7 @@ pub fn table_rules(
     for (p, r) in rows {
         let label = label_of(&r.default_name);
         if let Some(e) = crate::ultratax::rename_problem(r, p.short_names) {
-            problems.push(e);
+            problems.push((p.name.clone(), e));
             continue;
         }
         let mut folder = r.folder.trim().trim_matches('/').to_string();
@@ -320,8 +320,11 @@ pub fn table_rules(
                     .map(|t| default_of(t).unwrap_or_default())
                     .collect();
                 if fs.iter().any(|f| f != &fs[0]) {
-                    problems.push(format!(
-                        "{label}: the K-1 doc types have different default folders; choose a folder for this row"
+                    problems.push((
+                        p.name.clone(),
+                        format!(
+                            "{label}: the K-1 doc types have different default folders; choose a folder for this row"
+                        ),
                     ));
                     continue;
                 }
@@ -332,7 +335,10 @@ pub fn table_rules(
                 default_of(&r.doc_type)
             };
             let Some(d) = d else {
-                problems.push(format!("{label}: {} is not a doc type", r.doc_type));
+                problems.push((
+                    p.name.clone(),
+                    format!("{label}: {} is not a doc type", r.doc_type),
+                ));
                 continue;
             };
             folder = d;
@@ -341,6 +347,19 @@ pub fn table_rules(
             folder = "Income Tax/{Year}".into();
         }
         let layout = p.layout.as_ref().expect("filtered");
+        // The partner is read from the name only with the recipient in it (QA3 E10).
+        if r.copy_to_partner
+            && !layout.k1_recipient_after_document
+            && !r.template(p.short_names).contains("{Recipient}")
+        {
+            problems.push((
+                p.name.clone(),
+                format!(
+                    "{label}: Partner copy needs the K-1 recipient in the name: set K1 Recipient Name to After Document Name (Options), or turn Partner copy off"
+                ),
+            ));
+            continue;
+        }
         let mut rule = Rule::new(
             &format!("{} · {}", p.name, r.default_name),
             &crate::ultratax::rule_pattern(r, layout, p.short_names),
@@ -376,7 +395,7 @@ pub fn table_rules(
         }
         let errs = filer_core::rules::validate_rule(&rule, extra_tokens);
         if !errs.is_empty() {
-            problems.push(format!("{label}: {}", errs.join("; ")));
+            problems.push((p.name.clone(), format!("{label}: {}", errs.join("; "))));
             continue;
         }
         out.push(rule);
@@ -410,7 +429,7 @@ fn plan_rules(
     (
         filer_core::rules::RulesFile,
         filer_core::rules::RulesFile,
-        Vec<String>,
+        Vec<(String, String)>,
     ),
     String,
 > {
@@ -428,11 +447,28 @@ fn plan_rules(
             errors.join("; ")
         ));
     }
+    let mut dup: Vec<(String, String)> = Vec::new();
+    let mut names = std::collections::HashSet::new();
     let profiles: Vec<Profile> = loaded
         .into_iter()
         .map(|(path, p)| match replace {
             Some((rp, np)) if rp == path => np.clone(),
             _ => p,
+        })
+        // Two profiles of one name would make rules of one name: the second is left out
+        // (a copied file), said, and the rest goes on (QA3 E11).
+        .filter(|p| {
+            let first = names.insert(p.name.to_lowercase());
+            if !first {
+                dup.push((
+                    p.name.clone(),
+                    format!(
+                        "two profiles are named {}: rename or remove the copy",
+                        p.name
+                    ),
+                ));
+            }
+            first
         })
         .collect();
     let types = vf_fs::doctypes::load(root)?.unwrap_or_default();
@@ -458,7 +494,8 @@ fn plan_rules(
     }
     // The document tables go first, ahead of Filer's K-1 rules (they carry the partner copy).
     let k1 = active.iter().find(|r| r.name == "K-1").cloned();
-    let (table, problems) = table_rules(&profiles, &types, k1.as_ref(), &extra);
+    let (table, mut problems) = table_rules(&profiles, &types, k1.as_ref(), &extra);
+    problems.extend(dup);
     for (k, r) in table.into_iter().enumerate() {
         active.insert(k, r);
     }
@@ -484,7 +521,10 @@ pub fn sync_filer_rules_report(root: &Path) -> Result<Synced, String> {
         let master = vf_fs::clients::master_dir(root);
         filer_core::rules::save(&master, &file).map_err(|e| format!("saving rules.json: {e}"))?;
     }
-    Ok(Synced { changed, problems })
+    Ok(Synced {
+        changed,
+        problems: problems.into_iter().map(|(_, m)| m).collect(),
+    })
 }
 
 /// [`sync_filer_rules_report`], with left-out rows as an error (after the others are written).
@@ -499,12 +539,19 @@ pub fn sync_filer_rules(root: &Path) -> Result<bool, String> {
 
 /// Whether saving `profile` at `path` would give rules Filer takes, every row included: checked
 /// before the file is written (QA2 U1).
+/// Only the profile's own rows count: another profile's problem does not stop this save
+/// (QA3 #10).
 pub fn check_profile(root: &Path, path: &Path, profile: &Profile) -> Result<(), String> {
     let (_, _, problems) = plan_rules(root, Some((path, profile)))?;
-    if problems.is_empty() {
+    let own: Vec<String> = problems
+        .into_iter()
+        .filter(|(p, _)| *p == profile.name)
+        .map(|(_, m)| m)
+        .collect();
+    if own.is_empty() {
         Ok(())
     } else {
-        Err(problems.join("; "))
+        Err(own.join("; "))
     }
 }
 

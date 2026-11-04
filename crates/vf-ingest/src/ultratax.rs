@@ -559,43 +559,92 @@ pub struct Values {
 
 /// Fills `template`; parts left empty leave no doubled separators behind.
 pub fn render(template: &str, v: &Values) -> String {
-    let mut s = template.to_string();
-    for (k, val) in [
-        ("{Printed}", &v.printed),
-        ("{Document}", &v.document),
-        ("{DocType}", &v.doc_type),
-        ("{Client}", &v.client),
-        ("{ID}", &v.id),
-        ("{Year}", &v.year),
-        ("{Form}", &v.form),
-        ("{Recipient}", &v.recipient),
-        ("{State}", &v.state),
-        ("{Amended}", &v.amended),
-    ] {
-        s = s.replace(k, val);
+    // Literal text and values apart: values go in as they are (a client "Acme Corp -", a
+    // custom name with "__"), only the template's own separators are tidied (QA3 E2).
+    enum Part<'a> {
+        Lit(String),
+        Val(&'a str),
     }
-    // Tidy what empty parts leave: "2025 -  - x" → "2025 - x".
-    let mut out = String::new();
-    let mut last_sep = String::new();
-    for ch in s.chars() {
-        let sep = matches!(ch, ' ' | '_' | '-');
-        if sep {
-            last_sep.push(ch);
-        } else {
-            if !out.is_empty() && !last_sep.is_empty() {
-                // Keep the separator the template meant ("_" or " - "), collapsed.
-                let t = last_sep.trim();
-                let joined = if t.is_empty() {
-                    if last_sep.contains('_') { "_" } else { " " }.to_string()
-                } else if last_sep.starts_with(' ') || last_sep.ends_with(' ') {
-                    format!(" {} ", &t[..t.chars().next().map_or(0, |c| c.len_utf8())])
-                } else {
-                    t.chars().take(1).collect()
-                };
-                out.push_str(&joined);
+    let value = |tok: &str| -> Option<&String> {
+        Some(match tok {
+            "{Printed}" => &v.printed,
+            "{Document}" => &v.document,
+            "{DocType}" => &v.doc_type,
+            "{Client}" => &v.client,
+            "{ID}" => &v.id,
+            "{Year}" => &v.year,
+            "{Form}" => &v.form,
+            "{Recipient}" => &v.recipient,
+            "{State}" => &v.state,
+            "{Amended}" => &v.amended,
+            _ => return None,
+        })
+    };
+    let mut parts: Vec<Part> = Vec::new();
+    let mut lit = String::new();
+    let mut rest = template;
+    while let Some(c) = rest.chars().next() {
+        if c == '{'
+            && let Some(end) = rest.find('}')
+            && let Some(val) = value(&rest[..=end])
+        {
+            if !val.is_empty() {
+                parts.push(Part::Lit(std::mem::take(&mut lit)));
+                parts.push(Part::Val(val));
             }
-            last_sep.clear();
-            out.push(ch);
+            rest = &rest[end + 1..];
+            continue;
+        }
+        lit.push(c);
+        rest = &rest[c.len_utf8()..];
+    }
+    parts.push(Part::Lit(lit));
+    // Each run of separators in the literal text becomes one ("_", " ", or " - " kept as the
+    // template meant it); none at the very start or end.
+    let tidy = |l: &str, first: bool, last: bool| -> String {
+        let mut out = String::new();
+        let mut sep = String::new();
+        let flush = |out: &mut String, sep: &mut String| {
+            let t = sep.trim();
+            out.push_str(&if t.is_empty() {
+                if sep.contains('_') { "_" } else { " " }.to_string()
+            } else if sep.starts_with(' ') || sep.ends_with(' ') {
+                format!(" {} ", t.chars().next().expect("not empty"))
+            } else {
+                t.chars().take(1).collect()
+            });
+            sep.clear();
+        };
+        for ch in l.chars() {
+            if matches!(ch, ' ' | '_' | '-') {
+                sep.push(ch);
+            } else {
+                if !sep.is_empty() && !(first && out.is_empty()) {
+                    flush(&mut out, &mut sep);
+                }
+                sep.clear();
+                out.push(ch);
+            }
+        }
+        if !sep.is_empty() && !last && !(first && out.is_empty()) {
+            flush(&mut out, &mut sep);
+        }
+        out
+    };
+    // Literals between two values are merged where values were left out.
+    let mut merged: Vec<Part> = Vec::new();
+    for p in parts {
+        match (merged.last_mut(), p) {
+            (Some(Part::Lit(a)), Part::Lit(b)) => a.push_str(&b),
+            (_, p) => merged.push(p),
+        }
+    }
+    let n = merged.len();
+    let mut out = String::new();
+    for (k, p) in merged.into_iter().enumerate() {
+        match p {
+            Part::Val(v) => out.push_str(v),
+            Part::Lit(l) => out.push_str(&tidy(&l, k == 0, k + 1 == n)),
         }
     }
     out
@@ -629,6 +678,25 @@ pub fn rename_problem(row: &Row, short: bool) -> Option<String> {
             "{}: the name must keep {{Document}} or {{Printed}}: Intake recognizes the document by it",
             label_of(&row.default_name)
         ));
+    }
+    if t.ends_with('.') || t.ends_with(' ') {
+        return Some(format!(
+            "{}: the name cannot end with a dot or a space",
+            label_of(&row.default_name)
+        ));
+    }
+    // The partner is read from the name: right after the document name, or after plain text
+    // (" - "); an optional part before it would take the start of the name (QA3 E5).
+    if row.copy_to_partner
+        && let Some(i) = t.find("{Recipient}")
+    {
+        let before = t[..i].trim_end_matches([' ', '_', '-']);
+        if before.ends_with('}') && !before.ends_with("{Document}") {
+            return Some(format!(
+                "{}: put {{Recipient}} right after {{Document}}, or after text such as \" - \"",
+                label_of(&row.default_name)
+            ));
+        }
     }
     if row.copy_to_partner && !(t.contains("{Recipient}") || t.contains("{Printed}")) {
         return Some(format!(
@@ -881,6 +949,29 @@ mod tests {
             render("{Year} {Amended} {Document} - {Client}", &v),
             "2025 Tax_Return - Reyes, Dana"
         );
+        // Values go in as they are; only the template's own separators are tidied (QA3 E2).
+        let acme = Values {
+            printed: "Acme Corp -_2025_1120_Tax_Return_ACME1111".into(),
+            document: "Odd__Name".into(),
+            recipient: "Mary  Smith".into(),
+            ..Default::default()
+        };
+        assert_eq!(render("{Printed}", &acme), "Acme Corp -_2025_1120_Tax_Return_ACME1111");
+        assert_eq!(
+            render("{Document} - {Recipient}", &acme),
+            "Odd__Name - Mary  Smith"
+        );
+        assert_eq!(render("{Year}_{Document}", &acme), "Odd__Name");
+        let mut k = default_rows()
+            .into_iter()
+            .find(|r| r.default_name == "ArchiveK1Package")
+            .unwrap();
+        k.rename = "{Year} {Form} {Document} {State} {Recipient}".into();
+        assert!(rename_problem(&k, false).is_some(), "optional part before the partner");
+        k.rename = "{Year} {Document} - {Recipient}".into();
+        assert!(rename_problem(&k, false).is_none());
+        k.rename = "{Document}.".into();
+        assert!(rename_problem(&k, false).is_some(), "trailing dot");
         let mut r = default_rows()[0].clone();
         r.rename = "{Year} return".into();
         assert!(rename_problem(&r, false).is_some());

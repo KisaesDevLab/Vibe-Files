@@ -376,6 +376,16 @@ pub fn capture_name(root: &Path, lookup: &Lookup, name: &str) -> (String, Hint, 
         })
         .filter(|p| id_ok(&p.client_id));
     let Some(p) = parsed else {
+        // A profile read it but the ID is not one Filer reads: Filer would take another part
+        // of the name for the ID (a year, another client). Underscores out, so Intake asks
+        // which client (QA3 E1).
+        let read_by_profile = crate::parsers::parse(&profiles, name).is_some();
+        let name = if read_by_profile {
+            name.replace('_', " ")
+        } else {
+            name.to_string()
+        };
+        let name = name.as_str();
         let mut h = Hint::new("", name, "print_capture", "");
         h.source = Some("firm".into());
         return (
@@ -438,11 +448,21 @@ pub fn capture_name(root: &Path, lookup: &Lookup, name: &str) -> (String, Hint, 
             .get(..4)
             .and_then(|y| y.parse().ok())
             .unwrap_or(2026);
-        if filer_core::parse::detect_year(&rest, now).map(i32::from) != Some(y) && p.row.is_some() {
+        let readable = filer_core::parse::detect_year(&y.to_string(), now).is_some();
+        if readable
+            && !rest.starts_with(&y.to_string())
+            && filer_core::parse::detect_year(&rest, now).map(i32::from) != Some(y)
+            && p.row.is_some()
+        {
             rest = format!("{y} {rest}");
         }
     }
-    let file = format!("{}_{}_{}.pdf", clean(&client), p.client_id, rest);
+    let file = format!(
+        "{}_{}_{}.pdf",
+        clean(&client).replace('_', " "),
+        p.client_id,
+        rest
+    );
     let mut h = Hint::new("", &file, &format!("print_capture:{}", p.profile), "");
     h.tax_year = p.year;
     h.source = Some(p.source.clone());

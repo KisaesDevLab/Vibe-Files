@@ -70,11 +70,11 @@ fn handled_files_stay_handled_until_they_change() {
         .unwrap()
         .as_secs();
     std::fs::write(
-        dir.join(worker::HANDLED),
+        dir.join(worker::handled_file(dir, "dev-1")),
         format!("open.pdf	{}	{secs}", m.len()),
     )
     .unwrap();
-    assert!(worker::load_handled(dir).contains_key(&f));
+    assert!(worker::load_handled(dir, "dev-1").contains_key(&f));
     std::fs::write(&f, "changed").unwrap();
-    assert!(worker::load_handled(dir).is_empty());
+    assert!(worker::load_handled(dir, "dev-1").is_empty());
 }
