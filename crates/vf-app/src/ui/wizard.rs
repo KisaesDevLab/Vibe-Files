@@ -1,14 +1,9 @@
 //! Cabinet wizard: open an existing cabinet or create one (P01 step 1). Shown until a cabinet
 //! is open.
 
-use egui::{Color32, RichText, TextEdit};
+use egui::{RichText, TextEdit};
 
 use crate::ui::theme;
-
-/// Error text (light or dark theme).
-pub fn error() -> Color32 {
-    crate::ui::theme::error()
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
@@ -92,7 +87,7 @@ pub fn show(ui: &mut egui::Ui, w: &mut Wizard) -> Option<Mode> {
             }
             ui.add_space(12.0);
             if let Some(e) = &w.error {
-                ui.label(RichText::new(e).color(error()));
+                ui.label(RichText::new(e).color(crate::ui::theme::error()));
                 ui.add_space(8.0);
             }
             let label = match w.mode {

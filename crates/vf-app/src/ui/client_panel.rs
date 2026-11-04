@@ -8,7 +8,7 @@ use vf_fs::clients::{self, ENTITY_TYPES};
 
 use crate::ui::browse::{Browse, Env};
 use crate::ui::new_client::NewClientDialog;
-use crate::ui::{theme, wizard::error};
+use crate::ui::theme;
 
 /// The add-relationship form.
 #[derive(Debug, Clone, Default)]
@@ -215,7 +215,7 @@ fn add_form(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env, c: &vf_core::brows
         .color(theme::ink_muted()),
     );
     if let Some(e) = &f.error {
-        ui.label(RichText::new(e).color(error()));
+        ui.label(RichText::new(e).color(crate::ui::theme::error()));
     }
     if !ui.button("Add relationship").clicked() {
         return;

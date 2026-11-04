@@ -7,8 +7,8 @@ use egui::{RichText, TextEdit};
 use vf_fs::doctypes::{self, DocType, Edit};
 
 use crate::ui::browse::Env;
+use crate::ui::theme;
 use crate::ui::widgets;
-use crate::ui::{theme, wizard::error};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Page {
@@ -587,7 +587,7 @@ fn editor(ui: &mut egui::Ui, a: &mut Admin, env: &mut Env) {
         .and_then(|id| a.usage.get(id).copied())
         .unwrap_or(0);
     if let Some(e) = &a.error {
-        ui.label(RichText::new(e).color(error()));
+        ui.label(RichText::new(e).color(crate::ui::theme::error()));
     }
     ui.horizontal(|ui| {
         let ok = doctypes::check_fields(&a.form.name, &a.form.folder).is_ok();
@@ -657,7 +657,7 @@ fn editor(ui: &mut egui::Ui, a: &mut Admin, env: &mut Env) {
                     RichText::new(format!(
                         "{used} documents use this doc type. Remove it anyway? They keep it, shown as deleted; it cannot be undone from Browse."
                     ))
-                    .color(error()),
+                    .color(crate::ui::theme::error()),
                 );
                 ui.horizontal(|ui| {
                     if ui.button("Yes, remove").clicked() {
@@ -713,7 +713,7 @@ fn print_capture(ui: &mut egui::Ui, a: &mut Admin, env: &mut Env) {
         }
     });
     if let Some(e) = &a.error {
-        ui.label(RichText::new(e).color(error()));
+        ui.label(RichText::new(e).color(crate::ui::theme::error()));
     }
     ui.add_space(8.0);
     ui.label(RichText::new("Setting up the printer").strong());

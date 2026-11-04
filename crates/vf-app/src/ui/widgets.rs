@@ -98,7 +98,7 @@ pub fn fixed_body<R>(
 pub fn message_line(ui: &mut egui::Ui, msg: Option<&str>) {
     ui.add_sized(
         [ui.available_width(), 36.0],
-        egui::Label::new(RichText::new(msg.unwrap_or("")).color(crate::ui::wizard::error())).wrap(),
+        egui::Label::new(RichText::new(msg.unwrap_or("")).color(crate::ui::theme::error())).wrap(),
     );
 }
 

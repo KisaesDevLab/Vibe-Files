@@ -12,7 +12,7 @@ use vf_core::db::{Connection, Storage};
 use vf_fs::sweep::{self, Drift};
 
 use crate::ui::browse::Env;
-use crate::ui::{theme, widgets, wizard::error};
+use crate::ui::{theme, widgets};
 
 #[derive(Default)]
 pub struct SweepState {
@@ -152,7 +152,7 @@ pub fn show(ui: &mut egui::Ui, s: &mut SweepState, env: &mut Env, catalog: &Path
         ui.label(RichText::new(n).color(theme::ink_secondary()));
     }
     if let Some(e) = &s.error {
-        ui.label(RichText::new(e).color(error()));
+        ui.label(RichText::new(e).color(crate::ui::theme::error()));
     }
     ui.separator();
     let Some(d) = s.drift.clone() else {
@@ -277,7 +277,7 @@ pub fn show(ui: &mut egui::Ui, s: &mut SweepState, env: &mut Env, catalog: &Path
             if !d.unreadable.is_empty() {
                 section(ui, &format!("Could not be read ({})", d.unreadable.len()));
                 for u in &d.unreadable {
-                    ui.label(RichText::new(u).small().color(error()));
+                    ui.label(RichText::new(u).small().color(crate::ui::theme::error()));
                 }
             }
         });

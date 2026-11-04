@@ -3141,7 +3141,7 @@ fn tape_panel(ui: &mut egui::Ui, v: &mut Viewer, env: &mut Env<'_>, doc: &Doc) {
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             ui.label(RichText::new(v.tape.tape.display()).monospace().size(18.0));
                             if let Some(e) = v.tape.tape.error() {
-                                ui.label(RichText::new(e).color(crate::ui::wizard::error()));
+                                ui.label(RichText::new(e).color(crate::ui::theme::error()));
                             }
                         });
                         ui.label(widgets::caption(format!(

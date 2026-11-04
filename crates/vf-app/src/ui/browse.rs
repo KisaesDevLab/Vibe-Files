@@ -1762,7 +1762,7 @@ fn breadcrumb(b: &Browse) -> String {
 
 fn grid(ui: &mut egui::Ui, b: &mut Browse, conn: &Connection) {
     if let Some(e) = &b.error {
-        ui.label(RichText::new(e).color(crate::ui::wizard::error()));
+        ui.label(RichText::new(e).color(crate::ui::theme::error()));
     }
     let mut dismiss = false;
     if let Some(n) = &b.notice {
@@ -2392,7 +2392,7 @@ fn legal_holds(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env) {
                             h.reason,
                             widgets::local_time(&h.since)
                         ))
-                        .color(crate::ui::wizard::error())
+                        .color(crate::ui::theme::error())
                         .strong(),
                     );
                     ui.label(widgets::caption(

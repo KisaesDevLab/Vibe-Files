@@ -12,8 +12,8 @@ use vf_fs::doctypes::DocType;
 use vf_ingest::parsers::{self, DocRule, Profile, Trial};
 use vf_ingest::ultratax::{self, Action, Layout, Var};
 
+use crate::ui::theme;
 use crate::ui::widgets;
-use crate::ui::{theme, wizard::error};
 
 #[derive(Default)]
 pub struct CapturePage {
@@ -165,7 +165,7 @@ pub fn show(
         ));
     });
     for e in &p.errors {
-        ui.label(RichText::new(e).color(error()));
+        ui.label(RichText::new(e).color(crate::ui::theme::error()));
     }
     if p.files.is_empty() {
         ui.label("No parser profiles.");
@@ -282,7 +282,7 @@ pub fn show(
             .add_enabled(dirty, egui::Button::new("Discard"))
             .clicked();
         if dirty && let Some(i) = &issue {
-            ui.label(RichText::new(i).color(error()));
+            ui.label(RichText::new(i).color(crate::ui::theme::error()));
         }
     });
     let to_save = save.then(|| draft.clone());
@@ -336,7 +336,7 @@ pub fn show(
     }
     widgets::message_line(ui, p.notice.as_deref());
     if let Some(e) = &p.error {
-        ui.label(RichText::new(e).color(error()));
+        ui.label(RichText::new(e).color(crate::ui::theme::error()));
     }
 
     rules_changed
@@ -357,7 +357,7 @@ fn trial_view(ui: &mut egui::Ui, t: &Trial) {
                     ui,
                     "Profile",
                     RichText::new("no profile reads this name: it goes to Intake as it is")
-                        .color(error()),
+                        .color(crate::ui::theme::error()),
                 ),
                 Some(pr) => {
                     row(ui, "Profile", RichText::new(&pr.profile));
@@ -377,7 +377,9 @@ fn trial_view(ui: &mut egui::Ui, t: &Trial) {
                         "Doc type",
                         match &pr.doc_type {
                             Some(d) => RichText::new(d),
-                            None => RichText::new("no rule matched").color(error()),
+                            None => {
+                                RichText::new("no rule matched").color(crate::ui::theme::error())
+                            }
                         },
                     );
                 }
@@ -393,7 +395,7 @@ fn trial_view(ui: &mut egui::Ui, t: &Trial) {
                 "Filed as",
                 match &t.destination {
                     Ok(d) => RichText::new(format!("<client folder>/{d}")).monospace(),
-                    Err(e) => RichText::new(e).color(error()),
+                    Err(e) => RichText::new(e).color(crate::ui::theme::error()),
                 },
             );
         });
@@ -684,7 +686,7 @@ fn options(ui: &mut egui::Ui, draft: &mut Profile) {
     ui.add_space(6.0);
     match layout.problem() {
         Some(e) => {
-            ui.label(RichText::new(e).color(error()));
+            ui.label(RichText::new(e).color(crate::ui::theme::error()));
         }
         None => {
             ui.horizontal(|ui| {
@@ -827,7 +829,7 @@ fn document_names(ui: &mut egui::Ui, draft: &mut Profile, types: &[DocType], fol
                         [200.0, 22.0],
                         TextEdit::singleline(&mut r.folder)
                             .hint_text(default_text.clone())
-                            .text_color_opt(bad.as_ref().map(|_| error())),
+                            .text_color_opt(bad.as_ref().map(|_| crate::ui::theme::error())),
                     )
                     .on_hover_text(bad.unwrap_or_else(|| {
                         "Below the client folder; type a new one (e.g. Income Tax/{Year}/Government Copy) or pick one. Blank: the doc type's folder.".into()
@@ -874,7 +876,7 @@ fn document_names(ui: &mut egui::Ui, draft: &mut Profile, types: &[DocType], fol
                             [170.0, 22.0],
                             TextEdit::singleline(&mut r.rename)
                                 .hint_text(hint)
-                                .text_color_opt(bad.as_ref().map(|_| error())),
+                                .text_color_opt(bad.as_ref().map(|_| crate::ui::theme::error())),
                         )
                         .on_hover_text(bad.clone().unwrap_or_else(|| {
                             "Blank: the file name chosen above. Tokens: {Printed} {Document} {DocType} {Client} {ID} {Year} {Form} {Recipient} {State} {Amended}".into()
@@ -915,7 +917,7 @@ fn document_names(ui: &mut egui::Ui, draft: &mut Profile, types: &[DocType], fol
     ));
     for r in &draft.documents {
         if let Some(e) = ultratax::rename_problem(r, draft.short_names) {
-            ui.label(RichText::new(e).color(error()));
+            ui.label(RichText::new(e).color(crate::ui::theme::error()));
         }
     }
     if ui.button("Restore Default").clicked() {

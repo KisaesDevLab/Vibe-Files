@@ -431,21 +431,46 @@ impl eframe::App for VibeFilesApp {
         if ctx_zoom != size && self.zoom_applied {
             size = ctx_zoom;
         }
+        // The theme: Vibe's Light / Dark button sets it; Filer's theme button on Intake may set
+        // it too, including "follow Windows", which is then kept (review 2026-11-04).
         let ctx_dark = ui.ctx().theme() == egui::Theme::Dark;
-        let mut dark = self.config.look.dark;
-        if ctx_dark != dark && self.zoom_applied {
-            dark = ctx_dark;
+        let follows_windows =
+            ui.ctx().options(|o| o.theme_preference) == egui::ThemePreference::System;
+        let (mut dark, mut system) = (self.config.look.dark, self.config.look.system);
+        if self.zoom_applied {
+            if follows_windows {
+                system = true;
+                dark = ctx_dark;
+            } else if ctx_dark != dark || system {
+                system = false;
+                dark = ctx_dark;
+            }
         }
         crate::ui::theme::set_dark(dark);
+        let shown = dark;
         chrome::header(ui, name.as_deref(), &mut size, &mut dark);
-        if size != self.config.look.text_size || dark != self.config.look.dark || !self.zoom_applied
-        {
+        if dark != shown {
+            system = false; // the header's button chooses explicitly
+        }
+        let look_changed = size != self.config.look.text_size
+            || dark != self.config.look.dark
+            || system != self.config.look.system;
+        if look_changed || !self.zoom_applied {
+            let first = !self.zoom_applied;
             self.zoom_applied = true;
             ui.ctx().set_zoom_factor(f32::from(size) / 100.0);
-            crate::ui::theme::set_theme(ui.ctx(), dark);
-            if size != self.config.look.text_size || dark != self.config.look.dark {
+            if system {
+                if first {
+                    ui.ctx().set_theme(egui::ThemePreference::System);
+                }
+                crate::ui::theme::set_dark(ui.ctx().theme() == egui::Theme::Dark);
+            } else {
+                crate::ui::theme::set_theme(ui.ctx(), dark);
+            }
+            if look_changed {
                 self.config.look.text_size = size;
                 self.config.look.dark = dark;
+                self.config.look.system = system;
                 let _ = config::save(&self.data, &self.config);
             }
         }
@@ -499,7 +524,11 @@ impl eframe::App for VibeFilesApp {
                             .inner_margin(egui::Margin::symmetric(16, 8)),
                     )
                     .show(ui, |ui| {
-                        ui.label(egui::RichText::new(problem).color(wizard::error()).strong());
+                        ui.label(
+                            egui::RichText::new(problem)
+                                .color(crate::ui::theme::error())
+                                .strong(),
+                        );
                     });
             }
         }
@@ -2257,6 +2286,27 @@ mod tests {
         h.run();
         assert_eq!(h.ctx.theme(), egui::Theme::Light);
         assert!(!config::load(&data).unwrap().look.dark);
+        // "Follow Windows" picked with Filer's theme button is kept, not replaced.
+        h.ctx.set_theme(egui::ThemePreference::System);
+        h.run();
+        assert!(config::load(&data).unwrap().look.system);
+        assert_eq!(
+            h.ctx.options(|o| o.theme_preference),
+            egui::ThemePreference::System
+        );
+        // Vibe's own button chooses explicitly again.
+        let label = if h.ctx.theme() == egui::Theme::Dark {
+            "Light"
+        } else {
+            "Dark"
+        };
+        click(&mut h, label);
+        h.run();
+        assert!(!config::load(&data).unwrap().look.system);
+        assert_ne!(
+            h.ctx.options(|o| o.theme_preference),
+            egui::ThemePreference::System
+        );
     }
 
     /// Text size (owner 2026-11-04): the header's A+ / A- change it and this PC keeps it.

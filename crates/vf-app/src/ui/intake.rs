@@ -38,6 +38,10 @@ pub struct IntakeTab {
     /// Filer's rules.json was rewritten from Admin (print capture folders) while Filer had
     /// its rules loaded: Intake offers to reload.
     rules_stale: bool,
+    /// The theme Filer's screen was loaded with (`None` = follow Windows): when Vibe's own
+    /// button changes it, Filer's theme button would show the old one, so the screen is loaded
+    /// again once nothing waits in its review (review 2026-11-04).
+    filer_look: Option<Option<bool>>,
     /// The documents Intake's last batch filed, being given their details (owner 2026-11-04).
     just_filed: Option<crate::ui::filed_details::JustFiled>,
     /// A batch was recorded: list it on the next frame.
@@ -67,17 +71,26 @@ pub struct IntakeTab {
     dupe_action: Option<(usize, vf_fs::dupes::Choice)>,
 }
 
+/// The window's theme as Filer's settings name it: `None` = follow Windows.
+fn current_look(ctx: &egui::Context) -> Option<bool> {
+    if ctx.options(|o| o.theme_preference) == egui::ThemePreference::System {
+        None
+    } else {
+        Some(ctx.theme() == egui::Theme::Dark)
+    }
+}
+
 /// Filer's ID pattern for client IDs of letters and/or digits (`STOC1234`, `1042`).
 pub const ID_PATTERN: &str = r"[A-Z0-9]{4,}";
 
 /// Filer's settings for this cabinet on this PC: whatever `_Vibe/config.json` holds (rules
 /// profile, inboxes, column map, …), with the cabinet's own facts written over it, and Vibe's
 /// theme and text size so Filer's screen does not switch them when it loads (owner 2026-11-04);
-/// those two are never saved into the shared `config.json`.
-pub fn settings_with_look(
+/// those two are never saved into the shared `config.json`. `dark`: `None` = follow Windows.
+pub fn settings_with_theme(
     root: &Path,
     cabinet: &CabinetFile,
-    dark: bool,
+    dark: Option<bool>,
     zoom: f32,
 ) -> Result<(Settings, bool), String> {
     let dir = vf_fs::clients::master_dir(root);
@@ -111,10 +124,10 @@ pub fn settings_with_look(
             .map_err(|e| format!("saving Filer's config.json: {e}"))?;
     }
     // Vibe's theme and text size for Filer's screen, not Windows' or Filer's own.
-    s.display.theme = if dark {
-        ThemeChoice::Dark
-    } else {
-        ThemeChoice::Light
+    s.display.theme = match dark {
+        None => ThemeChoice::System,
+        Some(true) => ThemeChoice::Dark,
+        Some(false) => ThemeChoice::Light,
     };
     s.display.zoom = filer_core::config::Display::clamp_zoom(zoom);
     Ok((s, savable))
@@ -454,9 +467,17 @@ impl IntakeTab {
             }
         }
         self.dupes_panel(ui);
+        if let Some(seen) = self.filer_look
+            && self.filer.is_some()
+            && seen != current_look(ui.ctx())
+            && self.ingest.badge() == 0
+            && !filer_committing(root)
+        {
+            self.filer = None;
+        }
         if self.filer.is_none() && self.error.is_none() {
-            let dark = ui.ctx().theme() == egui::Theme::Dark;
-            match settings_with_look(root, cabinet, dark, ui.ctx().zoom_factor()) {
+            let look = current_look(ui.ctx());
+            match settings_with_theme(root, cabinet, look, ui.ctx().zoom_factor()) {
                 Ok((settings, savable)) => {
                     let state = AppState::load(
                         vf_fs::clients::master_dir(root),
@@ -472,6 +493,7 @@ impl IntakeTab {
                     .and_then(|m| m.modified())
                     .ok();
                     self.rules_seen = None;
+                    self.filer_look = Some(current_look(ui.ctx()));
                     self.clients_at = std::fs::metadata(filer_core::clients::cache_path(
                         &vf_fs::clients::master_dir(root),
                     ))
@@ -489,7 +511,7 @@ impl IntakeTab {
             (None, Some(e)) => {
                 egui::CentralPanel::default().show(ui, |ui| {
                     ui.heading("Intake");
-                    ui.label(egui::RichText::new(e).color(crate::ui::wizard::error()));
+                    ui.label(egui::RichText::new(e).color(crate::ui::theme::error()));
                 });
             }
             (None, None) => {}
@@ -527,7 +549,7 @@ mod tests {
             name: None,
         };
         vf_fs::cabinet::create(root, &cabinet).unwrap();
-        let (s, _) = settings_with_look(root, &cabinet, false, 1.0).unwrap();
+        let (s, _) = settings_with_theme(root, &cabinet, Some(false), 1.0).unwrap();
         assert_eq!(s.id_pattern, ID_PATTERN);
         let dir = vf_fs::clients::master_dir(root);
         let (mut own, _) = Settings::load_or_default(&dir);
@@ -535,7 +557,7 @@ mod tests {
         own.id_pattern = r"\d{5}".into();
         own.save(&dir).unwrap();
         assert_eq!(
-            settings_with_look(root, &cabinet, false, 1.0)
+            settings_with_theme(root, &cabinet, Some(false), 1.0)
                 .unwrap()
                 .0
                 .id_pattern,
@@ -543,7 +565,7 @@ mod tests {
         );
         // This PC's look reaches Filer's screen but not the cabinet's shared config.json.
         let before = std::fs::read(dir.join("config.json")).unwrap();
-        let (s, _) = settings_with_look(root, &cabinet, true, 1.35).unwrap();
+        let (s, _) = settings_with_theme(root, &cabinet, Some(true), 1.35).unwrap();
         assert_eq!(s.display.theme, ThemeChoice::Dark);
         assert!((s.display.zoom - 1.35).abs() < 0.001);
         assert_eq!(std::fs::read(dir.join("config.json")).unwrap(), before);

@@ -10,7 +10,7 @@ use vf_core::audit::{self, Filter, Listed, VerifyReport};
 use vf_core::db::Connection;
 
 use crate::ui::browse::Env;
-use crate::ui::{theme, widgets, wizard::error};
+use crate::ui::{theme, widgets};
 
 /// Rows shown on the page (exports take every matching row).
 const SHOWN: usize = 500;
@@ -283,7 +283,7 @@ pub fn show(ui: &mut egui::Ui, p: &mut AuditPage, env: &mut Env, chain: Option<&
             ui.label(RichText::new(c.summary()).color(if ok {
                 theme::ink_secondary()
             } else {
-                error()
+                crate::ui::theme::error()
             }));
         }
         if ui
@@ -411,7 +411,7 @@ pub fn show(ui: &mut egui::Ui, p: &mut AuditPage, env: &mut Env, chain: Option<&
         ui.label(RichText::new(n).color(theme::ink_secondary()));
     }
     if let Some(e) = &p.error {
-        ui.label(RichText::new(e).color(error()));
+        ui.label(RichText::new(e).color(crate::ui::theme::error()));
     }
     ui.separator();
     egui::ScrollArea::both().auto_shrink(false).show(ui, |ui| {

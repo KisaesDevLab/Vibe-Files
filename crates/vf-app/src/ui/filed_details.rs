@@ -230,7 +230,7 @@ pub fn show(ui: &mut egui::Ui, jf: &mut JustFiled, types: &[(String, String)]) -
                 });
             });
             if let Some(e) = &jf.error {
-                ui.label(RichText::new(e).color(crate::ui::wizard::error()));
+                ui.label(RichText::new(e).color(crate::ui::theme::error()));
             }
             ui.horizontal(|ui| {
                 ui.label(RichText::new("Set all").small().color(theme::ink_muted()));
@@ -266,7 +266,7 @@ pub fn show(ui: &mut egui::Ui, jf: &mut JustFiled, types: &[(String, String)]) -
                                 let resp = ui.add(
                                     egui::TextEdit::singleline(&mut r.now.year)
                                         .desired_width(70.0)
-                                        .text_color_opt(bad.then_some(crate::ui::wizard::error())),
+                                        .text_color_opt(bad.then_some(crate::ui::theme::error())),
                                 );
                                 resp.widget_info(|| {
                                     egui::WidgetInfo::labeled(

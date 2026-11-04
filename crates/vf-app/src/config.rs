@@ -131,6 +131,9 @@ pub struct Look {
     /// The dark theme.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub dark: bool,
+    /// Follow Windows' light / dark setting (chosen with Filer's theme button on Intake).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub system: bool,
 }
 
 fn hundred() -> u16 {
@@ -142,6 +145,7 @@ impl Default for Look {
         Look {
             text_size: 100,
             dark: false,
+            system: false,
         }
     }
 }

@@ -8,7 +8,7 @@ use egui::{RichText, TextEdit};
 use vf_fs::trash::{self, Trashed};
 
 use crate::ui::browse::Env;
-use crate::ui::{theme, widgets, wizard::error};
+use crate::ui::{theme, widgets};
 
 #[derive(Default)]
 pub struct TrashPage {
@@ -199,7 +199,7 @@ pub fn show(ui: &mut egui::Ui, p: &mut TrashPage, env: &mut Env) {
         ui.label(RichText::new(n).color(theme::ink_secondary()));
     }
     if let Some(e) = &p.error {
-        ui.label(RichText::new(e).color(error()));
+        ui.label(RichText::new(e).color(crate::ui::theme::error()));
     }
     ui.separator();
     if items.is_empty() {
@@ -230,7 +230,11 @@ pub fn show(ui: &mut egui::Ui, p: &mut TrashPage, env: &mut Env) {
                                 }
                             }
                             if t.held {
-                                ui.label(RichText::new("legal hold").small().color(error()));
+                                ui.label(
+                                    RichText::new("legal hold")
+                                        .small()
+                                        .color(crate::ui::theme::error()),
+                                );
                             }
                         });
                         ui.label(widgets::local_time(&t.deleted_at));

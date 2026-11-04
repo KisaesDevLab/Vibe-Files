@@ -12,7 +12,7 @@ use egui::{RichText, TextEdit};
 use vf_fs::disposition::{self, Line, Report};
 
 use crate::ui::browse::Env;
-use crate::ui::{theme, widgets, wizard::error};
+use crate::ui::{theme, widgets};
 
 #[derive(Default)]
 pub struct DispositionPage {
@@ -77,7 +77,7 @@ pub fn show(ui: &mut egui::Ui, p: &mut DispositionPage, env: &mut Env) {
         ui.label(RichText::new(n).color(theme::ink_secondary()));
     }
     if let Some(e) = &p.error {
-        ui.label(RichText::new(e).color(error()));
+        ui.label(RichText::new(e).color(crate::ui::theme::error()));
     }
     ui.separator();
     egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
@@ -139,7 +139,7 @@ pub fn show(ui: &mut egui::Ui, p: &mut DispositionPage, env: &mut Env) {
                         .get(..10)
                         .unwrap_or_default()
                     ))
-                    .color(error()),
+                    .color(crate::ui::theme::error()),
                 );
                 ui.horizontal(|ui| {
                     if ui
@@ -328,13 +328,13 @@ pub fn holds(ui: &mut egui::Ui, p: &mut HoldsPage, env: &mut Env) {
         ui.label(RichText::new(n).color(theme::ink_secondary()));
     }
     if let Some(e) = &p.error {
-        ui.label(RichText::new(e).color(error()));
+        ui.label(RichText::new(e).color(crate::ui::theme::error()));
     }
     ui.separator();
     let mut all = match vf_fs::holds::load(env.root) {
         Ok(h) => h,
         Err(e) => {
-            ui.label(RichText::new(e).color(error()));
+            ui.label(RichText::new(e).color(crate::ui::theme::error()));
             return;
         }
     };
@@ -368,7 +368,7 @@ pub fn holds(ui: &mut egui::Ui, p: &mut HoldsPage, env: &mut Env) {
                 h.placed_by.as_deref().unwrap_or("—")
             );
             if h.active() {
-                ui.label(RichText::new(line).color(error()));
+                ui.label(RichText::new(line).color(crate::ui::theme::error()));
                 if ui.small_button("Release").clicked() {
                     p.releasing = Some(h.id.clone());
                     p.pin.clear();
@@ -424,7 +424,7 @@ pub fn confirm_release(
             RichText::new(format!(
                 "Release the legal hold \"{reason}\"? Everything it covers can then be disposed of and emptied from the trash."
             ))
-            .color(error()),
+            .color(crate::ui::theme::error()),
         );
         let need_pin = vf_fs::trash::has_pin(env.root);
         if need_pin {
@@ -515,6 +515,6 @@ pub fn safeguards(ui: &mut egui::Ui, p: &mut SafeguardsPage, env: &mut Env) {
         ui.label(RichText::new(n).color(theme::ink_secondary()));
     }
     if let Some(e) = &p.error {
-        ui.label(RichText::new(e).color(error()));
+        ui.label(RichText::new(e).color(crate::ui::theme::error()));
     }
 }

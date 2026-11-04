@@ -18,7 +18,7 @@ use vf_sync::restore::{Conflict, Keep};
 
 use crate::config::SyncConfig;
 use crate::ui::browse::Env;
-use crate::ui::{theme, widgets, wizard::error};
+use crate::ui::{theme, widgets};
 
 /// Documents downloaded and checked by Verify now.
 pub const VERIFY_SAMPLE: usize = 20;
@@ -665,7 +665,7 @@ pub fn show(ui: &mut egui::Ui, t: &mut SyncTab, env: &mut Env, v: View<'_>) {
             ui.label(RichText::new(n).color(theme::ink()));
         }
         if let Some(e) = &t.error {
-            ui.label(RichText::new(e).color(error()));
+            ui.label(RichText::new(e).color(crate::ui::theme::error()));
         }
         ui.add_space(6.0);
         let configured = v.cfg.configured_for(v.cabinet_id);

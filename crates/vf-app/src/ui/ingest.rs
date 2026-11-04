@@ -13,8 +13,8 @@ use vf_ingest::worker::{self, Event, Worker};
 
 use crate::config::Ingest;
 use crate::ui::cover_sheet::{self, CoverSheetDialog};
+use crate::ui::theme;
 use crate::ui::widgets::{self, DialogOutcome};
-use crate::ui::{theme, wizard};
 
 /// How often the worker's folders and Filer's inbox are looked up again.
 const RECHECK: Duration = Duration::from_secs(3);
@@ -563,7 +563,7 @@ impl IngestState {
                     });
                 }
                 if let Some(w) = &self.warning {
-                    ui.label(RichText::new(w).color(wizard::error()));
+                    ui.label(RichText::new(w).color(crate::ui::theme::error()));
                 }
                 for l in self.log.iter().take(2) {
                     ui.label(widgets::caption(l));

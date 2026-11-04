@@ -6,7 +6,7 @@ use vf_fs::doctypes::DocType;
 use vf_fs::retention::{self, Class, Edit};
 
 use crate::ui::browse::Env;
-use crate::ui::{theme, widgets, wizard::error};
+use crate::ui::{theme, widgets};
 
 const ANCHORS: [(&str, &str); 4] = [
     ("tax_year_end", "From the end of the tax year"),
@@ -151,7 +151,7 @@ pub fn show(
         ui.label(RichText::new(e).color(theme::ink_muted()));
     }
     if let Some(e) = &p.error {
-        ui.label(RichText::new(e).color(error()));
+        ui.label(RichText::new(e).color(crate::ui::theme::error()));
     }
     let mut edit = None;
     ui.horizontal(|ui| {
