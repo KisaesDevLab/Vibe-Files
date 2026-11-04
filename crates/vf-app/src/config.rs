@@ -310,6 +310,12 @@ pub struct Prefs {
     /// Browse's tree by tax year (client → year → folder) instead of the folders on disk.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub tree_by_year: bool,
+    /// Browse's folder tree on the left is collapsed (owner 2026-11-04).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub hide_tree: bool,
+    /// Browse's details pane on the right is collapsed.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub hide_details: bool,
 }
 
 pub const RECENT_MAX: usize = 50;

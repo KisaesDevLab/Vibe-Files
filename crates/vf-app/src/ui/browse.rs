@@ -1361,20 +1361,25 @@ pub fn show(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env) {
     b.keys(ui.ctx());
     b.saved_requests(env);
     b.combine_requested(env);
-    egui::Panel::left("browse-tree")
-        .default_size(272.0)
-        .size_range(200.0..=480.0)
-        .frame(egui::Frame::new().fill(theme::pane()).inner_margin(8))
-        .show(ui, |ui| tree(ui, b));
-    egui::Panel::right("browse-inspector")
-        .exact_size(400.0)
-        .resizable(false)
-        .frame(egui::Frame::new().fill(theme::pane()).inner_margin(12))
-        .show(ui, |ui| {
-            egui::ScrollArea::vertical()
-                .id_salt("inspector-scroll")
-                .show(ui, |ui| inspector(ui, b, env))
-        });
+    // Either side can be collapsed to give the list more room (owner 2026-11-04).
+    if !b.prefs.hide_tree {
+        egui::Panel::left("browse-tree")
+            .default_size(272.0)
+            .size_range(200.0..=480.0)
+            .frame(egui::Frame::new().fill(theme::pane()).inner_margin(8))
+            .show(ui, |ui| tree(ui, b));
+    }
+    if !b.prefs.hide_details {
+        egui::Panel::right("browse-inspector")
+            .exact_size(400.0)
+            .resizable(false)
+            .frame(egui::Frame::new().fill(theme::pane()).inner_margin(12))
+            .show(ui, |ui| {
+                egui::ScrollArea::vertical()
+                    .id_salt("inspector-scroll")
+                    .show(ui, |ui| inspector(ui, b, env))
+            });
+    }
     egui::CentralPanel::default().show(ui, |ui| grid(ui, b, env.conn));
     drag_label(ui.ctx());
     if let Some((ids, dest)) = b.drop_request.take() {
@@ -2112,8 +2117,57 @@ fn grid(ui: &mut egui::Ui, b: &mut Browse, conn: &Connection) {
     });
     ui.add_space(6.0);
     ui.horizontal(|ui| {
-        ui.label(RichText::new(breadcrumb(b)).monospace());
-        sync_pill(ui, b);
+        let (tree_text, tree_tip) = if b.prefs.hide_tree {
+            ("Show folders", "Show the folder tree on the left")
+        } else {
+            (
+                "Hide folders",
+                "Collapse the folder tree to give the list more room",
+            )
+        };
+        if ui.small_button(tree_text).on_hover_text(tree_tip).clicked() {
+            b.prefs.hide_tree = !b.prefs.hide_tree;
+            b.prefs_changed();
+        }
+        // The folder path on its own row (it ran under the filter when long, owner
+        // 2026-11-04); cut short with … only when wider than the list, whole on hover.
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            let (details_text, details_tip) = if b.prefs.hide_details {
+                (
+                    "Show details",
+                    "Show the details and preview pane on the right",
+                )
+            } else {
+                (
+                    "Hide details",
+                    "Collapse the details pane to give the list more room",
+                )
+            };
+            if ui
+                .small_button(details_text)
+                .on_hover_text(details_tip)
+                .clicked()
+            {
+                b.prefs.hide_details = !b.prefs.hide_details;
+                b.prefs_changed();
+            }
+            ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                let crumb = breadcrumb(b);
+                ui.add(egui::Label::new(RichText::new(&crumb).monospace()).truncate())
+                    .on_hover_text(crumb);
+                sync_pill(ui, b);
+            });
+        });
+    });
+    ui.horizontal(|ui| {
+        ui.label(
+            RichText::new(format!(
+                "{} documents · {} selected",
+                b.visible.len(),
+                b.selected.len()
+            ))
+            .color(theme::ink_muted()),
+        );
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             let r = ui.add(
                 egui::TextEdit::singleline(&mut b.name_filter)
@@ -2130,14 +2184,6 @@ fn grid(ui: &mut egui::Ui, b: &mut Browse, conn: &Connection) {
             {
                 b.reload(conn);
             }
-            ui.label(
-                RichText::new(format!(
-                    "{} documents · {} selected",
-                    b.visible.len(),
-                    b.selected.len()
-                ))
-                .color(theme::ink_muted()),
-            );
         });
     });
     ui.add_space(6.0);
@@ -2162,6 +2208,10 @@ fn grid(ui: &mut egui::Ui, b: &mut Browse, conn: &Connection) {
         .iter()
         .map(|c| (c.id.clone(), c.name.clone()))
         .collect();
+    // A selected row keeps the normal text color (white in dark mode, owner 2026-11-04); the
+    // row's fill shows the selection.
+    let selection_text = ui.visuals().selection.stroke.color;
+    ui.visuals_mut().selection.stroke.color = theme::ink();
     let mut table = TableBuilder::new(ui)
         .striped(false)
         .sense(Sense::click_and_drag())
@@ -2224,9 +2274,13 @@ fn grid(ui: &mut egui::Ui, b: &mut Browse, conn: &Connection) {
                     }
                 });
                 row.col(|ui| {
-                    // The name in the normal text color; only the pill is colored (owner
-                    // 2026-11-04).
-                    ui.label(RichText::new(d.name()).monospace());
+                    // The name in the normal text color (black / white), semibold; only the
+                    // pill is colored (owner 2026-11-04).
+                    ui.label(
+                        RichText::new(d.name())
+                            .family(theme::mono_semibold(ui))
+                            .color(theme::ink()),
+                    );
                     if let Some(u) = &d.locked_by {
                         widgets::lock_pill(ui, u);
                     }
@@ -2313,6 +2367,7 @@ fn grid(ui: &mut egui::Ui, b: &mut Browse, conn: &Connection) {
             });
         });
     ui.style_mut().interaction.selectable_labels = selectable;
+    ui.visuals_mut().selection.stroke.color = selection_text;
     if let Some(c) = sort {
         b.sort_by(c);
     }
@@ -2559,15 +2614,6 @@ fn inspector(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env) {
                 };
                 kv(ui, "SHA-256", RichText::new(&d.hash).monospace().small());
                 kv(ui, "Versions", RichText::new(d.versions.to_string()));
-                kv(
-                    ui,
-                    "Lock",
-                    RichText::new(
-                        d.locked_by
-                            .clone()
-                            .unwrap_or_else(|| "Not checked out".into()),
-                    ),
-                );
                 kv(ui, "Size", RichText::new(widgets::size(d.size)));
                 kv(
                     ui,
@@ -3376,6 +3422,30 @@ mod tests {
                 .join("Client 0000 (1000)/Income Tax/2025/Invented bank statement (2).pdf")
                 .is_file()
         );
+    }
+
+    /// The folder tree and the details pane can be collapsed and opened again; the choice is
+    /// kept (owner 2026-11-04).
+    #[test]
+    fn tree_and_details_collapse() {
+        let mut h = harness(1, 2);
+        assert!(h.query_by_label("All documents").is_some());
+        h.get_by_label("Hide folders").click();
+        h.run();
+        assert!(h.state().b.prefs.hide_tree);
+        assert!(
+            h.query_by_label("All documents").is_none(),
+            "the tree is gone"
+        );
+        h.get_by_label("Hide details").click();
+        h.run();
+        assert!(h.state().b.prefs.hide_details);
+        assert!(h.query_by_label("Show details").is_some());
+        h.get_by_label("Show folders").click();
+        h.get_by_label("Show details").click();
+        h.run();
+        assert!(!h.state().b.prefs.hide_tree && !h.state().b.prefs.hide_details);
+        assert!(h.query_by_label("All documents").is_some());
     }
 
     /// Browse has a Scan button (owner 2026-11-04); the app starts it with Intake's scanner.

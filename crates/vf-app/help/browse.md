@@ -4,6 +4,8 @@ The Browse tab: the client tree, the document grid, sorting and filtering, and t
 
 Browse has three panes: the tree on the left, the documents of what you picked in the middle, and the details of the selected documents on the right.
 
+
+**Hide folders** (above the list, left) collapses the folder tree and **Hide details** (right) collapses the details and preview pane, giving the list the room; **Show folders** and **Show details** bring them back. This PC remembers the choice.
 ## The tree
 
 The tree lists, from the top:

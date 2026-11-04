@@ -460,11 +460,11 @@ fn nav(ui: &mut egui::Ui, a: &mut Admin, has_password: bool) {
                     a.page = Page::Trash;
                     a.trash.refresh();
                 }
-            } else if *item == "Audit trail" {
-                if ui.selectable_label(a.page == Page::Audit, *item).clicked() {
-                    a.page = Page::Audit;
-                    a.audit.refresh();
-                }
+            } else if *item == "Audit trail"
+                && ui.selectable_label(a.page == Page::Audit, *item).clicked()
+            {
+                a.page = Page::Audit;
+                a.audit.refresh();
             }
         }
     }

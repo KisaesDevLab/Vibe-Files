@@ -43,8 +43,9 @@ pub const ON_DARK_MUTED: Color32 = hex(0xB5BCC6);
 pub fn accent() -> Color32 {
     pick(0x1F56A8, 0x6EA8E8)
 }
+/// Body text: black on the light theme, white on the dark one (owner 2026-11-04).
 pub fn ink() -> Color32 {
-    pick(0x161A20, 0xE6E8EB)
+    pick(0x000000, 0xFFFFFF)
 }
 pub fn ink_secondary() -> Color32 {
     pick(0x3F4753, 0xC3C9D1)
@@ -115,8 +116,8 @@ pub fn install(ctx: &egui::Context) {
     let dark = is_dark();
     filer_intake::ui::theme::install(ctx);
     for (theme, bg, text) in [
-        (egui::Theme::Light, hex(0xEEF0F3), hex(0x161A20)),
-        (egui::Theme::Dark, hex(0x16191D), hex(0xE6E8EB)),
+        (egui::Theme::Light, hex(0xEEF0F3), hex(0x000000)),
+        (egui::Theme::Dark, hex(0x16191D), hex(0xFFFFFF)),
     ] {
         ctx.style_mut_of(theme, |s| {
             s.visuals.panel_fill = bg;
@@ -124,6 +125,17 @@ pub fn install(ctx: &egui::Context) {
         });
     }
     set_theme(ctx, dark);
+}
+
+/// The semibold monospace family (file names), or plain monospace where the fonts are not
+/// installed (a bare test context).
+pub fn mono_semibold(ui: &egui::Ui) -> egui::FontFamily {
+    let f = egui::FontFamily::Name(filer_intake::ui::theme::MONO_SEMIBOLD.into());
+    if ui.fonts(|x| x.families().contains(&f)) {
+        f
+    } else {
+        egui::FontFamily::Monospace
+    }
 }
 
 /// Shows the light or the dark theme.
