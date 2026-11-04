@@ -2000,7 +2000,19 @@ fn annotate_panel(ui: &mut egui::Ui, v: &mut Viewer, env: &Env<'_>) {
             .labelled_by(l.id);
         if r.lost_focus() {
             let typed = buf.trim().to_string();
-            if !typed.is_empty() && typed != env.initials {
+            let login = crate::config::windows_user();
+            if !typed.is_empty() && !crate::config::initials_match_login(&typed, &login) {
+                // A sign-off starts with the user's own letter (owner 2026-11-04).
+                let letter = login
+                    .chars()
+                    .find(|c| c.is_alphanumeric())
+                    .map(|c| c.to_uppercase().to_string())
+                    .unwrap_or_default();
+                v.error = Some(format!(
+                    "Initials must start with {letter}, the first letter of your Windows login ({login}). Not changed."
+                ));
+            } else if !typed.is_empty() && typed != env.initials {
+                v.error = None;
                 v.signed = Some(typed);
             }
             v.signed_buf = None;

@@ -166,10 +166,32 @@ pub struct ViewerPrefs {
     pub tick_color: Option<String>,
 }
 
+/// Whether `initials` may sign for Windows login `login`: their first letter or digit is the
+/// login's, any case (owner 2026-11-04: a sign-off must start with the user's own letter). An
+/// unknown login accepts any.
+pub fn initials_match_login(initials: &str, login: &str) -> bool {
+    let first = |s: &str| {
+        s.chars()
+            .find(|c| c.is_alphanumeric())
+            .map(|c| c.to_lowercase().collect::<String>())
+    };
+    match (first(initials), first(login)) {
+        (Some(i), Some(l)) => i == l,
+        (None, _) => false,
+        (_, None) => true,
+    }
+}
+
 impl ViewerPrefs {
-    /// The initials to sign with: the setting, else the Windows user name's (`kwkcpa` → `KWK`).
+    /// The initials to sign with: the setting when it starts with the login's first letter, else
+    /// the Windows user name's (`kwkcpa` → `KWK`).
     pub fn initials(&self) -> String {
-        if let Some(i) = self.initials.as_ref().filter(|i| !i.trim().is_empty()) {
+        let login = windows_user();
+        if let Some(i) = self
+            .initials
+            .as_ref()
+            .filter(|i| !i.trim().is_empty() && initials_match_login(i, &login))
+        {
             return i.trim().to_string();
         }
         std::env::var("USERNAME")
@@ -419,6 +441,17 @@ pub fn save(data: &Path, c: &Config) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A sign-off starts with the first letter of the Windows login, any case (owner 2026-11-04).
+    #[test]
+    fn initials_start_with_the_login_letter() {
+        assert!(initials_match_login("KWK", "kwkcpa"));
+        assert!(initials_match_login("kw", "KWKCPA"));
+        assert!(initials_match_login(" k.w.", "kwkcpa"));
+        assert!(!initials_match_login("JS", "kwkcpa"));
+        assert!(!initials_match_login("", "kwkcpa"));
+        assert!(initials_match_login("ANY", ""), "no login known");
+    }
 
     /// QA A2: a config.toml that cannot be read is never saved over; the device id stays.
     #[test]
