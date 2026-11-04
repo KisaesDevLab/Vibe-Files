@@ -11,7 +11,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use filer_intake::commit::{LastBatch, Method, load_last_batch};
+use filer_intake::commit::{LastBatch, load_last_batch};
 use filer_intake::oplog::{self, OpResult};
 use serde_json::json;
 use vf_core::audit::AuditEntry;
@@ -330,16 +330,41 @@ fn reconcile_dir(
     dir: &Path,
     device_id: &str,
 ) -> Result<Reconciled, String> {
-    let Some(lb) = load_last_batch(dir) else {
-        return Ok(Reconciled::default());
+    let lb = load_last_batch(dir);
+    // Batches before the last one that this catalog never saw (this PC was closed while
+    // another PC filed several): read back from that PC's op log (owner 2026-11-04). Only in
+    // the per-PC folders; the cabinet-level log predates them.
+    let mut out = Reconciled::default();
+    if *dir != crate::clients::master_dir(root) {
+        let last = lb.as_ref().map(|l| l.batch);
+        for (batch, items, backups) in missed_batches(conn, dir, last) {
+            let (added, updated) = record(conn, root, dir, batch, &items, &backups, device_id)?;
+            out.recorded = Some((batch.to_string(), added, updated));
+        }
+    }
+    let Some(lb) = lb else {
+        return Ok(out);
     };
     if lb.in_progress {
-        return Ok(Reconciled::default()); // still filing (or crashed mid-batch: Filer recovers)
+        return Ok(out); // still filing (or crashed mid-batch: Filer recovers)
     }
     let batch = lb.batch.to_string();
     match (recorded(conn, &batch), lb.undone) {
         (None, false) => {
-            let (added, updated) = record(conn, root, dir, &lb, device_id)?;
+            let backups: Vec<(std::path::PathBuf, std::path::PathBuf)> = lb
+                .backups
+                .iter()
+                .map(|b| (b.original.clone(), b.kept.clone()))
+                .collect();
+            let (added, updated) = record(
+                conn,
+                root,
+                dir,
+                lb.batch,
+                &from_last_batch(&lb),
+                &backups,
+                device_id,
+            )?;
             Ok(Reconciled {
                 recorded: Some((batch, added, updated)),
                 ..Default::default()
@@ -355,16 +380,119 @@ fn reconcile_dir(
             })
         }
         // Recorded and in step, or undone before it was ever recorded: nothing to do.
-        _ => Ok(Reconciled::default()),
+        _ => Ok(out),
     }
 }
+
+/// A file a batch put in the cabinet: where, for which client (CSV ID), its size, and its
+/// SHA-256 when the batch logged one.
+pub(crate) struct FiledFile {
+    /// A batch item (not a copy to a related client).
+    primary: bool,
+    dst: std::path::PathBuf,
+    client_id: String,
+    bytes: u64,
+    sha256: Option<String>,
+}
+
+fn from_last_batch(lb: &LastBatch) -> Vec<FiledFile> {
+    let mut out = Vec::new();
+    for it in &lb.items {
+        out.push(FiledFile {
+            primary: true,
+            dst: it.dst.clone(),
+            client_id: it.client_id.clone(),
+            bytes: it.bytes,
+            sha256: None,
+        });
+        for c in &it.copies {
+            out.push(FiledFile {
+                primary: false,
+                dst: c.dst.clone(),
+                client_id: c.client_id.clone(),
+                bytes: c.bytes,
+                sha256: Some(c.sha256.clone()),
+            });
+        }
+    }
+    out
+}
+
+/// The batches in `dir`'s op log, oldest first, that are not recorded in this catalog, not
+/// undone and not `last` (the last batch is read from `last_batch.json`), each with the files
+/// it filed (its successful moves and copies).
+fn missed_batches(conn: &Connection, dir: &Path, last: Option<uuid::Uuid>) -> Vec<MissedBatch> {
+    use filer_intake::oplog::{Op, OpResult};
+    let Ok(log) = oplog::read(&oplog::path(dir)) else {
+        return vec![];
+    };
+    let known: std::collections::HashSet<String> = conn
+        .prepare(
+            "SELECT json_extract(record, '$.extra.filer_batch') FROM undo_record WHERE label = ?1",
+        )
+        .and_then(|mut st| {
+            st.query_map([LABEL], |r| r.get::<_, Option<String>>(0))?
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .map(|v| v.into_iter().flatten().collect())
+        .unwrap_or_default();
+    let mut order: Vec<uuid::Uuid> = Vec::new();
+    let mut undone = std::collections::HashSet::new();
+    for r in &log.records {
+        if r.op == Op::Undo {
+            undone.insert(r.batch);
+        }
+        if !order.contains(&r.batch) {
+            order.push(r.batch);
+        }
+    }
+    order
+        .into_iter()
+        .filter(|b| Some(*b) != last && !undone.contains(b) && !known.contains(&b.to_string()))
+        .map(|b| {
+            let files: Vec<FiledFile> = log
+                .records
+                .iter()
+                .filter(|r| r.batch == b && r.result == OpResult::Ok)
+                .filter(|r| matches!(r.op, Op::Move | Op::CopyVerifyDelete | Op::Copy))
+                .filter_map(|r| {
+                    Some(FiledFile {
+                        primary: r.op != Op::Copy,
+                        dst: r.dst.clone()?,
+                        client_id: r.client_id.clone()?,
+                        bytes: r.bytes.unwrap_or(0),
+                        sha256: r.sha256.clone(),
+                    })
+                })
+                .collect();
+            // Files overwritten by the batch, kept by Filer: (where it was, the kept copy).
+            let backups: Vec<(std::path::PathBuf, std::path::PathBuf)> = log
+                .records
+                .iter()
+                .filter(|r| r.batch == b && r.op == Op::Backup && r.result == OpResult::Ok)
+                .filter_map(|r| Some((r.src.clone()?, r.dst.clone()?)))
+                .collect();
+            (b, files, backups)
+        })
+        .filter(|(_, f, _)| !f.is_empty())
+        .collect()
+}
+
+/// A batch read back from an op log: its id, the files it filed, the overwritten files kept.
+type MissedBatch = (
+    uuid::Uuid,
+    Vec<FiledFile>,
+    Vec<(std::path::PathBuf, std::path::PathBuf)>,
+);
 
 /// Records one finished, not-undone batch. Returns (documents added, documents updated).
 fn record(
     conn: &mut Connection,
     root: &Path,
     dir: &Path,
-    lb: &LastBatch,
+    batch: uuid::Uuid,
+    files: &[FiledFile],
+    backups: &[(std::path::PathBuf, std::path::PathBuf)],
     device_id: &str,
 ) -> Result<(usize, usize), String> {
     // A batch can create client folders and sentinels: catalog clients first.
@@ -393,26 +521,18 @@ fn record(
         bytes: u64,
         sha256: Option<String>,
     }
-    let mut filed: Vec<Filed> = Vec::new();
-    for it in &lb.items {
-        filed.push(Filed {
-            rel: rel(root, &it.dst),
-            client: clients.get(&it.client_id),
-            bytes: it.bytes,
-            sha256: None,
-        });
-        for c in &it.copies {
-            filed.push(Filed {
-                rel: rel(root, &c.dst),
-                client: clients.get(&c.client_id),
-                bytes: c.bytes,
-                sha256: Some(c.sha256.clone()),
-            });
-        }
-    }
+    let filed: Vec<Filed> = files
+        .iter()
+        .map(|f| Filed {
+            rel: rel(root, &f.dst),
+            client: clients.get(&f.client_id),
+            bytes: f.bytes,
+            sha256: f.sha256.clone(),
+        })
+        .collect();
 
     let now = vf_core::now_rfc3339();
-    let mut tx = Transaction::new(LABEL).extra(json!({ "filer_batch": lb.batch.to_string() }));
+    let mut tx = Transaction::new(LABEL).extra(json!({ "filer_batch": batch.to_string() }));
     let (mut added, mut updated) = (0, 0);
     for f in &filed {
         let path = root.join(&f.rel);
@@ -433,6 +553,9 @@ fn record(
             )
             .ok();
         match existing {
+            // Already in the catalog with this content (picked up from the folder before the
+            // batch was recorded): nothing to change.
+            Some((_, ref old_hash, _)) if *old_hash == hash => {}
             // Overwrite: the cataloged document now has new content; the old content is a
             // version (Filer kept the bytes in `_Vibe/overwritten/<batch>/`, Q-17).
             Some((id, old_hash, old_size)) => {
@@ -590,7 +713,7 @@ fn record(
         .map(|r| r.records)
         .unwrap_or_default();
     let mut audited = 0;
-    for op in ops.iter().filter(|o| o.batch == lb.batch) {
+    for op in ops.iter().filter(|o| o.batch == batch) {
         let action = serde_json::to_value(op.op)
             .ok()
             .and_then(|v| v.as_str().map(|s| format!("intake_{s}")))
@@ -600,7 +723,7 @@ fn record(
             &action,
             None,
             json!({
-                "filer_batch": lb.batch.to_string(),
+                "filer_batch": batch.to_string(),
                 "client": op.client_id,
                 "src": op.src.as_ref().map(|p| p.display().to_string()),
                 "dst": path_rel(&op.dst),
@@ -612,16 +735,12 @@ fn record(
         ));
         audited += 1;
     }
-    let moved = lb
-        .items
-        .iter()
-        .filter(|i| matches!(i.method, Method::Move | Method::CopyVerifyDelete))
-        .count();
+    let moved = files.iter().filter(|f| f.primary).count();
     tx = tx.audit(AuditEntry::new(
         LABEL,
         None,
         json!({
-            "filer_batch": lb.batch.to_string(),
+            "filer_batch": batch.to_string(),
             "files": moved,
             "documents_added": added,
             "documents_updated": updated,
@@ -636,8 +755,8 @@ fn record(
 
     // Q-17: keep overwritten content as versions in `_Vibe/versions/` (content-addressed, with a
     // sidecar so rebuild restores the version rows). Filer's own copy stays for its undo.
-    for b in &lb.backups {
-        let _ = keep_overwritten(root, &b.original, &b.kept, device_id, &now);
+    for (original, kept) in backups {
+        let _ = keep_overwritten(root, original, kept, device_id, &now);
     }
     Ok((added, updated))
 }
@@ -937,6 +1056,47 @@ mod tests {
                 .join("Acme LLC (1001)/Income Tax/2025/1099-int.pdf")
                 .is_file()
         );
+    }
+
+    /// A PC files several batches while this catalog does not look: every one is recorded
+    /// from that PC's op log, with Intake as the filer, not only the last (owner 2026-11-04);
+    /// an undone one is not.
+    #[test]
+    fn every_batch_another_pc_filed_is_recorded() {
+        let mut f = fx();
+        let acme = client("1001", "Acme LLC");
+        let a = pc_dir(&f.root, "pc-a");
+        std::fs::create_dir_all(&a).unwrap();
+        let r1 = file_from(&f, &acme, &["w2.pdf"], false, &a);
+        let r2 = file_from(&f, &acme, &["1099-int.pdf"], false, &a);
+        filer_intake::undo::run_undo(&a, r2.last_batch.clone(), false);
+        let r3 = file_from(&f, &acme, &["1099-div.pdf"], false, &a);
+        reconcile(&mut f.conn, &f.root, "dev").unwrap();
+        let filed: Vec<String> = f
+            .conn
+            .prepare(
+                "SELECT rel_path FROM document WHERE filed_by = 'intake' AND deleted_at IS NULL
+                 ORDER BY rel_path",
+            )
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(
+            filed,
+            [
+                "Acme LLC (1001)/Income Tax/2025/1099-div.pdf",
+                "Acme LLC (1001)/Income Tax/2025/w2.pdf"
+            ],
+            "the first and the last batch, not the undone one"
+        );
+        assert!(recorded(&f.conn, &r1.last_batch.batch.to_string()).is_some());
+        assert!(recorded(&f.conn, &r2.last_batch.batch.to_string()).is_none());
+        assert!(recorded(&f.conn, &r3.last_batch.batch.to_string()).is_some());
+        // Again: nothing more.
+        let again = reconcile(&mut f.conn, &f.root, "dev").unwrap();
+        assert!(!again.changed());
     }
 
     /// A Filer batch becomes one Transaction: document + sync rows, audit rows from ops.jsonl,
