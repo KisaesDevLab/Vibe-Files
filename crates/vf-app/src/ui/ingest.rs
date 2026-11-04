@@ -205,6 +205,22 @@ impl IngestState {
         };
         let mut warnings = Vec::new();
         let mut folders = Vec::new();
+        // One folder as both Scans and print capture would read each file both ways.
+        let same = |a: &std::path::Path, b: &std::path::Path| match (
+            std::fs::canonicalize(a),
+            std::fs::canonicalize(b),
+        ) {
+            (Ok(x), Ok(y)) => x == y,
+            _ => a == b,
+        };
+        if let (Some(s), Some(c)) = (&prefs.scans, &prefs.print_capture)
+            && same(s, c)
+        {
+            warnings.push(
+                "The Scans folder and the print capture folder are the same folder: give print capture its own (Admin › Print capture & parsers). Files there are read as scans until then."
+                    .to_string(),
+            );
+        }
         for (dir, origin) in [
             (&prefs.scans, Origin::Scans),
             (&prefs.print_capture, Origin::PrintCapture),
@@ -320,12 +336,57 @@ impl IngestState {
         self.scan_job.is_some()
     }
 
+    /// The last scan's outcome line, for Browse's Scan button (owner 2026-11-04).
+    pub fn last_line(&self) -> Option<&str> {
+        self.log.first().map(String::as_str)
+    }
+
+    /// Starts a scan with this PC's scanner and profile into the Scans folder: Intake's Scan
+    /// button, and Browse's (owner 2026-11-04). Returns the scanner's name, or why not.
+    pub fn start_scan(&mut self, ctx: &egui::Context, prefs: &Ingest) -> Result<String, String> {
+        if self.scanning() {
+            return Err("A scan is running.".into());
+        }
+        let Some(dir) = prefs.scans.clone() else {
+            return Err("Choose a Scans folder first (Intake tab, top strip).".into());
+        };
+        let Some(found) = self.devices.clone() else {
+            if self.devices_job.is_none() {
+                self.list_devices(ctx);
+            }
+            return Err("Looking for scanners; press Scan again in a moment.".into());
+        };
+        let user = crate::config::windows_user();
+        let Some(current) = scanner::pick(&found.list, prefs.scanner_for(&user)).cloned() else {
+            return Err(
+                "No scanner found on this PC (Intake › Look again after plugging one in).".into(),
+            );
+        };
+        let profiles = prefs.profiles();
+        let profile = prefs
+            .scan_profile
+            .as_ref()
+            .and_then(|n| profiles.iter().find(|x| &x.name == n))
+            .unwrap_or(&profiles[0])
+            .clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (ctx, id) = (ctx.clone(), current.id.clone());
+        let driver_ui = current.kind == Kind::Twain && prefs.driver_ui;
+        std::thread::spawn(move || {
+            let _ = tx.send(scanner::scan_to(&id, &profile, driver_ui, &dir));
+            ctx.request_repaint();
+        });
+        self.scan_job = Some(rx);
+        Ok(current.name.clone())
+    }
+
     /// Scan row: scanner, profile, Scan. The PDF lands in the Scans folder; the worker splits
     /// and delivers it like any other file there.
     fn scan_row(&mut self, ui: &mut egui::Ui, prefs: &Ingest) {
         if self.devices.is_none() && self.devices_job.is_none() {
             self.list_devices(ui.ctx());
         }
+        let mut scan_now = false;
         ui.horizontal(|ui| {
             ui.label(RichText::new("Scanner").strong());
             let Some(found) = self.devices.clone() else {
@@ -401,22 +462,16 @@ impl IngestState {
             if busy {
                 ui.spinner();
             }
-            if go.clicked()
-                && let Some(dir) = scans
-            {
-                let (tx, rx) = std::sync::mpsc::channel();
-                let (ctx, id) = (ui.ctx().clone(), current.id.clone());
-                let driver_ui = current.kind == Kind::Twain && prefs.driver_ui;
-                std::thread::spawn(move || {
-                    let _ = tx.send(scanner::scan_to(&id, &profile, driver_ui, &dir));
-                    ctx.request_repaint();
-                });
-                self.scan_job = Some(rx);
+            if go.clicked() {
+                scan_now = true;
             }
             for n in &found.notes {
                 ui.label(widgets::caption(n));
             }
         });
+        if scan_now && let Err(e) = self.start_scan(ui.ctx(), prefs) {
+            self.warning = Some(e);
+        }
     }
 
     /// Looks again at the next tick (a folder was chosen).
@@ -536,6 +591,24 @@ fn file_name(p: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Browse's Scan (owner 2026-11-04) says why it cannot scan instead of doing nothing.
+    #[test]
+    fn scan_from_browse_says_what_is_missing() {
+        let ctx = egui::Context::default();
+        let mut st = IngestState::default();
+        let e = st.start_scan(&ctx, &Ingest::default()).unwrap_err();
+        assert!(e.contains("Scans folder"), "{e}");
+        let t = tempfile::tempdir().unwrap();
+        let prefs = Ingest {
+            scans: Some(t.path().to_path_buf()),
+            ..Default::default()
+        };
+        st.devices = Some(scanner::Devices::default());
+        let e = st.start_scan(&ctx, &prefs).unwrap_err();
+        assert!(e.contains("No scanner"), "{e}");
+        assert!(!st.scanning());
+    }
 
     #[test]
     fn counts_what_filer_would_queue() {

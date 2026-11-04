@@ -56,6 +56,8 @@ struct Form {
     unlock: String,
     /// Remember the key on this PC for this Windows login (Q-38).
     remember: bool,
+    /// Keep the key and the bucket settings in the cabinet for everyone (Q-43).
+    share: bool,
 }
 
 impl Default for Form {
@@ -70,6 +72,7 @@ impl Default for Form {
             pass2: String::new(),
             unlock: String::new(),
             remember: true,
+            share: true,
         }
     }
 }
@@ -106,7 +109,16 @@ pub struct SyncTab {
     remembered: bool,
     /// This PC's data folder, for a set-up running on its thread.
     setup_data: PathBuf,
+    /// The cabinet, for a set-up or unlock running on its thread (to share the key).
+    setup_root: PathBuf,
+    /// The settings a set-up running on its thread is for.
+    setup_cfg: Option<SyncConfig>,
+    /// The cabinet keeps the key for everyone (`_Vibe/keys/sync-shared.json`).
+    pub shared: bool,
 }
+
+const SHARE_LABEL: &str = "Let everyone who opens this cabinet sync without the passphrase";
+const SHARE_HELP: &str = "Keeps the sync key and the bucket settings in the cabinet's _Vibe\\keys folder, which is never uploaded: the Backblaze copy stays encrypted, and anyone who can open the cabinet on the network can sync. Keep the passphrase with the firm's recovery papers.";
 
 const REMEMBER_HELP: &str = "The key is sealed with Windows (DPAPI) for your login on this \
 computer and kept in this PC's data folder: sync unlocks itself when you start Vibe Files. Another \
@@ -239,8 +251,11 @@ impl SyncTab {
                 if let Some(w) = self.apply_remember(&self.setup_data.clone(), &cab, Some(&firm)) {
                     self.error = Some(w);
                 }
-                let mut c = cfg.clone();
+                let mut c = self.setup_cfg.take().unwrap_or_else(|| cfg.clone());
                 c.app_key_sealed = sealed;
+                if let Some(w) = self.apply_share(&cab, &firm, &c) {
+                    self.error = Some(w);
+                }
                 self.config_changed = Some(c);
                 self.notice =
                     Some("Sync is set up. The first push sends the whole cabinet.".into());
@@ -249,7 +264,9 @@ impl SyncTab {
                 let cab = s.cabinet_id.clone();
                 self.session = Some(s);
                 self.locked_by_user = false;
-                let warn = self.apply_remember(&self.setup_data.clone(), &cab, Some(&firm));
+                let warn = self
+                    .apply_remember(&self.setup_data.clone(), &cab, Some(&firm))
+                    .or_else(|| self.apply_share(&cab, &firm, cfg));
                 self.notice = Some(if self.remembered {
                     "Sync unlocked, and remembered on this PC for your Windows login.".into()
                 } else {
@@ -353,6 +370,37 @@ impl SyncTab {
         let Ok(cab) = vf_fs::cabinet::read(root) else {
             return;
         };
+        // The key the firm keeps in the cabinet for everyone (Q-43): a login or PC that never
+        // set sync up takes the bucket settings from it too.
+        let shared = vf_sync::setup::shared(root, &cab.cabinet_id);
+        self.shared = shared.is_some();
+        if let Some((s, keys)) = shared {
+            let mut c = cfg.clone();
+            if !cfg.configured_for(&cab.cabinet_id) {
+                c = SyncConfig {
+                    endpoint: s.endpoint.clone(),
+                    region: s.region.clone(),
+                    bucket: s.bucket.clone(),
+                    key_id: s.key_id.clone(),
+                    app_key_sealed: s.app_key_sealed.clone(),
+                    cabinet_id: cab.cabinet_id.clone(),
+                    // Pushing on a timer stays a choice per PC: by hand until set here.
+                    auto_minutes: 0,
+                    ..SyncConfig::default()
+                };
+                self.config_changed = Some(c.clone());
+            }
+            match Self::session_from(keys, &c, device_id) {
+                Ok(sess) => {
+                    self.session = Some(sess);
+                    return;
+                }
+                Err(e) => tracing::warn!(
+                    kind = crate::logging::kind(&e),
+                    "shared sync key did not open sync"
+                ),
+            }
+        }
         if !cfg.configured_for(&cab.cabinet_id) {
             return;
         }
@@ -370,6 +418,34 @@ impl SyncTab {
                     self.remembered = false;
                 }
             }
+        }
+    }
+
+    /// Keeps the key in the cabinet for everyone when the box is ticked (Q-43). Unticked leaves
+    /// a key someone else shared alone ("Stop sharing the key" removes it).
+    fn apply_share(
+        &mut self,
+        cabinet_id: &str,
+        firm: &[u8; 32],
+        cfg: &SyncConfig,
+    ) -> Option<String> {
+        if !self.form.share {
+            return None;
+        }
+        match vf_sync::setup::share(
+            &self.setup_root,
+            cabinet_id,
+            firm,
+            &cfg.s3(),
+            &cfg.app_key_sealed,
+        ) {
+            Ok(()) => {
+                self.shared = true;
+                None
+            }
+            Err(e) => Some(format!(
+                "Sync is unlocked, but the key could not be kept in the cabinet for everyone ({e})."
+            )),
         }
     }
 
@@ -418,6 +494,7 @@ impl SyncTab {
         }
         let pass = zeroize::Zeroizing::new(std::mem::take(&mut self.form.unlock));
         self.setup_data = data.to_path_buf();
+        self.setup_root = root.to_path_buf();
         self.error = None;
         let (tx, rx) = std::sync::mpsc::channel();
         let (root, cfg, device) = (root.to_path_buf(), cfg.clone(), device_id.to_string());
@@ -453,6 +530,7 @@ impl SyncTab {
         cabinet_id: &str,
     ) {
         self.setup_data = data.to_path_buf();
+        self.setup_root = root.to_path_buf();
         let f = &mut self.form;
         if f.pass != f.pass2 {
             self.error = Some("The two passphrases differ.".into());
@@ -472,6 +550,7 @@ impl SyncTab {
         let (root, device, ctx) = (root.to_path_buf(), device_id.to_string(), ctx.clone());
         let cab = cabinet_id.to_string();
         self.config_changed = Some(cfg.clone());
+        self.setup_cfg = Some(cfg.clone());
         std::thread::Builder::new()
             .name("b2-setup".into())
             .spawn(move || {
@@ -597,6 +676,8 @@ pub fn show(ui: &mut egui::Ui, t: &mut SyncTab, env: &mut Env, v: View<'_>) {
             field(ui, "Sync passphrase", &mut t.form.unlock, true, "");
             ui.checkbox(&mut t.form.remember, "Remember on this PC for my Windows login")
                 .on_hover_text(REMEMBER_HELP);
+            ui.checkbox(&mut t.form.share, SHARE_LABEL)
+                .on_hover_text(SHARE_HELP);
             if ui
                 .add_enabled(!t.running(), widgets::primary_button("Unlock"))
                 .clicked()
@@ -637,6 +718,8 @@ fn setup_form(ui: &mut egui::Ui, t: &mut SyncTab, env: &Env, v: &View<'_>) {
     field(ui, "Passphrase again", &mut f.pass2, true, "");
     ui.checkbox(&mut f.remember, "Remember on this PC for my Windows login")
         .on_hover_text(REMEMBER_HELP);
+    ui.checkbox(&mut f.share, SHARE_LABEL)
+        .on_hover_text(SHARE_HELP);
     let ready = !f.endpoint.trim().is_empty()
         && !f.bucket.trim().is_empty()
         && !f.key_id.trim().is_empty()
@@ -761,6 +844,18 @@ fn unlocked(ui: &mut egui::Ui, t: &mut SyncTab, env: &mut Env, v: &View<'_>) {
             vf_sync::setup::forget(data, v.cabinet_id);
             t.remembered = false;
             t.notice = Some("The key is no longer remembered on this PC.".into());
+        }
+        if t.shared
+            && ui
+                .button("Stop sharing the key")
+                .on_hover_text(
+                    "Removes the key kept in the cabinet: everyone needs the passphrase (or their own remembered key) again.",
+                )
+                .clicked()
+        {
+            vf_sync::setup::unshare(env.root);
+            t.shared = false;
+            t.notice = Some("The key is no longer kept in the cabinet for everyone.".into());
         }
     });
     ui.add_space(8.0);
@@ -960,5 +1055,68 @@ mod tests {
         tab.apply_remember(t.path(), "cab-1", Some(&firm));
         assert!(!tab.remembered);
         assert!(vf_sync::setup::recall(t.path(), "cab-1").is_none());
+    }
+    /// Q-43: a key the firm keeps in the cabinet opens sync for a login that never set it up,
+    /// with the bucket settings, pushing by hand until that PC chooses a timer.
+    #[test]
+    fn shared_key_opens_sync_for_everyone() {
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path().join("Clients");
+        let o = crate::session::create(
+            &t.path().join("pc1"),
+            "dev-1",
+            &crate::session::CreateRequest {
+                root: &root,
+                name: "Firm",
+            },
+        )
+        .unwrap();
+        let cab = vf_fs::cabinet::read(&root).unwrap().cabinet_id;
+        drop(o);
+        let firm = [5u8; 32];
+        let keys = vf_sync::Keys::derive(vf_sync::setup::KEY_ID, &firm);
+        let sealed = vf_sync::setup::seal_secret(&keys, "invented application key");
+        let cfg = SyncConfig {
+            endpoint: "https://s3.example.invalid".into(),
+            region: "us-west-004".into(),
+            bucket: "invented-bucket".into(),
+            key_id: "invented-key-id".into(),
+            app_key_sealed: sealed,
+            cabinet_id: cab.clone(),
+            ..SyncConfig::default()
+        };
+        let mut sharer = SyncTab {
+            setup_root: root.clone(),
+            ..Default::default()
+        };
+        assert!(sharer.form.share, "ticked by default (owner 2026-11-04)");
+        assert_eq!(sharer.apply_share(&cab, &firm, &cfg), None);
+
+        // Another login: no settings of its own.
+        let mut other = SyncTab::default();
+        other.recall(
+            &root,
+            &t.path().join("pc2"),
+            &SyncConfig::default(),
+            "dev-2",
+        );
+        assert!(other.session.is_some(), "{:?}", other.error);
+        assert!(other.shared);
+        let got = other
+            .config_changed
+            .expect("settings taken from the cabinet");
+        assert_eq!(got.bucket, "invented-bucket");
+        assert_eq!(got.auto_minutes, 0);
+
+        // Stop sharing: the next login is asked again.
+        vf_sync::setup::unshare(&root);
+        let mut third = SyncTab::default();
+        third.recall(
+            &root,
+            &t.path().join("pc3"),
+            &SyncConfig::default(),
+            "dev-3",
+        );
+        assert!(third.session.is_none());
     }
 }

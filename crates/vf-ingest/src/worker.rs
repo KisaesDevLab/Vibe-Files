@@ -185,6 +185,56 @@ fn save_handled(dir: &Path, device_id: &str, all: &HashMap<PathBuf, (u64, u64)>)
     }
 }
 
+/// A claim on a staged file older than this was left by a copy of Vibe Files that stopped: it
+/// is taken over.
+pub const CLAIM_STALE: Duration = Duration::from_secs(60 * 60);
+
+/// The claim file of a staged file: `.vf-claim-<name>.txt` beside it (dot files are not staged).
+pub fn claim_file(p: &Path) -> Option<PathBuf> {
+    let name = p.file_name()?.to_string_lossy().into_owned();
+    Some(p.with_file_name(format!(".vf-claim-{name}.txt")))
+}
+
+/// Claims a staged file for this copy of Vibe Files, so two copies watching the same folder
+/// (two logins on the office server, two PCs on one network folder) never both deliver it
+/// (owner 2026-11-04: "no duplicate processing"). The claim is an atomic create beside the
+/// file; a stale one (older than [`CLAIM_STALE`], or this PC's own from a run that stopped) is
+/// taken over. `None` = another copy has it.
+pub fn claim(p: &Path, device_id: &str) -> Option<PathBuf> {
+    let c = claim_file(p)?;
+    for _ in 0..2 {
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&c)
+        {
+            Ok(mut f) => {
+                use std::io::Write;
+                let _ = f.write_all(device_id.as_bytes());
+                // Taken while another copy finished it: nothing left to do.
+                if !p.is_file() {
+                    let _ = std::fs::remove_file(&c);
+                    return None;
+                }
+                return Some(c);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                let mine = std::fs::read_to_string(&c).is_ok_and(|t| t.trim() == device_id);
+                let stale = std::fs::metadata(&c)
+                    .and_then(|m| m.modified())
+                    .ok()
+                    .and_then(|t| t.elapsed().ok())
+                    .is_some_and(|age| age > CLAIM_STALE);
+                if !(mine || stale) || std::fs::remove_file(&c).is_err() {
+                    return None;
+                }
+            }
+            Err(_) => return None,
+        }
+    }
+    None
+}
+
 /// [`pipeline::process`] with the marker written around it and a panic turned into an error.
 fn process_guarded(ctx: &Context<'_>, p: &Path, origin: Origin) -> Result<Processed, String> {
     let m = p.parent().map(|d| marker(d, ctx.device_id));
@@ -238,7 +288,13 @@ fn run(config: Arc<Mutex<Config>>, waiting: Arc<AtomicUsize>, tx: Sender<Event>,
         }
         let mut seen: HashMap<PathBuf, u64> = HashMap::new();
         let mut ready: Vec<(PathBuf, Origin)> = Vec::new();
+        let mut dirs_seen: std::collections::HashSet<PathBuf> = Default::default();
         for (dir, origin) in &cfg.folders {
+            // One folder named twice (as Scans and as print capture): read once.
+            let key = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.clone());
+            if !dirs_seen.insert(key) {
+                continue;
+            }
             for (p, len) in staged_files(dir) {
                 if len > 0 && sizes.get(&p) == Some(&len) && !stuck.contains_key(&p) && openable(&p)
                 {
@@ -263,6 +319,10 @@ fn run(config: Arc<Mutex<Config>>, waiting: Arc<AtomicUsize>, tx: Sender<Event>,
                 ocr: tesseract.as_ref().map(|t| t as &dyn vf_ocr::OcrEngine),
             };
             for (p, origin) in ready {
+                // Another copy of Vibe Files is on it (or just finished it): leave it.
+                let Some(claimed) = claim(&p, &cfg.device_id) else {
+                    continue;
+                };
                 let ev = match process_guarded(&ctx, &p, origin) {
                     Ok(done) => Event::Processed(done),
                     Err(error) => {
@@ -270,6 +330,7 @@ fn run(config: Arc<Mutex<Config>>, waiting: Arc<AtomicUsize>, tx: Sender<Event>,
                         Event::Failed { staged: p, error }
                     }
                 };
+                let _ = std::fs::remove_file(&claimed);
                 let (Event::Processed(Processed { staged, .. }) | Event::Failed { staged, .. }) =
                     &ev;
                 if let Some((l, t)) = stamp(staged) {

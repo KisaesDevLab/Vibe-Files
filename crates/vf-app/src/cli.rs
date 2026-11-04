@@ -717,6 +717,7 @@ mod tests {
                 ingest: Default::default(),
                 ocr: Default::default(),
                 viewer: Default::default(),
+                look: Default::default(),
                 sync: Default::default(),
                 update_check: false,
             },

@@ -7,6 +7,7 @@ pub mod client_panel;
 pub mod cover_sheet;
 pub mod disposition;
 pub mod doc_render;
+pub mod filed_details;
 pub mod import_csv;
 pub mod import_tree;
 pub mod ingest;

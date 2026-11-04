@@ -78,3 +78,24 @@ fn handled_files_stay_handled_until_they_change() {
     std::fs::write(&f, "changed").unwrap();
     assert!(worker::load_handled(dir, "dev-1").is_empty());
 }
+
+/// Two copies of Vibe Files watching one folder: only one can claim a file (owner 2026-11-04,
+/// no duplicate processing); a claim left by a stopped run of this PC is taken over.
+#[test]
+fn only_one_copy_claims_a_staged_file() {
+    use vf_ingest::worker::{claim, claim_file};
+    let t = tempfile::tempdir().unwrap();
+    let p = t
+        .path()
+        .join("Invented Client_2025_1040_Client Copy_INVE1001.pdf");
+    std::fs::write(&p, "invented").unwrap();
+    let a = claim(&p, "pc-a").expect("first claim");
+    assert!(claim(&p, "pc-b").is_none(), "the other copy leaves it");
+    // This PC's own leftover claim (a run that stopped) is taken over.
+    assert!(claim(&p, "pc-a").is_some());
+    std::fs::remove_file(&a).ok();
+    // A file already gone (the other copy finished it) is not claimed.
+    std::fs::remove_file(&p).unwrap();
+    assert!(claim(&p, "pc-b").is_none());
+    assert!(!claim_file(&p).unwrap().exists());
+}

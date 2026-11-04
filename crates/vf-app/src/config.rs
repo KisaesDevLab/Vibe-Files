@@ -28,6 +28,9 @@ pub struct Config {
     /// Viewer settings (P04).
     #[serde(default)]
     pub viewer: ViewerPrefs,
+    /// How the window looks on this PC (text size; owner 2026-11-04).
+    #[serde(default)]
+    pub look: Look,
     /// B2 sync (P11).
     #[serde(default)]
     pub sync: SyncConfig,
@@ -118,6 +121,27 @@ impl SyncConfig {
         }
     }
 }
+
+/// How the window looks on this PC.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Look {
+    /// Text and controls size in percent (egui zoom): 100 = as designed.
+    #[serde(default = "hundred")]
+    pub text_size: u16,
+}
+
+fn hundred() -> u16 {
+    100
+}
+
+impl Default for Look {
+    fn default() -> Self {
+        Look { text_size: 100 }
+    }
+}
+
+/// Text sizes offered (percent).
+pub const TEXT_SIZES: [u16; 7] = [80, 90, 100, 110, 125, 150, 175];
 
 /// Viewer settings of this workstation.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -235,6 +259,9 @@ pub struct Prefs {
     pub recent: Vec<String>,
     #[serde(default)]
     pub favorites: Vec<Favorite>,
+    /// Browse's tree by tax year (client → year → folder) instead of the folders on disk.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub tree_by_year: bool,
 }
 
 pub const RECENT_MAX: usize = 50;
@@ -246,13 +273,13 @@ pub enum Favorite {
     Client {
         client: String,
     },
-    /// Saved before the tree mirrored the disk (PA-23): opens the client now.
+    /// A year in the year view.
     Year {
         client: String,
         year: Option<i32>,
     },
-    /// A folder inside the client folder (`Income Tax/2025`). Favorites saved before PA-23 hold
-    /// the folder without its year segment and the year apart.
+    /// A folder inside the client folder (`Income Tax/2025`); with a year, a year view folder
+    /// (the folder without its year segment).
     Folder {
         client: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -314,6 +341,7 @@ pub fn set_aside_bad(data: &Path) -> Result<(Config, PathBuf)> {
         ingest: Ingest::default(),
         ocr: Ocr::default(),
         viewer: ViewerPrefs::default(),
+        look: Look::default(),
         sync: SyncConfig::default(),
         update_check: true,
     };
@@ -341,6 +369,7 @@ pub fn load(data: &Path) -> Result<Config> {
                 ingest: Ingest::default(),
                 ocr: Ocr::default(),
                 viewer: ViewerPrefs::default(),
+                look: Look::default(),
                 sync: SyncConfig::default(),
                 update_check: true,
             };

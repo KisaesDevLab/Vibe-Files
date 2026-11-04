@@ -38,6 +38,14 @@ pub struct IntakeTab {
     /// Filer's rules.json was rewritten from Admin (print capture folders) while Filer had
     /// its rules loaded: Intake offers to reload.
     rules_stale: bool,
+    /// The documents Intake's last batch filed, being given their details (owner 2026-11-04).
+    just_filed: Option<crate::ui::filed_details::JustFiled>,
+    /// A batch was recorded: list it on the next frame.
+    want_details: bool,
+    /// Filer's client list changed after Intake loaded it (a new client): reload offered.
+    clients_stale: bool,
+    /// `clients.json`'s modified time when Filer loaded it.
+    clients_at: Option<std::time::SystemTime>,
     /// rules.json's modified time when last brought in line, and when it was last looked at:
     /// a save from Filer's own Rules screen (with the rules it loaded) is noticed and the
     /// print capture rules put back (QA2 U5).
@@ -210,6 +218,7 @@ impl IntakeTab {
         let modified = |p: &Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
         let now = modified(&path);
         if now.is_none() || now == self.rules_seen {
+            self.look_at_clients(root);
             return;
         }
         // Brought in line (also on the first look: a save made elsewhere before it); recorded
@@ -218,10 +227,24 @@ impl IntakeTab {
             return;
         }
         self.rules_seen = modified(&path);
+        self.look_at_clients(root);
         // Filer loaded other rules than the file has now (written here, by Filer's own Rules
         // screen, or by another PC): offer the reload (QA3 #4).
         if self.filer.is_some() && self.filer_rules_at != self.rules_seen {
             self.rules_stale = true;
+        }
+    }
+
+    /// A client added since Filer loaded its list (Browse › New client, a CSV import, another
+    /// PC): Filer's client box would not offer it until Intake reloads (owner 2026-11-04).
+    fn look_at_clients(&mut self, root: &Path) {
+        if self.filer.is_none() {
+            return;
+        }
+        let p = filer_core::clients::cache_path(&vf_fs::clients::master_dir(root));
+        let now = std::fs::metadata(p).and_then(|m| m.modified()).ok();
+        if now.is_some() && now != self.clients_at {
+            self.clients_stale = true;
         }
     }
 
@@ -259,6 +282,7 @@ impl IntakeTab {
                 self.retry_at = None;
                 self.backoff = std::time::Duration::ZERO;
                 if let Some((_, added, updated)) = r.recorded {
+                    self.want_details = added > 0;
                     self.message = Some(format!(
                         "Intake filed {added} new documents{}.",
                         if updated > 0 {
@@ -362,10 +386,30 @@ impl IntakeTab {
         prefs: &Ingest,
         snap: &Snapshot,
         sheets_dir: &Path,
+        conn: &mut vf_core::db::Connection,
+        device_id: &str,
     ) {
         self.ingest.strip(ui, prefs, snap, sheets_dir, root);
+        if std::mem::take(&mut self.want_details) {
+            self.just_filed = crate::ui::filed_details::JustFiled::load(conn);
+        }
+        if let Some(jf) = &mut self.just_filed {
+            use crate::ui::filed_details::Act;
+            match crate::ui::filed_details::show(ui, jf, &snap.doc_types) {
+                Act::None => {}
+                Act::Close => self.just_filed = None,
+                Act::Apply => match jf.apply(conn, root, device_id) {
+                    Ok(n) => {
+                        jf.error = None;
+                        self.catalog_changed = true;
+                        self.message = Some(format!("Details set on {n} documents."));
+                    }
+                    Err(e) => jf.error = Some(e),
+                },
+            }
+        }
         self.watch_rules(root);
-        if self.rules_stale {
+        if self.rules_stale || self.clients_stale {
             let mut reload = false;
             // Not while Filer is filing a batch: its commit thread outlives the screen (QA2 U4).
             if self
@@ -378,9 +422,11 @@ impl IntakeTab {
             let committing = self.committing.0;
             egui::Panel::top("vf-intake-rules-stale").show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.label(
-                        "Where print captures are filed changed (Admin › Print capture). Reload Intake to use it; changes not yet confirmed in Intake's review are read again from the inbox.",
-                    );
+                    ui.label(if self.rules_stale {
+                        "Where print captures are filed changed (Admin › Print capture). Reload Intake to use it; changes not yet confirmed in Intake's review are read again from the inbox."
+                    } else {
+                        "The client list changed (a new client). Reload Intake to pick it; changes not yet confirmed in Intake's review are read again from the inbox."
+                    });
                     reload = ui
                         .add_enabled(!committing, egui::Button::new("Reload Intake"))
                         .on_disabled_hover_text("Intake is filing a batch: wait for it to finish.")
@@ -390,6 +436,7 @@ impl IntakeTab {
             if reload {
                 self.filer = None;
                 self.rules_stale = false;
+                self.clients_stale = false;
             }
         }
         self.dupes_panel(ui);
@@ -410,6 +457,12 @@ impl IntakeTab {
                     .and_then(|m| m.modified())
                     .ok();
                     self.rules_seen = None;
+                    self.clients_at = std::fs::metadata(filer_core::clients::cache_path(
+                        &vf_fs::clients::master_dir(root),
+                    ))
+                    .and_then(|m| m.modified())
+                    .ok();
+                    self.clients_stale = false;
                     // Filer's `new` installs its theme; put Vibe's tweaks back on top.
                     theme::install(&ctx);
                 }

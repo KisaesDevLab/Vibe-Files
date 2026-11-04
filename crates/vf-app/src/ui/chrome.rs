@@ -5,7 +5,8 @@ use egui::{Align, Frame, Layout, Margin, RichText, Sense, Stroke};
 use crate::app::Tab;
 use crate::ui::theme;
 
-pub fn header(ui: &mut egui::Ui, cabinet: Option<&str>) {
+/// The header; `text_size` is this PC's text size in percent, changed by its − / + buttons.
+pub fn header(ui: &mut egui::Ui, cabinet: Option<&str>, text_size: &mut u16) {
     egui::Panel::top("vf-header")
         .exact_size(44.0)
         .resizable(false)
@@ -24,6 +25,30 @@ pub fn header(ui: &mut egui::Ui, cabinet: Option<&str>) {
                 ui.label(
                     RichText::new(cabinet.unwrap_or("No cabinet open")).color(theme::ON_DARK_MUTED),
                 );
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    let sizes = crate::config::TEXT_SIZES;
+                    let at = sizes
+                        .iter()
+                        .position(|s| *s >= *text_size)
+                        .unwrap_or(sizes.len() - 1);
+                    let white = |t: &str| RichText::new(t).color(egui::Color32::WHITE);
+                    if ui
+                        .add_enabled(at + 1 < sizes.len(), egui::Button::new(white("A+")))
+                        .on_hover_text("Larger text (Ctrl +)")
+                        .clicked()
+                    {
+                        *text_size = sizes[at + 1];
+                    }
+                    ui.label(RichText::new(format!("{text_size}%")).color(theme::ON_DARK_MUTED));
+                    if ui
+                        .add_enabled(at > 0, egui::Button::new(white("A-")))
+                        .on_hover_text("Smaller text (Ctrl -)")
+                        .clicked()
+                    {
+                        *text_size = sizes[at - 1];
+                    }
+                    ui.label(RichText::new("Text size").color(theme::ON_DARK_MUTED));
+                });
             });
         });
 }

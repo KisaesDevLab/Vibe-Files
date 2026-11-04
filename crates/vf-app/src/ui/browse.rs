@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 use egui::{Align, Key, Layout, RichText, Sense};
 use egui_extras::{Column, TableBuilder};
-use vf_core::browse::{DocRow, IdList, Index, Scope, Snapshot};
+use vf_core::browse::{DocRow, IdList, Index, Scope, Snapshot, year_node_label};
 use vf_core::db::Connection;
 
 use crate::config::{Favorite, Prefs};
@@ -61,6 +61,8 @@ enum Node {
     Client(usize),
     /// A folder inside the client folder (`Income Tax/2025`).
     Folder(usize, String),
+    /// A year in the year view.
+    Year(usize, Option<i32>),
 }
 
 /// Documents being dragged from the grid (PA-23): their ids.
@@ -148,6 +150,10 @@ pub struct Browse {
     trash_confirm: Option<usize>,
     /// The cabinet root, for the folders on disk in the tree (`set_root`).
     root: Option<PathBuf>,
+    /// "Scan" clicked: the app starts it with Intake's scanner (owner 2026-11-04).
+    pub scan_request: bool,
+    /// A scan started from here is running: its outcome is shown here when it ends.
+    pub scan_watching: bool,
     /// Documents dropped on a tree folder: (ids, cabinet-relative folder), planned in `show`.
     drop_request: Option<(Vec<String>, String)>,
     /// Legal holds covering what is shown (P07 step 4), for the selection / client they were
@@ -268,6 +274,8 @@ impl Browse {
             trash_requested: false,
             root: None,
             drop_request: None,
+            scan_request: false,
+            scan_watching: false,
             holds_seen: None,
             hold_reason: None,
             rename: None,
@@ -468,6 +476,13 @@ impl Browse {
                 Node::Folder(c, f) => {
                     Some((self.snap.clients.get(*c)?.id.clone(), Some(f.clone())))
                 }
+                Node::Year(c, y) => Some((
+                    self.snap.clients.get(*c)?.id.clone(),
+                    Some(format!(
+                        "\u{1}{}",
+                        y.map_or(String::new(), |y| y.to_string())
+                    )),
+                )),
             })
             .collect();
         match vf_core::browse::load(conn) {
@@ -490,6 +505,15 @@ impl Browse {
                 client: c,
                 folder: folder.clone(),
             },
+            (Scope::Year { year, .. }, Some(c)) => Scope::Year {
+                client: c,
+                year: *year,
+            },
+            (Scope::YearFolder { year, folder, .. }, Some(c)) => Scope::YearFolder {
+                client: c,
+                year: *year,
+                folder: folder.clone(),
+            },
             (Scope::Unassigned, _) => Scope::Unassigned,
             (
                 s @ (Scope::NeedsDocType
@@ -510,7 +534,10 @@ impl Browse {
                 let c = ids.iter().position(|i| *i == id)?;
                 Some(match f {
                     None => Node::Client(c),
-                    Some(f) => Node::Folder(c, f),
+                    Some(f) => match f.strip_prefix('\u{1}') {
+                        Some(y) => Node::Year(c, y.parse().ok()),
+                        None => Node::Folder(c, f),
+                    },
                 })
             })
             .collect();
@@ -531,7 +558,10 @@ impl Browse {
 
     fn scope_client(&self) -> Option<usize> {
         match &self.scope {
-            Scope::Client(c) | Scope::Folder { client: c, .. } => Some(*c),
+            Scope::Client(c)
+            | Scope::Folder { client: c, .. }
+            | Scope::Year { client: c, .. }
+            | Scope::YearFolder { client: c, .. } => Some(*c),
             _ => None,
         }
     }
@@ -858,22 +888,28 @@ impl Browse {
     fn favorite_scope(&self, f: &Favorite) -> Option<Scope> {
         let ci = |id: &str| self.snap.clients.iter().position(|c| c.id == id);
         Some(match f {
-            Favorite::Client { client } | Favorite::Year { client, .. } => {
-                Scope::Client(ci(client)?)
-            }
+            Favorite::Client { client } => Scope::Client(ci(client)?),
+            Favorite::Year { client, year } => Scope::Year {
+                client: ci(client)?,
+                year: *year,
+            },
+            Favorite::Folder {
+                client,
+                year: None,
+                folder,
+            } => Scope::Folder {
+                client: ci(client)?,
+                folder: folder.clone(),
+            },
             Favorite::Folder {
                 client,
                 year,
                 folder,
-            } => {
-                let c = ci(client)?;
-                let with_year = year.map(|y| format!("{folder}/{y}"));
-                let folder = match with_year {
-                    Some(f) if self.ix.clients[c].folders.contains_key(&f) => f,
-                    _ => folder.clone(),
-                };
-                Scope::Folder { client: c, folder }
-            }
+            } => Scope::YearFolder {
+                client: ci(client)?,
+                year: *year,
+                folder: folder.clone(),
+            },
         })
     }
 
@@ -885,6 +921,19 @@ impl Browse {
             Scope::Folder { client, folder } => Favorite::Folder {
                 client: id(*client),
                 year: None,
+                folder: folder.clone(),
+            },
+            Scope::Year { client, year } => Favorite::Year {
+                client: id(*client),
+                year: *year,
+            },
+            Scope::YearFolder {
+                client,
+                year,
+                folder,
+            } => Favorite::Folder {
+                client: id(*client),
+                year: *year,
                 folder: folder.clone(),
             },
             _ => return None,
@@ -901,6 +950,19 @@ impl Browse {
             Scope::Folder { client, folder } => {
                 format!("{} · {}", name(client), folder.replace('/', " › "))
             }
+            Scope::Year { client, year } => {
+                format!("{} · {}", name(client), year_node_label(year))
+            }
+            Scope::YearFolder {
+                client,
+                year,
+                folder,
+            } => format!(
+                "{} · {} · {}",
+                name(client),
+                year_node_label(year),
+                year_folder_label(&folder)
+            ),
             _ => String::new(),
         }
     }
@@ -1042,6 +1104,11 @@ pub fn week_start_utc() -> String {
         .with_timezone(&chrono::Utc)
         .format("%Y-%m-%dT%H:%M:%SZ")
         .to_string()
+}
+
+/// A year view folder's name: "(client folder)" for documents directly in it.
+fn year_folder_label(f: &str) -> &str {
+    if f.is_empty() { "(client folder)" } else { f }
 }
 
 /// Draws the whole tab (three panes). Call where the central panel would go.
@@ -1204,7 +1271,31 @@ fn tree(ui: &mut egui::Ui, b: &mut Browse) {
         }
     }
     ui.add_space(8.0);
-    ui.label(RichText::new("CABINET").small().color(theme::INK_MUTED));
+    ui.horizontal(|ui| {
+        ui.label(RichText::new("CABINET").small().color(theme::INK_MUTED));
+        ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+            // Folders as on disk, or by tax year (owner 2026-11-04); kept on this PC.
+            let by_year = b.prefs.tree_by_year;
+            if ui
+                .selectable_label(by_year, "By year")
+                .on_hover_text("Client, then tax year, then folder")
+                .clicked()
+                && !by_year
+            {
+                b.prefs.tree_by_year = true;
+                b.prefs_changed();
+            }
+            if ui
+                .selectable_label(!by_year, "Folders")
+                .on_hover_text("The client's folders as they are on disk")
+                .clicked()
+                && by_year
+            {
+                b.prefs.tree_by_year = false;
+                b.prefs_changed();
+            }
+        });
+    });
     ui.add(
         egui::TextEdit::singleline(&mut b.client_filter)
             .hint_text("Find client by name or ID")
@@ -1283,6 +1374,72 @@ fn tree(ui: &mut egui::Ui, b: &mut Browse) {
                     }
                 }
                 if !open {
+                    continue;
+                }
+                if b.prefs.tree_by_year {
+                    for y in &node.years {
+                        let ynode = Node::Year(ci, y.year);
+                        let yopen = b.expanded.contains(&ynode);
+                        let here = Scope::Year {
+                            client: ci,
+                            year: y.year,
+                        };
+                        let (chev, resp) = tree_row(
+                            ui,
+                            1,
+                            Some(yopen),
+                            false,
+                            &year_node_label(y.year),
+                            y.count,
+                            b.scope == here,
+                        );
+                        fav_menu(&resp, here.clone(), &mut fav_scope);
+                        if chev {
+                            toggle = Some(ynode.clone());
+                        }
+                        if resp.clicked() {
+                            pick = Some(here);
+                            if !yopen {
+                                toggle = Some(ynode.clone());
+                            }
+                        }
+                        if !yopen {
+                            continue;
+                        }
+                        for (f, n) in &y.folders {
+                            let here = Scope::YearFolder {
+                                client: ci,
+                                year: y.year,
+                                folder: f.clone(),
+                            };
+                            let (_, resp) = tree_row(
+                                ui,
+                                2,
+                                None,
+                                false,
+                                year_folder_label(f),
+                                *n,
+                                b.scope == here,
+                            );
+                            // A drop files into the real folder: the year's own when the
+                            // template has one (`Income Tax/2025`), else the folder itself.
+                            if let Some(cf) = &c.folder_rel {
+                                let real = match y.year {
+                                    Some(yr) if node.folders.contains_key(&format!("{f}/{yr}")) => {
+                                        format!("{f}/{yr}")
+                                    }
+                                    _ => f.clone(),
+                                };
+                                if !real.is_empty() {
+                                    drop_target(&resp, &format!("{cf}/{real}"), &mut dropped);
+                                }
+                            }
+                            fav_menu(&resp, here.clone(), &mut fav_scope);
+                            if resp.clicked() {
+                                pick = Some(here);
+                            }
+                        }
+                    }
                     continue;
                 }
                 // The client folder's folders, as on disk: depth-first, open ones expanded.
@@ -1570,6 +1727,19 @@ fn breadcrumb(b: &Browse) -> String {
         Scope::Folder { client: c, folder } => {
             format!("Cabinet / {} / {}", client(*c), folder.replace('/', " / "))
         }
+        Scope::Year { client: c, year } => {
+            format!("Cabinet / {} / {}", client(*c), year_node_label(*year))
+        }
+        Scope::YearFolder {
+            client: c,
+            year,
+            folder,
+        } => format!(
+            "Cabinet / {} / {} / {}",
+            client(*c),
+            year_node_label(*year),
+            year_folder_label(folder).replace('/', " / ")
+        ),
     }
 }
 
@@ -1621,6 +1791,15 @@ fn grid(ui: &mut egui::Ui, b: &mut Browse, conn: &Connection) {
                 client.as_deref(),
                 doc_type.as_deref(),
             ));
+        }
+        if ui
+            .button("Scan")
+            .on_hover_text(
+                "Scan with this PC's scanner and profile (set on the Intake tab). The pages go to the Scans folder; a barcode cover sheet files them, otherwise they wait in Intake.",
+            )
+            .clicked()
+        {
+            b.scan_request = true;
         }
         sync_menu(ui, b);
         ui.separator();
@@ -2717,6 +2896,43 @@ mod tests {
         assert_eq!(h.state().b.visible.len(), 2);
         click(&mut h, "Permanent");
         assert_eq!(h.state().b.visible.len(), 2);
+    }
+
+    /// The tree toggles between the folders on disk and by tax year (owner 2026-11-04).
+    #[test]
+    fn tree_toggles_to_the_year_view() {
+        let mut h = harness(2, 8);
+        click(&mut h, "By year");
+        assert!(h.state().b.prefs.tree_by_year);
+        click(&mut h, "Client 0001  1001");
+        // Years newest first, "No tax year" for the Permanent/Setup documents.
+        assert!(h.query_by_label("No tax year").is_some());
+        click(&mut h, "2025");
+        assert_eq!(
+            h.state().b.scope,
+            Scope::Year {
+                client: 1,
+                year: Some(2025)
+            }
+        );
+        assert_eq!(h.state().b.visible.len(), 4);
+        click(&mut h, "Payroll");
+        assert_eq!(h.state().b.visible.len(), 2);
+        assert_eq!(
+            breadcrumb(&h.state().b),
+            "Cabinet / Client 0001 (1001) / 2025 / Payroll"
+        );
+        click(&mut h, "Folders");
+        assert!(!h.state().b.prefs.tree_by_year);
+        assert!(h.query_by_label("Income Tax").is_some());
+    }
+
+    /// Browse has a Scan button (owner 2026-11-04); the app starts it with Intake's scanner.
+    #[test]
+    fn scan_button_asks_the_app_to_scan() {
+        let mut h = harness(1, 0);
+        click(&mut h, "Scan");
+        assert!(h.state().b.scan_request);
     }
 
     /// Documents dropped on a tree folder are moved there after "Move" (PA-23).

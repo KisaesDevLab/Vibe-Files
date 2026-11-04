@@ -108,7 +108,9 @@ impl OpenCabinet {
         };
         let mut cx = crate::ui::search::Context::default();
         match &self.browse.scope {
-            B::Client(ci) if *ci < snap.clients.len() => {
+            B::Client(ci) | B::Year { client: ci, .. } | B::YearFolder { client: ci, .. }
+                if *ci < snap.clients.len() =>
+            {
                 cx.client = Some(label(*ci));
             }
             B::Folder { client, folder } if *client < snap.clients.len() => {
@@ -139,6 +141,8 @@ pub struct VibeFilesApp {
     update: Option<mpsc::Receiver<Option<vf_sync::update::Release>>>,
     /// A newer release, shown on Browse once.
     update_notice: Option<String>,
+    /// This PC's text size has been applied to the window.
+    zoom_applied: bool,
 }
 
 /// Asks GitHub for the latest release, once per start, on a thread (never in tests: no network).
@@ -185,6 +189,7 @@ impl VibeFilesApp {
                         ingest: Default::default(),
                         ocr: Default::default(),
                         viewer: Default::default(),
+                        look: Default::default(),
                         sync: Default::default(),
                         update_check: true,
                     },
@@ -202,6 +207,7 @@ impl VibeFilesApp {
             screen: Screen::Wizard(w),
             update,
             update_notice: None,
+            zoom_applied: false,
         };
         // Tests drive the wizard themselves; `open_last` has its own test.
         if !cfg!(test) {
@@ -416,7 +422,22 @@ impl eframe::App for VibeFilesApp {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         self.poll(ui.ctx());
         let name = self.cabinet_name();
-        chrome::header(ui, name.as_deref());
+        // Text size: the header's buttons, or Ctrl + / Ctrl - (egui's own zoom keys); kept in
+        // this PC's settings (owner 2026-11-04).
+        let ctx_zoom = (ui.ctx().zoom_factor() * 100.0).round() as u16;
+        let mut size = self.config.look.text_size;
+        if ctx_zoom != size && self.zoom_applied {
+            size = ctx_zoom;
+        }
+        chrome::header(ui, name.as_deref(), &mut size);
+        if size != self.config.look.text_size || !self.zoom_applied {
+            self.zoom_applied = true;
+            ui.ctx().set_zoom_factor(f32::from(size) / 100.0);
+            if size != self.config.look.text_size {
+                self.config.look.text_size = size;
+                let _ = config::save(&self.data, &self.config);
+            }
+        }
         let badge = match &self.screen {
             Screen::Open(o) => o.intake.ingest.badge(),
             _ => 0,
@@ -497,6 +518,8 @@ impl eframe::App for VibeFilesApp {
                     &self.config.ingest,
                     &o.browse.snap,
                     &o.browse.sheets_dir,
+                    &mut o.opened.conn,
+                    &self.config.device_id,
                 );
                 o.intake.reconcile(
                     &mut o.opened.conn,
@@ -676,6 +699,25 @@ impl eframe::App for VibeFilesApp {
                         running_for: o_sync.running_for.clone(),
                     });
                     browse::show(ui, tab_browse, &mut env);
+                    // Browse's Scan: Intake's scanner, profile and Scans folder (owner
+                    // 2026-11-04); the outcome lands in Intake's log and on Browse.
+                    if std::mem::take(&mut tab_browse.scan_request) {
+                        match o_intake.ingest.start_scan(ui.ctx(), &self.config.ingest) {
+                            Ok(name) => {
+                                tab_browse.notice = Some(format!(
+                                    "Scanning on {name}… The pages go to the Scans folder and then to Intake."
+                                ));
+                                tab_browse.scan_watching = true;
+                            }
+                            Err(e) => tab_browse.error = Some(format!("Not scanned: {e}")),
+                        }
+                    }
+                    if tab_browse.scan_watching && !o_intake.ingest.scanning() {
+                        tab_browse.scan_watching = false;
+                        if let Some(l) = o_intake.ingest.last_line() {
+                            tab_browse.notice = Some(l.to_string());
+                        }
+                    }
                     if let Some(d) = tab_browse.view_request.take() {
                         o_viewer.open(d);
                         self.tab = Tab::Viewer;
@@ -861,6 +903,11 @@ fn prepare(opened: &mut Opened, device_id: &str) -> Prepared {
             kind = crate::logging::kind(e),
             "print capture rules not written"
         );
+    }
+    // Intake's client box lists Filer's client list: clients known only from their folders
+    // are put in it (owner 2026-11-04: no client to pick in Intake).
+    if let Err(e) = vf_fs::clients::ensure_listed(&opened.conn, &root) {
+        tracing::warn!(kind = crate::logging::kind(&e), "client list not completed");
     }
     // This workstation in the cabinet's list (the Safeguards appendix lists them).
     if let Err(e) = vf_fs::safeguards::register_device(&root, device_id) {
@@ -1743,6 +1790,33 @@ mod tests {
             )
             .unwrap();
         assert_eq!(kept, 2, "each step kept the previous version");
+        // Close (owner 2026-11-04): asks first with unsaved annotations, then empties the Viewer.
+        if let Screen::Open(o) = &mut h.state_mut().screen {
+            o.viewer.pending.push(Annotation {
+                page: 0,
+                kind: Kind::Tickmark {
+                    tick: Tick::Letter(0),
+                    at: [100.0, 100.0],
+                    size: 28.0,
+                },
+                color: vf_pdf::annot::TICK_GREEN,
+                author: "KWK".into(),
+            });
+        }
+        h.step();
+        click(&mut h, "Close");
+        h.step();
+        h.run_steps(4);
+        click(&mut h, "Keep editing");
+        h.step();
+        click(&mut h, "Close");
+        h.run_steps(4);
+        click(&mut h, "Discard and close");
+        h.step();
+        let Screen::Open(o) = &h.state().screen else {
+            unreachable!()
+        };
+        assert!(o.viewer.doc.is_none() && o.viewer.pending.is_empty());
     }
 
     /// P04 step 5 through the Viewer: auto-find, apply & verify, the redacted copy opens.
@@ -2038,6 +2112,22 @@ mod tests {
         h.state_mut().open_last(&ctx);
         settle(&mut h);
         assert!(matches!(h.state().screen, Screen::Open(_)));
+    }
+
+    /// Text size (owner 2026-11-04): the header's A+ / A- change it and this PC keeps it.
+    #[test]
+    fn text_size_buttons_change_and_keep_the_size() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data = tmp.path().join("data");
+        let mut h = harness(&data);
+        click(&mut h, "A+");
+        h.run();
+        assert_eq!(h.state().config.look.text_size, 110);
+        assert!((h.ctx.zoom_factor() - 1.1).abs() < 0.001);
+        assert_eq!(config::load(&data).unwrap().look.text_size, 110);
+        click(&mut h, "A-");
+        h.run();
+        assert_eq!(config::load(&data).unwrap().look.text_size, 100);
     }
 
     #[test]

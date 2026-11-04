@@ -138,6 +138,54 @@ pub fn save_list(root: &Path, list: &ClientList) -> Result<(), String> {
     clients::save_cache(&master_dir(root), list).map_err(|e| format!("saving clients.json: {e}"))
 }
 
+/// Puts every client with a folder in the catalog into Filer's client list (`clients.json`)
+/// when it is missing there: a cabinet whose clients came from their folders (rebuild, or a
+/// cabinet made before the list) otherwise gives Intake no clients to pick (owner 2026-11-04).
+/// Returns how many were added.
+pub fn ensure_listed(conn: &vf_core::db::Connection, root: &Path) -> Result<usize, String> {
+    let mut st = conn
+        .prepare(
+            "SELECT id, ext_id, name FROM client
+             WHERE deleted_at IS NULL AND folder_rel IS NOT NULL AND ext_id <> ''
+             ORDER BY name",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows: Vec<(String, String, String)> = st
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+        .map_err(|e| e.to_string())?
+        .collect::<Result<_, _>>()
+        .map_err(|e| e.to_string())?;
+    if rows.is_empty() {
+        return Ok(0);
+    }
+    let mut list = load(root)?
+        .list
+        .unwrap_or_else(crate::newclient::empty_list);
+    let have: std::collections::HashSet<String> =
+        list.clients.iter().map(|c| c.id.to_uppercase()).collect();
+    let mut added = 0;
+    for (id, ext, name) in rows {
+        if have.contains(&ext.to_uppercase()) {
+            continue;
+        }
+        let Ok(uuid) = Uuid::parse_str(&id) else {
+            continue;
+        };
+        list.uuids.insert(ext.clone(), uuid);
+        list.clients.push(Client {
+            id: ext,
+            uuid,
+            name,
+            extra: BTreeMap::new(),
+        });
+        added += 1;
+    }
+    if added > 0 {
+        save_list(root, &list)?;
+    }
+    Ok(added)
+}
+
 pub fn save_rels(root: &Path, rels: &Relationships) -> Result<(), String> {
     relationships::save(&master_dir(root), rels)
         .map_err(|e| format!("saving relationships.json: {e}"))
@@ -435,6 +483,32 @@ pub fn tin_extras(map: &ColumnMap) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Clients known only from their folders reach Filer's list, once (owner 2026-11-04).
+    #[test]
+    fn clients_with_folders_are_put_in_filers_list() {
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path().join("cab");
+        std::fs::create_dir_all(master_dir(&root)).unwrap();
+        let conn = vf_core::db::open(&t.path().join("c.db"), vf_core::db::Storage::Local).unwrap();
+        conn.execute_batch(
+            "INSERT INTO client (id, ext_id, name, folder_rel, device_id, updated_at) VALUES
+               ('0190a1b2-0000-7000-8000-000000000001', 'INVE1001', 'Invented Family Trust',
+                'Invented Family Trust (INVE1001)', 'd', 't'),
+               ('0190a1b2-0000-7000-8000-000000000002', 'NOFO1002', 'No Folder Co', NULL, 'd', 't');",
+        )
+        .unwrap();
+        assert!(load(&root).unwrap().list.is_none());
+        assert_eq!(ensure_listed(&conn, &root).unwrap(), 1);
+        let list = load(&root).unwrap().list.unwrap();
+        assert_eq!(list.clients.len(), 1);
+        assert_eq!(list.clients[0].id, "INVE1001");
+        assert_eq!(
+            list.clients[0].uuid.to_string(),
+            "0190a1b2-0000-7000-8000-000000000001"
+        );
+        assert_eq!(ensure_listed(&conn, &root).unwrap(), 0, "once");
+    }
 
     fn write_csv(dir: &Path, text: &str) -> PathBuf {
         let p = dir.join("clients.csv");

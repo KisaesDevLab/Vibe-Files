@@ -136,6 +136,8 @@ pub struct Viewer {
     converting: Option<Converting>,
     /// Another document asked for while annotations are unsaved: open it and drop them?
     pub ask_open: Option<Doc>,
+    /// Close asked for while annotations are unsaved: drop them?
+    pub ask_close: bool,
     generation: u64,
     info: Option<DocInfo>,
     pub error: Option<String>,
@@ -211,6 +213,7 @@ impl Default for Viewer {
             seen: None,
             converting: None,
             ask_open: None,
+            ask_close: false,
             generation: 0,
             info: None,
             error: None,
@@ -262,6 +265,26 @@ impl Viewer {
             return;
         }
         self.open_now(doc);
+    }
+
+    /// Closes the document (owner 2026-11-04); asks first when annotations are unsaved.
+    pub fn close(&mut self) {
+        if self.pending.is_empty() {
+            self.close_now();
+        } else {
+            self.ask_close = true;
+        }
+    }
+
+    fn close_now(&mut self) {
+        self.pending.clear();
+        self.ask_close = false;
+        self.doc = None;
+        self.notice = None;
+        self.seen = None;
+        self.pii_found = None;
+        self.drawn.clear();
+        self.reload();
     }
 
     /// Opens `doc`, dropping unsaved annotations (asked first by [`Viewer::open`]).
@@ -540,6 +563,28 @@ pub fn show(ui: &mut egui::Ui, v: &mut Viewer, env: &mut Env<'_>) {
                 v.open_now(next);
             }
             Some(false) => v.ask_open = None,
+            None => {}
+        }
+    }
+    if v.ask_close {
+        let mut answer = None;
+        egui::Modal::new(egui::Id::unique("viewer-close")).show(ui.ctx(), |ui| {
+            ui.set_width(420.0);
+            ui.heading(format!("{} unsaved annotations", v.pending.len()));
+            ui.label("Closing the document drops them. Keep editing to save them first.");
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                if ui.button("Keep editing").clicked() {
+                    answer = Some(false);
+                }
+                if ui.button("Discard and close").clicked() {
+                    answer = Some(true);
+                }
+            });
+        });
+        match answer {
+            Some(true) => v.close_now(),
+            Some(false) => v.ask_close = false,
             None => {}
         }
     }
@@ -1061,6 +1106,14 @@ fn toolbar(ui: &mut egui::Ui, v: &mut Viewer, env: &mut Env<'_>, doc: &Doc) {
                     .clicked()
                 {
                     save(v, env, false);
+                }
+                ui.separator();
+                if ui
+                    .button("Close")
+                    .on_hover_text("Close this document (asks first when annotations are unsaved).")
+                    .clicked()
+                {
+                    v.close();
                 }
             });
             if let Some(n) = &v.notice {

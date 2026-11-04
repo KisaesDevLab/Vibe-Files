@@ -4,6 +4,10 @@
 //! Tree shape (PA-23, owner 2026-11-04): Cabinet → client → the client's folders as they are on
 //! disk (`Income Tax` → `2025`), so the tree and its breadcrumb read like Explorer. Tax year and
 //! doc type stay document attributes (grid columns, views, search), not tree levels.
+//!
+//! The year view (owner 2026-11-04, a toggle): client → tax year (newest first, then "No tax
+//! year") → the folders holding that year's documents, with the year segment taken out
+//! (`Income Tax/2025/x.pdf` sits under 2025 as `Income Tax`).
 
 use std::collections::BTreeMap;
 
@@ -181,6 +185,17 @@ pub enum Scope {
         client: usize,
         folder: String,
     },
+    /// Year view: a client's documents of one tax year (`None` = no tax year).
+    Year {
+        client: usize,
+        year: Option<i32>,
+    },
+    /// Year view: a year's documents in one folder (the folder without its year segment).
+    YearFolder {
+        client: usize,
+        year: Option<i32>,
+        folder: String,
+    },
     /// Documents with no client (outside any bound client folder).
     Unassigned,
     /// No doc type yet.
@@ -223,6 +238,46 @@ pub struct ClientNode {
     /// Every folder inside the client folder (`Income Tax`, `Income Tax/2025`, …), from
     /// documents and from disk, with the documents in it and below it.
     pub folders: BTreeMap<String, usize>,
+    /// Year view: years newest first, then no tax year.
+    pub years: Vec<YearNode>,
+}
+
+/// A year in the year view.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct YearNode {
+    /// `None` = no tax year.
+    pub year: Option<i32>,
+    pub count: usize,
+    /// (folder without its year segment, count); `""` = directly in the client folder.
+    pub folders: Vec<(String, usize)>,
+}
+
+/// A year view label: the year, or "No tax year".
+pub fn year_node_label(y: Option<i32>) -> String {
+    y.map_or_else(|| "No tax year".to_string(), |y| y.to_string())
+}
+
+/// `folder` without the segment naming `year` (the first one only).
+pub fn without_year(folder: &str, year: Option<i32>) -> String {
+    let year = year.map(|y| y.to_string());
+    let mut dropped = false;
+    folder
+        .split('/')
+        .filter(|seg| {
+            if !dropped && year.as_deref() == Some(*seg) {
+                dropped = true;
+                false
+            } else {
+                !seg.is_empty()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+fn sort_years(ys: &mut [YearNode]) {
+    // Years newest first, no tax year last.
+    ys.sort_by_key(|y| (y.year.is_none(), std::cmp::Reverse(y.year)));
 }
 
 impl ClientNode {
@@ -296,6 +351,8 @@ impl Index {
             .map(|(i, c)| (c.id.as_str(), i))
             .collect();
         let mut clients = vec![ClientNode::default(); s.clients.len()];
+        let mut years: Vec<BTreeMap<Option<i32>, BTreeMap<String, usize>>> =
+            vec![BTreeMap::new(); s.clients.len()];
         let mut place = Vec::with_capacity(s.docs.len());
         let mut unassigned = 0;
         for d in &s.docs {
@@ -311,10 +368,26 @@ impl Index {
                     for f in with_ancestors(&folder) {
                         *node.folders.entry(f.to_owned()).or_default() += 1;
                     }
+                    *years[ci]
+                        .entry(d.tax_year)
+                        .or_default()
+                        .entry(without_year(&folder, d.tax_year))
+                        .or_default() += 1;
                 }
                 None => unassigned += 1,
             }
             place.push((ci, folder));
+        }
+        for (node, ys) in clients.iter_mut().zip(years) {
+            node.years = ys
+                .into_iter()
+                .map(|(year, folders)| YearNode {
+                    year,
+                    count: folders.values().sum(),
+                    folders: folders.into_iter().collect(),
+                })
+                .collect();
+            sort_years(&mut node.years);
         }
         Index {
             clients,
@@ -334,7 +407,29 @@ impl Index {
             for f in with_ancestors(dir) {
                 node.folders.entry(f.to_owned()).or_default();
             }
+            // Year view: a folder for a tax year (`Income Tax/2025`) shows under that year
+            // before anything is filed in it. Folders with no year segment are not listed
+            // under "No tax year": that holds documents without a year, not folders.
+            let Some(year) = dir.split('/').find_map(year_of) else {
+                continue;
+            };
+            let folder = without_year(dir, Some(year));
+            let y = match node.years.iter().position(|y| y.year == Some(year)) {
+                Some(i) => &mut node.years[i],
+                None => {
+                    node.years.push(YearNode {
+                        year: Some(year),
+                        ..Default::default()
+                    });
+                    node.years.last_mut().expect("just pushed")
+                }
+            };
+            if !y.folders.iter().any(|(f, _)| *f == folder) {
+                y.folders.push((folder, 0));
+                y.folders.sort();
+            }
         }
+        sort_years(&mut node.years);
     }
 
     /// Indices into `Snapshot::docs` inside `scope`, in path order.
@@ -359,6 +454,16 @@ impl Index {
                                 || folder
                                     .strip_prefix(f.as_str())
                                     .is_some_and(|r| r.starts_with('/')))
+                    }
+                    Scope::Year { client, year } => *ci == Some(*client) && d.tax_year == *year,
+                    Scope::YearFolder {
+                        client,
+                        year,
+                        folder: f,
+                    } => {
+                        *ci == Some(*client)
+                            && d.tax_year == *year
+                            && without_year(folder, d.tax_year) == *f
                     }
                     Scope::NeedsDocType => d.doc_type_id.is_none(),
                     Scope::NeedsTaxYear => {
@@ -515,6 +620,57 @@ mod tests {
         assert_eq!(acme.children("Permanent"), [("Permanent/Setup", 1)]);
         assert_eq!(ix.clients[1].count, 1);
         assert_eq!(ix.unassigned, 1);
+    }
+
+    /// The year view (owner 2026-11-04 toggle): years newest first, "No tax year" last, the
+    /// year segment taken out of the folders; empty year folders on disk show under their year.
+    #[test]
+    fn year_view_groups_by_tax_year() {
+        let s = snap();
+        let mut ix = Index::build(&s);
+        let acme = &ix.clients[0];
+        let years: Vec<_> = acme.years.iter().map(|y| (y.year, y.count)).collect();
+        assert_eq!(years, [(Some(2025), 3), (Some(2024), 1), (None, 2)]);
+        assert_eq!(
+            acme.years[0].folders,
+            [
+                ("Income Tax".to_string(), 2),
+                ("Other/Practice".to_string(), 1)
+            ]
+        );
+        assert_eq!(year_node_label(None), "No tax year");
+        let names = |ix: &Index, sc: Scope| -> Vec<String> {
+            ix.docs_in(&s, &sc)
+                .into_iter()
+                .map(|i| s.docs[i].name().to_owned())
+                .collect()
+        };
+        assert_eq!(
+            names(
+                &ix,
+                Scope::YearFolder {
+                    client: 0,
+                    year: Some(2025),
+                    folder: "Income Tax".into()
+                }
+            ),
+            ["b.pdf", "c.pdf"]
+        );
+        assert_eq!(
+            names(
+                &ix,
+                Scope::Year {
+                    client: 0,
+                    year: None
+                }
+            ),
+            ["e.pdf", "f.pdf"]
+        );
+        ix.add_folders(0, &["Payroll/2026".into(), "Bookkeeping".into()]);
+        let acme = &ix.clients[0];
+        assert_eq!(acme.years[0].year, Some(2026));
+        assert_eq!(acme.years[0].folders, [("Payroll".to_string(), 0)]);
+        assert_eq!(acme.years.last().unwrap().year, None);
     }
 
     #[test]
