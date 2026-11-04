@@ -49,8 +49,8 @@ downloads or installs anything. `update_check = false` in `config.toml` turns th
    the ID in the folder name or the same name), gives files their doc type and tax year from
    their names and folders, and lists what is left for a person (export the list as CSV). Undo
    the last import puts everything back.
-5. **Intake**: the Intake tab is Filer Desktop. Set its inbox folders. Only **one workstation
-   runs Intake at a time** (v1 has no catalog lock; PA-16).
+5. **Intake**: the Intake tab is Filer Desktop. Set its inbox folders. Several workstations may
+   file at once (owner 2026-11-04, Q-52); see "Several people filing at once" below.
 6. **Scanner**: Intake › Scanner on each scanning PC (TWAIN for the fi-7160, or WIA).
 7. **OCR**: needs nothing (the bundled `tesseract\`); an imported cabinet's backlog is read in
    the background, or at once with `vibe-files ocr backlog <cabinet>`.
@@ -65,8 +65,8 @@ workstation keeps its own catalog of the shared cabinet (Q-26).
   anything. Windows Explorer opens every file in it without Vibe Files (principle 1).
 - Keep `<data>\` on each workstation's local disk, never on the share: SQLite over SMB is not
   safe.
-- One Intake writer at a time (above). Other changes (metadata, versions, trash, renames) can be
-  made from any workstation; each workstation sees another's changes after its next rebuild or
+- Anyone can file from Intake on any workstation (see "Several people filing at once"). Other
+  changes (metadata, versions, trash, renames) can be made from any workstation; each workstation sees another's changes after its next rebuild or
   integrity sweep, or at once when both sync through B2.
 - The weekly integrity sweep (Admin › Integrity sweep) re-hashes the cabinet and catches files
   edited, moved or added outside Vibe Files.

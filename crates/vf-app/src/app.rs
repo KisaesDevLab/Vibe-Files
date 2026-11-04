@@ -961,6 +961,24 @@ pub struct Prepared {
 /// The work of opening a cabinet that reads and writes the share or the whole catalog: print
 /// capture rules, this workstation's registration, legal holds, the old trash, the audit chain.
 /// Runs on the opening thread, so the window never freezes after the cabinet shows (QA A6).
+/// Removes what the check-out build left (Q-52): rows in the catalog's `lock` table (nothing
+/// writes them any more) and `_Vibe/locks/*.lock`, `_Vibe/intake.lock` on the server.
+fn clear_check_out_leftovers(conn: &mut vf_core::db::Connection, root: &std::path::Path) {
+    if let Err(e) = conn.execute("DELETE FROM lock", []) {
+        tracing::warn!(error = %e, "old check-outs not cleared");
+    }
+    let vibe = root.join(vf_fs::cabinet::VIBE_DIR);
+    let _ = std::fs::remove_file(vibe.join("intake.lock"));
+    if let Ok(rd) = std::fs::read_dir(vibe.join("locks")) {
+        for e in rd.flatten() {
+            if e.path().extension().is_some_and(|x| x == "lock") {
+                let _ = std::fs::remove_file(e.path());
+            }
+        }
+    }
+    let _ = std::fs::remove_dir(vibe.join("locks"));
+}
+
 fn prepare(opened: &mut Opened, device_id: &str) -> Prepared {
     let root = opened.root.clone();
     // Print captures are filed by their doc types' folders (Admin › Print capture): Filer's
@@ -978,6 +996,9 @@ fn prepare(opened: &mut Opened, device_id: &str) -> Prepared {
             "print capture rules not written"
         );
     }
+    // Check-out was built and removed the same day (Q-52): a catalog that copied other PCs'
+    // check-outs, and lock files on the server, would otherwise refuse edits for good.
+    clear_check_out_leftovers(&mut opened.conn, &root);
     // Intake's client box lists Filer's client list: clients known only from their folders
     // are put in it (owner 2026-11-04: no client to pick in Intake).
     if let Err(e) = vf_fs::clients::ensure_listed(&opened.conn, &root) {
@@ -2342,7 +2363,7 @@ mod tests {
     }
 
     /// Filer's screen loads once on the Intake tab, not on every frame (regression found
-    /// 2026-11-04), and any PC may file (owner 2026-11-04: no one-PC-at-a-time lock).
+    /// 2026-11-04); what the removed check-out build left is cleared at open (Q-52).
     #[test]
     fn intake_loads_once() {
         let tmp = tempfile::tempdir().unwrap();
@@ -2351,7 +2372,20 @@ mod tests {
             root: &root,
             name: "Firm",
         };
-        drop(session::create(&tmp.path().join("pc1"), "dev-1", &req).unwrap());
+        let o = session::create(&tmp.path().join("pc1"), "dev-1", &req).unwrap();
+        // What the removed check-out build could leave (Q-52).
+        o.conn
+            .execute_batch(
+                "INSERT INTO document (id, rel_path, hash, size, filed_at, device_id, updated_at)
+                   VALUES ('d1', 'A/x.pdf', 'h', 1, 't', 'dev-1', 't');
+                 INSERT INTO lock (doc_id, user, device_id, since) VALUES ('d1', 'anna on PC2', 'pc2', 't');",
+            )
+            .unwrap();
+        drop(o);
+        let vibe = root.join("_Vibe");
+        std::fs::create_dir_all(vibe.join("locks")).unwrap();
+        std::fs::write(vibe.join("locks").join("d1.lock"), "{}").unwrap();
+        std::fs::write(vibe.join("intake.lock"), "{}").unwrap();
         let mut h = harness(&tmp.path().join("pc1"));
         click(&mut h, "Open existing");
         type_into(&mut h, "Cabinet folder", &root.display().to_string());
@@ -2363,7 +2397,16 @@ mod tests {
             unreachable!()
         };
         assert_eq!(o.intake.mounts, 1, "{}", o.intake.debug_state());
-        assert!(!root.join("_Vibe").join("intake.lock").exists());
+        // The check-out leftovers are gone: nothing can refuse an edit for a lock no one can
+        // release.
+        let locks: i64 = o
+            .opened
+            .conn
+            .query_row("SELECT count(*) FROM lock", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(locks, 0);
+        assert!(!vibe.join("intake.lock").exists());
+        assert!(!vibe.join("locks").exists());
     }
 
     /// PA-24: with an admin password set, Admin and the Sync settings wait for it (wrong ones
