@@ -3,7 +3,7 @@
 //! Reads a [`Snapshot`] of the catalog once; tree expansion, folder changes, sort and filter work
 //! on it in memory. [`Browse::reload`] re-reads after anything changes the catalog.
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use egui::{Align, Key, Layout, RichText, Sense};
@@ -34,6 +34,8 @@ pub const ROW_H: f32 = 32.0;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SortCol {
     Name,
+    /// The client the document belongs to (owner 2026-11-04: views mix clients).
+    Client,
     DocType,
     Year,
     Status,
@@ -44,8 +46,9 @@ pub enum SortCol {
 }
 
 impl SortCol {
-    const ALL: [(SortCol, &'static str); 8] = [
+    const ALL: [(SortCol, &'static str); 9] = [
         (SortCol::Name, "Name"),
+        (SortCol::Client, "Client"),
         (SortCol::DocType, "Doc type"),
         (SortCol::Year, "Year"),
         (SortCol::Status, "Status"),
@@ -634,6 +637,19 @@ impl Browse {
         }
         let docs = &self.snap.docs;
         let (col, asc) = self.sort;
+        let client_names: HashMap<&str, String> = self
+            .snap
+            .clients
+            .iter()
+            .map(|c| (c.id.as_str(), c.name.to_lowercase()))
+            .collect();
+        let client_of = |d: &DocRow| {
+            d.client_id
+                .as_deref()
+                .and_then(|c| client_names.get(c))
+                .cloned()
+                .unwrap_or_default()
+        };
         if col == SortCol::Name {
             // One lower-case key per row, not two allocations per comparison.
             v.sort_by_cached_key(|&i| (docs[i].name().to_lowercase(), docs[i].rel_path.clone()));
@@ -645,6 +661,7 @@ impl Browse {
                 let (a, b) = (&docs[a], &docs[b]);
                 let o = match col {
                     SortCol::Name => unreachable!("sorted above"),
+                    SortCol::Client => client_of(a).cmp(&client_of(b)),
                     SortCol::DocType => a.doc_type.cmp(&b.doc_type),
                     SortCol::Year => a.tax_year.cmp(&b.tax_year),
                     SortCol::Status => status_rank(&a.status).cmp(&status_rank(&b.status)),
@@ -1905,17 +1922,24 @@ fn grid(ui: &mut egui::Ui, b: &mut Browse, conn: &Connection) {
     // and the row never sees it, so double-click-to-open would not work on the file name.
     let selectable = ui.style().interaction.selectable_labels;
     ui.style_mut().interaction.selectable_labels = false;
+    let client_names: HashMap<String, String> = b
+        .snap
+        .clients
+        .iter()
+        .map(|c| (c.id.clone(), c.name.clone()))
+        .collect();
     let mut table = TableBuilder::new(ui)
         .striped(false)
         .sense(Sense::click_and_drag())
         .cell_layout(Layout::left_to_right(Align::Center))
         .column(Column::exact(24.0))
         .column(
-            Column::initial(320.0)
+            Column::initial(260.0)
                 .at_least(160.0)
                 .clip(true)
                 .resizable(true),
         )
+        .column(Column::initial(140.0).clip(true).resizable(true))
         .column(Column::initial(120.0).clip(true).resizable(true))
         .column(Column::exact(80.0))
         .column(Column::exact(90.0))
@@ -1966,11 +1990,9 @@ fn grid(ui: &mut egui::Ui, b: &mut Browse, conn: &Connection) {
                     }
                 });
                 row.col(|ui| {
-                    let mut t = RichText::new(d.name()).monospace();
-                    if d.doc_type.is_none() {
-                        t = t.color(theme::WARN);
-                    }
-                    ui.label(t);
+                    // The name in the normal text color; only the pill is colored (owner
+                    // 2026-11-04).
+                    ui.label(RichText::new(d.name()).monospace());
                     if let Some(u) = &d.locked_by {
                         widgets::lock_pill(ui, u);
                     }
@@ -1982,6 +2004,14 @@ fn grid(ui: &mut egui::Ui, b: &mut Browse, conn: &Connection) {
                             widgets::rgb(0x7A4F07),
                         );
                     }
+                });
+                row.col(|ui| {
+                    let name = d
+                        .client_id
+                        .as_deref()
+                        .and_then(|id| client_names.get(id))
+                        .map_or("—", |n| n.as_str());
+                    ui.label(name);
                 });
                 row.col(|ui| {
                     ui.label(d.doc_type.as_deref().unwrap_or("—"));
@@ -2925,6 +2955,19 @@ mod tests {
         click(&mut h, "Folders");
         assert!(!h.state().b.prefs.tree_by_year);
         assert!(h.query_by_label("Income Tax").is_some());
+    }
+
+    /// The grid has a Client column (owner 2026-11-04: Views mix clients), and sorts by it.
+    #[test]
+    fn grid_shows_each_documents_client() {
+        let mut h = harness(2, 1);
+        assert!(h.query_by_label("Client 0000").is_some());
+        assert!(h.query_by_label("Client 0001").is_some());
+        let b = &mut h.state_mut().b;
+        b.sort_by(SortCol::Client);
+        b.sort_by(SortCol::Client);
+        let first = &b.snap.docs[b.visible[0]];
+        assert_eq!(first.client_id.as_deref(), Some("c0001"), "descending");
     }
 
     /// Browse has a Scan button (owner 2026-11-04); the app starts it with Intake's scanner.

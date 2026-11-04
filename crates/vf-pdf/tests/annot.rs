@@ -388,3 +388,56 @@ fn letter_tickmarks_in_a_chosen_color() {
         .count();
     assert!(red_px > 10, "{red_px} red pixels");
 }
+
+/// A pasted tape (PA-14) is a real FreeText annotation that draws in its box, and its data
+/// reads back so the tape can be restored.
+#[test]
+fn pasted_tape_is_a_real_annotation_and_reads_back() {
+    let t = tempfile::tempdir().unwrap();
+    let src = t.path().join("src.pdf");
+    filer_pdf::pdf::write_test_pdf(&src, &["Page one"]);
+    let out = t.path().join("out.pdf");
+    let row = |label: &str, amount: &str, mark: &str, total: bool| annot::TapeRow {
+        label: label.into(),
+        amount: amount.into(),
+        mark: mark.into(),
+        total,
+    };
+    let tape = Annotation {
+        page: 0,
+        kind: Kind::Tape {
+            at: [300.0, 400.0],
+            title: "1099-INT tie-out".into(),
+            rows: vec![
+                row("Interest income · p.1 box 1", "1,284.17", "+", false),
+                row("p.1 box 3", "45.00", "+", false),
+                row("", "1,329.17", "T", true),
+            ],
+            footer: "KWK · 11/04/2026 · ✓ ties to Sch B".into(),
+            labels: true,
+            data: r#"{"lines":[1,2]}"#.into(),
+        },
+        color: annot::ACCENT,
+        author: "KWK".into(),
+    };
+    annot::add(
+        &src,
+        &out,
+        std::slice::from_ref(&tape),
+        "2026-11-04T10:00:00Z",
+    )
+    .unwrap();
+    let found = annot::read(&out).unwrap();
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].subtype, "FreeText");
+    assert!(found[0].has_appearance && found[0].printable);
+    assert!(found[0].contents.as_deref().unwrap().contains("1,329.17 T"));
+    let tapes = annot::read_tapes(&out).unwrap();
+    assert_eq!(tapes.len(), 1);
+    assert_eq!(tapes[0].title, "1099-INT tie-out");
+    assert_eq!(tapes[0].data, r#"{"lines":[1,2]}"#);
+    // It draws in its box.
+    let (w, h, before) = render(&src, 0);
+    let (_, _, after) = render(&out, 0);
+    assert!(changed_in(&before, &after, w, h, found[0].rect) > 100);
+}

@@ -1384,8 +1384,14 @@ mod tests {
         // Counted while it waits in Scans, and again once it is in Filer's inbox.
         // The original is moved aside just after the file reaches the inbox.
         let original = scans.join("Acme_1001_2025 W-2.pdf");
+        let counted = |h: &egui_kittest::Harness<'static, VibeFilesApp>| match &h.state().screen {
+            Screen::Open(o) => o.intake.ingest.delivered == 1,
+            _ => false,
+        };
+        // The worker's event can come a frame after the file lands: wait for both.
         while !(delivered.is_file()
             && !original.exists()
+            && counted(&h)
             && h.query_by_label("Intake (1)").is_some())
         {
             assert!(
@@ -1573,6 +1579,112 @@ mod tests {
             h.query_by_label_contains("is already in the cabinet")
                 .is_none()
         );
+    }
+
+    /// PA-14: a tape picked off the page, totalled, pasted and saved is a real annotation in
+    /// the file, its lines remember their source boxes, and it is kept in the history.
+    #[test]
+    fn ten_key_tape_picks_pastes_and_saves() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("Clients");
+        std::fs::create_dir_all(root.join("Old")).unwrap();
+        filer_pdf::pdf::write_test_pdf(
+            &root.join("Old/interest.pdf"),
+            &["Interest income 1,284.17 Bond interest 45.00"],
+        );
+        let req = CreateRequest {
+            root: &root,
+            name: "Firm",
+        };
+        drop(session::create(&tmp.path().join("pc1"), "dev-1", &req).unwrap());
+        let mut h = harness(&tmp.path().join("pc1"));
+        click(&mut h, "Open existing");
+        type_into(&mut h, "Cabinet folder", &root.display().to_string());
+        click(&mut h, "Open cabinet");
+        settle(&mut h);
+        h.get_by_label("interest.pdf").click();
+        h.run();
+        h.key_press(egui::Key::Enter);
+        h.step();
+        h.step();
+        let start = std::time::Instant::now();
+        loop {
+            h.step();
+            let Screen::Open(o) = &h.state().screen else {
+                unreachable!()
+            };
+            if o.viewer.ready() {
+                break;
+            }
+            assert!(
+                start.elapsed() < std::time::Duration::from_secs(20),
+                "never rendered"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        click(&mut h, "Tape");
+        h.step();
+        if let Screen::Open(o) = &mut h.state_mut().screen {
+            o.viewer.tape.pick = true;
+            o.viewer.tape.tape.name = "Interest tie-out".into();
+        }
+        // The page's words arrive from the renderer.
+        let start = std::time::Instant::now();
+        let picked = loop {
+            h.step();
+            let Screen::Open(o) = &mut h.state_mut().screen else {
+                unreachable!()
+            };
+            if o.viewer.pick_amounts_for_test(0) >= 2 {
+                break o.viewer.tape.tape.lines().len();
+            }
+            assert!(
+                start.elapsed() < std::time::Duration::from_secs(20),
+                "no words"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        };
+        assert_eq!(picked, 2);
+        {
+            let Screen::Open(o) = &mut h.state_mut().screen else {
+                unreachable!()
+            };
+            let t = &mut o.viewer.tape.tape;
+            assert!(t.lines()[0].source.is_some(), "lines keep their source box");
+            assert!(
+                t.lines()[0].label.contains("Interest income"),
+                "{:?}",
+                t.lines()[0].label
+            );
+            t.press(vf_core::tape::Key::Total);
+            assert_eq!(vf_core::tape::format_cents(t.grand()), "1,329.17");
+            o.viewer.paste_for_test(0, [300.0, 500.0], "KWK");
+            assert_eq!(o.viewer.pending.len(), 1);
+        }
+        h.step();
+        click(&mut h, "Save");
+        h.step();
+        let pdf = root.join("Old/interest.pdf");
+        let tapes = vf_pdf::annot::read_tapes(&pdf).unwrap();
+        assert_eq!(tapes.len(), 1);
+        assert!(tapes[0].data.contains("\"source\""), "linked lines");
+        assert_eq!(
+            vf_fs::tapes::history(&root, "x", "Old/interest.pdf").len(),
+            1
+        );
+        let Screen::Open(o) = &h.state().screen else {
+            unreachable!()
+        };
+        let audited: i64 = o
+            .opened
+            .conn
+            .query_row(
+                "SELECT count(*) FROM audit WHERE action = 'tape_paste'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(audited, 1);
     }
 
     /// P04 steps 1-3: a PDF opened from Browse shows in the Viewer; Save writes pending

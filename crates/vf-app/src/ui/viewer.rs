@@ -191,6 +191,54 @@ pub struct Viewer {
     pub drawn: Vec<Redaction>,
     /// The "Pages…" window, while open.
     pub pages_dialog: Option<PagesDialog>,
+    /// The ten-key tape (PA-14).
+    pub tape: TapeState,
+}
+
+/// A tape in the History menu: (menu label, tape name, lines).
+type TapeEntry = (String, String, Vec<vf_core::tape::Line>);
+
+/// The ten-key tape docked under the page (PA-14).
+pub struct TapeState {
+    pub open: bool,
+    pub tape: vf_core::tape::Tape,
+    /// Entry mode "Pick from page": a click on an amount adds it (again: flips it), a drag adds
+    /// every amount in the box.
+    pub pick: bool,
+    /// A picked amount's label is the nearest caption on the form (else `p.N`).
+    pub captions: bool,
+    /// Paste with labels and initials.
+    pub include_labels: bool,
+    /// Paste keeping each line's source on the page.
+    pub link: bool,
+    /// Optional note under the tape (`✓ ties to Sch 1`).
+    pub note: String,
+    /// "Paste to page" pressed: the next click on a page places the tape.
+    pub placing: bool,
+    /// Tapes saved on this document and pasted on its pages, read for this generation.
+    history: Option<(u64, Vec<TapeEntry>)>,
+    /// A line's source shown after clicking it: (page, rect, when).
+    flash: Option<(usize, [f32; 4], std::time::Instant)>,
+    /// While dragging in pick mode: how many amounts, their sum.
+    pub drag_status: Option<String>,
+}
+
+impl Default for TapeState {
+    fn default() -> Self {
+        TapeState {
+            open: false,
+            tape: vf_core::tape::Tape::new("Tape"),
+            pick: false,
+            captions: true,
+            include_labels: true,
+            link: true,
+            note: String::new(),
+            placing: false,
+            history: None,
+            flash: None,
+            drag_status: None,
+        }
+    }
 }
 
 /// The "Pages…" window's fields.
@@ -253,6 +301,7 @@ impl Default for Viewer {
             pii_found: None,
             drawn: Vec::new(),
             pages_dialog: None,
+            tape: TapeState::default(),
         }
     }
 }
@@ -599,6 +648,9 @@ pub fn show(ui: &mut egui::Ui, v: &mut Viewer, env: &mut Env<'_>) {
     };
     toolbar(ui, v, env, &doc);
     footer(ui, v);
+    if v.tape.open && v.info.is_some() {
+        tape_panel(ui, v, env, &doc);
+    }
     if v.info.is_some() {
         thumbnails(ui, v);
         tool_panel(ui, v, env);
@@ -1109,6 +1161,17 @@ fn toolbar(ui: &mut egui::Ui, v: &mut Viewer, env: &mut Env<'_>, doc: &Doc) {
                 }
                 ui.separator();
                 if ui
+                    .selectable_label(v.tape.open, "Tape")
+                    .on_hover_text("Ten-key tape under the page: type or pick amounts off the page, paste the tape onto the PDF.")
+                    .clicked()
+                {
+                    v.tape.open = !v.tape.open;
+                    if !v.tape.open {
+                        v.tape.pick = false;
+                        v.tape.placing = false;
+                    }
+                }
+                if ui
                     .button("Close")
                     .on_hover_text("Close this document (asks first when annotations are unsaved).")
                     .clicked()
@@ -1336,6 +1399,9 @@ fn canvas(ui: &mut egui::Ui, v: &mut Viewer, initials: &str) {
             let geom = v.info.as_ref().and_then(|inf| inf.geoms.get(i).copied());
             if let (Some(g), true) = (geom, editable) {
                 draw_pending(ui, v, i, rect, s, &g);
+                if v.tape.open {
+                    draw_tape_marks(ui, v, i, rect, s, &g);
+                }
                 interact(ui, v, i, rect, s, &g, initials);
             }
         }
@@ -1439,6 +1505,69 @@ fn draw_pending(ui: &egui::Ui, v: &Viewer, page: usize, rect: Rect, s: f32, g: &
             }
             Kind::Tickmark { tick, at, size } => {
                 draw_tick(p, screen(rect, s, g, *at), size * s, *tick, a.color);
+            }
+            Kind::Tape {
+                at,
+                title,
+                rows,
+                footer,
+                labels,
+                ..
+            } => {
+                let (w, h) =
+                    annot::tape_size(rows.len(), *labels, !title.is_empty(), !footer.is_empty());
+                let c0 = screen(rect, s, g, *at);
+                let r = Rect::from_center_size(c0, vec2(w * s, h * s));
+                p.rect_filled(r, 0.0, Color32::from_rgb(0xFF, 0xFF, 0xF7));
+                p.rect_stroke(r, 0.0, Stroke::new(1.0, c), egui::StrokeKind::Inside);
+                let font = egui::FontId::monospace(7.0 * s);
+                let mut y = r.min.y + 4.0 * s;
+                let line = 10.0 * s;
+                if !title.is_empty() {
+                    p.text(
+                        pos2(r.min.x + 4.0 * s, y),
+                        egui::Align2::LEFT_TOP,
+                        title,
+                        font.clone(),
+                        c,
+                    );
+                    y += line;
+                }
+                for row in rows {
+                    if *labels && !row.label.is_empty() {
+                        p.text(
+                            pos2(r.min.x + 4.0 * s, y),
+                            egui::Align2::LEFT_TOP,
+                            &row.label,
+                            font.clone(),
+                            theme::INK_MUTED,
+                        );
+                    }
+                    p.text(
+                        pos2(r.max.x - 16.0 * s, y),
+                        egui::Align2::RIGHT_TOP,
+                        &row.amount,
+                        font.clone(),
+                        theme::INK,
+                    );
+                    p.text(
+                        pos2(r.max.x - 13.0 * s, y),
+                        egui::Align2::LEFT_TOP,
+                        &row.mark,
+                        font.clone(),
+                        c,
+                    );
+                    y += line;
+                }
+                if !footer.is_empty() {
+                    p.text(
+                        pos2(r.min.x + 4.0 * s, y),
+                        egui::Align2::LEFT_TOP,
+                        footer,
+                        font,
+                        theme::INK_MUTED,
+                    );
+                }
             }
             Kind::Stamp { text, at, size } => {
                 let (w, h) = annot::stamp_size(text, *size);
@@ -1577,6 +1706,10 @@ fn interact(
         [d.x, d.y]
     };
     let to_user = |d: [f32; 2]| g.to_user(d[0], d[1]);
+    if v.tape.open && (v.tape.pick || v.tape.placing) {
+        tape_interact(ui, v, page, &resp, rect, s, g, initials);
+        return;
+    }
     if matches!(
         v.tool,
         Tool::Select | Tool::Highlight | Tool::Underline | Tool::StrikeOut | Tool::RedactText
@@ -1807,6 +1940,7 @@ fn describe(k: &Kind) -> String {
         Kind::Arrow { .. } => "arrow".into(),
         Kind::Tickmark { tick, .. } => format!("tickmark: {}", tick.meaning()),
         Kind::Stamp { text, .. } => format!("stamp: {text}"),
+        Kind::Tape { title, rows, .. } => format!("tape: {title} ({} lines)", rows.len()),
     }
 }
 
@@ -2306,7 +2440,74 @@ fn finish_convert(v: &mut Viewer, env: &mut Env<'_>) {
 fn save(v: &mut Viewer, env: &mut Env<'_>, as_new: bool) {
     let Some(doc) = v.doc.clone() else { return };
     let n = v.pending.len();
+    // Pasted tapes, for their audit rows (PA-14 step 7: name, lines and total only).
+    let tapes: Vec<serde_json::Value> = v
+        .pending
+        .iter()
+        .filter_map(|a| match &a.kind {
+            Kind::Tape { title, rows, .. } => Some(serde_json::json!({
+                "tape": title,
+                "lines": rows.len(),
+                "total": rows.iter().rev().find(|r| r.total).map(|r| r.amount.clone()),
+                "page": a.page + 1,
+            })),
+            _ => None,
+        })
+        .collect();
+    // Pasted tapes are kept in the document's history too (PA-14 step 6).
+    let pasted: Vec<(String, Vec<vf_core::tape::Line>)> = v
+        .pending
+        .iter()
+        .filter_map(|a| match &a.kind {
+            Kind::Tape { data, .. } => {
+                let d: serde_json::Value = serde_json::from_str(data).ok()?;
+                Some((
+                    d["name"].as_str().unwrap_or("Tape").to_string(),
+                    serde_json::from_value(d["lines"].clone()).ok()?,
+                ))
+            }
+            _ => None,
+        })
+        .collect();
     let r = save_pending(v, env, &doc, as_new);
+    if r.is_ok() {
+        let rel = doc
+            .path
+            .strip_prefix(env.root)
+            .map(|p| p.to_string_lossy().replace('\\', "/"))
+            .unwrap_or_default();
+        for (name, lines) in pasted {
+            let rec = vf_fs::tapes::Saved {
+                doc_id: doc.doc_id.clone(),
+                rel_path: rel.clone(),
+                saved_at: vf_core::now_rfc3339(),
+                by: env.initials.to_string(),
+                name,
+                lines,
+            };
+            if let Err(e) = vf_fs::tapes::save(env.root, &rec) {
+                v.error = Some(format!("Tape not kept in the history: {e}"));
+            }
+        }
+        v.tape.history = None;
+    }
+    if r.is_ok() && !tapes.is_empty() {
+        let mut tx = vf_core::tx::Transaction::new("tape_paste");
+        for t in tapes {
+            tx = tx.audit(vf_core::audit::AuditEntry::new(
+                "tape_paste",
+                Some(doc.doc_id.as_str()),
+                t,
+            ));
+        }
+        if let Err(e) = tx.commit(
+            env.conn,
+            &mut vf_core::tx::NoFileOps,
+            &vf_core::tx::Actor::device(env.device_id),
+        ) {
+            v.error = Some(format!("The tape was pasted but not audited: {e}"));
+        }
+    }
     match r {
         Ok(new_doc) => {
             v.pending.clear();
@@ -2395,5 +2596,760 @@ fn save_pending(
     match vf_fs::content::replace(env.conn, env.root, env.device_id, &doc.doc_id, &tmp, change)? {
         Ok(_) => Ok(None),
         Err(why) => Err(format!("Not saved: {why}.")),
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Ten-key tape (PA-14)
+
+/// Whether a word on the page is an amount to pick: `1,284.17`, `$45`, `(45.00)`, `45.00-` (a
+/// bare `3` or `2025` is a box number or a year, not offered).
+fn amount_of(text: &str) -> Option<i64> {
+    let t = text.trim_matches(|c: char| matches!(c, ';' | ':' | '*'));
+    let looks = t.contains('.') || t.contains(',') || t.contains('$');
+    looks.then(|| vf_core::tape::parse_amount(t)).flatten()
+}
+
+/// The nearest caption of an amount on a form: the words before it on its line, else the words
+/// just above it (PA-14 step 4).
+fn caption_of(words: &[WordBox], w: &WordBox) -> Option<String> {
+    let (top, bottom) = (w.rect[3], w.rect[1]);
+    let h = (top - bottom).max(1.0);
+    let same_line = |o: &WordBox| {
+        let overlap = top.min(o.rect[3]) - bottom.max(o.rect[1]);
+        overlap > h * 0.5
+    };
+    let usable =
+        |o: &&WordBox| amount_of(&o.text).is_none() && o.text.chars().any(char::is_alphabetic);
+    let mut left: Vec<&WordBox> = words
+        .iter()
+        .filter(|o| same_line(o) && o.rect[2] <= w.rect[0] + 1.0 && w.rect[0] - o.rect[2] < 260.0)
+        .filter(usable)
+        .collect();
+    left.sort_by(|a, b| a.rect[0].total_cmp(&b.rect[0]));
+    let mut pick: Vec<&str> = left.iter().rev().take(6).map(|o| o.text.as_str()).collect();
+    if pick.is_empty() {
+        let mut above: Vec<&WordBox> = words
+            .iter()
+            .filter(|o| {
+                o.rect[1] >= top - 1.0
+                    && o.rect[1] - top < h * 2.5
+                    && o.rect[0] < w.rect[2] + 40.0
+                    && o.rect[2] > w.rect[0] - 120.0
+            })
+            .filter(usable)
+            .collect();
+        above.sort_by(|a, b| a.rect[0].total_cmp(&b.rect[0]));
+        pick = above
+            .iter()
+            .rev()
+            .take(6)
+            .map(|o| o.text.as_str())
+            .collect();
+    }
+    pick.reverse();
+    let c = pick.join(" ");
+    (!c.trim().is_empty()).then(|| c.trim().to_string())
+}
+
+fn tape_label(v: &Viewer, page: usize, w: &WordBox) -> String {
+    let p = format!("p.{}", page + 1);
+    if !v.tape.captions {
+        return p;
+    }
+    v.words
+        .get(&page)
+        .and_then(|ws| caption_of(ws, w))
+        .map_or(p.clone(), |c| format!("{c} · {p}"))
+}
+
+/// Picks off the page and places a pasted tape.
+#[allow(clippy::too_many_arguments)]
+fn tape_interact(
+    ui: &mut egui::Ui,
+    v: &mut Viewer,
+    page: usize,
+    resp: &egui::Response,
+    rect: Rect,
+    s: f32,
+    g: &Geometry,
+    initials: &str,
+) {
+    v.request_words(page);
+    let to_user = |pos: Pos2| {
+        let d = (pos - rect.min) / s;
+        g.to_user(d.x, d.y)
+    };
+    if v.tape.placing {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
+        if resp.clicked()
+            && let Some(pos) = resp.interact_pointer_pos()
+        {
+            let at = to_user(pos);
+            paste_tape(v, page, at, initials);
+        }
+        return;
+    }
+    // Amounts under the pointer show a hand.
+    let amounts: Vec<WordBox> = v
+        .words
+        .get(&page)
+        .into_iter()
+        .flatten()
+        .filter(|w| amount_of(&w.text).is_some())
+        .cloned()
+        .collect();
+    let hit = |pos: Pos2| -> Option<WordBox> {
+        let u = to_user(pos);
+        amounts
+            .iter()
+            .find(|w| {
+                u[0] >= w.rect[0] - 1.0
+                    && u[0] <= w.rect[2] + 1.0
+                    && u[1] >= w.rect[1] - 1.0
+                    && u[1] <= w.rect[3] + 1.0
+            })
+            .cloned()
+    };
+    if let Some(pos) = resp.hover_pos()
+        && hit(pos).is_some()
+    {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    if resp.clicked()
+        && let Some(pos) = resp.interact_pointer_pos()
+        && let Some(w) = hit(pos)
+    {
+        pick_word(v, page, &w);
+        return;
+    }
+    if resp.drag_started()
+        && let Some(pos) = resp.interact_pointer_pos()
+    {
+        let d = (pos - rect.min) / s;
+        v.drag = Some(Drag {
+            page,
+            start: [d.x, d.y],
+            points: vec![[d.x, d.y]],
+        });
+    }
+    let boxed = |v: &Viewer| -> Vec<WordBox> {
+        let Some(d) = v.drag.as_ref().filter(|d| d.page == page) else {
+            return vec![];
+        };
+        let end = *d.points.last().unwrap_or(&d.start);
+        let (a, b) = (g.to_user(d.start[0], d.start[1]), g.to_user(end[0], end[1]));
+        let bx = [
+            a[0].min(b[0]),
+            a[1].min(b[1]),
+            a[0].max(b[0]),
+            a[1].max(b[1]),
+        ];
+        let mut inside: Vec<WordBox> = amounts
+            .iter()
+            .filter(|w| {
+                w.rect[0] < bx[2] && w.rect[2] > bx[0] && w.rect[1] < bx[3] && w.rect[3] > bx[1]
+            })
+            .cloned()
+            .collect();
+        // Reading order: top to bottom, left to right.
+        inside.sort_by(|p, q| {
+            q.rect[3]
+                .total_cmp(&p.rect[3])
+                .then(p.rect[0].total_cmp(&q.rect[0]))
+        });
+        inside
+    };
+    if resp.dragged()
+        && let (Some(pos), Some(d)) = (resp.interact_pointer_pos(), v.drag.as_mut())
+        && d.page == page
+    {
+        let p = (pos - rect.min) / s;
+        d.points.push([p.x, p.y]);
+        let inside = boxed(v);
+        let sum: i64 = inside.iter().filter_map(|w| amount_of(&w.text)).sum();
+        v.tape.drag_status = Some(format!(
+            "Drag: {} number{} · +{}",
+            inside.len(),
+            if inside.len() == 1 { "" } else { "s" },
+            vf_core::tape::format_cents(sum)
+        ));
+    }
+    if resp.drag_stopped() && v.drag.as_ref().is_some_and(|d| d.page == page) {
+        let inside = boxed(v);
+        v.drag = None;
+        v.tape.drag_status = None;
+        for w in &inside {
+            if v.tape.tape.line_from(page as u32, w.rect).is_none() {
+                pick_word(v, page, w);
+            }
+        }
+    }
+}
+
+/// Adds the amount in `w` to the tape, or flips it when it is on the tape already.
+fn pick_word(v: &mut Viewer, page: usize, w: &WordBox) {
+    let Some(cents) = amount_of(&w.text) else {
+        return;
+    };
+    if let Some(i) = v.tape.tape.line_from(page as u32, w.rect) {
+        v.tape.tape.flip(i);
+        return;
+    }
+    let label = tape_label(v, page, w);
+    v.tape.tape.pick_at(
+        cents,
+        false,
+        label,
+        Some(vf_core::tape::Source {
+            page: page as u32,
+            rect: w.rect,
+        }),
+    );
+}
+
+/// Puts the tape on the page as a pending annotation (saved with Save / Save as), and keeps a
+/// copy in the document's tape history.
+fn paste_tape(v: &mut Viewer, page: usize, at: [f32; 2], initials: &str) {
+    use vf_core::tape::{Op, format_cents};
+    v.tape.placing = false;
+    let t = &v.tape.tape;
+    if t.lines().is_empty() {
+        v.notice = Some("The tape is empty: nothing to paste.".into());
+        return;
+    }
+    let labels = v.tape.include_labels;
+    let rows: Vec<annot::TapeRow> = t
+        .lines()
+        .iter()
+        .map(|l| annot::TapeRow {
+            label: if labels {
+                l.label.clone()
+            } else {
+                String::new()
+            },
+            amount: format_cents(l.amount),
+            mark: l.op.mark().to_string(),
+            total: matches!(l.op, Op::Subtotal | Op::Total | Op::GrandTotal),
+        })
+        .collect();
+    let footer = if labels {
+        let date = chrono::Local::now().format("%m/%d/%Y").to_string();
+        let note = v.tape.note.trim();
+        if note.is_empty() {
+            format!("{initials} · {date}")
+        } else {
+            format!("{initials} · {date} · {note}")
+        }
+    } else {
+        String::new()
+    };
+    let lines: Vec<vf_core::tape::Line> = t
+        .lines()
+        .iter()
+        .cloned()
+        .map(|mut l| {
+            if !v.tape.link {
+                l.source = None;
+            }
+            l
+        })
+        .collect();
+    let data = serde_json::json!({ "name": t.name, "lines": lines }).to_string();
+    v.pending.push(Annotation {
+        page: page as u32,
+        kind: Kind::Tape {
+            at,
+            title: t.name.clone(),
+            rows,
+            footer,
+            labels,
+            data,
+        },
+        color: annot::ACCENT,
+        author: initials.to_string(),
+    });
+    v.tape.pick = false;
+    v.notice = Some("Tape placed: Save writes it into the file (Save as: a new document).".into());
+}
+
+/// Dotted underlines under amounts to pick, numbered markers on picked ones, the flashed source.
+fn draw_tape_marks(ui: &egui::Ui, v: &Viewer, page: usize, rect: Rect, s: f32, g: &Geometry) {
+    let p = ui.painter();
+    if v.tape.pick
+        && let Some(ws) = v.words.get(&page)
+    {
+        for w in ws.iter().filter(|w| amount_of(&w.text).is_some()) {
+            let r = user_rect_to_screen(rect, s, g, w.rect);
+            let mut x = r.min.x;
+            while x < r.max.x {
+                p.line_segment(
+                    [
+                        pos2(x, r.max.y + 1.0),
+                        pos2((x + 2.0).min(r.max.x), r.max.y + 1.0),
+                    ],
+                    Stroke::new(1.0, theme::ACCENT_DEFAULT),
+                );
+                x += 4.0;
+            }
+        }
+    }
+    for (i, l) in v.tape.tape.lines().iter().enumerate() {
+        let Some(src) = l.source.filter(|x| x.page as usize == page) else {
+            continue;
+        };
+        let r = user_rect_to_screen(rect, s, g, src.rect);
+        let minus = l.op == vf_core::tape::Op::Minus;
+        let col = if minus {
+            Color32::from_rgb(0xB0, 0x20, 0x20)
+        } else {
+            theme::ACCENT_DEFAULT
+        };
+        p.rect_stroke(
+            r.expand(1.5),
+            2.0,
+            Stroke::new(1.2, col),
+            egui::StrokeKind::Outside,
+        );
+        let c = pos2(r.max.x + 8.0, r.min.y);
+        p.circle_filled(c, 7.0, col);
+        p.text(
+            c,
+            egui::Align2::CENTER_CENTER,
+            (i + 1).to_string(),
+            egui::FontId::proportional(9.0),
+            Color32::WHITE,
+        );
+    }
+    if let Some((pg, r, at)) = v.tape.flash
+        && pg == page
+        && at.elapsed() < std::time::Duration::from_millis(1500)
+    {
+        let r = user_rect_to_screen(rect, s, g, r);
+        p.rect_filled(
+            r.expand(3.0),
+            3.0,
+            Color32::from_rgba_unmultiplied(255, 200, 0, 90),
+        );
+        ui.ctx().request_repaint();
+    }
+    if let Some(d) = v.drag.as_ref().filter(|d| d.page == page && v.tape.pick) {
+        let end = *d.points.last().unwrap_or(&d.start);
+        let r = Rect::from_two_pos(
+            rect.min + vec2(d.start[0], d.start[1]) * s,
+            rect.min + vec2(end[0], end[1]) * s,
+        );
+        p.rect_stroke(
+            r,
+            0.0,
+            Stroke::new(1.0, theme::ACCENT_DEFAULT),
+            egui::StrokeKind::Inside,
+        );
+    }
+}
+
+/// The physical keys that drive the tape while nothing else has the keyboard.
+fn tape_keys(ui: &egui::Ui, v: &mut Viewer) {
+    use vf_core::tape::Key as K;
+    if ui.ctx().memory(|m| m.focused().is_some()) {
+        return;
+    }
+    let events = ui.input(|i| i.events.clone());
+    for e in events {
+        match e {
+            egui::Event::Text(t) => {
+                for c in t.chars() {
+                    let k = match c {
+                        '0'..='9' => Some(K::Digit(c as u8 - b'0')),
+                        '.' => Some(K::Point),
+                        '+' => Some(K::Plus),
+                        '-' => Some(K::Minus),
+                        '*' => Some(K::Times),
+                        '/' => Some(K::Divide),
+                        '=' => Some(K::Equals),
+                        _ => None,
+                    };
+                    if let Some(k) = k {
+                        v.tape.tape.press(k);
+                    }
+                }
+            }
+            egui::Event::Key {
+                key,
+                pressed: true,
+                modifiers,
+                ..
+            } => match key {
+                egui::Key::Enter => v.tape.tape.press(K::Plus),
+                egui::Key::Backspace => v.tape.tape.press(K::Backspace),
+                egui::Key::Delete => v.tape.tape.press(K::ClearEntry),
+                egui::Key::Escape => {
+                    v.tape.pick = false;
+                    v.tape.placing = false;
+                }
+                egui::Key::Z if modifiers.command => {
+                    if modifiers.shift {
+                        v.tape.tape.redo();
+                    } else {
+                        v.tape.tape.undo();
+                    }
+                }
+                _ => {}
+            },
+            _ => {}
+        }
+    }
+}
+
+/// Earlier tapes of this document: saved ones and the ones pasted on its pages.
+fn tape_history(v: &mut Viewer, env: &Env<'_>, doc: &Doc) {
+    if v.tape
+        .history
+        .as_ref()
+        .is_some_and(|(g, _)| *g == v.generation)
+    {
+        return;
+    }
+    let rel = doc
+        .path
+        .strip_prefix(env.root)
+        .map(|p| p.to_string_lossy().replace('\\', "/"))
+        .unwrap_or_default();
+    let mut list: Vec<TapeEntry> = Vec::new();
+    for t in annot::read_tapes(&doc.path).unwrap_or_default() {
+        #[derive(serde::Deserialize)]
+        struct Data {
+            name: String,
+            lines: Vec<vf_core::tape::Line>,
+        }
+        if let Ok(d) = serde_json::from_str::<Data>(&t.data) {
+            list.push((
+                format!("On page {}: {}", t.page + 1, d.name),
+                d.name,
+                d.lines,
+            ));
+        }
+    }
+    for s in vf_fs::tapes::history(env.root, &doc.doc_id, &rel) {
+        list.push((
+            format!(
+                "{} · {} · {}",
+                widgets::local_time(&s.saved_at),
+                s.by,
+                s.name
+            ),
+            s.name,
+            s.lines,
+        ));
+    }
+    v.tape.history = Some((v.generation, list));
+}
+
+/// The tape panel under the page (PA-14 step 2).
+fn tape_panel(ui: &mut egui::Ui, v: &mut Viewer, env: &mut Env<'_>, doc: &Doc) {
+    use vf_core::tape::{Key as K, Op, format_cents};
+    tape_history(v, env, doc);
+    tape_keys(ui, v);
+    let mut jump: Option<(usize, [f32; 4])> = None;
+    egui::Panel::bottom("vf-tape")
+        .resizable(true)
+        .default_size(260.0)
+        .frame(
+            egui::Frame::new()
+                .fill(theme::PANE)
+                .inner_margin(egui::Margin::symmetric(12, 8)),
+        )
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                let l = ui.label(RichText::new("Tape").strong());
+                ui.add(egui::TextEdit::singleline(&mut v.tape.tape.name).desired_width(200.0))
+                    .labelled_by(l.id);
+                ui.separator();
+                ui.selectable_value(&mut v.tape.pick, false, "Keypad");
+                ui.selectable_value(&mut v.tape.pick, true, "Pick from page")
+                    .on_hover_text("Click an amount to add it, again to subtract it; drag a box to add every amount in it. Esc: back to the keypad.");
+                ui.checkbox(&mut v.tape.captions, "Labels from box captions");
+                if let Some(st) = &v.tape.drag_status {
+                    ui.label(widgets::caption(st));
+                }
+            });
+            ui.add_space(4.0);
+            ui.columns(2, |cols| {
+                // The tape.
+                let ui = &mut cols[0];
+                egui::ScrollArea::vertical()
+                    .id_salt("tape-lines")
+                    .max_height(170.0)
+                    .stick_to_bottom(true)
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        egui::Grid::new("tape-grid")
+                            .num_columns(4)
+                            .spacing([6.0, 2.0])
+                            .show(ui, |ui| {
+                                let n = v.tape.tape.lines().len();
+                                for i in 0..n {
+                                    let l = v.tape.tape.lines()[i].clone();
+                                    ui.label(widgets::caption((i + 1).to_string()));
+                                    let mut label = l.label.clone();
+                                    let r = ui.add(
+                                        egui::TextEdit::singleline(&mut label)
+                                            .desired_width(220.0)
+                                            .hint_text(""),
+                                    );
+                                    r.widget_info(|| {
+                                        egui::WidgetInfo::labeled(
+                                            egui::accesskit::Role::TextInput,
+                                            true,
+                                            format!("Label of line {}", i + 1),
+                                        )
+                                    });
+                                    if r.changed() {
+                                        v.tape.tape.set_label(i, label);
+                                    }
+                                    let total =
+                                        matches!(l.op, Op::Subtotal | Op::Total | Op::GrandTotal);
+                                    let mut amount = RichText::new(format_cents(l.amount)).monospace();
+                                    if total {
+                                        amount = amount.strong();
+                                    }
+                                    let a = ui.add(egui::Label::new(amount).sense(Sense::click()));
+                                    if let Some(src) = l.source {
+                                        let a = a.on_hover_text("Show it on the page");
+                                        if a.clicked() {
+                                            jump = Some((src.page as usize, src.rect));
+                                        }
+                                    }
+                                    ui.label(RichText::new(l.op.mark()).monospace().color(
+                                        if l.op == Op::Minus {
+                                            Color32::from_rgb(0xB0, 0x20, 0x20)
+                                        } else {
+                                            theme::INK_SECONDARY
+                                        },
+                                    ));
+                                    ui.end_row();
+                                }
+                            });
+                    });
+                // Display, keypad, actions.
+                let ui = &mut cols[1];
+                egui::Frame::new()
+                    .fill(Color32::WHITE)
+                    .stroke(Stroke::new(1.0, theme::BORDER_PANE))
+                    .inner_margin(6)
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.label(RichText::new(v.tape.tape.display()).monospace().size(18.0));
+                            if let Some(e) = v.tape.tape.error() {
+                                ui.label(RichText::new(e).color(crate::ui::wizard::ERROR));
+                            }
+                        });
+                        ui.label(widgets::caption(format!(
+                            "Running {} · GT {}",
+                            format_cents(v.tape.tape.running()),
+                            format_cents(v.tape.tape.grand())
+                        )));
+                    });
+                let keys: [[(&str, K); 5]; 4] = [
+                    [("7", K::Digit(7)), ("8", K::Digit(8)), ("9", K::Digit(9)), ("÷", K::Divide), ("CE", K::ClearEntry)],
+                    [("4", K::Digit(4)), ("5", K::Digit(5)), ("6", K::Digit(6)), ("×", K::Times), ("±", K::Sign)],
+                    [("1", K::Digit(1)), ("2", K::Digit(2)), ("3", K::Digit(3)), ("−", K::Minus), ("S", K::Subtotal)],
+                    [("0", K::Digit(0)), ("00", K::DoubleZero), (".", K::Point), ("+", K::Plus), ("T", K::Total)],
+                ];
+                egui::Grid::new("tape-keys").spacing([4.0, 4.0]).show(ui, |ui| {
+                    for row in keys {
+                        for (label, k) in row {
+                            if ui
+                                .add_sized([44.0, 26.0], egui::Button::new(RichText::new(label).monospace()))
+                                .clicked()
+                            {
+                                v.tape.tape.press(k);
+                            }
+                        }
+                        ui.end_row();
+                    }
+                });
+                ui.horizontal_wrapped(|ui| {
+                    if ui.small_button("=").clicked() {
+                        v.tape.tape.press(K::Equals);
+                    }
+                    if ui.small_button("GT").clicked() {
+                        v.tape.tape.press(K::GrandTotal);
+                    }
+                    if ui.small_button("Del").on_hover_text("Delete the last digit").clicked() {
+                        v.tape.tape.press(K::Backspace);
+                    }
+                    if ui.add_enabled(v.tape.tape.can_undo(), egui::Button::new("Undo").small()).clicked() {
+                        v.tape.tape.undo();
+                    }
+                    if ui.add_enabled(v.tape.tape.can_redo(), egui::Button::new("Redo").small()).clicked() {
+                        v.tape.tape.redo();
+                    }
+                    if ui
+                        .small_button("Copy")
+                        .on_hover_text("The tape as text, and as columns for Excel")
+                        .clicked()
+                    {
+                        let t = &v.tape.tape;
+                        ui.ctx().copy_text(format!("{}\n{}", t.text(), t.tsv()));
+                        v.notice = Some("Tape copied.".into());
+                    }
+                    if ui.small_button("Clear").clicked() {
+                        v.tape.tape.press(K::Clear);
+                    }
+                    let hist = v.tape.history.as_ref().map(|(_, h)| h.clone()).unwrap_or_default();
+                    ui.menu_button("History", |ui| {
+                        if hist.is_empty() {
+                            ui.label(widgets::caption("No tapes on this document yet."));
+                        }
+                        for (label, name, lines) in hist {
+                            if ui.button(label).clicked() {
+                                v.tape.tape = vf_core::tape::Tape::from_lines(name, lines);
+                                ui.close();
+                            }
+                        }
+                    });
+                    if ui
+                        .small_button("Save tape")
+                        .on_hover_text("Keep this tape with the document (History)")
+                        .clicked()
+                    {
+                        save_tape(v, env, doc);
+                    }
+                });
+                ui.horizontal_wrapped(|ui| {
+                    ui.checkbox(&mut v.tape.include_labels, "Include labels & initials");
+                    ui.checkbox(&mut v.tape.link, "Link entries to page");
+                });
+                ui.horizontal(|ui| {
+                    let l = ui.label("Note");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut v.tape.note)
+                            .hint_text("e.g. ✓ ties to Sch 1")
+                            .desired_width(150.0),
+                    )
+                    .labelled_by(l.id);
+                    if ui
+                        .add_enabled(
+                            !v.tape.tape.lines().is_empty(),
+                            widgets::primary_button(if v.tape.placing {
+                                "Click on the page…"
+                            } else {
+                                "Paste to page"
+                            }),
+                        )
+                        .on_hover_text("Then click where the tape goes; Save writes it into the PDF.")
+                        .clicked()
+                    {
+                        v.tape.placing = !v.tape.placing;
+                    }
+                });
+            });
+        });
+    if let Some((page, r)) = jump {
+        if let Some(d) = &mut v.doc {
+            d.page = page;
+        }
+        v.scroll_to = Some(page);
+        v.tape.flash = Some((page, r, std::time::Instant::now()));
+    }
+}
+
+/// Keeps the tape in the document's history (`_Vibe/tapes.jsonl`).
+fn save_tape(v: &mut Viewer, env: &Env<'_>, doc: &Doc) {
+    if v.tape.tape.lines().is_empty() {
+        return;
+    }
+    let rel = doc
+        .path
+        .strip_prefix(env.root)
+        .map(|p| p.to_string_lossy().replace('\\', "/"))
+        .unwrap_or_default();
+    let rec = vf_fs::tapes::Saved {
+        doc_id: doc.doc_id.clone(),
+        rel_path: rel,
+        saved_at: vf_core::now_rfc3339(),
+        by: env.initials.to_string(),
+        name: v.tape.tape.name.clone(),
+        lines: v.tape.tape.lines().to_vec(),
+    };
+    match vf_fs::tapes::save(env.root, &rec) {
+        Ok(()) => {
+            v.tape.history = None;
+            v.notice = Some("Tape kept with the document (History).".into());
+        }
+        Err(e) => v.error = Some(format!("Tape not kept: {e}")),
+    }
+}
+
+#[cfg(test)]
+impl Viewer {
+    /// Picks every amount on `page` the renderer has sent words for; returns the tape's length.
+    pub fn pick_amounts_for_test(&mut self, page: usize) -> usize {
+        self.request_words(page);
+        let words: Vec<WordBox> = self
+            .words
+            .get(&page)
+            .into_iter()
+            .flatten()
+            .filter(|w| amount_of(&w.text).is_some())
+            .cloned()
+            .collect();
+        if words.len() >= 2 && self.tape.tape.lines().is_empty() {
+            for w in &words {
+                pick_word(self, page, w);
+            }
+        }
+        self.tape.tape.lines().len()
+    }
+
+    pub fn paste_for_test(&mut self, page: usize, at: [f32; 2], initials: &str) {
+        paste_tape(self, page, at, initials);
+    }
+}
+
+#[cfg(test)]
+mod tape_tests {
+    use super::*;
+
+    fn w(text: &str, rect: [f32; 4]) -> WordBox {
+        WordBox {
+            rect,
+            text: text.into(),
+        }
+    }
+
+    #[test]
+    fn amounts_to_pick() {
+        assert_eq!(amount_of("1,284.17"), Some(128417));
+        assert_eq!(amount_of("$45"), Some(4500));
+        assert_eq!(amount_of("(45.00)"), Some(-4500));
+        assert_eq!(amount_of("2025"), None, "a year is not offered");
+        assert_eq!(amount_of("3"), None, "a box number is not offered");
+        assert_eq!(amount_of("Interest"), None);
+    }
+
+    /// Box captions (step 4): the words before the amount on its line, else above it.
+    #[test]
+    fn captions_from_the_form() {
+        let words = vec![
+            w("1", [40.0, 700.0, 44.0, 710.0]),
+            w("Interest", [50.0, 700.0, 90.0, 710.0]),
+            w("income", [92.0, 700.0, 130.0, 710.0]),
+            w("1,284.17", [200.0, 700.0, 240.0, 710.0]),
+            w("Federal", [300.0, 660.0, 340.0, 670.0]),
+            w("tax", [342.0, 660.0, 360.0, 670.0]),
+            w("withheld", [362.0, 660.0, 400.0, 670.0]),
+            w("12.00", [310.0, 645.0, 340.0, 655.0]),
+        ];
+        assert_eq!(
+            caption_of(&words, &words[3]).as_deref(),
+            Some("Interest income")
+        );
+        assert_eq!(
+            caption_of(&words, &words[7]).as_deref(),
+            Some("Federal tax withheld")
+        );
     }
 }

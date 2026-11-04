@@ -107,6 +107,160 @@ impl Tick {
     }
 }
 
+/// One row of a pasted tape.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TapeRow {
+    pub label: String,
+    /// As shown: `1,284.17`.
+    pub amount: String,
+    /// `+`, `-`, `×`, `÷`, `=`, `S`, `T`, `GT`.
+    pub mark: String,
+    /// A total row (drawn bold, ruled above).
+    pub total: bool,
+}
+
+const TAPE_SIZE: f32 = 8.0;
+const TAPE_LINE: f32 = 10.0;
+
+/// The size of a pasted tape's box (display orientation).
+pub fn tape_size(rows: usize, labels: bool, title: bool, footer: bool) -> (f32, f32) {
+    let w = if labels { 240.0 } else { 120.0 };
+    let n = rows + usize::from(title) + usize::from(footer);
+    (w, 8.0 + n as f32 * TAPE_LINE)
+}
+
+/// Helvetica advance of `s` in ems (digits and the usual punctuation exact enough to right-align
+/// amounts).
+fn helv_width(s: &str) -> f32 {
+    s.chars()
+        .map(|c| match c {
+            '0'..='9' => 0.556,
+            ',' | '.' | ' ' => 0.278,
+            '-' => 0.333,
+            '(' | ')' => 0.333,
+            _ => 0.6,
+        })
+        .sum()
+}
+
+/// A pasted tape read back from a PDF: page, box, title and the `/VfTape` data.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FoundTape {
+    pub page: u32,
+    pub rect: [f32; 4],
+    pub title: String,
+    pub data: String,
+}
+
+/// The tapes pasted on `path`'s pages (PA-14: reopening restores them).
+pub fn read_tapes(path: &Path) -> Result<Vec<FoundTape>, String> {
+    let doc = Document::load(path).map_err(|e| format!("cannot read the PDF: {e}"))?;
+    let mut out = Vec::new();
+    for (i, (_, page)) in doc.get_pages().into_iter().enumerate() {
+        let Ok(dict) = doc.get_dictionary(page) else {
+            continue;
+        };
+        let Ok(Ok((_, Object::Array(annots)))) = dict.get(b"Annots").map(|o| doc.dereference(o))
+        else {
+            continue;
+        };
+        for a in annots.clone() {
+            let Ok((_, Object::Dictionary(d))) = doc.dereference(&a) else {
+                continue;
+            };
+            let text =
+                |k: &[u8]| -> Option<String> { Some(decode_text(d.get(k).ok()?.as_str().ok()?)) };
+            let Some(data) = text(b"VfTape") else {
+                continue;
+            };
+            let rect: Vec<f32> = d
+                .get(b"Rect")
+                .ok()
+                .and_then(|o| o.as_array().ok())
+                .map(|a| a.iter().filter_map(|v| v.as_float().ok()).collect())
+                .unwrap_or_default();
+            out.push(FoundTape {
+                page: i as u32,
+                rect: [
+                    rect.first().copied().unwrap_or(0.0),
+                    rect.get(1).copied().unwrap_or(0.0),
+                    rect.get(2).copied().unwrap_or(0.0),
+                    rect.get(3).copied().unwrap_or(0.0),
+                ],
+                title: text(b"Subj").unwrap_or_default(),
+                data,
+            });
+        }
+    }
+    Ok(out)
+}
+
+fn tape_ops(
+    w: f32,
+    h: f32,
+    title: &str,
+    rows: &[TapeRow],
+    footer: &str,
+    labels: bool,
+    c: Rgb,
+) -> Vec<Operation> {
+    let ink = [0.1, 0.1, 0.1];
+    let mut v = vec![
+        op("q", vec![]),
+        fill([1.0, 1.0, 0.97]),
+        stroke(c),
+        op("w", nums(&[1.0])),
+        op("re", nums(&[0.5, 0.5, w - 1.0, h - 1.0])),
+        op("B", vec![]),
+        op("re", nums(&[0.0, 0.0, w, h])),
+        op("W", vec![]),
+        op("n", vec![]),
+    ];
+    let s = TAPE_SIZE;
+    let mut y = h - 4.0 - s;
+    let text = |v: &mut Vec<Operation>, x: f32, y: f32, t: &str, col: Rgb| {
+        v.push(op("BT", vec![]));
+        v.push(fill(col));
+        v.push(op("Tf", vec![Object::Name(b"Helv".to_vec()), s.into()]));
+        v.push(op("Td", nums(&[x, y])));
+        v.push(op("Tj", vec![win_ansi_obj(t)]));
+        v.push(op("ET", vec![]));
+    };
+    if !title.is_empty() {
+        text(&mut v, 4.0, y, title, c);
+        y -= TAPE_LINE;
+    }
+    let amount_right = w - 16.0;
+    let label_chars = ((amount_right - 70.0) / (s * REGULAR_EM)).max(4.0) as usize;
+    for r in rows {
+        if r.total {
+            v.push(stroke(ink));
+            v.push(op("w", nums(&[0.5])));
+            v.push(op("m", nums(&[amount_right - 60.0, y + s + 0.5])));
+            v.push(op("l", nums(&[amount_right, y + s + 0.5])));
+            v.push(op("S", vec![]));
+        }
+        if labels && !r.label.is_empty() {
+            let mut l: String = r.label.chars().take(label_chars).collect();
+            if r.label.chars().count() > label_chars {
+                l.pop();
+                l.push('…');
+            }
+            text(&mut v, 4.0, y, &l, [0.3, 0.3, 0.3]);
+        }
+        let aw = helv_width(&r.amount) * s;
+        text(&mut v, amount_right - aw, y, &r.amount, ink);
+        let mark = r.mark.replace('−', "-");
+        text(&mut v, amount_right + 3.0, y, &mark, c);
+        y -= TAPE_LINE;
+    }
+    if !footer.is_empty() {
+        text(&mut v, 4.0, y, footer, [0.35, 0.35, 0.35]);
+    }
+    v.push(op("Q", vec![]));
+    v
+}
+
 /// Stamp presets (UI_SPEC §4). `{date}` and `{initials}` are filled in by [`Preset::text`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Preset {
@@ -294,6 +448,19 @@ pub enum Kind {
         at: [f32; 2],
         size: f32,
     },
+    /// A ten-key tape pasted on the page (PA-14), centred at a point: a FreeText box with the
+    /// title, one row per tape line (label, amount, mark), and a footer (`KWK · 11/04/2026 ·
+    /// ✓ ties to Sch 1`). `data` (the tape's lines with where each came from, JSON) is kept in
+    /// the annotation as `/VfTape`, so reopening the file restores the tape.
+    Tape {
+        at: [f32; 2],
+        title: String,
+        rows: Vec<TapeRow>,
+        footer: String,
+        /// Draw the labels (a narrow tape without them).
+        labels: bool,
+        data: String,
+    },
     /// A text stamp (`CLIENT COPY`, `RECEIVED 10/29/2025`) centred at a point.
     Stamp {
         text: String,
@@ -409,12 +576,7 @@ pub fn read(path: &Path) -> Result<Vec<Found>, String> {
             let Ok((_, Object::Dictionary(d))) = doc.dereference(&a) else {
                 continue;
             };
-            let s = |k: &[u8]| {
-                d.get(k)
-                    .ok()
-                    .and_then(|o| o.as_str().ok())
-                    .map(|b| String::from_utf8_lossy(b).into_owned())
-            };
+            let s = |k: &[u8]| d.get(k).ok().and_then(|o| o.as_str().ok()).map(decode_text);
             let rect: Vec<f32> = d
                 .get(b"Rect")
                 .ok()
@@ -548,6 +710,49 @@ fn build(a: &Annotation, rotate: i64, font: ObjectId, multiply: ObjectId) -> Bui
                     tick_ops(*tick, *size, a.color),
                     true,
                     Some(format!("Tickmark: {}, {}", tick.meaning(), a.author)),
+                )
+            }
+            Kind::Tape {
+                at,
+                title,
+                rows,
+                footer,
+                labels,
+                data,
+            } => {
+                dict.set("VfTape", text_obj(data));
+                dict.set("Subj", text_obj(title));
+                dict.set("IT", Object::Name(b"FreeTextTypeWriter".to_vec()));
+                dict.set(
+                    "DA",
+                    Object::string_literal(format!("/Helv {TAPE_SIZE} Tf 0 0 0 rg")),
+                );
+                let (w, h) = tape_size(rows.len(), *labels, !title.is_empty(), !footer.is_empty());
+                let (uw, uh) = if rotate % 180 == 0 { (w, h) } else { (h, w) };
+                let rect = [
+                    at[0] - uw / 2.0,
+                    at[1] - uh / 2.0,
+                    at[0] + uw / 2.0,
+                    at[1] + uh / 2.0,
+                ];
+                let mut contents = vec![title.clone()];
+                contents.extend(rows.iter().map(|r| {
+                    format!("{} {} {}", r.label, r.amount, r.mark)
+                        .trim()
+                        .to_string()
+                }));
+                contents.push(footer.clone());
+                let contents = contents
+                    .into_iter()
+                    .filter(|l| !l.is_empty())
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                (
+                    "FreeText",
+                    rect,
+                    tape_ops(w, h, title, rows, footer, *labels, a.color),
+                    true,
+                    Some(contents),
                 )
             }
             Kind::Stamp { text, at, size } => {
@@ -878,6 +1083,20 @@ fn wrap(text: &str, per_line: usize) -> Vec<String> {
 
 fn win_ansi_obj(s: &str) -> Object {
     Object::String(crate::layer::win_ansi(s), StringFormat::Literal)
+}
+
+/// An annotation text string as written by [`text_obj`] (or by Acrobat): UTF-16BE with its
+/// byte-order mark, else single bytes.
+fn decode_text(b: &[u8]) -> String {
+    if let Some(rest) = b.strip_prefix(&[0xFE, 0xFF]) {
+        let u: Vec<u16> = rest
+            .chunks(2)
+            .map(|c| u16::from_be_bytes([c[0], *c.get(1).unwrap_or(&0)]))
+            .collect();
+        String::from_utf16_lossy(&u)
+    } else {
+        String::from_utf8_lossy(b).into_owned()
+    }
 }
 
 /// A text string for an annotation key: PDFDocEncoding when it fits, else UTF-16BE.

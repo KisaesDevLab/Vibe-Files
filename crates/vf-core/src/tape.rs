@@ -32,7 +32,8 @@ pub enum Key {
 }
 
 /// What a tape line is.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Op {
     Plus,
     Minus,
@@ -63,13 +64,24 @@ impl Op {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Line {
     /// Cents.
     pub amount: i64,
     pub op: Op,
     /// Where it came from (`Interest income · p.1 box 1`), editable; empty when typed.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub label: String,
+    /// The number on the page it was picked from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<Source>,
+}
+
+/// Where a picked amount is on its page: page (0-based) and its box in PDF user space.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Source {
+    pub page: u32,
+    pub rect: [f32; 4],
 }
 
 /// The entry being typed: digits, whether a point was typed, decimals typed, sign.
@@ -121,7 +133,7 @@ impl Entry {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 struct State {
     lines: Vec<Line>,
     running: i64,
@@ -304,13 +316,52 @@ impl Tape {
 
     /// Adds (or subtracts) an amount picked off a page, with its label: as if typed then `+`.
     pub fn pick(&mut self, cents: i64, minus: bool, label: impl Into<String>) {
+        self.pick_at(cents, minus, label, None);
+    }
+
+    /// [`Tape::pick`] remembering where on the page the amount is.
+    pub fn pick_at(
+        &mut self,
+        cents: i64,
+        minus: bool,
+        label: impl Into<String>,
+        source: Option<Source>,
+    ) {
         self.save();
         self.state.entry = Entry::default();
-        self.post(
-            cents,
-            if minus { Op::Minus } else { Op::Plus },
-            label.into(),
-        );
+        let op = if minus { Op::Minus } else { Op::Plus };
+        self.post(cents, op, label.into());
+        if let Some(l) = self.state.lines.last_mut() {
+            l.source = source;
+        }
+    }
+
+    /// The line picked from `rect` on `page`, when there is one.
+    pub fn line_from(&self, page: u32, rect: [f32; 4]) -> Option<usize> {
+        self.state.lines.iter().position(|l| {
+            l.source.is_some_and(|s| {
+                s.page == page && s.rect.iter().zip(rect).all(|(a, b)| (a - b).abs() < 0.5)
+            })
+        })
+    }
+
+    /// A tape read back from its lines (History, a pasted tape): the totals replayed.
+    pub fn from_lines(name: impl Into<String>, lines: Vec<Line>) -> Tape {
+        let mut t = Tape::new(name);
+        for l in &lines {
+            match l.op {
+                Op::Plus => t.state.running += l.amount,
+                Op::Minus => t.state.running -= l.amount,
+                Op::Total => {
+                    t.state.grand += t.state.running;
+                    t.state.running = 0;
+                }
+                Op::GrandTotal => t.state.grand = 0,
+                _ => {}
+            }
+        }
+        t.state.lines = lines;
+        t
     }
 
     /// Sets a picked line's sign (`+` ↔ `−`), keeping the totals right.
@@ -353,6 +404,7 @@ impl Tape {
             amount: cents,
             op,
             label,
+            source: None,
         });
     }
 
@@ -361,6 +413,7 @@ impl Tape {
             amount,
             op,
             label: String::new(),
+            source: None,
         });
     }
 
@@ -730,6 +783,25 @@ mod tests {
         t.set_label(1, "Interest on US bonds · p.1 box 3");
         assert!(t.text().contains("Interest on US bonds · p.1 box 3"));
         assert!(t.tsv().contains("1284.17\t+"));
+    }
+
+    #[test]
+    fn sources_and_replay() {
+        let mut t = Tape::new("t");
+        let src = Source {
+            page: 0,
+            rect: [10.0, 20.0, 50.0, 30.0],
+        };
+        t.pick_at(128417, false, "box 1", Some(src));
+        t.keys("45 + T");
+        assert_eq!(t.line_from(0, [10.2, 20.0, 50.0, 30.0]), Some(0));
+        assert_eq!(t.line_from(1, src.rect), None);
+        let back = Tape::from_lines("t", t.lines().to_vec());
+        assert_eq!(back.running(), t.running());
+        assert_eq!(back.grand(), 132917);
+        let json = serde_json::to_string(t.lines()).unwrap();
+        let lines: Vec<Line> = serde_json::from_str(&json).unwrap();
+        assert_eq!(lines, t.lines());
     }
 
     #[test]
