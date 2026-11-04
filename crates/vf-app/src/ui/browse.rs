@@ -59,7 +59,26 @@ impl SortCol {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum Node {
     Client(usize),
-    Year(usize, Option<i32>),
+    /// A folder inside the client folder (`Income Tax/2025`).
+    Folder(usize, String),
+}
+
+/// Documents being dragged from the grid (PA-23): their ids.
+#[derive(Debug, Clone)]
+struct DocDrag(Vec<String>);
+
+/// Asking whether to move dragged documents into a folder.
+struct MoveAsk {
+    /// Cabinet-relative destination folder.
+    dest: String,
+    rows: Vec<vf_fs::rename::Row>,
+}
+
+/// What the folder-listing thread found: each client folder's folders, and files in client
+/// folders that are not in the catalog (copied in through Explorer).
+struct Listing {
+    dirs: DiskDirs,
+    new_files: Vec<vf_fs::sweep::Unknown>,
 }
 
 /// A combine running on its thread: the sources, the merged file, the result.
@@ -77,7 +96,12 @@ pub struct Browse {
     /// after a reload (not more than every 2 s), so a reload never walks the share on the UI
     /// thread (QA A6).
     disk_dirs: std::collections::HashMap<String, Vec<String>>,
-    disk_job: Option<std::sync::mpsc::Receiver<DiskDirs>>,
+    disk_job: Option<std::sync::mpsc::Receiver<Listing>>,
+    /// Files the last listing found in client folders and not in the catalog: added on the
+    /// next frame (PA-23).
+    new_files: Vec<vf_fs::sweep::Unknown>,
+    /// A drop on a folder waiting for "Move" (PA-23).
+    move_ask: Option<MoveAsk>,
     disk_listed: Option<std::time::Instant>,
     combining: Option<Combining>,
     /// For a repaint when a listing arrives.
@@ -86,6 +110,8 @@ pub struct Browse {
     pub ix: Index,
     pub scope: Scope,
     expanded: HashSet<Node>,
+    /// `expanded` by client id while the catalog is re-read.
+    expanded_ids: Vec<(String, Option<String>)>,
     pub client_filter: String,
     pub name_filter: String,
     pub sort: (SortCol, bool),
@@ -122,6 +148,8 @@ pub struct Browse {
     trash_confirm: Option<usize>,
     /// The cabinet root, for the folders on disk in the tree (`set_root`).
     root: Option<PathBuf>,
+    /// Documents dropped on a tree folder: (ids, cabinet-relative folder), planned in `show`.
+    drop_request: Option<(Vec<String>, String)>,
     /// Legal holds covering what is shown (P07 step 4), for the selection / client they were
     /// read for.
     holds_seen: Option<(String, Vec<vf_fs::holds::Hold>)>,
@@ -205,6 +233,8 @@ impl Browse {
         let ix = Index::build(&snap);
         let mut b = Browse {
             disk_dirs: Default::default(),
+            new_files: vec![],
+            move_ask: None,
             disk_job: None,
             disk_listed: None,
             combining: None,
@@ -213,6 +243,7 @@ impl Browse {
             ix,
             scope: Scope::Cabinet,
             expanded: HashSet::new(),
+            expanded_ids: vec![],
             client_filter: String::new(),
             name_filter: String::new(),
             sort: (SortCol::Name, true),
@@ -236,6 +267,7 @@ impl Browse {
             versions: None,
             trash_requested: false,
             root: None,
+            drop_request: None,
             holds_seen: None,
             hold_reason: None,
             rename: None,
@@ -273,36 +305,57 @@ impl Browse {
     }
 
     /// Adds each client's folders on disk to the tree (empty template folders included), when
-    /// Browse knows the cabinet root.
+    /// Browse knows the cabinet root, and looks for files copied into client folders through
+    /// Explorer (added on the next frame; PA-23). Listed on a thread (QA A6).
     fn add_disk_folders(&mut self) {
+        self.apply_disk_dirs();
+        self.list_disk(false);
+    }
+
+    /// Starts a folder listing on its thread: after a reload (`again` = false; not more than
+    /// every 2 s), or every 30 s while Browse is shown (`again` = true).
+    fn list_disk(&mut self, again: bool) {
         let Some(root) = self.root.clone() else {
             return;
         };
-        self.apply_disk_dirs();
-        let rels: Vec<String> = self
+        let clients: Vec<(String, String)> = self
             .snap
             .clients
             .iter()
-            .filter_map(|c| c.folder_rel.clone().filter(|r| !r.is_empty()))
+            .filter_map(|c| {
+                c.folder_rel
+                    .clone()
+                    .filter(|r| !r.is_empty())
+                    .map(|r| (r, c.id.clone()))
+            })
             .collect();
-        let list = move || -> DiskDirs {
-            rels.into_iter()
-                .map(|rel| {
+        let known: HashSet<String> = self
+            .snap
+            .docs
+            .iter()
+            .map(|d| d.rel_path.to_lowercase())
+            .collect();
+        let hashes: HashSet<String> = self.snap.docs.iter().map(|d| d.hash.clone()).collect();
+        let list = move || -> Listing {
+            let dirs = clients
+                .iter()
+                .map(|(rel, _)| {
                     let mut dirs = Vec::new();
-                    leaf_dirs(&root.join(&rel), "", 0, &mut dirs);
-                    (rel, dirs)
+                    leaf_dirs(&root.join(rel), "", 0, &mut dirs);
+                    (rel.clone(), dirs)
                 })
-                .collect()
+                .collect();
+            let new_files = vf_fs::sweep::find_new(&root, &clients, &known, &hashes);
+            Listing { dirs, new_files }
         };
         if cfg!(test) {
             // Tests: at once, so the tree is complete on the next frame.
             let got = list();
-            self.take_disk_dirs(got);
+            self.take_listing(got);
             return;
         }
-        let fresh = self
-            .disk_listed
-            .is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(2));
+        let wait = std::time::Duration::from_secs(if again { 30 } else { 2 });
+        let fresh = self.disk_listed.is_some_and(|t| t.elapsed() < wait);
         if self.disk_job.is_some() || fresh {
             return;
         }
@@ -330,23 +383,65 @@ impl Browse {
         }
     }
 
-    fn take_disk_dirs(&mut self, got: DiskDirs) {
-        self.disk_dirs = got.into_iter().collect();
+    fn take_listing(&mut self, got: Listing) {
+        self.disk_dirs = got.dirs.into_iter().collect();
         self.disk_listed = Some(std::time::Instant::now());
+        self.new_files = got.new_files;
+        let before = self.ix.clients.clone();
         self.apply_disk_dirs();
-        self.refresh();
+        if self.ix.clients != before {
+            self.refresh();
+        }
     }
 
-    /// Takes a finished folder listing (every frame).
+    /// Takes a finished folder listing (every frame), and starts the next one every 30 s.
     fn poll_disk(&mut self) {
-        let Some(rx) = &self.disk_job else { return };
-        match rx.try_recv() {
-            Ok(got) => {
-                self.disk_job = None;
-                self.take_disk_dirs(got);
+        if let Some(rx) = &self.disk_job {
+            match rx.try_recv() {
+                Ok(got) => {
+                    self.disk_job = None;
+                    self.take_listing(got);
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => self.disk_job = None,
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
             }
-            Err(std::sync::mpsc::TryRecvError::Disconnected) => self.disk_job = None,
-            Err(std::sync::mpsc::TryRecvError::Empty) => {}
+        } else if !cfg!(test) {
+            self.list_disk(true);
+            if let Some(c) = &self.egui_ctx {
+                c.request_repaint_after(std::time::Duration::from_secs(30));
+            }
+        }
+    }
+
+    /// Adds the files the last listing found (copied into client folders through Explorer) as
+    /// documents, so they show without waiting for the weekly sweep (PA-23, owner 2026-11-04).
+    fn add_new_files(&mut self, env: &mut Env) {
+        if self.new_files.is_empty() {
+            return;
+        }
+        let found = std::mem::take(&mut self.new_files);
+        match vf_fs::sweep::adopt_new(env.conn, env.root, env.device_id, &found) {
+            Ok(added) if added.is_empty() => {}
+            Ok(added) => {
+                self.reload(env.conn);
+                let names: Vec<&str> = added
+                    .iter()
+                    .take(3)
+                    .map(|p| p.rsplit('/').next().unwrap_or(p))
+                    .collect();
+                let more = if added.len() > 3 {
+                    format!(" and {} more", added.len() - 3)
+                } else {
+                    String::new()
+                };
+                self.notice = Some(format!(
+                    "Added {} new file{} found in client folders: {}{more}. Set the doc type in the inspector.",
+                    added.len(),
+                    if added.len() == 1 { "" } else { "s" },
+                    names.join(", ")
+                ));
+            }
+            Err(e) => self.error = Some(format!("New files in client folders not added: {e}")),
         }
     }
 
@@ -365,6 +460,16 @@ impl Browse {
             .map(|&i| self.snap.docs[i].id.clone())
             .collect();
         let old_client = self.scope_client().map(|c| self.snap.clients[c].id.clone());
+        self.expanded_ids = self
+            .expanded
+            .iter()
+            .filter_map(|n| match n {
+                Node::Client(c) => Some((self.snap.clients.get(*c)?.id.clone(), None)),
+                Node::Folder(c, f) => {
+                    Some((self.snap.clients.get(*c)?.id.clone(), Some(f.clone())))
+                }
+            })
+            .collect();
         match vf_core::browse::load(conn) {
             Ok(s) => {
                 self.snap = s;
@@ -381,13 +486,8 @@ impl Browse {
             old_client.and_then(|id| self.snap.clients.iter().position(|c| c.id == id));
         self.scope = match (&self.scope, new_client) {
             (Scope::Client(_), Some(c)) => Scope::Client(c),
-            (Scope::Year { year, .. }, Some(c)) => Scope::Year {
+            (Scope::Folder { folder, .. }, Some(c)) => Scope::Folder {
                 client: c,
-                year: *year,
-            },
-            (Scope::Folder { year, folder, .. }, Some(c)) => Scope::Folder {
-                client: c,
-                year: *year,
                 folder: folder.clone(),
             },
             (Scope::Unassigned, _) => Scope::Unassigned,
@@ -401,7 +501,19 @@ impl Browse {
             ) => s.clone(),
             _ => Scope::Cabinet,
         };
-        self.expanded.clear();
+        // Keep what was open: client indices can shift when a client is added or removed.
+        let ids: Vec<&str> = self.snap.clients.iter().map(|c| c.id.as_str()).collect();
+        let old_ids = std::mem::take(&mut self.expanded_ids);
+        self.expanded = old_ids
+            .into_iter()
+            .filter_map(|(id, f)| {
+                let c = ids.iter().position(|i| *i == id)?;
+                Some(match f {
+                    None => Node::Client(c),
+                    Some(f) => Node::Folder(c, f),
+                })
+            })
+            .collect();
         self.undo_stack = None;
         self.versions = None;
         self.holds_seen = None;
@@ -419,9 +531,7 @@ impl Browse {
 
     fn scope_client(&self) -> Option<usize> {
         match &self.scope {
-            Scope::Client(c) | Scope::Year { client: c, .. } | Scope::Folder { client: c, .. } => {
-                Some(*c)
-            }
+            Scope::Client(c) | Scope::Folder { client: c, .. } => Some(*c),
             _ => None,
         }
     }
@@ -742,43 +852,39 @@ impl Browse {
             .collect()
     }
 
-    /// The tree scope a favorite points at, when its client is still here.
+    /// The tree scope a favorite points at, when its client is still here. Favorites saved
+    /// before the tree mirrored the disk (PA-23) named a year: a year favorite opens the client,
+    /// a folder favorite its folder for that year when there is one.
     fn favorite_scope(&self, f: &Favorite) -> Option<Scope> {
         let ci = |id: &str| self.snap.clients.iter().position(|c| c.id == id);
         Some(match f {
-            Favorite::Client { client } => Scope::Client(ci(client)?),
-            Favorite::Year { client, year } => Scope::Year {
-                client: ci(client)?,
-                year: *year,
-            },
+            Favorite::Client { client } | Favorite::Year { client, .. } => {
+                Scope::Client(ci(client)?)
+            }
             Favorite::Folder {
                 client,
                 year,
                 folder,
-            } => Scope::Folder {
-                client: ci(client)?,
-                year: *year,
-                folder: folder.clone(),
-            },
+            } => {
+                let c = ci(client)?;
+                let with_year = year.map(|y| format!("{folder}/{y}"));
+                let folder = match with_year {
+                    Some(f) if self.ix.clients[c].folders.contains_key(&f) => f,
+                    _ => folder.clone(),
+                };
+                Scope::Folder { client: c, folder }
+            }
         })
     }
 
-    /// The favorite for a tree scope (client, year or folder).
+    /// The favorite for a tree scope (client or folder).
     fn as_favorite(&self, s: &Scope) -> Option<Favorite> {
         let id = |c: usize| self.snap.clients[c].id.clone();
         Some(match s {
             Scope::Client(c) => Favorite::Client { client: id(*c) },
-            Scope::Year { client, year } => Favorite::Year {
+            Scope::Folder { client, folder } => Favorite::Folder {
                 client: id(*client),
-                year: *year,
-            },
-            Scope::Folder {
-                client,
-                year,
-                folder,
-            } => Favorite::Folder {
-                client: id(*client),
-                year: *year,
+                year: None,
                 folder: folder.clone(),
             },
             _ => return None,
@@ -792,18 +898,30 @@ impl Browse {
         let name = |c: usize| self.snap.clients[c].name.clone();
         match s {
             Scope::Client(c) => name(c),
-            Scope::Year { client, year } => format!("{} · {}", name(client), year_label(year)),
-            Scope::Folder {
-                client,
-                year,
-                folder,
-            } => format!(
-                "{} · {} · {}",
-                name(client),
-                year_label(year),
-                folder_label(&folder)
-            ),
+            Scope::Folder { client, folder } => {
+                format!("{} · {}", name(client), folder.replace('/', " › "))
+            }
             _ => String::new(),
+        }
+    }
+
+    /// Plans moving `ids` into `dest` (a folder dropped on) and asks first (PA-23).
+    fn ask_move(&mut self, conn: &Connection, root: &Path, ids: Vec<String>, dest: String) {
+        match vf_fs::moveto::plan(conn, root, &ids, &dest) {
+            Ok(rows) if rows.iter().any(vf_fs::rename::Row::renames) => {
+                self.move_ask = Some(MoveAsk { dest, rows });
+            }
+            Ok(rows) => {
+                let why = rows.iter().find_map(|r| match &r.outcome {
+                    vf_fs::rename::Outcome::Skip(w) => Some(w.clone()),
+                    _ => None,
+                });
+                self.notice = Some(match why {
+                    Some(w) => format!("Not moved: {w}."),
+                    None => "Already in that folder.".into(),
+                });
+            }
+            Err(e) => self.error = Some(format!("Not moved: {e}")),
         }
     }
 
@@ -926,16 +1044,13 @@ pub fn week_start_utc() -> String {
         .to_string()
 }
 
-fn folder_label(f: &str) -> &str {
-    if f.is_empty() { "(client folder)" } else { f }
-}
-
 /// Draws the whole tab (three panes). Call where the central panel would go.
 pub fn show(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env) {
     if b.egui_ctx.is_none() {
         b.egui_ctx = Some(ui.ctx().clone());
     }
     b.poll_disk();
+    b.add_new_files(env);
     b.finish_combine(env);
     b.keys(ui.ctx());
     b.saved_requests(env);
@@ -955,6 +1070,11 @@ pub fn show(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env) {
                 .show(ui, |ui| inspector(ui, b, env))
         });
     egui::CentralPanel::default().show(ui, |ui| grid(ui, b, env.conn));
+    drag_label(ui.ctx());
+    if let Some((ids, dest)) = b.drop_request.take() {
+        b.ask_move(env.conn, env.root, ids, dest);
+    }
+    move_dialog(ui.ctx(), b, env);
     if let Some(d) = &mut b.new_client {
         match new_client::show(ui.ctx(), d, env) {
             DialogOutcome::Open => {}
@@ -1116,6 +1236,8 @@ fn tree(ui: &mut egui::Ui, b: &mut Browse) {
         });
     };
     let mut fav_scope: Option<Scope> = None;
+    // A drop of dragged documents on a client or folder row: (ids, cabinet-relative folder).
+    let mut dropped: Option<(Vec<String>, String)> = None;
     egui::ScrollArea::vertical()
         .auto_shrink(false)
         .show(ui, |ui| {
@@ -1147,6 +1269,9 @@ fn tree(ui: &mut egui::Ui, b: &mut Browse) {
                     node.count,
                     b.scope == Scope::Client(ci),
                 );
+                if let Some(cf) = &c.folder_rel {
+                    drop_target(&resp, cf, &mut dropped);
+                }
                 fav_menu(&resp, Scope::Client(ci), &mut fav_scope);
                 if chev {
                     toggle = Some(Node::Client(ci));
@@ -1160,47 +1285,51 @@ fn tree(ui: &mut egui::Ui, b: &mut Browse) {
                 if !open {
                     continue;
                 }
-                for y in &node.years {
-                    let ynode = Node::Year(ci, y.year);
-                    let yopen = b.expanded.contains(&ynode);
-                    let here = Scope::Year {
+                // The client folder's folders, as on disk: depth-first, open ones expanded.
+                let mut stack: Vec<(String, usize)> = node
+                    .children("")
+                    .into_iter()
+                    .rev()
+                    .map(|(f, _)| (f.to_owned(), 1))
+                    .collect();
+                while let Some((f, depth)) = stack.pop() {
+                    let n = node.folders.get(&f).copied().unwrap_or(0);
+                    let kids = node.has_children(&f);
+                    let fnode = Node::Folder(ci, f.clone());
+                    let fopen = kids && b.expanded.contains(&fnode);
+                    let here = Scope::Folder {
                         client: ci,
-                        year: y.year,
+                        folder: f.clone(),
                     };
                     let (chev, resp) = tree_row(
                         ui,
-                        1,
-                        Some(yopen),
+                        depth,
+                        kids.then_some(fopen),
                         false,
-                        &year_label(y.year),
-                        y.count,
+                        vf_core::browse::leaf(&f),
+                        n,
                         b.scope == here,
                     );
+                    if let Some(cf) = &c.folder_rel {
+                        drop_target(&resp, &format!("{cf}/{f}"), &mut dropped);
+                    }
                     fav_menu(&resp, here.clone(), &mut fav_scope);
                     if chev {
-                        toggle = Some(ynode.clone());
+                        toggle = Some(fnode.clone());
                     }
                     if resp.clicked() {
                         pick = Some(here);
-                        if !yopen {
-                            toggle = Some(ynode.clone());
+                        if kids && !fopen {
+                            toggle = Some(fnode);
                         }
                     }
-                    if !yopen {
-                        continue;
-                    }
-                    for (f, n) in &y.folders {
-                        let here = Scope::Folder {
-                            client: ci,
-                            year: y.year,
-                            folder: f.clone(),
-                        };
-                        let (_, resp) =
-                            tree_row(ui, 2, None, false, folder_label(f), *n, b.scope == here);
-                        fav_menu(&resp, here.clone(), &mut fav_scope);
-                        if resp.clicked() {
-                            pick = Some(here);
-                        }
+                    if fopen {
+                        stack.extend(
+                            node.children(&f)
+                                .into_iter()
+                                .rev()
+                                .map(|(k, _)| (k.to_owned(), depth + 1)),
+                        );
                     }
                 }
             }
@@ -1237,6 +1366,25 @@ fn tree(ui: &mut egui::Ui, b: &mut Browse) {
     }
     if let Some(s) = pick {
         b.set_scope(s);
+    }
+    if let Some((ids, dest)) = dropped {
+        b.drop_request = Some((ids, dest));
+    }
+}
+
+/// Makes a tree row a drop target for documents dragged from the grid: highlighted while they
+/// hover, and the drop recorded.
+fn drop_target(resp: &egui::Response, dest: &str, out: &mut Option<(Vec<String>, String)>) {
+    if resp.dnd_hover_payload::<DocDrag>().is_some() {
+        resp.ctx.debug_painter().rect_stroke(
+            resp.rect,
+            3.0,
+            egui::Stroke::new(2.0, theme::ACCENT_DEFAULT),
+            egui::StrokeKind::Inside,
+        );
+    }
+    if let Some(p) = resp.dnd_release_payload::<DocDrag>() {
+        *out = Some((p.0.clone(), dest.to_owned()));
     }
 }
 
@@ -1419,19 +1567,9 @@ fn breadcrumb(b: &Browse) -> String {
         Scope::Ids { list, .. } => format!("Views / {}", list.label()),
         Scope::Saved { name, .. } => format!("Saved searches / {name}"),
         Scope::Client(c) => format!("Cabinet / {}", client(*c)),
-        Scope::Year { client: c, year } => {
-            format!("Cabinet / {} / {}", client(*c), year_label(*year))
+        Scope::Folder { client: c, folder } => {
+            format!("Cabinet / {} / {}", client(*c), folder.replace('/', " / "))
         }
-        Scope::Folder {
-            client: c,
-            year,
-            folder,
-        } => format!(
-            "Cabinet / {} / {} / {}",
-            client(*c),
-            year_label(*year),
-            folder_label(folder)
-        ),
     }
 }
 
@@ -1585,7 +1723,7 @@ fn grid(ui: &mut egui::Ui, b: &mut Browse, conn: &Connection) {
     ui.style_mut().interaction.selectable_labels = false;
     let mut table = TableBuilder::new(ui)
         .striped(false)
-        .sense(Sense::click())
+        .sense(Sense::click_and_drag())
         .cell_layout(Layout::left_to_right(Align::Center))
         .column(Column::exact(24.0))
         .column(
@@ -1687,6 +1825,20 @@ fn grid(ui: &mut egui::Ui, b: &mut Browse, conn: &Connection) {
                     );
                 });
                 let resp = row.response();
+                // Drag rows onto a folder in the tree to move them (PA-23): the selection when
+                // this row is in it, otherwise this row.
+                if resp.drag_started() {
+                    let ids: Vec<String> = if sel {
+                        b.visible
+                            .iter()
+                            .filter(|i| b.selected.contains(i))
+                            .map(|&i| b.snap.docs[i].id.clone())
+                            .collect()
+                    } else {
+                        vec![d.id.clone()]
+                    };
+                    egui::DragAndDrop::set_payload(&resp.ctx, DocDrag(ids));
+                }
                 if resp.double_clicked() {
                     file_req = Some((di, FileAct::Open));
                 } else if resp.clicked() {
@@ -2144,6 +2296,7 @@ fn undo_label(u: &vf_core::tx::Undoable) -> String {
     let what = match u.label.as_str() {
         "doc_meta_edit" => "metadata edit",
         "doc_rename" => "rename",
+        "doc_move" => "move",
         "trash" | "trash_duplicate" => "move to trash",
         "trash_restore" => "restore from trash",
         "restore_version" => "version restore",
@@ -2263,6 +2416,107 @@ fn versions_list(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env, doc_id: &str,
                 }
             }
         }
+        None => {}
+    }
+}
+
+/// While documents are dragged: "Move N documents" beside the pointer.
+fn drag_label(ctx: &egui::Context) {
+    let Some(p) = egui::DragAndDrop::payload::<DocDrag>(ctx) else {
+        return;
+    };
+    let Some(pos) = ctx.pointer_latest_pos() else {
+        return;
+    };
+    ctx.set_cursor_icon(egui::CursorIcon::Grabbing);
+    let n = p.0.len();
+    egui::Area::new(egui::Id::unique("browse-drag-label"))
+        .order(egui::Order::Tooltip)
+        .fixed_pos(pos + egui::vec2(14.0, 10.0))
+        .interactable(false)
+        .show(ctx, |ui| {
+            egui::Frame::popup(ui.style()).show(ui, |ui| {
+                ui.label(if n == 1 {
+                    "Move 1 document to a folder".to_string()
+                } else {
+                    format!("Move {n} documents to a folder")
+                });
+            });
+        });
+}
+
+/// "Move N documents to …?" after a drop on a tree folder; Move commits in one Transaction.
+fn move_dialog(ctx: &egui::Context, b: &mut Browse, env: &mut Env) {
+    let Some(ask) = &b.move_ask else { return };
+    use vf_fs::rename::Outcome;
+    let moving = ask.rows.iter().filter(|r| r.renames()).count();
+    let kept: Vec<&str> = ask
+        .rows
+        .iter()
+        .filter_map(|r| match &r.outcome {
+            Outcome::KeepBoth(p) => Some(p.rsplit('/').next().unwrap_or(p)),
+            _ => None,
+        })
+        .collect();
+    let skipped: Vec<String> = ask
+        .rows
+        .iter()
+        .filter_map(|r| match &r.outcome {
+            Outcome::Skip(w) => Some(format!(
+                "{}: {w}",
+                r.old_rel.rsplit('/').next().unwrap_or("")
+            )),
+            _ => None,
+        })
+        .collect();
+    let mut answer = None;
+    egui::Modal::new(egui::Id::unique("move-confirm")).show(ctx, |ui| {
+        ui.set_width(460.0);
+        ui.heading(if moving == 1 {
+            "Move 1 document?".to_string()
+        } else {
+            format!("Move {moving} documents?")
+        });
+        ui.label(format!("To {}", ask.dest.replace('/', " / ")));
+        if !kept.is_empty() {
+            ui.label(format!(
+                "A file with the same name is there already, so these keep both: {}",
+                kept.join(", ")
+            ));
+        }
+        for w in skipped.iter().take(5) {
+            ui.label(RichText::new(format!("Not moved: {w}")).color(theme::WARN));
+        }
+        ui.label(widgets::caption("Undo last (Ctrl+Z) puts them back."));
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            if ui.add(widgets::primary_button("Move")).clicked() {
+                answer = Some(true);
+            }
+            if ui.button("Cancel").clicked() {
+                answer = Some(false);
+            }
+        });
+    });
+    match answer {
+        Some(true) => {
+            let ask = b.move_ask.take().expect("checked");
+            match vf_fs::moveto::commit(env.conn, env.root, &ask.rows, env.device_id) {
+                Ok((_, n)) => {
+                    let ids: Vec<String> = ask.rows.iter().map(|r| r.doc_id.clone()).collect();
+                    b.prefs.touch(&ids);
+                    b.prefs_dirty = true;
+                    b.reload(env.conn);
+                    b.notice = Some(format!(
+                        "Moved {n} document{} to {}.",
+                        if n == 1 { "" } else { "s" },
+                        ask.dest.replace('/', " / ")
+                    ));
+                }
+                Err(e) => b.error = Some(format!("Not moved: {e}")),
+            }
+        }
+        Some(false) => b.move_ask = None,
         None => {}
     }
 }
@@ -2394,7 +2648,7 @@ mod tests {
         assert_eq!(breadcrumb(b), "Saved searches / Everything 2025");
     }
 
-    /// A client with nothing filed yet shows its template folders from disk.
+    /// A client with nothing filed yet shows its folders as they are on disk (PA-23).
     #[test]
     fn tree_shows_empty_template_folders() {
         let mut h = harness(1, 0);
@@ -2403,7 +2657,8 @@ mod tests {
             let folder = s.root.join("Client 0000 (1000)");
             for d in [
                 "Income Tax/2025",
-                "Bookkeeping/2025",
+                "Bookkeeping",
+                "Financials",
                 "Permanent/Setup",
                 "_Vibe",
             ] {
@@ -2414,14 +2669,20 @@ mod tests {
         }
         h.run();
         click(&mut h, "Client 0000  1000");
-        click(&mut h, "2025");
-        assert!(h.query_by_label("Income Tax").is_some());
-        assert!(h.query_by_label("Bookkeeping").is_some());
-        click(&mut h, "Permanent");
-        assert!(
-            h.query_by_label("Permanent/Setup").is_some() || h.query_by_label("Setup").is_some()
-        );
+        for f in ["Income Tax", "Bookkeeping", "Financials", "Permanent"] {
+            assert!(h.query_by_label(f).is_some(), "{f}");
+        }
         assert!(h.query_by_label("_Vibe").is_none());
+        assert!(h.query_by_label("2025").is_none(), "Income Tax is closed");
+        click(&mut h, "Income Tax");
+        assert!(h.query_by_label("2025").is_some());
+        click(&mut h, "Permanent");
+        assert!(h.query_by_label("Setup").is_some());
+        click(&mut h, "Setup");
+        assert_eq!(
+            breadcrumb(&h.state().b),
+            "Cabinet / Client 0000 (1000) / Permanent / Setup"
+        );
     }
 
     #[test]
@@ -2431,20 +2692,89 @@ mod tests {
         click(&mut h, "Client 0001  1001");
         assert_eq!(h.state().b.scope, Scope::Client(1));
         assert_eq!(h.state().b.visible.len(), 8);
-        click(&mut h, "2025");
+        // A folder shows what is in it and below it.
+        click(&mut h, "Income Tax");
         assert_eq!(h.state().b.visible.len(), 4);
-        click(&mut h, "Payroll");
+        click(&mut h, "2025");
         assert_eq!(
             h.state().b.scope,
             Scope::Folder {
                 client: 1,
-                year: Some(2025),
-                folder: "Payroll".into()
+                folder: "Income Tax/2025".into()
             }
         );
         assert_eq!(h.state().b.visible.len(), 2);
+        assert_eq!(
+            breadcrumb(&h.state().b),
+            "Cabinet / Client 0001 (1001) / Income Tax / 2025"
+        );
+        click(&mut h, "Payroll");
+        assert_eq!(h.state().b.visible.len(), 2);
         click(&mut h, "Permanent");
         assert_eq!(h.state().b.visible.len(), 2);
+    }
+
+    /// Documents dropped on a tree folder are moved there after "Move" (PA-23).
+    #[test]
+    fn dropping_documents_on_a_folder_moves_them() {
+        let mut h = harness(1, 2);
+        let (ids, dest) = {
+            let s = h.state_mut();
+            let folder = s.root.join("Client 0000 (1000)");
+            std::fs::create_dir_all(folder.join("Financials")).unwrap();
+            for d in &s.b.snap.docs {
+                let p = s.root.join(&d.rel_path);
+                std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+                std::fs::write(&p, &d.id).unwrap();
+            }
+            let ids: Vec<String> = s.b.snap.docs.iter().map(|d| d.id.clone()).collect();
+            (ids, "Client 0000 (1000)/Financials".to_string())
+        };
+        h.state_mut().b.drop_request = Some((ids, dest));
+        h.run();
+        assert!(h.query_by_label("Move 2 documents?").is_some());
+        click(&mut h, "Move");
+        let s = h.state();
+        assert!(s.b.move_ask.is_none());
+        assert!(
+            s.b.snap
+                .docs
+                .iter()
+                .all(|d| d.rel_path.starts_with("Client 0000 (1000)/Financials/")),
+            "{:?}",
+            s.b.error
+        );
+        assert!(
+            s.root
+                .join("Client 0000 (1000)/Financials/doc 000.pdf")
+                .is_file()
+        );
+    }
+
+    /// A file copied into a client folder through Explorer shows without the weekly sweep
+    /// (owner report 2026-11-04).
+    #[test]
+    fn files_copied_into_a_client_folder_are_added() {
+        let mut h = harness(1, 0);
+        {
+            let s = h.state_mut();
+            let fin = s.root.join("Client 0000 (1000)/Financials");
+            std::fs::create_dir_all(&fin).unwrap();
+            std::fs::write(fin.join("invented balance sheet.pdf"), "invented").unwrap();
+            let root = s.root.clone();
+            s.b.set_root(&root);
+        }
+        h.run();
+        h.run();
+        let s = h.state();
+        let names: Vec<&str> = s.b.snap.docs.iter().map(|d| d.name()).collect();
+        assert_eq!(names, ["invented balance sheet.pdf"]);
+        assert!(
+            s.b.notice
+                .as_deref()
+                .unwrap_or("")
+                .contains("Added 1 new file")
+        );
     }
 
     #[test]

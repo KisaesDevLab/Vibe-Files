@@ -108,14 +108,10 @@ impl OpenCabinet {
         };
         let mut cx = crate::ui::search::Context::default();
         match &self.browse.scope {
-            B::Client(ci) | B::Year { client: ci, .. } if *ci < snap.clients.len() => {
+            B::Client(ci) if *ci < snap.clients.len() => {
                 cx.client = Some(label(*ci));
             }
-            B::Folder {
-                client,
-                year,
-                folder,
-            } if *client < snap.clients.len() => {
+            B::Folder { client, folder } if *client < snap.clients.len() => {
                 cx.client = Some(label(*client));
                 let base = snap.clients[*client].folder_rel.clone().unwrap_or_default();
                 cx.folder = Some((
@@ -124,8 +120,8 @@ impl OpenCabinet {
                     } else {
                         format!("{base}/{folder}")
                     },
-                    *year,
-                    format!("{folder} · {}", crate::ui::widgets::year_label(*year)),
+                    None,
+                    folder.replace('/', " › "),
                 ));
             }
             _ => {}
@@ -199,13 +195,30 @@ impl VibeFilesApp {
         let mut w = Wizard::new(config.last_cabinet.as_deref());
         w.error = error;
         let update = check_for_update(config.update_check);
-        Self {
+        let mut app = Self {
             tab: Tab::Browse,
             data,
             config,
             screen: Screen::Wizard(w),
             update,
             update_notice: None,
+        };
+        // Tests drive the wizard themselves; `open_last` has its own test.
+        if !cfg!(test) {
+            app.open_last(ctx);
+        }
+        app
+    }
+
+    /// Opens the cabinet this PC opened last, without the wizard (owner 2026-11-04). When it
+    /// cannot be opened (share down, folder moved) the wizard shows with the reason; while it
+    /// opens, "Open a different cabinet" goes to the wizard.
+    pub fn open_last(&mut self, ctx: &egui::Context) {
+        let Screen::Wizard(w) = &self.screen else {
+            return;
+        };
+        if self.config.last_cabinet.is_some() && w.error.is_none() {
+            self.start(Mode::Open, ctx);
         }
     }
 
@@ -472,6 +485,7 @@ impl eframe::App for VibeFilesApp {
         chrome::footer(ui, &segments, name.as_deref().unwrap_or("No cabinet open"));
         let ctx = ui.ctx().clone();
         let mut submit = None;
+        let mut to_wizard = false;
         match &mut self.screen {
             Screen::Open(o) if self.tab == Tab::Intake => {
                 let o = &mut **o;
@@ -537,6 +551,9 @@ impl eframe::App for VibeFilesApp {
             Screen::Open(o) if self.tab == Tab::Viewer => {
                 let o = &mut **o;
                 let initials = self.config.viewer.initials();
+                let tick =
+                    crate::ui::viewer::tick_color_index(self.config.viewer.tick_color.as_deref());
+                o.viewer.tick_color = tick;
                 crate::ui::viewer::show(
                     ui,
                     &mut o.viewer,
@@ -550,6 +567,18 @@ impl eframe::App for VibeFilesApp {
                 );
                 if std::mem::take(&mut o.viewer.catalog_changed) {
                     o.browse.reload(&o.opened.conn);
+                }
+                // Initials and tickmark color are this PC's settings (owner 2026-11-04).
+                let signed = o.viewer.signed.take();
+                if signed.is_some() || o.viewer.tick_color != tick {
+                    if signed.is_some() {
+                        self.config.viewer.initials = signed;
+                    }
+                    self.config.viewer.tick_color =
+                        Some(crate::ui::viewer::tick_color_name(o.viewer.tick_color).into());
+                    if let Err(e) = config::save(&self.data, &self.config) {
+                        o.viewer.error = Some(format!("Settings not saved: {e:#}"));
+                    }
                 }
                 if let Some(p) = o.viewer.open_request.take()
                     && let Err(e) = (o.browse.shell)(&crate::shell::ShellAction::Open(p))
@@ -677,11 +706,17 @@ impl eframe::App for VibeFilesApp {
             screen => {
                 egui::CentralPanel::default().show(ui, |ui| match screen {
                     Screen::Wizard(w) => submit = wizard::show(ui, w),
-                    Screen::Busy { what, .. } => {
+                    Screen::Busy { what, back, .. } => {
                         ui.horizontal(|ui| {
                             ui.spinner();
                             ui.label(*what);
                         });
+                        if back.mode == Mode::Open {
+                            ui.add_space(8.0);
+                            if ui.button("Open a different cabinet").clicked() {
+                                to_wizard = true;
+                            }
+                        }
                     }
                     Screen::Open(_) => {
                         ui.heading(self.tab.name());
@@ -782,6 +817,10 @@ impl eframe::App for VibeFilesApp {
         }
         if let Some(mode) = submit {
             self.start(mode, &ctx);
+        }
+        // The opening carries on on its thread; its result is dropped with the receiver.
+        if to_wizard && let Screen::Busy { back, .. } = &self.screen {
+            self.screen = Screen::Wizard(back.clone());
         }
     }
 }
@@ -1549,6 +1588,29 @@ mod tests {
                 .unwrap();
             (id, hash)
         };
+        // Letter tickmarks A-Z, and the tickmark color and initials kept in this PC's
+        // settings (owner 2026-11-04).
+        h.get_by_label("Z").click();
+        h.step();
+        {
+            let Screen::Open(o) = &mut h.state_mut().screen else {
+                unreachable!()
+            };
+            assert_eq!(
+                o.viewer.tool,
+                crate::ui::viewer::Tool::Tickmark(Tick::Letter(25))
+            );
+            o.viewer.tool = crate::ui::viewer::Tool::Select;
+        }
+        h.get_by_role_and_label(Role::ComboBox, "Tickmark color")
+            .click();
+        h.step();
+        h.step();
+        h.get_by_label("Purple").click();
+        h.step();
+        h.step();
+        let saved = config::load(&tmp.path().join("pc1")).unwrap();
+        assert_eq!(saved.viewer.tick_color.as_deref(), Some("Purple"));
         let pend = |h: &mut egui_kittest::Harness<'static, VibeFilesApp>, kind| {
             if let Screen::Open(o) = &mut h.state_mut().screen {
                 o.viewer.pending.push(Annotation {
@@ -1938,6 +2000,44 @@ mod tests {
             h.query_by_label_contains("does not verify at row 1")
                 .is_some()
         );
+    }
+
+    /// The cabinet this PC opened last opens at start without the wizard (owner 2026-11-04);
+    /// "Open a different cabinet" goes back to the wizard.
+    #[test]
+    fn last_cabinet_opens_without_the_wizard() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (data, root) = (tmp.path().join("data"), tmp.path().join("Clients"));
+        drop(
+            session::create(
+                &data,
+                "dev-1",
+                &CreateRequest {
+                    root: &root,
+                    name: "Test Cabinet",
+                },
+            )
+            .unwrap(),
+        );
+        let mut c = config::load(&data).unwrap();
+        c.last_cabinet = Some(root.clone());
+        config::save(&data, &c).unwrap();
+
+        let mut h = harness(&data);
+        let ctx = h.ctx.clone();
+        h.state_mut().open_last(&ctx);
+        assert!(matches!(h.state().screen, Screen::Busy { .. }));
+        h.step();
+        if matches!(h.state().screen, Screen::Busy { .. }) {
+            click(&mut h, "Open a different cabinet");
+            assert!(matches!(h.state().screen, Screen::Wizard(_)));
+        }
+        // The abandoned opening lets go of the data folder before the next one.
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        // And straight through when left alone.
+        h.state_mut().open_last(&ctx);
+        settle(&mut h);
+        assert!(matches!(h.state().screen, Screen::Open(_)));
     }
 
     #[test]

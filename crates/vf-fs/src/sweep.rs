@@ -420,6 +420,96 @@ pub fn adopt_unknown(
     Ok(items.len())
 }
 
+/// Files in the client folders that are not in the catalog: a file copied in through Explorer.
+/// Browse looks for them on its folder-listing thread and adds them on its own (PA-23, owner
+/// 2026-11-04), so they show without waiting for the weekly sweep. Only reads.
+///
+/// `clients`: (client folder, client id). `known`: the live documents' paths, lower case.
+/// Left out: Office and Explorer working files (`~$…`, `.…`, `desktop.ini`, `Thumbs.db`), and a
+/// file with the content of a live document (a move or a copy: the sweep's "moved" and the
+/// duplicate finder handle those).
+pub fn find_new(
+    root: &Path,
+    clients: &[(String, String)],
+    known: &std::collections::HashSet<String>,
+    known_hashes: &std::collections::HashSet<String>,
+) -> Vec<Unknown> {
+    let mut out = Vec::new();
+    for (folder, client_id) in clients {
+        let mut paths = Vec::new();
+        if rebuild::files_under(&root.join(folder), &mut paths).is_err() {
+            continue;
+        }
+        for p in paths {
+            let name = p
+                .file_name()
+                .map(|n| n.to_string_lossy().to_lowercase())
+                .unwrap_or_default();
+            if name.starts_with('~')
+                || name.starts_with('.')
+                || name == "desktop.ini"
+                || name == "thumbs.db"
+            {
+                continue;
+            }
+            let rel = rebuild::rel(root, &p);
+            if known.contains(&rel.to_lowercase()) {
+                continue;
+            }
+            // A file still being copied in cannot be opened for reading: next time.
+            let Ok(hash) = sha256_file(&p) else { continue };
+            if known_hashes.contains(&hash) {
+                continue;
+            }
+            let size = std::fs::metadata(&p).map(|m| m.len()).unwrap_or(0);
+            out.push(Unknown {
+                rel_path: rel,
+                client_id: Some(client_id.clone()),
+                hash,
+                size,
+            });
+        }
+    }
+    out
+}
+
+/// Adds what [`find_new`] found, after checking again against the catalog now (Intake may have
+/// recorded a file meanwhile, or still be filing it) and the disk (same content still there).
+/// Returns the paths added.
+pub fn adopt_new(
+    conn: &mut Connection,
+    root: &Path,
+    device_id: &str,
+    found: &[Unknown],
+) -> Result<Vec<String>, String> {
+    if found.is_empty() {
+        return Ok(vec![]);
+    }
+    let pending = crate::intake::unrecorded_paths(conn, root);
+    let mut go = Vec::new();
+    {
+        let mut st = conn
+            .prepare_cached(
+                "SELECT 1 FROM document WHERE deleted_at IS NULL
+                   AND (rel_path = ?1 COLLATE NOCASE OR hash = ?2)",
+            )
+            .map_err(|e| e.to_string())?;
+        for u in found {
+            if pending.contains(&u.rel_path.to_lowercase())
+                || st
+                    .exists((&u.rel_path, &u.hash))
+                    .map_err(|e| e.to_string())?
+                || sha256_file(&root.join(&u.rel_path)).ok().as_ref() != Some(&u.hash)
+            {
+                continue;
+            }
+            go.push(u.clone());
+        }
+    }
+    adopt_unknown(conn, root, device_id, &go)?;
+    Ok(go.into_iter().map(|u| u.rel_path).collect())
+}
+
 /// Moves unknown files into Filer's `inbox`, to be filed by Intake like any new file.
 pub fn refile_unknown(
     conn: &mut Connection,
@@ -583,6 +673,61 @@ mod tests {
             !v[0].kept,
             "the content before the outside edit was never seen"
         );
+    }
+
+    /// A file copied into a client folder through Explorer is found and added (PA-23); working
+    /// files, moved copies and already cataloged paths are not.
+    #[test]
+    fn new_files_in_client_folders_are_found_and_added() {
+        let (_t, root, mut conn) = fx();
+        let client = "Anderson Farms LLC (ANDE1042)";
+        let fin = root.join(client).join("Financials");
+        std::fs::create_dir_all(&fin).unwrap();
+        std::fs::write(fin.join("balance sheet.xlsx"), "invented balance sheet").unwrap();
+        std::fs::write(fin.join("~$balance sheet.xlsx"), "office lock").unwrap();
+        std::fs::write(fin.join("desktop.ini"), "x").unwrap();
+        // A copy of a cataloged document's content: left for the sweep.
+        let k1 = std::fs::read(root.join(client).join("Income Tax/2025/k1.pdf")).unwrap();
+        std::fs::write(fin.join("k1 copy.pdf"), k1).unwrap();
+        let (known, hashes): (
+            std::collections::HashSet<String>,
+            std::collections::HashSet<String>,
+        ) = {
+            let mut st = conn
+                .prepare("SELECT rel_path, hash FROM document WHERE deleted_at IS NULL")
+                .unwrap();
+            let rows: Vec<(String, String)> = st
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+                .unwrap()
+                .map(Result::unwrap)
+                .collect();
+            (
+                rows.iter().map(|r| r.0.to_lowercase()).collect(),
+                rows.into_iter().map(|r| r.1).collect(),
+            )
+        };
+        let client_id: String = conn
+            .query_row("SELECT id FROM client", [], |r| r.get(0))
+            .unwrap();
+        let found = find_new(&root, &[(client.into(), client_id)], &known, &hashes);
+        let names: Vec<&str> = found.iter().map(|u| u.rel_path.as_str()).collect();
+        assert_eq!(names, [format!("{client}/Financials/balance sheet.xlsx")]);
+        let added = adopt_new(&mut conn, &root, "dev", &found).unwrap();
+        assert_eq!(added.len(), 1);
+        // Found again before the catalog was re-read: not added twice.
+        assert!(
+            adopt_new(&mut conn, &root, "dev", &found)
+                .unwrap()
+                .is_empty()
+        );
+        let n: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM document WHERE rel_path LIKE '%balance sheet.xlsx'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 1);
     }
 
     #[test]

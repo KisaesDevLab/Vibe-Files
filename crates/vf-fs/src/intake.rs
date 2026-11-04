@@ -75,6 +75,19 @@ pub fn undoable_paths(root: &Path) -> std::collections::HashSet<String> {
         .collect()
 }
 
+/// Cabinet-relative paths (lower case) of the files in Filer's last batch while that batch is
+/// not in the catalog yet (still being filed, or filed and waiting for [`reconcile`]). Files
+/// found in client folders at these paths are Intake's to record, not new files (PA-23).
+pub fn unrecorded_paths(conn: &Connection, root: &Path) -> std::collections::HashSet<String> {
+    let Some(lb) = load_last_batch(&crate::clients::master_dir(root)) else {
+        return Default::default();
+    };
+    if lb.undone || (!lb.in_progress && recorded(conn, &lb.batch.to_string()).is_some()) {
+        return Default::default();
+    }
+    undoable_paths(root)
+}
+
 pub fn reconcile(
     conn: &mut Connection,
     root: &Path,

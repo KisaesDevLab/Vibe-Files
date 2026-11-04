@@ -17,8 +17,28 @@ pub type Rgb = [f32; 3];
 pub const YELLOW: Rgb = [1.0, 0.91, 0.6];
 pub const RED: Rgb = [0.75, 0.1, 0.1];
 pub const ACCENT: Rgb = [0.12, 0.34, 0.66];
-const TICK_FILL: Rgb = [0.867, 0.949, 0.894];
-const TICK_INK: Rgb = [0.114, 0.361, 0.22];
+/// The tickmark color unless one is chosen (green ink, pale green disc).
+pub const TICK_GREEN: Rgb = [0.114, 0.361, 0.22];
+
+/// Tickmark colors offered in the Viewer (owner 2026-11-04): name, ink.
+pub const TICK_COLORS: [(&str, Rgb); 6] = [
+    ("Green", TICK_GREEN),
+    ("Red", [0.75, 0.1, 0.1]),
+    ("Blue", [0.12, 0.34, 0.66]),
+    ("Black", [0.1, 0.1, 0.1]),
+    ("Purple", [0.42, 0.18, 0.6]),
+    ("Orange", [0.8, 0.4, 0.0]),
+];
+
+/// The disc behind a tickmark: its ink, mostly white.
+pub fn tick_fill(ink: Rgb) -> Rgb {
+    ink.map(|c| 0.85 + 0.15 * c)
+}
+
+const LETTERS: [&str; 26] = [
+    "A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P", "Q", "R", "S",
+    "T", "U", "V", "W", "X", "Y", "Z",
+];
 
 /// Tickmark glyphs (UI_SPEC §4 palette). Drawn as vector paths and letters, never font
 /// symbols, so they look the same in every viewer.
@@ -38,6 +58,8 @@ pub enum Tick {
     PriorYear,
     /// CY agreed to current year
     CurrentYear,
+    /// A letter tickmark `A`–`Z` (0 = A), defined by the preparer's legend (owner 2026-11-04).
+    Letter(u8),
 }
 
 impl Tick {
@@ -51,9 +73,15 @@ impl Tick {
         Tick::CurrentYear,
     ];
 
+    /// The letter tickmarks `A`–`Z`.
+    pub fn letters() -> impl Iterator<Item = Tick> {
+        (0..26u8).map(Tick::Letter)
+    }
+
     /// The words a tooltip and `/Contents` use.
     pub fn meaning(self) -> &'static str {
         match self {
+            Tick::Letter(i) => LETTERS[usize::from(i.min(25))],
             Tick::Check => "agreed",
             Tick::Cross => "exception",
             Tick::Void => "not applicable",
@@ -67,6 +95,7 @@ impl Tick {
     /// Short label (letters for the letter ticks).
     pub fn label(self) -> &'static str {
         match self {
+            Tick::Letter(i) => LETTERS[usize::from(i.min(25))],
             Tick::Check => "check",
             Tick::Cross => "cross",
             Tick::Void => "void",
@@ -516,7 +545,7 @@ fn build(a: &Annotation, rotate: i64, font: ObjectId, multiply: ObjectId) -> Bui
                 (
                     "Stamp",
                     rect,
-                    tick_ops(*tick, *size),
+                    tick_ops(*tick, *size, a.color),
                     true,
                     Some(format!("Tickmark: {}, {}", tick.meaning(), a.author)),
                 )
@@ -754,12 +783,13 @@ fn circle(cx: f32, cy: f32, r: f32) -> Vec<Operation> {
     ]
 }
 
-fn tick_ops(t: Tick, size: f32) -> Vec<Operation> {
+/// A tickmark's appearance in `ink` (the annotation's color).
+fn tick_ops(t: Tick, size: f32, ink: Rgb) -> Vec<Operation> {
     let (c, r) = (size / 2.0, size / 2.0 - 0.75);
     let mut v = vec![
         op("q", vec![]),
-        fill(TICK_FILL),
-        stroke(TICK_INK),
+        fill(tick_fill(ink)),
+        stroke(ink),
         op("w", nums(&[1.0])),
     ];
     v.extend(circle(c, c, r));
@@ -796,7 +826,7 @@ fn tick_ops(t: Tick, size: f32) -> Vec<Operation> {
             let fs = if text.len() > 1 { s * 0.36 } else { s * 0.55 };
             let tw = text.len() as f32 * fs * BOLD_EM;
             v.push(op("BT", vec![]));
-            v.push(fill(TICK_INK));
+            v.push(fill(ink));
             v.push(op("Tf", vec![Object::Name(b"VfB".to_vec()), fs.into()]));
             v.push(op("Td", nums(&[c - tw / 2.0, c - fs * 0.35])));
             v.push(op("Tj", vec![win_ansi_obj(text)]));

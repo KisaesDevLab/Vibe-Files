@@ -582,7 +582,10 @@ fn import_guesses_wait_for_a_person_before_disposition() {
     };
     vf_fs::clients::import_csv(&root, &csv, &map, &Default::default()).unwrap();
     for (p, body) in [
-        ("John Smith (SMIT1001)/Old Papers/W2 1999 Oak St.pdf", "w2 1999"),
+        (
+            "John Smith (SMIT1001)/Old Papers/W2 1999 Oak St.pdf",
+            "w2 1999",
+        ),
         ("John Smith (SMIT1001)/Bank/2010/closing.pdf", "closing"),
     ] {
         let p = root.join(p);

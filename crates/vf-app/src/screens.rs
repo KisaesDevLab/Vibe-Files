@@ -71,9 +71,9 @@ mod tests {
             let crate::app::Screen::Open(o) = &mut h.state_mut().screen else {
                 panic!()
             };
-            o.browse.set_scope(vf_core::browse::Scope::Year {
+            o.browse.set_scope(vf_core::browse::Scope::Folder {
                 client: 0,
-                year: Some(2024),
+                folder: "Income Tax/2024".into(),
             });
             if !o.browse.visible.is_empty() {
                 o.browse.selected.insert(o.browse.visible[0]);

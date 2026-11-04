@@ -349,8 +349,8 @@ pub fn edit_each(
     Ok((c.tx_id, changed))
 }
 
-/// Labels of the Browse changes "Undo last" offers (metadata edits and renames).
-pub const UNDOABLE: [&str; 2] = [LABEL, crate::rename::LABEL];
+/// Labels of the Browse changes "Undo last" offers (metadata edits, renames, moves).
+pub const UNDOABLE: [&str; 3] = [LABEL, crate::rename::LABEL, crate::moveto::LABEL];
 
 /// Every `docmeta.jsonl` record of the cabinet, for rebuild: the latest per (cabinet path, hash)
 /// and per hash.

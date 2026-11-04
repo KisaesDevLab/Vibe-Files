@@ -173,9 +173,9 @@ mod tests {
         for c in [0usize, 250, 499] {
             let t0 = Instant::now();
             b.set_scope(vf_core::browse::Scope::Client(c));
-            b.set_scope(vf_core::browse::Scope::Year {
+            b.set_scope(vf_core::browse::Scope::Folder {
                 client: c,
-                year: Some(2020),
+                folder: "Income Tax/2020".into(),
             });
             expands.push(t0.elapsed());
             assert_eq!(b.visible.len(), PER / 10);

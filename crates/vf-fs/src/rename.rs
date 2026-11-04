@@ -263,7 +263,7 @@ impl Planner {
 }
 
 /// `name`, or Filer's ` (2)`, ` (3)`… form (as `commit::free_path`) when `taken`.
-fn free_name(name: &str, taken: impl Fn(&str) -> bool) -> String {
+pub(crate) fn free_name(name: &str, taken: impl Fn(&str) -> bool) -> String {
     if !taken(name) {
         return name.to_owned();
     }
@@ -306,12 +306,24 @@ pub fn commit(
     rows: &[Row],
     device_id: &str,
 ) -> Result<(String, usize), String> {
+    commit_as(conn, root, rows, device_id, LABEL)
+}
+
+/// [`commit`] under another audit and undo label (moves to another folder use it too,
+/// [`crate::moveto`]).
+pub(crate) fn commit_as(
+    conn: &mut Connection,
+    root: &Path,
+    rows: &[Row],
+    device_id: &str,
+    label: &'static str,
+) -> Result<(String, usize), String> {
     let go: Vec<&Row> = rows.iter().filter(|r| r.renames()).collect();
     if go.is_empty() {
         return Err("No file gets a new name.".into());
     }
     let now = vf_core::now_rfc3339();
-    let mut tx = Transaction::new(LABEL);
+    let mut tx = Transaction::new(label);
     // docmeta keys: append a record at the new path for documents that have one.
     let mut meta_lines: BTreeMap<PathBuf, (Vec<String>, Vec<String>)> = BTreeMap::new();
     let metas: Vec<docmeta::Meta> = go
@@ -375,7 +387,7 @@ pub fn commit(
         });
     }
     tx = tx.audit(AuditEntry::new(
-        LABEL,
+        label,
         if go.len() == 1 {
             Some(go[0].doc_id.as_str())
         } else {

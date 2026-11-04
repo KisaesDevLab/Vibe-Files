@@ -163,6 +163,13 @@ pub struct Viewer {
     scroll_to: Option<usize>,
     pub tool: Tool,
     color: usize,
+    /// Tickmark color, an index into `annot::TICK_COLORS` (green first); the app keeps it in
+    /// this PC's settings.
+    pub tick_color: usize,
+    /// The "Signed" box while it is edited.
+    signed_buf: Option<String>,
+    /// New initials typed in the "Signed" box, for the app to save in this PC's settings.
+    pub signed: Option<String>,
     pub panel: Panel,
     drag: Option<Drag>,
     typing: Option<Typing>,
@@ -228,6 +235,9 @@ impl Default for Viewer {
             scroll_to: None,
             tool: Tool::Select,
             color: 0,
+            tick_color: 0,
+            signed_buf: None,
+            signed: None,
             panel: Panel::Annotate,
             drag: None,
             typing: None,
@@ -1375,7 +1385,7 @@ fn draw_pending(ui: &egui::Ui, v: &Viewer, page: usize, rect: Rect, s: f32, g: &
                 p.arrow(a0, b0 - a0, stroke);
             }
             Kind::Tickmark { tick, at, size } => {
-                draw_tick(p, screen(rect, s, g, *at), size * s, *tick);
+                draw_tick(p, screen(rect, s, g, *at), size * s, *tick, a.color);
             }
             Kind::Stamp { text, at, size } => {
                 let (w, h) = annot::stamp_size(text, *size);
@@ -1450,12 +1460,16 @@ fn draw_pending(ui: &egui::Ui, v: &Viewer, page: usize, rect: Rect, s: f32, g: &
 }
 
 /// A tickmark drawn the way its appearance stream draws it (shapes, not font glyphs).
-fn draw_tick(p: &egui::Painter, c: Pos2, size: f32, t: Tick) {
-    let ink = Color32::from_rgb(0x1D, 0x5C, 0x38);
+fn draw_tick(p: &egui::Painter, c: Pos2, size: f32, t: Tick, color: annot::Rgb) {
+    let rgb = |c: annot::Rgb| {
+        let [r, g, b] = c.map(|x| (x.clamp(0.0, 1.0) * 255.0).round() as u8);
+        Color32::from_rgb(r, g, b)
+    };
+    let ink = rgb(color);
     p.circle(
         c,
         size / 2.0 - 1.0,
-        Color32::from_rgb(0xDD, 0xF2, 0xE4),
+        rgb(annot::tick_fill(color)),
         Stroke::new(1.0, ink),
     );
     let st = Stroke::new((size / 12.0).max(1.2), ink);
@@ -1538,7 +1552,7 @@ fn interact(
                     at,
                     size: 28.0,
                 },
-                color,
+                color: annot::TICK_COLORS[v.tick_color.min(annot::TICK_COLORS.len() - 1)].1,
                 author,
             }),
             _ => {}
@@ -1754,7 +1768,28 @@ fn annotate_panel(ui: &mut egui::Ui, v: &mut Viewer, env: &Env<'_>) {
                 ui.selectable_value(&mut v.color, i, *n);
             }
         });
-    ui.label(widgets::caption(format!("Signed {}", env.initials)));
+    // Initials on annotations, stamps and tickmarks: this PC's setting, else from the Windows
+    // login (first three letters); editable here (owner 2026-11-04).
+    ui.horizontal(|ui| {
+        let l = ui.label("Signed");
+        let buf = v.signed_buf.get_or_insert_with(|| env.initials.to_string());
+        let r = ui
+            .add(
+                egui::TextEdit::singleline(buf)
+                    .desired_width(80.0)
+                    .char_limit(12),
+            )
+            .labelled_by(l.id);
+        if r.lost_focus() {
+            let typed = buf.trim().to_string();
+            if !typed.is_empty() && typed != env.initials {
+                v.signed = Some(typed);
+            }
+            v.signed_buf = None;
+        } else if !r.has_focus() {
+            v.signed_buf = None;
+        }
+    });
     ui.add_space(8.0);
     ui.label(RichText::new("Tickmarks").strong());
     ui.horizontal_wrapped(|ui| {
@@ -1769,6 +1804,32 @@ fn annotate_panel(ui: &mut egui::Ui, v: &mut Viewer, env: &Env<'_>) {
             }
         }
     });
+    // Letter tickmarks A–Z, for the preparer's own legend (owner 2026-11-04).
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing.x = 2.0;
+        for t in Tick::letters() {
+            let on = v.tool == Tool::Tickmark(t);
+            if ui
+                .selectable_label(on, RichText::new(t.label()).monospace())
+                .on_hover_text(format!("Tickmark {}", t.label()))
+                .clicked()
+            {
+                v.tool = Tool::Tickmark(t);
+            }
+        }
+    });
+    egui::ComboBox::new("vtickcolor", "Tickmark color")
+        .selected_text(annot::TICK_COLORS[v.tick_color.min(annot::TICK_COLORS.len() - 1)].0)
+        .show_ui(ui, |ui| {
+            for (i, (n, c)) in annot::TICK_COLORS.iter().enumerate() {
+                let [r, g, b] = c.map(|x| (x * 255.0).round() as u8);
+                ui.selectable_value(
+                    &mut v.tick_color,
+                    i,
+                    RichText::new(*n).color(Color32::from_rgb(r, g, b)),
+                );
+            }
+        });
     ui.label(widgets::caption(
         "Stamped as real PDF annotations with author and date.",
     ));
@@ -1899,6 +1960,21 @@ fn apply_redactions(v: &mut Viewer, env: &mut Env<'_>) {
 }
 
 /// Palette label without symbol glyphs (the bundled fonts lack ✓ ✗ ⊘ ƒ).
+/// The index in `annot::TICK_COLORS` of a saved tickmark color name (green when unknown).
+pub fn tick_color_index(name: Option<&str>) -> usize {
+    name.and_then(|n| {
+        annot::TICK_COLORS
+            .iter()
+            .position(|(c, _)| c.eq_ignore_ascii_case(n))
+    })
+    .unwrap_or(0)
+}
+
+/// The name of tickmark color `i`.
+pub fn tick_color_name(i: usize) -> &'static str {
+    annot::TICK_COLORS[i.min(annot::TICK_COLORS.len() - 1)].0
+}
+
 fn tick_name(t: Tick) -> &'static str {
     match t {
         Tick::Check => "Check",
@@ -1908,6 +1984,7 @@ fn tick_name(t: Tick) -> &'static str {
         Tick::TiedToBooks => "T/B",
         Tick::PriorYear => "PY",
         Tick::CurrentYear => "CY",
+        Tick::Letter(_) => t.label(),
     }
 }
 

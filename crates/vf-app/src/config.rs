@@ -126,6 +126,9 @@ pub struct ViewerPrefs {
     /// users exist (PA-15) this is per workstation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub initials: Option<String>,
+    /// Tickmark color by name (`annot::TICK_COLORS`); none = green.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tick_color: Option<String>,
 }
 
 impl ViewerPrefs {
@@ -236,19 +239,23 @@ pub struct Prefs {
 
 pub const RECENT_MAX: usize = 50;
 
-/// A place in the Browse tree. `client` is the client uuid; `year: None` is Permanent.
+/// A place in the Browse tree. `client` is the client uuid.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Favorite {
     Client {
         client: String,
     },
+    /// Saved before the tree mirrored the disk (PA-23): opens the client now.
     Year {
         client: String,
         year: Option<i32>,
     },
+    /// A folder inside the client folder (`Income Tax/2025`). Favorites saved before PA-23 hold
+    /// the folder without its year segment and the year apart.
     Folder {
         client: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         year: Option<i32>,
         folder: String,
     },

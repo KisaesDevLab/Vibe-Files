@@ -345,3 +345,46 @@ fn page_edits() {
     assert!(pages::delete(&x, &t.path().join("none.pdf"), &[0, 1]).is_err());
     assert!(pages::reorder(&x, &t.path().join("bad.pdf"), &[0, 0]).is_err());
 }
+
+/// A letter tickmark (A–Z) in a chosen color is a real annotation that renders in that color
+/// (owner 2026-11-04).
+#[test]
+fn letter_tickmarks_in_a_chosen_color() {
+    let t = tempfile::tempdir().unwrap();
+    let src = t.path().join("src.pdf");
+    filer_pdf::pdf::write_test_pdf(&src, &["Page one"]);
+    let out = t.path().join("out.pdf");
+    let red = annot::TICK_COLORS[1].1;
+    let letters: Vec<Annotation> = [(0u8, 100.0), (25, 300.0)]
+        .into_iter()
+        .map(|(i, x)| Annotation {
+            page: 0,
+            kind: Kind::Tickmark {
+                tick: Tick::Letter(i),
+                at: [x, 500.0],
+                size: 40.0,
+            },
+            color: red,
+            author: "KWK".into(),
+        })
+        .collect();
+    annot::add(&src, &out, &letters, "2026-11-04T10:00:00Z").unwrap();
+    let found = annot::read(&out).unwrap();
+    let contents: Vec<_> = found.iter().map(|f| f.contents.as_deref()).collect();
+    assert_eq!(
+        contents,
+        [Some("Tickmark: A, KWK"), Some("Tickmark: Z, KWK")]
+    );
+    assert_eq!(Tick::letters().count(), 26);
+    // Red ink: some pixel in the box is strongly red.
+    let (w, _h, img) = render(&out, 0);
+    let r = found[0].rect;
+    let red_px = (r[0] as u32..r[2] as u32)
+        .flat_map(|x| ((792.0 - r[3]) as u32..(792.0 - r[1]) as u32).map(move |y| (x, y)))
+        .filter(|&(x, y)| {
+            let i = ((y * w + x) * 4) as usize;
+            img[i] > 150 && img[i + 1] < 80 && img[i + 2] < 80
+        })
+        .count();
+    assert!(red_px > 10, "{red_px} red pixels");
+}

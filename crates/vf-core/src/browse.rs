@@ -1,9 +1,9 @@
 //! Read model for the Browse tab: one load of the live catalog rows, then the client tree and
 //! folder filters are built in memory (tree expansion never touches SQLite).
 //!
-//! Tree shape (UI_SPEC §1): Cabinet → client → `Permanent` / tax years (descending) → folders.
-//! A folder is the document's directory inside its client folder with the `{Year}` segment
-//! removed, so `Income Tax/2025/x.pdf` sits under year 2025 as `Income Tax`.
+//! Tree shape (PA-23, owner 2026-11-04): Cabinet → client → the client's folders as they are on
+//! disk (`Income Tax` → `2025`), so the tree and its breadcrumb read like Explorer. Tax year and
+//! doc type stay document attributes (grid columns, views, search), not tree levels.
 
 use std::collections::BTreeMap;
 
@@ -170,19 +170,15 @@ pub fn load(conn: &Connection) -> Result<Snapshot> {
     })
 }
 
-/// A tree node the grid can show. `year: None` is the Permanent node.
+/// A tree node the grid can show.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Scope {
     /// Every document in the cabinet.
     Cabinet,
     Client(usize),
-    Year {
-        client: usize,
-        year: Option<i32>,
-    },
+    /// A folder inside a client folder (`Income Tax/2025`, `/`-separated) and everything below it.
     Folder {
         client: usize,
-        year: Option<i32>,
         folder: String,
     },
     /// Documents with no client (outside any bound client folder).
@@ -221,18 +217,65 @@ impl IdList {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct YearNode {
-    pub year: Option<i32>,
+pub struct ClientNode {
+    /// Documents anywhere in the client folder.
     pub count: usize,
-    /// (folder, count), by folder name. `""` = directly in the client folder.
-    pub folders: Vec<(String, usize)>,
+    /// Every folder inside the client folder (`Income Tax`, `Income Tax/2025`, …), from
+    /// documents and from disk, with the documents in it and below it.
+    pub folders: BTreeMap<String, usize>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct ClientNode {
-    pub count: usize,
-    /// Permanent first (when present), then years descending.
-    pub years: Vec<YearNode>,
+impl ClientNode {
+    /// The folders directly inside `parent` (`""` = the client folder), in tree order: by name,
+    /// except that tax-year folders come newest first.
+    pub fn children(&self, parent: &str) -> Vec<(&str, usize)> {
+        let mut v: Vec<(&str, usize)> = self
+            .folders
+            .iter()
+            .filter(|(f, _)| parent_of(f) == parent)
+            .map(|(f, n)| (f.as_str(), *n))
+            .collect();
+        v.sort_by(|a, b| {
+            let (na, nb) = (leaf(a.0), leaf(b.0));
+            match (year_of(na), year_of(nb)) {
+                (Some(x), Some(y)) => y.cmp(&x),
+                (Some(_), None) => std::cmp::Ordering::Less,
+                (None, Some(_)) => std::cmp::Ordering::Greater,
+                (None, None) => na.to_lowercase().cmp(&nb.to_lowercase()),
+            }
+        });
+        v
+    }
+
+    /// Whether `folder` has folders inside it.
+    pub fn has_children(&self, folder: &str) -> bool {
+        self.folders.keys().any(|f| parent_of(f) == folder)
+    }
+}
+
+/// The folder holding `f` (`""` at the top of the client folder).
+pub fn parent_of(f: &str) -> &str {
+    f.rsplit_once('/').map(|(p, _)| p).unwrap_or("")
+}
+
+/// The last segment of a folder path: its name in the tree.
+pub fn leaf(f: &str) -> &str {
+    f.rsplit('/').next().unwrap_or(f)
+}
+
+fn year_of(seg: &str) -> Option<i32> {
+    (seg.len() == 4)
+        .then(|| seg.parse::<i32>().ok())
+        .flatten()
+        .filter(|y| (1990..=2100).contains(y))
+}
+
+/// `folder` and the folders above it (`a/b/c` → `a`, `a/b`, `a/b/c`).
+fn with_ancestors(folder: &str) -> impl Iterator<Item = &str> {
+    folder
+        .match_indices('/')
+        .map(|(i, _)| &folder[..i])
+        .chain((!folder.is_empty()).then_some(folder))
 }
 
 /// The tree plus each document's place in it. Indices refer to `Snapshot::clients` / `docs`.
@@ -240,7 +283,7 @@ pub struct ClientNode {
 pub struct Index {
     pub clients: Vec<ClientNode>,
     pub unassigned: usize,
-    /// Per document: (client index, folder key).
+    /// Per document: (client index, its folder inside the client folder; `""` = the top).
     pub place: Vec<(Option<usize>, String)>,
 }
 
@@ -252,9 +295,7 @@ impl Index {
             .enumerate()
             .map(|(i, c)| (c.id.as_str(), i))
             .collect();
-        // client → year → folder → count
-        let mut acc: Vec<BTreeMap<Option<i32>, BTreeMap<String, usize>>> =
-            vec![BTreeMap::new(); s.clients.len()];
+        let mut clients = vec![ClientNode::default(); s.clients.len()];
         let mut place = Vec::with_capacity(s.docs.len());
         let mut unassigned = 0;
         for d in &s.docs {
@@ -265,35 +306,16 @@ impl Index {
             };
             match ci {
                 Some(ci) => {
-                    *acc[ci]
-                        .entry(d.tax_year)
-                        .or_default()
-                        .entry(folder.clone())
-                        .or_default() += 1
+                    let node = &mut clients[ci];
+                    node.count += 1;
+                    for f in with_ancestors(&folder) {
+                        *node.folders.entry(f.to_owned()).or_default() += 1;
+                    }
                 }
                 None => unassigned += 1,
             }
             place.push((ci, folder));
         }
-        let clients = acc
-            .into_iter()
-            .map(|years| {
-                let mut ys: Vec<YearNode> = years
-                    .into_iter()
-                    .map(|(year, folders)| YearNode {
-                        year,
-                        count: folders.values().sum(),
-                        folders: folders.into_iter().collect(),
-                    })
-                    .collect();
-                // None (Permanent) first, then years descending.
-                ys.sort_by_key(|y| (y.year.is_some(), std::cmp::Reverse(y.year)));
-                ClientNode {
-                    count: ys.iter().map(|y| y.count).sum(),
-                    years: ys,
-                }
-            })
-            .collect();
         Index {
             clients,
             unassigned,
@@ -301,45 +323,18 @@ impl Index {
         }
     }
 
-    /// Adds client `ci`'s folders that exist on disk (`dirs`: leaf folders relative to the
-    /// client folder, `/`-separated), so the template's folders show before anything is filed in
-    /// them. A folder's first segment that is a tax year (1990..=2100) puts it under that year,
-    /// the way filed documents are placed; folders with no year go under Permanent / no year.
+    /// Adds client `ci`'s folders that exist on disk (`dirs`: folders relative to the client
+    /// folder, `/`-separated), so the template's folders show before anything is filed in them.
     pub fn add_folders(&mut self, ci: usize, dirs: &[String]) {
         let Some(node) = self.clients.get_mut(ci) else {
             return;
         };
         for dir in dirs {
-            let segs: Vec<&str> = dir.split('/').filter(|s| !s.is_empty()).collect();
-            let year_at = segs.iter().position(|s| {
-                s.len() == 4 && s.parse::<i32>().is_ok_and(|y| (1990..=2100).contains(&y))
-            });
-            let year = year_at.map(|i| segs[i].parse::<i32>().expect("checked"));
-            let folder: String = segs
-                .iter()
-                .enumerate()
-                .filter(|(i, _)| Some(*i) != year_at)
-                .map(|(_, s)| *s)
-                .collect::<Vec<_>>()
-                .join("/");
-            let y = match node.years.iter_mut().position(|y| y.year == year) {
-                Some(i) => &mut node.years[i],
-                None => {
-                    node.years.push(YearNode {
-                        year,
-                        count: 0,
-                        folders: vec![],
-                    });
-                    node.years.last_mut().expect("just pushed")
-                }
-            };
-            if !y.folders.iter().any(|(f, _)| *f == folder) {
-                y.folders.push((folder, 0));
-                y.folders.sort();
+            let dir = dir.trim_matches('/');
+            for f in with_ancestors(dir) {
+                node.folders.entry(f.to_owned()).or_default();
             }
         }
-        node.years
-            .sort_by_key(|y| (y.year.is_some(), std::cmp::Reverse(y.year)));
     }
 
     /// Indices into `Snapshot::docs` inside `scope`, in path order.
@@ -358,12 +353,13 @@ impl Index {
                     Scope::Cabinet => true,
                     Scope::Unassigned => ci.is_none(),
                     Scope::Client(c) => *ci == Some(*c),
-                    Scope::Year { client, year } => *ci == Some(*client) && d.tax_year == *year,
-                    Scope::Folder {
-                        client,
-                        year,
-                        folder: f,
-                    } => *ci == Some(*client) && d.tax_year == *year && folder == f,
+                    Scope::Folder { client, folder: f } => {
+                        *ci == Some(*client)
+                            && (folder == f
+                                || folder
+                                    .strip_prefix(f.as_str())
+                                    .is_some_and(|r| r.starts_with('/')))
+                    }
                     Scope::NeedsDocType => d.doc_type_id.is_none(),
                     Scope::NeedsTaxYear => {
                         let permanent = |p: &str| {
@@ -380,7 +376,7 @@ impl Index {
     }
 }
 
-/// The document's directory inside its client folder, minus the segment naming its tax year.
+/// The document's folder inside its client folder (`""` = directly in it).
 fn folder_key(c: &ClientRow, d: &DocRow) -> String {
     let inner = match c.folder_rel.as_deref() {
         Some(f) if !f.is_empty() => d
@@ -390,18 +386,12 @@ fn folder_key(c: &ClientRow, d: &DocRow) -> String {
             .unwrap_or(&d.rel_path),
         _ => &d.rel_path,
     };
-    let dir = inner.rsplit_once('/').map(|(dir, _)| dir).unwrap_or("");
-    let year = d.tax_year.map(|y| y.to_string());
-    let mut dropped = false;
-    dir.split('/')
-        .filter(|seg| {
-            if !dropped && year.as_deref() == Some(*seg) {
-                dropped = true;
-                false
-            } else {
-                !seg.is_empty()
-            }
-        })
+    inner
+        .rsplit_once('/')
+        .map(|(dir, _)| dir)
+        .unwrap_or("")
+        .split('/')
+        .filter(|seg| !seg.is_empty())
         .collect::<Vec<_>>()
         .join("/")
 }
@@ -460,7 +450,7 @@ mod tests {
         }
     }
 
-    /// Folders on disk show under the client before anything is filed in them.
+    /// Folders on disk show under the client before anything is filed in them, as on disk.
     #[test]
     fn empty_template_folders_join_the_tree() {
         let s = Snapshot {
@@ -468,55 +458,61 @@ mod tests {
             ..Default::default()
         };
         let mut ix = Index::build(&s);
-        assert!(ix.clients[0].years.is_empty());
+        assert!(ix.clients[0].folders.is_empty());
         ix.add_folders(
             0,
             &[
-                "Income Tax/2025".into(),
                 "Income Tax/2024".into(),
-                "Bookkeeping/2025".into(),
+                "Income Tax/2025".into(),
+                "Bookkeeping".into(),
                 "Permanent/Setup".into(),
                 "Not Yet Filed".into(),
-                "Other/Practice/2025".into(),
+                "Other/Practice".into(),
             ],
         );
-        let years: Vec<_> = ix.clients[0].years.iter().map(|y| y.year).collect();
-        assert_eq!(years, [None, Some(2025), Some(2024)]);
-        let folders = |i: usize| -> Vec<&str> {
-            ix.clients[0].years[i]
-                .folders
+        let node = &ix.clients[0];
+        let names = |p: &str| -> Vec<String> {
+            node.children(p)
                 .iter()
-                .map(|(f, _)| f.as_str())
+                .map(|(f, _)| f.to_string())
                 .collect()
         };
-        assert_eq!(folders(0), ["Not Yet Filed", "Permanent/Setup"]);
-        assert_eq!(folders(1), ["Bookkeeping", "Income Tax", "Other/Practice"]);
-        assert_eq!(ix.clients[0].count, 0);
+        assert_eq!(
+            names(""),
+            [
+                "Bookkeeping",
+                "Income Tax",
+                "Not Yet Filed",
+                "Other",
+                "Permanent"
+            ]
+        );
+        // Tax-year folders newest first.
+        assert_eq!(names("Income Tax"), ["Income Tax/2025", "Income Tax/2024"]);
+        assert_eq!(names("Permanent"), ["Permanent/Setup"]);
+        assert!(node.has_children("Other") && !node.has_children("Bookkeeping"));
+        assert_eq!(node.count, 0);
         // Adding again changes nothing.
         let before = ix.clients[0].clone();
         ix.add_folders(0, &["Income Tax/2025".into()]);
         assert_eq!(ix.clients[0], before);
     }
 
+    /// A document with no tax year in `Income Tax` sits in `Income Tax`, not under a
+    /// "Permanent" heading (owner report 2026-11-04).
     #[test]
-    fn tree_groups_permanent_then_years_descending() {
+    fn tree_is_the_folders_on_disk_with_counts_below() {
         let s = snap();
         let ix = Index::build(&s);
         let acme = &ix.clients[0];
         assert_eq!(acme.count, 6);
-        let years: Vec<_> = acme.years.iter().map(|y| (y.year, y.count)).collect();
-        assert_eq!(years, [(None, 2), (Some(2025), 3), (Some(2024), 1)]);
+        let top: Vec<_> = acme.children("").into_iter().collect();
+        assert_eq!(top, [("Income Tax", 3), ("Other", 1), ("Permanent", 1)]);
         assert_eq!(
-            acme.years[1].folders,
-            [
-                ("Income Tax".to_string(), 2),
-                ("Other/Practice".to_string(), 1)
-            ]
+            acme.children("Income Tax"),
+            [("Income Tax/2025", 2), ("Income Tax/2024", 1)]
         );
-        assert_eq!(
-            acme.years[0].folders,
-            [(String::new(), 1), ("Permanent/Setup".to_string(), 1)]
-        );
+        assert_eq!(acme.children("Permanent"), [("Permanent/Setup", 1)]);
         assert_eq!(ix.clients[1].count, 1);
         assert_eq!(ix.unassigned, 1);
     }
@@ -533,21 +529,16 @@ mod tests {
         };
         assert_eq!(names(Scope::Cabinet).len(), 8);
         assert_eq!(names(Scope::Client(1)), ["g.pdf"]);
-        assert_eq!(
-            names(Scope::Year {
-                client: 0,
-                year: Some(2025)
-            }),
-            ["b.pdf", "c.pdf", "d.pdf"]
-        );
-        assert_eq!(
-            names(Scope::Folder {
-                client: 0,
-                year: Some(2025),
-                folder: "Income Tax".into()
-            }),
-            ["b.pdf", "c.pdf"]
-        );
+        let folder = |f: &str| Scope::Folder {
+            client: 0,
+            folder: f.into(),
+        };
+        // A folder shows what is in it and below it.
+        assert_eq!(names(folder("Income Tax")), ["a.pdf", "b.pdf", "c.pdf"]);
+        assert_eq!(names(folder("Income Tax/2025")), ["b.pdf", "c.pdf"]);
+        assert_eq!(names(folder("Other/Practice")), ["d.pdf"]);
+        // "Income" is not a prefix match of "Income Tax".
+        assert!(names(folder("Income")).is_empty());
         assert_eq!(names(Scope::Unassigned), ["h.pdf"]);
     }
 
@@ -580,10 +571,12 @@ mod tests {
     }
 
     #[test]
-    fn year_segment_dropped_once_only() {
+    fn folder_is_the_path_inside_the_client_folder() {
         let c = client("1", "Acme");
-        let d = doc(Some("1"), Some(2025), "Acme (1)/Income Tax/2025/2025/x.pdf");
+        let d = doc(Some("1"), Some(2025), "Acme (1)/Income Tax/2025/x.pdf");
         assert_eq!(folder_key(&c, &d), "Income Tax/2025");
+        let d = doc(Some("1"), None, "Acme (1)/x.pdf");
+        assert_eq!(folder_key(&c, &d), "");
     }
 
     #[test]
