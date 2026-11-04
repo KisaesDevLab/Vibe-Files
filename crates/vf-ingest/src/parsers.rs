@@ -32,6 +32,10 @@ pub struct Profile {
     /// from it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub layout: Option<crate::ultratax::Layout>,
+    /// Documents in the table are filed under the short standard name (`2025 1120S
+    /// Tax_Return.pdf`) unless their row has its own; `false`: as printed.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub short_names: bool,
     /// First match wins.
     #[serde(default)]
     pub doc: Vec<DocRule>,
@@ -198,7 +202,7 @@ pub fn profile_text(profile: &Profile) -> Result<String, String> {
         );
     }
     for r in &profile.documents {
-        if let Some(p) = crate::ultratax::rename_problem(r) {
+        if let Some(p) = crate::ultratax::rename_problem(r, profile.short_names) {
             return Err(p);
         }
     }
@@ -308,7 +312,7 @@ pub fn table_rules(
     rows.sort_by_key(|(_, r)| std::cmp::Reverse(crate::ultratax::phrase_len(r)));
     let mut out = Vec::new();
     for (p, r) in rows {
-        if let Some(e) = crate::ultratax::rename_problem(r) {
+        if let Some(e) = crate::ultratax::rename_problem(r, p.short_names) {
             return Err(e);
         }
         let mut folder = r.folder.trim().trim_matches('/').to_string();
@@ -665,6 +669,8 @@ pub struct Parsed {
     pub row: Option<crate::ultratax::Row>,
     /// The file name as printed, without `.pdf`.
     pub printed: String,
+    /// The profile files table documents under the short standard name.
+    pub short_names: bool,
 }
 
 impl Compiled {
@@ -708,6 +714,7 @@ impl Compiled {
             state: text("state"),
             amended: text("amended"),
             row,
+            short_names: self.profile.short_names,
             printed: file_name
                 .strip_suffix(".pdf")
                 .or_else(|| file_name.strip_suffix(".PDF"))

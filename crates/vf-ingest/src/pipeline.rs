@@ -404,7 +404,7 @@ pub fn capture_name(root: &Path, lookup: &Lookup, name: &str) -> (String, Hint, 
                 state: p.state.clone().unwrap_or_default(),
                 amended: p.amended.clone().unwrap_or_default(),
             };
-            crate::ultratax::render(row.template(), &v)
+            crate::ultratax::render(&row.template(p.short_names), &v)
         }
         None => rest,
     };

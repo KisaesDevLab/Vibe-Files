@@ -62,7 +62,7 @@ fn problem(p: &Profile, types: &[DocType]) -> Option<String> {
             return Some(e);
         }
         for r in &p.documents {
-            if let Some(e) = ultratax::rename_problem(r) {
+            if let Some(e) = ultratax::rename_problem(r, p.short_names) {
                 return Some(e);
             }
             if !r.doc_type.is_empty()
@@ -621,6 +621,22 @@ fn document_names(ui: &mut egui::Ui, draft: &mut Profile, types: &[DocType], fol
         "Custom names as set in UltraTax (PDF File Options › Document Names); prints with either the default or the custom name are read. \"Amended\" or \"Superseded\" in front of a name is read too. For each document: its doc type, whether it is filed, the folder, and the name it is filed under (blank = as printed).",
     ));
     ui.add_space(6.0);
+    ui.horizontal(|ui| {
+        ui.label("File names");
+        ui.radio_value(
+            &mut draft.short_names,
+            false,
+            "As printed (Stockton Family Seed LLC_2025_1120S_Tax_Return_STOC3418.pdf)",
+        );
+        ui.radio_value(
+            &mut draft.short_names,
+            true,
+            "Short (2025 1120S Tax_Return.pdf; K-1s end with the partner)",
+        );
+    });
+    ui.label(widgets::caption("A row's own File name overrides this."));
+    let short = draft.short_names;
+    ui.add_space(6.0);
     let default_of = |name: &str| {
         types
             .iter()
@@ -719,43 +735,64 @@ fn document_names(ui: &mut egui::Ui, draft: &mut Profile, types: &[DocType], fol
                 } else {
                     format!("Default: {default}")
                 };
-                let shown = if r.folder.is_empty() {
-                    default_text.clone()
-                } else {
-                    r.folder.clone()
-                };
-                {
-                    egui::ComboBox::from_id_salt(("ut-folder", label.as_str()))
-                        .truncate()
-                        .selected_text(shown)
-                        .width(230.0)
-                        .show_ui(ui, |ui| {
-                            ui.selectable_value(&mut r.folder, String::new(), &default_text);
-                            for f in folders {
-                                ui.selectable_value(&mut r.folder, f.clone(), f);
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 2.0;
+                    let bad = ultratax::folder_problem(&r.folder);
+                    ui.add_sized(
+                        [200.0, 22.0],
+                        TextEdit::singleline(&mut r.folder)
+                            .hint_text(default_text.clone())
+                            .text_color_opt(bad.as_ref().map(|_| ERROR)),
+                    )
+                    .on_hover_text(bad.unwrap_or_else(|| {
+                        "Below the client folder; type a new one (e.g. Income Tax/{Year}/Government Copy) or pick one. Blank: the doc type's folder.".into()
+                    }))
+                    .widget_info(|| {
+                        egui::WidgetInfo::labeled(
+                            egui::accesskit::Role::TextInput,
+                            true,
+                            format!("{label} folder"),
+                        )
+                    });
+                    ui.menu_button("…", |ui| {
+                        if ui.button(&default_text).clicked() {
+                            r.folder.clear();
+                            ui.close();
+                        }
+                        for f in folders {
+                            if ui.button(f).clicked() {
+                                r.folder = f.clone();
+                                ui.close();
                             }
-                        })
-                        .response
-                        .widget_info(|| {
-                            egui::WidgetInfo::labeled(
-                                egui::accesskit::Role::ComboBox,
-                                true,
-                                format!("{label} folder"),
-                            )
-                        });
-                }
+                        }
+                    })
+                    .response
+                    .widget_info(|| {
+                        egui::WidgetInfo::labeled(
+                            egui::accesskit::Role::Button,
+                            true,
+                            format!("{label} pick folder"),
+                        )
+                    });
+                });
                 // File name
-                let bad = ultratax::rename_problem(r);
+                let bad = ultratax::rename_problem(r, short);
+                // What a blank File name gives (the profile's choice).
+                let hint = ultratax::Row {
+                    rename: String::new(),
+                    ..r.clone()
+                }
+                .template(short);
                 {
                     let t = ui
                         .add_sized(
                             [170.0, 22.0],
                             TextEdit::singleline(&mut r.rename)
-                                .hint_text("as printed")
+                                .hint_text(hint)
                                 .text_color_opt(bad.as_ref().map(|_| ERROR)),
                         )
                         .on_hover_text(bad.clone().unwrap_or_else(|| {
-                            "Blank: the name as printed. Tokens: {Printed} {Document} {DocType} {Client} {ID} {Year} {Form} {Recipient} {State} {Amended}".into()
+                            "Blank: the file name chosen above. Tokens: {Printed} {Document} {DocType} {Client} {ID} {Year} {Form} {Recipient} {State} {Amended}".into()
                         }));
                     t.widget_info(|| {
                         egui::WidgetInfo::labeled(
@@ -791,7 +828,7 @@ fn document_names(ui: &mut egui::Ui, draft: &mut Profile, types: &[DocType], fol
         "File name tokens: {Printed} the name as printed · {Document} the document name · {DocType} · {Client} · {ID} · {Year} · {Form} the entity type · {Recipient} the K-1 partner · {State} · {Amended}. A name must keep {Document} or {Printed}; a K-1 that copies to the partner ends with {Recipient}.",
     ));
     for r in &draft.documents {
-        if let Some(e) = ultratax::rename_problem(r) {
+        if let Some(e) = ultratax::rename_problem(r, draft.short_names) {
             ui.label(RichText::new(e).color(ERROR));
         }
     }

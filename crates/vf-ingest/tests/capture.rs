@@ -191,12 +191,12 @@ fn ultratax_prints_go_to_their_doc_types_folder() {
         (
             "1040_Preparer_Copy_Tax_Return",
             "UltraTax CS · PreparerCopyTaxReturn",
-            "Income Tax/2025",
+            "Workpapers & Support/2025",
         ),
         (
             "1040_GovernmentCopyTaxReturn",
             "UltraTax CS · GovernmentCopyTaxReturn",
-            "Income Tax/2025",
+            "Income Tax/2025/Government Copy",
         ),
         (
             "1040_Tax_Return_Documents",
@@ -217,6 +217,28 @@ fn ultratax_prints_go_to_their_doc_types_folder() {
             "{doc}"
         );
     }
+
+    // The short standard names (owner 2026-11-04: either, chosen per profile).
+    let (files, _) = vf_ingest::parsers::load_files(&root);
+    let (path, mut prof) = files.into_iter().next().unwrap();
+    prof.short_names = true;
+    vf_ingest::parsers::save_profile(&path, &prof).unwrap();
+    vf_ingest::parsers::sync_filer_rules(&root).unwrap();
+    assert_eq!(
+        dest("1040_Tax_Return"),
+        "Income Tax/2025/2025 1040 Tax_Return.pdf"
+    );
+    assert_eq!(
+        dest("1040_Amended_Tax_Return"),
+        "Income Tax/2025/2025 1040 Amended Tax_Return.pdf"
+    );
+    assert_eq!(
+        dest("1120S_K1_Package_Pat Partner"),
+        "Income Tax/2025/2025 1120S K1_Package - Pat Partner.pdf"
+    );
+    prof.short_names = false;
+    vf_ingest::parsers::save_profile(&path, &prof).unwrap();
+    vf_ingest::parsers::sync_filer_rules(&root).unwrap();
 
     // Government copies to their own folder and renamed; preparer copies not filed.
     let (files, errors) = vf_ingest::parsers::load_files(&root);

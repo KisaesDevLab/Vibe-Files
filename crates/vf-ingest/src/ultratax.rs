@@ -238,6 +238,11 @@ pub enum Action {
     Skip,
 }
 
+/// Where government copies are filed by default (owner 2026-11-04).
+pub const GOVERNMENT_FOLDER: &str = "Income Tax/{Year}/Government Copy";
+/// Where preparer copies are filed by default (owner 2026-11-04).
+pub const PREPARER_FOLDER: &str = "Workpapers & Support/{Year}";
+
 /// The doc type a K-1 row takes from the entity type (1120-S, 1065, 1041).
 pub const K1_BY_FORM: &str = "K-1 (by entity type)";
 
@@ -353,14 +358,25 @@ pub fn default_rows() -> Vec<Row> {
         rename: String::new(),
         copy_to_partner: copy,
     };
+    // Owner 2026-11-04 (QUESTIONS Q-39, Q-40): government copies in their own folder under the
+    // year, preparer copies with the workpapers; only the client-copy K-1 package goes to the
+    // partner.
+    let gov = |mut r: Row| {
+        r.folder = GOVERNMENT_FOLDER.into();
+        r
+    };
+    let prep = |mut r: Row| {
+        r.folder = PREPARER_FOLDER.into();
+        r
+    };
     vec![
-        row(
+        gov(row(
             "GovernmentCopyTaxReturn",
             "",
             "Return copy — federal",
             false,
-        ),
-        row("GovernmentCopyK1Package", "", K1_BY_FORM, false),
+        )),
+        gov(row("GovernmentCopyK1Package", "", K1_BY_FORM, false)),
         row(
             "ArchivedTaxReturn",
             "Tax_Return",
@@ -381,18 +397,18 @@ pub fn default_rows() -> Vec<Row> {
             "Workpaper",
             false,
         ),
-        row(
+        prep(row(
             "PreparerCopyTaxReturn",
             "Preparer_Copy_Tax_Return",
             "Return copy — federal",
             false,
-        ),
-        row(
+        )),
+        prep(row(
             "PreparerCopyK1Package",
             "Preparer_Copy_K1",
             K1_BY_FORM,
             false,
-        ),
+        )),
         row("Organizer", "", "Organizer", false),
         row("Organizer-ActionRequired", "", "Organizer", false),
         row("Extension", "", "Extension", false),
@@ -427,12 +443,19 @@ impl Row {
         (!self.doc_type.is_empty()).then(|| self.doc_type.clone())
     }
 
-    /// The rename template in effect.
-    pub fn template(&self) -> &str {
-        if self.rename.trim().is_empty() {
-            "{Printed}"
+    /// The file name template in effect: the row's own, else the profile's choice: the name as
+    /// printed, or the short standard name (`short`).
+    pub fn template(&self, short: bool) -> String {
+        if !self.rename.trim().is_empty() {
+            return self.rename.trim().to_string();
+        }
+        if !short {
+            return "{Printed}".into();
+        }
+        if self.default_name.contains("K1") {
+            SHORT_K1.into()
         } else {
-            self.rename.trim()
+            SHORT.into()
         }
     }
 }
@@ -450,6 +473,11 @@ pub fn k1_type(form: &str) -> Option<&'static str> {
         None
     }
 }
+
+/// The short standard file name (the client and ID are in the folder path already).
+pub const SHORT: &str = "{Year} {Form} {Amended} {Document}";
+/// The short standard name of a K-1: ends with the partner, one file per partner.
+pub const SHORT_K1: &str = "{Year} {Form} {Amended} {Document} - {Recipient}";
 
 /// Rename tokens, for the editor's help.
 pub const TOKENS: [(&str, &str); 10] = [
@@ -531,8 +559,12 @@ pub fn render(template: &str, v: &Values) -> String {
 }
 
 /// What is wrong with `row`'s rename, if anything.
-pub fn rename_problem(row: &Row) -> Option<String> {
-    let t = row.template();
+pub fn rename_problem(row: &Row, short: bool) -> Option<String> {
+    if let Some(e) = folder_problem(&row.folder) {
+        return Some(format!("{}: {e}", label_of(&row.default_name)));
+    }
+    let t = row.template(short);
+    let t = t.as_str();
     if let Some(c) = t.chars().find(|c| r#"\/:*?"<>|"#.contains(*c)) {
         return Some(format!(
             "{}: the name cannot contain {c}",
@@ -560,6 +592,26 @@ pub fn rename_problem(row: &Row) -> Option<String> {
             "{}: to copy to the partner the name must end with {{Recipient}}",
             label_of(&row.default_name)
         ));
+    }
+    None
+}
+
+/// What is wrong with a folder typed for a row (below the client folder), if anything.
+pub fn folder_problem(folder: &str) -> Option<String> {
+    if let Some(c) = folder.chars().find(|c| r#"\:*?"<>|"#.contains(*c)) {
+        return Some(format!(
+            "the folder cannot contain {c} (use / between folders)"
+        ));
+    }
+    let mut rest = folder.to_string();
+    for k in ["{Client}", "{ID}", "{Year}"] {
+        rest = rest.replace(k, "");
+    }
+    if rest.contains('{') || rest.contains('}') {
+        return Some("a folder takes only {Client}, {ID} and {Year}".into());
+    }
+    if folder.split('/').any(|seg| seg.trim() == "..") {
+        return Some("a folder cannot go up (..)".into());
     }
     None
 }
@@ -679,8 +731,21 @@ mod tests {
         );
         let mut r = default_rows()[0].clone();
         r.rename = "{Year} return".into();
-        assert!(rename_problem(&r).is_some());
+        assert!(rename_problem(&r, false).is_some());
         r.rename = "{Year} {Document}".into();
-        assert!(rename_problem(&r).is_none());
+        assert!(rename_problem(&r, false).is_none());
+        // The short names keep the document name; a K-1's ends with the partner.
+        for row in default_rows() {
+            assert!(rename_problem(&row, true).is_none(), "{}", row.default_name);
+            assert!(
+                rename_problem(&row, false).is_none(),
+                "{}",
+                row.default_name
+            );
+        }
+        r.folder = "Income Tax/{Year}/../x".into();
+        assert!(rename_problem(&r, false).is_some());
+        r.folder = "Income Tax/{Year}/Government Copy".into();
+        assert!(rename_problem(&r, false).is_none());
     }
 }
