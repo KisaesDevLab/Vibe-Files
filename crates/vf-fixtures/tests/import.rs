@@ -477,3 +477,74 @@ fn sentinel_folders_without_a_client_list_count_as_bound() {
     assert_eq!(applied.bound, 0, "nothing to bind");
     assert!(applied.mapped > 0, "files got their doc types and years");
 }
+
+/// QA P4/P5/P14: folders that only look like a client are not bound on their own.
+#[test]
+fn look_alike_folders_wait_for_a_person() {
+    let t = tempfile::tempdir().unwrap();
+    let root = t.path().join("Clients");
+    std::fs::create_dir_all(&root).unwrap();
+    vf_fs::cabinet::create(
+        &root,
+        &CabinetFile {
+            cabinet_id: vf_core::new_id(),
+            firm_id: uuid::Uuid::new_v4().to_string(),
+            schema_version: vf_core::db::SCHEMA_VERSION,
+            layout_version: 1,
+            created: vf_core::now_rfc3339(),
+            name: None,
+        },
+    )
+    .unwrap();
+    let mut conn = vf_core::db::open(&t.path().join("c.db"), Storage::Local).unwrap();
+    vf_fs::doctypes::seed_if_missing(&root).unwrap();
+    vf_fs::doctypes::sync(&mut conn, &root, "dev", "seed").unwrap();
+    let csv = t.path().join("clients.csv");
+    std::fs::write(
+        &csv,
+        "ID,Name\nSMIT1001,\"Smith, John\"\nANDE1042,Anderson Farms LLC\nSMIT2002,Smith\nREYE3003,\"Reyes, Dana\"\n",
+    )
+    .unwrap();
+    let map = filer_core::config::ColumnMap {
+        id: Some("ID".into()),
+        name: Some("Name".into()),
+        extras: vec![],
+    };
+    vf_fs::clients::import_csv(&root, &csv, &map, &Default::default()).unwrap();
+    for f in [
+        "Smith LLC",               // one meaningful word against "Smith, John"
+        "Smith Family Trust",      // more words than the client "Smith"
+        "Baker Dental (ANDE1042)", // Anderson's ID, another name
+        "Tax Returns (2019)",      // a year, not an ID
+        "Reyes (DECEASED)",        // a word, not an ID
+        "_Archive",                // skipped by name
+    ] {
+        let p = root.join(f).join("2023").join("a.pdf");
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, f).unwrap();
+    }
+    // A genuine one binds.
+    let p = root.join("John Smith").join("2023").join("W2 Acme.pdf");
+    std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+    std::fs::write(p, "w2").unwrap();
+    vf_fs::rebuild::rebuild(&mut conn, &root, "dev").unwrap();
+    let plan = import::plan(&conn, &root).unwrap();
+    let get = |n: &str| plan.folders.iter().find(|r| r.rel == n).unwrap();
+    for f in [
+        "Smith LLC",
+        "Smith Family Trust",
+        "Baker Dental (ANDE1042)",
+        "Tax Returns (2019)",
+        "Reyes (DECEASED)",
+    ] {
+        let r = get(f);
+        assert!(!r.include, "{f}: {r:?}");
+        assert!(
+            r.client.as_ref().is_none_or(|c| !c.new),
+            "{f} became a new client"
+        );
+    }
+    assert!(get("John Smith").include, "{:?}", get("John Smith"));
+    assert_eq!(plan.skipped, ["_Archive"]);
+    assert!(plan.report_csv().contains("_Archive"));
+}

@@ -165,7 +165,16 @@ pub fn appendix(conn: &Connection, root: &Path, inp: &Inputs) -> Result<Vec<u8>,
         lines: vec![
             "Documents are plain files in the cabinet folder; protect the share and its disk (e.g. BitLocker) and limit who can open it.".into(),
             "Each workstation's catalog (<data>\\catalog.db) is plain SQLite by the firm's decision (2026-11-03): protect the workstation's disk the same way.".into(),
-            "Off-site copies (B2 sync) are encrypted on the workstation before upload; sync is not configured in this version.".into(),
+            if root
+                .join(crate::cabinet::VIBE_DIR)
+                .join(crate::cabinet::KEYS_DIR)
+                .join("sync.json")
+                .is_file()
+            {
+                "Off-site copies (B2 sync) are encrypted on the workstation with the firm's key (XChaCha20-Poly1305) before upload; the key is held only by the firm (sync passphrase).".into()
+            } else {
+                "B2 sync is not set up for this cabinet: no off-site copy is made by Vibe Files.".into()
+            },
         ],
         table: None,
     });
@@ -297,7 +306,7 @@ pub fn appendix(conn: &Connection, root: &Path, inp: &Inputs) -> Result<Vec<u8>,
         heading: "6. Backup and sync",
         lines: vec![match last_push {
             Some(t) => format!("Last sync to B2: {t}"),
-            None => "B2 sync is not configured (arrives in a later version); back up the cabinet share with the firm's own backup.".into(),
+            None => "No sync to B2 has run from this workstation; if sync is not set up, back up the cabinet share with the firm's own backup.".into(),
         }],
         table: None,
     });
@@ -313,9 +322,12 @@ pub fn appendix(conn: &Connection, root: &Path, inp: &Inputs) -> Result<Vec<u8>,
             )
         } else {
             format!(
-                "{} runs since {}; certificates are filed in _Vibe\\disposition.",
+                "{} runs from this workstation since {}; every workstation's certificates are filed in _Vibe\\disposition ({} there).",
                 runs.len(),
-                &inp.period_from[..10.min(inp.period_from.len())]
+                &inp.period_from[..10.min(inp.period_from.len())],
+                std::fs::read_dir(root.join(crate::cabinet::VIBE_DIR).join("disposition"))
+                    .map(|d| d.flatten().filter(|e| e.path().extension().is_some_and(|x| x == "pdf")).count())
+                    .unwrap_or(0)
             )
         }],
         table: Some((

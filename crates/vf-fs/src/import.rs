@@ -86,6 +86,8 @@ pub struct Plan {
     pub files: Vec<FileRow>,
     /// Every client in the list, for the person to choose from.
     pub clients: Vec<ClientPick>,
+    /// Top-level folders left out (names starting `_`, `.` or `~`): listed, not imported.
+    pub skipped: Vec<String>,
 }
 
 /// Why a file is in the remainder.
@@ -158,6 +160,13 @@ impl Plan {
     pub fn report_csv(&self) -> String {
         let q = |s: &str| format!("\"{}\"", s.replace('"', "\"\""));
         let mut out = String::from("kind,path,missing,proposed client,doc type,tax year\n");
+        for f in &self.skipped {
+            out.push_str(&format!(
+                "folder,{},{},,,\n",
+                q(f),
+                q("skipped: the name starts with _ . or ~")
+            ));
+        }
         for r in self.unmapped_folders() {
             out.push_str(&format!(
                 "folder,{},{},{},,\n",
@@ -526,6 +535,13 @@ fn id_in_name(id_pattern: &str, name: &str) -> Option<(String, String)> {
     Some((id, name[..start].trim().to_string()))
 }
 
+/// Whether a trailing token can be a client ID for a new client: it has a digit and is not a
+/// year (`Tax Returns (2019)`, `Reyes (DECEASED)`, `Archive_2019` are not clients).
+fn looks_like_client_id(id: &str) -> bool {
+    id.chars().any(|c| c.is_ascii_digit())
+        && !(id.len() == 4 && id.parse::<u32>().is_ok_and(|y| (1990..=2100).contains(&y)))
+}
+
 /// The client a top-level folder is for, with how and how sure.
 fn folder_client(
     b: &filer_intake::sentinel::FolderBinding,
@@ -537,8 +553,17 @@ fn folder_client(
     match b.status {
         Status::UnboundNamed => {
             let c = b.client_id.as_deref().and_then(|id| list.match_by_id(id));
+            let base = id_in_name(id_pattern, &name).map_or(name.clone(), |(_, rest)| rest);
             return match c {
-                Some(c) => (Some(pick(c, false)), "client ID in the name".into(), 0.97),
+                // The name must agree too: an old tree's IDs can be another client's now.
+                Some(c) if vf_extract::matching::name_score(&base, &c.name) >= 0.6 => {
+                    (Some(pick(c, false)), "client ID and name".into(), 0.97)
+                }
+                Some(c) => (
+                    Some(pick(c, false)),
+                    format!("the ID is {}'s, the name is not", c.name),
+                    0.4,
+                ),
                 None => (None, String::new(), 0.0),
             };
         }
@@ -557,17 +582,37 @@ fn folder_client(
         Some((id, rest)) => (rest, Some(id)),
         None => (name.clone(), None),
     };
-    // Word-for-word: every word of the shorter name in the other (`Reyes, Dana` = `Dana Reyes`).
-    let full: Vec<&Client> = list
+    // Word-for-word: every word of the shorter name in the other (`Reyes, Dana` = `Dana Reyes`);
+    // among those, the clients sharing the most meaningful words (`John Smith` is `Smith, John`,
+    // not the client `Smith`).
+    let folder_words = vf_extract::matching::meaningful_words(&base);
+    let shared = |c: &Client| {
+        vf_extract::matching::meaningful_words(&c.name)
+            .iter()
+            .filter(|w| folder_words.contains(w))
+            .count()
+    };
+    let mut full: Vec<&Client> = list
         .clients
         .iter()
         .filter(|c| vf_extract::matching::name_score(&base, &c.name) >= 0.99)
         .collect();
+    if let Some(best) = full.iter().map(|c| shared(c)).max() {
+        full.retain(|c| shared(c) == best);
+    }
     if full.len() == 1 {
         let c = full[0];
-        // A one-word folder name (`Smith`) is not enough on its own.
-        let words_in_folder = words(&base).len();
-        let conf = if words_in_folder >= 2 { 0.9 } else { 0.6 };
+        // Two or more meaningful words on each side (no `LLC`, `Inc`, `The`), about as many on
+        // both: `Smith LLC` is not `John Smith`, `Smith Family Trust` is not `Smith`.
+        let (fw, cw) = (
+            vf_extract::matching::meaningful_words(&base).len(),
+            vf_extract::matching::meaningful_words(&c.name).len(),
+        );
+        let conf = if fw >= 2 && cw >= 2 && fw.abs_diff(cw) <= 1 {
+            0.9
+        } else {
+            0.6
+        };
         return (Some(pick(c, false)), "same name".into(), conf);
     }
     if full.len() > 1 {
@@ -578,7 +623,7 @@ fn folder_client(
             0.5,
         );
     }
-    if let Some(id) = id {
+    if let Some(id) = id.filter(|id| looks_like_client_id(id)) {
         // An ID the list does not have: a client to add.
         let c = Client {
             id: id.clone(),
@@ -703,10 +748,13 @@ pub fn plan(conn: &Connection, root: &Path) -> Result<Plan, String> {
             template_name,
         });
     }
-    // Two folders proposed for the same client: neither goes in on its own.
+    // Two folders confidently proposed for the same client (or one and a folder already
+    // bound to it): neither goes in on its own. A weak look-alike does not hold back a sure one.
     let mut by_client: HashMap<String, Vec<usize>> = HashMap::new();
     for (i, r) in p.folders.iter().enumerate() {
-        if let Some(c) = &r.client {
+        if let Some(c) = &r.client
+            && (r.bound || r.confidence >= AUTO)
+        {
             by_client.entry(c.ext_id.clone()).or_default().push(i);
         }
     }
@@ -729,6 +777,16 @@ pub fn plan(conn: &Connection, root: &Path) -> Result<Plan, String> {
 
     let mut paths: Vec<PathBuf> = vec![];
     collect_files(root, &mut paths)?;
+    for e in std::fs::read_dir(root).into_iter().flatten().flatten() {
+        let n = e.file_name().to_string_lossy().into_owned();
+        if e.file_type().is_ok_and(|t| t.is_dir())
+            && crate::cabinet::is_skipped_name(&n)
+            && n != crate::cabinet::VIBE_DIR
+        {
+            p.skipped.push(n);
+        }
+    }
+    p.skipped.sort();
     for path in paths {
         let r = rel(root, &path);
         let segs: Vec<&str> = r.split('/').collect();
@@ -827,6 +885,34 @@ pub fn apply(
 ) -> Result<Applied, String> {
     let cab = crate::cabinet::read(root)?;
     let mut out = Applied::default();
+    // Chosen by hand too: two folders for one client, or a client that has a folder already,
+    // would leave duplicate sentinels.
+    {
+        let mut seen: HashSet<&str> = HashSet::new();
+        for r in plan.folders.iter().filter(|r| r.include && !r.bound) {
+            let Some(c) = &r.client else { continue };
+            if !seen.insert(c.ext_id.as_str()) {
+                return Err(format!(
+                    "Two folders are chosen for {} ({}): keep one.",
+                    c.name, c.ext_id
+                ));
+            }
+            let has: Option<String> = conn
+                .query_row(
+                    "SELECT folder_rel FROM client WHERE ext_id = ?1 AND deleted_at IS NULL
+                       AND folder_rel IS NOT NULL",
+                    [&c.ext_id],
+                    |r| r.get(0),
+                )
+                .ok();
+            if let Some(f) = has.filter(|f| *f != r.rel) {
+                return Err(format!(
+                    "{} ({}) has a folder already ({f}): choose another client for {}.",
+                    c.name, c.ext_id, r.rel
+                ));
+            }
+        }
+    }
     let chosen: Vec<(usize, &FolderRow, &ClientPick)> = plan
         .folders
         .iter()
@@ -960,10 +1046,30 @@ pub fn undo(
     applied: &Applied,
     device_id: &str,
 ) -> Result<(), String> {
+    // Each step once: a retry after one step failed (a folder open in Explorer) skips what was
+    // undone already, and the progress is saved.
+    let undone = |conn: &Connection, t: &str| -> bool {
+        conn.query_row(
+            "SELECT undone FROM undo_record WHERE tx_id = ?1",
+            [t],
+            |r| r.get::<_, bool>(0),
+        )
+        .unwrap_or(true)
+    };
+    let mut left = applied.clone();
     if let Some(t) = &applied.meta_tx {
-        crate::fileops::undo(conn, root, t, device_id)?;
+        if !undone(conn, t) {
+            crate::fileops::undo(conn, root, t, device_id)?;
+        }
+        left.meta_tx = None;
+        let _ = crate::cabinet::write_replace(
+            &last_path(root),
+            &serde_json::to_vec_pretty(&left).expect("serializes"),
+        );
     }
-    if let Some(t) = &applied.bind_tx {
+    if let Some(t) = &applied.bind_tx
+        && !undone(conn, t)
+    {
         crate::fileops::undo(conn, root, t, device_id)?;
     }
     rebuild::rebuild(conn, root, device_id).map_err(|e| e.to_string())?;

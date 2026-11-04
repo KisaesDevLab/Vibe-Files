@@ -65,6 +65,11 @@ const NOISE: [&str; 14] = [
     "COMPANY",
 ];
 
+/// The words that tell names apart (upper case, no `LLC`, `Inc`, `The`, …), sorted, unique.
+pub fn meaningful_words(name: &str) -> Vec<String> {
+    tokens(name)
+}
+
 fn tokens(name: &str) -> Vec<String> {
     let mut v: Vec<String> = name
         .to_uppercase()

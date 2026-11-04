@@ -108,6 +108,9 @@ pub struct Browse {
     holds_seen: Option<(String, Vec<vf_fs::holds::Hold>)>,
     /// The reason typed for a new hold, while the form is open.
     hold_reason: Option<String>,
+    /// A hold being released (asked first), and the PIN typed.
+    hold_releasing: Option<(String, String)>,
+    hold_pin: String,
     /// The `Rename…` dialog, while open.
     pub rename: Option<RenameDialog>,
     /// A PDF to show in the Viewer (taken by the app).
@@ -203,6 +206,8 @@ impl Browse {
             undo_stack: None,
             undo_requested: false,
             trash_asking: None,
+            hold_releasing: None,
+            hold_pin: String::new(),
             trash_confirm: None,
             versions: None,
             trash_requested: false,
@@ -1874,11 +1879,24 @@ fn legal_holds(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env) {
                         "Nothing here is disposed of or emptied from the trash while it holds.",
                     ));
                     if ui.small_button("Release hold").clicked() {
-                        release = Some(h.id.clone());
+                        b.hold_releasing = Some((h.id.clone(), h.reason.clone()));
+                        b.hold_pin.clear();
                     }
                 });
             });
         ui.add_space(4.0);
+    }
+    if let Some((id, reason)) = b.hold_releasing.clone() {
+        let mut pin = std::mem::take(&mut b.hold_pin);
+        match crate::ui::disposition::confirm_release(ui, env, &reason, &mut pin) {
+            Some(true) => {
+                b.hold_releasing = None;
+                release = Some(id);
+            }
+            Some(false) => b.hold_releasing = None,
+            None => {}
+        }
+        b.hold_pin = pin;
     }
     if let Some(id) = release {
         match vf_fs::holds::release(env.conn, env.root, env.device_id, &id) {
@@ -2712,6 +2730,16 @@ mod tests {
         let d = &s.b.snap.docs[0];
         assert!(vf_fs::holds::covers(&s.root, None, &d.rel_path, &d.hash));
         click(&mut h, "Release hold");
+        // Asked first, naming the hold (QA P8).
+        assert!(
+            h.query_by_label_contains("Release the legal hold")
+                .is_some()
+        );
+        assert!(
+            h.query_by_label_contains("Legal hold:").is_some(),
+            "still held"
+        );
+        click(&mut h, "Yes, release");
         assert!(h.query_by_label_contains("Legal hold:").is_none());
         assert_eq!(h.state().b.notice.as_deref(), Some("Legal hold released."));
     }

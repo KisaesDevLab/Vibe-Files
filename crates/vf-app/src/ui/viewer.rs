@@ -129,6 +129,8 @@ pub struct Env<'a> {
 
 pub struct Viewer {
     pub doc: Option<Doc>,
+    /// Another document asked for while annotations are unsaved: open it and drop them?
+    pub ask_open: Option<Doc>,
     generation: u64,
     info: Option<DocInfo>,
     pub error: Option<String>,
@@ -194,6 +196,7 @@ impl Default for Viewer {
     fn default() -> Self {
         Viewer {
             doc: None,
+            ask_open: None,
             generation: 0,
             info: None,
             error: None,
@@ -236,6 +239,16 @@ impl Default for Viewer {
 
 impl Viewer {
     pub fn open(&mut self, doc: Doc) {
+        if !self.pending.is_empty() {
+            // Unsaved annotations are never dropped unasked: the other document waits.
+            self.ask_open = Some(doc);
+            return;
+        }
+        self.open_now(doc);
+    }
+
+    /// Opens `doc`, dropping unsaved annotations (asked first by [`Viewer::open`]).
+    fn open_now(&mut self, doc: Doc) {
         if !self.pending.is_empty() {
             self.notice = Some(format!(
                 "{} unsaved annotations were discarded.",
@@ -459,6 +472,34 @@ impl Viewer {
 
 pub fn show(ui: &mut egui::Ui, v: &mut Viewer, env: &mut Env<'_>) {
     v.pump(ui.ctx());
+    if let Some(next) = v.ask_open.clone() {
+        let mut answer = None;
+        egui::Modal::new(egui::Id::unique("viewer-unsaved")).show(ui.ctx(), |ui| {
+            ui.set_width(420.0);
+            ui.heading(format!("{} unsaved annotations", v.pending.len()));
+            ui.label(format!(
+                "Opening {} drops them. Keep editing to save them first.",
+                next.name
+            ));
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                if ui.button("Keep editing").clicked() {
+                    answer = Some(false);
+                }
+                if ui.button("Discard and open").clicked() {
+                    answer = Some(true);
+                }
+            });
+        });
+        match answer {
+            Some(true) => {
+                v.ask_open = None;
+                v.open_now(next);
+            }
+            Some(false) => v.ask_open = None,
+            None => {}
+        }
+    }
     let Some(doc) = v.doc.clone() else {
         egui::CentralPanel::default().show(ui, |ui| {
             ui.heading("Viewer");

@@ -127,6 +127,17 @@ fn save(root: &Path, holds: &[Hold]) -> Result<(), String> {
 /// with content `hash`. A file that cannot be read counts as covering everything: when in
 /// doubt, nothing is destroyed.
 pub fn covers(root: &Path, client_id: Option<&str>, rel_path: &str, hash: &str) -> bool {
+    covers_any(
+        root,
+        client_id,
+        rel_path,
+        std::slice::from_ref(&hash.to_string()),
+    )
+}
+
+/// [`covers`] for a document that has had several contents (its versions): a hold placed on
+/// any of them still holds it after OCR, annotations or a rename (QA P6).
+pub fn covers_any(root: &Path, client_id: Option<&str>, rel_path: &str, hashes: &[String]) -> bool {
     let Ok(holds) = load(root) else {
         return true;
     };
@@ -134,7 +145,7 @@ pub fn covers(root: &Path, client_id: Option<&str>, rel_path: &str, hash: &str) 
         (h.client_id.is_some() && h.client_id.as_deref() == client_id)
             || h.docs
                 .iter()
-                .any(|d| d.hash == hash || d.rel_path == rel_path)
+                .any(|d| hashes.contains(&d.hash) || d.rel_path == rel_path)
     })
 }
 

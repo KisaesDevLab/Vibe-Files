@@ -112,8 +112,12 @@ pub fn standing(
 }
 
 /// Today's date (UTC), for callers.
+/// Today in the office's calendar (local time: a US evening is still today, not tomorrow's UTC
+/// date; QA P16).
 pub fn today() -> Date {
-    time::OffsetDateTime::now_utc().date()
+    time::OffsetDateTime::now_local()
+        .unwrap_or_else(|_| time::OffsetDateTime::now_utc())
+        .date()
 }
 
 #[cfg(test)]

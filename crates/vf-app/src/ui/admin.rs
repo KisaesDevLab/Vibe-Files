@@ -97,6 +97,8 @@ pub struct Admin {
     pub import: crate::ui::import_tree::ImportPage,
     /// The editor above the table.
     pub editing: Editing,
+    /// Asking before removing a doc type documents use.
+    confirm_remove: bool,
     form: Form,
     pub error: Option<String>,
     /// Set when the catalog changed; Browse re-reads before it next draws.
@@ -132,6 +134,7 @@ impl Admin {
             safeguards: Default::default(),
             import: Default::default(),
             editing: Editing::Closed,
+            confirm_remove: false,
             form: Form::default(),
             error: None,
             changed: false,
@@ -557,8 +560,32 @@ fn editor(ui: &mut egui::Ui, a: &mut Admin, env: &mut Env) {
             } else {
                 remove
             };
-            if remove.clicked() && a.run(env, Edit::Remove(id)) {
-                a.editing = Editing::Closed;
+            // Used by documents: asked first (it is not on the undo stack).
+            if remove.clicked() {
+                if used > 0 {
+                    a.confirm_remove = true;
+                } else if a.run(env, Edit::Remove(id.clone())) {
+                    a.editing = Editing::Closed;
+                }
+            }
+            if a.confirm_remove && used > 0 {
+                ui.label(
+                    RichText::new(format!(
+                        "{used} documents use this doc type. Remove it anyway? They keep it, shown as deleted; it cannot be undone from Browse."
+                    ))
+                    .color(ERROR),
+                );
+                ui.horizontal(|ui| {
+                    if ui.button("Yes, remove").clicked() {
+                        a.confirm_remove = false;
+                        if a.run(env, Edit::Remove(id.clone())) {
+                            a.editing = Editing::Closed;
+                        }
+                    }
+                    if ui.button("Keep it").clicked() {
+                        a.confirm_remove = false;
+                    }
+                });
             }
         }
         if ui.button("Close").clicked() {
@@ -1059,6 +1086,17 @@ HALV1001,\"Halvorsen, Dana\"
         h.get_by_label("B/2015/w2.pdf").click();
         h.run();
         click(&mut h, "Approve 1");
+        // Asked first (QA P7): nothing approved until "Yes".
+        assert!(
+            vf_fs::disposition::pending(&h.state().conn)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            h.query_by_label_contains("Approve 1 documents for destruction?")
+                .is_some()
+        );
+        click(&mut h, "Yes, approve 1");
         let s = h.state();
         assert!(
             s.a.disposition.error.is_none(),
@@ -1089,6 +1127,8 @@ HALV1001,\"Halvorsen, Dana\"
                 .is_some()
         );
         click(&mut h, "Release");
+        assert!(h.state().a.holds.notice.is_none(), "asked first");
+        click(&mut h, "Yes, release");
         assert_eq!(
             h.state().a.holds.notice.as_deref(),
             Some("Legal hold released.")

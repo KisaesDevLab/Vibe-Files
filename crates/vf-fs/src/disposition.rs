@@ -145,7 +145,15 @@ fn held(
     rel: &str,
     hash: &str,
 ) -> bool {
-    crate::trash::held(conn, id) || crate::holds::covers(root, client, rel, hash)
+    // Every content the document has had (its versions) counts: a hold placed on an earlier
+    // one holds it still.
+    let mut hashes = vec![hash.to_string()];
+    if let Ok(mut st) = conn.prepare("SELECT DISTINCT hash FROM version WHERE doc_id = ?1")
+        && let Ok(rows) = st.query_map([id], |r| r.get::<_, String>(0))
+    {
+        hashes.extend(rows.flatten());
+    }
+    crate::trash::held(conn, id) || crate::holds::covers_any(root, client, rel, &hashes)
 }
 
 /// Documents whose retention ended on or before `today`.
@@ -243,12 +251,12 @@ fn decide(
         tx = tx
             .catalog(Stmt::new(
                 "INSERT INTO disposition (doc_id, class_id, eligible_on, decision, decided_by,
-                   decided_at, destroy_after, deferred_until, device_id)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                   decided_at, destroy_after, deferred_until, device_id, hash)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
                  ON CONFLICT(doc_id) DO UPDATE SET decision = excluded.decision,
                    decided_by = excluded.decided_by, decided_at = excluded.decided_at,
                    destroy_after = excluded.destroy_after, deferred_until = excluded.deferred_until,
-                   device_id = excluded.device_id",
+                   device_id = excluded.device_id, hash = excluded.hash",
                 vec![
                     l.doc_id.clone().into(),
                     l.class_id.clone().into(),
@@ -259,6 +267,7 @@ fn decide(
                     after.clone().into(),
                     until.clone().into(),
                     device_id.into(),
+                    l.hash.clone().into(),
                 ],
             ))
             .audit(AuditEntry::new(
@@ -336,6 +345,49 @@ pub fn pending(conn: &Connection) -> Result<Vec<Pending>, String> {
     rows.collect::<Result<_, _>>().map_err(|e| e.to_string())
 }
 
+/// Why an approved document may not be destroyed now (`None`: it may). Its retention under its
+/// current doc type, class and year must still have ended; its content must be the approved
+/// one (when recorded); the file must be there with the catalog's content.
+fn still_due(
+    conn: &Connection,
+    root: &Path,
+    doc_id: &str,
+    rel: &str,
+    hash: &str,
+    today: Date,
+) -> Result<Option<String>, String> {
+    let approved: Option<String> = conn
+        .query_row(
+            "SELECT hash FROM disposition WHERE doc_id = ?1",
+            [doc_id],
+            |r| r.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+    if approved.as_deref().is_some_and(|a| a != hash) {
+        return Ok(Some("its content changed after approval".into()));
+    }
+    let Some(d) = live_docs(conn)?.into_iter().find(|d| d.id == doc_id) else {
+        return Ok(Some("not in the catalog".into()));
+    };
+    let Some((_, _, years, anchor)) = d.class else {
+        return Ok(Some("it no longer has a retention class".into()));
+    };
+    let anchor = Anchor::parse(&anchor).unwrap_or(Anchor::Never);
+    if !matches!(
+        retention::standing(anchor, years, d.tax_year, &d.filed_at, today),
+        Standing::Eligible(_)
+    ) {
+        return Ok(Some(
+            "its retention has not ended under its current doc type and year".into(),
+        ));
+    }
+    match filer_intake::commit::sha256_file(&root.join(rel)) {
+        Ok(h) if h == hash => Ok(None),
+        Ok(_) => Ok(Some("the file on disk is not the catalog's content".into())),
+        Err(_) => Ok(Some("the file is not there".into())),
+    }
+}
+
 /// Overwrites `p` with zeros, flushes, and deletes it. Best effort on SSDs and NTFS (the
 /// certificate says "overwritten and deleted", not "unrecoverable").
 fn wipe(p: &Path) -> std::io::Result<()> {
@@ -376,6 +428,9 @@ pub struct RunReport {
     pub held: usize,
     /// Could not be wiped (open in another program …): kept, still approved.
     pub failed: Vec<String>,
+    /// Changed since approval (new content, a different retention, the file missing or not
+    /// what the catalog says): kept, and its approval cleared so it comes up again.
+    pub changed: Vec<String>,
     /// The certificate, cabinet-relative.
     pub certificate: Option<String>,
 }
@@ -496,7 +551,7 @@ pub fn destroy_due(
     cabinet_name: &str,
 ) -> Result<RunReport, String> {
     let today_s = ymd(today);
-    let (due, held_now): (Vec<Victim>, usize) = {
+    let (due, held_now, changed_now): (Vec<Victim>, usize, Vec<String>) = {
         let mut st = conn
             .prepare(
                 "SELECT p.doc_id, d.rel_path, d.hash, d.client_id, c.name, t.name, r.name,
@@ -532,6 +587,7 @@ pub fn destroy_due(
             .map_err(|e| e.to_string())?;
         let mut out = Vec::new();
         let mut rep_held = 0;
+        let mut changed: Vec<(String, String)> = Vec::new();
         for row in rows {
             let (mut v, client_id) = row.map_err(|e| e.to_string())?;
             // Holds again, from the cabinet file, just before anything is destroyed.
@@ -546,12 +602,28 @@ pub fn destroy_due(
                 rep_held += 1;
                 continue;
             }
+            // The document as it is now: still eligible under its current class and year,
+            // the content that was approved, and on disk as the catalog says.
+            if let Some(why) = still_due(conn, root, &v.doc_id, &v.rel_path, &v.hash, today)? {
+                changed.push((v.doc_id.clone(), format!("{}: {why}", v.rel_path)));
+                continue;
+            }
             v.hashes.push(v.hash.clone());
             out.push(v);
         }
+        // Changed since approval: the approval goes (it comes up again for a new decision).
+        for (id, _) in &changed {
+            conn.execute(
+                "DELETE FROM disposition WHERE doc_id = ?1 AND destroyed_at IS NULL",
+                [id],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+        let changed: Vec<String> = changed.into_iter().map(|(_, w)| w).collect();
         if out.is_empty() {
             return Ok(RunReport {
                 held: rep_held,
+                changed,
                 ..Default::default()
             });
         }
@@ -568,10 +640,11 @@ pub fn destroy_due(
                 }
             }
         }
-        (out, rep_held)
+        (out, rep_held, changed)
     };
     let mut rep = RunReport {
         held: held_now,
+        changed: changed_now,
         ..Default::default()
     };
     let ids: HashSet<&str> = due.iter().map(|v| v.doc_id.as_str()).collect();
@@ -627,10 +700,26 @@ pub fn destroy_due(
                 continue;
             }
             let stored = cabinet::version_path(root, h);
-            if stored.exists() && wipe(&stored).is_ok() {
-                rep.copies += 1;
-            }
             let sidecar = stored.with_extension("json");
+            // Each workstation has its own catalog: the sidecar (in the cabinet) says whether a
+            // document elsewhere had this content as a version too. Then it stays.
+            let elsewhere = std::fs::read_to_string(&sidecar)
+                .ok()
+                .and_then(|t| serde_json::from_str::<Vec<cabinet::VersionSidecar>>(&t).ok())
+                .is_some_and(|es| es.iter().any(|e| e.rel_path != v.rel_path));
+            if elsewhere {
+                continue;
+            }
+            if stored.exists() {
+                match wipe(&stored) {
+                    Ok(()) => rep.copies += 1,
+                    Err(e) => {
+                        // Not certified as gone: the sidecar stays with it.
+                        rep.failed.push(format!("a version of {}: {e}", v.rel_path));
+                        continue;
+                    }
+                }
+            }
             if sidecar.exists() {
                 let _ = std::fs::remove_file(&sidecar);
             }
@@ -1011,6 +1100,48 @@ mod tests {
             ids(&eligible(&f.conn, &f.root, d(2027, 11, 3)).unwrap()),
             ["engage", "w2-2019"]
         );
+    }
+
+    /// QA P3: an approval is checked again at destroy time. Reclassified as permanent, or new
+    /// content since: kept, the approval cleared, and reported.
+    #[test]
+    fn destroy_rechecks_each_approved_document() {
+        let mut f = fx();
+        let today = d(2026, 11, 3);
+        let r = eligible(&f.conn, &f.root, today).unwrap();
+        approve(&mut f.conn, "dev", &r.lines, today).unwrap();
+        // The 2019 W-2 is reclassified (an EIN letter: kept permanently).
+        f.conn
+            .execute(
+                "UPDATE document SET doc_type_id = (SELECT id FROM doc_type WHERE name = 'EIN letter')
+                 WHERE id = 'w2-2019'",
+                [],
+            )
+            .unwrap();
+        // The engagement letter's file is replaced in Explorer.
+        std::fs::write(f.root.join("B/2017/engagement.pdf"), b"another file").unwrap();
+        let run = destroy_due(&mut f.conn, &f.root, "dev", d(2026, 12, 4), "Firm").unwrap();
+        assert_eq!(run.destroyed, 1, "only the 2018 return");
+        assert_eq!(run.changed.len(), 2, "{:?}", run.changed);
+        let w2: String = f
+            .conn
+            .query_row(
+                "SELECT rel_path FROM document WHERE id = 'w2-2019' AND deleted_at IS NULL",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(f.root.join(w2).is_file(), "the reclassified W-2 stays");
+        assert!(f.root.join("B/2017/engagement.pdf").is_file());
+        let left: i64 = f
+            .conn
+            .query_row(
+                "SELECT count(*) FROM disposition WHERE doc_id IN ('w2-2019', 'engage')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(left, 0, "their approvals are cleared");
     }
 
     /// PHASES P07 done-when 3: secure delete leaves no copy in the versions store, the

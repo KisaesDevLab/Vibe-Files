@@ -19,6 +19,8 @@ pub struct DispositionPage {
     report: Option<Report>,
     picked: BTreeSet<String>,
     pin: String,
+    /// Asking "Approve N for destruction?"
+    confirm_approve: bool,
     pub notice: Option<String>,
     pub error: Option<String>,
     /// The catalog changed: Browse re-reads.
@@ -116,6 +118,33 @@ pub fn show(ui: &mut egui::Ui, p: &mut DispositionPage, env: &mut Env) {
                 .cloned()
                 .collect();
             let n = chosen.len();
+            let mut go = false;
+            if p.confirm_approve && n > 0 {
+                // Approving is the decision to destroy: said in full before it is taken (QA P7).
+                ui.label(
+                    RichText::new(format!(
+                        "Approve {n} documents for destruction? They are destroyed on or after {} unless a legal hold covers them; until then Admin › Disposition can still cancel.",
+                        widgets::local_time(&vf_core::rfc3339_days_ago(
+                            -disposition::WAIT_DAYS
+                        ))
+                        .get(..10)
+                        .unwrap_or_default()
+                    ))
+                    .color(ERROR),
+                );
+                ui.horizontal(|ui| {
+                    if ui
+                        .add(widgets::primary_button(format!("Yes, approve {n}")))
+                        .clicked()
+                    {
+                        go = true;
+                        p.confirm_approve = false;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        p.confirm_approve = false;
+                    }
+                });
+            }
             ui.horizontal(|ui| {
                 if ui
                     .add_enabled(n > 0, egui::Button::new(format!("Approve {n}")))
@@ -125,6 +154,9 @@ pub fn show(ui: &mut egui::Ui, p: &mut DispositionPage, env: &mut Env) {
                     ))
                     .clicked()
                 {
+                    p.confirm_approve = true;
+                }
+                if go {
                     match disposition::approve(env.conn, env.device_id, &chosen, today) {
                         Ok(n) => {
                             p.notice = Some(format!(
@@ -271,6 +303,9 @@ pub fn show(ui: &mut egui::Ui, p: &mut DispositionPage, env: &mut Env) {
 pub struct HoldsPage {
     pub notice: Option<String>,
     pub error: Option<String>,
+    /// The hold being released (asked first) and the PIN typed.
+    pub releasing: Option<String>,
+    pub pin: String,
 }
 
 pub fn holds(ui: &mut egui::Ui, p: &mut HoldsPage, env: &mut Env) {
@@ -326,7 +361,8 @@ pub fn holds(ui: &mut egui::Ui, p: &mut HoldsPage, env: &mut Env) {
             if h.active() {
                 ui.label(RichText::new(line).color(ERROR));
                 if ui.small_button("Release").clicked() {
-                    release = Some(h.id.clone());
+                    p.releasing = Some(h.id.clone());
+                    p.pin.clear();
                 }
             } else {
                 ui.label(
@@ -342,12 +378,67 @@ pub fn holds(ui: &mut egui::Ui, p: &mut HoldsPage, env: &mut Env) {
             }
         });
     }
+    if let Some(id) = p.releasing.clone() {
+        let reason = all
+            .iter()
+            .find(|h| h.id == id)
+            .map(|h| h.reason.clone())
+            .unwrap_or_default();
+        match confirm_release(ui, env, &reason, &mut p.pin) {
+            Some(true) => {
+                p.releasing = None;
+                release = Some(id);
+            }
+            Some(false) => p.releasing = None,
+            None => {}
+        }
+    }
     if let Some(id) = release {
         match vf_fs::holds::release(env.conn, env.root, env.device_id, &id) {
             Ok(()) => p.notice = Some("Legal hold released.".into()),
             Err(e) => p.error = Some(e),
         }
     }
+}
+
+/// "Release the hold?" with what it covers and, when the firm has a PIN, the PIN (QA P8).
+/// `Some(true)`: release; `Some(false)`: cancelled; `None`: still asking.
+pub fn confirm_release(
+    ui: &mut egui::Ui,
+    env: &Env,
+    reason: &str,
+    pin: &mut String,
+) -> Option<bool> {
+    let mut out = None;
+    ui.group(|ui| {
+        ui.label(
+            RichText::new(format!(
+                "Release the legal hold \"{reason}\"? Everything it covers can then be disposed of and emptied from the trash."
+            ))
+            .color(ERROR),
+        );
+        let need_pin = vf_fs::trash::has_pin(env.root);
+        if need_pin {
+            ui.horizontal(|ui| {
+                let l = ui.label("Firm PIN");
+                ui.add(egui::TextEdit::singleline(pin).password(true).desired_width(120.0))
+                    .labelled_by(l.id);
+            });
+        }
+        ui.horizontal(|ui| {
+            if ui.add(widgets::primary_button("Yes, release")).clicked() {
+                if !need_pin || vf_fs::trash::check_pin(env.root, pin) {
+                    out = Some(true);
+                } else {
+                    ui.ctx().debug_text("wrong PIN");
+                }
+            }
+            if ui.button("Cancel").clicked() {
+                out = Some(false);
+            }
+        });
+    });
+    out
 }
 
 /// Admin › Safeguards appendix (P07 step 5).
