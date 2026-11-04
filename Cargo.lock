@@ -5842,6 +5842,7 @@ dependencies = [
 name = "vf-sync"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "bytes",
  "chacha20poly1305",
  "filer-core",

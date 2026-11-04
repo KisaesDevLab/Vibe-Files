@@ -102,7 +102,7 @@ pub fn restore_session(conn: &mut Connection, root: &Path, s: &Sync) -> Result<R
 
     // The cabinet file first: everything else reads it.
     let cab_seg: CabinetSegment = s
-        .get_json(&layout::cabinet_segment_key(head.cabinet_segment_rev))?
+        .get_json(&head.cabinet_key())?
         .ok_or_else(|| SyncError::Format("the cabinet segment is missing".into()))?;
     cab_seg
         .check()
@@ -287,6 +287,12 @@ pub fn resolve(
 /// applied the manifest that carries their tombstone, and no live document or version uses the
 /// same content. Returns how many objects were removed.
 pub fn remove_disposed(s: &Sync) -> Result<usize> {
+    remove_disposed_in(s, None)
+}
+
+/// [`remove_disposed`]; with a catalog, its "already in the bucket" note is dropped for each
+/// object removed.
+pub fn remove_disposed_in(s: &Sync, conn: Option<&Connection>) -> Result<usize> {
     let Some(head) = s.head()? else {
         return Ok(0);
     };
@@ -303,13 +309,12 @@ pub fn remove_disposed(s: &Sync) -> Result<usize> {
     let mut gone = std::collections::BTreeSet::new();
     let mut docs = vec![];
     if head.cabinet_segment_rev > 0
-        && let Some(c) =
-            s.get_json::<CabinetSegment>(&layout::cabinet_segment_key(head.cabinet_segment_rev))?
+        && let Some(c) = s.get_json::<CabinetSegment>(&head.cabinet_key())?
     {
         docs.extend(c.documents);
     }
     for (client, rev) in &head.segments {
-        if let Some(c) = s.get_json::<ClientSegment>(&layout::segment_key(client, *rev))? {
+        if let Some(c) = s.get_json::<ClientSegment>(&head.client_key(client, *rev))? {
             docs.extend(c.documents);
         }
     }
@@ -324,11 +329,21 @@ pub fn remove_disposed(s: &Sync) -> Result<usize> {
         }
     }
     let mut n = 0;
+    let hash_of: std::collections::BTreeMap<&String, &String> = docs
+        .iter()
+        .flat_map(|d| {
+            std::iter::once((&d.object, &d.hash))
+                .chain(d.versions.iter().map(|v| (&v.object, &v.hash)))
+        })
+        .collect();
     for o in gone.difference(&live) {
         let key = layout::object_key(o);
         if s.remote.exists(&key)? {
             s.remote.delete(&key)?;
             n += 1;
+        }
+        if let (Some(c), Some(h)) = (conn, hash_of.get(o)) {
+            c.execute("DELETE FROM sync_object WHERE hash = ?1", [h])?;
         }
     }
     Ok(n)
@@ -341,13 +356,12 @@ fn current_docs(s: &Sync) -> Result<Vec<(String, crate::layout::DocEntry)>> {
     };
     let mut out = vec![];
     if head.cabinet_segment_rev > 0
-        && let Some(c) =
-            s.get_json::<CabinetSegment>(&layout::cabinet_segment_key(head.cabinet_segment_rev))?
+        && let Some(c) = s.get_json::<CabinetSegment>(&head.cabinet_key())?
     {
         out.extend(c.documents.into_iter().map(|d| (String::new(), d)));
     }
     for (client, rev) in &head.segments {
-        if let Some(c) = s.get_json::<ClientSegment>(&layout::segment_key(client, *rev))? {
+        if let Some(c) = s.get_json::<ClientSegment>(&head.client_key(client, *rev))? {
             let f = c.folder_rel.clone();
             out.extend(c.documents.into_iter().map(|d| (f.clone(), d)));
         }
@@ -392,7 +406,7 @@ pub fn export_client(s: &Sync, client_id: &str, dest: &Path) -> Result<usize> {
         .get(client_id)
         .ok_or_else(|| SyncError::Local("this client is not in the bucket".into()))?;
     let seg: ClientSegment = s
-        .get_json(&layout::segment_key(client_id, *rev))?
+        .get_json(&head.client_key(client_id, *rev))?
         .ok_or_else(|| SyncError::Format("the client segment is missing".into()))?;
     seg.check()
         .map_err(|what| SyncError::Format(format!("the client segment: refused {what}")))?;

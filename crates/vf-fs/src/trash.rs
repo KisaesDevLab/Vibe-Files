@@ -53,8 +53,21 @@ pub fn delete(
     ids: &[String],
     reason: &str,
 ) -> Result<String, String> {
+    delete_as(conn, root, device_id, ids, reason, DELETE_LABEL)
+}
+
+/// [`delete`] as a Transaction labelled `label` (a delete applied from another workstation by
+/// sync is `sync_pull`, off this login's undo stack).
+pub fn delete_as(
+    conn: &mut Connection,
+    root: &Path,
+    device_id: &str,
+    ids: &[String],
+    reason: &str,
+    label: &str,
+) -> Result<String, String> {
     let now = vf_core::now_rfc3339();
-    let mut tx = Transaction::new(DELETE_LABEL);
+    let mut tx = Transaction::new(label);
     for id in ids {
         let rel: String = conn
             .query_row(

@@ -99,6 +99,7 @@ fn push_once(
     rep: &mut PushReport,
 ) -> Result<()> {
     let head = s.head()?.unwrap_or_default();
+    let writer = vf_core::new_id();
     let pending = catalog::pending(conn)?;
     let mut uploaded = catalog::uploaded(conn)?;
     let files = master_files(root);
@@ -106,9 +107,12 @@ fn push_once(
     let files_dirty = hashes != catalog::files_base(conn)?;
 
     let mut new_head = head.clone();
-    let mut sent_docs: Vec<String> = vec![];
+    // What was sent, as sent (the live rows may change while the push runs): the base later.
+    let mut sent_docs: Vec<SentDoc> = vec![];
     let mut sent_segments: Vec<(String, u64, Option<String>, Option<String>)> = vec![];
 
+    // `Ok(false)`: the local file cannot be read or no longer has this content (edited outside
+    // Vibe Files); bucket errors are errors.
     let mut upload = |hash: &str, path: &Path, rep: &mut PushReport| -> Result<bool> {
         if uploaded.contains(hash) {
             return Ok(true);
@@ -130,13 +134,27 @@ fn push_once(
         Ok(true)
     };
 
+    // A segment this PC has not applied (a pull left documents for later) is never sent: it
+    // would put back what the other workstation changed.
+    let applied = |c: &str| -> Result<bool> {
+        let theirs = if c == CABINET {
+            head.cabinet_segment_rev
+        } else {
+            head.segments.get(c).copied().unwrap_or(0)
+        };
+        Ok(theirs == catalog::segment_rev(conn, c)? || theirs == 0)
+    };
     let clients: Vec<String> = pending
         .keys()
         .filter(|c| only.is_none_or(|o| o == c.as_str()))
         .cloned()
         .collect();
-    let cabinet_too = files_dirty || clients.iter().any(|c| c == CABINET);
-    for client in clients.iter().filter(|c| c.as_str() != CABINET) {
+    let cabinet_too = (files_dirty || clients.iter().any(|c| c == CABINET)) && applied(CABINET)?;
+    'clients: for client in clients.iter().filter(|c| c.as_str() != CABINET) {
+        if !applied(client)? {
+            rep.skipped += pending.get(client).copied().unwrap_or(0);
+            continue;
+        }
         let Some(folder) = catalog::client_folder(conn, client)? else {
             continue; // a client with no folder has no segment
         };
@@ -145,20 +163,25 @@ fn push_once(
             continue;
         };
         let mut docs = catalog::entries(conn, &s.keys, client, &folder)?;
-        docs.retain(|e| {
-            let live = e.deleted_at.is_none();
-            let ok = !live
-                || upload(&e.hash, &root.join(&folder).join(&e.rel_path), rep).unwrap_or(false);
-            if !ok {
-                rep.skipped += 1;
+        for e in &mut docs {
+            if e.deleted_at.is_none()
+                && !upload(&e.hash, &root.join(&folder).join(&e.rel_path), rep)?
+            {
+                // A file that cannot be read now: the client's segment waits (the bucket keeps
+                // its previous one, nothing is dropped from it).
+                rep.skipped += pending.get(client).copied().unwrap_or(1);
+                continue 'clients;
             }
-            ok
-        });
+            let mut kept = Vec::with_capacity(e.versions.len());
+            for v in std::mem::take(&mut e.versions) {
+                if upload(&v.hash, &vf_fs::cabinet::version_path(root, &v.hash), rep)? {
+                    kept.push(v);
+                }
+            }
+            e.versions = kept;
+        }
         for e in &docs {
-            for v in &e.versions {
-                upload(&v.hash, &vf_fs::cabinet::version_path(root, &v.hash), rep)?;
-            }
-            sent_docs.push(e.doc_id.clone());
+            sent_docs.push(SentDoc::of(e, Some(client), &folder));
         }
         let rev = head.segments.get(client).copied().unwrap_or(0) + 1;
         let seg = ClientSegment {
@@ -170,8 +193,11 @@ fn push_once(
             empty_dirs: catalog::empty_dirs(root, &folder),
             written_by: s.device_name.clone(),
         };
-        s.put_json(&layout::segment_key(client, rev), &seg)?;
+        s.put_json(&layout::segment_key_by(client, rev, &writer), &seg)?;
         new_head.segments.insert(client.clone(), rev);
+        new_head
+            .segment_writers
+            .insert(client.clone(), writer.clone());
         sent_segments.push((
             client.clone(),
             rev,
@@ -182,26 +208,39 @@ fn push_once(
     }
     if cabinet_too {
         let mut docs = catalog::entries(conn, &s.keys, CABINET, "")?;
-        docs.retain(|e| {
-            e.deleted_at.is_some() || upload(&e.hash, &root.join(&e.rel_path), rep).unwrap_or(false)
-        });
-        for e in &docs {
-            for v in &e.versions {
-                upload(&v.hash, &vf_fs::cabinet::version_path(root, &v.hash), rep)?;
+        let mut ok = true;
+        for e in &mut docs {
+            if e.deleted_at.is_none() && !upload(&e.hash, &root.join(&e.rel_path), rep)? {
+                ok = false;
+                break;
             }
-            sent_docs.push(e.doc_id.clone());
+            let mut kept = Vec::with_capacity(e.versions.len());
+            for v in std::mem::take(&mut e.versions) {
+                if upload(&v.hash, &vf_fs::cabinet::version_path(root, &v.hash), rep)? {
+                    kept.push(v);
+                }
+            }
+            e.versions = kept;
         }
-        let rev = head.cabinet_segment_rev + 1;
-        let seg = CabinetSegment {
-            segment_rev: rev,
-            files,
-            documents: docs,
-            written_by: s.device_name.clone(),
-        };
-        s.put_json(&layout::cabinet_segment_key(rev), &seg)?;
-        new_head.cabinet_segment_rev = rev;
-        sent_segments.push((CABINET.into(), rev, None, None));
-        rep.segments += 1;
+        if ok {
+            for e in &docs {
+                sent_docs.push(SentDoc::of(e, None, ""));
+            }
+            let rev = head.cabinet_segment_rev + 1;
+            let seg = CabinetSegment {
+                segment_rev: rev,
+                files,
+                documents: docs,
+                written_by: s.device_name.clone(),
+            };
+            s.put_json(&layout::cabinet_segment_key_by(rev, &writer), &seg)?;
+            new_head.cabinet_segment_rev = rev;
+            new_head.cabinet_writer = writer.clone();
+            sent_segments.push((CABINET.into(), rev, None, None));
+            rep.segments += 1;
+        } else {
+            rep.skipped += 1;
+        }
     }
     push_audit(conn, root, s)?;
     if rep.segments == 0 {
@@ -209,12 +248,17 @@ fn push_once(
         return Ok(());
     }
 
-    // The commit point.
+    // The commit point. Another push that committed while this one uploaded (its HEAD moved
+    // on) wins: this one pulls and starts again, so neither change is lost.
+    let now_there = s.head()?.unwrap_or_default();
+    if now_there.rev != head.rev || now_there.writer != head.writer {
+        return Err(SyncError::Raced);
+    }
     new_head.rev = head.rev + 1;
     new_head.written_at = vf_core::now_rfc3339();
     new_head.device_id = s.device_id.clone();
     new_head.device_name = s.device_name.clone();
-    new_head.writer = vf_core::new_id();
+    new_head.writer = writer;
     s.put_json(layout::HEAD, &new_head)?;
     let back: Head = s.head()?.unwrap_or_default();
     if back.writer != new_head.writer {
@@ -223,8 +267,16 @@ fn push_once(
 
     // What was sent is now the base.
     let tx = vf_core::db::begin_write(conn)?;
-    for id in &sent_docs {
-        catalog::set_base(&tx, id)?;
+    for d in &sent_docs {
+        catalog::set_base_values(
+            &tx,
+            &d.doc_id,
+            d.client.as_deref(),
+            &d.rel_path,
+            &d.hash,
+            d.rev,
+            d.deleted,
+        )?;
     }
     for (c, rev, folder, sh) in &sent_segments {
         let fh = (c == CABINET).then(|| serde_json::to_string(&hashes).expect("serializes"));
@@ -237,8 +289,8 @@ fn push_once(
             fh.as_deref(),
         )?;
     }
-    for id in &sent_docs {
-        tx.execute("DELETE FROM sync_pending WHERE doc_id = ?1", [id])?;
+    for d in &sent_docs {
+        tx.execute("DELETE FROM sync_pending WHERE doc_id = ?1", [&d.doc_id])?;
     }
     catalog::set_state(&tx, &s.device_id, new_head.rev, "push")?;
     tx.commit()?;
@@ -262,6 +314,34 @@ fn push_once(
         "sync push"
     );
     Ok(())
+}
+
+/// A document as it went into a segment.
+struct SentDoc {
+    doc_id: String,
+    client: Option<String>,
+    /// Cabinet-relative.
+    rel_path: String,
+    hash: String,
+    rev: i64,
+    deleted: bool,
+}
+
+impl SentDoc {
+    fn of(e: &crate::layout::DocEntry, client: Option<&str>, folder: &str) -> SentDoc {
+        SentDoc {
+            doc_id: e.doc_id.clone(),
+            client: client.map(str::to_owned),
+            rel_path: if folder.is_empty() {
+                e.rel_path.clone()
+            } else {
+                format!("{folder}/{}", e.rel_path)
+            },
+            hash: e.hash.clone(),
+            rev: e.rev,
+            deleted: e.deleted_at.is_some(),
+        }
+    }
 }
 
 fn conn_note_uploaded(conn: &Connection, hash: &str) -> Result<()> {

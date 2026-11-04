@@ -21,6 +21,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/006_extract.sql"),
     include_str!("../migrations/007_sync.sql"),
     include_str!("../migrations/008_tx_journal.sql"),
+    include_str!("../migrations/009_sync_conflict_kinds.sql"),
 ];
 
 /// Schema version this build writes.

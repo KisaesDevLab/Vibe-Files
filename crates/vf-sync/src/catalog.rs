@@ -87,6 +87,28 @@ pub fn set_base(conn: &Connection, id: &str) -> Result<()> {
     Ok(())
 }
 
+/// Records what was sent for a document (not the live row: it may have changed meanwhile, and
+/// then stays pending).
+pub fn set_base_values(
+    conn: &Connection,
+    id: &str,
+    client: Option<&str>,
+    rel_path: &str,
+    hash: &str,
+    rev: i64,
+    deleted: bool,
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO sync_base (doc_id, client_id, rel_path, hash, rev, deleted)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+         ON CONFLICT(doc_id) DO UPDATE SET client_id = excluded.client_id,
+           rel_path = excluded.rel_path, hash = excluded.hash, rev = excluded.rev,
+           deleted = excluded.deleted",
+        params![id, client, rel_path, hash, rev, deleted],
+    )?;
+    Ok(())
+}
+
 const DIRTY: &str = "
     FROM document d LEFT JOIN sync_base b ON b.doc_id = d.id
     WHERE (b.doc_id IS NULL AND d.deleted_at IS NULL)

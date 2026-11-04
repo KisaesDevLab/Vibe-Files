@@ -96,7 +96,7 @@ pub fn safe_month(m: &str) -> bool {
 }
 
 pub fn object_key(name: &str) -> String {
-    format!("objects/{}/{name}", &name[..2])
+    format!("objects/{}/{name}", name.get(..2).unwrap_or("00"))
 }
 
 pub fn segment_key(client_id: &str, rev: u64) -> String {
@@ -105,6 +105,15 @@ pub fn segment_key(client_id: &str, rev: u64) -> String {
 
 pub fn cabinet_segment_key(rev: u64) -> String {
     format!("manifest/cabinet/{rev}")
+}
+
+/// A segment written by one push: `<rev>-<writer>` (two pushes racing never write the same key).
+pub fn segment_key_by(client_id: &str, rev: u64, writer: &str) -> String {
+    format!("manifest/clients/{client_id}/{rev}-{writer}")
+}
+
+pub fn cabinet_segment_key_by(rev: u64, writer: &str) -> String {
+    format!("manifest/cabinet/{rev}-{writer}")
 }
 
 pub fn device_key(device_id: &str) -> String {
@@ -147,6 +156,29 @@ pub struct Head {
     /// client_id → segment rev.
     pub segments: BTreeMap<String, u64>,
     pub cabinet_segment_rev: u64,
+    /// The push that wrote each client's current segment (its key's suffix).
+    #[serde(default)]
+    pub segment_writers: BTreeMap<String, String>,
+    #[serde(default)]
+    pub cabinet_writer: String,
+}
+
+impl Head {
+    /// The key of `client`'s current segment (`rev` = `segments[client]`).
+    pub fn client_key(&self, client: &str, rev: u64) -> String {
+        match self.segment_writers.get(client) {
+            Some(w) if !w.is_empty() => segment_key_by(client, rev, w),
+            _ => segment_key(client, rev),
+        }
+    }
+
+    pub fn cabinet_key(&self) -> String {
+        if self.cabinet_writer.is_empty() {
+            cabinet_segment_key(self.cabinet_segment_rev)
+        } else {
+            cabinet_segment_key_by(self.cabinet_segment_rev, &self.cabinet_writer)
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

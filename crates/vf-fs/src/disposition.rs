@@ -397,6 +397,97 @@ struct Victim {
 
 /// Destroys every approved document whose wait ended on or before `today`. `cabinet_name`
 /// heads the certificate.
+/// Applies a disposal made on another workstation (sync): the document's file, its versions
+/// no other document uses and its OCR text are destroyed here too, and it is tombstoned as
+/// disposed. `false` (nothing done) when a legal hold here covers it.
+pub fn destroy_pulled(
+    conn: &mut Connection,
+    root: &Path,
+    device_id: &str,
+    doc_id: &str,
+) -> Result<bool, String> {
+    let (rel, hash, client): (String, String, Option<String>) = conn
+        .query_row(
+            "SELECT rel_path, hash, client_id FROM document WHERE id = ?1 AND deleted_at IS NULL",
+            [doc_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .map_err(|_| "the document is not in the catalog".to_string())?;
+    if held(conn, root, doc_id, client.as_deref(), &rel, &hash) {
+        return Ok(false);
+    }
+    let mut hashes = vec![hash.clone()];
+    {
+        let mut st = conn
+            .prepare("SELECT DISTINCT hash FROM version WHERE doc_id = ?1")
+            .map_err(|e| e.to_string())?;
+        let hs = st
+            .query_map([doc_id], |r| r.get::<_, String>(0))
+            .map_err(|e| e.to_string())?;
+        for h in hs.flatten() {
+            if !hashes.contains(&h) {
+                hashes.push(h);
+            }
+        }
+    }
+    let file = root.join(&rel);
+    if file.exists() {
+        wipe(&file).map_err(|e| format!("cannot destroy {rel}: {e}"))?;
+    }
+    for h in &hashes {
+        let used: bool = conn
+            .query_row(
+                "SELECT 1 FROM document WHERE hash = ?1 AND id != ?2
+                   AND coalesce(tombstone_reason, '') NOT IN ('disposed', 'purged')
+                 UNION SELECT 1 FROM version WHERE hash = ?1 AND doc_id != ?2",
+                [h, doc_id],
+                |_| Ok(()),
+            )
+            .is_ok();
+        if used {
+            continue;
+        }
+        let stored = cabinet::version_path(root, h);
+        if stored.exists() {
+            let _ = wipe(&stored);
+        }
+        let _ = std::fs::remove_file(stored.with_extension("json"));
+    }
+    let now = vf_core::now_rfc3339();
+    let mut tx = Transaction::new(crate::disposition::RUN_LABEL)
+        .catalog(Stmt::new(
+            "UPDATE document SET deleted_at = ?2, tombstone_reason = 'disposed', rev = rev + 1,
+               updated_at = ?2, device_id = ?3 WHERE id = ?1",
+            vec![doc_id.into(), now.clone().into(), device_id.into()],
+        ))
+        .catalog(Stmt::new(
+            "DELETE FROM version WHERE doc_id = ?1",
+            vec![doc_id.into()],
+        ))
+        .catalog(Stmt::new(
+            "DELETE FROM doc_fts WHERE doc_id = ?1",
+            vec![doc_id.into()],
+        ))
+        .catalog(Stmt::new(
+            "DELETE FROM ocr_job WHERE doc_id = ?1",
+            vec![doc_id.into()],
+        ))
+        .audit(AuditEntry::new(
+            "disposed_elsewhere",
+            Some(doc_id),
+            json!({ "versions": hashes.len() - 1 }),
+        ));
+    for h in &hashes {
+        tx = tx.catalog(Stmt::new(
+            "DELETE FROM page_text WHERE hash = ?1
+               AND NOT EXISTS (SELECT 1 FROM document WHERE hash = ?1 AND deleted_at IS NULL)",
+            vec![h.clone().into()],
+        ));
+    }
+    crate::fileops::commit(conn, root, tx, device_id)?;
+    Ok(true)
+}
+
 pub fn destroy_due(
     conn: &mut Connection,
     root: &Path,

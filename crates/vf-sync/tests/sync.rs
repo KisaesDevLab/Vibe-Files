@@ -551,3 +551,294 @@ fn hostile_manifests_are_refused() {
         "{r:?}"
     );
 }
+
+// ---- QA 2026-11-03: races and partial states (S1, S2, S4, S9) ----
+
+use std::sync::Mutex;
+
+use futures::stream::BoxStream;
+use object_store::path::Path as OPath;
+use object_store::{
+    GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, PutMultipartOptions,
+    PutOptions, PutPayload, PutResult,
+};
+
+type HookFn = Box<dyn FnOnce() + Send>;
+
+/// A bucket that runs `hook` (once, on its own thread) just before the first write whose key
+/// contains a given text: another workstation acting at exactly that moment.
+struct Hooked {
+    inner: Arc<dyn ObjectStore>,
+    hook: Mutex<Option<(String, HookFn)>>,
+}
+
+impl std::fmt::Debug for Hooked {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Hooked")
+    }
+}
+
+impl std::fmt::Display for Hooked {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Hooked")
+    }
+}
+
+impl Hooked {
+    fn new() -> Arc<Hooked> {
+        Arc::new(Hooked {
+            inner: Remote::memory(),
+            hook: Mutex::new(None),
+        })
+    }
+    fn arm(&self, contains: &str, f: HookFn) {
+        *self.hook.lock().unwrap() = Some((contains.into(), f));
+    }
+}
+
+#[async_trait::async_trait]
+impl ObjectStore for Hooked {
+    async fn put_opts(
+        &self,
+        location: &OPath,
+        payload: PutPayload,
+        opts: PutOptions,
+    ) -> object_store::Result<PutResult> {
+        let fire = {
+            let mut g = self.hook.lock().unwrap();
+            if g.as_ref()
+                .is_some_and(|(c, _)| location.as_ref().contains(c.as_str()))
+            {
+                g.take()
+            } else {
+                None
+            }
+        };
+        if let Some((_, f)) = fire {
+            std::thread::spawn(f).join().unwrap();
+        }
+        self.inner.put_opts(location, payload, opts).await
+    }
+    async fn put_multipart_opts(
+        &self,
+        location: &OPath,
+        opts: PutMultipartOptions,
+    ) -> object_store::Result<Box<dyn MultipartUpload>> {
+        self.inner.put_multipart_opts(location, opts).await
+    }
+    async fn get_opts(
+        &self,
+        location: &OPath,
+        options: GetOptions,
+    ) -> object_store::Result<GetResult> {
+        self.inner.get_opts(location, options).await
+    }
+    async fn delete(&self, location: &OPath) -> object_store::Result<()> {
+        self.inner.delete(location).await
+    }
+    fn list(&self, prefix: Option<&OPath>) -> BoxStream<'static, object_store::Result<ObjectMeta>> {
+        self.inner.list(prefix)
+    }
+    async fn list_with_delimiter(
+        &self,
+        prefix: Option<&OPath>,
+    ) -> object_store::Result<ListResult> {
+        self.inner.list_with_delimiter(prefix).await
+    }
+    async fn copy(&self, from: &OPath, to: &OPath) -> object_store::Result<()> {
+        self.inner.copy(from, to).await
+    }
+    async fn copy_if_not_exists(&self, from: &OPath, to: &OPath) -> object_store::Result<()> {
+        self.inner.copy_if_not_exists(from, to).await
+    }
+}
+
+fn year_of(conn: &Connection, file: &str) -> Option<i64> {
+    meta(conn, &doc_id(conn, file)).3
+}
+
+fn restored(t: &Path, store: Arc<dyn ObjectStore>, cabinet_id: &str, name: &str) -> Connection {
+    let mut c = catalog(&t.join(name).join("data"));
+    vf_sync::restore::restore(
+        &mut c,
+        &t.join(name).join("Clients"),
+        store,
+        cabinet_id,
+        PASS,
+        name,
+        name,
+    )
+    .unwrap();
+    c
+}
+
+/// QA S1: A's whole push lands while B is uploading; B must not write a HEAD that drops A's
+/// change.
+#[test]
+fn two_pushes_racing_keep_both_changes() {
+    let t = tempfile::tempdir().unwrap();
+    let hooked = Hooked::new();
+    let store: Arc<dyn ObjectStore> = hooked.clone();
+    let mut a = pc_a(t.path(), store.clone());
+    vf_sync::push::push(&mut a.conn, &a.root, &a.sync, None).unwrap();
+    let mut b = pc_b(t.path(), store.clone(), &a);
+    set_type(
+        &mut a.conn,
+        &a.root.clone(),
+        "EIN letter.pdf",
+        "W-2",
+        Some(2019),
+    );
+    set_type(
+        &mut b.conn,
+        &b.root.clone(),
+        "941 Q1.pdf",
+        "W-2",
+        Some(2018),
+    );
+    let (tx, rx) = std::sync::mpsc::channel();
+    hooked.arm(
+        "manifest/clients/",
+        Box::new(move || {
+            let mut a = a;
+            vf_sync::push::push(&mut a.conn, &a.root, &a.sync, None).unwrap();
+            tx.send(a).unwrap();
+        }),
+    );
+    vf_sync::push::push(&mut b.conn, &b.root, &b.sync, None).unwrap();
+    let a = rx.recv().unwrap();
+    let c = restored(t.path(), store, &a.sync.cabinet_id, "c");
+    assert_eq!(
+        year_of(&c, "EIN letter.pdf"),
+        Some(2019),
+        "A's change survived"
+    );
+    assert_eq!(year_of(&c, "941 Q1.pdf"), Some(2018), "B's change arrived");
+}
+
+/// QA S2: an edit made while a push uploads stays pending and goes up with the next push.
+#[test]
+fn an_edit_during_a_push_is_sent_next_time() {
+    let t = tempfile::tempdir().unwrap();
+    let hooked = Hooked::new();
+    let store: Arc<dyn ObjectStore> = hooked.clone();
+    let mut a = pc_a(t.path(), store.clone());
+    vf_sync::push::push(&mut a.conn, &a.root, &a.sync, None).unwrap();
+    put(
+        &a.root,
+        "Anderson Farms LLC (1042)/Income Tax/2025/1099 new.pdf",
+        "1099 new invented",
+    );
+    vf_fs::rebuild::rebuild(&mut a.conn, &a.root.clone(), "dev-a").unwrap();
+    let (root, db) = (
+        a.root.clone(),
+        t.path().join("a").join("data").join("catalog.db"),
+    );
+    hooked.arm(
+        "/objects/",
+        Box::new(move || {
+            let mut c2 = vf_core::db::open(&db, Storage::Local).unwrap();
+            set_type(&mut c2, &root, "EIN letter.pdf", "W-2", Some(2017));
+        }),
+    );
+    vf_sync::push::push(&mut a.conn, &a.root, &a.sync, None).unwrap();
+    assert!(
+        !vf_sync::catalog::pending(&a.conn).unwrap().is_empty(),
+        "the edit made during the push is still pending"
+    );
+    vf_sync::push::push(&mut a.conn, &a.root, &a.sync, None).unwrap();
+    let c = restored(t.path(), store, &a.sync.cabinet_id, "c");
+    assert_eq!(year_of(&c, "EIN letter.pdf"), Some(2017));
+}
+
+/// QA S4: a settings file changed on two PCs is never lost silently; legal holds merge.
+#[test]
+fn master_files_changed_on_two_pcs() {
+    let t = tempfile::tempdir().unwrap();
+    let store = Remote::memory();
+    let mut a = pc_a(t.path(), store.clone());
+    std::fs::write(a.root.join("_Vibe/extract_aliases.json"), r#"{"base":1}"#).unwrap();
+    vf_sync::push::push(&mut a.conn, &a.root, &a.sync, None).unwrap();
+    let mut b = pc_b(t.path(), store.clone(), &a);
+    std::fs::write(a.root.join("_Vibe/extract_aliases.json"), r#"{"from_a":1}"#).unwrap();
+    // Two holds placed on two PCs at the same time.
+    let ein = doc_id(&a.conn, "EIN letter.pdf");
+    vf_fs::holds::place(
+        &mut a.conn,
+        &a.root,
+        "dev-a",
+        vf_fs::holds::Target::Docs(vec![ein]),
+        "subpoena A",
+    )
+    .unwrap();
+    let q1 = doc_id(&b.conn, "941 Q1.pdf");
+    vf_fs::holds::place(
+        &mut b.conn,
+        &b.root,
+        "dev-b",
+        vf_fs::holds::Target::Docs(vec![q1]),
+        "subpoena B",
+    )
+    .unwrap();
+    vf_sync::push::push(&mut a.conn, &a.root, &a.sync, None).unwrap();
+    std::fs::write(b.root.join("_Vibe/extract_aliases.json"), r#"{"from_b":1}"#).unwrap();
+    vf_sync::push::push(&mut b.conn, &b.root, &b.sync, None).unwrap();
+    let holds = vf_fs::holds::load(&b.root).unwrap();
+    assert_eq!(holds.len(), 2, "both holds kept");
+    let kept: Vec<String> = std::fs::read_dir(b.root.join("_Vibe/conflicts"))
+        .unwrap()
+        .flatten()
+        .map(|e| std::fs::read_to_string(e.path()).unwrap())
+        .collect();
+    assert!(kept.iter().any(|t| t.contains("from_a")), "{kept:?}");
+    vf_sync::pull::pull(&mut a.conn, &a.root, &a.sync).unwrap();
+    assert_eq!(vf_fs::holds::load(&a.root).unwrap().len(), 2);
+}
+
+/// QA S9: a metadata edit made here survives the other PC's new content.
+#[test]
+fn a_local_metadata_edit_survives_remote_content() {
+    let t = tempfile::tempdir().unwrap();
+    let store = Remote::memory();
+    let mut a = pc_a(t.path(), store.clone());
+    vf_sync::push::push(&mut a.conn, &a.root, &a.sync, None).unwrap();
+    let mut b = pc_b(t.path(), store.clone(), &a);
+    let id = doc_id(&b.conn, "EIN letter.pdf");
+    let tmp = vf_fs::content::tmp_file(&b.root, "part").unwrap();
+    std::fs::write(&tmp, "ein v2 invented").unwrap();
+    vf_fs::content::replace(
+        &mut b.conn,
+        &b.root.clone(),
+        "dev-b",
+        &id,
+        &tmp,
+        vf_fs::content::Change {
+            label: "edit",
+            created_by: "x",
+            reason: "x",
+            detail: serde_json::json!({}),
+            extra: vec![],
+        },
+    )
+    .unwrap()
+    .unwrap();
+    vf_sync::push::push(&mut b.conn, &b.root, &b.sync, None).unwrap();
+    set_type(
+        &mut a.conn,
+        &a.root.clone(),
+        "EIN letter.pdf",
+        "W-2",
+        Some(2016),
+    );
+    vf_sync::pull::pull(&mut a.conn, &a.root, &a.sync).unwrap();
+    assert_eq!(year_of(&a.conn, "EIN letter.pdf"), Some(2016));
+    assert_eq!(
+        std::fs::read_to_string(
+            a.root
+                .join("Anderson Farms LLC (1042)/Permanent/Setup/EIN letter.pdf")
+        )
+        .unwrap(),
+        "ein v2 invented"
+    );
+    assert!(!vf_sync::catalog::pending(&a.conn).unwrap().is_empty());
+}

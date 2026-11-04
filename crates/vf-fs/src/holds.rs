@@ -84,6 +84,33 @@ pub fn load(root: &Path) -> Result<Vec<Hold>, String> {
     }
 }
 
+/// Merges two `legal_holds.json` texts (two workstations changed holds since their last sync):
+/// every hold from either side; a hold released on either side stays released. `None` when
+/// either side cannot be read.
+pub fn merge_text(a: &str, b: &str) -> Option<String> {
+    let pa: FileV1 = serde_json::from_str(a).ok()?;
+    let pb: FileV1 = serde_json::from_str(b).ok()?;
+    if pa.version != 1 || pb.version != 1 {
+        return None;
+    }
+    let mut by: std::collections::BTreeMap<String, Hold> =
+        pa.holds.into_iter().map(|h| (h.id.clone(), h)).collect();
+    for h in pb.holds {
+        match by.get_mut(&h.id) {
+            Some(x) if x.released.is_none() && h.released.is_some() => *x = h,
+            Some(_) => {}
+            None => {
+                by.insert(h.id.clone(), h);
+            }
+        }
+    }
+    let f = FileV1 {
+        version: 1,
+        holds: by.into_values().collect(),
+    };
+    Some(serde_json::to_string_pretty(&f).expect("serializes"))
+}
+
 fn save(root: &Path, holds: &[Hold]) -> Result<(), String> {
     let f = FileV1 {
         version: 1,

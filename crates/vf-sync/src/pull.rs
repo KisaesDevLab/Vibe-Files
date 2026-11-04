@@ -67,8 +67,12 @@ pub fn pull(conn: &mut Connection, root: &Path, s: &Sync) -> Result<PullReport> 
     }
     rep.head_rev = head.rev;
     apply_head(conn, root, s, &head, &mut rep)?;
-    catalog::set_state(conn, &s.device_id, head.rev, "pull")?;
-    crate::push::write_device(s, head.rev)?;
+    // With documents left for later, this PC has not applied HEAD: the next push pulls first,
+    // and never sends a segment it has not applied (`push`).
+    if rep.deferred == 0 {
+        catalog::set_state(conn, &s.device_id, head.rev, "pull")?;
+        crate::push::write_device(s, head.rev)?;
+    }
     if rep.segments > 0 {
         Transaction::new(LABEL)
             .audit(AuditEntry::new(
@@ -101,13 +105,13 @@ pub(crate) fn apply_head(
     if head.cabinet_segment_rev > 0
         && head.cabinet_segment_rev != catalog::segment_rev(conn, CABINET)?
     {
-        let key = layout::cabinet_segment_key(head.cabinet_segment_rev);
+        let key = head.cabinet_key();
         let seg: CabinetSegment = s
             .get_json(&key)?
             .ok_or_else(|| SyncError::Format(format!("{key} is missing")))?;
         seg.check()
             .map_err(|what| SyncError::Format(format!("{key}: refused {what}")))?;
-        let merged = apply_files(conn, root, s, &seg.files)?;
+        let merged = apply_files(conn, root, s, &seg.files, &seg.written_by)?;
         let deferred = apply_docs(conn, root, s, None, "", &seg.documents, rep)?;
         if !deferred {
             let fh = serde_json::to_string(&merged).expect("serializes");
@@ -119,7 +123,7 @@ pub(crate) fn apply_head(
         if *rev == catalog::segment_rev(conn, client)? {
             continue;
         }
-        let key = layout::segment_key(client, *rev);
+        let key = head.client_key(client, *rev);
         let seg: ClientSegment = s
             .get_json(&key)?
             .ok_or_else(|| SyncError::Format(format!("{key} is missing")))?;
@@ -151,11 +155,13 @@ fn apply_files(
     root: &Path,
     s: &Sync,
     files: &std::collections::BTreeMap<String, String>,
+    from_device: &str,
 ) -> Result<std::collections::BTreeMap<String, String>> {
     let base = catalog::files_base(conn)?;
     let vibe = root.join(cabinet::VIBE_DIR);
     let mut merged = base.clone();
     let mut wrote = 0;
+    let mut files_conflicts: Vec<String> = vec![];
     for (rel, text) in files {
         let p = vibe.join(rel);
         let local = std::fs::read_to_string(&p).ok();
@@ -172,8 +178,42 @@ fn apply_files(
             cabinet::write_replace(&p, text.as_bytes())?;
             merged.insert(rel.clone(), remote_h);
             wrote += 1;
+            continue;
         }
-        // Changed here as well: this workstation's copy stays and goes up on the next push.
+        // Changed on both PCs since the last exchange.
+        let mine = local.unwrap_or_default();
+        if rel == vf_fs::holds::FILE
+            && let Some(m) = vf_fs::holds::merge_text(&mine, text)
+        {
+            // Legal holds are never lost: both sides' holds, a release on either side kept.
+            cabinet::write_replace(&p, m.as_bytes())?;
+            merged.insert(rel.clone(), remote_h);
+            wrote += 1;
+        } else {
+            // This PC's copy stays (and goes up with the next push); the other one is kept
+            // beside it for a person to compare, and the pull reports it.
+            let other = vibe.join("conflicts").join(format!(
+                "{}.from-{}",
+                rel.replace('/', "_"),
+                conflict_device(if from_device.is_empty() {
+                    "another PC"
+                } else {
+                    from_device
+                })
+            ));
+            if let Some(d) = other.parent() {
+                std::fs::create_dir_all(d).map_err(|e| SyncError::Local(e.to_string()))?;
+            }
+            cabinet::write_replace(&other, text.as_bytes())?;
+            merged.insert(rel.clone(), remote_h);
+            files_conflicts.push(rel.clone());
+        }
+    }
+    if !files_conflicts.is_empty() {
+        tracing::warn!(
+            files = files_conflicts.len(),
+            "cabinet settings changed on two workstations: this PC's kept, the other's saved in _Vibe/conflicts"
+        );
     }
     if wrote > 0 {
         let d = &s.device_id;
@@ -286,9 +326,12 @@ fn rename_folder(
          WHERE client_id = ?3 AND (rel_path LIKE ?1 || '/%')",
         [from, to, client],
     )?;
+    // The rename added 1 to each document's rev: the base follows only where nothing else was
+    // pending (an edit made here and not sent yet stays pending).
     conn.execute(
-        "UPDATE sync_base SET rev = (SELECT rev FROM document WHERE id = sync_base.doc_id)
-         WHERE client_id = ?1",
+        "UPDATE sync_base SET rev = rev + 1
+         WHERE client_id = ?1
+           AND rev + 1 = (SELECT rev FROM document WHERE id = sync_base.doc_id)",
         [client],
     )?;
     Ok(())
@@ -539,6 +582,14 @@ fn insert_new(
     Ok(rel)
 }
 
+/// A device name safe in a file name.
+pub(crate) fn conflict_device(device: &str) -> String {
+    device
+        .chars()
+        .map(|c| if r#"<>:"/\|?*"#.contains(c) { '_' } else { c })
+        .collect()
+}
+
 /// `name (conflict from <device>).ext` beside `rel`.
 pub fn conflict_name(rel: &str, device: &str) -> String {
     let (dir, file) = rel.rsplit_once('/').map_or(("", rel), |(d, f)| (d, f));
@@ -560,7 +611,16 @@ pub fn conflict_name(rel: &str, device: &str) -> String {
     }
 }
 
-/// Returns whether anything was deferred.
+/// What became of one document.
+enum One {
+    Done,
+    /// Not applied now (in Intake's last batch, refused, a file in use, an object not in the
+    /// bucket): the segment is applied again on the next pull.
+    Deferred,
+}
+
+/// Returns whether anything was deferred. One document that cannot be applied does not stop
+/// the others; only bucket errors stop the pull.
 fn apply_docs(
     conn: &mut Connection,
     root: &Path,
@@ -572,162 +632,235 @@ fn apply_docs(
 ) -> Result<bool> {
     let mut deferred = false;
     for e in entries {
-        let want = join(folder, &e.rel_path);
-        let local = catalog::doc(conn, &e.doc_id)?;
-        let base = catalog::base(conn, &e.doc_id)?;
-        let Some(l) = local else {
-            if e.deleted_at.is_some() {
-                continue;
+        match apply_one(conn, root, s, client, folder, e, rep) {
+            Ok(One::Done) => {}
+            Ok(One::Deferred) => {
+                deferred = true;
+                rep.deferred += 1;
             }
-            // Already here under another id (a shared cabinet folder, or a restore)?
-            let other: Option<(String, String)> = conn
-                .query_row(
-                    "SELECT id, hash FROM document WHERE rel_path = ?1 AND deleted_at IS NULL",
-                    [&want],
-                    |r| Ok((r.get(0)?, r.get(1)?)),
-                )
-                .optional()?;
-            match other {
-                Some((id, h)) if h == e.hash && catalog::base(conn, &id)?.is_none() => {
-                    catalog::rekey(conn, &id, &e.doc_id)?;
-                    if meta_differs(conn, e)? {
-                        set_meta(conn, root, s, e, &want, folder)?;
-                    }
-                }
-                _ => {
-                    insert_new(conn, root, s, client, folder, e)?;
-                    rep.new += 1;
-                }
+            Err(err @ SyncError::Remote(_)) => return Err(err),
+            Err(err) => {
+                let kind = match &err {
+                    SyncError::Format(_) => "bucket object",
+                    SyncError::Crypto(_) => "decrypt",
+                    _ => "local",
+                };
+                tracing::warn!(kind, "sync pull: a document is left for the next pull");
+                deferred = true;
+                rep.deferred += 1;
             }
-            ensure_versions(conn, root, s, e, &want)?;
-            catalog::set_base(conn, &e.doc_id)?;
-            continue;
-        };
-        let content_here = base.as_ref().is_none_or(|b| b.hash != l.hash);
-        let changed_here = base.as_ref().is_none_or(|b| {
-            b.hash != l.hash || b.rel_path != l.rel_path || b.rev != l.rev || b.deleted != l.deleted
-        });
+        }
+    }
+    Ok(deferred)
+}
+
+fn apply_one(
+    conn: &mut Connection,
+    root: &Path,
+    s: &Sync,
+    client: Option<&str>,
+    folder: &str,
+    e: &DocEntry,
+    rep: &mut PullReport,
+) -> Result<One> {
+    let want = join(folder, &e.rel_path);
+    let local = catalog::doc(conn, &e.doc_id)?;
+    let base = catalog::base(conn, &e.doc_id)?;
+    let disposed = e.tombstone_reason.as_deref() == Some("disposed");
+    if disposed {
+        // The bucket object goes once every PC has seen this: never trust it is there again.
+        for h in std::iter::once(&e.hash).chain(e.versions.iter().map(|v| &v.hash)) {
+            conn.execute("DELETE FROM sync_object WHERE hash = ?1", [h])?;
+        }
+    }
+    let Some(l) = local else {
         if e.deleted_at.is_some() {
-            if l.deleted {
-                catalog::set_base(conn, &e.doc_id)?;
-            } else if !content_here {
-                vf_fs::trash::delete(
+            return Ok(One::Done);
+        }
+        // Already here under another id (a shared cabinet folder, or a restore)?
+        let other: Option<(String, String)> = conn
+            .query_row(
+                "SELECT id, hash FROM document WHERE rel_path = ?1 AND deleted_at IS NULL",
+                [&want],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        match other {
+            Some((id, h)) if h == e.hash && catalog::base(conn, &id)?.is_none() => {
+                catalog::rekey(conn, &id, &e.doc_id)?;
+                if meta_differs(conn, e)? {
+                    set_meta(conn, root, s, e, &want, folder)?;
+                }
+            }
+            _ => {
+                insert_new(conn, root, s, client, folder, e)?;
+                rep.new += 1;
+            }
+        }
+        ensure_versions(conn, root, s, e, &want)?;
+        catalog::set_base(conn, &e.doc_id)?;
+        return Ok(One::Done);
+    };
+    let content_here = base.as_ref().is_none_or(|b| b.hash != l.hash);
+    let changed_here = base.as_ref().is_none_or(|b| {
+        b.hash != l.hash || b.rel_path != l.rel_path || b.rev != l.rev || b.deleted != l.deleted
+    });
+    // Something other than the content changed here (metadata, a move) and is not sent yet.
+    let other_here = base.as_ref().is_none_or(|b| b.rev != l.rev);
+    if e.deleted_at.is_some() {
+        if l.deleted {
+            catalog::set_base(conn, &e.doc_id)?;
+        } else if !content_here {
+            if disposed {
+                // Destroyed under the retention schedule elsewhere: destroyed here too (unless
+                // a hold here covers it: then it stays, and it is raised).
+                if vf_fs::disposition::destroy_pulled(conn, root, &s.device_id, &e.doc_id)? {
+                    catalog::set_base(conn, &e.doc_id)?;
+                    rep.deleted += 1;
+                } else {
+                    raise(conn, &e.doc_id, "deleted_there", &e.device_id, rep)?;
+                }
+            } else {
+                vf_fs::trash::delete_as(
                     conn,
                     root,
                     &s.device_id,
                     std::slice::from_ref(&e.doc_id),
                     "deleted on another workstation",
+                    LABEL,
                 )?;
                 catalog::set_base(conn, &e.doc_id)?;
                 rep.deleted += 1;
-            } else {
-                record_conflict(conn, &e.doc_id, None, "deleted_there", &e.device_id)?;
-                rep.conflicts += 1;
             }
-            continue;
+        } else {
+            raise(conn, &e.doc_id, "deleted_there", &e.device_id, rep)?;
         }
-        if l.deleted {
-            continue; // deleted here: the next push sends the tombstone
+        return Ok(One::Done);
+    }
+    if l.deleted {
+        // Deleted here: the next push sends the tombstone. Changed there meanwhile: raised, so
+        // the change is not lost unseen (the trash still has this PC's copy).
+        if base.as_ref().is_some_and(|b| b.hash != e.hash) {
+            raise(conn, &e.doc_id, "deleted_here", &e.device_id, rep)?;
         }
-        let mut took_remote = !changed_here;
-        if e.hash != l.hash {
-            if !content_here {
-                match replace_with(conn, root, s, e)? {
-                    true => {
-                        rep.updated += 1;
-                        took_remote = true;
-                    }
-                    false => {
-                        deferred = true;
-                        rep.deferred += 1;
-                        continue;
-                    }
-                }
-            } else {
-                // In Intake's last batch: wait, before making the copy (a retry makes one).
-                if matches!(
-                    vf_fs::content::check(conn, root, &e.doc_id)?,
-                    Err(vf_fs::content::Refused::FilerUndo)
-                ) {
-                    deferred = true;
-                    rep.deferred += 1;
-                    continue;
-                }
-                // Both changed: keep this workstation's bytes beside, the bucket's take the path.
-                let copy_rel = conflict_name(&l.rel_path, &s.device_name);
-                let tmp = vf_fs::content::tmp_file(root, "part")?;
-                std::fs::copy(root.join(&l.rel_path), &tmp)
-                    .map_err(|e| SyncError::Local(e.to_string()))?;
-                let m = docmeta::load(conn, &l.id)?;
-                let added = vf_fs::content::add(
-                    conn,
-                    root,
-                    &s.device_id,
-                    &tmp,
-                    vf_fs::content::NewDoc {
-                        rel_path: copy_rel,
-                        client_id: l.client_id.clone(),
-                        doc_type_id: m.doc_type.clone(),
-                        tax_year: m.tax_year,
-                        source: m.source.clone(),
-                        tags: m.tags.clone(),
-                        label: LABEL.into(),
-                        detail: json!({ "conflict_copy": 1 }),
-                    },
-                )?;
-                if !replace_with(conn, root, s, e)? {
-                    deferred = true;
-                    rep.deferred += 1;
-                    continue;
-                }
-                record_conflict(
-                    conn,
-                    &e.doc_id,
-                    Some(&added.doc_id),
-                    "both_changed",
-                    &e.device_id,
-                )?;
-                rep.conflicts += 1;
-                took_remote = true;
+        return Ok(One::Done);
+    }
+    let mut took_remote = !changed_here;
+    if e.hash != l.hash {
+        // Nothing is touched while the file cannot be changed (Intake's last batch, a check-out,
+        // edited outside Vibe Files): it waits for the next pull.
+        if vf_fs::content::check(conn, root, &e.doc_id)?.is_err() {
+            return Ok(One::Deferred);
+        }
+        if !content_here {
+            if !replace_with(conn, root, s, e)? {
+                return Ok(One::Deferred);
             }
-        }
-        // Moved or renamed there (and not here).
-        let now = catalog::doc(conn, &e.doc_id)?.expect("still here");
-        if now.rel_path != want && base.as_ref().is_some_and(|b| b.rel_path == l.rel_path) {
-            let dst = filer_intake::commit::free_path(&root.join(&want));
-            let rel = vf_fs::rebuild::rel(root, &dst);
-            let tx = Transaction::new(LABEL)
-                .file(FileOp::Move {
-                    src: root.join(&now.rel_path),
-                    dst,
-                })
-                .catalog(Stmt::new(
-                    "UPDATE document SET rel_path = ?2, client_id = ?3, rev = rev + 1, updated_at = ?4
-                     WHERE id = ?1",
-                    vec![
-                        e.doc_id.clone().into(),
-                        rel.into(),
-                        client.map(str::to_owned).into(),
-                        vf_core::now_rfc3339().into(),
-                    ],
-                ))
-                .audit(AuditEntry::new(LABEL, Some(&e.doc_id), json!({ "moved": 1 })));
-            vf_fs::fileops::commit(conn, root, tx, &s.device_id)?;
-            rep.moved += 1;
-        }
-        let local_meta_changed = base.as_ref().is_none_or(|b| b.rev != l.rev);
-        if (took_remote || !local_meta_changed) && meta_differs(conn, e)? {
-            let rel = catalog::doc(conn, &e.doc_id)?.expect("still here").rel_path;
-            set_meta(conn, root, s, e, &rel, folder)?;
-            rep.meta += 1;
-        }
-        let rel = catalog::doc(conn, &e.doc_id)?.expect("still here").rel_path;
-        ensure_versions(conn, root, s, e, &rel)?;
-        if took_remote || !changed_here {
-            catalog::set_base(conn, &e.doc_id)?;
+            rep.updated += 1;
+            // A metadata edit made here stays (and goes up with the next push).
+            took_remote = !other_here;
+        } else {
+            // Both changed: keep this workstation's bytes beside, the bucket's take the path.
+            let copy_rel = conflict_name(&l.rel_path, &s.device_name);
+            let tmp = vf_fs::content::tmp_file(root, "part")?;
+            std::fs::copy(root.join(&l.rel_path), &tmp)
+                .map_err(|e| SyncError::Local(e.to_string()))?;
+            let m = docmeta::load(conn, &l.id)?;
+            let added = vf_fs::content::add(
+                conn,
+                root,
+                &s.device_id,
+                &tmp,
+                vf_fs::content::NewDoc {
+                    rel_path: copy_rel,
+                    client_id: l.client_id.clone(),
+                    doc_type_id: m.doc_type.clone(),
+                    tax_year: m.tax_year,
+                    source: m.source.clone(),
+                    tags: m.tags.clone(),
+                    label: LABEL.into(),
+                    detail: json!({ "conflict_copy": 1 }),
+                },
+            )?;
+            if !replace_with(conn, root, s, e)? {
+                return Ok(One::Deferred);
+            }
+            record_conflict(
+                conn,
+                &e.doc_id,
+                Some(&added.doc_id),
+                "both_changed",
+                &e.device_id,
+            )?;
+            rep.conflicts += 1;
+            took_remote = true;
         }
     }
-    Ok(deferred)
+    // Moved or renamed there (and not here).
+    let now = catalog::doc(conn, &e.doc_id)?.ok_or_else(|| SyncError::Local("gone".into()))?;
+    if now.rel_path != want && base.as_ref().is_some_and(|b| b.rel_path == l.rel_path) {
+        let dst = filer_intake::commit::free_path(&root.join(&want));
+        let rel = vf_fs::rebuild::rel(root, &dst);
+        let tx = Transaction::new(LABEL)
+            .file(FileOp::Move {
+                src: root.join(&now.rel_path),
+                dst,
+            })
+            .catalog(Stmt::new(
+                "UPDATE document SET rel_path = ?2, client_id = ?3, rev = rev + 1, updated_at = ?4
+                 WHERE id = ?1",
+                vec![
+                    e.doc_id.clone().into(),
+                    rel.into(),
+                    client.map(str::to_owned).into(),
+                    vf_core::now_rfc3339().into(),
+                ],
+            ))
+            .audit(AuditEntry::new(
+                LABEL,
+                Some(&e.doc_id),
+                json!({ "moved": 1 }),
+            ));
+        vf_fs::fileops::commit(conn, root, tx, &s.device_id)?;
+        rep.moved += 1;
+    }
+    if (took_remote || !other_here) && meta_differs(conn, e)? {
+        let rel = catalog::doc(conn, &e.doc_id)?
+            .ok_or_else(|| SyncError::Local("gone".into()))?
+            .rel_path;
+        set_meta(conn, root, s, e, &rel, folder)?;
+        rep.meta += 1;
+    }
+    let rel = catalog::doc(conn, &e.doc_id)?
+        .ok_or_else(|| SyncError::Local("gone".into()))?
+        .rel_path;
+    ensure_versions(conn, root, s, e, &rel)?;
+    if took_remote || !changed_here {
+        catalog::set_base(conn, &e.doc_id)?;
+    }
+    Ok(One::Done)
+}
+
+/// Raises a Conflicts item once per document and kind (an unresolved one is not repeated).
+fn raise(
+    conn: &Connection,
+    doc: &str,
+    kind: &str,
+    from_device: &str,
+    rep: &mut PullReport,
+) -> Result<()> {
+    let open: bool = conn
+        .query_row(
+            "SELECT 1 FROM sync_conflict WHERE doc_id = ?1 AND kind = ?2 AND resolved IS NULL",
+            [doc, kind],
+            |_| Ok(()),
+        )
+        .is_ok();
+    if !open {
+        record_conflict(conn, doc, None, kind, from_device)?;
+        rep.conflicts += 1;
+    }
+    Ok(())
 }
 
 /// The bucket's content for `e` replaces this workstation's (kept as a version). `false`: the
