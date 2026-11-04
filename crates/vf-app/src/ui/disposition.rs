@@ -206,16 +206,38 @@ pub fn show(ui: &mut egui::Ui, p: &mut DispositionPage, env: &mut Env) {
         if pending.is_empty() {
             ui.label(RichText::new("Nothing approved.").color(theme::ink_muted()));
         }
+        let mut cancel: Option<String> = None;
         for x in &pending {
-            ui.label(
-                RichText::new(format!(
-                    "{}  ·  destroyed from {}  ·  approved by {}",
-                    x.rel_path,
-                    x.destroy_after,
-                    x.decided_by.as_deref().unwrap_or("—")
-                ))
-                .small(),
-            );
+            ui.horizontal(|ui| {
+                ui.label(
+                    RichText::new(format!(
+                        "{}  ·  destroyed from {}  ·  approved by {}",
+                        x.rel_path,
+                        x.destroy_after,
+                        x.decided_by.as_deref().unwrap_or("—")
+                    ))
+                    .small(),
+                );
+                let b = ui
+                    .small_button("Cancel")
+                    .on_hover_text("Take back the approval: the document is not destroyed and comes back to the list above for a new decision.");
+                let name = format!("Cancel destruction of {}", x.rel_path);
+                b.widget_info(|| {
+                    egui::WidgetInfo::labeled(egui::Role::Button, true, name.clone())
+                });
+                if b.clicked() {
+                    cancel = Some(x.doc_id.clone());
+                }
+            });
+        }
+        if let Some(id) = cancel {
+            match disposition::cancel(env.conn, env.device_id, &[id]) {
+                Ok(_) => {
+                    p.notice = Some("Approval taken back: the document is not destroyed.".into());
+                    p.refresh();
+                }
+                Err(e) => p.error = Some(e),
+            }
         }
         if due > 0 {
             ui.horizontal(|ui| {

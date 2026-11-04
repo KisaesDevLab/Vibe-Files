@@ -28,7 +28,7 @@ Tick documents (or use **Select all** and **Select none**), then:
 
 ## The destruction run
 
-**Waiting for destruction** lists what has been approved, with the date each can be destroyed and who approved it. Once some are due, type the admin password in **Password** and press **Destroy N due now**.
+**Waiting for destruction** lists what has been approved, with the date each can be destroyed and who approved it. Changed your mind? **Cancel** beside a document takes back its approval: it is not destroyed and returns to the list above for a new decision (recorded in the audit trail). Once some are due, type the admin password in **Password** and press **Destroy N due now**.
 
 For each document, every copy of its content is overwritten and deleted: the file, its versions (when no other document has the same content), copies in the trash and Intake's working folders, and its OCR text. The catalog keeps a row marked as disposed. A certificate of destruction (PDF) is filed in the cabinet's `_Vibe\disposition` folder.
 

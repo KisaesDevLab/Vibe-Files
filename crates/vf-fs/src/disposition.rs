@@ -322,6 +322,42 @@ pub fn defer(
     decide(conn, device_id, lines, false, today)
 }
 
+/// Takes back the approval of `doc_ids` while they wait for destruction (owner 2026-11-04):
+/// each returns to the eligible list for a new decision. Audited (`disposition_cancel`).
+pub fn cancel(conn: &mut Connection, device_id: &str, doc_ids: &[String]) -> Result<usize, String> {
+    let mut tx = Transaction::new(DECIDE_LABEL);
+    let mut n = 0;
+    for id in doc_ids {
+        let row: Option<(Option<String>, Option<String>)> = conn
+            .query_row(
+                "SELECT destroy_after, decided_by FROM disposition
+                 WHERE doc_id = ?1 AND decision = 'approved' AND destroyed_at IS NULL",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .ok();
+        let Some((after, by)) = row else { continue };
+        tx = tx
+            .catalog(Stmt::new(
+                "DELETE FROM disposition
+                 WHERE doc_id = ?1 AND decision = 'approved' AND destroyed_at IS NULL",
+                vec![id.clone().into()],
+            ))
+            .audit(AuditEntry::new(
+                "disposition_cancel",
+                Some(id),
+                json!({ "destroy_after": after, "approved_by": by }),
+            ));
+        n += 1;
+    }
+    if n == 0 {
+        return Ok(0);
+    }
+    tx.commit(conn, &mut NoFileOps, &Actor::device(device_id))
+        .map_err(|e| e.to_string())?;
+    Ok(n)
+}
+
 /// An approved document waiting for destruction.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Pending {
@@ -1126,6 +1162,23 @@ mod tests {
             ids(&eligible(&f.conn, &f.root, d(2027, 11, 3)).unwrap()),
             ["engage", "w2-2019"]
         );
+        // Cancelled while waiting: back on the eligible list, audited (owner 2026-11-04).
+        assert_eq!(cancel(&mut f.conn, "dev", &["ret-2018".into()]).unwrap(), 1);
+        assert!(pending(&f.conn).unwrap().is_empty());
+        assert_eq!(
+            ids(&eligible(&f.conn, &f.root, today).unwrap()),
+            ["ret-2018"]
+        );
+        let n: i64 = f
+            .conn
+            .query_row(
+                "SELECT count(*) FROM audit WHERE action = 'disposition_cancel'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 1);
+        assert_eq!(cancel(&mut f.conn, "dev", &["ret-2018".into()]).unwrap(), 0);
     }
 
     /// QA P3: an approval is checked again at destroy time. Reclassified as permanent, or new
