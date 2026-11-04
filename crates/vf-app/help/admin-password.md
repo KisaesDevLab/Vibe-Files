@@ -42,7 +42,7 @@ A wrong password says "That admin password is not right." After three wrong trie
 1. On the server, open the cabinet folder and delete `_Vibe\trash_pin.json`.
 2. In Vibe Files, open **Admin** › **Admin password** and set a new one.
 
-The audit trail records the new password as a reset (the file had been removed), so going around the password always shows.
+The audit trail records the new password as a reset (the file had been removed), so going around the password always shows. With B2 sync, the removal goes to the other places at the next sync; the old password does not come back.
 
 > Anyone who can change files in the cabinet folder can do this. The password keeps settings from being changed by mistake; it is not a lock against someone with access to the server.
 

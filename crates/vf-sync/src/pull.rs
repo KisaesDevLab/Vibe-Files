@@ -148,6 +148,9 @@ pub(crate) fn apply_head(
     Ok(())
 }
 
+/// The admin password file, relative to `_Vibe` (vf_fs::trash::pin_file).
+const PIN_FILE: &str = "trash_pin.json";
+
 /// Writes the bucket's master files where this workstation has not changed them since the last
 /// exchange, then brings the catalog in line. Returns the hashes now exchanged.
 fn apply_files(
@@ -171,6 +174,13 @@ fn apply_files(
             continue;
         }
         let local_h = local.as_ref().map(|t| sha256(t.as_bytes()));
+        // The admin password file deleted here after it was exchanged (the "forgotten password"
+        // reset): a removal, not a file to restore. The removed marker goes up instead
+        // (owner 2026-11-04).
+        if local.is_none() && rel == PIN_FILE && base.get(rel) == Some(&remote_h) {
+            cabinet::write_replace(&p, vf_fs::trash::REMOVED_MARKER.as_bytes())?;
+            continue;
+        }
         if local.is_none() || local_h.as_ref() == base.get(rel) {
             if let Some(d) = p.parent() {
                 std::fs::create_dir_all(d).map_err(|e| SyncError::Local(e.to_string()))?;

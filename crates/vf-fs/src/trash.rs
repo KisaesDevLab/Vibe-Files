@@ -358,10 +358,23 @@ fn stored_pin(root: &Path) -> Option<String> {
 /// cannot be read right now (a share hiccup, a write in progress, a damaged file) counts as set,
 /// so Admin stays locked rather than opening. Only a file that is not there means "no password".
 pub fn has_pin(root: &Path) -> bool {
-    match std::fs::metadata(pin_file(root)) {
-        Ok(_) => true,
+    match std::fs::read_to_string(pin_file(root)) {
+        // Removed: the file says so, so sync carries the removal (owner 2026-11-04).
+        Ok(t) => !is_removed_marker(&t),
         Err(e) => e.kind() != std::io::ErrorKind::NotFound,
     }
+}
+
+/// The password file's content once the password is removed: kept (not deleted) so B2 sync
+/// carries the removal to the other places instead of bringing the old password back.
+pub const REMOVED_MARKER: &str = "{\"removed\": true}
+";
+
+fn is_removed_marker(text: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(text)
+        .ok()
+        .and_then(|v| v.get("removed").and_then(|r| r.as_bool()))
+        .unwrap_or(false)
 }
 
 /// Whether `pin` is the firm PIN. After three wrong tries in a row it is not checked for a while
@@ -456,7 +469,8 @@ pub fn remove_pin(
     if !check_pin(root, current) {
         return Err("the current admin password is not right".into());
     }
-    std::fs::remove_file(pin_file(root)).map_err(|e| e.to_string())?;
+    cabinet::write_replace(&pin_file(root), REMOVED_MARKER.as_bytes())
+        .map_err(|e| e.to_string())?;
     Transaction::new(PIN_LABEL)
         .audit(AuditEntry::new("firm_pin_removed", None, json!({})))
         .commit(conn, &mut NoFileOps, &Actor::device(device_id))
@@ -620,6 +634,21 @@ mod tests {
             !dump.contains("2222"),
             "the PIN is never in the audit trail"
         );
+    }
+
+    /// Removing the password leaves the removed marker (so sync carries it), and a new one can
+    /// be set after (owner 2026-11-04).
+    #[test]
+    fn removed_password_is_a_marker() {
+        let (_t, root, mut conn) = fx();
+        std::fs::create_dir_all(root.join(cabinet::VIBE_DIR)).unwrap();
+        set_pin(&mut conn, &root, "dev", None, "482193").unwrap();
+        remove_pin(&mut conn, &root, "dev", "482193").unwrap();
+        assert!(pin_file(&root).is_file(), "kept as the removed marker");
+        assert!(!has_pin(&root));
+        assert_eq!(unlock_admin(&mut conn, &root, "dev", "x"), Ok(true));
+        set_pin(&mut conn, &root, "dev", None, "555555").unwrap();
+        assert!(has_pin(&root) && check_pin(&root, "555555"));
     }
 
     /// A password file that is there but unreadable keeps Admin locked (QA 2026-11-04).

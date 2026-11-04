@@ -102,6 +102,13 @@ fn push_once(
     let writer = vf_core::new_id();
     let pending = catalog::pending(conn)?;
     let mut uploaded = catalog::uploaded(conn)?;
+    // The admin password file deleted here after it was exchanged (the forgotten-password
+    // reset): sent as removed, so the other places drop it too (owner 2026-11-04).
+    let pin = vf_fs::trash::pin_file(root);
+    if !pin.exists() && catalog::files_base(conn)?.contains_key("trash_pin.json") {
+        vf_fs::cabinet::write_replace(&pin, vf_fs::trash::REMOVED_MARKER.as_bytes())
+            .map_err(|e| SyncError::Local(e.to_string()))?;
+    }
     let files = master_files(root);
     let hashes = files_hashes(&files);
     let files_dirty = hashes != catalog::files_base(conn)?;

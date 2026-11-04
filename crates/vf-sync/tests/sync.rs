@@ -796,6 +796,31 @@ fn master_files_changed_on_two_pcs() {
     assert_eq!(vf_fs::holds::load(&a.root).unwrap().len(), 2);
 }
 
+/// Removing the admin password reaches the other place, by the button or by deleting the file
+/// (the forgotten-password reset); the old password never comes back (owner 2026-11-04).
+#[test]
+fn a_removed_admin_password_stays_removed_everywhere() {
+    let t = tempfile::tempdir().unwrap();
+    let store = Remote::memory();
+    let mut a = pc_a(t.path(), store.clone());
+    vf_fs::trash::set_pin(&mut a.conn, &a.root, "dev-a", None, "482193").unwrap();
+    vf_sync::push::push(&mut a.conn, &a.root, &a.sync, None).unwrap();
+    let mut b = pc_b(t.path(), store.clone(), &a);
+    assert!(vf_fs::trash::has_pin(&b.root), "the password reached B");
+    // B forgets it and deletes the file.
+    std::fs::remove_file(vf_fs::trash::pin_file(&b.root)).unwrap();
+    vf_sync::pull::pull(&mut b.conn, &b.root, &b.sync).unwrap();
+    assert!(!vf_fs::trash::has_pin(&b.root), "not restored by the pull");
+    vf_sync::push::push(&mut b.conn, &b.root, &b.sync, None).unwrap();
+    vf_sync::pull::pull(&mut a.conn, &a.root, &a.sync).unwrap();
+    assert!(!vf_fs::trash::has_pin(&a.root), "the removal reached A");
+    // A sets a new one: it reaches B.
+    vf_fs::trash::set_pin(&mut a.conn, &a.root, "dev-a", None, "555555").unwrap();
+    vf_sync::push::push(&mut a.conn, &a.root, &a.sync, None).unwrap();
+    vf_sync::pull::pull(&mut b.conn, &b.root, &b.sync).unwrap();
+    assert!(vf_fs::trash::check_pin(&b.root, "555555"));
+}
+
 /// QA S9: a metadata edit made here survives the other PC's new content.
 #[test]
 fn a_local_metadata_edit_survives_remote_content() {

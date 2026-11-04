@@ -179,7 +179,7 @@ no names, paths or document contents.
 
 One password for the cabinet (Admin › Admin password). It locks the Admin tab and the Sync settings on every PC; anyone can still push, pull and verify. It also empties the trash by hand and releases legal holds (it was called the firm PIN before). A PC stays unlocked until Vibe Files closes, or until **Lock Admin**.
 
-Forgotten: on the server, delete `_Vibe	rash_pin.json` in the cabinet folder, then set a new one in Admin › Admin password. Setting it again is audited as a reset. Anyone who can change files in the cabinet folder can do this, so the password keeps settings from being changed by mistake; it is not a security boundary.
+Forgotten: on the server, delete `_Vibe\trash_pin.json` in the cabinet folder, then set a new one in Admin › Admin password. Setting it again is audited as a reset. With B2 sync the deletion is sent as a removal (the file comes back as `{"removed": true}`), so other places drop the password too instead of restoring it; removing it with the button does the same. Anyone who can change files in the cabinet folder can do this, so the password keeps settings from being changed by mistake; it is not a security boundary.
 
 ## Several people filing at once
 
