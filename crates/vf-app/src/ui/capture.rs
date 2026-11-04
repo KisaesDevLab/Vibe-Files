@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use egui::{RichText, TextEdit};
 use vf_fs::doctypes::DocType;
 use vf_ingest::parsers::{self, DocRule, Profile, Trial};
+use vf_ingest::ultratax::{self, Action, Layout, Var};
 
 use crate::ui::widgets;
 use crate::ui::{theme, wizard::ERROR};
@@ -26,6 +27,8 @@ pub struct CapturePage {
     trial: Option<Trial>,
     notice: Option<String>,
     error: Option<String>,
+    /// UltraTax editor: Options (false) or Document Names (true), as UltraTax's tabs.
+    ut_tab: bool,
 }
 
 impl CapturePage {
@@ -54,6 +57,31 @@ fn problem(p: &Profile, types: &[DocType]) -> Option<String> {
     if p.name.trim().is_empty() {
         return Some("The profile needs a name.".into());
     }
+    if let Some(l) = &p.layout {
+        if let Some(e) = l.problem() {
+            return Some(e);
+        }
+        for r in &p.documents {
+            if let Some(e) = ultratax::rename_problem(r) {
+                return Some(e);
+            }
+            if !r.doc_type.is_empty()
+                && r.doc_type != ultratax::K1_BY_FORM
+                && !types.iter().any(|t| t.name == r.doc_type)
+            {
+                return Some(format!(
+                    "{}: {} is not a doc type.",
+                    ultratax::label_of(&r.default_name),
+                    r.doc_type
+                ));
+            }
+        }
+        return p
+            .doc
+            .iter()
+            .enumerate()
+            .find_map(|(i, d)| doc_rule_problem(i, d, types));
+    }
     match regex::Regex::new(&p.pattern) {
         Err(e) => return Some(format!("File name pattern: {e}")),
         Ok(r) if !r.capture_names().flatten().any(|n| n == "id") => {
@@ -61,19 +89,24 @@ fn problem(p: &Profile, types: &[DocType]) -> Option<String> {
         }
         Ok(_) => {}
     }
-    for (i, d) in p.doc.iter().enumerate() {
-        if d.pattern.trim().is_empty() {
-            return Some(format!(
-                "Rule {}: say what the document name contains.",
-                i + 1
-            ));
-        }
-        if let Err(e) = regex::Regex::new(&d.pattern) {
-            return Some(format!("Rule {}: {e}", i + 1));
-        }
-        if !types.iter().any(|t| t.name == d.doc_type) {
-            return Some(format!("Rule {}: choose a doc type.", i + 1));
-        }
+    p.doc
+        .iter()
+        .enumerate()
+        .find_map(|(i, d)| doc_rule_problem(i, d, types))
+}
+
+fn doc_rule_problem(i: usize, d: &DocRule, types: &[DocType]) -> Option<String> {
+    if d.pattern.trim().is_empty() {
+        return Some(format!(
+            "Rule {}: say what the document name contains.",
+            i + 1
+        ));
+    }
+    if let Err(e) = regex::Regex::new(&d.pattern) {
+        return Some(format!("Rule {}: {e}", i + 1));
+    }
+    if !types.iter().any(|t| t.name == d.doc_type) {
+        return Some(format!("Rule {}: choose a doc type.", i + 1));
     }
     None
 }
@@ -121,9 +154,13 @@ pub fn show(
     let saved = p.files[p.pick].1.clone();
     ui.label(
         RichText::new(format!(
-            "{} · {} rules{}",
+            "{} · {}{}",
             saved.name,
-            saved.doc.len(),
+            if saved.layout.is_some() {
+                format!("{} documents", saved.documents.len())
+            } else {
+                format!("{} rules", saved.doc.len())
+            },
             if saved.enabled { "" } else { " · off" }
         ))
         .size(15.0),
@@ -161,19 +198,136 @@ pub fn show(
             .labelled_by(l.id);
         ui.checkbox(&mut draft.enabled, "On");
     });
-    ui.horizontal(|ui| {
-        let l = ui.label("File name pattern");
-        ui.add(
-            TextEdit::singleline(&mut draft.pattern)
-                .font(egui::TextStyle::Monospace)
-                .desired_width(f32::INFINITY),
-        )
-        .labelled_by(l.id);
-    });
-    ui.label(widgets::caption(
+    if draft.layout.is_none() {
+        ui.horizontal(|ui| {
+            let l = ui.label("File name pattern");
+            ui.add(
+                TextEdit::singleline(&mut draft.pattern)
+                    .font(egui::TextStyle::Monospace)
+                    .desired_width(f32::INFINITY),
+            )
+            .labelled_by(l.id);
+        });
+        ui.label(widgets::caption(
         "A regular expression over the printed file name. Groups: id (client ID, required), year, doc (the document name the rules below read), recipient (a K-1's partner).",
     ));
+    }
 
+    if draft.layout.is_some() {
+        ultratax_editor(ui, &mut p.ut_tab, draft, types, folders);
+        ui.add_space(8.0);
+        egui::CollapsingHeader::new("Documents not in UltraTax's list")
+            .id_salt("capture-other-docs")
+            .show(ui, |ui| doc_rules(ui, draft, types, folders));
+    } else {
+        doc_rules(ui, draft, types, folders);
+    }
+    // Overrides for doc types no rule uses any more are dropped on save.
+    let dirty = *draft != saved;
+    let issue = problem(draft, types);
+    ui.add_space(8.0);
+    let mut save = false;
+    let mut discard = false;
+    ui.horizontal(|ui| {
+        save = ui
+            .add_enabled(dirty && issue.is_none(), widgets::primary_button("Save"))
+            .clicked();
+        discard = ui
+            .add_enabled(dirty, egui::Button::new("Discard"))
+            .clicked();
+        if dirty && let Some(i) = &issue {
+            ui.label(RichText::new(i).color(ERROR));
+        }
+    });
+    let to_save = save.then(|| draft.clone());
+    if discard {
+        p.draft = None;
+    }
+    if let Some(mut d) = to_save {
+        d.folders
+            .retain(|t, _| d.doc.iter().any(|r| &r.doc_type == t));
+        let path = p.files[p.pick].0.clone();
+        match parsers::save_profile(&path, &d).and_then(|()| parsers::sync_filer_rules(root)) {
+            Ok(changed) => {
+                rules_changed = changed;
+                p.error = None;
+                p.notice = Some(if changed {
+                    "Saved. Intake files these prints by the new folders.".into()
+                } else {
+                    "Saved.".into()
+                });
+                p.reload(root);
+            }
+            Err(e) => p.error = Some(e),
+        }
+    }
+    widgets::message_line(ui, p.notice.as_deref());
+    if let Some(e) = &p.error {
+        ui.label(RichText::new(e).color(ERROR));
+    }
+
+    rules_changed
+}
+
+fn trial_view(ui: &mut egui::Ui, t: &Trial) {
+    egui::Grid::new("capture-trial")
+        .num_columns(2)
+        .spacing([12.0, 3.0])
+        .show(ui, |ui| {
+            let row = |ui: &mut egui::Ui, k: &str, v: RichText| {
+                ui.label(RichText::new(k).color(theme::INK_MUTED));
+                ui.label(v);
+                ui.end_row();
+            };
+            match &t.parsed {
+                None => row(
+                    ui,
+                    "Profile",
+                    RichText::new("no profile reads this name: it goes to Intake as it is")
+                        .color(ERROR),
+                ),
+                Some(pr) => {
+                    row(ui, "Profile", RichText::new(&pr.profile));
+                    row(ui, "Client ID", RichText::new(&pr.client_id).monospace());
+                    row(
+                        ui,
+                        "Tax year",
+                        RichText::new(pr.year.map_or("—".into(), |y| y.to_string())),
+                    );
+                    row(
+                        ui,
+                        "Document",
+                        RichText::new(pr.doc.clone().unwrap_or_default()),
+                    );
+                    row(
+                        ui,
+                        "Doc type",
+                        match &pr.doc_type {
+                            Some(d) => RichText::new(d),
+                            None => RichText::new("no rule matched").color(ERROR),
+                        },
+                    );
+                }
+            }
+            row(
+                ui,
+                "Reaches Intake as",
+                RichText::new(&t.delivered).monospace(),
+            );
+            row(ui, "Intake rule", RichText::new(&t.rule));
+            row(
+                ui,
+                "Filed as",
+                match &t.destination {
+                    Ok(d) => RichText::new(format!("<client folder>/{d}")).monospace(),
+                    Err(e) => RichText::new(e).color(ERROR),
+                },
+            );
+        });
+}
+
+/// The `[[doc]]` rules (document name → doc type) and the folder of each doc type they use.
+fn doc_rules(ui: &mut egui::Ui, draft: &mut Profile, types: &[DocType], folders: &[String]) {
     ui.add_space(10.0);
     ui.label(RichText::new("Document name → doc type").strong());
     ui.label(widgets::caption(
@@ -325,106 +479,323 @@ pub fn show(
                 ui.end_row();
             }
         });
-    // Overrides for doc types no rule uses any more are dropped on save.
-    let dirty = *draft != saved;
-    let issue = problem(draft, types);
-    ui.add_space(8.0);
-    let mut save = false;
-    let mut discard = false;
-    ui.horizontal(|ui| {
-        save = ui
-            .add_enabled(dirty && issue.is_none(), widgets::primary_button("Save"))
-            .clicked();
-        discard = ui
-            .add_enabled(dirty, egui::Button::new("Discard"))
-            .clicked();
-        if dirty && let Some(i) = &issue {
-            ui.label(RichText::new(i).color(ERROR));
-        }
-    });
-    let to_save = save.then(|| draft.clone());
-    if discard {
-        p.draft = None;
-    }
-    if let Some(mut d) = to_save {
-        d.folders
-            .retain(|t, _| d.doc.iter().any(|r| &r.doc_type == t));
-        let path = p.files[p.pick].0.clone();
-        match parsers::save_profile(&path, &d).and_then(|()| parsers::sync_filer_rules(root)) {
-            Ok(changed) => {
-                rules_changed = changed;
-                p.error = None;
-                p.notice = Some(if changed {
-                    "Saved. Intake files these prints by the new folders.".into()
-                } else {
-                    "Saved.".into()
-                });
-                p.reload(root);
-            }
-            Err(e) => p.error = Some(e),
-        }
-    }
-    widgets::message_line(ui, p.notice.as_deref());
-    if let Some(e) = &p.error {
-        ui.label(RichText::new(e).color(ERROR));
-    }
-
-    rules_changed
 }
 
-fn trial_view(ui: &mut egui::Ui, t: &Trial) {
-    egui::Grid::new("capture-trial")
+/// UltraTax's PDF File Options, as its two tabs: Options (the file name variables and their
+/// positions) and Document Names (each document with its custom name, and here also its doc
+/// type, filing, folder and file name).
+fn ultratax_editor(
+    ui: &mut egui::Ui,
+    tab: &mut bool,
+    draft: &mut Profile,
+    types: &[DocType],
+    folders: &[String],
+) {
+    ui.add_space(8.0);
+    ui.horizontal(|ui| {
+        ui.selectable_value(tab, false, "Options");
+        ui.selectable_value(tab, true, "Document Names");
+    });
+    ui.separator();
+    if *tab {
+        document_names(ui, draft, types, folders);
+    } else {
+        options(ui, draft);
+    }
+}
+
+fn options(ui: &mut egui::Ui, draft: &mut Profile) {
+    let example_doc = draft
+        .documents
+        .iter()
+        .find(|r| r.default_name == "ArchivedTaxReturn")
+        .map_or("Tax_Return".to_string(), |r| r.printed_name().to_string());
+    let Some(layout) = draft.layout.as_mut() else {
+        return;
+    };
+    ui.label(widgets::caption(
+        "Set these as in UltraTax: Setup › Office Configuration › Print Options › PDF File Options › Options. All variables are separated by an underscore.",
+    ));
+    ui.add_space(6.0);
+    let n = Var::ALL.len() as u8;
+    let pos_text = |p: u8| {
+        if p == 0 {
+            "None".to_string()
+        } else {
+            format!("Position {p}")
+        }
+    };
+    egui::Grid::new("ut-variables")
         .num_columns(2)
-        .spacing([12.0, 3.0])
+        .spacing([24.0, 6.0])
         .show(ui, |ui| {
-            let row = |ui: &mut egui::Ui, k: &str, v: RichText| {
-                ui.label(RichText::new(k).color(theme::INK_MUTED));
-                ui.label(v);
-                ui.end_row();
-            };
-            match &t.parsed {
-                None => row(
-                    ui,
-                    "Profile",
-                    RichText::new("no profile reads this name: it goes to Intake as it is")
-                        .color(ERROR),
-                ),
-                Some(pr) => {
-                    row(ui, "Profile", RichText::new(&pr.profile));
-                    row(ui, "Client ID", RichText::new(&pr.client_id).monospace());
-                    row(
-                        ui,
-                        "Tax year",
-                        RichText::new(pr.year.map_or("—".into(), |y| y.to_string())),
-                    );
-                    row(
-                        ui,
-                        "Document",
-                        RichText::new(pr.doc.clone().unwrap_or_default()),
-                    );
-                    row(
-                        ui,
-                        "Doc type",
-                        match &pr.doc_type {
-                            Some(d) => RichText::new(d),
-                            None => RichText::new("no rule matched").color(ERROR),
-                        },
-                    );
+            ui.label(RichText::new("File Name Variables").color(theme::INK_MUTED));
+            ui.label(RichText::new("Variable Position").color(theme::INK_MUTED));
+            ui.end_row();
+            for v in Var::ALL {
+                let l = ui.label(v.label());
+                let mut p = layout.position(v);
+                egui::ComboBox::from_id_salt(("ut-pos", v.label()))
+                    .selected_text(pos_text(p))
+                    .width(160.0)
+                    .show_ui(ui, |ui| {
+                        for k in 0..=n {
+                            ui.selectable_value(&mut p, k, pos_text(k));
+                        }
+                    })
+                    .response
+                    .labelled_by(l.id);
+                if p != layout.position(v) {
+                    layout.set_position(v, p);
                 }
+                ui.end_row();
             }
-            row(
-                ui,
-                "Reaches Intake as",
-                RichText::new(&t.delivered).monospace(),
-            );
-            row(ui, "Intake rule", RichText::new(&t.rule));
-            row(
-                ui,
-                "Filed as",
-                match &t.destination {
-                    Ok(d) => RichText::new(format!("<client folder>/{d}")).monospace(),
-                    Err(e) => RichText::new(e).color(ERROR),
-                },
-            );
+            let l = ui.label("K1 Recipient Name");
+            egui::ComboBox::from_id_salt("ut-k1")
+                .selected_text(if layout.k1_recipient_after_document {
+                    "After Document Name"
+                } else {
+                    "None"
+                })
+                .width(160.0)
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut layout.k1_recipient_after_document, false, "None");
+                    ui.selectable_value(
+                        &mut layout.k1_recipient_after_document,
+                        true,
+                        "After Document Name",
+                    );
+                })
+                .response
+                .labelled_by(l.id);
+            ui.end_row();
         });
+    ui.add_space(6.0);
+    let mut separate = layout.postal_code_after.is_some();
+    if ui
+        .checkbox(
+            &mut separate,
+            "Print separate PDF files for each federal and state return",
+        )
+        .changed()
+    {
+        layout.postal_code_after = separate.then_some(Var::TaxYear);
+    }
+    if let Some(after) = layout.postal_code_after {
+        ui.horizontal(|ui| {
+            ui.add_space(24.0);
+            let l = ui.label("Include Postal Code");
+            let mut a = after;
+            egui::ComboBox::from_id_salt("ut-postal")
+                .selected_text(format!("After {}", a.label()))
+                .width(220.0)
+                .show_ui(ui, |ui| {
+                    for v in layout.order() {
+                        ui.selectable_value(&mut a, v, format!("After {}", v.label()));
+                    }
+                })
+                .response
+                .labelled_by(l.id);
+            layout.postal_code_after = Some(a);
+        });
+    }
+    ui.add_space(6.0);
+    match layout.problem() {
+        Some(e) => {
+            ui.label(RichText::new(e).color(ERROR));
+        }
+        None => {
+            ui.horizontal(|ui| {
+                ui.label("File Name Example");
+                ui.label(RichText::new(layout.example(&example_doc)).monospace());
+            });
+        }
+    }
+    if ui.button("Restore Default").clicked() {
+        *layout = Layout::default();
+    }
+}
+
+fn document_names(ui: &mut egui::Ui, draft: &mut Profile, types: &[DocType], folders: &[String]) {
+    ui.label(widgets::caption(
+        "Custom names as set in UltraTax (PDF File Options › Document Names); prints with either the default or the custom name are read. \"Amended\" or \"Superseded\" in front of a name is read too. For each document: its doc type, whether it is filed, the folder, and the name it is filed under (blank = as printed).",
+    ));
+    ui.add_space(6.0);
+    let default_of = |name: &str| {
+        types
+            .iter()
+            .find(|t| t.name == name)
+            .map(|t| t.default_folder.clone())
+            .unwrap_or_default()
+    };
+    let mut group = "";
+    egui::Grid::new("ut-documents")
+        .num_columns(7)
+        .spacing([8.0, 4.0])
+        .striped(true)
+        .show(ui, |ui| {
+            for h in [
+                "Default Document Name",
+                "Custom Name",
+                "Doc type",
+                "Filing",
+                "Folder",
+                "File name",
+                "Partner copy",
+            ] {
+                ui.label(RichText::new(h).color(theme::INK_MUTED));
+            }
+            ui.end_row();
+            for r in draft.documents.iter_mut() {
+                let g = ultratax::group_of(&r.default_name);
+                if g != group {
+                    group = g;
+                    ui.label(RichText::new(g).strong());
+                    ui.end_row();
+                }
+                let label = ultratax::label_of(&r.default_name).to_string();
+                let l = ui.label(&label);
+                ui.add_sized(
+                    [160.0, 22.0],
+                    TextEdit::singleline(&mut r.custom_name).hint_text(r.default_name.clone()),
+                )
+                .labelled_by(l.id);
+                // Doc type
+                let shown = if r.doc_type.is_empty() {
+                    "None".to_string()
+                } else {
+                    r.doc_type.clone()
+                };
+                egui::ComboBox::from_id_salt(("ut-type", label.as_str()))
+                        .truncate()
+                    .selected_text(shown)
+                    .width(190.0)
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut r.doc_type, String::new(), "None");
+                        ui.selectable_value(
+                            &mut r.doc_type,
+                            ultratax::K1_BY_FORM.to_string(),
+                            ultratax::K1_BY_FORM,
+                        );
+                        for t in types {
+                            ui.selectable_value(&mut r.doc_type, t.name.clone(), &t.name);
+                        }
+                    })
+                    .response
+                    .widget_info(|| {
+                        egui::WidgetInfo::labeled(
+                            egui::accesskit::Role::ComboBox,
+                            true,
+                            format!("{label} doc type"),
+                        )
+                    });
+                // Filing
+                egui::ComboBox::from_id_salt(("ut-action", label.as_str()))
+                    .selected_text(match r.action {
+                        Action::File => "File",
+                        Action::Skip => "Don't file",
+                    })
+                    .width(90.0)
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut r.action, Action::File, "File");
+                        ui.selectable_value(&mut r.action, Action::Skip, "Don't file");
+                    })
+                    .response
+                    .widget_info(|| {
+                        egui::WidgetInfo::labeled(
+                            egui::accesskit::Role::ComboBox,
+                            true,
+                            format!("{label} filing"),
+                        )
+                    });
+                // Folder
+                let default = if r.doc_type == ultratax::K1_BY_FORM {
+                    default_of("K-1 (1065)")
+                } else {
+                    default_of(&r.doc_type)
+                };
+                let default_text = if default.is_empty() {
+                    "Default: Income Tax/{Year}".to_string()
+                } else {
+                    format!("Default: {default}")
+                };
+                let shown = if r.folder.is_empty() {
+                    default_text.clone()
+                } else {
+                    r.folder.clone()
+                };
+                {
+                    egui::ComboBox::from_id_salt(("ut-folder", label.as_str()))
+                        .truncate()
+                        .selected_text(shown)
+                        .width(230.0)
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut r.folder, String::new(), &default_text);
+                            for f in folders {
+                                ui.selectable_value(&mut r.folder, f.clone(), f);
+                            }
+                        })
+                        .response
+                        .widget_info(|| {
+                            egui::WidgetInfo::labeled(
+                                egui::accesskit::Role::ComboBox,
+                                true,
+                                format!("{label} folder"),
+                            )
+                        });
+                }
+                // File name
+                let bad = ultratax::rename_problem(r);
+                {
+                    let t = ui
+                        .add_sized(
+                            [170.0, 22.0],
+                            TextEdit::singleline(&mut r.rename)
+                                .hint_text("as printed")
+                                .text_color_opt(bad.as_ref().map(|_| ERROR)),
+                        )
+                        .on_hover_text(bad.clone().unwrap_or_else(|| {
+                            "Blank: the name as printed. Tokens: {Printed} {Document} {DocType} {Client} {ID} {Year} {Form} {Recipient} {State} {Amended}".into()
+                        }));
+                    t.widget_info(|| {
+                        egui::WidgetInfo::labeled(
+                            egui::accesskit::Role::TextInput,
+                            true,
+                            format!("{label} file name"),
+                        )
+                    });
+                }
+                // Copy to partner (K-1 rows)
+                if r.default_name.contains("K1") {
+                    ui.add_enabled(
+                        r.action == Action::File,
+                        egui::Checkbox::without_text(&mut r.copy_to_partner),
+                    )
+                    .on_hover_text("Also copy it to the partner's folder (a related client, or one in the client list)")
+                    .widget_info(|| {
+                        egui::WidgetInfo::selected(
+                            egui::accesskit::Role::CheckBox,
+                            true,
+                            r.copy_to_partner,
+                            format!("{label} copy to partner"),
+                        )
+                    });
+                } else {
+                    ui.label("");
+                }
+                ui.end_row();
+            }
+        });
+    ui.add_space(4.0);
+    ui.label(widgets::caption(
+        "File name tokens: {Printed} the name as printed · {Document} the document name · {DocType} · {Client} · {ID} · {Year} · {Form} the entity type · {Recipient} the K-1 partner · {State} · {Amended}. A name must keep {Document} or {Printed}; a K-1 that copies to the partner ends with {Recipient}.",
+    ));
+    for r in &draft.documents {
+        if let Some(e) = ultratax::rename_problem(r) {
+            ui.label(RichText::new(e).color(ERROR));
+        }
+    }
+    if ui.button("Restore Default").clicked() {
+        draft.documents = ultratax::default_rows();
+    }
 }

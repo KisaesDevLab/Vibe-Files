@@ -788,9 +788,22 @@ ANDE1042,Anderson Farms LLC
         vf_ingest::parsers::seed_if_missing(&root).unwrap();
         vf_ingest::parsers::sync_filer_rules(&root).unwrap();
         click(&mut h, "Print capture & parsers");
+        // UltraTax's Options tab: the office's layout and its example.
         assert!(
-            h.query_by_label("Correspondence/{Year}").is_some(),
-            "engagement letters"
+            h.query_by_label_contains(
+                "John Smith_2025_1040NR_Tax_Return_Pat Partner*_THOMREUT.pdf"
+            )
+            .is_some()
+        );
+        // Document Names: the preparer copy row, with its folder and filing choices.
+        h.get_by_label("Document Names").click();
+        // The wide grid settles its columns over a few frames.
+        h.run_steps(12);
+        assert!(h.query_by_label("Tax Return (preparer copy)").is_some());
+        assert!(h.query_by_label("PreparerCopyTaxReturn filing").is_some());
+        assert!(
+            h.query_by_label("ArchiveK1Package copy to partner")
+                .is_some()
         );
         type_into(
             &mut h,

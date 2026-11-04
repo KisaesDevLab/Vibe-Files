@@ -115,5 +115,12 @@ mod tests {
             .click();
         h.run_steps(8);
         shot(&mut h, "30-admin-import-scanned");
+        // UltraTax's Document Names tab (PA-22).
+        h.get_by_role_and_label(Role::Button, "Print capture & parsers")
+            .click();
+        h.run_steps(8);
+        h.get_by_label("Document Names").click();
+        h.run_steps(12);
+        shot(&mut h, "31-admin-ultratax-documents");
     }
 }
