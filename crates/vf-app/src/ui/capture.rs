@@ -440,7 +440,8 @@ fn doc_rules(ui: &mut egui::Ui, draft: &mut Profile, types: &[DocType], folders:
                     .selected_text(shown)
                     .width(220.0)
                     .show_ui(ui, |ui| {
-                        for t in types {
+                        let current = draft.doc[i].doc_type.clone();
+                        for t in types.iter().filter(|t| !t.archived || t.name == current) {
                             ui.selectable_value(
                                 &mut draft.doc[i].doc_type,
                                 t.name.clone(),
@@ -780,7 +781,8 @@ fn document_names(ui: &mut egui::Ui, draft: &mut Profile, types: &[DocType], fol
                             ultratax::K1_BY_FORM.to_string(),
                             ultratax::K1_BY_FORM,
                         );
-                        for t in types {
+                        let current = r.doc_type.clone();
+                        for t in types.iter().filter(|t| !t.archived || t.name == current) {
                             ui.selectable_value(&mut r.doc_type, t.name.clone(), &t.name);
                         }
                     })

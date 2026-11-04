@@ -2272,7 +2272,9 @@ fn inspector(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env) {
         ui.label(RichText::new("Select documents to see their details.").color(theme::ink_muted()));
         return;
     }
-    meta_editor::fields(ui, &mut b.meta_form, &b.snap.doc_types);
+    // Archived doc types are not offered (a document's own still shows as its current value).
+    let types = b.snap.pickable_doc_types(None);
+    meta_editor::fields(ui, &mut b.meta_form, &types);
     ui.add_space(10.0);
     let can_apply = !b.meta_form.to_edit().is_empty();
     let go = widgets::primary_button(format!("Apply to {} (one transaction)", b.selected.len()));

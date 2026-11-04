@@ -91,6 +91,10 @@ pub struct DocType {
     /// Picked first on a new barcode cover sheet (owner 2026-11-04). One doc type at most.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub cover_default: bool,
+    /// Archived (owner 2026-11-04): left out of pick lists; documents that have it keep it, and
+    /// its retention class still applies.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub archived: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -152,6 +156,7 @@ pub fn seed_if_missing(root: &Path) -> Result<bool, String> {
             client_visible: *v,
             retention: None,
             cover_default: false,
+            archived: false,
         })
         .collect();
     save(root, &types)?;
@@ -233,18 +238,19 @@ pub fn catalog_stmts(
         let folder = Some(t.default_folder.trim()).filter(|f| !f.is_empty());
         stmts.push(Stmt::new(
             "INSERT INTO doc_type (id, name, default_folder_tpl, client_visible, sort, device_id,
-               updated_at, retention_class_id)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+               updated_at, retention_class_id, archived)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
              ON CONFLICT(id) DO UPDATE SET
                name = excluded.name, default_folder_tpl = excluded.default_folder_tpl,
                client_visible = excluded.client_visible, sort = excluded.sort, deleted_at = NULL,
-               retention_class_id = excluded.retention_class_id,
+               retention_class_id = excluded.retention_class_id, archived = excluded.archived,
                device_id = excluded.device_id, updated_at = excluded.updated_at,
                rev = doc_type.rev + 1
              WHERE (doc_type.name, doc_type.default_folder_tpl, doc_type.client_visible,
-                    doc_type.sort, doc_type.deleted_at, doc_type.retention_class_id)
+                    doc_type.sort, doc_type.deleted_at, doc_type.retention_class_id,
+                    doc_type.archived)
                IS NOT (excluded.name, excluded.default_folder_tpl, excluded.client_visible,
-                       excluded.sort, NULL, excluded.retention_class_id)",
+                       excluded.sort, NULL, excluded.retention_class_id, excluded.archived)",
             vec![
                 t.id.clone().into(),
                 t.name.trim().into(),
@@ -254,6 +260,7 @@ pub fn catalog_stmts(
                 device_id.into(),
                 now.into(),
                 t.retention.clone().into(),
+                (t.archived as i64).into(),
             ],
         ));
     }
@@ -330,8 +337,12 @@ pub fn apply(root: &Path, edit: Edit) -> Result<(), String> {
             client_visible,
             retention,
             cover_default: false,
+            archived: false,
         }),
-        Edit::Update(t) => {
+        Edit::Update(mut t) => {
+            if t.archived {
+                t.cover_default = false;
+            }
             let i = pos(&types, &t.id)?;
             // One cover sheet default: setting it here takes it from the others.
             if t.cover_default {
@@ -377,6 +388,52 @@ mod tests {
 
     fn n(conn: &Connection, sql: &str) -> i64 {
         conn.query_row(sql, [], |r| r.get(0)).unwrap()
+    }
+
+    /// Archived doc types reach the catalog (pick lists leave them out); archiving takes the
+    /// cover sheet default away.
+    #[test]
+    fn archived_doc_types() {
+        let (_t, root, mut conn) = setup();
+        seed_if_missing(&root).unwrap();
+        let w2 = load(&root).unwrap().unwrap()[0].clone();
+        apply(
+            &root,
+            Edit::Update(DocType {
+                cover_default: true,
+                ..w2.clone()
+            }),
+        )
+        .unwrap();
+        apply(
+            &root,
+            Edit::Update(DocType {
+                archived: true,
+                cover_default: true,
+                ..w2.clone()
+            }),
+        )
+        .unwrap();
+        let now = load(&root).unwrap().unwrap()[0].clone();
+        assert!(now.archived && !now.cover_default);
+        sync(&mut conn, &root, "dev", "edit").unwrap();
+        let snap = vf_core::browse::load(&conn).unwrap();
+        assert!(snap.archived_types.contains(&w2.id));
+        assert!(
+            snap.doc_types.iter().any(|(id, _)| *id == w2.id),
+            "still named"
+        );
+        assert!(
+            !snap
+                .pickable_doc_types(None)
+                .iter()
+                .any(|(id, _)| *id == w2.id)
+        );
+        assert!(
+            snap.pickable_doc_types(Some(&w2.id))
+                .iter()
+                .any(|(id, _)| *id == w2.id)
+        );
     }
 
     #[test]

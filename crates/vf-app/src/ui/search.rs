@@ -407,8 +407,14 @@ fn filters(ui: &mut egui::Ui, s: &mut SearchTab, snap: &Snapshot) {
                 .show_ui(ui, |ui| {
                     ui.selectable_value(&mut f.doc_type, None, "Any doc type");
                     ui.selectable_value(&mut f.doc_type, Some(DocType::Needed), "Needs doc type");
+                    // Archived types stay searchable (older documents have them), marked.
                     for (id, name) in &snap.doc_types {
-                        ui.selectable_value(&mut f.doc_type, Some(DocType::Is(id.clone())), name);
+                        let label = if snap.archived_types.contains(id) {
+                            format!("{name} (archived)")
+                        } else {
+                            name.clone()
+                        };
+                        ui.selectable_value(&mut f.doc_type, Some(DocType::Is(id.clone())), label);
                     }
                 })
                 .response

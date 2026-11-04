@@ -92,6 +92,8 @@ struct Form {
     retention: Option<String>,
     /// Picked first on new cover sheets.
     cover_default: bool,
+    /// Archived: left out of pick lists.
+    archived: bool,
 }
 
 pub struct Admin {
@@ -141,6 +143,8 @@ pub struct Admin {
     pub lock_requested: bool,
     pub devices: crate::ui::devices::DevicesPage,
     pub templates: crate::ui::templates::TemplatesPage,
+    /// Doc types: archived ones listed too.
+    pub show_archived: bool,
 }
 
 impl Admin {
@@ -173,6 +177,7 @@ impl Admin {
             lock_requested: false,
             devices: Default::default(),
             templates: Default::default(),
+            show_archived: false,
         };
         a.reload(env);
         a
@@ -212,6 +217,7 @@ impl Admin {
                 visible: t.client_visible,
                 retention: t.retention.clone(),
                 cover_default: t.cover_default,
+                archived: t.archived,
             })
             .unwrap_or_default();
         self.editing = match id {
@@ -491,6 +497,10 @@ fn doc_types(ui: &mut egui::Ui, a: &mut Admin, env: &mut Env) {
             if ui.add(widgets::primary_button("Add doc type")).clicked() {
                 a.select(None);
             }
+            let archived = a.types.iter().filter(|t| t.archived).count();
+            if archived > 0 {
+                ui.checkbox(&mut a.show_archived, format!("Show archived ({archived})"));
+            }
         });
     });
     ui.add_space(8.0);
@@ -525,8 +535,17 @@ fn doc_types(ui: &mut egui::Ui, a: &mut Admin, env: &mut Env) {
                     ui.end_row();
                     let n = a.types.len();
                     for (i, t) in a.types.iter().enumerate() {
+                        if t.archived && !a.show_archived {
+                            continue;
+                        }
                         let sel = a.editing.id() == Some(t.id.as_str());
-                        if ui.selectable_label(sel, &t.name).clicked() {
+                        let name = if t.archived {
+                            RichText::new(format!("{} (archived)", t.name))
+                                .color(theme::ink_muted())
+                        } else {
+                            RichText::new(&t.name)
+                        };
+                        if ui.selectable_label(sel, name).clicked() {
                             pick = Some(t.id.clone());
                         }
                         let folder = if t.default_folder.is_empty() {
@@ -620,10 +639,25 @@ fn editor(ui: &mut egui::Ui, a: &mut Admin, env: &mut Env) {
             ui.checkbox(&mut a.form.visible, "Client-visible");
             ui.end_row();
             ui.label("");
-            ui.checkbox(&mut a.form.cover_default, "Default on cover sheets")
+            ui.add_enabled(
+                !a.form.archived,
+                egui::Checkbox::new(&mut a.form.cover_default, "Default on cover sheets"),
+            )
+            .on_hover_text(
+                "Print cover sheet starts with this doc type. Only one doc type can be the default.",
+            );
+            ui.end_row();
+            ui.label("");
+            if ui
+                .checkbox(&mut a.form.archived, "Archived (hidden from pick lists)")
                 .on_hover_text(
-                    "Print cover sheet starts with this doc type. Only one doc type can be the default.",
-                );
+                    "Not offered when choosing a doc type. Documents that have it keep it and its retention still applies. Untick to bring it back.",
+                )
+                .changed()
+                && a.form.archived
+            {
+                a.form.cover_default = false;
+            }
             ui.end_row();
             let l = ui.label("Retention");
             let shown = a
@@ -706,6 +740,7 @@ fn editor(ui: &mut egui::Ui, a: &mut Admin, env: &mut Env) {
                         client_visible: f.visible,
                         retention: f.retention,
                         cover_default: f.cover_default,
+                        archived: f.archived,
                     }),
                 );
             }
@@ -1008,6 +1043,46 @@ ANDE1042,Anderson Farms LLC
         let text = d.extract_text(&[1]).unwrap();
         assert!(text.contains("Vibe Files audit trail"), "{text}");
         assert!(text.contains("intact"), "{text}");
+    }
+
+    /// Doc types can be archived: hidden from the list until "Show archived", and from the
+    /// catalog's pick lists (owner 2026-11-04).
+    #[test]
+    fn doc_type_archives_and_hides() {
+        let mut h = harness();
+        h.get_by_label("8879 e-file authorization").click();
+        h.run();
+        h.get_by_label("Archived (hidden from pick lists)").click();
+        h.run();
+        click(&mut h, "Save changes");
+        let t = h
+            .state()
+            .a
+            .types
+            .iter()
+            .find(|t| t.name == "8879 e-file authorization")
+            .unwrap()
+            .clone();
+        assert!(t.archived, "{:?}", h.state().a.error);
+        h.state_mut().a.editing = Editing::Closed;
+        h.run();
+        assert!(
+            h.query_by_label("8879 e-file authorization (archived)")
+                .is_none()
+        );
+        h.get_by_label("Show archived (1)").click();
+        h.run();
+        assert!(
+            h.query_by_label("8879 e-file authorization (archived)")
+                .is_some()
+        );
+        let snap = vf_core::browse::load(&h.state().conn).unwrap();
+        assert!(
+            !snap
+                .pickable_doc_types(None)
+                .iter()
+                .any(|(id, _)| *id == t.id)
+        );
     }
 
     /// PA-24: Folder templates edits Filer's template.json; a new client then gets the folder.

@@ -475,7 +475,7 @@ impl IntakeTab {
         }
         if let Some(jf) = &mut self.just_filed {
             use crate::ui::filed_details::Act;
-            match crate::ui::filed_details::show(ui, jf, &snap.doc_types) {
+            match crate::ui::filed_details::show(ui, jf, &snap.pickable_doc_types(None)) {
                 Act::None => {}
                 Act::Close => self.just_filed = None,
                 Act::Apply => match jf.apply(conn, root, device_id) {

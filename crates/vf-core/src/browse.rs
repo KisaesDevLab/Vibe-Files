@@ -71,8 +71,10 @@ pub struct Snapshot {
     pub clients: Vec<ClientRow>,
     pub docs: Vec<DocRow>,
     pub relationships: Vec<RelRow>,
-    /// Live doc types (id, name) in list order.
+    /// Live doc types (id, name) in list order, archived ones too (their documents show them).
     pub doc_types: Vec<(String, String)>,
+    /// Ids of the archived doc types: left out of pick lists (owner 2026-11-04).
+    pub archived_types: std::collections::HashSet<String>,
     /// Doc type id → its default folder below the client folder (`Income Tax/{Year}`).
     pub doc_type_folders: std::collections::HashMap<String, String>,
 }
@@ -148,7 +150,7 @@ pub fn load(conn: &Connection) -> Result<Snapshot> {
         })?
         .collect::<std::result::Result<Vec<_>, _>>()?;
     let mut st = conn.prepare(
-        "SELECT id, name, default_folder_tpl FROM doc_type WHERE deleted_at IS NULL
+        "SELECT id, name, default_folder_tpl, archived FROM doc_type WHERE deleted_at IS NULL
          ORDER BY sort, name",
     )?;
     let rows = st
@@ -157,21 +159,36 @@ pub fn load(conn: &Connection) -> Result<Snapshot> {
                 r.get::<_, String>(0)?,
                 r.get::<_, String>(1)?,
                 r.get::<_, Option<String>>(2)?,
+                r.get::<_, bool>(3)?,
             ))
         })?
         .collect::<std::result::Result<Vec<_>, _>>()?;
     let doc_type_folders = rows
         .iter()
-        .filter_map(|(id, _, f)| f.clone().map(|f| (id.clone(), f)))
+        .filter_map(|(id, _, f, _)| f.clone().map(|f| (id.clone(), f)))
         .collect();
-    let doc_types = rows.into_iter().map(|(id, n, _)| (id, n)).collect();
+    let archived_types = rows.iter().filter(|r| r.3).map(|r| r.0.clone()).collect();
+    let doc_types = rows.into_iter().map(|(id, n, _, _)| (id, n)).collect();
     Ok(Snapshot {
         clients,
         docs,
         relationships,
         doc_types,
+        archived_types,
         doc_type_folders,
     })
+}
+
+impl Snapshot {
+    /// The doc types to offer in a pick list: the ones not archived, plus `keep` (the current
+    /// value) when that one is archived.
+    pub fn pickable_doc_types(&self, keep: Option<&str>) -> Vec<(String, String)> {
+        self.doc_types
+            .iter()
+            .filter(|(id, _)| !self.archived_types.contains(id) || Some(id.as_str()) == keep)
+            .cloned()
+            .collect()
+    }
 }
 
 /// A tree node the grid can show.
@@ -551,6 +568,7 @@ mod tests {
             ],
             relationships: vec![],
             doc_types: vec![],
+            archived_types: Default::default(),
             doc_type_folders: Default::default(),
         }
     }

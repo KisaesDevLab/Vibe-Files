@@ -49,7 +49,7 @@ impl CoverSheetDialog {
         });
         CoverSheetDialog {
             clients,
-            doc_types: snap.doc_types.clone(),
+            doc_types: snap.pickable_doc_types(None),
             doc_type_folders: snap.doc_type_folders.clone(),
             copies: "1".into(),
             client: start,
