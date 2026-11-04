@@ -146,8 +146,9 @@ impl Default for Look {
     }
 }
 
-/// Text sizes offered (percent).
-pub const TEXT_SIZES: [u16; 7] = [80, 90, 100, 110, 125, 150, 175];
+/// Text sizes offered (percent): inside Filer's zoom range (`filer_core::config::ZOOM_RANGE`,
+/// 90-150), so its Intake screen never changes them.
+pub const TEXT_SIZES: [u16; 6] = [90, 100, 110, 120, 135, 150];
 
 /// Viewer settings of this workstation.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

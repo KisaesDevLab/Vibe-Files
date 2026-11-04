@@ -169,7 +169,6 @@ fn check_for_update(enabled: bool) -> Option<mpsc::Receiver<Option<vf_sync::upda
 
 impl VibeFilesApp {
     pub fn new(ctx: &egui::Context, data: PathBuf) -> Self {
-        theme::install(ctx);
         let (config, error) = match config::load(&data) {
             Ok(c) => (c, None),
             // Never saved over: the unreadable file is kept aside, the device id carried over.
@@ -197,6 +196,9 @@ impl VibeFilesApp {
                 ),
             },
         };
+        // This PC's theme from the first paint (no flash of the light one).
+        theme::set_dark(config.look.dark);
+        theme::install(ctx);
         let mut w = Wizard::new(config.last_cabinet.as_deref());
         w.error = error;
         let update = check_for_update(config.update_check);
@@ -2249,6 +2251,8 @@ mod tests {
         h.run();
         assert_eq!(h.ctx.theme(), egui::Theme::Dark);
         assert!(config::load(&data).unwrap().look.dark);
+        // The colors follow (the theme flag is per thread: no other test can flip it).
+        assert!(crate::ui::theme::is_dark());
         click(&mut h, "Light");
         h.run();
         assert_eq!(h.ctx.theme(), egui::Theme::Light);

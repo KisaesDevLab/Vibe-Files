@@ -71,14 +71,9 @@ pub struct IntakeTab {
 pub const ID_PATTERN: &str = r"[A-Z0-9]{4,}";
 
 /// Filer's settings for this cabinet on this PC: whatever `_Vibe/config.json` holds (rules
-/// profile, inboxes, column map, …), with the cabinet's own facts written over it.
-#[cfg(test)]
-pub fn settings_for(root: &Path, cabinet: &CabinetFile) -> Result<(Settings, bool), String> {
-    settings_with_look(root, cabinet, false, 1.0)
-}
-
-/// [`settings_for`] with Vibe's theme and text size, so Filer's screen does not switch them
-/// when it loads (owner 2026-11-04: dark mode, text size).
+/// profile, inboxes, column map, …), with the cabinet's own facts written over it, and Vibe's
+/// theme and text size so Filer's screen does not switch them when it loads (owner 2026-11-04);
+/// those two are never saved into the shared `config.json`.
 pub fn settings_with_look(
     root: &Path,
     cabinet: &CabinetFile,
@@ -95,13 +90,8 @@ pub fn settings_with_look(
         uuid::Uuid::parse_str(&cabinet.firm_id)
             .map_err(|e| format!("cabinet.json firm_id is not a uuid: {e}"))?,
     );
-    // Vibe's theme and text size, not Windows' or Filer's own.
-    s.display.theme = if dark {
-        ThemeChoice::Dark
-    } else {
-        ThemeChoice::Light
-    };
-    s.display.zoom = filer_core::config::Display::clamp_zoom(zoom);
+    // The theme and text size are set after the save below: they are this PC's (config.toml),
+    // not the cabinet's shared config.json.
     // The office's UltraTax client IDs are letters and digits; Filer's default ID pattern is
     // digits only. A pattern the firm chose is kept (owner 2026-11-03).
     if s.id_pattern == filer_core::parse::DEFAULT_ID_PATTERN {
@@ -120,6 +110,13 @@ pub fn settings_with_look(
         s.save(&dir)
             .map_err(|e| format!("saving Filer's config.json: {e}"))?;
     }
+    // Vibe's theme and text size for Filer's screen, not Windows' or Filer's own.
+    s.display.theme = if dark {
+        ThemeChoice::Dark
+    } else {
+        ThemeChoice::Light
+    };
+    s.display.zoom = filer_core::config::Display::clamp_zoom(zoom);
     Ok((s, savable))
 }
 
@@ -530,13 +527,25 @@ mod tests {
             name: None,
         };
         vf_fs::cabinet::create(root, &cabinet).unwrap();
-        let (s, _) = settings_for(root, &cabinet).unwrap();
+        let (s, _) = settings_with_look(root, &cabinet, false, 1.0).unwrap();
         assert_eq!(s.id_pattern, ID_PATTERN);
         let dir = vf_fs::clients::master_dir(root);
         let (mut own, _) = Settings::load_or_default(&dir);
         assert_eq!(own.id_pattern, ID_PATTERN, "saved");
         own.id_pattern = r"\d{5}".into();
         own.save(&dir).unwrap();
-        assert_eq!(settings_for(root, &cabinet).unwrap().0.id_pattern, r"\d{5}");
+        assert_eq!(
+            settings_with_look(root, &cabinet, false, 1.0)
+                .unwrap()
+                .0
+                .id_pattern,
+            r"\d{5}"
+        );
+        // This PC's look reaches Filer's screen but not the cabinet's shared config.json.
+        let before = std::fs::read(dir.join("config.json")).unwrap();
+        let (s, _) = settings_with_look(root, &cabinet, true, 1.35).unwrap();
+        assert_eq!(s.display.theme, ThemeChoice::Dark);
+        assert!((s.display.zoom - 1.35).abs() < 0.001);
+        assert_eq!(std::fs::read(dir.join("config.json")).unwrap(), before);
     }
 }

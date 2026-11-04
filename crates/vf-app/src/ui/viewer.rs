@@ -1383,7 +1383,7 @@ fn canvas(ui: &mut egui::Ui, v: &mut Viewer, initials: &str) {
                         egui::Align2::CENTER_CENTER,
                         format!("Page {}", i + 1),
                         egui::FontId::proportional(14.0),
-                        theme::ink_muted(),
+                        theme::PAGE_INK_MUTED,
                     );
                 }
             }
@@ -1474,7 +1474,7 @@ fn draw_pending(ui: &egui::Ui, v: &Viewer, page: usize, rect: Rect, s: f32, g: &
                     egui::Align2::LEFT_TOP,
                     format!("{} · {}", a.author, text),
                     egui::FontId::proportional(11.0),
-                    theme::ink(),
+                    theme::PAGE_INK,
                 );
             }
             Kind::TextBox {
@@ -1539,7 +1539,7 @@ fn draw_pending(ui: &egui::Ui, v: &Viewer, page: usize, rect: Rect, s: f32, g: &
                             egui::Align2::LEFT_TOP,
                             &row.label,
                             font.clone(),
-                            theme::ink_muted(),
+                            theme::PAGE_INK_MUTED,
                         );
                     }
                     p.text(
@@ -1547,7 +1547,7 @@ fn draw_pending(ui: &egui::Ui, v: &Viewer, page: usize, rect: Rect, s: f32, g: &
                         egui::Align2::RIGHT_TOP,
                         &row.amount,
                         font.clone(),
-                        theme::ink(),
+                        theme::PAGE_INK,
                     );
                     p.text(
                         pos2(r.max.x - 13.0 * s, y),
@@ -1564,7 +1564,7 @@ fn draw_pending(ui: &egui::Ui, v: &Viewer, page: usize, rect: Rect, s: f32, g: &
                         egui::Align2::LEFT_TOP,
                         footer,
                         font,
-                        theme::ink_muted(),
+                        theme::PAGE_INK_MUTED,
                     );
                 }
             }

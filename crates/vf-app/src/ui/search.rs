@@ -564,6 +564,8 @@ fn row(ui: &mut egui::Ui, h: &Hit, thumb: Option<&egui::TextureHandle>) -> egui:
                     };
                     if on {
                         fmt.background = MARK_BG;
+                        // The mark is pale yellow in both themes: dark text on it.
+                        fmt.color = theme::PAGE_INK;
                     }
                     job.append(&text, 0.0, fmt);
                 }

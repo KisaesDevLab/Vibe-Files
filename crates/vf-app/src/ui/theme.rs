@@ -3,19 +3,23 @@
 //! called every frame from the window's theme). The dark palette is Filer Desktop's, so the
 //! mounted Intake tab and Vibe's own tabs match.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::cell::Cell;
 
 use egui::Color32;
 
-static DARK: AtomicBool = AtomicBool::new(false);
+thread_local! {
+    /// Per thread: the window is drawn on one thread, and tests running side by side each have
+    /// their own.
+    static DARK: Cell<bool> = const { Cell::new(false) };
+}
 
-/// The window shows the dark theme (set every frame by the app).
+/// The window shows the dark theme (set every frame by the app from the window's theme).
 pub fn set_dark(dark: bool) {
-    DARK.store(dark, Ordering::Relaxed);
+    DARK.with(|d| d.set(dark));
 }
 
 pub fn is_dark() -> bool {
-    DARK.load(Ordering::Relaxed)
+    DARK.with(Cell::get)
 }
 
 const fn hex(v: u32) -> Color32 {
@@ -25,6 +29,11 @@ const fn hex(v: u32) -> Color32 {
 fn pick(light: u32, dark: u32) -> Color32 {
     hex(if is_dark() { dark } else { light })
 }
+
+/// Text drawn on a PDF page (notes, a pasted tape, "Page 2" while it renders): pages are white
+/// in both themes.
+pub const PAGE_INK: Color32 = hex(0x161A20);
+pub const PAGE_INK_MUTED: Color32 = hex(0x5B6470);
 
 /// The header bar: dark in both themes.
 pub const HEADER: Color32 = hex(0x161A20);
