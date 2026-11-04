@@ -13,4 +13,4 @@ pub mod pdf;
 pub mod split;
 
 // Upstream paths (`crate::clients`, …) resolve through these re-exports, so module files stay unedited.
-pub use filer_core::{clients, config, parse};
+pub use filer_core::{clients, config, parse, rules};

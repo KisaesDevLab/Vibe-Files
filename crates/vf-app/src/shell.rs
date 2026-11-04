@@ -68,6 +68,40 @@ pub fn never_run(p: &Path) -> bool {
         .is_some_and(|e| NEVER_RUN.contains(&e.as_str()))
 }
 
+/// The owner's Ko-fi page (header "Tip VibeMyFirm", owner 2026-11-04).
+pub const TIP_URL: &str = "https://ko-fi.com/vibemyfirm";
+
+/// Opens an https web page in the default browser (nothing else: no other scheme, no files).
+pub fn open_url(url: &str) -> Result<(), String> {
+    if !url.starts_with("https://") || url.chars().any(|c| c.is_whitespace() || c == '"') {
+        return Err(format!("not a web page: {url}"));
+    }
+    use windows::Win32::UI::Shell::ShellExecuteW;
+    use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+    use windows::core::PCWSTR;
+    let verb = wide("open");
+    let target = wide(url);
+    // SAFETY: both strings are NUL-terminated UTF-16 buffers that outlive the call.
+    let r = unsafe {
+        ShellExecuteW(
+            None,
+            PCWSTR(verb.as_ptr()),
+            PCWSTR(target.as_ptr()),
+            PCWSTR::null(),
+            PCWSTR::null(),
+            SW_SHOWNORMAL,
+        )
+    };
+    if r.0 as isize > 32 {
+        Ok(())
+    } else {
+        Err(format!(
+            "Windows could not open {url} (error {}).",
+            r.0 as isize
+        ))
+    }
+}
+
 fn open(p: &Path) -> Result<(), String> {
     if never_run(p) {
         return Err(format!(

@@ -80,7 +80,12 @@ fn ultratax_print_lands_as_a_federal_return_copy() {
         .match_by_id(parsed.id.as_deref().unwrap())
         .unwrap()
         .clone();
-    let hit = filer_core::rules::evaluate(&compiled, &parsed, &client, parsed.year);
+    let hit = filer_core::rules::evaluate_rule(
+        compiled.first_match(&parsed.rest, parsed.ultratax.is_some()),
+        &parsed,
+        &client,
+        parsed.year,
+    );
     assert_eq!(hit.rule_name, "UltraTax CS · GovernmentCopyTaxReturn");
     let rendered = hit.outcome.unwrap();
     let folder = root.join("Anderson Farms LLC (ANDE1042)");
@@ -302,7 +307,7 @@ fn ultratax_prints_go_to_their_doc_types_folder() {
     let compiled = filer_core::rules::CompiledRules::new(rules.active_rules()).unwrap();
     let rest = "Anderson Farms LLC_2025_1120S_K1_Package_Pat Partner_ANDE1042";
     assert_eq!(
-        compiled.first_match(rest).name,
+        compiled.first_match(rest, false).name,
         "UltraTax CS · ArchiveK1Package"
     );
     assert_eq!(compiled.captures(&k1.id, rest)["who"], "Pat Partner");
@@ -322,7 +327,7 @@ fn ultratax_prints_go_to_their_doc_types_folder() {
     assert_eq!(t.rule, "UltraTax CS · InputScreens");
     assert!(
         !compiled
-            .first_match("2025 Tax Return signed")
+            .first_match("2025 Tax Return signed", false)
             .id
             .starts_with(vf_ingest::parsers::MANAGED_PREFIX),
         "a hand-dropped file keeps Filer's own rules"
@@ -357,7 +362,13 @@ fn ultratax_prints_go_to_their_doc_types_folder() {
             .iter()
             .all(|r| !r.id.starts_with(vf_ingest::parsers::MANAGED_PREFIX))
     );
-    assert!(rules.active_rules().iter().any(|r| r.name == "UltraTax"));
+    // Filer's own rules stay (Filer 0.2.5 took its "UltraTax" rule out of the firm set).
+    assert!(
+        rules
+            .active_rules()
+            .iter()
+            .any(|r| !r.catch_all && r.name == "Payroll")
+    );
 }
 
 /// A folder beside the cabinet (outside it, as staging and inboxes must be).

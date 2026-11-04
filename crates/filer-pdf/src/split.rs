@@ -352,4 +352,45 @@ mod tests {
         let (_, segs) = propose(&texts, &finder(&list));
         assert_eq!(segs.len(), 3);
     }
+
+    /// A run of Form 9325 acknowledgements, one page per client named "First Last" in capitals:
+    /// one piece per client, each filed by the Firm "Form 9325" rule from its page text.
+    #[test]
+    fn form_9325_print_run_splits_per_client() {
+        let list = clients();
+        let texts: Vec<String> = [
+            "Form 9325 Acknowledgement and General Information
+JOHN SMITH
+SSN XXX-XX-4321
+AR 72701",
+            "Form 9325 Acknowledgement and General Information
+ACME LLC
+EIN XX-XXX9876",
+            "Form 9325 Acknowledgement and General Information
+BAKER FARMS",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let (_, segs) = propose(&texts, &finder(&list));
+        let summary: Vec<(Range<usize>, Option<&str>)> = segs
+            .iter()
+            .map(|s| (s.pages.clone(), s.client_id.as_deref()))
+            .collect();
+        assert_eq!(
+            summary,
+            [
+                (0..1, Some("1001")),
+                (1..2, Some("1002")),
+                (2..3, Some("1004"))
+            ]
+        );
+        let rules = crate::rules::CompiledRules::new(&crate::rules::firm_rules()).unwrap();
+        for t in &texts {
+            assert_eq!(
+                rules.first_specific_match(t, false).unwrap().name,
+                "Form 9325"
+            );
+        }
+    }
 }

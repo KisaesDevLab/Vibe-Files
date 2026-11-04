@@ -20,9 +20,10 @@ use crate::oplog::{self, Op, OpRecord, OpResult};
 use crate::plan::{CollisionChoice, FolderAction};
 use crate::sentinel::Status as FolderStatus;
 use crate::template;
-use crate::ui::preview::human_size;
-use crate::ui::setup::banner;
-use crate::ui::theme::{self, PillKind, label_caps, mono, pal, pill, primary_button, strong};
+use crate::ui::theme::{
+    self, PillKind, banner, file_name, human_size, label_caps, mono, pal, pill, primary_button,
+    strong,
+};
 use crate::ui::widgets::{search_clients, show_in_explorer};
 use crate::worker;
 use crate::zipimport::{self, EntryKind, PreScan};
@@ -116,7 +117,7 @@ impl ImportScreen {
     /// Footer slot (UI_SPEC §2): `data\tmp · 61 MB`.
     pub fn footer(&self) -> String {
         match self.tmp_size {
-            Some((_, bytes)) => format!("data\\tmp · {}", crate::ui::preview::human_size(bytes)),
+            Some((_, bytes)) => format!("data\\tmp · {}", human_size(bytes)),
             None => String::new(),
         }
     }
@@ -236,18 +237,11 @@ impl ImportScreen {
                 "over the limits"
             };
             let rec = OpRecord {
-                ts: chrono::Utc::now(),
-                batch: Uuid::new_v4(),
-                op: crate::oplog::Op::ZipImport,
-                client_id: None,
                 src: Some(zip),
-                dst: None,
-                bytes: None,
-                sha256: None,
                 result: OpResult::Error,
                 error: Some(why),
-                copy_of: None,
                 note: Some(format!("rejected · {short}")),
+                ..OpRecord::new(Uuid::new_v4(), crate::oplog::Op::ZipImport)
             };
             if let Err(e) = crate::oplog::append(&crate::oplog::path(&state.data_dir), &rec) {
                 tracing::error!(error = %e, "cannot append to ops.jsonl");
@@ -571,7 +565,22 @@ impl ImportScreen {
         path: &Path,
     ) -> Option<Dest> {
         let p = pal(ui);
-        let list = state.clients.list().cloned()?;
+        let Some(list) = state.clients.list().cloned() else {
+            // Without a client list there is nothing to pick from: say so instead of hiding the
+            // card (owner 2026-11-02).
+            theme::card(ui, |ui| {
+                ui.set_width(ui.available_width());
+                label_caps(ui, "Unpack destination");
+                ui.add_space(4.0);
+                let text = if state.clients.busy() {
+                    "Loading the client list…"
+                } else {
+                    "No client list yet. Import the client CSV in Setup (Client master list), then pick the client here."
+                };
+                ui.label(RichText::new(text).color(p.muted));
+            });
+            return None;
+        };
         let root = state.settings.root.clone();
         let mut result = None;
         let mut want_subfolders: Option<PathBuf> = None;
@@ -1140,9 +1149,9 @@ fn safe_subfolder(s: &str) -> Result<PathBuf, String> {
     if s.is_empty() {
         return Ok(PathBuf::new());
     }
-    zipimport::safe_entry_path(s)
-        .map(|p| PathBuf::from(p.replace('/', "\\")))
-        .map_err(|()| "That sub-folder isn't allowed (no .., drives or : ).".to_string())
+    // The same rules as Preview's folder picker (no .., drives, or names Windows can't hold).
+    crate::plan::checked_rel(Path::new(&s.replace('/', "\\")))
+        .map_err(|e| format!("That sub-folder isn't allowed: {e}."))
 }
 
 /// Folders below `dir`, two levels deep, as relative paths.
@@ -1328,8 +1337,20 @@ fn zip_card(ui: &mut egui::Ui, path: &Path, scan: &PreScan) {
     });
 }
 
-fn file_name(p: &Path) -> String {
-    p.file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default()
+#[cfg(test)]
+mod tests {
+    use super::safe_subfolder;
+    use std::path::PathBuf;
+
+    #[test]
+    fn subfolder_follows_the_folder_picker_rules() {
+        assert_eq!(safe_subfolder("  "), Ok(PathBuf::new()));
+        assert_eq!(
+            safe_subfolder("2024/Bank"),
+            Ok(PathBuf::from("2024").join("Bank"))
+        );
+        for bad in [r"..\x", r"C:\x", "CON", "trailing.", "a<b"] {
+            assert!(safe_subfolder(bad).is_err(), "{bad}");
+        }
+    }
 }

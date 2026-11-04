@@ -1,9 +1,6 @@
 //! Folder template (the tree created for a new client), token substitution, and the Windows
 //! path rules every generated path must pass (CLAUDE.md §7).
 
-// Rendering is used by the rule engine (P04) and commit (P07); until then only tests call it.
-#![cfg_attr(not(test), allow(dead_code))]
-
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -11,8 +8,20 @@ use serde::{Deserialize, Serialize};
 
 /// Tokens every template can use. CSV extra columns add more, but may not reuse these names
 /// (compared case-insensitively).
-pub const BUILTIN_TOKENS: [&str; 7] =
-    ["Client", "ID", "Year", "DocType", "Rest", "Ext", "Original"];
+pub const BUILTIN_TOKENS: [&str; 12] = [
+    "Client",
+    "ID",
+    "Year",
+    "DocType",
+    "Rest",
+    "Ext",
+    "Original",
+    "EntityType",
+    "Document",
+    "K1Recipient",
+    "YearEnd",
+    "DatePrinted",
+];
 /// Built-in tokens allowed in the folder tree (no per-document tokens).
 pub const TREE_TOKENS: [&str; 3] = ["Client", "ID", "Year"];
 pub const TEMPLATE_FILE: &str = "template.json";
@@ -199,6 +208,7 @@ pub fn render_segment(segment: &str, tokens: &Tokens) -> Result<String, RenderEr
 }
 
 /// Fills a `/`-separated template (e.g. `{Client}/Tax Returns/{Year}`) into a relative path.
+#[cfg(test)]
 pub fn render_relative(template: &str, tokens: &Tokens) -> Result<PathBuf, RenderError> {
     let mut path = PathBuf::new();
     for seg in template.split('/') {
@@ -308,11 +318,7 @@ pub fn load_or_seed(data_dir: &Path) -> (TemplateNode, bool, Option<String>) {
 }
 
 pub fn save(data_dir: &Path, tree: &TemplateNode) -> anyhow::Result<()> {
-    let p = path(data_dir);
-    let tmp = p.with_extension("json.tmp");
-    std::fs::write(&tmp, serde_json::to_vec_pretty(tree)?)?;
-    std::fs::rename(&tmp, &p)?;
-    Ok(())
+    crate::datafile::save_json(&path(data_dir), tree)
 }
 
 /// Problems with the tree. `extra_tokens` are the CSV extra-column tokens.

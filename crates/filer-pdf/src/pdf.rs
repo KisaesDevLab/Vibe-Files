@@ -71,6 +71,8 @@ pub struct Sniffer {
     tx: Option<Sender<PathBuf>>,
     rx: Option<Receiver<(PathBuf, PageText)>>,
     results: HashMap<PathBuf, PageText>,
+    /// Bumped whenever `results` changes, so Preview can tell without hashing every text.
+    generation: u64,
 }
 
 impl Sniffer {
@@ -100,6 +102,7 @@ impl Sniffer {
             tx: Some(tx),
             rx: Some(rx),
             results: HashMap::new(),
+            generation: 0,
         }
     }
 
@@ -113,6 +116,7 @@ impl Sniffer {
             tx: None,
             rx: None,
             results: HashMap::new(),
+            generation: 0,
         }
     }
 
@@ -123,6 +127,7 @@ impl Sniffer {
             return;
         }
         self.results.insert(path.to_path_buf(), PageText::Pending);
+        self.generation += 1;
         let _ = tx.send(path.to_path_buf());
     }
 
@@ -134,8 +139,14 @@ impl Sniffer {
                     tracing::info!(file = %path.display(), error = %e, "no first-page text");
                 }
                 self.results.insert(path, text);
+                self.generation += 1;
             }
         }
+    }
+
+    /// Changes whenever a file is requested or its text arrives.
+    pub fn generation(&self) -> u64 {
+        self.generation
     }
 
     pub fn get(&self, path: &Path) -> Option<&PageText> {
@@ -144,7 +155,6 @@ impl Sniffer {
 }
 
 /// Number of pages in a PDF.
-#[cfg_attr(not(test), allow(dead_code))] // used by split (P09)
 pub fn page_count(path: &Path) -> Result<usize, String> {
     lopdf::Document::load(path)
         .map(|d| d.get_pages().len())

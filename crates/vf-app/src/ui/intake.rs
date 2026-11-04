@@ -117,6 +117,10 @@ pub fn settings_with_theme(
     if s.id_pattern == filer_core::parse::DEFAULT_ID_PATTERN {
         s.id_pattern = ID_PATTERN.into();
     }
+    // UltraTax names are read once, by Vibe's print capture (Admin › Print capture & parsers),
+    // which renames each print for Filer: Filer's own UltraTax reading (0.2.5+) stays off so
+    // there is one place to set it up (owner 2026-11-04, no duplicate processing).
+    s.ultratax.enabled = false;
     // Filer re-imports the client CSV on launch when it changed; point it at the one the master
     // list came from.
     if let Ok(Some(list)) = filer_core::clients::load_cache(&dir)
@@ -620,6 +624,10 @@ mod tests {
         vf_fs::cabinet::create(root, &cabinet).unwrap();
         let (s, _) = settings_with_theme(root, &cabinet, Some(false), 1.0).unwrap();
         assert_eq!(s.id_pattern, ID_PATTERN);
+        assert!(
+            !s.ultratax.enabled,
+            "Filer's UltraTax reading is off: Vibe's print capture reads those names"
+        );
         let dir = vf_fs::clients::master_dir(root);
         let (mut own, _) = Settings::load_or_default(&dir);
         assert_eq!(own.id_pattern, ID_PATTERN, "saved");

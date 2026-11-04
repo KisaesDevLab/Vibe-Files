@@ -12,8 +12,10 @@ use crate::clients::ClientList;
 use crate::commit::{LastBatch, Method};
 use crate::config::Level;
 use crate::oplog::{self, Op, OpRecord, OpResult, ReadResult};
-use crate::ui::setup::banner;
-use crate::ui::theme::{self, PillKind, card, label_caps, mono, pal, pill, primary_button, strong};
+use crate::ui::theme::{
+    self, PillKind, banner, card, human_size, label_caps, mono, pal, pill, plural, primary_button,
+    strong,
+};
 use crate::ui::widgets::show_in_explorer;
 use crate::undo::{self, UndoReport};
 use crate::worker;
@@ -727,7 +729,7 @@ fn batch_line(lb: &LastBatch) -> String {
         when(lb.committed_at),
         short_batch(lb.batch),
         parts.join(", "),
-        crate::ui::preview::human_size(bytes),
+        human_size(bytes),
         if lb.undone { " · undone" } else { "" }
     )
 }
@@ -819,8 +821,4 @@ fn op_name(op: Op) -> &'static str {
 
 fn short_batch(b: Uuid) -> String {
     b.simple().to_string()[..8].to_string()
-}
-
-fn plural(n: usize) -> &'static str {
-    if n == 1 { "" } else { "s" }
 }

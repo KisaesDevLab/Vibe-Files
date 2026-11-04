@@ -81,13 +81,8 @@ pub fn load(data_dir: &Path) -> (Relationships, bool, Option<String>) {
     }
 }
 
-/// Temp file + rename, like the other data files.
 pub fn save(data_dir: &Path, rel: &Relationships) -> anyhow::Result<()> {
-    let file = path(data_dir);
-    let tmp = file.with_extension("json.tmp");
-    std::fs::write(&tmp, serde_json::to_vec_pretty(&rel.records)?)?;
-    std::fs::rename(&tmp, &file)?;
-    Ok(())
+    crate::datafile::save_json(&path(data_dir), &rel.records)
 }
 
 /// Why a relationship can't be added, if it can't.
@@ -133,7 +128,6 @@ impl Relationships {
     }
 
     /// Children of `parent`, only those with one of `roles` (empty: every role).
-    #[cfg_attr(not(test), allow(dead_code))] // used by the plan builder (R2c)
     pub fn children<'a>(&'a self, parent: &str, roles: &[String]) -> Vec<&'a Relationship> {
         self.records
             .iter()
@@ -142,7 +136,6 @@ impl Relationships {
     }
 
     /// Parents of `child`, only those with one of `roles` (empty: every role).
-    #[cfg_attr(not(test), allow(dead_code))] // used by the plan builder (R2c)
     pub fn parents<'a>(&'a self, child: &str, roles: &[String]) -> Vec<&'a Relationship> {
         self.records
             .iter()
@@ -195,7 +188,6 @@ impl Relationships {
     }
 }
 
-#[cfg_attr(not(test), allow(dead_code))] // used by children()/parents()
 fn role_matches(role: &str, roles: &[String]) -> bool {
     roles.is_empty()
         || roles

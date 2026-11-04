@@ -1,9 +1,12 @@
 //! Filename parsing (`ClientName_ID_rest.ext`) and tax-year detection.
 
 use regex::Regex;
+use serde::{Deserialize, Serialize};
 
-/// Default for `Settings::id_pattern`: the ID part of `ClientName_ID_rest.ext`.
-pub const DEFAULT_ID_PATTERN: &str = r"\d{4,}";
+/// Default for `Settings::id_pattern`: the ID part of `ClientName_ID_rest.ext`. Digits and capital
+/// letters (UltraTax client IDs such as `THOMREUT`, owner 2026-11-02); case-sensitive, so a name
+/// word like `John` is not taken for an ID.
+pub const DEFAULT_ID_PATTERN: &str = r"[A-Z0-9]{4,}";
 /// Years accepted in a filename: this many years back from the current year...
 pub const YEARS_BACK: i32 = 10; // owner #41
 /// ...through this many years ahead.
@@ -33,6 +36,334 @@ pub fn validate_id_pattern(id_pattern: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Where UltraTax puts the K-1 recipient's name (UltraTax's "K1 Recipient Name" setting).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum K1Position {
+    None,
+    #[default]
+    AfterDocument,
+}
+
+/// The parts of an UltraTax PDF name and their positions (1 = first, `_` between parts), as set
+/// in UltraTax's "File Name Variables". `None`: not in the name.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(default)]
+pub struct UltraTaxLayout {
+    /// Read names in this layout (tried before `Name_ID_rest`).
+    pub enabled: bool,
+    pub client_id: Option<u8>,
+    pub client_name: Option<u8>,
+    pub entity_type: Option<u8>,
+    pub document: Option<u8>,
+    pub tax_year: Option<u8>,
+    pub year_end: Option<u8>,
+    pub date_printed: Option<u8>,
+    pub k1: K1Position,
+}
+
+impl Default for UltraTaxLayout {
+    /// UltraTax's default: `Name_Year_EntityType_Document[_K1Recipient]_ID`.
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            client_id: Some(5),
+            client_name: Some(1),
+            entity_type: Some(3),
+            document: Some(4),
+            tax_year: Some(2),
+            year_end: None,
+            date_printed: None,
+            k1: K1Position::AfterDocument,
+        }
+    }
+}
+
+/// One part of an UltraTax name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UtField {
+    ClientId,
+    ClientName,
+    EntityType,
+    Document,
+    TaxYear,
+    YearEnd,
+    DatePrinted,
+}
+
+impl UtField {
+    pub const ALL: [UtField; 7] = [
+        UtField::ClientId,
+        UtField::ClientName,
+        UtField::EntityType,
+        UtField::Document,
+        UtField::TaxYear,
+        UtField::YearEnd,
+        UtField::DatePrinted,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            UtField::ClientId => "Client ID",
+            UtField::ClientName => "Client Name",
+            UtField::EntityType => "Federal Entity Type",
+            UtField::Document => "Document Name",
+            UtField::TaxYear => "Tax Year",
+            UtField::YearEnd => "Client Year End",
+            UtField::DatePrinted => "Date Printed",
+        }
+    }
+
+    /// A made-up value for the Setup example.
+    pub fn example(self) -> &'static str {
+        match self {
+            UtField::ClientId => "THOMREUT",
+            UtField::ClientName => "John Smith",
+            UtField::EntityType => "1040NR",
+            UtField::Document => "Tax_Return",
+            UtField::TaxYear => "2025",
+            UtField::YearEnd => "1231",
+            UtField::DatePrinted => "03152026",
+        }
+    }
+}
+
+impl UltraTaxLayout {
+    pub fn position(&self, f: UtField) -> Option<u8> {
+        match f {
+            UtField::ClientId => self.client_id,
+            UtField::ClientName => self.client_name,
+            UtField::EntityType => self.entity_type,
+            UtField::Document => self.document,
+            UtField::TaxYear => self.tax_year,
+            UtField::YearEnd => self.year_end,
+            UtField::DatePrinted => self.date_printed,
+        }
+    }
+
+    pub fn position_mut(&mut self, f: UtField) -> &mut Option<u8> {
+        match f {
+            UtField::ClientId => &mut self.client_id,
+            UtField::ClientName => &mut self.client_name,
+            UtField::EntityType => &mut self.entity_type,
+            UtField::Document => &mut self.document,
+            UtField::TaxYear => &mut self.tax_year,
+            UtField::YearEnd => &mut self.year_end,
+            UtField::DatePrinted => &mut self.date_printed,
+        }
+    }
+
+    /// The fields in the name, in order.
+    fn ordered(&self) -> Vec<UtField> {
+        let mut v: Vec<(u8, UtField)> = UtField::ALL
+            .iter()
+            .filter_map(|&f| self.position(f).map(|p| (p, f)))
+            .collect();
+        v.sort_by_key(|(p, _)| *p);
+        v.into_iter().map(|(_, f)| f).collect()
+    }
+
+    /// Problems for the Setup screen (only checked while the layout is on).
+    pub fn validate(&self) -> Result<(), String> {
+        if !self.enabled {
+            return Ok(());
+        }
+        if self.client_id.is_none() || self.document.is_none() {
+            return Err("UltraTax file names: Client ID and Document Name need a position.".into());
+        }
+        let mut used: Vec<u8> = UtField::ALL
+            .iter()
+            .filter_map(|&f| self.position(f))
+            .collect();
+        used.sort_unstable();
+        if used.windows(2).any(|w| w[0] == w[1]) {
+            return Err("UltraTax file names: two parts have the same position.".into());
+        }
+        if used
+            .iter()
+            .enumerate()
+            .any(|(i, &p)| usize::from(p) != i + 1)
+        {
+            return Err(format!(
+                "UltraTax file names: positions must run 1, 2, 3… without gaps (now {}).",
+                used.iter()
+                    .map(|p| p.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        Ok(())
+    }
+
+    /// The Setup example, like UltraTax's "File Name Example".
+    pub fn example(&self) -> String {
+        let mut parts = Vec::new();
+        for f in self.ordered() {
+            parts.push(f.example().to_string());
+            if f == UtField::Document && self.k1 == K1Position::AfterDocument {
+                parts.push("John Smith*".into());
+            }
+        }
+        format!("{}.PDF", parts.join("_"))
+    }
+}
+
+impl K1Position {
+    pub const ALL: [K1Position; 2] = [K1Position::None, K1Position::AfterDocument];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            K1Position::None => "None",
+            K1Position::AfterDocument => "After Document Name",
+        }
+    }
+}
+
+/// The UltraTax parts of a file name (all text as written, `_` in the document name read as
+/// spaces).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct UltraTaxParts {
+    pub client_id: String,
+    pub client_name: String,
+    pub entity_type: String,
+    pub document: String,
+    pub k1_recipient: String,
+    pub tax_year: String,
+    pub year_end: String,
+    pub date_printed: String,
+}
+
+/// Splits `stem` (no extension) by `layout`: the parts before Document from the front, the parts
+/// after it from the back, Document (and a K-1 recipient) in between. `None` when the name has
+/// too few parts, a fixed part is empty, or the Tax Year part is not a year in the window.
+/// `is_recipient` tells whether the last part of the middle names a K-1 recipient; a trailing
+/// `*` always does.
+pub fn split_ultratax(
+    stem: &str,
+    layout: &UltraTaxLayout,
+    current_year: i32,
+    is_recipient: impl Fn(&str) -> bool,
+) -> Option<UltraTaxParts> {
+    if !layout.enabled || layout.validate().is_err() {
+        return None;
+    }
+    let order = layout.ordered();
+    let doc_at = order.iter().position(|f| *f == UtField::Document)?;
+    let segs: Vec<&str> = stem.split('_').collect();
+    let (before, after) = (doc_at, order.len() - doc_at - 1);
+    if segs.len() < before + after + 1 {
+        return None;
+    }
+    let mut parts = UltraTaxParts::default();
+    let fixed = order[..doc_at]
+        .iter()
+        .zip(&segs[..before])
+        .chain(order[doc_at + 1..].iter().zip(&segs[segs.len() - after..]));
+    for (f, seg) in fixed {
+        let seg = seg.trim();
+        if seg.is_empty() {
+            return None;
+        }
+        let slot = match f {
+            UtField::ClientId => &mut parts.client_id,
+            UtField::ClientName => &mut parts.client_name,
+            UtField::EntityType => &mut parts.entity_type,
+            UtField::TaxYear => &mut parts.tax_year,
+            UtField::YearEnd => &mut parts.year_end,
+            UtField::DatePrinted => &mut parts.date_printed,
+            UtField::Document => unreachable!("document is the middle"),
+        };
+        *slot = seg.to_string();
+    }
+    if layout.tax_year.is_some()
+        && !(parts.tax_year.len() == 4 && detect_year(&parts.tax_year, current_year).is_some())
+    {
+        return None;
+    }
+    let mut middle: Vec<&str> = segs[before..segs.len() - after].to_vec();
+    if layout.k1 == K1Position::AfterDocument && middle.len() >= 2 {
+        let last = middle[middle.len() - 1].trim();
+        // UltraTax's per-recipient K-1 packages: whatever follows "...Package" is the recipient.
+        let after_package = middle[middle.len() - 2]
+            .trim()
+            .to_ascii_lowercase()
+            .ends_with("package");
+        // UltraTax adds the recipient only to K-1 PDFs: a client's name after any other document
+        // ("Tax_Return_Reuter Co") stays part of the document.
+        let k1_doc = middle[..middle.len() - 1].iter().any(|s| {
+            s.to_ascii_lowercase()
+                .replace('-', "")
+                .split_whitespace()
+                .any(|w| w == "k1" || w == "k1s")
+        });
+        if !last.is_empty() && (after_package || (k1_doc && is_recipient(last))) {
+            parts.k1_recipient = last.to_string();
+            middle.pop();
+        }
+    }
+    parts.document = middle
+        .iter()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    if parts.document.is_empty() {
+        return None;
+    }
+    Some(parts)
+}
+
+/// Reads `file_name` (no directory): as an UltraTax name when it fits `layout` and its ID is a
+/// client (`is_client_id`), else as `Name_ID_rest` when that ID is a client, else as UltraTax
+/// when the name fits that layout at all, else as `Name_ID_rest` or the bare name.
+pub fn read_name(
+    file_name: &str,
+    re: Option<&Regex>,
+    layout: &UltraTaxLayout,
+    current_year: i32,
+    is_client_id: impl Fn(&str) -> bool,
+    is_recipient: impl Fn(&str) -> bool,
+) -> Parsed {
+    let (stem, ext) = match file_name.rsplit_once('.') {
+        Some((s, e)) if !s.is_empty() => (s, e),
+        _ => (file_name, ""),
+    };
+    let ut = split_ultratax(stem, layout, current_year, is_recipient);
+    let standard = || match re {
+        Some(re) => parse_filename(file_name, re, current_year),
+        None => unparsed(file_name, current_year),
+    };
+    let from_ut = |u: UltraTaxParts| {
+        let mut rest = format!("{} {}", u.entity_type, u.document);
+        if !u.k1_recipient.is_empty() {
+            rest = format!("{rest} {}", u.k1_recipient);
+        }
+        let rest = rest.trim().to_string();
+        Parsed {
+            name: u.client_name.clone(),
+            id: Some(u.client_id.clone()),
+            year: detect_year(&u.tax_year, current_year)
+                .or_else(|| detect_year(&rest, current_year)),
+            rest,
+            ext: ext.to_string(),
+            stem: stem.to_string(),
+            ultratax: Some(u),
+        }
+    };
+    match ut {
+        Some(u) if is_client_id(&u.client_id) => from_ut(u),
+        Some(u) => {
+            let s = standard();
+            if s.id.as_deref().is_some_and(&is_client_id) {
+                s
+            } else {
+                from_ut(u)
+            }
+        }
+        None => standard(),
+    }
+}
+
 /// A filename split into its parts.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Parsed {
@@ -48,6 +379,8 @@ pub struct Parsed {
     pub year: Option<u16>,
     /// The whole file name without its extension (`{Original}`, V11).
     pub stem: String,
+    /// The name was read with the UltraTax layout: its parts.
+    pub ultratax: Option<UltraTaxParts>,
 }
 
 /// Parses `file_name` (no directory) with the filename regex.
@@ -64,8 +397,14 @@ pub fn parse_filename(file_name: &str, re: &Regex, current_year: i32) -> Parsed 
                 .strip_suffix(&format!(".{}", &c["ext"]))
                 .unwrap_or(file_name)
                 .to_string(),
+            ultratax: None,
         };
     }
+    unparsed(file_name, current_year)
+}
+
+/// A name that doesn't follow the convention: the whole stem is the name and the rest.
+fn unparsed(file_name: &str, current_year: i32) -> Parsed {
     let (stem, ext) = match file_name.rsplit_once('.') {
         Some((s, e)) if !s.is_empty() => (s, e),
         _ => (file_name, ""),
@@ -77,6 +416,7 @@ pub fn parse_filename(file_name: &str, re: &Regex, current_year: i32) -> Parsed 
         ext: ext.to_string(),
         year: detect_year(stem, current_year),
         stem: stem.to_string(),
+        ultratax: None,
     }
 }
 
@@ -118,6 +458,144 @@ mod tests {
         assert_eq!(&c["id"], "1234");
         assert_eq!(&c["rest"], "2025 1040");
         assert_eq!(&c["ext"], "pdf");
+        // UltraTax-style letter IDs; a capitalised name word is not an ID.
+        let c = re.captures("John Smith_THOMREUT_2025 1040.pdf").unwrap();
+        assert_eq!(&c["id"], "THOMREUT");
+        let c = re.captures("Smith_John_1001_notes.pdf").unwrap();
+        assert_eq!((&c["name"], &c["id"]), ("Smith_John", "1001"));
+    }
+
+    fn ut(stem: &str, layout: &UltraTaxLayout) -> Option<UltraTaxParts> {
+        split_ultratax(stem, layout, 2026, |who| who == "Jane Doe")
+    }
+
+    #[test]
+    fn ultratax_default_layout() {
+        let l = UltraTaxLayout::default();
+        assert_eq!(
+            l.example(),
+            "John Smith_2025_1040NR_Tax_Return_John Smith*_THOMREUT.PDF"
+        );
+        let p = ut("John Smith_2025_1040NR_Tax_Return_THOMREUT", &l).unwrap();
+        assert_eq!(p.client_name, "John Smith");
+        assert_eq!(p.tax_year, "2025");
+        assert_eq!(p.entity_type, "1040NR");
+        assert_eq!(p.document, "Tax Return");
+        assert_eq!(p.k1_recipient, "");
+        assert_eq!(p.client_id, "THOMREUT");
+        // After "...Package" the last part is always the recipient, client or not.
+        let p = ut("Acme_2025_1065_K1_Package_Nobody Known_ACME01", &l).unwrap();
+        assert_eq!(
+            (p.document.as_str(), p.k1_recipient.as_str()),
+            ("K1 Package", "Nobody Known")
+        );
+        // A client's name after a non-K-1 document stays part of the document.
+        let p = ut("Acme_2025_1040_Tax_Return_Jane Doe_ACME01", &l).unwrap();
+        assert_eq!(
+            (p.document.as_str(), p.k1_recipient.as_str()),
+            ("Tax Return Jane Doe", "")
+        );
+        // No * and not a client's name: part of the document.
+        let p = ut("Acme_2025_1065_K1_Package_ACME01", &l).unwrap();
+        assert_eq!(
+            (p.document.as_str(), p.k1_recipient.as_str()),
+            ("K1 Package", "")
+        );
+        let p = ut("Acme_2025_1065_K1_Jane Doe_ACME01", &l).unwrap();
+        assert_eq!(
+            (p.document.as_str(), p.k1_recipient.as_str()),
+            ("K1", "Jane Doe")
+        );
+        // K-1 recipient off: everything in the middle is the document.
+        let off = UltraTaxLayout {
+            k1: K1Position::None,
+            ..l.clone()
+        };
+        assert_eq!(
+            ut("Acme_2025_1065_K1_Jane Doe_ACME01", &off)
+                .unwrap()
+                .document,
+            "K1 Jane Doe"
+        );
+        // Too few parts, a non-year in the year position, a year outside the window, an empty part.
+        assert!(ut("Acme_2025_1065_ACME01", &l).is_none());
+        assert!(ut("Smith, John_1001_2025 1040_x_y", &l).is_none());
+        assert!(ut("Acme_1999_1065_Return_ACME01", &l).is_none());
+        assert!(ut("Acme_2025__Return_ACME01", &l).is_none());
+        // Off: never.
+        let disabled = UltraTaxLayout {
+            enabled: false,
+            ..l
+        };
+        assert!(ut("Acme_2025_1065_Return_ACME01", &disabled).is_none());
+    }
+
+    #[test]
+    fn ultratax_custom_layout_and_validation() {
+        let l = UltraTaxLayout {
+            client_id: Some(1),
+            client_name: None,
+            entity_type: None,
+            document: Some(3),
+            tax_year: Some(2),
+            year_end: None,
+            date_printed: Some(4),
+            ..UltraTaxLayout::default()
+        };
+        assert!(l.validate().is_ok());
+        assert_eq!(
+            l.example(),
+            "THOMREUT_2025_Tax_Return_John Smith*_03152026.PDF"
+        );
+        let p = ut("ACME01_2025_Engagement_Letter_03152026", &l).unwrap();
+        assert_eq!(p.client_id, "ACME01");
+        assert_eq!(p.document, "Engagement Letter");
+        assert_eq!(p.date_printed, "03152026");
+
+        let dup = UltraTaxLayout {
+            client_name: Some(5),
+            ..UltraTaxLayout::default()
+        };
+        assert!(dup.validate().unwrap_err().contains("same position"));
+        let gap = UltraTaxLayout {
+            client_id: Some(7),
+            ..UltraTaxLayout::default()
+        };
+        assert!(gap.validate().unwrap_err().contains("without gaps"));
+        let no_id = UltraTaxLayout {
+            client_id: None,
+            ..UltraTaxLayout::default()
+        };
+        assert!(no_id.validate().is_err());
+    }
+
+    #[test]
+    fn read_name_prefers_the_layout_whose_id_is_a_client() {
+        let re = filename_regex(DEFAULT_ID_PATTERN).unwrap();
+        let l = UltraTaxLayout::default();
+        let read = |name: &str, ids: &[&str]| {
+            read_name(name, Some(&re), &l, 2026, |id| ids.contains(&id), |_| false)
+        };
+        let p = read(
+            "John Smith_2025_1040_Tax_Return_THOMREUT.pdf",
+            &["THOMREUT"],
+        );
+        assert_eq!(p.id.as_deref(), Some("THOMREUT"));
+        assert_eq!(p.name, "John Smith");
+        assert_eq!(p.rest, "1040 Tax Return");
+        assert_eq!(p.year, Some(2025));
+        assert_eq!(p.ext, "pdf");
+        // Fits both; only the standard ID (2025) is a client.
+        let p = read("John Smith_2025_1040_Tax_Return_THOMREUT.pdf", &["2025"]);
+        assert!(p.ultratax.is_none());
+        assert_eq!(p.id.as_deref(), Some("2025"));
+        // Neither ID known: UltraTax (the standard reading would take the year as the ID).
+        let p = read("John Smith_2025_1040_Tax_Return_THOMREUT.pdf", &[]);
+        assert!(p.ultratax.is_some());
+        // A standard name doesn't fit the layout.
+        let p = read("Smith, John_1001_2025 1040.pdf", &[]);
+        assert!(p.ultratax.is_none());
+        assert_eq!(p.id.as_deref(), Some("1001"));
     }
 
     #[test]

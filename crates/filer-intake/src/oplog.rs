@@ -65,6 +65,26 @@ pub struct OpRecord {
     pub note: Option<String>,
 }
 
+impl OpRecord {
+    /// A successful `op` of `batch` now, with every optional field empty.
+    pub fn new(batch: Uuid, op: Op) -> Self {
+        Self {
+            ts: Utc::now(),
+            batch,
+            op,
+            client_id: None,
+            src: None,
+            dst: None,
+            bytes: None,
+            sha256: None,
+            result: OpResult::Ok,
+            error: None,
+            copy_of: None,
+            note: None,
+        }
+    }
+}
+
 /// Lines that could not be parsed are reported, not fatal, so one bad line never hides history.
 #[derive(Debug, Default)]
 pub struct ReadResult {

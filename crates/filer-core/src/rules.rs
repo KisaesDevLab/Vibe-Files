@@ -13,6 +13,8 @@ use crate::template::{self, BUILTIN_TOKENS, RenderError, Tokens};
 
 pub const RULES_FILE: &str = "rules.json";
 pub const DEFAULT_PROFILE: &str = "Firm";
+/// The Firm rule for names read with the UltraTax layout.
+pub const ULTRATAX_RULE_NAME: &str = "UltraTax files";
 pub const CATCH_ALL_NAME: &str = "Catch-all";
 const CATCH_ALL_PATTERN: &str = ".*";
 
@@ -47,6 +49,9 @@ pub struct Rule {
     /// regex crate has no negative look-ahead). Empty: no exception.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub exclude: String,
+    /// Matches only files whose name was read with the UltraTax layout (Setup).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub ultratax_only: bool,
 }
 
 /// One extra destination of a rule (P07a).
@@ -141,6 +146,7 @@ impl Rule {
             copies: Vec::new(),
             next_year_folder: false,
             exclude: String::new(),
+            ultratax_only: false,
         }
     }
 
@@ -253,49 +259,20 @@ pub fn tax_rules() -> Vec<Rule> {
 /// The owner's old filer's rules (V11), reviewed 2026-11-02: (name, pattern, folder below the
 /// client, group by year). Patterns are whole words, any case; `[\s_-]+` lets a space also be
 /// `_` or `-`, `s?` takes singular and plural, and a trailing `\d*` lets a number follow right
-/// after a word that ends in a letter ("UltraTax2025"; never after a form number, so "K-10" and
+/// after a word that ends in a letter ("Payroll2025"; never after a form number, so "K-10" and
 /// "W-22" don't match K-1 / W-2). The more specific rules come before the general ones
-/// (Setup of Entity / Stock Basis before Permanent, Sales Tax before Tax Documents, CS Accounting
-/// Products before CSAccounting); the rules added at the review (Tax Forms, Bank Statements,
+/// (Setup of Entity / Stock Basis before Permanent, Sales Tax before Tax Documents); the rules
+/// added at the review (Tax Forms, Bank Statements,
 /// Engagement Letter, Notices and Letters) sit where they don't take files from the old ones.
-const FIRM_RULES: [(&str, &str, &str, bool); 28] = [
-    ("UltraTax", r"ultra[\s_-]*tax\d*", "Income Tax", true),
-    (
-        "Fixed Assets",
-        r"fixed[\s_-]+assets?\d*",
-        "Income Tax",
-        true,
-    ),
-    (
-        "CS Accounting Products",
-        r"cs[\s_-]*accounting[\s_-]+products?\d*",
-        "Bookkeeping",
-        true,
-    ),
-    (
-        "CSAccounting",
-        r"cs[\s_-]*accounting\d*",
-        "Bookkeeping",
-        true,
-    ),
-    (
-        "Practice CS",
-        r"practice[\s_-]+cs\d*",
-        "Other/Practice",
-        true,
-    ),
+/// UltraTax, Fixed Assets, CS Accounting Products, CSAccounting, Practice CS and Engagement CS
+/// were taken out (owner 2026-11-02).
+const FIRM_RULES: [(&str, &str, &str, bool); 22] = [
     ("Payroll", r"payroll\d*", "Payroll", true),
     (
         "Amortization Schedules",
         r"amortization[\s_-]+schedules?\d*",
         "Workpapers & Support",
         false,
-    ),
-    (
-        "Engagement CS",
-        r"engagement[\s_-]+cs\d*",
-        "Financials",
-        true,
     ),
     (
         "IRS Correspondence",
@@ -408,6 +385,24 @@ pub fn firm_rules() -> Vec<Rule> {
         ..CopyDest::new(resolver)
     };
     let mut out = vec![
+        // UltraTax prints one K-1 package per recipient, with the recipient after the document
+        // name: named after the recipient, copied to that related client only (plan.rs).
+        Rule {
+            ultratax_only: true,
+            copies: vec![k1_copy(
+                "{Year} K-1 Package from {Client}.{Ext}",
+                Resolver::Related {
+                    roles: vec!["shareholder".into(), "partner".into(), "member".into()],
+                },
+            )],
+            ..words(Rule::new(
+                "UltraTax K-1 package",
+                r"k-?1[\s_-]*package\s+\S.*",
+                "{Client}/Income Tax/{Year}",
+                "{Year} K-1 Package - {K1Recipient}.{Ext}",
+                true,
+            ))
+        },
         Rule {
             copies: vec![k1_copy(
                 "{Year} K-1 Package from {Client}.{Ext}",
@@ -442,6 +437,29 @@ pub fn firm_rules() -> Vec<Rule> {
                 "{Year} K-1 - {Copy.Client}.{Ext}",
                 true,
             ))
+        },
+        // E-file acknowledgements (Form 9325), often one page per client split from a print run.
+        Rule {
+            next_year_folder: true,
+            ..words(Rule::new(
+                "Form 9325",
+                r"(?:form[\s_-]*)?9325",
+                "{Client}/Income Tax/{Year}",
+                "{Year} Form 9325 - {Client}.{Ext}",
+                true,
+            ))
+        },
+        // Every UltraTax-named PDF the K-1 rules didn't take, named from its parts.
+        Rule {
+            next_year_folder: true,
+            ultratax_only: true,
+            ..Rule::new(
+                ULTRATAX_RULE_NAME,
+                ".+",
+                "{Client}/Income Tax/{Year}",
+                "{Year} {EntityType} {Document} - {Client}.{Ext}",
+                true,
+            )
         },
     ];
     for (name, pattern, path, by_year) in FIRM_RULES {
@@ -593,11 +611,7 @@ pub fn load_or_seed(data_dir: &Path) -> (RulesFile, bool, Option<String>) {
 }
 
 pub fn save(data_dir: &Path, rules: &RulesFile) -> anyhow::Result<()> {
-    let p = path(data_dir);
-    let tmp = p.with_extension("json.tmp");
-    std::fs::write(&tmp, serde_json::to_vec_pretty(rules)?)?;
-    std::fs::rename(&tmp, &p)?;
-    Ok(())
+    crate::datafile::save_json(&path(data_dir), rules)
 }
 
 // ---------------------------------------------------------------------------
@@ -819,16 +833,18 @@ impl CompiledRules {
         })
     }
 
-    /// First enabled rule whose pattern matches `rest`; the catch-all if none does.
-    pub fn first_match(&self, rest: &str) -> &Rule {
-        self.first_specific_match(rest).unwrap_or_else(|| {
-            &self
-                .rules
-                .iter()
-                .find(|(r, _)| r.catch_all)
-                .expect("catch-all always present")
-                .0
-        })
+    /// First enabled rule whose pattern matches `rest`; the catch-all if none does. `ultratax`:
+    /// the file's name was read with the UltraTax layout (UltraTax-only rules may match).
+    pub fn first_match(&self, rest: &str, ultratax: bool) -> &Rule {
+        self.first_specific_match(rest, ultratax)
+            .unwrap_or_else(|| {
+                &self
+                    .rules
+                    .iter()
+                    .find(|(r, _)| r.catch_all)
+                    .expect("catch-all always present")
+                    .0
+            })
     }
 
     /// The named groups `rule_id`'s pattern captures in `text` (P07a copies), by name.
@@ -846,13 +862,14 @@ impl CompiledRules {
         out
     }
 
-    /// First enabled rule other than the catch-all whose pattern matches `text`. Used for
-    /// filenames and, in P06, for first-page text.
-    pub fn first_specific_match(&self, text: &str) -> Option<&Rule> {
+    /// First enabled rule other than the catch-all whose pattern matches `text` (file names and
+    /// first-page text); rules marked UltraTax-only match only when `ultratax`.
+    pub fn first_specific_match(&self, text: &str, ultratax: bool) -> Option<&Rule> {
         self.rules
             .iter()
             .find(|(r, re)| {
                 !r.catch_all
+                    && (ultratax || !r.ultratax_only)
                     && re.is_match(text)
                     && !self.excludes.get(&r.id).is_some_and(|ex| ex.is_match(text))
             })
@@ -883,10 +900,31 @@ pub struct RuleHit {
 }
 
 impl RuleHit {
-    #[cfg_attr(not(test), allow(dead_code))] // used by the plan builder (P06)
+    #[cfg(test)]
     pub fn needs_year(&self) -> bool {
         self.outcome == Err(HitProblem::NeedsYear)
     }
+}
+
+/// The tokens taken from the file name: `{Rest}`, `{Original}`, `{Ext}` and the UltraTax parts
+/// (`{EntityType}`, `{Document}`, `{K1Recipient}`, `{YearEnd}`, `{DatePrinted}`). For a
+/// `Name_ID_rest` name, `{Document}` is the rest and the other UltraTax parts are empty.
+pub fn name_tokens(parsed: &Parsed) -> Tokens {
+    let mut t = Tokens::new();
+    t.insert("Rest".into(), parsed.rest.clone());
+    t.insert("Original".into(), parsed.stem.clone());
+    t.insert("Ext".into(), parsed.ext.clone());
+    let empty = crate::parse::UltraTaxParts {
+        document: parsed.rest.clone(),
+        ..Default::default()
+    };
+    let u = parsed.ultratax.as_ref().unwrap_or(&empty);
+    t.insert("EntityType".into(), u.entity_type.clone());
+    t.insert("Document".into(), u.document.clone());
+    t.insert("K1Recipient".into(), u.k1_recipient.clone());
+    t.insert("YearEnd".into(), u.year_end.clone());
+    t.insert("DatePrinted".into(), u.date_printed.clone());
+    t
 }
 
 /// Fills `rule`'s templates for this file and client. `year` is the file's year or the batch
@@ -936,39 +974,21 @@ pub fn evaluate_rule_with_copy(
     year: Option<u16>,
     copy: Option<(&Client, &str)>,
 ) -> RuleHit {
-    let hit = |outcome| RuleHit {
+    let outcome = base_tokens(rule, parsed, client, year).and_then(|mut tokens| {
+        if rule.copies.len() == 1 {
+            tokens.extend(copy_token_values(
+                copy,
+                parsed,
+                client.extra.keys().cloned(),
+            ));
+        }
+        render(&rule.dest_template, &rule.filename_template, &tokens)
+    });
+    RuleHit {
         rule_id: rule.id.clone(),
         rule_name: rule.name.clone(),
         outcome,
-    };
-    if rule.requires_year && year.is_none() {
-        return hit(Err(HitProblem::NeedsYear));
     }
-    let mut tokens: Tokens = template::client_tokens(client);
-    if let Some(y) = year {
-        tokens.insert("Year".into(), y.to_string());
-    }
-    tokens.insert("DocType".into(), rule.name.clone());
-    tokens.insert("Rest".into(), parsed.rest.clone());
-    tokens.insert("Original".into(), parsed.stem.clone());
-    tokens.insert("Ext".into(), parsed.ext.clone());
-    if rule.copies.len() == 1 {
-        tokens.extend(copy_token_values(
-            copy,
-            parsed,
-            client.extra.keys().cloned(),
-        ));
-    }
-
-    let render = || -> Result<Rendered, RenderError> {
-        let mut dest_rel = PathBuf::new();
-        for seg in rule.dest_template.split('/').skip(1) {
-            dest_rel.push(template::render_segment(seg, &tokens)?);
-        }
-        let filename = template::render_segment(&rule.filename_template, &tokens)?;
-        Ok(Rendered { dest_rel, filename })
-    };
-    hit(render().map_err(HitProblem::Render))
 }
 
 /// Where a copy of `rule` goes for `copy_client` (P07a): the copy's templates with the primary
@@ -982,6 +1002,23 @@ pub fn evaluate_copy(
     copy_client: &Client,
     role: &str,
 ) -> Result<Rendered, HitProblem> {
+    let mut tokens = base_tokens(rule, parsed, client, year)?;
+    tokens.extend(copy_token_values(
+        Some((copy_client, role)),
+        parsed,
+        client.extra.keys().cloned(),
+    ));
+    render(&copy.dest_template, &copy.filename_template, &tokens)
+}
+
+/// The client's tokens, `{Year}`, `{DocType}` and the file name's tokens; `NeedsYear` when the
+/// rule needs a year and there is none.
+fn base_tokens(
+    rule: &Rule,
+    parsed: &Parsed,
+    client: &Client,
+    year: Option<u16>,
+) -> Result<Tokens, HitProblem> {
     if rule.requires_year && year.is_none() {
         return Err(HitProblem::NeedsYear);
     }
@@ -990,34 +1027,38 @@ pub fn evaluate_copy(
         tokens.insert("Year".into(), y.to_string());
     }
     tokens.insert("DocType".into(), rule.name.clone());
-    tokens.insert("Rest".into(), parsed.rest.clone());
-    tokens.insert("Original".into(), parsed.stem.clone());
-    tokens.insert("Ext".into(), parsed.ext.clone());
-    tokens.extend(copy_token_values(
-        Some((copy_client, role)),
-        parsed,
-        client.extra.keys().cloned(),
-    ));
+    tokens.extend(name_tokens(parsed));
+    Ok(tokens)
+}
+
+/// Fills a destination (`{Client}/...`, the first part being the client folder itself) and a
+/// file name template.
+fn render(dest: &str, filename: &str, tokens: &Tokens) -> Result<Rendered, HitProblem> {
     let render = || -> Result<Rendered, RenderError> {
         let mut dest_rel = PathBuf::new();
-        for seg in copy.dest_template.split('/').skip(1) {
-            dest_rel.push(template::render_segment(seg, &tokens)?);
+        for seg in dest.split('/').skip(1) {
+            dest_rel.push(template::render_segment(seg, tokens)?);
         }
-        let filename = template::render_segment(&copy.filename_template, &tokens)?;
+        let filename = template::render_segment(filename, tokens)?;
         Ok(Rendered { dest_rel, filename })
     };
     render().map_err(HitProblem::Render)
 }
 
 /// First-match rule for `parsed.rest`, evaluated.
-#[cfg_attr(not(test), allow(dead_code))] // used by the plan builder (P06)
+#[cfg(test)]
 pub fn evaluate(
     rules: &CompiledRules,
     parsed: &Parsed,
     client: &Client,
     year: Option<u16>,
 ) -> RuleHit {
-    evaluate_rule(rules.first_match(&parsed.rest), parsed, client, year)
+    evaluate_rule(
+        rules.first_match(&parsed.rest, parsed.ultratax.is_some()),
+        parsed,
+        client,
+        year,
+    )
 }
 
 #[cfg(test)]
@@ -1039,7 +1080,7 @@ mod tests {
     }
 
     fn matched(rules: &CompiledRules, rest: &str) -> String {
-        rules.first_match(rest).name.clone()
+        rules.first_match(rest, false).name.clone()
     }
 
     #[test]
@@ -1062,15 +1103,16 @@ mod tests {
             "{:?}",
             validate_profile(&rules, &[])
         );
-        assert_eq!(rules.len(), 31);
+        assert_eq!(rules.len(), 28);
         assert!(rules.last().unwrap().catch_all);
         assert_eq!(RulesFile::default().active, "Firm");
         let r = CompiledRules::new(&rules).unwrap();
         for (rest, want) in [
-            ("UltraTax 2025 1040", "UltraTax"),
-            ("2025 ultratax", "UltraTax"),
-            ("Fixed_Assets 2025", "Fixed Assets"),
-            ("Fixed-Assets", "Fixed Assets"),
+            ("Tax_Documents 2025", "Tax Documents"),
+            ("Tax-Document", "Tax Documents"),
+            ("UltraTax 2025 1040", "Catch-all"),
+            ("Fixed Assets 2025", "Catch-all"),
+            ("Engagement CS 2025", "Catch-all"),
             ("2025 K-1 Baker, Thomas", "K-1"),
             ("2025 K-1 package", "K-1 package"),
             ("Tax Documents 2025", "Tax Documents"),
@@ -1087,13 +1129,9 @@ mod tests {
             ("2025 Tax Return", "Tax Returns"),
             ("Audit Report 2025", "Audit Reports"),
             ("Financial Statements 2025", "Financials"),
-            ("Fixed Asset 2025", "Fixed Assets"),
             ("Vendor Document", "Vendor Documents"),
             ("2025 Amortization Schedule", "Amortization Schedules"),
-            ("CS Accounting 2025", "CSAccounting"),
-            ("CS Accounting Products 2025", "CS Accounting Products"),
-            ("Ultra Tax 2025", "UltraTax"),
-            ("UltraTax2025", "UltraTax"),
+            ("Payroll2025", "Payroll"),
             ("Permanent Setup of Entity", "Setup of Entity"),
             (
                 "Permanent Stock Basis Information",
@@ -1110,15 +1148,18 @@ mod tests {
             ("IRS Notice 2025", "Notices and Letters"),
             ("Tax Return letter 2025", "Tax Returns"),
             ("2025 K-1", "K-1 other"),
+            ("Form 9325 2025", "Form 9325"),
+            ("2025_9325", "Form 9325"),
+            ("93250", "Catch-all"),
             ("K-10 2025", "Catch-all"),
             ("W-22 2025", "Catch-all"),
             ("10990 2025", "Catch-all"),
         ] {
             assert_eq!(matched(&r, rest), want, "{rest}");
         }
-        let ultra = rules.iter().find(|x| x.name == "UltraTax").unwrap();
-        assert_eq!(ultra.dest_template, "{Client}/Income Tax/{Year}");
-        assert!(ultra.requires_year && ultra.next_year_folder);
+        let docs = rules.iter().find(|x| x.name == "Tax Documents").unwrap();
+        assert_eq!(docs.dest_template, "{Client}/Income Tax/{Year}");
+        assert!(docs.requires_year && docs.next_year_folder);
         let setup = rules.iter().find(|x| x.name == "Setup of Entity").unwrap();
         assert_eq!(setup.dest_template, "{Client}/Permanent/Setup");
         assert!(!setup.requires_year && !setup.next_year_folder);
@@ -1129,13 +1170,13 @@ mod tests {
         assert_eq!(irs.dest_template, "{Client}/Correspondence/{Year}");
         // The full original name is kept.
         let hit = evaluate_rule(
-            ultra,
-            &parsed("Smith, John_1234_UltraTax 2025.pdf"),
+            docs,
+            &parsed("Smith, John_1234_Tax Documents 2025.pdf"),
             &client(),
             Some(2025),
         );
         let out = hit.outcome.unwrap();
-        assert_eq!(out.filename, "Smith, John_1234_UltraTax 2025.pdf");
+        assert_eq!(out.filename, "Smith, John_1234_Tax Documents 2025.pdf");
         assert_eq!(out.dest_rel, PathBuf::from("Income Tax").join("2025"));
         let catch = rules.last().unwrap();
         let out = evaluate_rule(catch, &parsed("Smith, John_1234_misc.pdf"), &client(), None)
@@ -1360,7 +1401,7 @@ mod tests {
         let r = CompiledRules::new(&rules).unwrap();
         assert_eq!(matched(&r, "invoice"), "B");
         assert_eq!(matched(&r, "zzz"), CATCH_ALL_NAME);
-        assert!(r.first_specific_match("zzz").is_none());
+        assert!(r.first_specific_match("zzz", false).is_none());
     }
 
     #[test]

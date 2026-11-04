@@ -118,14 +118,25 @@ impl ClientList {
     }
 
     /// Exact ID match (after trimming). Leading zeros are significant.
-    #[cfg_attr(not(test), allow(dead_code))] // used by the plan builder (P06)
     pub fn match_by_id(&self, id: &str) -> Option<&Client> {
         self.index.by_id.get(id.trim()).map(|&i| &self.clients[i])
     }
 
+    /// Some client's name is at least `threshold` similar to `query` (as [`Self::fuzzy_by_name`]
+    /// scores it); stops at the first one.
+    pub fn any_name_at_least(&self, query: &str, threshold: f64) -> bool {
+        let query = name_variants(query);
+        self.index.names.iter().any(|names| {
+            query.iter().any(|q| {
+                names
+                    .iter()
+                    .any(|n| strsim::jaro_winkler(q, n) >= threshold)
+            })
+        })
+    }
+
     /// The `limit` best clients by Jaro-Winkler similarity of normalized names, best first.
     /// "Last, First" and "First Last" forms are compared both ways.
-    #[cfg_attr(not(test), allow(dead_code))] // used by the plan builder (P06)
     pub fn fuzzy_by_name(&self, query: &str, limit: usize) -> Vec<(f64, &Client)> {
         let query = name_variants(query);
         if query.is_empty() || limit == 0 {
@@ -533,13 +544,9 @@ fn known_uuids(data_dir: &Path) -> BTreeMap<String, Uuid> {
     }
 }
 
-/// Temp file + rename, like `config.json`.
+/// Compact JSON (the list can be large), written atomically like the other data files.
 pub fn save_cache(data_dir: &Path, list: &ClientList) -> anyhow::Result<()> {
-    let path = cache_path(data_dir);
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, serde_json::to_vec(list)?)?;
-    std::fs::rename(&tmp, &path)?;
-    Ok(())
+    crate::datafile::write_atomic(&cache_path(data_dir), &serde_json::to_vec(list)?)
 }
 
 fn import_and_cache(

@@ -1,6 +1,7 @@
 //! `_Vibe/client.json` sentinels, the root scan that matches top-level folders to clients, and
 //! the folder index (`folders.json`) the rest of the app looks client folders up in.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -13,6 +14,7 @@ use uuid::Uuid;
 
 use crate::clients::{Client, ClientList};
 use crate::config::Level;
+use crate::datafile::{load_json, save_json};
 use crate::worker;
 
 pub const VIBE_DIR: &str = "_Vibe";
@@ -151,18 +153,10 @@ fn log_action(
     dst: Option<&Path>,
 ) {
     let rec = crate::oplog::OpRecord {
-        ts: Utc::now(),
-        batch,
-        op,
         client_id: client_id.map(str::to_string),
         src: src.map(Path::to_path_buf),
         dst: dst.map(Path::to_path_buf),
-        bytes: None,
-        sha256: None,
-        result: crate::oplog::OpResult::Ok,
-        error: None,
-        copy_of: None,
-        note: None,
+        ..crate::oplog::OpRecord::new(batch, op)
     };
     if let Err(e) = crate::oplog::append(&crate::oplog::path(data_dir), &rec) {
         tracing::error!(error = %e, "could not log a Conflicts action to ops.jsonl");
@@ -254,22 +248,16 @@ pub fn rename_folders(
         };
         let result = check();
         let rec = crate::oplog::OpRecord {
-            ts: chrono::Utc::now(),
-            batch,
-            op: crate::oplog::Op::RenameDir,
             client_id: Some(client_id.clone()),
-            copy_of: None,
             src: Some(from.clone()),
             dst: Some(to.clone()),
-            bytes: None,
-            sha256: None,
             result: if result.is_ok() {
                 crate::oplog::OpResult::Ok
             } else {
                 crate::oplog::OpResult::Error
             },
             error: result.clone().err(),
-            note: None,
+            ..crate::oplog::OpRecord::new(batch, crate::oplog::Op::RenameDir)
         };
         if let Err(e) = crate::oplog::append(&crate::oplog::path(data_dir), &rec) {
             tracing::error!(error = %e, "cannot append to ops.jsonl");
@@ -402,7 +390,15 @@ fn id_in_name<'a>(re: &Regex, name: &'a str) -> Option<(String, &'a str)> {
     Some((id, name[..start].trim_end()))
 }
 
-fn id_regex(id_pattern: &str) -> Result<Regex, String> {
+/// `name` without a trailing client ID (`Name (1234)` / `Name_1234`), as the scan reads it.
+pub fn name_without_id(re: &Regex, name: &str) -> String {
+    id_in_name(re, name)
+        .map_or(name.trim_end(), |(_, rest)| rest)
+        .to_string()
+}
+
+/// Finds a client ID at the end of a folder name (see [`id_in_name`]).
+pub fn id_regex(id_pattern: &str) -> Result<Regex, String> {
     Regex::new(&format!(
         r"(?:\s*\((?P<p>{id_pattern})\)\s*$)|(?:_(?P<u>{id_pattern})$)"
     ))
@@ -427,11 +423,23 @@ pub fn scan_root(input: &ScanInput, progress: &Progress) -> Result<Vec<FolderBin
     folders.sort_by_key(|p| p.file_name().map(|n| n.to_string_lossy().to_lowercase()));
     progress.total.store(folders.len(), Ordering::Relaxed);
 
-    let mut out: Vec<FolderBinding> = Vec::with_capacity(folders.len());
-    for path in folders {
-        out.push(classify(input, &re, path));
-        progress.done.fetch_add(1, Ordering::Relaxed);
-    }
+    // Each folder's sentinel is a separate read (a round trip on a network share): read them on
+    // a few threads, each filling its own slice so the order stays the sorted one.
+    let mut slots: Vec<Option<FolderBinding>> = (0..folders.len()).map(|_| None).collect();
+    let threads = std::thread::available_parallelism().map_or(4, |n| n.get().min(8));
+    let chunk = folders.len().div_ceil(threads).max(1);
+    std::thread::scope(|scope| {
+        for (paths, slots) in folders.chunks(chunk).zip(slots.chunks_mut(chunk)) {
+            let re = &re;
+            scope.spawn(move || {
+                for (path, slot) in paths.iter().zip(slots) {
+                    *slot = Some(classify(input, re, path.clone()));
+                    progress.done.fetch_add(1, Ordering::Relaxed);
+                }
+            });
+        }
+    });
+    let mut out: Vec<FolderBinding> = slots.into_iter().flatten().collect();
     mark_duplicates(&mut out);
     note_already_bound(&mut out, &input.clients);
     Ok(out)
@@ -500,38 +508,41 @@ fn classify(input: &ScanInput, re: &Regex, path: PathBuf) -> FolderBinding {
 
 /// Folders whose sentinels name the same client are all marked Duplicate.
 fn mark_duplicates(out: &mut [FolderBinding]) {
-    let bound: Vec<(usize, String)> = out
-        .iter()
-        .enumerate()
-        .filter(|(_, b)| b.status == Status::Bound)
-        .filter_map(|(i, b)| b.client_id.clone().map(|id| (i, id)))
-        .collect();
-    for (i, id) in &bound {
-        let others: Vec<String> = bound
-            .iter()
-            .filter(|(j, other)| j != i && other == id)
-            .map(|(j, _)| out[*j].name())
-            .collect();
-        if !others.is_empty() {
-            out[*i].status = Status::Duplicate;
-            out[*i].note = Some(format!("Also bound to this client: {}.", others.join(", ")));
+    let mut by_client: HashMap<String, Vec<usize>> = HashMap::new();
+    for (i, b) in out.iter().enumerate() {
+        if b.status == Status::Bound
+            && let Some(id) = &b.client_id
+        {
+            by_client.entry(id.clone()).or_default().push(i);
+        }
+    }
+    for idx in by_client.values().filter(|v| v.len() > 1) {
+        for &i in idx {
+            let others: Vec<String> = idx
+                .iter()
+                .filter(|&&j| j != i)
+                .map(|&j| out[j].name())
+                .collect();
+            out[i].status = Status::Duplicate;
+            out[i].note = Some(format!("Also bound to this client: {}.", others.join(", ")));
         }
     }
 }
 
 /// Unbound candidates for a client that already has a bound folder get a note.
 fn note_already_bound(out: &mut [FolderBinding], clients: &ClientList) {
-    let bound: Vec<(String, String)> = out
-        .iter()
-        .filter(|b| b.status == Status::Bound)
-        .filter_map(|b| b.client_id.clone().map(|id| (id, b.name())))
-        .collect();
+    let mut bound: HashMap<String, String> = HashMap::new();
+    for b in out.iter().filter(|b| b.status == Status::Bound) {
+        if let Some(id) = &b.client_id {
+            bound.entry(id.clone()).or_insert_with(|| b.name());
+        }
+    }
     for b in out.iter_mut() {
         if !matches!(b.status, Status::UnboundNamed | Status::UnboundFuzzy) {
             continue;
         }
         if let Some(id) = &b.client_id
-            && let Some((_, folder)) = bound.iter().find(|(bid, _)| bid == id)
+            && let Some(folder) = bound.get(id)
         {
             let name = clients.match_by_id(id).map_or("", |c| c.name.as_str());
             b.note = Some(format!("{name} ({id}) is already bound to \"{folder}\"."));
@@ -551,21 +562,6 @@ pub struct FoldersFile {
     /// Folders the user chose to ignore in Conflicts (full paths, any root).
     #[serde(default)]
     pub ignored: Vec<PathBuf>,
-}
-
-fn save_json<T: Serialize>(path: &Path, value: &T) -> anyhow::Result<()> {
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, serde_json::to_vec_pretty(value)?)?;
-    std::fs::rename(&tmp, path)?;
-    Ok(())
-}
-
-fn load_json<T: for<'de> Deserialize<'de>>(path: &Path) -> anyhow::Result<Option<T>> {
-    match std::fs::read_to_string(path) {
-        Ok(text) => Ok(Some(serde_json::from_str(&text)?)),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(e.into()),
-    }
 }
 
 struct ScanJob {
@@ -673,7 +669,6 @@ impl FoldersManager {
     }
 
     /// Folder bound to `client_id` in the last scan of `root`.
-    #[cfg_attr(not(test), allow(dead_code))] // used by the plan builder (P06)
     pub fn bound_folder(&self, root: Option<&Path>, client_id: &str) -> Option<&Path> {
         self.scan_of(root)?
             .folders
@@ -1120,6 +1115,43 @@ mod tests {
         assert!(write_sentinel(&root, &fresh, &no_uuid, firm).is_err());
     }
 
+    /// Many folders (more than one thread's share): sorted like the folder list, every one
+    /// classified once, duplicates and "already bound" notes as before.
+    #[test]
+    fn parallel_scan_keeps_order_and_marks() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let cl = clients();
+        let firm = Uuid::new_v4();
+        for i in 0..60 {
+            mkdir(root, &format!("Folder {i:02}"));
+        }
+        for name in ["Dup A", "Dup Z"] {
+            let d = mkdir(root, name);
+            write_sentinel(root, &d, cl.match_by_id("1004").unwrap(), firm).unwrap();
+        }
+        let smith = mkdir(root, "Smith, John (1001)");
+        write_sentinel(root, &smith, cl.match_by_id("1001").unwrap(), firm).unwrap();
+        mkdir(root, "Smith John_1001");
+        let progress = Progress::default();
+        let out = scan_root(&input(root, vec![]), &progress).unwrap();
+        assert_eq!(out.len(), 64);
+        assert_eq!(progress.done.load(Ordering::Relaxed), 64);
+        let names: Vec<String> = out.iter().map(|b| b.name().to_lowercase()).collect();
+        let mut sorted = names.clone();
+        sorted.sort();
+        assert_eq!(names, sorted);
+        assert_eq!(status_of(&out, "Dup A").status, Status::Duplicate);
+        assert_eq!(
+            status_of(&out, "Dup A").note.as_deref(),
+            Some("Also bound to this client: Dup Z.")
+        );
+        assert_eq!(
+            status_of(&out, "Smith John_1001").note.as_deref(),
+            Some("Smith, John (1001) is already bound to \"Smith, John (1001)\".")
+        );
+    }
+
     #[test]
     fn scan_classifies_every_state() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1289,6 +1321,17 @@ mod tests {
         );
         assert_eq!(id_in_name(&re, "Smith 1234"), None);
         assert_eq!(id_in_name(&re, "(12) Smith"), None);
+        // The default pattern also takes UltraTax letter IDs.
+        let re = id_regex(crate::parse::DEFAULT_ID_PATTERN).unwrap();
+        assert_eq!(
+            id_in_name(&re, "John Smith (THOMREUT)"),
+            Some(("THOMREUT".into(), "John Smith"))
+        );
+        // The Conflicts search starts from the name without its ID.
+        assert_eq!(name_without_id(&re, "Smith, John (1234)"), "Smith, John");
+        assert_eq!(name_without_id(&re, "Acme_1002"), "Acme");
+        assert_eq!(name_without_id(&re, "Random Stuff"), "Random Stuff");
+        assert_eq!(name_without_id(&re, "Under_score"), "Under_score");
     }
 
     #[test]

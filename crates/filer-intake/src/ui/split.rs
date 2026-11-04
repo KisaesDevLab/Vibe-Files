@@ -289,15 +289,16 @@ impl SplitDialog {
         }
         let c = self.compiled.as_ref()?;
         let rest = &self.cx.parsed.rest;
-        if let Some(r) = c.first_specific_match(rest) {
+        let ut = self.cx.parsed.ultratax.is_some();
+        if let Some(r) = c.first_specific_match(rest, ut) {
             return Some((r.clone(), false));
         }
         if self.cx.sniff
-            && let Some(r) = texts.get(start).and_then(|t| c.first_specific_match(t))
+            && let Some(r) = texts.get(start).and_then(|t| c.first_specific_match(t, ut))
         {
             return Some((r.clone(), true));
         }
-        Some((c.first_match(rest).clone(), false))
+        Some((c.first_match(rest, ut).clone(), false))
     }
 
     fn name_for(&self, client: Option<&Client>, rule: Option<&Rule>) -> String {

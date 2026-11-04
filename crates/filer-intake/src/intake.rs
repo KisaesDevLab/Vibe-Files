@@ -1,4 +1,4 @@
-//! Intake: watches the inboxes (recursively), takes files added by drag-drop or Browse, and
+//! Intake: watches the inboxes (with their sub-folders unless that is turned off), takes files added by drag-drop or Browse, and
 //! queues each file once it is stable: same size on two 1-second checks and openable with
 //! exclusive share. Non-PDF files are queued as unsupported.
 
@@ -163,6 +163,16 @@ impl Tracker {
         self.candidates.remove(path);
     }
 
+    /// Forgets every candidate and queued path for which `drop` is true; returns the queued ones.
+    pub fn drop_where(&mut self, drop: impl Fn(&Path) -> bool) -> Vec<PathBuf> {
+        self.candidates.retain(|p, _| !drop(p));
+        let gone: Vec<PathBuf> = self.emitted.iter().filter(|p| drop(p)).cloned().collect();
+        for p in &gone {
+            self.emitted.remove(p);
+        }
+        gone
+    }
+
     /// Queued paths that no longer exist; they are forgotten and returned.
     pub fn prune(&mut self, exists: impl Fn(&Path) -> bool) -> Vec<PathBuf> {
         let gone: Vec<PathBuf> = self
@@ -201,9 +211,10 @@ fn exclusive_open(path: &Path) -> bool {
         .is_ok()
 }
 
-/// Every file under `dir` (recursively), skipping hidden/system folders and skipped files.
-fn walk_files(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
-    if depth > MAX_DEPTH {
+/// Every file under `dir` down to `max_depth` folder levels (0 = only `dir` itself), skipping
+/// hidden/system folders and skipped files.
+fn walk_files(dir: &Path, depth: usize, max_depth: usize, out: &mut Vec<PathBuf>) {
+    if depth > max_depth {
         return;
     }
     let Ok(entries) = std::fs::read_dir(dir) else {
@@ -216,10 +227,23 @@ fn walk_files(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
             continue;
         }
         if meta.is_dir() {
-            walk_files(&path, depth + 1, out);
+            walk_files(&path, depth + 1, max_depth, out);
         } else if meta.is_file() {
             out.push(path);
         }
+    }
+}
+
+/// Which inbox `path` is in (by its canonical path, `canon[i]` for `inboxes[i]`), and whether it
+/// is in a sub-folder of that inbox rather than directly in it.
+fn locate(inboxes: &[PathBuf], canon: &[PathBuf], path: &Path) -> (Source, bool) {
+    let c = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    match canon.iter().position(|i| c.starts_with(i)) {
+        Some(i) => (
+            Source::Inbox(inboxes[i].clone()),
+            c.parent() != Some(canon[i].as_path()),
+        ),
+        None => (Source::Manual, false),
     }
 }
 
@@ -227,7 +251,8 @@ fn walk_files(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
 // Worker
 
 enum Msg {
-    SetInboxes(Vec<PathBuf>),
+    /// The inboxes, and whether their sub-folders count.
+    SetInboxes(Vec<PathBuf>, bool),
     Add(Vec<PathBuf>),
     Forget(PathBuf),
     Fs(notify_debouncer_mini::DebounceEventResult),
@@ -249,6 +274,9 @@ pub enum Event {
 
 struct Worker {
     inboxes: Vec<PathBuf>,
+    /// `inboxes`, canonicalized once when they are set.
+    canon: Vec<PathBuf>,
+    subfolders: bool,
     watchers:
         Vec<notify_debouncer_mini::Debouncer<notify_debouncer_mini::notify::RecommendedWatcher>>,
     tracker: Tracker,
@@ -263,13 +291,9 @@ impl Worker {
         self.ctx.request_repaint();
     }
 
-    /// The inbox `path` is in, if any.
-    fn source_for(&self, path: &Path) -> Source {
-        let canon = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-        self.inboxes
-            .iter()
-            .find(|inbox| std::fs::canonicalize(inbox).is_ok_and(|c| canon.starts_with(&c)))
-            .map_or(Source::Manual, |i| Source::Inbox(i.clone()))
+    /// The inbox `path` is in, if any, and whether it is in one of its sub-folders.
+    fn locate(&self, path: &Path) -> (Source, bool) {
+        locate(&self.inboxes, &self.canon, path)
     }
 
     fn offer_file(&mut self, path: PathBuf, source: Source) {
@@ -281,23 +305,42 @@ impl Worker {
         }
     }
 
-    fn offer_tree(&mut self, path: &Path, source: Source) {
+    fn offer_tree(&mut self, path: &Path, source: Source, max_depth: usize) {
         let mut files = Vec::new();
-        walk_files(path, 0, &mut files);
+        walk_files(path, 0, max_depth, &mut files);
         for f in files {
             self.offer_file(f, source.clone());
         }
     }
 
     fn list_inboxes(&mut self) {
+        let depth = if self.subfolders { MAX_DEPTH } else { 0 };
         for inbox in self.inboxes.clone() {
-            self.offer_tree(&inbox, Source::Inbox(inbox.clone()));
+            self.offer_tree(&inbox, Source::Inbox(inbox.clone()), depth);
         }
     }
 
-    fn set_inboxes(&mut self, inboxes: Vec<PathBuf>) {
+    fn set_inboxes(&mut self, inboxes: Vec<PathBuf>, subfolders: bool) {
         self.watchers.clear();
+        self.canon = inboxes
+            .iter()
+            .map(|i| std::fs::canonicalize(i).unwrap_or_else(|_| i.clone()))
+            .collect();
         self.inboxes = inboxes;
+        self.subfolders = subfolders;
+        if !subfolders {
+            // Files already found in sub-folders leave the queue.
+            let (inboxes, canon) = (&self.inboxes, &self.canon);
+            let gone = self.tracker.drop_where(|p| locate(inboxes, canon, p).1);
+            for p in gone {
+                self.send(Event::Gone(p));
+            }
+        }
+        let mode = if subfolders {
+            notify_debouncer_mini::notify::RecursiveMode::Recursive
+        } else {
+            notify_debouncer_mini::notify::RecursiveMode::NonRecursive
+        };
         let mut ok = Vec::new();
         let mut failed = Vec::new();
         for inbox in self.inboxes.clone() {
@@ -306,10 +349,7 @@ impl Worker {
                 let _ = tx.send(Msg::Fs(r));
             })
             .and_then(|mut d| {
-                d.watcher().watch(
-                    &inbox,
-                    notify_debouncer_mini::notify::RecursiveMode::Recursive,
-                )?;
+                d.watcher().watch(&inbox, mode)?;
                 Ok(d)
             });
             match watch {
@@ -335,13 +375,20 @@ impl Worker {
                 continue;
             }
             match std::fs::metadata(&path) {
-                Ok(m) if m.is_dir() => {
-                    let source = self.source_for(&path);
-                    self.offer_tree(&path, source);
-                }
-                Ok(m) if m.is_file() => {
-                    let source = self.source_for(&path);
-                    self.offer_file(path, source);
+                Ok(m) if m.is_dir() || m.is_file() => {
+                    let (source, in_sub) = self.locate(&path);
+                    // Sub-folders off: only files directly in an inbox.
+                    if !self.subfolders
+                        && matches!(source, Source::Inbox(_))
+                        && (m.is_dir() || in_sub)
+                    {
+                        continue;
+                    }
+                    if m.is_dir() {
+                        self.offer_tree(&path, source, MAX_DEPTH);
+                    } else {
+                        self.offer_file(path, source);
+                    }
                 }
                 Ok(_) => {}
                 Err(_) => {
@@ -380,12 +427,12 @@ impl Worker {
         loop {
             let wait = next_tick.saturating_duration_since(Instant::now());
             match rx.recv_timeout(wait) {
-                Ok(Msg::SetInboxes(v)) => self.set_inboxes(v),
+                Ok(Msg::SetInboxes(v, sub)) => self.set_inboxes(v, sub),
                 Ok(Msg::Add(paths)) => {
                     for p in paths {
-                        let source = self.source_for(&p);
+                        let (source, _) = self.locate(&p);
                         if p.is_dir() {
-                            self.offer_tree(&p, source);
+                            self.offer_tree(&p, source, MAX_DEPTH);
                         } else {
                             self.offer_file(p, source);
                         }
@@ -417,7 +464,7 @@ impl Worker {
 pub struct IntakeManager {
     tx: Option<Sender<Msg>>,
     rx: Option<Receiver<Event>>,
-    inboxes: Option<Vec<PathBuf>>,
+    inboxes: Option<(Vec<PathBuf>, bool)>,
     watching: Vec<PathBuf>,
     watch_errors: Vec<(PathBuf, String)>,
     queue: Vec<QueuedFile>,
@@ -449,6 +496,8 @@ impl IntakeManager {
         let (out_tx, out_rx) = channel();
         let worker = Worker {
             inboxes: Vec::new(),
+            canon: Vec::new(),
+            subfolders: true,
             watchers: Vec::new(),
             tracker: Tracker::default(),
             self_tx: tx.clone(),
@@ -469,13 +518,18 @@ impl IntakeManager {
         }
     }
 
-    /// Watches these inboxes (restarting the watchers only when the list changed).
-    pub fn set_inboxes(&mut self, inboxes: &[PathBuf]) {
-        if self.inboxes.as_deref() == Some(inboxes) {
+    /// Watches these inboxes, with their sub-folders when `subfolders` (restarting the watchers
+    /// only when something changed).
+    pub fn set_inboxes(&mut self, inboxes: &[PathBuf], subfolders: bool) {
+        if self
+            .inboxes
+            .as_ref()
+            .is_some_and(|(v, s)| v == inboxes && *s == subfolders)
+        {
             return;
         }
-        self.inboxes = Some(inboxes.to_vec());
-        self.send(Msg::SetInboxes(inboxes.to_vec()));
+        self.inboxes = Some((inboxes.to_vec(), subfolders));
+        self.send(Msg::SetInboxes(inboxes.to_vec(), subfolders));
     }
 
     /// Files or folders (recursively) from drag-drop or Browse.
@@ -570,7 +624,6 @@ impl IntakeManager {
     }
 
     /// Takes a file out of the queue and lets it be queued again later (used after commit/skip).
-    #[cfg_attr(not(test), allow(dead_code))] // used by Preview/commit (P06/P07)
     pub fn remove(&mut self, path: &Path) {
         self.queue.retain(|q| q.path != path);
         self.send(Msg::Forget(path.to_path_buf()));
@@ -663,7 +716,7 @@ mod tests {
     fn manager(ctx: &egui::Context, inboxes: &[PathBuf]) -> IntakeManager {
         let mut m = IntakeManager::new();
         m.start(ctx);
-        m.set_inboxes(inboxes);
+        m.set_inboxes(inboxes, true);
         m
     }
 
@@ -789,6 +842,44 @@ mod tests {
         assert_eq!(m.queue().len(), 2);
         m.add_paths(vec![elsewhere.join("a.pdf")]);
         wait_for(&mut m, Duration::from_secs(5), |m| m.queue().len() == 3).expect("re-queued");
+    }
+
+    /// Sub-folders off: only files directly in the inbox; turning it off drops sub-folder files
+    /// already queued, turning it back on finds them again.
+    #[test]
+    fn subfolders_off_takes_only_top_level_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let inbox = tmp.path().join("inbox");
+        std::fs::create_dir_all(inbox.join("sub")).unwrap();
+        std::fs::write(inbox.join("top.pdf"), b"%PDF-1.4 top").unwrap();
+        std::fs::write(inbox.join("sub").join("deep.pdf"), b"%PDF-1.4 deep").unwrap();
+        let ctx = egui::Context::default();
+        let mut m = manager(&ctx, std::slice::from_ref(&inbox));
+        wait_for(&mut m, Duration::from_secs(5), |m| {
+            queued(m, "top.pdf") && queued(m, "deep.pdf")
+        })
+        .expect("both queued with sub-folders on");
+
+        m.set_inboxes(std::slice::from_ref(&inbox), false);
+        wait_for(&mut m, Duration::from_secs(5), |m| !queued(m, "deep.pdf"))
+            .expect("sub-folder file left the queue");
+        assert!(queued(&m, "top.pdf"));
+
+        // New files: one in a new sub-folder (ignored), one at the top (queued).
+        std::fs::create_dir_all(inbox.join("later")).unwrap();
+        std::fs::write(inbox.join("later").join("skip.pdf"), b"%PDF-1.4 skip").unwrap();
+        std::fs::write(inbox.join("sub").join("skip2.pdf"), b"%PDF-1.4 skip2").unwrap();
+        std::fs::write(inbox.join("new.pdf"), b"%PDF-1.4 new").unwrap();
+        wait_for(&mut m, Duration::from_secs(6), |m| queued(m, "new.pdf")).expect("top file");
+        std::thread::sleep(Duration::from_millis(2500));
+        m.poll();
+        assert!(!queued(&m, "skip.pdf") && !queued(&m, "skip2.pdf") && !queued(&m, "deep.pdf"));
+
+        m.set_inboxes(std::slice::from_ref(&inbox), true);
+        wait_for(&mut m, Duration::from_secs(5), |m| {
+            queued(m, "deep.pdf") && queued(m, "skip.pdf") && queued(m, "skip2.pdf")
+        })
+        .expect("sub-folder files back with sub-folders on");
     }
 
     #[test]

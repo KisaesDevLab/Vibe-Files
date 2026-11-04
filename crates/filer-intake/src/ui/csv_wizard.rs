@@ -10,7 +10,7 @@ use egui::{Align, CornerRadius, Frame, Layout, Margin, RichText, Stroke};
 
 use crate::clients::{self, CsvTable, ImportError};
 use crate::config::{ColumnMap, Level};
-use crate::ui::setup::banner;
+use crate::ui::theme::banner;
 use crate::ui::theme::{self, PillKind, label_caps, mono, pal, pill, strong};
 use crate::worker;
 

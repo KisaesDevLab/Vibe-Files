@@ -297,16 +297,26 @@ pub fn pill(ui: &mut egui::Ui, kind: PillKind, text: impl Into<String>) -> Respo
 }
 
 /// A pill with monospace text, for `{Token}` names.
+/// One widget of known size (not a Frame around a Label), so `horizontal_wrapped` can move it to
+/// the next line instead of letting a row run past its column.
 pub fn token_pill(ui: &mut egui::Ui, kind: PillKind, text: impl Into<String>) -> Response {
     let (bg, fg) = pal(ui).pill(kind);
-    Frame::new()
-        .fill(bg)
-        .corner_radius(CornerRadius::same(3))
-        .inner_margin(Margin::symmetric(6, 2))
-        .show(ui, |ui| {
-            ui.add(egui::Label::new(mono_strong(text).color(fg)).wrap_mode(TextWrapMode::Extend))
-        })
-        .inner
+    let text: String = text.into();
+    let galley = egui::WidgetText::from(mono_strong(text.clone()).color(fg)).into_galley(
+        ui,
+        Some(TextWrapMode::Extend),
+        f32::INFINITY,
+        TextStyle::Body,
+    );
+    let pad = egui::vec2(6.0, 3.0);
+    let (rect, response) = ui.allocate_exact_size(galley.size() + 2.0 * pad, egui::Sense::hover());
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Label, true, &text));
+    if ui.is_rect_visible(rect) {
+        ui.painter().rect_filled(rect, CornerRadius::same(3), bg);
+        let pos = rect.center() - galley.size() / 2.0;
+        ui.painter().galley(pos, galley, fg);
+    }
+    response
 }
 
 /// An 11px uppercase muted label (UI_SPEC §1 "labels").
@@ -419,6 +429,49 @@ pub fn switch_small(ui: &mut egui::Ui, on: &mut bool, label: &str) -> Response {
     resp
 }
 
+/// A full-width message: error in the err pill colours, info in the info pill colours.
+pub fn banner(ui: &mut egui::Ui, level: crate::config::Level, text: &str) {
+    let kind = match level {
+        crate::config::Level::Error => PillKind::Err,
+        crate::config::Level::Info => PillKind::Info,
+    };
+    let (bg, fg) = pal(ui).pill(kind);
+    Frame::new()
+        .fill(bg)
+        .inner_margin(Margin::symmetric(12, 8))
+        .corner_radius(CornerRadius::same(4))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.label(RichText::new(text).color(fg));
+        });
+    ui.add_space(4.0);
+}
+
+/// The last part of a path, for display.
+pub fn file_name(p: &std::path::Path) -> String {
+    p.file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
+/// `"s"` unless `n` is 1.
+pub fn plural(n: usize) -> &'static str {
+    if n == 1 { "" } else { "s" }
+}
+
+/// `512 B`, `2 KB`, `3.1 MB`.
+pub fn human_size(bytes: u64) -> String {
+    const KB: f64 = 1024.0;
+    let b = bytes as f64;
+    if b < KB {
+        format!("{bytes} B")
+    } else if b < KB * KB {
+        format!("{:.0} KB", b / KB)
+    } else {
+        format!("{:.1} MB", b / KB / KB)
+    }
+}
+
 /// `1284` → `1,284`.
 pub fn thousands(n: usize) -> String {
     let s = n.to_string();
@@ -435,6 +488,14 @@ pub fn thousands(n: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sizes_and_plurals() {
+        assert_eq!(human_size(512), "512 B");
+        assert_eq!(human_size(2048), "2 KB");
+        assert_eq!(human_size(3 * 1024 * 1024 + 100_000), "3.1 MB");
+        assert_eq!((plural(1), plural(2)), ("", "s"));
+    }
 
     #[test]
     fn thousands_separators() {

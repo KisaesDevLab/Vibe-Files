@@ -483,14 +483,11 @@ fn plan_rules(
         .iter()
         .position(|r| r.name.eq_ignore_ascii_case("UltraTax"));
     let made = filer_rules(&profiles, &types, ut.map(|i| &active[i]));
-    let at = ut.unwrap_or_else(|| {
-        active
-            .iter()
-            .position(|r| r.catch_all)
-            .unwrap_or(active.len())
-    });
+    // Ahead of Filer's own rules: they match only names print capture writes
+    // (`<year> <profile> <doc type> …`), and Filer 0.2.5+ put rules such as "Engagement Letter"
+    // before its UltraTax rule, where they took captured prints (re-vendor, 2026-11-04).
     for (k, r) in made.into_iter().enumerate() {
-        active.insert(at + k, r);
+        active.insert(k, r);
     }
     // The document tables go first, ahead of Filer's K-1 rules (they carry the partner copy).
     let k1 = active.iter().find(|r| r.name == "K-1").cloned();
@@ -668,7 +665,10 @@ pub fn trial(root: &Path, file_name: &str) -> Trial {
         Ok(c) => c,
         Err(e) => return fail(String::new(), format!("Filer's rules: {e}")),
     };
-    let rule = compiled.first_match(&fp.rest).name.clone();
+    let rule = compiled
+        .first_match(&fp.rest, fp.ultratax.is_some())
+        .name
+        .clone();
     let Some(id) = fp.id.clone() else {
         return fail(
             rule,
@@ -688,7 +688,13 @@ pub fn trial(root: &Path, file_name: &str) -> Trial {
     if !lookup.clients.contains_key(&id) {
         return fail(rule, format!("client ID {id} is not in the client list"));
     }
-    let hit = filer_core::rules::evaluate(&compiled, &fp, &client, fp.year);
+    // Filer 0.2.6 keeps `evaluate` for its tests; the same two steps here.
+    let hit = filer_core::rules::evaluate_rule(
+        compiled.first_match(&fp.rest, fp.ultratax.is_some()),
+        &fp,
+        &client,
+        fp.year,
+    );
     Trial {
         parsed: parsed.clone(),
         delivered: delivered.clone(),

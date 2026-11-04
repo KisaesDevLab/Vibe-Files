@@ -4,8 +4,6 @@
 
 use std::path::{Path, PathBuf};
 
-use chrono::Utc;
-
 use crate::commit::{self, LastBatch};
 use crate::oplog::{self, Op, OpRecord, OpResult};
 
@@ -113,22 +111,16 @@ pub fn run_undo(data_dir: &Path, mut lb: LastBatch, force_copy: bool) -> UndoRep
     let record =
         |src: Option<&Path>, dst: Option<&Path>, client: Option<&str>, err: Option<&str>| {
             let rec = OpRecord {
-                ts: Utc::now(),
-                batch: lb.batch,
-                op: Op::Undo,
                 client_id: client.map(str::to_string),
                 src: src.map(Path::to_path_buf),
                 dst: dst.map(Path::to_path_buf),
-                bytes: None,
-                sha256: None,
                 result: if err.is_some() {
                     OpResult::Error
                 } else {
                     OpResult::Ok
                 },
                 error: err.map(str::to_string),
-                copy_of: None,
-                note: None,
+                ..OpRecord::new(lb.batch, Op::Undo)
             };
             if let Err(e) = oplog::append(&log, &rec) {
                 warnings
@@ -137,35 +129,35 @@ pub fn run_undo(data_dir: &Path, mut lb: LastBatch, force_copy: bool) -> UndoRep
             }
         };
 
+    // A file the app wrote (copy or unpacked entry): removed only if unchanged since written.
+    let remove_if_unchanged = |dst: &Path, sha: &str, client: &str| match commit::sha256_file(dst) {
+        Ok(h) if h == sha => match std::fs::remove_file(dst) {
+            Ok(()) => record(Some(dst), None, Some(client), None),
+            Err(e) => {
+                let msg = format!("cannot remove it: {e}");
+                record(Some(dst), None, Some(client), Some(msg.as_str()));
+                warnings
+                    .borrow_mut()
+                    .push(format!("{}: {msg}", dst.display()));
+            }
+        },
+        Ok(_) => {
+            let msg = "modified since filed, left in place";
+            record(Some(dst), None, Some(client), Some(msg));
+            warnings
+                .borrow_mut()
+                .push(format!("{}: {msg}", dst.display()));
+        }
+        Err(_) => record(Some(dst), None, Some(client), Some("already gone")),
+    };
+
     // 1. Files back where they came from (newest first).
     let mut outcomes = Vec::new();
     let mut piece_failed: Vec<PathBuf> = Vec::new();
     for item in lb.items.iter().rev() {
-        // Copies to related clients first (P07a): removed only if unchanged since written.
+        // Copies to related clients first (P07a).
         for c in &item.copies {
-            match commit::sha256_file(&c.dst) {
-                Ok(h) if h == c.sha256 => match std::fs::remove_file(&c.dst) {
-                    Ok(()) => record(Some(&c.dst), None, Some(&c.client_id), None),
-                    Err(e) => {
-                        let msg = format!("cannot remove the copy: {e}");
-                        record(Some(&c.dst), None, Some(&c.client_id), Some(msg.as_str()));
-                        warnings
-                            .borrow_mut()
-                            .push(format!("{}: {msg}", c.dst.display()));
-                    }
-                },
-                Ok(_) => {
-                    let msg = "modified since filed, left in place";
-                    record(Some(&c.dst), None, Some(&c.client_id), Some(msg));
-                    warnings
-                        .borrow_mut()
-                        .push(format!("{}: {msg}", c.dst.display()));
-                }
-                Err(_) => {
-                    let msg = "already gone";
-                    record(Some(&c.dst), None, Some(&c.client_id), Some(msg));
-                }
-            }
+            remove_if_unchanged(&c.dst, &c.sha256, &c.client_id);
         }
         if let Some(original) = &item.piece_of {
             // A piece of a split: delete it (the app made it). Its original is restored below
@@ -291,26 +283,9 @@ pub fn run_undo(data_dir: &Path, mut lb: LastBatch, force_copy: bool) -> UndoRep
             .push(format!("partial_splits.json could not be updated: {e}"));
     }
 
-    // 1b. Files unpacked from a zip (P07b): removed only if unchanged since written.
+    // 1b. Files unpacked from a zip (P07b).
     for c in &lb.zip_entries {
-        match commit::sha256_file(&c.dst) {
-            Ok(h) if h == c.sha256 => match std::fs::remove_file(&c.dst) {
-                Ok(()) => record(Some(&c.dst), None, Some(&c.client_id), None),
-                Err(e) => {
-                    let msg = format!("cannot remove {}: {e}", c.dst.display());
-                    warnings.borrow_mut().push(msg.clone());
-                    record(Some(&c.dst), None, Some(&c.client_id), Some(&msg));
-                }
-            },
-            Ok(_) => {
-                let msg = "modified since filed, left in place";
-                record(Some(&c.dst), None, Some(&c.client_id), Some(msg));
-                warnings
-                    .borrow_mut()
-                    .push(format!("{}: {msg}", c.dst.display()));
-            }
-            Err(_) => record(Some(&c.dst), None, Some(&c.client_id), Some("already gone")),
-        }
+        remove_if_unchanged(&c.dst, &c.sha256, &c.client_id);
     }
 
     // 2. Overwritten files back in place.
@@ -438,6 +413,7 @@ mod tests {
     use crate::intake::{Kind, QueuedFile, Source};
     use crate::plan::{self, BatchSettings, CollisionChoice, PlanInput, Rescan, RowEdits};
     use crate::sentinel::{self, FolderBinding, FoldersFile, Status};
+    use chrono::Utc;
     use std::collections::{BTreeMap, HashMap};
     use std::sync::Arc;
     use std::sync::atomic::AtomicUsize;
@@ -613,6 +589,7 @@ mod tests {
             }),
             root: Some(w.root.clone()),
             id_pattern: crate::parse::DEFAULT_ID_PATTERN.into(),
+            ultratax: Default::default(),
             fuzzy_suggest: 0.85,
             fuzzy_auto: 0.97,
             current_year: 2026,
@@ -717,6 +694,7 @@ mod tests {
             }),
             root: Some(cw.root.clone()),
             id_pattern: crate::parse::DEFAULT_ID_PATTERN.into(),
+            ultratax: Default::default(),
             fuzzy_suggest: 0.85,
             fuzzy_auto: 0.97,
             current_year: 2026,
@@ -808,6 +786,7 @@ mod tests {
             }),
             root: Some(cw.root.clone()),
             id_pattern: crate::parse::DEFAULT_ID_PATTERN.into(),
+            ultratax: Default::default(),
             fuzzy_suggest: 0.85,
             fuzzy_auto: 0.97,
             current_year: 2026,
@@ -1131,6 +1110,7 @@ mod tests {
             }),
             root: Some(root.clone()),
             id_pattern: crate::parse::DEFAULT_ID_PATTERN.into(),
+            ultratax: Default::default(),
             fuzzy_suggest: 0.85,
             fuzzy_auto: 0.97,
             current_year: 2026,
@@ -1175,9 +1155,11 @@ mod tests {
             "Baker Farms_1004_scan.pdf | Ready | Catch-all | Baker Farms (1004)\\Not Yet Filed\\Baker Farms_1004_scan.pdf",
             "Entity Co_1234_2025 K-1 package.pdf | Ready | K-1 package | Entity Co (1234)\\Income Tax\\2025\\2025 K-1 Package - Entity Co.pdf | copies 3",
             "Front desk_1001_2025 print run.pdf | Ready | Catch-all | Smith, John (1001)\\Not Yet Filed\\Front desk_1001_2025 print run.pdf",
+            "John Smith_2025_1040_Tax_Return_1001.pdf | Ready | UltraTax files | Smith, John (1001)\\Income Tax\\2025\\2025 1040 Tax Return - Smith, John.pdf",
+            "Riverbend Holdings LP_2025_1065_K1_Package_Thomas Baker_4472.pdf | Ready | UltraTax K-1 package | Riverbend Holdings LP (4472)\\Income Tax\\2025\\2025 K-1 Package - Thomas Baker.pdf | copies 1",
             "Riverbend_4472_2025 K-1 Baker, Thomas.pdf | Ready | K-1 | Riverbend Holdings LP (4472)\\Income Tax\\2025\\2025 K-1 - Baker, Thomas.pdf | copies 1",
             "Smith, John_1001_Sales Tax Q1 2025.pdf | Ready | Sales Tax | Smith, John (1001)\\Sales Tax\\2025\\Smith, John_1001_Sales Tax Q1 2025.pdf",
-            "Smith, John_1001_UltraTax 2025 1040.pdf | Ready | UltraTax | Smith, John (1001)\\Income Tax\\2025\\Smith, John_1001_UltraTax 2025 1040.pdf",
+            "Smith, John_1001_Tax Documents 2025.pdf | Ready | Tax Documents | Smith, John (1001)\\Income Tax\\2025\\Smith, John_1001_Tax Documents 2025.pdf",
             "Smth Jon_9999_2025 W-2.pdf | NeedsClient |",
         ];
         assert_eq!(report.lines().count(), expect.len());
@@ -1190,15 +1172,15 @@ mod tests {
             (format!("{score:.2}").as_str(), who.name.as_str()),
             ("0.95", "Smith, John")
         );
-        let ultra = &out.proposals[10];
+        let docs = &out.proposals[12];
         assert_eq!(
-            ultra.next_year_dir.as_ref().unwrap(),
+            docs.next_year_dir.as_ref().unwrap(),
             &root
                 .join("Smith, John (1001)")
                 .join("Income Tax")
                 .join("2026")
         );
-        let k1 = &out.proposals[8];
+        let k1 = &out.proposals[10];
         assert_eq!(
             k1.copies[0]
                 .dest
@@ -1238,12 +1220,12 @@ mod tests {
             .iter()
             .map(|s| {
                 compiled
-                    .first_specific_match(&texts[s.pages.start])
+                    .first_specific_match(&texts[s.pages.start], false)
                     .map(|r| r.name.clone())
                     .unwrap_or_default()
             })
             .collect();
-        assert_eq!(sniffed, ["UltraTax", "Payroll", "Financials"]);
+        assert_eq!(sniffed, ["Tax Documents", "Payroll", "Financials"]);
         let scan_pdf =
             crate::pdf::page_texts(pdfium, &inbox.join("Baker Farms_1004_scan.pdf")).unwrap();
         assert!(
@@ -1873,7 +1855,7 @@ mod tests {
     fn next_year_folder_is_created_and_undone() {
         let w = world();
         let root_before = snapshot(&w.root);
-        let path = w.inbox.join("Smith, John_1001_UltraTax 2025.pdf");
+        let path = w.inbox.join("Smith, John_1001_Tax Documents 2025.pdf");
         std::fs::write(&path, b"return").unwrap();
         let file = QueuedFile {
             path: path.clone(),
@@ -1890,7 +1872,7 @@ mod tests {
         let dest = p.dest.clone().unwrap();
         assert_eq!(
             dest.file_name().unwrap(),
-            "Smith, John_1001_UltraTax 2025.pdf"
+            "Smith, John_1001_Tax Documents 2025.pdf"
         );
         let next = dest.parent().unwrap().with_file_name("2026");
         assert_eq!(p.next_year_dir.as_ref(), Some(&next));

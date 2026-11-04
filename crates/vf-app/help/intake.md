@@ -2,6 +2,10 @@
 
 How the Intake tab files the PDFs that land in your inbox folders: reading the queue, fixing a row, committing a batch, undoing it, and what Vibe Files adds on top.
 
+## Looking at a file, and fixing several rows at once
+
+**Preview pane** in the queue's toolbar shows the pages of the file whose name you last clicked, beside the list, with **Previous** and **Next** (it opens by itself on a wide screen). Tick rows to fix them together: **Set client…** gives every ticked file one client, **Apply rule…** files every ticked file by the rule you choose, and **Untick all** clears the ticks.
+
 ## The queue
 
 The **Intake** tab opens on **Preview**. Every PDF in an inbox folder (set in **Setup**, see [rules and Setup](help:intake-rules)) shows as one row. Intake reads the client ID from the file name, picks a rule, and works out where the file will go. Each row has these columns:

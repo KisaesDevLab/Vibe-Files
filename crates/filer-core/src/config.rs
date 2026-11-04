@@ -19,11 +19,15 @@ pub struct Settings {
     /// Client folder tree root (local or UNC).
     pub root: Option<PathBuf>,
     pub inboxes: Vec<PathBuf>,
+    /// Files in the inboxes' sub-folders are queued too (on by default; owner 2026-11-02).
+    pub inbox_subfolders: bool,
     /// Client master CSV (P02).
     pub csv_path: Option<PathBuf>,
     pub column_map: ColumnMap,
     /// Regex for the ID part of `ClientName_ID_rest.ext`.
     pub id_pattern: String,
+    /// UltraTax PDF names: which part is where (tried before `ClientName_ID_rest`).
+    pub ultratax: parse::UltraTaxLayout,
     pub fuzzy_suggest: f32,
     pub fuzzy_auto: f32,
     /// Generated once (see [`Settings::ensure_firm_id`]); written into new sentinels.
@@ -94,9 +98,11 @@ impl Default for Settings {
         Self {
             root: None,
             inboxes: Vec::new(),
+            inbox_subfolders: true,
             csv_path: None,
             column_map: ColumnMap::default(),
             id_pattern: parse::DEFAULT_ID_PATTERN.to_string(),
+            ultratax: parse::UltraTaxLayout::default(),
             fuzzy_suggest: DEFAULT_FUZZY_SUGGEST,
             fuzzy_auto: DEFAULT_FUZZY_AUTO,
             firm_id: None,
@@ -151,11 +157,7 @@ impl Settings {
 
     /// Writes to a temp file next to `config.json`, then renames over it.
     pub fn save(&self, data_dir: &Path) -> anyhow::Result<()> {
-        let path = Self::path(data_dir);
-        let tmp = path.with_extension("json.tmp");
-        std::fs::write(&tmp, serde_json::to_vec_pretty(self)?)?;
-        std::fs::rename(&tmp, &path)?;
-        Ok(())
+        crate::datafile::save_json(&Self::path(data_dir), self)
     }
 
     /// Generates the firm ID if there is none yet. Returns `true` when it did, so the caller saves.
@@ -212,6 +214,9 @@ impl Issue {
 pub fn check_fields(s: &Settings) -> Vec<Issue> {
     let mut out = Vec::new();
     if let Err(msg) = parse::validate_id_pattern(&s.id_pattern) {
+        out.push(Issue::error(msg));
+    }
+    if let Err(msg) = s.ultratax.validate() {
         out.push(Issue::error(msg));
     }
     for (what, v) in [

@@ -3,6 +3,7 @@ pub mod conflicts;
 pub mod csv_wizard;
 pub mod history;
 pub mod import;
+pub mod peek;
 pub mod preview;
 pub mod relationships;
 pub mod rules;

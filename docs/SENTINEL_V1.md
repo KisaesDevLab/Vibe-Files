@@ -1,6 +1,6 @@
 # SentinelV1 — `_Vibe/client.json`
 
-**Source of truth:** Vibe Filer Desktop `src/sentinel.rs` at `ea4e726` (vendored as
+**Source of truth:** Vibe Filer Desktop `src/sentinel.rs` at `ea4e726` (re-checked at `f0a3e28`, 2026-11-04: the format is unchanged; only the code around it was tidied) (vendored as
 `crates/filer-intake/src/sentinel.rs`). This document describes that code; if they disagree, the
 code wins and this file is fixed. Practice Manager is not consulted (owner 2026-11-02).
 

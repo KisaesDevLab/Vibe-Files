@@ -11,7 +11,8 @@ use crate::parse::{self, Parsed};
 use crate::rulebuild::{self, Form};
 use crate::rules::{self, CompiledRules, CopyDest, HitProblem, OnSplit, Resolver, Rule, RulesFile};
 use crate::template::{self, BUILTIN_TOKENS};
-use crate::ui::setup::{banner, set_aside};
+use crate::ui::setup::set_aside;
+use crate::ui::theme::banner;
 use crate::ui::theme::{
     self, PillKind, card, label_caps, mono, pal, pill, primary_button, strong, token_pill,
 };
@@ -29,6 +30,36 @@ pub struct RulesScreen {
     /// When rules.json was last written (footer).
     saved_at: Option<chrono::DateTime<chrono::Local>>,
     builder: Builder,
+    /// Worked out from the draft; kept until it changes (compiling every pattern each frame
+    /// was most of this tab's cost).
+    checked: std::cell::RefCell<Option<Checked>>,
+    /// The test name read like an inbox file name, for one name and setup.
+    test_parsed: std::cell::RefCell<Option<(u64, Parsed)>>,
+    /// Queued file names and the text rules match on, for one queue and setup.
+    queue_rests: Option<(u64, Vec<(String, String)>)>,
+}
+
+/// Validation and compiled rules for one draft and set of CSV tokens.
+struct Checked {
+    draft: RulesFile,
+    tokens: Vec<String>,
+    file_errors: Vec<String>,
+    profile_errors: Vec<(usize, String)>,
+    compiled: Result<CompiledRules, String>,
+}
+
+/// What reading a file name depends on besides the name: the ID pattern, UltraTax layout,
+/// client list and suggest threshold.
+fn name_setup_key(state: &AppState, h: &mut impl std::hash::Hasher) {
+    use std::hash::Hash;
+    state.settings.id_pattern.hash(h);
+    state.settings.ultratax.hash(h);
+    state.settings.fuzzy_suggest.to_bits().hash(h);
+    state
+        .clients
+        .list()
+        .map_or(0, |l| std::sync::Arc::as_ptr(l) as usize)
+        .hash(h);
 }
 
 /// Which list a clicked word goes to (V10).
@@ -83,6 +114,47 @@ impl RulesScreen {
                 .and_then(|m| m.modified())
                 .ok()
                 .map(chrono::DateTime::from),
+            checked: Default::default(),
+            test_parsed: Default::default(),
+            queue_rests: None,
+        }
+    }
+
+    /// Validation and compiled rules for the current draft, worked out again only after it
+    /// (or the CSV tokens) changed.
+    fn checked(&self, state: &AppState) -> std::cell::RefMut<'_, Checked> {
+        let tokens = clients::extra_tokens(&state.settings.column_map);
+        let mut c = self.checked.borrow_mut();
+        if c.as_ref()
+            .is_none_or(|c| c.draft != self.draft || c.tokens != tokens)
+        {
+            *c = Some(Checked {
+                file_errors: rules::validate_file(&self.draft, &tokens),
+                profile_errors: rules::validate_profile(self.draft.active_rules(), &tokens),
+                compiled: CompiledRules::new(self.draft.active_rules()),
+                draft: self.draft.clone(),
+                tokens,
+            });
+        }
+        std::cell::RefMut::map(c, |c| c.as_mut().expect("set above"))
+    }
+
+    /// The test name read like an inbox file name, kept while the name and setup are the same.
+    fn parsed_test(&self, state: &AppState) -> Parsed {
+        use std::hash::{Hash, Hasher};
+        let input = self.test_input.trim();
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        input.hash(&mut h);
+        name_setup_key(state, &mut h);
+        let key = h.finish();
+        let mut c = self.test_parsed.borrow_mut();
+        match c.as_ref() {
+            Some((k, p)) if *k == key => p.clone(),
+            _ => {
+                let p = test_parsed(state, input);
+                *c = Some((key, p.clone()));
+                p
+            }
         }
     }
 
@@ -114,10 +186,7 @@ impl RulesScreen {
     }
 
     fn errors(&self, state: &AppState) -> Vec<String> {
-        rules::validate_file(
-            &self.draft,
-            &clients::extra_tokens(&state.settings.column_map),
-        )
+        self.checked(state).file_errors.clone()
     }
 
     pub fn can_save(&self, state: &AppState) -> bool {
@@ -170,7 +239,7 @@ impl RulesScreen {
             );
         }
         let extra_tokens = clients::extra_tokens(&state.settings.column_map);
-        let rule_errors = rules::validate_profile(self.draft.active_rules(), &extra_tokens);
+        let rule_errors = self.checked(state).profile_errors.clone();
         ui.add_space(4.0);
         ui.horizontal_top(|ui| {
             ui.vertical(|ui| {
@@ -327,16 +396,23 @@ impl RulesScreen {
             if ui.button("Add rule").clicked() {
                 self.selected = rules::add_rule(self.draft.active_rules_mut());
             }
-            let can_dup = self
+            let editable = self
                 .draft
                 .active_rules()
                 .get(self.selected)
                 .is_some_and(|r| !r.catch_all);
             if ui
-                .add_enabled(can_dup, egui::Button::new("Duplicate"))
+                .add_enabled(editable, egui::Button::new("Duplicate"))
                 .clicked()
             {
                 self.apply_row_action(Some(RowAction::Duplicate(self.selected)));
+            }
+            if ui
+                .add_enabled(editable, egui::Button::new("Delete rule"))
+                .on_hover_text("Deletes the selected rule (Catch-all stays). Save to keep the change.")
+                .clicked()
+            {
+                self.apply_row_action(Some(RowAction::Delete(self.selected)));
             }
             if ui
                 .button("Add default profile")
@@ -423,6 +499,9 @@ impl RulesScreen {
             }
             RowAction::Move(from, to) => rules::move_rule(rules, from, to),
             RowAction::Delete(i) => {
+                if rules.get(i).is_none_or(|r| r.catch_all) {
+                    return;
+                }
                 rules.remove(i);
                 self.selected = self.selected.min(rules.len().saturating_sub(1));
                 return;
@@ -542,6 +621,15 @@ impl RulesScreen {
                     "Matches only where the pattern is a separate word. Spaces, _ and punctuation \
                      count as separators, so k-?1 matches \"2025_K-1\" but not \"K-10\".",
                 );
+                ui.add_enabled(
+                    !rule.catch_all,
+                    egui::Checkbox::new(&mut rule.ultratax_only, "Only UltraTax file names"),
+                )
+                .on_hover_text(
+                    "Matches only files whose name was read with the UltraTax layout (Setup). \
+                     The pattern is then tried on \"{EntityType} {Document}\" plus the K-1 \
+                     recipient.",
+                );
             });
             if !rule.catch_all {
                 copies_ui(ui, rule, &mut self.roles_edit);
@@ -607,7 +695,7 @@ impl RulesScreen {
             ui.label(RichText::new(" · click words of the test name, or type them").color(p.muted));
         });
         ui.add_space(4.0);
-        let rest = test_parsed(state, self.test_input.trim()).rest;
+        let rest = self.parsed_test(state).rest;
         let b = &mut self.builder;
         ui.horizontal(|ui| {
             ui.label(RichText::new("Click adds to").color(p.muted));
@@ -816,19 +904,15 @@ impl RulesScreen {
                 }
                 let queue = state.intake.queue();
                 if !queue.is_empty() {
-                    let names: Vec<String> = queue
+                    let rests = queue_rests(&mut self.queue_rests, state);
+                    let names: Vec<&String> = rests
                         .iter()
-                        .map(|q| {
-                            q.path
-                                .file_name()
-                                .map(|n| n.to_string_lossy().into_owned())
-                                .unwrap_or_default()
-                        })
-                        .filter(|n| hits(&test_parsed(state, n).rest))
+                        .filter(|(_, rest)| hits(rest))
+                        .map(|(name, _)| name)
                         .collect();
                     let mut t = format!("Matches {} of {} queued files", names.len(), queue.len());
                     if !names.is_empty() {
-                        let shown: Vec<&str> = names.iter().take(4).map(String::as_str).collect();
+                        let shown: Vec<&str> = names.iter().take(4).map(|n| n.as_str()).collect();
                         t.push_str(&format!(": {}", shown.join(", ")));
                         if names.len() > 4 {
                             t.push_str(&format!(" +{} more", names.len() - 4));
@@ -949,7 +1033,12 @@ impl RulesScreen {
             return;
         }
         ui.add_space(6.0);
-        match test_result(&self.draft, state, input) {
+        let parsed = self.parsed_test(state);
+        let result = match &self.checked(state).compiled {
+            Ok(compiled) => Ok(test_result(&self.draft, compiled, parsed, state)),
+            Err(e) => Err(format!("Fix the rule errors first ({e}).")),
+        };
+        match result {
             Err(e) => banner(ui, Level::Error, &e),
             Ok(t) => {
                 egui::Grid::new("rules_test_result")
@@ -959,6 +1048,11 @@ impl RulesScreen {
                         label_caps(ui, "Parsed");
                         ui.label(parsed_job(ui, &t.parsed));
                         ui.end_row();
+                        if let Some(u) = &t.parsed.ultratax {
+                            label_caps(ui, "UltraTax");
+                            ui.label(RichText::new(ultratax_summary(u)).size(12.0).color(p.text));
+                            ui.end_row();
+                        }
                         label_caps(ui, "Matched rule");
                         ui.horizontal(|ui| {
                             ui.spacing_mut().item_spacing.x = 4.0;
@@ -1464,28 +1558,94 @@ struct TestResult {
     copies: Vec<String>,
 }
 
-/// `input` parsed like an inbox file name, or taken as the remainder when it isn't one.
+/// The UltraTax parts the test box read, on one line.
+fn ultratax_summary(u: &parse::UltraTaxParts) -> String {
+    [
+        ("Client", &u.client_name),
+        ("ID", &u.client_id),
+        ("Year", &u.tax_year),
+        ("Entity", &u.entity_type),
+        ("Document", &u.document),
+        ("K-1 recipient", &u.k1_recipient),
+        ("Year end", &u.year_end),
+        ("Printed", &u.date_printed),
+    ]
+    .iter()
+    .filter(|(_, v)| !v.is_empty())
+    .map(|(k, v)| format!("{k} {v}"))
+    .collect::<Vec<_>>()
+    .join(" · ")
+}
+
+/// The queued files' names and the text rules match on, read again only when the queue or the
+/// setup changed.
+fn queue_rests<'a>(
+    cache: &'a mut Option<(u64, Vec<(String, String)>)>,
+    state: &AppState,
+) -> &'a [(String, String)] {
+    use std::hash::{Hash, Hasher};
+    let queue = state.intake.queue();
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    for q in queue {
+        q.path.hash(&mut h);
+    }
+    name_setup_key(state, &mut h);
+    let key = h.finish();
+    if cache.as_ref().is_none_or(|(k, _)| *k != key) {
+        let re = parse::filename_regex(&state.settings.id_pattern).ok();
+        let rests = queue
+            .iter()
+            .map(|q| {
+                let name = theme::file_name(&q.path);
+                let rest = test_parsed_with(state, re.as_ref(), &name).rest;
+                (name, rest)
+            })
+            .collect();
+        *cache = Some((key, rests));
+    }
+    &cache.as_ref().expect("set above").1
+}
+
+/// `input` read like an inbox file name (UltraTax layout or `Name_ID_rest`), or taken as the
+/// remainder when it is neither.
 fn test_parsed(state: &AppState, input: &str) -> Parsed {
+    let re = parse::filename_regex(&state.settings.id_pattern).ok();
+    test_parsed_with(state, re.as_ref(), input)
+}
+
+/// [`test_parsed`] with the filename regex compiled once by the caller.
+fn test_parsed_with(state: &AppState, re: Option<&regex::Regex>, input: &str) -> Parsed {
     let current_year = chrono::Datelike::year(&chrono::Local::now());
-    match parse::filename_regex(&state.settings.id_pattern) {
-        Ok(re) if re.is_match(input) => parse::parse_filename(input, &re, current_year),
-        _ => Parsed {
-            name: String::new(),
-            id: None,
-            rest: input.to_string(),
-            ext: "pdf".into(),
-            year: parse::detect_year(input, current_year),
-            stem: input.to_string(),
-        },
+    let parsed = crate::plan::read_name(
+        input,
+        re,
+        &state.settings.ultratax,
+        current_year,
+        state.clients.list().map(|l| l.as_ref()),
+        state.settings.fuzzy_suggest,
+    );
+    if parsed.id.is_some() {
+        return parsed;
+    }
+    Parsed {
+        name: String::new(),
+        id: None,
+        rest: input.to_string(),
+        ext: "pdf".into(),
+        year: parse::detect_year(input, current_year),
+        stem: input.to_string(),
+        ultratax: None,
     }
 }
 
-/// What the active profile would do with `input` (a full filename or just the remainder).
-fn test_result(draft: &RulesFile, state: &AppState, input: &str) -> Result<TestResult, String> {
-    let compiled = CompiledRules::new(draft.active_rules())
-        .map_err(|e| format!("Fix the rule errors first ({e})."))?;
+/// What the active profile (`compiled` from `draft`) would do with the test name, `parsed`.
+fn test_result(
+    draft: &RulesFile,
+    compiled: &CompiledRules,
+    parsed: Parsed,
+    state: &AppState,
+) -> TestResult {
     let current_year = chrono::Datelike::year(&chrono::Local::now());
-    let parsed = test_parsed(state, input);
     let list = state.clients.list();
     let client = parsed
         .id
@@ -1495,7 +1655,7 @@ fn test_result(draft: &RulesFile, state: &AppState, input: &str) -> Result<TestR
         .cloned()
         .unwrap_or_else(|| sample_client(&clients::extra_tokens(&state.settings.column_map)));
 
-    let rule = compiled.first_match(&parsed.rest);
+    let rule = compiled.first_match(&parsed.rest, parsed.ultratax.is_some());
     let tried = draft
         .active_rules()
         .iter()
@@ -1552,7 +1712,7 @@ fn test_result(draft: &RulesFile, state: &AppState, input: &str) -> Result<TestR
             format!("{who} → {}", c.dest_template)
         })
         .collect();
-    Ok(TestResult {
+    TestResult {
         parsed,
         rule: rule.name.clone(),
         tried,
@@ -1560,7 +1720,7 @@ fn test_result(draft: &RulesFile, state: &AppState, input: &str) -> Result<TestR
         primary,
         client: format!("{} ({})", client.name, client.id),
         copies,
-    })
+    }
 }
 
 fn sample_client(extra_tokens: &[String]) -> Client {

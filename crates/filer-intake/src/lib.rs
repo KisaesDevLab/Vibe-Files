@@ -25,5 +25,7 @@ pub mod zipimport;
 
 // Upstream paths (`crate::clients`, `crate::pdf`, …) resolve through these re-exports, so module
 // files stay unedited.
-pub use filer_core::{clients, config, parse, relationships, rulebuild, rules, template, worker};
+pub use filer_core::{
+    clients, config, datafile, parse, relationships, rulebuild, rules, template, worker,
+};
 pub use filer_pdf::{pdf, split};

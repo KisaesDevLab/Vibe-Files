@@ -115,38 +115,7 @@ pub fn transfer(
             Err(e) => return Err(format!("cannot move to {}: {e}", dst.display())),
         }
     }
-    let name = dst
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    let tmp = dst.with_file_name(format!("~vfd-partial-{}-{name}", Uuid::new_v4().simple()));
-    let copy = || -> Result<String, String> {
-        let mut out = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&tmp)
-            .map_err(|e| format!("cannot create {}: {e}", tmp.display()))?;
-        let mut input =
-            std::fs::File::open(src).map_err(|e| format!("cannot open {}: {e}", src.display()))?;
-        std::io::copy(&mut input, &mut out).map_err(|e| format!("copy failed: {e}"))?;
-        out.sync_all().map_err(|e| format!("copy failed: {e}"))?;
-        drop(out);
-        let a = sha256_file(src).map_err(|e| format!("cannot hash the original: {e}"))?;
-        let b = sha256_file(&tmp).map_err(|e| format!("cannot hash the copy: {e}"))?;
-        if a != b {
-            return Err("the copy does not match the original (SHA-256)".into());
-        }
-        move_no_replace(&tmp, dst).map_err(|e| format!("cannot put the copy in place: {e}"))?;
-        Ok(a)
-    };
-    let sha = match copy() {
-        Ok(sha) => sha,
-        Err(e) => {
-            // Our own partial copy; never the user's file.
-            let _ = std::fs::remove_file(&tmp);
-            return Err(e);
-        }
-    };
+    let (_, sha) = copy_verified(src, dst)?;
     // The copy is verified; only now may the original go.
     if let Err(e) = std::fs::remove_file(src) {
         let _ = std::fs::remove_file(dst);
@@ -364,11 +333,7 @@ pub fn load_last_batch(data_dir: &Path) -> Option<LastBatch> {
 }
 
 pub fn save_last_batch(data_dir: &Path, lb: &LastBatch) -> anyhow::Result<()> {
-    let p = last_batch_path(data_dir);
-    let tmp = p.with_extension("json.tmp");
-    std::fs::write(&tmp, serde_json::to_vec_pretty(lb)?)?;
-    std::fs::rename(&tmp, &p)?;
-    Ok(())
+    crate::datafile::save_json(&last_batch_path(data_dir), lb)
 }
 
 // ---------------------------------------------------------------------------
@@ -436,11 +401,7 @@ pub fn load_partial(data_dir: &Path) -> Vec<PartialSplit> {
 }
 
 fn save_partial(data_dir: &Path, list: &[PartialSplit]) -> anyhow::Result<()> {
-    let p = data_dir.join(PARTIAL_SPLITS_FILE);
-    let tmp = p.with_extension("json.tmp");
-    std::fs::write(&tmp, serde_json::to_vec_pretty(list)?)?;
-    std::fs::rename(&tmp, &p)?;
-    Ok(())
+    crate::datafile::save_json(&data_dir.join(PARTIAL_SPLITS_FILE), list)
 }
 
 /// Forgets the partly-filed marks a batch made (its undo removed those pieces again).
@@ -505,7 +466,7 @@ impl CommitInput {
                         dest: dest.clone(),
                         folder: folder.clone(),
                         client: client.clone(),
-                        overwrite: p.collision && p.collision_choice == CollisionChoice::Overwrite,
+                        overwrite: p.overwrites(),
                         kept_both: p.renamed,
                         also_dirs: p.next_year_dir.iter().cloned().collect(),
                         source: p.file.source.clone(),
@@ -525,7 +486,7 @@ impl CommitInput {
                                     dest: c.dest.clone()?,
                                     folder: c.folder.clone()?,
                                     client: c.client.clone()?,
-                                    overwrite: c.collision
+                                    overwrite: c.collides()
                                         && c.collision_choice == CollisionChoice::Overwrite,
                                 })
                             })
@@ -586,20 +547,7 @@ struct Ctx<'a> {
 impl Ctx<'_> {
     /// A log entry for this batch with everything but `op` empty and result OK.
     fn entry(&self, op: Op) -> OpRecord {
-        OpRecord {
-            ts: Utc::now(),
-            batch: self.input.batch,
-            op,
-            client_id: None,
-            src: None,
-            dst: None,
-            bytes: None,
-            sha256: None,
-            result: OpResult::Ok,
-            error: None,
-            copy_of: None,
-            note: None,
-        }
+        OpRecord::new(self.input.batch, op)
     }
 
     fn log(&mut self, rec: OpRecord) {
@@ -1353,27 +1301,17 @@ pub fn run_unpack(input: &UnpackInput, progress: &AtomicUsize) -> UnpackReport {
     if written > 0 && stopped.is_none() {
         let dir = t.data_dir.join(UNDO_ZIPS_DIR);
         let kept = dir.join(format!("{batch}.zip"));
+        // Moved, or copied and hash-verified before the original goes (CLAUDE.md §7, X139).
         let keep = std::fs::create_dir_all(&dir)
             .map_err(|e| e.to_string())
-            .and_then(|()| copy_verified(&input.zip, &kept));
+            .and_then(|()| transfer(&input.zip, &kept, false));
         match keep {
             Ok(_) => {
-                // Allowed (CLAUDE.md §7, X139): its copy has been hash-verified.
-                match std::fs::remove_file(&input.zip) {
-                    Ok(()) => {
-                        zip_deleted = true;
-                        ctx.lb.zip = Some(ZipSource {
-                            original: input.zip.clone(),
-                            kept,
-                        });
-                    }
-                    Err(e) => {
-                        let _ = std::fs::remove_file(&kept);
-                        ctx.warnings.push(format!(
-                            "the zip could not be removed ({e}); it stays where it is"
-                        ));
-                    }
-                }
+                zip_deleted = true;
+                ctx.lb.zip = Some(ZipSource {
+                    original: input.zip.clone(),
+                    kept,
+                });
             }
             Err(e) => ctx.warnings.push(format!(
                 "no undo copy of the zip could be kept ({e}); it stays where it is"

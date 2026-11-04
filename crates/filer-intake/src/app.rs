@@ -271,12 +271,12 @@ impl AppState {
                 (Some(_), Some(lb)) => {
                     let dir = self.data_dir.join(commit::UNDO_ZIPS_DIR);
                     let kept = dir.join(format!("{}-{}.zip", lb.batch, lb.routed_zips.len() + 1));
+                    // A rename on one volume; elsewhere a verified copy, then the zip goes.
                     let keep = std::fs::create_dir_all(&dir)
                         .map_err(|e| e.to_string())
-                        .and_then(|()| commit::copy_verified(&r.zip, &kept));
-                    match keep.and_then(|_| std::fs::remove_file(&r.zip).map_err(|e| e.to_string()))
-                    {
-                        Ok(()) => {
+                        .and_then(|()| commit::transfer(&r.zip, &kept, false));
+                    match keep {
+                        Ok(_) => {
                             lb.routed_zips.push(commit::ZipSource {
                                 original: r.zip.clone(),
                                 kept,
@@ -287,7 +287,6 @@ impl AppState {
                             }
                         }
                         Err(e) => {
-                            let _ = std::fs::remove_file(&kept);
                             note.push_str(" · zip kept");
                             result = crate::oplog::OpResult::Error;
                             error = Some(format!("the zip could not be removed: {e}"));
@@ -308,18 +307,12 @@ impl AppState {
             }
             let _ = std::fs::remove_dir(&r.tmp);
             let rec = crate::oplog::OpRecord {
-                ts: chrono::Utc::now(),
-                batch: current.unwrap_or(r.id),
-                op: crate::oplog::Op::ZipImport,
-                client_id: None,
                 src: Some(r.zip.clone()),
                 dst: Some(r.tmp.clone()),
-                bytes: None,
-                sha256: None,
                 result,
                 error,
-                copy_of: None,
                 note: Some(note),
+                ..crate::oplog::OpRecord::new(current.unwrap_or(r.id), crate::oplog::Op::ZipImport)
             };
             if let Err(e) = crate::oplog::append(&crate::oplog::path(&self.data_dir), &rec) {
                 tracing::error!(error = %e, "cannot append to ops.jsonl");
@@ -431,7 +424,9 @@ impl FilerApp {
         let rules = RulesScreen::new(&shared);
         shared.intake.start(ctx);
         shared.sniffer = Sniffer::new(ctx, shared.pdfium_dir.clone());
-        shared.intake.set_inboxes(&shared.settings.inboxes);
+        shared
+            .intake
+            .set_inboxes(&shared.settings.inboxes, shared.settings.inbox_subfolders);
         shared.clients.load(
             ctx,
             shared.data_dir.clone(),
@@ -842,7 +837,8 @@ impl eframe::App for FilerApp {
         let data_dir = self.shared.data_dir.clone();
         self.shared.folders.poll(&ctx, &data_dir);
         let inboxes = self.shared.settings.inboxes.clone();
-        self.shared.intake.set_inboxes(&inboxes);
+        let subfolders = self.shared.settings.inbox_subfolders;
+        self.shared.intake.set_inboxes(&inboxes, subfolders);
         self.shared.intake.poll();
         self.shared.sniffer.poll();
         self.handle_dropped_files(&ctx);
@@ -1159,7 +1155,7 @@ mod import_tests {
         let data = data.to_path_buf();
         let mut h = HarnessBuilder::default()
             .with_theme(egui::Theme::Light)
-            .with_size([1100.0, 1600.0])
+            .with_size([1100.0, 2100.0])
             .build_eframe(move |cc| {
                 FilerApp::new(&cc.egui_ctx, AppState::load(data, settings, savable, None))
             });
@@ -1599,8 +1595,11 @@ mod rules_tests {
         assert_eq!(made.name, "Bank");
         assert!(rules[n - 1].catch_all);
         let compiled = crate::rules::CompiledRules::new(rules).unwrap();
-        assert_eq!(compiled.first_match("2024 statement_bank").name, "Bank");
-        assert_eq!(compiled.first_match("bank 2024").name, "Catch-all");
+        assert_eq!(
+            compiled.first_match("2024 statement_bank", false).name,
+            "Bank"
+        );
+        assert_eq!(compiled.first_match("bank 2024", false).name, "Catch-all");
     }
 
     /// V11: an install with saved rules gets the Firm rules as an extra profile.
@@ -1612,11 +1611,42 @@ mod rules_tests {
         h.get_by_label("Add default profile").click();
         h.step();
         h.step();
-        assert_eq!(names(&h)[2], "UltraTax");
+        assert_eq!(names(&h)[5], "Payroll");
         h.get_by_label("Add default profile").click();
         h.step();
         let profiles: Vec<String> = h.state().rules.draft_profiles();
         assert_eq!(profiles, ["Firm", "Firm 2", "Tax"]);
+    }
+
+    /// The Delete rule button removes the selected default rule; Catch-all can't be deleted.
+    #[test]
+    fn delete_rule_button_removes_a_default_rule() {
+        let data = tempfile::tempdir().unwrap();
+        let mut h = harness(data.path());
+        h.get_by_label("Add default profile").click();
+        h.step();
+        h.step();
+        let before = names(&h);
+        assert_eq!(before[5], "Payroll");
+        h.get_by_label("Payroll").click();
+        h.step();
+        h.get_by_label("Delete rule").click();
+        h.step();
+        h.step();
+        let after = names(&h);
+        assert_eq!(after.len(), before.len() - 1);
+        assert!(!after.iter().any(|n| n == "Payroll"));
+        h.get_by_label("Catch-all").click();
+        h.step();
+        {
+            use egui_kittest::kittest::NodeT;
+            assert!(h.get_by_label("Delete rule").accesskit_node().is_disabled());
+        }
+        h.get_by_label("Save").click();
+        h.step();
+        h.step();
+        let (saved, _, _) = crate::rules::load_or_seed(data.path());
+        assert!(!saved.profiles["Firm"].iter().any(|r| r.name == "Payroll"));
     }
 
     #[test]
@@ -2497,6 +2527,148 @@ mod combine_ui_tests {
             "nothing ticked: W-2 blocks again"
         );
     }
+
+    /// The side pane shows the row last clicked; ticked rows get one client and one rule at once
+    /// (owner 2026-11-04).
+    #[test]
+    fn preview_pane_and_ticked_rows_client_and_rule() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data = tmp.path().join("data");
+        let root = tmp.path().join("root");
+        let inbox = tmp.path().join("inbox");
+        for d in [&data, &root, &inbox] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let csv = tmp.path().join("clients.csv");
+        std::fs::write(
+            &csv,
+            "id,name
+1001,\"Smith, John\"
+1004,Baker Farms
+",
+        )
+        .unwrap();
+        let names = [
+            "Smith, John_1001_2025 1040.pdf",
+            "scan0001.pdf",
+            "scan0002.pdf",
+        ];
+        for n in names {
+            crate::pdf::write_test_pdf(&inbox.join(n), &[n, "second page"]);
+        }
+        let settings = Settings {
+            root: Some(root.clone()),
+            inboxes: vec![inbox.clone()],
+            csv_path: Some(csv),
+            column_map: ColumnMap {
+                id: Some("id".into()),
+                name: Some("name".into()),
+                extras: vec![],
+            },
+            ..Settings::default()
+        };
+        let pdfium = crate::pdf::find_pdfium(std::path::Path::new(""));
+        assert!(pdfium.is_some());
+        let d = data.clone();
+        let mut h = HarnessBuilder::default()
+            .with_theme(egui::Theme::Light)
+            .with_size([1800.0, 1200.0])
+            .build_eframe(move |cc| {
+                crate::rules::seed_tax(&d);
+                FilerApp::new(&cc.egui_ctx, AppState::load(d, settings, true, pdfium))
+            });
+        settle(&mut h, "queue", |a| {
+            a.shared.intake.queue().len() == 3 && a.shared.clients.list().is_some()
+        });
+        h.get_by_label("Preview").click();
+        settle(&mut h, "plan", |a| plan_ready(a, 3));
+        h.step();
+        // Narrower than 1800 points: the pane opens with its switch.
+        assert!(h.state().preview.pane_for_test().is_none());
+        h.get_by_label("Preview pane").click();
+        h.step();
+        h.step();
+        // The pane starts on the first row; a click on a file name shows that file.
+        let first = h.state().preview.proposals()[0].file.path.clone();
+        assert_eq!(h.state().preview.pane_for_test().unwrap().0, first);
+        h.get_by_label("scan0002.pdf").click();
+        h.step();
+        h.step();
+        assert_eq!(
+            h.state().preview.pane_for_test().unwrap().0,
+            inbox.join("scan0002.pdf")
+        );
+        settle(&mut h, "page drawn", |a| {
+            a.preview.pane_for_test().is_some_and(|p| p.2)
+        });
+        // Two pages: Next shows the second.
+        settle(&mut h, "page count", |_| true);
+        for _ in 0..3 {
+            h.step();
+        }
+        h.get_by_label("Next page").click();
+        h.step();
+        settle(&mut h, "second page drawn", |a| {
+            a.preview.pane_for_test().is_some_and(|p| p.1 == 1 && p.2)
+        });
+
+        // Tick the two scans: one client for both.
+        tick(&mut h, "scan0001.pdf");
+        tick(&mut h, "scan0002.pdf");
+        h.get_by_label("Set client for ticked").click();
+        settle(&mut h, "picker open", |a| a.preview.picker_open());
+        h.step();
+        h.get_by_label("Search by name or ID").click();
+        h.step();
+        h.get_by_label("Search by name or ID").type_text("1004");
+        h.step();
+        h.step();
+        h.get_by_label("Baker Farms (1004)  ID match").click();
+        settle(&mut h, "bulk client", |a| {
+            ["scan0001.pdf", "scan0002.pdf"].iter().all(|n| {
+                a.preview
+                    .edits_for_test(&inbox.join(n))
+                    .and_then(|e| e.client_id.as_deref())
+                    == Some("1004")
+            })
+        });
+        assert!(
+            h.state()
+                .preview
+                .edits_for_test(&inbox.join(names[0]))
+                .is_none_or(|e| e.client_id.is_none()),
+            "the unticked row keeps its own client"
+        );
+
+        // One rule for both.
+        settle(&mut h, "plan after client", |a| a.preview.plan_idle());
+        let rule = h.state().shared.rules.active_rules()[1].clone();
+        h.get_by_label("Apply rule to ticked").click();
+        h.step();
+        h.step();
+        h.get_all_by_label(&rule.name).last().unwrap().click();
+        settle(&mut h, "bulk rule", |a| {
+            ["scan0001.pdf", "scan0002.pdf"].iter().all(|n| {
+                a.preview
+                    .edits_for_test(&inbox.join(n))
+                    .and_then(|e| e.rule_id.as_deref())
+                    == Some(rule.id.as_str())
+            })
+        });
+        settle(&mut h, "replanned", |a| {
+            a.preview.plan_idle()
+                && a.preview
+                    .proposals()
+                    .iter()
+                    .filter(|p| p.rule_id.as_deref() == Some(rule.id.as_str()))
+                    .count()
+                    >= 2
+        });
+        for _ in 0..3 {
+            h.step();
+        }
+        crate::app::snapshot(&mut h, "preview_pane_bulk");
+    }
 }
 
 #[cfg(test)]
@@ -2941,7 +3113,7 @@ mod r1c_tests {
         let d = data.clone();
         let mut h = HarnessBuilder::default()
             .with_theme(egui::Theme::Light)
-            .with_size([1200.0, 1000.0])
+            .with_size([1200.0, 1500.0])
             .build_eframe(move |cc| {
                 FilerApp::new(&cc.egui_ctx, AppState::load(d, settings, true, None))
             });
@@ -2958,6 +3130,10 @@ mod r1c_tests {
         h.get_by_label("+ Partner as tokens");
         h.get_by_label("{Partner}");
         h.get_by_label("TOKENS AVAILABLE");
+        // UltraTax card: default positions and the example; the K-1 position combo.
+        h.get_by_label("John Smith_2025_1040NR_Tax_Return_John Smith*_THOMREUT.PDF");
+        h.get_by_label("K1 Recipient Name");
+        h.get_by_label("Restore Default");
         crate::app::snapshot(&mut h, "setup_tab");
 
         // Template editing: select Payroll and rename it.
@@ -3100,6 +3276,39 @@ mod r2_tests {
         h.get_by_label("+1 copy");
         h.get_by_label("Commit 1 file + 1 copy");
         crate::app::snapshot(&mut h, "preview_copy_ready");
+    }
+
+    /// Without a client list the destination card still shows and says what is missing.
+    #[test]
+    fn import_tab_without_client_list_says_so() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data = tmp.path().join("data");
+        let root = tmp.path().join("root");
+        let inbox = tmp.path().join("inbox");
+        for d in [&data, &root, &inbox] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        crate::zipimport::tests::make_zip(&inbox.join("docs.zip"), &[("a.pdf", b"a")]);
+        let settings = Settings {
+            root: Some(root.clone()),
+            inboxes: vec![inbox.clone()],
+            ..Settings::default()
+        };
+        let d = data.clone();
+        let mut h = HarnessBuilder::default()
+            .with_theme(egui::Theme::Light)
+            .with_size([1300.0, 1000.0])
+            .build_eframe(move |cc| {
+                FilerApp::new(&cc.egui_ctx, AppState::load(d, settings, true, None))
+            });
+        settle(&mut h, "draft", |a| a.shared.intake.zips().len() == 1);
+        h.get_by_label("Import").click();
+        for _ in 0..5 {
+            h.step();
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        h.get_by_label("pre-scan ok");
+        h.get_by_label_contains("No client list yet");
     }
 
     /// P07b Unpack through the Import tab: a zip in the inbox becomes a draft; typing the client

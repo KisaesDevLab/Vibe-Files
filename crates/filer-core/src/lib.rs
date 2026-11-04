@@ -12,6 +12,7 @@
 
 pub mod clients;
 pub mod config;
+pub mod datafile;
 pub mod parse;
 pub mod relationships;
 pub mod rulebuild;

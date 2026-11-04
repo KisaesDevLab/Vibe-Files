@@ -11,7 +11,7 @@ use crate::app::AppState;
 use crate::clients::{self, Client, ClientList, CsvTable};
 use crate::config::Level;
 use crate::relationships::{self, ROLES, RelColumns, Relationship};
-use crate::ui::setup::banner;
+use crate::ui::theme::banner;
 use crate::ui::theme::{PillKind, label_caps, mono, pal, pill, primary_button, strong, thousands};
 use crate::ui::widgets::{PickerOutcome, client_picker, search_clients};
 use crate::worker;

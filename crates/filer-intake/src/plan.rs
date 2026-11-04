@@ -101,6 +101,8 @@ pub struct PlanInput {
     pub folders: Option<FoldersFile>,
     pub root: Option<PathBuf>,
     pub id_pattern: String,
+    /// UltraTax name layout (Setup).
+    pub ultratax: parse::UltraTaxLayout,
     /// Name matches at or above this are offered as a one-click suggestion.
     pub fuzzy_suggest: f32,
     /// Name matches at or above this resolve without a click.
@@ -226,7 +228,7 @@ pub struct CopyProposal {
     pub looked_for: Option<String>,
     pub folder: Option<FolderAction>,
     pub dest: Option<PathBuf>,
-    pub collision: bool,
+    /// A file is already at the destination: what it is.
     pub collision_with: Option<CollisionWith>,
     pub collision_choice: CollisionChoice,
     pub renamed: bool,
@@ -235,6 +237,18 @@ pub struct CopyProposal {
     /// `on_split: Whole` on a split piece: the unsplit original is copied, not the piece.
     pub whole_of: Option<PathBuf>,
     pub status: CopyStatus,
+}
+
+impl CopyProposal {
+    /// A file is already at the destination.
+    pub fn collides(&self) -> bool {
+        self.collision_with.is_some()
+    }
+
+    /// It collides and will replace the file that is there.
+    pub fn overwrites(&self) -> bool {
+        self.collides() && self.collision_choice == CollisionChoice::Overwrite
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -255,9 +269,8 @@ pub struct Proposal {
     /// Final full path of the file after filing.
     pub dest: Option<PathBuf>,
     pub dest_dir_exists: bool,
-    /// A file is already at the destination (on disk or earlier in this batch).
-    pub collision: bool,
-    /// What is already there (the hover on the Collision pill, V4).
+    /// A file is already at the destination (on disk or earlier in this batch): what it is (the
+    /// hover on the Collision pill, V4).
     pub collision_with: Option<CollisionWith>,
     pub collision_choice: CollisionChoice,
     /// Keep both gave the file a " (n)" name.
@@ -270,6 +283,18 @@ pub struct Proposal {
     pub next_year_dir: Option<PathBuf>,
     /// Notes about copies that were not made (e.g. "no related clients").
     pub copy_notes: Vec<String>,
+}
+
+impl Proposal {
+    /// A file is already at the destination.
+    pub fn collides(&self) -> bool {
+        self.collision_with.is_some()
+    }
+
+    /// It collides and will replace the file that is there.
+    pub fn overwrites(&self) -> bool {
+        self.collides() && self.collision_choice == CollisionChoice::Overwrite
+    }
 }
 
 /// What a destination collides with (V4).
@@ -320,16 +345,28 @@ pub fn build_plan(input: &PlanInput) -> PlanOutput {
     };
     let re = parse::filename_regex(&input.id_pattern);
     let compiled = CompiledRules::new(&input.rules);
-    let root_canon = input
-        .root
-        .as_ref()
-        .and_then(|r| std::fs::canonicalize(r).ok());
+    // Both checked once per build; each row reports the first problem.
+    let ready: Result<&CompiledRules, String> = match (&re, &compiled) {
+        (Err(e), _) => Err(format!("The client ID pattern is not valid: {e}")),
+        (_, Err(e)) => Err(format!("Fix the rules first: {e}")),
+        (_, Ok(c)) => Ok(c),
+    };
+    let build = Build {
+        input,
+        ready: ready.as_ref().map_err(String::as_str).copied(),
+        root_canon: input
+            .root
+            .as_ref()
+            .and_then(|r| std::fs::canonicalize(r).ok()),
+        fs: FsMemo::default(),
+    };
     // Final paths already taken by earlier rows, lowercased (Windows names are case-insensitive).
     let mut claimed: HashMap<String, PathBuf> = HashMap::new();
     // Ticked rows first (a stable sort keeps the queue order within each group); the
     // proposals still come out in queue order.
     let mut order: Vec<usize> = (0..input.files.len()).collect();
-    order.sort_by_key(|&i| !input.batch.ticked.contains(&input.files[i].path));
+    let ticked: HashSet<&PathBuf> = input.batch.ticked.iter().collect();
+    order.sort_by_key(|&i| !ticked.contains(&input.files[i].path));
     let mut planned: Vec<Option<Proposal>> = (0..input.files.len()).map(|_| None).collect();
 
     for i in order {
@@ -340,17 +377,14 @@ pub fn build_plan(input: &PlanInput) -> PlanOutput {
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
-        let parsed = match &re {
-            Ok(re) => parse::parse_filename(&name, re, input.current_year),
-            Err(_) => Parsed {
-                name: name.clone(),
-                id: None,
-                rest: name.clone(),
-                ext: String::new(),
-                year: None,
-                stem: name.clone(),
-            },
-        };
+        let parsed = read_name(
+            &name,
+            re.as_ref().ok(),
+            &input.ultratax,
+            input.current_year,
+            input.clients.as_deref(),
+            input.fuzzy_suggest,
+        );
         let mut p = Proposal {
             file: file.clone(),
             parsed,
@@ -365,7 +399,6 @@ pub fn build_plan(input: &PlanInput) -> PlanOutput {
             folder: None,
             dest: None,
             dest_dir_exists: false,
-            collision: false,
             collision_with: None,
             collision_choice: edits.collision.unwrap_or(input.batch.collision),
             renamed: false,
@@ -384,15 +417,7 @@ pub fn build_plan(input: &PlanInput) -> PlanOutput {
         } else {
             &mut claimed
         };
-        let status = plan_row(
-            input,
-            &compiled,
-            root_canon.as_deref(),
-            &edits,
-            &mut p,
-            claims,
-            &mut out,
-        );
+        let status = plan_row(&build, &edits, &mut p, claims, &mut out);
         p.status = if edits.skip {
             RowStatus::Skipped
         } else {
@@ -402,6 +427,27 @@ pub fn build_plan(input: &PlanInput) -> PlanOutput {
     }
     out.proposals = planned.into_iter().flatten().collect();
     out
+}
+
+/// Reads a file name with the UltraTax layout or `Name_ID_rest` (see [`parse::read_name`]): an
+/// ID counts when it is in `list`, a K-1 recipient when it names a client at least at `suggest`.
+/// Preview and the Rules test box both read names through this.
+pub fn read_name(
+    name: &str,
+    re: Option<&regex::Regex>,
+    layout: &parse::UltraTaxLayout,
+    current_year: i32,
+    list: Option<&ClientList>,
+    suggest: f32,
+) -> Parsed {
+    parse::read_name(
+        name,
+        re,
+        layout,
+        current_year,
+        |id| list.is_some_and(|l| l.match_by_id(id).is_some()),
+        |who| list.is_some_and(|l| l.any_name_at_least(who, f64::from(suggest))),
+    )
 }
 
 /// `b` exists with the same bytes as `a` (size first, then SHA-256).
@@ -415,22 +461,64 @@ fn same_bytes(a: &Path, b: &Path) -> bool {
     }
 }
 
+/// What every row of one build shares: the input, the checked rules, the root's real path, and
+/// a memo of disk lookups. Rows of one client share its folder, destination folder and source
+/// volume, and each lookup can be a network round trip; nothing on disk changes while planning.
+struct Build<'a> {
+    input: &'a PlanInput,
+    ready: Result<&'a CompiledRules, &'a str>,
+    root_canon: Option<PathBuf>,
+    fs: FsMemo,
+}
+
+/// Disk lookups of one build, each made once.
+#[derive(Default)]
+struct FsMemo {
+    exists: std::cell::RefCell<HashMap<PathBuf, bool>>,
+    is_dir: std::cell::RefCell<HashMap<PathBuf, bool>>,
+    /// A file's folder, canonicalized (where it really is, for the cross-drive check).
+    real_parent: std::cell::RefCell<HashMap<PathBuf, Option<PathBuf>>>,
+}
+
+impl FsMemo {
+    fn exists(&self, path: &Path) -> bool {
+        *self
+            .exists
+            .borrow_mut()
+            .entry(path.to_path_buf())
+            .or_insert_with(|| path.exists())
+    }
+
+    fn is_dir(&self, path: &Path) -> bool {
+        *self
+            .is_dir
+            .borrow_mut()
+            .entry(path.to_path_buf())
+            .or_insert_with(|| path.is_dir())
+    }
+
+    fn real_parent(&self, file: &Path) -> Option<PathBuf> {
+        let parent = file.parent()?;
+        self.real_parent
+            .borrow_mut()
+            .entry(parent.to_path_buf())
+            .or_insert_with(|| std::fs::canonicalize(parent).ok())
+            .clone()
+    }
+}
+
 /// Fills `p` and returns its status. Stops at the first thing that blocks the row.
 fn plan_row(
-    input: &PlanInput,
-    compiled: &Result<CompiledRules, String>,
-    root_canon: Option<&Path>,
+    b: &Build,
     edits: &RowEdits,
     p: &mut Proposal,
     claimed: &mut HashMap<String, PathBuf>,
     out: &mut PlanOutput,
 ) -> RowStatus {
-    if let Err(e) = parse::filename_regex(&input.id_pattern) {
-        return RowStatus::Error(format!("The client ID pattern is not valid: {e}"));
-    }
-    let compiled = match compiled {
+    let input = b.input;
+    let compiled = match b.ready {
         Ok(c) => c,
-        Err(e) => return RowStatus::Error(format!("Fix the rules first: {e}")),
+        Err(e) => return RowStatus::Error(e.to_string()),
     };
     if input.partial.contains(&p.file.path) {
         return RowStatus::Error(
@@ -465,10 +553,11 @@ fn plan_row(
         .rule_id
         .as_deref()
         .and_then(|id| input.rules.iter().find(|r| r.id == id));
+    let ut = p.parsed.ultratax.is_some();
     let rule: &Rule = if let Some(r) = override_rule {
         p.rule_source = RuleSource::Override;
         r
-    } else if let Some(r) = compiled.first_specific_match(&p.parsed.rest) {
+    } else if let Some(r) = compiled.first_specific_match(&p.parsed.rest, ut) {
         p.rule_source = RuleSource::Filename;
         r
     } else {
@@ -476,7 +565,7 @@ fn plan_row(
         let is_pdf = p.file.kind == crate::intake::Kind::Pdf;
         let from_text = if input.sniff_enabled && is_pdf {
             match input.sniff.get(&p.file.path) {
-                Some(PageText::Text(t)) => compiled.first_specific_match(t),
+                Some(PageText::Text(t)) => compiled.first_specific_match(t, ut),
                 Some(PageText::Failed(_)) => None,
                 Some(PageText::Pending) | None => {
                     out.needs_sniff.push(p.file.path.clone());
@@ -494,7 +583,7 @@ fn plan_row(
             }
             None => {
                 p.rule_source = RuleSource::CatchAll;
-                compiled.first_match(&p.parsed.rest)
+                compiled.first_match(&p.parsed.rest, ut)
             }
         }
     };
@@ -524,7 +613,14 @@ fn plan_row(
             }
             _ => HashMap::new(),
         };
-        let (mut copies, notes) = resolve_copies(input, list, rule, &client, edits, &captures);
+        let recipient = p
+            .parsed
+            .ultratax
+            .as_ref()
+            .map(|u| u.k1_recipient.as_str())
+            .filter(|r| !r.is_empty());
+        let (mut copies, notes) =
+            resolve_copies(input, list, rule, &client, edits, &captures, recipient);
         if let Some(original) = &edits.split_of {
             for c in copies.iter_mut().filter(|c| !c.added) {
                 if c.template.on_split == rules::OnSplit::Whole {
@@ -603,7 +699,7 @@ fn plan_row(
     };
 
     // Folder.
-    let folder = match find_folder(input, &client) {
+    let folder = match find_folder(b, &client) {
         Some(f) => f,
         None if input.rescan != Rescan::Done => {
             out.needs_rescan = true;
@@ -615,7 +711,7 @@ fn plan_row(
                 Err(e) => return RowStatus::Error(format!("Cannot name the client folder: {e}.")),
             };
             let path = root.join(&name);
-            if path.exists() {
+            if b.fs.exists(&path) {
                 return RowStatus::Error(format!(
                     "A folder named \"{name}\" already exists but isn't bound to this client. Bind it in Conflicts."
                 ));
@@ -659,15 +755,14 @@ fn plan_row(
         Ok(d) => d,
         Err(e) => return RowStatus::Error(format!("{e}.")),
     };
-    if same_file(&dest, &p.file.path) {
+    if b.fs.exists(&dest) && same_file(&dest, &p.file.path) {
         return RowStatus::Error("The file is already at its destination.".into());
     }
 
     // Collision.
     let key = |path: &Path| path.to_string_lossy().to_lowercase();
     let in_batch = claimed.get(&key(&dest)).cloned();
-    if in_batch.is_some() || dest.exists() {
-        p.collision = true;
+    if in_batch.is_some() || b.fs.exists(&dest) {
         p.collision_with = Some(collision_with(&dest, in_batch.clone()));
         // Two files of this batch on one name are always numbered, never overwritten.
         let choice = if in_batch.is_some() {
@@ -683,7 +778,7 @@ fn plan_row(
             }
             CollisionChoice::Overwrite => {}
             CollisionChoice::KeepBoth => {
-                dest = match free_name(&dest, |c| claimed.contains_key(&key(c)) || c.exists()) {
+                dest = match free_name(&dest, |c| claimed.contains_key(&key(c)) || b.fs.exists(c)) {
                     Ok(d) => d,
                     Err(e) => return RowStatus::Error(format!("{e}.")),
                 };
@@ -700,17 +795,17 @@ fn plan_row(
                 .ok()
                 .zip(p.folder.as_ref())
                 .map(|(r, f)| f.path().join(r.dest_rel))
-                .filter(|d| *d != dest_dir && !d.is_dir())
+                .filter(|d| *d != dest_dir && !b.fs.is_dir(d))
         }
         _ => None,
     };
-    p.dest_dir_exists = dest_dir.is_dir();
-    p.cross_drive = match (std::fs::canonicalize(&p.file.path).ok(), root_canon) {
+    p.dest_dir_exists = b.fs.is_dir(&dest_dir);
+    p.cross_drive = match (b.fs.real_parent(&p.file.path), &b.root_canon) {
         (Some(f), Some(r)) => !config::same_volume(&f, r),
         _ => !config::same_volume(&p.file.path, root),
     };
     p.dest = Some(dest);
-    plan_copy_paths(input, root, rule, &client, edits, p, claimed, out)
+    plan_copy_paths(b, root, rule, &client, edits, p, claimed, out)
 }
 
 /// The copy's client from the file name (RelatedByName): the primary client's related clients
@@ -788,6 +883,7 @@ fn resolve_copies(
     client: &Client,
     edits: &RowEdits,
     captures: &HashMap<String, String>,
+    recipient: Option<&str>,
 ) -> (Vec<CopyProposal>, Vec<String>) {
     let mut out: Vec<CopyProposal> = Vec::new();
     let mut notes: Vec<String> = Vec::new();
@@ -801,7 +897,6 @@ fn resolve_copies(
         looked_for: None,
         folder: None,
         dest: None,
-        collision: false,
         collision_with: None,
         collision_choice: CollisionChoice::default(),
         renamed: false,
@@ -812,9 +907,27 @@ fn resolve_copies(
     for (ci, cd) in rule.copies.iter().enumerate() {
         match &cd.resolver {
             Resolver::Related { roles } => {
-                let kids = input.relationships.children(&client.id, roles);
+                let mut kids = input.relationships.children(&client.id, roles);
                 if kids.is_empty() {
                     notes.push("no related clients".into());
+                }
+                // An UltraTax file for one K-1 recipient goes to that related client only (none
+                // when the recipient is not related: never to the other partners).
+                if let Some(who) = recipient
+                    && !kids.is_empty()
+                {
+                    let named = |id: &str| {
+                        list.match_by_id(id).is_some_and(|c| {
+                            crate::clients::name_score(who, &c.name)
+                                >= f64::from(input.fuzzy_suggest)
+                        })
+                    };
+                    kids.retain(|r| named(&r.child_id));
+                    if kids.is_empty() {
+                        notes.push(format!(
+                            "K-1 recipient \"{who}\" is not a related client, so no copy"
+                        ));
+                    }
                 }
                 for r in kids {
                     let key = format!("{ci}:{}", r.child_id);
@@ -929,7 +1042,7 @@ fn resolve_copies(
 /// Folders, paths and collisions for the row's resolved copies; the row's status from them.
 #[allow(clippy::too_many_arguments)]
 fn plan_copy_paths(
-    input: &PlanInput,
+    b: &Build,
     root: &Path,
     rule: &Rule,
     client: &Client,
@@ -938,6 +1051,7 @@ fn plan_copy_paths(
     claimed: &mut HashMap<String, PathBuf>,
     out: &mut PlanOutput,
 ) -> RowStatus {
+    let input = b.input;
     let key = |path: &Path| path.to_string_lossy().to_lowercase();
     for c in &mut p.copies {
         let Some(cc) = c.client.clone() else { continue };
@@ -957,7 +1071,7 @@ fn plan_copy_paths(
                 continue;
             }
         };
-        let folder = match find_folder(input, &cc) {
+        let folder = match find_folder(b, &cc) {
             Some(f) => f,
             None if input.rescan != Rescan::Done => {
                 out.needs_rescan = true;
@@ -965,7 +1079,7 @@ fn plan_copy_paths(
                 continue;
             }
             None => match template::client_folder_name(&input.template, &cc) {
-                Ok(name) if root.join(&name).exists() => {
+                Ok(name) if b.fs.exists(&root.join(&name)) => {
                     c.status = CopyStatus::Error(format!(
                         "A folder named \"{name}\" already exists but isn't bound to {}. Bind it in Conflicts.",
                         cc.name
@@ -1009,8 +1123,7 @@ fn plan_copy_paths(
             continue;
         }
         let in_batch = claimed.get(&key(&dest)).cloned();
-        if in_batch.is_some() || dest.exists() {
-            c.collision = true;
+        if in_batch.is_some() || b.fs.exists(&dest) {
             c.collision_with = Some(collision_with(&dest, in_batch.clone()));
             if in_batch.is_some() {
                 c.collision_choice = CollisionChoice::KeepBoth;
@@ -1023,13 +1136,15 @@ fn plan_copy_paths(
                 }
                 CollisionChoice::Overwrite => {}
                 CollisionChoice::KeepBoth => {
-                    dest = match free_name(&dest, |x| claimed.contains_key(&key(x)) || x.exists()) {
-                        Ok(d) => d,
-                        Err(e) => {
-                            c.status = CopyStatus::Error(format!("{e}."));
-                            continue;
-                        }
-                    };
+                    dest =
+                        match free_name(&dest, |x| claimed.contains_key(&key(x)) || b.fs.exists(x))
+                        {
+                            Ok(d) => d,
+                            Err(e) => {
+                                c.status = CopyStatus::Error(format!("{e}."));
+                                continue;
+                            }
+                        };
                     c.renamed = true;
                 }
             }
@@ -1060,7 +1175,6 @@ fn plan_copy_paths(
     RowStatus::Ready
 }
 
-/// The client's bound folder, or an ID-named folder to bind. `None` if neither is known.
 /// A folder typed or picked below the client folder: relative, no `..`, each part a name
 /// Windows can hold (V6).
 pub fn checked_rel(rel: &Path) -> Result<PathBuf, String> {
@@ -1082,8 +1196,9 @@ pub fn checked_rel(rel: &Path) -> Result<PathBuf, String> {
     Ok(out)
 }
 
-fn find_folder(input: &PlanInput, client: &Client) -> Option<FolderAction> {
-    let scan = input.folders.as_ref()?;
+/// The client's bound folder, or an ID-named folder to bind. `None` if neither is known.
+fn find_folder(build: &Build, client: &Client) -> Option<FolderAction> {
+    let scan = build.input.folders.as_ref()?;
     let mine =
         |b: &&crate::sentinel::FolderBinding| b.client_id.as_deref() == Some(client.id.as_str());
     if let Some(b) = scan
@@ -1093,15 +1208,15 @@ fn find_folder(input: &PlanInput, client: &Client) -> Option<FolderAction> {
         .find(|b| b.status == FolderStatus::Bound)
     {
         // A bound folder that has since vanished counts as unknown (triggers a rescan).
-        return b
-            .path
-            .is_dir()
+        return build
+            .fs
+            .is_dir(&b.path)
             .then(|| FolderAction::Exists(b.path.clone()));
     }
     scan.folders
         .iter()
         .filter(mine)
-        .find(|b| b.status == FolderStatus::UnboundNamed && b.path.is_dir())
+        .find(|b| b.status == FolderStatus::UnboundNamed && build.fs.is_dir(&b.path))
         .map(|b| FolderAction::WillBind(b.path.clone()))
 }
 
@@ -1199,7 +1314,7 @@ pub fn summarize<'a>(proposals: impl IntoIterator<Item = &'a Proposal>) -> Summa
         {
             subdirs.insert(d.to_path_buf());
         }
-        if p.collision && p.collision_choice == CollisionChoice::Overwrite {
+        if p.overwrites() {
             s.overwrites += 1;
         }
         if p.renamed {
@@ -1216,7 +1331,7 @@ pub fn summarize<'a>(proposals: impl IntoIterator<Item = &'a Proposal>) -> Summa
                 }
                 _ => {}
             }
-            if c.collision && c.collision_choice == CollisionChoice::Overwrite {
+            if c.overwrites() {
                 s.overwrites += 1;
             }
             if c.renamed {
@@ -1306,6 +1421,7 @@ mod tests {
             }),
             root: Some(f.root.clone()),
             id_pattern: parse::DEFAULT_ID_PATTERN.into(),
+            ultratax: Default::default(),
             fuzzy_suggest: 0.85,
             fuzzy_auto: 0.97,
             current_year: 2026,
@@ -1341,6 +1457,23 @@ mod tests {
             .iter()
             .find(|p| p.file.path.file_name().unwrap() == name)
             .unwrap()
+    }
+
+    /// One build looks each path up once: a later change on disk is seen by the next build.
+    #[test]
+    fn disk_lookups_are_made_once_per_build() {
+        let tmp = tempfile::tempdir().unwrap();
+        let f = tmp.path().join("a.pdf");
+        let memo = FsMemo::default();
+        assert!(!memo.exists(&f));
+        std::fs::write(&f, b"x").unwrap();
+        assert!(!memo.exists(&f), "remembered for this build");
+        assert!(FsMemo::default().exists(&f));
+        assert!(memo.is_dir(tmp.path()));
+        assert_eq!(
+            memo.real_parent(&f),
+            Some(std::fs::canonicalize(tmp.path()).unwrap())
+        );
     }
 
     #[test]
@@ -1483,6 +1616,115 @@ mod tests {
         ));
         let c = &copy_of(&out, related)[0];
         assert!(c.client.is_none() && c.suggestion.is_some());
+    }
+
+    /// UltraTax-named PDFs and `Name_ID_rest` names in one queue, Firm rules: the UltraTax return
+    /// is named from its parts, the UltraTax K-1 with a recipient makes a copy for that partner,
+    /// and the standard name is read as before.
+    #[test]
+    fn ultratax_and_standard_names_in_one_queue() {
+        let f = fixture();
+        let ret = "Riverbend Holdings LP_2025_1065_Tax_Return_4472.pdf";
+        let k1 = "Riverbend Holdings LP_2025_1065_K1_Thomas Baker_4472.pdf";
+        let unknown = "New Client_2025_1040_Tax_Return_ZZTOP1.pdf";
+        let std_name = "Entity Co_1234_2025 Tax Returns.pdf";
+        let mut inp = copy_input(
+            &f,
+            &[ret, k1, unknown, std_name],
+            &[("4472", "2093", "partner")],
+        );
+        inp.rules = rules::firm_rules();
+        inp.batch.year = None;
+        let out = build_plan(&inp);
+
+        let r = row(&out, ret);
+        let u = r.parsed.ultratax.as_ref().unwrap();
+        assert_eq!(
+            (u.entity_type.as_str(), u.document.as_str()),
+            ("1065", "Tax Return")
+        );
+        assert!(u.k1_recipient.is_empty());
+        assert_eq!(r.client_match, ClientMatch::Exact);
+        assert_eq!(r.rule_name, rules::ULTRATAX_RULE_NAME);
+        assert_eq!(r.status, RowStatus::Ready, "{:?}", r.status);
+        assert!(
+            r.dest.as_ref().unwrap().ends_with(
+                Path::new("Income Tax")
+                    .join("2025")
+                    .join("2025 1065 Tax Return - Riverbend Holdings LP.pdf")
+            )
+        );
+
+        // "Thomas Baker" names a client (Baker, Thomas): the recipient, and the K-1 rule copies
+        // to him.
+        let r = row(&out, k1);
+        assert_eq!(
+            r.parsed.ultratax.as_ref().unwrap().k1_recipient,
+            "Thomas Baker"
+        );
+        assert_eq!(r.parsed.rest, "1065 K1 Thomas Baker");
+        assert_eq!(r.rule_name, "K-1");
+        assert_eq!(r.copies[0].client.as_ref().unwrap().id, "2093");
+
+        // A K-1 package for one recipient copies only to that partner; without a recipient it
+        // goes to every related partner.
+        let mut inp2 = copy_input(
+            &f,
+            &[
+                "Riverbend Holdings LP_2025_1065_K1_Package_Thomas Baker_4472.pdf",
+                "Riverbend Holdings LP_2025_1065_K1_Package_4472.pdf",
+                "Riverbend Holdings LP_2025_1065_K1_Package_Mark Hendricks_4472.pdf",
+            ],
+            &[("4472", "2093", "partner"), ("4472", "4471", "partner")],
+        );
+        inp2.rules = rules::firm_rules();
+        let out2 = build_plan(&inp2);
+        let ids = |name: &str| -> Vec<String> {
+            row(&out2, name)
+                .copies
+                .iter()
+                .map(|c| c.client.as_ref().unwrap().id.clone())
+                .collect()
+        };
+        let one = "Riverbend Holdings LP_2025_1065_K1_Package_Thomas Baker_4472.pdf";
+        assert_eq!(row(&out2, one).rule_name, "UltraTax K-1 package");
+        assert!(
+            row(&out2, one)
+                .dest
+                .as_ref()
+                .unwrap()
+                .ends_with("2025 K-1 Package - Thomas Baker.pdf")
+        );
+        assert_eq!(ids(one), ["2093"]);
+        assert_eq!(
+            ids("Riverbend Holdings LP_2025_1065_K1_Package_4472.pdf"),
+            ["2093", "4471"]
+        );
+        // Hendricks is a client but not related: no copy at all.
+        let other = "Riverbend Holdings LP_2025_1065_K1_Package_Mark Hendricks_4472.pdf";
+        assert!(ids(other).is_empty());
+        assert!(
+            row(&out2, other)
+                .copy_notes
+                .iter()
+                .any(|n| n.contains("not a related client"))
+        );
+
+        // An UltraTax name whose ID is not in the list is still read as UltraTax (not as ID 2025).
+        let r = row(&out, unknown);
+        assert_eq!(r.parsed.id.as_deref(), Some("ZZTOP1"));
+        assert_eq!(r.status, RowStatus::NeedsClient);
+
+        let r = row(&out, std_name);
+        assert!(r.parsed.ultratax.is_none());
+        assert_eq!(r.parsed.id.as_deref(), Some("1234"));
+        assert_eq!(r.rule_name, "Tax Returns");
+
+        // Layout off: the UltraTax return is read as Name_ID_rest (ID 2025, no such client).
+        inp.ultratax.enabled = false;
+        let out = build_plan(&inp);
+        assert!(row(&out, ret).parsed.ultratax.is_none());
+        assert_eq!(row(&out, ret).parsed.id.as_deref(), Some("2025"));
     }
 
     #[test]
@@ -1751,7 +1993,7 @@ mod tests {
         assert!(
             out.proposals
                 .iter()
-                .all(|p| p.collision && p.renamed && p.dest_dir_exists)
+                .all(|p| p.collides() && p.renamed && p.dest_dir_exists)
         );
 
         // Overwrite as batch default: the first overwrites, later ones in the batch are numbered.
@@ -1840,7 +2082,7 @@ mod tests {
         bind(&f, &mut inp, "Acme (1002)", "1002", FolderStatus::Bound);
         let out = build_plan(&inp);
         let (a, b) = (&out.proposals[0], &out.proposals[1]);
-        assert!(!a.collision);
+        assert!(!a.collides());
         match &b.collision_with {
             Some(CollisionWith::Batch { row, path }) => {
                 assert_eq!(row, &a.file.path);
@@ -1892,7 +2134,7 @@ mod tests {
             "queue order kept"
         );
         assert_eq!(file(&out, 1), "2025 Tax Return - Acme LLC.pdf");
-        assert!(!out.proposals[1].collision);
+        assert!(!out.proposals[1].collides());
         assert_eq!(file(&out, 0), "2025 Tax Return - Acme LLC (2).pdf");
     }
 

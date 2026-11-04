@@ -8,7 +8,7 @@ use egui::{Align, CornerRadius, Frame, Layout, Margin, RichText, Stroke};
 use crate::app::AppState;
 use crate::clients::{Client, ClientList};
 use crate::sentinel::{FolderBinding, Status};
-use crate::ui::setup::banner;
+use crate::ui::theme::banner;
 use crate::ui::theme::{self, PillKind, label_caps, mono, pal, pill, primary_button, strong};
 use crate::ui::widgets::{PickerOutcome, client_picker};
 
@@ -24,7 +24,15 @@ pub struct ConflictsScreen {
     rename: Option<Vec<RenameRow>>,
     rename_job: Option<std::sync::mpsc::Receiver<crate::sentinel::RenameReport>>,
     message: Option<(crate::config::Level, String)>,
+    /// Name matches per fuzzy folder, for one scan and client list (a search over every client
+    /// is too slow to repeat each frame).
+    fuzzy_cache: (Option<(chrono::DateTime<chrono::Utc>, usize)>, FuzzyOptions),
+    /// Setup's ID pattern and its folder-name regex (the scan's), to search from a folder's
+    /// name without its ID.
+    id_re: Option<(String, regex::Regex)>,
 }
+
+type FuzzyOptions = std::collections::HashMap<PathBuf, Vec<(f64, Client)>>;
 
 /// One bound folder whose name differs from the template's client-folder name (V9).
 struct RenameRow {
@@ -87,7 +95,22 @@ impl ConflictsScreen {
         tiles_ui(ui, &scan.folders);
         ui.add_space(10.0);
 
+        let pattern = &state.settings.id_pattern;
+        if self.id_re.as_ref().is_none_or(|(p, _)| p != pattern) {
+            self.id_re = crate::sentinel::id_regex(pattern)
+                .ok()
+                .map(|re| (pattern.clone(), re));
+        }
         let clients = state.clients.list().cloned();
+        let key = Some((
+            scan.scanned_at,
+            clients
+                .as_ref()
+                .map_or(0, |c| std::sync::Arc::as_ptr(c) as usize),
+        ));
+        if self.fuzzy_cache.0 != key {
+            self.fuzzy_cache = (key, Default::default());
+        }
         let busy = state.folders.binding_in_progress();
         // Relationships per client ID: an orphan's are dangling too (UI_SPEC §12).
         let mut rel_counts: std::collections::HashMap<String, usize> = Default::default();
@@ -151,7 +174,7 @@ impl ConflictsScreen {
         else {
             return Vec::new();
         };
-        let bound: Vec<&str> = scan
+        let bound: std::collections::HashSet<&str> = scan
             .folders
             .iter()
             .filter(|b| b.status == Status::Bound)
@@ -166,15 +189,18 @@ impl ConflictsScreen {
             })
             .filter_map(|b| {
                 let id = b.client_id.as_deref()?;
-                if bound.contains(&id) {
+                if bound.contains(id) {
                     return None;
                 }
                 Some((b.path.clone(), list.match_by_id(id)?.clone()))
             })
             .collect();
         // A client two folders point at is left for the user.
-        let ids: Vec<String> = out.iter().map(|(_, c)| c.id.clone()).collect();
-        out.retain(|(_, c)| ids.iter().filter(|i| **i == c.id).count() == 1);
+        let mut per_client: std::collections::HashMap<String, usize> = Default::default();
+        for (_, c) in &out {
+            *per_client.entry(c.id.clone()).or_default() += 1;
+        }
+        out.retain(|(_, c)| per_client[&c.id] == 1);
         out
     }
 
@@ -566,7 +592,13 @@ impl ConflictsScreen {
                 }
                 Status::UnboundFuzzy => {
                     let Some(list) = clients else { return };
-                    let options = fuzzy_options(list, b);
+                    let query = self.search_name(b);
+                    let options = self
+                        .fuzzy_cache
+                        .1
+                        .entry(b.path.clone())
+                        .or_insert_with(|| fuzzy_options(list, b, &query))
+                        .clone();
                     let chosen = self
                         .fuzzy_choice
                         .get(&b.path)
@@ -604,6 +636,15 @@ impl ConflictsScreen {
                 }
                 _ => {}
             },
+        }
+    }
+
+    /// A folder's name without its client ID, to start a client search from.
+    fn search_name(&self, b: &FolderBinding) -> String {
+        let name = b.name();
+        match &self.id_re {
+            Some((_, re)) => crate::sentinel::name_without_id(re, &name),
+            None => name,
         }
     }
 
@@ -648,7 +689,7 @@ impl ConflictsScreen {
                 }
             }
             Row::Single(b) => {
-                let query = strip_id_suffix(&b.name());
+                let query = self.search_name(b);
                 match b.status {
                     Status::UnboundNamed => {
                         if let Some(c) = b.client_id.as_deref().and_then(client)
@@ -941,10 +982,13 @@ fn folder_note(
     }
 }
 
-/// Best name matches for a fuzzy folder, the scan's candidate first.
-fn fuzzy_options<'a>(list: &'a ClientList, b: &FolderBinding) -> Vec<(f64, &'a Client)> {
-    let query = strip_id_suffix(&b.name());
-    let mut out = list.fuzzy_by_name(&query, 5);
+/// Best name matches for a fuzzy folder (searched by `query`), the scan's candidate first.
+fn fuzzy_options(list: &ClientList, b: &FolderBinding, query: &str) -> Vec<(f64, Client)> {
+    let mut out: Vec<(f64, Client)> = list
+        .fuzzy_by_name(query, 5)
+        .into_iter()
+        .map(|(s, c)| (s, c.clone()))
+        .collect();
     if let Some(id) = &b.client_id
         && let Some(pos) = out.iter().position(|(_, c)| &c.id == id)
     {
@@ -952,34 +996,4 @@ fn fuzzy_options<'a>(list: &'a ClientList, b: &FolderBinding) -> Vec<(f64, &'a C
         out.insert(0, first);
     }
     out
-}
-
-/// Folder name without a trailing `(1234)` / `_1234`, as a starting search.
-fn strip_id_suffix(name: &str) -> String {
-    let trimmed = name.trim_end();
-    if let Some(open) = trimmed.rfind('(')
-        && trimmed.ends_with(')')
-    {
-        return trimmed[..open].trim_end().to_string();
-    }
-    if let Some(us) = trimmed.rfind('_')
-        && trimmed[us + 1..].chars().all(|c| c.is_ascii_digit())
-        && us + 1 < trimmed.len()
-    {
-        return trimmed[..us].to_string();
-    }
-    trimmed.to_string()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::strip_id_suffix;
-
-    #[test]
-    fn search_starts_from_folder_name() {
-        assert_eq!(strip_id_suffix("Smith, John (1234)"), "Smith, John");
-        assert_eq!(strip_id_suffix("Acme_1002"), "Acme");
-        assert_eq!(strip_id_suffix("Random Stuff"), "Random Stuff");
-        assert_eq!(strip_id_suffix("Under_score"), "Under_score");
-    }
 }

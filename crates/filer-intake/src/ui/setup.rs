@@ -12,7 +12,7 @@ use crate::config::{self, FUZZY_THRESHOLD_RANGE, Issue, Level, Settings, ThemeCh
 use crate::sentinel::Status;
 use crate::template::{self, BUILTIN_TOKENS, TemplateNode};
 use crate::ui::csv_wizard::{CsvWizard, Outcome};
-use crate::ui::theme::{self, PillKind, label_caps, mono, pal, pill, strong, token_pill};
+use crate::ui::theme::{self, PillKind, banner, label_caps, mono, pal, pill, strong, token_pill};
 use crate::worker;
 
 type PathKey = (Option<PathBuf>, Vec<PathBuf>);
@@ -167,6 +167,8 @@ impl SetupScreen {
                     });
                 });
                 ui.add_space(6.0);
+                setup_card(ui, |ui| self.ultratax_card(ui));
+                ui.add_space(6.0);
                 setup_card(ui, |ui| self.template_card(ui));
                 ui.add_space(6.0);
                 setup_card(ui, |ui| display_card(ui, state));
@@ -296,6 +298,11 @@ impl SetupScreen {
         if let Some(i) = remove {
             self.draft.inboxes.remove(i);
         }
+        ui.checkbox(&mut self.draft.inbox_subfolders, "Include sub-folders")
+            .on_hover_text(
+                "On: files in folders inside an inbox are queued too. Off: only files directly \
+                 in the inbox.",
+            );
         ui.horizontal(|ui| {
             if ui.button("Add inbox…").clicked()
                 && let Some(p) = pick_folder(None)
@@ -419,6 +426,83 @@ impl SetupScreen {
                 }
             }
         }
+    }
+
+    /// UltraTax PDF names: the same position settings as UltraTax's "File Name Variables".
+    fn ultratax_card(&mut self, ui: &mut egui::Ui) {
+        use crate::parse::{K1Position, UltraTaxLayout, UtField};
+        card_title(
+            ui,
+            "UltraTax file names",
+            " · tried before ClientName_ID_rest · set like UltraTax's File Name Variables",
+        );
+        let p = pal(ui);
+        let layout = &mut self.draft.ultratax;
+        ui.checkbox(&mut layout.enabled, "Read UltraTax file names");
+        if !layout.enabled {
+            return;
+        }
+        ui.add_space(4.0);
+        let pos_text = |v: Option<u8>| v.map_or("None".to_string(), |n| format!("Position {n}"));
+        egui::Grid::new("setup_ultratax")
+            .num_columns(2)
+            .spacing([16.0, 6.0])
+            .show(ui, |ui| {
+                for f in UtField::ALL {
+                    let l = ui.label(f.label());
+                    let slot = layout.position_mut(f);
+                    egui::ComboBox::from_id_salt(("ut_pos", f.label()))
+                        .selected_text(pos_text(*slot))
+                        .width(160.0)
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(slot, None, "None");
+                            for n in 1..=UtField::ALL.len() as u8 {
+                                ui.selectable_value(slot, Some(n), format!("Position {n}"));
+                            }
+                        })
+                        .response
+                        .labelled_by(l.id);
+                    ui.end_row();
+                }
+                let l = ui.label("K1 Recipient Name");
+                egui::ComboBox::from_id_salt("ut_k1")
+                    .selected_text(layout.k1.label())
+                    .width(160.0)
+                    .show_ui(ui, |ui| {
+                        for k in K1Position::ALL {
+                            ui.selectable_value(&mut layout.k1, k, k.label());
+                        }
+                    })
+                    .response
+                    .labelled_by(l.id);
+                ui.end_row();
+            });
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            label_caps(ui, "Example");
+            match layout.validate() {
+                Ok(()) => {
+                    ui.label(mono(layout.example()).color(p.text));
+                }
+                Err(e) => {
+                    ui.label(RichText::new(e).color(p.pill(PillKind::Err).1));
+                }
+            }
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if ui.button("Restore Default").clicked() {
+                    *layout = UltraTaxLayout::default();
+                }
+            });
+        });
+        ui.label(
+            RichText::new(
+                "The parts become tokens for rule file names: {EntityType}, {Document}, \
+                 {K1Recipient}, {YearEnd}, {DatePrinted} (plus {Client}, {ID}, {Year}). The \
+                 client ID is looked up in the client list as written.",
+            )
+            .size(11.0)
+            .color(p.muted),
+        );
     }
 
     fn parsing_card(&mut self, ui: &mut egui::Ui) {
@@ -1133,24 +1217,6 @@ fn pick_folder(start: Option<&Path>) -> Option<PathBuf> {
         dialog = dialog.set_directory(dir);
     }
     dialog.pick_folder()
-}
-
-/// A full-width message: error in the err pill colours, info in the info pill colours.
-pub fn banner(ui: &mut egui::Ui, level: Level, text: &str) {
-    let kind = match level {
-        Level::Error => PillKind::Err,
-        Level::Info => PillKind::Info,
-    };
-    let (bg, fg) = pal(ui).pill(kind);
-    Frame::new()
-        .fill(bg)
-        .inner_margin(Margin::symmetric(12, 8))
-        .corner_radius(CornerRadius::same(4))
-        .show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            ui.label(RichText::new(text).color(fg));
-        });
-    ui.add_space(4.0);
 }
 
 /// Amber border around a field that needs attention (UI_SPEC §1).

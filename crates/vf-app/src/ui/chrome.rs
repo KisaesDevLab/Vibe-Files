@@ -13,6 +13,7 @@ pub fn header(
     text_size: &mut u16,
     dark: &mut bool,
     help: &mut bool,
+    tip: &mut bool,
 ) {
     egui::Panel::top("vf-header")
         .exact_size(44.0)
@@ -46,6 +47,15 @@ pub fn header(
                             .fill(egui::Color32::from_rgb(0x2A, 0x30, 0x37))
                             .stroke(Stroke::new(1.0, theme::ON_DARK_MUTED))
                     };
+                    // The owner's Ko-fi page (owner 2026-11-04).
+                    if ui
+                        .add(header_button(white("Tip VibeMyFirm")))
+                        .on_hover_text("Support VibeMyFirm on Ko-fi (opens your browser)")
+                        .clicked()
+                    {
+                        *tip = true;
+                    }
+                    ui.add_space(8.0);
                     // Help (PA-25): the article about the tab shown; F1 too.
                     if ui
                         .add(header_button(white("Help")))

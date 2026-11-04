@@ -7,6 +7,7 @@ The parts of the window that stay the same on every tab: the header, the tab bar
 The dark strip across the top shows **Vibe Files** and the name of the open cabinet (or **No cabinet open**). On the right:
 
 - **Help** — opens this Help. The F1 key does the same.
+- **Tip VibeMyFirm** — opens VibeMyFirm's Ko-fi page in your browser, if you'd like to support the work.
 - **Text size** with **A-** and **A+** — makes all text and controls smaller or larger. The current size shows between them as a percentage, such as `110%`. Ctrl and + or Ctrl and - do the same from the keyboard.
 - **Light** / **Dark** — switches the color theme. The button names the theme you switch to: in the dark theme it reads **Light**.
 

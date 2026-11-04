@@ -1,7 +1,7 @@
 [package]
 name = "filer-core"
 # Upstream version kept so the vendored About/footer text is unchanged. See VENDORED.md.
-version = "0.2.4"
+version = "0.2.6"
 edition.workspace = true
 publish.workspace = true
 license.workspace = true

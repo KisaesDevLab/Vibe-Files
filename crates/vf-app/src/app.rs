@@ -153,6 +153,8 @@ pub struct VibeFilesApp {
     pub help: crate::ui::help::HelpState,
     /// The window is closing after the Viewer's question was answered (not asked again).
     closing: bool,
+    /// "Tip VibeMyFirm" was pressed (tests).
+    tip_clicked: bool,
 }
 
 /// Asks GitHub for the latest release, once per start, on a thread (never in tests: no network).
@@ -222,6 +224,7 @@ impl VibeFilesApp {
             zoom_applied: false,
             help: Default::default(),
             closing: false,
+            tip_clicked: false,
         };
         // Tests drive the wizard themselves; `open_last` has its own test.
         if !cfg!(test) {
@@ -486,7 +489,24 @@ impl eframe::App for VibeFilesApp {
         crate::ui::theme::set_dark(dark);
         let shown = dark;
         let mut help = ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::F1));
-        chrome::header(ui, name.as_deref(), &mut size, &mut dark, &mut help);
+        let mut tip = false;
+        chrome::header(
+            ui,
+            name.as_deref(),
+            &mut size,
+            &mut dark,
+            &mut help,
+            &mut tip,
+        );
+        if tip {
+            self.tip_clicked = true;
+            // Tests never start a browser.
+            if !cfg!(test)
+                && let Err(e) = crate::shell::open_url(crate::shell::TIP_URL)
+            {
+                tracing::info!(error = %e, "tip page not opened");
+            }
+        }
         if help {
             let tab = matches!(self.screen, Screen::Open(_)).then_some(self.tab);
             self.help.open_at(crate::help::for_tab(tab));
@@ -1676,6 +1696,12 @@ mod tests {
         h.run_steps(2);
         assert_eq!(h.state().help.current, Some("browse"));
 
+        // The tip button (owner 2026-11-04): pressed, the Ko-fi page is opened (not in tests).
+        click(&mut h, "Tip VibeMyFirm");
+        assert!(h.state().tip_clicked);
+        assert_eq!(crate::shell::TIP_URL, "https://ko-fi.com/vibemyfirm");
+        assert!(crate::shell::open_url("file:///C:/x.exe").is_err());
+
         // On another tab, the Help button opens that tab's article.
         h.state_mut().help.open = false;
         click(&mut h, "Viewer");
@@ -2541,9 +2567,10 @@ mod tests {
         assert_eq!(t[0], "Alpha one");
         assert!(t[1].trim().is_empty(), "the blank page: {t:?}");
 
-        // Browse: select a.pdf and b.pdf, Combine.
+        // Browse: select a.pdf and b.pdf, Combine (the preview renders in the background:
+        // fixed steps, not run()).
         click(&mut h, "Browse");
-        h.run();
+        h.run_steps(8);
         if let Screen::Open(o) = &mut h.state_mut().screen {
             let b = &mut o.browse;
             let pick: Vec<usize> = b

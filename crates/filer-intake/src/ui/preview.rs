@@ -1,6 +1,8 @@
 //! Preview tab (UI_SPEC §3): the batch plan (one row per queued PDF) with client, rule, year,
 //! destination and status; per-row fixes (right-click a file for Skip / Split… / Change client);
 //! batch year, collision default and keep-original switch; the Commit modal (UI_SPEC §4).
+//! A side pane shows the pages of the row last clicked, and ticked rows can be given one client
+//! or one rule at once (owner 2026-11-04).
 
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
@@ -24,11 +26,18 @@ use crate::plan::{
     CopyStatus, FolderAction, PlanInput, PlanOutput, Proposal, Rescan, RowEdits, RowStatus,
     RuleSource,
 };
-use crate::ui::setup::banner;
+use crate::ui::peek::{self, PagePane};
 use crate::ui::split::{PieceSpec, SplitContext, SplitDialog, SplitOutcome};
-use crate::ui::theme::{self, PillKind, label_caps, mono, pal, pill, primary_button, strong};
+use crate::ui::theme::{
+    self, PillKind, banner, file_name, human_size, label_caps, mono, pal, pill, plural,
+    primary_button, strong,
+};
 use crate::ui::widgets::{PickerOutcome, client_picker};
 use crate::worker;
+
+/// The side pane opens by itself in a window at least this wide, so the table keeps the room its
+/// columns need; narrower, "Preview pane" opens it.
+const PANE_AUTO_WIDTH: f32 = 1800.0;
 
 /// (file, page count or `None` when unreadable).
 type PageCounts = Vec<(PathBuf, (u64, Option<usize>))>;
@@ -75,6 +84,14 @@ pub struct PreviewScreen {
     /// The row under the mouse pointer (Del skips it).
     hovered: Option<PathBuf>,
     message: Option<(Level, String)>,
+    /// The row whose pages the side pane shows (the file name last clicked; the first row
+    /// until then).
+    focused: Option<PathBuf>,
+    /// The side pane is shown (this frame).
+    pane_open: bool,
+    /// Turned on or off with "Preview pane"; until then it is open when the window has room.
+    pane_choice: Option<bool>,
+    pane: Option<PagePane>,
 }
 
 /// A combined PDF and the queued files it was made from.
@@ -129,6 +146,8 @@ enum PickFor {
     Copy(String),
     /// A new copy ("+ Copy to…").
     NewCopy,
+    /// Every ticked row.
+    Ticked,
 }
 
 /// A commit running on a worker thread.
@@ -168,6 +187,10 @@ impl Default for PreviewScreen {
             page_counts: HashMap::new(),
             page_job: None,
             message: None,
+            focused: None,
+            pane_open: false,
+            pane_choice: None,
+            pane: None,
         }
     }
 }
@@ -191,6 +214,18 @@ impl PreviewScreen {
     /// A commit is filing right now.
     pub fn committing(&self) -> bool {
         self.commit_job.is_some()
+    }
+
+    #[cfg(test)]
+    pub fn edits_for_test(&self, path: &Path) -> Option<&RowEdits> {
+        self.edits.get(path)
+    }
+
+    #[cfg(test)]
+    pub fn pane_for_test(&self) -> Option<(&Path, usize, bool)> {
+        self.pane
+            .as_ref()
+            .map(|p| (p.path(), p.page(), p.has_image()))
     }
 
     #[cfg(test)]
@@ -314,7 +349,12 @@ impl PreviewScreen {
         let Some(paths) = &self.batch_files else {
             return Vec::new();
         };
-        let queue = state.intake.queue();
+        let queue: std::collections::HashMap<&Path, &QueuedFile> = state
+            .intake
+            .queue()
+            .iter()
+            .map(|q| (q.path.as_path(), q))
+            .collect();
         let mut out = Vec::new();
         for p in paths {
             if let Some(g) = self
@@ -345,8 +385,8 @@ impl PreviewScreen {
                 }
                 continue;
             }
-            if let Some(q) = queue.iter().find(|q| &q.path == p) {
-                out.push(q.clone());
+            if let Some(q) = queue.get(p.as_path()) {
+                out.push((*q).clone());
             }
         }
         out
@@ -419,8 +459,9 @@ impl PreviewScreen {
         let mut h = DefaultHasher::new();
         for f in files {
             f.path.hash(&mut h);
-            state.sniffer.get(&f.path).hash(&mut h);
         }
+        // Not the page texts themselves (up to a page of text per file, every frame).
+        state.sniffer.generation().hash(&mut h);
         let mut edits: Vec<_> = self.edits.iter().collect();
         edits.sort_by(|a, b| a.0.cmp(b.0));
         edits.hash(&mut h);
@@ -442,6 +483,7 @@ impl PreviewScreen {
         }
         root.hash(&mut h);
         state.settings.id_pattern.hash(&mut h);
+        state.settings.ultratax.hash(&mut h);
         state.settings.fuzzy_suggest.to_bits().hash(&mut h);
         state.settings.fuzzy_auto.to_bits().hash(&mut h);
         state.sniffer.enabled().hash(&mut h);
@@ -476,6 +518,7 @@ impl PreviewScreen {
                 .cloned(),
             root: state.settings.root.clone(),
             id_pattern: state.settings.id_pattern.clone(),
+            ultratax: state.settings.ultratax.clone(),
             fuzzy_suggest: state.settings.fuzzy_suggest,
             fuzzy_auto: state.settings.fuzzy_auto,
             current_year: chrono::Local::now().year(),
@@ -563,10 +606,11 @@ impl PreviewScreen {
 
     /// The rows Commit works on: the ticked ones, or all of them when none is ticked (V3).
     fn commit_rows(&self) -> impl Iterator<Item = &Proposal> {
-        let ticked = self.ticked_only();
+        let ticked: std::collections::HashSet<&PathBuf> = self.selected.iter().collect();
+        let only = self.proposals.iter().any(|p| ticked.contains(&p.file.path));
         self.proposals
             .iter()
-            .filter(move |p| !ticked || self.selected.contains(&p.file.path))
+            .filter(move |p| !only || ticked.contains(&p.file.path))
     }
 
     fn edit(&mut self, path: &Path) -> &mut RowEdits {
@@ -746,32 +790,71 @@ impl PreviewScreen {
 
         let files = self.batch(state);
         let filing = self.commit_job.is_some();
+        self.pane_open = self
+            .pane_choice
+            .unwrap_or(state.pdfium_dir.is_some() && ui.available_width() >= PANE_AUTO_WIDTH);
+        self.ticked_ui(ui, state, filing);
+        self.keep_focus();
+        peek::follow(
+            &mut self.pane,
+            &ctx,
+            self.focused.as_deref().filter(|_| self.pane_open),
+            state.pdfium_dir.clone(),
+        );
         let table_height = (ui.available_height() - 44.0).max(160.0);
-        ui.allocate_ui_with_layout(
-            egui::vec2(ui.available_width(), table_height),
-            Layout::top_down(Align::Min),
-            |ui| {
+        let pane_w = if self.pane_open {
+            peek::PANE_WIDTH + 24.0
+        } else {
+            0.0
+        };
+        let table_w = (ui.available_width() - pane_w).max(200.0);
+        ui.horizontal_top(|ui| {
+            ui.allocate_ui_with_layout(
+                egui::vec2(table_w, table_height),
+                Layout::top_down(Align::Min),
+                |ui| {
+                    let p = pal(ui);
+                    Frame::new()
+                        .fill(p.card)
+                        .stroke(Stroke::new(1.0, p.border))
+                        .corner_radius(CornerRadius::same(6))
+                        .show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            ui.set_min_height(table_height - 2.0);
+                            ui.add_enabled_ui(!filing, |ui| {
+                                if files.is_empty() {
+                                    Frame::new().inner_margin(Margin::same(16)).show(ui, |ui| {
+                                        ui.label(RichText::new("No files waiting.").color(p.muted));
+                                    });
+                                } else {
+                                    self.table_ui(ui, state, table_height - 40.0);
+                                }
+                            });
+                            self.unsupported_ui(ui, state);
+                        });
+                },
+            );
+            if self.pane_open {
                 let p = pal(ui);
                 Frame::new()
                     .fill(p.card)
                     .stroke(Stroke::new(1.0, p.border))
                     .corner_radius(CornerRadius::same(6))
+                    .inner_margin(Margin::same(8))
                     .show(ui, |ui| {
-                        ui.set_width(ui.available_width());
-                        ui.set_min_height(table_height - 2.0);
-                        ui.add_enabled_ui(!filing, |ui| {
-                            if files.is_empty() {
-                                Frame::new().inner_margin(Margin::same(16)).show(ui, |ui| {
-                                    ui.label(RichText::new("No files waiting.").color(p.muted));
-                                });
-                            } else {
-                                self.table_ui(ui, state, table_height - 40.0);
-                            }
+                        ui.set_min_height(table_height - 18.0);
+                        ui.set_max_height(table_height - 18.0);
+                        let pages = self
+                            .focused
+                            .as_ref()
+                            .and_then(|f| self.page_counts.get(f))
+                            .and_then(|(_, n)| *n);
+                        ui.vertical(|ui| {
+                            peek::show(ui, &mut self.pane, pages, state.pdfium_dir.is_some())
                         });
-                        self.unsupported_ui(ui, state);
                     });
-            },
-        );
+            }
+        });
         ui.add_space(6.0);
         self.bottom_bar_ui(ui);
 
@@ -807,6 +890,12 @@ impl PreviewScreen {
             }
             ui.spacing_mut().item_spacing.x = 8.0;
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                let pane = ui
+                    .selectable_label(self.pane_open, "Preview pane")
+                    .on_hover_text("Show the pages of the file last clicked beside the list");
+                if pane.clicked() {
+                    self.pane_choice = Some(!self.pane_open);
+                }
                 let blocker = state.scan_blocker();
                 let rescan = ui.add_enabled(blocker.is_none(), egui::Button::new("Rescan root"));
                 let rescan = match blocker {
@@ -916,6 +1005,77 @@ impl PreviewScreen {
         }
     }
 
+    /// The pane's row: the one last clicked while it is in the batch, else the first row.
+    fn keep_focus(&mut self) {
+        let listed = |f: &PathBuf| self.proposals.iter().any(|p| &p.file.path == f);
+        if !self.focused.as_ref().is_some_and(listed) {
+            self.focused = self.proposals.first().map(|p| p.file.path.clone());
+        }
+    }
+
+    /// With rows ticked: one client or one rule for all of them (owner 2026-11-04).
+    fn ticked_ui(&mut self, ui: &mut egui::Ui, state: &AppState, filing: bool) {
+        let ticked: Vec<PathBuf> = self
+            .selected
+            .iter()
+            .filter(|s| self.proposals.iter().any(|p| &p.file.path == *s))
+            .cloned()
+            .collect();
+        if ticked.is_empty() {
+            return;
+        }
+        let p = pal(ui);
+        let n = ticked.len();
+        ui.add_enabled_ui(!filing, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(strong(format!("{n} ticked")));
+                ui.label(RichText::new("·").color(p.muted));
+                let set = ui
+                    .add_enabled(
+                        state.clients.list().is_some(),
+                        egui::Button::new("Set client…"),
+                    )
+                    .on_hover_text("Choose one client for every ticked file")
+                    .on_disabled_hover_text("Load the client list first (Setup)");
+                set.widget_info(|| {
+                    egui::WidgetInfo::labeled(egui::Role::Button, true, "Set client for ticked")
+                });
+                if set.clicked() {
+                    self.picker = Some((ticked[0].clone(), String::new(), PickFor::Ticked));
+                }
+                let rules: Vec<(String, String)> = state
+                    .rules
+                    .active_rules()
+                    .iter()
+                    .map(|r| (r.id.clone(), r.name.clone()))
+                    .collect();
+                let menu = ui.menu_button("Apply rule…", |ui| {
+                    egui::ScrollArea::vertical()
+                        .max_height(360.0)
+                        .show(ui, |ui| {
+                            for (id, name) in &rules {
+                                if ui.button(name).clicked() {
+                                    for t in &ticked {
+                                        self.edit(t).rule_id = Some(id.clone());
+                                    }
+                                    ui.close();
+                                }
+                            }
+                        });
+                });
+                let r = menu.response;
+                r.widget_info(|| {
+                    egui::WidgetInfo::labeled(egui::Role::Button, true, "Apply rule to ticked")
+                });
+                r.on_hover_text("File every ticked file by this rule (its folder and name)");
+                if ui.button("Untick all").clicked() {
+                    self.selected.clear();
+                }
+            });
+        });
+        ui.add_space(4.0);
+    }
+
     fn open_combine(&mut self, ctx: &egui::Context) {
         let first = &self.selected[0];
         let p = self.proposals.iter().find(|p| &p.file.path == first);
@@ -950,7 +1110,7 @@ impl PreviewScreen {
         let ticked = self.ticked_only();
         let count = |f: &dyn Fn(&Proposal) -> bool| self.commit_rows().filter(|x| f(x)).count();
         let ready = count(&|x| x.status == RowStatus::Ready);
-        let collisions = count(&|x| x.status == RowStatus::Ready && x.collision);
+        let collisions = count(&|x| x.status == RowStatus::Ready && x.collides());
         let ready_copies: usize = self
             .commit_rows()
             .filter(|x| x.status == RowStatus::Ready)
@@ -1635,7 +1795,12 @@ impl PreviewScreen {
                             | RowStatus::Error(_)
                             | RowStatus::Paused
                     );
-                    if attention {
+                    if self.pane_open && self.focused.as_ref() == Some(&pr.file.path) {
+                        // The row shown in the side pane.
+                        let fill = ui.visuals().selection.bg_fill.gamma_multiply(0.25);
+                        ui.painter()
+                            .set(bg, egui::epaint::RectShape::filled(rect, 0.0, fill));
+                    } else if attention {
                         ui.painter().set(
                             bg,
                             egui::epaint::RectShape::filled(rect, 0.0, p.tint_attention),
@@ -1743,6 +1908,7 @@ impl PreviewScreen {
                     state.goto = Some(crate::app::Tab::Relationships);
                 }
                 RowAction::SetRule(path, id) => self.edit(&path).rule_id = Some(id),
+                RowAction::Focus(path) => self.focused = Some(path),
                 RowAction::SetYear(path, y) => self.set_row_year(&path, y),
                 RowAction::AllMissingYear(y) => self.batch.year = Some(y),
                 RowAction::SetCollision(path, c) => self.edit(&path).collision = Some(c),
@@ -1999,7 +2165,12 @@ impl PreviewScreen {
             self.picker = None;
             return;
         };
-        let title = format!("Client for \"{}\"", file_name(path));
+        let title = if *target == PickFor::Ticked {
+            let n = self.selected.len();
+            format!("Client for {n} ticked file{}", plural(n))
+        } else {
+            format!("Client for \"{}\"", file_name(path))
+        };
         match client_picker(ctx, &title, query, &list) {
             PickerOutcome::Open => {}
             PickerOutcome::Cancel => self.picker = None,
@@ -2011,6 +2182,11 @@ impl PreviewScreen {
                         self.edit(&path).copy_clients.insert(key, c.id);
                     }
                     PickFor::NewCopy => self.edit(&path).added_copies.push(c.id),
+                    PickFor::Ticked => {
+                        for p in self.selected.clone() {
+                            self.edit(&p).client_id = Some(c.id.clone());
+                        }
+                    }
                 }
                 self.picker = None;
             }
@@ -2070,7 +2246,7 @@ impl PreviewScreen {
             .collect();
         let overwrites: Vec<String> = ready
             .iter()
-            .filter(|p| p.collision && p.collision_choice == CollisionChoice::Overwrite)
+            .filter(|p| p.overwrites())
             .filter_map(|p| p.dest.as_deref().map(short_file(&root)))
             .collect();
         let mut copy_rules: Vec<String> = Vec::new();
@@ -2472,6 +2648,8 @@ enum RowAction {
     ResetFolder(PathBuf),
     /// Open the Rules tab with this file name in the test box (V10).
     BuildRule(String),
+    /// Show this row's pages in the side pane.
+    Focus(PathBuf),
 }
 
 /// One table row. Cells are top-aligned; text cells start a little lower so their first line sits
@@ -2590,6 +2768,9 @@ fn row_ui(
             .inner;
         if let Some(sub) = sub {
             ui.label(RichText::new(sub).size(11.0).color(pl.muted));
+        }
+        if resp.clicked() {
+            actions.push(RowAction::Focus(path.clone()));
         }
         resp.context_menu(|ui| {
             let skip_text = if group.is_some() {
@@ -2769,7 +2950,7 @@ fn row_ui(
 
     // Destination, or what is missing.
     cell(ui, w[5], |ui| {
-        if !p.collision {
+        if !p.collides() {
             ui.add_space(TEXT_TOP);
         }
         destination_cell(ui, p, edits, ctx, actions);
@@ -2781,7 +2962,7 @@ fn row_ui(
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing = egui::vec2(4.0, 4.0);
             match &p.status {
-                RowStatus::Ready if p.collision => {
+                RowStatus::Ready if p.collides() => {
                     pill(ui, PillKind::Err, "Collision").on_hover_text(collision_hover(
                         p.collision_with.as_ref(),
                         p.collision_choice,
@@ -2798,7 +2979,7 @@ fn row_ui(
                     );
                 }
                 RowStatus::Skipped => {
-                    let why = if p.collision {
+                    let why = if p.collides() {
                         "A file with this name is already there and the choice is Skip: this file stays where it is."
                     } else {
                         "Left out of this batch: it stays where it is."
@@ -3084,7 +3265,7 @@ fn destination_cell(
         .on_hover_text(dest.display().to_string());
         return;
     }
-    if p.collision {
+    if p.collides() {
         ui.label(mono("File already exists").color(pl.pill(PillKind::Err).1))
             .on_hover_text(dest.display().to_string());
         let mut choice = p.collision_choice;
@@ -3302,7 +3483,7 @@ fn copy_row_ui(
                                 .wrap(),
                         );
                     }
-                    (_, Some(dest)) if c.collision => {
+                    (_, Some(dest)) if c.collides() => {
                         ui.label(mono("File already exists").color(pl.pill(PillKind::Err).1))
                             .on_hover_text(dest.display().to_string());
                         let mut choice = c.collision_choice;
@@ -3359,7 +3540,7 @@ fn copy_row_ui(
                     ui.horizontal_wrapped(|ui| {
                         ui.spacing_mut().item_spacing = egui::vec2(4.0, 4.0);
                         match &c.status {
-                            CopyStatus::Ready if c.collision => {
+                            CopyStatus::Ready if c.collides() => {
                                 pill(ui, PillKind::Err, "Collision").on_hover_text(
                                     collision_hover(
                                         c.collision_with.as_ref(),
@@ -3589,42 +3770,8 @@ fn year_combo(
         None => resp,
     }
 }
-fn file_name(p: &Path) -> String {
-    p.file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default()
-}
-
 fn parent(p: &Path) -> String {
     p.parent()
         .map(|d| d.display().to_string())
         .unwrap_or_default()
-}
-
-fn plural(n: usize) -> &'static str {
-    if n == 1 { "" } else { "s" }
-}
-
-pub fn human_size(bytes: u64) -> String {
-    const KB: f64 = 1024.0;
-    let b = bytes as f64;
-    if b < KB {
-        format!("{bytes} B")
-    } else if b < KB * KB {
-        format!("{:.0} KB", b / KB)
-    } else {
-        format!("{:.1} MB", b / KB / KB)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::human_size;
-
-    #[test]
-    fn sizes() {
-        assert_eq!(human_size(512), "512 B");
-        assert_eq!(human_size(2048), "2 KB");
-        assert_eq!(human_size(3 * 1024 * 1024 + 100_000), "3.1 MB");
-    }
 }
