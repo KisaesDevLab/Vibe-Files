@@ -48,7 +48,7 @@ See [Intake](help:intake).
 
 ### The ten-key tape
 
-With **Tape** open and no text box in use, the keyboard drives the tape:
+With the **10-key** tab open and no text box in use, the keyboard drives the tape:
 
 - 0 to 9 and . — type an amount.
 - + - * / = — the operation keys.

@@ -105,7 +105,7 @@ fn take_dropped_files(ctx: &egui::Context, b: &mut Browse, env: &mut Env) {
     if hovering {
         let painter = ctx.layer_painter(egui::LayerId::new(
             egui::Order::Foreground,
-            egui::Id::new("browse-drop-hint"),
+            egui::Id::unique("browse-drop-hint"),
         ));
         let rect = ctx.content_rect();
         painter.rect_filled(rect, 0.0, egui::Color32::from_black_alpha(160));

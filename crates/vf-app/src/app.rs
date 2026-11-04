@@ -151,6 +151,8 @@ pub struct VibeFilesApp {
     zoom_applied: bool,
     /// The Help window (PA-25).
     pub help: crate::ui::help::HelpState,
+    /// The window is closing after the Viewer's question was answered (not asked again).
+    closing: bool,
 }
 
 /// Asks GitHub for the latest release, once per start, on a thread (never in tests: no network).
@@ -219,6 +221,7 @@ impl VibeFilesApp {
             update_notice: None,
             zoom_applied: false,
             help: Default::default(),
+            closing: false,
         };
         // Tests drive the wizard themselves; `open_last` has its own test.
         if !cfg!(test) {
@@ -424,6 +427,27 @@ impl VibeFilesApp {
         }
     }
 
+    /// Closing the window with annotations unsaved in the Viewer asks first (owner
+    /// 2026-11-04): the Viewer is shown with Save and quit / Discard and quit / Keep editing.
+    fn guard_close(&mut self, ctx: &egui::Context) {
+        let Screen::Open(o) = &mut self.screen else {
+            return;
+        };
+        if std::mem::take(&mut o.viewer.quit_ok) {
+            self.closing = true;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            return;
+        }
+        if !self.closing
+            && ctx.input(|i| i.viewport().close_requested())
+            && !o.viewer.pending.is_empty()
+        {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            self.tab = Tab::Viewer;
+            o.viewer.quit_asked = true;
+        }
+    }
+
     pub fn cabinet_name(&self) -> Option<String> {
         match &self.screen {
             Screen::Open(o) => Some(o.opened.cabinet.display_name(&o.opened.root)),
@@ -435,6 +459,7 @@ impl VibeFilesApp {
 impl eframe::App for VibeFilesApp {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         self.poll(ui.ctx());
+        self.guard_close(ui.ctx());
         let name = self.cabinet_name();
         // Text size: the header's buttons, or Ctrl + / Ctrl - (egui's own zoom keys); kept in
         // this PC's settings (owner 2026-11-04).
@@ -1540,6 +1565,76 @@ mod tests {
         );
     }
 
+    /// Closing the window with annotations unsaved asks first: the window stays, the Viewer
+    /// shows the question; Discard and quit closes it (owner 2026-11-04).
+    #[test]
+    fn closing_with_unsaved_annotations_asks_first() {
+        use egui::{ViewportCommand, ViewportEvent, ViewportId};
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("Clients");
+        let req = CreateRequest {
+            root: &root,
+            name: "Firm",
+        };
+        drop(session::create(&tmp.path().join("pc1"), "dev-1", &req).unwrap());
+        let mut h = harness(&tmp.path().join("pc1b"));
+        click(&mut h, "Open existing");
+        type_into(&mut h, "Cabinet folder", &root.display().to_string());
+        click(&mut h, "Open cabinet");
+        settle(&mut h);
+        let commands = |h: &egui_kittest::Harness<'static, VibeFilesApp>| {
+            h.output()
+                .viewport_output
+                .get(&ViewportId::ROOT)
+                .map(|v| v.commands.clone())
+                .unwrap_or_default()
+        };
+        let close = |h: &mut egui_kittest::Harness<'static, VibeFilesApp>| {
+            h.input_mut()
+                .viewports
+                .entry(ViewportId::ROOT)
+                .or_default()
+                .events
+                .push(ViewportEvent::Close);
+            h.step();
+        };
+        // Nothing unsaved: not held.
+        close(&mut h);
+        assert!(
+            !commands(&h)
+                .iter()
+                .any(|c| matches!(c, ViewportCommand::CancelClose))
+        );
+        if let Screen::Open(o) = &mut h.state_mut().screen {
+            o.viewer.pending.push(vf_pdf::annot::Annotation {
+                page: 0,
+                kind: vf_pdf::annot::Kind::Note {
+                    at: [72.0, 700.0],
+                    text: "Invented note".into(),
+                },
+                color: vf_pdf::annot::YELLOW,
+                author: "KUR".into(),
+            });
+        }
+        close(&mut h);
+        assert!(
+            commands(&h)
+                .iter()
+                .any(|c| matches!(c, ViewportCommand::CancelClose))
+        );
+        h.run_steps(3);
+        assert_eq!(h.state().tab, Tab::Viewer);
+        h.get_by_label("Discard and quit").click();
+        let mut closed = false;
+        for _ in 0..4 {
+            h.step();
+            closed |= commands(&h)
+                .iter()
+                .any(|c| matches!(c, ViewportCommand::Close));
+        }
+        assert!(closed, "the window closes after Discard and quit");
+    }
+
     /// PA-25: F1 (or Help) opens the article about the tab shown; searching and links move
     /// between articles, Back returns.
     #[test]
@@ -1897,7 +1992,8 @@ mod tests {
             );
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
-        click(&mut h, "Tape");
+        click(&mut h, "10-key");
+        h.step();
         h.step();
         if let Screen::Open(o) = &mut h.state_mut().screen {
             o.viewer.tape.pick = true;
@@ -1936,6 +2032,13 @@ mod tests {
             o.viewer.paste_for_test(0, [300.0, 500.0], "KWK");
             assert_eq!(o.viewer.pending.len(), 1);
         }
+        // VF_SCREENS_DIR set: the 10-key tab as it looks (review aid).
+        if let Ok(dir) = std::env::var("VF_SCREENS_DIR") {
+            h.run_steps(4);
+            if let Ok(img) = h.render() {
+                let _ = img.save(std::path::Path::new(&dir).join("41-viewer-10-key.png"));
+            }
+        }
         h.step();
         click(&mut h, "Save");
         h.step();
@@ -1960,6 +2063,38 @@ mod tests {
             )
             .unwrap();
         assert_eq!(audited, 1);
+
+        // A second tape pasted on the same spot goes beside the first, never over it (owner
+        // 2026-11-04).
+        let start = std::time::Instant::now();
+        loop {
+            h.step();
+            let Screen::Open(o) = &h.state().screen else {
+                unreachable!()
+            };
+            if o.viewer.ready() && o.viewer.tape_on_file_for_test() == 1 {
+                break;
+            }
+            assert!(
+                start.elapsed() < std::time::Duration::from_secs(20),
+                "reloaded"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        if let Screen::Open(o) = &mut h.state_mut().screen {
+            o.viewer.paste_for_test(0, [300.0, 500.0], "KWK");
+            assert_eq!(o.viewer.pending.len(), 1);
+        }
+        h.step();
+        click(&mut h, "Save");
+        h.step();
+        let tapes = vf_pdf::annot::read_tapes(&pdf).unwrap();
+        assert_eq!(tapes.len(), 2);
+        let (a, b) = (tapes[0].rect, tapes[1].rect);
+        assert!(
+            a[3] <= b[1] || b[3] <= a[1] || a[2] <= b[0] || b[2] <= a[0],
+            "the tapes do not overlap: {a:?} {b:?}"
+        );
     }
 
     /// P04 steps 1-3: a PDF opened from Browse shows in the Viewer; Save writes pending

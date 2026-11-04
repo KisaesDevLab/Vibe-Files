@@ -152,6 +152,89 @@ pub struct FoundTape {
     pub data: String,
 }
 
+/// Where a tape annotation sits on its page (user space), on a page turned `rotate` degrees;
+/// `None` for any other kind.
+pub fn tape_rect(kind: &Kind, rotate: i64) -> Option<[f32; 4]> {
+    let Kind::Tape {
+        at,
+        title,
+        rows,
+        footer,
+        labels,
+        ..
+    } = kind
+    else {
+        return None;
+    };
+    let (w, h) = tape_size(rows.len(), *labels, !title.is_empty(), !footer.is_empty());
+    let (uw, uh) = if rotate % 180 == 0 { (w, h) } else { (h, w) };
+    Some([
+        at[0] - uw / 2.0,
+        at[1] - uh / 2.0,
+        at[0] + uw / 2.0,
+        at[1] + uh / 2.0,
+    ])
+}
+
+/// Where a new tape goes so it covers no tape already on the page (owner 2026-11-04).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Spot {
+    /// Where it was put: nothing there.
+    Here,
+    /// Moved to this centre, beside the tape it would have covered.
+    Moved([f32; 2]),
+    /// No free place on the page.
+    NoRoom,
+}
+
+/// Room between two tapes, points.
+const TAPE_GAP: f32 = 6.0;
+
+/// The place nearest `at` for a tape of `size` (user space, width and height) that overlaps
+/// none of `taken` and stays inside `bounds` (the page box): `at` itself when free, else a spot
+/// just beside one of the tapes there (below, above, right or left).
+pub fn tape_spot(at: [f32; 2], size: (f32, f32), taken: &[[f32; 4]], bounds: [f32; 4]) -> Spot {
+    let (w, h) = size;
+    let rect = |c: [f32; 2]| {
+        [
+            c[0] - w / 2.0,
+            c[1] - h / 2.0,
+            c[0] + w / 2.0,
+            c[1] + h / 2.0,
+        ]
+    };
+    let overlaps =
+        |a: [f32; 4], b: [f32; 4]| a[0] < b[2] && b[0] < a[2] && a[1] < b[3] && b[1] < a[3];
+    let free = |c: [f32; 2]| !taken.iter().any(|t| overlaps(rect(c), *t));
+    if free(at) {
+        return Spot::Here;
+    }
+    let inside = |c: [f32; 2]| {
+        let r = rect(c);
+        r[0] >= bounds[0] && r[1] >= bounds[1] && r[2] <= bounds[2] && r[3] <= bounds[3]
+    };
+    let g = TAPE_GAP;
+    let mut best: Option<([f32; 2], f32)> = None;
+    for t in taken {
+        for c in [
+            [at[0], t[1] - g - h / 2.0], // below
+            [at[0], t[3] + g + h / 2.0], // above
+            [t[2] + g + w / 2.0, at[1]], // right
+            [t[0] - g - w / 2.0, at[1]], // left
+            [(t[0] + t[2]) / 2.0, t[1] - g - h / 2.0],
+            [t[2] + g + w / 2.0, (t[1] + t[3]) / 2.0],
+        ] {
+            if inside(c) && free(c) {
+                let d = (c[0] - at[0]).powi(2) + (c[1] - at[1]).powi(2);
+                if best.is_none_or(|(_, bd)| d < bd) {
+                    best = Some((c, d));
+                }
+            }
+        }
+    }
+    best.map_or(Spot::NoRoom, |(c, _)| Spot::Moved(c))
+}
+
 /// The tapes pasted on `path`'s pages (PA-14: reopening restores them).
 pub fn read_tapes(path: &Path) -> Result<Vec<FoundTape>, String> {
     let doc = Document::load(path).map_err(|e| format!("cannot read the PDF: {e}"))?;
@@ -728,13 +811,7 @@ fn build(a: &Annotation, rotate: i64, font: ObjectId, multiply: ObjectId) -> Bui
                     Object::string_literal(format!("/Helv {TAPE_SIZE} Tf 0 0 0 rg")),
                 );
                 let (w, h) = tape_size(rows.len(), *labels, !title.is_empty(), !footer.is_empty());
-                let (uw, uh) = if rotate % 180 == 0 { (w, h) } else { (h, w) };
-                let rect = [
-                    at[0] - uw / 2.0,
-                    at[1] - uh / 2.0,
-                    at[0] + uw / 2.0,
-                    at[1] + uh / 2.0,
-                ];
+                let rect = tape_rect(&a.kind, rotate).unwrap_or([at[0], at[1], at[0], at[1]]);
                 let mut contents = vec![title.clone()];
                 contents.extend(rows.iter().map(|r| {
                     format!("{} {} {}", r.label, r.amount, r.mark)
@@ -1190,6 +1267,42 @@ fn push_annot(doc: &mut Document, page: ObjectId, annot: ObjectId) -> Result<(),
                 .set("Annots", vec![Object::Reference(annot)]);
             Ok(())
         }
+    }
+}
+
+#[cfg(test)]
+mod tape_spot_tests {
+    use super::*;
+
+    /// A tape is never put over another one: moved beside it, or refused when the page is full.
+    #[test]
+    fn a_new_tape_moves_off_the_one_there() {
+        let page = [0.0, 0.0, 612.0, 792.0];
+        let old = [200.0, 500.0, 440.0, 600.0];
+        assert_eq!(
+            tape_spot([100.0, 200.0], (240.0, 100.0), &[old], page),
+            Spot::Here
+        );
+        let Spot::Moved(c) = tape_spot([320.0, 560.0], (240.0, 100.0), &[old], page) else {
+            panic!("moved");
+        };
+        let r = [c[0] - 120.0, c[1] - 50.0, c[0] + 120.0, c[1] + 50.0];
+        assert!(r[3] <= old[1] || r[1] >= old[3] || r[2] <= old[0] || r[0] >= old[2]);
+        assert!(r[0] >= 0.0 && r[1] >= 0.0 && r[2] <= 612.0 && r[3] <= 792.0);
+        // Two tapes: the new spot clears both.
+        let other = [200.0, 380.0, 440.0, 494.0];
+        let Spot::Moved(c) = tape_spot([320.0, 560.0], (240.0, 100.0), &[old, other], page) else {
+            panic!("moved");
+        };
+        let r = [c[0] - 120.0, c[1] - 50.0, c[0] + 120.0, c[1] + 50.0];
+        for t in [old, other] {
+            assert!(r[3] <= t[1] || r[1] >= t[3] || r[2] <= t[0] || r[0] >= t[2]);
+        }
+        // A page covered by one tape: no room.
+        assert_eq!(
+            tape_spot([300.0, 400.0], (240.0, 100.0), &[page], page),
+            Spot::NoRoom
+        );
     }
 }
 

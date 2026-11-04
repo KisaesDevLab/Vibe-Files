@@ -1,10 +1,10 @@
 # The ten-key tape
 
-An adding-machine tape under the page in the Viewer: type amounts or pick them off the PDF, take subtotals and totals, keep the tape with the document, and paste it onto the page.
+An adding-machine tape in the Viewer's right-hand panel: type amounts or pick them off the PDF, take subtotals and totals, keep the tape with the document, and paste it onto the page.
 
 ## Opening the tape
 
-In the [Viewer](help:viewer), click **Tape** in the toolbar. The tape opens under the page: lines on the left, keypad on the right. Click **Tape** again to hide it. You can name the tape in the box beside **Tape**.
+In the [Viewer](help:viewer), click the **10-key** tab in the panel on the right, beside **Annotate**, **Stamps** and **Redact**. The display and keypad are at the top, the tape's lines below them. Click another tab to put the tape away; it keeps its lines while Vibe Files is open. You can name the tape in the box beside **Tape**.
 
 ## The keys
 
@@ -44,5 +44,7 @@ With **Labels from box captions** on, each picked line is labelled with the word
 1. Choose **Include labels & initials** to print the labels and a footer with your initials, today's date and the **Note**, if any.
 2. Choose **Link entries to page** to keep where each picked amount was.
 3. Click **Paste to page**, then click on the page where the tape goes.
+
+> A tape never covers another one. If the spot you click would overlap a tape already on that page, saved or not, the new tape goes just beside it and the Viewer says so. When the page has no free room, nothing is pasted: click on another page.
 
 The pasted tape waits as an unsaved annotation: **Save** writes it into the file as a new version, **Save as…** into a new document. See [annotations](help:annotations).

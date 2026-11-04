@@ -55,7 +55,7 @@ pub fn show(ctx: &egui::Context, h: &mut HelpState) {
             egui::Panel::left("help-list")
                 .resizable(true)
                 .default_size(250.0)
-                .show_inside(ui, |ui| {
+                .show(ui, |ui| {
                     let l = ui.label("Search help");
                     ui.add(
                         egui::TextEdit::singleline(&mut h.query)
@@ -104,7 +104,7 @@ pub fn show(ctx: &egui::Context, h: &mut HelpState) {
                             }
                         });
                 });
-            egui::CentralPanel::default().show_inside(ui, |ui| {
+            egui::CentralPanel::default().show(ui, |ui| {
                 ui.horizontal(|ui| {
                     if ui
                         .add_enabled(!h.back.is_empty(), egui::Button::new("Back"))

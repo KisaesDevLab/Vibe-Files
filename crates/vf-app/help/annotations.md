@@ -4,7 +4,7 @@ How to mark up a PDF in the Viewer: highlights, notes, freehand, arrows, stamps,
 
 ## The Annotate panel
 
-The panel on the right of the [Viewer](help:viewer) has three tabs: **Annotate**, **Stamps** and **Redact** (redaction is in [page tools](help:page-tools)). On **Annotate**, pick one tool:
+The panel on the right of the [Viewer](help:viewer) has four tabs: **Annotate**, **Stamps**, **Redact** (see [page tools](help:page-tools)) and **10-key** (see [the ten-key tape](help:ten-key)). On **Annotate**, pick one tool:
 
 - **Select text**: drag a box over words to copy them.
 - **Highlight**, **Underline**, **Strikeout**: drag a box over the words to mark.

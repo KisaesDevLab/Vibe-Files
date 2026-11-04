@@ -91,6 +91,8 @@ pub enum Panel {
     Annotate,
     Stamps,
     Redact,
+    /// The ten-key tape (owner 2026-11-04: beside the other tools, not under the page).
+    Tape,
 }
 
 const COLORS: [(&str, annot::Rgb); 4] = [
@@ -137,6 +139,11 @@ pub struct Viewer {
     pub ask_open: Option<Doc>,
     /// Close asked for while annotations are unsaved: drop them?
     pub ask_close: bool,
+    /// The window is being closed with annotations unsaved: Save / Discard / Keep editing
+    /// (owner 2026-11-04).
+    pub quit_asked: bool,
+    /// The answer allows the window to close.
+    pub quit_ok: bool,
     generation: u64,
     info: Option<DocInfo>,
     pub error: Option<String>,
@@ -218,6 +225,9 @@ pub struct TapeState {
     pub placing: bool,
     /// Tapes saved on this document and pasted on its pages, read for this generation.
     history: Option<(u64, Vec<TapeEntry>)>,
+    /// Tapes already in the file: (page, rect), read with the history; a new paste avoids
+    /// them.
+    on_file: Vec<(u32, [f32; 4])>,
     /// A line's source shown after clicking it: (page, rect, when).
     flash: Option<(usize, [f32; 4], std::time::Instant)>,
     /// While dragging in pick mode: how many amounts, their sum.
@@ -238,6 +248,7 @@ impl Default for TapeState {
             history: None,
             flash: None,
             drag_status: None,
+            on_file: Vec::new(),
         }
     }
 }
@@ -263,6 +274,8 @@ impl Default for Viewer {
             converting: None,
             ask_open: None,
             ask_close: false,
+            quit_asked: false,
+            quit_ok: false,
             generation: 0,
             info: None,
             error: None,
@@ -632,6 +645,9 @@ pub fn show(ui: &mut egui::Ui, v: &mut Viewer, env: &mut Env<'_>) {
             None => {}
         }
     }
+    if v.quit_asked {
+        quit_dialog(ui, v, env);
+    }
     if v.ask_close {
         let mut answer = None;
         egui::Modal::new(egui::Id::unique("viewer-close")).show(ui.ctx(), |ui| {
@@ -663,11 +679,17 @@ pub fn show(ui: &mut egui::Ui, v: &mut Viewer, env: &mut Env<'_>) {
         });
         return;
     };
+    // The tape is open while its tab is shown.
+    let tape_open = v.panel == Panel::Tape;
+    if v.tape.open != tape_open {
+        v.tape.open = tape_open;
+        if !tape_open {
+            v.tape.pick = false;
+            v.tape.placing = false;
+        }
+    }
     toolbar(ui, v, env, &doc);
     footer(ui, v);
-    if v.tape.open && v.info.is_some() {
-        tape_panel(ui, v, env, &doc);
-    }
     if v.info.is_some() {
         thumbnails(ui, v);
         tool_panel(ui, v, env);
@@ -685,6 +707,53 @@ pub fn show(ui: &mut egui::Ui, v: &mut Viewer, env: &mut Env<'_>) {
         });
     typing_window(ui.ctx(), v, &initials);
     pages_window(ui.ctx(), v, env);
+}
+
+/// Closing the window with annotations unsaved: save them, drop them, or stay.
+fn quit_dialog(ui: &mut egui::Ui, v: &mut Viewer, env: &mut Env<'_>) {
+    if v.pending.is_empty() {
+        v.quit_asked = false;
+        v.quit_ok = true;
+        return;
+    }
+    let mut answer = None;
+    egui::Modal::new(egui::Id::unique("viewer-quit")).show(ui.ctx(), |ui| {
+        ui.set_width(440.0);
+        ui.heading(format!(
+            "{} unsaved annotation{} on {}",
+            v.pending.len(),
+            if v.pending.len() == 1 { "" } else { "s" },
+            v.doc.as_ref().map_or("this document", |d| d.name.as_str())
+        ));
+        ui.label("Vibe Files is closing. Save them as a new version of the file first?");
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            if ui.add(widgets::primary_button("Save and quit")).clicked() {
+                answer = Some(0);
+            }
+            if ui.button("Discard and quit").clicked() {
+                answer = Some(1);
+            }
+            if ui.button("Keep editing").clicked() {
+                answer = Some(2);
+            }
+        });
+    });
+    match answer {
+        Some(0) => {
+            save(v, env, false);
+            // Saved: the window closes; not saved: the error shows and nothing is lost.
+            v.quit_asked = false;
+            v.quit_ok = v.pending.is_empty();
+        }
+        Some(1) => {
+            v.pending.clear();
+            v.quit_asked = false;
+            v.quit_ok = true;
+        }
+        Some(_) => v.quit_asked = false,
+        None => {}
+    }
 }
 
 /// What the "Pages…" window asked for.
@@ -1196,17 +1265,6 @@ fn toolbar(ui: &mut egui::Ui, v: &mut Viewer, env: &mut Env<'_>, doc: &Doc) {
                     save(v, env, false);
                 }
                 ui.separator();
-                if ui
-                    .selectable_label(v.tape.open, "Tape")
-                    .on_hover_text("Ten-key tape under the page: type or pick amounts off the page, paste the tape onto the PDF.")
-                    .clicked()
-                {
-                    v.tape.open = !v.tape.open;
-                    if !v.tape.open {
-                        v.tape.pick = false;
-                        v.tape.placing = false;
-                    }
-                }
                 if ui
                     .button("Close")
                     .on_hover_text("Close this document (asks first when annotations are unsaved).")
@@ -1932,12 +1990,19 @@ fn tool_panel(ui: &mut egui::Ui, v: &mut Viewer, env: &mut Env<'_>) {
                 ui.selectable_value(&mut v.panel, Panel::Annotate, "Annotate");
                 ui.selectable_value(&mut v.panel, Panel::Stamps, "Stamps");
                 ui.selectable_value(&mut v.panel, Panel::Redact, "Redact");
+                ui.selectable_value(&mut v.panel, Panel::Tape, "10-key")
+                    .on_hover_text("Ten-key tape: type or pick amounts off the page, paste the tape onto the PDF.");
             });
             ui.separator();
             match v.panel {
                 Panel::Annotate => annotate_panel(ui, v, env),
                 Panel::Stamps => stamps_panel(ui, v, env),
                 Panel::Redact => redact_panel(ui, v, env),
+                Panel::Tape => {
+                    if let Some(doc) = v.doc.clone() {
+                        tape_panel(ui, v, env, &doc);
+                    }
+                }
             }
             if !v.pending.is_empty() {
                 ui.separator();
@@ -2905,21 +2970,63 @@ fn paste_tape(v: &mut Viewer, page: usize, at: [f32; 2], initials: &str) {
         })
         .collect();
     let data = serde_json::json!({ "name": t.name, "lines": lines }).to_string();
+    let mut kind = Kind::Tape {
+        at,
+        title: t.name.clone(),
+        rows,
+        footer,
+        labels,
+        data,
+    };
+    // Never over another tape on this page, saved in the file or waiting to be (owner
+    // 2026-11-04): moved beside it, or refused when there is no room.
+    let geom = v.info.as_ref().and_then(|i| i.geoms.get(page).copied());
+    let rotate = geom.map_or(0, |g| g.rotate);
+    let mut taken: Vec<[f32; 4]> = v
+        .pending
+        .iter()
+        .filter(|a| a.page as usize == page)
+        .filter_map(|a| annot::tape_rect(&a.kind, rotate))
+        .collect();
+    taken.extend(
+        v.tape
+            .on_file
+            .iter()
+            .filter(|(p, _)| *p as usize == page)
+            .map(|(_, r)| *r),
+    );
+    let mut moved = false;
+    if let (Some(g), Some(r)) = (geom, annot::tape_rect(&kind, rotate)) {
+        let size = (r[2] - r[0], r[3] - r[1]);
+        match annot::tape_spot(at, size, &taken, g.cbox) {
+            annot::Spot::Here => {}
+            annot::Spot::Moved(c) => {
+                if let Kind::Tape { at, .. } = &mut kind {
+                    *at = c;
+                }
+                moved = true;
+            }
+            annot::Spot::NoRoom => {
+                v.notice = Some(
+                    "Not pasted: there is no free room for the tape on this page without covering another tape. Click on another page, or remove a tape first."
+                        .into(),
+                );
+                return;
+            }
+        }
+    }
     v.pending.push(Annotation {
         page: page as u32,
-        kind: Kind::Tape {
-            at,
-            title: t.name.clone(),
-            rows,
-            footer,
-            labels,
-            data,
-        },
+        kind,
         color: annot::ACCENT,
         author: initials.to_string(),
     });
     v.tape.pick = false;
-    v.notice = Some("Tape placed: Save writes it into the file (Save as: a new document).".into());
+    v.notice = Some(if moved {
+        "Tape placed beside the tape already there (it would have covered it). Save writes it into the file.".into()
+    } else {
+        "Tape placed: Save writes it into the file (Save as: a new document).".into()
+    });
 }
 
 /// Dotted underlines under amounts to pick, numbered markers on picked ones, the flashed source.
@@ -3065,7 +3172,9 @@ fn tape_history(v: &mut Viewer, env: &Env<'_>, doc: &Doc) {
         .map(|p| p.to_string_lossy().replace('\\', "/"))
         .unwrap_or_default();
     let mut list: Vec<TapeEntry> = Vec::new();
-    for t in annot::read_tapes(&doc.path).unwrap_or_default() {
+    let found = annot::read_tapes(&doc.path).unwrap_or_default();
+    v.tape.on_file = found.iter().map(|t| (t.page, t.rect)).collect();
+    for t in found {
         #[derive(serde::Deserialize)]
         struct Data {
             name: String,
@@ -3100,18 +3209,11 @@ fn tape_panel(ui: &mut egui::Ui, v: &mut Viewer, env: &mut Env<'_>, doc: &Doc) {
     tape_history(v, env, doc);
     tape_keys(ui, v);
     let mut jump: Option<(usize, [f32; 4])> = None;
-    egui::Panel::bottom("vf-tape")
-        .resizable(true)
-        .default_size(260.0)
-        .frame(
-            egui::Frame::new()
-                .fill(theme::pane())
-                .inner_margin(egui::Margin::symmetric(12, 8)),
-        )
-        .show(ui, |ui| {
-            ui.horizontal(|ui| {
+    {
+        {
+            ui.horizontal_wrapped(|ui| {
                 let l = ui.label(RichText::new("Tape").strong());
-                ui.add(egui::TextEdit::singleline(&mut v.tape.tape.name).desired_width(200.0))
+                ui.add(egui::TextEdit::singleline(&mut v.tape.tape.name).desired_width(170.0))
                     .labelled_by(l.id);
                 ui.separator();
                 ui.selectable_value(&mut v.tape.pick, false, "Keypad");
@@ -3123,94 +3225,70 @@ fn tape_panel(ui: &mut egui::Ui, v: &mut Viewer, env: &mut Env<'_>, doc: &Doc) {
                 }
             });
             ui.add_space(4.0);
-            ui.columns(2, |cols| {
-                // The tape.
-                let ui = &mut cols[0];
-                egui::ScrollArea::vertical()
-                    .id_salt("tape-lines")
-                    .max_height(170.0)
-                    .stick_to_bottom(true)
-                    .auto_shrink([false, false])
-                    .show(ui, |ui| {
-                        egui::Grid::new("tape-grid")
-                            .num_columns(4)
-                            .spacing([6.0, 2.0])
-                            .show(ui, |ui| {
-                                let n = v.tape.tape.lines().len();
-                                for i in 0..n {
-                                    let l = v.tape.tape.lines()[i].clone();
-                                    ui.label(widgets::caption((i + 1).to_string()));
-                                    let mut label = l.label.clone();
-                                    let r = ui.add(
-                                        egui::TextEdit::singleline(&mut label)
-                                            .desired_width(220.0)
-                                            .hint_text(""),
-                                    );
-                                    r.widget_info(|| {
-                                        egui::WidgetInfo::labeled(
-                                            egui::accesskit::Role::TextInput,
-                                            true,
-                                            format!("Label of line {}", i + 1),
-                                        )
-                                    });
-                                    if r.changed() {
-                                        v.tape.tape.set_label(i, label);
-                                    }
-                                    let total =
-                                        matches!(l.op, Op::Subtotal | Op::Total | Op::GrandTotal);
-                                    let mut amount = RichText::new(format_cents(l.amount)).monospace();
-                                    if total {
-                                        amount = amount.strong();
-                                    }
-                                    let a = ui.add(egui::Label::new(amount).sense(Sense::click()));
-                                    if let Some(src) = l.source {
-                                        let a = a.on_hover_text("Show it on the page");
-                                        if a.clicked() {
-                                            jump = Some((src.page as usize, src.rect));
-                                        }
-                                    }
-                                    ui.label(RichText::new(l.op.mark()).monospace().color(
-                                        if l.op == Op::Minus {
-                                            Color32::from_rgb(0xB0, 0x20, 0x20)
-                                        } else {
-                                            theme::ink_secondary()
-                                        },
-                                    ));
-                                    ui.end_row();
-                                }
-                            });
-                    });
-                // Display, keypad, actions.
-                let ui = &mut cols[1];
-                egui::Frame::new()
-                    .fill(theme::pane())
-                    .stroke(Stroke::new(1.0, theme::border_pane()))
-                    .inner_margin(6)
-                    .show(ui, |ui| {
-                        ui.set_width(ui.available_width());
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            egui::Frame::new()
+                .fill(theme::pane())
+                .stroke(Stroke::new(1.0, theme::border_pane()))
+                .inner_margin(6)
+                .show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    // One row, right-aligned like an adding machine (not the panel's height).
+                    let w = ui.available_width();
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(w, 26.0),
+                        egui::Layout::right_to_left(egui::Align::Center),
+                        |ui| {
                             ui.label(RichText::new(v.tape.tape.display()).monospace().size(18.0));
                             if let Some(e) = v.tape.tape.error() {
                                 ui.label(RichText::new(e).color(crate::ui::theme::error()));
                             }
-                        });
-                        ui.label(widgets::caption(format!(
-                            "Running {} · GT {}",
-                            format_cents(v.tape.tape.running()),
-                            format_cents(v.tape.tape.grand())
-                        )));
-                    });
-                let keys: [[(&str, K); 5]; 4] = [
-                    [("7", K::Digit(7)), ("8", K::Digit(8)), ("9", K::Digit(9)), ("÷", K::Divide), ("CE", K::ClearEntry)],
-                    [("4", K::Digit(4)), ("5", K::Digit(5)), ("6", K::Digit(6)), ("×", K::Times), ("±", K::Sign)],
-                    [("1", K::Digit(1)), ("2", K::Digit(2)), ("3", K::Digit(3)), ("−", K::Minus), ("S", K::Subtotal)],
-                    [("0", K::Digit(0)), ("00", K::DoubleZero), (".", K::Point), ("+", K::Plus), ("T", K::Total)],
-                ];
-                egui::Grid::new("tape-keys").spacing([4.0, 4.0]).show(ui, |ui| {
+                        },
+                    );
+                    ui.label(widgets::caption(format!(
+                        "Running {} · GT {}",
+                        format_cents(v.tape.tape.running()),
+                        format_cents(v.tape.tape.grand())
+                    )));
+                });
+            let keys: [[(&str, K); 5]; 4] = [
+                [
+                    ("7", K::Digit(7)),
+                    ("8", K::Digit(8)),
+                    ("9", K::Digit(9)),
+                    ("÷", K::Divide),
+                    ("CE", K::ClearEntry),
+                ],
+                [
+                    ("4", K::Digit(4)),
+                    ("5", K::Digit(5)),
+                    ("6", K::Digit(6)),
+                    ("×", K::Times),
+                    ("±", K::Sign),
+                ],
+                [
+                    ("1", K::Digit(1)),
+                    ("2", K::Digit(2)),
+                    ("3", K::Digit(3)),
+                    ("−", K::Minus),
+                    ("S", K::Subtotal),
+                ],
+                [
+                    ("0", K::Digit(0)),
+                    ("00", K::DoubleZero),
+                    (".", K::Point),
+                    ("+", K::Plus),
+                    ("T", K::Total),
+                ],
+            ];
+            egui::Grid::new("tape-keys")
+                .spacing([4.0, 4.0])
+                .show(ui, |ui| {
                     for row in keys {
                         for (label, k) in row {
                             if ui
-                                .add_sized([44.0, 26.0], egui::Button::new(RichText::new(label).monospace()))
+                                .add_sized(
+                                    [44.0, 26.0],
+                                    egui::Button::new(RichText::new(label).monospace()),
+                                )
                                 .clicked()
                             {
                                 v.tape.tape.press(k);
@@ -3219,84 +3297,154 @@ fn tape_panel(ui: &mut egui::Ui, v: &mut Viewer, env: &mut Env<'_>, doc: &Doc) {
                         ui.end_row();
                     }
                 });
-                ui.horizontal_wrapped(|ui| {
-                    if ui.small_button("=").clicked() {
-                        v.tape.tape.press(K::Equals);
+            ui.horizontal_wrapped(|ui| {
+                if ui.small_button("=").clicked() {
+                    v.tape.tape.press(K::Equals);
+                }
+                if ui.small_button("GT").clicked() {
+                    v.tape.tape.press(K::GrandTotal);
+                }
+                if ui
+                    .small_button("Del")
+                    .on_hover_text("Delete the last digit")
+                    .clicked()
+                {
+                    v.tape.tape.press(K::Backspace);
+                }
+                if ui
+                    .add_enabled(v.tape.tape.can_undo(), egui::Button::new("Undo").small())
+                    .clicked()
+                {
+                    v.tape.tape.undo();
+                }
+                if ui
+                    .add_enabled(v.tape.tape.can_redo(), egui::Button::new("Redo").small())
+                    .clicked()
+                {
+                    v.tape.tape.redo();
+                }
+                if ui
+                    .small_button("Copy")
+                    .on_hover_text("The tape as text, and as columns for Excel")
+                    .clicked()
+                {
+                    let t = &v.tape.tape;
+                    ui.ctx().copy_text(format!("{}\n{}", t.text(), t.tsv()));
+                    v.notice = Some("Tape copied.".into());
+                }
+                if ui.small_button("Clear").clicked() {
+                    v.tape.tape.press(K::Clear);
+                }
+                let hist = v
+                    .tape
+                    .history
+                    .as_ref()
+                    .map(|(_, h)| h.clone())
+                    .unwrap_or_default();
+                ui.menu_button("History", |ui| {
+                    if hist.is_empty() {
+                        ui.label(widgets::caption("No tapes on this document yet."));
                     }
-                    if ui.small_button("GT").clicked() {
-                        v.tape.tape.press(K::GrandTotal);
-                    }
-                    if ui.small_button("Del").on_hover_text("Delete the last digit").clicked() {
-                        v.tape.tape.press(K::Backspace);
-                    }
-                    if ui.add_enabled(v.tape.tape.can_undo(), egui::Button::new("Undo").small()).clicked() {
-                        v.tape.tape.undo();
-                    }
-                    if ui.add_enabled(v.tape.tape.can_redo(), egui::Button::new("Redo").small()).clicked() {
-                        v.tape.tape.redo();
-                    }
-                    if ui
-                        .small_button("Copy")
-                        .on_hover_text("The tape as text, and as columns for Excel")
-                        .clicked()
-                    {
-                        let t = &v.tape.tape;
-                        ui.ctx().copy_text(format!("{}\n{}", t.text(), t.tsv()));
-                        v.notice = Some("Tape copied.".into());
-                    }
-                    if ui.small_button("Clear").clicked() {
-                        v.tape.tape.press(K::Clear);
-                    }
-                    let hist = v.tape.history.as_ref().map(|(_, h)| h.clone()).unwrap_or_default();
-                    ui.menu_button("History", |ui| {
-                        if hist.is_empty() {
-                            ui.label(widgets::caption("No tapes on this document yet."));
+                    for (label, name, lines) in hist {
+                        if ui.button(label).clicked() {
+                            // One undo step: an unsaved working tape comes back with Undo.
+                            v.tape.tape.load(name, lines);
+                            ui.close();
                         }
-                        for (label, name, lines) in hist {
-                            if ui.button(label).clicked() {
-                                // One undo step: an unsaved working tape comes back with Undo.
-                                v.tape.tape.load(name, lines);
-                                ui.close();
-                            }
-                        }
-                    });
-                    if ui
-                        .small_button("Save tape")
-                        .on_hover_text("Keep this tape with the document (History)")
-                        .clicked()
-                    {
-                        save_tape(v, env, doc);
                     }
                 });
-                ui.horizontal_wrapped(|ui| {
-                    ui.checkbox(&mut v.tape.include_labels, "Include labels & initials");
-                    ui.checkbox(&mut v.tape.link, "Link entries to page");
-                });
-                ui.horizontal(|ui| {
-                    let l = ui.label("Note");
-                    ui.add(
-                        egui::TextEdit::singleline(&mut v.tape.note)
-                            .hint_text("e.g. ✓ ties to Sch 1")
-                            .desired_width(150.0),
-                    )
-                    .labelled_by(l.id);
-                    if ui
-                        .add_enabled(
-                            !v.tape.tape.lines().is_empty(),
-                            widgets::primary_button(if v.tape.placing {
-                                "Click on the page…"
-                            } else {
-                                "Paste to page"
-                            }),
-                        )
-                        .on_hover_text("Then click where the tape goes; Save writes it into the PDF.")
-                        .clicked()
-                    {
-                        v.tape.placing = !v.tape.placing;
-                    }
-                });
+                if ui
+                    .small_button("Save tape")
+                    .on_hover_text("Keep this tape with the document (History)")
+                    .clicked()
+                {
+                    save_tape(v, env, doc);
+                }
             });
-        });
+            ui.horizontal_wrapped(|ui| {
+                ui.checkbox(&mut v.tape.include_labels, "Include labels & initials");
+                ui.checkbox(&mut v.tape.link, "Link entries to page");
+            });
+            ui.horizontal(|ui| {
+                let l = ui.label("Note");
+                ui.add(
+                    egui::TextEdit::singleline(&mut v.tape.note)
+                        .hint_text("e.g. ✓ ties to Sch 1")
+                        .desired_width(150.0),
+                )
+                .labelled_by(l.id);
+                if ui
+                    .add_enabled(
+                        !v.tape.tape.lines().is_empty(),
+                        widgets::primary_button(if v.tape.placing {
+                            "Click on the page…"
+                        } else {
+                            "Paste to page"
+                        }),
+                    )
+                    .on_hover_text("Then click where the tape goes; Save writes it into the PDF.")
+                    .clicked()
+                {
+                    v.tape.placing = !v.tape.placing;
+                }
+            });
+            ui.separator();
+            egui::ScrollArea::vertical()
+                .id_salt("tape-lines")
+                .max_height(ui.available_height().max(120.0))
+                .stick_to_bottom(true)
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    egui::Grid::new("tape-grid")
+                        .num_columns(4)
+                        .spacing([6.0, 2.0])
+                        .show(ui, |ui| {
+                            let n = v.tape.tape.lines().len();
+                            for i in 0..n {
+                                let l = v.tape.tape.lines()[i].clone();
+                                ui.label(widgets::caption((i + 1).to_string()));
+                                let mut label = l.label.clone();
+                                // A fixed size: in a grid a text box only gets last frame's width.
+                                let r = ui.add_sized(
+                                    [128.0, 20.0],
+                                    egui::TextEdit::singleline(&mut label),
+                                );
+                                r.widget_info(|| {
+                                    egui::WidgetInfo::labeled(
+                                        egui::accesskit::Role::TextInput,
+                                        true,
+                                        format!("Label of line {}", i + 1),
+                                    )
+                                });
+                                if r.changed() {
+                                    v.tape.tape.set_label(i, label);
+                                }
+                                let total =
+                                    matches!(l.op, Op::Subtotal | Op::Total | Op::GrandTotal);
+                                let mut amount = RichText::new(format_cents(l.amount)).monospace();
+                                if total {
+                                    amount = amount.strong();
+                                }
+                                let a = ui.add(egui::Label::new(amount).sense(Sense::click()));
+                                if let Some(src) = l.source {
+                                    let a = a.on_hover_text("Show it on the page");
+                                    if a.clicked() {
+                                        jump = Some((src.page as usize, src.rect));
+                                    }
+                                }
+                                ui.label(RichText::new(l.op.mark()).monospace().color(
+                                    if l.op == Op::Minus {
+                                        Color32::from_rgb(0xB0, 0x20, 0x20)
+                                    } else {
+                                        theme::ink_secondary()
+                                    },
+                                ));
+                                ui.end_row();
+                            }
+                        });
+                });
+        }
+    }
     if let Some((page, r)) = jump {
         if let Some(d) = &mut v.doc {
             d.page = page;
@@ -3352,6 +3500,10 @@ impl Viewer {
             }
         }
         self.tape.tape.lines().len()
+    }
+
+    pub fn tape_on_file_for_test(&self) -> usize {
+        self.tape.on_file.len()
     }
 
     pub fn paste_for_test(&mut self, page: usize, at: [f32; 2], initials: &str) {
