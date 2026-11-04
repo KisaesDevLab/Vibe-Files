@@ -33,13 +33,18 @@ pub struct CapturePage {
 
 impl CapturePage {
     /// Reads the profile files again (after a save, or Reload).
+    /// Reads the profile files again. Unsaved edits are kept (only Save and Discard end them;
+    /// QA2 U2).
     pub fn reload(&mut self, root: &Path) {
+        let keep = self.dirty();
         let _ = parsers::seed_if_missing(root);
         let (files, errors) = parsers::load_files(root);
         self.files = files;
         self.errors = errors;
         self.pick = self.pick.min(self.files.len().saturating_sub(1));
-        self.draft = None;
+        if !keep {
+            self.draft = None;
+        }
         self.trial = None;
         self.loaded = true;
     }
@@ -60,6 +65,16 @@ fn problem(p: &Profile, types: &[DocType]) -> Option<String> {
     if let Some(l) = &p.layout {
         if let Some(e) = l.problem() {
             return Some(e);
+        }
+        let mut seen = std::collections::HashSet::new();
+        for r in &p.documents {
+            for n in r.names() {
+                if !seen.insert(n.to_ascii_lowercase()) {
+                    return Some(format!(
+                        "{n} is the name of two documents: UltraTax prints each under its own name."
+                    ));
+                }
+            }
         }
         for r in &p.documents {
             if let Some(e) = ultratax::rename_problem(r, p.short_names) {
@@ -146,9 +161,16 @@ pub fn show(
                     ui.selectable_value(&mut pick, i, n);
                 }
             });
-        if pick != p.pick && !p.dirty() {
-            p.pick = pick;
-            p.draft = None;
+        if pick != p.pick {
+            if p.dirty() {
+                p.notice = None;
+                p.error = Some("Save or discard the changes to this profile first.".into());
+            } else {
+                p.pick = pick;
+                p.draft = None;
+                p.notice = None;
+                p.error = None;
+            }
         }
     }
     let saved = p.files[p.pick].1.clone();
@@ -242,23 +264,33 @@ pub fn show(
     let to_save = save.then(|| draft.clone());
     if discard {
         p.draft = None;
+        p.notice = None;
+        p.error = None;
     }
     if let Some(mut d) = to_save {
         d.folders
             .retain(|t, _| d.doc.iter().any(|r| &r.doc_type == t));
         let path = p.files[p.pick].0.clone();
-        match parsers::save_profile(&path, &d).and_then(|()| parsers::sync_filer_rules(root)) {
-            Ok(changed) => {
-                rules_changed = changed;
-                p.error = None;
-                p.notice = Some(if changed {
+        // The rules it gives are checked before anything is written (QA2 U1).
+        let r = parsers::check_profile(root, &path, &d)
+            .and_then(|()| parsers::save_profile(&path, &d))
+            .and_then(|()| parsers::sync_filer_rules_report(root));
+        match r {
+            Ok(s) => {
+                rules_changed = s.changed;
+                p.draft = None;
+                p.reload(root);
+                p.error = (!s.problems.is_empty()).then(|| s.problems.join("; "));
+                p.notice = Some(if s.changed {
                     "Saved. Intake files these prints by the new folders.".into()
                 } else {
                     "Saved.".into()
                 });
-                p.reload(root);
             }
-            Err(e) => p.error = Some(e),
+            Err(e) => {
+                p.notice = None;
+                p.error = Some(format!("Not saved: {e}"));
+            }
         }
     }
     widgets::message_line(ui, p.notice.as_deref());
@@ -384,24 +416,33 @@ fn doc_rules(ui: &mut egui::Ui, draft: &mut Profile, types: &[DocType], folders:
                     RichText::new(folder).monospace()
                 });
                 ui.horizontal(|ui| {
-                    if ui
-                        .add_enabled(i > 0, egui::Button::new("↑").small())
-                        .on_hover_text("Move up")
-                        .clicked()
+                    if named(
+                        ui.add_enabled(i > 0, egui::Button::new("↑").small())
+                            .on_hover_text("Move up"),
+                        i > 0,
+                        format!("Move rule {} up", i + 1),
+                    )
+                    .clicked()
                     {
                         action = Some((i, -1));
                     }
-                    if ui
-                        .add_enabled(i + 1 < n, egui::Button::new("↓").small())
-                        .on_hover_text("Move down")
-                        .clicked()
+                    if named(
+                        ui.add_enabled(i + 1 < n, egui::Button::new("↓").small())
+                            .on_hover_text("Move down"),
+                        i + 1 < n,
+                        format!("Move rule {} down", i + 1),
+                    )
+                    .clicked()
                     {
                         action = Some((i, 1));
                     }
-                    if ui
-                        .small_button("Remove")
-                        .on_hover_text(format!("Remove rule {}", i + 1))
-                        .clicked()
+                    if named(
+                        ui.small_button("Remove")
+                            .on_hover_text(format!("Remove rule {}", i + 1)),
+                        true,
+                        format!("Remove rule {}", i + 1),
+                    )
+                    .clicked()
                     {
                         action = Some((i, 0));
                     }
@@ -645,6 +686,9 @@ fn document_names(ui: &mut egui::Ui, draft: &mut Profile, types: &[DocType], fol
             .unwrap_or_default()
     };
     let mut group = "";
+    egui::ScrollArea::horizontal()
+        .id_salt("ut-documents-scroll")
+        .show(ui, |ui| {
     egui::Grid::new("ut-documents")
         .num_columns(7)
         .spacing([8.0, 4.0])
@@ -823,9 +867,10 @@ fn document_names(ui: &mut egui::Ui, draft: &mut Profile, types: &[DocType], fol
                 ui.end_row();
             }
         });
+        });
     ui.add_space(4.0);
     ui.label(widgets::caption(
-        "File name tokens: {Printed} the name as printed · {Document} the document name · {DocType} · {Client} · {ID} · {Year} · {Form} the entity type · {Recipient} the K-1 partner · {State} · {Amended}. A name must keep {Document} or {Printed}; a K-1 that copies to the partner ends with {Recipient}.",
+        "File name tokens: {Printed} the name as printed · {Document} the document name · {DocType} · {Client} · {ID} · {Year} · {Form} the entity type · {Recipient} the K-1 partner · {State} · {Amended}. A name must keep {Document} or {Printed}; a K-1 that copies to the partner keeps {Recipient} (or {Printed}).",
     ));
     for r in &draft.documents {
         if let Some(e) = ultratax::rename_problem(r, draft.short_names) {
@@ -835,4 +880,10 @@ fn document_names(ui: &mut egui::Ui, draft: &mut Profile, types: &[DocType], fol
     if ui.button("Restore Default").clicked() {
         draft.documents = ultratax::default_rows();
     }
+}
+
+/// `r` with a screen-reader name (for buttons whose text is a symbol).
+fn named(r: egui::Response, enabled: bool, name: String) -> egui::Response {
+    r.widget_info(|| egui::WidgetInfo::labeled(egui::accesskit::Role::Button, enabled, &name));
+    r
 }

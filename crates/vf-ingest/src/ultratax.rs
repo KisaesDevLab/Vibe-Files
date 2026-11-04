@@ -153,46 +153,81 @@ impl Layout {
         if self.document_name == 0 {
             return Some("The document name must be in the name: it says what a file is.".into());
         }
+        // The K-1 partner and the client name would run into each other (QA2 E5).
+        if self.k1_recipient_after_document && self.client_name == self.document_name + 1 {
+            return Some(
+                "With the K-1 recipient after the document name, the client name cannot come right after the document name: the two cannot be told apart.".into(),
+            );
+        }
         None
     }
 
     /// The regex reading a printed file name (`.pdf` included). Groups: `client`, `id`, `form`,
-    /// `amended`, `doc`, `recipient`, `year`, `state`, `ye`, `printed`. `docs` are the document
-    /// names to recognize (longest first is done here); other names still read as `doc`.
-    pub fn regex(&self, docs: &[String]) -> String {
-        format!("(?i)^{}\\.pdf$", self.body(docs, "recipient"))
+    /// `amended`, `doc` (a K-1 name, then maybe `recipient`) or `doc_o` (any other name),
+    /// `year`, `state`, `ye`, `printed`. Names of `rows` are recognized whole (longest first);
+    /// other document names still read. Only a K-1 name takes a recipient after it (QA2 E4).
+    pub fn regex(&self, rows: &[Row]) -> String {
+        let (k1, other): (Vec<&Row>, Vec<&Row>) = rows.iter().partition(|r| r.is_k1());
+        let alts = |rs: &[&Row]| {
+            let mut names: Vec<String> = rs.iter().flat_map(|r| r.names()).collect();
+            names.sort_by_key(|d| std::cmp::Reverse(d.len()));
+            names.dedup();
+            names.iter().map(|d| regex::escape(d)).collect::<Vec<_>>()
+        };
+        let (k1, mut other) = (alts(&k1), alts(&other));
+        other.push(".+?".into());
+        let mut doc = String::from("(?:(?P<amended>Amended|Superseded)_)?(?:");
+        if !k1.is_empty() {
+            doc.push_str(&format!("(?P<doc>{})", k1.join("|")));
+            if self.k1_recipient_after_document {
+                doc.push_str("(?:_(?P<recipient>[^_]+?))??");
+            }
+            doc.push('|');
+        }
+        doc.push_str(&format!("(?P<doc_o>{}))", other.join("|")));
+        format!("(?i)^{}\\.pdf$", self.join(doc, true))
     }
 
-    /// The name part of [`Layout::regex`], with the recipient group named `who`.
-    pub fn body(&self, docs: &[String], who: &str) -> String {
-        let mut names: Vec<&String> = docs.iter().filter(|d| !d.is_empty()).collect();
+    /// The printed name of one row, anchored to its place in the layout, with no capture groups
+    /// but `who` (the K-1 partner, when `who`): what a managed Filer rule matches for `{Printed}`.
+    pub fn row_body(&self, row: &Row, who: bool) -> String {
+        let mut names: Vec<String> = row.names();
         names.sort_by_key(|d| std::cmp::Reverse(d.len()));
         names.dedup();
-        let alts: Vec<String> = names.iter().map(|d| regex::escape(d)).collect();
-        let doc_alt = if alts.is_empty() {
-            ".+?".to_string()
-        } else {
-            format!("{}|.+?", alts.join("|"))
+        let names: Vec<String> = names.iter().map(|d| regex::escape(d)).collect();
+        let mut doc = format!("(?:(?:Amended|Superseded)_)?(?:{})", names.join("|"));
+        if row.is_k1() && self.k1_recipient_after_document {
+            doc.push_str(if who {
+                "(?:_(?P<who>[^_]+?))??"
+            } else {
+                "(?:_[^_]+?)??"
+            });
+        }
+        self.join(doc, false)
+    }
+
+    /// The layout's variables in order, `doc` standing for the document name.
+    fn join(&self, doc: String, named: bool) -> String {
+        let g = |name: &str, re: &str| {
+            if named {
+                format!("(?P<{name}>{re})")
+            } else {
+                format!("(?:{re})")
+            }
         };
         let mut parts = Vec::new();
         for v in self.order() {
             let mut p = match v {
-                Var::ClientName => "(?P<client>.+?)".to_string(),
-                Var::ClientId => "(?P<id>[^_ ]+)".to_string(),
-                Var::EntityType => "(?P<form>[A-Za-z0-9-]+)".to_string(),
-                Var::TaxYear => "(?P<year>(?:19|20)\\d{2})".to_string(),
-                Var::YearEnd => "(?P<ye>[^_]+)".to_string(),
-                Var::DatePrinted => "(?P<printed>[^_]+)".to_string(),
-                Var::DocumentName => {
-                    let mut d = format!("(?:(?P<amended>Amended|Superseded)_)?(?P<doc>{doc_alt})");
-                    if self.k1_recipient_after_document {
-                        d.push_str(&format!("(?:_(?P<{who}>[^_]+?))??"));
-                    }
-                    d
-                }
+                Var::ClientName => g("client", ".+?"),
+                Var::ClientId => g("id", "[^_ ]+"),
+                Var::EntityType => g("form", "[A-Za-z0-9-]+"),
+                Var::TaxYear => g("year", "(?:19|20)\\d{2}"),
+                Var::YearEnd => g("ye", "[^_]+"),
+                Var::DatePrinted => g("printed", "[^_]+"),
+                Var::DocumentName => doc.clone(),
             };
             if self.postal_code_after == Some(v) {
-                p.push_str("(?:_(?P<state>[A-Z]{2}))?");
+                p.push_str(&format!("(?:_{})?", g("state", "[A-Z]{2}")));
             }
             parts.push(p);
         }
@@ -417,6 +452,11 @@ pub fn default_rows() -> Vec<Row> {
 }
 
 impl Row {
+    /// A K-1 document (its printed name may carry the partner after it).
+    pub fn is_k1(&self) -> bool {
+        self.default_name.contains("K1")
+    }
+
     /// The name UltraTax prints for it.
     pub fn printed_name(&self) -> &str {
         if self.custom_name.trim().is_empty() {
@@ -452,7 +492,7 @@ impl Row {
         if !short {
             return "{Printed}".into();
         }
-        if self.default_name.contains("K1") {
+        if self.is_k1() {
             SHORT_K1.into()
         } else {
             SHORT.into()
@@ -475,9 +515,9 @@ pub fn k1_type(form: &str) -> Option<&'static str> {
 }
 
 /// The short standard file name (the client and ID are in the folder path already).
-pub const SHORT: &str = "{Year} {Form} {Amended} {Document}";
+pub const SHORT: &str = "{Year} {Form} {State} {Amended} {Document}";
 /// The short standard name of a K-1: ends with the partner, one file per partner.
-pub const SHORT_K1: &str = "{Year} {Form} {Amended} {Document} - {Recipient}";
+pub const SHORT_K1: &str = "{Year} {Form} {State} {Amended} {Document} - {Recipient}";
 
 /// Rename tokens, for the editor's help.
 pub const TOKENS: [(&str, &str); 10] = [
@@ -587,9 +627,9 @@ pub fn rename_problem(row: &Row, short: bool) -> Option<String> {
             label_of(&row.default_name)
         ));
     }
-    if row.copy_to_partner && !(t.ends_with("{Recipient}") || t == "{Printed}") {
+    if row.copy_to_partner && !(t.contains("{Recipient}") || t.contains("{Printed}")) {
         return Some(format!(
-            "{}: to copy to the partner the name must end with {{Recipient}}",
+            "{}: to copy to the partner the name must keep {{Recipient}} (or {{Printed}})",
             label_of(&row.default_name)
         ));
     }
@@ -610,38 +650,101 @@ pub fn folder_problem(folder: &str) -> Option<String> {
     if rest.contains('{') || rest.contains('}') {
         return Some("a folder takes only {Client}, {ID} and {Year}".into());
     }
-    if folder.split('/').any(|seg| seg.trim() == "..") {
-        return Some("a folder cannot go up (..)".into());
+    let segs: Vec<&str> = folder.trim().trim_matches('/').split('/').collect();
+    if folder.trim().is_empty() {
+        return None;
+    }
+    for seg in segs {
+        if seg.trim().is_empty() {
+            return Some("a folder name is empty (two / in a row)".into());
+        }
+        if seg.trim() == "." || seg.trim() == ".." {
+            return Some("a folder cannot be . or ..".into());
+        }
+        if seg.ends_with(' ') || seg.ends_with('.') {
+            return Some(format!(
+                "\"{seg}\": Windows does not allow a folder name ending in a space or a dot"
+            ));
+        }
+        let base = seg
+            .split('.')
+            .next()
+            .unwrap_or("")
+            .trim()
+            .to_ascii_uppercase();
+        let reserved = ["CON", "PRN", "AUX", "NUL"].contains(&base.as_str())
+            || ((base.starts_with("COM") || base.starts_with("LPT"))
+                && base.len() == 4
+                && base.as_bytes()[3].is_ascii_digit());
+        if reserved {
+            return Some(format!("\"{seg}\" is a name Windows reserves"));
+        }
     }
     None
 }
 
-/// The Filer rule pattern that recognizes `row`'s rendered names: its document name as a whole
-/// phrase (separators `_`, space or `-` alike), with the partner's name captured as `who` when
-/// it copies to the partner. Rules are tried longest phrase first, so `Tax_Return` never claims
-/// `Preparer_Copy_Tax_Return`.
-pub fn rule_pattern(row: &Row) -> String {
-    let words: Vec<String> = row
-        .names()
-        .iter()
-        .map(|n| {
-            crate::pipeline::words(n)
-                .split([' ', '-'])
-                .filter(|w| !w.is_empty())
-                .map(regex::escape)
-                .collect::<Vec<_>>()
-                .join(r"[\s_-]*")
-        })
-        .collect();
-    let mut alts = words;
-    alts.sort_by_key(|a| std::cmp::Reverse(a.len()));
-    alts.dedup();
-    let phrase = format!("(?:{})", alts.join("|"));
-    if row.copy_to_partner {
-        format!(r"(?:^|[^a-z0-9]){phrase}(?:[\s_-]+(?P<who>.+?))??(?:_[a-z0-9]+)?$")
-    } else {
-        format!(r"(?:^|[^a-z0-9]){phrase}(?:[^a-z0-9]|$)")
+/// The Filer rule pattern that recognizes the names Vibe Files renders for `row`: the row's file
+/// name template with each token replaced by what it can render to, anchored at both ends
+/// (QA2 E1). So a document name inside a client's name, or an ordinary file someone drops in
+/// the inbox, is never taken by the row. The K-1 partner is captured as `who` (copies).
+/// `layout` gives the shape of `{Printed}`; a leading year may be added by the pipeline when
+/// the name would otherwise give Filer the wrong year (QA2 E2).
+pub fn rule_pattern(row: &Row, layout: &Layout, short: bool) -> String {
+    let t = row.template(short);
+    let mut names: Vec<String> = row.names();
+    names.sort_by_key(|d| std::cmp::Reverse(d.len()));
+    names.dedup();
+    let doc = format!(
+        "(?:{})",
+        names
+            .iter()
+            .map(|d| regex::escape(d))
+            .collect::<Vec<_>>()
+            .join("|")
+    );
+    let mut who = row.copy_to_partner;
+    let mut out = String::from(r"^(?:(?:19|20)\d{2} )?");
+    let mut rest = t.as_str();
+    while !rest.is_empty() {
+        if rest.starts_with('{')
+            && let Some(end) = rest.find('}')
+        {
+            let tok = &rest[..=end];
+            rest = &rest[end + 1..];
+            out.push_str(&match tok {
+                "{Printed}" => {
+                    let b = format!("(?:{})", layout.row_body(row, who));
+                    if row.is_k1() && layout.k1_recipient_after_document {
+                        who = false;
+                    }
+                    b
+                }
+                "{Document}" => doc.clone(),
+                "{Amended}" => "(?:Amended|Superseded)?".into(),
+                "{Year}" => r"(?:(?:19|20)\d{2})?".into(),
+                "{Form}" => "[A-Za-z0-9-]*".into(),
+                "{State}" => "(?:[A-Z]{2})?".into(),
+                "{ID}" => r"[^\s_]*".into(),
+                "{Recipient}" if who => {
+                    who = false;
+                    "(?P<who>.*?)".into()
+                }
+                _ => ".*?".into(),
+            });
+            continue;
+        }
+        let ch = rest.chars().next().expect("not empty");
+        rest = &rest[ch.len_utf8()..];
+        if matches!(ch, ' ' | '_' | '-') {
+            if !out.ends_with(r"[\s_-]*") {
+                out.push_str(r"[\s_-]*");
+            }
+        } else {
+            out.push_str(&regex::escape(&ch.to_string()));
+        }
     }
+    out.push('$');
+    out
 }
 
 /// How long a row's phrase is (the order rules are tried in).
@@ -660,8 +763,7 @@ mod tests {
     #[test]
     fn office_layout_reads_the_office_names() {
         let l = Layout::default();
-        let docs: Vec<String> = default_rows().iter().flat_map(Row::names).collect();
-        let re = regex::Regex::new(&l.regex(&docs)).unwrap();
+        let re = regex::Regex::new(&l.regex(&default_rows())).unwrap();
         let c = re
             .captures("Harbor Point Farms LLC_2025_1120S_Preparer_Copy_K1_Dana Reyes_HARB1234.pdf")
             .unwrap();
@@ -674,43 +776,87 @@ mod tests {
         let c = re
             .captures("Reyes, Dana & Lee_2025_1040_Amended_Tax_Return_REYE5521.pdf")
             .unwrap();
-        assert_eq!(&c["doc"], "Tax_Return");
+        assert_eq!(&c["doc_o"], "Tax_Return");
         assert_eq!(&c["amended"], "Amended");
         assert!(c.name("recipient").is_none());
-        // A document not in the table still reads.
+        // A document not in the table still reads, whole: only K-1 names take a recipient
+        // (QA2 E4).
         let c = re
             .captures("Reyes, Dana & Lee_2025_1040_Invoice_REYE5521.pdf")
             .unwrap();
-        assert_eq!(&c["doc"], "Invoice");
+        assert_eq!(&c["doc_o"], "Invoice");
+        let c = re
+            .captures("Reyes, Dana & Lee_2025_1040_Form_8879_REYE5521.pdf")
+            .unwrap();
+        assert_eq!(&c["doc_o"], "Form_8879");
+        assert!(c.name("recipient").is_none());
         assert_eq!(
             l.example("Tax_Return"),
             "John Smith_2025_1040NR_Tax_Return_Pat Partner*_THOMREUT.pdf"
         );
     }
 
+    /// QA2 E1/E6/E7: a row's rule matches only the names rendered for it, anchored; never a
+    /// document name inside a client's name or an ordinary inbox file.
     #[test]
-    fn phrases_do_not_claim_longer_names() {
+    fn rule_patterns_are_anchored_to_the_rendered_shape() {
+        let l = Layout::default();
         let rows = default_rows();
         let get = |d: &str| rows.iter().find(|r| r.default_name == d).unwrap();
-        let tax = regex::RegexBuilder::new(&rule_pattern(get("ArchivedTaxReturn")))
-            .case_insensitive(true)
-            .build()
-            .unwrap();
+        let re = |d: &str, short: bool| {
+            regex::RegexBuilder::new(&rule_pattern(get(d), &l, short))
+                .case_insensitive(true)
+                .build()
+                .unwrap()
+        };
+        let tax = re("ArchivedTaxReturn", false);
         assert!(tax.is_match("Reyes_2025_1040_Tax_Return_REYE5521"));
-        assert!(tax.is_match("2025 Tax Return - Reyes"));
-        assert!(phrase_len(get("PreparerCopyTaxReturn")) > phrase_len(get("ArchivedTaxReturn")));
-        let k1 = regex::RegexBuilder::new(&rule_pattern(get("ArchiveK1Package")))
-            .case_insensitive(true)
-            .build()
-            .unwrap();
+        assert!(tax.is_match("Reyes_2025_1040_Amended_Tax_Return_REYE5521"));
+        assert!(tax.is_match("2019 Smith 2019 Trust_2025_1041_Tax_Return_SMIT1234"));
+        for other in [
+            "Tax Return Pros LLC_2025_1120S_InputScreens_TAXR1234",
+            "Tax Return Pros LLC_2025_1120S_K1_Package_Ann Lee_TAXR1234",
+            "Reyes_2025_1040_Preparer_Copy_Tax_Return_REYE5521",
+            "Reyes_2025_1040_Tax_Return_Documents_REYE5521",
+            "2025 Tax Return signed",
+        ] {
+            assert!(!tax.is_match(other), "{other}");
+        }
+        assert!(
+            !re("InputScreens", false).is_match("Input Screens Inc_2025_1120_Extension_INPU1234")
+        );
+        let k1 = re("ArchiveK1Package", false);
         let c = k1
             .captures("Harbor Point Farms LLC_2025_1120S_K1_Package_Dana Reyes_HARB1234")
             .unwrap();
         assert_eq!(&c["who"], "Dana Reyes");
         let c = k1.captures("Harbor_2025_1065_K1_Package_HARB1234").unwrap();
         assert!(c.name("who").is_none());
-        let c = k1.captures("2025 K1 Package - Dana Reyes").unwrap();
+        let short = re("ArchiveK1Package", true);
+        let c = short.captures("2025 1065 K1_Package - Dana Reyes").unwrap();
         assert_eq!(&c["who"], "Dana Reyes");
+        assert!(re("ArchivedTaxReturn", true).is_match("2025 1040 Tax_Return"));
+        assert!(re("ArchivedTaxReturn", true).is_match("2025 1040 NE Tax_Return"));
+        assert!(!re("ArchivedTaxReturn", true).is_match("2025 1040 Tax_Return_Documents"));
+        // A rename with the partner joined by "_" still captures the partner.
+        let mut r = get("ArchiveK1Package").clone();
+        r.rename = "{Year} {Document}_{Recipient}".into();
+        let p = regex::RegexBuilder::new(&rule_pattern(&r, &l, false))
+            .case_insensitive(true)
+            .build()
+            .unwrap();
+        assert_eq!(&p.captures("2025 K1_Package_Ryan").unwrap()["who"], "Ryan");
+        // The client name right after the document name cannot be read with a recipient.
+        let bad = Layout {
+            client_name: 5,
+            client_id: 1,
+            ..Default::default()
+        };
+        assert!(bad.problem().is_some());
+        assert!(folder_problem("Income Tax//{Year}").is_some());
+        assert!(folder_problem("Income Tax/CON").is_some());
+        assert!(folder_problem("Income Tax/x. ").is_some());
+        assert!(folder_problem("Income Tax/{Year}/Government Copy").is_none());
     }
 
     #[test]

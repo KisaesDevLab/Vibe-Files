@@ -142,7 +142,7 @@ pub fn process(ctx: &Context<'_>, staged: &Path, origin: Origin) -> Result<Proce
         let (file, hint, note, skip) = capture_name(ctx.root, &lookup, &name);
         if skip {
             // The firm chose not to file this document (Admin › Print capture): kept, not sent.
-            let kept = keep_original(staged)?;
+            let kept = keep_original(staged).unwrap_or_else(|_| staged.to_path_buf());
             return Ok(Processed {
                 staged: staged.to_path_buf(),
                 delivered: vec![],
@@ -351,9 +351,19 @@ fn cover_name(cover: &Cover, lookup: &Lookup, stem: &str, part: usize) -> (Strin
 /// through as it is, still marked as the firm's.
 /// Also returns whether the document is not to be filed (its row says "Don't file").
 pub fn capture_name(root: &Path, lookup: &Lookup, name: &str) -> (String, Hint, String, bool) {
-    let _ = crate::parsers::seed_if_missing(root);
+    // A profile seeded or upgraded here gets its Filer rules at once (QA2 E12).
+    if crate::parsers::seed_if_missing(root).unwrap_or(false) {
+        let _ = crate::parsers::sync_filer_rules_report(root);
+    }
     let (profiles, _) = crate::parsers::load(root);
-    let Some(p) = crate::parsers::parse(&profiles, name) else {
+    // The client ID must read back as Filer's ID, or Filer would take another part of the name
+    // for it (wrong client); such a name goes through unprofiled (QA2 E11).
+    let id_ok = |id: &str| {
+        regex::Regex::new(&format!("^(?:{})$", filer_id_pattern(root)))
+            .is_ok_and(|r| r.is_match(id))
+    };
+    let parsed = crate::parsers::parse(&profiles, name).filter(|p| id_ok(&p.client_id));
+    let Some(p) = parsed else {
         let mut h = Hint::new("", name, "print_capture", "");
         h.source = Some("firm".into());
         return (
@@ -408,7 +418,19 @@ pub fn capture_name(root: &Path, lookup: &Lookup, name: &str) -> (String, Hint, 
         }
         None => rest,
     };
-    let file = format!("{}_{}_{}.pdf", clean(&client), p.client_id, clean(&rest));
+    // Filer files by the first year it finds in the name: a year in the client's name
+    // ("Smith 2019 Trust") would win, so the tax year goes first then (QA2 E2).
+    let mut rest = clean(&rest);
+    if let Some(y) = p.year {
+        let now: i32 = vf_core::now_rfc3339()
+            .get(..4)
+            .and_then(|y| y.parse().ok())
+            .unwrap_or(2026);
+        if filer_core::parse::detect_year(&rest, now).map(i32::from) != Some(y) && p.row.is_some() {
+            rest = format!("{y} {rest}");
+        }
+    }
+    let file = format!("{}_{}_{}.pdf", clean(&client), p.client_id, rest);
     let mut h = Hint::new("", &file, &format!("print_capture:{}", p.profile), "");
     h.tax_year = p.year;
     h.source = Some(p.source.clone());
@@ -546,6 +568,20 @@ fn deliver(
         sha256,
     })
 }
+
+/// Filer's client ID pattern for this cabinet: its config's, or the one Vibe Files gives it
+/// (letters and digits) while Filer still has its digits-only default.
+pub fn filer_id_pattern(root: &Path) -> String {
+    let s = filer_intake::config::Settings::load_or_default(&vf_fs::clients::master_dir(root)).0;
+    if s.id_pattern.trim().is_empty() || s.id_pattern == filer_core::parse::DEFAULT_ID_PATTERN {
+        ID_PATTERN.into()
+    } else {
+        s.id_pattern
+    }
+}
+
+/// The ID pattern Vibe Files sets in Filer (owner 2026-11-03: letters and/or digits).
+pub const ID_PATTERN: &str = r"[A-Z0-9]{4,}";
 
 /// Moves `file` into `<staging>/<sub>/<date>/` under a free name. Returns where it went.
 pub fn move_aside(file: &Path, staging: &Path, sub: &str) -> Result<PathBuf, String> {

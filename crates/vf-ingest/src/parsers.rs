@@ -193,13 +193,7 @@ pub fn profile_text(profile: &Profile) -> Result<String, String> {
     let mut profile = profile.clone();
     if let Some(l) = &profile.layout {
         // Written for reference; read back from the layout.
-        profile.pattern = l.regex(
-            &profile
-                .documents
-                .iter()
-                .flat_map(|r| r.names())
-                .collect::<Vec<_>>(),
-        );
+        profile.pattern = l.regex(&profile.documents);
     }
     for r in &profile.documents {
         if let Some(p) = crate::ultratax::rename_problem(r, profile.short_names) {
@@ -286,22 +280,23 @@ pub fn filer_rules(
 }
 
 /// The Filer rules for the document tables of the enabled profiles (PA-22): one per row that is
-/// filed, recognizing its document name in the name Vibe Files renders, longest name first,
-/// filed with `{Rest}.{Ext}` in the row's folder. A K-1 row that copies to the partner carries
-/// the copy Filer's own K-1 rule makes (`like_k1`), since these rules come before Filer's.
+/// filed, matching the names rendered for that row (anchored; QA2 E1), filed with
+/// `{Rest}.{Ext}` in the row's folder. A K-1 row that copies to the partner carries the copy
+/// Filer's own K-1 rule makes (`like_k1`), since these rules come before Filer's. A row that
+/// cannot become a valid rule is left out and reported, the others are made (QA2 E3).
 pub fn table_rules(
     profiles: &[Profile],
     types: &[vf_fs::doctypes::DocType],
     like_k1: Option<&filer_core::rules::Rule>,
-) -> Result<Vec<filer_core::rules::Rule>, String> {
-    use crate::ultratax::{Action, K1_BY_FORM};
+    extra_tokens: &[String],
+) -> (Vec<filer_core::rules::Rule>, Vec<String>) {
+    use crate::ultratax::{Action, K1_BY_FORM, label_of};
     use filer_core::rules::{CopyDest, OnSplit, Resolver, Rule};
     let default_of = |name: &str| {
         types
             .iter()
             .find(|t| t.name == name)
             .map(|t| t.default_folder.trim().trim_matches('/').to_string())
-            .unwrap_or_default()
     };
     let mut rows: Vec<(&Profile, &crate::ultratax::Row)> = profiles
         .iter()
@@ -310,39 +305,49 @@ pub fn table_rules(
         .filter(|(_, r)| r.action == Action::File)
         .collect();
     rows.sort_by_key(|(_, r)| std::cmp::Reverse(crate::ultratax::phrase_len(r)));
-    let mut out = Vec::new();
+    let (mut out, mut problems) = (Vec::new(), Vec::new());
     for (p, r) in rows {
+        let label = label_of(&r.default_name);
         if let Some(e) = crate::ultratax::rename_problem(r, p.short_names) {
-            return Err(e);
+            problems.push(e);
+            continue;
         }
         let mut folder = r.folder.trim().trim_matches('/').to_string();
         if folder.is_empty() {
-            folder = if r.doc_type == K1_BY_FORM {
+            let d = if r.doc_type == K1_BY_FORM {
                 let fs: Vec<String> = ["K-1 (1120-S)", "K-1 (1065)", "K-1 (1041)"]
                     .iter()
-                    .map(|t| default_of(t))
+                    .map(|t| default_of(t).unwrap_or_default())
                     .collect();
                 if fs.iter().any(|f| f != &fs[0]) {
-                    return Err(format!(
-                        "{}: the K-1 doc types have different default folders; choose a folder for this row",
-                        crate::ultratax::label_of(&r.default_name)
+                    problems.push(format!(
+                        "{label}: the K-1 doc types have different default folders; choose a folder for this row"
                     ));
+                    continue;
                 }
-                fs[0].clone()
+                Some(fs[0].clone())
+            } else if r.doc_type.is_empty() {
+                Some(String::new())
             } else {
                 default_of(&r.doc_type)
             };
+            let Some(d) = d else {
+                problems.push(format!("{label}: {} is not a doc type", r.doc_type));
+                continue;
+            };
+            folder = d;
         }
         if folder.is_empty() {
             folder = "Income Tax/{Year}".into();
         }
-        let by_year = folder.contains("{Year}");
+        let layout = p.layout.as_ref().expect("filtered");
         let mut rule = Rule::new(
             &format!("{} · {}", p.name, r.default_name),
-            &crate::ultratax::rule_pattern(r),
+            &crate::ultratax::rule_pattern(r, layout, p.short_names),
             &format!("{{Client}}/{folder}"),
             "{Rest}.{Ext}",
-            by_year,
+            // The partner copy's folder has {Year} too.
+            folder.contains("{Year}") || r.copy_to_partner,
         );
         rule.id = format!("{MANAGED_PREFIX}{}", stable_id(&p.name, &r.default_name));
         if r.copy_to_partner {
@@ -369,9 +374,14 @@ pub fn table_rules(
                 }],
             };
         }
+        let errs = filer_core::rules::validate_rule(&rule, extra_tokens);
+        if !errs.is_empty() {
+            problems.push(format!("{label}: {}", errs.join("; ")));
+            continue;
+        }
         out.push(rule);
     }
-    Ok(out)
+    (out, problems)
 }
 
 /// A stable id from the profile and doc type (so an unchanged mapping rewrites nothing).
@@ -381,20 +391,54 @@ fn stable_id(profile: &str, doc_type: &str) -> String {
     h[..8].iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// Brings Filer's `rules.json` in line with the parser profiles and doc types: the managed rules
-/// are removed from every profile and written again into the active one, just before its
-/// `UltraTax` rule (else before the catch-all). Filer's own rules are never touched. Returns
-/// whether the file changed (Intake must then reload its rules).
-pub fn sync_filer_rules(root: &Path) -> Result<bool, String> {
+/// What a rules sync did.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Synced {
+    /// rules.json was written (Intake must reload its rules).
+    pub changed: bool,
+    /// Rows left out (each with why); the other rules were made.
+    pub problems: Vec<String>,
+}
+
+/// The rules file as it is, and as the profiles (with `replace` in place of the file at its
+/// path, for a save not yet made) and doc types make it, with the rows left out.
+#[allow(clippy::type_complexity)]
+fn plan_rules(
+    root: &Path,
+    replace: Option<(&Path, &Profile)>,
+) -> Result<
+    (
+        filer_core::rules::RulesFile,
+        filer_core::rules::RulesFile,
+        Vec<String>,
+    ),
+    String,
+> {
     let master = vf_fs::clients::master_dir(root);
     let (mut file, savable, err) = filer_core::rules::load_or_seed(&master);
     if !savable {
         return Err(err.unwrap_or_else(|| "rules.json cannot be read".into()));
     }
     let before = file.clone();
-    let (profiles, _) = load_files(root);
-    let profiles: Vec<Profile> = profiles.into_iter().map(|(_, p)| p).collect();
+    let (loaded, errors) = load_files(root);
+    // A profile that does not read must not lose its rules (QA2 U6): nothing changes.
+    if !errors.is_empty() {
+        return Err(format!(
+            "a parser profile cannot be read, so Intake's rules were left as they are: {}",
+            errors.join("; ")
+        ));
+    }
+    let profiles: Vec<Profile> = loaded
+        .into_iter()
+        .map(|(path, p)| match replace {
+            Some((rp, np)) if rp == path => np.clone(),
+            _ => p,
+        })
+        .collect();
     let types = vf_fs::doctypes::load(root)?.unwrap_or_default();
+    // Filer's own Rules screen checks with the client list's extra columns (QA2 E3).
+    let settings = filer_intake::config::Settings::load_or_default(&master).0;
+    let extra = filer_core::clients::extra_tokens(&settings.column_map);
     for rules in file.profiles.values_mut() {
         rules.retain(|r| !r.id.starts_with(MANAGED_PREFIX));
     }
@@ -414,22 +458,97 @@ pub fn sync_filer_rules(root: &Path) -> Result<bool, String> {
     }
     // The document tables go first, ahead of Filer's K-1 rules (they carry the partner copy).
     let k1 = active.iter().find(|r| r.name == "K-1").cloned();
-    let table = table_rules(&profiles, &types, k1.as_ref())?;
+    let (table, problems) = table_rules(&profiles, &types, k1.as_ref(), &extra);
     for (k, r) in table.into_iter().enumerate() {
         active.insert(k, r);
     }
-    if file == before {
-        return Ok(false);
-    }
-    let errors = filer_core::rules::validate_file(&file, &[]);
+    let errors = filer_core::rules::validate_file(&file, &extra);
     if !errors.is_empty() {
         return Err(format!(
-            "the folders give Filer rules it refuses: {}",
+            "Filer would refuse these rules: {}",
             errors.join("; ")
         ));
     }
-    filer_core::rules::save(&master, &file).map_err(|e| format!("saving rules.json: {e}"))?;
-    Ok(true)
+    Ok((before, file, problems))
+}
+
+/// Brings Filer's `rules.json` in line with the parser profiles and doc types: the managed rules
+/// are removed from every profile and written again into the active one (document tables at
+/// the top, doc-type folders just before its `UltraTax` rule). Filer's own rules are never
+/// touched. A profile that does not read changes nothing (an error); rows that cannot become a
+/// rule are reported in [`Synced::problems`].
+pub fn sync_filer_rules_report(root: &Path) -> Result<Synced, String> {
+    let (before, file, problems) = plan_rules(root, None)?;
+    let changed = file != before;
+    if changed {
+        let master = vf_fs::clients::master_dir(root);
+        filer_core::rules::save(&master, &file).map_err(|e| format!("saving rules.json: {e}"))?;
+    }
+    Ok(Synced { changed, problems })
+}
+
+/// [`sync_filer_rules_report`], with left-out rows as an error (after the others are written).
+pub fn sync_filer_rules(root: &Path) -> Result<bool, String> {
+    let s = sync_filer_rules_report(root)?;
+    if s.problems.is_empty() {
+        Ok(s.changed)
+    } else {
+        Err(s.problems.join("; "))
+    }
+}
+
+/// Whether saving `profile` at `path` would give rules Filer takes, every row included: checked
+/// before the file is written (QA2 U1).
+pub fn check_profile(root: &Path, path: &Path, profile: &Profile) -> Result<(), String> {
+    let (_, _, problems) = plan_rules(root, Some((path, profile)))?;
+    if problems.is_empty() {
+        Ok(())
+    } else {
+        Err(problems.join("; "))
+    }
+}
+
+/// Doc type `old` renamed to `new` in every parser profile that names it (rows, `[[doc]]`
+/// rules, `[folders]`), so a rename never silently re-routes prints (QA2 U3).
+pub fn rename_doc_type(root: &Path, old: &str, new: &str) -> Result<(), String> {
+    let (files, errors) = load_files(root);
+    if !errors.is_empty() {
+        return Err(errors.join("; "));
+    }
+    for (path, mut p) in files {
+        let before = p.clone();
+        for r in &mut p.documents {
+            if r.doc_type == old {
+                r.doc_type = new.into();
+            }
+        }
+        for d in &mut p.doc {
+            if d.doc_type == old {
+                d.doc_type = new.into();
+            }
+        }
+        if let Some(f) = p.folders.remove(old) {
+            p.folders.insert(new.into(), f);
+        }
+        if p != before {
+            save_profile(&path, &p)?;
+        }
+    }
+    Ok(())
+}
+
+/// The profiles that name doc type `name` (a doc type they use cannot be removed).
+pub fn profiles_using(root: &Path, name: &str) -> Vec<String> {
+    load_files(root)
+        .0
+        .into_iter()
+        .filter(|(_, p)| {
+            p.documents.iter().any(|r| r.doc_type == name)
+                || p.doc.iter().any(|d| d.doc_type == name)
+                || p.folders.contains_key(name)
+        })
+        .map(|(_, p)| p.name)
+        .collect()
 }
 
 /// Where a printed file would go, for the editor's test box: what the profile reads, and the
@@ -456,11 +575,8 @@ pub fn trial(root: &Path, file_name: &str) -> Trial {
     let master = vf_fs::clients::master_dir(root);
     let (rules, _, _) = filer_core::rules::load_or_seed(&master);
     let settings = filer_intake::config::Settings::load_or_default(&master).0;
-    let id_pattern = if settings.id_pattern.is_empty() {
-        filer_core::parse::DEFAULT_ID_PATTERN.to_string()
-    } else {
-        settings.id_pattern.clone()
-    };
+    let _ = &settings;
+    let id_pattern = crate::pipeline::filer_id_pattern(root);
     let year: i32 = vf_core::now_rfc3339()
         .get(..4)
         .and_then(|y| y.parse().ok())
@@ -574,8 +690,7 @@ pub fn ultratax_profile() -> Profile {
     p.doc.retain(|d| !d.pattern.starts_with("(?i)^1"));
     p.layout = Some(crate::ultratax::Layout::default());
     p.documents = crate::ultratax::default_rows();
-    let names: Vec<String> = p.documents.iter().flat_map(|r| r.names()).collect();
-    p.pattern = p.layout.as_ref().expect("set above").regex(&names);
+    p.pattern = p.layout.as_ref().expect("set above").regex(&p.documents);
     p
 }
 
@@ -622,13 +737,7 @@ pub fn compile_profile(mut profile: Profile) -> Result<Compiled, String> {
         if let Some(p) = l.problem() {
             return Err(p);
         }
-        profile.pattern = l.regex(
-            &profile
-                .documents
-                .iter()
-                .flat_map(|r| r.names())
-                .collect::<Vec<_>>(),
-        );
+        profile.pattern = l.regex(&profile.documents);
     }
     let re = Regex::new(&profile.pattern).map_err(|e| format!("pattern: {e}"))?;
     if !re.capture_names().flatten().any(|n| n == "id") {
@@ -679,7 +788,10 @@ impl Compiled {
             return None;
         }
         let c = self.re.captures(file_name)?;
-        let doc = c.name("doc").map(|m| m.as_str().trim().to_string());
+        let doc = c
+            .name("doc")
+            .or_else(|| c.name("doc_o"))
+            .map(|m| m.as_str().trim().to_string());
         let text = |g: &str| {
             c.name(g)
                 .map(|m| m.as_str().trim().to_string())
@@ -715,11 +827,15 @@ impl Compiled {
             amended: text("amended"),
             row,
             short_names: self.profile.short_names,
-            printed: file_name
-                .strip_suffix(".pdf")
-                .or_else(|| file_name.strip_suffix(".PDF"))
-                .unwrap_or(file_name)
-                .to_string(),
+            printed: match file_name.len().checked_sub(4) {
+                Some(i)
+                    if file_name.is_char_boundary(i)
+                        && file_name[i..].eq_ignore_ascii_case(".pdf") =>
+                {
+                    file_name[..i].to_string()
+                }
+                _ => file_name.to_string(),
+            },
         })
     }
 }

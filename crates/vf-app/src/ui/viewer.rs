@@ -129,6 +129,9 @@ pub struct Env<'a> {
 
 pub struct Viewer {
     pub doc: Option<Doc>,
+    /// The catalog content of the document as shown (read when it is opened or read again):
+    /// edits are made on it and refused once the document has other content (QA2 U7).
+    seen: Option<(u64, String)>,
     /// Another document asked for while annotations are unsaved: open it and drop them?
     pub ask_open: Option<Doc>,
     generation: u64,
@@ -196,6 +199,7 @@ impl Default for Viewer {
     fn default() -> Self {
         Viewer {
             doc: None,
+            seen: None,
             ask_open: None,
             generation: 0,
             info: None,
@@ -264,6 +268,14 @@ impl Viewer {
         self.drawn.clear();
         self.doc = Some(doc);
         self.reload();
+    }
+
+    /// The content the document had when it was shown (see `seen`).
+    fn seen_hash(&self) -> Option<String> {
+        self.seen
+            .as_ref()
+            .filter(|(g, _)| *g == self.generation)
+            .map(|(_, h)| h.clone())
     }
 
     /// Reads the document again (after a save, or a new one opened).
@@ -472,6 +484,19 @@ impl Viewer {
 
 pub fn show(ui: &mut egui::Ui, v: &mut Viewer, env: &mut Env<'_>) {
     v.pump(ui.ctx());
+    if let Some(doc) = &v.doc
+        && v.seen.as_ref().is_none_or(|(g, _)| *g != v.generation)
+    {
+        let hash: Option<String> = env
+            .conn
+            .query_row(
+                "SELECT hash FROM document WHERE id = ?1",
+                [&doc.doc_id],
+                |r| r.get(0),
+            )
+            .ok();
+        v.seen = hash.map(|h| (v.generation, h));
+    }
     if let Some(next) = v.ask_open.clone() {
         let mut answer = None;
         egui::Modal::new(egui::Id::unique("viewer-unsaved")).show(ui.ctx(), |ui| {
@@ -652,7 +677,7 @@ fn run_page_op(
                 what: &str,
                 f: &dyn Fn(&Path, &Path) -> Result<(), String>|
      -> Result<String, String> {
-        let based_on = source_hash(env, &doc)?;
+        let based_on = source_hash(env, &doc, v.seen_hash().as_deref())?;
         let tmp = vf_fs::content::tmp_file(env.root, "pdf")?;
         f(&doc.path, &tmp).inspect_err(|_| {
             let _ = std::fs::remove_file(&tmp);
@@ -1933,7 +1958,7 @@ enum Convert {
 /// The catalog hash of the open document, after checking it is still at the path it was opened
 /// from: a document renamed or moved meanwhile is never edited from its old path, where another
 /// file may sit now (QA A11).
-fn source_hash(env: &Env<'_>, doc: &Doc) -> Result<String, String> {
+fn source_hash(env: &Env<'_>, doc: &Doc, seen: Option<&str>) -> Result<String, String> {
     let (rel, hash): (String, String) = env
         .conn
         .query_row(
@@ -1948,14 +1973,23 @@ fn source_hash(env: &Env<'_>, doc: &Doc) -> Result<String, String> {
             doc.name
         ));
     }
+    if let Some(seen) = seen
+        && seen != hash
+    {
+        return Err(format!(
+            "{} changed since it was shown (a sync, a restore or another PC): your edits were made on the earlier pages. Open it again.",
+            doc.name
+        ));
+    }
     Ok(hash)
 }
 
 /// Flatten or PDF/A: the result is a new version of this document (current one kept).
 fn convert(v: &mut Viewer, env: &mut Env<'_>, what: Convert) {
     let Some(doc) = v.doc.clone() else { return };
+    let seen = v.seen_hash();
     let r = (|| -> Result<String, String> {
-        let based_on = source_hash(env, &doc)?;
+        let based_on = source_hash(env, &doc, seen.as_deref())?;
         let tmp = vf_fs::content::tmp_file(env.root, "pdf")?;
         let (label, reason, detail) = match what {
             Convert::Flatten => {
@@ -2077,7 +2111,7 @@ fn save_pending(
     as_new: bool,
 ) -> Result<Option<Doc>, String> {
     let n = v.pending.len();
-    let based_on = source_hash(env, doc)?;
+    let based_on = source_hash(env, doc, v.seen_hash().as_deref())?;
     let tmp = vf_fs::content::tmp_file(env.root, "pdf")?;
     let now = vf_core::now_rfc3339();
     if let Err(e) = annot::add(&doc.path, &tmp, &v.pending, &now) {

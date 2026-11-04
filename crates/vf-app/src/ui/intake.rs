@@ -38,6 +38,11 @@ pub struct IntakeTab {
     /// Filer's rules.json was rewritten from Admin (print capture folders) while Filer had
     /// its rules loaded: Intake offers to reload.
     rules_stale: bool,
+    /// rules.json's modified time when last brought in line, and when it was last looked at:
+    /// a save from Filer's own Rules screen (with the rules it loaded) is noticed and the
+    /// print capture rules put back (QA2 U5).
+    rules_seen: Option<std::time::SystemTime>,
+    rules_looked: Option<std::time::Instant>,
     /// The catalog changed (a batch was recorded or undone): Browse re-reads it.
     pub catalog_changed: bool,
     /// What the last reconcile did or why it failed, for Browse's notice.
@@ -94,6 +99,16 @@ pub fn settings_for(root: &Path, cabinet: &CabinetFile) -> Result<(Settings, boo
 pub(crate) fn pdfium_dir() -> Option<PathBuf> {
     let exe_dir = vf_core::exe_dir()?;
     filer_pdf::pdf::find_pdfium(&exe_dir)
+}
+
+/// Whether Filer is filing a batch now (its `last_batch.json` says in progress).
+fn filer_committing(root: &Path) -> bool {
+    let p = filer_intake::commit::last_batch_path(&vf_fs::clients::master_dir(root));
+    std::fs::read(p)
+        .ok()
+        .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+        .and_then(|v| v.get("in_progress").and_then(|x| x.as_bool()))
+        .unwrap_or(false)
 }
 
 /// What a reconcile found: the batch recorded or undone, and the duplicates it filed.
@@ -165,6 +180,31 @@ impl IntakeTab {
             Ok(_) => self.reconciling = Some((modified, rx)),
             Err(e) => self.reconciled(modified, Err(e.to_string())),
         }
+    }
+
+    /// Every 2 s on the Intake tab: when rules.json changed since it was last brought in line
+    /// (Filer's Rules screen saved), the print capture rules are put back, and Intake is offered
+    /// a reload if that changed anything.
+    fn watch_rules(&mut self, root: &Path) {
+        if self
+            .rules_looked
+            .is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(2))
+        {
+            return;
+        }
+        self.rules_looked = Some(std::time::Instant::now());
+        let path = filer_core::rules::path(&vf_fs::clients::master_dir(root));
+        let modified = |p: &Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
+        let now = modified(&path);
+        if now.is_none() || now == self.rules_seen {
+            return;
+        }
+        if self.rules_seen.is_some()
+            && vf_ingest::parsers::sync_filer_rules_report(root).is_ok_and(|s| s.changed)
+        {
+            self.rules_stale = self.filer.is_some();
+        }
+        self.rules_seen = modified(&path);
     }
 
     /// Admin rewrote Filer's rules: a loaded Filer must reload them (offered on the tab).
@@ -306,14 +346,20 @@ impl IntakeTab {
         sheets_dir: &Path,
     ) {
         self.ingest.strip(ui, prefs, snap, sheets_dir, root);
+        self.watch_rules(root);
         if self.rules_stale {
             let mut reload = false;
+            // Not while Filer is filing a batch: its commit thread outlives the screen (QA2 U4).
+            let committing = filer_committing(root);
             egui::Panel::top("vf-intake-rules-stale").show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.label(
                         "Where print captures are filed changed (Admin › Print capture). Reload Intake to use it; changes not yet confirmed in Intake's review are read again from the inbox.",
                     );
-                    reload = ui.button("Reload Intake").clicked();
+                    reload = ui
+                        .add_enabled(!committing, egui::Button::new("Reload Intake"))
+                        .on_disabled_hover_text("Intake is filing a batch: wait for it to finish.")
+                        .clicked();
                 });
             });
             if reload {

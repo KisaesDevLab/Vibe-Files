@@ -196,15 +196,47 @@ impl Admin {
 
     /// Saves one edit to `doc_types.json`, then the catalog (one Transaction).
     fn run(&mut self, env: &mut Env, edit: Edit) -> bool {
+        // Print capture profiles name doc types: a rename follows, a removal waits (QA2 U3).
+        let renamed = match &edit {
+            Edit::Update(t) => self
+                .types
+                .iter()
+                .find(|x| x.id == t.id && x.name != t.name)
+                .map(|old| (old.name.clone(), t.name.clone())),
+            _ => None,
+        };
+        if let Edit::Remove(id) = &edit
+            && let Some(t) = self.types.iter().find(|x| &x.id == id)
+        {
+            let users = vf_ingest::parsers::profiles_using(env.root, &t.name);
+            if !users.is_empty() {
+                self.error = Some(format!(
+                    "{} is used by print capture ({}): change those rows in Admin › Print capture & parsers first.",
+                    t.name,
+                    users.join(", ")
+                ));
+                return false;
+            }
+        }
         let r = doctypes::apply(env.root, edit)
             .and_then(|()| doctypes::sync(env.conn, env.root, env.device_id, "doc_types_edit"));
         match r {
             Ok(_) => {
                 self.changed = true;
+                if let Some((old, new)) = renamed
+                    && let Err(e) = vf_ingest::parsers::rename_doc_type(env.root, &old, &new)
+                {
+                    self.error = Some(format!("Print capture still names {old}: {e}"));
+                }
                 // A doc type's default folder decides where its prints are filed.
-                match vf_ingest::parsers::sync_filer_rules(env.root) {
-                    Ok(c) => self.rules_changed |= c,
-                    Err(e) => self.error = Some(format!("Intake's rules: {e}")),
+                match vf_ingest::parsers::sync_filer_rules_report(env.root) {
+                    Ok(s) => {
+                        self.rules_changed |= s.changed;
+                        if !s.problems.is_empty() {
+                            self.error = Some(format!("Print capture: {}", s.problems.join("; ")));
+                        }
+                    }
+                    Err(e) => self.error = Some(format!("Print capture: {e}")),
                 }
                 self.reload(env);
                 true

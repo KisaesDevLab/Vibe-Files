@@ -278,9 +278,15 @@ impl VibeFilesApp {
                 // Print captures are filed by their doc types' folders (Admin › Print capture):
                 // Filer's rules are brought in line before Intake first loads them.
                 let _ = vf_ingest::parsers::seed_if_missing(&root);
-                if let Err(e) = vf_ingest::parsers::sync_filer_rules(&root) {
+                // Shown on Browse, not only logged (QA2 U6).
+                let rules_problem = match vf_ingest::parsers::sync_filer_rules_report(&root) {
+                    Ok(s) if s.problems.is_empty() => None,
+                    Ok(s) => Some(s.problems.join("; ")),
+                    Err(e) => Some(e),
+                };
+                if let Some(e) = &rules_problem {
                     tracing::warn!(
-                        kind = crate::logging::kind(&e),
+                        kind = crate::logging::kind(e),
                         "print capture rules not written"
                     );
                 }
@@ -314,6 +320,11 @@ impl VibeFilesApp {
                 browse.sheets_dir = self.data.join("sheets");
                 browse.set_prefs(self.config.prefs.clone());
                 browse.saved = vf_index::saved::load(&opened.root);
+                if let Some(e) = rules_problem {
+                    browse.error = Some(format!(
+                        "Print capture (Admin › Print capture & parsers): {e}"
+                    ));
+                }
                 browse.notice = opened.rebuild.as_ref().map(|r| match &opened.set_aside {
                     Some(old) => format!(
                         "The catalog is no longer encrypted: the old one was kept as {} and the cabinet indexed again. {r}",

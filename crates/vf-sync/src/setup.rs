@@ -180,10 +180,12 @@ pub fn remember(data: &Path, cabinet_id: &str, firm: &[u8; 32]) -> Result<()> {
 /// The remembered keys, when this login on this PC has them.
 pub fn recall(data: &Path, cabinet_id: &str) -> Option<Keys> {
     let sealed = std::fs::read(remembered_file(data, cabinet_id)).ok()?;
-    let firm: [u8; 32] = vf_security::dpapi::unprotect(&sealed, cabinet_id.as_bytes())
-        .ok()?
-        .try_into()
-        .ok()?;
+    // Both copies of the key are wiped once the keys are derived (QA2 #10).
+    let plain = zeroize::Zeroizing::new(
+        vf_security::dpapi::unprotect(&sealed, cabinet_id.as_bytes()).ok()?,
+    );
+    let firm: zeroize::Zeroizing<[u8; 32]> =
+        zeroize::Zeroizing::new(plain.as_slice().try_into().ok()?);
     Some(Keys::derive(KEY_ID, &firm))
 }
 

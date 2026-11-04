@@ -80,6 +80,11 @@ pub fn reconcile(
     root: &Path,
     device_id: &str,
 ) -> Result<Reconciled, String> {
+    // One reconcile at a time in this process: two threads (a tab reopened while a big batch is
+    // still being hashed) would both see the batch unrecorded and record it twice (QA2 U9).
+    // Other processes cannot share the catalog (the data folder's in-use lock).
+    static ONE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _one = ONE.lock().unwrap_or_else(|p| p.into_inner());
     let dir = crate::clients::master_dir(root);
     let Some(lb) = load_last_batch(&dir) else {
         return Ok(Reconciled::default());

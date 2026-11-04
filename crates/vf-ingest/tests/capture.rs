@@ -307,6 +307,38 @@ fn ultratax_prints_go_to_their_doc_types_folder() {
     );
     assert_eq!(compiled.captures(&k1.id, rest)["who"], "Pat Partner");
 
+    // QA2 E1/E2: a year in the client's name does not move the file to that year; a document
+    // name inside a client's name, or an ordinary inbox file, is not taken by a row.
+    assert_eq!(
+        vf_ingest::parsers::trial(&root, "Smith 2019 Trust_2025_1041_Tax_Return_ANDE1042.pdf")
+            .destination
+            .unwrap(),
+        "Income Tax/2025/2025 Smith 2019 Trust_2025_1041_Tax_Return_ANDE1042.pdf"
+    );
+    let t = vf_ingest::parsers::trial(
+        &root,
+        "Tax Return Pros LLC_2025_1120S_InputScreens_ANDE1042.pdf",
+    );
+    assert_eq!(t.rule, "UltraTax CS · InputScreens");
+    assert!(
+        !compiled
+            .first_match("2025 Tax Return signed")
+            .id
+            .starts_with(vf_ingest::parsers::MANAGED_PREFIX),
+        "a hand-dropped file keeps Filer's own rules"
+    );
+
+    // QA2 U1: a save that would give a bad rule is refused before anything is written.
+    let mut bad = prof.clone();
+    bad.documents[0].folder = "Income Tax/CON".into();
+    assert!(vf_ingest::parsers::check_profile(&root, &path, &bad).is_err());
+    // QA2 U6: a profile file that does not read leaves Intake's rules as they are.
+    let rules_before = std::fs::read(filer_core::rules::path(&master)).unwrap();
+    std::fs::write(vf_ingest::parsers::dir(&root).join("broken.toml"), "name = ").unwrap();
+    assert!(vf_ingest::parsers::sync_filer_rules_report(&root).is_err());
+    assert_eq!(std::fs::read(filer_core::rules::path(&master)).unwrap(), rules_before);
+    std::fs::remove_file(vf_ingest::parsers::dir(&root).join("broken.toml")).unwrap();
+
     // A disabled profile takes its rules out again; Filer's own rules stay.
     prof.enabled = false;
     vf_ingest::parsers::save_profile(&path, &prof).unwrap();

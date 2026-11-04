@@ -233,6 +233,8 @@ impl SyncTab {
     fn finished(&mut self, d: Done, cfg: &SyncConfig) {
         match d {
             Done::Setup(firm, s, sealed) => {
+                // Wiped when this arm ends (QA2 #10).
+                let firm = zeroize::Zeroizing::new(firm);
                 let cab = s.cabinet_id.clone();
                 self.session = Some(s);
                 if let Some(w) = self.apply_remember(&self.setup_data.clone(), &cab, Some(&firm)) {
@@ -245,6 +247,8 @@ impl SyncTab {
                     Some("Sync is set up. The first push sends the whole cabinet.".into());
             }
             Done::Unlocked(firm, s) => {
+                // Wiped when this arm ends (QA2 #10).
+                let firm = zeroize::Zeroizing::new(firm);
                 let cab = s.cabinet_id.clone();
                 self.session = Some(s);
                 self.locked_by_user = false;
@@ -411,6 +415,10 @@ impl SyncTab {
         cfg: &SyncConfig,
         device_id: &str,
     ) {
+        // One job at a time: a second click would replace the running one (QA2 U8).
+        if self.running() {
+            return;
+        }
         let pass = zeroize::Zeroizing::new(std::mem::take(&mut self.form.unlock));
         self.setup_data = data.to_path_buf();
         self.error = None;
@@ -588,7 +596,10 @@ pub fn show(ui: &mut egui::Ui, t: &mut SyncTab, env: &mut Env, v: View<'_>) {
             field(ui, "Sync passphrase", &mut t.form.unlock, true, "");
             ui.checkbox(&mut t.form.remember, "Remember on this PC for my Windows login")
                 .on_hover_text(REMEMBER_HELP);
-            if ui.add(widgets::primary_button("Unlock")).clicked() {
+            if ui
+                .add_enabled(!t.running(), widgets::primary_button("Unlock"))
+                .clicked()
+            {
                 t.unlock(ui.ctx(), env.root, data_dir(v.catalog), v.cfg, env.device_id);
             }
         } else {
@@ -731,7 +742,8 @@ fn unlocked(ui: &mut egui::Ui, t: &mut SyncTab, env: &mut Env, v: &View<'_>) {
             t.start(ui.ctx(), v.catalog, env.root, Op::Restore(p));
         }
         if ui
-            .button("Lock")
+            .add_enabled(!t.running(), egui::Button::new("Lock"))
+            .on_disabled_hover_text("Wait for the running sync to finish.")
             .on_hover_text("Close sync until unlocked again (a remembered key unlocks it at the next start).")
             .clicked()
         {
