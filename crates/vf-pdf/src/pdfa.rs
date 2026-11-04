@@ -416,7 +416,8 @@ pub fn check(path: &Path) -> Result<Vec<String>, String> {
         .position(|&b| b == b'\n')
         .map(|i| &raw[i + 1..(i + 6).min(raw.len())]);
     if !raw.starts_with(b"%PDF-1.")
-        || !second_line.is_some_and(|l| l[0] == b'%' && l[1..5].iter().all(|&b| b >= 128))
+        // A short line (a tiny or cut-off file) fails the check; it never panics (QA I15).
+        || !second_line.is_some_and(|l| l.len() >= 5 && l[0] == b'%' && l[1..5].iter().all(|&b| b >= 128))
     {
         issues.push("header: no binary comment line".into());
     }
@@ -525,6 +526,17 @@ pub fn check(path: &Path) -> Result<Vec<String>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// QA I15: a tiny or cut-off file is an error or a failed check, never a panic.
+    #[test]
+    fn tiny_files_do_not_panic() {
+        let t = tempfile::tempdir().unwrap();
+        for raw in [&b""[..], b"%PDF-1.7\n%", b"%PDF-1.7\n%\xe2", b"\n\n"] {
+            let p = t.path().join("t.pdf");
+            std::fs::write(&p, raw).unwrap();
+            let _ = check(&p);
+        }
+    }
 
     #[test]
     fn icc_profile_is_well_formed() {

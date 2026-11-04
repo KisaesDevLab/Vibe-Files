@@ -89,6 +89,15 @@ pub fn documents_stamp(
 /// Takes the next job (intake first, then oldest).
 pub fn claim(conn: &Connection) -> vf_core::Result<Option<Job>> {
     let now = vf_core::now_rfc3339();
+    // A job still queued after MAX_ATTEMPTS claims was running when the app stopped (crashed)
+    // that many times: it is failed, not tried on every start (QA I10). A stop asked for or a
+    // missing engine gives its attempt back.
+    conn.execute(
+        "UPDATE ocr_job SET state = 'failed', updated_at = ?1,
+           error = 'Vibe Files stopped while reading this document ' || attempts || ' times'
+         WHERE state = 'queued' AND attempts >= ?2",
+        params![now, MAX_ATTEMPTS],
+    )?;
     let job = conn
         .query_row(
             "UPDATE ocr_job SET state = 'running', attempts = attempts + 1, updated_at = ?1
@@ -153,7 +162,7 @@ pub enum Outcome {
 
 /// Reads every page of the job's PDF that has no saved text yet, then indexes the document.
 /// Every way out leaves the job in a settled state: a catalog error puts it back in the queue
-/// (pages already read are kept); only [`Outcome::Stopped`] leaves it running, for [`recover`].
+/// (pages already read are kept); a stop puts it back too. A panic while reading fails the job.
 pub fn run_job(
     conn: &Connection,
     root: &Path,
@@ -162,7 +171,18 @@ pub fn run_job(
     job: &Job,
     stop: &AtomicBool,
 ) -> vf_core::Result<Outcome> {
-    let r = settle(conn, root, pdfium, engine, job, stop);
+    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        settle(conn, root, pdfium, engine, job, stop)
+    }));
+    let r = match r {
+        Ok(r) => r,
+        Err(_) => {
+            // A damaged PDF that crashes the reader: failed for good, the worker lives on.
+            let e = "reading this document failed unexpectedly (internal error)";
+            let _ = set_state(conn, &job.doc_id, "failed", Some(e));
+            return Ok(Outcome::Failed(e.into()));
+        }
+    };
     if r.is_err() {
         let _ = conn.execute(
             "UPDATE ocr_job SET state = 'queued', updated_at = ?2
@@ -199,7 +219,14 @@ fn settle(
                 ],
             )?;
         }
-        Outcome::Stopped => {}
+        Outcome::Stopped => {
+            // Asked to stop (quit): not an attempt; its finished pages are kept.
+            conn.execute(
+                "UPDATE ocr_job SET state = 'queued', attempts = max(attempts - 1, 0),
+                 updated_at = ?2 WHERE doc_id = ?1 AND state = 'running'",
+                params![job.doc_id, vf_core::now_rfc3339()],
+            )?;
+        }
         Outcome::Waiting(why) => {
             conn.execute(
                 "UPDATE ocr_job SET state = 'queued', attempts = max(attempts - 1, 0), error = ?2,

@@ -275,6 +275,11 @@ pub fn rotate(img: &RgbImage, deg: f32) -> RgbImage {
 // Windows Imaging Component
 
 /// Every frame of the image file, upright.
+/// The largest page taken (120 MP: a 600 dpi 11 × 17 page is 67 MP).
+pub const MAX_PIXELS: u64 = 120_000_000;
+/// The most pages taken from one image file.
+pub const MAX_FRAMES: u32 = 500;
+
 pub fn decode(path: &Path) -> Result<Vec<Frame>, String> {
     use windows::Win32::Foundation::GENERIC_READ;
     use windows::Win32::Graphics::Imaging::*;
@@ -310,6 +315,11 @@ pub fn decode(path: &Path) -> Result<Vec<Frame>, String> {
                 }
             })?;
         let count = decoder.GetFrameCount().map_err(|e| e.to_string())?;
+        if count > MAX_FRAMES {
+            return Err(format!(
+                "{name}: {count} pages; at most {MAX_FRAMES} are taken"
+            ));
+        }
         let mut out = Vec::new();
         for i in 0..count {
             let frame = decoder.GetFrame(i).map_err(|e| e.to_string())?;
@@ -336,6 +346,14 @@ pub fn decode(path: &Path) -> Result<Vec<Frame>, String> {
             .map_err(|e| format!("{name}: cannot convert frame {}: {e}", i + 1))?;
             let (mut w, mut h) = (0, 0);
             conv.GetSize(&mut w, &mut h).map_err(|e| e.to_string())?;
+            // A hostile or broken file can claim any size: refused before memory is taken.
+            if w == 0 || h == 0 || u64::from(w) * u64::from(h) > MAX_PIXELS {
+                return Err(format!(
+                    "{name}: page {} is {w} × {h} pixels; at most {} megapixels are taken",
+                    i + 1,
+                    MAX_PIXELS / 1_000_000
+                ));
+            }
             let mut buf = vec![0u8; w as usize * h as usize * 3];
             conv.CopyPixels(std::ptr::null(), w * 3, &mut buf)
                 .map_err(|e| format!("{name}: cannot read frame {}: {e}", i + 1))?;

@@ -67,14 +67,86 @@ impl Tesseract {
     }
 }
 
+/// The longest one page may take (a stuck or looping Tesseract is stopped; QA I10).
+pub const PAGE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
+
+/// Page images left by a run that stopped mid-page (they hold client pages): removed once per
+/// start when older than an hour (QA I14).
+fn sweep_temp(dir: &Path) {
+    static DONE: std::sync::Once = std::sync::Once::new();
+    DONE.call_once(|| {
+        let hour = std::time::Duration::from_secs(3600);
+        for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+            let n = e.file_name().to_string_lossy().into_owned();
+            let old = e
+                .metadata()
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.elapsed().ok())
+                .is_some_and(|a| a > hour);
+            if n.starts_with("vf-ocr-") && n.ends_with(".pgm") && old {
+                let _ = std::fs::remove_file(e.path());
+            }
+        }
+    });
+}
+
+/// Runs `cmd` with its output collected, killing it after `limit`.
+fn output_within(
+    cmd: &mut Command,
+    limit: std::time::Duration,
+) -> std::io::Result<std::process::Output> {
+    use std::io::Read;
+    use std::process::Stdio;
+    let mut child = cmd
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    // Read both pipes on their own threads so a full pipe never stalls the child.
+    let mut so = child.stdout.take().expect("piped");
+    let mut se = child.stderr.take().expect("piped");
+    let out = std::thread::spawn(move || {
+        let mut b = Vec::new();
+        let _ = so.read_to_end(&mut b);
+        b
+    });
+    let err = std::thread::spawn(move || {
+        let mut b = Vec::new();
+        let _ = se.read_to_end(&mut b);
+        b
+    });
+    let start = std::time::Instant::now();
+    let status = loop {
+        if let Some(s) = child.try_wait()? {
+            break s;
+        }
+        if start.elapsed() > limit {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!("stopped after {} s", limit.as_secs()),
+            ));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    };
+    Ok(std::process::Output {
+        status,
+        stdout: out.join().unwrap_or_default(),
+        stderr: err.join().unwrap_or_default(),
+    })
+}
+
 impl OcrEngine for Tesseract {
     fn name(&self) -> &str {
         "tesseract"
     }
 
     fn recognize(&self, page: &GrayImage, dpi: u32) -> Result<OcrPage, OcrError> {
-        let tmp =
-            std::env::temp_dir().join(format!("vf-ocr-{}.pgm", uuid::Uuid::now_v7().simple()));
+        let temp = std::env::temp_dir();
+        sweep_temp(&temp);
+        let tmp = temp.join(format!("vf-ocr-{}.pgm", uuid::Uuid::now_v7().simple()));
         let mut pgm = format!("P5\n{} {}\n255\n", page.width(), page.height()).into_bytes();
         pgm.extend_from_slice(page.as_raw());
         std::fs::write(&tmp, pgm).map_err(|e| OcrError::Failed(format!("temp page: {e}")))?;
@@ -91,9 +163,13 @@ impl OcrEngine for Tesseract {
             cmd.arg("--tessdata-dir").arg(d);
         }
         cmd.arg("tsv");
-        let out = cmd.output();
+        let out = output_within(&mut cmd, PAGE_TIMEOUT);
         let _ = std::fs::remove_file(&tmp);
-        let out = out.map_err(|e| OcrError::Unavailable(format!("{}: {e}", self.exe.display())))?;
+        let out = out.map_err(|e| match e.kind() {
+            // A page Tesseract cannot finish fails this document, not the engine.
+            std::io::ErrorKind::TimedOut => OcrError::Failed(format!("Tesseract {e}")),
+            _ => OcrError::Unavailable(format!("{}: {e}", self.exe.display())),
+        })?;
         if !out.status.success() {
             let err = String::from_utf8_lossy(&out.stderr);
             return Err(OcrError::Failed(

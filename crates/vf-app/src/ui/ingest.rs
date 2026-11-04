@@ -162,7 +162,12 @@ impl IngestState {
                             .iter()
                             .map(|d| format!("{} ({})", file_name(&d.path), d.note))
                             .collect();
-                        format!("{name} → {}", parts.join(" · "))
+                        let left = if p.kept == p.staged {
+                            " (the original could not be moved to _processed: it stays in the folder and is not delivered again; move it away by hand)"
+                        } else {
+                            ""
+                        };
+                        format!("{name} → {}{left}", parts.join(" · "))
                     }
                     Event::Failed { staged, error } => {
                         format!("{} set aside in _failed: {error}", file_name(&staged))

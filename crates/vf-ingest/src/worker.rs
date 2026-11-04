@@ -90,20 +90,77 @@ pub fn staged_files(dir: &Path) -> Vec<(PathBuf, u64)> {
         .collect()
 }
 
+/// Names the staged file being processed, in its staging folder. Still there at the next start
+/// means the app stopped (crashed, was killed) on that file: it is set aside rather than tried
+/// again on every start (QA I4).
+pub const MARKER: &str = ".vf-processing.txt";
+
+/// Sets aside the file a previous run stopped on, if any.
+pub fn recover_marker(dir: &Path) -> Option<Event> {
+    let marker = dir.join(MARKER);
+    let name = std::fs::read_to_string(&marker).ok()?;
+    let staged = dir.join(name.trim());
+    let _ = std::fs::remove_file(&marker);
+    if name.trim().is_empty() || !staged.is_file() {
+        return None;
+    }
+    let error = "Vibe Files stopped while processing this file; it was set aside so it is not tried again. Open it to check it, then put it back in the folder to retry.".to_string();
+    pipeline::set_aside(&staged, &error).ok()?;
+    Some(Event::Failed { staged, error })
+}
+
+/// Size and modified time: a file left in place after it was handled is skipped until it changes.
+fn stamp(p: &Path) -> Option<(u64, std::time::SystemTime)> {
+    let m = std::fs::metadata(p).ok()?;
+    Some((m.len(), m.modified().ok()?))
+}
+
+/// [`pipeline::process`] with the marker written around it and a panic turned into an error.
+fn process_guarded(ctx: &Context<'_>, p: &Path, origin: Origin) -> Result<Processed, String> {
+    let marker = p.parent().map(|d| d.join(MARKER));
+    if let (Some(m), Some(n)) = (&marker, p.file_name()) {
+        let _ = std::fs::write(m, n.to_string_lossy().as_bytes());
+    }
+    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        pipeline::process(ctx, p, origin)
+    }))
+    .unwrap_or_else(|_| Err("processing failed unexpectedly (internal error)".into()));
+    if let Some(m) = &marker {
+        let _ = std::fs::remove_file(m);
+    }
+    r
+}
+
 fn run(config: Arc<Mutex<Config>>, waiting: Arc<AtomicUsize>, tx: Sender<Event>, wake: impl Fn()) {
     // Size seen on the previous pass: a file is processed when it has the same, non-zero size
     // twice in a row and can be opened for writing (no one else is still writing it).
     let mut sizes: HashMap<PathBuf, u64> = HashMap::new();
+    // Handled, but could not be moved out of the folder (open in another program): not handled
+    // again until it changes (QA I5).
+    let mut stuck: HashMap<PathBuf, (u64, std::time::SystemTime)> = HashMap::new();
+    let mut checked: std::collections::HashSet<PathBuf> = Default::default();
     loop {
         if Arc::strong_count(&config) == 1 {
             return; // the Worker was dropped
         }
         let cfg = config.lock().expect("config lock").clone();
+        for (dir, _) in &cfg.folders {
+            if checked.insert(dir.clone())
+                && let Some(ev) = recover_marker(dir)
+            {
+                if tx.send(ev).is_err() {
+                    return;
+                }
+                wake();
+            }
+        }
+        stuck.retain(|p, s| stamp(p).as_ref() == Some(s));
         let mut seen: HashMap<PathBuf, u64> = HashMap::new();
         let mut ready: Vec<(PathBuf, Origin)> = Vec::new();
         for (dir, origin) in &cfg.folders {
             for (p, len) in staged_files(dir) {
-                if len > 0 && sizes.get(&p) == Some(&len) && openable(&p) {
+                if len > 0 && sizes.get(&p) == Some(&len) && !stuck.contains_key(&p) && openable(&p)
+                {
                     ready.push((p.clone(), *origin));
                 }
                 seen.insert(p, len);
@@ -125,13 +182,18 @@ fn run(config: Arc<Mutex<Config>>, waiting: Arc<AtomicUsize>, tx: Sender<Event>,
                 ocr: tesseract.as_ref().map(|t| t as &dyn vf_ocr::OcrEngine),
             };
             for (p, origin) in ready {
-                let ev = match pipeline::process(&ctx, &p, origin) {
+                let ev = match process_guarded(&ctx, &p, origin) {
                     Ok(done) => Event::Processed(done),
                     Err(error) => {
                         let _ = pipeline::set_aside(&p, &error);
                         Event::Failed { staged: p, error }
                     }
                 };
+                let (Event::Processed(Processed { staged, .. }) | Event::Failed { staged, .. }) =
+                    &ev;
+                if let Some(s) = stamp(staged) {
+                    stuck.insert(staged.clone(), s);
+                }
                 sizes.retain(|k, _| k.exists());
                 if tx.send(ev).is_err() {
                     return; // the app is gone

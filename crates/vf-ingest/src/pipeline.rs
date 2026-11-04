@@ -152,7 +152,7 @@ pub fn process(ctx: &Context<'_>, staged: &Path, origin: Origin) -> Result<Proce
         let d = r.inspect_err(|_| {
             let _ = std::fs::remove_file(&tmp);
         })?;
-        let kept = keep_original(staged)?;
+        let kept = keep_original(staged).unwrap_or_else(|_| staged.to_path_buf());
         return Ok(Processed {
             staged: staged.to_path_buf(),
             delivered: vec![d],
@@ -180,7 +180,9 @@ pub fn process(ctx: &Context<'_>, staged: &Path, origin: Origin) -> Result<Proce
         let _ = std::fs::remove_file(tmp);
     }
     let out = result?;
-    let kept = keep_original(staged)?;
+    // Delivered: the original that cannot be moved aside (open elsewhere) stays, `kept` says so,
+    // and the worker does not deliver it again (QA I5).
+    let kept = keep_original(staged).unwrap_or_else(|_| staged.to_path_buf());
     Ok(Processed {
         staged: staged.to_path_buf(),
         delivered: out,
@@ -222,7 +224,7 @@ fn split_and_deliver(
         for (i, (seg, tmp)) in segments.iter().zip(&tmps).enumerate() {
             let pages = page_note(&seg.pages);
             let r = match &seg.sheet {
-                Some(Some(cover)) => {
+                Some(Some(cover)) if lookup.clients.contains_key(&cover.client_id) => {
                     let (file, hint) = cover_name(cover, lookup, stem, i + 1);
                     deliver(
                         ctx,
@@ -239,6 +241,15 @@ fn split_and_deliver(
                     &format!("{stem} part {}.pdf", i + 1),
                     format!("{pages} · separator sheet"),
                 ),
+                // A sheet for a client ID the list does not have (an old sheet, a misread):
+                // a plain part, never a name made from what the barcode says (QA I7).
+                Some(Some(_)) => deliver_or_recognized(
+                    ctx,
+                    lookup,
+                    tmp,
+                    &format!("{stem} part {}.pdf", i + 1),
+                    format!("{pages} · cover sheet for a client not in the client list"),
+                ),
                 None => deliver_or_recognized(
                     ctx,
                     lookup,
@@ -253,12 +264,25 @@ fn split_and_deliver(
                     for t in &tmps {
                         let _ = std::fs::remove_file(t);
                     }
+                    // All or nothing: the parts already in the inbox go too (while unchanged),
+                    // so the retry from `_failed` does not file them twice (QA I6).
+                    take_back(&out);
                     return Err(e);
                 }
             }
         }
     }
     Ok(out)
+}
+
+/// Removes delivered files from the inbox again (each only while it is still the delivered
+/// content; Filer files only on Confirm, so they are still waiting there).
+fn take_back(delivered: &[Delivered]) {
+    for d in delivered {
+        if filer_intake::commit::sha256_file(&d.path).is_ok_and(|h| h == d.sha256) {
+            let _ = std::fs::remove_file(&d.path);
+        }
+    }
 }
 
 pub fn is_pdf(p: &Path) -> bool {
@@ -299,7 +323,7 @@ fn cover_name(cover: &Cover, lookup: &Lookup, stem: &str, part: usize) -> (Strin
     let file = format!(
         "{}_{}_{}.pdf",
         clean(&client),
-        cover.client_id,
+        clean(&cover.client_id),
         clean(&rest.join(" "))
     );
     let mut hint = Hint::new("", &file, "barcode", "");
@@ -436,6 +460,22 @@ pub fn free_name(dir: &Path, name: &str) -> PathBuf {
         .expect("a free name")
 }
 
+/// Renames `src` to `dir/name` (or a free `name (n)`) without ever replacing a file: a file
+/// that appears under the chosen name meanwhile makes it try the next name (QA I9).
+pub fn rename_free(src: &Path, dir: &Path, name: &str) -> std::io::Result<PathBuf> {
+    let mut last = None;
+    for _ in 0..20 {
+        let dst = free_name(dir, name);
+        match filer_intake::commit::move_no_replace(src, &dst) {
+            Ok(()) => return Ok(dst),
+            // ERROR_FILE_EXISTS (80) / ERROR_ALREADY_EXISTS (183)
+            Err(e) if matches!(e.raw_os_error(), Some(80 | 183)) => last = Some(e),
+            Err(e) => return Err(e),
+        }
+    }
+    Err(last.unwrap_or_else(|| std::io::Error::other("no free name")))
+}
+
 /// Records the hint (when it says anything), then renames `tmp` into the inbox as `name`.
 fn deliver(
     ctx: &Context<'_>,
@@ -457,7 +497,7 @@ fn deliver(
         // Before the file appears in the inbox, so the hint is there when Filer files it.
         vf_fs::hints::append(ctx.root, &h)?;
     }
-    std::fs::rename(tmp, &dst).map_err(|e| {
+    let dst = rename_free(tmp, ctx.inbox, name).map_err(|e| {
         let _ = std::fs::remove_file(tmp);
         format!("cannot deliver {name} to {}: {e}", ctx.inbox.display())
     })?;
@@ -473,10 +513,7 @@ pub fn move_aside(file: &Path, staging: &Path, sub: &str) -> Result<PathBuf, Str
     let dir = staging.join(sub).join(today());
     std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
     let name = file.file_name().ok_or("no file name")?.to_string_lossy();
-    let dst = free_name(&dir, &name);
-    std::fs::rename(file, &dst)
-        .map_err(|e| format!("cannot move {} aside: {e}", file.display()))?;
-    Ok(dst)
+    rename_free(file, &dir, &name).map_err(|e| format!("cannot move {} aside: {e}", file.display()))
 }
 
 fn today() -> String {

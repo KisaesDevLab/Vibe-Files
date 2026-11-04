@@ -444,8 +444,46 @@ pub fn scan_to(
     let work = scans_dir.join(format!(".scan-{}", uuid::Uuid::now_v7().simple()));
     let r = scan_pages(device_id, profile, &work)
         .and_then(|pages| deliver(scans_dir, |tmp| assemble(&pages, profile, tmp)));
-    let _ = std::fs::remove_dir_all(&work);
+    match &r {
+        Ok(_) => {
+            let _ = std::fs::remove_dir_all(&work);
+        }
+        Err(e) => {
+            // Scanned pages are paper someone fed: never thrown away because the PDF could not
+            // be built. They go to `_failed/<date>/` with the error (QA I8).
+            if let Some(kept) = keep_failed_pages(&work, scans_dir, e) {
+                return Err(format!(
+                    "{e} (the scanned pages are kept in {})",
+                    kept.display()
+                ));
+            }
+            let _ = std::fs::remove_dir_all(&work);
+        }
+    }
     r
+}
+
+/// Moves a failed scan's page images to `<scans>/_failed/<date>/scan-…/` with the error.
+/// `None` when there were no pages (nothing to keep) or the move failed.
+fn keep_failed_pages(work: &Path, scans_dir: &Path, error: &str) -> Option<PathBuf> {
+    let has_pages = std::fs::read_dir(work).ok()?.flatten().next().is_some();
+    if !has_pages {
+        return None;
+    }
+    let day = vf_core::now_rfc3339()
+        .get(..10)
+        .unwrap_or("undated")
+        .to_string();
+    let dir = scans_dir.join(crate::pipeline::FAILED_DIR).join(day);
+    std::fs::create_dir_all(&dir).ok()?;
+    let name = work
+        .file_name()?
+        .to_string_lossy()
+        .trim_start_matches('.')
+        .to_string();
+    let dst = crate::pipeline::rename_free(work, &dir, &name).ok()?;
+    let _ = std::fs::write(dst.join("error.txt"), error);
+    Some(dst)
 }
 
 /// Writes the scan's PDF under a hidden name, then gives it its `Scan <date>.pdf` name.
@@ -458,7 +496,11 @@ pub fn deliver(
     let a = make(&tmp).inspect_err(|_| {
         let _ = std::fs::remove_file(&tmp);
     })?;
-    std::fs::rename(&tmp, &out).map_err(|e| {
+    let name = out
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let out = crate::pipeline::rename_free(&tmp, scans_dir, &name).map_err(|e| {
         let _ = std::fs::remove_file(&tmp);
         format!("cannot write {}: {e}", out.display())
     })?;

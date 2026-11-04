@@ -170,14 +170,10 @@ fn restart_mid_document_resumes_without_redoing_pages() {
     let r = queue::run_job(&f.conn, &f.root, pdfium(), Some(&first), &job, &stop).unwrap();
     assert_eq!(r, Outcome::Stopped);
     assert_eq!(first.calls.load(Ordering::SeqCst), 2);
-    assert_eq!(f.state("d1"), "running");
-    assert!(
-        queue::claim(&f.conn).unwrap().is_none(),
-        "nothing else queued"
-    );
+    assert_eq!(f.state("d1"), "queued", "a quit is not an attempt");
 
     // Restart.
-    assert_eq!(queue::recover(&f.conn).unwrap(), 1);
+    assert_eq!(queue::recover(&f.conn).unwrap(), 0);
     let second = Fake::new();
     let job = queue::claim(&f.conn).unwrap().unwrap();
     let r = queue::run_job(
@@ -378,4 +374,19 @@ fn short_own_text_is_not_repeated_by_ocr() {
         .unwrap();
     assert_eq!(source, "pdf");
     assert_eq!(text.trim(), "Bravo one");
+}
+
+/// QA I10: a document the app crashes on is failed after three tries, not read on every start.
+#[test]
+fn a_document_that_crashes_the_app_fails_after_three_tries() {
+    let f = fx();
+    f.add("d1", "scan.pdf", 1, false);
+    queue::enqueue_missing(&f.conn, queue::BACKLOG).unwrap();
+    for _ in 0..3 {
+        // Claimed, then the app dies mid-page: the next start puts it back.
+        assert!(queue::claim(&f.conn).unwrap().is_some());
+        assert_eq!(queue::recover(&f.conn).unwrap(), 1);
+    }
+    assert!(queue::claim(&f.conn).unwrap().is_none());
+    assert_eq!(f.state("d1"), "failed");
 }

@@ -345,6 +345,12 @@ impl Ds<'_> {
             return Err(self.status());
         }
         let pixel = Pixel::from_twain(info.pixel_type).ok_or(TWCC_BADVALUE)?;
+        // Only uncompressed, chunky pixels are read: compressed or planar data read as plain
+        // pixels would be a garbled page (QA I12). The driver was asked for TWCP_NONE.
+        let (compression, planar) = (info.compression, info.planar);
+        if compression != TWCP_NONE || planar != 0 {
+            return Err(TWCC_BADVALUE);
+        }
         let width = info.image_width.max(0) as u32;
         let known_height = (info.image_length > 0).then_some(info.image_length as u32);
         let row = pixel.row_bytes(width);
