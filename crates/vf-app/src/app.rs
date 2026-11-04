@@ -347,7 +347,7 @@ impl VibeFilesApp {
                             vf_fs::trash::AUTO_EMPTY_DAYS
                         ))
                     }
-                    Err(e) => browse.error = Some(format!("Emptying old trash: {e}")),
+                    Err(e) => add_error(&mut browse.error, format!("Emptying old trash: {e}")),
                 }
                 let ocr = crate::ui::ocr::OcrState::start(
                     ctx,
@@ -784,7 +784,10 @@ impl eframe::App for VibeFilesApp {
                     tracing::info!(check = c.name, ok = c.ok, "startup self-check");
                 }
                 if !failed.is_empty() {
-                    o.browse.error = Some(format!("Startup check: {}", failed.join(" · ")));
+                    add_error(
+                        &mut o.browse.error,
+                        format!("Startup check: {}", failed.join(" · ")),
+                    );
                 }
             }
             if let Some(c) = o.sync.config_changed.take() {
@@ -806,6 +809,14 @@ impl eframe::App for VibeFilesApp {
             self.start(mode, &ctx);
         }
     }
+}
+
+/// Adds `msg` to a message line without hiding what it already says (QA3 #14).
+fn add_error(line: &mut Option<String>, msg: String) {
+    *line = Some(match line.take() {
+        Some(old) if !old.is_empty() => format!("{old} · {msg}"),
+        _ => msg,
+    });
 }
 
 #[cfg(test)]

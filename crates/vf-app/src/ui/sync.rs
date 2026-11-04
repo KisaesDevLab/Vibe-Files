@@ -9,6 +9,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, TryRecvError};
 use std::time::{Duration, Instant};
+use zeroize::Zeroizing;
 
 use egui::RichText;
 use vf_core::db::Storage;
@@ -24,9 +25,9 @@ pub const VERIFY_SAMPLE: usize = 20;
 
 pub enum Done {
     /// (firm key, session, sealed application key).
-    Setup([u8; 32], Sync, String),
+    Setup(Zeroizing<[u8; 32]>, Sync, String),
     /// (firm key, session): unlocked with the passphrase.
-    Unlocked([u8; 32], Sync),
+    Unlocked(Zeroizing<[u8; 32]>, Sync),
     Push(vf_sync::push::PushReport),
     Pull(vf_sync::pull::PullReport),
     Verify(usize, usize),
@@ -233,8 +234,6 @@ impl SyncTab {
     fn finished(&mut self, d: Done, cfg: &SyncConfig) {
         match d {
             Done::Setup(firm, s, sealed) => {
-                // Wiped when this arm ends (QA2 #10).
-                let firm = zeroize::Zeroizing::new(firm);
                 let cab = s.cabinet_id.clone();
                 self.session = Some(s);
                 if let Some(w) = self.apply_remember(&self.setup_data.clone(), &cab, Some(&firm)) {
@@ -247,8 +246,6 @@ impl SyncTab {
                     Some("Sync is set up. The first push sends the whole cabinet.".into());
             }
             Done::Unlocked(firm, s) => {
-                // Wiped when this arm ends (QA2 #10).
-                let firm = zeroize::Zeroizing::new(firm);
                 let cab = s.cabinet_id.clone();
                 self.session = Some(s);
                 self.locked_by_user = false;
@@ -429,8 +426,11 @@ impl SyncTab {
             .name("b2-unlock".into())
             .spawn(move || {
                 let r = (|| -> Result<Done, String> {
-                    let firm = vf_sync::setup::firm_key_local(&root, &cfg.cabinet_id, &pass)
-                        .map_err(|e| e.to_string())?;
+                    // Wiped wherever it ends up (QA3 #16).
+                    let firm = Zeroizing::new(
+                        vf_sync::setup::firm_key_local(&root, &cfg.cabinet_id, &pass)
+                            .map_err(|e| e.to_string())?,
+                    );
                     let keys = vf_sync::Keys::derive(vf_sync::setup::KEY_ID, &firm);
                     Ok(Done::Unlocked(
                         firm,
@@ -487,6 +487,7 @@ impl SyncTab {
                     )
                     .map_err(|e| e.to_string())?;
                     let sealed = vf_sync::setup::seal_secret(&keys, &app_key);
+                    let firm = Zeroizing::new(firm);
                     Ok(Done::Setup(
                         firm,
                         Sync {

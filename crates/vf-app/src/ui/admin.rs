@@ -197,14 +197,34 @@ impl Admin {
     /// Saves one edit to `doc_types.json`, then the catalog (one Transaction).
     fn run(&mut self, env: &mut Env, edit: Edit) -> bool {
         // Print capture profiles name doc types: a rename follows, a removal waits (QA2 U3).
+        // Compared as saved (trimmed): a stray space is not a rename (QA3 #2).
         let renamed = match &edit {
             Edit::Update(t) => self
                 .types
                 .iter()
-                .find(|x| x.id == t.id && x.name != t.name)
-                .map(|old| (old.name.clone(), t.name.clone())),
+                .find(|x| x.id == t.id && x.name.trim() != t.name.trim())
+                .map(|old| (old.name.clone(), t.name.trim().to_string())),
             _ => None,
         };
+        if let Some((old, _)) = &renamed {
+            // The profiles must all read before anything changes, so a rename never stops
+            // half way (QA3 #7); the K-1 doc types behind "K-1 (by entity type)" are named in the
+            // program, not in the profile, and cannot follow a rename (QA3 #8).
+            let (_, errs) = vf_ingest::parsers::load_files(env.root);
+            if !errs.is_empty() {
+                self.error = Some(format!(
+                    "Not renamed: a print capture profile cannot be read ({}).",
+                    errs.join("; ")
+                ));
+                return false;
+            }
+            if vf_ingest::parsers::fixed_name_in_use(env.root, old) {
+                self.error = Some(format!(
+                    "{old} is used by print capture's \"K-1 (by entity type)\" rows under this name: it cannot be renamed."
+                ));
+                return false;
+            }
+        }
         if let Edit::Remove(id) = &edit
             && let Some(t) = self.types.iter().find(|x| &x.id == id)
         {
@@ -223,22 +243,27 @@ impl Admin {
         match r {
             Ok(_) => {
                 self.changed = true;
+                let mut msgs: Vec<String> = Vec::new();
                 if let Some((old, new)) = renamed
                     && let Err(e) = vf_ingest::parsers::rename_doc_type(env.root, &old, &new)
                 {
-                    self.error = Some(format!("Print capture still names {old}: {e}"));
+                    msgs.push(format!("Print capture still names {old}: {e}"));
                 }
                 // A doc type's default folder decides where its prints are filed.
                 match vf_ingest::parsers::sync_filer_rules_report(env.root) {
                     Ok(s) => {
                         self.rules_changed |= s.changed;
                         if !s.problems.is_empty() {
-                            self.error = Some(format!("Print capture: {}", s.problems.join("; ")));
+                            msgs.push(format!("Print capture: {}", s.problems.join("; ")));
                         }
                     }
-                    Err(e) => self.error = Some(format!("Print capture: {e}")),
+                    Err(e) => msgs.push(format!("Print capture: {e}")),
                 }
                 self.reload(env);
+                // Every message kept, after the reload (QA3 #7).
+                if !msgs.is_empty() {
+                    self.error = Some(msgs.join(" "));
+                }
                 true
             }
             Err(e) => {

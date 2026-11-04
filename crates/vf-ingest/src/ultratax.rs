@@ -500,6 +500,9 @@ impl Row {
     }
 }
 
+/// The doc types a [`K1_BY_FORM`] row files under.
+pub const K1_TYPES: [&str; 3] = ["K-1 (1120-S)", "K-1 (1065)", "K-1 (1041)"];
+
 /// The K-1 doc type for an entity type.
 pub fn k1_type(form: &str) -> Option<&'static str> {
     let f = form.to_ascii_uppercase().replace('-', "");
@@ -743,7 +746,8 @@ pub fn rule_pattern(row: &Row, layout: &Layout, short: bool) -> String {
             out.push_str(&regex::escape(&ch.to_string()));
         }
     }
-    out.push('$');
+    // The inbox names a second print of the same name `… (2).pdf` (QA3 e2e #1).
+    out.push_str(r"(?: \(\d+\))?$");
     out
 }
 
@@ -812,6 +816,8 @@ mod tests {
         let tax = re("ArchivedTaxReturn", false);
         assert!(tax.is_match("Reyes_2025_1040_Tax_Return_REYE5521"));
         assert!(tax.is_match("Reyes_2025_1040_Amended_Tax_Return_REYE5521"));
+        // A second print of the same name, renamed by the inbox (QA3 e2e #1).
+        assert!(tax.is_match("Reyes_2025_1040_Tax_Return_REYE5521 (2)"));
         assert!(tax.is_match("2019 Smith 2019 Trust_2025_1041_Tax_Return_SMIT1234"));
         for other in [
             "Tax Return Pros LLC_2025_1120S_InputScreens_TAXR1234",

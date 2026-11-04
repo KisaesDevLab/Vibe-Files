@@ -1849,6 +1849,11 @@ fn redact_panel(ui: &mut egui::Ui, v: &mut Viewer, env: &mut Env<'_>) {
 
 fn apply_redactions(v: &mut Viewer, env: &mut Env<'_>) {
     let Some(doc) = v.doc.clone() else { return };
+    // The boxes were drawn on the pages shown: never applied to other content (QA3 #5).
+    if let Err(e) = source_hash(env, &doc, v.seen_hash().as_deref()) {
+        v.error = Some(e);
+        return;
+    }
     let plan = crate::redact::Plan {
         found: v
             .pii_found
@@ -1976,10 +1981,22 @@ fn source_hash(env: &Env<'_>, doc: &Doc, seen: Option<&str>) -> Result<String, S
     if let Some(seen) = seen
         && seen != hash
     {
-        return Err(format!(
-            "{} changed since it was shown (a sync, a restore or another PC): your edits were made on the earlier pages. Open it again.",
-            doc.name
-        ));
+        // A text layer added after OCR leaves the pages as they were: edits still fit (QA3 #6).
+        let text_layer_only: bool = env
+            .conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM version WHERE doc_id = ?1 AND hash = ?2
+                   AND created_by = ?3)",
+                vf_core::db::params![doc.doc_id, seen, vf_fs::cabinet::TEXT_LAYER_VERSION_BY],
+                |r| r.get(0),
+            )
+            .unwrap_or(false);
+        if !text_layer_only {
+            return Err(format!(
+                "{} has other content since it was shown (a sync, a restore, a version put back or another PC), so your edits, made on the earlier pages, were not applied. Note them, then Discard and open it again.",
+                doc.name
+            ));
+        }
     }
     Ok(hash)
 }

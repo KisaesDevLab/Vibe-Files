@@ -362,7 +362,19 @@ pub fn capture_name(root: &Path, lookup: &Lookup, name: &str) -> (String, Hint, 
         regex::Regex::new(&format!("^(?:{})$", filer_id_pattern(root)))
             .is_ok_and(|r| r.is_match(id))
     };
-    let parsed = crate::parsers::parse(&profiles, name).filter(|p| id_ok(&p.client_id));
+    // An ID typed in another case is the client list's (QA3 e2e #4).
+    let parsed = crate::parsers::parse(&profiles, name)
+        .map(|mut p| {
+            if let Some(k) = lookup
+                .clients
+                .keys()
+                .find(|k| k.eq_ignore_ascii_case(&p.client_id))
+            {
+                p.client_id = k.clone();
+            }
+            p
+        })
+        .filter(|p| id_ok(&p.client_id));
     let Some(p) = parsed else {
         let mut h = Hint::new("", name, "print_capture", "");
         h.source = Some("firm".into());
@@ -591,9 +603,9 @@ pub fn move_aside(file: &Path, staging: &Path, sub: &str) -> Result<PathBuf, Str
     rename_free(file, &dir, &name).map_err(|e| format!("cannot move {} aside: {e}", file.display()))
 }
 
+/// The office's date (QA3 e2e #5: not UTC, which is tomorrow in the evening).
 fn today() -> String {
-    let now = vf_core::now_rfc3339();
-    now.get(..10).unwrap_or("undated").to_string()
+    vf_core::retention::today().to_string()
 }
 
 /// Moves the staged original to `_processed/<date>/`.

@@ -185,7 +185,10 @@ pub fn run_job(
     };
     if r.is_err() {
         let _ = conn.execute(
-            "UPDATE ocr_job SET state = 'queued', attempts = max(attempts - 1, 0), updated_at = ?2
+            // Back of the queue: a document that keeps failing this way does not hold the
+            // worker (QA3 #12).
+            "UPDATE ocr_job SET state = 'queued', attempts = max(attempts - 1, 0), updated_at = ?2,
+               queued_at = ?2
              WHERE doc_id = ?1 AND state = 'running'",
             params![job.doc_id, vf_core::now_rfc3339()],
         );
@@ -506,6 +509,14 @@ impl Queue {
             std::thread::Builder::new()
                 .name(format!("vf-ocr-{n}"))
                 .spawn(move || {
+                    // Counted down however the thread ends, a panic included (QA3 #13).
+                    struct Alive(Arc<AtomicUsize>);
+                    impl Drop for Alive {
+                        fn drop(&mut self) {
+                            self.0.fetch_sub(1, Ordering::SeqCst);
+                        }
+                    }
+                    let _alive = Alive(alive);
                     worker(
                         n,
                         &config,
@@ -516,7 +527,6 @@ impl Queue {
                         &status,
                         &*wake,
                     );
-                    alive.fetch_sub(1, Ordering::SeqCst);
                 })
                 .map_err(|e| e.to_string())?;
         }

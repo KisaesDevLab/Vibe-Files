@@ -132,6 +132,10 @@ $mb = [math]::Round((Get-Item $zip).Length / 1MB, 1)
 # make it a trial (QA2 #8).
 $after = git status --porcelain
 $trial = if ($dirty -or $after) { ' (UNCOMMITTED CHANGES: trial only)' } elseif ($SkipBuild) { ' (REUSED BUILD, not checked against the commit: trial only)' } else { '' }
+# A trial leaves a marker beside the zip, so it is never taken for a release (QA3).
+$marker = Join-Path $dist 'TRIAL.txt'
+if ($trial) { "Trial build$trial from $commit; do not publish." | Set-Content -Encoding ascii $marker }
+elseif (Test-Path $marker) { Remove-Item $marker }
 "Release $ver staged from $commit${trial}: $zip ($mb MB)"
 "SHA-256 zip $zipHash"
 "SHA-256 exe $exeHash"

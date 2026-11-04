@@ -537,13 +537,27 @@ pub fn rename_doc_type(root: &Path, old: &str, new: &str) -> Result<(), String> 
     Ok(())
 }
 
+/// Whether `name` is one of the K-1 doc types a "K-1 (by entity type)" row files under (named in
+/// the program, so it cannot be renamed or removed while such a row exists; QA3 #8).
+pub fn fixed_name_in_use(root: &Path, name: &str) -> bool {
+    crate::ultratax::K1_TYPES.contains(&name)
+        && load_files(root).0.iter().any(|(_, p)| {
+            p.documents
+                .iter()
+                .any(|r| r.doc_type == crate::ultratax::K1_BY_FORM)
+        })
+}
+
 /// The profiles that name doc type `name` (a doc type they use cannot be removed).
 pub fn profiles_using(root: &Path, name: &str) -> Vec<String> {
+    let k1 = crate::ultratax::K1_TYPES.contains(&name);
     load_files(root)
         .0
         .into_iter()
         .filter(|(_, p)| {
-            p.documents.iter().any(|r| r.doc_type == name)
+            p.documents
+                .iter()
+                .any(|r| r.doc_type == name || (k1 && r.doc_type == crate::ultratax::K1_BY_FORM))
                 || p.doc.iter().any(|d| d.doc_type == name)
                 || p.folders.contains_key(name)
         })
@@ -638,7 +652,23 @@ pub fn trial(root: &Path, file_name: &str) -> Trial {
                 if !d.is_empty() {
                     d.push('/');
                 }
-                Ok(format!("{d}{}", r.filename))
+                let d = format!("{d}{}", r.filename);
+                // Filer refuses a path over 240 characters (it stays in the inbox): said here,
+                // with the cabinet's own root and the client's folder (QA3 e2e #2).
+                let full = root
+                    .join(format!("{} ({})", client.name, client.id))
+                    .join(&d)
+                    .to_string_lossy()
+                    .chars()
+                    .count();
+                if full > filer_core::template::MAX_PATH_LEN {
+                    Err(format!(
+                        "{d}: the full path would be {full} characters, over Filer's {}; it would stay in the inbox. Use short names or a rename for this document.",
+                        filer_core::template::MAX_PATH_LEN
+                    ))
+                } else {
+                    Ok(d)
+                }
             }
             Err(filer_core::rules::HitProblem::NeedsYear) => {
                 Err("no tax year in the name: Intake asks for one".into())
@@ -688,6 +718,11 @@ pub fn ultratax_profile() -> Profile {
     let mut p: Profile = toml::from_str(ULTRATAX).expect("seeded profile reads");
     // The document name no longer starts with the form: K-1s are in the table instead.
     p.doc.retain(|d| !d.pattern.starts_with("(?i)^1"));
+    // UltraTax invoices (not in its Document Names) are the firm's invoices (QA3 e2e #3).
+    p.doc.push(DocRule {
+        pattern: "(?i)invoice".into(),
+        doc_type: "Invoice".into(),
+    });
     p.layout = Some(crate::ultratax::Layout::default());
     p.documents = crate::ultratax::default_rows();
     p.pattern = p.layout.as_ref().expect("set above").regex(&p.documents);

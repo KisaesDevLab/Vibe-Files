@@ -23,6 +23,10 @@ pub struct CapturePage {
     pick: usize,
     /// The profile being edited (a copy of `files[pick]` until saved).
     draft: Option<Profile>,
+    /// The file the draft is of, and that file's profile when editing began: a reload finds
+    /// the draft's profile by path, and a save over a file changed meanwhile (another PC) is
+    /// refused (QA3 #1).
+    draft_of: Option<(PathBuf, Profile)>,
     test: String,
     trial: Option<Trial>,
     notice: Option<String>,
@@ -32,26 +36,40 @@ pub struct CapturePage {
 }
 
 impl CapturePage {
-    /// Reads the profile files again (after a save, or Reload).
     /// Reads the profile files again. Unsaved edits are kept (only Save and Discard end them;
-    /// QA2 U2).
+    /// QA2 U2), still on their own file however the list changed.
     pub fn reload(&mut self, root: &Path) {
         let keep = self.dirty();
         let _ = parsers::seed_if_missing(root);
         let (files, errors) = parsers::load_files(root);
         self.files = files;
         self.errors = errors;
-        self.pick = self.pick.min(self.files.len().saturating_sub(1));
-        if !keep {
-            self.draft = None;
+        let at = self
+            .draft_of
+            .as_ref()
+            .and_then(|(path, _)| self.files.iter().position(|(p, _)| p == path));
+        match (keep, at) {
+            (true, Some(i)) => self.pick = i,
+            (true, None) => {
+                self.draft = None;
+                self.draft_of = None;
+                self.error = Some(
+                    "The profile being edited is no longer there: its changes were dropped.".into(),
+                );
+            }
+            (false, _) => {
+                self.draft = None;
+                self.draft_of = None;
+            }
         }
+        self.pick = self.pick.min(self.files.len().saturating_sub(1));
         self.trial = None;
         self.loaded = true;
     }
 
     fn dirty(&self) -> bool {
-        match (&self.draft, self.files.get(self.pick)) {
-            (Some(d), Some((_, p))) => d != p,
+        match (&self.draft, &self.draft_of) {
+            (Some(d), Some((_, base))) => d != base,
             _ => false,
         }
     }
@@ -68,7 +86,9 @@ fn problem(p: &Profile, types: &[DocType]) -> Option<String> {
         }
         let mut seen = std::collections::HashSet::new();
         for r in &p.documents {
-            for n in r.names() {
+            let mut own = r.names();
+            own.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
+            for n in own {
                 if !seen.insert(n.to_ascii_lowercase()) {
                     return Some(format!(
                         "{n} is the name of two documents: UltraTax prints each under its own name."
@@ -168,6 +188,7 @@ pub fn show(
             } else {
                 p.pick = pick;
                 p.draft = None;
+                p.draft_of = None;
                 p.notice = None;
                 p.error = None;
             }
@@ -211,6 +232,9 @@ pub fn show(
         trial_view(ui, t);
     }
     ui.add_space(8.0);
+    if p.draft.is_none() {
+        p.draft_of = Some((p.files[p.pick].0.clone(), saved.clone()));
+    }
     let draft = p.draft.get_or_insert_with(|| saved.clone());
 
     ui.add_space(6.0);
@@ -264,21 +288,38 @@ pub fn show(
     let to_save = save.then(|| draft.clone());
     if discard {
         p.draft = None;
+        p.draft_of = None;
+        p.reload(root);
         p.notice = None;
         p.error = None;
     }
     if let Some(mut d) = to_save {
         d.folders
             .retain(|t, _| d.doc.iter().any(|r| &r.doc_type == t));
-        let path = p.files[p.pick].0.clone();
+        let (path, base) = p.draft_of.clone().expect("a draft has its file");
+        // Changed on disk since editing began (another PC): not saved over (QA3 #1).
+        let on_disk = parsers::load_files(root)
+            .0
+            .into_iter()
+            .find(|(fp, _)| *fp == path)
+            .map(|(_, pr)| pr);
+        let changed_meanwhile = match on_disk {
+            Some(now) if now != base => Err(
+                "the profile was changed on another PC since you began: Discard to see it, then make your changes again".to_string(),
+            ),
+            None => Err("the profile file is no longer there".to_string()),
+            _ => Ok(()),
+        };
         // The rules it gives are checked before anything is written (QA2 U1).
-        let r = parsers::check_profile(root, &path, &d)
+        let r = changed_meanwhile
+            .and_then(|()| parsers::check_profile(root, &path, &d))
             .and_then(|()| parsers::save_profile(&path, &d))
             .and_then(|()| parsers::sync_filer_rules_report(root));
         match r {
             Ok(s) => {
                 rules_changed = s.changed;
                 p.draft = None;
+                p.draft_of = None;
                 p.reload(root);
                 p.error = (!s.problems.is_empty()).then(|| s.problems.join("; "));
                 p.notice = Some(if s.changed {

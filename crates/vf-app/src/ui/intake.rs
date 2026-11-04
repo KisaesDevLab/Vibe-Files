@@ -43,6 +43,10 @@ pub struct IntakeTab {
     /// print capture rules put back (QA2 U5).
     rules_seen: Option<std::time::SystemTime>,
     rules_looked: Option<std::time::Instant>,
+    /// rules.json's modified time when Filer was loaded (the rules it holds).
+    filer_rules_at: Option<std::time::SystemTime>,
+    /// Whether Filer is filing a batch, and when that was last read (once a second).
+    committing: (bool, Option<std::time::Instant>),
     /// The catalog changed (a batch was recorded or undone): Browse re-reads it.
     pub catalog_changed: bool,
     /// What the last reconcile did or why it failed, for Browse's notice.
@@ -102,13 +106,22 @@ pub(crate) fn pdfium_dir() -> Option<PathBuf> {
 }
 
 /// Whether Filer is filing a batch now (its `last_batch.json` says in progress).
+/// A flag left by a crash mid-commit (Filer never clears it by itself) is not believed once the
+/// file has not changed for 15 minutes (a commit writes it when it starts and ends; one
+/// running longer than that is rare and only re-enables the button) (QA3 #3).
 fn filer_committing(root: &Path) -> bool {
     let p = filer_intake::commit::last_batch_path(&vf_fs::clients::master_dir(root));
-    std::fs::read(p)
+    let recent = std::fs::metadata(&p)
+        .and_then(|m| m.modified())
         .ok()
-        .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
-        .and_then(|v| v.get("in_progress").and_then(|x| x.as_bool()))
-        .unwrap_or(false)
+        .and_then(|t| t.elapsed().ok())
+        .is_some_and(|age| age < std::time::Duration::from_secs(15 * 60));
+    recent
+        && std::fs::read(p)
+            .ok()
+            .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+            .and_then(|v| v.get("in_progress").and_then(|x| x.as_bool()))
+            .unwrap_or(false)
 }
 
 /// What a reconcile found: the batch recorded or undone, and the duplicates it filed.
@@ -199,12 +212,17 @@ impl IntakeTab {
         if now.is_none() || now == self.rules_seen {
             return;
         }
-        if self.rules_seen.is_some()
-            && vf_ingest::parsers::sync_filer_rules_report(root).is_ok_and(|s| s.changed)
-        {
-            self.rules_stale = self.filer.is_some();
+        // Brought in line (also on the first look: a save made elsewhere before it); recorded
+        // only when that worked, so a failure is tried again (QA3 #11).
+        if vf_ingest::parsers::sync_filer_rules_report(root).is_err() {
+            return;
         }
         self.rules_seen = modified(&path);
+        // Filer loaded other rules than the file has now (written here, by Filer's own Rules
+        // screen, or by another PC): offer the reload (QA3 #4).
+        if self.filer.is_some() && self.filer_rules_at != self.rules_seen {
+            self.rules_stale = true;
+        }
     }
 
     /// Admin rewrote Filer's rules: a loaded Filer must reload them (offered on the tab).
@@ -350,7 +368,14 @@ impl IntakeTab {
         if self.rules_stale {
             let mut reload = false;
             // Not while Filer is filing a batch: its commit thread outlives the screen (QA2 U4).
-            let committing = filer_committing(root);
+            if self
+                .committing
+                .1
+                .is_none_or(|t| t.elapsed() > std::time::Duration::from_secs(1))
+            {
+                self.committing = (filer_committing(root), Some(std::time::Instant::now()));
+            }
+            let committing = self.committing.0;
             egui::Panel::top("vf-intake-rules-stale").show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.label(
@@ -379,6 +404,12 @@ impl IntakeTab {
                     );
                     let ctx = ui.ctx().clone();
                     self.filer = Some(FilerApp::new(&ctx, state));
+                    self.filer_rules_at = std::fs::metadata(filer_core::rules::path(
+                        &vf_fs::clients::master_dir(root),
+                    ))
+                    .and_then(|m| m.modified())
+                    .ok();
+                    self.rules_seen = None;
                     // Filer's `new` installs its theme; put Vibe's tweaks back on top.
                     theme::install(&ctx);
                 }

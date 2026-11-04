@@ -334,9 +334,16 @@ fn ultratax_prints_go_to_their_doc_types_folder() {
     assert!(vf_ingest::parsers::check_profile(&root, &path, &bad).is_err());
     // QA2 U6: a profile file that does not read leaves Intake's rules as they are.
     let rules_before = std::fs::read(filer_core::rules::path(&master)).unwrap();
-    std::fs::write(vf_ingest::parsers::dir(&root).join("broken.toml"), "name = ").unwrap();
+    std::fs::write(
+        vf_ingest::parsers::dir(&root).join("broken.toml"),
+        "name = ",
+    )
+    .unwrap();
     assert!(vf_ingest::parsers::sync_filer_rules_report(&root).is_err());
-    assert_eq!(std::fs::read(filer_core::rules::path(&master)).unwrap(), rules_before);
+    assert_eq!(
+        std::fs::read(filer_core::rules::path(&master)).unwrap(),
+        rules_before
+    );
     std::fs::remove_file(vf_ingest::parsers::dir(&root).join("broken.toml")).unwrap();
 
     // A disabled profile takes its rules out again; Filer's own rules stay.
