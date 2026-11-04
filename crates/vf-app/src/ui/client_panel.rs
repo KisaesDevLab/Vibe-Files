@@ -109,11 +109,15 @@ pub fn show(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env, ci: usize) {
         b.snap
             .clients
             .iter()
-            .find(|x| x.id == id)
-            .map(|x| (x.name.clone(), x.ext_id.clone()))
-            .unwrap_or_else(|| ("(unknown)".into(), "?".into()))
+            .position(|x| x.id == id)
+            .map(|i| {
+                let x = &b.snap.clients[i];
+                (x.name.clone(), x.ext_id.clone(), Some(i))
+            })
+            .unwrap_or_else(|| ("(unknown)".into(), "?".into(), None))
     };
     let mut remove: Option<(String, String, String)> = None;
+    let mut open: Option<usize> = None;
     let rels: Vec<_> = b
         .snap
         .relationships
@@ -126,15 +130,36 @@ pub fn show(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env, ci: usize) {
     }
     for r in &rels {
         let parent = r.parent_id == c.id;
-        let (other, other_ext) = name_of(if parent { &r.child_id } else { &r.parent_id });
+        let (other, other_ext, other_ix) = name_of(if parent { &r.child_id } else { &r.parent_id });
         let share = r.share_pct.map(|p| format!(" · {p}%")).unwrap_or_default();
-        let text = if parent {
-            format!("{other} ({other_ext}) is {}{share}", r.kind)
-        } else {
-            format!("{} of {other} ({other_ext}){share}", capitalize(&r.kind))
+        let who = format!("{other} ({other_ext})");
+        // The other client's name opens its folder (owner 2026-11-04).
+        let mut name = |ui: &mut egui::Ui| match other_ix {
+            Some(i) => {
+                if ui
+                    .link(&who)
+                    .on_hover_text(format!("Open {other}'s folder"))
+                    .clicked()
+                {
+                    open = Some(i);
+                }
+            }
+            None => {
+                ui.label(&who);
+            }
         };
-        ui.horizontal(|ui| {
-            ui.add(egui::Label::new(text).wrap());
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing.x = 4.0;
+            if parent {
+                name(ui);
+                ui.label(format!("is {}{share}", r.kind));
+            } else {
+                ui.label(format!("{} of", capitalize(&r.kind)));
+                name(ui);
+                if !share.is_empty() {
+                    ui.label(share.trim_start());
+                }
+            }
             if ui
                 .small_button("Remove")
                 .on_hover_text("Remove this relationship")
@@ -148,6 +173,10 @@ pub fn show(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env, ci: usize) {
                 remove = Some((p_ext, c_ext, r.kind.clone()));
             }
         });
+    }
+    if let Some(i) = open {
+        b.go_to_client(i);
+        return;
     }
     if let Some((p, ch, k)) = remove {
         match clients::remove_relationship(env.root, &p, &ch, &k) {

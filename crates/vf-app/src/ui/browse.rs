@@ -629,6 +629,15 @@ impl Browse {
         })
     }
 
+    /// Shows client `ci`'s folder, opened in the tree (a related client's link, owner
+    /// 2026-11-04).
+    pub fn go_to_client(&mut self, ci: usize) {
+        if ci < self.snap.clients.len() {
+            self.expanded.insert(Node::Client(ci));
+            self.set_scope(Scope::Client(ci));
+        }
+    }
+
     /// Shows `scope` in the grid and clears the selection.
     pub fn set_scope(&mut self, scope: Scope) {
         if self.scope != scope {
@@ -3537,10 +3546,21 @@ mod tests {
         let b = &h.state().b;
         assert_eq!(b.snap.relationships.len(), 1, "{:?}", b.rel_form.error);
         assert_eq!(b.snap.relationships[0].share_pct, Some(40.0));
-        assert!(
-            h.query_by_label("Baker Trust (1002) is shareholder · 40%")
-                .is_some()
-        );
+        assert!(h.query_by_label("is shareholder · 40%").is_some());
+        // The related client's name opens its folder (owner 2026-11-04).
+        h.get_by_label("Baker Trust (1002)").click();
+        h.run();
+        let baker = h
+            .state()
+            .b
+            .snap
+            .clients
+            .iter()
+            .position(|c| c.ext_id == "1002")
+            .unwrap();
+        assert_eq!(h.state().b.scope, Scope::Client(baker));
+        assert!(h.query_by_label("Shareholder of").is_some());
+        assert!(h.query_by_label("Acme LLC (1001)").is_some());
         let m = vf_fs::clients::load(&h.state().root).unwrap();
         assert_eq!(m.rels.records[0].parent_id, "1001");
         assert_eq!(m.rels.records[0].child_id, "1002");
