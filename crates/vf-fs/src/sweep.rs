@@ -482,7 +482,8 @@ pub fn adopt_new(
     device_id: &str,
     found: &[Unknown],
 ) -> Result<Vec<String>, String> {
-    if found.is_empty() {
+    // A batch being filed: its files are Intake's; looked at again next time.
+    if found.is_empty() || crate::intake::filing_now(root) {
         return Ok(vec![]);
     }
     let pending = crate::intake::unrecorded_paths(conn, root);

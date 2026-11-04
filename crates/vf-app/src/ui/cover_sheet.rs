@@ -47,13 +47,16 @@ impl CoverSheetDialog {
             let c = snap.clients.iter().find(|c| c.id == id)?;
             clients.iter().position(|(e, _, _)| *e == c.ext_id)
         });
+        let doc_types = snap.pickable_doc_types(None);
+        // Its place in the list offered (archived types left out), QA 2026-11-04.
+        let doc_type = doc_type.and_then(|id| doc_types.iter().position(|(t, _)| t == id));
         CoverSheetDialog {
             clients,
-            doc_types: snap.pickable_doc_types(None),
+            doc_types,
             doc_type_folders: snap.doc_type_folders.clone(),
             copies: "1".into(),
             client: start,
-            doc_type: doc_type.and_then(|id| snap.doc_types.iter().position(|(t, _)| t == id)),
+            doc_type,
             year: (chrono::Local::now().year() - 1).to_string(),
             error: None,
         }

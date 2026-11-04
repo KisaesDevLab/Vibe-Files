@@ -22,8 +22,12 @@ const LOG_MAX: usize = 6;
 
 #[derive(Default)]
 pub struct IngestState {
-    /// The last scan's PDF (or why not), for the one who started it to take.
-    pub finished_scan: Option<Result<PathBuf, String>>,
+    /// Finished scans by the folder they were scanned into: the PDF (or why not), for the one
+    /// who started that scan to take ([`IngestState::take_finished_scan`]). Keyed by folder so a
+    /// Browse scan is never confused with an Intake scan finished after it (QA 2026-11-04).
+    pub finished_scans: Vec<(PathBuf, Result<PathBuf, String>)>,
+    /// The folder the running scan goes to.
+    scan_dir: Option<PathBuf>,
     worker: Option<Worker>,
     /// This PC's Tesseract setting (`config.toml [ocr]`), for reading scanned forms (P08).
     pub tesseract: Option<PathBuf>,
@@ -312,11 +316,15 @@ impl IngestState {
             let line = match rx.try_recv() {
                 Ok(Ok((pdf, a))) => {
                     let l = format!("Scanned {} ({})", file_name(&pdf), a.note());
-                    self.finished_scan = Some(Ok(pdf));
+                    if let Some(d) = self.scan_dir.clone() {
+                        self.finished_scans.push((d, Ok(pdf)));
+                    }
                     Some(l)
                 }
                 Ok(Err(e)) => {
-                    self.finished_scan = Some(Err(e.clone()));
+                    if let Some(d) = self.scan_dir.clone() {
+                        self.finished_scans.push((d, Err(e.clone())));
+                    }
                     Some(format!("Scan failed: {e}"))
                 }
                 Err(TryRecvError::Disconnected) => Some("Scan stopped.".into()),
@@ -324,6 +332,7 @@ impl IngestState {
             };
             if let Some(l) = line {
                 self.scan_job = None;
+                self.scan_dir = None;
                 self.log_line(l);
             }
         }
@@ -371,7 +380,6 @@ impl IngestState {
         if self.scanning() {
             return Err("A scan is running.".into());
         }
-        self.finished_scan = None;
         let Some(found) = self.devices.clone() else {
             if self.devices_job.is_none() {
                 self.list_devices(ctx);
@@ -394,12 +402,20 @@ impl IngestState {
         let (tx, rx) = std::sync::mpsc::channel();
         let (ctx, id) = (ctx.clone(), current.id.clone());
         let driver_ui = current.kind == Kind::Twain && prefs.driver_ui;
+        self.finished_scans.retain(|(d, _)| *d != dir);
+        self.scan_dir = Some(dir.clone());
         std::thread::spawn(move || {
             let _ = tx.send(scanner::scan_to(&id, &profile, driver_ui, &dir));
             ctx.request_repaint();
         });
         self.scan_job = Some(rx);
         Ok(current.name.clone())
+    }
+
+    /// The finished scan into `dir`, when there is one.
+    pub fn take_finished_scan(&mut self, dir: &std::path::Path) -> Option<Result<PathBuf, String>> {
+        let i = self.finished_scans.iter().position(|(d, _)| d == dir)?;
+        Some(self.finished_scans.remove(i).1)
     }
 
     /// Scan row: scanner, profile, Scan. The PDF lands in the Scans folder; the worker splits

@@ -166,9 +166,9 @@ pub struct Browse {
     pub scan_request: bool,
     /// A scan started from here is running: its outcome is shown here when it ends.
     pub scan_watching: bool,
-    /// Where that scan is filed: the folder shown when Scan was pressed (owner 2026-11-04);
-    /// `None` = to the Scans folder and Intake.
-    pub scan_target: Option<ScanTarget>,
+    /// Where that scan is filed: the folder shown when Scan was pressed (owner 2026-11-04),
+    /// and the private folder it is scanned into; `None` = to the Scans folder and Intake.
+    pub scan_target: Option<(ScanTarget, PathBuf)>,
     /// Documents dropped on a tree folder: (ids, cabinet-relative folder), planned in `show`.
     drop_request: Option<(Vec<String>, String)>,
     /// Legal holds covering what is shown (P07 step 4), for the selection / client they were

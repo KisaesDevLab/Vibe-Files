@@ -140,6 +140,11 @@ pub const NOT_ON_UNDO_STACK: &[&str] = &[
     "sync_push",
     "sync_pull",
     "sync_restore",
+    // Records only, or done in the background (QA 2026-11-04): Ctrl+Z never lands on them.
+    "adopt",
+    "print",
+    "device_removed",
+    "template_edit",
 ];
 
 /// This Windows login's undo stack: its last 20 undoable transactions, newest first.

@@ -195,6 +195,9 @@ pub fn claim_file(p: &Path) -> Option<PathBuf> {
     Some(p.with_file_name(format!(".vf-claim-{name}.txt")))
 }
 
+/// A claim marked done: the file was delivered by the PC named after it.
+const DONE: &str = "done:";
+
 /// Claims a staged file for this copy of Vibe Files, so two copies watching the same folder
 /// (two logins on the office server, two PCs on one network folder) never both deliver it
 /// (owner 2026-11-04: "no duplicate processing"). The claim is an atomic create beside the
@@ -219,6 +222,10 @@ pub fn claim(p: &Path, device_id: &str) -> Option<PathBuf> {
                 return Some(c);
             }
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                // Delivered already (its original could not be moved out): never again.
+                if std::fs::read_to_string(&c).is_ok_and(|t| t.starts_with(DONE)) {
+                    return None;
+                }
                 let mine = std::fs::read_to_string(&c).is_ok_and(|t| t.trim() == device_id);
                 let stale = std::fs::metadata(&c)
                     .and_then(|m| m.modified())
@@ -327,10 +334,17 @@ fn run(config: Arc<Mutex<Config>>, waiting: Arc<AtomicUsize>, tx: Sender<Event>,
                     Ok(done) => Event::Processed(done),
                     Err(error) => {
                         let _ = pipeline::set_aside(&p, &error);
-                        Event::Failed { staged: p, error }
+                        Event::Failed { staged: p.clone(), error }
                     }
                 };
-                let _ = std::fs::remove_file(&claimed);
+                if matches!(ev, Event::Processed(_)) && p.is_file() {
+                    // Delivered, but the original could not be moved out (open elsewhere): the
+                    // claim stays, marked done, so no other PC delivers it again (QA
+                    // 2026-11-04).
+                    let _ = std::fs::write(&claimed, format!("{DONE}{}", cfg.device_id));
+                } else {
+                    let _ = std::fs::remove_file(&claimed);
+                }
                 let (Event::Processed(Processed { staged, .. }) | Event::Failed { staged, .. }) =
                     &ev;
                 if let Some((l, t)) = stamp(staged) {

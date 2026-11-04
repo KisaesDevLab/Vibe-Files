@@ -189,25 +189,31 @@ pub fn record(
         }
     }
     let printed = out.iter().filter(|o| o.2.is_ok()).count();
-    if printed > 0 {
-        let _ = tx.commit(
+    // The print was sent; a failed audit write is said, never swallowed (QA 2026-11-04).
+    let unrecorded = if printed > 0 {
+        tx.commit(
             conn,
             &mut vf_core::tx::NoFileOps,
             &vf_core::tx::Actor::device(device_id),
-        );
+        )
+        .err()
+        .map(|e| format!(" The print was NOT recorded in the audit trail: {e}"))
+    } else {
+        None
     }
+    .unwrap_or_default();
     let failed: Vec<String> = out
         .iter()
         .filter_map(|(_, n, r)| r.as_ref().err().map(|e| format!("{n}: {e}")))
         .collect();
     if failed.is_empty() {
         format!(
-            "Sent {printed} document{} to {printer}.",
+            "Sent {printed} document{} to {printer}.{unrecorded}",
             if printed == 1 { "" } else { "s" }
         )
     } else {
         format!(
-            "Sent {printed} to {printer}; not printed: {}",
+            "Sent {printed} to {printer}; not printed: {}.{unrecorded}",
             failed.join("; ")
         )
     }

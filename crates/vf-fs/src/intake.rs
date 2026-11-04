@@ -67,6 +67,21 @@ pub fn batch_dirs(root: &Path) -> Vec<std::path::PathBuf> {
     v
 }
 
+/// Whether any PC's Filer is filing a batch right now (its last batch saved as in progress
+/// within the hour; an older one is a stopped run Filer's recovery deals with). Files appear
+/// in client folders before Filer lists them, so nothing is adopted meanwhile (QA 2026-11-04).
+pub fn filing_now(root: &Path) -> bool {
+    batch_dirs(root).iter().any(|d| {
+        load_last_batch(d).is_some_and(|lb| {
+            lb.in_progress
+                && !lb.undone
+                && std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .is_ok_and(|n| (n.as_secs() as i64) - lb.committed_at.timestamp() < 3600)
+        })
+    })
+}
+
 /// The newest change to any PC's last batch (Intake looks again when it moves).
 pub fn latest_change(root: &Path) -> Option<std::time::SystemTime> {
     batch_dirs(root)
@@ -105,6 +120,55 @@ fn copy_over(from: &Path, to: &Path) -> Result<(), String> {
     crate::cabinet::write_replace(to, &bytes).map_err(|e| format!("{}: {e}", to.display()))
 }
 
+/// Filer's `config.json` carries the look (theme, zoom) under `display`: that part is each PC's
+/// own and never travels (QA 2026-11-04: a text-size change on one PC made every other PC's
+/// Intake ask for a reload). `from`'s settings with `keep`'s `display`; `None` when either is not
+/// JSON (then the file is copied as is).
+fn config_keeping_display(from: &Path, keep: &Path) -> Option<serde_json::Value> {
+    let mut v: serde_json::Value = serde_json::from_slice(&std::fs::read(from).ok()?).ok()?;
+    let k: Option<serde_json::Value> = std::fs::read(keep)
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok());
+    let o = v.as_object_mut()?;
+    match k.as_ref().and_then(|k| k.get("display")) {
+        Some(d) => {
+            o.insert("display".into(), d.clone());
+        }
+        None => {
+            o.remove("display");
+        }
+    }
+    Some(v)
+}
+
+/// Copies shared file `name` from `from` over `to`; `false` when nothing but the look differs
+/// (`config.json`), so nothing was written.
+fn bring(name: &str, from: &Path, to: &Path) -> Result<bool, String> {
+    if name == CONFIG
+        && let Some(v) = config_keeping_display(from, to)
+    {
+        let now: Option<serde_json::Value> = std::fs::read(to)
+            .ok()
+            .and_then(|b| serde_json::from_slice(&b).ok());
+        if now.as_ref() == Some(&v) {
+            return Ok(false);
+        }
+        let bytes = serde_json::to_vec_pretty(&v).map_err(|e| e.to_string())?;
+        crate::cabinet::write_replace(to, &bytes).map_err(|e| format!("{}: {e}", to.display()))?;
+        return Ok(true);
+    }
+    // The same bytes are not written again (another PC would see a change that is none).
+    if let (Ok(a), Ok(b)) = (std::fs::read(from), std::fs::read(to))
+        && a == b
+    {
+        return Ok(false);
+    }
+    copy_over(from, to)?;
+    Ok(true)
+}
+
+const CONFIG: &str = "config.json";
+
 impl Shared {
     /// Before Filer loads from `pc`: the cabinet's shared files copied in.
     pub fn prepare(&mut self, root: &Path, pc: &Path) -> Result<(), String> {
@@ -113,8 +177,17 @@ impl Shared {
         self.seen.clear();
         for f in SHARED {
             let (m, p) = (master.join(f), pc.join(f));
-            if m.is_file() {
-                copy_over(&m, &p)?;
+            // A save on this PC the 2 s poll had not sent yet (a reload or exit right after
+            // it) goes to the cabinet first, not lost under the cabinet's copy (QA 2026-11-04).
+            let pc_newer = match (mtime(&p), mtime(&m)) {
+                (Some(pt), Some(mt)) => pt > mt,
+                (Some(_), None) => true,
+                _ => false,
+            };
+            if pc_newer {
+                bring(f, &p, &m)?;
+            } else if m.is_file() {
+                bring(f, &m, &p)?;
             }
             self.seen.insert(f, (mtime(&m), mtime(&p)));
         }
@@ -131,11 +204,13 @@ impl Shared {
             let (mt, pt) = (mtime(&m), mtime(&p));
             let (sm, sp) = self.seen.get(f).copied().unwrap_or((None, None));
             if pt.is_some() && pt != sp {
-                copy_over(&p, &m)?;
-                out.to_cabinet.push(f);
+                if bring(f, &p, &m)? {
+                    out.to_cabinet.push(f);
+                }
             } else if mt.is_some() && mt != sm {
-                copy_over(&m, &p)?;
-                out.from_cabinet.push(f);
+                if bring(f, &m, &p)? {
+                    out.from_cabinet.push(f);
+                }
             } else {
                 continue;
             }
@@ -177,8 +252,12 @@ fn recorded(conn: &Connection, batch: &str) -> Option<(String, bool)> {
 /// would check: a file there must keep its bytes (Filer refuses to undo a changed size). Empty
 /// when the last batch was undone; a batch still being written counts.
 pub fn undoable_paths(root: &Path) -> std::collections::HashSet<String> {
+    // The cabinet-level `_Vibe/last_batch.json` predates the per-PC folders (Q-53): no Filer
+    // loads it, so it can never be undone and its files are not held (QA 2026-11-04).
+    let master = crate::clients::master_dir(root);
     batch_dirs(root)
         .iter()
+        .filter(|d| **d != master)
         .flat_map(|d| undoable_in(root, d))
         .collect()
 }
@@ -653,8 +732,59 @@ mod tests {
             SharedChanges::default(),
             "A is in step"
         );
+        // A's save right before a reload (the poll had not run): prepare sends it, not loses it.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(a.join("rules.json"), "rules saved just before reload").unwrap();
+        sa.prepare(&root, &a).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(master.join("rules.json")).unwrap(),
+            "rules saved just before reload"
+        );
         let dirs = batch_dirs(&root);
         assert_eq!(dirs, [master.clone(), a, b]);
+    }
+
+    /// A PC's look (theme, text size) in Filer's config.json stays on that PC: a save that
+    /// changes only it is not sent, and settings coming in keep this PC's look (QA 2026-11-04).
+    #[test]
+    fn the_look_in_config_stays_on_its_pc() {
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path().join("cab");
+        let master = crate::clients::master_dir(&root);
+        std::fs::create_dir_all(&master).unwrap();
+        std::fs::write(
+            master.join(CONFIG),
+            r#"{"root":"X","display":{"zoom":1.0}}"#,
+        )
+        .unwrap();
+        let (a, b) = (pc_dir(&root, "pc-a"), pc_dir(&root, "pc-b"));
+        let (mut sa, mut sb) = (Shared::default(), Shared::default());
+        sa.prepare(&root, &a).unwrap();
+        sb.prepare(&root, &b).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(a.join(CONFIG), r#"{"root":"X","display":{"zoom":1.5}}"#).unwrap();
+        assert_eq!(sa.poll(&root, &a).unwrap(), SharedChanges::default());
+        assert_eq!(sb.poll(&root, &b).unwrap(), SharedChanges::default());
+        // A real settings change travels; B keeps its own look.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(b.join(CONFIG), r#"{"root":"X","display":{"zoom":0.9}}"#).unwrap();
+        sb.poll(&root, &b).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(a.join(CONFIG), r#"{"root":"Y","display":{"zoom":1.5}}"#).unwrap();
+        assert_eq!(sa.poll(&root, &a).unwrap().to_cabinet, [CONFIG]);
+        let m: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(master.join(CONFIG)).unwrap()).unwrap();
+        assert_eq!(
+            (m["root"].as_str(), m["display"]["zoom"].as_f64()),
+            (Some("Y"), Some(1.0))
+        );
+        assert_eq!(sb.poll(&root, &b).unwrap().from_cabinet, [CONFIG]);
+        let bb: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(b.join(CONFIG)).unwrap()).unwrap();
+        assert_eq!(
+            (bb["root"].as_str(), bb["display"]["zoom"].as_f64()),
+            (Some("Y"), Some(0.9))
+        );
     }
     use crate::cabinet::{self, CabinetFile};
 

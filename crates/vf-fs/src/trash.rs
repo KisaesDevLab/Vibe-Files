@@ -354,8 +354,14 @@ fn stored_pin(root: &Path) -> Option<String> {
     v.get("hash")?.as_str().map(str::to_string)
 }
 
+/// Whether a password is set. Fails closed (QA 2026-11-04): a password file that is there but
+/// cannot be read right now (a share hiccup, a write in progress, a damaged file) counts as set,
+/// so Admin stays locked rather than opening. Only a file that is not there means "no password".
 pub fn has_pin(root: &Path) -> bool {
-    stored_pin(root).is_some()
+    match std::fs::metadata(pin_file(root)) {
+        Ok(_) => true,
+        Err(e) => e.kind() != std::io::ErrorKind::NotFound,
+    }
 }
 
 /// Whether `pin` is the firm PIN. After three wrong tries in a row it is not checked for a while
@@ -422,7 +428,8 @@ pub fn unlock_admin(
     password: &str,
 ) -> Result<bool, u64> {
     let Some(h) = stored_pin(root) else {
-        return Ok(true);
+        // No password, unless the file is there but unreadable: then locked.
+        return Ok(!has_pin(root));
     };
     let ok = vf_security::pin::check(password, &h)?;
     let _ = Transaction::new(PIN_LABEL)
@@ -613,5 +620,17 @@ mod tests {
             !dump.contains("2222"),
             "the PIN is never in the audit trail"
         );
+    }
+
+    /// A password file that is there but unreadable keeps Admin locked (QA 2026-11-04).
+    #[test]
+    fn a_damaged_password_file_fails_closed() {
+        let (_t, root, mut conn) = fx();
+        std::fs::create_dir_all(root.join(cabinet::VIBE_DIR)).unwrap();
+        std::fs::write(pin_file(&root), "{ half written").unwrap();
+        assert!(has_pin(&root));
+        assert!(!check_pin(&root, "anything"));
+        assert_eq!(unlock_admin(&mut conn, &root, "dev", "anything"), Ok(false));
+        assert!(set_pin(&mut conn, &root, "dev", None, "123456").is_err());
     }
 }

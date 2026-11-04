@@ -93,6 +93,11 @@ fn only_one_copy_claims_a_staged_file() {
     assert!(claim(&p, "pc-b").is_none(), "the other copy leaves it");
     // This PC's own leftover claim (a run that stopped) is taken over.
     assert!(claim(&p, "pc-a").is_some());
+    // Delivered but its original could not be moved out: marked done, no PC takes it again,
+    // this one included (QA 2026-11-04).
+    std::fs::write(&a, "done:pc-a").unwrap();
+    assert!(claim(&p, "pc-b").is_none());
+    assert!(claim(&p, "pc-a").is_none());
     std::fs::remove_file(&a).ok();
     // A file already gone (the other copy finished it) is not claimed.
     std::fs::remove_file(&p).unwrap();

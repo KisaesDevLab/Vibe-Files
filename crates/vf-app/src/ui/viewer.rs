@@ -328,6 +328,7 @@ impl Viewer {
     }
 
     fn close_now(&mut self) {
+        self.tape.tape.forget_sources();
         self.pending.clear();
         self.ask_close = false;
         self.doc = None;
@@ -348,6 +349,10 @@ impl Viewer {
             self.pending.clear();
         } else {
             self.notice = None;
+        }
+        if self.doc.as_ref().is_some_and(|d| d.doc_id != doc.doc_id) {
+            // The tape stays; its picks point at the other document's pages.
+            self.tape.tape.forget_sources();
         }
         self.scroll_to = Some(doc.page);
         self.find = doc.terms.join(" ");
@@ -2512,16 +2517,24 @@ fn save(v: &mut Viewer, env: &mut Env<'_>, as_new: bool) {
             _ => None,
         })
         .collect();
-    let r = save_pending(v, env, &doc, as_new);
-    if r.is_ok() {
-        let rel = doc
+    // The tape rows are written with the content change, on the document that holds the tape
+    // (the new one for Save as).
+    let also = tapes
+        .into_iter()
+        .map(|t| ("tape_paste".to_string(), t))
+        .collect();
+    let r = save_pending(v, env, &doc, as_new, also);
+    if let Ok(saved) = &r {
+        let holder = saved.as_ref().unwrap_or(&doc);
+        let doc_id = holder.doc_id.clone();
+        let rel = holder
             .path
             .strip_prefix(env.root)
             .map(|p| p.to_string_lossy().replace('\\', "/"))
             .unwrap_or_default();
         for (name, lines) in pasted {
             let rec = vf_fs::tapes::Saved {
-                doc_id: doc.doc_id.clone(),
+                doc_id: doc_id.clone(),
                 rel_path: rel.clone(),
                 saved_at: vf_core::now_rfc3339(),
                 by: env.initials.to_string(),
@@ -2533,23 +2546,6 @@ fn save(v: &mut Viewer, env: &mut Env<'_>, as_new: bool) {
             }
         }
         v.tape.history = None;
-    }
-    if r.is_ok() && !tapes.is_empty() {
-        let mut tx = vf_core::tx::Transaction::new("tape_paste");
-        for t in tapes {
-            tx = tx.audit(vf_core::audit::AuditEntry::new(
-                "tape_paste",
-                Some(doc.doc_id.as_str()),
-                t,
-            ));
-        }
-        if let Err(e) = tx.commit(
-            env.conn,
-            &mut vf_core::tx::NoFileOps,
-            &vf_core::tx::Actor::device(env.device_id),
-        ) {
-            v.error = Some(format!("The tape was pasted but not audited: {e}"));
-        }
     }
     match r {
         Ok(new_doc) => {
@@ -2578,6 +2574,7 @@ fn save_pending(
     env: &mut Env<'_>,
     doc: &Doc,
     as_new: bool,
+    also: vf_fs::content::AlsoAudit,
 ) -> Result<Option<Doc>, String> {
     let n = v.pending.len();
     let based_on = source_hash(env, doc, v.seen_hash().as_deref())?;
@@ -2604,7 +2601,7 @@ fn save_pending(
             )
             .map_err(|e| e.to_string())?;
         let (rel, client_id, doc_type_id, tax_year, source) = row;
-        let added = vf_fs::content::add(
+        let added = vf_fs::content::add_also(
             env.conn,
             env.root,
             env.device_id,
@@ -2619,6 +2616,7 @@ fn save_pending(
                 label: "save_as".into(),
                 detail: serde_json::json!({ "from": doc.doc_id, "annotations": n }),
             },
+            also,
         )?;
         return Ok(Some(Doc::at(
             env.root,
@@ -2636,7 +2634,15 @@ fn save_pending(
         extra: vec![],
         based_on: Some(based_on),
     };
-    match vf_fs::content::replace(env.conn, env.root, env.device_id, &doc.doc_id, &tmp, change)? {
+    match vf_fs::content::replace_also(
+        env.conn,
+        env.root,
+        env.device_id,
+        &doc.doc_id,
+        &tmp,
+        change,
+        also,
+    )? {
         Ok(_) => Ok(None),
         Err(why) => Err(format!("Not saved: {why}.")),
     }
@@ -3248,7 +3254,8 @@ fn tape_panel(ui: &mut egui::Ui, v: &mut Viewer, env: &mut Env<'_>, doc: &Doc) {
                         }
                         for (label, name, lines) in hist {
                             if ui.button(label).clicked() {
-                                v.tape.tape = vf_core::tape::Tape::from_lines(name, lines);
+                                // One undo step: an unsaved working tape comes back with Undo.
+                                v.tape.tape.load(name, lines);
                                 ui.close();
                             }
                         }

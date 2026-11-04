@@ -181,7 +181,7 @@ pub fn show(ui: &mut egui::Ui, p: &mut TemplatesPage, env: &mut Env) {
         {
             match template::save(&dir, tree) {
                 Ok(()) => {
-                    let _ = vf_core::tx::Transaction::new("template_edit")
+                    let audited = vf_core::tx::Transaction::new("template_edit")
                         .audit(vf_core::audit::AuditEntry::new(
                             "template_edit",
                             None,
@@ -194,7 +194,9 @@ pub fn show(ui: &mut egui::Ui, p: &mut TemplatesPage, env: &mut Env) {
                         );
                     p.saved = Some(tree.clone());
                     p.notice = Some("Template saved: new clients get these folders.".into());
-                    p.error = None;
+                    p.error = audited
+                        .err()
+                        .map(|e| format!("Saved, but not recorded in the audit trail: {e}"));
                     p.changed = true;
                 }
                 Err(e) => p.error = Some(format!("Not saved: {e}")),

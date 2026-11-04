@@ -202,7 +202,8 @@ fn text_layer_is_written_and_the_original_kept_as_a_version() {
 fn files_in_filers_undoable_batch_wait() {
     let mut f = fx();
     read(&f);
-    let master = vf_fs::clients::master_dir(&f.root);
+    // A PC's own Intake folder (Q-53): where Filer keeps its last batch.
+    let master = vf_fs::intake::pc_dir(&f.root, "pc-a");
     std::fs::create_dir_all(&master).unwrap();
     let batch = |undone: bool| {
         serde_json::json!({

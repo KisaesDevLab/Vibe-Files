@@ -218,11 +218,11 @@ pub fn parse_amount(text: &str) -> Option<i64> {
     Some(if neg { -v } else { v })
 }
 
-/// `a × b` in cents, rounded half away from zero.
-fn mul(a: i64, b: i64) -> i64 {
+/// `a × b` in cents, rounded half away from zero; `None` when it does not fit.
+fn mul(a: i64, b: i64) -> Option<i64> {
     let p = i128::from(a) * i128::from(b);
     let r = (p.abs() + 50) / 100;
-    (if p < 0 { -r } else { r }) as i64
+    i64::try_from(if p < 0 { -r } else { r }).ok()
 }
 
 /// `a ÷ b` in cents, rounded half away from zero; `None` for ÷ 0.
@@ -233,8 +233,10 @@ fn div(a: i64, b: i64) -> Option<i64> {
     let n = i128::from(a) * 100;
     let d = i128::from(b);
     let q = (n.abs() * 2 + d.abs()) / (d.abs() * 2);
-    Some((if (n < 0) != (d < 0) { -q } else { q }) as i64)
+    i64::try_from(if (n < 0) != (d < 0) { -q } else { q }).ok()
 }
+
+const TOO_LARGE: &str = "Too large for the tape";
 
 impl Tape {
     pub fn new(name: impl Into<String>) -> Self {
@@ -330,8 +332,9 @@ impl Tape {
         self.save();
         self.state.entry = Entry::default();
         let op = if minus { Op::Minus } else { Op::Plus };
-        self.post(cents, op, label.into());
-        if let Some(l) = self.state.lines.last_mut() {
+        if self.post(cents, op, label.into())
+            && let Some(l) = self.state.lines.last_mut()
+        {
             l.source = source;
         }
     }
@@ -348,20 +351,58 @@ impl Tape {
     /// A tape read back from its lines (History, a pasted tape): the totals replayed.
     pub fn from_lines(name: impl Into<String>, lines: Vec<Line>) -> Tape {
         let mut t = Tape::new(name);
-        for l in &lines {
+        t.state.lines = lines;
+        t.replay();
+        t
+    }
+
+    /// Recomputes the running total, the grand total and every S / T / GT line from the posted
+    /// lines (after a sign flip, or a tape read back).
+    fn replay(&mut self) {
+        let (mut running, mut grand) = (0i64, 0i64);
+        for l in &mut self.state.lines {
             match l.op {
-                Op::Plus => t.state.running += l.amount,
-                Op::Minus => t.state.running -= l.amount,
+                Op::Plus => running = running.saturating_add(l.amount),
+                Op::Minus => running = running.saturating_sub(l.amount),
+                Op::Subtotal => l.amount = running,
                 Op::Total => {
-                    t.state.grand += t.state.running;
-                    t.state.running = 0;
+                    l.amount = running;
+                    grand = grand.saturating_add(running);
+                    running = 0;
                 }
-                Op::GrandTotal => t.state.grand = 0,
+                Op::GrandTotal => {
+                    l.amount = grand;
+                    grand = 0;
+                }
                 _ => {}
             }
         }
-        t.state.lines = lines;
-        t
+        self.state.running = running;
+        self.state.grand = grand;
+    }
+
+    /// Replaces the lines with `lines` (a tape from History), named `name`, as one undoable step.
+    pub fn load(&mut self, name: impl Into<String>, lines: Vec<Line>) {
+        self.save();
+        self.name = name.into();
+        self.state = State {
+            lines,
+            ..State::default()
+        };
+        self.replay();
+    }
+
+    /// Forgets where on a page each line was picked (another document is shown: its pages are
+    /// not the ones the picks came from). Amounts and labels stay.
+    pub fn forget_sources(&mut self) {
+        for l in &mut self.state.lines {
+            l.source = None;
+        }
+        for s in self.undo.iter_mut().chain(self.redo.iter_mut()) {
+            for l in &mut s.lines {
+                l.source = None;
+            }
+        }
     }
 
     /// Sets a picked line's sign (`+` ↔ `−`), keeping the totals right.
@@ -374,16 +415,13 @@ impl Tape {
         }
         self.save();
         let l = &mut self.state.lines[i];
-        let (old, new) = match l.op {
-            Op::Plus => (l.amount, -l.amount),
-            _ => (-l.amount, l.amount),
-        };
         l.op = if l.op == Op::Plus {
             Op::Minus
         } else {
             Op::Plus
         };
-        self.state.running += new - old;
+        // Later S / T / GT lines and the totals follow.
+        self.replay();
     }
 
     fn save(&mut self) {
@@ -394,18 +432,67 @@ impl Tape {
         }
     }
 
-    fn post(&mut self, cents: i64, op: Op, label: String) {
-        match op {
-            Op::Plus => self.state.running += cents,
-            Op::Minus => self.state.running -= cents,
-            _ => {}
-        }
+    /// Posts a line; `false` (and the error shown, the press undone) when the total would not fit.
+    fn post(&mut self, cents: i64, op: Op, label: String) -> bool {
+        let r = match op {
+            Op::Plus => self.state.running.checked_add(cents),
+            Op::Minus => self.state.running.checked_sub(cents),
+            _ => Some(self.state.running),
+        };
+        let Some(r) = r else {
+            self.fail(TOO_LARGE);
+            return false;
+        };
+        self.state.running = r;
         self.state.lines.push(Line {
             amount: cents,
             op,
             label,
             source: None,
         });
+        true
+    }
+
+    /// The key just pressed failed: the tape goes back to before it, the pending `×` / `÷` (and
+    /// its printed line) and the entry are dropped, so nothing half done is left, and `msg` shows.
+    fn fail(&mut self, msg: &str) {
+        if let Some(s) = self.undo.pop() {
+            self.state = s;
+        }
+        if self.state.pending.take().is_some() {
+            self.state.lines.pop();
+        }
+        self.state.entry = Entry::default();
+        self.state.error = Some(msg.into());
+    }
+
+    /// The value a posting key works on: a pending `×` / `÷` finished with what was typed (its
+    /// right side printed `=`), else what was typed. `Err` when the press failed (shown, undone).
+    fn resolve(&mut self, typed: Option<i64>) -> Result<Option<i64>, ()> {
+        match (self.state.pending.take(), typed) {
+            (Some((left, pop)), Some(right)) => {
+                let r = if pop == Op::Times {
+                    mul(left, right).ok_or(TOO_LARGE)
+                } else if right == 0 {
+                    Err("Cannot divide by zero")
+                } else {
+                    div(left, right).ok_or(TOO_LARGE)
+                };
+                match r {
+                    Ok(v) => {
+                        self.line(right, Op::Equals);
+                        Ok(Some(v))
+                    }
+                    Err(m) => {
+                        self.fail(m);
+                        Err(())
+                    }
+                }
+            }
+            // `12 × +`: the left side alone.
+            (Some((left, _)), None) => Ok(Some(left)),
+            (None, v) => Ok(v),
+        }
     }
 
     fn line(&mut self, amount: i64, op: Op) {
@@ -484,25 +571,8 @@ impl Tape {
                     Key::Minus => Op::Minus,
                     _ => Op::Equals,
                 };
-                let value = match (self.state.pending.take(), typed) {
-                    (Some((left, pop)), Some(right)) => {
-                        self.line(right, Op::Equals);
-                        let r = if pop == Op::Times {
-                            Some(mul(left, right))
-                        } else {
-                            div(left, right)
-                        };
-                        match r {
-                            Some(v) => Some(v),
-                            None => {
-                                self.state.error = Some("Cannot divide by zero".into());
-                                return;
-                            }
-                        }
-                    }
-                    // `12 × +`: the left side alone.
-                    (Some((left, _)), None) => Some(left),
-                    (None, v) => v,
+                let Ok(value) = self.resolve(typed) else {
+                    return;
                 };
                 let Some(v) = value else {
                     return; // nothing typed: nothing to post
@@ -520,45 +590,44 @@ impl Tape {
                 } else {
                     Op::Divide
                 };
-                // A chained `2 × 3 × 4`: the product so far is the new left side.
-                let left = match (self.state.pending.take(), typed) {
-                    (Some((l, pop)), Some(r)) => {
-                        self.line(r, Op::Equals);
-                        let v = if pop == Op::Times {
-                            Some(mul(l, r))
-                        } else {
-                            div(l, r)
-                        };
-                        match v {
-                            Some(v) => v,
-                            None => {
-                                self.state.error = Some("Cannot divide by zero".into());
-                                return;
-                            }
-                        }
-                    }
-                    (Some((l, _)), None) => l,
-                    (None, Some(v)) => v,
-                    // `×` with nothing typed works on the running total.
-                    (None, None) => self.state.running,
+                // A chained `2 × 3 × 4`: the product so far is the new left side; `×` with
+                // nothing typed works on the running total.
+                let Ok(left) = self.resolve(typed) else {
+                    return;
                 };
+                let left = left.unwrap_or(self.state.running);
                 self.line(left, op);
                 self.state.pending = Some((left, op));
             }
+            // S and T finish a pending `×` / `÷` first, as `+` does.
             Key::Subtotal => {
-                if let Some(v) = typed {
-                    self.post(v, Op::Plus, String::new());
+                let Ok(value) = self.resolve(typed) else {
+                    return;
+                };
+                if let Some(v) = value
+                    && !self.post(v, Op::Plus, String::new())
+                {
+                    return;
                 }
                 let r = self.state.running;
                 self.line(r, Op::Subtotal);
             }
             Key::Total => {
-                if let Some(v) = typed {
-                    self.post(v, Op::Plus, String::new());
+                let Ok(value) = self.resolve(typed) else {
+                    return;
+                };
+                if let Some(v) = value
+                    && !self.post(v, Op::Plus, String::new())
+                {
+                    return;
                 }
                 let r = self.state.running;
+                let Some(g) = self.state.grand.checked_add(r) else {
+                    self.fail(TOO_LARGE);
+                    return;
+                };
                 self.line(r, Op::Total);
-                self.state.grand += r;
+                self.state.grand = g;
                 self.state.running = 0;
             }
             Key::GrandTotal => {
@@ -754,9 +823,53 @@ mod tests {
         t.keys("10 / 0 +");
         assert_eq!(t.error(), Some("Cannot divide by zero"));
         assert_eq!(t.running(), 0);
+        assert!(t.lines().is_empty(), "no half-done lines: {:?}", t.lines());
         t.keys("5 +");
         assert_eq!(t.error(), None);
         assert_eq!(t.running(), 500);
+    }
+
+    /// S and T finish a pending × / ÷ first (QA 2026-11-04).
+    #[test]
+    fn subtotal_and_total_finish_a_multiplication() {
+        let mut t = Tape::new("t");
+        t.keys("12 * 3 T");
+        assert_eq!(t.grand(), 3600);
+        assert_eq!(t.running(), 0);
+        t.keys("5 +");
+        assert_eq!(t.running(), 500, "no multiplication left pending");
+        let mut t = Tape::new("t");
+        t.keys("10 + 12 * 3 S");
+        assert_eq!(t.running(), 4600);
+        assert_eq!(
+            t.lines().last().map(|l| (l.op, l.amount)),
+            Some((Op::Subtotal, 4600))
+        );
+    }
+
+    /// Flipping a pick after a total recomputes the total lines (QA 2026-11-04).
+    #[test]
+    fn flip_after_total_recomputes() {
+        let mut t = Tape::new("t");
+        t.pick(1000, false, "a");
+        t.pick(250, false, "b");
+        t.keys("T");
+        t.flip(1);
+        let total = t.lines().iter().find(|l| l.op == Op::Total).unwrap().amount;
+        assert_eq!(total, 750);
+        assert_eq!((t.running(), t.grand()), (0, 750));
+        let again = Tape::from_lines("t", t.lines().to_vec());
+        assert_eq!((again.running(), again.grand()), (0, 750));
+    }
+
+    /// Amounts too large for the tape are refused, never wrapped (QA 2026-11-04).
+    #[test]
+    fn overflow_is_refused() {
+        let mut t = Tape::new("t");
+        t.keys("9999999999999 * 9999999999999 +");
+        assert_eq!(t.error(), Some(TOO_LARGE));
+        assert_eq!(t.running(), 0);
+        assert!(t.lines().is_empty());
     }
 
     #[test]

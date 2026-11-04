@@ -120,7 +120,24 @@ pub fn replace(
     new_file: &Path,
     change: Change<'_>,
 ) -> Result<Result<Replaced, Refused>, String> {
-    let r = replace_inner(conn, root, device_id, doc_id, new_file, change);
+    replace_also(conn, root, device_id, doc_id, new_file, change, vec![])
+}
+
+/// Further audit rows on a document, `(action, detail)`, written in the same Transaction as
+/// its content change (a pasted tape's `tape_paste` rows).
+pub type AlsoAudit = Vec<(String, serde_json::Value)>;
+
+/// [`replace`] with further audit rows on the document in the same Transaction.
+pub fn replace_also(
+    conn: &mut Connection,
+    root: &Path,
+    device_id: &str,
+    doc_id: &str,
+    new_file: &Path,
+    change: Change<'_>,
+    also: AlsoAudit,
+) -> Result<Result<Replaced, Refused>, String> {
+    let r = replace_inner(conn, root, device_id, doc_id, new_file, change, also);
     if !matches!(r, Ok(Ok(_))) {
         let _ = std::fs::remove_file(new_file);
     }
@@ -134,6 +151,7 @@ fn replace_inner(
     doc_id: &str,
     new_file: &Path,
     change: Change<'_>,
+    also: AlsoAudit,
 ) -> Result<Result<Replaced, Refused>, String> {
     let (rel, old_hash, old_size) = match check(conn, root, doc_id)? {
         Ok(v) => v,
@@ -239,6 +257,9 @@ fn replace_inner(
         d.extend(extra);
     }
     tx = tx.audit(AuditEntry::new(change.label, Some(doc_id), detail));
+    for (action, detail) in also {
+        tx = tx.audit(AuditEntry::new(&action, Some(doc_id), detail));
+    }
     let c = crate::fileops::commit(conn, root, tx, device_id)?;
     // Every version row has its sidecar entry (rebuild restores rows from them), also when
     // the content was already kept.
@@ -295,7 +316,19 @@ pub fn add(
     file: &Path,
     d: NewDoc,
 ) -> Result<Added, String> {
-    let r = add_inner(conn, root, device_id, file, d);
+    add_also(conn, root, device_id, file, d, vec![])
+}
+
+/// [`add`] with further audit rows on the new document in the same Transaction.
+pub fn add_also(
+    conn: &mut Connection,
+    root: &Path,
+    device_id: &str,
+    file: &Path,
+    d: NewDoc,
+    also: AlsoAudit,
+) -> Result<Added, String> {
+    let r = add_inner(conn, root, device_id, file, d, also);
     if r.is_err() {
         let _ = std::fs::remove_file(file);
     }
@@ -308,6 +341,7 @@ fn add_inner(
     device_id: &str,
     file: &Path,
     d: NewDoc,
+    also: AlsoAudit,
 ) -> Result<Added, String> {
     let rel = free_rel(root, &d.rel_path);
     let hash = filer_intake::commit::sha256_file(file).map_err(|e| e.to_string())?;
@@ -394,6 +428,9 @@ fn add_inner(
         o.extend(extra);
     }
     tx = tx.audit(AuditEntry::new(&d.label, Some(&id), detail));
+    for (action, detail) in also {
+        tx = tx.audit(AuditEntry::new(&action, Some(&id), detail));
+    }
     let c = crate::fileops::commit(conn, root, tx, device_id)?;
     Ok(Added {
         doc_id: id,

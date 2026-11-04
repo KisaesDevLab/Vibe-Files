@@ -688,6 +688,16 @@ pub fn destroy_due(
         for d in COPY_DIRS {
             files_in(&root.join(cabinet::VIBE_DIR).join(d), &mut files);
         }
+        // Each PC's Intake folder has its own Filer working folders (Q-53, QA 2026-11-04).
+        let master = crate::clients::master_dir(root);
+        for pc in crate::intake::batch_dirs(root)
+            .into_iter()
+            .filter(|d| *d != master)
+        {
+            for d in COPY_DIRS {
+                files_in(&pc.join(d), &mut files);
+            }
+        }
         let wanted: HashSet<&str> = due
             .iter()
             .flat_map(|v| v.hashes.iter().map(String::as_str))
@@ -1192,6 +1202,10 @@ mod tests {
         let leftover = root.join("_Vibe/trash/annotate-x-return.pdf");
         std::fs::create_dir_all(leftover.parent().unwrap()).unwrap();
         std::fs::copy(&old, &leftover).unwrap();
+        // And one in a PC's own Intake working folder (Q-53).
+        let pc_left = crate::intake::pc_dir(&root, "pc-a").join("overwritten/b1/return.pdf");
+        std::fs::create_dir_all(pc_left.parent().unwrap()).unwrap();
+        std::fs::copy(&old, &pc_left).unwrap();
         f.conn
             .execute_batch(&format!(
                 "INSERT INTO page_text (hash, page, source, text) VALUES ('{h}', 0, 'pdf', 'Form 1040');
@@ -1219,11 +1233,12 @@ mod tests {
         .unwrap();
         let run = destroy_due(&mut f.conn, &root, "dev", d(2026, 12, 3), "Firm").unwrap();
         assert_eq!((run.destroyed, run.held), (1, 1), "{run:?}");
-        assert!(run.copies >= 2, "{run:?}");
+        assert!(run.copies >= 3, "{run:?}");
         assert!(!root.join("B/2018/return.pdf").exists());
         assert!(!old.exists(), "no copy in the versions store");
         assert!(!old.with_extension("json").exists());
         assert!(!leftover.exists(), "no leftover copy");
+        assert!(!pc_left.exists(), "none in a PC's Intake folder either");
         assert!(root.join("B/2019/w2.pdf").is_file(), "held: kept");
         let n = |sql: &str| -> i64 { f.conn.query_row(sql, [], |r| r.get(0)).unwrap() };
         assert_eq!(n("SELECT count(*) FROM page_text"), 0);

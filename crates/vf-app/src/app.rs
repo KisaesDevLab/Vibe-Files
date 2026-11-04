@@ -779,6 +779,7 @@ impl eframe::App for VibeFilesApp {
                         // A client's folder shown: the scan goes straight into it (owner
                         // 2026-11-04); otherwise to the Scans folder and Intake.
                         let target = tab_browse.scan_target();
+                        let mut private = None;
                         let started = match &target {
                             Some(_) => vf_fs::content::tmp_file(&opened.root, "scan")
                                 .map(|p| p.with_extension(""))
@@ -787,6 +788,7 @@ impl eframe::App for VibeFilesApp {
                                     Ok(d)
                                 })
                                 .and_then(|d| {
+                                    private = Some(d.clone());
                                     o_intake.ingest.start_scan_into(
                                         ui.ctx(),
                                         &self.config.ingest,
@@ -807,57 +809,41 @@ impl eframe::App for VibeFilesApp {
                                     ),
                                 });
                                 tab_browse.scan_watching = true;
-                                tab_browse.scan_target = target;
+                                tab_browse.scan_target = target.zip(private);
                             }
-                            Err(e) => tab_browse.error = Some(format!("Not scanned: {e}")),
+                            Err(e) => {
+                                if let Some(d) = private {
+                                    let _ = std::fs::remove_dir(d);
+                                }
+                                tab_browse.error = Some(format!("Not scanned: {e}"));
+                            }
                         }
                     }
                     if tab_browse.scan_watching && !o_intake.ingest.scanning() {
                         tab_browse.scan_watching = false;
-                        let target = tab_browse.scan_target.take();
-                        match (target, o_intake.ingest.finished_scan.take()) {
-                            (Some(t), Some(Ok(pdf))) => {
-                                let name = pdf
-                                    .file_name()
-                                    .map(|n| n.to_string_lossy().into_owned())
-                                    .unwrap_or_else(|| "Scan.pdf".into());
-                                let r = vf_fs::content::add(
-                                    env.conn,
-                                    env.root,
-                                    env.device_id,
+                        match tab_browse.scan_target.take() {
+                            Some((t, dir)) => match o_intake.ingest.take_finished_scan(&dir) {
+                                Some(Ok(pdf)) => file_browse_scan(
+                                    tab_browse,
+                                    &mut env,
+                                    &t,
+                                    &dir,
                                     &pdf,
-                                    vf_fs::content::NewDoc {
-                                        rel_path: format!("{}/{name}", t.folder),
-                                        client_id: Some(t.client_id.clone()),
-                                        doc_type_id: None,
-                                        tax_year: t.tax_year,
-                                        source: Some("client".into()),
-                                        tags: vec![],
-                                        label: "scan".into(),
-                                        detail: serde_json::json!({ "scanned_into": t.folder }),
-                                    },
-                                );
-                                if let Some(d) = pdf.parent() {
-                                    let _ = std::fs::remove_dir_all(d);
+                                    self.config.ingest.scans.as_deref(),
+                                ),
+                                Some(Err(e)) => {
+                                    let _ = std::fs::remove_dir_all(&dir);
+                                    tab_browse.error = Some(format!("Not scanned: {e}"));
                                 }
-                                match r {
-                                    Ok(added) => {
-                                        tab_browse.reload(env.conn);
-                                        tab_browse.notice = Some(format!(
-                                            "Scanned into {}. Set its doc type in the details.",
-                                            added.rel_path.replace('/', " / ")
-                                        ));
-                                    }
-                                    Err(e) => {
-                                        tab_browse.error =
-                                            Some(format!("Scanned, but not filed: {e}"))
+                                None => {
+                                    // Stopped with nothing: the private folder is empty.
+                                    let _ = std::fs::remove_dir(&dir);
+                                    if let Some(l) = o_intake.ingest.last_line() {
+                                        tab_browse.notice = Some(l.to_string());
                                     }
                                 }
-                            }
-                            (_, Some(Err(e))) => {
-                                tab_browse.error = Some(format!("Not scanned: {e}"));
-                            }
-                            _ => {
+                            },
+                            None => {
                                 if let Some(l) = o_intake.ingest.last_line() {
                                     tab_browse.notice = Some(l.to_string());
                                 }
@@ -1095,6 +1081,74 @@ fn prepare(opened: &mut Opened, device_id: &str) -> Prepared {
         rules_problem,
         emptied,
         chain,
+    }
+}
+
+/// Files a scan started from Browse (in the private folder `dir`) into the folder shown. The
+/// scanned pages are never lost (QA 2026-11-04): when filing fails, the PDF goes to this PC's
+/// Scans folder for Intake, or stays where it is and the message says where.
+fn file_browse_scan(
+    b: &mut Browse,
+    env: &mut browse::Env<'_>,
+    t: &browse::ScanTarget,
+    dir: &std::path::Path,
+    pdf: &std::path::Path,
+    scans: Option<&std::path::Path>,
+) {
+    let name = pdf
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "Scan.pdf".into());
+    // content::add removes its input when it fails: it is given a copy.
+    let keep = dir.join(format!("kept-{name}"));
+    if let Err(e) = std::fs::copy(pdf, &keep) {
+        b.error = Some(format!(
+            "Scanned, but not filed: {e}. The scan is at {}.",
+            pdf.display()
+        ));
+        return;
+    }
+    let r = vf_fs::content::add(
+        env.conn,
+        env.root,
+        env.device_id,
+        pdf,
+        vf_fs::content::NewDoc {
+            rel_path: format!("{}/{name}", t.folder),
+            client_id: Some(t.client_id.clone()),
+            doc_type_id: None,
+            tax_year: t.tax_year,
+            source: Some("client".into()),
+            tags: vec![],
+            label: "scan".into(),
+            detail: serde_json::json!({ "scanned_into": t.folder }),
+        },
+    );
+    match r {
+        Ok(added) => {
+            let _ = std::fs::remove_dir_all(dir);
+            b.reload(env.conn);
+            b.notice = Some(format!(
+                "Scanned into {}. Set its doc type in the details.",
+                added.rel_path.replace('/', " / ")
+            ));
+        }
+        Err(e) => {
+            let moved = scans.and_then(|s| {
+                let to = s.join(&name);
+                (!to.exists() && std::fs::rename(&keep, &to).is_ok()).then_some(to)
+            });
+            b.error = Some(match moved {
+                Some(to) => format!(
+                    "Scanned, but not filed: {e}. The scan went to the Scans folder for Intake ({}).",
+                    to.display()
+                ),
+                None => format!(
+                    "Scanned, but not filed: {e}. The scan is kept at {}.",
+                    keep.display()
+                ),
+            });
+        }
     }
 }
 
@@ -2470,12 +2524,24 @@ mod tests {
         let folder = format!("{}/Income Tax/2026", p.folder_rel);
         if let Screen::Open(o) = &mut h.state_mut().screen {
             o.browse.scan_watching = true;
-            o.browse.scan_target = Some(crate::ui::browse::ScanTarget {
-                client_id: p.client.uuid.to_string(),
-                folder: folder.clone(),
-                tax_year: Some(2026),
-            });
-            o.intake.ingest.finished_scan = Some(Ok(pdf.clone()));
+            o.browse.scan_target = Some((
+                crate::ui::browse::ScanTarget {
+                    client_id: p.client.uuid.to_string(),
+                    folder: folder.clone(),
+                    tax_year: Some(2026),
+                },
+                scan_dir.clone(),
+            ));
+            // An Intake scan finished after it is not taken for it (QA 2026-11-04).
+            let other = root.join("Scans");
+            o.intake
+                .ingest
+                .finished_scans
+                .push((other.clone(), Ok(other.join("other.pdf"))));
+            o.intake
+                .ingest
+                .finished_scans
+                .push((scan_dir.clone(), Ok(pdf.clone())));
         }
         h.run_steps(3);
         let Screen::Open(o) = &h.state().screen else {

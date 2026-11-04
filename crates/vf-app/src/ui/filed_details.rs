@@ -39,7 +39,31 @@ pub struct JustFiled {
     /// The batch had more documents than are listed.
     more: usize,
     all: Values,
+    /// The Set-all row as first shown: only the fields changed from it are set on every row
+    /// (QA 2026-11-04: setting the year alone no longer copies row 1's doc type to all).
+    all_was: Values,
     pub error: Option<String>,
+}
+
+impl JustFiled {
+    /// "Set all rows": the Set-all fields that were changed, on every row.
+    fn set_all(&mut self) {
+        let (a, w) = (&self.all, &self.all_was);
+        for r in &mut self.rows {
+            if a.doc_type != w.doc_type {
+                r.now.doc_type = a.doc_type.clone();
+            }
+            if a.year != w.year {
+                r.now.year = a.year.clone();
+            }
+            if a.status != w.status {
+                r.now.status = a.status.clone();
+            }
+            if a.source != w.source {
+                r.now.source = a.source.clone();
+            }
+        }
+    }
 }
 
 fn year_text(y: Option<i32>) -> String {
@@ -97,6 +121,7 @@ impl JustFiled {
         Some(JustFiled {
             rows,
             more,
+            all_was: all.clone(),
             all,
             error: None,
         })
@@ -241,9 +266,7 @@ pub fn show(ui: &mut egui::Ui, jf: &mut JustFiled, types: &[(String, String)]) -
                 status_box(ui, "jf-all-status", &mut jf.all.status);
                 source_box(ui, "jf-all-source", &mut jf.all.source);
                 if ui.button("Set all rows").clicked() {
-                    for r in &mut jf.rows {
-                        r.now = jf.all.clone();
-                    }
+                    jf.set_all();
                 }
             });
             egui::ScrollArea::vertical()
@@ -320,11 +343,16 @@ mod tests {
         .unwrap();
         let mut jf = JustFiled::load(&conn).unwrap();
         assert_eq!(jf.rows.len(), 2, "only the last batch");
+        jf.rows[1].now.doc_type = Some("t-k1".into());
         jf.all.year = "2026".into();
         jf.all.source = Some("third_party".into());
-        for r in &mut jf.rows {
-            r.now = jf.all.clone();
-        }
+        jf.set_all();
+        assert_eq!(
+            jf.rows[1].now.doc_type.as_deref(),
+            Some("t-k1"),
+            "a field not changed in Set all is left alone"
+        );
+        jf.rows[1].now.doc_type = None;
         jf.rows[1].now.status = "final".into();
         assert_eq!(jf.apply(&mut conn, &root, "dev").unwrap(), 2);
         let got: Vec<(i32, String, Option<String>)> = conn

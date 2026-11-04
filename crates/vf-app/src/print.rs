@@ -60,7 +60,9 @@ pub fn pages_of(ranges: &[(u32, u32)], count: usize) -> Vec<usize> {
         .flat_map(|&(a, b)| (a.max(1)..=b.max(a)).map(|p| p as usize - 1))
         .filter(|&p| p < count)
         .collect();
-    v.dedup();
+    // `1-3,2` prints page 2 once; the order chosen is kept.
+    let mut seen = std::collections::HashSet::new();
+    v.retain(|p| seen.insert(*p));
     v
 }
 
@@ -209,73 +211,85 @@ pub fn print_pdf(
             if unsafe { StartDocW(hdc, &info) } <= 0 {
                 return Err("the printer refused the job".into());
             }
-            for &i in &pages {
-                let page = doc
-                    .pages()
-                    .get(i as i32)
-                    .map_err(|e| format!("page {}: {e}", i + 1))?;
-                let (pw, ph) = (page.width().value, page.height().value);
-                // A landscape page on portrait paper (or the reverse) is turned to fit.
-                let turn = (pw > ph) != (w > h);
-                let (aw, ah) = if turn { (ph, pw) } else { (pw, ph) };
-                let fit = (w as f32 / aw).min(h as f32 / ah);
-                let (tw, th) = ((aw * fit) as i32, (ah * fit) as i32);
-                let mut cfg = PdfRenderConfig::new()
-                    .set_target_width(((tw as f32) * scale).max(1.0) as i32)
-                    .render_annotations(true)
-                    .render_form_data(true);
-                if turn {
-                    cfg = cfg.rotate(PdfPageRenderRotation::Degrees90, true);
-                }
-                let img = page
-                    .render_with_config(&cfg)
-                    .map_err(|e| format!("page {}: {e}", i + 1))?
-                    .as_image()
-                    .map_err(|e| format!("page {}: {e}", i + 1))?
-                    .to_rgba8();
-                let (iw, ih) = (img.width() as i32, img.height() as i32);
-                // GDI wants BGRA, top-down with a negative height.
-                let mut bgra = img.into_raw();
-                for px in bgra.as_chunks_mut::<4>().0 {
-                    px.swap(0, 2);
-                }
-                let bmi = BITMAPINFO {
-                    bmiHeader: BITMAPINFOHEADER {
-                        biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
-                        biWidth: iw,
-                        biHeight: -ih,
-                        biPlanes: 1,
-                        biBitCount: 32,
-                        biCompression: BI_RGB.0,
-                        ..Default::default()
-                    },
-                    ..Default::default()
-                };
-                unsafe {
-                    if StartPage(hdc) <= 0 {
-                        let _ = AbortDoc(hdc);
-                        return Err("the printer refused a page".into());
+            // A page that fails ends the job with AbortDoc: nothing half printed is left open
+            // on the device context the next document uses.
+            let job = || -> Result<(), String> {
+                for &i in &pages {
+                    let page = doc
+                        .pages()
+                        .get(i as i32)
+                        .map_err(|e| format!("page {}: {e}", i + 1))?;
+                    let (pw, ph) = (page.width().value, page.height().value);
+                    // A landscape page on portrait paper (or the reverse) is turned to fit.
+                    let turn = (pw > ph) != (w > h);
+                    let (aw, ah) = if turn { (ph, pw) } else { (pw, ph) };
+                    let fit = (w as f32 / aw).min(h as f32 / ah);
+                    let (tw, th) = ((aw * fit) as i32, (ah * fit) as i32);
+                    let mut cfg = PdfRenderConfig::new()
+                        .set_target_width(((tw as f32) * scale).max(1.0) as i32)
+                        .render_annotations(true)
+                        .render_form_data(true);
+                    if turn {
+                        cfg = cfg.rotate(PdfPageRenderRotation::Degrees90, true);
                     }
-                    StretchDIBits(
-                        hdc,
-                        (w - tw) / 2,
-                        (h - th) / 2,
-                        tw,
-                        th,
-                        0,
-                        0,
-                        iw,
-                        ih,
-                        Some(bgra.as_ptr().cast()),
-                        &bmi,
-                        DIB_RGB_COLORS,
-                        SRCCOPY,
-                    );
-                    EndPage(hdc);
+                    let img = page
+                        .render_with_config(&cfg)
+                        .map_err(|e| format!("page {}: {e}", i + 1))?
+                        .as_image()
+                        .map_err(|e| format!("page {}: {e}", i + 1))?
+                        .to_rgba8();
+                    let (iw, ih) = (img.width() as i32, img.height() as i32);
+                    // GDI wants BGRA, top-down with a negative height.
+                    let mut bgra = img.into_raw();
+                    for px in bgra.as_chunks_mut::<4>().0 {
+                        px.swap(0, 2);
+                    }
+                    let bmi = BITMAPINFO {
+                        bmiHeader: BITMAPINFOHEADER {
+                            biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                            biWidth: iw,
+                            biHeight: -ih,
+                            biPlanes: 1,
+                            biBitCount: 32,
+                            biCompression: BI_RGB.0,
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    };
+                    unsafe {
+                        if StartPage(hdc) <= 0 {
+                            return Err("the printer refused a page".into());
+                        }
+                        StretchDIBits(
+                            hdc,
+                            (w - tw) / 2,
+                            (h - th) / 2,
+                            tw,
+                            th,
+                            0,
+                            0,
+                            iw,
+                            ih,
+                            Some(bgra.as_ptr().cast()),
+                            &bmi,
+                            DIB_RGB_COLORS,
+                            SRCCOPY,
+                        );
+                        if EndPage(hdc) <= 0 {
+                            return Err(format!("page {}: the printer refused it", i + 1));
+                        }
+                    }
                 }
+                Ok(())
+            };
+            if let Err(e) = job() {
+                unsafe {
+                    let _ = AbortDoc(hdc);
+                }
+                return Err(e);
             }
-            unsafe {
-                EndDoc(hdc);
+            if unsafe { EndDoc(hdc) } <= 0 {
+                return Err("the printer did not finish the job".into());
             }
         }
         Ok(pages.len())
@@ -317,6 +331,11 @@ mod tests {
         assert_eq!(pages_of(&[], 3), [0, 1, 2]);
         assert_eq!(pages_of(&[(2, 3)], 3), [1, 2]);
         assert_eq!(pages_of(&[(1, 1), (3, 9)], 4), [0, 2, 3]);
+        assert_eq!(
+            pages_of(&[(1, 3), (2, 2)], 4),
+            [0, 1, 2],
+            "overlap printed once"
+        );
     }
 
     /// PA-13 done-when 1: pages 2-3 of a 3-page PDF printed to "Microsoft Print to PDF" give a

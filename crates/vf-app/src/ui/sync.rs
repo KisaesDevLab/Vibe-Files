@@ -264,9 +264,13 @@ impl SyncTab {
                 let cab = s.cabinet_id.clone();
                 self.session = Some(s);
                 self.locked_by_user = false;
-                let warn = self
-                    .apply_remember(&self.setup_data.clone(), &cab, Some(&firm))
-                    .or_else(|| self.apply_share(&cab, &firm, cfg));
+                // Both run: a remember warning never skips the sharing asked for.
+                let remember = self.apply_remember(&self.setup_data.clone(), &cab, Some(&firm));
+                let share = self.apply_share(&cab, &firm, cfg);
+                let warn = match (remember, share) {
+                    (Some(a), Some(b)) => Some(format!("{a} {b}")),
+                    (a, b) => a.or(b),
+                };
                 self.notice = Some(if self.remembered {
                     "Sync unlocked, and remembered on this PC for your Windows login.".into()
                 } else {
@@ -883,6 +887,8 @@ fn unlocked(ui: &mut egui::Ui, t: &mut SyncTab, env: &mut Env, v: &View<'_>) {
         {
             vf_sync::setup::unshare(env.root);
             t.shared = false;
+            // Not shared again by the next unlock of this session unless ticked again.
+            t.form.share = false;
             t.notice = Some("The key is no longer kept in the cabinet for everyone.".into());
         }
     });
