@@ -845,6 +845,7 @@ impl eframe::App for VibeFilesApp {
         if let Screen::Open(o) = &mut self.screen {
             let o = &mut **o;
             o.intake.ingest.tesseract = self.config.ocr.tesseract.clone();
+            o.intake.tick_lock(&o.opened.root, &self.config.device_id);
             o.intake.ingest.tick(
                 &ctx,
                 &o.opened.root,
@@ -2379,6 +2380,24 @@ mod tests {
         // Filer's screen loads once, not on every frame (regression found 2026-11-04).
         assert_eq!(o.intake.mounts, 1, "{}", o.intake.debug_state());
         assert!(h.query_by_label("Let another PC use Intake").is_some());
+        // On another tab the heartbeat goes on (review 2026-11-04: a PC on Browse while Filer
+        // works must not look gone).
+        click(&mut h, "Browse");
+        let lock = root.join("_Vibe").join(vf_fs::locks::INTAKE_LOCK);
+        let old = std::fs::read_to_string(&lock).unwrap();
+        let mut v: serde_json::Value = serde_json::from_str(&old).unwrap();
+        v["beat"] = "2020-01-01T00:00:00Z".into();
+        std::fs::write(&lock, serde_json::to_vec(&v).unwrap()).unwrap();
+        if let Screen::Open(o) = &mut h.state_mut().screen {
+            o.intake.beat_now();
+        }
+        h.run_steps(2);
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&lock).unwrap()).unwrap();
+        assert_ne!(
+            v["beat"], "2020-01-01T00:00:00Z",
+            "heartbeat written from Browse"
+        );
     }
 
     /// PA-24: with an admin password set, Admin and the Sync settings wait for it (wrong ones

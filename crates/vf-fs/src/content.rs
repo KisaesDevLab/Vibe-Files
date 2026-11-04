@@ -139,6 +139,11 @@ fn replace_inner(
         Ok(v) => v,
         Err(why) => return Ok(Err(why)),
     };
+    // Checked out on another PC, read from the lock files now (PA-16): the catalog's copy of
+    // the locks may be up to 30 s old.
+    if crate::locks::refuse_held(conn, root, device_id, &[doc_id.to_string()]).is_err() {
+        return Ok(Err(Refused::Locked));
+    }
     if change.based_on.as_ref().is_some_and(|b| *b != old_hash) {
         return Ok(Err(Refused::Changed));
     }

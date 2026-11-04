@@ -194,8 +194,9 @@ pub struct Viewer {
     pub tape: TapeState,
     /// Print (PA-13).
     pub print: crate::ui::print_ui::PrintState,
-    /// Checked out on another PC (PA-16): who, read with the document's content.
+    /// Checked out on another PC (PA-16): who, and when the lock file was last read.
     pub locked_by: Option<String>,
+    locked_seen: Option<(u64, std::time::Instant)>,
 }
 
 /// A tape in the History menu: (menu label, tape name, lines).
@@ -307,6 +308,7 @@ impl Default for Viewer {
             tape: TapeState::default(),
             print: Default::default(),
             locked_by: None,
+            locked_seen: None,
         }
     }
 }
@@ -601,14 +603,18 @@ pub fn show(ui: &mut egui::Ui, v: &mut Viewer, env: &mut Env<'_>) {
             )
             .ok();
         v.seen = hash.map(|h| (v.generation, h));
-        v.locked_by = env
-            .conn
-            .query_row(
-                "SELECT user FROM lock WHERE doc_id = ?1",
-                [&doc.doc_id],
-                |r| r.get(0),
-            )
-            .ok();
+    }
+    // Who has the document checked out, from the lock file, looked at every 3 s (a check-out or
+    // check-in on another PC shows without reopening it).
+    if let Some(doc) = &v.doc
+        && v.locked_seen.is_none_or(|(g, t)| {
+            g != v.generation || t.elapsed() >= std::time::Duration::from_secs(3)
+        })
+    {
+        v.locked_seen = Some((v.generation, std::time::Instant::now()));
+        v.locked_by = vf_fs::locks::holder(env.root, &doc.doc_id)
+            .filter(|h| h.device_id != env.device_id)
+            .map(|h| h.who());
     }
     if let Some(next) = v.ask_open.clone() {
         let mut answer = None;

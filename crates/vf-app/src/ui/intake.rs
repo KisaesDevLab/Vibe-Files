@@ -210,10 +210,41 @@ impl IntakeTab {
         )
     }
 
+    /// Writes the heartbeat on the next frame (tests; every 10 s otherwise).
+    #[cfg(test)]
+    pub fn beat_now(&mut self) {
+        self.intake_beat = None;
+    }
+
     /// Looks at the Intake lock on the next frame (tests; the tab looks every 5 s).
     #[cfg(test)]
     pub fn look_again_now(&mut self) {
         self.intake_busy = None;
+    }
+
+    /// The Intake heartbeat (every 10 s while this PC holds Intake), called every frame whatever
+    /// tab shows: a PC that is on Browse while Filer works must not look gone.
+    pub fn tick_lock(&mut self, root: &Path, device_id: &str) {
+        if self.filer.is_none()
+            || self.intake_held.is_none()
+            || self
+                .intake_beat
+                .is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(10))
+        {
+            return;
+        }
+        self.intake_beat = Some(std::time::Instant::now());
+        if vf_fs::locks::intake_heartbeat(root, device_id) {
+            return;
+        }
+        // Taken over while this PC was silent (asleep, off the network). A batch still being
+        // filed finishes first (its thread outlives the screen); the screen goes after.
+        if filer_committing(root) {
+            return;
+        }
+        self.intake_held = None;
+        self.filer = None;
+        self.message = Some("Another PC took over Intake while this one was away.".into());
     }
 
     /// Lets go of Intake so another PC can file (and unloads Filer's screen here).
@@ -520,19 +551,7 @@ impl IntakeTab {
             self.filer = None;
         }
         // One PC files at a time (PA-16): Filer's screen loads only on the PC holding Intake.
-        if self.filer.is_some()
-            && self
-                .intake_beat
-                .is_none_or(|t| t.elapsed() >= std::time::Duration::from_secs(10))
-        {
-            self.intake_beat = Some(std::time::Instant::now());
-            if !vf_fs::locks::intake_heartbeat(root, device_id) {
-                // Taken over while this PC was silent (asleep, off the network).
-                self.filer = None;
-                self.intake_held = None;
-                self.message = Some("Another PC took over Intake while this one was away.".into());
-            }
-        }
+        // (The heartbeat is written by `tick_lock`, every frame whatever tab shows.)
         if self.let_go {
             egui::CentralPanel::default().show(ui, |ui| {
                 ui.heading("Intake is free for another PC");
@@ -559,17 +578,33 @@ impl IntakeTab {
                     Ok(vf_fs::locks::IntakeLock::Theirs(h)) => {
                         self.intake_busy = Some((h, std::time::Instant::now()));
                     }
-                    Err(e) => self.error = Some(e),
+                    Err(e) => {
+                        // Tried again with the others (every 5 s), not stuck as an error.
+                        let h = vf_fs::locks::Held {
+                            doc_id: String::new(),
+                            user: e,
+                            machine: String::new(),
+                            device_id: String::new(),
+                            since: vf_core::now_rfc3339(),
+                        };
+                        self.intake_busy = Some((h, std::time::Instant::now()));
+                    }
                 }
             }
             if let Some((h, _)) = &self.intake_busy {
-                let (who, since) = (h.who(), h.since.clone());
+                let (who, since, failed) = (h.who(), h.since.clone(), h.machine.is_empty());
+                let user = h.user.clone();
                 egui::CentralPanel::default().show(ui, |ui| {
-                    ui.heading("Intake is in use on another PC");
-                    ui.label(format!(
-                        "{who} has had Intake since {}. One PC files at a time; this tab opens when it is free (checked every few seconds).",
-                        crate::ui::widgets::local_time(&since)
-                    ));
+                    if failed {
+                        ui.heading("Intake could not be opened yet");
+                        ui.label(format!("{user}. Trying again every few seconds."));
+                    } else {
+                        ui.heading("Intake is in use on another PC");
+                        ui.label(format!(
+                            "{who} has had Intake since {}. One PC files at a time; this tab opens when it is free (checked every few seconds).",
+                            crate::ui::widgets::local_time(&since)
+                        ));
+                    }
                 });
                 ui.ctx()
                     .request_repaint_after(std::time::Duration::from_secs(5));
@@ -589,8 +624,13 @@ impl IntakeTab {
                     ui.label(crate::ui::widgets::caption(
                         "This PC has Intake: other PCs wait until it lets go (or closes Vibe Files).",
                     ));
+                    let committing = filer_committing(root);
                     let_go = ui
-                        .small_button("Let another PC use Intake")
+                        .add_enabled(
+                            !committing,
+                            egui::Button::new("Let another PC use Intake").small(),
+                        )
+                        .on_disabled_hover_text("Intake is filing a batch: wait for it to finish.")
                         .clicked();
                 });
             });
