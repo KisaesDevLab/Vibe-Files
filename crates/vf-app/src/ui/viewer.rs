@@ -194,9 +194,6 @@ pub struct Viewer {
     pub tape: TapeState,
     /// Print (PA-13).
     pub print: crate::ui::print_ui::PrintState,
-    /// Checked out on another PC (PA-16): who, and when the lock file was last read.
-    pub locked_by: Option<String>,
-    locked_seen: Option<(u64, std::time::Instant)>,
 }
 
 /// A tape in the History menu: (menu label, tape name, lines).
@@ -307,8 +304,6 @@ impl Default for Viewer {
             pages_dialog: None,
             tape: TapeState::default(),
             print: Default::default(),
-            locked_by: None,
-            locked_seen: None,
         }
     }
 }
@@ -603,18 +598,6 @@ pub fn show(ui: &mut egui::Ui, v: &mut Viewer, env: &mut Env<'_>) {
             )
             .ok();
         v.seen = hash.map(|h| (v.generation, h));
-    }
-    // Who has the document checked out, from the lock file, looked at every 3 s (a check-out or
-    // check-in on another PC shows without reopening it).
-    if let Some(doc) = &v.doc
-        && v.locked_seen.is_none_or(|(g, t)| {
-            g != v.generation || t.elapsed() >= std::time::Duration::from_secs(3)
-        })
-    {
-        v.locked_seen = Some((v.generation, std::time::Instant::now()));
-        v.locked_by = vf_fs::locks::holder(env.root, &doc.doc_id)
-            .filter(|h| h.device_id != env.device_id)
-            .map(|h| h.who());
     }
     if let Some(next) = v.ask_open.clone() {
         let mut answer = None;
@@ -1192,11 +1175,7 @@ fn toolbar(ui: &mut egui::Ui, v: &mut Viewer, env: &mut Env<'_>, doc: &Doc) {
                 if ui.button("Open in PDF app").clicked() {
                     v.open_request = Some(doc.path.clone());
                 }
-                if let Some(who) = &v.locked_by {
-                    widgets::lock_pill(ui, who)
-                        .on_hover_text("Checked out on another PC: read-only here until it is checked in.");
-                }
-                let can = !v.pending.is_empty() && v.locked_by.is_none();
+                let can = !v.pending.is_empty();
                 if ui
                     .add_enabled(can, egui::Button::new("Save as…"))
                     .on_hover_text("A new document beside this one; this file is not changed.")

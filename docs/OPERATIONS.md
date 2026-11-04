@@ -181,8 +181,11 @@ One password for the cabinet (Admin › Admin password). It locks the Admin tab 
 
 Forgotten: on the server, delete `_Vibe	rash_pin.json` in the cabinet folder, then set a new one in Admin › Admin password. Setting it again is audited as a reset. Anyone who can change files in the cabinet folder can do this, so the password keeps settings from being changed by mistake; it is not a security boundary.
 
-## Several PCs: check-out and Intake
+## Several people filing at once
 
-- **Check out** a document (Browse inspector) before working on it: other PCs see who has it and cannot change it until you **Check in**. A check-out left behind (a PC that is gone) can be broken with the admin password; that is in the audit trail. The locks are files in `_Vibe\locks` on the server.
-- **Intake** is used by one PC at a time. Another PC's Intake tab says who has it and opens when it is free. Press **Let another PC use Intake** when you are done filing; closing Vibe Files lets go too. A PC that stops answering (asleep, off the network) is taken over after 45 seconds (audited).
+Anyone can open Intake and file, on any PC, at the same time. Three things to know:
+
+- **Undo last batch** undoes the cabinet's most recent batch, whoever filed it. Read the batch Filer shows before confirming the undo.
+- Two people filing the same file from the shared inbox: the second gets "file not found" for it (the first already filed it). Nothing is lost.
+- If two batches finish within a second or two of each other, the first may lose the doc type and year its cover sheet gave it; the files are still filed and show in Browse (set the doc type there, or in the "Just filed" panel).
 

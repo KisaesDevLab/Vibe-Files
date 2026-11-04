@@ -322,9 +322,6 @@ pub(crate) fn commit_as(
     if go.is_empty() {
         return Err("No file gets a new name.".into());
     }
-    // Checked out on another PC since the preview (PA-16): read the lock files now.
-    let ids: Vec<String> = go.iter().map(|r| r.doc_id.clone()).collect();
-    crate::locks::refuse_held(conn, root, device_id, &ids)?;
     let now = vf_core::now_rfc3339();
     let mut tx = Transaction::new(label);
     // docmeta keys: append a record at the new path for documents that have one.

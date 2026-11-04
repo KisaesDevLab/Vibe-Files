@@ -772,7 +772,6 @@ impl eframe::App for VibeFilesApp {
                         conflicts: o_sync.conflicts.len(),
                         running_for: o_sync.running_for.clone(),
                     });
-                    tab_browse.admin_unlocked = *admin_unlocked;
                     browse::show(ui, tab_browse, &mut env);
                     // Browse's Scan: Intake's scanner, profile and Scans folder (owner
                     // 2026-11-04); the outcome lands in Intake's log and on Browse.
@@ -845,7 +844,6 @@ impl eframe::App for VibeFilesApp {
         if let Screen::Open(o) = &mut self.screen {
             let o = &mut **o;
             o.intake.ingest.tesseract = self.config.ocr.tesseract.clone();
-            o.intake.tick_lock(&o.opened.root, &self.config.device_id);
             o.intake.ingest.tick(
                 &ctx,
                 &o.opened.root,
@@ -2343,61 +2341,29 @@ mod tests {
         );
     }
 
-    /// PA-16: while another PC has Intake, this one says who and does not load Filer.
+    /// Filer's screen loads once on the Intake tab, not on every frame (regression found
+    /// 2026-11-04), and any PC may file (owner 2026-11-04: no one-PC-at-a-time lock).
     #[test]
-    fn intake_waits_while_another_pc_has_it() {
+    fn intake_loads_once() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().join("Clients");
         let req = CreateRequest {
             root: &root,
             name: "Firm",
         };
-        let mut o = session::create(&tmp.path().join("pc1"), "dev-1", &req).unwrap();
-        assert_eq!(
-            vf_fs::locks::take_intake(&mut o.conn, &root, "other-pc", "anna").unwrap(),
-            vf_fs::locks::IntakeLock::Mine
-        );
-        drop(o);
+        drop(session::create(&tmp.path().join("pc1"), "dev-1", &req).unwrap());
         let mut h = harness(&tmp.path().join("pc1"));
         click(&mut h, "Open existing");
         type_into(&mut h, "Cabinet folder", &root.display().to_string());
         click(&mut h, "Open cabinet");
         settle(&mut h);
         click(&mut h, "Intake");
-        h.run_steps(3);
-        assert!(h.query_by_label("Intake is in use on another PC").is_some());
-        // Freed: this PC takes it (looked at again within a few seconds).
-        vf_fs::locks::release_intake(&root, "other-pc");
-        if let Screen::Open(o) = &mut h.state_mut().screen {
-            o.intake.look_again_now();
-        }
-        h.run_steps(3);
-        assert!(h.query_by_label("Intake is in use on another PC").is_none());
-        h.run_steps(6);
+        h.run_steps(8);
         let Screen::Open(o) = &h.state().screen else {
             unreachable!()
         };
-        // Filer's screen loads once, not on every frame (regression found 2026-11-04).
         assert_eq!(o.intake.mounts, 1, "{}", o.intake.debug_state());
-        assert!(h.query_by_label("Let another PC use Intake").is_some());
-        // On another tab the heartbeat goes on (review 2026-11-04: a PC on Browse while Filer
-        // works must not look gone).
-        click(&mut h, "Browse");
-        let lock = root.join("_Vibe").join(vf_fs::locks::INTAKE_LOCK);
-        let old = std::fs::read_to_string(&lock).unwrap();
-        let mut v: serde_json::Value = serde_json::from_str(&old).unwrap();
-        v["beat"] = "2020-01-01T00:00:00Z".into();
-        std::fs::write(&lock, serde_json::to_vec(&v).unwrap()).unwrap();
-        if let Screen::Open(o) = &mut h.state_mut().screen {
-            o.intake.beat_now();
-        }
-        h.run_steps(2);
-        let v: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(&lock).unwrap()).unwrap();
-        assert_ne!(
-            v["beat"], "2020-01-01T00:00:00Z",
-            "heartbeat written from Browse"
-        );
+        assert!(!root.join("_Vibe").join("intake.lock").exists());
     }
 
     /// PA-24: with an admin password set, Admin and the Sync settings wait for it (wrong ones

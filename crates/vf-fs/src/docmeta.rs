@@ -284,9 +284,6 @@ pub fn edit_each(
     for (_, e) in items {
         check(conn, e)?;
     }
-    // Checked out on another PC (PA-16): not changed here.
-    let ids: Vec<String> = items.iter().map(|(i, _)| i.clone()).collect();
-    crate::locks::refuse_held(conn, root, device_id, &ids)?;
     let type_names: HashMap<String, String> = conn
         .prepare("SELECT id, name FROM doc_type")
         .and_then(|mut st| st.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect())

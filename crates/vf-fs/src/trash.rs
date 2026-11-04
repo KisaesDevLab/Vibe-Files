@@ -66,8 +66,6 @@ pub fn delete_as(
     reason: &str,
     label: &str,
 ) -> Result<String, String> {
-    // Checked out on another PC (PA-16): not moved to the trash.
-    crate::locks::refuse_held(conn, root, device_id, ids)?;
     let now = vf_core::now_rfc3339();
     let mut tx = Transaction::new(label);
     for id in ids {
