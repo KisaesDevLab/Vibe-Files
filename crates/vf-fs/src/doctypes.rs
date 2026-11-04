@@ -88,6 +88,9 @@ pub struct DocType {
     /// Retention class id (`crate::retention`); `None`: never disposed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retention: Option<String>,
+    /// Picked first on a new barcode cover sheet (owner 2026-11-04). One doc type at most.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub cover_default: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -148,6 +151,7 @@ pub fn seed_if_missing(root: &Path) -> Result<bool, String> {
             default_folder: (*f).into(),
             client_visible: *v,
             retention: None,
+            cover_default: false,
         })
         .collect();
     save(root, &types)?;
@@ -193,7 +197,20 @@ pub fn check(types: &[DocType]) -> Result<(), String> {
             return Err(format!("Doc type id {} is used twice.", t.id));
         }
     }
+    if types.iter().filter(|t| t.cover_default).count() > 1 {
+        return Err("Only one doc type can be the cover sheet default.".into());
+    }
     Ok(())
+}
+
+/// The doc type a new cover sheet starts with (Admin › Doc types), when one is set.
+pub fn cover_default(root: &Path) -> Option<String> {
+    load(root)
+        .ok()
+        .flatten()?
+        .into_iter()
+        .find(|t| t.cover_default)
+        .map(|t| t.id)
 }
 
 /// Catalog statements making `doc_type` match `types`: upsert each (sort = list position),
@@ -312,9 +329,16 @@ pub fn apply(root: &Path, edit: Edit) -> Result<(), String> {
             default_folder: default_folder.trim().into(),
             client_visible,
             retention,
+            cover_default: false,
         }),
         Edit::Update(t) => {
             let i = pos(&types, &t.id)?;
+            // One cover sheet default: setting it here takes it from the others.
+            if t.cover_default {
+                for x in types.iter_mut() {
+                    x.cover_default = false;
+                }
+            }
             types[i] = DocType {
                 name: t.name.trim().into(),
                 default_folder: t.default_folder.trim().into(),
@@ -353,6 +377,40 @@ mod tests {
 
     fn n(conn: &Connection, sql: &str) -> i64 {
         conn.query_row(sql, [], |r| r.get(0)).unwrap()
+    }
+
+    #[test]
+    fn one_doc_type_is_the_cover_sheet_default() {
+        let (_t, root, _conn) = setup();
+        seed_if_missing(&root).unwrap();
+        assert_eq!(cover_default(&root), None);
+        let types = load(&root).unwrap().unwrap();
+        let set = |t: &DocType| {
+            apply(
+                &root,
+                Edit::Update(DocType {
+                    cover_default: true,
+                    ..t.clone()
+                }),
+            )
+            .unwrap()
+        };
+        set(&types[0]);
+        assert_eq!(cover_default(&root), Some(types[0].id.clone()));
+        // Setting another moves it.
+        set(&types[3]);
+        assert_eq!(cover_default(&root), Some(types[3].id.clone()));
+        let n = load(&root)
+            .unwrap()
+            .unwrap()
+            .iter()
+            .filter(|t| t.cover_default)
+            .count();
+        assert_eq!(n, 1);
+        // A file with two is refused.
+        let mut two = load(&root).unwrap().unwrap();
+        two[0].cover_default = true;
+        assert!(save(&root, &two).is_err());
     }
 
     #[test]

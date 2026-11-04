@@ -1615,7 +1615,12 @@ fn grid(ui: &mut egui::Ui, b: &mut Browse, conn: &Connection) {
             .clicked()
         {
             let client = b.scope_client().map(|c| b.snap.clients[c].id.clone());
-            b.cover = Some(CoverSheetDialog::new(&b.snap, client.as_deref()));
+            let doc_type = b.root.as_deref().and_then(vf_fs::doctypes::cover_default);
+            b.cover = Some(CoverSheetDialog::new(
+                &b.snap,
+                client.as_deref(),
+                doc_type.as_deref(),
+            ));
         }
         sync_menu(ui, b);
         ui.separator();
@@ -3398,7 +3403,14 @@ mod tests {
         }
         click(&mut h, "Client 0001  1001");
         click(&mut h, "Print cover sheet");
-        type_into(&mut h, "Tax year", "2025");
+        // The tax year starts at last year (owner 2026-11-04).
+        {
+            use chrono::Datelike;
+            let d = h.state_mut().b.cover.as_mut().unwrap();
+            assert_eq!(d.year, (chrono::Local::now().year() - 1).to_string());
+            d.year = "2025".into();
+        }
+        h.run();
         click(&mut h, "Create cover sheet");
         assert!(h.state().b.cover.is_none(), "dialog closed");
         let ShellAction::Open(pdf) = calls.borrow()[0].clone() else {

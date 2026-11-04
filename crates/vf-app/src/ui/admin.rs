@@ -76,6 +76,8 @@ struct Form {
     visible: bool,
     /// Retention class id.
     retention: Option<String>,
+    /// Picked first on new cover sheets.
+    cover_default: bool,
 }
 
 pub struct Admin {
@@ -185,6 +187,7 @@ impl Admin {
                 folder: t.default_folder.clone(),
                 visible: t.client_visible,
                 retention: t.retention.clone(),
+                cover_default: t.cover_default,
             })
             .unwrap_or_default();
         self.editing = match id {
@@ -459,7 +462,12 @@ fn doc_types(ui: &mut egui::Ui, a: &mut Admin, env: &mut Env) {
                             &t.default_folder
                         };
                         ui.label(RichText::new(folder).monospace().small());
-                        ui.label(if t.client_visible { "Yes" } else { "" });
+                        ui.label(match (t.client_visible, t.cover_default) {
+                            (true, true) => "Yes · cover default",
+                            (true, false) => "Yes",
+                            (false, true) => "Cover default",
+                            (false, false) => "",
+                        });
                         ui.label(a.usage.get(&t.id).copied().unwrap_or(0).to_string());
                         ui.horizontal(|ui| {
                             if order_button(ui, i > 0, "Up", &format!("Move {} up", t.name)) {
@@ -538,6 +546,12 @@ fn editor(ui: &mut egui::Ui, a: &mut Admin, env: &mut Env) {
             ui.label("");
             ui.checkbox(&mut a.form.visible, "Client-visible");
             ui.end_row();
+            ui.label("");
+            ui.checkbox(&mut a.form.cover_default, "Default on cover sheets")
+                .on_hover_text(
+                    "Print cover sheet starts with this doc type. Only one doc type can be the default.",
+                );
+            ui.end_row();
             let l = ui.label("Retention");
             let shown = a
                 .form
@@ -589,8 +603,19 @@ fn editor(ui: &mut egui::Ui, a: &mut Admin, env: &mut Env) {
                         retention: f.retention,
                     },
                 ) {
-                    let id = a.types.last().map(|t| t.id.clone());
-                    a.select(id);
+                    let added = a.types.last().cloned();
+                    if f.cover_default
+                        && let Some(t) = &added
+                    {
+                        a.run(
+                            env,
+                            Edit::Update(DocType {
+                                cover_default: true,
+                                ..t.clone()
+                            }),
+                        );
+                    }
+                    a.select(added.map(|t| t.id));
                 }
             }
         } else if let Some(id) = a.editing.id().map(str::to_owned) {
@@ -607,6 +632,7 @@ fn editor(ui: &mut egui::Ui, a: &mut Admin, env: &mut Env) {
                         default_folder: f.folder,
                         client_visible: f.visible,
                         retention: f.retention,
+                        cover_default: f.cover_default,
                     }),
                 );
             }

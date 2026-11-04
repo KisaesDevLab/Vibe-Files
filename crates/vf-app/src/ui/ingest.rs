@@ -477,7 +477,9 @@ impl IngestState {
                     ui.label(RichText::new(shown).monospace());
                     ui.separator();
                     if ui.button("Cover sheet for client…").clicked() {
-                        self.cover = Some(CoverSheetDialog::new(snap, None));
+                        let doc_type = vf_fs::doctypes::cover_default(root);
+                        self.cover =
+                            Some(CoverSheetDialog::new(snap, None, doc_type.as_deref()));
                     }
                     if ui.button("Print 10 blank separators").clicked() {
                         match cover_sheet::separators(sheets_dir) {

@@ -26,8 +26,11 @@ pub struct CoverSheetDialog {
 }
 
 impl CoverSheetDialog {
-    /// `client`: the client uuid to start with.
-    pub fn new(snap: &Snapshot, client: Option<&str>) -> Self {
+    /// `client`: the client uuid to start with; `doc_type`: the doc type id to start with (the
+    /// cabinet's cover sheet default, Admin › Doc types). The tax year starts at last year: the
+    /// return season's year (owner 2026-11-04).
+    pub fn new(snap: &Snapshot, client: Option<&str>, doc_type: Option<&str>) -> Self {
+        use chrono::Datelike;
         let clients: Vec<(String, String, String)> = snap
             .clients
             .iter()
@@ -50,8 +53,8 @@ impl CoverSheetDialog {
             doc_type_folders: snap.doc_type_folders.clone(),
             copies: "1".into(),
             client: start,
-            doc_type: None,
-            year: String::new(),
+            doc_type: doc_type.and_then(|id| snap.doc_types.iter().position(|(t, _)| t == id)),
+            year: (chrono::Local::now().year() - 1).to_string(),
             error: None,
         }
     }
@@ -265,6 +268,31 @@ mod folder_tests {
         assert_eq!(
             folder_label("Bell Ranch (BELL2002)", Some(&tpl), None),
             r"Bell Ranch (BELL2002)\Income Tax\{Year}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A new cover sheet starts with the cabinet's default doc type and last year (owner
+    /// 2026-11-04).
+    #[test]
+    fn starts_with_the_default_doc_type_and_last_year() {
+        use chrono::Datelike;
+        let snap = Snapshot {
+            doc_types: vec![("t1".into(), "W-2".into()), ("t2".into(), "Misc".into())],
+            ..Default::default()
+        };
+        let d = CoverSheetDialog::new(&snap, None, Some("t2"));
+        assert_eq!(d.doc_type, Some(1));
+        assert_eq!(d.year, (chrono::Local::now().year() - 1).to_string());
+        // No default, or one that is gone: none picked.
+        assert_eq!(CoverSheetDialog::new(&snap, None, None).doc_type, None);
+        assert_eq!(
+            CoverSheetDialog::new(&snap, None, Some("gone")).doc_type,
+            None
         );
     }
 }
