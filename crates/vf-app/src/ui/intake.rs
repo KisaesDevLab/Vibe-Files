@@ -29,6 +29,10 @@ pub struct IntakeTab {
     /// Built the first time the tab is shown (its `new` starts the inbox watcher and the
     /// first-page sniffer threads).
     filer: Option<FilerApp>,
+    /// This PC's Intake folder, while Filer is loaded from it (Q-53).
+    pc: Option<PathBuf>,
+    /// This PC's copies of the shared Filer files, kept in step with the cabinet's.
+    shared: vf_fs::intake::Shared,
     error: Option<String>,
     /// `last_batch.json`'s modification time when the catalog was last brought in line with it.
     seen: Option<std::time::SystemTime>,
@@ -147,8 +151,8 @@ pub(crate) fn pdfium_dir() -> Option<PathBuf> {
 /// A flag left by a crash mid-commit (Filer never clears it by itself) is not believed once the
 /// file has not changed for 15 minutes (a commit writes it when it starts and ends; one
 /// running longer than that is rare and only re-enables the button) (QA3 #3).
-fn filer_committing(root: &Path) -> bool {
-    let p = filer_intake::commit::last_batch_path(&vf_fs::clients::master_dir(root));
+fn filer_committing(dir: &Path) -> bool {
+    let p = filer_intake::commit::last_batch_path(dir);
     let recent = std::fs::metadata(&p)
         .and_then(|m| m.modified())
         .ok()
@@ -194,6 +198,13 @@ impl IntakeTab {
         )
     }
 
+    /// The folder this PC's Filer works in (its own once loaded; the cabinet's before).
+    fn filer_dir(&self, root: &Path) -> PathBuf {
+        self.pc
+            .clone()
+            .unwrap_or_else(|| vf_fs::clients::master_dir(root))
+    }
+
     /// Records Filer's last batch in the catalog when `last_batch.json` changed since the last
     /// look (a stat per frame otherwise). See `vf_fs::intake`. The work (a walk of the client
     /// folders and a hash of each filed file) runs on its own thread with its own catalog
@@ -210,8 +221,8 @@ impl IntakeTab {
         if self.poll_reconcile() {
             return;
         }
-        let file = filer_intake::commit::last_batch_path(&vf_fs::clients::master_dir(root));
-        let modified = std::fs::metadata(&file).and_then(|m| m.modified()).ok();
+        // Every PC's last batch (Q-53): any of them changing is looked at.
+        let modified = vf_fs::intake::latest_change(root);
         if modified.is_none() || modified == self.seen {
             return;
         }
@@ -255,6 +266,34 @@ impl IntakeTab {
             return;
         }
         self.rules_looked = Some(std::time::Instant::now());
+        if let (Some(pc), true) = (self.pc.clone(), self.filer.is_some()) {
+            match self.shared.poll(root, &pc) {
+                Ok(ch) => {
+                    let master = vf_fs::clients::master_dir(root);
+                    let at = |p: PathBuf| std::fs::metadata(p).and_then(|m| m.modified()).ok();
+                    // This PC's own saves: the cabinet now has what Filer has loaded.
+                    if ch.to_cabinet.contains(&"rules.json") {
+                        self.filer_rules_at = at(filer_core::rules::path(&master));
+                    }
+                    if ch.to_cabinet.contains(&"clients.json") {
+                        self.clients_at = at(filer_core::clients::cache_path(&master));
+                    }
+                    // Changed elsewhere: rules and clients are noticed below; the others offer
+                    // the reload here.
+                    if ch
+                        .from_cabinet
+                        .iter()
+                        .any(|f| !matches!(*f, "rules.json" | "clients.json"))
+                    {
+                        self.clients_stale = true;
+                    }
+                }
+                Err(e) => tracing::warn!(
+                    kind = crate::logging::kind(&e),
+                    "shared Intake files not in step"
+                ),
+            }
+        }
         let path = filer_core::rules::path(&vf_fs::clients::master_dir(root));
         let modified = |p: &Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
         let now = modified(&path);
@@ -458,7 +497,10 @@ impl IntakeTab {
                 .1
                 .is_none_or(|t| t.elapsed() > std::time::Duration::from_secs(1))
             {
-                self.committing = (filer_committing(root), Some(std::time::Instant::now()));
+                self.committing = (
+                    filer_committing(&self.filer_dir(root)),
+                    Some(std::time::Instant::now()),
+                );
             }
             let committing = self.committing.0;
             egui::Panel::top("vf-intake-rules-stale").show(ui, |ui| {
@@ -466,7 +508,7 @@ impl IntakeTab {
                     ui.label(if self.rules_stale {
                         "Where print captures are filed changed (Admin › Print capture). Reload Intake to use it; changes not yet confirmed in Intake's review are read again from the inbox."
                     } else {
-                        "The client list changed (a new client). Reload Intake to pick it; changes not yet confirmed in Intake's review are read again from the inbox."
+                        "The client list or Intake's settings changed (another PC, or Admin). Reload Intake to use them; changes not yet confirmed in Intake's review are read again from the inbox."
                     });
                     reload = ui
                         .add_enabled(!committing, egui::Button::new("Reload Intake"))
@@ -485,7 +527,7 @@ impl IntakeTab {
             && self.filer.is_some()
             && seen != current_look(ui.ctx())
             && self.ingest.badge() == 0
-            && !filer_committing(root)
+            && !filer_committing(&self.filer_dir(root))
         {
             self.filer = None;
         }
@@ -493,12 +535,15 @@ impl IntakeTab {
             let look = current_look(ui.ctx());
             match settings_with_theme(root, cabinet, look, ui.ctx().zoom_factor()) {
                 Ok((settings, savable)) => {
-                    let state = AppState::load(
-                        vf_fs::clients::master_dir(root),
-                        settings,
-                        savable,
-                        pdfium_dir(),
-                    );
+                    // This PC's own Intake folder (Q-53: several people file at once), with
+                    // the cabinet's shared files copied in.
+                    let pc = vf_fs::intake::pc_dir(root, device_id);
+                    if let Err(e) = self.shared.prepare(root, &pc) {
+                        self.error = Some(format!("Intake's folder for this PC: {e}"));
+                        return;
+                    }
+                    let state = AppState::load(pc.clone(), settings, savable, pdfium_dir());
+                    self.pc = Some(pc);
                     let ctx = ui.ctx().clone();
                     self.filer = Some(FilerApp::new(&ctx, state));
                     self.filer_rules_at = std::fs::metadata(filer_core::rules::path(

@@ -183,9 +183,7 @@ Forgotten: on the server, delete `_Vibe	rash_pin.json` in the cabinet folder, th
 
 ## Several people filing at once
 
-Anyone can open Intake and file, on any PC, at the same time. Three things to know:
+Anyone can open Intake and file, on any PC, at the same time. Each PC's Intake works in its own folder in the cabinet (`_Vibe\intake\<PC>`): its last batch, its **Undo last batch**, its working PDFs and its leftovers check are its own, and every PC's batches are recorded in every catalog. The settings, rules, client list, relationships and folder template are shared: a change made on one PC reaches the others, which offer **Reload Intake**. Two things to know:
 
-- **Undo last batch** undoes the cabinet's most recent batch, whoever filed it. Read the batch Filer shows before confirming the undo.
-- Two people filing the same file from the shared inbox: the second gets "file not found" for it (the first already filed it). Nothing is lost.
-- If two batches finish within a second or two of each other, the first may lose the doc type and year its cover sheet gave it; the files are still filed and show in Browse (set the doc type there, or in the "Just filed" panel).
-
+- Two people changing Intake's rules or settings at the same moment: the last save wins.
+- Two people filing the same file from a shared inbox: the second gets "file not found" for it (the first already filed it). Nothing is lost. Separate inbox folders per person avoid it.

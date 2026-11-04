@@ -24,6 +24,127 @@ use crate::rebuild::{mime, rel, year_from_path};
 
 pub const LABEL: &str = "intake_batch";
 
+/// Each PC's Intake works in its own folder, `_Vibe/intake/<device>` (owner 2026-11-04, Q-53:
+/// several people file at once): its last batch, op log, undo zips, working PDFs and running
+/// marker are its own; the files every PC shares ([`SHARED`]) are copied in and back
+/// ([`Shared`]). Batches of every PC are recorded in each catalog ([`reconcile`]).
+pub const PC_DIR: &str = "intake";
+
+/// Filer's files the PCs share: settings, rules, client list, relationships, folder template,
+/// folder index.
+pub const SHARED: [&str; 6] = [
+    "config.json",
+    "rules.json",
+    "clients.json",
+    "relationships.json",
+    "template.json",
+    "folders.json",
+];
+
+/// This PC's Intake folder.
+pub fn pc_dir(root: &Path, device_id: &str) -> std::path::PathBuf {
+    let safe: String = device_id
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
+        .collect();
+    crate::clients::master_dir(root).join(PC_DIR).join(safe)
+}
+
+/// Every folder a batch can be in: the cabinet's `_Vibe` (batches filed before Q-53) and each
+/// PC's Intake folder.
+pub fn batch_dirs(root: &Path) -> Vec<std::path::PathBuf> {
+    let master = crate::clients::master_dir(root);
+    let mut v = vec![master.clone()];
+    if let Ok(rd) = std::fs::read_dir(master.join(PC_DIR)) {
+        let mut pcs: Vec<_> = rd
+            .flatten()
+            .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+            .map(|e| e.path())
+            .collect();
+        pcs.sort();
+        v.extend(pcs);
+    }
+    v
+}
+
+/// The newest change to any PC's last batch (Intake looks again when it moves).
+pub fn latest_change(root: &Path) -> Option<std::time::SystemTime> {
+    batch_dirs(root)
+        .iter()
+        .filter_map(|d| {
+            std::fs::metadata(filer_intake::commit::last_batch_path(d))
+                .and_then(|m| m.modified())
+                .ok()
+        })
+        .max()
+}
+
+fn mtime(p: &Path) -> Option<std::time::SystemTime> {
+    std::fs::metadata(p).and_then(|m| m.modified()).ok()
+}
+
+/// Keeps a PC's copies of the [`SHARED`] files and the cabinet's in step.
+#[derive(Debug, Default)]
+pub struct Shared {
+    /// Per file: (cabinet copy's time, PC copy's time) as last brought in step.
+    seen: HashMap<&'static str, (Option<std::time::SystemTime>, Option<std::time::SystemTime>)>,
+}
+
+/// What [`Shared::poll`] copied.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct SharedChanges {
+    /// Changed by this PC's Filer, copied to the cabinet.
+    pub to_cabinet: Vec<&'static str>,
+    /// Changed elsewhere (another PC, Vibe's own screens), copied in: Filer, loaded earlier,
+    /// should reload to use them.
+    pub from_cabinet: Vec<&'static str>,
+}
+
+fn copy_over(from: &Path, to: &Path) -> Result<(), String> {
+    let bytes = std::fs::read(from).map_err(|e| format!("{}: {e}", from.display()))?;
+    crate::cabinet::write_replace(to, &bytes).map_err(|e| format!("{}: {e}", to.display()))
+}
+
+impl Shared {
+    /// Before Filer loads from `pc`: the cabinet's shared files copied in.
+    pub fn prepare(&mut self, root: &Path, pc: &Path) -> Result<(), String> {
+        std::fs::create_dir_all(pc).map_err(|e| format!("{}: {e}", pc.display()))?;
+        let master = crate::clients::master_dir(root);
+        self.seen.clear();
+        for f in SHARED {
+            let (m, p) = (master.join(f), pc.join(f));
+            if m.is_file() {
+                copy_over(&m, &p)?;
+            }
+            self.seen.insert(f, (mtime(&m), mtime(&p)));
+        }
+        Ok(())
+    }
+
+    /// Brings the copies in step: a file this PC's Filer saved goes to the cabinet; one changed
+    /// in the cabinet comes in. When both changed, this PC's save wins (the last save does).
+    pub fn poll(&mut self, root: &Path, pc: &Path) -> Result<SharedChanges, String> {
+        let master = crate::clients::master_dir(root);
+        let mut out = SharedChanges::default();
+        for f in SHARED {
+            let (m, p) = (master.join(f), pc.join(f));
+            let (mt, pt) = (mtime(&m), mtime(&p));
+            let (sm, sp) = self.seen.get(f).copied().unwrap_or((None, None));
+            if pt.is_some() && pt != sp {
+                copy_over(&p, &m)?;
+                out.to_cabinet.push(f);
+            } else if mt.is_some() && mt != sm {
+                copy_over(&m, &p)?;
+                out.from_cabinet.push(f);
+            } else {
+                continue;
+            }
+            self.seen.insert(f, (mtime(&m), mtime(&p)));
+        }
+        Ok(out)
+    }
+}
+
 /// What [`reconcile`] did.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Reconciled {
@@ -56,7 +177,15 @@ fn recorded(conn: &Connection, batch: &str) -> Option<(String, bool)> {
 /// would check: a file there must keep its bytes (Filer refuses to undo a changed size). Empty
 /// when the last batch was undone; a batch still being written counts.
 pub fn undoable_paths(root: &Path) -> std::collections::HashSet<String> {
-    let Some(lb) = load_last_batch(&crate::clients::master_dir(root)) else {
+    batch_dirs(root)
+        .iter()
+        .flat_map(|d| undoable_in(root, d))
+        .collect()
+}
+
+/// [`undoable_paths`] of one Intake folder's last batch.
+fn undoable_in(root: &Path, dir: &Path) -> std::collections::HashSet<String> {
+    let Some(lb) = load_last_batch(dir) else {
         return Default::default();
     };
     if lb.undone {
@@ -79,13 +208,17 @@ pub fn undoable_paths(root: &Path) -> std::collections::HashSet<String> {
 /// not in the catalog yet (still being filed, or filed and waiting for [`reconcile`]). Files
 /// found in client folders at these paths are Intake's to record, not new files (PA-23).
 pub fn unrecorded_paths(conn: &Connection, root: &Path) -> std::collections::HashSet<String> {
-    let Some(lb) = load_last_batch(&crate::clients::master_dir(root)) else {
-        return Default::default();
-    };
-    if lb.undone || (!lb.in_progress && recorded(conn, &lb.batch.to_string()).is_some()) {
-        return Default::default();
+    let mut out = std::collections::HashSet::new();
+    for d in batch_dirs(root) {
+        let Some(lb) = load_last_batch(&d) else {
+            continue;
+        };
+        if lb.undone || (!lb.in_progress && recorded(conn, &lb.batch.to_string()).is_some()) {
+            continue;
+        }
+        out.extend(undoable_in(root, &d));
     }
-    undoable_paths(root)
+    out
 }
 
 pub fn reconcile(
@@ -98,8 +231,27 @@ pub fn reconcile(
     // Other processes cannot share the catalog (the data folder's in-use lock).
     static ONE: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let _one = ONE.lock().unwrap_or_else(|p| p.into_inner());
-    let dir = crate::clients::master_dir(root);
-    let Some(lb) = load_last_batch(&dir) else {
+    // Every PC's last batch (Q-53), and the cabinet's own from before.
+    let mut out = Reconciled::default();
+    for dir in batch_dirs(root) {
+        let r = reconcile_dir(conn, root, &dir, device_id)?;
+        if r.recorded.is_some() {
+            out.recorded = r.recorded;
+        }
+        if r.undone.is_some() {
+            out.undone = r.undone;
+        }
+    }
+    Ok(out)
+}
+
+fn reconcile_dir(
+    conn: &mut Connection,
+    root: &Path,
+    dir: &Path,
+    device_id: &str,
+) -> Result<Reconciled, String> {
+    let Some(lb) = load_last_batch(dir) else {
         return Ok(Reconciled::default());
     };
     if lb.in_progress {
@@ -108,7 +260,7 @@ pub fn reconcile(
     let batch = lb.batch.to_string();
     match (recorded(conn, &batch), lb.undone) {
         (None, false) => {
-            let (added, updated) = record(conn, root, &lb, device_id)?;
+            let (added, updated) = record(conn, root, dir, &lb, device_id)?;
             Ok(Reconciled {
                 recorded: Some((batch, added, updated)),
                 ..Default::default()
@@ -132,6 +284,7 @@ pub fn reconcile(
 fn record(
     conn: &mut Connection,
     root: &Path,
+    dir: &Path,
     lb: &LastBatch,
     device_id: &str,
 ) -> Result<(usize, usize), String> {
@@ -354,7 +507,7 @@ fn record(
     }
 
     // Filer's op log for this batch becomes audit rows (one per record).
-    let ops = oplog::read(&oplog::path(&crate::clients::master_dir(root)))
+    let ops = oplog::read(&oplog::path(dir))
         .map(|r| r.records)
         .unwrap_or_default();
     let mut audited = 0;
@@ -463,6 +616,46 @@ mod tests {
     use vf_core::db::Storage;
 
     use super::*;
+
+    /// Q-53: a PC's copies of the shared files go to the cabinet when its Filer saves them, and
+    /// come in when the cabinet's change; every PC's batch folder is looked at.
+    #[test]
+    fn shared_files_go_both_ways() {
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path().join("cab");
+        let master = crate::clients::master_dir(&root);
+        std::fs::create_dir_all(&master).unwrap();
+        std::fs::write(master.join("rules.json"), "cabinet rules").unwrap();
+        let (a, b) = (pc_dir(&root, "pc-a"), pc_dir(&root, "pc-b"));
+        let (mut sa, mut sb) = (Shared::default(), Shared::default());
+        sa.prepare(&root, &a).unwrap();
+        sb.prepare(&root, &b).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(a.join("rules.json")).unwrap(),
+            "cabinet rules"
+        );
+        assert_eq!(sa.poll(&root, &a).unwrap(), SharedChanges::default());
+        // A's Filer saves its rules: they reach the cabinet, then B.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(a.join("rules.json"), "rules from A").unwrap();
+        assert_eq!(sa.poll(&root, &a).unwrap().to_cabinet, ["rules.json"]);
+        assert_eq!(
+            std::fs::read_to_string(master.join("rules.json")).unwrap(),
+            "rules from A"
+        );
+        assert_eq!(sb.poll(&root, &b).unwrap().from_cabinet, ["rules.json"]);
+        assert_eq!(
+            std::fs::read_to_string(b.join("rules.json")).unwrap(),
+            "rules from A"
+        );
+        assert_eq!(
+            sa.poll(&root, &a).unwrap(),
+            SharedChanges::default(),
+            "A is in step"
+        );
+        let dirs = batch_dirs(&root);
+        assert_eq!(dirs, [master.clone(), a, b]);
+    }
     use crate::cabinet::{self, CabinetFile};
 
     struct Fx {
@@ -512,6 +705,17 @@ mod tests {
 
     /// Files `names` from the inbox into the folder for `c` with Filer's own commit.
     fn file(f: &Fx, c: &Client, names: &[&str], overwrite: bool) -> CommitReport {
+        file_from(f, c, names, overwrite, &crate::clients::master_dir(&f.root))
+    }
+
+    /// [`file`] from the Intake folder `data_dir` (a PC's own, Q-53).
+    fn file_from(
+        f: &Fx,
+        c: &Client,
+        names: &[&str],
+        overwrite: bool,
+        data_dir: &Path,
+    ) -> CommitReport {
         let folder = f.root.join(format!("{} ({})", c.name, c.id));
         let action = if folder.exists() {
             FolderAction::Exists(folder.clone())
@@ -546,7 +750,7 @@ mod tests {
             skipped: vec![],
             root: f.root.clone(),
             first_inbox: Some(f.inbox.clone()),
-            data_dir: crate::clients::master_dir(&f.root),
+            data_dir: data_dir.to_path_buf(),
             firm_id: f.firm,
             template: filer_core::template::default_tree(),
             splits: vec![],
@@ -563,6 +767,46 @@ mod tests {
 
     fn w2(f: &Fx) -> PathBuf {
         f.root.join("Acme LLC (1001)/Income Tax/2025/w2.pdf")
+    }
+
+    /// Q-53: two PCs file at once, each from its own Intake folder: both batches are recorded
+    /// (documents and audit rows), and one PC's Undo takes back only its own batch.
+    #[test]
+    fn two_pcs_filing_at_once_are_both_recorded() {
+        let mut f = fx();
+        let acme = client("1001", "Acme LLC");
+        let (a, b) = (pc_dir(&f.root, "pc-a"), pc_dir(&f.root, "pc-b"));
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        let ra = file_from(&f, &acme, &["w2.pdf"], false, &a);
+        let rb = file_from(&f, &acme, &["1099-int.pdf"], false, &b);
+        reconcile(&mut f.conn, &f.root, "dev").unwrap();
+        assert_eq!(
+            n(
+                &f.conn,
+                "SELECT count(*) FROM document WHERE filed_by = 'intake' AND deleted_at IS NULL"
+            ),
+            2,
+            "both batches recorded"
+        );
+        for batch in [ra.last_batch.batch, rb.last_batch.batch] {
+            assert!(recorded(&f.conn, &batch.to_string()).is_some());
+        }
+        // PC A's Undo: its own batch only.
+        filer_intake::undo::run_undo(&a, ra.last_batch, false);
+        reconcile(&mut f.conn, &f.root, "dev").unwrap();
+        assert_eq!(
+            n(
+                &f.conn,
+                "SELECT count(*) FROM document WHERE filed_by = 'intake' AND deleted_at IS NULL"
+            ),
+            1
+        );
+        assert!(
+            f.root
+                .join("Acme LLC (1001)/Income Tax/2025/1099-int.pdf")
+                .is_file()
+        );
     }
 
     /// A Filer batch becomes one Transaction: document + sync rows, audit rows from ops.jsonl,
