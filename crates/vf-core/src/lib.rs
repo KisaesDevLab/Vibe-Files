@@ -5,6 +5,7 @@ pub mod audit;
 pub mod browse;
 pub mod db;
 pub mod retention;
+pub mod tape;
 pub mod tx;
 
 #[derive(Debug, thiserror::Error)]
