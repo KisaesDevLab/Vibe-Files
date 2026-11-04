@@ -22,6 +22,8 @@ const LOG_MAX: usize = 6;
 
 #[derive(Default)]
 pub struct IngestState {
+    /// The last scan's PDF (or why not), for the one who started it to take.
+    pub finished_scan: Option<Result<PathBuf, String>>,
     worker: Option<Worker>,
     /// This PC's Tesseract setting (`config.toml [ocr]`), for reading scanned forms (P08).
     pub tesseract: Option<PathBuf>,
@@ -308,8 +310,15 @@ impl IngestState {
         }
         if let Some(rx) = &self.scan_job {
             let line = match rx.try_recv() {
-                Ok(Ok((pdf, a))) => Some(format!("Scanned {} ({})", file_name(&pdf), a.note())),
-                Ok(Err(e)) => Some(format!("Scan failed: {e}")),
+                Ok(Ok((pdf, a))) => {
+                    let l = format!("Scanned {} ({})", file_name(&pdf), a.note());
+                    self.finished_scan = Some(Ok(pdf));
+                    Some(l)
+                }
+                Ok(Err(e)) => {
+                    self.finished_scan = Some(Err(e.clone()));
+                    Some(format!("Scan failed: {e}"))
+                }
                 Err(TryRecvError::Disconnected) => Some("Scan stopped.".into()),
                 Err(TryRecvError::Empty) => None,
             };
@@ -344,12 +353,25 @@ impl IngestState {
     /// Starts a scan with this PC's scanner and profile into the Scans folder: Intake's Scan
     /// button, and Browse's (owner 2026-11-04). Returns the scanner's name, or why not.
     pub fn start_scan(&mut self, ctx: &egui::Context, prefs: &Ingest) -> Result<String, String> {
-        if self.scanning() {
-            return Err("A scan is running.".into());
-        }
         let Some(dir) = prefs.scans.clone() else {
             return Err("Choose a Scans folder first (Intake tab, top strip).".into());
         };
+        self.start_scan_into(ctx, prefs, dir)
+    }
+
+    /// [`IngestState::start_scan`] into `dir` (Browse's folder scans go to a private folder,
+    /// then straight into the cabinet folder shown, owner 2026-11-04). The PDF is in
+    /// `finished_scan` when it is done.
+    pub fn start_scan_into(
+        &mut self,
+        ctx: &egui::Context,
+        prefs: &Ingest,
+        dir: PathBuf,
+    ) -> Result<String, String> {
+        if self.scanning() {
+            return Err("A scan is running.".into());
+        }
+        self.finished_scan = None;
         let Some(found) = self.devices.clone() else {
             if self.devices_job.is_none() {
                 self.list_devices(ctx);

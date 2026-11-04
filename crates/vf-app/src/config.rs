@@ -199,7 +199,7 @@ pub struct Ocr {
 
 /// Folders Vibe Files processes before Filer sees the files (`vf_ingest::pipeline`). Outside
 /// the cabinet and not one of Filer's inboxes.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Ingest {
     /// Scanner output, phone photos, barcode-sheet stacks.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -216,8 +216,9 @@ pub struct Ingest {
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub scanner_by_user: std::collections::BTreeMap<String, String>,
     /// TWAIN: show the driver's own window, so its settings and profiles (PaperStream IP)
-    /// drive the scan instead of the Vibe Files profile.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    /// drive the scan instead of the Vibe Files profile. On unless turned off (owner
+    /// 2026-11-04).
+    #[serde(default = "yes")]
     pub driver_ui: bool,
     /// Last scan profile used, by name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -225,6 +226,20 @@ pub struct Ingest {
     /// This PC's scan profiles; empty = `vf_ingest::scanner::default_profiles()`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub scan_profiles: Vec<vf_ingest::scanner::Profile>,
+}
+
+impl Default for Ingest {
+    fn default() -> Self {
+        Ingest {
+            scans: None,
+            print_capture: None,
+            scanner: None,
+            scanner_by_user: Default::default(),
+            driver_ui: true,
+            scan_profile: None,
+            scan_profiles: vec![],
+        }
+    }
 }
 
 /// The Windows user name (`USERNAME`), or "" when unset.
@@ -443,7 +458,13 @@ broken = ",
         assert_eq!(back, i);
         let old: Ingest = toml::from_str("scanner = 'wia-1'").unwrap();
         assert_eq!(old.scanner_for("ann"), Some("wia-1"));
-        assert!(!old.driver_ui);
+        assert!(old.driver_ui, "the driver's own window by default");
+        let off = Ingest {
+            driver_ui: false,
+            ..Ingest::default()
+        };
+        let back: Ingest = toml::from_str(&toml::to_string(&off).unwrap()).unwrap();
+        assert!(!back.driver_ui, "turned off stays off");
     }
 
     #[test]

@@ -275,6 +275,17 @@ pub fn twain_settings(profile: &Profile, driver_ui: bool) -> crate::twain::Setti
     }
 }
 
+/// The profile a TWAIN scan's pages are assembled with. With the driver's own window, the driver
+/// (PaperStream's "blank page skip") decides what is blank: every page it sends is kept, front
+/// and back, so a faint back side is never dropped by a second guess (owner 2026-11-04).
+pub fn for_twain(profile: &Profile, driver_ui: bool) -> Profile {
+    let mut p = profile.clone();
+    if driver_ui {
+        p.drop_blank = false;
+    }
+    p
+}
+
 /// The pages of one TWAIN scan as one PDF at `out`.
 pub fn assemble_twain(
     scanned: crate::twain::Scanned,
@@ -438,7 +449,8 @@ pub fn scan_to(
 ) -> Result<(PathBuf, Assembled), String> {
     if let Some(source) = device_id.strip_prefix(TWAIN_PREFIX) {
         let scanned = crate::twain::scan(source, &twain_settings(profile, driver_ui))?;
-        return deliver(scans_dir, |tmp| assemble_twain(scanned, profile, tmp));
+        let profile = for_twain(profile, driver_ui);
+        return deliver(scans_dir, |tmp| assemble_twain(scanned, &profile, tmp));
     }
     // Hidden from the worker (it skips dot names and folders).
     let work = scans_dir.join(format!(".scan-{}", uuid::Uuid::now_v7().simple()));
@@ -652,6 +664,35 @@ mod tests {
         assert_eq!(lopdf::Document::load(&out).unwrap().get_pages().len(), 3);
         // Nothing hidden left behind.
         assert_eq!(std::fs::read_dir(t.path()).unwrap().count(), 1);
+    }
+
+    /// With the driver's own window, a two-sided batch keeps every page the driver sends, faint
+    /// back sides included (owner 2026-11-04: all pages processed).
+    #[test]
+    fn driver_window_scan_keeps_every_front_and_back() {
+        use crate::twain::fake::{Fake, Scanner};
+        use crate::twain::{Entry, on_twain_thread};
+        let profile = default_profiles()[0].clone(); // both sides, drop blank
+        let s = twain_settings(&profile, true);
+        assert!(s.show_ui);
+        let fake = Fake::new(vec![Scanner {
+            pages: 8,
+            blank: vec![1, 3, 5, 7],
+            ..Scanner::fi7160()
+        }]);
+        let scanned = on_twain_thread(
+            move || Ok(Box::new(fake) as Box<dyn Entry>),
+            move |m| m.scan("fi-7160", &s),
+        )
+        .unwrap();
+        assert_eq!(scanned.pages.len(), 8, "fronts and backs transferred");
+        let t = tempfile::tempdir().unwrap();
+        let p = for_twain(&profile, true);
+        let (out, a) = deliver(t.path(), |tmp| assemble_twain(scanned, &p, tmp)).unwrap();
+        assert_eq!((a.scanned, a.blank, a.normalized.pages), (8, 0, 8));
+        assert_eq!(lopdf::Document::load(&out).unwrap().get_pages().len(), 8);
+        // Without the driver's window the profile's blank drop still applies.
+        assert!(for_twain(&profile, false).drop_blank);
     }
 
     #[test]

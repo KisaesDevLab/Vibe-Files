@@ -86,6 +86,15 @@ struct Listing {
     new_files: Vec<vf_fs::sweep::Unknown>,
 }
 
+/// A folder a Browse scan is filed into.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScanTarget {
+    pub client_id: String,
+    /// Cabinet-relative folder.
+    pub folder: String,
+    pub tax_year: Option<i32>,
+}
+
 /// A combine running on its thread: the sources, the merged file, the result.
 struct Combining {
     docs: Vec<DocRow>,
@@ -157,6 +166,9 @@ pub struct Browse {
     pub scan_request: bool,
     /// A scan started from here is running: its outcome is shown here when it ends.
     pub scan_watching: bool,
+    /// Where that scan is filed: the folder shown when Scan was pressed (owner 2026-11-04);
+    /// `None` = to the Scans folder and Intake.
+    pub scan_target: Option<ScanTarget>,
     /// Documents dropped on a tree folder: (ids, cabinet-relative folder), planned in `show`.
     drop_request: Option<(Vec<String>, String)>,
     /// Legal holds covering what is shown (P07 step 4), for the selection / client they were
@@ -288,6 +300,7 @@ impl Browse {
             print: Default::default(),
             print_request: false,
             scan_watching: false,
+            scan_target: None,
             holds_seen: None,
             hold_reason: None,
             rename: None,
@@ -576,6 +589,44 @@ impl Browse {
             | Scope::YearFolder { client: c, .. } => Some(*c),
             _ => None,
         }
+    }
+
+    /// The folder shown, when it is a client's folder: where a scan from here is filed. A year
+    /// folder (`Income Tax/2026`, or 2026 › Income Tax in the year view) gives the year.
+    pub fn scan_target(&self) -> Option<ScanTarget> {
+        let year_of = |seg: &str| {
+            (seg.len() == 4)
+                .then(|| seg.parse::<i32>().ok())
+                .flatten()
+                .filter(|y| (1990..=2100).contains(y))
+        };
+        let (ci, inner, year) = match &self.scope {
+            Scope::Folder { client, folder } => {
+                let y = folder.split('/').find_map(year_of);
+                (*client, folder.clone(), y)
+            }
+            Scope::YearFolder {
+                client,
+                year,
+                folder,
+            } if !folder.is_empty() => {
+                // The year's own folder when the client has one (`Income Tax/2026`).
+                let with = year.map(|y| format!("{folder}/{y}"));
+                let real = match with {
+                    Some(f) if self.ix.clients.get(*client)?.folders.contains_key(&f) => f,
+                    _ => folder.clone(),
+                };
+                (*client, real, *year)
+            }
+            _ => return None,
+        };
+        let c = self.snap.clients.get(ci)?;
+        let base = c.folder_rel.as_deref().filter(|b| !b.is_empty())?;
+        Some(ScanTarget {
+            client_id: c.id.clone(),
+            folder: format!("{base}/{inner}"),
+            tax_year: year,
+        })
     }
 
     /// Shows `scope` in the grid and clears the selection.
@@ -1850,7 +1901,7 @@ fn grid(ui: &mut egui::Ui, b: &mut Browse, conn: &Connection) {
         if ui
             .button("Scan")
             .on_hover_text(
-                "Scan with this PC's scanner and profile (set on the Intake tab). The pages go to the Scans folder; a barcode cover sheet files them, otherwise they wait in Intake.",
+                "Scan with this PC's scanner (set on the Intake tab). With a client's folder open, the scan is filed straight into it as one document; otherwise the pages go to the Scans folder and Intake (barcode cover sheets split and file them).",
             )
             .clicked()
         {
@@ -3098,6 +3149,36 @@ mod tests {
         b.sort_by(SortCol::Client);
         let first = &b.snap.docs[b.visible[0]];
         assert_eq!(first.client_id.as_deref(), Some("c0001"), "descending");
+    }
+
+    /// A scan from Browse goes to the folder shown (owner 2026-11-04): its client, folder and
+    /// year; the whole cabinet or a view has no folder.
+    #[test]
+    fn scan_target_is_the_folder_shown() {
+        let mut h = harness(1, 8);
+        let b = &mut h.state_mut().b;
+        assert_eq!(b.scan_target(), None, "the whole cabinet");
+        b.set_scope(Scope::Folder {
+            client: 0,
+            folder: "Income Tax/2025".into(),
+        });
+        let t = b.scan_target().unwrap();
+        assert_eq!(t.folder, "Client 0000 (1000)/Income Tax/2025");
+        assert_eq!((t.client_id.as_str(), t.tax_year), ("c0000", Some(2025)));
+        b.set_scope(Scope::Folder {
+            client: 0,
+            folder: "Permanent/Setup".into(),
+        });
+        assert_eq!(b.scan_target().unwrap().tax_year, None);
+        // The year view: 2025 > Income Tax is the Income Tax/2025 folder.
+        b.set_scope(Scope::YearFolder {
+            client: 0,
+            year: Some(2025),
+            folder: "Income Tax".into(),
+        });
+        let t = b.scan_target().unwrap();
+        assert_eq!(t.folder, "Client 0000 (1000)/Income Tax/2025");
+        assert_eq!(t.tax_year, Some(2025));
     }
 
     /// Browse has a Scan button (owner 2026-11-04); the app starts it with Intake's scanner.

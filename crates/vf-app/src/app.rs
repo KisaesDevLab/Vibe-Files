@@ -776,20 +776,92 @@ impl eframe::App for VibeFilesApp {
                     // Browse's Scan: Intake's scanner, profile and Scans folder (owner
                     // 2026-11-04); the outcome lands in Intake's log and on Browse.
                     if std::mem::take(&mut tab_browse.scan_request) {
-                        match o_intake.ingest.start_scan(ui.ctx(), &self.config.ingest) {
+                        // A client's folder shown: the scan goes straight into it (owner
+                        // 2026-11-04); otherwise to the Scans folder and Intake.
+                        let target = tab_browse.scan_target();
+                        let started = match &target {
+                            Some(_) => vf_fs::content::tmp_file(&opened.root, "scan")
+                                .map(|p| p.with_extension(""))
+                                .and_then(|d| {
+                                    std::fs::create_dir_all(&d).map_err(|e| e.to_string())?;
+                                    Ok(d)
+                                })
+                                .and_then(|d| {
+                                    o_intake.ingest.start_scan_into(
+                                        ui.ctx(),
+                                        &self.config.ingest,
+                                        d,
+                                    )
+                                }),
+                            None => o_intake.ingest.start_scan(ui.ctx(), &self.config.ingest),
+                        };
+                        match started {
                             Ok(name) => {
-                                tab_browse.notice = Some(format!(
-                                    "Scanning on {name}… The pages go to the Scans folder and then to Intake."
-                                ));
+                                tab_browse.notice = Some(match &target {
+                                    Some(t) => format!(
+                                        "Scanning on {name}… It is filed into {} when done.",
+                                        t.folder.replace('/', " / ")
+                                    ),
+                                    None => format!(
+                                        "Scanning on {name}… The pages go to the Scans folder and then to Intake."
+                                    ),
+                                });
                                 tab_browse.scan_watching = true;
+                                tab_browse.scan_target = target;
                             }
                             Err(e) => tab_browse.error = Some(format!("Not scanned: {e}")),
                         }
                     }
                     if tab_browse.scan_watching && !o_intake.ingest.scanning() {
                         tab_browse.scan_watching = false;
-                        if let Some(l) = o_intake.ingest.last_line() {
-                            tab_browse.notice = Some(l.to_string());
+                        let target = tab_browse.scan_target.take();
+                        match (target, o_intake.ingest.finished_scan.take()) {
+                            (Some(t), Some(Ok(pdf))) => {
+                                let name = pdf
+                                    .file_name()
+                                    .map(|n| n.to_string_lossy().into_owned())
+                                    .unwrap_or_else(|| "Scan.pdf".into());
+                                let r = vf_fs::content::add(
+                                    env.conn,
+                                    env.root,
+                                    env.device_id,
+                                    &pdf,
+                                    vf_fs::content::NewDoc {
+                                        rel_path: format!("{}/{name}", t.folder),
+                                        client_id: Some(t.client_id.clone()),
+                                        doc_type_id: None,
+                                        tax_year: t.tax_year,
+                                        source: Some("client".into()),
+                                        tags: vec![],
+                                        label: "scan".into(),
+                                        detail: serde_json::json!({ "scanned_into": t.folder }),
+                                    },
+                                );
+                                if let Some(d) = pdf.parent() {
+                                    let _ = std::fs::remove_dir_all(d);
+                                }
+                                match r {
+                                    Ok(added) => {
+                                        tab_browse.reload(env.conn);
+                                        tab_browse.notice = Some(format!(
+                                            "Scanned into {}. Set its doc type in the details.",
+                                            added.rel_path.replace('/', " / ")
+                                        ));
+                                    }
+                                    Err(e) => {
+                                        tab_browse.error =
+                                            Some(format!("Scanned, but not filed: {e}"))
+                                    }
+                                }
+                            }
+                            (_, Some(Err(e))) => {
+                                tab_browse.error = Some(format!("Not scanned: {e}"));
+                            }
+                            _ => {
+                                if let Some(l) = o_intake.ingest.last_line() {
+                                    tab_browse.notice = Some(l.to_string());
+                                }
+                            }
                         }
                     }
                     if let Some(d) = tab_browse.view_request.take() {
@@ -2360,6 +2432,68 @@ mod tests {
             h.ctx.options(|o| o.theme_preference),
             egui::ThemePreference::System
         );
+    }
+
+    /// A scan started from Browse with a client folder shown is filed straight into it, with
+    /// the folder's year (owner 2026-11-04).
+    #[test]
+    fn browse_scan_is_filed_into_the_folder_shown() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("Clients");
+        let req = CreateRequest {
+            root: &root,
+            name: "Firm",
+        };
+        let mut o = session::create(&tmp.path().join("pc1"), "dev-1", &req).unwrap();
+        let p = vf_fs::newclient::plan(
+            &o.conn,
+            &root,
+            &vf_fs::newclient::NewClient {
+                ext_id: "INVE1001".into(),
+                name: "Invented Family".into(),
+                entity_type: None,
+            },
+        )
+        .unwrap();
+        vf_fs::newclient::create(&mut o.conn, &root, &p, "dev-1").unwrap();
+        drop(o);
+        let mut h = harness(&tmp.path().join("pc1"));
+        click(&mut h, "Open existing");
+        type_into(&mut h, "Cabinet folder", &root.display().to_string());
+        click(&mut h, "Open cabinet");
+        settle(&mut h);
+        // As if a scan from Browse had just finished: its PDF in a private folder.
+        let scan_dir = root.join("_Vibe").join("tmp").join("scan-test");
+        std::fs::create_dir_all(&scan_dir).unwrap();
+        let pdf = scan_dir.join("Scan 2026-11-04 120000.pdf");
+        filer_pdf::pdf::write_test_pdf(&pdf, &["Invented scanned page"]);
+        let folder = format!("{}/Income Tax/2026", p.folder_rel);
+        if let Screen::Open(o) = &mut h.state_mut().screen {
+            o.browse.scan_watching = true;
+            o.browse.scan_target = Some(crate::ui::browse::ScanTarget {
+                client_id: p.client.uuid.to_string(),
+                folder: folder.clone(),
+                tax_year: Some(2026),
+            });
+            o.intake.ingest.finished_scan = Some(Ok(pdf.clone()));
+        }
+        h.run_steps(3);
+        let Screen::Open(o) = &h.state().screen else {
+            unreachable!()
+        };
+        let (rel, year): (String, Option<i32>) = o
+            .opened
+            .conn
+            .query_row(
+                "SELECT rel_path, tax_year FROM document WHERE rel_path LIKE '%Scan 2026-11-04%'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .expect("filed");
+        assert_eq!(rel, format!("{folder}/Scan 2026-11-04 120000.pdf"));
+        assert_eq!(year, Some(2026));
+        assert!(root.join(&rel).is_file());
+        assert!(!scan_dir.exists(), "the private scan folder is cleared");
     }
 
     /// Filer's screen loads once on the Intake tab, not on every frame (regression found
