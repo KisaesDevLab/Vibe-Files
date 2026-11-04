@@ -226,11 +226,7 @@ pub fn run(cmd: &Command, data: &Path, out: &mut dyn Write) -> Result<i32> {
             let secret = |var: &str| -> Result<String> {
                 Ok(match std::env::var(var) {
                     Ok(v) => v,
-                    Err(_) => {
-                        let mut l = String::new();
-                        std::io::stdin().read_line(&mut l)?;
-                        l.trim_end_matches(['\r', '\n']).to_string()
-                    }
+                    Err(_) => read_secret(var)?,
                 })
             };
             let store = vf_sync::Remote::s3(
@@ -288,6 +284,36 @@ pub fn run(cmd: &Command, data: &Path, out: &mut dyn Write) -> Result<i32> {
     }
 }
 
+/// One line from stdin for the secret `var` names. Typed at a console it is not shown (QA X8);
+/// piped in, it is read as it comes.
+fn read_secret(var: &str) -> std::io::Result<String> {
+    use windows::Win32::System::Console::{
+        CONSOLE_MODE, ENABLE_ECHO_INPUT, GetConsoleMode, GetStdHandle, STD_INPUT_HANDLE,
+        SetConsoleMode,
+    };
+    // SAFETY: plain console calls on this process's stdin handle.
+    let console = unsafe {
+        GetStdHandle(STD_INPUT_HANDLE).ok().and_then(|h| {
+            let mut mode = CONSOLE_MODE::default();
+            GetConsoleMode(h, &mut mode).ok().map(|_| (h, mode))
+        })
+    };
+    if let Some((h, mode)) = console {
+        eprint!("{var} (not shown): ");
+        // SAFETY: as above; the mode is put back below.
+        let _ = unsafe { SetConsoleMode(h, mode & !ENABLE_ECHO_INPUT) };
+    }
+    let mut l = String::new();
+    let r = std::io::stdin().read_line(&mut l);
+    if let Some((h, mode)) = console {
+        // SAFETY: restores the mode read above.
+        let _ = unsafe { SetConsoleMode(h, mode) };
+        eprintln!();
+    }
+    r?;
+    Ok(l.trim_end_matches(['\r', '\n']).to_string())
+}
+
 /// An unlocked sync session from `config.toml [sync]` and the passphrase.
 fn sync_session(cabinet: &Path, data: &Path) -> Result<vf_sync::Sync> {
     let config = crate::config::load(data)?;
@@ -313,11 +339,7 @@ fn sync_session(cabinet: &Path, data: &Path) -> Result<vf_sync::Sync> {
     }
     let pass = match std::env::var("VF_SYNC_PASSPHRASE") {
         Ok(p) => p,
-        Err(_) => {
-            let mut l = String::new();
-            std::io::stdin().read_line(&mut l)?;
-            l.trim_end_matches(['\r', '\n']).to_string()
-        }
+        Err(_) => read_secret("VF_SYNC_PASSPHRASE")?,
     };
     let keys = vf_sync::setup::unlock_local(cabinet, &cab.cabinet_id, &pass)?;
     Ok(connect(keys)?)

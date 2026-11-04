@@ -33,6 +33,8 @@ pub struct IntakeTab {
     /// minute), so a share that is gone does not stall every frame (QA A5).
     retry_at: Option<std::time::Instant>,
     backoff: std::time::Duration,
+    /// A reconcile running on its thread: the `last_batch.json` time it started from.
+    reconciling: Option<(Option<std::time::SystemTime>, ReconcileRx)>,
     /// The catalog changed (a batch was recorded or undone): Browse re-reads it.
     pub catalog_changed: bool,
     /// What the last reconcile did or why it failed, for Browse's notice.
@@ -91,11 +93,43 @@ pub(crate) fn pdfium_dir() -> Option<PathBuf> {
     filer_pdf::pdf::find_pdfium(&exe_dir)
 }
 
+/// What a reconcile found: the batch recorded or undone, and the duplicates it filed.
+type Reconcile = (
+    vf_fs::intake::Reconciled,
+    Result<Vec<vf_fs::dupes::Dup>, String>,
+);
+
+type ReconcileRx = std::sync::mpsc::Receiver<Result<Reconcile, String>>;
+
+/// [`vf_fs::intake::reconcile`] and the duplicate check of what it filed.
+fn reconcile_now(conn: &mut Connection, root: &Path, device_id: &str) -> Result<Reconcile, String> {
+    let before = vf_core::now_rfc3339();
+    let r = vf_fs::intake::reconcile(conn, root, device_id)?;
+    let dupes = if r.recorded.is_some() {
+        vf_fs::dupes::filed_since(conn, &before)
+    } else {
+        Ok(vec![])
+    };
+    Ok((r, dupes))
+}
+
 impl IntakeTab {
     /// Records Filer's last batch in the catalog when `last_batch.json` changed since the last
-    /// look (a stat per frame otherwise). See `vf_fs::intake`.
-    pub fn reconcile(&mut self, conn: &mut Connection, root: &Path, device_id: &str) {
+    /// look (a stat per frame otherwise). See `vf_fs::intake`. The work (a walk of the client
+    /// folders and a hash of each filed file) runs on its own thread with its own catalog
+    /// connection, so a big batch or a slow share never freezes the window (QA A5); its result
+    /// is taken on a later frame. A failure is retried after 2 s, doubling to a minute.
+    pub fn reconcile(
+        &mut self,
+        conn: &mut Connection,
+        catalog: &Path,
+        root: &Path,
+        device_id: &str,
+    ) {
         self.apply_dupe_action(conn, root, device_id);
+        if self.poll_reconcile() {
+            return;
+        }
         let file = filer_intake::commit::last_batch_path(&vf_fs::clients::master_dir(root));
         let modified = std::fs::metadata(&file).and_then(|m| m.modified()).ok();
         if modified.is_none() || modified == self.seen {
@@ -104,9 +138,57 @@ impl IntakeTab {
         if self.retry_at.is_some_and(|t| std::time::Instant::now() < t) {
             return;
         }
-        let before = vf_core::now_rfc3339();
-        match vf_fs::intake::reconcile(conn, root, device_id) {
-            Ok(r) => {
+        // Tests take the result on the same frame.
+        if cfg!(test) {
+            let r = reconcile_now(conn, root, device_id);
+            self.reconciled(modified, r);
+            return;
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (catalog, root, device) = (
+            catalog.to_path_buf(),
+            root.to_path_buf(),
+            device_id.to_string(),
+        );
+        let started = std::thread::Builder::new()
+            .name("intake-reconcile".into())
+            .spawn(move || {
+                let r = vf_core::db::open(&catalog, vf_core::db::Storage::Local)
+                    .map_err(|e| e.to_string())
+                    .and_then(|mut c| reconcile_now(&mut c, &root, &device));
+                let _ = tx.send(r);
+            });
+        match started {
+            Ok(_) => self.reconciling = Some((modified, rx)),
+            Err(e) => self.reconciled(modified, Err(e.to_string())),
+        }
+    }
+
+    /// Takes a finished reconcile's result (every frame, whatever tab shows). Returns whether
+    /// one is still running.
+    pub fn poll_reconcile(&mut self) -> bool {
+        let Some((_, rx)) = &self.reconciling else {
+            return false;
+        };
+        let r = match rx.try_recv() {
+            Ok(r) => r,
+            Err(std::sync::mpsc::TryRecvError::Empty) => return true,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                Err("the work stopped unexpectedly".into())
+            }
+        };
+        let (modified, _) = self.reconciling.take().expect("checked");
+        self.reconciled(modified, r);
+        false
+    }
+
+    fn reconciled(
+        &mut self,
+        modified: Option<std::time::SystemTime>,
+        r: Result<Reconcile, String>,
+    ) {
+        match r {
+            Ok((r, dupes)) => {
                 self.seen = modified;
                 self.retry_at = None;
                 self.backoff = std::time::Duration::ZERO;
@@ -119,7 +201,7 @@ impl IntakeTab {
                             String::new()
                         }
                     ));
-                    match vf_fs::dupes::filed_since(conn, &before) {
+                    match dupes {
                         Ok(d) => self.dupes.extend(d),
                         Err(e) => self.message = Some(format!("Duplicate check failed: {e}")),
                     }
@@ -128,7 +210,7 @@ impl IntakeTab {
                 }
                 self.catalog_changed |= r.changed();
             }
-            // Try again next frame (e.g. a file still being written); keep the message.
+            // Tried again later (e.g. a file still being written); keep the message.
             Err(e) => {
                 self.backoff = (self.backoff * 2).clamp(
                     std::time::Duration::from_secs(2),

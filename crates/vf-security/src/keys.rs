@@ -96,8 +96,8 @@ pub fn wrap_with_passphrase(
     let mut nonce = [0u8; 12];
     getrandom::fill(&mut salt).map_err(|e| KeyError::Random(e.to_string()))?;
     getrandom::fill(&mut nonce).map_err(|e| KeyError::Random(e.to_string()))?;
-    let kek = derive(passphrase, &salt, params)?;
-    let ct = ChaCha20Poly1305::new(Key::from_slice(&kek))
+    let kek = zeroize::Zeroizing::new(derive(passphrase, &salt, params)?);
+    let ct = ChaCha20Poly1305::new(Key::from_slice(&*kek))
         .encrypt(
             Nonce::from_slice(&nonce),
             Payload {
@@ -130,18 +130,23 @@ pub fn unwrap_with_passphrase(
     if nonce.len() != 12 {
         return Err(KeyError::BadFile("nonce length".into()));
     }
-    let kek = derive(passphrase, &salt, w.params)?;
-    let pt = ChaCha20Poly1305::new(Key::from_slice(&kek))
-        .decrypt(
-            Nonce::from_slice(&nonce),
-            Payload {
-                msg: &ct,
-                aad: context.as_bytes(),
-            },
-        )
-        .map_err(|_| KeyError::WrongPassphrase)?;
-    pt.try_into()
-        .map_err(|_| KeyError::BadFile("key length".into()))
+    let mut kek = derive(passphrase, &salt, w.params)?;
+    let r = ChaCha20Poly1305::new(Key::from_slice(&kek)).decrypt(
+        Nonce::from_slice(&nonce),
+        Payload {
+            msg: &ct,
+            aad: context.as_bytes(),
+        },
+    );
+    // The key-encryption key and the plain key's copies are wiped (QA X7).
+    zeroize::Zeroize::zeroize(&mut kek);
+    let mut pt = zeroize::Zeroizing::new(r.map_err(|_| KeyError::WrongPassphrase)?);
+    let key: [u8; 32] = pt
+        .as_slice()
+        .try_into()
+        .map_err(|_| KeyError::BadFile("key length".into()))?;
+    zeroize::Zeroize::zeroize(&mut *pt);
+    Ok(key)
 }
 
 fn derive(passphrase: &str, salt: &[u8], p: KdfParams) -> Result<[u8; 32], KeyError> {

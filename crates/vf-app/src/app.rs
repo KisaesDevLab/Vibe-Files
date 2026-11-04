@@ -273,7 +273,8 @@ impl VibeFilesApp {
                 // A crash between Filer's commit and the catalog write is caught up here.
                 let mut intake = IntakeTab::default();
                 let root = opened.root.clone();
-                intake.reconcile(&mut opened.conn, &root, &self.config.device_id);
+                let catalog = opened.catalog.clone();
+                intake.reconcile(&mut opened.conn, &catalog, &root, &self.config.device_id);
                 self.config.last_cabinet = Some(opened.root.clone());
                 // The cabinet is open either way; a settings write failure only loses "last".
                 let _ = config::save(&self.data, &self.config);
@@ -424,6 +425,11 @@ impl eframe::App for VibeFilesApp {
             if std::mem::take(&mut o.sweep.changed) {
                 o.browse.reload(&o.opened.conn);
             }
+            // Intake's reconcile runs on its own thread; its result is taken on any tab.
+            if o.intake.poll_reconcile() {
+                ui.ctx()
+                    .request_repaint_after(std::time::Duration::from_millis(200));
+            }
             // The audit trail's copy in the cabinet (CLAUDE.md layout: _Vibe/audit/*.jsonl).
             if o.mirrored_at.is_none_or(|t| t.elapsed() >= o.mirror_wait) {
                 o.mirrored_at = Some(std::time::Instant::now());
@@ -483,8 +489,12 @@ impl eframe::App for VibeFilesApp {
                     &o.browse.snap,
                     &o.browse.sheets_dir,
                 );
-                o.intake
-                    .reconcile(&mut o.opened.conn, &o.opened.root, &self.config.device_id);
+                o.intake.reconcile(
+                    &mut o.opened.conn,
+                    &o.opened.catalog,
+                    &o.opened.root,
+                    &self.config.device_id,
+                );
             }
             Screen::Open(o) if self.tab == Tab::Search => {
                 let o = &mut **o;

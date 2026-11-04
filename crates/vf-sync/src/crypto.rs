@@ -31,6 +31,15 @@ pub struct Keys {
     naming: [u8; 32],
 }
 
+/// The key bytes are wiped when the keys are dropped (QA X7).
+impl Drop for Keys {
+    fn drop(&mut self) {
+        use zeroize::Zeroize;
+        self.content.zeroize();
+        self.naming.zeroize();
+    }
+}
+
 impl std::fmt::Debug for Keys {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "Keys({})", self.key_id) // never the key bytes

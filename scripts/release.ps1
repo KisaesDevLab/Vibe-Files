@@ -14,20 +14,31 @@
 # see docs/OPERATIONS.md §Release. This script changes nothing outside target/.
 param(
     [switch]$SkipBuild,
+    # Allow uncommitted changes (a trial build only: never publish one).
+    [switch]$AllowDirty,
     [string]$Tesseract = 'C:\Program Files\Tesseract-OCR'
 )
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path $PSScriptRoot
 Set-Location $repo
 
-$ver = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"').Matches[0].Groups[1].Value
+# A release is built from a committed tree, so the zip matches a commit (QA X11).
+$dirty = git status --porcelain
+if ($dirty -and -not $AllowDirty) {
+    throw "uncommitted changes; commit them first (or -AllowDirty for a trial build):`n$($dirty -join "`n")"
+}
+$commit = (git rev-parse HEAD).Trim()
+# The version of the program itself (vf-app), as cargo resolves it.
+$meta = cargo metadata --format-version 1 --no-deps | ConvertFrom-Json
+$ver = ($meta.packages | Where-Object name -eq 'vf-app').version
+if (-not $ver) { throw 'no vf-app package version' }
 if (-not $SkipBuild) {
     # Static C runtime: the exe runs on a PC without the VC++ redistributable.
     $env:RUSTFLAGS = '-C target-feature=+crt-static'
     try { cargo build --release -p vf-app; if ($LASTEXITCODE) { throw 'build failed' } }
     finally { Remove-Item Env:RUSTFLAGS -ErrorAction SilentlyContinue }
 }
-$target = (cargo metadata --format-version 1 --no-deps | ConvertFrom-Json).target_directory
+$target = $meta.target_directory
 $exe = Join-Path $target 'release\vibe-files.exe'
 if (-not (Test-Path $exe)) { throw "no release build at $exe" }
 
@@ -66,7 +77,7 @@ $zipHash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower()
 $exeHash = (Get-FileHash (Join-Path $stage 'vibe-files.exe') -Algorithm SHA256).Hash.ToLower()
 @(
     "$zipHash  $name.zip",
-    "$exeHash  $name/vibe-files.exe"
+    "$exeHash  vibe-files.exe"
 ) | Set-Content -Encoding ascii (Join-Path $dist 'SHA256SUMS.txt')
 
 # winget manifests (portable zip; the data folder then lives in %LOCALAPPDATA%\Vibe Files).
@@ -88,6 +99,7 @@ NestedInstallerType: portable
 NestedInstallerFiles:
   - RelativeFilePath: vibe-files.exe
     PortableCommandAlias: vibe-files
+ArchiveBinariesDependOnPath: true
 Installers:
   - Architecture: x64
     InstallerUrl: $url
@@ -115,7 +127,7 @@ ManifestVersion: 1.6.0
 "@ | Set-Content -Encoding utf8 (Join-Path $w 'Kisaes.VibeFiles.locale.en-US.yaml')
 
 $mb = [math]::Round((Get-Item $zip).Length / 1MB, 1)
-"Release $ver staged: $zip ($mb MB)"
+"Release $ver staged from $commit$(if ($dirty) { ' (UNCOMMITTED CHANGES: trial only)' }): $zip ($mb MB)"
 "SHA-256 zip $zipHash"
 "SHA-256 exe $exeHash"
 "winget manifests: $w"

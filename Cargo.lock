@@ -5692,6 +5692,7 @@ dependencies = [
  "vf-pdf",
  "vf-sync",
  "windows",
+ "zeroize",
  "zip",
 ]
 
@@ -5847,6 +5848,7 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.21",
  "windows",
+ "zeroize",
 ]
 
 [[package]]
@@ -5874,6 +5876,7 @@ dependencies = [
  "vf-core",
  "vf-fs",
  "vf-security",
+ "zeroize",
 ]
 
 [[package]]

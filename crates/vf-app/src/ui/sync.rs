@@ -25,6 +25,8 @@ pub const VERIFY_SAMPLE: usize = 20;
 pub enum Done {
     /// (firm key, session, sealed application key).
     Setup([u8; 32], Sync, String),
+    /// (firm key, session): unlocked with the passphrase.
+    Unlocked([u8; 32], Sync),
     Push(vf_sync::push::PushReport),
     Pull(vf_sync::pull::PullReport),
     Verify(usize, usize),
@@ -242,6 +244,20 @@ impl SyncTab {
                 self.notice =
                     Some("Sync is set up. The first push sends the whole cabinet.".into());
             }
+            Done::Unlocked(firm, s) => {
+                let cab = s.cabinet_id.clone();
+                self.session = Some(s);
+                self.locked_by_user = false;
+                let warn = self.apply_remember(&self.setup_data.clone(), &cab, Some(&firm));
+                self.notice = Some(if self.remembered {
+                    "Sync unlocked, and remembered on this PC for your Windows login.".into()
+                } else {
+                    "Sync unlocked for this session.".into()
+                });
+                if warn.is_some() {
+                    self.error = warn;
+                }
+            }
             Done::Push(r) => {
                 if r.pulled.as_ref().is_some_and(|p| p.changed() > 0) {
                     self.changed = true;
@@ -384,31 +400,40 @@ impl SyncTab {
     }
 
     /// Opens sync with the passphrase; remembers (or forgets) the key on this PC as asked.
-    fn unlock(&mut self, root: &Path, data: &Path, cfg: &SyncConfig, device_id: &str) {
-        let pass = std::mem::take(&mut self.form.unlock);
-        let r = (|| -> Result<([u8; 32], Sync), String> {
-            let firm = vf_sync::setup::firm_key_local(root, &cfg.cabinet_id, &pass)
-                .map_err(|e| e.to_string())?;
-            let keys = vf_sync::Keys::derive(vf_sync::setup::KEY_ID, &firm);
-            Ok((firm, Self::session_from(keys, cfg, device_id)?))
-        })();
-        match r {
-            Ok((firm, s)) => {
-                self.session = Some(s);
-                self.locked_by_user = false;
-                self.error = None;
-                let warn = self.apply_remember(data, &cfg.cabinet_id, Some(&firm));
-                self.notice = Some(if self.remembered {
-                    "Sync unlocked, and remembered on this PC for your Windows login.".into()
-                } else {
-                    "Sync unlocked for this session.".into()
-                });
-                if warn.is_some() {
-                    self.error = warn;
-                }
-            }
-            Err(e) => self.error = Some(e),
-        }
+    /// Unlocks with the typed passphrase. The key derivation (Argon2, about a second) runs on
+    /// its own thread, so the window keeps answering (QA S15); the result comes back as
+    /// [`Done::Unlocked`].
+    fn unlock(
+        &mut self,
+        ctx: &egui::Context,
+        root: &Path,
+        data: &Path,
+        cfg: &SyncConfig,
+        device_id: &str,
+    ) {
+        let pass = zeroize::Zeroizing::new(std::mem::take(&mut self.form.unlock));
+        self.setup_data = data.to_path_buf();
+        self.error = None;
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (root, cfg, device) = (root.to_path_buf(), cfg.clone(), device_id.to_string());
+        let ctx = ctx.clone();
+        std::thread::Builder::new()
+            .name("b2-unlock".into())
+            .spawn(move || {
+                let r = (|| -> Result<Done, String> {
+                    let firm = vf_sync::setup::firm_key_local(&root, &cfg.cabinet_id, &pass)
+                        .map_err(|e| e.to_string())?;
+                    let keys = vf_sync::Keys::derive(vf_sync::setup::KEY_ID, &firm);
+                    Ok(Done::Unlocked(
+                        firm,
+                        Self::session_from(keys, &cfg, &device)?,
+                    ))
+                })();
+                let _ = tx.send(r);
+                ctx.request_repaint();
+            })
+            .ok();
+        self.job = Some(("Unlocking…".into(), rx));
     }
 
     fn setup(
@@ -564,7 +589,7 @@ pub fn show(ui: &mut egui::Ui, t: &mut SyncTab, env: &mut Env, v: View<'_>) {
             ui.checkbox(&mut t.form.remember, "Remember on this PC for my Windows login")
                 .on_hover_text(REMEMBER_HELP);
             if ui.add(widgets::primary_button("Unlock")).clicked() {
-                t.unlock(env.root, data_dir(v.catalog), v.cfg, env.device_id);
+                t.unlock(ui.ctx(), env.root, data_dir(v.catalog), v.cfg, env.device_id);
             }
         } else {
             unlocked(ui, t, env, &v);

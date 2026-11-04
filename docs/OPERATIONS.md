@@ -17,6 +17,13 @@ Two ways; both give the same program.
   `Get-FileHash vibe-files-<version>-win64.zip` must show the same SHA-256. The data folder is
   `data\` beside `vibe-files.exe`. To upgrade, replace everything but `data\`.
 
+**One data folder per Windows login.** On a server where several people run the app in their
+own sessions, `data\` beside the exe belongs to the first login that used it (named in
+`data\owner.txt`); every other login gets
+`%LOCALAPPDATA%\Vibe Files\data`. A data folder is used by one running copy at a time: a second
+copy for the same folder says who has it open (from `in-use.txt`) and quits (exit code 7 from
+the command line). The lock is `<data>\in-use.lock`; it is released when the app ends, crash included.
+
 The release carries `pdfium.dll` (PDF viewing), `TWAINDSM.dll` (TWAIN scanning) and a `tesseract\`
 folder (OCR, English); nothing else needs installing. No installer, no registry writes (the
 Explorer context-menu entry is opt-in).
@@ -133,12 +140,19 @@ the sync state; anything wrong shows on Browse. The same from a command prompt:
 | `vibe-files audit verify` | the audit hash chain; exit 0 / 2 |
 | `vibe-files rebuild <cabinet>` | catalog rows from the folder tree (safe to repeat) |
 | `vibe-files ocr backlog <cabinet>` | read every PDF not yet searchable |
-| `vibe-files sync <cabinet> push\|pull\|status` | sync (passphrase from `VF_SYNC_PASSPHRASE` or stdin) |
+| `vibe-files sync <cabinet> push\|pull\|status` | sync (passphrase from `VF_SYNC_PASSPHRASE`, else typed: not shown) |
 | `vibe-files restore <folder> --endpoint … --region … --bucket … --key-id … [--cabinet-id …]` | disaster recovery from B2 (§5) |
 | `vibe-files export-client <cabinet> <ID> <out.zip>` | a client's files + audit extract (CSV) + manifest (SHA-256 per file) |
 | `vibe-files soak --hours 8` | the leak test on a synthetic cabinet (P13) |
 
-Every command takes `--data <folder>` for a data folder other than the default.
+Every command takes `--data <folder>` for a data folder other than the default. Commands that
+change things take the data folder's lock: with the app open on the same data folder they stop
+with exit code 7 (close the app, or use `--data`). `check` only reads.
+
+`vibe-files.exe` is a windowed program: cmd and PowerShell do not wait for it, so for the exit
+code run it as `start /wait vibe-files.exe check <cabinet>` (cmd) or
+`Start-Process vibe-files.exe -ArgumentList 'check','<cabinet>' -Wait -PassThru` (PowerShell),
+or from Task Scheduler.
 
 Logs: `<data>\logs\vibe-files.<date>.log`, 30 days kept; actions, counts and error kinds only,
 no names, paths or document contents.
@@ -146,9 +160,11 @@ no names, paths or document contents.
 ## 7. Release (Kisaes)
 
 1. Bump `version` in `Cargo.toml`; update STATE.md.
-2. `pwsh scripts/release.ps1`: static-CRT build, the portable folder with pdfium, TWAINDSM and
-   Tesseract (only the DLLs it loads), `vibe-files-<ver>-win64.zip`, `SHA256SUMS.txt`, and the
-   winget manifests under `target/dist/winget/`.
+2. Commit everything, then `pwsh scripts/release.ps1`: static-CRT build, the portable folder
+   with pdfium, TWAINDSM and Tesseract (only the DLLs it loads), `vibe-files-<ver>-win64.zip`
+   (no top folder: the exe is at its root), `SHA256SUMS.txt`, and the winget manifests under
+   `target/dist/winget/`. It refuses a tree with uncommitted changes (`-AllowDirty` makes a
+   trial build, never to publish) and prints the commit it was built from.
 3. Smoke test the zip on a clean PC (open a cabinet, view a PDF, OCR one scan, push).
 4. Tag `v<ver>`, create the GitHub release, attach the zip and `SHA256SUMS.txt`; put the SHA-256
    lines in the release notes.
