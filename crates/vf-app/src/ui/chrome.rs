@@ -6,13 +6,13 @@ use crate::app::Tab;
 use crate::ui::theme;
 
 /// The header; `text_size` is this PC's text size in percent, changed by its − / + buttons.
-pub fn header(ui: &mut egui::Ui, cabinet: Option<&str>, text_size: &mut u16) {
+pub fn header(ui: &mut egui::Ui, cabinet: Option<&str>, text_size: &mut u16, dark: &mut bool) {
     egui::Panel::top("vf-header")
         .exact_size(44.0)
         .resizable(false)
         .frame(
             Frame::new()
-                .fill(theme::INK)
+                .fill(theme::HEADER)
                 .inner_margin(Margin::symmetric(16, 0)),
         )
         .show(ui, |ui| {
@@ -32,6 +32,23 @@ pub fn header(ui: &mut egui::Ui, cabinet: Option<&str>, text_size: &mut u16) {
                         .position(|s| *s >= *text_size)
                         .unwrap_or(sizes.len() - 1);
                     let white = |t: &str| RichText::new(t).color(egui::Color32::WHITE);
+                    // Light / dark (owner 2026-11-04), kept on this PC.
+                    if ui
+                        .add(egui::Button::new(white(if *dark {
+                            "Light"
+                        } else {
+                            "Dark"
+                        })))
+                        .on_hover_text(if *dark {
+                            "Switch to the light theme"
+                        } else {
+                            "Switch to the dark theme"
+                        })
+                        .clicked()
+                    {
+                        *dark = !*dark;
+                    }
+                    ui.add_space(8.0);
                     if ui
                         .add_enabled(at + 1 < sizes.len(), egui::Button::new(white("A+")))
                         .on_hover_text("Larger text (Ctrl +)")
@@ -60,8 +77,8 @@ pub fn tab_bar(ui: &mut egui::Ui, current: &mut Tab, intake_badge: usize) {
         .resizable(false)
         .frame(
             Frame::new()
-                .fill(theme::PANE)
-                .stroke(Stroke::new(1.0, theme::BORDER_PANE))
+                .fill(theme::pane())
+                .stroke(Stroke::new(1.0, theme::border_pane()))
                 .inner_margin(Margin::symmetric(16, 0)),
         )
         .show(ui, |ui| {
@@ -73,9 +90,9 @@ pub fn tab_bar(ui: &mut egui::Ui, current: &mut Tab, intake_badge: usize) {
                     };
                     let selected = *current == t;
                     let text = RichText::new(label).color(if selected {
-                        theme::ACCENT_DEFAULT
+                        theme::accent()
                     } else {
-                        theme::INK_SECONDARY
+                        theme::ink_secondary()
                     });
                     let resp = ui.add(egui::Button::selectable(selected, text).frame(false));
                     if selected {
@@ -83,7 +100,7 @@ pub fn tab_bar(ui: &mut egui::Ui, current: &mut Tab, intake_badge: usize) {
                         ui.painter().hline(
                             r.x_range(),
                             ui.max_rect().bottom() - 1.0,
-                            Stroke::new(2.0, theme::ACCENT_DEFAULT),
+                            Stroke::new(2.0, theme::accent()),
                         );
                     }
                     if resp.clicked() {
@@ -101,19 +118,19 @@ pub fn footer(ui: &mut egui::Ui, segments: &[String], health: &str) {
         .resizable(false)
         .frame(
             Frame::new()
-                .fill(theme::FOOTER)
+                .fill(theme::footer())
                 .inner_margin(Margin::symmetric(16, 0)),
         )
         .show(ui, |ui| {
             ui.horizontal_centered(|ui| {
                 for s in segments {
-                    ui.label(RichText::new(s).small().color(theme::INK_MUTED));
+                    ui.label(RichText::new(s).small().color(theme::ink_muted()));
                 }
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    ui.label(RichText::new(health).small().color(theme::INK_MUTED));
+                    ui.label(RichText::new(health).small().color(theme::ink_muted()));
                     let (r, _) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), Sense::hover());
                     ui.painter()
-                        .circle_filled(r.center(), 4.0, theme::HEALTH_OK);
+                        .circle_filled(r.center(), 4.0, theme::health_ok());
                 });
             });
         });

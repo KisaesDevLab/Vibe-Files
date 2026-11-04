@@ -6,7 +6,7 @@ use vf_fs::doctypes::DocType;
 use vf_fs::retention::{self, Class, Edit};
 
 use crate::ui::browse::Env;
-use crate::ui::{theme, widgets, wizard::ERROR};
+use crate::ui::{theme, widgets, wizard::error};
 
 const ANCHORS: [(&str, &str); 4] = [
     ("tax_year_end", "From the end of the tax year"),
@@ -148,10 +148,10 @@ pub fn show(
     let years = p.years.trim().parse::<i32>().ok();
     let check = retention::check_fields(&p.name, years, &p.anchor);
     if let Err(e) = &check {
-        ui.label(RichText::new(e).color(theme::INK_MUTED));
+        ui.label(RichText::new(e).color(theme::ink_muted()));
     }
     if let Some(e) = &p.error {
-        ui.label(RichText::new(e).color(ERROR));
+        ui.label(RichText::new(e).color(error()));
     }
     let mut edit = None;
     ui.horizontal(|ui| {

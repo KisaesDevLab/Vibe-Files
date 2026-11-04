@@ -491,7 +491,7 @@ impl IngestState {
             .resizable(false)
             .frame(
                 egui::Frame::new()
-                    .fill(theme::PANE)
+                    .fill(theme::pane())
                     .inner_margin(egui::Margin::symmetric(16, 8)),
             )
             .show(ui, |ui| {
@@ -552,7 +552,7 @@ impl IngestState {
                                 file_name(&d.path),
                                 d.existing
                             ))
-                            .color(theme::WARN),
+                            .color(theme::warn()),
                         );
                         if ui.button("Remove from inbox").clicked() {
                             self.pre_action = Some((i, true));
@@ -563,7 +563,7 @@ impl IngestState {
                     });
                 }
                 if let Some(w) = &self.warning {
-                    ui.label(RichText::new(w).color(wizard::ERROR));
+                    ui.label(RichText::new(w).color(wizard::error()));
                 }
                 for l in self.log.iter().take(2) {
                     ui.label(widgets::caption(l));

@@ -13,7 +13,7 @@ use vf_ingest::parsers::{self, DocRule, Profile, Trial};
 use vf_ingest::ultratax::{self, Action, Layout, Var};
 
 use crate::ui::widgets;
-use crate::ui::{theme, wizard::ERROR};
+use crate::ui::{theme, wizard::error};
 
 #[derive(Default)]
 pub struct CapturePage {
@@ -165,7 +165,7 @@ pub fn show(
         ));
     });
     for e in &p.errors {
-        ui.label(RichText::new(e).color(ERROR));
+        ui.label(RichText::new(e).color(error()));
     }
     if p.files.is_empty() {
         ui.label("No parser profiles.");
@@ -282,7 +282,7 @@ pub fn show(
             .add_enabled(dirty, egui::Button::new("Discard"))
             .clicked();
         if dirty && let Some(i) = &issue {
-            ui.label(RichText::new(i).color(ERROR));
+            ui.label(RichText::new(i).color(error()));
         }
     });
     let to_save = save.then(|| draft.clone());
@@ -336,7 +336,7 @@ pub fn show(
     }
     widgets::message_line(ui, p.notice.as_deref());
     if let Some(e) = &p.error {
-        ui.label(RichText::new(e).color(ERROR));
+        ui.label(RichText::new(e).color(error()));
     }
 
     rules_changed
@@ -348,7 +348,7 @@ fn trial_view(ui: &mut egui::Ui, t: &Trial) {
         .spacing([12.0, 3.0])
         .show(ui, |ui| {
             let row = |ui: &mut egui::Ui, k: &str, v: RichText| {
-                ui.label(RichText::new(k).color(theme::INK_MUTED));
+                ui.label(RichText::new(k).color(theme::ink_muted()));
                 ui.label(v);
                 ui.end_row();
             };
@@ -357,7 +357,7 @@ fn trial_view(ui: &mut egui::Ui, t: &Trial) {
                     ui,
                     "Profile",
                     RichText::new("no profile reads this name: it goes to Intake as it is")
-                        .color(ERROR),
+                        .color(error()),
                 ),
                 Some(pr) => {
                     row(ui, "Profile", RichText::new(&pr.profile));
@@ -377,7 +377,7 @@ fn trial_view(ui: &mut egui::Ui, t: &Trial) {
                         "Doc type",
                         match &pr.doc_type {
                             Some(d) => RichText::new(d),
-                            None => RichText::new("no rule matched").color(ERROR),
+                            None => RichText::new("no rule matched").color(error()),
                         },
                     );
                 }
@@ -393,7 +393,7 @@ fn trial_view(ui: &mut egui::Ui, t: &Trial) {
                 "Filed as",
                 match &t.destination {
                     Ok(d) => RichText::new(format!("<client folder>/{d}")).monospace(),
-                    Err(e) => RichText::new(e).color(ERROR),
+                    Err(e) => RichText::new(e).color(error()),
                 },
             );
         });
@@ -413,7 +413,7 @@ fn doc_rules(ui: &mut egui::Ui, draft: &mut Profile, types: &[DocType], folders:
         .striped(true)
         .show(ui, |ui| {
             for h in ["", "Document name contains", "Doc type", "Filed in", ""] {
-                ui.label(RichText::new(h).color(theme::INK_MUTED));
+                ui.label(RichText::new(h).color(theme::ink_muted()));
             }
             ui.end_row();
             let n = draft.doc.len();
@@ -611,8 +611,8 @@ fn options(ui: &mut egui::Ui, draft: &mut Profile) {
         .num_columns(2)
         .spacing([24.0, 6.0])
         .show(ui, |ui| {
-            ui.label(RichText::new("File Name Variables").color(theme::INK_MUTED));
-            ui.label(RichText::new("Variable Position").color(theme::INK_MUTED));
+            ui.label(RichText::new("File Name Variables").color(theme::ink_muted()));
+            ui.label(RichText::new("Variable Position").color(theme::ink_muted()));
             ui.end_row();
             for v in Var::ALL {
                 let l = ui.label(v.label());
@@ -684,7 +684,7 @@ fn options(ui: &mut egui::Ui, draft: &mut Profile) {
     ui.add_space(6.0);
     match layout.problem() {
         Some(e) => {
-            ui.label(RichText::new(e).color(ERROR));
+            ui.label(RichText::new(e).color(error()));
         }
         None => {
             ui.horizontal(|ui| {
@@ -744,7 +744,7 @@ fn document_names(ui: &mut egui::Ui, draft: &mut Profile, types: &[DocType], fol
                 "File name",
                 "Partner copy",
             ] {
-                ui.label(RichText::new(h).color(theme::INK_MUTED));
+                ui.label(RichText::new(h).color(theme::ink_muted()));
             }
             ui.end_row();
             for r in draft.documents.iter_mut() {
@@ -827,7 +827,7 @@ fn document_names(ui: &mut egui::Ui, draft: &mut Profile, types: &[DocType], fol
                         [200.0, 22.0],
                         TextEdit::singleline(&mut r.folder)
                             .hint_text(default_text.clone())
-                            .text_color_opt(bad.as_ref().map(|_| ERROR)),
+                            .text_color_opt(bad.as_ref().map(|_| error())),
                     )
                     .on_hover_text(bad.unwrap_or_else(|| {
                         "Below the client folder; type a new one (e.g. Income Tax/{Year}/Government Copy) or pick one. Blank: the doc type's folder.".into()
@@ -874,7 +874,7 @@ fn document_names(ui: &mut egui::Ui, draft: &mut Profile, types: &[DocType], fol
                             [170.0, 22.0],
                             TextEdit::singleline(&mut r.rename)
                                 .hint_text(hint)
-                                .text_color_opt(bad.as_ref().map(|_| ERROR)),
+                                .text_color_opt(bad.as_ref().map(|_| error())),
                         )
                         .on_hover_text(bad.clone().unwrap_or_else(|| {
                             "Blank: the file name chosen above. Tokens: {Printed} {Document} {DocType} {Client} {ID} {Year} {Form} {Recipient} {State} {Amended}".into()
@@ -915,7 +915,7 @@ fn document_names(ui: &mut egui::Ui, draft: &mut Profile, types: &[DocType], fol
     ));
     for r in &draft.documents {
         if let Some(e) = ultratax::rename_problem(r, draft.short_names) {
-            ui.label(RichText::new(e).color(ERROR));
+            ui.label(RichText::new(e).color(error()));
         }
     }
     if ui.button("Restore Default").clicked() {

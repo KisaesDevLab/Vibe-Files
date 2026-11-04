@@ -26,7 +26,6 @@ const BASE: f32 = 640.0 / 612.0;
 const GAP: f32 = 14.0;
 const THUMB_W: u32 = 88;
 const TEXTURES_KEPT: usize = 24;
-const CANVAS: Color32 = Color32::from_rgb(0xDE, 0xE2, 0xE8);
 const HIT: Color32 = Color32::from_rgba_premultiplied(120, 100, 0, 90);
 const PENDING_HL: Color32 = Color32::from_rgba_premultiplied(150, 130, 40, 110);
 
@@ -657,7 +656,7 @@ pub fn show(ui: &mut egui::Ui, v: &mut Viewer, env: &mut Env<'_>) {
     }
     let initials = env.initials.to_string();
     egui::CentralPanel::default()
-        .frame(egui::Frame::new().fill(CANVAS))
+        .frame(egui::Frame::new().fill(theme::canvas()))
         .show(ui, |ui| {
             widgets::message_line(ui, v.error.as_deref());
             if v.info.is_none() {
@@ -1015,7 +1014,7 @@ fn toolbar(ui: &mut egui::Ui, v: &mut Viewer, env: &mut Env<'_>, doc: &Doc) {
         .resizable(false)
         .frame(
             egui::Frame::new()
-                .fill(theme::PANE)
+                .fill(theme::pane())
                 .inner_margin(egui::Margin::symmetric(12, 6)),
         )
         .show(ui, |ui| {
@@ -1208,7 +1207,7 @@ fn footer(ui: &mut egui::Ui, v: &Viewer) {
         .resizable(false)
         .frame(
             egui::Frame::new()
-                .fill(theme::FOOTER)
+                .fill(theme::footer())
                 .inner_margin(egui::Margin::symmetric(12, 4)),
         )
         .show(ui, |ui| {
@@ -1233,7 +1232,7 @@ fn thumbnails(ui: &mut egui::Ui, v: &mut Viewer) {
     egui::Panel::left("vf-viewer-thumbs")
         .exact_size(112.0)
         .resizable(false)
-        .frame(egui::Frame::new().fill(theme::PANE).inner_margin(8))
+        .frame(egui::Frame::new().fill(theme::pane()).inner_margin(8))
         .show(ui, |ui| {
             let n = v.pages();
             let current = v.doc.as_ref().map_or(0, |d| d.page);
@@ -1265,20 +1264,20 @@ fn thumbnails(ui: &mut egui::Ui, v: &mut Viewer) {
                                 Rect::from_min_size(rect.min, s.min(rect.size() - vec2(0.0, 14.0)));
                             p.image(t.id(), r, uv(), Color32::WHITE);
                             let stroke = if i == current {
-                                Stroke::new(2.0, theme::ACCENT_DEFAULT)
+                                Stroke::new(2.0, theme::accent())
                             } else {
-                                Stroke::new(1.0, theme::BORDER_PANE)
+                                Stroke::new(1.0, theme::border_pane())
                             };
                             p.rect_stroke(r, 0.0, stroke, egui::StrokeKind::Outside);
                         } else {
-                            p.rect_filled(rect.shrink2(vec2(0.0, 8.0)), 2.0, theme::APP_BG);
+                            p.rect_filled(rect.shrink2(vec2(0.0, 8.0)), 2.0, theme::app_bg());
                         }
                         p.text(
                             pos2(rect.center().x, rect.max.y - 6.0),
                             egui::Align2::CENTER_BOTTOM,
                             (i + 1).to_string(),
                             egui::FontId::proportional(11.0),
-                            theme::INK_MUTED,
+                            theme::ink_muted(),
                         );
                         if resp.clicked() {
                             v.goto_page(i);
@@ -1384,7 +1383,7 @@ fn canvas(ui: &mut egui::Ui, v: &mut Viewer, initials: &str) {
                         egui::Align2::CENTER_CENTER,
                         format!("Page {}", i + 1),
                         egui::FontId::proportional(14.0),
-                        theme::INK_MUTED,
+                        theme::ink_muted(),
                     );
                 }
             }
@@ -1475,7 +1474,7 @@ fn draw_pending(ui: &egui::Ui, v: &Viewer, page: usize, rect: Rect, s: f32, g: &
                     egui::Align2::LEFT_TOP,
                     format!("{} · {}", a.author, text),
                     egui::FontId::proportional(11.0),
-                    theme::INK,
+                    theme::ink(),
                 );
             }
             Kind::TextBox {
@@ -1540,7 +1539,7 @@ fn draw_pending(ui: &egui::Ui, v: &Viewer, page: usize, rect: Rect, s: f32, g: &
                             egui::Align2::LEFT_TOP,
                             &row.label,
                             font.clone(),
-                            theme::INK_MUTED,
+                            theme::ink_muted(),
                         );
                     }
                     p.text(
@@ -1548,7 +1547,7 @@ fn draw_pending(ui: &egui::Ui, v: &Viewer, page: usize, rect: Rect, s: f32, g: &
                         egui::Align2::RIGHT_TOP,
                         &row.amount,
                         font.clone(),
-                        theme::INK,
+                        theme::ink(),
                     );
                     p.text(
                         pos2(r.max.x - 13.0 * s, y),
@@ -1565,7 +1564,7 @@ fn draw_pending(ui: &egui::Ui, v: &Viewer, page: usize, rect: Rect, s: f32, g: &
                         egui::Align2::LEFT_TOP,
                         footer,
                         font,
-                        theme::INK_MUTED,
+                        theme::ink_muted(),
                     );
                 }
             }
@@ -1622,7 +1621,7 @@ fn draw_pending(ui: &egui::Ui, v: &Viewer, page: usize, rect: Rect, s: f32, g: &
         && let Some(last) = d.points.last()
     {
         let to_s = |q: [f32; 2]| rect.min + vec2(q[0] * s, q[1] * s);
-        let st = Stroke::new(1.0, theme::ACCENT_DEFAULT);
+        let st = Stroke::new(1.0, theme::accent());
         match v.tool {
             Tool::Freehand => {
                 let pts: Vec<Pos2> = d.points.iter().map(|q| to_s(*q)).collect();
@@ -1890,7 +1889,7 @@ fn tool_panel(ui: &mut egui::Ui, v: &mut Viewer, env: &mut Env<'_>) {
     egui::Panel::right("vf-viewer-tools")
         .exact_size(320.0)
         .resizable(false)
-        .frame(egui::Frame::new().fill(theme::PANE).inner_margin(12))
+        .frame(egui::Frame::new().fill(theme::pane()).inner_margin(12))
         .show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.selectable_value(&mut v.panel, Panel::Annotate, "Annotate");
@@ -2074,7 +2073,7 @@ fn redact_panel(ui: &mut egui::Ui, v: &mut Viewer, env: &mut Env<'_>) {
     let n = v.drawn.len() + v.pii_found.iter().flatten().filter(|(_, on)| *on).count();
     ui.add_space(6.0);
     egui::Frame::new()
-        .fill(theme::APP_BG)
+        .fill(theme::app_bg())
         .inner_margin(8)
         .corner_radius(4)
         .show(ui, |ui| {
@@ -2888,7 +2887,7 @@ fn draw_tape_marks(ui: &egui::Ui, v: &Viewer, page: usize, rect: Rect, s: f32, g
                         pos2(x, r.max.y + 1.0),
                         pos2((x + 2.0).min(r.max.x), r.max.y + 1.0),
                     ],
-                    Stroke::new(1.0, theme::ACCENT_DEFAULT),
+                    Stroke::new(1.0, theme::accent()),
                 );
                 x += 4.0;
             }
@@ -2903,7 +2902,7 @@ fn draw_tape_marks(ui: &egui::Ui, v: &Viewer, page: usize, rect: Rect, s: f32, g
         let col = if minus {
             Color32::from_rgb(0xB0, 0x20, 0x20)
         } else {
-            theme::ACCENT_DEFAULT
+            theme::accent()
         };
         p.rect_stroke(
             r.expand(1.5),
@@ -2942,7 +2941,7 @@ fn draw_tape_marks(ui: &egui::Ui, v: &Viewer, page: usize, rect: Rect, s: f32, g
         p.rect_stroke(
             r,
             0.0,
-            Stroke::new(1.0, theme::ACCENT_DEFAULT),
+            Stroke::new(1.0, theme::accent()),
             egui::StrokeKind::Inside,
         );
     }
@@ -3056,7 +3055,7 @@ fn tape_panel(ui: &mut egui::Ui, v: &mut Viewer, env: &mut Env<'_>, doc: &Doc) {
         .default_size(260.0)
         .frame(
             egui::Frame::new()
-                .fill(theme::PANE)
+                .fill(theme::pane())
                 .inner_margin(egui::Margin::symmetric(12, 8)),
         )
         .show(ui, |ui| {
@@ -3124,7 +3123,7 @@ fn tape_panel(ui: &mut egui::Ui, v: &mut Viewer, env: &mut Env<'_>, doc: &Doc) {
                                         if l.op == Op::Minus {
                                             Color32::from_rgb(0xB0, 0x20, 0x20)
                                         } else {
-                                            theme::INK_SECONDARY
+                                            theme::ink_secondary()
                                         },
                                     ));
                                     ui.end_row();
@@ -3134,15 +3133,15 @@ fn tape_panel(ui: &mut egui::Ui, v: &mut Viewer, env: &mut Env<'_>, doc: &Doc) {
                 // Display, keypad, actions.
                 let ui = &mut cols[1];
                 egui::Frame::new()
-                    .fill(Color32::WHITE)
-                    .stroke(Stroke::new(1.0, theme::BORDER_PANE))
+                    .fill(theme::pane())
+                    .stroke(Stroke::new(1.0, theme::border_pane()))
                     .inner_margin(6)
                     .show(ui, |ui| {
                         ui.set_width(ui.available_width());
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             ui.label(RichText::new(v.tape.tape.display()).monospace().size(18.0));
                             if let Some(e) = v.tape.tape.error() {
-                                ui.label(RichText::new(e).color(crate::ui::wizard::ERROR));
+                                ui.label(RichText::new(e).color(crate::ui::wizard::error()));
                             }
                         });
                         ui.label(widgets::caption(format!(

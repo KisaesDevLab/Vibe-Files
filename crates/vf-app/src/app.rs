@@ -429,12 +429,21 @@ impl eframe::App for VibeFilesApp {
         if ctx_zoom != size && self.zoom_applied {
             size = ctx_zoom;
         }
-        chrome::header(ui, name.as_deref(), &mut size);
-        if size != self.config.look.text_size || !self.zoom_applied {
+        let ctx_dark = ui.ctx().theme() == egui::Theme::Dark;
+        let mut dark = self.config.look.dark;
+        if ctx_dark != dark && self.zoom_applied {
+            dark = ctx_dark;
+        }
+        crate::ui::theme::set_dark(dark);
+        chrome::header(ui, name.as_deref(), &mut size, &mut dark);
+        if size != self.config.look.text_size || dark != self.config.look.dark || !self.zoom_applied
+        {
             self.zoom_applied = true;
             ui.ctx().set_zoom_factor(f32::from(size) / 100.0);
-            if size != self.config.look.text_size {
+            crate::ui::theme::set_theme(ui.ctx(), dark);
+            if size != self.config.look.text_size || dark != self.config.look.dark {
                 self.config.look.text_size = size;
+                self.config.look.dark = dark;
                 let _ = config::save(&self.data, &self.config);
             }
         }
@@ -482,11 +491,13 @@ impl eframe::App for VibeFilesApp {
                 egui::Panel::top("vf-audit-banner")
                     .frame(
                         egui::Frame::new()
-                            .fill(egui::Color32::from_rgb(0xfd, 0xec, 0xea))
+                            .fill(crate::ui::theme::soft(egui::Color32::from_rgb(
+                                0xfd, 0xec, 0xea,
+                            )))
                             .inner_margin(egui::Margin::symmetric(16, 8)),
                     )
                     .show(ui, |ui| {
-                        ui.label(egui::RichText::new(problem).color(wizard::ERROR).strong());
+                        ui.label(egui::RichText::new(problem).color(wizard::error()).strong());
                     });
             }
         }
@@ -2224,6 +2235,24 @@ mod tests {
         h.state_mut().open_last(&ctx);
         settle(&mut h);
         assert!(matches!(h.state().screen, Screen::Open(_)));
+    }
+
+    /// Dark mode (owner 2026-11-04): the header's button switches the theme, this PC keeps
+    /// it, and the theme colors follow.
+    #[test]
+    fn dark_button_switches_and_keeps_the_theme() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data = tmp.path().join("data");
+        let mut h = harness(&data);
+        assert_eq!(h.ctx.theme(), egui::Theme::Light);
+        click(&mut h, "Dark");
+        h.run();
+        assert_eq!(h.ctx.theme(), egui::Theme::Dark);
+        assert!(config::load(&data).unwrap().look.dark);
+        click(&mut h, "Light");
+        h.run();
+        assert_eq!(h.ctx.theme(), egui::Theme::Light);
+        assert!(!config::load(&data).unwrap().look.dark);
     }
 
     /// Text size (owner 2026-11-04): the header's A+ / A- change it and this PC keeps it.

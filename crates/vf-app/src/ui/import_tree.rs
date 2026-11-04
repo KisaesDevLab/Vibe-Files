@@ -12,7 +12,7 @@ use vf_core::db::Storage;
 use vf_fs::import::{self, Applied, ClientPick, Options, Plan};
 
 use crate::ui::browse::Env;
-use crate::ui::{theme, widgets, wizard::ERROR};
+use crate::ui::{theme, widgets, wizard::error};
 
 /// Rows of the remainder shown on the page (the CSV has all of them).
 const SHOWN: usize = 300;
@@ -176,10 +176,10 @@ pub fn show(ui: &mut egui::Ui, p: &mut ImportPage, env: &mut Env, catalog: &Path
         }
     });
     if let Some(n) = &p.notice {
-        ui.label(RichText::new(n).color(theme::INK));
+        ui.label(RichText::new(n).color(theme::ink()));
     }
     if let Some(e) = &p.error {
-        ui.label(RichText::new(e).color(ERROR));
+        ui.label(RichText::new(e).color(error()));
     }
     let Some(plan) = p.plan.as_mut() else {
         return;

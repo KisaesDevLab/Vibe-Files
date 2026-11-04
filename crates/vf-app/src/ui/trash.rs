@@ -8,7 +8,7 @@ use egui::{RichText, TextEdit};
 use vf_fs::trash::{self, Trashed};
 
 use crate::ui::browse::Env;
-use crate::ui::{theme, widgets, wizard::ERROR};
+use crate::ui::{theme, widgets, wizard::error};
 
 #[derive(Default)]
 pub struct TrashPage {
@@ -196,14 +196,14 @@ pub fn show(ui: &mut egui::Ui, p: &mut TrashPage, env: &mut Env) {
         });
     }
     if let Some(n) = &p.notice {
-        ui.label(RichText::new(n).color(theme::INK_SECONDARY));
+        ui.label(RichText::new(n).color(theme::ink_secondary()));
     }
     if let Some(e) = &p.error {
-        ui.label(RichText::new(e).color(ERROR));
+        ui.label(RichText::new(e).color(error()));
     }
     ui.separator();
     if items.is_empty() {
-        ui.label(RichText::new("The trash is empty.").color(theme::INK_MUTED));
+        ui.label(RichText::new("The trash is empty.").color(theme::ink_muted()));
         return;
     }
     egui::ScrollArea::vertical()
@@ -230,7 +230,7 @@ pub fn show(ui: &mut egui::Ui, p: &mut TrashPage, env: &mut Env) {
                                 }
                             }
                             if t.held {
-                                ui.label(RichText::new("legal hold").small().color(ERROR));
+                                ui.label(RichText::new("legal hold").small().color(error()));
                             }
                         });
                         ui.label(widgets::local_time(&t.deleted_at));

@@ -117,7 +117,7 @@ pub fn show(ctx: &egui::Context, d: &mut ImportDialog, env: &mut Env) -> DialogO
         let mut ready = false;
         widgets::fixed_body(ui, "import-body", 260.0, |ui| {
             let Some(t) = &d.table else {
-                ui.label(RichText::new("Choose the CSV, then Read.").color(theme::INK_MUTED));
+                ui.label(RichText::new("Choose the CSV, then Read.").color(theme::ink_muted()));
                 return;
             };
             ui.label(format!(

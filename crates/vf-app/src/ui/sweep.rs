@@ -12,7 +12,7 @@ use vf_core::db::{Connection, Storage};
 use vf_fs::sweep::{self, Drift};
 
 use crate::ui::browse::Env;
-use crate::ui::{theme, widgets, wizard::ERROR};
+use crate::ui::{theme, widgets, wizard::error};
 
 #[derive(Default)]
 pub struct SweepState {
@@ -149,10 +149,10 @@ pub fn show(ui: &mut egui::Ui, s: &mut SweepState, env: &mut Env, catalog: &Path
         }
     });
     if let Some(n) = &s.notice {
-        ui.label(RichText::new(n).color(theme::INK_SECONDARY));
+        ui.label(RichText::new(n).color(theme::ink_secondary()));
     }
     if let Some(e) = &s.error {
-        ui.label(RichText::new(e).color(ERROR));
+        ui.label(RichText::new(e).color(error()));
     }
     ui.separator();
     let Some(d) = s.drift.clone() else {
@@ -176,7 +176,7 @@ pub fn show(ui: &mut egui::Ui, s: &mut SweepState, env: &mut Env, catalog: &Path
             }
             if d.is_clean() && d.unreadable.is_empty() {
                 ui.label(
-                    RichText::new("Everything matches the catalog.").color(theme::INK_SECONDARY),
+                    RichText::new("Everything matches the catalog.").color(theme::ink_secondary()),
                 );
             }
             if !d.moved.is_empty() {
@@ -277,7 +277,7 @@ pub fn show(ui: &mut egui::Ui, s: &mut SweepState, env: &mut Env, catalog: &Path
             if !d.unreadable.is_empty() {
                 section(ui, &format!("Could not be read ({})", d.unreadable.len()));
                 for u in &d.unreadable {
-                    ui.label(RichText::new(u).small().color(ERROR));
+                    ui.label(RichText::new(u).small().color(error()));
                 }
             }
         });

@@ -5,6 +5,8 @@ use vf_fs::docmeta::STATUSES;
 
 /// A rounded status pill.
 pub fn pill(ui: &mut egui::Ui, text: &str, bg: Color32, fg: Color32) -> egui::Response {
+    // Colors are given for the light theme; the dark one gets a dark tint (owner 2026-11-04).
+    let (bg, fg) = crate::ui::theme::pill(bg, fg);
     egui::Frame::new()
         .fill(bg)
         .corner_radius(CornerRadius::same(8))
@@ -60,13 +62,17 @@ pub fn year_label(y: Option<i32>) -> String {
 pub fn caption(text: impl Into<String>) -> RichText {
     RichText::new(text)
         .small()
-        .color(crate::ui::theme::INK_MUTED)
+        .color(crate::ui::theme::ink_muted())
 }
 
 /// The accent-filled primary button.
 pub fn primary_button(text: impl Into<String>) -> egui::Button<'static> {
-    egui::Button::new(RichText::new(text).color(Color32::WHITE))
-        .fill(crate::ui::theme::ACCENT_DEFAULT)
+    let on_accent = if crate::ui::theme::is_dark() {
+        crate::ui::theme::HEADER
+    } else {
+        Color32::WHITE
+    };
+    egui::Button::new(RichText::new(text).color(on_accent)).fill(crate::ui::theme::accent())
 }
 
 /// A fixed-size scrolling body for a modal. A modal that sizes itself to its content re-centers
@@ -92,7 +98,7 @@ pub fn fixed_body<R>(
 pub fn message_line(ui: &mut egui::Ui, msg: Option<&str>) {
     ui.add_sized(
         [ui.available_width(), 36.0],
-        egui::Label::new(RichText::new(msg.unwrap_or("")).color(crate::ui::wizard::ERROR)).wrap(),
+        egui::Label::new(RichText::new(msg.unwrap_or("")).color(crate::ui::wizard::error())).wrap(),
     );
 }
 

@@ -128,6 +128,9 @@ pub struct Look {
     /// Text and controls size in percent (egui zoom): 100 = as designed.
     #[serde(default = "hundred")]
     pub text_size: u16,
+    /// The dark theme.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub dark: bool,
 }
 
 fn hundred() -> u16 {
@@ -136,7 +139,10 @@ fn hundred() -> u16 {
 
 impl Default for Look {
     fn default() -> Self {
-        Look { text_size: 100 }
+        Look {
+            text_size: 100,
+            dark: false,
+        }
     }
 }
 

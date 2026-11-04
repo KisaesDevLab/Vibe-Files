@@ -105,12 +105,12 @@ pub fn show(ctx: &egui::Context, d: &mut NewClientDialog, env: &mut Env) -> Dial
                     RichText::new(format!("{}/_Vibe/client.json", p.folder_rel))
                         .monospace()
                         .small()
-                        .color(theme::INK_MUTED),
+                        .color(theme::ink_muted()),
                 );
                 true
             }
             Some(Err(e)) => {
-                ui.label(RichText::new(e).color(theme::INK_MUTED));
+                ui.label(RichText::new(e).color(theme::ink_muted()));
                 false
             }
             None => false,

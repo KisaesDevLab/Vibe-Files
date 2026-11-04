@@ -8,7 +8,7 @@ use vf_fs::doctypes::{self, DocType, Edit};
 
 use crate::ui::browse::Env;
 use crate::ui::widgets;
-use crate::ui::{theme, wizard::ERROR};
+use crate::ui::{theme, wizard::error};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Page {
@@ -288,7 +288,7 @@ pub fn show(ui: &mut egui::Ui, a: &mut Admin, env: &mut Env, sweep: SweepEnv) {
     egui::Panel::left("admin-nav")
         .exact_size(248.0)
         .resizable(false)
-        .frame(egui::Frame::new().fill(theme::PANE).inner_margin(10))
+        .frame(egui::Frame::new().fill(theme::pane()).inner_margin(10))
         .show(ui, |ui| nav(ui, a));
     egui::CentralPanel::default().show(ui, |ui| match a.page {
         Page::DocTypes => doc_types(ui, a, env),
@@ -339,7 +339,7 @@ pub fn show(ui: &mut egui::Ui, a: &mut Admin, env: &mut Env, sweep: SweepEnv) {
 fn nav(ui: &mut egui::Ui, a: &mut Admin) {
     for (group, items) in NAV {
         ui.add_space(6.0);
-        ui.label(RichText::new(*group).small().color(theme::INK_MUTED));
+        ui.label(RichText::new(*group).small().color(theme::ink_muted()));
         for item in *items {
             if *item == "Doc types" {
                 let label = format!("Doc types ({})", a.types.len());
@@ -447,7 +447,7 @@ fn doc_types(ui: &mut egui::Ui, a: &mut Admin, env: &mut Env) {
                         "DOCUMENTS",
                         "ORDER",
                     ] {
-                        ui.label(RichText::new(h).small().color(theme::INK_MUTED));
+                        ui.label(RichText::new(h).small().color(theme::ink_muted()));
                     }
                     ui.end_row();
                     let n = a.types.len();
@@ -525,7 +525,7 @@ fn editor(ui: &mut egui::Ui, a: &mut Admin, env: &mut Env) {
                         .font(egui::TextStyle::Monospace),
                 )
                 .labelled_by(l.id);
-                let pick = ui.label(RichText::new("or").color(theme::INK_MUTED));
+                let pick = ui.label(RichText::new("or").color(theme::ink_muted()));
                 egui::ComboBox::from_id_salt("doc-type-folder-pick")
                     .selected_text("Pick from template")
                     .show_ui(ui, |ui| {
@@ -579,7 +579,7 @@ fn editor(ui: &mut egui::Ui, a: &mut Admin, env: &mut Env) {
             ui.end_row();
         });
     if let Err(e) = doctypes::check_fields(&a.form.name, &a.form.folder) {
-        ui.label(RichText::new(e).color(theme::INK_MUTED));
+        ui.label(RichText::new(e).color(theme::ink_muted()));
     }
     let used = a
         .editing
@@ -587,7 +587,7 @@ fn editor(ui: &mut egui::Ui, a: &mut Admin, env: &mut Env) {
         .and_then(|id| a.usage.get(id).copied())
         .unwrap_or(0);
     if let Some(e) = &a.error {
-        ui.label(RichText::new(e).color(ERROR));
+        ui.label(RichText::new(e).color(error()));
     }
     ui.horizontal(|ui| {
         let ok = doctypes::check_fields(&a.form.name, &a.form.folder).is_ok();
@@ -657,7 +657,7 @@ fn editor(ui: &mut egui::Ui, a: &mut Admin, env: &mut Env) {
                     RichText::new(format!(
                         "{used} documents use this doc type. Remove it anyway? They keep it, shown as deleted; it cannot be undone from Browse."
                     ))
-                    .color(ERROR),
+                    .color(error()),
                 );
                 ui.horizontal(|ui| {
                     if ui.button("Yes, remove").clicked() {
@@ -713,7 +713,7 @@ fn print_capture(ui: &mut egui::Ui, a: &mut Admin, env: &mut Env) {
         }
     });
     if let Some(e) = &a.error {
-        ui.label(RichText::new(e).color(ERROR));
+        ui.label(RichText::new(e).color(error()));
     }
     ui.add_space(8.0);
     ui.label(RichText::new("Setting up the printer").strong());

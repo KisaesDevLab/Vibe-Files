@@ -8,7 +8,7 @@ use vf_fs::clients::{self, ENTITY_TYPES};
 
 use crate::ui::browse::{Browse, Env};
 use crate::ui::new_client::NewClientDialog;
-use crate::ui::{theme, wizard::ERROR};
+use crate::ui::{theme, wizard::error};
 
 /// The add-relationship form.
 #[derive(Debug, Clone, Default)]
@@ -53,17 +53,17 @@ pub fn show(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env, ci: usize) {
     ui.label(
         RichText::new(format!("ID {}", c.ext_id))
             .monospace()
-            .color(theme::INK_MUTED),
+            .color(theme::ink_muted()),
     );
     ui.add_space(8.0);
     match &c.folder_rel {
         Some(f) => {
-            ui.label(RichText::new("FOLDER").small().color(theme::INK_MUTED));
+            ui.label(RichText::new("FOLDER").small().color(theme::ink_muted()));
             ui.label(RichText::new(f).monospace().small());
         }
         None => {
             ui.label(
-                RichText::new("No folder yet (from the client list).").color(theme::INK_MUTED),
+                RichText::new("No folder yet (from the client list).").color(theme::ink_muted()),
             );
             if ui.button("Create folder…").clicked() {
                 b.new_client = Some(NewClientDialog::new(Some(c.ext_id.clone())));
@@ -72,7 +72,11 @@ pub fn show(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env, ci: usize) {
     }
     ui.add_space(10.0);
 
-    let l = ui.label(RichText::new("ENTITY TYPE").small().color(theme::INK_MUTED));
+    let l = ui.label(
+        RichText::new("ENTITY TYPE")
+            .small()
+            .color(theme::ink_muted()),
+    );
     let mut et = c.entity_type.clone();
     egui::ComboBox::from_id_salt("client-entity-type")
         .selected_text(crate::ui::widgets::label_of(
@@ -99,7 +103,7 @@ pub fn show(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env, ci: usize) {
     ui.label(
         RichText::new("RELATIONSHIPS")
             .small()
-            .color(theme::INK_MUTED),
+            .color(theme::ink_muted()),
     );
     let name_of = |id: &str| {
         b.snap
@@ -118,7 +122,7 @@ pub fn show(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env, ci: usize) {
         .cloned()
         .collect();
     if rels.is_empty() {
-        ui.label(RichText::new("None").color(theme::INK_MUTED));
+        ui.label(RichText::new("None").color(theme::ink_muted()));
     }
     for r in &rels {
         let parent = r.parent_id == c.id;
@@ -208,10 +212,10 @@ fn add_form(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env, c: &vf_core::brows
             filer_core::relationships::ROLES.join(", ")
         ))
         .small()
-        .color(theme::INK_MUTED),
+        .color(theme::ink_muted()),
     );
     if let Some(e) = &f.error {
-        ui.label(RichText::new(e).color(ERROR));
+        ui.label(RichText::new(e).color(error()));
     }
     if !ui.button("Add relationship").clicked() {
         return;

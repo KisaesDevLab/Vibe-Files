@@ -5,7 +5,10 @@ use egui::{Color32, RichText, TextEdit};
 
 use crate::ui::theme;
 
-pub const ERROR: Color32 = Color32::from_rgb(0xB4, 0x23, 0x18);
+/// Error text (light or dark theme).
+pub fn error() -> Color32 {
+    crate::ui::theme::error()
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
@@ -43,8 +46,8 @@ impl Wizard {
 pub fn show(ui: &mut egui::Ui, w: &mut Wizard) -> Option<Mode> {
     let mut submit = None;
     egui::Frame::new()
-        .fill(theme::PANE)
-        .stroke(egui::Stroke::new(1.0, theme::BORDER_PANE))
+        .fill(theme::pane())
+        .stroke(egui::Stroke::new(1.0, theme::border_pane()))
         .inner_margin(24)
         .corner_radius(6)
         .show(ui, |ui| {
@@ -84,12 +87,12 @@ pub fn show(ui: &mut egui::Ui, w: &mut Wizard) -> Option<Mode> {
                         "The folder may already hold client folders; they are indexed, not moved.",
                     )
                     .small()
-                    .color(theme::INK_MUTED),
+                    .color(theme::ink_muted()),
                 );
             }
             ui.add_space(12.0);
             if let Some(e) = &w.error {
-                ui.label(RichText::new(e).color(ERROR));
+                ui.label(RichText::new(e).color(error()));
                 ui.add_space(8.0);
             }
             let label = match w.mode {
@@ -104,7 +107,7 @@ pub fn show(ui: &mut egui::Ui, w: &mut Wizard) -> Option<Mode> {
 }
 
 fn field(ui: &mut egui::Ui, label: &str, add: impl FnOnce(&mut egui::Ui, egui::Id)) {
-    let l = ui.label(RichText::new(label).color(theme::INK_SECONDARY));
+    let l = ui.label(RichText::new(label).color(theme::ink_secondary()));
     add(ui, l.id);
     ui.add_space(8.0);
 }

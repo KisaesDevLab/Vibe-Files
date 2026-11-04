@@ -12,7 +12,7 @@ use egui::{RichText, TextEdit};
 use vf_fs::disposition::{self, Line, Report};
 
 use crate::ui::browse::Env;
-use crate::ui::{theme, widgets, wizard::ERROR};
+use crate::ui::{theme, widgets, wizard::error};
 
 #[derive(Default)]
 pub struct DispositionPage {
@@ -74,16 +74,16 @@ pub fn show(ui: &mut egui::Ui, p: &mut DispositionPage, env: &mut Env) {
         }
     )));
     if let Some(n) = &p.notice {
-        ui.label(RichText::new(n).color(theme::INK_SECONDARY));
+        ui.label(RichText::new(n).color(theme::ink_secondary()));
     }
     if let Some(e) = &p.error {
-        ui.label(RichText::new(e).color(ERROR));
+        ui.label(RichText::new(e).color(error()));
     }
     ui.separator();
     egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
         ui.label(RichText::new("Eligible for disposition").strong());
         if rep.lines.is_empty() {
-            ui.label(RichText::new("Nothing has reached the end of its retention.").color(theme::INK_MUTED));
+            ui.label(RichText::new("Nothing has reached the end of its retention.").color(theme::ink_muted()));
         } else {
             ui.horizontal(|ui| {
                 if ui.small_button("Select all").clicked() {
@@ -139,7 +139,7 @@ pub fn show(ui: &mut egui::Ui, p: &mut DispositionPage, env: &mut Env) {
                         .get(..10)
                         .unwrap_or_default()
                     ))
-                    .color(ERROR),
+                    .color(error()),
                 );
                 ui.horizontal(|ui| {
                     if ui
@@ -204,7 +204,7 @@ pub fn show(ui: &mut egui::Ui, p: &mut DispositionPage, env: &mut Env) {
         let today_s = today.to_string();
         let due = pending.iter().filter(|x| x.destroy_after <= today_s).count();
         if pending.is_empty() {
-            ui.label(RichText::new("Nothing approved.").color(theme::INK_MUTED));
+            ui.label(RichText::new("Nothing approved.").color(theme::ink_muted()));
         }
         for x in &pending {
             ui.label(
@@ -289,7 +289,7 @@ pub fn show(ui: &mut egui::Ui, p: &mut DispositionPage, env: &mut Env) {
         ui.label(RichText::new("Runs").strong());
         let runs = disposition::runs(env.conn, None).unwrap_or_default();
         if runs.is_empty() {
-            ui.label(RichText::new("None yet.").color(theme::INK_MUTED));
+            ui.label(RichText::new("None yet.").color(theme::ink_muted()));
         }
         for r in runs {
             ui.horizontal(|ui| {
@@ -325,22 +325,22 @@ pub fn holds(ui: &mut egui::Ui, p: &mut HoldsPage, env: &mut Env) {
         ));
     });
     if let Some(n) = &p.notice {
-        ui.label(RichText::new(n).color(theme::INK_SECONDARY));
+        ui.label(RichText::new(n).color(theme::ink_secondary()));
     }
     if let Some(e) = &p.error {
-        ui.label(RichText::new(e).color(ERROR));
+        ui.label(RichText::new(e).color(error()));
     }
     ui.separator();
     let mut all = match vf_fs::holds::load(env.root) {
         Ok(h) => h,
         Err(e) => {
-            ui.label(RichText::new(e).color(ERROR));
+            ui.label(RichText::new(e).color(error()));
             return;
         }
     };
     all.sort_by_key(|h| (!h.active(), std::cmp::Reverse(h.since.clone())));
     if all.is_empty() {
-        ui.label(RichText::new("No legal holds.").color(theme::INK_MUTED));
+        ui.label(RichText::new("No legal holds.").color(theme::ink_muted()));
         return;
     }
     let names: std::collections::HashMap<String, String> = env
@@ -368,7 +368,7 @@ pub fn holds(ui: &mut egui::Ui, p: &mut HoldsPage, env: &mut Env) {
                 h.placed_by.as_deref().unwrap_or("—")
             );
             if h.active() {
-                ui.label(RichText::new(line).color(ERROR));
+                ui.label(RichText::new(line).color(error()));
                 if ui.small_button("Release").clicked() {
                     p.releasing = Some(h.id.clone());
                     p.pin.clear();
@@ -382,7 +382,7 @@ pub fn holds(ui: &mut egui::Ui, p: &mut HoldsPage, env: &mut Env) {
                             .map(widgets::local_time)
                             .unwrap_or_default()
                     ))
-                    .color(theme::INK_MUTED),
+                    .color(theme::ink_muted()),
                 );
             }
         });
@@ -424,7 +424,7 @@ pub fn confirm_release(
             RichText::new(format!(
                 "Release the legal hold \"{reason}\"? Everything it covers can then be disposed of and emptied from the trash."
             ))
-            .color(ERROR),
+            .color(error()),
         );
         let need_pin = vf_fs::trash::has_pin(env.root);
         if need_pin {
@@ -512,9 +512,9 @@ pub fn safeguards(ui: &mut egui::Ui, p: &mut SafeguardsPage, env: &mut Env) {
         }
     });
     if let Some(n) = &p.notice {
-        ui.label(RichText::new(n).color(theme::INK_SECONDARY));
+        ui.label(RichText::new(n).color(theme::ink_secondary()));
     }
     if let Some(e) = &p.error {
-        ui.label(RichText::new(e).color(ERROR));
+        ui.label(RichText::new(e).color(error()));
     }
 }

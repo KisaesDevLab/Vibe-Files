@@ -72,7 +72,19 @@ pub const ID_PATTERN: &str = r"[A-Z0-9]{4,}";
 
 /// Filer's settings for this cabinet on this PC: whatever `_Vibe/config.json` holds (rules
 /// profile, inboxes, column map, …), with the cabinet's own facts written over it.
+#[cfg(test)]
 pub fn settings_for(root: &Path, cabinet: &CabinetFile) -> Result<(Settings, bool), String> {
+    settings_with_look(root, cabinet, false, 1.0)
+}
+
+/// [`settings_for`] with Vibe's theme and text size, so Filer's screen does not switch them
+/// when it loads (owner 2026-11-04: dark mode, text size).
+pub fn settings_with_look(
+    root: &Path,
+    cabinet: &CabinetFile,
+    dark: bool,
+    zoom: f32,
+) -> Result<(Settings, bool), String> {
     let dir = vf_fs::clients::master_dir(root);
     let (mut s, savable) = Settings::load_or_default(&dir);
     let before = serde_json::to_value(&s).ok();
@@ -83,8 +95,13 @@ pub fn settings_for(root: &Path, cabinet: &CabinetFile) -> Result<(Settings, boo
         uuid::Uuid::parse_str(&cabinet.firm_id)
             .map_err(|e| format!("cabinet.json firm_id is not a uuid: {e}"))?,
     );
-    // Vibe Files is light-only until it has a dark theme; Filer would otherwise follow Windows.
-    s.display.theme = ThemeChoice::Light;
+    // Vibe's theme and text size, not Windows' or Filer's own.
+    s.display.theme = if dark {
+        ThemeChoice::Dark
+    } else {
+        ThemeChoice::Light
+    };
+    s.display.zoom = filer_core::config::Display::clamp_zoom(zoom);
     // The office's UltraTax client IDs are letters and digits; Filer's default ID pattern is
     // digits only. A pattern the firm chose is kept (owner 2026-11-03).
     if s.id_pattern == filer_core::parse::DEFAULT_ID_PATTERN {
@@ -350,7 +367,7 @@ impl IntakeTab {
             .resizable(false)
             .frame(
                 egui::Frame::new()
-                    .fill(egui::Color32::from_rgb(0xFF, 0xF6, 0xE0))
+                    .fill(crate::ui::theme::soft(egui::Color32::from_rgb(0xFF, 0xF6, 0xE0)))
                     .inner_margin(egui::Margin::symmetric(16, 8)),
             )
             .show(ui, |ui| {
@@ -441,7 +458,8 @@ impl IntakeTab {
         }
         self.dupes_panel(ui);
         if self.filer.is_none() && self.error.is_none() {
-            match settings_for(root, cabinet) {
+            let dark = ui.ctx().theme() == egui::Theme::Dark;
+            match settings_with_look(root, cabinet, dark, ui.ctx().zoom_factor()) {
                 Ok((settings, savable)) => {
                     let state = AppState::load(
                         vf_fs::clients::master_dir(root),
@@ -474,7 +492,7 @@ impl IntakeTab {
             (None, Some(e)) => {
                 egui::CentralPanel::default().show(ui, |ui| {
                     ui.heading("Intake");
-                    ui.label(egui::RichText::new(e).color(crate::ui::wizard::ERROR));
+                    ui.label(egui::RichText::new(e).color(crate::ui::wizard::error()));
                 });
             }
             (None, None) => {}

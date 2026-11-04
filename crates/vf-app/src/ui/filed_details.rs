@@ -200,7 +200,7 @@ pub fn show(ui: &mut egui::Ui, jf: &mut JustFiled, types: &[(String, String)]) -
         .default_size(240.0)
         .frame(
             egui::Frame::new()
-                .fill(theme::PANE)
+                .fill(theme::pane())
                 .inner_margin(egui::Margin::symmetric(16, 8)),
         )
         .show(ui, |ui| {
@@ -230,10 +230,10 @@ pub fn show(ui: &mut egui::Ui, jf: &mut JustFiled, types: &[(String, String)]) -
                 });
             });
             if let Some(e) = &jf.error {
-                ui.label(RichText::new(e).color(crate::ui::wizard::ERROR));
+                ui.label(RichText::new(e).color(crate::ui::wizard::error()));
             }
             ui.horizontal(|ui| {
-                ui.label(RichText::new("Set all").small().color(theme::INK_MUTED));
+                ui.label(RichText::new("Set all").small().color(theme::ink_muted()));
                 type_box(ui, "jf-all-type", &mut jf.all.doc_type, types);
                 let l = ui.label("Tax year");
                 ui.add(egui::TextEdit::singleline(&mut jf.all.year).desired_width(70.0))
@@ -256,7 +256,7 @@ pub fn show(ui: &mut egui::Ui, jf: &mut JustFiled, types: &[(String, String)]) -
                         .spacing([10.0, 4.0])
                         .show(ui, |ui| {
                             for h in ["DOCUMENT", "DOC TYPE", "TAX YEAR", "STATUS", "SOURCE"] {
-                                ui.label(RichText::new(h).small().color(theme::INK_MUTED));
+                                ui.label(RichText::new(h).small().color(theme::ink_muted()));
                             }
                             ui.end_row();
                             for (i, r) in jf.rows.iter_mut().enumerate() {
@@ -266,7 +266,7 @@ pub fn show(ui: &mut egui::Ui, jf: &mut JustFiled, types: &[(String, String)]) -
                                 let resp = ui.add(
                                     egui::TextEdit::singleline(&mut r.now.year)
                                         .desired_width(70.0)
-                                        .text_color_opt(bad.then_some(crate::ui::wizard::ERROR)),
+                                        .text_color_opt(bad.then_some(crate::ui::wizard::error())),
                                 );
                                 resp.widget_info(|| {
                                     egui::WidgetInfo::labeled(

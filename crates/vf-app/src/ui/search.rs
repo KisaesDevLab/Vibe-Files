@@ -140,7 +140,7 @@ pub fn show(
         .resizable(false)
         .frame(
             egui::Frame::new()
-                .fill(theme::PANE)
+                .fill(theme::pane())
                 .inner_margin(egui::Margin::symmetric(16, 10)),
         )
         .show(ui, |ui| {
@@ -526,12 +526,12 @@ fn row(ui: &mut egui::Ui, h: &Hit, thumb: Option<&egui::TextureHandle>) -> egui:
                 ui.painter().rect_stroke(
                     r,
                     0.0,
-                    (1.0, theme::BORDER_PANE),
+                    (1.0, theme::border_pane()),
                     egui::StrokeKind::Outside,
                 );
             }
             None => {
-                ui.painter().rect_filled(rect, 2.0, theme::APP_BG);
+                ui.painter().rect_filled(rect, 2.0, theme::app_bg());
             }
         }
         ui.vertical(|ui| {
@@ -559,7 +559,7 @@ fn row(ui: &mut egui::Ui, h: &Hit, thumb: Option<&egui::TextureHandle>) -> egui:
                 let mut job = egui::text::LayoutJob::default();
                 for (text, on) in search::runs(&h.snippet) {
                     let mut fmt = egui::TextFormat {
-                        color: theme::INK,
+                        color: theme::ink(),
                         ..Default::default()
                     };
                     if on {
@@ -577,7 +577,7 @@ fn row(ui: &mut egui::Ui, h: &Hit, thumb: Option<&egui::TextureHandle>) -> egui:
         ui.painter().rect_stroke(
             resp.rect,
             4.0,
-            (1.0, theme::ACCENT_DEFAULT),
+            (1.0, theme::accent()),
             egui::StrokeKind::Inside,
         );
     }

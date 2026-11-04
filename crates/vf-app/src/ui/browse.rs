@@ -1142,12 +1142,12 @@ pub fn show(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env) {
     egui::Panel::left("browse-tree")
         .default_size(272.0)
         .size_range(200.0..=480.0)
-        .frame(egui::Frame::new().fill(theme::PANE).inner_margin(8))
+        .frame(egui::Frame::new().fill(theme::pane()).inner_margin(8))
         .show(ui, |ui| tree(ui, b));
     egui::Panel::right("browse-inspector")
         .exact_size(320.0)
         .resizable(false)
-        .frame(egui::Frame::new().fill(theme::PANE).inner_margin(12))
+        .frame(egui::Frame::new().fill(theme::pane()).inner_margin(12))
         .show(ui, |ui| {
             egui::ScrollArea::vertical()
                 .id_salt("inspector-scroll")
@@ -1289,7 +1289,7 @@ fn tree(ui: &mut egui::Ui, b: &mut Browse) {
     }
     ui.add_space(8.0);
     ui.horizontal(|ui| {
-        ui.label(RichText::new("CABINET").small().color(theme::INK_MUTED));
+        ui.label(RichText::new("CABINET").small().color(theme::ink_muted()));
         ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
             // Folders as on disk, or by tax year (owner 2026-11-04); kept on this PC.
             let by_year = b.prefs.tree_by_year;
@@ -1330,7 +1330,7 @@ fn tree(ui: &mut egui::Ui, b: &mut Browse) {
     ui.label(
         RichText::new(format!("{} clients", shown.len()))
             .small()
-            .color(theme::INK_MUTED),
+            .color(theme::ink_muted()),
     );
     ui.add_space(4.0);
     let mut toggle: Option<Node> = None;
@@ -1553,7 +1553,7 @@ fn drop_target(resp: &egui::Response, dest: &str, out: &mut Option<(Vec<String>,
         resp.ctx.debug_painter().rect_stroke(
             resp.rect,
             3.0,
-            egui::Stroke::new(2.0, theme::ACCENT_DEFAULT),
+            egui::Stroke::new(2.0, theme::accent()),
             egui::StrokeKind::Inside,
         );
     }
@@ -1598,16 +1598,16 @@ fn tree_row(
             };
             ui.painter().add(egui::Shape::convex_polygon(
                 pts,
-                theme::INK_MUTED,
+                theme::ink_muted(),
                 egui::Stroke::NONE,
             ));
         }
         let resp = ui.selectable_label(sel, label);
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             let c = if warn && count > 0 {
-                theme::WARN
+                theme::warn()
             } else {
-                theme::INK_MUTED
+                theme::ink_muted()
             };
             ui.label(RichText::new(count.to_string()).small().color(c));
         });
@@ -1667,7 +1667,7 @@ fn sync_menu(ui: &mut egui::Ui, b: &mut Browse) {
             c + egui::vec2(4.0, -2.0),
             c + egui::vec2(0.0, 3.0),
         ],
-        theme::INK_SECONDARY,
+        theme::ink_secondary(),
         egui::Stroke::NONE,
     ));
     if req.is_some() {
@@ -1762,17 +1762,17 @@ fn breadcrumb(b: &Browse) -> String {
 
 fn grid(ui: &mut egui::Ui, b: &mut Browse, conn: &Connection) {
     if let Some(e) = &b.error {
-        ui.label(RichText::new(e).color(crate::ui::wizard::ERROR));
+        ui.label(RichText::new(e).color(crate::ui::wizard::error()));
     }
     let mut dismiss = false;
     if let Some(n) = &b.notice {
         egui::Frame::new()
-            .fill(widgets::rgb(0xE6EEF9))
+            .fill(crate::ui::theme::soft(widgets::rgb(0xE6EEF9)))
             .inner_margin(8)
             .corner_radius(4)
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new(n).color(theme::INK_SECONDARY));
+                    ui.label(RichText::new(n).color(theme::ink_secondary()));
                     ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
                         dismiss = ui.button("Dismiss").clicked();
                     });
@@ -1902,7 +1902,7 @@ fn grid(ui: &mut egui::Ui, b: &mut Browse, conn: &Connection) {
                     b.visible.len(),
                     b.selected.len()
                 ))
-                .color(theme::INK_MUTED),
+                .color(theme::ink_muted()),
             );
         });
     });
@@ -1957,7 +1957,7 @@ fn grid(ui: &mut egui::Ui, b: &mut Browse, conn: &Connection) {
                 h.col(|ui| {
                     let t = RichText::new(name.to_uppercase())
                         .small()
-                        .color(theme::INK_MUTED);
+                        .color(theme::ink_muted());
                     if ui.add(egui::Button::new(t).frame(false)).clicked() {
                         sort = Some(col);
                     }
@@ -2035,7 +2035,7 @@ fn grid(ui: &mut egui::Ui, b: &mut Browse, conn: &Connection) {
                     ui.label(
                         RichText::new(&d.hash[..d.hash.len().min(8)])
                             .monospace()
-                            .color(theme::INK_MUTED),
+                            .color(theme::ink_muted()),
                     );
                 });
                 let resp = row.response();
@@ -2109,7 +2109,7 @@ fn sort_arrow(ui: &mut egui::Ui, asc: bool) {
             c + egui::vec2(4.0, base),
             c + egui::vec2(-4.0, base),
         ],
-        theme::INK_MUTED,
+        theme::ink_muted(),
         egui::Stroke::NONE,
     ));
 }
@@ -2161,7 +2161,7 @@ fn inspector(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env) {
                                 ui.close();
                             }
                         } else {
-                            ui.label(RichText::new(text).color(theme::INK_MUTED));
+                            ui.label(RichText::new(text).color(theme::ink_muted()));
                         }
                     }
                 });
@@ -2192,7 +2192,7 @@ fn inspector(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env) {
     }
     ui.add_space(8.0);
     if b.selected.is_empty() {
-        ui.label(RichText::new("Select documents to see their details.").color(theme::INK_MUTED));
+        ui.label(RichText::new("Select documents to see their details.").color(theme::ink_muted()));
         return;
     }
     meta_editor::fields(ui, &mut b.meta_form, &b.snap.doc_types);
@@ -2290,7 +2290,7 @@ fn inspector(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env) {
             .spacing([12.0, 6.0])
             .show(ui, |ui| {
                 let kv = |ui: &mut egui::Ui, k: &str, v: RichText| {
-                    ui.label(RichText::new(k).small().color(theme::INK_MUTED));
+                    ui.label(RichText::new(k).small().color(theme::ink_muted()));
                     ui.add(egui::Label::new(v).wrap());
                     ui.end_row();
                 };
@@ -2380,7 +2380,9 @@ fn legal_holds(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env) {
     let mut release = None;
     for h in &holds {
         egui::Frame::new()
-            .fill(egui::Color32::from_rgb(0xfd, 0xec, 0xea))
+            .fill(crate::ui::theme::soft(egui::Color32::from_rgb(
+                0xfd, 0xec, 0xea,
+            )))
             .inner_margin(egui::Margin::symmetric(10, 6))
             .show(ui, |ui| {
                 ui.horizontal_wrapped(|ui| {
@@ -2390,7 +2392,7 @@ fn legal_holds(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env) {
                             h.reason,
                             widgets::local_time(&h.since)
                         ))
-                        .color(crate::ui::wizard::ERROR)
+                        .color(crate::ui::wizard::error())
                         .strong(),
                     );
                     ui.label(widgets::caption(
@@ -2699,7 +2701,7 @@ fn move_dialog(ctx: &egui::Context, b: &mut Browse, env: &mut Env) {
             ));
         }
         for w in skipped.iter().take(5) {
-            ui.label(RichText::new(format!("Not moved: {w}")).color(theme::WARN));
+            ui.label(RichText::new(format!("Not moved: {w}")).color(theme::warn()));
         }
         ui.label(widgets::caption("Undo last (Ctrl+Z) puts them back."));
         ui.add_space(8.0);
