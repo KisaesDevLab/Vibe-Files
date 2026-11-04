@@ -37,7 +37,7 @@ Both buttons are greyed out when nothing is waiting.
 
 ## Closing
 
-**Close** closes the document. If annotations are unsaved, Vibe Files asks first: **Keep editing** goes back so you can save them, **Discard and close** drops them. Opening another document while annotations are unsaved asks the same question, with **Discard and open**. Closing Vibe Files itself with annotations unsaved shows the document and asks: **Save and quit** saves them as a new version first, **Discard and quit** drops them, **Keep editing** stays.
+**Close** closes the document and takes you back to [Browse](help:browse). If annotations are unsaved, Vibe Files asks first: **Keep editing** goes back so you can save them, **Discard and close** drops them. Opening another document while annotations are unsaved asks the same question, with **Discard and open**. Closing Vibe Files itself with annotations unsaved shows the document and asks: **Save and quit** saves them as a new version first, **Discard and quit** drops them, **Keep editing** stays.
 
 > If the file was changed on another PC, by sync, or by restoring a version while you had it open, your unsaved edits are refused rather than put on the wrong pages. Note them, discard, and open the document again.
 

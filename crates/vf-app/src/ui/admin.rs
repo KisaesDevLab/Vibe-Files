@@ -30,20 +30,15 @@ pub enum Page {
     Templates,
 }
 
-/// UI_SPEC §6 nav, grouped. Only Doc types is built in P01.
+/// UI_SPEC §6 nav, grouped: the pages that are built. Version 2 pages (Users & roles, Client
+/// access, Scan profiles, §7216 consents, Keys & recovery) are not listed until they exist
+/// (owner 2026-11-04: no greyed-out items).
 const NAV: &[(&str, &[&str])] = &[
     (
         "FIRM",
-        &[
-            "Users & roles",
-            "Client access (ACL)",
-            "Devices",
-            "Doc types",
-            "Folder templates",
-            "Folder import",
-        ],
+        &["Devices", "Doc types", "Folder templates", "Folder import"],
     ),
-    ("INTAKE", &["Print capture & parsers", "Scan profiles"]),
+    ("INTAKE", &["Print capture & parsers"]),
     (
         "COMPLIANCE",
         &[
@@ -51,19 +46,10 @@ const NAV: &[(&str, &[&str])] = &[
             "Retention classes",
             "Disposition",
             "Legal holds",
-            "§7216 consents",
             "Safeguards appendix",
         ],
     ),
-    (
-        "SECURITY",
-        &[
-            "Admin password",
-            "Keys & recovery",
-            "Integrity sweep",
-            "Trash",
-        ],
-    ),
+    ("SECURITY", &["Admin password", "Integrity sweep", "Trash"]),
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -479,9 +465,6 @@ fn nav(ui: &mut egui::Ui, a: &mut Admin, has_password: bool) {
                     a.page = Page::Audit;
                     a.audit.refresh();
                 }
-            } else {
-                ui.add_enabled(false, egui::Button::selectable(false, *item))
-                    .on_disabled_hover_text("Planned for version 2.");
             }
         }
     }

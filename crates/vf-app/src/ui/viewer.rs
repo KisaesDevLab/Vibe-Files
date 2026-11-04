@@ -142,6 +142,8 @@ pub struct Viewer {
     /// The window is being closed with annotations unsaved: Save / Discard / Keep editing
     /// (owner 2026-11-04).
     pub quit_asked: bool,
+    /// A document was closed: the app goes back to Browse (owner 2026-11-04).
+    pub closed: bool,
     /// The answer allows the window to close.
     pub quit_ok: bool,
     generation: u64,
@@ -264,6 +266,8 @@ pub struct PagesDialog {
     pub client: Option<String>,
     /// Extract target year: `2025`, `Permanent`, or empty for this document's.
     pub year: String,
+    /// A blank page goes after this page (`0` = before the first).
+    pub blank_after: String,
 }
 
 impl Default for Viewer {
@@ -275,6 +279,7 @@ impl Default for Viewer {
             ask_open: None,
             ask_close: false,
             quit_asked: false,
+            closed: false,
             quit_ok: false,
             generation: 0,
             info: None,
@@ -341,6 +346,7 @@ impl Viewer {
     }
 
     fn close_now(&mut self) {
+        self.closed = true;
         self.tape.tape.forget_sources();
         self.pending.clear();
         self.ask_close = false;
@@ -763,6 +769,8 @@ enum PageOp {
     Reorder,
     Extract,
     Split,
+    /// A blank page after page N (owner 2026-11-04).
+    Blank,
 }
 
 fn pages_window(ctx: &egui::Context, v: &mut Viewer, env: &mut Env<'_>) {
@@ -801,6 +809,16 @@ fn pages_window(ctx: &egui::Context, v: &mut Viewer, env: &mut Env<'_>) {
             if ui.button("Reorder").clicked() {
                 op = Some(PageOp::Reorder);
             }
+            ui.separator();
+            ui.horizontal(|ui| {
+                let l = ui.label("Blank page after page");
+                ui.add(egui::TextEdit::singleline(&mut d.blank_after).desired_width(50.0))
+                    .labelled_by(l.id)
+                    .on_hover_text("0 puts it before the first page");
+                if ui.button("Insert blank page").clicked() {
+                    op = Some(PageOp::Blank);
+                }
+            });
             ui.separator();
             ui.label(RichText::new("Extract the pages to a new document").strong());
             let name = |id: &Option<String>| {
@@ -921,6 +939,20 @@ fn run_page_op(
             edit(v, env, "Pages reordered", &|a, b| {
                 vf_pdf::pages::reorder(a, b, &order)
             })
+        }
+        PageOp::Blank => {
+            let t = d.blank_after.trim();
+            let after: usize = t
+                .parse()
+                .ok()
+                .filter(|n| *n <= count)
+                .ok_or_else(|| format!("After which page? A number from 0 to {count}."))?;
+            edit(
+                v,
+                env,
+                &format!("Blank page inserted after page {after}"),
+                &|a, b| vf_pdf::pages::insert_blank(a, b, after),
+            )
         }
         PageOp::Extract => {
             let p = pages()?;
@@ -1216,6 +1248,7 @@ fn toolbar(ui: &mut egui::Ui, v: &mut Viewer, env: &mut Env<'_>, doc: &Doc) {
                 {
                     v.pages_dialog = Some(PagesDialog {
                         pages: (doc.page + 1).to_string(),
+                        blank_after: (doc.page + 1).to_string(),
                         ..PagesDialog::default()
                     });
                 }

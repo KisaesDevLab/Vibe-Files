@@ -9,6 +9,7 @@ In the [Viewer](help:viewer), click **Pages…**. Type the pages to work on in *
 - **Rotate left** and **Rotate right** turn those pages in the file.
 - **Delete pages** removes them.
 - **Reorder**: list every page in **New order**, for example `3, 1, 2`, then click **Reorder**.
+- **Insert blank page**: type the page it goes after in **Blank page after page** (it starts as the page you are on; `0` puts it before the first page), then click **Insert blank page**. The blank page has the size and turn of the page beside it.
 
 Each of these makes a new version of the file. The previous version is kept and can be restored from the document's details in [Browse](help:documents).
 

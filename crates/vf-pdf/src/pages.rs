@@ -1,4 +1,4 @@
-//! Page edits within one document (P04 step 6): rotate, delete, reorder. Combining documents
+//! Page edits within one document (P04 step 6): rotate, delete, reorder, insert a blank page. Combining documents
 //! and cutting page ranges out reuse Filer's `merge_pdfs` / `split_pdf` (vendored, with
 //! bookmarks per source and form fields kept).
 //!
@@ -72,6 +72,58 @@ pub fn reorder(src: &Path, out: &Path, order: &[usize]) -> Result<(), String> {
         ));
     }
     set_order(&mut doc, order)?;
+    save(&mut doc, out)
+}
+
+/// Inserts a blank page so it becomes page `at` (0-based; `0` = first, the page count = last),
+/// the size and turn of the page beside it (owner 2026-11-04).
+pub fn insert_blank(src: &Path, out: &Path, at: usize) -> Result<(), String> {
+    let mut doc = load(src)?;
+    let n = doc.get_pages().len();
+    if at > n {
+        return Err(format!(
+            "the PDF has {n} pages: a blank page goes after page 0 to {n}"
+        ));
+    }
+    // Every page directly under the root with its inherited attributes.
+    set_order(&mut doc, &(0..n).collect::<Vec<_>>())?;
+    let ids: Vec<ObjectId> = doc.get_pages().values().copied().collect();
+    let root = doc
+        .catalog()
+        .map_err(|e| e.to_string())?
+        .get(b"Pages")
+        .and_then(Object::as_reference)
+        .map_err(|e| format!("no page tree: {e}"))?;
+    let like = ids.get(at.min(n.saturating_sub(1))).copied();
+    let mut page = lopdf::Dictionary::new();
+    page.set("Type", Object::Name(b"Page".to_vec()));
+    page.set("Parent", Object::Reference(root));
+    let mut media = Object::Array(vec![0.into(), 0.into(), 612.into(), 792.into()]);
+    if let Some(l) = like.and_then(|id| doc.get_dictionary(id).ok()) {
+        if let Ok(m) = l.get(b"MediaBox") {
+            media = m.clone();
+        }
+        if let Ok(c) = l.get(b"CropBox") {
+            page.set("CropBox", c.clone());
+        }
+        if let Ok(r) = l.get(b"Rotate") {
+            page.set("Rotate", r.clone());
+        }
+    }
+    page.set("MediaBox", media);
+    page.set("Resources", lopdf::Dictionary::new());
+    let contents = doc.add_object(lopdf::Stream::new(lopdf::Dictionary::new(), Vec::new()));
+    page.set("Contents", Object::Reference(contents));
+    let new_id = doc.add_object(page);
+    let tree = doc.get_dictionary_mut(root).map_err(|e| e.to_string())?;
+    let mut kids = tree
+        .get(b"Kids")
+        .and_then(Object::as_array)
+        .cloned()
+        .map_err(|e| e.to_string())?;
+    kids.insert(at.min(kids.len()), Object::Reference(new_id));
+    tree.set("Count", kids.len() as i64);
+    tree.set("Kids", kids);
     save(&mut doc, out)
 }
 
@@ -170,6 +222,69 @@ pub fn parse_ranges(text: &str, count: usize) -> Result<Vec<usize>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A blank page goes where asked, the size of the page beside it, and adds no text.
+    #[test]
+    fn blank_page_is_inserted() {
+        let t = tempfile::tempdir().unwrap();
+        let src = t.path().join("a.pdf");
+        let mut doc = Document::with_version("1.5");
+        let pages_id = doc.new_object_id();
+        let mut kids = vec![];
+        for _ in 0..2 {
+            let mut p = lopdf::Dictionary::new();
+            p.set("Type", Object::Name(b"Page".to_vec()));
+            p.set("Parent", Object::Reference(pages_id));
+            kids.push(Object::Reference(doc.add_object(p)));
+        }
+        let mut tree = lopdf::Dictionary::new();
+        tree.set("Type", Object::Name(b"Pages".to_vec()));
+        tree.set("Count", 2);
+        tree.set("Kids", kids);
+        tree.set(
+            "MediaBox",
+            Object::Array(vec![0.into(), 0.into(), 792.into(), 612.into()]),
+        );
+        doc.objects.insert(pages_id, Object::Dictionary(tree));
+        let mut cat = lopdf::Dictionary::new();
+        cat.set("Type", Object::Name(b"Catalog".to_vec()));
+        cat.set("Pages", Object::Reference(pages_id));
+        let cat_id = doc.add_object(cat);
+        doc.trailer.set("Root", Object::Reference(cat_id));
+        doc.save(&src).unwrap();
+
+        let out = t.path().join("b.pdf");
+        insert_blank(&src, &out, 1).unwrap();
+        let d = Document::load(&out).unwrap();
+        let ids: Vec<ObjectId> = d.get_pages().values().copied().collect();
+        assert_eq!(ids.len(), 3);
+        let p = d.get_dictionary(ids[1]).unwrap();
+        assert!(p.get(b"Contents").is_ok());
+        let mb: Vec<f32> = p
+            .get(b"MediaBox")
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|o| o.as_float().unwrap())
+            .collect();
+        assert_eq!(
+            mb,
+            [0.0, 0.0, 792.0, 612.0],
+            "the size of the page beside it"
+        );
+        // At the end and at the start; past the end is refused.
+        insert_blank(&out, &t.path().join("c.pdf"), 3).unwrap();
+        insert_blank(&out, &t.path().join("d.pdf"), 0).unwrap();
+        assert!(insert_blank(&out, &t.path().join("e.pdf"), 4).is_err());
+        assert_eq!(
+            Document::load(t.path().join("c.pdf"))
+                .unwrap()
+                .get_pages()
+                .len(),
+            4
+        );
+    }
 
     #[test]
     fn ranges() {

@@ -673,6 +673,10 @@ impl eframe::App for VibeFilesApp {
                         clients: &o.browse.snap.clients,
                     },
                 );
+                if std::mem::take(&mut o.viewer.closed) {
+                    // Closing a document goes back to Browse (owner 2026-11-04).
+                    self.tab = Tab::Browse;
+                }
                 if std::mem::take(&mut o.viewer.catalog_changed) {
                     o.browse.reload(&o.opened.conn);
                 }
@@ -2339,6 +2343,7 @@ mod tests {
             unreachable!()
         };
         assert!(o.viewer.doc.is_none() && o.viewer.pending.is_empty());
+        assert_eq!(h.state().tab, Tab::Browse, "closing goes back to Browse");
     }
 
     /// P04 step 5 through the Viewer: auto-find, apply & verify, the redacted copy opens.
@@ -2522,6 +2527,20 @@ mod tests {
         );
         assert_eq!(texts(&root.join("Old/a.pdf")).len(), 3, "kept whole");
 
+        // A blank page after page 1 (owner 2026-11-04): a new version with four pages.
+        open_pages(&mut h, "1");
+        if let Screen::Open(o) = &mut h.state_mut().screen
+            && let Some(d) = &mut o.viewer.pages_dialog
+        {
+            d.blank_after = "1".into();
+        }
+        click(&mut h, "Insert blank page");
+        h.step();
+        let t = texts(&root.join("Old/a.pdf"));
+        assert_eq!(t.len(), 4, "{t:?}");
+        assert_eq!(t[0], "Alpha one");
+        assert!(t[1].trim().is_empty(), "the blank page: {t:?}");
+
         // Browse: select a.pdf and b.pdf, Combine.
         click(&mut h, "Browse");
         h.run();
@@ -2541,7 +2560,7 @@ mod tests {
         let combined = root.join("Old/Combined a.pdf");
         assert_eq!(
             texts(&combined),
-            ["Alpha one", "Alpha two", "Alpha three", "Bravo one"]
+            ["Alpha one", "", "Alpha two", "Alpha three", "Bravo one"]
         );
         let marks = lopdf::Document::load(&combined)
             .unwrap()
