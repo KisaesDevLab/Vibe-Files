@@ -54,7 +54,8 @@ fn ultratax_print_lands_as_a_federal_return_copy() {
         ocr: None,
     };
     let done = pipeline::process(&ctx, &printed, Origin::PrintCapture).unwrap();
-    let name = "Anderson Farms LLC_ANDE1042_2025 UltraTax CS Return copy — federal 1040 Government Copy Tax Return.pdf";
+    // PA-22: the government copy row keeps the printed name (no rename set).
+    let name = "Anderson Farms LLC_ANDE1042_Anderson Farms LLC_2025_1040_GovernmentCopyTaxReturn_ANDE1042.pdf";
     assert_eq!(done.delivered[0].path, inbox.join(name));
     assert_eq!(
         done.delivered[0].note,
@@ -67,8 +68,9 @@ fn ultratax_print_lands_as_a_federal_return_copy() {
         "seeded"
     );
 
-    // Filer: the exact ID picks the client; the firm's rules pick the folder.
+    // Filer: the exact ID picks the client; the managed rule for the row picks the folder.
     let master = vf_fs::clients::master_dir(&root);
+    vf_ingest::parsers::sync_filer_rules(&root).unwrap();
     let (rules, _, _) = filer_core::rules::load_or_seed(&master);
     let compiled = filer_core::rules::CompiledRules::new(rules.active_rules()).unwrap();
     // UltraTax IDs here are letters + digits: Filer's ID pattern is set to match them.
@@ -79,7 +81,7 @@ fn ultratax_print_lands_as_a_federal_return_copy() {
         .unwrap()
         .clone();
     let hit = filer_core::rules::evaluate(&compiled, &parsed, &client, parsed.year);
-    assert_eq!(hit.rule_name, "UltraTax");
+    assert_eq!(hit.rule_name, "UltraTax CS · GovernmentCopyTaxReturn");
     let rendered = hit.outcome.unwrap();
     let folder = root.join("Anderson Farms LLC (ANDE1042)");
     let dest = folder.join(&rendered.dest_rel).join(&rendered.filename);
@@ -126,6 +128,10 @@ fn ultratax_print_lands_as_a_federal_return_copy() {
     assert_eq!((year, source.as_str()), (2025, "firm"));
     assert!(rel.starts_with("Anderson Farms LLC (ANDE1042)/"), "{rel}");
     assert!(rel.contains("/Income Tax/2025/"), "year folder: {rel}");
+    assert!(
+        rel.ends_with("/Anderson Farms LLC_2025_1040_GovernmentCopyTaxReturn_ANDE1042.pdf"),
+        "filed under the printed name: {rel}"
+    );
     let _ = Path::new(&rel);
 }
 
@@ -162,56 +168,126 @@ fn ultratax_prints_go_to_their_doc_types_folder() {
     s.save(&master).unwrap();
     vf_ingest::parsers::seed_if_missing(&root).unwrap();
 
-    let engagement = "Anderson Farms LLC_2025_1040_Engagement Letter_ANDE1042.pdf";
-    let federal = "Anderson Farms LLC_2025_1040_GovernmentCopyTaxReturn_ANDE1042.pdf";
-    let dest = |n: &str| vf_ingest::parsers::trial(&root, n).destination.unwrap();
-    // Before: Filer's UltraTax rule sends everything to Income Tax.
-    assert!(
-        dest(engagement).starts_with("Income Tax/2025/"),
-        "{}",
-        dest(engagement)
-    );
-
-    assert!(vf_ingest::parsers::sync_filer_rules(&root).unwrap());
+    let p = |n: &str| format!("Anderson Farms LLC_2025_{n}_ANDE1042.pdf");
+    let dest = |n: &str| vf_ingest::parsers::trial(&root, &p(n)).destination.unwrap();
+    vf_ingest::parsers::sync_filer_rules(&root).unwrap();
     assert!(
         !vf_ingest::parsers::sync_filer_rules(&root).unwrap(),
         "stable"
     );
-    let tr = vf_ingest::parsers::trial(&root, engagement);
-    assert_eq!(tr.rule, "Engagement letter · UltraTax CS");
-    assert!(
-        dest(engagement).starts_with("Correspondence/2025/"),
-        "{}",
-        dest(engagement)
-    );
-    assert!(
-        dest(federal).starts_with("Income Tax/2025/"),
-        "{}",
-        dest(federal)
-    );
 
-    // An override in the profile wins over the doc type's folder.
+    // Not in the document table: the [[doc]] rules and the doc type's folder (PA-21).
+    let tr = vf_ingest::parsers::trial(&root, &p("1040_Engagement Letter"));
+    assert_eq!(tr.rule, "Engagement letter · UltraTax CS");
+    assert!(dest("1040_Engagement Letter").starts_with("Correspondence/2025/"));
+
+    // The table (PA-22): each copy by its own row, the longer name never taken by the shorter.
+    for (doc, rule, folder) in [
+        (
+            "1040_Tax_Return",
+            "UltraTax CS · ArchivedTaxReturn",
+            "Income Tax/2025",
+        ),
+        (
+            "1040_Preparer_Copy_Tax_Return",
+            "UltraTax CS · PreparerCopyTaxReturn",
+            "Income Tax/2025",
+        ),
+        (
+            "1040_GovernmentCopyTaxReturn",
+            "UltraTax CS · GovernmentCopyTaxReturn",
+            "Income Tax/2025",
+        ),
+        (
+            "1040_Tax_Return_Documents",
+            "UltraTax CS · TaxSourceDocuments",
+            "Workpapers & Support/2025",
+        ),
+        (
+            "1040_Amended_Tax_Return",
+            "UltraTax CS · ArchivedTaxReturn",
+            "Income Tax/2025",
+        ),
+    ] {
+        let t = vf_ingest::parsers::trial(&root, &p(doc));
+        assert_eq!(t.rule, rule, "{doc}");
+        assert_eq!(
+            t.destination.unwrap(),
+            format!("{folder}/{}", p(doc)),
+            "{doc}"
+        );
+    }
+
+    // Government copies to their own folder and renamed; preparer copies not filed.
     let (files, errors) = vf_ingest::parsers::load_files(&root);
     assert!(errors.is_empty(), "{errors:?}");
-    let (path, mut p) = files.into_iter().next().unwrap();
-    p.folders
-        .insert("Return copy — federal".into(), "Other/{Year}".into());
-    vf_ingest::parsers::save_profile(&path, &p).unwrap();
+    let (path, mut prof) = files.into_iter().next().unwrap();
+    for r in &mut prof.documents {
+        match r.default_name.as_str() {
+            "GovernmentCopyTaxReturn" => {
+                r.folder = "Other/{Year}".into();
+                r.rename = "{Year} {Form} {Document} - {Client}".into();
+            }
+            "PreparerCopyTaxReturn" => r.action = vf_ingest::ultratax::Action::Skip,
+            _ => {}
+        }
+    }
+    vf_ingest::parsers::save_profile(&path, &prof).unwrap();
     assert_eq!(
-        vf_ingest::parsers::load_files(&root).0[0].1,
-        p,
-        "round trip"
+        vf_ingest::parsers::load_files(&root).0[0].1.documents,
+        prof.documents
     );
     assert!(vf_ingest::parsers::sync_filer_rules(&root).unwrap());
-    assert!(
-        dest(federal).starts_with("Other/2025/"),
-        "{}",
-        dest(federal)
+    assert_eq!(
+        dest("1040_GovernmentCopyTaxReturn"),
+        "Other/2025/2025 1040 GovernmentCopyTaxReturn - Anderson Farms LLC.pdf"
     );
+    let t = vf_ingest::parsers::trial(&root, &p("1040_Preparer_Copy_Tax_Return"));
+    assert!(t.destination.unwrap_err().contains("not filed"));
+    let (inbox, capture) = (t_dir(&root, "inbox"), t_dir(&root, "capture"));
+    let printed = capture.join(p("1040_Preparer_Copy_Tax_Return"));
+    filer_pdf::pdf::write_test_pdf(&printed, &["synthetic preparer copy"]);
+    let ctx = Context {
+        root: &root,
+        inbox: &inbox,
+        device_id: "dev",
+        pdfium: None,
+        ocr: None,
+    };
+    let done = pipeline::process(&ctx, &printed, Origin::PrintCapture).unwrap();
+    assert!(done.delivered.is_empty(), "not sent to Intake");
+    assert!(std::fs::read_dir(&inbox).unwrap().next().is_none());
+    assert!(done.kept.is_file() && done.kept.to_string_lossy().contains("_processed"));
+    // A rename without the document name is refused (Intake could not recognize it).
+    let mut bad = prof.clone();
+    bad.documents[0].rename = "{Year} return".into();
+    assert!(vf_ingest::parsers::save_profile(&path, &bad).is_err());
 
-    // Filer's own rules stay; a disabled profile takes its rules out again.
-    p.enabled = false;
-    vf_ingest::parsers::save_profile(&path, &p).unwrap();
+    // A K-1 for one partner: its row's rule carries the copy to the partner.
+    let (rules, _, _) = filer_core::rules::load_or_seed(&master);
+    let k1 = rules
+        .active_rules()
+        .iter()
+        .find(|r| r.name == "UltraTax CS · ArchiveK1Package")
+        .unwrap();
+    assert_eq!(k1.copies.len(), 1);
+    assert!(
+        rules.active_rules()[0]
+            .id
+            .starts_with(vf_ingest::parsers::MANAGED_PREFIX),
+        "the table goes ahead of Filer's K-1 rules"
+    );
+    let compiled = filer_core::rules::CompiledRules::new(rules.active_rules()).unwrap();
+    let rest = "Anderson Farms LLC_2025_1120S_K1_Package_Pat Partner_ANDE1042";
+    assert_eq!(
+        compiled.first_match(rest).name,
+        "UltraTax CS · ArchiveK1Package"
+    );
+    assert_eq!(compiled.captures(&k1.id, rest)["who"], "Pat Partner");
+
+    // A disabled profile takes its rules out again; Filer's own rules stay.
+    prof.enabled = false;
+    vf_ingest::parsers::save_profile(&path, &prof).unwrap();
     assert!(vf_ingest::parsers::sync_filer_rules(&root).unwrap());
     let (rules, _, _) = filer_core::rules::load_or_seed(&master);
     assert!(
@@ -221,4 +297,11 @@ fn ultratax_prints_go_to_their_doc_types_folder() {
             .all(|r| !r.id.starts_with(vf_ingest::parsers::MANAGED_PREFIX))
     );
     assert!(rules.active_rules().iter().any(|r| r.name == "UltraTax"));
+}
+
+/// A folder beside the cabinet (outside it, as staging and inboxes must be).
+fn t_dir(root: &Path, name: &str) -> std::path::PathBuf {
+    let d = root.parent().unwrap().join(name);
+    std::fs::create_dir_all(&d).unwrap();
+    d
 }

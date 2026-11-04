@@ -169,7 +169,13 @@ impl IngestState {
                         } else {
                             ""
                         };
-                        format!("{name} → {}{left}", parts.join(" · "))
+                        if p.delivered.is_empty() {
+                            format!(
+                                "{name}: not filed (Admin › Print capture says Don't file); kept in _processed"
+                            )
+                        } else {
+                            format!("{name} → {}{left}", parts.join(" · "))
+                        }
                     }
                     Event::Failed { staged, error } => {
                         format!("{} set aside in _failed: {error}", file_name(&staged))

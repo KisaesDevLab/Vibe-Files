@@ -21,14 +21,24 @@ pub struct Profile {
     pub name: String,
     #[serde(default = "yes")]
     pub enabled: bool,
-    /// Regex over the whole file name, with named groups `id`, `year`, `doc`.
+    /// Regex over the whole file name, with named groups `id`, `year`, `doc`. With a `layout`
+    /// it is generated from it (and written for reference).
+    #[serde(default)]
     pub pattern: String,
     /// Source recorded on the document.
     #[serde(default = "firm")]
     pub source: String,
+    /// UltraTax's PDF File Options › Options (PA-22): the name's layout; the pattern is made
+    /// from it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layout: Option<crate::ultratax::Layout>,
     /// First match wins.
     #[serde(default)]
     pub doc: Vec<DocRule>,
+    /// UltraTax's PDF File Options › Document Names (PA-22), with the doc type, folder, filing
+    /// and name of each. A document in this table takes its row over the `[[doc]]` rules.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub documents: Vec<crate::ultratax::Row>,
     /// Where a doc type's prints are filed, below the client folder (`Correspondence/{Year}`),
     /// when not the doc type's own default folder (Admin › Doc types). By doc type name.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -171,15 +181,36 @@ pub fn load_files(root: &Path) -> (Vec<(PathBuf, Profile)>, Vec<String>) {
 /// Writes `profile` to `path` (in the parsers folder) after checking it compiles. The file's
 /// comments are replaced by a header: the editor in Admin is the way to change it.
 pub fn save_profile(path: &Path, profile: &Profile) -> Result<(), String> {
-    let body = toml::to_string_pretty(profile).map_err(|e| e.to_string())?;
+    vf_fs::cabinet::write_replace(path, profile_text(profile)?.as_bytes())
+}
+
+/// A profile's file text, checked.
+pub fn profile_text(profile: &Profile) -> Result<String, String> {
+    let mut profile = profile.clone();
+    if let Some(l) = &profile.layout {
+        // Written for reference; read back from the layout.
+        profile.pattern = l.regex(
+            &profile
+                .documents
+                .iter()
+                .flat_map(|r| r.names())
+                .collect::<Vec<_>>(),
+        );
+    }
+    for r in &profile.documents {
+        if let Some(p) = crate::ultratax::rename_problem(r) {
+            return Err(p);
+        }
+    }
+    let body = toml::to_string_pretty(&profile).map_err(|e| e.to_string())?;
     compile(&body)?;
     let text = format!(
         "# Print capture parser profile. Edited in Vibe Files: Admin › Print capture & parsers.\n\
-         # `pattern` reads the printed file name (groups id, year, doc, recipient); the first\n\
-         # [[doc]] whose `match` finds the document name sets the doc type; [folders] files a doc\n\
-         # type's prints somewhere other than its default folder.\n{body}"
+         # [layout] is UltraTax's PDF File Options (variable positions; `pattern` is made from\n\
+         # it); [[documents]] its Document Names, each with doc type, folder, filing and name.\n\
+         # Documents not in the table: the first [[doc]] whose `match` finds the name.\n{body}"
     );
-    vf_fs::cabinet::write_replace(path, text.as_bytes())
+    Ok(text)
 }
 
 /// Filer rules Vibe Files writes for print captures carry this id prefix; they are rewritten
@@ -250,6 +281,95 @@ pub fn filer_rules(
     out
 }
 
+/// The Filer rules for the document tables of the enabled profiles (PA-22): one per row that is
+/// filed, recognizing its document name in the name Vibe Files renders, longest name first,
+/// filed with `{Rest}.{Ext}` in the row's folder. A K-1 row that copies to the partner carries
+/// the copy Filer's own K-1 rule makes (`like_k1`), since these rules come before Filer's.
+pub fn table_rules(
+    profiles: &[Profile],
+    types: &[vf_fs::doctypes::DocType],
+    like_k1: Option<&filer_core::rules::Rule>,
+) -> Result<Vec<filer_core::rules::Rule>, String> {
+    use crate::ultratax::{Action, K1_BY_FORM};
+    use filer_core::rules::{CopyDest, OnSplit, Resolver, Rule};
+    let default_of = |name: &str| {
+        types
+            .iter()
+            .find(|t| t.name == name)
+            .map(|t| t.default_folder.trim().trim_matches('/').to_string())
+            .unwrap_or_default()
+    };
+    let mut rows: Vec<(&Profile, &crate::ultratax::Row)> = profiles
+        .iter()
+        .filter(|p| p.enabled && p.layout.is_some())
+        .flat_map(|p| p.documents.iter().map(move |r| (p, r)))
+        .filter(|(_, r)| r.action == Action::File)
+        .collect();
+    rows.sort_by_key(|(_, r)| std::cmp::Reverse(crate::ultratax::phrase_len(r)));
+    let mut out = Vec::new();
+    for (p, r) in rows {
+        if let Some(e) = crate::ultratax::rename_problem(r) {
+            return Err(e);
+        }
+        let mut folder = r.folder.trim().trim_matches('/').to_string();
+        if folder.is_empty() {
+            folder = if r.doc_type == K1_BY_FORM {
+                let fs: Vec<String> = ["K-1 (1120-S)", "K-1 (1065)", "K-1 (1041)"]
+                    .iter()
+                    .map(|t| default_of(t))
+                    .collect();
+                if fs.iter().any(|f| f != &fs[0]) {
+                    return Err(format!(
+                        "{}: the K-1 doc types have different default folders; choose a folder for this row",
+                        crate::ultratax::label_of(&r.default_name)
+                    ));
+                }
+                fs[0].clone()
+            } else {
+                default_of(&r.doc_type)
+            };
+        }
+        if folder.is_empty() {
+            folder = "Income Tax/{Year}".into();
+        }
+        let by_year = folder.contains("{Year}");
+        let mut rule = Rule::new(
+            &format!("{} · {}", p.name, r.default_name),
+            &crate::ultratax::rule_pattern(r),
+            &format!("{{Client}}/{folder}"),
+            "{Rest}.{Ext}",
+            by_year,
+        );
+        rule.id = format!("{MANAGED_PREFIX}{}", stable_id(&p.name, &r.default_name));
+        if r.copy_to_partner {
+            rule.copies = match like_k1.map(|k| k.copies.clone()).filter(|c| {
+                c.iter()
+                    .any(|d| matches!(d.resolver, Resolver::RelatedByName { .. }))
+            }) {
+                Some(mut c) => {
+                    for d in &mut c {
+                        if let Resolver::RelatedByName { group } = &mut d.resolver {
+                            *group = "who".into();
+                        }
+                    }
+                    c
+                }
+                None => vec![CopyDest {
+                    resolver: Resolver::RelatedByName {
+                        group: "who".into(),
+                    },
+                    dest_template: "{Copy.Client}/Income Tax/{Year}".into(),
+                    filename_template: "{Year} K-1 from {Client}.{Ext}".into(),
+                    on_split: OnSplit::Whole,
+                    optional: true,
+                }],
+            };
+        }
+        out.push(rule);
+    }
+    Ok(out)
+}
+
 /// A stable id from the profile and doc type (so an unchanged mapping rewrites nothing).
 fn stable_id(profile: &str, doc_type: &str) -> String {
     use sha2::{Digest, Sha256};
@@ -288,6 +408,12 @@ pub fn sync_filer_rules(root: &Path) -> Result<bool, String> {
     for (k, r) in made.into_iter().enumerate() {
         active.insert(at + k, r);
     }
+    // The document tables go first, ahead of Filer's K-1 rules (they carry the partner copy).
+    let k1 = active.iter().find(|r| r.name == "K-1").cloned();
+    let table = table_rules(&profiles, &types, k1.as_ref())?;
+    for (k, r) in table.into_iter().enumerate() {
+        active.insert(k, r);
+    }
     if file == before {
         return Ok(false);
     }
@@ -322,7 +448,7 @@ pub fn trial(root: &Path, file_name: &str) -> Trial {
     });
     let (profiles, _) = load(root);
     let parsed = parse(&profiles, file_name);
-    let (delivered, _, _) = crate::pipeline::capture_name(root, &lookup, file_name);
+    let (delivered, _, _, skip) = crate::pipeline::capture_name(root, &lookup, file_name);
     let master = vf_fs::clients::master_dir(root);
     let (rules, _, _) = filer_core::rules::load_or_seed(&master);
     let settings = filer_intake::config::Settings::load_or_default(&master).0;
@@ -335,6 +461,17 @@ pub fn trial(root: &Path, file_name: &str) -> Trial {
         .get(..4)
         .and_then(|y| y.parse().ok())
         .unwrap_or(2026);
+    if skip {
+        return Trial {
+            parsed,
+            delivered: String::new(),
+            rule: String::new(),
+            destination: Err(
+                "not filed: its row says Don't file (kept in the capture folder's _processed)"
+                    .into(),
+            ),
+        };
+    }
     let fail = |rule: String, e: String| Trial {
         parsed: parsed.clone(),
         delivered: delivered.clone(),
@@ -400,8 +537,12 @@ pub fn dir(root: &Path) -> PathBuf {
 pub fn seed_if_missing(root: &Path) -> Result<bool, String> {
     let d = dir(root);
     let ut = d.join("ultratax.toml");
-    if std::fs::read_to_string(&ut).is_ok_and(|t| t.replace("\r\n", "\n") == ULTRATAX_V1) {
-        vf_fs::cabinet::write_replace(&ut, ULTRATAX.as_bytes())?;
+    // An unedited earlier seed (regex profiles) becomes the UltraTax set-up (PA-22).
+    if std::fs::read_to_string(&ut).is_ok_and(|t| {
+        let t = t.replace("\r\n", "\n");
+        t == ULTRATAX_V1 || t == ULTRATAX
+    }) {
+        vf_fs::cabinet::write_replace(&ut, profile_text(&ultratax_profile())?.as_bytes())?;
         return Ok(true);
     }
     let any = std::fs::read_dir(&d)
@@ -414,8 +555,24 @@ pub fn seed_if_missing(root: &Path) -> Result<bool, String> {
         return Ok(false);
     }
     std::fs::create_dir_all(&d).map_err(|e| format!("cannot create {}: {e}", d.display()))?;
-    vf_fs::cabinet::write_new(&d.join("ultratax.toml"), ULTRATAX.as_bytes())?;
+    vf_fs::cabinet::write_new(
+        &d.join("ultratax.toml"),
+        profile_text(&ultratax_profile())?.as_bytes(),
+    )?;
     Ok(true)
+}
+
+/// The UltraTax CS profile seeded for a new cabinet (PA-22): the office's layout and document
+/// names; the old `[[doc]]` rules stay as the fallback for documents not in the table.
+pub fn ultratax_profile() -> Profile {
+    let mut p: Profile = toml::from_str(ULTRATAX).expect("seeded profile reads");
+    // The document name no longer starts with the form: K-1s are in the table instead.
+    p.doc.retain(|d| !d.pattern.starts_with("(?i)^1"));
+    p.layout = Some(crate::ultratax::Layout::default());
+    p.documents = crate::ultratax::default_rows();
+    let names: Vec<String> = p.documents.iter().flat_map(|r| r.names()).collect();
+    p.pattern = p.layout.as_ref().expect("set above").regex(&names);
+    p
 }
 
 /// A profile ready to use.
@@ -452,6 +609,23 @@ pub fn load(root: &Path) -> (Vec<Compiled>, Vec<String>) {
 
 pub fn compile(text: &str) -> Result<Compiled, String> {
     let profile: Profile = toml::from_str(text).map_err(|e| e.to_string())?;
+    compile_profile(profile)
+}
+
+/// [`compile`] for a profile already read.
+pub fn compile_profile(mut profile: Profile) -> Result<Compiled, String> {
+    if let Some(l) = &profile.layout {
+        if let Some(p) = l.problem() {
+            return Err(p);
+        }
+        profile.pattern = l.regex(
+            &profile
+                .documents
+                .iter()
+                .flat_map(|r| r.names())
+                .collect::<Vec<_>>(),
+        );
+    }
     let re = Regex::new(&profile.pattern).map_err(|e| format!("pattern: {e}"))?;
     if !re.capture_names().flatten().any(|n| n == "id") {
         return Err("pattern needs a (?P<id>…) group".into());
@@ -478,9 +652,19 @@ pub struct Parsed {
     pub doc: Option<String>,
     /// Who a K-1 is for, when the name carries it.
     pub recipient: Option<String>,
-    /// Doc type name from the first matching `[[doc]]` rule.
+    /// Doc type name from the document's row, else the first matching `[[doc]]` rule.
     pub doc_type: Option<String>,
     pub source: String,
+    /// Federal entity type (`1120S`), when the name carries it.
+    pub form: Option<String>,
+    /// State postal code (separate state returns).
+    pub state: Option<String>,
+    /// `Amended` / `Superseded`, when UltraTax put it before the document name.
+    pub amended: Option<String>,
+    /// The document's row in the profile's table (PA-22).
+    pub row: Option<crate::ultratax::Row>,
+    /// The file name as printed, without `.pdf`.
+    pub printed: String,
 }
 
 impl Compiled {
@@ -490,22 +674,45 @@ impl Compiled {
         }
         let c = self.re.captures(file_name)?;
         let doc = c.name("doc").map(|m| m.as_str().trim().to_string());
-        Some(Parsed {
-            profile: self.profile.name.clone(),
-            client_id: c.name("id")?.as_str().trim().to_string(),
-            year: c.name("year").and_then(|m| m.as_str().parse().ok()),
-            doc_type: doc.as_ref().and_then(|d| {
+        let text = |g: &str| {
+            c.name(g)
+                .map(|m| m.as_str().trim().to_string())
+                .filter(|v| !v.is_empty())
+        };
+        let form = text("form");
+        let row = doc.as_ref().and_then(|d| {
+            self.profile
+                .documents
+                .iter()
+                .find(|r| r.names().iter().any(|n| n.eq_ignore_ascii_case(d)))
+                .cloned()
+        });
+        let doc_type = match &row {
+            Some(r) => r.doc_type_for(form.as_deref()),
+            None => doc.as_ref().and_then(|d| {
                 self.doc
                     .iter()
                     .find(|(r, _)| r.is_match(d))
                     .map(|(_, t)| t.clone())
             }),
+        };
+        Some(Parsed {
+            profile: self.profile.name.clone(),
+            client_id: c.name("id")?.as_str().trim().to_string(),
+            year: c.name("year").and_then(|m| m.as_str().parse().ok()),
+            doc_type,
             doc,
-            recipient: c
-                .name("recipient")
-                .map(|m| m.as_str().trim().to_string())
-                .filter(|r| !r.is_empty()),
+            recipient: text("recipient"),
             source: self.profile.source.clone(),
+            form,
+            state: text("state"),
+            amended: text("amended"),
+            row,
+            printed: file_name
+                .strip_suffix(".pdf")
+                .or_else(|| file_name.strip_suffix(".PDF"))
+                .unwrap_or(file_name)
+                .to_string(),
         })
     }
 }
@@ -620,10 +827,12 @@ mod tests {
         std::fs::create_dir_all(&d).unwrap();
         std::fs::write(d.join("ultratax.toml"), ULTRATAX_V1.replace('\n', "\r\n")).unwrap();
         assert!(seed_if_missing(t.path()).unwrap());
-        assert_eq!(
-            std::fs::read_to_string(d.join("ultratax.toml")).unwrap(),
-            ULTRATAX
+        let up = std::fs::read_to_string(d.join("ultratax.toml")).unwrap();
+        assert!(
+            up.contains("[layout]") && up.contains("[[documents]]"),
+            "{up}"
         );
+        assert_eq!(load_files(t.path()).0[0].1, ultratax_profile());
         let edited = ULTRATAX_V1.replace("enabled = true", "enabled = false");
         std::fs::write(d.join("ultratax.toml"), &edited).unwrap();
         assert!(!seed_if_missing(t.path()).unwrap());

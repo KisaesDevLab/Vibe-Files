@@ -139,9 +139,19 @@ pub fn process(ctx: &Context<'_>, staged: &Path, origin: Origin) -> Result<Proce
         if !is_pdf(staged) {
             return Err(format!("{name}: the print capture folder takes PDFs"));
         }
+        let (file, hint, note, skip) = capture_name(ctx.root, &lookup, &name);
+        if skip {
+            // The firm chose not to file this document (Admin › Print capture): kept, not sent.
+            let kept = keep_original(staged)?;
+            return Ok(Processed {
+                staged: staged.to_path_buf(),
+                delivered: vec![],
+                kept,
+                original_sha256,
+            });
+        }
         let tmp = tmp_in(ctx.inbox);
         copy_to(staged, &tmp)?;
-        let (file, hint, note) = capture_name(ctx.root, &lookup, &name);
         let profiled = hint.origin.starts_with("print_capture:");
         let r = if profiled {
             deliver(ctx, &tmp, &file, Some(hint), note)
@@ -339,7 +349,8 @@ fn cover_name(cover: &Cover, lookup: &Lookup, stem: &str, part: usize) -> (Strin
 /// Print capture (step 5): the name a parser profile reads, as Filer's `Name_ID_rest.pdf`, and
 /// a hint with the profile's doc type, year and source (`firm`). A name no profile reads goes
 /// through as it is, still marked as the firm's.
-pub fn capture_name(root: &Path, lookup: &Lookup, name: &str) -> (String, Hint, String) {
+/// Also returns whether the document is not to be filed (its row says "Don't file").
+pub fn capture_name(root: &Path, lookup: &Lookup, name: &str) -> (String, Hint, String, bool) {
     let _ = crate::parsers::seed_if_missing(root);
     let (profiles, _) = crate::parsers::load(root);
     let Some(p) = crate::parsers::parse(&profiles, name) else {
@@ -349,6 +360,7 @@ pub fn capture_name(root: &Path, lookup: &Lookup, name: &str) -> (String, Hint, 
             name.to_string(),
             h,
             "print capture · no parser profile matched".into(),
+            false,
         );
     };
     let client = lookup
@@ -374,6 +386,28 @@ pub fn capture_name(root: &Path, lookup: &Lookup, name: &str) -> (String, Hint, 
     } else {
         rest.join(" ")
     };
+    // A document in the profile's table (PA-22) is named by its row; the name carries its
+    // document name, which its managed Filer rule recognizes.
+    let mut skip = false;
+    let rest = match &p.row {
+        Some(row) => {
+            skip = row.action == crate::ultratax::Action::Skip;
+            let v = crate::ultratax::Values {
+                printed: p.printed.clone(),
+                document: p.doc.clone().unwrap_or_default(),
+                doc_type: p.doc_type.clone().unwrap_or_default(),
+                client: client.clone(),
+                id: p.client_id.clone(),
+                year: p.year.map(|y| y.to_string()).unwrap_or_default(),
+                form: p.form.clone().unwrap_or_default(),
+                recipient: p.recipient.clone().unwrap_or_default(),
+                state: p.state.clone().unwrap_or_default(),
+                amended: p.amended.clone().unwrap_or_default(),
+            };
+            crate::ultratax::render(row.template(), &v)
+        }
+        None => rest,
+    };
     let file = format!("{}_{}_{}.pdf", clean(&client), p.client_id, clean(&rest));
     let mut h = Hint::new("", &file, &format!("print_capture:{}", p.profile), "");
     h.tax_year = p.year;
@@ -386,11 +420,16 @@ pub fn capture_name(root: &Path, lookup: &Lookup, name: &str) -> (String, Hint, 
             .map(|(id, _)| id.clone())
     });
     let note = format!(
-        "{} filename profile{}",
+        "{} filename profile{}{}",
         p.profile,
-        p.doc_type.map(|t| format!(" · {t}")).unwrap_or_default()
+        p.doc_type.map(|t| format!(" · {t}")).unwrap_or_default(),
+        if skip {
+            " · not filed (Admin › Print capture: Don't file)"
+        } else {
+            ""
+        }
     );
-    (file, h, note)
+    (file, h, note, skip)
 }
 
 /// A program's document name as words: `1120S_GovernmentCopyK1Package` →

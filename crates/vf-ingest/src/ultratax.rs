@@ -1,0 +1,686 @@
+//! UltraTax CS print capture set up the way UltraTax itself is (PA-22, owner 2026-11-03): its
+//! PDF File Options. The **file name layout** (which variable sits in which position, the K-1
+//! recipient after the document name, the state postal code) gives the pattern that reads a
+//! printed name; the **document names** table lists UltraTax's documents (government, client and
+//! preparer copies of the return and K-1 package, organizers, extension, input screens) with the
+//! custom name the office set in UltraTax, and for each: the doc type, the folder, whether it is
+//! filed at all, and the name it is filed under.
+//!
+//! Filer files what reaches its inbox by its rules, whose file name tokens are fixed; so the
+//! file name is rendered here and handed to Filer as the name's remainder, and each row gets a
+//! managed Filer rule that recognizes its document name in that remainder (longest first) and
+//! files it with `{Rest}.{Ext}`. A rename therefore keeps `{Document}` (or `{Printed}`, the name
+//! as printed), and a K-1 row that copies to the partner ends with the recipient.
+
+use serde::{Deserialize, Serialize};
+
+/// The variables UltraTax can put in a PDF file name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Var {
+    ClientId,
+    ClientName,
+    EntityType,
+    DocumentName,
+    TaxYear,
+    YearEnd,
+    DatePrinted,
+}
+
+impl Var {
+    pub const ALL: [Var; 7] = [
+        Var::ClientId,
+        Var::ClientName,
+        Var::EntityType,
+        Var::DocumentName,
+        Var::TaxYear,
+        Var::YearEnd,
+        Var::DatePrinted,
+    ];
+
+    /// As UltraTax labels it.
+    pub fn label(self) -> &'static str {
+        match self {
+            Var::ClientId => "Client ID",
+            Var::ClientName => "Client Name",
+            Var::EntityType => "Federal Entity Type",
+            Var::DocumentName => "Document Name",
+            Var::TaxYear => "Tax Year",
+            Var::YearEnd => "Client Year End",
+            Var::DatePrinted => "Date Printed",
+        }
+    }
+}
+
+/// UltraTax's PDF File Options › Options tab.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Layout {
+    /// Position (1-based) of each variable; 0 = not in the name.
+    pub client_id: u8,
+    pub client_name: u8,
+    pub entity_type: u8,
+    pub document_name: u8,
+    pub tax_year: u8,
+    #[serde(default)]
+    pub year_end: u8,
+    #[serde(default)]
+    pub date_printed: u8,
+    /// K-1 recipient name after the document name (K-1 package files only).
+    #[serde(default = "yes")]
+    pub k1_recipient_after_document: bool,
+    /// "Print separate PDF files for each federal and state return": the state's postal code
+    /// follows this variable. `None`: one file for all returns.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub postal_code_after: Option<Var>,
+}
+
+fn yes() -> bool {
+    true
+}
+
+impl Default for Layout {
+    /// The office's setting (owner's screenshot 2026-11-03): name, year, entity type, document,
+    /// ID; K-1 recipient after the document name.
+    fn default() -> Self {
+        Layout {
+            client_name: 1,
+            tax_year: 2,
+            entity_type: 3,
+            document_name: 4,
+            client_id: 5,
+            year_end: 0,
+            date_printed: 0,
+            k1_recipient_after_document: true,
+            postal_code_after: None,
+        }
+    }
+}
+
+impl Layout {
+    pub fn position(&self, v: Var) -> u8 {
+        match v {
+            Var::ClientId => self.client_id,
+            Var::ClientName => self.client_name,
+            Var::EntityType => self.entity_type,
+            Var::DocumentName => self.document_name,
+            Var::TaxYear => self.tax_year,
+            Var::YearEnd => self.year_end,
+            Var::DatePrinted => self.date_printed,
+        }
+    }
+
+    pub fn set_position(&mut self, v: Var, p: u8) {
+        let slot = match v {
+            Var::ClientId => &mut self.client_id,
+            Var::ClientName => &mut self.client_name,
+            Var::EntityType => &mut self.entity_type,
+            Var::DocumentName => &mut self.document_name,
+            Var::TaxYear => &mut self.tax_year,
+            Var::YearEnd => &mut self.year_end,
+            Var::DatePrinted => &mut self.date_printed,
+        };
+        *slot = p;
+    }
+
+    /// The variables in name order.
+    pub fn order(&self) -> Vec<Var> {
+        let mut v: Vec<Var> = Var::ALL
+            .into_iter()
+            .filter(|&v| self.position(v) > 0)
+            .collect();
+        v.sort_by_key(|&v| self.position(v));
+        v
+    }
+
+    /// What is wrong with the layout, if anything.
+    pub fn problem(&self) -> Option<String> {
+        let order = self.order();
+        for w in order.windows(2) {
+            if self.position(w[0]) == self.position(w[1]) {
+                return Some(format!(
+                    "{} and {} are both in position {}.",
+                    w[0].label(),
+                    w[1].label(),
+                    self.position(w[0])
+                ));
+            }
+        }
+        if self.client_id == 0 {
+            return Some(
+                "The client ID must be in the name: it says which client a file is for.".into(),
+            );
+        }
+        if self.document_name == 0 {
+            return Some("The document name must be in the name: it says what a file is.".into());
+        }
+        None
+    }
+
+    /// The regex reading a printed file name (`.pdf` included). Groups: `client`, `id`, `form`,
+    /// `amended`, `doc`, `recipient`, `year`, `state`, `ye`, `printed`. `docs` are the document
+    /// names to recognize (longest first is done here); other names still read as `doc`.
+    pub fn regex(&self, docs: &[String]) -> String {
+        format!("(?i)^{}\\.pdf$", self.body(docs, "recipient"))
+    }
+
+    /// The name part of [`Layout::regex`], with the recipient group named `who`.
+    pub fn body(&self, docs: &[String], who: &str) -> String {
+        let mut names: Vec<&String> = docs.iter().filter(|d| !d.is_empty()).collect();
+        names.sort_by_key(|d| std::cmp::Reverse(d.len()));
+        names.dedup();
+        let alts: Vec<String> = names.iter().map(|d| regex::escape(d)).collect();
+        let doc_alt = if alts.is_empty() {
+            ".+?".to_string()
+        } else {
+            format!("{}|.+?", alts.join("|"))
+        };
+        let mut parts = Vec::new();
+        for v in self.order() {
+            let mut p = match v {
+                Var::ClientName => "(?P<client>.+?)".to_string(),
+                Var::ClientId => "(?P<id>[^_ ]+)".to_string(),
+                Var::EntityType => "(?P<form>[A-Za-z0-9-]+)".to_string(),
+                Var::TaxYear => "(?P<year>(?:19|20)\\d{2})".to_string(),
+                Var::YearEnd => "(?P<ye>[^_]+)".to_string(),
+                Var::DatePrinted => "(?P<printed>[^_]+)".to_string(),
+                Var::DocumentName => {
+                    let mut d = format!("(?:(?P<amended>Amended|Superseded)_)?(?P<doc>{doc_alt})");
+                    if self.k1_recipient_after_document {
+                        d.push_str(&format!("(?:_(?P<{who}>[^_]+?))??"));
+                    }
+                    d
+                }
+            };
+            if self.postal_code_after == Some(v) {
+                p.push_str("(?:_(?P<state>[A-Z]{2}))?");
+            }
+            parts.push(p);
+        }
+        parts.join("_")
+    }
+
+    /// The example UltraTax shows under the variables.
+    pub fn example(&self, document: &str) -> String {
+        let mut parts = Vec::new();
+        for v in self.order() {
+            let mut p = match v {
+                Var::ClientName => "John Smith".to_string(),
+                Var::ClientId => "THOMREUT".to_string(),
+                Var::EntityType => "1040NR".to_string(),
+                Var::TaxYear => "2025".to_string(),
+                Var::YearEnd => "1225".to_string(),
+                Var::DatePrinted => "11032026".to_string(),
+                Var::DocumentName => {
+                    let mut d = document.to_string();
+                    if self.k1_recipient_after_document {
+                        d.push_str("_Pat Partner*");
+                    }
+                    d
+                }
+            };
+            if self.postal_code_after == Some(v) {
+                p.push_str("_NE");
+            }
+            parts.push(p);
+        }
+        format!("{}.pdf", parts.join("_"))
+    }
+}
+
+/// What happens to one document.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Action {
+    /// Sent to Intake and filed in its folder.
+    #[default]
+    File,
+    /// Not filed: the print is kept in the capture folder's `_processed`.
+    Skip,
+}
+
+/// The doc type a K-1 row takes from the entity type (1120-S, 1065, 1041).
+pub const K1_BY_FORM: &str = "K-1 (by entity type)";
+
+/// One row of UltraTax's Document Names tab, with what Vibe Files does with it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Row {
+    /// UltraTax's default document name (`PreparerCopyTaxReturn`); also the row's identity.
+    pub default_name: String,
+    /// The custom name set in UltraTax (`Preparer_Copy_Tax_Return`); empty = the default.
+    #[serde(default)]
+    pub custom_name: String,
+    /// Doc type name, or [`K1_BY_FORM`]; empty = none.
+    #[serde(default)]
+    pub doc_type: String,
+    #[serde(default)]
+    pub action: Action,
+    /// Folder below the client folder; empty = the doc type's default.
+    #[serde(default)]
+    pub folder: String,
+    /// The name it is filed under (tokens, see [`TOKENS`]); empty = as printed.
+    #[serde(default)]
+    pub rename: String,
+    /// A K-1 for one partner is also copied to that partner's folder (when the partner is a
+    /// related client or in the client list).
+    #[serde(default)]
+    pub copy_to_partner: bool,
+}
+
+/// UltraTax's document groups and rows, as its Document Names tab lists them: (group, label,
+/// default name). The Organizer (XLS) row is left out: the capture folder takes PDFs.
+pub const DOCUMENTS: [(&str, &str, &str); 13] = [
+    (
+        "Tax Return (government copy)",
+        "GovernmentCopyTaxReturn",
+        "GovernmentCopyTaxReturn",
+    ),
+    (
+        "Tax Return (government copy)",
+        "GovernmentCopyK1Package",
+        "GovernmentCopyK1Package",
+    ),
+    (
+        "Tax Return (client copy)",
+        "ArchivedTaxReturn",
+        "ArchivedTaxReturn",
+    ),
+    (
+        "Tax Return (client copy)",
+        "TaxReturn-ActionRequired",
+        "TaxReturn-ActionRequired",
+    ),
+    (
+        "Tax Return (client copy)",
+        "ArchiveK1Package",
+        "ArchiveK1Package",
+    ),
+    (
+        "Tax Return (client copy)",
+        "ActionRequiredK1Package",
+        "ActionRequiredK1Package",
+    ),
+    (
+        "Tax Return (client copy)",
+        "TaxSourceDocuments",
+        "TaxSourceDocuments",
+    ),
+    (
+        "Tax Return (preparer copy)",
+        "PreparerCopyTaxReturn",
+        "PreparerCopyTaxReturn",
+    ),
+    (
+        "Tax Return (preparer copy)",
+        "PreparerCopyK1Package",
+        "PreparerCopyK1Package",
+    ),
+    ("Organizer", "Organizer (PDF)", "Organizer"),
+    (
+        "Organizer",
+        "Organizer-ActionRequired",
+        "Organizer-ActionRequired",
+    ),
+    ("Other", "Extension", "Extension"),
+    ("Other", "InputScreens", "InputScreens"),
+];
+
+/// The group a row belongs to (by its default name).
+pub fn group_of(default_name: &str) -> &'static str {
+    DOCUMENTS
+        .iter()
+        .find(|(_, _, d)| *d == default_name)
+        .map_or("Other", |(g, _, _)| *g)
+}
+
+/// UltraTax's label for a row.
+pub fn label_of(default_name: &str) -> &str {
+    DOCUMENTS
+        .iter()
+        .find(|(_, _, d)| *d == default_name)
+        .map_or(default_name, |(_, l, _)| *l)
+}
+
+/// The rows seeded for this office: its custom names (owner's screenshot 2026-11-03); every
+/// document filed, in its doc type's default folder, under its printed name. Government and
+/// preparer copies are filed like the client copy until the firm says otherwise.
+pub fn default_rows() -> Vec<Row> {
+    let row = |d: &str, custom: &str, doc_type: &str, copy: bool| Row {
+        default_name: d.into(),
+        custom_name: custom.into(),
+        doc_type: doc_type.into(),
+        action: Action::File,
+        folder: String::new(),
+        rename: String::new(),
+        copy_to_partner: copy,
+    };
+    vec![
+        row(
+            "GovernmentCopyTaxReturn",
+            "",
+            "Return copy — federal",
+            false,
+        ),
+        row("GovernmentCopyK1Package", "", K1_BY_FORM, false),
+        row(
+            "ArchivedTaxReturn",
+            "Tax_Return",
+            "Return copy — federal",
+            false,
+        ),
+        row(
+            "TaxReturn-ActionRequired",
+            "Sign_Return_Mail_These_Documents",
+            "8879 e-file authorization",
+            false,
+        ),
+        row("ArchiveK1Package", "K1_Package", K1_BY_FORM, true),
+        row("ActionRequiredK1Package", "K1_Letter", K1_BY_FORM, false),
+        row(
+            "TaxSourceDocuments",
+            "Tax_Return_Documents",
+            "Workpaper",
+            false,
+        ),
+        row(
+            "PreparerCopyTaxReturn",
+            "Preparer_Copy_Tax_Return",
+            "Return copy — federal",
+            false,
+        ),
+        row(
+            "PreparerCopyK1Package",
+            "Preparer_Copy_K1",
+            K1_BY_FORM,
+            false,
+        ),
+        row("Organizer", "", "Organizer", false),
+        row("Organizer-ActionRequired", "", "Organizer", false),
+        row("Extension", "", "Extension", false),
+        row("InputScreens", "", "Workpaper", false),
+    ]
+}
+
+impl Row {
+    /// The name UltraTax prints for it.
+    pub fn printed_name(&self) -> &str {
+        if self.custom_name.trim().is_empty() {
+            &self.default_name
+        } else {
+            self.custom_name.trim()
+        }
+    }
+
+    /// Both names a print may carry (custom names can be switched off in UltraTax).
+    pub fn names(&self) -> Vec<String> {
+        let mut v = vec![self.default_name.clone()];
+        if !self.custom_name.trim().is_empty() {
+            v.push(self.custom_name.trim().to_string());
+        }
+        v
+    }
+
+    /// The doc type for a print of entity type `form`.
+    pub fn doc_type_for(&self, form: Option<&str>) -> Option<String> {
+        if self.doc_type == K1_BY_FORM {
+            return k1_type(form?).map(str::to_string);
+        }
+        (!self.doc_type.is_empty()).then(|| self.doc_type.clone())
+    }
+
+    /// The rename template in effect.
+    pub fn template(&self) -> &str {
+        if self.rename.trim().is_empty() {
+            "{Printed}"
+        } else {
+            self.rename.trim()
+        }
+    }
+}
+
+/// The K-1 doc type for an entity type.
+pub fn k1_type(form: &str) -> Option<&'static str> {
+    let f = form.to_ascii_uppercase().replace('-', "");
+    if f.starts_with("1120S") {
+        Some("K-1 (1120-S)")
+    } else if f.starts_with("1065") {
+        Some("K-1 (1065)")
+    } else if f.starts_with("1041") {
+        Some("K-1 (1041)")
+    } else {
+        None
+    }
+}
+
+/// Rename tokens, for the editor's help.
+pub const TOKENS: [(&str, &str); 10] = [
+    ("{Printed}", "the name as UltraTax printed it"),
+    (
+        "{Document}",
+        "the document name as printed (Preparer_Copy_Tax_Return)",
+    ),
+    ("{DocType}", "the doc type"),
+    ("{Client}", "the client's name in the client list"),
+    ("{ID}", "the client ID"),
+    ("{Year}", "the tax year"),
+    ("{Form}", "the federal entity type (1040, 1120S, …)"),
+    ("{Recipient}", "the K-1 partner"),
+    ("{State}", "the state postal code (separate state returns)"),
+    (
+        "{Amended}",
+        "\"Amended\" or \"Superseded\" when UltraTax added it",
+    ),
+];
+
+/// Values for [`render`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Values {
+    pub printed: String,
+    pub document: String,
+    pub doc_type: String,
+    pub client: String,
+    pub id: String,
+    pub year: String,
+    pub form: String,
+    pub recipient: String,
+    pub state: String,
+    pub amended: String,
+}
+
+/// Fills `template`; parts left empty leave no doubled separators behind.
+pub fn render(template: &str, v: &Values) -> String {
+    let mut s = template.to_string();
+    for (k, val) in [
+        ("{Printed}", &v.printed),
+        ("{Document}", &v.document),
+        ("{DocType}", &v.doc_type),
+        ("{Client}", &v.client),
+        ("{ID}", &v.id),
+        ("{Year}", &v.year),
+        ("{Form}", &v.form),
+        ("{Recipient}", &v.recipient),
+        ("{State}", &v.state),
+        ("{Amended}", &v.amended),
+    ] {
+        s = s.replace(k, val);
+    }
+    // Tidy what empty parts leave: "2025 -  - x" → "2025 - x".
+    let mut out = String::new();
+    let mut last_sep = String::new();
+    for ch in s.chars() {
+        let sep = matches!(ch, ' ' | '_' | '-');
+        if sep {
+            last_sep.push(ch);
+        } else {
+            if !out.is_empty() && !last_sep.is_empty() {
+                // Keep the separator the template meant ("_" or " - "), collapsed.
+                let t = last_sep.trim();
+                let joined = if t.is_empty() {
+                    if last_sep.contains('_') { "_" } else { " " }.to_string()
+                } else if last_sep.starts_with(' ') || last_sep.ends_with(' ') {
+                    format!(" {} ", &t[..t.chars().next().map_or(0, |c| c.len_utf8())])
+                } else {
+                    t.chars().take(1).collect()
+                };
+                out.push_str(&joined);
+            }
+            last_sep.clear();
+            out.push(ch);
+        }
+    }
+    out
+}
+
+/// What is wrong with `row`'s rename, if anything.
+pub fn rename_problem(row: &Row) -> Option<String> {
+    let t = row.template();
+    if let Some(c) = t.chars().find(|c| r#"\/:*?"<>|"#.contains(*c)) {
+        return Some(format!(
+            "{}: the name cannot contain {c}",
+            label_of(&row.default_name)
+        ));
+    }
+    let mut rest = t.to_string();
+    for (k, _) in TOKENS {
+        rest = rest.replace(k, "");
+    }
+    if rest.contains('{') || rest.contains('}') {
+        return Some(format!(
+            "{}: unknown {{token}} in the name",
+            label_of(&row.default_name)
+        ));
+    }
+    if !t.contains("{Document}") && !t.contains("{Printed}") {
+        return Some(format!(
+            "{}: the name must keep {{Document}} or {{Printed}}: Intake recognizes the document by it",
+            label_of(&row.default_name)
+        ));
+    }
+    if row.copy_to_partner && !(t.ends_with("{Recipient}") || t == "{Printed}") {
+        return Some(format!(
+            "{}: to copy to the partner the name must end with {{Recipient}}",
+            label_of(&row.default_name)
+        ));
+    }
+    None
+}
+
+/// The Filer rule pattern that recognizes `row`'s rendered names: its document name as a whole
+/// phrase (separators `_`, space or `-` alike), with the partner's name captured as `who` when
+/// it copies to the partner. Rules are tried longest phrase first, so `Tax_Return` never claims
+/// `Preparer_Copy_Tax_Return`.
+pub fn rule_pattern(row: &Row) -> String {
+    let words: Vec<String> = row
+        .names()
+        .iter()
+        .map(|n| {
+            crate::pipeline::words(n)
+                .split([' ', '-'])
+                .filter(|w| !w.is_empty())
+                .map(regex::escape)
+                .collect::<Vec<_>>()
+                .join(r"[\s_-]*")
+        })
+        .collect();
+    let mut alts = words;
+    alts.sort_by_key(|a| std::cmp::Reverse(a.len()));
+    alts.dedup();
+    let phrase = format!("(?:{})", alts.join("|"));
+    if row.copy_to_partner {
+        format!(r"(?:^|[^a-z0-9]){phrase}(?:[\s_-]+(?P<who>.+?))??(?:_[a-z0-9]+)?$")
+    } else {
+        format!(r"(?:^|[^a-z0-9]){phrase}(?:[^a-z0-9]|$)")
+    }
+}
+
+/// How long a row's phrase is (the order rules are tried in).
+pub fn phrase_len(row: &Row) -> usize {
+    row.names()
+        .iter()
+        .map(|n| crate::pipeline::words(n).len())
+        .max()
+        .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn office_layout_reads_the_office_names() {
+        let l = Layout::default();
+        let docs: Vec<String> = default_rows().iter().flat_map(Row::names).collect();
+        let re = regex::Regex::new(&l.regex(&docs)).unwrap();
+        let c = re
+            .captures("Harbor Point Farms LLC_2025_1120S_Preparer_Copy_K1_Dana Reyes_HARB1234.pdf")
+            .unwrap();
+        assert_eq!(&c["client"], "Harbor Point Farms LLC");
+        assert_eq!(&c["year"], "2025");
+        assert_eq!(&c["form"], "1120S");
+        assert_eq!(&c["doc"], "Preparer_Copy_K1");
+        assert_eq!(&c["recipient"], "Dana Reyes");
+        assert_eq!(&c["id"], "HARB1234");
+        let c = re
+            .captures("Reyes, Dana & Lee_2025_1040_Amended_Tax_Return_REYE5521.pdf")
+            .unwrap();
+        assert_eq!(&c["doc"], "Tax_Return");
+        assert_eq!(&c["amended"], "Amended");
+        assert!(c.name("recipient").is_none());
+        // A document not in the table still reads.
+        let c = re
+            .captures("Reyes, Dana & Lee_2025_1040_Invoice_REYE5521.pdf")
+            .unwrap();
+        assert_eq!(&c["doc"], "Invoice");
+        assert_eq!(
+            l.example("Tax_Return"),
+            "John Smith_2025_1040NR_Tax_Return_Pat Partner*_THOMREUT.pdf"
+        );
+    }
+
+    #[test]
+    fn phrases_do_not_claim_longer_names() {
+        let rows = default_rows();
+        let get = |d: &str| rows.iter().find(|r| r.default_name == d).unwrap();
+        let tax = regex::RegexBuilder::new(&rule_pattern(get("ArchivedTaxReturn")))
+            .case_insensitive(true)
+            .build()
+            .unwrap();
+        assert!(tax.is_match("Reyes_2025_1040_Tax_Return_REYE5521"));
+        assert!(tax.is_match("2025 Tax Return - Reyes"));
+        assert!(phrase_len(get("PreparerCopyTaxReturn")) > phrase_len(get("ArchivedTaxReturn")));
+        let k1 = regex::RegexBuilder::new(&rule_pattern(get("ArchiveK1Package")))
+            .case_insensitive(true)
+            .build()
+            .unwrap();
+        let c = k1
+            .captures("Harbor Point Farms LLC_2025_1120S_K1_Package_Dana Reyes_HARB1234")
+            .unwrap();
+        assert_eq!(&c["who"], "Dana Reyes");
+        let c = k1.captures("Harbor_2025_1065_K1_Package_HARB1234").unwrap();
+        assert!(c.name("who").is_none());
+        let c = k1.captures("2025 K1 Package - Dana Reyes").unwrap();
+        assert_eq!(&c["who"], "Dana Reyes");
+    }
+
+    #[test]
+    fn render_tidies_empty_parts() {
+        let v = Values {
+            year: "2025".into(),
+            document: "Tax_Return".into(),
+            client: "Reyes, Dana".into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            render("{Year} {Document} - {Recipient}", &v),
+            "2025 Tax_Return"
+        );
+        assert_eq!(
+            render("{Year} {Amended} {Document} - {Client}", &v),
+            "2025 Tax_Return - Reyes, Dana"
+        );
+        let mut r = default_rows()[0].clone();
+        r.rename = "{Year} return".into();
+        assert!(rename_problem(&r).is_some());
+        r.rename = "{Year} {Document}".into();
+        assert!(rename_problem(&r).is_none());
+    }
+}

@@ -10,4 +10,5 @@ pub mod scanner;
 pub mod sheet;
 pub mod stack;
 pub mod twain;
+pub mod ultratax;
 pub mod worker;
