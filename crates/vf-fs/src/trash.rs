@@ -342,7 +342,8 @@ pub fn auto_empty(conn: &mut Connection, root: &Path, device_id: &str) -> Result
     Ok(n)
 }
 
-/// `_Vibe/trash_pin.json`: the firm PIN's hash (Q-29).
+/// `_Vibe/trash_pin.json`: the admin password's hash (Q-29 "firm PIN", Q-49 admin password:
+/// the same secret, so a PIN set before is the admin password). Deleting the file clears it.
 pub fn pin_file(root: &Path) -> PathBuf {
     root.join(cabinet::VIBE_DIR).join("trash_pin.json")
 }
@@ -382,7 +383,7 @@ pub fn set_pin(
 ) -> Result<(), String> {
     let had = has_pin(root);
     if had && !current.is_some_and(|c| check_pin(root, c)) {
-        return Err("the current PIN is not right".into());
+        return Err("the current admin password is not right".into());
     }
     let set_before = conn
         .query_row(
@@ -406,6 +407,51 @@ pub fn set_pin(
     };
     Transaction::new(PIN_LABEL)
         .audit(AuditEntry::new("firm_pin_set", None, json!({ "how": how })))
+        .commit(conn, &mut NoFileOps, &Actor::device(device_id))
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
+/// Unlocks Admin and the Sync settings with the admin password (Q-49). Both outcomes are
+/// audited (`admin_unlock`, `admin_unlock_refused`; no text). `Err` = wait that many seconds
+/// (too many wrong tries).
+pub fn unlock_admin(
+    conn: &mut Connection,
+    root: &Path,
+    device_id: &str,
+    password: &str,
+) -> Result<bool, u64> {
+    let Some(h) = stored_pin(root) else {
+        return Ok(true);
+    };
+    let ok = vf_security::pin::check(password, &h)?;
+    let _ = Transaction::new(PIN_LABEL)
+        .audit(AuditEntry::new(
+            if ok {
+                "admin_unlock"
+            } else {
+                "admin_unlock_refused"
+            },
+            None,
+            json!({}),
+        ))
+        .commit(conn, &mut NoFileOps, &Actor::device(device_id));
+    Ok(ok)
+}
+
+/// Removes the admin password (the current one needed). Audited `firm_pin_removed`.
+pub fn remove_pin(
+    conn: &mut Connection,
+    root: &Path,
+    device_id: &str,
+    current: &str,
+) -> Result<(), String> {
+    if !check_pin(root, current) {
+        return Err("the current admin password is not right".into());
+    }
+    std::fs::remove_file(pin_file(root)).map_err(|e| e.to_string())?;
+    Transaction::new(PIN_LABEL)
+        .audit(AuditEntry::new("firm_pin_removed", None, json!({})))
         .commit(conn, &mut NoFileOps, &Actor::device(device_id))
         .map(|_| ())
         .map_err(|e| e.to_string())

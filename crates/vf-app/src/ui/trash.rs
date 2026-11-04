@@ -1,4 +1,4 @@
-//! Admin › Trash (PHASES P05 step 3): what was deleted, restore it, empty it with the firm PIN
+//! Admin › Trash (PHASES P05 step 3): what was deleted, restore it, empty it with the admin password
 //! (QUESTIONS Q-29). Trash older than 90 days empties on its own when a cabinet opens (Q-15);
 //! documents under a legal hold stay until it is released.
 
@@ -16,11 +16,8 @@ pub struct TrashPage {
     items: Option<Vec<Trashed>>,
     /// Ticked doc ids.
     picked: BTreeSet<String>,
+    /// The admin password typed to empty the trash.
     pin: String,
-    /// Setting or changing the PIN.
-    new_pin: String,
-    new_pin_again: String,
-    changing: bool,
     pub notice: Option<String>,
     pub error: Option<String>,
     /// The catalog changed (restore / empty): Browse re-reads.
@@ -83,7 +80,7 @@ pub fn show(ui: &mut egui::Ui, p: &mut TrashPage, env: &mut Env) {
         }
         ui.separator();
         if has_pin {
-            let l = ui.label("Firm PIN");
+            let l = ui.label("Password");
             ui.add(
                 TextEdit::singleline(&mut p.pin)
                     .password(true)
@@ -106,8 +103,8 @@ pub fn show(ui: &mut egui::Ui, p: &mut TrashPage, env: &mut Env) {
             if go.clicked() {
                 if !trash::check_pin(env.root, &p.pin) {
                     p.error = Some(match vf_fs::trash::pin_wait() {
-                        0 => "That PIN is not right.".to_string(),
-                        w => format!("Too many wrong PINs: try again in {w} s."),
+                        0 => "That admin password is not right.".to_string(),
+                        w => format!("Too many wrong passwords: try again in {w} s."),
                     });
                 } else {
                     let chosen: Vec<Trashed> = items
@@ -140,61 +137,12 @@ pub fn show(ui: &mut egui::Ui, p: &mut TrashPage, env: &mut Env) {
                 }
                 p.pin.clear();
             }
-            if ui.small_button("Change PIN").clicked() {
-                p.changing = !p.changing;
-            }
         } else {
             ui.label(widgets::caption(
-                "Set a firm PIN to empty the trash by hand (anyone who knows it can).",
+                "Set an admin password (Admin › Admin password) to empty the trash by hand.",
             ));
         }
     });
-    if !has_pin || p.changing {
-        ui.horizontal(|ui| {
-            if has_pin {
-                let l = ui.label("Current PIN");
-                ui.add(
-                    TextEdit::singleline(&mut p.pin)
-                        .password(true)
-                        .desired_width(80.0),
-                )
-                .labelled_by(l.id);
-            }
-            let l = ui.label("New PIN");
-            ui.add(
-                TextEdit::singleline(&mut p.new_pin)
-                    .password(true)
-                    .desired_width(80.0),
-            )
-            .labelled_by(l.id);
-            let l = ui.label("Again");
-            ui.add(
-                TextEdit::singleline(&mut p.new_pin_again)
-                    .password(true)
-                    .desired_width(80.0),
-            )
-            .labelled_by(l.id);
-            if ui.button("Set PIN").clicked() {
-                if p.new_pin != p.new_pin_again {
-                    p.error = Some("The two PINs differ.".into());
-                } else {
-                    let current = has_pin.then_some(p.pin.as_str());
-                    match trash::set_pin(env.conn, env.root, env.device_id, current, &p.new_pin) {
-                        Ok(()) => {
-                            tracing::info!("firm PIN set");
-                            p.notice = Some("The firm PIN is set.".into());
-                            p.error = None;
-                            p.changing = false;
-                        }
-                        Err(e) => p.error = Some(e),
-                    }
-                }
-                p.pin.clear();
-                p.new_pin.clear();
-                p.new_pin_again.clear();
-            }
-        });
-    }
     if let Some(n) = &p.notice {
         ui.label(RichText::new(n).color(theme::ink_secondary()));
     }

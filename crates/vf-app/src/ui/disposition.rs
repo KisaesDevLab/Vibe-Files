@@ -2,7 +2,7 @@
 //!
 //! Disposition: the "eligible for disposition" report by client and class, approve (destroyed
 //! after 30 days) or defer (12 months) per line, what waits for destruction, "Destroy due now"
-//! with the firm PIN, and the runs with their certificates. Review it monthly; nothing runs on
+//! with the admin password, and the runs with their certificates. Review it monthly; nothing runs on
 //! its own.
 
 use std::collections::BTreeSet;
@@ -220,7 +220,7 @@ pub fn show(ui: &mut egui::Ui, p: &mut DispositionPage, env: &mut Env) {
         if due > 0 {
             ui.horizontal(|ui| {
                 if vf_fs::trash::has_pin(env.root) {
-                    let l = ui.label("Firm PIN");
+                    let l = ui.label("Password");
                     ui.add(TextEdit::singleline(&mut p.pin).password(true).desired_width(80.0))
                         .labelled_by(l.id);
                     let go = ui
@@ -232,8 +232,8 @@ pub fn show(ui: &mut egui::Ui, p: &mut DispositionPage, env: &mut Env) {
                     if go.clicked() {
                         if !vf_fs::trash::check_pin(env.root, &p.pin) {
                             p.error = Some(match vf_fs::trash::pin_wait() {
-                                0 => "That PIN is not right.".to_string(),
-                                w => format!("Too many wrong PINs: try again in {w} s."),
+                                0 => "That admin password is not right.".to_string(),
+                                w => format!("Too many wrong passwords: try again in {w} s."),
                             });
                         } else {
                             let name = vf_fs::cabinet::read(env.root)
@@ -279,7 +279,7 @@ pub fn show(ui: &mut egui::Ui, p: &mut DispositionPage, env: &mut Env) {
                     }
                 } else {
                     ui.label(widgets::caption(
-                        "Set the firm PIN (Admin › Trash) to destroy approved documents.",
+                        "Set the admin password (Admin › Admin password) to destroy approved documents.",
                     ));
                 }
             });
@@ -429,7 +429,7 @@ pub fn confirm_release(
         let need_pin = vf_fs::trash::has_pin(env.root);
         if need_pin {
             ui.horizontal(|ui| {
-                let l = ui.label("Firm PIN");
+                let l = ui.label("Password");
                 ui.add(egui::TextEdit::singleline(pin).password(true).desired_width(120.0))
                     .labelled_by(l.id);
             });
@@ -439,7 +439,7 @@ pub fn confirm_release(
                 if !need_pin || vf_fs::trash::check_pin(env.root, pin) {
                     out = Some(true);
                 } else {
-                    ui.ctx().debug_text("wrong PIN");
+                    ui.ctx().debug_text("wrong admin password");
                 }
             }
             if ui.button("Cancel").clicked() {

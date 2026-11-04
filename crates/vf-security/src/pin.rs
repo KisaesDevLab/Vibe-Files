@@ -52,7 +52,9 @@ pub fn check(pin: &str, phc: &str) -> Result<bool, u64> {
 /// The PHC hash to store for `pin`.
 pub fn hash(pin: &str) -> Result<String, String> {
     if pin.chars().count() < MIN_PIN_LEN {
-        return Err(format!("the PIN needs at least {MIN_PIN_LEN} characters"));
+        return Err(format!(
+            "the admin password needs at least {MIN_PIN_LEN} characters"
+        ));
     }
     let mut salt = [0u8; 16];
     getrandom::fill(&mut salt).map_err(|e| format!("random generator: {e}"))?;

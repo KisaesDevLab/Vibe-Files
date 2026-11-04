@@ -93,6 +93,12 @@ pub struct OpenCabinet {
     pub sweep: crate::ui::sweep::SweepState,
     /// B2 sync (P11).
     pub sync: crate::ui::sync::SyncTab,
+    /// The admin password was given in this session (PA-24): Admin and Sync settings open
+    /// until Vibe Files closes or Lock Admin.
+    pub admin_unlocked: bool,
+    /// The lock screen's field and message.
+    admin_typed: String,
+    admin_msg: Option<String>,
     /// Startup self-checks (P13 step 4), while they run.
     checks: Option<mpsc::Receiver<Vec<crate::selfcheck::Check>>>,
 }
@@ -402,6 +408,9 @@ impl VibeFilesApp {
                     search: Default::default(),
                     viewer: Default::default(),
                     indexed_seen: (0, None),
+                    admin_unlocked: false,
+                    admin_typed: String::new(),
+                    admin_msg: None,
                 }));
             }
             Err(e) => {
@@ -661,6 +670,7 @@ impl eframe::App for VibeFilesApp {
                     .map(|c| (c.id.clone(), c.name.clone()))
                     .collect();
                 let cabinet_id = o.opened.cabinet.cabinet_id.clone();
+                let admin = o.admin_unlocked || !vf_fs::trash::has_pin(&o.opened.root);
                 crate::ui::sync::show(
                     ui,
                     &mut o.sync,
@@ -674,6 +684,7 @@ impl eframe::App for VibeFilesApp {
                         cabinet_id: &cabinet_id,
                         cfg: &self.config.sync,
                         clients: &clients,
+                        admin,
                     },
                 );
             }
@@ -687,6 +698,9 @@ impl eframe::App for VibeFilesApp {
                     chain: o_chain,
                     sweep: o_sweep,
                     sync: o_sync,
+                    admin_unlocked,
+                    admin_typed,
+                    admin_msg,
                     ..
                 } = &mut **o;
                 let mut env = browse::Env {
@@ -694,7 +708,22 @@ impl eframe::App for VibeFilesApp {
                     root: &opened.root,
                     device_id: &self.config.device_id,
                 };
-                if self.tab == Tab::Admin {
+                // The admin password (PA-24): Admin waits behind the lock screen.
+                if self.tab == Tab::Admin && !*admin_unlocked && vf_fs::trash::has_pin(&opened.root)
+                {
+                    egui::CentralPanel::default().show(ui, |ui| {
+                        if let crate::ui::admin_password::Unlock::Unlocked =
+                            crate::ui::admin_password::lock_screen(
+                                ui,
+                                admin_typed,
+                                admin_msg,
+                                &mut env,
+                            )
+                        {
+                            *admin_unlocked = true;
+                        }
+                    });
+                } else if self.tab == Tab::Admin {
                     let a = tab_admin.get_or_insert_with(|| Admin::load(&env));
                     a.capture = self.config.ingest.print_capture.clone();
                     a.chain = Some(o_chain.clone());
@@ -707,6 +736,9 @@ impl eframe::App for VibeFilesApp {
                             catalog: &opened.catalog,
                         },
                     );
+                    if std::mem::take(&mut a.lock_requested) {
+                        *admin_unlocked = false;
+                    }
                     if std::mem::take(&mut a.audit.verify_requested) {
                         *o_chain = crate::ui::audit::ChainCheck::run(env.conn);
                     }
@@ -2307,6 +2339,71 @@ mod tests {
             h.ctx.options(|o| o.theme_preference),
             egui::ThemePreference::System
         );
+    }
+
+    /// PA-24: with an admin password set, Admin and the Sync settings wait for it (wrong ones
+    /// refused and audited); Lock Admin locks again.
+    #[test]
+    fn admin_password_locks_admin_and_sync_settings() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("Clients");
+        let req = CreateRequest {
+            root: &root,
+            name: "Firm",
+        };
+        let mut o = session::create(&tmp.path().join("pc1"), "dev-1", &req).unwrap();
+        vf_fs::trash::set_pin(&mut o.conn, &root, "dev-1", None, "invented-pass-1").unwrap();
+        drop(o);
+        let mut h = harness(&tmp.path().join("pc1"));
+        click(&mut h, "Open existing");
+        type_into(&mut h, "Cabinet folder", &root.display().to_string());
+        click(&mut h, "Open cabinet");
+        settle(&mut h);
+        // Sync: the set-up form waits for the password.
+        click(&mut h, "Sync");
+        h.run();
+        assert!(h.query_by_label("Sync is not set up on this PC.").is_some());
+        assert!(h.query_by_label("Connect").is_none());
+        // Admin: the lock screen.
+        click(&mut h, "Admin");
+        h.run();
+        assert!(h.query_by_label("Admin is locked").is_some());
+        type_into(&mut h, "Admin password", "wrong-password");
+        click(&mut h, "Unlock");
+        h.run();
+        assert!(
+            h.query_by_label("That admin password is not right.")
+                .is_some()
+        );
+        type_into(&mut h, "Admin password", "invented-pass-1");
+        click(&mut h, "Unlock");
+        h.run();
+        assert!(h.query_by_label("Admin is locked").is_none());
+        assert!(h.query_by_label("Lock Admin").is_some());
+        click(&mut h, "Sync");
+        h.run();
+        assert!(
+            h.query_by_label("Connect").is_some(),
+            "set-up open once unlocked"
+        );
+        {
+            let Screen::Open(o) = &h.state().screen else {
+                unreachable!()
+            };
+            let n = |a: &str| -> i64 {
+                o.opened
+                    .conn
+                    .query_row("SELECT count(*) FROM audit WHERE action = ?1", [a], |r| {
+                        r.get(0)
+                    })
+                    .unwrap()
+            };
+            assert_eq!((n("admin_unlock_refused"), n("admin_unlock")), (1, 1));
+        }
+        click(&mut h, "Admin");
+        click(&mut h, "Lock Admin");
+        h.run();
+        assert!(h.query_by_label("Admin is locked").is_some());
     }
 
     /// Text size (owner 2026-11-04): the header's A+ / A- change it and this PC keeps it.

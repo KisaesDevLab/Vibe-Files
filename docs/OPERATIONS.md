@@ -174,3 +174,10 @@ no names, paths or document contents.
 5. winget: open a pull request to `microsoft/winget-pkgs` with the generated
    `manifests/k/Kisaes/VibeFiles/<ver>/` files (`wingetcreate submit` or by hand). The first
    submission is reviewed by Microsoft; later ones are routine.
+
+## Admin password
+
+One password for the cabinet (Admin › Admin password). It locks the Admin tab and the Sync settings on every PC; anyone can still push, pull and verify. It also empties the trash by hand and releases legal holds (it was called the firm PIN before). A PC stays unlocked until Vibe Files closes, or until **Lock Admin**.
+
+Forgotten: on the server, delete `_Vibe	rash_pin.json` in the cabinet folder, then set a new one in Admin › Admin password. Setting it again is audited as a reset. Anyone who can change files in the cabinet folder can do this, so the password keeps settings from being changed by mistake; it is not a security boundary.
+

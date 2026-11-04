@@ -644,7 +644,12 @@ pub struct View<'a> {
     pub cfg: &'a SyncConfig,
     /// (id, name) of every client, for the pending table.
     pub clients: &'a [(String, String)],
+    /// The settings may change: no admin password, or it was given this session (PA-24).
+    /// Push, pull and verify do not need it.
+    pub admin: bool,
 }
+
+const ADMIN_NEEDED: &str = "Needs the admin password (Admin tab).";
 
 pub fn show(ui: &mut egui::Ui, t: &mut SyncTab, env: &mut Env, v: View<'_>) {
     egui::CentralPanel::default().show(ui, |ui| {
@@ -669,15 +674,28 @@ pub fn show(ui: &mut egui::Ui, t: &mut SyncTab, env: &mut Env, v: View<'_>) {
         }
         ui.add_space(6.0);
         let configured = v.cfg.configured_for(v.cabinet_id);
-        if !configured {
+        if !v.admin {
+            // Without the admin password nothing here shares or forgets the key.
+            t.form.share = false;
+        }
+        if !configured && !v.admin {
+            ui.label("Sync is not set up on this PC.");
+            ui.label(widgets::caption(
+                "Setting it up needs the admin password (Admin tab). Once the firm keeps the key in \
+                 the cabinet (Sync › \"Let everyone who opens this cabinet sync\"), this PC syncs \
+                 without any set-up.",
+            ));
+        } else if !configured {
             setup_form(ui, t, env, &v);
         } else if t.session.is_none() {
             ui.label("Sync is set up for this cabinet. Unlock it for this session:");
             field(ui, "Sync passphrase", &mut t.form.unlock, true, "");
             ui.checkbox(&mut t.form.remember, "Remember on this PC for my Windows login")
                 .on_hover_text(REMEMBER_HELP);
-            ui.checkbox(&mut t.form.share, SHARE_LABEL)
-                .on_hover_text(SHARE_HELP);
+            if v.admin {
+                ui.checkbox(&mut t.form.share, SHARE_LABEL)
+                    .on_hover_text(SHARE_HELP);
+            }
             if ui
                 .add_enabled(!t.running(), widgets::primary_button("Unlock"))
                 .clicked()
@@ -811,14 +829,22 @@ fn unlocked(ui: &mut egui::Ui, t: &mut SyncTab, env: &mut Env, v: &View<'_>) {
         }
         let mut cfg = v.cfg.clone();
         if ui
-            .button(if cfg.paused { "Resume" } else { "Pause" })
+            .add_enabled(
+                v.admin,
+                egui::Button::new(if cfg.paused { "Resume" } else { "Pause" }),
+            )
+            .on_disabled_hover_text(ADMIN_NEEDED)
             .clicked()
         {
             cfg.paused = !cfg.paused;
             t.config_changed = Some(cfg);
         }
         if ui
-            .add_enabled(idle, egui::Button::new("Restore cabinet to a folder…"))
+            .add_enabled(
+                idle && v.admin,
+                egui::Button::new("Restore cabinet to a folder…"),
+            )
+            .on_disabled_hover_text(ADMIN_NEEDED)
             .on_hover_text("Rebuilds the whole cabinet from the bucket into an empty folder.")
             .clicked()
             && let Some(p) = rfd::FileDialog::new().pick_folder()
@@ -836,6 +862,7 @@ fn unlocked(ui: &mut egui::Ui, t: &mut SyncTab, env: &mut Env, v: &View<'_>) {
         }
         let data = data_dir(v.catalog);
         if t.remembered
+            && v.admin
             && ui
                 .button("Forget on this PC")
                 .on_hover_text("Sync will ask for the passphrase again on this PC.")
@@ -846,6 +873,7 @@ fn unlocked(ui: &mut egui::Ui, t: &mut SyncTab, env: &mut Env, v: &View<'_>) {
             t.notice = Some("The key is no longer remembered on this PC.".into());
         }
         if t.shared
+            && v.admin
             && ui
                 .button("Stop sharing the key")
                 .on_hover_text(
@@ -970,6 +998,14 @@ fn unlocked(ui: &mut egui::Ui, t: &mut SyncTab, env: &mut Env, v: &View<'_>) {
 
     ui.add_space(10.0);
     ui.label(RichText::new("Settings").strong());
+    if !v.admin {
+        ui.label(widgets::caption(ADMIN_NEEDED));
+    }
+    ui.add_enabled_ui(v.admin, |ui| settings_section(ui, t, v));
+}
+
+/// Timers, window and Object Lock (admin only, PA-24).
+fn settings_section(ui: &mut egui::Ui, t: &mut SyncTab, v: &View<'_>) {
     let mut cfg = v.cfg.clone();
     let mut changed = false;
     ui.horizontal(|ui| {

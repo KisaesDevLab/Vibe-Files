@@ -22,6 +22,8 @@ pub enum Page {
     Holds,
     Safeguards,
     Import,
+    /// Admin › Admin password (PA-24).
+    Password,
 }
 
 /// UI_SPEC §6 nav, grouped. Only Doc types is built in P01.
@@ -49,7 +51,15 @@ const NAV: &[(&str, &[&str])] = &[
             "Safeguards appendix",
         ],
     ),
-    ("SECURITY", &["Keys & recovery", "Integrity sweep", "Trash"]),
+    (
+        "SECURITY",
+        &[
+            "Admin password",
+            "Keys & recovery",
+            "Integrity sweep",
+            "Trash",
+        ],
+    ),
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -121,6 +131,10 @@ pub struct Admin {
     pub chain: Option<crate::ui::audit::ChainCheck>,
     /// Trash page (P05 step 3).
     pub trash: crate::ui::trash::TrashPage,
+    /// Admin password page (PA-24).
+    pub password: crate::ui::admin_password::PasswordPage,
+    /// "Lock Admin" pressed (the app ends the unlocked session).
+    pub lock_requested: bool,
 }
 
 impl Admin {
@@ -149,6 +163,8 @@ impl Admin {
             audit: Default::default(),
             chain: None,
             trash: Default::default(),
+            password: Default::default(),
+            lock_requested: false,
         };
         a.reload(env);
         a
@@ -285,11 +301,12 @@ pub struct SweepEnv<'a> {
 }
 
 pub fn show(ui: &mut egui::Ui, a: &mut Admin, env: &mut Env, sweep: SweepEnv) {
+    let has_password = vf_fs::trash::has_pin(env.root);
     egui::Panel::left("admin-nav")
         .exact_size(248.0)
         .resizable(false)
         .frame(egui::Frame::new().fill(theme::pane()).inner_margin(10))
-        .show(ui, |ui| nav(ui, a));
+        .show(ui, |ui| nav(ui, a, has_password));
     egui::CentralPanel::default().show(ui, |ui| match a.page {
         Page::DocTypes => doc_types(ui, a, env),
         Page::PrintCapture => {
@@ -327,6 +344,7 @@ pub fn show(ui: &mut egui::Ui, a: &mut Admin, env: &mut Env, sweep: SweepEnv) {
                 a.reload(env);
             }
         }
+        Page::Password => crate::ui::admin_password::show(ui, &mut a.password, env),
         Page::Trash => {
             crate::ui::trash::show(ui, &mut a.trash, env);
             if std::mem::take(&mut a.trash.changed) {
@@ -336,7 +354,24 @@ pub fn show(ui: &mut egui::Ui, a: &mut Admin, env: &mut Env, sweep: SweepEnv) {
     });
 }
 
-fn nav(ui: &mut egui::Ui, a: &mut Admin) {
+fn nav(ui: &mut egui::Ui, a: &mut Admin, has_password: bool) {
+    if has_password {
+        if ui
+            .button("Lock Admin")
+            .on_hover_text("Ask for the admin password again on this PC.")
+            .clicked()
+        {
+            a.lock_requested = true;
+        }
+    } else if ui
+        .add(egui::Button::new(
+            RichText::new("No admin password: set one").color(theme::warn()),
+        ))
+        .on_hover_text("Anyone can change Admin and Sync settings until one is set.")
+        .clicked()
+    {
+        a.page = Page::Password;
+    }
     for (group, items) in NAV {
         ui.add_space(6.0);
         ui.label(RichText::new(*group).small().color(theme::ink_muted()));
@@ -389,6 +424,13 @@ fn nav(ui: &mut egui::Ui, a: &mut Admin) {
             } else if *item == "Integrity sweep" {
                 if ui.selectable_label(a.page == Page::Sweep, *item).clicked() {
                     a.page = Page::Sweep;
+                }
+            } else if *item == "Admin password" {
+                if ui
+                    .selectable_label(a.page == Page::Password, *item)
+                    .clicked()
+                {
+                    a.page = Page::Password;
                 }
             } else if *item == "Trash" {
                 if ui.selectable_label(a.page == Page::Trash, *item).clicked() {
@@ -937,7 +979,7 @@ ANDE1042,Anderson Farms LLC
         assert!(text.contains("intact"), "{text}");
     }
 
-    /// P05 step 3: set the firm PIN, restore from the trash, empty it with the PIN.
+    /// P05 step 3: set the admin password, restore from the trash, empty it with the password.
     #[test]
     fn trash_page_restores_and_empties_with_the_pin() {
         let mut h = harness();
@@ -961,13 +1003,16 @@ ANDE1042,Anderson Farms LLC
         trash_one(&mut h);
         click(&mut h, "Trash");
         assert!(h.query_by_label("A (1)/2025/w2.pdf").is_some());
-        type_into(&mut h, "New PIN", "482193");
-        type_into(&mut h, "Again", "482193");
-        click(&mut h, "Set PIN");
+        // The admin password (PA-24; it was the firm PIN) is set on its own page.
+        click(&mut h, "Admin password");
+        type_into(&mut h, "New password", "482193");
+        type_into(&mut h, "New password again", "482193");
+        click(&mut h, "Set admin password");
+        click(&mut h, "Trash");
         assert!(
             vf_fs::trash::has_pin(&h.state().root),
             "{:?}",
-            h.state().a.trash.error
+            h.state().a.password.error
         );
 
         h.get_by_label("A (1)/2025/w2.pdf").click();
@@ -978,13 +1023,13 @@ ANDE1042,Anderson Farms LLC
 
         trash_one(&mut h);
         h.run();
-        type_into(&mut h, "Firm PIN", "000000");
+        type_into(&mut h, "Password", "000000");
         click(&mut h, "Empty trash");
         assert_eq!(
             h.state().a.trash.error.as_deref(),
-            Some("That PIN is not right.")
+            Some("That admin password is not right.")
         );
-        type_into(&mut h, "Firm PIN", "482193");
+        type_into(&mut h, "Password", "482193");
         click(&mut h, "Empty trash");
         assert_eq!(
             h.state().a.trash.notice.as_deref(),
