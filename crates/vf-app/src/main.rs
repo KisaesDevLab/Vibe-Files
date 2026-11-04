@@ -8,6 +8,7 @@ mod config;
 mod datalock;
 mod logging;
 mod perf;
+mod print;
 mod redact;
 mod screens;
 mod selfcheck;

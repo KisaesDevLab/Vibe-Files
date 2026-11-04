@@ -173,6 +173,10 @@ pub struct Browse {
     pub view_request: Option<crate::ui::viewer::Doc>,
     /// The preview pane at the top of the inspector (PA-12).
     pub preview: crate::ui::preview::Preview,
+    /// Print (PA-13).
+    pub print: crate::ui::print_ui::PrintState,
+    /// "Print…" pressed: the selection is printed from `show` (it needs the catalog).
+    print_request: bool,
     /// `Combine` pressed: merged on the next frame (needs the catalog).
     combine_request: bool,
     /// Pinned / Recent / Favorites, from this PC's config; `prefs_dirty` asks the app to save.
@@ -281,6 +285,8 @@ impl Browse {
             drop_request: None,
             scan_request: false,
             preview: Default::default(),
+            print: Default::default(),
+            print_request: false,
             scan_watching: false,
             holds_seen: None,
             hold_reason: None,
@@ -1138,6 +1144,35 @@ pub fn show(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env) {
     }
     b.poll_disk();
     b.add_new_files(env);
+    if std::mem::take(&mut b.print_request) {
+        let docs: Vec<crate::ui::print_ui::PrintDoc> = b
+            .visible
+            .iter()
+            .filter(|i| b.selected.contains(i))
+            .map(|&i| {
+                let d = &b.snap.docs[i];
+                crate::ui::print_ui::PrintDoc {
+                    doc_id: d.id.clone(),
+                    name: d.name().to_string(),
+                    path: env.root.join(&d.rel_path),
+                    hash: d.hash.clone(),
+                }
+            })
+            .collect();
+        if let Err(e) = b.print.start(env.conn, docs, None, None) {
+            b.error = Some(e);
+        }
+    }
+    if let Some(e) = b.print.ask(ui.ctx()) {
+        b.error = Some(e);
+    }
+    if let Some(msg) = b.print.poll(env.conn, env.device_id) {
+        b.notice = Some(msg);
+    }
+    if b.print.running() {
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_millis(300));
+    }
     b.finish_combine(env);
     b.keys(ui.ctx());
     b.saved_requests(env);
@@ -1823,6 +1858,18 @@ fn grid(ui: &mut egui::Ui, b: &mut Browse, conn: &Connection) {
         }
         sync_menu(ui, b);
         ui.separator();
+        if ui
+            .add_enabled(
+                !b.selected.is_empty() && !b.print.running(),
+                egui::Button::new("Print…"),
+            )
+            .on_disabled_hover_text("Select the documents to print first.")
+            .on_hover_text("Print the selected documents (one print job each).")
+            .clicked()
+        {
+            b.print_request = true;
+        }
+        b.print.status(ui);
         let rename = ui
             .add_enabled(!b.selected.is_empty(), egui::Button::new("Rename…"))
             .on_disabled_hover_text("Select the documents to rename first.");

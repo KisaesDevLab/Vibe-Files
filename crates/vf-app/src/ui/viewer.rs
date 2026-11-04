@@ -192,6 +192,8 @@ pub struct Viewer {
     pub pages_dialog: Option<PagesDialog>,
     /// The ten-key tape (PA-14).
     pub tape: TapeState,
+    /// Print (PA-13).
+    pub print: crate::ui::print_ui::PrintState,
 }
 
 /// A tape in the History menu: (menu label, tape name, lines).
@@ -301,6 +303,7 @@ impl Default for Viewer {
             drawn: Vec::new(),
             pages_dialog: None,
             tape: TapeState::default(),
+            print: Default::default(),
         }
     }
 }
@@ -569,6 +572,16 @@ impl Viewer {
 pub fn show(ui: &mut egui::Ui, v: &mut Viewer, env: &mut Env<'_>) {
     v.pump(ui.ctx());
     finish_convert(v, env);
+    if let Some(e) = v.print.ask(ui.ctx()) {
+        v.error = Some(e);
+    }
+    if let Some(msg) = v.print.poll(env.conn, env.device_id) {
+        v.notice = Some(msg);
+    }
+    if v.print.running() {
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_millis(300));
+    }
     if v.converting.is_some() {
         ui.ctx()
             .request_repaint_after(std::time::Duration::from_millis(200));
@@ -1140,6 +1153,25 @@ fn toolbar(ui: &mut egui::Ui, v: &mut Viewer, env: &mut Env<'_>, doc: &Doc) {
                 {
                     convert(v, env, Convert::Compress);
                 }
+                if ui
+                    .add_enabled(!v.print.running(), egui::Button::new("Print…"))
+                    .on_hover_text("Print this document or some of its pages (saved annotations print as shown).")
+                    .clicked()
+                {
+                    let pages = v.pages() as u32;
+                    let current = doc.page as u32 + 1;
+                    let hash = v.seen_hash().unwrap_or_default();
+                    let d = crate::ui::print_ui::PrintDoc {
+                        doc_id: doc.doc_id.clone(),
+                        name: doc.name.clone(),
+                        path: doc.path.clone(),
+                        hash,
+                    };
+                    if let Err(e) = v.print.start(env.conn, vec![d], Some(pages), Some(current)) {
+                        v.error = Some(e);
+                    }
+                }
+                v.print.status(ui);
                 if ui.button("Open in PDF app").clicked() {
                     v.open_request = Some(doc.path.clone());
                 }

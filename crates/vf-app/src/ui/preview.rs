@@ -152,8 +152,10 @@ pub fn show(ui: &mut egui::Ui, p: &mut Preview, rel: &str, at: (usize, usize)) -
             }
             let n = match &p.pages {
                 None => {
+                    // A note, not a spinner: the renderer wakes the window when the document is
+                    // open, so nothing repaints while it waits.
                     ui.add_space(40.0);
-                    ui.vertical_centered(|ui| ui.spinner());
+                    ui.vertical_centered(|ui| ui.label(widgets::caption("Loading page…")));
                     ui.add_space(40.0);
                     return;
                 }
@@ -198,8 +200,6 @@ pub fn show(ui: &mut egui::Ui, p: &mut Preview, rel: &str, at: (usize, usize)) -
                         egui::FontId::proportional(13.0),
                         theme::PAGE_INK_MUTED,
                     );
-                    ui.ctx()
-                        .request_repaint_after(std::time::Duration::from_millis(100));
                 }
             }
             ui.horizontal(|ui| {
