@@ -32,13 +32,16 @@ pub fn header(ui: &mut egui::Ui, cabinet: Option<&str>, text_size: &mut u16, dar
                         .position(|s| *s >= *text_size)
                         .unwrap_or(sizes.len() - 1);
                     let white = |t: &str| RichText::new(t).color(egui::Color32::WHITE);
+                    // The header is dark in both themes: its buttons get their own dark fill and
+                    // a light outline (the light theme's white fill hid the white labels).
+                    let header_button = |t: egui::RichText| {
+                        egui::Button::new(t)
+                            .fill(egui::Color32::from_rgb(0x2A, 0x30, 0x37))
+                            .stroke(Stroke::new(1.0, theme::ON_DARK_MUTED))
+                    };
                     // Light / dark (owner 2026-11-04), kept on this PC.
                     if ui
-                        .add(egui::Button::new(white(if *dark {
-                            "Light"
-                        } else {
-                            "Dark"
-                        })))
+                        .add(header_button(white(if *dark { "Light" } else { "Dark" })))
                         .on_hover_text(if *dark {
                             "Switch to the light theme"
                         } else {
@@ -50,7 +53,7 @@ pub fn header(ui: &mut egui::Ui, cabinet: Option<&str>, text_size: &mut u16, dar
                     }
                     ui.add_space(8.0);
                     if ui
-                        .add_enabled(at + 1 < sizes.len(), egui::Button::new(white("A+")))
+                        .add_enabled(at + 1 < sizes.len(), header_button(white("A+")))
                         .on_hover_text("Larger text (Ctrl +)")
                         .clicked()
                     {
@@ -58,7 +61,7 @@ pub fn header(ui: &mut egui::Ui, cabinet: Option<&str>, text_size: &mut u16, dar
                     }
                     ui.label(RichText::new(format!("{text_size}%")).color(theme::ON_DARK_MUTED));
                     if ui
-                        .add_enabled(at > 0, egui::Button::new(white("A-")))
+                        .add_enabled(at > 0, header_button(white("A-")))
                         .on_hover_text("Smaller text (Ctrl -)")
                         .clicked()
                     {
