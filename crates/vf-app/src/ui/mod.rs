@@ -23,6 +23,7 @@ pub mod retention;
 pub mod search;
 pub mod sweep;
 pub mod sync;
+pub mod templates;
 #[cfg(test)]
 pub mod test_util;
 pub mod theme;

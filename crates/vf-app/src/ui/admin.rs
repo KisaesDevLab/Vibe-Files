@@ -26,6 +26,8 @@ pub enum Page {
     Password,
     /// Admin › Devices (PA-24).
     Devices,
+    /// Admin › Folder templates (PA-24).
+    Templates,
 }
 
 /// UI_SPEC §6 nav, grouped. Only Doc types is built in P01.
@@ -138,6 +140,7 @@ pub struct Admin {
     /// "Lock Admin" pressed (the app ends the unlocked session).
     pub lock_requested: bool,
     pub devices: crate::ui::devices::DevicesPage,
+    pub templates: crate::ui::templates::TemplatesPage,
 }
 
 impl Admin {
@@ -169,6 +172,7 @@ impl Admin {
             password: Default::default(),
             lock_requested: false,
             devices: Default::default(),
+            templates: Default::default(),
         };
         a.reload(env);
         a
@@ -350,6 +354,14 @@ pub fn show(ui: &mut egui::Ui, a: &mut Admin, env: &mut Env, sweep: SweepEnv) {
         }
         Page::Password => crate::ui::admin_password::show(ui, &mut a.password, env),
         Page::Devices => crate::ui::devices::show(ui, &mut a.devices, env),
+        Page::Templates => {
+            crate::ui::templates::show(ui, &mut a.templates, env);
+            if std::mem::take(&mut a.templates.changed) {
+                // Doc types offer the template's folders; Intake files with the tree.
+                a.reload(env);
+                a.rules_changed = true;
+            }
+        }
         Page::Trash => {
             crate::ui::trash::show(ui, &mut a.trash, env);
             if std::mem::take(&mut a.trash.changed) {
@@ -429,6 +441,13 @@ fn nav(ui: &mut egui::Ui, a: &mut Admin, has_password: bool) {
             } else if *item == "Integrity sweep" {
                 if ui.selectable_label(a.page == Page::Sweep, *item).clicked() {
                     a.page = Page::Sweep;
+                }
+            } else if *item == "Folder templates" {
+                if ui
+                    .selectable_label(a.page == Page::Templates, *item)
+                    .clicked()
+                {
+                    a.page = Page::Templates;
                 }
             } else if *item == "Devices" {
                 if ui
@@ -989,6 +1008,34 @@ ANDE1042,Anderson Farms LLC
         let text = d.extract_text(&[1]).unwrap();
         assert!(text.contains("Vibe Files audit trail"), "{text}");
         assert!(text.contains("intact"), "{text}");
+    }
+
+    /// PA-24: Folder templates edits Filer's template.json; a new client then gets the folder.
+    #[test]
+    fn folder_templates_edit_reaches_new_clients() {
+        let mut h = harness();
+        click(&mut h, "Folder templates");
+        h.get_by_label("{Client} ({ID})").click();
+        h.run();
+        click(&mut h, "Add sub-folder");
+        h.run();
+        h.state_mut().a.templates.name = "Engagements".into();
+        h.run();
+        click(&mut h, "Rename");
+        click(&mut h, "Save template");
+        let root = h.state().root.clone();
+        let (tree, _, _) = filer_core::template::load_or_seed(&vf_fs::clients::master_dir(&root));
+        assert!(
+            tree.children.iter().any(|c| c.name == "Engagements"),
+            "{:?}",
+            h.state().a.templates.error
+        );
+        // New clients are made from this list (vf_fs::newclient reads the same file).
+        assert!(
+            filer_core::template::folder_templates(&tree)
+                .iter()
+                .any(|f| f == "Engagements")
+        );
     }
 
     /// PA-24: Devices lists the workstations; this PC is marked and cannot be removed; another
