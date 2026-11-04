@@ -17,12 +17,26 @@ const SHOWN: usize = 500;
 const WEEK: Duration = Duration::from_secs(7 * 24 * 3600);
 
 /// The last chain verification and when it ran.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct ChainCheck {
     pub at: Instant,
     /// Local time it ran, for the page.
     pub when: String,
     pub result: Result<VerifyReport, String>,
+    /// The weekly check running on its thread.
+    next: Option<std::sync::mpsc::Receiver<ChainCheck>>,
+}
+
+/// A copy for the Audit page (without the running weekly check).
+impl Clone for ChainCheck {
+    fn clone(&self) -> Self {
+        ChainCheck {
+            at: self.at,
+            when: self.when.clone(),
+            result: self.result.clone(),
+            next: None,
+        }
+    }
 }
 
 impl ChainCheck {
@@ -39,13 +53,51 @@ impl ChainCheck {
             at: Instant::now(),
             when: widgets::local_time(&vf_core::now_rfc3339()),
             result,
+            next: None,
         }
     }
 
-    /// Runs again when a week has passed.
-    pub fn tick(&mut self, conn: &Connection) {
-        if self.at.elapsed() >= WEEK {
-            *self = Self::run(conn);
+    /// Runs again when a week has passed, on its own thread with its own connection (it
+    /// hashes every row; QA A6); the result replaces this one when it arrives.
+    pub fn tick(&mut self, ctx: &egui::Context, catalog: &std::path::Path) {
+        if let Some(rx) = &self.next {
+            match rx.try_recv() {
+                Ok(c) => *self = c,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => self.next = None,
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            }
+            return;
+        }
+        if self.at.elapsed() < WEEK {
+            return;
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (catalog, ctx) = (catalog.to_path_buf(), ctx.clone());
+        let check = move || {
+            vf_core::db::open(&catalog, vf_core::db::Storage::Local)
+                .map(|conn| ChainCheck::run(&conn))
+                .unwrap_or_else(|e| ChainCheck {
+                    at: Instant::now(),
+                    when: widgets::local_time(&vf_core::now_rfc3339()),
+                    result: Err(e.to_string()),
+                    next: None,
+                })
+        };
+        if cfg!(test) {
+            // Tests: at once (a result arriving between frames would land at a random step).
+            *self = check();
+            return;
+        }
+        let started = std::thread::Builder::new()
+            .name("audit-chain".into())
+            .spawn(move || {
+                let _ = tx.send(check());
+                ctx.request_repaint();
+            });
+        match started {
+            Ok(_) => self.next = Some(rx),
+            // No thread: checked here rather than not at all.
+            Err(_) => self.at = Instant::now(),
         }
     }
 

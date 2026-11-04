@@ -956,7 +956,10 @@ mod tests {
             recipient: "Mary  Smith".into(),
             ..Default::default()
         };
-        assert_eq!(render("{Printed}", &acme), "Acme Corp -_2025_1120_Tax_Return_ACME1111");
+        assert_eq!(
+            render("{Printed}", &acme),
+            "Acme Corp -_2025_1120_Tax_Return_ACME1111"
+        );
         assert_eq!(
             render("{Document} - {Recipient}", &acme),
             "Odd__Name - Mary  Smith"
@@ -967,7 +970,10 @@ mod tests {
             .find(|r| r.default_name == "ArchiveK1Package")
             .unwrap();
         k.rename = "{Year} {Form} {Document} {State} {Recipient}".into();
-        assert!(rename_problem(&k, false).is_some(), "optional part before the partner");
+        assert!(
+            rename_problem(&k, false).is_some(),
+            "optional part before the partner"
+        );
         k.rename = "{Year} {Document} - {Recipient}".into();
         assert!(rename_problem(&k, false).is_none());
         k.rename = "{Document}.".into();

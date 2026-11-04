@@ -61,7 +61,7 @@ pub enum Screen {
     /// Create/open runs off the UI thread (Argon2 and the first rebuild take a while).
     Busy {
         what: &'static str,
-        rx: mpsc::Receiver<Result<Opened, String>>,
+        rx: mpsc::Receiver<Result<(Opened, Prepared), String>>,
         back: Wizard,
     },
     Open(Box<OpenCabinet>),
@@ -243,6 +243,12 @@ impl VibeFilesApp {
                 ),
                 Mode::Open => session::open(&data, &device, &root),
             };
+            // The rest of opening (it reads and writes the share) here too, not on the UI
+            // thread once the cabinet shows (QA A6).
+            let r = r.map(|mut o| {
+                let p = prepare(&mut o, &device);
+                (o, p)
+            });
             let _ = tx.send(r.map_err(|e| format!("{e:#}")));
             ctx.request_repaint();
         });
@@ -258,7 +264,7 @@ impl VibeFilesApp {
         };
     }
 
-    /// Picks up a finished create/open.
+    /// Picks up a finished create/open (and [`prepare`]).
     fn poll(&mut self, ctx: &egui::Context) {
         let Screen::Busy { rx, back, .. } = &mut self.screen else {
             return;
@@ -269,52 +275,22 @@ impl VibeFilesApp {
             Err(mpsc::TryRecvError::Disconnected) => Err("The work stopped unexpectedly.".into()),
         };
         match result {
-            Ok(mut opened) => {
+            Ok((
+                mut opened,
+                Prepared {
+                    rules_problem,
+                    emptied,
+                    chain,
+                },
+            )) => {
                 // A crash between Filer's commit and the catalog write is caught up here.
                 let mut intake = IntakeTab::default();
                 let root = opened.root.clone();
                 let catalog = opened.catalog.clone();
                 intake.reconcile(&mut opened.conn, &catalog, &root, &self.config.device_id);
-                // Print captures are filed by their doc types' folders (Admin › Print capture):
-                // Filer's rules are brought in line before Intake first loads them.
-                let _ = vf_ingest::parsers::seed_if_missing(&root);
-                // Shown on Browse, not only logged (QA2 U6).
-                let rules_problem = match vf_ingest::parsers::sync_filer_rules_report(&root) {
-                    Ok(s) if s.problems.is_empty() => None,
-                    Ok(s) => Some(s.problems.join("; ")),
-                    Err(e) => Some(e),
-                };
-                if let Some(e) = &rules_problem {
-                    tracing::warn!(
-                        kind = crate::logging::kind(e),
-                        "print capture rules not written"
-                    );
-                }
                 self.config.last_cabinet = Some(opened.root.clone());
                 // The cabinet is open either way; a settings write failure only loses "last".
                 let _ = config::save(&self.data, &self.config);
-                // This workstation in the cabinet's list (the Safeguards appendix lists them).
-                if let Err(e) =
-                    vf_fs::safeguards::register_device(&opened.root, &self.config.device_id)
-                {
-                    tracing::warn!(
-                        kind = crate::logging::kind(&e),
-                        "workstation not registered"
-                    );
-                }
-                // Legal holds placed on other workstations first (P07): nothing they cover may
-                // be emptied below.
-                if let Err(e) =
-                    vf_fs::holds::sync(&mut opened.conn, &opened.root, &self.config.device_id)
-                {
-                    tracing::warn!(kind = crate::logging::kind(&e), "legal holds not synced");
-                }
-                // Trash older than 90 days empties on its own (Q-15; held documents stay).
-                let emptied = vf_fs::trash::auto_empty(
-                    &mut opened.conn,
-                    &opened.root,
-                    &self.config.device_id,
-                );
                 let mut browse = Browse::load(&opened.conn);
                 browse.set_root(&opened.root);
                 browse.sheets_dir = self.data.join("sheets");
@@ -355,7 +331,6 @@ impl VibeFilesApp {
                     &self.config.ocr,
                     &self.config.device_id,
                 );
-                let chain = crate::ui::audit::ChainCheck::run(&opened.conn);
                 let checks = {
                     let (tx, rx) = mpsc::channel();
                     let (catalog, root, ctx) =
@@ -435,7 +410,7 @@ impl eframe::App for VibeFilesApp {
         };
         chrome::tab_bar(ui, &mut self.tab, badge);
         if let Screen::Open(o) = &mut self.screen {
-            o.chain.tick(&o.opened.conn);
+            o.chain.tick(ui.ctx(), &o.opened.catalog);
             if let Some(line) =
                 o.sweep
                     .poll(&mut o.opened.conn, &o.opened.root, &self.config.device_id)
@@ -817,6 +792,57 @@ fn add_error(line: &mut Option<String>, msg: String) {
         Some(old) if !old.is_empty() => format!("{old} · {msg}"),
         _ => msg,
     });
+}
+
+/// What opening a cabinet does after the catalog is open, on the opening thread.
+pub struct Prepared {
+    /// Print capture rules not in line (shown on Browse).
+    rules_problem: Option<String>,
+    /// Documents the 90-day trash rule emptied.
+    emptied: Result<usize, String>,
+    chain: crate::ui::audit::ChainCheck,
+}
+
+/// The work of opening a cabinet that reads and writes the share or the whole catalog: print
+/// capture rules, this workstation's registration, legal holds, the old trash, the audit chain.
+/// Runs on the opening thread, so the window never freezes after the cabinet shows (QA A6).
+fn prepare(opened: &mut Opened, device_id: &str) -> Prepared {
+    let root = opened.root.clone();
+    // Print captures are filed by their doc types' folders (Admin › Print capture): Filer's
+    // rules are brought in line before Intake first loads them.
+    let _ = vf_ingest::parsers::seed_if_missing(&root);
+    // Shown on Browse, not only logged (QA2 U6).
+    let rules_problem = match vf_ingest::parsers::sync_filer_rules_report(&root) {
+        Ok(s) if s.problems.is_empty() => None,
+        Ok(s) => Some(s.problems.join("; ")),
+        Err(e) => Some(e),
+    };
+    if let Some(e) = &rules_problem {
+        tracing::warn!(
+            kind = crate::logging::kind(e),
+            "print capture rules not written"
+        );
+    }
+    // This workstation in the cabinet's list (the Safeguards appendix lists them).
+    if let Err(e) = vf_fs::safeguards::register_device(&root, device_id) {
+        tracing::warn!(
+            kind = crate::logging::kind(&e),
+            "workstation not registered"
+        );
+    }
+    // Legal holds placed on other workstations first (P07): nothing they cover may be emptied
+    // below.
+    if let Err(e) = vf_fs::holds::sync(&mut opened.conn, &root, device_id) {
+        tracing::warn!(kind = crate::logging::kind(&e), "legal holds not synced");
+    }
+    // Trash older than 90 days empties on its own (Q-15; held documents stay).
+    let emptied = vf_fs::trash::auto_empty(&mut opened.conn, &root, device_id);
+    let chain = crate::ui::audit::ChainCheck::run(&opened.conn);
+    Prepared {
+        rules_problem,
+        emptied,
+        chain,
+    }
 }
 
 #[cfg(test)]

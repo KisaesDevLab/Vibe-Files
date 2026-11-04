@@ -62,7 +62,26 @@ enum Node {
     Year(usize, Option<i32>),
 }
 
+/// A combine running on its thread: the sources, the merged file, the result.
+struct Combining {
+    docs: Vec<DocRow>,
+    tmp: PathBuf,
+    rx: std::sync::mpsc::Receiver<Result<(), String>>,
+}
+
+/// Client folders' sub-folders on disk, by client folder (cabinet-relative).
+type DiskDirs = Vec<(String, Vec<String>)>;
+
 pub struct Browse {
+    /// Each client's folders on disk, by its folder, as last listed; listed again on a thread
+    /// after a reload (not more than every 2 s), so a reload never walks the share on the UI
+    /// thread (QA A6).
+    disk_dirs: std::collections::HashMap<String, Vec<String>>,
+    disk_job: Option<std::sync::mpsc::Receiver<DiskDirs>>,
+    disk_listed: Option<std::time::Instant>,
+    combining: Option<Combining>,
+    /// For a repaint when a listing arrives.
+    egui_ctx: Option<egui::Context>,
     pub snap: Snapshot,
     pub ix: Index,
     pub scope: Scope,
@@ -185,6 +204,11 @@ impl Browse {
     pub fn new(snap: Snapshot) -> Self {
         let ix = Index::build(&snap);
         let mut b = Browse {
+            disk_dirs: Default::default(),
+            disk_job: None,
+            disk_listed: None,
+            combining: None,
+            egui_ctx: None,
             snap,
             ix,
             scope: Scope::Cabinet,
@@ -254,13 +278,75 @@ impl Browse {
         let Some(root) = self.root.clone() else {
             return;
         };
+        self.apply_disk_dirs();
+        let rels: Vec<String> = self
+            .snap
+            .clients
+            .iter()
+            .filter_map(|c| c.folder_rel.clone().filter(|r| !r.is_empty()))
+            .collect();
+        let list = move || -> DiskDirs {
+            rels.into_iter()
+                .map(|rel| {
+                    let mut dirs = Vec::new();
+                    leaf_dirs(&root.join(&rel), "", 0, &mut dirs);
+                    (rel, dirs)
+                })
+                .collect()
+        };
+        if cfg!(test) {
+            // Tests: at once, so the tree is complete on the next frame.
+            let got = list();
+            self.take_disk_dirs(got);
+            return;
+        }
+        let fresh = self
+            .disk_listed
+            .is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(2));
+        if self.disk_job.is_some() || fresh {
+            return;
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        let ctx = self.egui_ctx.clone();
+        let started = std::thread::Builder::new()
+            .name("browse-folders".into())
+            .spawn(move || {
+                let _ = tx.send(list());
+                if let Some(c) = ctx {
+                    c.request_repaint();
+                }
+            });
+        if started.is_ok() {
+            self.disk_job = Some(rx);
+        }
+    }
+
+    /// The cached folders, on the current tree.
+    fn apply_disk_dirs(&mut self) {
         for (ci, c) in self.snap.clients.iter().enumerate() {
-            let Some(rel) = c.folder_rel.as_deref().filter(|r| !r.is_empty()) else {
-                continue;
-            };
-            let mut dirs = Vec::new();
-            leaf_dirs(&root.join(rel), "", 0, &mut dirs);
-            self.ix.add_folders(ci, &dirs);
+            if let Some(dirs) = c.folder_rel.as_deref().and_then(|r| self.disk_dirs.get(r)) {
+                self.ix.add_folders(ci, dirs);
+            }
+        }
+    }
+
+    fn take_disk_dirs(&mut self, got: DiskDirs) {
+        self.disk_dirs = got.into_iter().collect();
+        self.disk_listed = Some(std::time::Instant::now());
+        self.apply_disk_dirs();
+        self.refresh();
+    }
+
+    /// Takes a finished folder listing (every frame).
+    fn poll_disk(&mut self) {
+        let Some(rx) = &self.disk_job else { return };
+        match rx.try_recv() {
+            Ok(got) => {
+                self.disk_job = None;
+                self.take_disk_dirs(got);
+            }
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => self.disk_job = None,
+            Err(std::sync::mpsc::TryRecvError::Empty) => {}
         }
     }
 
@@ -457,7 +543,7 @@ impl Browse {
     /// The selected PDFs, in grid order, merged into one new document beside the first (one
     /// bookmark per source; Filer's `merge_pdfs`). The sources are not changed.
     fn combine_requested(&mut self, env: &mut Env) {
-        if !std::mem::take(&mut self.combine_request) {
+        if !std::mem::take(&mut self.combine_request) || self.combining.is_some() {
             return;
         }
         let docs: Vec<DocRow> = self
@@ -466,8 +552,8 @@ impl Browse {
             .filter(|i| self.selected.contains(i))
             .map(|&i| self.snap.docs[i].clone())
             .collect();
-        let r = (|| -> Result<vf_fs::content::Added, String> {
-            let first = docs.first().ok_or("select the documents to combine")?;
+        let started = (|| -> Result<Combining, String> {
+            docs.first().ok_or("select the documents to combine")?;
             let inputs: Vec<(std::path::PathBuf, String)> = docs
                 .iter()
                 .map(|d| {
@@ -478,38 +564,81 @@ impl Browse {
                 })
                 .collect();
             let tmp = vf_fs::content::tmp_file(env.root, "pdf")?;
-            filer_pdf::pdf::merge_pdfs(&inputs, &tmp).inspect_err(|_| {
-                let _ = std::fs::remove_file(&tmp);
-            })?;
-            let dir = first
-                .rel_path
-                .rsplit_once('/')
-                .map(|(d, _)| d)
-                .unwrap_or("");
-            let name = format!("Combined {}.pdf", first.name().trim_end_matches(".pdf"));
-            vf_fs::content::add(
-                env.conn,
-                env.root,
-                env.device_id,
-                &tmp,
-                vf_fs::content::NewDoc {
-                    rel_path: if dir.is_empty() {
-                        name
-                    } else {
-                        format!("{dir}/{name}")
-                    },
-                    client_id: first.client_id.clone(),
-                    doc_type_id: None,
-                    tax_year: first.tax_year,
-                    source: None,
-                    tags: vec!["combined".into()],
-                    label: "combine".into(),
-                    detail: serde_json::json!({
-                        "sources": docs.iter().map(|d| d.id.clone()).collect::<Vec<_>>(),
-                    }),
-                },
-            )
+            let (tx, rx) = std::sync::mpsc::channel();
+            let out = tmp.clone();
+            // Every page of every source is read and written: on its own thread (QA A6).
+            let work = move || filer_pdf::pdf::merge_pdfs(&inputs, &out).map(drop);
+            if cfg!(test) {
+                let _ = tx.send(work());
+            } else {
+                let ctx = self.egui_ctx.clone();
+                std::thread::Builder::new()
+                    .name("browse-combine".into())
+                    .spawn(move || {
+                        let _ = tx.send(work());
+                        if let Some(c) = ctx {
+                            c.request_repaint();
+                        }
+                    })
+                    .map_err(|e| e.to_string())?;
+            }
+            Ok(Combining { docs, tmp, rx })
         })();
+        match started {
+            Ok(c) => {
+                self.combining = Some(c);
+                self.notice = Some("Combining…".into());
+            }
+            Err(e) => self.error = Some(format!("Not combined: {e}")),
+        }
+    }
+
+    /// Takes a finished combine (every frame): the merged file becomes a new document.
+    fn finish_combine(&mut self, env: &mut Env) {
+        let Some(c) = &self.combining else { return };
+        let merged = match c.rx.try_recv() {
+            Ok(r) => r,
+            Err(std::sync::mpsc::TryRecvError::Empty) => return,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                Err("the combine stopped unexpectedly".into())
+            }
+        };
+        let Combining { docs, tmp, .. } = self.combining.take().expect("checked");
+        let r = merged
+            .inspect_err(|_| {
+                let _ = std::fs::remove_file(&tmp);
+            })
+            .and_then(|()| {
+                let first = docs.first().ok_or("no documents")?;
+                let dir = first
+                    .rel_path
+                    .rsplit_once('/')
+                    .map(|(d, _)| d)
+                    .unwrap_or("");
+                let name = format!("Combined {}.pdf", first.name().trim_end_matches(".pdf"));
+                vf_fs::content::add(
+                    env.conn,
+                    env.root,
+                    env.device_id,
+                    &tmp,
+                    vf_fs::content::NewDoc {
+                        rel_path: if dir.is_empty() {
+                            name
+                        } else {
+                            format!("{dir}/{name}")
+                        },
+                        client_id: first.client_id.clone(),
+                        doc_type_id: None,
+                        tax_year: first.tax_year,
+                        source: None,
+                        tags: vec!["combined".into()],
+                        label: "combine".into(),
+                        detail: serde_json::json!({
+                            "sources": docs.iter().map(|d| d.id.clone()).collect::<Vec<_>>(),
+                        }),
+                    },
+                )
+            });
         match r {
             Ok(added) => {
                 self.reload(env.conn);
@@ -519,7 +648,10 @@ impl Browse {
                     added.rel_path
                 ));
             }
-            Err(e) => self.error = Some(format!("Not combined: {e}")),
+            Err(e) => {
+                self.notice = None;
+                self.error = Some(format!("Not combined: {e}"));
+            }
         }
     }
 
@@ -800,6 +932,11 @@ fn folder_label(f: &str) -> &str {
 
 /// Draws the whole tab (three panes). Call where the central panel would go.
 pub fn show(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env) {
+    if b.egui_ctx.is_none() {
+        b.egui_ctx = Some(ui.ctx().clone());
+    }
+    b.poll_disk();
+    b.finish_combine(env);
     b.keys(ui.ctx());
     b.saved_requests(env);
     b.combine_requested(env);

@@ -132,6 +132,8 @@ pub struct Viewer {
     /// The catalog content of the document as shown (read when it is opened or read again):
     /// edits are made on it and refused once the document has other content (QA2 U7).
     seen: Option<(u64, String)>,
+    /// A Flatten / PDF/A / Compress running on its thread.
+    converting: Option<Converting>,
     /// Another document asked for while annotations are unsaved: open it and drop them?
     pub ask_open: Option<Doc>,
     generation: u64,
@@ -200,6 +202,7 @@ impl Default for Viewer {
         Viewer {
             doc: None,
             seen: None,
+            converting: None,
             ask_open: None,
             generation: 0,
             info: None,
@@ -484,6 +487,11 @@ impl Viewer {
 
 pub fn show(ui: &mut egui::Ui, v: &mut Viewer, env: &mut Env<'_>) {
     v.pump(ui.ctx());
+    finish_convert(v, env);
+    if v.converting.is_some() {
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_millis(200));
+    }
     if let Some(doc) = &v.doc
         && v.seen.as_ref().is_none_or(|(g, _)| *g != v.generation)
     {
@@ -2004,92 +2012,162 @@ fn source_hash(env: &Env<'_>, doc: &Doc, seen: Option<&str>) -> Result<String, S
 /// Flatten or PDF/A: the result is a new version of this document (current one kept).
 fn convert(v: &mut Viewer, env: &mut Env<'_>, what: Convert) {
     let Some(doc) = v.doc.clone() else { return };
+    if v.converting.is_some() {
+        return;
+    }
     let seen = v.seen_hash();
-    let r = (|| -> Result<String, String> {
+    let started = (|| -> Result<Converting, String> {
         let based_on = source_hash(env, &doc, seen.as_deref())?;
         let tmp = vf_fs::content::tmp_file(env.root, "pdf")?;
-        let (label, reason, detail) = match what {
-            Convert::Flatten => {
-                let n = vf_pdf::flatten::flatten(&doc.path, &tmp).inspect_err(|_| {
-                    let _ = std::fs::remove_file(&tmp);
-                })?;
-                (
-                    "flatten",
-                    "before flatten",
-                    serde_json::json!({ "annotations": n }),
-                )
-            }
-            Convert::Compress => {
-                let r =
-                    vf_pdf::compress::compress(&doc.path, &tmp, 200.0, 70).inspect_err(|_| {
-                        let _ = std::fs::remove_file(&tmp);
-                    })?;
-                (
-                    "compress",
-                    "before compress",
-                    serde_json::json!({ "images": r.images, "before": r.before, "after": r.after }),
-                )
-            }
-            Convert::PdfA => {
-                let pdfium = crate::ui::intake::pdfium_dir()
-                    .ok_or_else(|| "pdfium.dll not found".to_string())
-                    .and_then(|d| filer_pdf::pdf::pdfium(&d))?;
-                let title = doc.name.trim_end_matches(".pdf").to_string();
-                let rep =
-                    vf_pdf::pdfa::convert(pdfium, &doc.path, &tmp, &title, &vf_core::now_rfc3339())
-                        .inspect_err(|_| {
-                            let _ = std::fs::remove_file(&tmp);
-                        })?;
-                (
-                    "pdfa",
-                    "before PDF/A",
-                    serde_json::json!({
-                        "rasterized_pages": rep.rasterized.len(),
-                        "flattened": rep.flattened,
-                    }),
-                )
-            }
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (src, out) = (doc.path.clone(), tmp.clone());
+        let title = doc.name.trim_end_matches(".pdf").to_string();
+        // The whole file is rewritten: on its own thread (QA A6); the result is taken by
+        // `finish_convert` on a later frame.
+        let work = move || -> Result<ConvertDone, String> {
+            Ok(match what {
+                Convert::Flatten => {
+                    let n = vf_pdf::flatten::flatten(&src, &out)?;
+                    (
+                        "flatten",
+                        "before flatten",
+                        serde_json::json!({ "annotations": n }),
+                    )
+                }
+                Convert::Compress => {
+                    let r = vf_pdf::compress::compress(&src, &out, 200.0, 70)?;
+                    (
+                        "compress",
+                        "before compress",
+                        serde_json::json!({ "images": r.images, "before": r.before, "after": r.after }),
+                    )
+                }
+                Convert::PdfA => {
+                    let pdfium = crate::ui::intake::pdfium_dir()
+                        .ok_or_else(|| "pdfium.dll not found".to_string())
+                        .and_then(|d| filer_pdf::pdf::pdfium(&d))?;
+                    let rep =
+                        vf_pdf::pdfa::convert(pdfium, &src, &out, &title, &vf_core::now_rfc3339())?;
+                    (
+                        "pdfa",
+                        "before PDF/A",
+                        serde_json::json!({
+                            "rasterized_pages": rep.rasterized.len(),
+                            "flattened": rep.flattened,
+                        }),
+                    )
+                }
+            })
         };
-        if what == Convert::Compress && detail["after"].as_u64() >= detail["before"].as_u64() {
-            let _ = std::fs::remove_file(&tmp);
-            return Ok("Already compact: nothing to gain, the file is not changed.".into());
+        if cfg!(test) {
+            let _ = tx.send(work());
+        } else {
+            std::thread::Builder::new()
+                .name("viewer-convert".into())
+                .spawn(move || {
+                    let _ = tx.send(work());
+                })
+                .map_err(|e| e.to_string())?;
         }
-        let change = vf_fs::content::Change {
-            label,
-            created_by: label,
-            reason,
-            detail: detail.clone(),
-            extra: vec![],
-            based_on: Some(based_on),
-        };
-        match vf_fs::content::replace(env.conn, env.root, env.device_id, &doc.doc_id, &tmp, change)?
-        {
-            Ok(_) => Ok(match what {
-                Convert::Flatten => format!(
-                    "Flattened {} annotations into the pages; the previous version is kept.",
-                    detail["annotations"]
-                ),
-                Convert::PdfA => format!(
-                    "Saved as PDF/A-2b ({} pages rebuilt as images with a text layer); the previous version is kept.",
-                    detail["rasterized_pages"]
-                ),
-                Convert::Compress => format!(
-                    "Compressed {} images: {} → {}; the previous version is kept.",
-                    detail["images"],
-                    widgets::size(detail["before"].as_i64().unwrap_or(0)),
-                    widgets::size(detail["after"].as_i64().unwrap_or(0))
-                ),
-            }),
-            Err(why) => Err(format!("Not changed: {why}.")),
-        }
+        Ok(Converting {
+            what,
+            doc_id: doc.doc_id.clone(),
+            based_on,
+            tmp,
+            rx,
+        })
     })();
+    match started {
+        Ok(c) => {
+            v.converting = Some(c);
+            v.error = None;
+            v.notice = Some("Working… (the rest of Vibe Files can be used meanwhile)".into());
+        }
+        Err(e) => v.error = Some(e),
+    }
+}
+
+/// What a conversion made: (action label, version reason, audit detail).
+type ConvertDone = (&'static str, &'static str, serde_json::Value);
+
+/// A Flatten / PDF/A / Compress running on its thread.
+struct Converting {
+    what: Convert,
+    doc_id: String,
+    based_on: String,
+    tmp: PathBuf,
+    rx: std::sync::mpsc::Receiver<Result<ConvertDone, String>>,
+}
+
+/// Takes a finished conversion (every frame): the new file becomes the document's new version.
+fn finish_convert(v: &mut Viewer, env: &mut Env<'_>) {
+    let Some(c) = &v.converting else { return };
+    let r = match c.rx.try_recv() {
+        Ok(r) => r,
+        Err(std::sync::mpsc::TryRecvError::Empty) => return,
+        Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+            Err("the conversion stopped unexpectedly".into())
+        }
+    };
+    let c = v.converting.take().expect("checked");
+    let what = c.what;
+    let r = r
+        .inspect_err(|_| {
+            let _ = std::fs::remove_file(&c.tmp);
+        })
+        .and_then(|(label, reason, detail)| {
+            if what == Convert::Compress && detail["after"].as_u64() >= detail["before"].as_u64() {
+                let _ = std::fs::remove_file(&c.tmp);
+                return Ok(None);
+            }
+            let change = vf_fs::content::Change {
+                label,
+                created_by: label,
+                reason,
+                detail: detail.clone(),
+                extra: vec![],
+                based_on: Some(c.based_on.clone()),
+            };
+            match vf_fs::content::replace(
+                env.conn,
+                env.root,
+                env.device_id,
+                &c.doc_id,
+                &c.tmp,
+                change,
+            )? {
+                Ok(_) => Ok(Some(match what {
+                    Convert::Flatten => format!(
+                        "Flattened {} annotations into the pages; the previous version is kept.",
+                        detail["annotations"]
+                    ),
+                    Convert::PdfA => format!(
+                        "Saved as PDF/A-2b ({} pages rebuilt as images with a text layer); the previous version is kept.",
+                        detail["rasterized_pages"]
+                    ),
+                    Convert::Compress => format!(
+                        "Compressed {} images: {} → {}; the previous version is kept.",
+                        detail["images"],
+                        widgets::size(detail["before"].as_i64().unwrap_or(0)),
+                        widgets::size(detail["after"].as_i64().unwrap_or(0))
+                    ),
+                })),
+                Err(why) => Err(format!("Not changed: {why}.")),
+            }
+        });
     match r {
-        Ok(msg) => {
+        Ok(Some(msg)) => {
             v.catalog_changed = true;
             v.reload();
             v.notice = Some(msg);
         }
-        Err(e) => v.error = Some(e),
+        Ok(None) => {
+            v.notice = Some("Already compact: nothing to gain, the file is not changed.".into())
+        }
+        Err(e) => {
+            v.notice = None;
+            v.error = Some(e);
+        }
     }
 }
 
