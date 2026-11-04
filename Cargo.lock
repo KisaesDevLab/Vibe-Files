@@ -5732,6 +5732,7 @@ dependencies = [
  "pdf-writer",
  "pdfium-render",
  "tempfile",
+ "time",
  "uuid",
  "vf-core",
  "vf-extract",

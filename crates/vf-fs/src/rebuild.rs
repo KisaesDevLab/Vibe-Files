@@ -718,11 +718,14 @@ pub fn rebuild(
         rep.docs_tombstoned += 1;
     }
 
-    // Versions from sidecars.
+    // Versions from sidecars. An entry that says what replaced it is followed from each
+    // document's current content back through the versions (path-independent, QA C7); older
+    // entries go by the path the document had.
     let vdir = root.join(cabinet::VIBE_DIR).join(cabinet::VERSIONS_DIR);
     if vdir.is_dir() {
         let mut sidecars = Vec::new();
         files_under(&vdir, &mut sidecars)?;
+        let mut all: Vec<(String, u64, VersionSidecar)> = Vec::new();
         for sc in sidecars
             .iter()
             .filter(|p| p.extension().is_some_and(|e| e == "json"))
@@ -747,20 +750,63 @@ pub fn rebuild(
                 rep.bad_sidecars += 1;
                 continue;
             };
-            for v in entries {
-                let Some(doc_id) = doc_id_by_rel.get(&v.rel_path) else {
-                    continue;
-                };
-                stmts.push(Stmt::new(
-                    "INSERT OR IGNORE INTO version (doc_id, hash, size, created, created_by, device_id, reason)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                    vec![
-                        doc_id.clone().into(), hash.clone().into(), size.into(), v.created.into(),
-                        v.created_by.into(), v.device_id.into(), v.reason.into(),
-                    ],
-                ));
-                rep.versions_new += 1;
+            all.extend(entries.into_iter().map(|e| (hash.clone(), size, e)));
+        }
+        // Documents by their current content: (path, id).
+        let mut by_hash: HashMap<&str, Vec<(&str, &String)>> = HashMap::new();
+        for f in &found {
+            if let Some(id) = doc_id_by_rel.get(&f.rel) {
+                by_hash.entry(&f.hash).or_default().push((&f.rel, id));
             }
+        }
+        let mut by_version: HashMap<&str, Vec<usize>> = HashMap::new();
+        for (i, (h, _, _)) in all.iter().enumerate() {
+            by_version.entry(h.as_str()).or_default().push(i);
+        }
+        fn owner(
+            i: usize,
+            depth: usize,
+            all: &[(String, u64, VersionSidecar)],
+            by_hash: &HashMap<&str, Vec<(&str, &String)>>,
+            by_version: &HashMap<&str, Vec<usize>>,
+            by_rel: &HashMap<String, String>,
+        ) -> Option<String> {
+            let e = &all[i].2;
+            let Some(next) = &e.next else {
+                return by_rel.get(&e.rel_path).cloned();
+            };
+            if let Some(docs) = by_hash.get(next.as_str()) {
+                // Two documents with that content: the one at the entry's path first.
+                return docs
+                    .iter()
+                    .find(|(rel, _)| *rel == e.rel_path)
+                    .or_else(|| docs.first())
+                    .map(|(_, id)| (*id).clone());
+            }
+            if depth >= 32 {
+                return None;
+            }
+            // Replaced by content that is itself a version now: whose version it is.
+            let mut cands = by_version.get(next.as_str()).cloned().unwrap_or_default();
+            cands.sort_by_key(|j| all[*j].2.rel_path != e.rel_path);
+            cands
+                .into_iter()
+                .find_map(|j| owner(j, depth + 1, all, by_hash, by_version, by_rel))
+        }
+        for i in 0..all.len() {
+            let Some(doc_id) = owner(i, 0, &all, &by_hash, &by_version, &doc_id_by_rel) else {
+                continue;
+            };
+            let (hash, size, v) = all[i].clone();
+            stmts.push(Stmt::new(
+                "INSERT OR IGNORE INTO version (doc_id, hash, size, created, created_by, device_id, reason)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                vec![
+                    doc_id.into(), hash.into(), size.into(), v.created.into(),
+                    v.created_by.into(), v.device_id.into(), v.reason.into(),
+                ],
+            ));
+            rep.versions_new += 1;
         }
     }
     let before_versions: i64 = conn.query_row("SELECT count(*) FROM version", [], |r| r.get(0))?;
@@ -963,6 +1009,7 @@ mod tests {
         let vpath = cabinet::version_path(&c.root, &hash);
         put(&vpath, old);
         let side = vec![VersionSidecar {
+            next: None,
             rel_path: "Smith, John (1001)/Income Tax/2025/w2.pdf".into(),
             created: "2026-10-01T00:00:00Z".into(),
             created_by: Some("kwk".into()),
@@ -981,6 +1028,55 @@ mod tests {
         assert_eq!(rep.versions_new, 1);
         let rep2 = rebuild(&mut conn, &c.root, "dev-1").unwrap();
         assert_eq!(rep2.versions_new, 0);
+    }
+
+    /// QA C7: a renamed document keeps its versions after a fresh rebuild, and a different
+    /// file now at its old path does not take them.
+    #[test]
+    fn versions_follow_their_document_not_its_old_path() {
+        let c = cab();
+        let w2 = "Smith, John (1001)/Income Tax/2025/w2.pdf";
+        let cur = std::fs::read(c.root.join(w2)).unwrap();
+        let cur_hash = sha256_file(&c.root.join(w2)).unwrap();
+        let old = "w2 2025 first draft";
+        let old_hash = {
+            let tmp = c.data.join("probe");
+            std::fs::write(&tmp, old).unwrap();
+            sha256_file(&tmp).unwrap()
+        };
+        let vpath = cabinet::version_path(&c.root, &old_hash);
+        put(&vpath, old);
+        let side = vec![VersionSidecar {
+            next: Some(cur_hash),
+            rel_path: w2.into(),
+            created: "2026-10-01T00:00:00Z".into(),
+            created_by: Some("annotate".into()),
+            device_id: "dev-0".into(),
+            reason: Some("before annotations".into()),
+        }];
+        std::fs::write(
+            vpath.with_extension("json"),
+            serde_json::to_vec(&side).unwrap(),
+        )
+        .unwrap();
+        // Renamed outside the catalog's knowledge; another file takes the old name.
+        let renamed = "Smith, John (1001)/Income Tax/2025/W-2 Acme.pdf";
+        std::fs::rename(c.root.join(w2), c.root.join(renamed)).unwrap();
+        put(&c.root.join(w2), "another document entirely");
+        assert_eq!(std::fs::read(c.root.join(renamed)).unwrap(), cur);
+
+        let mut conn = open(&c);
+        let rep = rebuild(&mut conn, &c.root, "dev-1").unwrap();
+        assert_eq!(rep.versions_new, 1);
+        let owner: String = conn
+            .query_row(
+                "SELECT d.rel_path FROM version v JOIN document d ON d.id = v.doc_id
+                 WHERE v.hash = ?1",
+                [&old_hash],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(owner, renamed);
     }
 
     #[test]

@@ -54,6 +54,11 @@ pub struct Record {
     pub tags: Vec<String>,
 }
 
+/// Tag on a document whose doc type or tax year a folder import guessed (a year from the file
+/// name, a doc type from a folder name): it is not disposed of until a person sets them; doing
+/// so removes the tag (QA P12).
+pub const GUESSED_TAG: &str = "import:guessed";
+
 /// A document's current metadata, from the catalog.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Meta {
@@ -185,6 +190,9 @@ fn apply_edit(m: &Meta, e: &MetaEdit, type_names: &HashMap<String, String>) -> M
     }
     if let Some(t) = &e.tags {
         n.tags = t.clone();
+    } else if e.doc_type.is_some() || e.tax_year.is_some() {
+        // A person set the doc type or year: the import's guess is confirmed or corrected.
+        n.tags.retain(|t| t != GUESSED_TAG);
     }
     n
 }

@@ -96,7 +96,7 @@ impl ImportPage {
                     "folder import"
                 );
                 self.notice = Some(format!(
-                    "Imported: {} folders bound{}{}, {} documents, {} with client, doc type and year; {} PDFs queued for OCR.",
+                    "Imported: {} folders bound{}{}, {} documents, {} with client, doc type and year; {} PDFs queued for OCR.{}",
                     a.bound,
                     if a.renamed > 0 {
                         format!(" ({} renamed)", a.renamed)
@@ -110,7 +110,16 @@ impl ImportPage {
                     },
                     a.documents,
                     a.mapped,
-                    a.ocr_queued
+                    a.ocr_queued,
+                    if a.guessed > 0 {
+                        format!(
+                            " {} have a doc type or year guessed from a file or folder name (tag {}): they are not disposed of until someone sets them.",
+                            a.guessed,
+                            vf_fs::docmeta::GUESSED_TAG
+                        )
+                    } else {
+                        String::new()
+                    }
                 ));
                 self.last = Some(a);
                 self.plan = None;

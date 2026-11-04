@@ -431,6 +431,8 @@ fn keep_overwritten(
             created_by: Some("intake".into()),
             device_id: device_id.into(),
             reason: Some("overwritten by intake".into()),
+            // What overwrote it: the file at the document's path now.
+            next: filer_intake::commit::sha256_file(original).ok(),
         },
     )
 }

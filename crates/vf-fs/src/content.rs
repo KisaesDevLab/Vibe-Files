@@ -252,6 +252,7 @@ fn replace_inner(
                 created_by: Some(change.created_by.into()),
                 device_id: device_id.into(),
                 reason: Some(change.reason.into()),
+                next: Some(new_hash.clone()),
             },
         );
     }

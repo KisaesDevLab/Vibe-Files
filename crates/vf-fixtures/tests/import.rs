@@ -548,3 +548,89 @@ fn look_alike_folders_wait_for_a_person() {
     assert_eq!(plan.skipped, ["_Archive"]);
     assert!(plan.report_csv().contains("_Archive"));
 }
+
+/// QA P12: a year from a file name or a doc type from a folder name is a guess: tagged, kept
+/// out of disposition until a person sets it.
+#[test]
+fn import_guesses_wait_for_a_person_before_disposition() {
+    let t = tempfile::tempdir().unwrap();
+    let root = t.path().join("Clients");
+    std::fs::create_dir_all(&root).unwrap();
+    vf_fs::cabinet::create(
+        &root,
+        &CabinetFile {
+            cabinet_id: vf_core::new_id(),
+            firm_id: uuid::Uuid::new_v4().to_string(),
+            schema_version: vf_core::db::SCHEMA_VERSION,
+            layout_version: 1,
+            created: vf_core::now_rfc3339(),
+            name: None,
+        },
+    )
+    .unwrap();
+    let mut conn = vf_core::db::open(&t.path().join("c.db"), Storage::Local).unwrap();
+    vf_fs::doctypes::seed_if_missing(&root).unwrap();
+    vf_fs::doctypes::sync(&mut conn, &root, "dev", "seed").unwrap();
+    vf_fs::retention::seed_if_missing(&root).unwrap();
+    vf_fs::retention::sync(&mut conn, &root, "dev", "seed").unwrap();
+    let csv = t.path().join("clients.csv");
+    std::fs::write(&csv, "ID,Name\nSMIT1001,\"Smith, John\"\n").unwrap();
+    let map = filer_core::config::ColumnMap {
+        id: Some("ID".into()),
+        name: Some("Name".into()),
+        extras: vec![],
+    };
+    vf_fs::clients::import_csv(&root, &csv, &map, &Default::default()).unwrap();
+    for (p, body) in [
+        ("John Smith (SMIT1001)/Old Papers/W2 1999 Oak St.pdf", "w2 1999"),
+        ("John Smith (SMIT1001)/Bank/2010/closing.pdf", "closing"),
+    ] {
+        let p = root.join(p);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, body).unwrap();
+    }
+    vf_fs::rebuild::rebuild(&mut conn, &root, "dev").unwrap();
+    let plan = import::plan(&conn, &root).unwrap();
+    let applied = import::apply(&mut conn, &root, &plan, &Options::default(), "dev").unwrap();
+    assert!(applied.guessed >= 1, "{applied:?}");
+    let tagged: Vec<String> = {
+        let mut st = conn
+            .prepare(
+                "SELECT d.rel_path FROM document_tag t JOIN document d ON d.id = t.doc_id
+                 WHERE t.tag = ?1",
+            )
+            .unwrap();
+        st.query_map([vf_fs::docmeta::GUESSED_TAG], |r| r.get(0))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect()
+    };
+    assert!(!tagged.is_empty());
+    let today = time::Date::from_calendar_date(2040, time::Month::January, 1).unwrap();
+    let rep = vf_fs::disposition::eligible(&conn, &root, today).unwrap();
+    assert!(
+        rep.lines.iter().all(|l| !tagged.contains(&l.rel_path)),
+        "guessed documents are not offered"
+    );
+    assert_eq!(rep.guessed, tagged.len());
+    // A person sets the year: the tag goes, the document can come up.
+    let id: String = conn
+        .query_row(
+            "SELECT id FROM document WHERE rel_path = ?1",
+            [&tagged[0]],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let edit = vf_fs::docmeta::MetaEdit {
+        tax_year: Some(Some(2001)),
+        ..Default::default()
+    };
+    vf_fs::docmeta::edit_each(&mut conn, &root, &[(id.clone(), edit)], "meta_edit", "dev").unwrap();
+    assert!(
+        !vf_fs::docmeta::load(&conn, &id)
+            .unwrap()
+            .tags
+            .iter()
+            .any(|t| t == vf_fs::docmeta::GUESSED_TAG)
+    );
+}

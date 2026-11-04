@@ -86,6 +86,9 @@ pub struct Report {
     pub held: usize,
     /// Eligible but approved (waiting) or deferred.
     pub decided: usize,
+    /// Eligible by a doc type or year a folder import guessed: not offered until a person sets
+    /// them (QA P12; Browse, tag `import:guessed`).
+    pub guessed: usize,
 }
 
 struct Doc {
@@ -169,6 +172,15 @@ pub fn eligible(conn: &Connection, root: &Path, today: Date) -> Result<Report, S
             .map_err(|e| e.to_string())?;
         rows.collect::<Result<_, _>>().map_err(|e| e.to_string())?
     };
+    let guessed: std::collections::HashSet<String> = {
+        let mut st = conn
+            .prepare("SELECT doc_id FROM document_tag WHERE tag = ?1")
+            .map_err(|e| e.to_string())?;
+        let rows = st
+            .query_map([crate::docmeta::GUESSED_TAG], |r| r.get(0))
+            .map_err(|e| e.to_string())?;
+        rows.collect::<Result<_, _>>().map_err(|e| e.to_string())?
+    };
     let today_s = ymd(today);
     let mut rep = Report::default();
     for d in live_docs(conn)? {
@@ -191,6 +203,10 @@ pub fn eligible(conn: &Connection, root: &Path, today: Date) -> Result<Report, S
             &d.hash,
         ) {
             rep.held += 1;
+            continue;
+        }
+        if guessed.contains(&d.id) {
+            rep.guessed += 1;
             continue;
         }
         match decided.get(&d.id) {

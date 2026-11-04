@@ -141,6 +141,12 @@ pub struct VersionSidecar {
     pub created_by: Option<String>,
     pub device_id: String,
     pub reason: Option<String>,
+    /// The content that replaced this one (its SHA-256). A rebuild follows these from each
+    /// document's current content back through its versions, so a document renamed or moved
+    /// since keeps them, and a file now at the old path never takes them (QA C7). Absent in
+    /// entries written before: those go by `rel_path`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next: Option<String>,
 }
 
 pub fn version_path(root: &Path, hash: &str) -> PathBuf {

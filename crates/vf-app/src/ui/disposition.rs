@@ -58,11 +58,20 @@ pub fn show(ui: &mut egui::Ui, p: &mut DispositionPage, env: &mut Env) {
         ));
     });
     ui.label(widgets::caption(format!(
-        "{} eligible · {} under a legal hold · {} approved or deferred · {} with no retention class (never disposed)",
+        "{} eligible · {} under a legal hold · {} approved or deferred · {} with no retention class (never disposed){}",
         rep.lines.len(),
         rep.held,
         rep.decided,
-        rep.unclassified
+        rep.unclassified,
+        if rep.guessed > 0 {
+            format!(
+                " · {} would be eligible but their doc type or year was guessed by a folder import: set them in Browse (tag {}) first",
+                rep.guessed,
+                vf_fs::docmeta::GUESSED_TAG
+            )
+        } else {
+            String::new()
+        }
     )));
     if let Some(n) = &p.notice {
         ui.label(RichText::new(n).color(theme::INK_SECONDARY));

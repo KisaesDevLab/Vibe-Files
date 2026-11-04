@@ -864,6 +864,9 @@ pub struct Applied {
     pub mapped: usize,
     /// PDFs queued for OCR (set by the caller: `vf_ocr::queue::enqueue_missing`).
     pub ocr_queued: usize,
+    /// Documents whose doc type or year was guessed (tagged `import:guessed`; QA P12).
+    #[serde(default)]
+    pub guessed: usize,
 }
 
 /// `_Vibe/import_last.json`: the last import on this cabinet, for Undo after a restart.
@@ -1015,6 +1018,18 @@ pub fn apply(
             "permanent" => e.tax_year = Some(None),
             "" => {}
             _ => e.tax_year = Some(f.tax_year),
+        }
+        // A year from the file name ("W2 1999 Oak St") or a doc type from a folder name (a
+        // "Bank" folder) is a guess: kept out of disposition until someone sets it (QA P12).
+        let guessed = (e.tax_year.is_some() && f.year_from == "file name")
+            || (e.doc_type.is_some() && f.type_how.starts_with("folder"));
+        if guessed {
+            let mut tags = crate::docmeta::load(conn, &id)?.tags;
+            if !tags.iter().any(|t| t == crate::docmeta::GUESSED_TAG) {
+                tags.push(crate::docmeta::GUESSED_TAG.into());
+            }
+            e.tags = Some(tags);
+            out.guessed += 1;
         }
         if plan.gaps(f).is_empty() {
             out.mapped += 1;

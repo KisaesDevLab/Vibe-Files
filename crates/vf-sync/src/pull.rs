@@ -455,6 +455,8 @@ fn ensure_versions(
                 created_by: v.created_by.clone(),
                 device_id: v.device_id.clone(),
                 reason: v.reason.clone(),
+                // Pulled versions do not say what replaced them: rebuild goes by the path.
+                next: None,
             },
         );
     }
