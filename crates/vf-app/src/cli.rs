@@ -107,6 +107,42 @@ pub enum AuditCmd {
     Verify,
 }
 
+impl Command {
+    /// Whether the command changes the catalog or the cabinet (then it needs the data folder
+    /// to itself: not while the app has it open).
+    pub fn changes_things(&self) -> bool {
+        !matches!(
+            self,
+            Command::Audit { .. }
+                | Command::Check { .. }
+                | Command::Sync {
+                    cmd: SyncCmd::Status,
+                    ..
+                }
+                | Command::ExportClient { .. }
+                | Command::Soak { .. }
+        )
+    }
+}
+
+/// Refuses a cabinet the catalog does not belong to (a typo, a second cabinet): a rebuild there
+/// would tombstone every document of the catalog's own cabinet (QA A3).
+fn same_cabinet(conn: &db::Connection, cabinet: &Path) -> Result<()> {
+    let cab = vf_fs::cabinet::read(cabinet).map_err(anyhow::Error::msg)?;
+    let (n, known): (i64, i64) = conn.query_row(
+        "SELECT count(*), coalesce(sum(id = ?1), 0) FROM cabinet",
+        [&cab.cabinet_id],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    if n > 0 && known == 0 {
+        bail!(
+            "this data folder's catalog belongs to a different cabinet than {}: use the data folder of that cabinet (--data)",
+            cabinet.display()
+        );
+    }
+    Ok(())
+}
+
 /// Runs one subcommand; returns the process exit code.
 pub fn run(cmd: &Command, data: &Path, out: &mut dyn Write) -> Result<i32> {
     let catalog = data.join("catalog.db");
@@ -133,6 +169,7 @@ pub fn run(cmd: &Command, data: &Path, out: &mut dyn Write) -> Result<i32> {
         Command::Rebuild { cabinet } => {
             std::fs::create_dir_all(data)?;
             let mut conn = db::open(&catalog, Storage::Local)?;
+            same_cabinet(&conn, cabinet)?;
             let rep = vf_fs::rebuild::rebuild(&mut conn, cabinet, &device_id(data)?)?;
             writeln!(out, "{rep}")?;
             Ok(0)
@@ -145,10 +182,9 @@ pub fn run(cmd: &Command, data: &Path, out: &mut dyn Write) -> Result<i32> {
                 bail!("no catalog at {}", catalog.display());
             }
             let conn = db::open(&catalog, Storage::Local)?;
-            let rec = vf_fs::fileops::recover(&conn).map_err(anyhow::Error::msg)?;
-            if rec.transactions > 0 {
-                writeln!(out, "put back {} interrupted changes", rec.transactions)?;
-            }
+            same_cabinet(&conn, cabinet)?;
+            // Read-only: interrupted changes are put back when the app opens the cabinet (a check
+            // run beside a working app must not move its files).
             let config = crate::config::load(data)?;
             let cab = vf_fs::cabinet::read(cabinet).map_err(anyhow::Error::msg);
             let synced = cab
@@ -171,7 +207,14 @@ pub fn run(cmd: &Command, data: &Path, out: &mut dyn Write) -> Result<i32> {
             cabinet,
             id,
             out: zip,
-        } => export_client(&catalog, cabinet, id, zip, out),
+        } => {
+            let r = export_client(&catalog, cabinet, id, zip, out);
+            if r.is_err() && zip.exists() {
+                // Nothing half-written stays behind (the next try would find it "exists").
+                let _ = std::fs::remove_file(zip);
+            }
+            r
+        }
         Command::Restore {
             folder,
             endpoint,
@@ -291,6 +334,7 @@ fn sync(
         bail!("no catalog at {}", catalog.display());
     }
     let mut conn = db::open(catalog, Storage::Local)?;
+    same_cabinet(&conn, cabinet)?;
     match cmd {
         SyncCmd::Status => {
             let pending = vf_sync::catalog::pending(&conn)?;
@@ -349,6 +393,7 @@ fn export_client(
         bail!("no catalog at {}", catalog.display());
     }
     let conn = db::open(catalog, Storage::Local)?;
+    same_cabinet(&conn, cabinet)?;
     let (client_id, name): (String, String) = conn
         .query_row(
             "SELECT id, name FROM client WHERE ext_id = ?1 AND deleted_at IS NULL",
@@ -442,6 +487,7 @@ fn ocr_backlog(
     }
     let config = crate::config::load(data)?;
     let mut conn = db::open(catalog, Storage::Local)?;
+    same_cabinet(&conn, cabinet)?;
     // Queue the backlog here, so the first count already sees it.
     queue::recover(&conn)?;
     queue::enqueue_missing(&conn, queue::BACKLOG)?;

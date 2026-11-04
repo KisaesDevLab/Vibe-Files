@@ -91,8 +91,10 @@ pub fn write_replace(p: &Path, bytes: &[u8]) -> Result<(), String> {
         std::fs::create_dir_all(dir)
             .map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
     }
+    // A temp name of its own (two workstations writing the same file at once must not share
+    // one temp file).
     let mut name = p.file_name().unwrap_or_default().to_os_string();
-    name.push(".tmp");
+    name.push(format!(".{}.tmp", uuid::Uuid::now_v7().simple()));
     let tmp = p.with_file_name(name);
     std::fs::File::create(&tmp)
         .and_then(|mut f| f.write_all(bytes).and_then(|()| f.sync_all()))
@@ -144,8 +146,15 @@ pub struct VersionSidecar {
 pub fn version_path(root: &Path, hash: &str) -> PathBuf {
     root.join(VIBE_DIR)
         .join(VERSIONS_DIR)
-        .join(&hash[..2])
+        .join(hash.get(..2).unwrap_or("00"))
         .join(hash)
+}
+
+/// Whether `h` is a SHA-256 in hex (64 lowercase hex characters).
+pub fn is_sha256(h: &str) -> bool {
+    h.len() == 64
+        && h.bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
 /// `created_by` of a version kept when OCR wrote a text layer into the file (P03). Content
@@ -165,10 +174,14 @@ pub fn tmp_dir(root: &Path) -> PathBuf {
 /// Adds `entry` to the sidecar of the kept version `hash` (`<hash>.json`, a JSON array).
 pub fn add_version_sidecar(root: &Path, hash: &str, entry: VersionSidecar) -> Result<(), String> {
     let sidecar = version_path(root, hash).with_extension("json");
-    let mut entries: Vec<VersionSidecar> = std::fs::read_to_string(&sidecar)
-        .ok()
-        .and_then(|t| serde_json::from_str(&t).ok())
-        .unwrap_or_default();
+    // Only a missing sidecar starts empty: one that cannot be read (in use on the share,
+    // damaged) is never overwritten with a single entry.
+    let mut entries: Vec<VersionSidecar> = match std::fs::read_to_string(&sidecar) {
+        Ok(t) => serde_json::from_str(&t)
+            .map_err(|e| format!("{} is not valid: {e}", sidecar.display()))?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => vec![],
+        Err(e) => return Err(format!("cannot read {}: {e}", sidecar.display())),
+    };
     entries.push(entry);
     write_replace(
         &sidecar,

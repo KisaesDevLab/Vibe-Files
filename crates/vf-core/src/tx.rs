@@ -62,6 +62,9 @@ pub enum FileOp {
 pub struct JournalOp {
     pub op: FileOp,
     pub existed: bool,
+    /// The op is being undone (its reversal is what may have landed): recovery applies it again.
+    #[serde(default)]
+    pub undo: bool,
 }
 
 /// A transaction that started changing files and never committed (the process died).
@@ -238,7 +241,7 @@ pub fn undo_stack(conn: &Connection, actor: &Actor, except: &[&str]) -> Result<V
          FROM undo_record u
          WHERE u.undone = 0
            AND (u.user = ?1 OR (u.user IS NULL AND u.device_id = ?2))
-         ORDER BY u.ts DESC, u.rowid DESC",
+         ORDER BY u.rowid DESC",
     )?;
     let rows = st.query_map(rusqlite::params![actor.user, actor.device_id], |r| {
         let action: Option<String> = r.get(3)?;
@@ -273,7 +276,7 @@ pub fn last_undoable(conn: &Connection, device_id: &str, labels: &[&str]) -> Opt
     let marks = vec!["?"; labels.len()].join(", ");
     let sql = format!(
         "SELECT tx_id FROM undo_record WHERE device_id = ? AND undone = 0 AND label IN ({marks})
-         ORDER BY ts DESC, rowid DESC LIMIT 1"
+         ORDER BY rowid DESC LIMIT 1"
     );
     let params: Vec<&dyn rusqlite::ToSql> = std::iter::once(&device_id as &dyn rusqlite::ToSql)
         .chain(labels.iter().map(|l| l as &dyn rusqlite::ToSql))
@@ -355,6 +358,7 @@ impl Transaction {
                 .map(|op| JournalOp {
                     existed: op.target().exists(),
                     op: op.clone(),
+                    undo: false,
                 })
                 .collect();
             conn.execute(
@@ -372,9 +376,16 @@ impl Transaction {
                 let _ = clear_journal(conn, &tx_id);
             }
         };
-        // If even this fails (the catalog is busy), the journal row stays and recovery finds
-        // nothing landed: it only clears the row.
-        let sql_tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let sql_tx =
+            match rusqlite::Transaction::new_unchecked(conn, TransactionBehavior::Immediate) {
+                Ok(t) => t,
+                Err(e) => {
+                    // Nothing was done: no journal row may stay (a later recovery would take it for
+                    // an interrupted change and move files back).
+                    forget(conn);
+                    return Err(e.into());
+                }
+            };
         let prepared = (|| -> Result<Vec<AuditRow>> {
             for s in &self.catalog {
                 s.run(&sql_tx)?;
@@ -506,14 +517,53 @@ pub fn undo(
     if !blocked.is_empty() {
         return Err(Error::UndoBlocked(blocked));
     }
-    let sql_tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    for s in record.catalog_undo.iter().rev() {
-        s.run(&sql_tx)?;
-    }
-    sql_tx.execute(
-        "UPDATE undo_record SET undone = 1 WHERE tx_id = ?1",
-        [tx_id],
+    // Crash safety: the reversal is journaled like a commit (recovery applies the ops again
+    // if the undo never committed).
+    let journal_id = format!("undo-{}", uuid::Uuid::now_v7());
+    let ops: Vec<JournalOp> = record
+        .applied
+        .iter()
+        .map(|a| JournalOp {
+            existed: a.op.target().exists(),
+            op: a.op.clone(),
+            undo: true,
+        })
+        .collect();
+    conn.execute(
+        "INSERT INTO tx_journal (tx_id, ts, label, ops) VALUES (?1, ?2, ?3, ?4)",
+        rusqlite::params![
+            journal_id,
+            crate::now_rfc3339(),
+            format!("undo {label}"),
+            serde_json::to_string(&ops).expect("journal serializes")
+        ],
     )?;
+    let forget = |conn: &Connection| {
+        let _ = clear_journal(conn, &journal_id);
+    };
+    let sql_tx = match rusqlite::Transaction::new_unchecked(conn, TransactionBehavior::Immediate) {
+        Ok(t) => t,
+        Err(e) => {
+            forget(conn);
+            return Err(e.into());
+        }
+    };
+    let prepared = (|| -> Result<()> {
+        for s in record.catalog_undo.iter().rev() {
+            s.run(&sql_tx)?;
+        }
+        sql_tx.execute(
+            "UPDATE undo_record SET undone = 1 WHERE tx_id = ?1",
+            [tx_id],
+        )?;
+        sql_tx.execute("DELETE FROM tx_journal WHERE tx_id = ?1", [&journal_id])?;
+        Ok(())
+    })();
+    if let Err(e) = prepared {
+        drop(sql_tx);
+        forget(conn);
+        return Err(e);
+    }
     let row = audit::append(
         &sql_tx,
         &crate::now_rfc3339(),
@@ -525,16 +575,41 @@ pub fn undo(
             serde_json::json!({"tx": tx_id, "label": label, "files": record.applied.len()}),
         ),
     )?;
-    let failed = reverse_all(fs, &record.applied);
+    // Newest first; if one fails, the ones already reversed are applied again, so the files
+    // stay as the catalog (left as it was) says.
+    let mut done: Vec<&AppliedOp> = Vec::new();
+    let mut failed: Vec<String> = Vec::new();
+    for a in record.applied.iter().rev() {
+        match fs.reverse(a) {
+            Ok(()) => done.push(a),
+            Err(e) => {
+                failed.push(format!("{:?}: {e}", a.op));
+                break;
+            }
+        }
+    }
     if !failed.is_empty() {
+        for a in done.iter().rev() {
+            if let Err(e) = fs.apply(&a.op) {
+                failed.push(format!("{:?} could not be put back: {e}", a.op));
+            }
+        }
         drop(sql_tx);
+        forget(conn);
         return Err(Error::FileOp {
-            error: "undo could not reverse every file change; the catalog was left as it was"
+            error: "undo could not reverse every file change; the files and the catalog were left as they were"
                 .into(),
             not_reversed: failed,
         });
     }
-    sql_tx.commit()?;
+    if let Err(e) = sql_tx.commit() {
+        // Put the files back as the catalog still has them.
+        for a in &record.applied {
+            let _ = fs.apply(&a.op);
+        }
+        forget(conn);
+        return Err(e.into());
+    }
     Ok(vec![row])
 }
 

@@ -58,9 +58,12 @@ pub fn run(conn: &Connection, root: &Path, sync_configured: bool) -> Vec<Check> 
     out.push(check("Cabinet reachable", reachable(root)));
     out.push(check(
         "Interrupted changes",
-        conn.query_row("SELECT count(*) FROM tx_journal", [], |r| {
-            r.get::<_, i64>(0)
-        })
+        // A change running right now has a row too: only rows over 10 minutes old count.
+        conn.query_row(
+            "SELECT count(*) FROM tx_journal WHERE ts < ?1",
+            [vf_core::rfc3339_secs_ago(600)],
+            |r| r.get::<_, i64>(0),
+        )
         .map_err(|e| e.to_string())
         .and_then(|n| {
             if n == 0 {

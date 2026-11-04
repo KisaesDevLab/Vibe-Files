@@ -97,6 +97,10 @@ pub struct Browse {
     versions: Option<(String, Vec<vf_fs::versions::Version>)>,
     /// "Move to trash" chosen for the selection (P05 step 3).
     pub trash_requested: bool,
+    /// Asking "Move N documents to the trash?" (N = 2+).
+    trash_asking: Option<usize>,
+    /// The person said yes for N documents.
+    trash_confirm: Option<usize>,
     /// The cabinet root, for the folders on disk in the tree (`set_root`).
     root: Option<PathBuf>,
     /// Legal holds covering what is shown (P07 step 4), for the selection / client they were
@@ -198,6 +202,8 @@ impl Browse {
             meta_form: MetaForm::default(),
             undo_stack: None,
             undo_requested: false,
+            trash_asking: None,
+            trash_confirm: None,
             versions: None,
             trash_requested: false,
             root: None,
@@ -332,6 +338,7 @@ impl Browse {
     /// Shows `scope` in the grid and clears the selection.
     pub fn set_scope(&mut self, scope: Scope) {
         if self.scope != scope {
+            self.trash_asking = None;
             self.scope = scope;
             self.selected.clear();
             self.cursor = None;
@@ -427,6 +434,9 @@ impl Browse {
         self.selected.retain(|&i| shown[i]);
         if self.cursor.is_some_and(|c| c >= self.visible.len()) {
             self.cursor = None;
+        }
+        // Checked on its own: a cursor still in range does not make the anchor so (QA A1).
+        if self.anchor.is_some_and(|a| a >= self.visible.len()) {
             self.anchor = None;
         }
     }
@@ -673,7 +683,10 @@ impl Browse {
     pub fn click_row(&mut self, pos: usize, m: egui::Modifiers) {
         let doc = self.visible[pos];
         if m.shift {
-            let a = self.anchor.unwrap_or(pos);
+            let a = self
+                .anchor
+                .filter(|&a| a < self.visible.len())
+                .unwrap_or(pos);
             if !m.command {
                 self.selected.clear();
             }
@@ -1219,6 +1232,22 @@ fn sync_pill(ui: &mut egui::Ui, b: &mut Browse) {
     }
 }
 
+/// Undoes this login's newest change (Ctrl+Z with the client panel showing).
+fn undo_newest(b: &mut Browse, env: &mut Env) {
+    let top = vf_fs::fileops::undo_stack(env.conn, env.device_id)
+        .ok()
+        .and_then(|s| s.into_iter().next());
+    let Some(u) = top else { return };
+    match vf_fs::fileops::undo(env.conn, env.root, &u.tx_id, env.device_id) {
+        Ok(()) => {
+            b.reload(env.conn);
+            b.notice = Some(format!("Undid {}.", undo_label(&u)));
+        }
+        Err(e) => b.error = Some(format!("Undo failed: {e}")),
+    }
+    b.undo_stack = None;
+}
+
 fn breadcrumb(b: &Browse) -> String {
     let client = |c: usize| {
         let c = &b.snap.clients[c];
@@ -1567,6 +1596,10 @@ fn inspector(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env) {
     if b.selected.is_empty()
         && let Some(c) = b.scope_client()
     {
+        // Ctrl+Z is acted on now wherever the inspector is (never held for a later click).
+        if std::mem::take(&mut b.undo_requested) {
+            undo_newest(b, env);
+        }
         client_panel::show(ui, b, env, c);
         return;
     }
@@ -1651,7 +1684,42 @@ fn inspector(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env) {
     {
         b.trash_requested = true;
     }
+    // Two or more ask first (owner 2026-11-03); one goes straight (Undo brings it back).
+    if b.trash_requested && b.selected.len() > 1 && b.trash_confirm != Some(b.selected.len()) {
+        b.trash_requested = false;
+        b.trash_asking = Some(b.selected.len());
+    }
+    if let Some(n) = b.trash_asking {
+        let mut answer = None;
+        egui::Modal::new(egui::Id::unique("trash-confirm")).show(ui.ctx(), |ui| {
+            ui.set_width(380.0);
+            ui.heading(format!("Move {n} documents to the trash?"));
+            ui.label("Undo last puts them back; Admin › Trash restores them for 90 days.");
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                if ui
+                    .add(widgets::primary_button(format!("Yes, move {n} to trash")))
+                    .clicked()
+                {
+                    answer = Some(true);
+                }
+                if ui.button("Cancel").clicked() {
+                    answer = Some(false);
+                }
+            });
+        });
+        match answer {
+            Some(true) => {
+                b.trash_asking = None;
+                b.trash_confirm = Some(n);
+                b.trash_requested = true;
+            }
+            Some(false) => b.trash_asking = None,
+            None => {}
+        }
+    }
     if std::mem::take(&mut b.trash_requested) {
+        b.trash_confirm = None;
         let ids: Vec<String> = b
             .selected
             .iter()
@@ -2291,6 +2359,23 @@ mod tests {
         );
     }
 
+    /// QA A1: a shift-click after the grid shrank (anchor past its end) does not panic.
+    #[test]
+    fn shift_click_after_the_grid_shrinks() {
+        let mut h = harness(1, 6);
+        let b = &mut h.state_mut().b;
+        assert_eq!(b.visible.len(), 6);
+        b.click_row(5, egui::Modifiers::NONE); // anchor 5
+        b.click_row(1, egui::Modifiers::SHIFT); // cursor 1
+        b.cursor = Some(0);
+        // The grid shrinks to one document (a name filter): the anchor no longer fits.
+        b.name_filter = "doc 000".into();
+        b.refresh();
+        assert!(b.visible.len() < 6, "{}", b.visible.len());
+        b.click_row(0, egui::Modifiers::SHIFT);
+        assert!(!b.selected.is_empty());
+    }
+
     #[test]
     fn reload_keeps_scope_and_selection_by_id() {
         let mut h = harness(2, 4);
@@ -2575,6 +2660,10 @@ mod tests {
         };
         h.run();
         click(&mut h, "Move 2 to trash");
+        // Two or more ask first (owner 2026-11-03).
+        assert!(h.query_by_label("Move 2 documents to the trash?").is_some());
+        assert_eq!(h.state().b.snap.docs.len(), 2, "nothing moved yet");
+        click(&mut h, "Yes, move 2 to trash");
         let s = h.state();
         assert!(s.b.error.is_none(), "{:?}", s.b.error);
         assert!(s.b.snap.docs.is_empty());

@@ -169,19 +169,29 @@ impl VibeFilesApp {
         theme::install(ctx);
         let (config, error) = match config::load(&data) {
             Ok(c) => (c, None),
-            Err(e) => (
-                Config {
-                    device_id: vf_core::new_id(),
-                    last_cabinet: None,
-                    prefs: Default::default(),
-                    ingest: Default::default(),
-                    ocr: Default::default(),
-                    viewer: Default::default(),
-                    sync: Default::default(),
-                    update_check: true,
-                },
-                Some(format!("Settings could not be read: {e:#}")),
-            ),
+            // Never saved over: the unreadable file is kept aside, the device id carried over.
+            Err(e) => match config::set_aside_bad(&data) {
+                Ok((c, aside)) => (
+                    c,
+                    Some(format!(
+                        "Settings could not be read ({e:#}). They were kept as {} and fresh settings made; this PC keeps its identity.",
+                        aside.display()
+                    )),
+                ),
+                Err(e2) => (
+                    Config {
+                        device_id: vf_core::new_id(),
+                        last_cabinet: None,
+                        prefs: Default::default(),
+                        ingest: Default::default(),
+                        ocr: Default::default(),
+                        viewer: Default::default(),
+                        sync: Default::default(),
+                        update_check: true,
+                    },
+                    Some(format!("Settings could not be read: {e:#} ({e2:#})")),
+                ),
+            },
         };
         let mut w = Wizard::new(config.last_cabinet.as_deref());
         w.error = error;
@@ -327,22 +337,30 @@ impl VibeFilesApp {
                     let (catalog, root, ctx) =
                         (opened.catalog.clone(), opened.root.clone(), ctx.clone());
                     let synced = self.config.sync.configured_for(&opened.cabinet.cabinet_id);
-                    std::thread::Builder::new()
-                        .name("self-check".into())
-                        .spawn(move || {
-                            let r = vf_core::db::open(&catalog, vf_core::db::Storage::Local)
-                                .map(|c| crate::selfcheck::run(&c, &root, synced))
-                                .unwrap_or_else(|e| {
-                                    vec![crate::selfcheck::Check {
-                                        name: "Catalog integrity",
-                                        ok: false,
-                                        detail: e.to_string(),
-                                    }]
-                                });
-                            let _ = tx.send(r);
-                            ctx.request_repaint();
-                        })
-                        .ok();
+                    let run = move || {
+                        vf_core::db::open(&catalog, vf_core::db::Storage::Local)
+                            .map(|c| crate::selfcheck::run(&c, &root, synced))
+                            .unwrap_or_else(|e| {
+                                vec![crate::selfcheck::Check {
+                                    name: "Catalog integrity",
+                                    ok: false,
+                                    detail: e.to_string(),
+                                }]
+                            })
+                    };
+                    if cfg!(test) {
+                        // Tests: at once (a result arriving between frames would repaint at
+                        // a random moment).
+                        let _ = tx.send(run());
+                    } else {
+                        std::thread::Builder::new()
+                            .name("self-check".into())
+                            .spawn(move || {
+                                let _ = tx.send(run());
+                                ctx.request_repaint();
+                            })
+                            .ok();
+                    }
                     Some(rx)
                 };
                 let mut sweep = crate::ui::sweep::SweepState::default();

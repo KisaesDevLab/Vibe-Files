@@ -198,13 +198,26 @@ pub fn verify(conn: &Connection) -> Result<VerifyReport> {
 }
 
 /// Appends rows to `<dir>/<yyyy-mm>.jsonl` (one JSON object per line, `detail` as JSON).
+fn file_safe(s: &str) -> String {
+    s.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
 pub fn mirror_append(dir: &Path, rows: &[AuditRow]) -> std::io::Result<()> {
     std::fs::create_dir_all(dir)?;
     for row in rows {
         let mut f = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
-            .open(dir.join(format!("{}.jsonl", row.month())))?;
+            // One file per month and device: each workstation's catalog has its own chain.
+            .open(dir.join(format!("{}.{}.jsonl", row.month(), file_safe(&row.device))))?;
         let detail: serde_json::Value =
             serde_json::from_str(&row.detail).unwrap_or(serde_json::Value::Null);
         let line = serde_json::json!({
@@ -608,7 +621,7 @@ mod tests {
         assert_eq!(mirror_pending(&c, &dir).unwrap(), 0);
         fill(&c, 2);
         assert_eq!(mirror_pending(&c, &dir).unwrap(), 2);
-        let text = std::fs::read_to_string(dir.join("2026-11.jsonl")).unwrap();
+        let text = std::fs::read_to_string(dir.join("2026-11.dev-1.jsonl")).unwrap();
         assert_eq!(text.lines().count(), 5);
         let seqs: Vec<u64> = text
             .lines()
@@ -630,7 +643,10 @@ mod tests {
         let r2 = append(&c, "2026-11-01T00:00:00Z", None, "d", &e).unwrap();
         let dir = tmp.path().join("audit");
         mirror_append(&dir, &[r1, r2]).unwrap();
-        assert!(dir.join("2026-10.jsonl").is_file());
-        assert!(dir.join("2026-11.jsonl").is_file());
+        assert!(
+            dir.join("2026-10.d.jsonl").is_file(),
+            "one file per month and device"
+        );
+        assert!(dir.join("2026-11.d.jsonl").is_file());
     }
 }

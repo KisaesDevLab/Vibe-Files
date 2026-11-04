@@ -79,7 +79,7 @@ fn crash_child() {
             .wrapping_add(1442695040888963407);
         let docs = ids(&conn);
         let id = &docs[(n >> 33) as usize % docs.len()];
-        match (n >> 20) % 3 {
+        match (n >> 20) % 4 {
             0 => {
                 let tmp = vf_fs::content::tmp_file(&root, "pdf").unwrap();
                 std::fs::write(&tmp, format!("content {n}")).unwrap();
@@ -111,6 +111,15 @@ fn crash_child() {
                     },
                     "dev",
                 );
+            }
+            3 => {
+                // Undo the newest change (killed mid-undo too: recovery applies it again).
+                if let Some(u) = vf_fs::fileops::undo_stack(&conn, "dev")
+                    .ok()
+                    .and_then(|s| s.into_iter().next())
+                {
+                    let _ = vf_fs::fileops::undo(&mut conn, &root, &u.tx_id, "dev");
+                }
             }
             _ => {
                 let rows = vf_fs::rename::plan(
@@ -183,7 +192,12 @@ fn crash_kill_and_recover() {
     drop(conn);
     let exe = std::env::current_exe().unwrap();
     let mut recovered = 0;
-    for round in 0..15u64 {
+    // `VF_CRASH_ROUNDS` runs more (a stress run); 15 by default.
+    let rounds: u64 = std::env::var("VF_CRASH_ROUNDS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(15);
+    for round in 0..rounds {
         let mut child = std::process::Command::new(&exe)
             .args(["--exact", "crash_child", "--ignored", "--nocapture"])
             .env("VF_CRASH_DIR", t.path())
@@ -195,14 +209,14 @@ fn crash_kill_and_recover() {
         child.kill().unwrap();
         child.wait().unwrap();
         let conn = vf_core::db::open(&t.path().join("catalog.db"), Storage::Local).unwrap();
-        let r = vf_fs::fileops::recover(&conn).unwrap();
+        let r = vf_fs::fileops::recover(&conn, &root).unwrap();
         recovered += r.transactions;
         assert!(r.problems.is_empty(), "round {round}: {:?}", r.problems);
         if let Err(e) = consistent(&conn, &root) {
             panic!("round {round} (recovered {r:?}): {e}");
         }
     }
-    eprintln!("15 kills, {recovered} interrupted transactions put back");
+    eprintln!("{rounds} kills, {recovered} interrupted transactions put back");
 }
 
 /// Fails at the `fail_at`-th file op.
@@ -357,4 +371,80 @@ fn transaction_rollback_fuzz() {
             assert_eq!(j, 0, "round {round}: journal left");
         }
     }
+}
+
+/// Fails the `fail_at`-th reversal.
+struct FlakyUndo {
+    inner: vf_fs::fileops::FilerFileOps,
+    n: usize,
+    fail_at: usize,
+}
+
+impl FileOps for FlakyUndo {
+    fn apply(&mut self, op: &FileOp) -> Result<AppliedOp, String> {
+        self.inner.apply(op)
+    }
+    fn reverse(&mut self, a: &AppliedOp) -> Result<(), String> {
+        self.n += 1;
+        if self.n == self.fail_at {
+            return Err("injected failure".into());
+        }
+        self.inner.reverse(a)
+    }
+    fn check_reverse(&self, a: &AppliedOp, vacated: &[PathBuf]) -> Result<(), String> {
+        self.inner.check_reverse(a, vacated)
+    }
+}
+
+/// QA C2: an undo that fails part way leaves files and catalog as they were (the reversals
+/// already done are applied again), and no journal row.
+#[test]
+fn an_undo_failing_part_way_rolls_forward() {
+    let t = tempfile::tempdir().unwrap();
+    let (root, mut conn) = cabinet(t.path());
+    let docs = ids(&conn);
+    let mut tx =
+        Transaction::new("rename").audit(AuditEntry::new("rename", None, serde_json::json!({})));
+    for (i, id) in docs.iter().take(3).enumerate() {
+        let rel: String = conn
+            .query_row("SELECT rel_path FROM document WHERE id = ?1", [id], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        let new_rel = format!("Renamed/{i}.pdf");
+        tx = tx
+            .file(FileOp::Move {
+                src: root.join(&rel),
+                dst: root.join(&new_rel),
+            })
+            .catalog(vf_core::tx::Stmt::new(
+                "UPDATE document SET rel_path = ?2 WHERE id = ?1",
+                vec![id.clone().into(), new_rel.into()],
+            ))
+            .catalog_undo(vf_core::tx::Stmt::new(
+                "UPDATE document SET rel_path = ?2 WHERE id = ?1",
+                vec![id.clone().into(), rel.into()],
+            ));
+    }
+    let c = vf_fs::fileops::commit(&mut conn, &root, tx, "dev").unwrap();
+    let before = (snapshot(&root), catalog_state(&conn));
+    let mut fs = FlakyUndo {
+        inner: vf_fs::fileops::FilerFileOps::new(&[&root]).unwrap(),
+        n: 0,
+        fail_at: 2,
+    };
+    let r = vf_core::tx::undo(
+        &mut conn,
+        &mut fs,
+        &vf_core::tx::Actor::device("dev"),
+        &c.tx_id,
+    );
+    assert!(r.is_err());
+    assert_eq!(snapshot(&root), before.0, "files as the catalog has them");
+    assert_eq!(catalog_state(&conn), before.1);
+    let j: i64 = conn
+        .query_row("SELECT count(*) FROM tx_journal", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(j, 0);
+    consistent(&conn, &root).unwrap();
 }

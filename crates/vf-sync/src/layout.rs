@@ -87,12 +87,18 @@ impl CabinetSegment {
 
 /// An audit month key: `yyyy-mm`.
 pub fn safe_month(m: &str) -> bool {
-    let b = m.as_bytes();
+    // `yyyy-mm`, or `yyyy-mm.<device>` (one mirror file per month and device).
+    let (month, device) = m.split_once('.').unwrap_or((m, ""));
+    let b = month.as_bytes();
     b.len() == 7
         && b[4] == b'-'
         && b.iter()
             .enumerate()
             .all(|(i, c)| i == 4 || c.is_ascii_digit())
+        && device.len() <= 64
+        && device
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_')
 }
 
 pub fn object_key(name: &str) -> String {

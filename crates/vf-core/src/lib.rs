@@ -40,17 +40,34 @@ pub fn windows_login() -> Option<String> {
     })
 }
 
-/// The time `days` days ago, RFC 3339 UTC (for "older than" comparisons with stored times).
+/// A time as stored: RFC 3339 UTC with microseconds and `Z`, fixed width, so the text sorts
+/// in time order (QA C9).
+pub fn rfc3339(t: time::OffsetDateTime) -> String {
+    static FMT: std::sync::OnceLock<Vec<time::format_description::BorrowedFormatItem<'static>>> =
+        std::sync::OnceLock::new();
+    let fmt = FMT.get_or_init(|| {
+        time::format_description::parse_borrowed::<1>(
+            "[year]-[month]-[day]T[hour]:[minute]:[second].[subsecond digits:6]Z",
+        )
+        .expect("valid format")
+    });
+    t.to_offset(time::UtcOffset::UTC)
+        .format(fmt)
+        .expect("formats")
+}
+
+/// The time `days` days ago (for "older than" comparisons with stored times).
 pub fn rfc3339_days_ago(days: i64) -> String {
-    let t = time::OffsetDateTime::now_utc() - time::Duration::days(days);
-    t.format(&time::format_description::well_known::Rfc3339)
-        .expect("RFC 3339 formats")
+    rfc3339(time::OffsetDateTime::now_utc() - time::Duration::days(days))
+}
+
+/// The time `secs` seconds ago.
+pub fn rfc3339_secs_ago(secs: i64) -> String {
+    rfc3339(time::OffsetDateTime::now_utc() - time::Duration::seconds(secs))
 }
 
 pub fn now_rfc3339() -> String {
-    let now = time::OffsetDateTime::now_utc();
-    now.format(&time::format_description::well_known::Rfc3339)
-        .expect("RFC 3339 formats")
+    rfc3339(time::OffsetDateTime::now_utc())
 }
 
 /// New catalog id (uuid v7, time-ordered).

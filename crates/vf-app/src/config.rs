@@ -281,6 +281,39 @@ impl Prefs {
 }
 
 /// Reads `<data>/config.toml`, creating `<data>` and the file on first run.
+/// A `config.toml` that cannot be read is renamed `config.toml.bad-<time>` (so nothing saves
+/// over it) and a fresh one made, keeping the workstation's device id when it can be found in
+/// the old text (QA A2). Returns the new config and the old file's new name.
+pub fn set_aside_bad(data: &Path) -> Result<(Config, PathBuf)> {
+    let p = data.join(CONFIG_FILE);
+    let text = std::fs::read_to_string(&p).unwrap_or_default();
+    let device_id = text
+        .lines()
+        .find_map(|l| {
+            let (k, v) = l.split_once('=')?;
+            (k.trim() == "device_id").then(|| v.trim().trim_matches('"').to_string())
+        })
+        .filter(|d| !d.is_empty())
+        .unwrap_or_else(vf_core::new_id);
+    let aside = data.join(format!(
+        "{CONFIG_FILE}.bad-{}",
+        vf_core::now_rfc3339().replace(':', "")
+    ));
+    std::fs::rename(&p, &aside).with_context(|| format!("setting aside {}", p.display()))?;
+    let c = Config {
+        device_id,
+        last_cabinet: None,
+        prefs: Prefs::default(),
+        ingest: Ingest::default(),
+        ocr: Ocr::default(),
+        viewer: ViewerPrefs::default(),
+        sync: SyncConfig::default(),
+        update_check: true,
+    };
+    save(data, &c)?;
+    Ok((c, aside))
+}
+
 pub fn load(data: &Path) -> Result<Config> {
     let p = data.join(CONFIG_FILE);
     match std::fs::read_to_string(&p) {
@@ -324,6 +357,24 @@ pub fn save(data: &Path, c: &Config) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// QA A2: a config.toml that cannot be read is never saved over; the device id stays.
+    #[test]
+    fn an_unreadable_config_is_kept_aside_with_its_device_id() {
+        let t = tempfile::tempdir().unwrap();
+        std::fs::write(
+            t.path().join(CONFIG_FILE),
+            "device_id = \"0192-dev\"
+[sync
+broken = ",
+        )
+        .unwrap();
+        assert!(load(t.path()).is_err());
+        let (c, aside) = set_aside_bad(t.path()).unwrap();
+        assert_eq!(c.device_id, "0192-dev");
+        assert!(std::fs::read_to_string(aside).unwrap().contains("broken"));
+        assert_eq!(load(t.path()).unwrap().device_id, "0192-dev");
+    }
 
     /// PA-19 step 4: on a server, each session user keeps their own scanner (their own
     /// remote-scanning source); a user who never chose one gets the workstation's.

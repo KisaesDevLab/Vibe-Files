@@ -5,6 +5,7 @@
 mod app;
 mod cli;
 mod config;
+mod datalock;
 mod logging;
 mod perf;
 mod redact;
@@ -35,11 +36,12 @@ fn main() -> anyhow::Result<std::process::ExitCode> {
     let args = Args::parse();
     let data = match args.data {
         Some(d) => d,
-        None => default_data(
+        None => datalock::default_data(
             &vf_core::exe_dir()
                 .context("locating the exe")?
                 .join("vibe-files.exe"),
             std::env::var_os("LOCALAPPDATA").map(PathBuf::from),
+            vf_core::windows_login().as_deref(),
         ),
     };
     let _log = logging::init(&data);
@@ -52,9 +54,33 @@ fn main() -> anyhow::Result<std::process::ExitCode> {
                 windows::Win32::System::Console::ATTACH_PARENT_PROCESS,
             );
         }
+        // Commands that change the catalog or the cabinet need the data folder to themselves.
+        let _lock = if cmd.changes_things() {
+            match datalock::acquire(&data) {
+                Ok(l) => Some(l),
+                Err(e) => {
+                    eprintln!("{e}");
+                    return Ok(std::process::ExitCode::from(7));
+                }
+            }
+        } else {
+            None
+        };
         let code = cli::run(cmd, &data, &mut std::io::stdout())?;
         return Ok(std::process::ExitCode::from(code as u8));
     }
+    // One window per data folder: a second copy would share the catalog and the crash journal.
+    let _lock = match datalock::acquire(&data) {
+        Ok(l) => l,
+        Err(e) => {
+            rfd::MessageDialog::new()
+                .set_title("Vibe Files")
+                .set_description(&e)
+                .set_level(rfd::MessageLevel::Warning)
+                .show();
+            return Ok(std::process::ExitCode::from(7));
+        }
+    };
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Vibe Files")
@@ -70,48 +96,4 @@ fn main() -> anyhow::Result<std::process::ExitCode> {
     )
     .map_err(|e| anyhow::anyhow!("ui failed: {e}"))?;
     Ok(std::process::ExitCode::SUCCESS)
-}
-
-/// `data` beside the exe (the portable copy, principle 4), unless the exe was installed by
-/// winget: its package folder is replaced on upgrade and removed on uninstall, so the data
-/// lives in `%LOCALAPPDATA%\Vibe Files\data`. A `data` folder already beside the exe always
-/// wins.
-fn default_data(exe: &std::path::Path, local_app_data: Option<PathBuf>) -> PathBuf {
-    let dir = exe.parent().unwrap_or(std::path::Path::new("."));
-    let beside = dir.join("data");
-    let winget = dir
-        .to_string_lossy()
-        .to_lowercase()
-        .contains(r"\microsoft\winget\packages\");
-    match local_app_data {
-        Some(l) if winget && !beside.exists() => l.join("Vibe Files").join("data"),
-        _ => beside,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn data_lives_beside_the_exe_except_under_winget() {
-        let t = tempfile::tempdir().unwrap();
-        let local = t.path().join("Local");
-        let portable = t.path().join("Tools").join("vibe-files.exe");
-        assert_eq!(
-            default_data(&portable, Some(local.clone())),
-            t.path().join("Tools").join("data")
-        );
-        let pkg = local.join(
-            r"Microsoft\WinGet\Packages\Kisaes.VibeFiles_Microsoft.Winget.Source_8wekyb3d8bbwe",
-        );
-        let exe = pkg.join("vibe-files.exe");
-        assert_eq!(
-            default_data(&exe, Some(local.clone())),
-            local.join("Vibe Files").join("data")
-        );
-        // A data folder already beside it (moved there by hand) is kept.
-        std::fs::create_dir_all(pkg.join("data")).unwrap();
-        assert_eq!(default_data(&exe, Some(local)), pkg.join("data"));
-    }
 }

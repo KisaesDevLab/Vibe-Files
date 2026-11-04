@@ -326,7 +326,20 @@ pub fn auto_empty(conn: &mut Connection, root: &Path, device_id: &str) -> Result
         .into_iter()
         .filter(|t| t.deleted_at < cutoff)
         .collect();
-    purge(conn, root, device_id, &old, "in the trash over 90 days")
+    let n = purge(conn, root, device_id, &old, "in the trash over 90 days")?;
+    // Files no trashed document owns (old content set aside by a change whose version was
+    // already kept) and the temp folder's leftovers go after the same 90 days.
+    let cutoff_t = std::time::SystemTime::now()
+        - std::time::Duration::from_secs(AUTO_EMPTY_DAYS as u64 * 86_400);
+    for dir in [cabinet::trash_dir(root), cabinet::tmp_dir(root)] {
+        for e in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+            let Ok(m) = e.metadata() else { continue };
+            if m.is_file() && m.modified().is_ok_and(|t| t < cutoff_t) {
+                let _ = std::fs::remove_file(e.path());
+            }
+        }
+    }
+    Ok(n)
 }
 
 /// `_Vibe/trash_pin.json`: the firm PIN's hash (Q-29).

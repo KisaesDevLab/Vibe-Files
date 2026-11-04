@@ -186,11 +186,72 @@ fn remove_partials(dst: &Path) -> usize {
 
 /// Puts back the file changes of transactions the process died in the middle of (P13 step 2):
 /// each one's `tx_journal` row lists its ops and whether their targets existed before. Their
-/// catalog changes never committed. Run at open, before anything else touches the cabinet.
-pub fn recover(conn: &vf_core::db::Connection) -> Result<Recovered, String> {
+/// catalog changes never committed. An undo that never committed has its reversals applied
+/// again. Run at open (with the data folder locked to this copy of the program), before
+/// anything else touches the cabinet.
+///
+/// A journal row means its transaction never committed (the commit deletes the row in the same
+/// SQLite transaction); the data folder is held by one copy of the program, so no other one is
+/// mid-change. Every step checks what is on disk now: a copy is removed only if it is still the
+/// same content, a sentinel only if it still names the same client.
+pub fn recover(conn: &vf_core::db::Connection, root: &Path) -> Result<Recovered, String> {
     let mut out = Recovered::default();
+    let same = |a: &Path, b: &Path| -> bool {
+        matches!((commit::sha256_file(a), commit::sha256_file(b)), (Ok(x), Ok(y)) if x == y)
+    };
     for e in vf_core::tx::journal(conn).map_err(|e| e.to_string())? {
         out.transactions += 1;
+        if e.ops.iter().any(|j| j.undo) {
+            // An undo cut short: its reversals that landed are applied again, oldest first.
+            let mut fs = FilerFileOps::new(&[root]).map_err(|e| e.to_string())?;
+            for j in &e.ops {
+                // A copy-back cut short leaves a partial beside either end.
+                if let FileOp::Move { src, dst } | FileOp::Copy { src, dst } = &j.op {
+                    remove_partials(src);
+                    remove_partials(dst);
+                }
+                // Undoing a move into the version store copied the bytes back and kept the
+                // stored ones: applying it again removes the copy (when it is that content).
+                if let FileOp::Move { src, dst } = &j.op
+                    && in_versions(dst)
+                    && src.is_file()
+                    && dst.is_file()
+                {
+                    if same(src, dst) {
+                        match std::fs::remove_file(src) {
+                            Ok(()) => out.reversed += 1,
+                            Err(err) => out
+                                .problems
+                                .push(format!("cannot remove {}: {err}", src.display())),
+                        }
+                    }
+                    continue;
+                }
+                let again = match &j.op {
+                    FileOp::Move { src, dst } => src.exists() && !dst.exists(),
+                    FileOp::Copy { src, dst } => src.exists() && !dst.exists(),
+                    FileOp::AppendLines {
+                        path, undo_lines, ..
+                    } => {
+                        let tail: String = undo_lines.iter().map(|l| format!("{l}\n")).collect();
+                        !tail.is_empty()
+                            && std::fs::read_to_string(path).is_ok_and(|t| t.ends_with(&tail))
+                    }
+                    FileOp::WriteSentinel { folder, .. } => {
+                        !filer_intake::sentinel::sentinel_path(folder).exists()
+                    }
+                    FileOp::Mkdir { .. } => false,
+                };
+                if again {
+                    match fs.apply(&j.op) {
+                        Ok(_) => out.reversed += 1,
+                        Err(err) => out.problems.push(err),
+                    }
+                }
+            }
+            vf_core::tx::clear_journal(conn, &e.tx_id).map_err(|e| e.to_string())?;
+            continue;
+        }
         for j in e.ops.iter().rev() {
             let r: Result<bool, String> = match &j.op {
                 FileOp::Move { src, dst } => {
@@ -199,13 +260,18 @@ pub fn recover(conn: &vf_core::db::Connection) -> Result<Recovered, String> {
                     // the new one into the same path (which existed when it was planned).
                     if dst.exists() && !src.exists() {
                         commit::transfer(dst, src, false).map(|_| true)
+                    } else if dst.is_file() && src.is_file() && same(src, dst) {
+                        // A copy across volumes finished but the source was not removed yet.
+                        std::fs::remove_file(dst)
+                            .map(|()| true)
+                            .map_err(|err| format!("cannot remove {}: {err}", dst.display()))
                     } else {
                         Ok(false)
                     }
                 }
-                FileOp::Copy { dst, .. } => {
+                FileOp::Copy { src, dst } => {
                     remove_partials(dst);
-                    if !j.existed && dst.is_file() {
+                    if !j.existed && dst.is_file() && same(src, dst) {
                         std::fs::remove_file(dst)
                             .map(|()| true)
                             .map_err(|err| format!("cannot remove {}: {err}", dst.display()))
@@ -233,9 +299,15 @@ pub fn recover(conn: &vf_core::db::Connection) -> Result<Recovered, String> {
                         Ok(false)
                     }
                 }
-                FileOp::WriteSentinel { folder, .. } => {
+                FileOp::WriteSentinel {
+                    folder, client_id, ..
+                } => {
                     let p = filer_intake::sentinel::sentinel_path(folder);
-                    Ok(!j.existed && p.is_file() && std::fs::remove_file(&p).is_ok())
+                    let ours = filer_intake::sentinel::read_sentinel(folder)
+                        .ok()
+                        .flatten()
+                        .is_some_and(|s| s.client_id.to_string() == *client_id);
+                    Ok(!j.existed && ours && std::fs::remove_file(&p).is_ok())
                 }
             };
             match r {
@@ -267,6 +339,10 @@ fn append(path: &Path, lines: &[String]) -> Result<(), String> {
         .open(path)
         .map_err(|e| format!("cannot open {}: {e}", path.display()))?;
     let mut buf = String::new();
+    // A last line cut short (a crash, a share dropping) would merge with the first new one.
+    if std::fs::metadata(path).is_ok_and(|m| m.len() > 0) && !ends_with_newline(path) {
+        buf.push('\n');
+    }
     for l in lines {
         buf.push_str(l);
         buf.push('\n');
@@ -274,6 +350,25 @@ fn append(path: &Path, lines: &[String]) -> Result<(), String> {
     f.write_all(buf.as_bytes())
         .and_then(|()| f.sync_all())
         .map_err(|e| format!("cannot write {}: {e}", path.display()))
+}
+
+/// Whether `p` is in a cabinet's version store (`_Vibe/versions/`).
+fn in_versions(p: &Path) -> bool {
+    let s = p.to_string_lossy().replace('\\', "/");
+    s.contains(&format!(
+        "/{}/{}/",
+        crate::cabinet::VIBE_DIR,
+        crate::cabinet::VERSIONS_DIR
+    ))
+}
+
+fn ends_with_newline(path: &Path) -> bool {
+    use std::io::{Read, Seek, SeekFrom};
+    let Ok(mut f) = std::fs::File::open(path) else {
+        return true;
+    };
+    let mut b = [0u8; 1];
+    f.seek(SeekFrom::End(-1)).is_ok() && f.read_exact(&mut b).is_ok() && b[0] == b'\n'
 }
 
 fn method_name(m: Method) -> &'static str {
@@ -421,6 +516,11 @@ impl FileOps for FilerFileOps {
     fn reverse(&mut self, a: &AppliedOp) -> Result<(), String> {
         self.check_reverse(a, &[])?;
         match &a.op {
+            // Content kept as a version may be shared by other documents' versions since (the
+            // store is by content): undoing copies it back and leaves the stored one.
+            FileOp::Move { src, dst } if in_versions(dst) => {
+                commit::copy_verified(dst, src)?;
+            }
             FileOp::Move { src, dst } => {
                 commit::transfer(dst, src, self.force_copy)?;
             }

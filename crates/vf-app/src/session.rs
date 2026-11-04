@@ -131,7 +131,7 @@ pub fn open(data: &Path, device_id: &str, root: &Path) -> Result<Opened> {
         );
     }
     // A change cut short by a crash is put back before anything else reads the cabinet.
-    let rec = vf_fs::fileops::recover(&conn).map_err(anyhow::Error::msg)?;
+    let rec = vf_fs::fileops::recover(&conn, root).map_err(anyhow::Error::msg)?;
     if rec.transactions > 0 {
         tracing::warn!(
             transactions = rec.transactions,

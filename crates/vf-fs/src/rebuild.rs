@@ -45,6 +45,10 @@ pub struct RebuildReport {
     pub docmeta_restored: usize,
     /// `docmeta.jsonl` lines that could not be read (skipped).
     pub docmeta_bad_lines: usize,
+    /// Files that could not be read (cabinet paths); their catalog rows were left as they were.
+    pub unreadable: Vec<String>,
+    /// Version sidecars that could not be read (skipped).
+    pub bad_sidecars: usize,
 }
 
 impl std::fmt::Display for RebuildReport {
@@ -119,6 +123,13 @@ client IDs whose master-list uuid differs from their folder (folder kept): {}",
                 f,
                 "\nfolders without a valid sentinel (documents kept, no client): {}",
                 self.unbound_folders.join(", ")
+            )?;
+        }
+        if !self.unreadable.is_empty() {
+            write!(
+                f,
+                "\nfiles that could not be read (left as they were): {}",
+                self.unreadable.len()
             )?;
         }
         if !self.duplicate_folders.is_empty() {
@@ -527,8 +538,12 @@ pub fn rebuild(
         let mut paths = Vec::new();
         files_under(folder, &mut paths)?;
         for p in paths {
-            let hash = sha256_file(&p)
-                .map_err(|e| RebuildError::Io(format!("cannot hash {}: {e}", p.display())))?;
+            // One file that cannot be read (open in QuickBooks, a denied ACL) does not stop the
+            // rebuild: it is listed and left as the catalog has it.
+            let Ok(hash) = sha256_file(&p) else {
+                rep.unreadable.push(rel(root, &p));
+                continue;
+            };
             let size = std::fs::metadata(&p).map(|m| m.len()).unwrap_or(0);
             found.push(Found {
                 rel: rel(root, &p),
@@ -717,14 +732,21 @@ pub fn rebuild(
                 .unwrap_or_default()
                 .to_string_lossy()
                 .into_owned();
+            if !cabinet::is_sha256(&hash) {
+                rep.bad_sidecars += 1;
+                continue;
+            }
             let content = sc.with_extension("");
             let Ok(size) = std::fs::metadata(&content).map(|m| m.len()) else {
                 continue; // sidecar without its content: nothing to restore
             };
-            let text = std::fs::read_to_string(sc)
-                .map_err(|e| RebuildError::Io(format!("cannot read {}: {e}", sc.display())))?;
-            let entries: Vec<VersionSidecar> = serde_json::from_str(&text)
-                .map_err(|e| RebuildError::Io(format!("{} is not valid: {e}", sc.display())))?;
+            let Some(entries) = std::fs::read_to_string(sc)
+                .ok()
+                .and_then(|t| serde_json::from_str::<Vec<VersionSidecar>>(&t).ok())
+            else {
+                rep.bad_sidecars += 1;
+                continue;
+            };
             for v in entries {
                 let Some(doc_id) = doc_id_by_rel.get(&v.rel_path) else {
                     continue;
