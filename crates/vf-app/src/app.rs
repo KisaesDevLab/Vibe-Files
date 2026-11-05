@@ -2549,6 +2549,18 @@ mod tests {
         let root = tmp.path().join("Clients");
         std::fs::create_dir_all(root.join("Old")).unwrap();
         vf_pdf::forms::write_test_form(&root.join("Old/form.pdf"));
+        // A signed copy (Q-59): a signature field with a value.
+        {
+            use lopdf::dictionary;
+            let p = root.join("Old/signed.pdf");
+            vf_pdf::forms::write_test_form(&p);
+            let mut d = lopdf::Document::load(&p).unwrap();
+            let sig = d.add_object(dictionary! { "Type" => "Sig" });
+            d.add_object(dictionary! {
+                "FT" => "Sig", "T" => lopdf::Object::string_literal("sig"), "V" => sig,
+            });
+            d.save(&p).unwrap();
+        }
         filer_pdf::pdf::write_test_pdf(
             &root.join("Old/a.pdf"),
             &["Alpha one", "Alpha two", "Alpha three", "Alpha four"],
@@ -2709,6 +2721,32 @@ mod tests {
         click(&mut h, "Delete page 2");
         h.run_steps(3);
         assert_eq!(texts(&root.join("Old/a.pdf")), ["Alpha one", "Alpha four"]);
+
+        // A signed PDF: Save asks first; "Save as a new document" leaves the signed file alone.
+        open(&mut h, "signed.pdf");
+        let before = std::fs::read(root.join("Old/signed.pdf")).unwrap();
+        if let Screen::Open(o) = &mut h.state_mut().screen {
+            o.viewer.set_field("client_name", "Sample".into());
+        }
+        h.run_steps(2);
+        click(&mut h, "Save");
+        h.run_steps(2);
+        click(&mut h, "Save as a new document");
+        h.run_steps(3);
+        assert_eq!(std::fs::read(root.join("Old/signed.pdf")).unwrap(), before);
+        if let Screen::Open(o) = &h.state().screen {
+            let d = o.viewer.doc.as_ref().unwrap();
+            assert_ne!(d.name, "signed.pdf", "the new document is open");
+            assert_eq!(
+                vf_pdf::forms::read(&d.path)
+                    .unwrap()
+                    .iter()
+                    .find(|f| f.name == "client_name")
+                    .unwrap()
+                    .value,
+                "Sample"
+            );
+        }
     }
 
     /// P04 step 6: rotate, extract and split from the Viewer's Pages window, Combine from

@@ -33,7 +33,7 @@ Annotations, stamps, pasted tapes and [form entries](help:forms) are not written
 - **Save** writes them into this file as a new version. The current version is kept and can be opened or restored from the document's details in Browse.
 - **Save as…** writes a new document beside this one, with the same client, year and doc type. This file is not changed.
 
-Both buttons are greyed out when nothing is waiting.
+Both buttons are greyed out when nothing is waiting. On a digitally signed PDF, **Save** asks first, because saving changes into it makes the signature invalid (see [filling in forms](help:forms)).
 
 ## Closing
 

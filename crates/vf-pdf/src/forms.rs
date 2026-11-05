@@ -91,10 +91,42 @@ impl Field {
 /// The fillable fields of the PDF at `path`, in page order then top to bottom.
 pub fn read(path: &Path) -> Result<Vec<Field>, String> {
     let doc = Document::load(path).map_err(|e| format!("cannot read the PDF: {e}"))?;
-    if doc.is_encrypted() {
+    if needs_password(&doc) {
         return Err("the PDF is password protected".into());
     }
     Ok(read_doc(&doc))
+}
+
+/// Encrypted with a password to open it. A PDF with only an owner password (it opens without
+/// one but forbids changes) is not: lopdf reads it with the empty password.
+pub fn needs_password(doc: &Document) -> bool {
+    doc.is_encrypted() && doc.encryption_state.is_none()
+}
+
+/// A PDF with only an owner password, saved without its protection (owner 2026-11-04, Q-59:
+/// fill such forms and drop the restriction).
+fn drop_protection(doc: &mut Document) {
+    if !doc.is_encrypted() {
+        return;
+    }
+    if let Some(Object::Reference(id)) = doc.trailer.remove(b"Encrypt") {
+        doc.objects.remove(&id);
+    }
+    doc.encryption_state = None;
+}
+
+/// Whether the PDF carries a digital signature (a signature field with a value). Saving any
+/// change rewrites the file and the signature no longer verifies.
+pub fn is_signed(doc: &Document) -> bool {
+    doc.objects.values().any(|o| {
+        o.as_dict().is_ok_and(|d| {
+            d.get(b"FT")
+                .ok()
+                .and_then(|o| o.as_name().ok())
+                .is_some_and(|n| n == b"Sig")
+                && d.has(b"V")
+        })
+    })
 }
 
 /// [`read`] on a loaded document.
@@ -119,10 +151,13 @@ pub fn read_doc(doc: &Document) -> Vec<Field> {
 /// nothing is written.
 pub fn fill(src: &Path, out: &Path, values: &[(String, String)]) -> Result<usize, String> {
     let mut doc = Document::load(src).map_err(|e| format!("cannot read the PDF: {e}"))?;
-    if doc.is_encrypted() {
+    if needs_password(&doc) {
         return Err("the PDF is password protected".into());
     }
     let n = fill_doc(&mut doc, values)?;
+    // An owner-password PDF is written out decrypted: without its /Encrypt, so it opens
+    // everywhere and stays fillable.
+    drop_protection(&mut doc);
     let mut bytes = Vec::new();
     doc.save_to(&mut bytes)
         .map_err(|e| format!("cannot write the PDF: {e}"))?;
@@ -1484,6 +1519,89 @@ mod tests {
             "CR breaks the line"
         );
         assert!(has("(Turned) Tj"));
+    }
+
+    #[test]
+    fn owner_password_forms_are_filled_and_saved_unprotected() {
+        use lopdf::{EncryptionState, EncryptionVersion, Permissions};
+        let t = tempfile::tempdir().unwrap();
+        let (plain, locked, out) = (
+            t.path().join("p.pdf"),
+            t.path().join("l.pdf"),
+            t.path().join("o.pdf"),
+        );
+        write_test_form(&plain);
+        let mut doc = Document::load(&plain).unwrap();
+        doc.trailer.set(
+            "ID",
+            vec![
+                Object::string_literal("0123456789abcdef"),
+                Object::string_literal("0123456789abcdef"),
+            ],
+        );
+        let owner_only = EncryptionState::try_from(EncryptionVersion::V2 {
+            document: &doc,
+            owner_password: "owner-secret",
+            user_password: "",
+            key_length: 128,
+            permissions: Permissions::PRINTABLE,
+        })
+        .unwrap();
+        doc.encrypt(&owner_only).unwrap();
+        doc.save(&locked).unwrap();
+        let reread = Document::load(&locked).unwrap();
+        assert!(reread.is_encrypted() && !needs_password(&reread));
+
+        assert_eq!(read(&locked).unwrap().len(), 6);
+        fill(&locked, &out, &[("client_name".into(), "Sample".into())]).unwrap();
+        let d = Document::load(&out).unwrap();
+        assert!(!d.is_encrypted(), "saved without the owner password");
+        assert_eq!(
+            read(&out)
+                .unwrap()
+                .iter()
+                .find(|f| f.name == "client_name")
+                .unwrap()
+                .value,
+            "Sample"
+        );
+
+        // A password to open it: refused.
+        let mut doc = Document::load(&plain).unwrap();
+        doc.trailer.set(
+            "ID",
+            vec![
+                Object::string_literal("0123456789abcdef"),
+                Object::string_literal("0123456789abcdef"),
+            ],
+        );
+        let user = EncryptionState::try_from(EncryptionVersion::V2 {
+            document: &doc,
+            owner_password: "owner-secret",
+            user_password: "open-secret",
+            key_length: 128,
+            permissions: Permissions::PRINTABLE,
+        })
+        .unwrap();
+        doc.encrypt(&user).unwrap();
+        doc.save(&locked).unwrap();
+        assert!(read(&locked).is_err());
+        assert!(fill(&locked, &out, &[]).is_err());
+    }
+
+    #[test]
+    fn signatures_are_noticed() {
+        let t = tempfile::tempdir().unwrap();
+        let p = t.path().join("f.pdf");
+        write_test_form(&p);
+        let mut doc = Document::load(&p).unwrap();
+        assert!(!is_signed(&doc));
+        let sig = doc
+            .add_object(dictionary! { "Type" => "Sig", "Contents" => Object::string_literal("x") });
+        doc.add_object(
+            dictionary! { "FT" => "Sig", "T" => Object::string_literal("sig"), "V" => sig },
+        );
+        assert!(is_signed(&doc));
     }
 
     #[test]

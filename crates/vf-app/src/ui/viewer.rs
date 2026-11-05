@@ -211,6 +211,8 @@ pub struct Viewer {
     page_request: Option<(PageMenu, usize)>,
     /// Pages… thumbnails: the page last clicked, for Shift-click ranges.
     pick_anchor: Option<usize>,
+    /// Save pressed on a digitally signed PDF: asked first (Q-59).
+    ask_signed: bool,
 }
 
 /// A page's right-click menu (canvas or thumbnail strip).
@@ -341,6 +343,7 @@ impl Default for Viewer {
             form: Default::default(),
             page_request: None,
             pick_anchor: None,
+            ask_signed: false,
         }
     }
 }
@@ -717,6 +720,40 @@ pub fn show(ui: &mut egui::Ui, v: &mut Viewer, env: &mut Env<'_>) {
     }
     if v.quit_asked {
         quit_dialog(ui, v, env);
+    }
+    if v.ask_signed {
+        let mut answer = None;
+        egui::Modal::new(egui::Id::unique("viewer-signed")).show(ui.ctx(), |ui| {
+            ui.set_width(460.0);
+            ui.heading("This PDF is digitally signed");
+            ui.label(
+                "Saving your changes into it makes a new version whose signature is no longer valid (the signed version is kept in its history). Save as… leaves the signed file as it is and puts your changes in a new document.",
+            );
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                if ui.add(widgets::primary_button("Save as a new document")).clicked() {
+                    answer = Some(1);
+                }
+                if ui.button("Save into the signed file").clicked() {
+                    answer = Some(0);
+                }
+                if ui.button("Cancel").clicked() {
+                    answer = Some(2);
+                }
+            });
+        });
+        match answer {
+            Some(0) => {
+                v.ask_signed = false;
+                save(v, env, false);
+            }
+            Some(1) => {
+                v.ask_signed = false;
+                save(v, env, true);
+            }
+            Some(_) => v.ask_signed = false,
+            None => {}
+        }
     }
     if v.ask_close {
         let mut answer = None;
@@ -1630,7 +1667,11 @@ fn toolbar(ui: &mut egui::Ui, v: &mut Viewer, env: &mut Env<'_>, doc: &Doc) {
                     .on_hover_text("A new version of this file; the current one is kept.")
                     .clicked()
                 {
-                    save(v, env, false);
+                    if v.info.as_ref().is_some_and(|i| i.signed) {
+                        v.ask_signed = true;
+                    } else {
+                        save(v, env, false);
+                    }
                 }
                 ui.separator();
                 if ui
@@ -3106,33 +3147,37 @@ fn save_pending(
 /// The open document with the unsaved annotations and form values written in, as a temporary
 /// file in the cabinet (the caller files or removes it).
 fn edited_copy(v: &Viewer, env: &Env<'_>, doc: &Doc) -> Result<PathBuf, String> {
+    // The form first: filling saves an owner-password PDF without its protection (Q-59), so the
+    // annotations can then be added to it.
     let tmp = vf_fs::content::tmp_file(env.root, "pdf")?;
-    let annotated = if v.pending.is_empty() {
+    let filled = if v.form.is_empty() {
         std::fs::copy(&doc.path, &tmp)
             .map(|_| ())
             .map_err(|e| format!("cannot read {}: {e}", doc.name))
     } else {
-        annot::add(&doc.path, &tmp, &v.pending, &vf_core::now_rfc3339()).map(|_| ())
+        let values: Vec<(String, String)> =
+            v.form.iter().map(|(k, x)| (k.clone(), x.clone())).collect();
+        vf_pdf::forms::fill(&doc.path, &tmp, &values)
+            .map(|_| ())
+            .map_err(|e| format!("The form was not filled: {e}."))
     };
-    if let Err(e) = annotated {
+    if let Err(e) = filled {
         let _ = std::fs::remove_file(&tmp);
         return Err(e);
     }
-    if v.form.is_empty() {
+    if v.pending.is_empty() {
         return Ok(tmp);
     }
-    let filled = vf_fs::content::tmp_file(env.root, "pdf").inspect_err(|_| {
+    let annotated = vf_fs::content::tmp_file(env.root, "pdf").inspect_err(|_| {
         let _ = std::fs::remove_file(&tmp);
     })?;
-    let values: Vec<(String, String)> =
-        v.form.iter().map(|(k, x)| (k.clone(), x.clone())).collect();
-    let r = vf_pdf::forms::fill(&tmp, &filled, &values);
+    let r = annot::add(&tmp, &annotated, &v.pending, &vf_core::now_rfc3339());
     let _ = std::fs::remove_file(&tmp);
     match r {
-        Ok(_) => Ok(filled),
+        Ok(_) => Ok(annotated),
         Err(e) => {
-            let _ = std::fs::remove_file(&filled);
-            Err(format!("The form was not filled: {e}."))
+            let _ = std::fs::remove_file(&annotated);
+            Err(e)
         }
     }
 }

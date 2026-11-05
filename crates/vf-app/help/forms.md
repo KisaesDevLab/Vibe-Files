@@ -32,6 +32,12 @@ The [audit trail](help:audit) records that a form was filled and how many fields
 
 Some government forms also hold a second, Adobe-only copy of their fields (XFA). Saving a filled form removes that copy, so Acrobat shows what you typed rather than the old values.
 
-A password-protected PDF can't be filled here: the **Form** tab says so. Fill it in the PDF program that has its password.
+Some PDFs open without a password but are locked against changes (an "owner" password). Vibe Files fills them and saves the filled file without that lock, so it opens and can be changed anywhere. A PDF that needs a password to open can't be filled here: the **Form** tab says so. Fill it in the PDF program that has its password.
+
+## Signed PDFs
+
+Saving changes into a PDF that has a digital signature makes the signature invalid. **Save** on a signed PDF asks first: **Save as a new document** keeps the signed file as it is and puts your changes in a new one; **Save into the signed file** saves a new version anyway (the signed version stays in its history).
+
+A list that allows several choices keeps one choice here.
 
 > Characters outside the usual Western European ones (for example Greek or Chinese) are kept in the field but show as `?` on the page.

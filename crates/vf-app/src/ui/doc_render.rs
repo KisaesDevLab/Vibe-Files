@@ -20,8 +20,11 @@ pub struct DocInfo {
     pub bytes: usize,
     /// Its fillable fields (PA-27); shared, the Viewer reads them every frame.
     pub fields: std::sync::Arc<Vec<vf_pdf::forms::Field>>,
-    /// Password protected: its form can't be filled (saving would be refused).
+    /// Needs a password to open: its form can't be filled (saving would be refused). A PDF with
+    /// only an owner password is not locked: filled, it is saved without the protection.
     pub locked: bool,
+    /// Digitally signed: any saved change makes the signature invalid (asked before Save).
+    pub signed: bool,
 }
 
 pub enum Job {
@@ -133,15 +136,16 @@ fn run(jobs: &Receiver<Job>, out: &Sender<Done>, ctx: &egui::Context) {
                         .map_err(|e| format!("cannot read {}: {e}", path.display()))
                         .and_then(|bytes| {
                             let n = bytes.len();
-                            let (geoms, fields, locked) = lopdf::Document::load_mem(&bytes)
+                            let (geoms, fields, locked, signed) = lopdf::Document::load_mem(&bytes)
                                 .map(|d| {
-                                    let locked = d.is_encrypted();
+                                    let locked = vf_pdf::forms::needs_password(&d);
+                                    let signed = vf_pdf::forms::is_signed(&d);
                                     let fields = if locked {
                                         vec![]
                                     } else {
                                         vf_pdf::forms::read_doc(&d)
                                     };
-                                    (vf_pdf::layer::geometries(&d), fields, locked)
+                                    (vf_pdf::layer::geometries(&d), fields, locked, signed)
                                 })
                                 .map_err(|e| format!("cannot read the PDF: {e}"))?;
                             let d = p
@@ -153,6 +157,7 @@ fn run(jobs: &Receiver<Job>, out: &Sender<Done>, ctx: &egui::Context) {
                                 bytes: n,
                                 fields: std::sync::Arc::new(fields),
                                 locked,
+                                signed,
                             })
                         }),
                 };
