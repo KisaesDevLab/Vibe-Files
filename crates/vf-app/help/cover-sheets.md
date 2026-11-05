@@ -15,6 +15,15 @@ The folder the document will go to is shown below. Press **Create cover sheet**:
 
 **Print 10 blank separators** prints sheets that only mark where a new document starts, with no client.
 
+## Cover sheets for several clients
+
+Click **Several clients** at the top of the dialog to print sheets for many clients at once, for example at the start of tax season.
+
+- Set the **Doc type**, **Tax year** and **Sheets per client** once; every ticked client gets them.
+- Type in **Find client by name or ID** to narrow the list. **Tick all shown** and **Untick all shown** act on the clients listed. Click one client's box, then Shift-click another to tick or untick every client between.
+- A ticked client's row has its own doc type, year and sheets. Leave them as they are to print the settings above, or change them for that client only.
+- Press **Create cover sheets (N clients)**. One PDF opens with every client's sheets, in the order of the list, ready to print.
+
 ## Scanning a stack
 
 1. Put a cover sheet (or a separator) on top of each document.

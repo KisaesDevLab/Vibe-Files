@@ -1,6 +1,8 @@
 //! "Print cover sheet" (Browse toolbar) / "Cover sheet for client…" (Intake) and "Print 10
 //! blank separators" (P02 step 3): writes the sheet PDF to `<data>/sheets/` and opens it in
-//! the PDF app to print (Vibe's own Print is PA-13).
+//! the PDF app to print (Vibe's own Print is PA-13). **Several clients** (owner 2026-11-05,
+//! Q-61): clients ticked in a searchable list, one doc type / tax year / sheet count for all
+//! (each ticked row may set its own), one PDF with every client's sheets in list order.
 
 use std::path::{Path, PathBuf};
 
@@ -23,6 +25,37 @@ pub struct CoverSheetDialog {
     /// A year, `Permanent`, or empty.
     pub year: String,
     pub error: Option<String>,
+    /// Several clients at once, ticked in a searchable list.
+    pub several: bool,
+    /// The list's search: name or ID.
+    pub find: String,
+    /// One per client (the order of `clients`).
+    pub rows: Vec<RowPick>,
+    /// The row whose box was clicked last, for Shift-click runs.
+    last_tick: Option<usize>,
+}
+
+/// A client's row in **Several clients**: ticked, and what it prints when not the settings
+/// above (`None`: the setting above).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RowPick {
+    pub ticked: bool,
+    /// `Some(None)`: no doc type.
+    pub doc_type: Option<Option<usize>>,
+    pub year: Option<String>,
+    pub copies: Option<String>,
+}
+
+/// Sheets for one client: 1 to 50 (empty = 1).
+fn copies_of(s: &str) -> Result<usize, String> {
+    match s.trim() {
+        "" => Ok(1),
+        c => c
+            .parse()
+            .ok()
+            .filter(|n| (1..=50).contains(n))
+            .ok_or_else(|| "Sheets: a number from 1 to 50.".to_string()),
+    }
 }
 
 impl CoverSheetDialog {
@@ -50,6 +83,7 @@ impl CoverSheetDialog {
         let doc_types = snap.pickable_doc_types(None);
         // Its place in the list offered (archived types left out), QA 2026-11-04.
         let doc_type = doc_type.and_then(|id| doc_types.iter().position(|(t, _)| t == id));
+        let n_clients = clients.len();
         CoverSheetDialog {
             clients,
             doc_types,
@@ -59,16 +93,69 @@ impl CoverSheetDialog {
             doc_type,
             year: (chrono::Local::now().year() - 1).to_string(),
             error: None,
+            several: false,
+            find: String::new(),
+            rows: vec![RowPick::default(); n_clients],
+            last_tick: None,
         }
     }
 
     fn sheet(&self) -> Result<(Sheet, Labels), String> {
-        let (id, name, client_folder) = self
-            .client
-            .and_then(|i| self.clients.get(i))
-            .ok_or("Choose the client.")?;
-        let doc_type = self.doc_type.and_then(|i| self.doc_types.get(i));
-        let y = self.year.trim();
+        let ci = self.client.ok_or("Choose the client.")?;
+        self.sheet_for(ci, self.doc_type, &self.year)
+    }
+
+    /// Every ticked client's sheets, in list order, each with its own settings or the ones
+    /// above.
+    pub fn bulk_pages(&self) -> Result<Vec<(Sheet, Labels)>, String> {
+        let mut out = vec![];
+        for (i, r) in self.rows.iter().enumerate().filter(|(_, r)| r.ticked) {
+            let who = || {
+                let (id, n, _) = &self.clients[i];
+                format!("{n} ({id})")
+            };
+            let dt = r.doc_type.unwrap_or(self.doc_type);
+            let year = r.year.as_deref().unwrap_or(&self.year);
+            let n = copies_of(r.copies.as_deref().unwrap_or(&self.copies))
+                .map_err(|e| format!("{}: {e}", who()))?;
+            let page = self
+                .sheet_for(i, dt, year)
+                .map_err(|e| format!("{}: {e}", who()))?;
+            out.extend(std::iter::repeat_n(page, n));
+        }
+        if out.is_empty() {
+            return Err("Tick at least one client.".into());
+        }
+        Ok(out)
+    }
+
+    /// How many clients are ticked.
+    pub fn ticked(&self) -> usize {
+        self.rows.iter().filter(|r| r.ticked).count()
+    }
+
+    /// The clients the search shows (indices into `clients`).
+    fn shown(&self) -> Vec<usize> {
+        let needle = self.find.trim().to_lowercase();
+        (0..self.clients.len())
+            .filter(|&i| {
+                let (id, n, _) = &self.clients[i];
+                needle.is_empty()
+                    || n.to_lowercase().contains(&needle)
+                    || id.to_lowercase().contains(&needle)
+            })
+            .collect()
+    }
+
+    fn sheet_for(
+        &self,
+        ci: usize,
+        doc_type: Option<usize>,
+        year: &str,
+    ) -> Result<(Sheet, Labels), String> {
+        let (id, name, client_folder) = self.clients.get(ci).ok_or("Choose the client.")?;
+        let doc_type = doc_type.and_then(|i| self.doc_types.get(i));
+        let y = year.trim();
         let tax_year = if y.is_empty() {
             None
         } else if y.eq_ignore_ascii_case("permanent") {
@@ -148,33 +235,40 @@ pub fn separators(dir: &Path) -> Result<PathBuf, String> {
 pub fn show(ctx: &egui::Context, d: &mut CoverSheetDialog, dir: &Path) -> DialogOutcome<PathBuf> {
     let mut out = DialogOutcome::Open;
     egui::Modal::new(egui::Id::unique("cover-sheet")).show(ctx, |ui| {
-        ui.set_width(460.0);
-        ui.heading("Cover sheet");
+        ui.set_width(if d.several { 760.0 } else { 460.0 });
+        ui.heading(if d.several { "Cover sheets" } else { "Cover sheet" });
         ui.label(widgets::caption(
             "Put it on top of the document and scan the stack into the Scans folder: Intake splits the stack at each sheet and files the document to this client.",
         ));
-        ui.add_space(8.0);
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            ui.selectable_value(&mut d.several, false, "One client");
+            ui.selectable_value(&mut d.several, true, "Several clients");
+        });
+        ui.add_space(6.0);
         egui::Grid::new("cover-fields")
             .num_columns(2)
             .spacing([12.0, 8.0])
             .show(ui, |ui| {
-                let l = ui.label("Client");
-                let current = d
-                    .client
-                    .and_then(|i| d.clients.get(i))
-                    .map(|(id, n, _)| format!("{n} ({id})"))
-                    .unwrap_or_else(|| "Choose…".into());
-                egui::ComboBox::from_id_salt("cover-client")
-                    .width(300.0)
-                    .selected_text(current)
-                    .show_ui(ui, |ui| {
-                        for (i, (id, n, _)) in d.clients.iter().enumerate() {
-                            ui.selectable_value(&mut d.client, Some(i), format!("{n} ({id})"));
-                        }
-                    })
-                    .response
-                    .labelled_by(l.id);
-                ui.end_row();
+                if !d.several {
+                    let l = ui.label("Client");
+                    let current = d
+                        .client
+                        .and_then(|i| d.clients.get(i))
+                        .map(|(id, n, _)| format!("{n} ({id})"))
+                        .unwrap_or_else(|| "Choose…".into());
+                    egui::ComboBox::from_id_salt("cover-client")
+                        .width(300.0)
+                        .selected_text(current)
+                        .show_ui(ui, |ui| {
+                            for (i, (id, n, _)) in d.clients.iter().enumerate() {
+                                ui.selectable_value(&mut d.client, Some(i), format!("{n} ({id})"));
+                            }
+                        })
+                        .response
+                        .labelled_by(l.id);
+                    ui.end_row();
+                }
                 let l = ui.label("Doc type");
                 let current = d
                     .doc_type
@@ -201,13 +295,19 @@ pub fn show(ctx: &egui::Context, d: &mut CoverSheetDialog, dir: &Path) -> Dialog
                 )
                 .labelled_by(l.id);
                 ui.end_row();
-                let l = ui.label("Sheets");
+                let l = ui.label(if d.several {
+                    "Sheets per client"
+                } else {
+                    "Sheets"
+                });
                 ui.add(egui::TextEdit::singleline(&mut d.copies).desired_width(60.0))
                     .labelled_by(l.id)
                     .on_hover_text("One per document in the stack (each starts a new document).");
                 ui.end_row();
             });
-        if let Ok((_, l)) = d.sheet()
+        if d.several {
+            several_list(ui, d);
+        } else if let Ok((_, l)) = d.sheet()
             && !l.folder.is_empty()
         {
             ui.label(widgets::caption(format!("Folder on the sheet: {}", l.folder)));
@@ -215,27 +315,30 @@ pub fn show(ctx: &egui::Context, d: &mut CoverSheetDialog, dir: &Path) -> Dialog
         ui.add_space(4.0);
         widgets::message_line(ui, d.error.as_deref());
         ui.horizontal(|ui| {
-            if ui
-                .add(widgets::primary_button("Create cover sheet"))
-                .clicked()
-            {
-                let r = d.sheet().and_then(|(s, l)| {
-                    let id = s.0.as_ref().map(|c| c.client_id.clone()).unwrap_or_default();
-                    let p = out_path(
-                        dir,
-                        &format!("cover sheet {}.pdf", vf_ingest::pipeline::clean(&id)),
-                    )?;
-                    let n: usize = match d.copies.trim() {
-                        "" => 1,
-                        c => c
-                            .parse()
-                            .ok()
-                            .filter(|n| (1..=50).contains(n))
-                            .ok_or("Sheets: a number from 1 to 50.")?,
-                    };
-                    sheet::write_pdf(&p, &vec![(s, l); n])?;
-                    Ok(p)
-                });
+            let label = if d.several {
+                format!("Create cover sheets ({} clients)", d.ticked())
+            } else {
+                "Create cover sheet".into()
+            };
+            if ui.add(widgets::primary_button(label)).clicked() {
+                let r = if d.several {
+                    d.bulk_pages().and_then(|pages| {
+                        let p = out_path(dir, &format!("cover sheets {} clients.pdf", d.ticked()))?;
+                        sheet::write_pdf(&p, &pages)?;
+                        Ok(p)
+                    })
+                } else {
+                    d.sheet().and_then(|(s, l)| {
+                        let id = s.0.as_ref().map(|c| c.client_id.clone()).unwrap_or_default();
+                        let p = out_path(
+                            dir,
+                            &format!("cover sheet {}.pdf", vf_ingest::pipeline::clean(&id)),
+                        )?;
+                        let n = copies_of(&d.copies)?;
+                        sheet::write_pdf(&p, &vec![(s, l); n])?;
+                        Ok(p)
+                    })
+                };
                 match r {
                     Ok(p) => out = DialogOutcome::Done(p),
                     Err(e) => d.error = Some(e),
@@ -247,6 +350,126 @@ pub fn show(ctx: &egui::Context, d: &mut CoverSheetDialog, dir: &Path) -> Dialog
         });
     });
     out
+}
+
+/// **Several clients**: search, tick (all shown, Shift-click runs), and a ticked row's own
+/// doc type, year and sheets.
+fn several_list(ui: &mut egui::Ui, d: &mut CoverSheetDialog) {
+    ui.add_space(6.0);
+    let shown = d.shown();
+    ui.horizontal(|ui| {
+        ui.add(
+            egui::TextEdit::singleline(&mut d.find)
+                .hint_text("Find client by name or ID")
+                .desired_width(260.0),
+        );
+        if ui.button("Tick all shown").clicked() {
+            for &i in &shown {
+                d.rows[i].ticked = true;
+            }
+        }
+        if ui.button("Untick all shown").clicked() {
+            for &i in &shown {
+                d.rows[i].ticked = false;
+            }
+        }
+        ui.label(widgets::caption(format!(
+            "{} ticked · showing {} of {}",
+            d.ticked(),
+            shown.len(),
+            d.clients.len()
+        )));
+    });
+    ui.label(widgets::caption(
+        "A ticked client prints the settings above; change its doc type, year or sheets on its row to print something else for it. Shift-click ticks or unticks a run.",
+    ));
+    let shift = ui.input(|i| i.modifiers.shift);
+    let mut clicked: Option<(usize, bool)> = None;
+    let row_h = 28.0;
+    egui::ScrollArea::vertical()
+        .id_salt("cover-clients")
+        // A fixed height: the dialog holds still while the search narrows the list.
+        .min_scrolled_height(320.0)
+        .max_height(320.0)
+        .auto_shrink([false, false])
+        .show_rows(ui, row_h, shown.len(), |ui, range| {
+            for k in range {
+                let i = shown[k];
+                let (id, n, _) = d.clients[i].clone();
+                ui.horizontal(|ui| {
+                    ui.set_min_height(row_h - 4.0);
+                    let r = ui.add_sized(
+                        [300.0, row_h - 6.0],
+                        egui::Checkbox::new(&mut d.rows[i].ticked, format!("{n} ({id})")),
+                    );
+                    if r.changed() {
+                        clicked = Some((i, d.rows[i].ticked));
+                    }
+                    if !d.rows[i].ticked {
+                        return;
+                    }
+                    let row = &mut d.rows[i];
+                    let text = match row.doc_type {
+                        None => "Same as above".to_string(),
+                        Some(None) => "Not set".to_string(),
+                        Some(Some(t)) => {
+                            d.doc_types.get(t).map(|t| t.1.clone()).unwrap_or_default()
+                        }
+                    };
+                    egui::ComboBox::from_id_salt(("cover-row-type", i))
+                        .width(170.0)
+                        .selected_text(text)
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut row.doc_type, None, "Same as above");
+                            ui.selectable_value(&mut row.doc_type, Some(None), "Not set");
+                            for (t, (_, tn)) in d.doc_types.iter().enumerate() {
+                                ui.selectable_value(&mut row.doc_type, Some(Some(t)), tn);
+                            }
+                        })
+                        .response
+                        .on_hover_text("This client's doc type")
+                        .labelled_by(r.id);
+                    let mut y = row.year.clone().unwrap_or_default();
+                    if ui
+                        .add(
+                            egui::TextEdit::singleline(&mut y)
+                                .hint_text(d.year.as_str())
+                                .desired_width(80.0),
+                        )
+                        .on_hover_text("This client's tax year (empty: the year above)")
+                        .changed()
+                    {
+                        row.year = (!y.trim().is_empty()).then_some(y);
+                    }
+                    let mut c = row.copies.clone().unwrap_or_default();
+                    if ui
+                        .add(
+                            egui::TextEdit::singleline(&mut c)
+                                .hint_text(d.copies.as_str())
+                                .desired_width(36.0),
+                        )
+                        .on_hover_text("Sheets for this client (empty: the number above)")
+                        .changed()
+                    {
+                        row.copies = (!c.trim().is_empty()).then_some(c);
+                    }
+                });
+            }
+        });
+    if let Some((i, on)) = clicked {
+        if shift
+            && let Some(a) = d.last_tick
+            && let (Some(pa), Some(pi)) = (
+                shown.iter().position(|&x| x == a),
+                shown.iter().position(|&x| x == i),
+            )
+        {
+            for &j in &shown[pa.min(pi)..=pa.max(pi)] {
+                d.rows[j].ticked = on;
+            }
+        }
+        d.last_tick = Some(i);
+    }
 }
 
 #[cfg(test)]

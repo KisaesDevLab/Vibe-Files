@@ -4573,6 +4573,86 @@ mod tests {
         assert_eq!(cover.tax_year, Some(vf_ingest::sheet::TaxYear::Year(2025)));
     }
 
+    /// Q-61 (owner 2026-11-05): cover sheets for several clients, ticked in a searchable list
+    /// (all shown, Shift-click runs), one setting for all and a row's own; one PDF.
+    #[test]
+    fn cover_sheets_for_several_clients() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+        let mut h = harness(3, 1);
+        let calls: Rc<RefCell<Vec<ShellAction>>> = Rc::default();
+        {
+            let rec = calls.clone();
+            let s = h.state_mut();
+            s.b.shell = Box::new(move |a| {
+                rec.borrow_mut().push(a.clone());
+                Ok(())
+            });
+            s.b.sheets_dir = s._tmp.path().join("sheets");
+        }
+        click(&mut h, "Print cover sheet");
+        h.get_by_label("Several clients").click();
+        h.run();
+        h.state_mut().b.cover.as_mut().unwrap().year = "2025".into();
+        h.run();
+        click(&mut h, "Tick all shown");
+        assert_eq!(h.state().b.cover.as_ref().unwrap().ticked(), 3);
+        click(&mut h, "Untick all shown");
+        // The search narrows the list; ticking acts on what is shown.
+        h.state_mut().b.cover.as_mut().unwrap().find = "1002".into();
+        h.run();
+        assert!(h.query_by_label_contains("showing 1 of 3").is_some());
+        click(&mut h, "Tick all shown");
+        assert_eq!(h.state().b.cover.as_ref().unwrap().ticked(), 1);
+        h.state_mut().b.cover.as_mut().unwrap().find.clear();
+        h.run();
+        // Click one, Shift-click another: the run between is ticked.
+        click(&mut h, "Untick all shown");
+        h.get_by_label("Client 0000 (1000)").click();
+        h.run();
+        h.get_by_label("Client 0002 (1002)")
+            .click_modifiers(egui::Modifiers::SHIFT);
+        h.run();
+        assert_eq!(h.state().b.cover.as_ref().unwrap().ticked(), 3);
+        // Client 0001 prints its own year, two sheets.
+        {
+            let d = h.state_mut().b.cover.as_mut().unwrap();
+            d.rows[1].year = Some("2024".into());
+            d.rows[1].copies = Some("2".into());
+        }
+        h.run();
+        click(&mut h, "Create cover sheets (3 clients)");
+        assert!(
+            h.state().b.cover.is_none(),
+            "{:?}",
+            h.state().b.cover.as_ref().map(|d| d.error.clone())
+        );
+        let ShellAction::Open(pdf) = calls.borrow()[0].clone() else {
+            panic!("opened the sheets");
+        };
+        let dir = filer_pdf::pdf::find_pdfium(std::path::Path::new("")).expect("pdfium");
+        let pdfium = filer_pdf::pdf::pdfium(&dir).unwrap();
+        let got: Vec<(String, Option<vf_ingest::sheet::TaxYear>)> =
+            vf_ingest::stack::scan_pages(pdfium, &pdf)
+                .unwrap()
+                .into_iter()
+                .map(|p| {
+                    let c = p.sheet.and_then(|s| s.0).expect("a cover sheet");
+                    (c.client_id, c.tax_year)
+                })
+                .collect();
+        use vf_ingest::sheet::TaxYear::Year;
+        assert_eq!(
+            got,
+            [
+                ("1000".to_string(), Some(Year(2025))),
+                ("1001".to_string(), Some(Year(2024))),
+                ("1001".to_string(), Some(Year(2024))),
+                ("1002".to_string(), Some(Year(2025))),
+            ]
+        );
+    }
+
     /// P01 step 8: double-click / Enter open the file, Open in Explorer reveals it, Copy path
     /// copies it; opening adds the document to Recent. The shell is recorded, nothing launches.
     #[test]
