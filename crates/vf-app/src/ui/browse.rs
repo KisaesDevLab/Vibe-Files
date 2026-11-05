@@ -30,6 +30,9 @@ pub struct Env<'a> {
     pub device_id: &'a str,
 }
 
+/// Documents above which Browse reads windows of the catalog instead of all of it (PA-34).
+pub const LARGE: usize = 50_000;
+
 pub const ROW_H: f32 = 32.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -241,6 +244,19 @@ pub struct Browse {
     /// A pane width being dragged, saved when the drag ends (tree, details).
     width_drag: (Option<u16>, Option<u16>),
     pub name_filter: String,
+    /// A large cabinet (PA-34): the snapshot holds a window of documents, reloaded when the
+    /// scope, the open clients or the lists change.
+    pub large: bool,
+    /// The window the snapshot holds.
+    loaded: Option<vf_core::browse::Window>,
+    /// The name filter a cabinet-wide page was read with, and when the filter last changed
+    /// (the page is read again once typing pauses).
+    page_filter: String,
+    filter_typed: Option<std::time::Instant>,
+    /// The next reload only moves the window: the counts are kept.
+    reuse_counts: bool,
+    /// The clients (uuids) the last folder listing covered: opening another lists it now.
+    listed_for: Vec<String>,
     pub sort: (SortCol, bool),
     /// Doc indices shown in the grid, filtered and sorted.
     pub visible: Vec<usize>,
@@ -391,6 +407,12 @@ impl Browse {
             width_drag: (None, None),
             partner_draft: None,
             name_filter: String::new(),
+            large: false,
+            loaded: None,
+            page_filter: String::new(),
+            filter_typed: None,
+            listed_for: Vec::new(),
+            reuse_counts: false,
             sort: (SortCol::Name, true),
             visible: Vec::new(),
             selected: BTreeSet::new(),
@@ -446,6 +468,18 @@ impl Browse {
     }
 
     pub fn load(conn: &Connection) -> Self {
+        Self::load_with(conn, LARGE)
+    }
+
+    /// [`Browse::load`] with the size above which the catalog is read in windows.
+    pub fn load_with(conn: &Connection, large_above: usize) -> Self {
+        // A large cabinet is never loaded whole (PA-34): Browse reads windows of it.
+        if vf_core::browse::document_count(conn).is_ok_and(|n| n > large_above) {
+            let mut b = Self::new(Snapshot::default());
+            b.large = true;
+            b.reload(conn);
+            return b;
+        }
         match vf_core::browse::load(conn) {
             Ok(s) => Self::new(s),
             Err(e) => {
@@ -454,6 +488,100 @@ impl Browse {
                 b
             }
         }
+    }
+
+    /// The documents a large cabinet's snapshot should hold now: the client shown and those
+    /// open in the tree or among the favorites, a cabinet-wide view's page, Recent and Pinned,
+    /// a search's results.
+    pub fn window(&self) -> vf_core::browse::Window {
+        let mut w = vf_core::browse::Window {
+            since: self.week_start.clone(),
+            ..Default::default()
+        };
+        let id_of = |c: usize| self.snap.clients.get(c).map(|c| c.id.clone());
+        if let Some(c) = self.scope_client().and_then(id_of) {
+            w.clients.insert(c);
+        }
+        for n in &self.expanded {
+            let c = match n {
+                Node::Client(c) | Node::Folder(c, _) | Node::Year(c, _) => *c,
+            };
+            if let Some(id) = id_of(c) {
+                w.clients.insert(id);
+            }
+        }
+        for f in &self.prefs.favorites {
+            if let Some(c) = self.favorite_scope(f).and_then(|s| match s {
+                Scope::Client(c)
+                | Scope::Folder { client: c, .. }
+                | Scope::Year { client: c, .. }
+                | Scope::YearFolder { client: c, .. } => Some(c),
+                _ => None,
+            }) && let Some(id) = id_of(c)
+            {
+                w.clients.insert(id);
+            }
+        }
+        w.page = vf_core::browse::page_kind(&self.scope);
+        if w.page.is_some() {
+            w.name_filter = self.page_filter.clone();
+        }
+        w.ids.extend(self.prefs.recent.iter().cloned());
+        w.ids.extend(self.prefs.pinned.iter().cloned());
+        if let Scope::Ids { ids, .. } | Scope::Saved { ids, .. } = &self.scope {
+            w.ids.extend(ids.iter().cloned());
+        }
+        w
+    }
+
+    /// A large cabinet: reads the window again when it changed (scope, open clients, lists),
+    /// and the page's name filter once typing pauses.
+    pub fn keep_window(&mut self, conn: &Connection) {
+        if !self.large {
+            return;
+        }
+        if let Some(t) = self.filter_typed
+            && t.elapsed() >= std::time::Duration::from_millis(400)
+        {
+            self.filter_typed = None;
+            self.page_filter = self.name_filter.trim().to_string();
+        }
+        if self.loaded.as_ref() != Some(&self.window()) {
+            // Only the window moved: the catalog's counts stand (recounted on a real reload).
+            self.reuse_counts = true;
+            self.reload(conn);
+        }
+    }
+
+    /// The clients open (shown, or expanded in the tree), as uuids in order.
+    fn open_clients(&self) -> Vec<String> {
+        let mut v: Vec<String> = self
+            .scope_client()
+            .into_iter()
+            .chain(self.expanded.iter().map(|n| match n {
+                Node::Client(c) | Node::Folder(c, _) | Node::Year(c, _) => *c,
+            }))
+            .filter_map(|c| self.snap.clients.get(c).map(|c| c.id.clone()))
+            .collect();
+        v.sort();
+        v.dedup();
+        v
+    }
+
+    /// Documents in the cabinet (a large cabinet's window holds only some).
+    pub fn document_total(&self) -> usize {
+        match &self.snap.windowed {
+            Some(w) => w.client_counts.values().sum::<usize>() + w.unassigned,
+            None => self.snap.docs.len(),
+        }
+    }
+
+    /// The cabinet-wide view's page: (rows held, rows in all), when it is not all of them.
+    pub fn page_note(&self) -> Option<(usize, usize)> {
+        let w = self.snap.windowed.as_ref()?;
+        let (kind, ids, total) = w.page.as_ref()?;
+        (vf_core::browse::page_kind(&self.scope).as_ref() == Some(kind) && *total > ids.len())
+            .then_some((ids.len(), *total))
     }
 
     /// Adds each client's folders on disk to the tree (empty template folders included), when
@@ -470,10 +598,28 @@ impl Browse {
         let Some(root) = self.root.clone() else {
             return;
         };
-        let clients: Vec<(String, String)> = self
-            .snap
-            .clients
+        // Before anything is built: the 30 s wait, and a listing already running (this ran
+        // every frame; at ~900K documents its sets alone took most of a second, PA-34).
+        if !cfg!(test) {
+            let wait = std::time::Duration::from_secs(if again { 30 } else { 2 });
+            let fresh = self.disk_listed.is_some_and(|t| t.elapsed() < wait);
+            if self.disk_job.is_some() || fresh {
+                return;
+            }
+        }
+        // Only the clients open: the one shown and those expanded in the tree (Q-67: files
+        // added outside Vibe Files are found in a client folder when it is opened). Their
+        // folders on disk fill the tree; the one shown is also looked through for new files.
+        let open: HashSet<usize> = self
+            .scope_client()
+            .into_iter()
+            .chain(self.expanded.iter().map(|n| match n {
+                Node::Client(c) | Node::Folder(c, _) | Node::Year(c, _) => *c,
+            }))
+            .collect();
+        let clients: Vec<(String, String)> = open
             .iter()
+            .filter_map(|&ci| self.snap.clients.get(ci))
             .filter_map(|c| {
                 c.folder_rel
                     .clone()
@@ -481,13 +627,33 @@ impl Browse {
                     .map(|r| (r, c.id.clone()))
             })
             .collect();
+        let shown: Vec<(String, String)> = self
+            .scope_client()
+            .and_then(|ci| self.snap.clients.get(ci))
+            .and_then(|c| {
+                c.folder_rel
+                    .clone()
+                    .filter(|r| !r.is_empty())
+                    .map(|r| (r, c.id.clone()))
+            })
+            .into_iter()
+            .collect();
+        let shown_id = shown.first().map(|(_, id)| id.clone());
+        let mine = |d: &&DocRow| d.client_id.is_some() && d.client_id == shown_id;
         let known: HashSet<String> = self
             .snap
             .docs
             .iter()
+            .filter(mine)
             .map(|d| d.rel_path.to_lowercase())
             .collect();
-        let hashes: HashSet<String> = self.snap.docs.iter().map(|d| d.hash.clone()).collect();
+        let hashes: HashSet<String> = self
+            .snap
+            .docs
+            .iter()
+            .filter(mine)
+            .map(|d| d.hash.clone())
+            .collect();
         let list = move || -> Listing {
             let dirs = clients
                 .iter()
@@ -497,20 +663,17 @@ impl Browse {
                     (rel.clone(), dirs)
                 })
                 .collect();
-            let new_files = vf_fs::sweep::find_new(&root, &clients, &known, &hashes);
+            let new_files = vf_fs::sweep::find_new(&root, &shown, &known, &hashes);
             Listing { dirs, new_files }
         };
         if cfg!(test) {
             // Tests: at once, so the tree is complete on the next frame.
+            self.listed_for = self.open_clients();
             let got = list();
             self.take_listing(got);
             return;
         }
-        let wait = std::time::Duration::from_secs(if again { 30 } else { 2 });
-        let fresh = self.disk_listed.is_some_and(|t| t.elapsed() < wait);
-        if self.disk_job.is_some() || fresh {
-            return;
-        }
+        self.listed_for = self.open_clients();
         let (tx, rx) = std::sync::mpsc::channel();
         let ctx = self.egui_ctx.clone();
         let started = std::thread::Builder::new()
@@ -629,9 +792,25 @@ impl Browse {
                 )),
             })
             .collect();
-        match vf_core::browse::load(conn) {
+        let window = self.large.then(|| self.window());
+        let reuse = std::mem::take(&mut self.reuse_counts)
+            .then(|| self.snap.windowed.clone())
+            .flatten()
+            .filter(|w| {
+                // "Received this week" counts from a time that moves on.
+                self.loaded
+                    .as_ref()
+                    .is_some_and(|l| l.since == self.week_start)
+                    && w.client_counts.len() <= self.snap.clients.len()
+            });
+        let loaded = match &window {
+            Some(w) => vf_core::browse::load_window_reusing(conn, w, reuse.as_ref()),
+            None => vf_core::browse::load(conn),
+        };
+        match loaded {
             Ok(s) => {
                 self.snap = s;
+                self.loaded = window;
                 self.ix = Index::build(&self.snap);
                 self.add_disk_folders();
                 self.error = None;
@@ -835,7 +1014,13 @@ impl Browse {
         self.week_start = week_start_utc();
         let views = self.views();
         for (i, (_, v, _)) in views.iter().enumerate() {
-            self.view_counts[i] = self.ix.docs_in(&self.snap, v).len();
+            // A large cabinet's views count in the catalog (their pages hold 1,000 rows).
+            self.view_counts[i] = match (&self.snap.windowed, v) {
+                (Some(w), Scope::NeedsDocType) => w.needs_doc_type,
+                (Some(w), Scope::NeedsTaxYear) => w.needs_tax_year,
+                (Some(w), Scope::ReceivedSince(_)) => w.received,
+                _ => self.ix.docs_in(&self.snap, v).len(),
+            };
         }
         self.fav_counts = self
             .prefs
@@ -1357,6 +1542,12 @@ fn year_folder_label(f: &str) -> &str {
 pub fn show(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env) {
     if b.egui_ctx.is_none() {
         b.egui_ctx = Some(ui.ctx().clone());
+    }
+    b.keep_window(env.conn);
+    // A client opened (shown or expanded): its folders and new files now, not in 30 s.
+    if b.root.is_some() && b.open_clients() != b.listed_for {
+        b.disk_listed = None;
+        b.list_disk(false);
     }
     b.poll_disk();
     b.add_new_files(env);
@@ -2450,11 +2641,18 @@ fn grid(ui: &mut egui::Ui, b: &mut Browse, conn: &Connection) {
     });
     ui.horizontal(|ui| {
         ui.label(
-            RichText::new(format!(
-                "{} documents · {} selected",
-                b.visible.len(),
-                b.selected.len()
-            ))
+            RichText::new(match b.page_note() {
+                Some((held, total)) => format!(
+                    "{} of {total} documents (the first {held}: choose a client, a view or type a filter) · {} selected",
+                    b.visible.len(),
+                    b.selected.len()
+                ),
+                None => format!(
+                    "{} documents · {} selected",
+                    b.visible.len(),
+                    b.selected.len()
+                ),
+            })
             .color(theme::ink_muted()),
         );
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -2465,6 +2663,11 @@ fn grid(ui: &mut egui::Ui, b: &mut Browse, conn: &Connection) {
             );
             if r.changed() {
                 b.refresh();
+                if b.large {
+                    b.filter_typed = Some(std::time::Instant::now());
+                    ui.ctx()
+                        .request_repaint_after(std::time::Duration::from_millis(450));
+                }
             }
             if ui
                 .button("Refresh")
@@ -2970,16 +3173,27 @@ fn legal_holds(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env) {
     } else {
         None
     };
-    let docs: Vec<String> = b
-        .selected
-        .iter()
-        .map(|&i| b.snap.docs[i].id.clone())
-        .collect();
-    if client.is_none() && docs.is_empty() {
+    if client.is_none() && b.selected.is_empty() {
         return;
     }
-    let key = format!("{client:?}{docs:?}");
+    // Keyed by the selection without listing it (a whole-cabinet selection made a string of
+    // every id on every frame, PA-34).
+    let key = {
+        use std::hash::{Hash, Hasher};
+        let mut folded: u64 = 0;
+        for &i in &b.selected {
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            i.hash(&mut h);
+            folded ^= h.finish();
+        }
+        format!("{client:?}|{}|{folded:x}", b.selected.len())
+    };
     if b.holds_seen.as_ref().is_none_or(|(k, _)| *k != key) {
+        let docs: Vec<String> = b
+            .selected
+            .iter()
+            .map(|&i| b.snap.docs[i].id.clone())
+            .collect();
         let found = vf_fs::holds::active_for(env.root, env.conn, client.as_deref(), &docs);
         b.holds_seen = Some((key, found));
     }
@@ -3036,7 +3250,7 @@ fn legal_holds(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env) {
         }
         b.holds_seen = None;
     }
-    let what = match (&client, docs.len()) {
+    let what = match (&client, b.selected.len()) {
         (Some(_), _) => "this client".to_string(),
         (None, 1) => "this document".to_string(),
         (None, n) => format!("these {n} documents"),
@@ -3069,7 +3283,12 @@ fn legal_holds(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env) {
             if place {
                 let target = match &client {
                     Some(c) => vf_fs::holds::Target::Client(c.clone()),
-                    None => vf_fs::holds::Target::Docs(docs.clone()),
+                    None => vf_fs::holds::Target::Docs(
+                        b.selected
+                            .iter()
+                            .map(|&i| b.snap.docs[i].id.clone())
+                            .collect(),
+                    ),
                 };
                 let reason = reason.clone();
                 match vf_fs::holds::place(env.conn, env.root, env.device_id, target, &reason) {
@@ -3414,9 +3633,14 @@ mod tests {
     }
 
     fn harness(clients: usize, per: usize) -> Harness<'static, State> {
+        harness_from(clients, per, LARGE)
+    }
+
+    /// [`harness`] with Browse reading windows above `large_above` documents (PA-34).
+    fn harness_from(clients: usize, per: usize, large_above: usize) -> Harness<'static, State> {
         crate::ui::test_util::pdfium_first();
         let (tmp, conn) = seed(clients, per);
-        let b = Browse::load(&conn);
+        let b = Browse::load_with(&conn, large_above);
         let mut h = HarnessBuilder::default()
             // Wide enough for every grid column beside the 400 px inspector (PA-12).
             .with_size([1600.0, 900.0])
@@ -3726,6 +3950,31 @@ mod tests {
         );
     }
 
+    /// PA-34: a large cabinet's Browse holds a window: the client opened, a view's page; the
+    /// tree and the views still count everything.
+    #[test]
+    fn a_large_cabinet_is_read_in_windows() {
+        let mut h = harness_from(3, 5, 1);
+        assert!(h.state().b.large);
+        // Cabinet: the page (all 15 here) with the views' counts from the catalog.
+        assert_eq!(h.state().b.visible.len(), 15);
+        assert!(h.query_by_label("Client 0001  1001").is_some());
+        // Opening a client: only its documents are held; the tree still counts the others.
+        click(&mut h, "Client 0001  1001");
+        h.run();
+        let b = &h.state().b;
+        assert_eq!(b.snap.docs.len(), 5, "only the client opened");
+        assert_eq!(b.visible.len(), 5);
+        assert_eq!(b.ix.clients.iter().map(|c| c.count).sum::<usize>(), 15);
+        let needs_type = b.view_counts[2];
+        assert_eq!(needs_type, 15, "Needs doc type counted in the catalog");
+        // Back to the cabinet: its page again.
+        click(&mut h, "All documents");
+        h.run();
+        assert_eq!(h.state().b.visible.len(), 15);
+        assert!(h.state().b.page_note().is_none(), "all of it fits one page");
+    }
+
     /// The folder tree and the details pane can be collapsed and opened again; the choice is
     /// kept (owner 2026-11-04).
     #[test]
@@ -3851,7 +4100,8 @@ mod tests {
     }
 
     /// A file copied into a client folder through Explorer shows without the weekly sweep
-    /// (owner report 2026-11-04).
+    /// (owner report 2026-11-04), once its client folder is opened (Q-67: a large cabinet is
+    /// not walked whole).
     #[test]
     fn files_copied_into_a_client_folder_are_added() {
         let mut h = harness(1, 0);
@@ -3864,6 +4114,11 @@ mod tests {
             s.b.set_root(&root);
         }
         h.run();
+        assert!(
+            h.state().b.snap.docs.is_empty(),
+            "not looked for until opened"
+        );
+        click(&mut h, "Client 0000  1000");
         h.run();
         let s = h.state();
         let names: Vec<&str> = s.b.snap.docs.iter().map(|d| d.name()).collect();

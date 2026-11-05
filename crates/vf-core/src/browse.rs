@@ -9,7 +9,7 @@
 //! year") → the folders holding that year's documents, with the year segment taken out
 //! (`Income Tax/2025/x.pdf` sits under 2025 as `Income Tax`).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use rusqlite::Connection;
 
@@ -79,6 +79,52 @@ pub struct Snapshot {
     pub archived_types: std::collections::HashSet<String>,
     /// Doc type id → its default folder below the client folder (`Income Tax/{Year}`).
     pub doc_type_folders: std::collections::HashMap<String, String>,
+    /// A large cabinet's snapshot holds only some documents (PA-34): the counts the tree and
+    /// views show, and the page of a cabinet-wide view. `None`: every document is loaded.
+    pub windowed: Option<Windowed>,
+}
+
+/// Rows of a cabinet-wide view a windowed snapshot holds (the first ones by path).
+pub const PAGE: usize = 1000;
+
+/// A cabinet-wide view, for its page.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PageKind {
+    Cabinet,
+    Unassigned,
+    NeedsDocType,
+    NeedsTaxYear,
+    /// Filed at or after this RFC 3339 time.
+    ReceivedSince(String),
+}
+
+/// Which documents a windowed snapshot holds (owner 2026-11-05, Q-67: a cabinet of ~900K
+/// documents is never loaded whole).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Window {
+    /// Every document of these clients (uuids): the client shown, those open in the tree.
+    pub clients: BTreeSet<String>,
+    /// A cabinet-wide view's first [`PAGE`] rows (by path), with its total.
+    pub page: Option<PageKind>,
+    /// The page's name filter (any case, part of the path).
+    pub name_filter: String,
+    /// These documents (Recent, Pinned, a search's results).
+    pub ids: BTreeSet<String>,
+    /// "Received this week" counts from this time.
+    pub since: String,
+}
+
+/// What a windowed snapshot knows beyond its documents.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Windowed {
+    /// Documents per client uuid (the tree's counts).
+    pub client_counts: HashMap<String, usize>,
+    pub unassigned: usize,
+    /// The page of [`Window::page`]: its documents' ids in path order, and how many match.
+    pub page: Option<(PageKind, Vec<String>, usize)>,
+    pub needs_doc_type: usize,
+    pub needs_tax_year: usize,
+    pub received: usize,
 }
 
 impl Snapshot {
@@ -93,7 +139,183 @@ impl Snapshot {
     }
 }
 
+/// The document columns `DocRow` is read from.
+const DOC_SELECT: &str =
+    "SELECT d.id, d.client_id, t.name, d.tax_year, d.rel_path, d.hash, d.size, d.status,
+        d.source, d.filed_by, d.updated_at, l.user,
+        (SELECT count(*) FROM version v WHERE v.doc_id = d.id),
+        d.doc_type_id,
+        (SELECT group_concat(tag, char(31)) FROM
+           (SELECT tag FROM document_tag g WHERE g.doc_id = d.id ORDER BY tag COLLATE NOCASE)),
+        d.filed_at
+ FROM document d
+ LEFT JOIN doc_type t ON t.id = d.doc_type_id
+ LEFT JOIN lock l ON l.doc_id = d.id";
+
+fn doc_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<DocRow> {
+    Ok(DocRow {
+        id: r.get(0)?,
+        client_id: r.get(1)?,
+        doc_type: r.get(2)?,
+        tax_year: r.get(3)?,
+        rel_path: r.get(4)?,
+        hash: r.get(5)?,
+        size: r.get(6)?,
+        status: r.get(7)?,
+        source: r.get(8)?,
+        filed_by: r.get(9)?,
+        updated_at: r.get(10)?,
+        locked_by: r.get(11)?,
+        versions: r.get(12)?,
+        doc_type_id: r.get(13)?,
+        tags: r
+            .get::<_, Option<String>>(14)?
+            .map(|t| t.split('\u{1f}').map(str::to_owned).collect())
+            .unwrap_or_default(),
+        filed_at: r.get(15)?,
+    })
+}
+
+/// Documents matching `cond` (SQL over `d`), with `params`.
+fn docs_where(
+    conn: &Connection,
+    cond: &str,
+    params: &[&dyn rusqlite::ToSql],
+    tail: &str,
+) -> Result<Vec<DocRow>> {
+    let sql = format!("{DOC_SELECT} WHERE d.deleted_at IS NULL AND ({cond}) {tail}");
+    let mut st = conn.prepare_cached(&sql)?;
+    let rows = st
+        .query_map(params, doc_row)?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+/// The condition and parameters of a cabinet-wide view's page (`?1` = the name filter).
+fn page_cond(kind: &PageKind) -> (&'static str, Option<String>) {
+    match kind {
+        PageKind::Cabinet => ("1", None),
+        PageKind::Unassigned => ("d.client_id IS NULL", None),
+        PageKind::NeedsDocType => ("d.doc_type_id IS NULL", None),
+        PageKind::NeedsTaxYear => (
+            "d.tax_year IS NULL AND ('/' || lower(d.rel_path) || '/') NOT LIKE '%/permanent/%'",
+            None,
+        ),
+        PageKind::ReceivedSince(t) => ("d.filed_at >= ?2", Some(t.clone())),
+    }
+}
+
+/// A large cabinet's snapshot (PA-34): clients, relationships and doc types whole; documents
+/// only for `w` (see [`Window`]); counts for the tree and the views from the catalog.
+pub fn load_window(conn: &Connection, w: &Window) -> Result<Snapshot> {
+    load_window_reusing(conn, w, None)
+}
+
+/// [`load_window`], reusing the counts of `counts` when the catalog has not changed since (only
+/// the window moved: another client opened, another view).
+pub fn load_window_reusing(
+    conn: &Connection,
+    w: &Window,
+    counts: Option<&Windowed>,
+) -> Result<Snapshot> {
+    let mut s = load_base(conn)?;
+    let mut win = Windowed::default();
+    let count = |cond: &str, p: &[&dyn rusqlite::ToSql]| -> Result<usize> {
+        Ok(conn.query_row(
+            &format!("SELECT count(*) FROM document d WHERE d.deleted_at IS NULL AND ({cond})"),
+            p,
+            |r| r.get::<_, i64>(0),
+        )? as usize)
+    };
+    if let Some(c) = counts {
+        win.client_counts = c.client_counts.clone();
+        win.unassigned = c.unassigned;
+        win.needs_doc_type = c.needs_doc_type;
+        win.needs_tax_year = c.needs_tax_year;
+        win.received = c.received;
+    } else {
+        let mut st = conn.prepare_cached(
+            "SELECT client_id, count(*) FROM document WHERE deleted_at IS NULL GROUP BY client_id",
+        )?;
+        let rows = st.query_map([], |r| {
+            Ok((r.get::<_, Option<String>>(0)?, r.get::<_, i64>(1)? as usize))
+        })?;
+        for r in rows {
+            match r? {
+                (Some(c), n) => {
+                    win.client_counts.insert(c, n);
+                }
+                (None, n) => win.unassigned = n,
+            }
+        }
+        win.needs_doc_type = count(page_cond(&PageKind::NeedsDocType).0, &[])?;
+        win.needs_tax_year = count(page_cond(&PageKind::NeedsTaxYear).0, &[])?;
+        win.received = count("d.filed_at >= ?1", &[&w.since])?;
+    }
+
+    let mut docs: BTreeMap<String, DocRow> = BTreeMap::new();
+    let clients: Vec<&String> = w.clients.iter().collect();
+    for chunk in clients.chunks(500) {
+        let marks = vec!["?"; chunk.len()].join(",");
+        let p: Vec<&dyn rusqlite::ToSql> =
+            chunk.iter().map(|c| *c as &dyn rusqlite::ToSql).collect();
+        for d in docs_where(conn, &format!("d.client_id IN ({marks})"), &p, "")? {
+            docs.insert(d.id.clone(), d);
+        }
+    }
+    let ids: Vec<&String> = w.ids.iter().collect();
+    for chunk in ids.chunks(500) {
+        let marks = vec!["?"; chunk.len()].join(",");
+        let p: Vec<&dyn rusqlite::ToSql> =
+            chunk.iter().map(|c| *c as &dyn rusqlite::ToSql).collect();
+        for d in docs_where(conn, &format!("d.id IN ({marks})"), &p, "")? {
+            docs.insert(d.id.clone(), d);
+        }
+    }
+    if let Some(kind) = &w.page {
+        let (cond, extra) = page_cond(kind);
+        let needle = format!("%{}%", w.name_filter.trim().to_lowercase());
+        let cond = format!("({cond}) AND lower(d.rel_path) LIKE ?1");
+        let extra = extra.unwrap_or_default();
+        let p: [&dyn rusqlite::ToSql; 2] = [&needle, &extra];
+        let used: &[&dyn rusqlite::ToSql] = if cond.contains("?2") { &p } else { &p[..1] };
+        let total = count(&cond, used)?;
+        let rows = docs_where(
+            conn,
+            &cond,
+            used,
+            &format!("ORDER BY d.rel_path LIMIT {PAGE}"),
+        )?;
+        let page_ids = rows.iter().map(|d| d.id.clone()).collect();
+        for d in rows {
+            docs.insert(d.id.clone(), d);
+        }
+        win.page = Some((kind.clone(), page_ids, total));
+    }
+    let mut docs: Vec<DocRow> = docs.into_values().collect();
+    docs.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
+    s.docs = docs;
+    s.windowed = Some(win);
+    Ok(s)
+}
+
+/// How many live documents the catalog holds (a large cabinet's Browse loads windows).
+pub fn document_count(conn: &Connection) -> Result<usize> {
+    Ok(conn.query_row(
+        "SELECT count(*) FROM document WHERE deleted_at IS NULL",
+        [],
+        |r| r.get::<_, i64>(0),
+    )? as usize)
+}
+
 pub fn load(conn: &Connection) -> Result<Snapshot> {
+    let mut s = load_base(conn)?;
+    s.docs = docs_where(conn, "1", &[], "ORDER BY d.rel_path")?;
+    Ok(s)
+}
+
+/// Everything but the documents.
+fn load_base(conn: &Connection) -> Result<Snapshot> {
     let mut st = conn.prepare(
         "SELECT id, ext_id, name, folder_rel, entity_type, partner FROM client
          WHERE deleted_at IS NULL ORDER BY name COLLATE NOCASE, ext_id",
@@ -107,45 +329,6 @@ pub fn load(conn: &Connection) -> Result<Snapshot> {
                 folder_rel: r.get(3)?,
                 entity_type: r.get(4)?,
                 partner: r.get(5)?,
-            })
-        })?
-        .collect::<std::result::Result<Vec<_>, _>>()?;
-    let mut st = conn.prepare(
-        "SELECT d.id, d.client_id, t.name, d.tax_year, d.rel_path, d.hash, d.size, d.status,
-                d.source, d.filed_by, d.updated_at, l.user,
-                (SELECT count(*) FROM version v WHERE v.doc_id = d.id),
-                d.doc_type_id,
-                (SELECT group_concat(tag, char(31)) FROM
-                   (SELECT tag FROM document_tag g WHERE g.doc_id = d.id ORDER BY tag COLLATE NOCASE)),
-                d.filed_at
-         FROM document d
-         LEFT JOIN doc_type t ON t.id = d.doc_type_id
-         LEFT JOIN lock l ON l.doc_id = d.id
-         WHERE d.deleted_at IS NULL
-         ORDER BY d.rel_path",
-    )?;
-    let docs = st
-        .query_map([], |r| {
-            Ok(DocRow {
-                id: r.get(0)?,
-                client_id: r.get(1)?,
-                doc_type: r.get(2)?,
-                tax_year: r.get(3)?,
-                rel_path: r.get(4)?,
-                hash: r.get(5)?,
-                size: r.get(6)?,
-                status: r.get(7)?,
-                source: r.get(8)?,
-                filed_by: r.get(9)?,
-                updated_at: r.get(10)?,
-                locked_by: r.get(11)?,
-                versions: r.get(12)?,
-                doc_type_id: r.get(13)?,
-                tags: r
-                    .get::<_, Option<String>>(14)?
-                    .map(|t| t.split('\u{1f}').map(str::to_owned).collect())
-                    .unwrap_or_default(),
-                filed_at: r.get(15)?,
             })
         })?
         .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -186,11 +369,12 @@ pub fn load(conn: &Connection) -> Result<Snapshot> {
     let doc_types = rows.into_iter().map(|(id, n, _, _)| (id, n)).collect();
     Ok(Snapshot {
         clients,
-        docs,
+        docs: Vec::new(),
         relationships,
         doc_types,
         archived_types,
         doc_type_folders,
+        windowed: None,
     })
 }
 
@@ -410,6 +594,13 @@ impl Index {
             }
             place.push((ci, folder));
         }
+        // A windowed snapshot: the counts of every client, loaded or not (PA-34).
+        if let Some(w) = &s.windowed {
+            for (node, c) in clients.iter_mut().zip(&s.clients) {
+                node.count = w.client_counts.get(&c.id).copied().unwrap_or(0);
+            }
+            unassigned = w.unassigned;
+        }
         for (node, ys) in clients.iter_mut().zip(years) {
             node.years = ys
                 .into_iter()
@@ -466,6 +657,26 @@ impl Index {
 
     /// Indices into `Snapshot::docs` inside `scope`, in path order.
     pub fn docs_in(&self, s: &Snapshot, scope: &Scope) -> Vec<usize> {
+        if let Some(kind) = page_kind(scope)
+            && let Some(w) = &s.windowed
+        {
+            let Some((k, ids, _)) = &w.page else {
+                return Vec::new();
+            };
+            if *k != kind {
+                return Vec::new();
+            }
+            let at: HashMap<&str, usize> = s
+                .docs
+                .iter()
+                .enumerate()
+                .map(|(i, d)| (d.id.as_str(), i))
+                .collect();
+            return ids
+                .iter()
+                .filter_map(|id| at.get(id.as_str()).copied())
+                .collect();
+        }
         let ids: std::collections::HashSet<&str> = match scope {
             Scope::Ids { ids, .. } | Scope::Saved { ids, .. } => {
                 ids.iter().map(String::as_str).collect()
@@ -511,6 +722,18 @@ impl Index {
             })
             .collect()
     }
+}
+
+/// The cabinet-wide view a scope is, if it is one (a windowed snapshot pages it).
+pub fn page_kind(scope: &Scope) -> Option<PageKind> {
+    Some(match scope {
+        Scope::Cabinet => PageKind::Cabinet,
+        Scope::Unassigned => PageKind::Unassigned,
+        Scope::NeedsDocType => PageKind::NeedsDocType,
+        Scope::NeedsTaxYear => PageKind::NeedsTaxYear,
+        Scope::ReceivedSince(t) => PageKind::ReceivedSince(t.clone()),
+        _ => return None,
+    })
 }
 
 /// The document's folder inside its client folder (`""` = directly in it).
@@ -586,6 +809,7 @@ mod tests {
             doc_types: vec![],
             archived_types: Default::default(),
             doc_type_folders: Default::default(),
+            windowed: None,
         }
     }
 

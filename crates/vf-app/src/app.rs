@@ -601,7 +601,7 @@ impl eframe::App for VibeFilesApp {
                 0,
                 format!(
                     "{} documents · {} clients",
-                    o.browse.snap.docs.len(),
+                    o.browse.document_total(),
                     o.browse.snap.clients.len()
                 ),
             );
