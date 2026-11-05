@@ -236,6 +236,8 @@ pub struct Browse {
     /// A client (uuid) to scroll the tree to once (Go to client's folder); by id, so a reload
     /// that shifts the list does not scroll to another client.
     reveal: Option<String>,
+    /// The client panel's Partner box while typing: (client uuid, text).
+    pub partner_draft: Option<(String, String)>,
     /// A pane width being dragged, saved when the drag ends (tree, details).
     width_drag: (Option<u16>, Option<u16>),
     pub name_filter: String,
@@ -387,6 +389,7 @@ impl Browse {
             client_filter: String::new(),
             reveal: None,
             width_drag: (None, None),
+            partner_draft: None,
             name_filter: String::new(),
             sort: (SortCol::Name, true),
             visible: Vec::new(),
@@ -774,6 +777,10 @@ impl Browse {
                 && !c.ext_id.to_lowercase().contains(&needle)
             {
                 self.client_filter.clear();
+            }
+            if !partner_shows(self.prefs.partner.as_deref(), c.partner.as_deref()) {
+                self.prefs.partner = None;
+                self.prefs_dirty = true;
             }
             self.expanded.insert(Node::Client(ci));
             self.reveal = Some(c.id.clone());
@@ -1557,6 +1564,16 @@ fn folderless_selected(b: &Browse) -> Option<String> {
     }
 }
 
+/// Whether the tree's partner filter (`None`: all; `""`: no partner) shows a client whose
+/// partner is `partner` (any case).
+fn partner_shows(filter: Option<&str>, partner: Option<&str>) -> bool {
+    match filter {
+        None => true,
+        Some("") => partner.is_none(),
+        Some(f) => partner.is_some_and(|p| p.eq_ignore_ascii_case(f)),
+    }
+}
+
 /// The tree's open (pointing down) or shut (pointing right) triangle in `rect`.
 fn paint_chevron(ui: &egui::Ui, rect: egui::Rect, open: bool) {
     let c = rect.center();
@@ -1740,6 +1757,48 @@ fn tree(ui: &mut egui::Ui, b: &mut Browse) {
             }
         });
     });
+    // Only one partner's clients (owner 2026-11-05), when any client has a partner.
+    let partners = b.snap.partners();
+    if !partners.is_empty() || b.prefs.partner.is_some() {
+        ui.horizontal(|ui| {
+            let l = ui.label(widgets::caption("Partner"));
+            let shown = match b.prefs.partner.as_deref() {
+                None => "All partners".to_string(),
+                Some("") => "No partner".to_string(),
+                Some(p) => p.to_string(),
+            };
+            let current = match b.prefs.partner.as_deref() {
+                None => None,
+                Some("") => Some(0),
+                Some(p) => partners.iter().position(|x| x == p).map(|k| k + 1),
+            };
+            let (r, pick) = widgets::search_combo(
+                ui,
+                "tree-partner",
+                ui.available_width() - 8.0,
+                shown,
+                || {
+                    std::iter::once("No partner".to_string())
+                        .chain(partners.iter().cloned())
+                        .collect()
+                },
+                current,
+                Some("All partners"),
+            );
+            r.labelled_by(l.id)
+                .on_hover_text("Show only the clients of one partner");
+            if let Some(p) = pick {
+                b.prefs.partner = p.map(|k| {
+                    if k == 0 {
+                        String::new()
+                    } else {
+                        partners[k - 1].clone()
+                    }
+                });
+                b.prefs_dirty = true;
+            }
+        });
+    }
     ui.add(
         egui::TextEdit::singleline(&mut b.client_filter)
             .hint_text("Find client by name or ID")
@@ -1749,9 +1808,10 @@ fn tree(ui: &mut egui::Ui, b: &mut Browse) {
     let shown: Vec<usize> = (0..b.snap.clients.len())
         .filter(|&i| {
             let c = &b.snap.clients[i];
-            needle.is_empty()
-                || c.name.to_lowercase().contains(&needle)
-                || c.ext_id.to_lowercase().contains(&needle)
+            partner_shows(b.prefs.partner.as_deref(), c.partner.as_deref())
+                && (needle.is_empty()
+                    || c.name.to_lowercase().contains(&needle)
+                    || c.ext_id.to_lowercase().contains(&needle))
         })
         .collect();
     ui.label(
@@ -3941,6 +4001,52 @@ mod tests {
     }
 
     /// P01 step 3: `+ New client` previews the template folders, then creates them.
+    /// The tree shows one partner's clients (owner 2026-11-05); "No partner" the rest; Go to
+    /// client's folder clears a filter that hides the client.
+    #[test]
+    fn tree_filters_clients_by_partner() {
+        let mut h = harness(3, 1);
+        {
+            let s = h.state_mut();
+            s.conn
+                .execute("UPDATE client SET partner = 'KW' WHERE ext_id = '1000'", [])
+                .unwrap();
+            s.conn
+                .execute("UPDATE client SET partner = 'JD' WHERE ext_id = '1001'", [])
+                .unwrap();
+            s.b.reload(&s.conn);
+        }
+        h.run();
+        assert!(h.query_by_label("3 clients").is_some());
+        h.get_by_role_and_label(Role::ComboBox, "Partner").click();
+        h.run();
+        h.get_by_label("KW").click();
+        h.run();
+        assert_eq!(h.state().b.prefs.partner.as_deref(), Some("KW"));
+        assert!(h.query_by_label("1 clients").is_some());
+        assert!(h.query_by_label("Client 0000  1000").is_some());
+        assert!(h.query_by_label("Client 0001  1001").is_none());
+        h.get_by_role_and_label(Role::ComboBox, "Partner").click();
+        h.run();
+        h.get_by_label("No partner").click();
+        h.run();
+        assert!(h.query_by_label("Client 0002  1002").is_some());
+        assert!(h.query_by_label("1 clients").is_some());
+        // Going to a client the filter hides clears it.
+        let ci = h
+            .state()
+            .b
+            .snap
+            .clients
+            .iter()
+            .position(|c| c.ext_id == "1000")
+            .unwrap();
+        h.state_mut().b.go_to_client(ci);
+        h.run();
+        assert_eq!(h.state().b.prefs.partner, None);
+        assert!(h.query_by_label("3 clients").is_some());
+    }
+
     /// PA-29 (owner 2026-11-05): right-click a client or folder in the tree to add, rename
     /// or delete a folder; Rename… in the client panel renames the client and its folder.
     #[test]
@@ -4037,6 +4143,12 @@ mod tests {
             Some("Anderson Farms LLC II (1042)")
         );
         assert_eq!(b.scope, Scope::Client(0), "the client is still shown");
+
+        // The client's partner, typed in the panel (Enter saves it).
+        type_into(&mut h, "PARTNER", "KW");
+        h.key_press(egui::Key::Enter);
+        h.run();
+        assert_eq!(h.state().b.snap.clients[0].partner.as_deref(), Some("KW"));
     }
 
     #[test]

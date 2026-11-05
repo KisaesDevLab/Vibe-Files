@@ -15,7 +15,7 @@ The tree lists, from the top:
 - **SAVED SEARCHES** — searches saved on the Search tab. See [Search](help:search).
 - **CABINET** — **All documents**, then every client, then **Not in a client folder** for files outside any client folder.
 
-Type in **Find client by name or ID** to shorten the client list, for example `smith` or `1004`.
+Type in **Find client by name or ID** to shorten the client list, for example `smith` or `1004`. When clients have partners, **Partner** above it shows only one partner's clients, or **No partner**; this PC remembers the choice.
 
 ### Folders or By year
 

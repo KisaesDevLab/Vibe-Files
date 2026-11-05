@@ -112,6 +112,52 @@ pub fn show(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env, ci: usize) {
             Err(e) => b.error = Some(e),
         }
     }
+    ui.add_space(10.0);
+
+    // Partner (owner 2026-11-05): optional; typed, or one other clients have.
+    let l = ui.label(RichText::new("PARTNER").small().color(theme::ink_muted()));
+    let current = c.partner.clone().unwrap_or_default();
+    if b.partner_draft.as_ref().is_none_or(|(id, _)| *id != c.id) {
+        b.partner_draft = Some((c.id.clone(), current.clone()));
+    }
+    let partners = b.snap.partners();
+    let mut save: Option<String> = None;
+    ui.horizontal(|ui| {
+        if let Some((_, d)) = b.partner_draft.as_mut() {
+            let r = ui
+                .add(
+                    TextEdit::singleline(d)
+                        .hint_text("Not set")
+                        .desired_width(150.0),
+                )
+                .labelled_by(l.id);
+            if r.lost_focus() && d.trim() != current {
+                save = Some(d.trim().to_string());
+            }
+        }
+        if !partners.is_empty() {
+            let (pr, pick) = crate::ui::widgets::search_combo(
+                ui,
+                "client-partner-pick",
+                90.0,
+                "Pick…",
+                || partners.clone(),
+                partners.iter().position(|p| *p == current),
+                Some("Not set"),
+            );
+            pr.on_hover_text("A partner other clients have");
+            if let Some(p) = pick {
+                save = Some(p.map(|k| partners[k].clone()).unwrap_or_default());
+            }
+        }
+    });
+    if let Some(p) = save {
+        b.partner_draft = Some((c.id.clone(), p.clone()));
+        match clients::set_partner(env.root, &c.id, Some(&p)) {
+            Ok(()) => synced(b, env, "client_edit"),
+            Err(e) => b.error = Some(e),
+        }
+    }
     ui.add_space(12.0);
 
     ui.label(

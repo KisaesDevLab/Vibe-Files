@@ -26,9 +26,13 @@ Press **Rename client…** beside the name in the client panel, or right-click t
 
 Every client folder holds `_Vibe\client.json`. This small file ties the folder to the client, so the folder can be renamed in Explorer and Vibe Files still knows whose it is. Do not delete or edit it.
 
+## Partner
+
+A client may have a **PARTNER**: who at the firm looks after it. Type it in the client panel and press Enter, or **Pick…** one other clients have; empty means none. If your client export has a Partner column, tick it under **Other columns to keep** when you import the client list: clients get that partner unless you set another here. In Browse, **Partner** above the client search shows one partner's clients (or those with **No partner**).
+
 ## Relationships
 
-Select a client in Browse to see its panel: **ID**, **FOLDER**, **ENTITY TYPE** and **RELATIONSHIPS**. A relationship links an entity to an owner, for example `Baker Farms (1004)` and a partner who owns 40%.
+Select a client in Browse to see its panel: **ID**, **FOLDER**, **ENTITY TYPE**, **PARTNER** and **RELATIONSHIPS**. A relationship links an entity to an owner, for example `Baker Farms (1004)` and a partner who owns 40%.
 
 1. Open **New relationship…**.
 2. Choose **This client is the entity** or **This client is the owner**.

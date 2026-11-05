@@ -63,6 +63,10 @@ pub struct ClientMeta {
     /// the client CSV's taxpayer ID column. Form recognition (P08) matches on it.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub tin_last4: BTreeMap<String, String>,
+    /// Client uuid → the firm's partner for the client (owner 2026-11-05). Set here it wins over
+    /// a client CSV column named Partner.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub partners: BTreeMap<String, String>,
 }
 
 impl ClientMeta {
@@ -294,6 +298,33 @@ pub fn import_csv_tin(
     load(root)?
         .list
         .ok_or_else(|| "clients.json vanished after saving".into())
+}
+
+/// Sets (or clears, `None` or blank) a client's partner in the sidecar. Run
+/// `rebuild::sync_clients` after.
+pub fn set_partner(root: &Path, client_id: &str, partner: Option<&str>) -> Result<(), String> {
+    let mut m = load(root)?;
+    match partner.map(str::trim).filter(|p| !p.is_empty()) {
+        Some(p) => {
+            m.meta.partners.insert(client_id.into(), p.into());
+        }
+        None => {
+            m.meta.partners.remove(client_id);
+        }
+    }
+    save_meta(root, &m.meta)
+}
+
+/// A client's partner: set in Vibe Files, else the client CSV's Partner column.
+pub fn partner_of(meta: &ClientMeta, client: &str, listed: Option<&Client>) -> Option<String> {
+    meta.partners.get(client).cloned().or_else(|| {
+        listed?
+            .extra
+            .iter()
+            .find(|(k, _)| k.trim().eq_ignore_ascii_case("partner"))
+            .map(|(_, v)| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+    })
 }
 
 /// Sets (or clears) a client's entity type in the sidecar. Run `rebuild::sync_clients` after.

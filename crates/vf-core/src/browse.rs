@@ -22,6 +22,8 @@ pub struct ClientRow {
     pub name: String,
     pub folder_rel: Option<String>,
     pub entity_type: Option<String>,
+    /// The firm's partner for the client (owner 2026-11-05), when set.
+    pub partner: Option<String>,
 }
 
 /// A live `client_relationship` row (ids are client uuids).
@@ -79,9 +81,21 @@ pub struct Snapshot {
     pub doc_type_folders: std::collections::HashMap<String, String>,
 }
 
+impl Snapshot {
+    /// The partners clients have, each once (any case), sorted.
+    pub fn partners(&self) -> Vec<String> {
+        let mut seen = std::collections::BTreeMap::new();
+        for p in self.clients.iter().filter_map(|c| c.partner.as_deref()) {
+            seen.entry(p.to_lowercase())
+                .or_insert_with(|| p.to_string());
+        }
+        seen.into_values().collect()
+    }
+}
+
 pub fn load(conn: &Connection) -> Result<Snapshot> {
     let mut st = conn.prepare(
-        "SELECT id, ext_id, name, folder_rel, entity_type FROM client
+        "SELECT id, ext_id, name, folder_rel, entity_type, partner FROM client
          WHERE deleted_at IS NULL ORDER BY name COLLATE NOCASE, ext_id",
     )?;
     let clients = st
@@ -92,6 +106,7 @@ pub fn load(conn: &Connection) -> Result<Snapshot> {
                 name: r.get(2)?,
                 folder_rel: r.get(3)?,
                 entity_type: r.get(4)?,
+                partner: r.get(5)?,
             })
         })?
         .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -529,6 +544,7 @@ mod tests {
             name: name.into(),
             folder_rel: Some(format!("{name} ({id})")),
             entity_type: None,
+            partner: None,
         }
     }
 

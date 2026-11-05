@@ -386,19 +386,23 @@ fn client_stmts(
                   name: &str,
                   folder_rel: Option<&str>,
                   sentinel_hash: Option<&str>,
-                  extra: String| {
+                  extra: String,
+                  partner: Option<String>| {
         Stmt::new(
-            "INSERT INTO client (id, ext_id, name, entity_type, folder_rel, sentinel_hash, extra, device_id, updated_at, tin_last4)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+            "INSERT INTO client (id, ext_id, name, entity_type, folder_rel, sentinel_hash, extra, device_id, updated_at, tin_last4, partner)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
              ON CONFLICT(id) DO UPDATE SET
                ext_id = excluded.ext_id, name = excluded.name, entity_type = excluded.entity_type,
                folder_rel = excluded.folder_rel, sentinel_hash = excluded.sentinel_hash,
-               extra = excluded.extra, tin_last4 = excluded.tin_last4, deleted_at = NULL,
+               extra = excluded.extra, tin_last4 = excluded.tin_last4, partner = excluded.partner,
+               deleted_at = NULL,
                device_id = excluded.device_id, updated_at = excluded.updated_at, rev = client.rev + 1
              WHERE (client.ext_id, client.name, client.entity_type, client.folder_rel,
-                    client.sentinel_hash, client.extra, client.tin_last4, client.deleted_at)
+                    client.sentinel_hash, client.extra, client.tin_last4, client.partner,
+                    client.deleted_at)
                IS NOT (excluded.ext_id, excluded.name, excluded.entity_type, excluded.folder_rel,
-                       excluded.sentinel_hash, excluded.extra, excluded.tin_last4, NULL)",
+                       excluded.sentinel_hash, excluded.extra, excluded.tin_last4,
+                       excluded.partner, NULL)",
             vec![
                 id.into(),
                 ext.into(),
@@ -410,6 +414,7 @@ fn client_stmts(
                 device_id.into(),
                 now.into(),
                 m.meta.tin_last4.get(id).cloned().into(),
+                partner.into(),
             ],
         )
     };
@@ -458,6 +463,7 @@ fn client_stmts(
             Some(&b.folder_rel),
             Some(&b.sentinel_hash),
             extras(l),
+            crate::clients::partner_of(&m.meta, &b.id, l),
         ));
         ext_to_id.insert(b.ext_id.clone(), b.id.clone());
     }
@@ -470,7 +476,15 @@ fn client_stmts(
             rep.uuid_mismatches.push(c.id.clone());
             continue;
         }
-        stmts.push(upsert(&id, &c.id, &c.name, None, None, extras(Some(c))));
+        stmts.push(upsert(
+            &id,
+            &c.id,
+            &c.name,
+            None,
+            None,
+            extras(Some(c)),
+            crate::clients::partner_of(&m.meta, &id, Some(c)),
+        ));
         ext_to_id.insert(c.id.clone(), id);
         rep.master_only += 1;
     }
@@ -1242,6 +1256,62 @@ mod tests {
             out.push(r.unwrap());
         }
         out
+    }
+
+    /// A client's partner (owner 2026-11-05): a client CSV column named Partner gives it; one
+    /// set in Vibe Files wins; cleared, the CSV's comes back.
+    #[test]
+    fn partners_come_from_the_csv_or_are_set_here() {
+        let c = cab();
+        let csv = c.root.parent().unwrap().join("clients.csv");
+        std::fs::write(
+            &csv,
+            "ClientID,Name,Partner
+1001,John Smith,KW
+1002,Acme LLC,
+",
+        )
+        .unwrap();
+        let known = BTreeMap::from([
+            ("1001".to_string(), sentinel_uuid(&c, "Smith, John (1001)")),
+            ("1002".to_string(), sentinel_uuid(&c, "Acme LLC (1002)")),
+        ]);
+        let map = filer_core::config::ColumnMap {
+            id: Some("ClientID".into()),
+            name: Some("Name".into()),
+            extras: vec!["Partner".into()],
+        };
+        crate::clients::import_csv(&c.root, &csv, &map, &known).unwrap();
+        let mut conn = open(&c);
+        rebuild(&mut conn, &c.root, "dev-1").unwrap();
+        let partner = |conn: &Connection, ext: &str| -> Option<String> {
+            conn.query_row("SELECT partner FROM client WHERE ext_id = ?1", [ext], |r| {
+                r.get(0)
+            })
+            .unwrap()
+        };
+        assert_eq!(partner(&conn, "1001").as_deref(), Some("KW"));
+        assert_eq!(partner(&conn, "1002"), None, "blank in the CSV: none");
+        let acme = sentinel_uuid(&c, "Acme LLC (1002)").to_string();
+        let smith = sentinel_uuid(&c, "Smith, John (1001)").to_string();
+        crate::clients::set_partner(&c.root, &acme, Some(" JD ")).unwrap();
+        crate::clients::set_partner(&c.root, &smith, Some("AB")).unwrap();
+        sync_clients(&mut conn, &c.root, "dev-1", "clients_edit").unwrap();
+        assert_eq!(partner(&conn, "1002").as_deref(), Some("JD"));
+        assert_eq!(
+            partner(&conn, "1001").as_deref(),
+            Some("AB"),
+            "set here wins"
+        );
+        crate::clients::set_partner(&c.root, &smith, None).unwrap();
+        sync_clients(&mut conn, &c.root, "dev-1", "clients_edit").unwrap();
+        assert_eq!(
+            partner(&conn, "1001").as_deref(),
+            Some("KW"),
+            "the CSV's again"
+        );
+        let snap = vf_core::browse::load(&conn).unwrap();
+        assert_eq!(snap.partners(), ["JD", "KW"]);
     }
 
     #[test]

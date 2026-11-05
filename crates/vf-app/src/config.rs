@@ -325,6 +325,9 @@ pub struct Prefs {
     /// Sections of Browse's left pane folded shut ("views", "favorites", "saved").
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub folded: Vec<String>,
+    /// Browse's tree shows only this partner's clients (`""`: clients with no partner).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub partner: Option<String>,
 }
 
 pub const RECENT_MAX: usize = 50;
