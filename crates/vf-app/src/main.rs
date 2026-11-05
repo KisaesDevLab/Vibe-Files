@@ -45,12 +45,15 @@ fn main() -> anyhow::Result<std::process::ExitCode> {
     let exe_dir = vf_core::exe_dir().context("locating the exe")?;
     let mut data = match (args.data, &personal) {
         (Some(d), _) => d,
-        // Run from a network path (several servers, PA-36): never a data folder on the share.
-        (None, Some(p)) if server::server_mode() => server::personal_data(
-            &exe_dir.join("data"),
-            p,
-            vf_core::windows_login().as_deref(),
-        ),
+        // Run from a network path (a server, or an office PC run from the shared program
+        // folder): never a data folder on the share (Q-70: SQLite there can be damaged).
+        (None, Some(p)) if server::server_mode() || server::is_network(&exe_dir) => {
+            server::personal_data(
+                &exe_dir.join("data"),
+                p,
+                vf_core::windows_login().as_deref(),
+            )
+        }
         (None, _) => datalock::default_data(
             &exe_dir.join("vibe-files.exe"),
             personal.clone(),

@@ -499,9 +499,12 @@ pub fn adopt_unknown(
         .prepare_cached(
             "SELECT id FROM document WHERE hash = ?1 AND deleted_at IS NOT NULL
                AND tombstone_reason IN ('missing on rebuild', 'missing')
+               AND deleted_at >= ?3
+               AND (lower(rel_path) = lower(?2) OR lower(rel_path) LIKE '%/' || lower(?2))
              ORDER BY deleted_at DESC LIMIT 1",
         )
         .map_err(|e| e.to_string())?;
+    let revive_since = vf_core::rfc3339_days_ago(30);
     let mut revived: std::collections::HashSet<String> = Default::default();
     for u in items {
         // A document marked gone from another client folder whose content turns up here (moved
@@ -511,35 +514,107 @@ pub fn adopt_unknown(
             .get_at(&u.rel_path, &u.hash)
             .and_then(|m| m.id.clone())
             .filter(|id| !revived.contains(id));
-        let recorded_state: Option<bool> = match &recorded {
+        // 0 live, 1 gone missing (may come back), 2 deleted otherwise (never brought back).
+        let recorded_state: Option<i64> = match &recorded {
             Some(rid) => vf_core::db::OptionalExtension::optional(conn.query_row(
-                "SELECT deleted_at IS NOT NULL FROM document WHERE id = ?1",
+                "SELECT CASE WHEN deleted_at IS NULL THEN 0
+                             WHEN tombstone_reason IN ('missing on rebuild', 'missing') THEN 1
+                             ELSE 2 END
+                 FROM document WHERE id = ?1",
                 [rid],
-                |r| r.get::<_, bool>(0),
+                |r| r.get::<_, i64>(0),
             ))
             .map_err(|e| e.to_string())?,
             None => None,
         };
-        let back: Option<String> = match (&recorded, recorded_state) {
-            (Some(rid), Some(true)) => Some(rid.clone()),
-            _ => vf_core::db::OptionalExtension::optional(
-                revive.query_row([&u.hash], |r| r.get::<_, String>(0)),
+        let name = u
+            .rel_path
+            .rsplit('/')
+            .next()
+            .unwrap_or(&u.rel_path)
+            .to_string();
+        // The recorded id wins; matching by content only for a file with no record (QA).
+        let mut back: Option<String> = match (&recorded, recorded_state) {
+            (Some(rid), Some(1)) => Some(rid.clone()),
+            (Some(_), _) => None,
+            (None, _) => vf_core::db::OptionalExtension::optional(
+                revive.query_row((&u.hash, &name, &revive_since), |r| r.get::<_, String>(0)),
             )
             .map_err(|e| e.to_string())?
             .filter(|id| !revived.contains(id)),
         };
+        // The recorded document is live at another path whose file is gone: moved (by another
+        // server, or in Explorer) and this folder was looked at first (code review).
+        if let (Some(rid), Some(0)) = (&recorded, recorded_state) {
+            let at: Option<String> = vf_core::db::OptionalExtension::optional(conn.query_row(
+                "SELECT rel_path FROM document WHERE id = ?1",
+                [rid],
+                |r| r.get::<_, String>(0),
+            ))
+            .map_err(|e| e.to_string())?;
+            if at.is_some_and(|p| p != u.rel_path && !root.join(&p).exists()) {
+                back = Some(rid.clone());
+            }
+        }
+        // As it was, for the undo (QA).
+        let before: Option<Before> = match &back {
+            Some(id) => vf_core::db::OptionalExtension::optional(conn.query_row(
+                "SELECT rel_path, client_id, deleted_at, tombstone_reason FROM document
+                     WHERE id = ?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            ))
+            .map_err(|e| e.to_string())?,
+            None => None,
+        };
         if let Some(id) = back {
+            // Its record at the new place, with its id, so the other servers follow it.
+            if let Ok(mut moved) = crate::docmeta::load(conn, &id) {
+                moved.rel_path = u.rel_path.clone();
+                moved.folder_rel = u
+                    .rel_path
+                    .split_once('/')
+                    .map(|(f, _)| f.to_string())
+                    .filter(|_| u.client_id.is_some());
+                let (path, line) = crate::docmeta::record_line(root, &moved, &now, device_id);
+                tx = tx.file(FileOp::AppendLines {
+                    path,
+                    lines: vec![line],
+                    undo_lines: vec![],
+                });
+            }
             tx = tx
+                // Live again: sent as a put, not the delete queued when it went missing.
+                .catalog(Stmt::new(
+                    "DELETE FROM sync_pending WHERE doc_id = ?1 AND op = 'delete'",
+                    vec![id.clone().into()],
+                ))
+                .catalog(Stmt::new(
+                    "INSERT INTO sync_pending (doc_id, op, since) VALUES (?1, 'put', ?2)
+                     ON CONFLICT(doc_id, op) DO NOTHING",
+                    vec![id.clone().into(), now.clone().into()],
+                ))
                 .catalog(Stmt::new(
                     "UPDATE document SET deleted_at = NULL, tombstone_reason = NULL, rel_path = ?2,
                        client_id = ?3, device_id = ?4, updated_at = ?5, rev = rev + 1
-                     WHERE id = ?1 AND deleted_at IS NOT NULL",
+                     WHERE id = ?1",
                     vec![
                         id.clone().into(),
                         u.rel_path.clone().into(),
                         u.client_id.clone().into(),
                         device_id.into(),
                         now.clone().into(),
+                    ],
+                ))
+                .catalog_undo(Stmt::new(
+                    "UPDATE document SET rel_path = ?2, client_id = ?3, deleted_at = ?4,
+                       tombstone_reason = ?5, rev = rev + 1 WHERE id = ?1",
+                    vec![
+                        id.clone().into(),
+                        before.as_ref().map(|b| b.0.clone()).into(),
+                        before.as_ref().and_then(|b| b.1.clone()).into(),
+                        before.as_ref().and_then(|b| b.2.clone()).into(),
+                        before.as_ref().and_then(|b| b.3.clone()).into(),
                     ],
                 ))
                 .audit(AuditEntry::new(
@@ -643,6 +718,10 @@ pub fn adopt_unknown(
     crate::fileops::commit(conn, root, tx, device_id)?;
     Ok(items.len())
 }
+
+/// A document's place and state before an adoption changes it: (path, client, deleted at,
+/// reason), for the undo.
+type Before = (String, Option<String>, Option<String>, Option<String>);
 
 /// The live documents of the client folder `folder` (their cabinet-relative paths in `known`;
 /// only those inside the folder count) whose files are gone from disk: deleted or moved in

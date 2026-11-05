@@ -67,6 +67,16 @@ pub fn item_path(root: &Path, doc_id: &str) -> PathBuf {
     cabinet::trash_dir(root).join(doc_id).join("item.jsonl")
 }
 
+/// The client of a client folder, by this catalog.
+fn client_of_folder(conn: &Connection, folder: Option<&str>) -> Option<String> {
+    conn.query_row(
+        "SELECT id FROM client WHERE folder_rel = ?1 COLLATE NOCASE AND deleted_at IS NULL",
+        [folder?],
+        |r| r.get(0),
+    )
+    .ok()
+}
+
 /// The last event in `doc_id`'s record.
 fn last_item(root: &Path, doc_id: &str) -> Option<Item> {
     let text = std::fs::read_to_string(item_path(root, doc_id)).ok()?;
@@ -320,9 +330,11 @@ fn held_in_cabinet(conn: &Connection, root: &Path, t: &Trashed) -> bool {
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .unwrap_or_else(|_| {
+            // Trashed on another server: its client by its folder (a client-wide hold covers it).
+            let i = t.item.as_ref();
             (
-                None,
-                t.item.as_ref().map(|i| i.hash.clone()).unwrap_or_default(),
+                i.and_then(|i| client_of_folder(conn, i.client_folder.as_deref())),
+                i.map(|i| i.hash.clone()).unwrap_or_default(),
             )
         });
     crate::holds::covers(root, client.as_deref(), &t.rel_path, &hash)
@@ -385,7 +397,8 @@ pub fn list(conn: &Connection, root: &Path) -> Result<Vec<Trashed>, String> {
         if !file.is_file() {
             continue;
         }
-        let held = crate::holds::covers(root, None, &i.rel_path, &i.hash);
+        let client = client_of_folder(conn, i.client_folder.as_deref());
+        let held = crate::holds::covers(root, client.as_deref(), &i.rel_path, &i.hash);
         out.push(Trashed {
             doc_id: id,
             rel_path: i.rel_path.clone(),
@@ -627,6 +640,16 @@ pub fn restore(
     let mut allowed: Vec<&Path> = vec![root];
     allowed.extend(allowed_extra.iter().map(PathBuf::as_path));
     crate::fileops::commit_in(conn, &allowed, tx, device_id)?;
+    // A restored document's record leaves the trash with it (restored to Intake too), and its
+    // folder when empty: nothing is left behind for every server's Trash (code review).
+    for t in items {
+        if !t.file.exists() {
+            let _ = std::fs::remove_file(item_path(root, &t.doc_id));
+            if let Some(dir) = t.file.parent() {
+                let _ = std::fs::remove_dir(dir);
+            }
+        }
+    }
     Ok(placed)
 }
 

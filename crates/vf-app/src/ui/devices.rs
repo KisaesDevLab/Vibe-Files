@@ -11,12 +11,17 @@ fn servers_section(ui: &mut egui::Ui, p: &mut DevicesPage, env: &mut Env) {
     use crate::server::Setting;
     ui.label(RichText::new("Servers").strong().size(16.0));
     // The choice for this computer (owner 2026-11-05): Windows decides, or always / never.
-    let now = crate::server::mode_setting();
+    let (now, auto) = *p.server.get_or_insert_with(|| {
+        (
+            crate::server::mode_setting(),
+            crate::server::auto_detected(),
+        )
+    });
     let mut pick = now;
     ui.horizontal(|ui| {
         ui.label("Server mode on this computer");
         ui.radio_value(&mut pick, Setting::Auto, "Automatic")
-            .on_hover_text(if crate::server::auto_detected() {
+            .on_hover_text(if auto {
                 "Windows Server running Vibe Files from a network folder: on."
             } else {
                 "Not a Windows Server running Vibe Files from a network folder: off."
@@ -31,6 +36,7 @@ fn servers_section(ui: &mut egui::Ui, p: &mut DevicesPage, env: &mut Env) {
     if pick != now {
         match crate::server::set_mode_setting(pick) {
             Ok(()) => {
+                p.server = Some((pick, auto));
                 p.notice = Some(
                     "Server mode changes when Vibe Files next starts on this computer.".into(),
                 );
@@ -158,6 +164,8 @@ fn shared_section(ui: &mut egui::Ui, p: &mut DevicesPage, env: &mut Env) {
 pub struct DevicesPage {
     pub notice: Option<String>,
     pub error: Option<String>,
+    /// This computer's server-mode choice and what Windows says, read once (not every frame).
+    server: Option<(crate::server::Setting, bool)>,
 }
 
 pub fn show(ui: &mut egui::Ui, p: &mut DevicesPage, env: &mut Env) {

@@ -537,6 +537,16 @@ fn record(
     let now = vf_core::now_rfc3339();
     let mut tx = Transaction::new(LABEL).extra(json!({ "filer_batch": batch.to_string() }));
     let (mut added, mut updated) = (0, 0);
+    // What the client folders' docmeta.jsonl already say about these files: a batch another
+    // server recorded first (several servers record every PC's batches) keeps that server's id
+    // and record (QA).
+    let folders: Vec<String> = filed
+        .iter()
+        .filter_map(|f| f.client.and_then(|c| c.1.clone()))
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let recorded = crate::docmeta::Index::load(root, &folders);
     for f in &filed {
         let path = root.join(&f.rel);
         if !path.is_file() {
@@ -600,7 +610,15 @@ fn record(
                 updated += 1;
             }
             None => {
-                let id = vf_core::new_id();
+                let prior = recorded.get_at(&f.rel, &hash);
+                // Its recorded id when no row here has it (else a new one).
+                let id = prior
+                    .and_then(|r| r.id.clone())
+                    .filter(|rid| {
+                        conn.query_row("SELECT 1 FROM document WHERE id = ?1", [rid], |_| Ok(()))
+                            .is_err()
+                    })
+                    .unwrap_or_else(vf_core::new_id);
                 // What a Vibe intake processor knew about the file (barcode cover sheet, print
                 // capture parser): doc type, tax year, source. Kept in docmeta.jsonl too, so
                 // rebuild restores it (Q-22).
@@ -647,8 +665,9 @@ fn record(
                     vec![]
                 };
                 // Every filed document gets its docmeta record (its id included), so the other
-                // servers and a rebuilt catalog know it by the same id (owner 2026-11-05).
-                {
+                // servers and a rebuilt catalog know it by the same id (owner 2026-11-05); not
+                // a second one when another server recorded this batch first.
+                if prior.is_none() {
                     let meta = crate::docmeta::Meta {
                         id: id.clone(),
                         rel_path: f.rel.clone(),

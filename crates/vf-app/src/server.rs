@@ -126,7 +126,10 @@ pub fn is_windows_server() -> bool {
         return false;
     }
     let n = (len as usize / 2).saturating_sub(1).min(buf.len());
-    String::from_utf16_lossy(&buf[..n]).eq_ignore_ascii_case("Server")
+    // "Server", "Server Core" (and any other Server kind); not "Client".
+    String::from_utf16_lossy(&buf[..n])
+        .to_ascii_lowercase()
+        .starts_with("server")
 }
 
 /// This computer's name.

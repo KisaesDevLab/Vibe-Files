@@ -922,21 +922,41 @@ fn rebuild_scoped(
             }
         }
     }
-    // A scoped re-read leaves files Intake has just filed and not recorded yet to Intake.
-    if only.is_some() {
-        let pending = crate::intake::unrecorded_paths(conn, root);
-        if !pending.is_empty() {
-            found.retain(|f| !pending.contains(&f.rel.to_lowercase()));
-        }
+    // A scoped re-read leaves files Intake has just filed and not recorded yet to Intake (and
+    // the rows at those paths: an Overwrite is Intake's to record, QA).
+    let pending: HashSet<String> = if only.is_some() {
+        crate::intake::unrecorded_paths(conn, root)
+            .into_iter()
+            .collect()
+    } else {
+        HashSet::new()
+    };
+    if !pending.is_empty() {
+        found.retain(|f| !pending.contains(&f.rel.to_lowercase()));
     }
+    // Only a document that went missing lately (30 days) with the same name and content: a
+    // blank form dropped into another client is a new document, not the first one back
+    // (code review).
     let mut revive = conn.prepare(
         "SELECT id FROM document WHERE hash = ?1 AND deleted_at IS NOT NULL
            AND tombstone_reason IN ('missing on rebuild', 'missing')
+           AND deleted_at >= ?3
+           AND (lower(rel_path) = lower(?2) OR lower(rel_path) LIKE '%/' || lower(?2))
          ORDER BY deleted_at DESC LIMIT 1",
     )?;
+    let revive_since = vf_core::rfc3339_days_ago(30);
+    // A live document's path, to see whether its file is still there.
+    let mut id_rel = conn.prepare("SELECT rel_path FROM document WHERE id = ?1")?;
     let mut revived: HashSet<String> = HashSet::new();
     // Whether an id is in this catalog: Some(true) marked deleted, Some(false) live.
-    let mut id_state = conn.prepare("SELECT deleted_at IS NOT NULL FROM document WHERE id = ?1")?;
+    // An id's state here: 0 live, 1 gone missing (may come back), 2 deleted otherwise (trashed,
+    // purged, disposed, undone: never brought back by a record, QA).
+    let mut id_state = conn.prepare(
+        "SELECT CASE WHEN deleted_at IS NULL THEN 0
+                     WHEN tombstone_reason IN ('missing on rebuild', 'missing') THEN 1
+                     ELSE 2 END
+         FROM document WHERE id = ?1",
+    )?;
     let mut used_ids: HashSet<String> = HashSet::new();
     let on_disk: HashSet<&str> = found.iter().map(|f| f.rel.as_str()).collect();
     // Missing rows, by hash, available to absorb a move.
@@ -946,6 +966,7 @@ fn rebuild_scoped(
     live_paths.sort();
     let unread = |p: &str| {
         unread_files.contains(p)
+            || pending.contains(&p.to_lowercase())
             || unread_dirs.iter().any(|d| {
                 p.strip_prefix(d.as_str())
                     .is_some_and(|r| r.starts_with('/'))
@@ -1007,18 +1028,35 @@ fn rebuild_scoped(
                     .get_at(&f.rel, &f.hash)
                     .and_then(|m| m.id.clone())
                     .filter(|id| !revived.contains(id) && !used_ids.contains(id));
-                let recorded_state: Option<bool> = match &recorded {
+                let recorded_state: Option<i64> = match &recorded {
                     Some(rid) => vf_core::db::OptionalExtension::optional(
-                        id_state.query_row([rid], |r| r.get::<_, bool>(0)),
+                        id_state.query_row([rid], |r| r.get::<_, i64>(0)),
                     )?,
                     None => None,
                 };
+                let name = f.rel.rsplit('/').next().unwrap_or(&f.rel).to_string();
+                // The recorded id wins; matching by content only for a file with no record
+                // (QA: content is shared by copies in different clients).
                 let back: Option<String> = match (&recorded, recorded_state) {
-                    (Some(rid), Some(true)) => Some(rid.clone()),
-                    _ => vf_core::db::OptionalExtension::optional(
-                        revive.query_row([&f.hash], |r| r.get::<_, String>(0)),
+                    (Some(rid), Some(1)) => Some(rid.clone()),
+                    (Some(_), _) => None,
+                    (None, _) => vf_core::db::OptionalExtension::optional(
+                        revive
+                            .query_row((&f.hash, &name, &revive_since), |r| r.get::<_, String>(0)),
                     )?
                     .filter(|id| !revived.contains(id)),
+                };
+                // The recorded document is live here at another path whose file is gone: it
+                // was moved (by another server, or in Explorer) and this folder was read first.
+                let moved_here: Option<String> = match (&recorded, recorded_state) {
+                    (Some(rid), Some(0)) => {
+                        let at: Option<String> = vf_core::db::OptionalExtension::optional(
+                            id_rel.query_row([rid], |r| r.get::<_, String>(0)),
+                        )?;
+                        at.filter(|p| *p != f.rel && !root.join(p).exists())
+                            .map(|_| rid.clone())
+                    }
+                    _ => None,
                 };
                 if let Some(id) = missing_by_hash.get_mut(&f.hash).and_then(|v| v.pop()) {
                     stmts.push(Stmt::new(
@@ -1026,6 +1064,22 @@ fn rebuild_scoped(
                         vec![id.clone().into(), f.rel.clone().into(), f.client_id.clone().into(), device_id.into(), now.clone().into(), stamp.get(&id).cloned().unwrap_or_default().into()],
                     ));
                     moved.insert(id.clone());
+                    rep.docs_moved += 1;
+                    doc_id_by_rel.insert(f.rel.clone(), id);
+                } else if let Some(id) = moved_here {
+                    stmts.push(Stmt::new(
+                        "UPDATE document SET rel_path = ?2, client_id = ?3, device_id = ?4,
+                           updated_at = ?5, rev = rev + 1 WHERE id = ?1 AND deleted_at IS NULL",
+                        vec![
+                            id.clone().into(),
+                            f.rel.clone().into(),
+                            f.client_id.clone().into(),
+                            device_id.into(),
+                            now.clone().into(),
+                        ],
+                    ));
+                    moved.insert(id.clone());
+                    revived.insert(id.clone());
                     rep.docs_moved += 1;
                     doc_id_by_rel.insert(f.rel.clone(), id);
                 } else if let Some(id) = back {
@@ -1123,7 +1177,10 @@ fn rebuild_scoped(
             };
             // The newer wins: a record older than the catalog row (an edit made here after it,
             // or one read before a later edit) does not put old values back (QA).
-            if m.ts <= updated {
+            // This catalog's own older record does not undo a later change here; another
+            // writer's record is applied (the file keeps records in the order they were made,
+            // so the last one for a path is the latest edit anywhere: no clock comparison).
+            if m.ts <= updated && m.device == device_id {
                 continue;
             }
             let want_dt = m
@@ -1139,7 +1196,7 @@ fn rebuild_scoped(
             if dt != want_dt || ty != m.tax_year.map(i64::from) || st != m.status || so != m.source
             {
                 stmts.push(Stmt::new(
-                    "UPDATE document SET doc_type_id = ?2, tax_year = ?3, status = ?4, source = ?5, device_id = ?6, updated_at = ?7, rev = rev + 1 WHERE id = ?1 AND updated_at = ?8",
+                    "UPDATE document SET doc_type_id = ?2, tax_year = ?3, status = ?4, source = ?5, device_id = ?6, updated_at = ?7, rev = rev + 1 WHERE id = ?1 AND updated_at IN (?8, ?7)",
                     vec![
                         id.clone().into(), want_dt.into(), m.tax_year.map(i64::from).into(),
                         m.status.clone().into(), m.source.clone().into(), device_id.into(),
@@ -1154,15 +1211,24 @@ fn rebuild_scoped(
             let mut want_tags = m.tags.clone();
             want_tags.sort();
             want_tags.dedup();
+            // Tags too only while the row is as read (or as this rebuild left it).
             if tags != want_tags {
                 stmts.push(Stmt::new(
-                    "DELETE FROM document_tag WHERE doc_id = ?1",
-                    vec![id.clone().into()],
+                    "DELETE FROM document_tag WHERE doc_id = ?1
+                       AND EXISTS (SELECT 1 FROM document WHERE id = ?1 AND updated_at IN (?2, ?3))",
+                    vec![id.clone().into(), updated.clone().into(), now.clone().into()],
                 ));
                 for t in want_tags {
                     stmts.push(Stmt::new(
-                        "INSERT OR IGNORE INTO document_tag (doc_id, tag) VALUES (?1, ?2)",
-                        vec![id.clone().into(), t.into()],
+                        "INSERT OR IGNORE INTO document_tag (doc_id, tag)
+                         SELECT ?1, ?2 WHERE EXISTS
+                           (SELECT 1 FROM document WHERE id = ?1 AND updated_at IN (?3, ?4))",
+                        vec![
+                            id.clone().into(),
+                            t.into(),
+                            updated.clone().into(),
+                            now.clone().into(),
+                        ],
                     ));
                 }
             }
@@ -1170,6 +1236,7 @@ fn rebuild_scoped(
     }
     drop(revive);
     drop(id_state);
+    drop(id_rel);
     let mut gone_ids: Vec<String> = vec![];
     for id in missing_ids.iter().filter(|id| !moved.contains(*id)) {
         // A document under legal hold is never marked deleted: its file is reported missing
@@ -1322,19 +1389,39 @@ fn rebuild_scoped(
     ));
     // A scoped re-read (files deleted in Explorer, another server's change): one audit row per
     // document it marks deleted, as the sweep's "missing" does (QA).
-    if only.is_some() {
-        for id in &gone_ids {
-            tx = tx.audit(AuditEntry::new(
-                "missing",
-                Some(id),
-                json!({ "found_by": "re-read of its client folder" }),
-            ));
-        }
-    }
     for s in stmts {
         tx = tx.catalog(s);
     }
     tx.commit(conn, &mut NoFileOps, &actor)?;
+    // Only the documents it really marked deleted (another writer's change wins over this
+    // rebuild's: code review), one audit row each.
+    if only.is_some() && !gone_ids.is_empty() {
+        let really: Vec<String> = gone_ids
+            .iter()
+            .filter(|id| {
+                conn.query_row(
+                    "SELECT 1 FROM document WHERE id = ?1 AND deleted_at = ?2
+                       AND tombstone_reason = 'missing on rebuild'",
+                    (id.as_str(), now.as_str()),
+                    |_| Ok(()),
+                )
+                .is_ok()
+            })
+            .cloned()
+            .collect();
+        rep.docs_tombstoned = really.len();
+        if !really.is_empty() {
+            let mut a = Transaction::new("rebuild");
+            for id in &really {
+                a = a.audit(AuditEntry::new(
+                    "missing",
+                    Some(id),
+                    json!({ "found_by": "re-read of its client folder" }),
+                ));
+            }
+            a.commit(conn, &mut NoFileOps, &actor)?;
+        }
+    }
     if only.is_none() {
         conn.execute("DELETE FROM local_state WHERE k = ?1", [UNFINISHED])?;
     }
