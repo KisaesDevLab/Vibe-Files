@@ -149,7 +149,34 @@ pub fn fill_doc(doc: &mut Document, values: &[(String, String)]) -> Result<usize
         set_value(doc, f, value)?;
         changed += 1;
     }
+    if changed > 0 {
+        drop_xfa(doc);
+    }
     Ok(changed)
+}
+
+/// Removes the form's XFA data (`/AcroForm /XFA`). Acrobat fills an XFA form's fields from
+/// the XFA data, not from `/V`, so a form filled here would show its old values there; without
+/// it, Acrobat uses the AcroForm fields like every other viewer. (What other fillers do.)
+fn drop_xfa(doc: &mut Document) {
+    let form = match doc.catalog().ok().and_then(|c| c.get(b"AcroForm").ok()) {
+        Some(Object::Reference(id)) => Some(*id),
+        _ => None,
+    };
+    match form {
+        Some(id) => {
+            if let Ok(d) = doc.get_dictionary_mut(id) {
+                d.remove(b"XFA");
+            }
+        }
+        None => {
+            if let Ok(Object::Dictionary(d)) =
+                doc.catalog_mut().and_then(|c| c.get_mut(b"AcroForm"))
+            {
+                d.remove(b"XFA");
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -371,7 +398,9 @@ fn kind_of(doc: &Document, inh: &Inherit, widgets: &[Widget]) -> Option<FieldKin
                     states.push(on.clone());
                 }
             }
-            if ff & (1 << 15) != 0 {
+            // Radio buttons, or check boxes whose boxes have different values (one of them on at
+            // a time, as tax forms use them): each box turns on with its own value.
+            if ff & (1 << 15) != 0 || states.len() > 1 {
                 Some(FieldKind::Radio { options: states })
             } else {
                 Some(FieldKind::Check {
@@ -514,6 +543,16 @@ fn set_value(doc: &mut Document, f: &Found, value: &str) -> Result<(), String> {
                 ));
             }
             set(doc, f.id, "V", encode_text(value))?;
+            if let FieldKind::Choice { options, .. } = &f.field.kind {
+                // `/I`, the chosen options' indices, is what Acrobat highlights in a list.
+                let d = doc.get_dictionary_mut(f.id).map_err(|e| e.to_string())?;
+                match options.iter().position(|o| o.value == value) {
+                    Some(i) => d.set("I", vec![Object::Integer(i as i64)]),
+                    None => {
+                        d.remove(b"I");
+                    }
+                }
+            }
             for w in &f.widgets {
                 let Ok(wd) = doc.get_dictionary(*w) else {
                     continue;
@@ -1114,6 +1153,127 @@ mod tests {
         // The appearance holding the text is still in the file, as a form XObject.
         let any = d.objects.values().any(|o| matches!(o, Object::Stream(s) if String::from_utf8_lossy(&s.content).contains("(Sample Client) Tj")));
         assert!(any);
+    }
+
+    #[test]
+    fn xfa_list_index_and_multi_value_check_boxes() {
+        let t = tempfile::tempdir().unwrap();
+        let (src, out) = (t.path().join("f.pdf"), t.path().join("o.pdf"));
+        write_test_form(&src);
+        let mut doc = Document::load(&src).unwrap();
+        // XFA beside the AcroForm, a list with /I, and a check box with two boxes ("1", "2").
+        let form = doc
+            .catalog()
+            .unwrap()
+            .get(b"AcroForm")
+            .unwrap()
+            .as_reference()
+            .unwrap();
+        doc.get_dictionary_mut(form)
+            .unwrap()
+            .set("XFA", Object::string_literal("<xdp/>"));
+        let year = found(&doc)
+            .into_iter()
+            .find(|f| f.field.name == "year")
+            .unwrap()
+            .id;
+        doc.get_dictionary_mut(year)
+            .unwrap()
+            .set("I", vec![Object::Integer(1)]);
+        let page = *doc.get_pages().values().next().unwrap();
+        let mk = |doc: &mut Document, on: &str, x: i64, parent: ObjectId| {
+            let s = doc.add_object(Stream::new(Dictionary::new(), Vec::new()));
+            let mut n = Dictionary::new();
+            n.set(on, s);
+            n.set("Off", s);
+            doc.add_object(dictionary! {
+                "Type" => "Annot", "Subtype" => "Widget", "Parent" => parent, "AS" => "Off",
+                "AP" => dictionary! { "N" => n },
+                "Rect" => vec![x.into(), 400.into(), (x + 12).into(), 412.into()],
+            })
+        };
+        let filing = doc.new_object_id();
+        let (a, b) = (
+            mk(&mut doc, "1", 72, filing),
+            mk(&mut doc, "2", 120, filing),
+        );
+        doc.objects.insert(
+            filing,
+            Object::Dictionary(dictionary! {
+                "FT" => "Btn", "T" => Object::string_literal("filing"), "Kids" => vec![a.into(), b.into()],
+            }),
+        );
+        doc.get_dictionary_mut(page)
+            .unwrap()
+            .get_mut(b"Annots")
+            .unwrap()
+            .as_array_mut()
+            .unwrap()
+            .extend([a.into(), b.into()]);
+        doc.get_dictionary_mut(form)
+            .unwrap()
+            .get_mut(b"Fields")
+            .unwrap()
+            .as_array_mut()
+            .unwrap()
+            .push(filing.into());
+        doc.save(&src).unwrap();
+
+        let f = read(&src).unwrap();
+        let filing_f = f.iter().find(|f| f.name == "filing").unwrap();
+        assert_eq!(
+            filing_f.kind,
+            FieldKind::Radio {
+                options: vec!["1".into(), "2".into()]
+            }
+        );
+        fill(
+            &src,
+            &out,
+            &[
+                ("filing".into(), "2".into()),
+                ("year".into(), "2025".into()),
+            ],
+        )
+        .unwrap();
+        let d = Document::load(&out).unwrap();
+        let form = d
+            .catalog()
+            .unwrap()
+            .get(b"AcroForm")
+            .unwrap()
+            .as_reference()
+            .unwrap();
+        assert!(!d.get_dictionary(form).unwrap().has(b"XFA"), "XFA dropped");
+        let fs = found(&d);
+        let y = fs.iter().find(|f| f.field.name == "year").unwrap();
+        let i = d
+            .get_dictionary(y.id)
+            .unwrap()
+            .get(b"I")
+            .unwrap()
+            .as_array()
+            .unwrap();
+        assert_eq!(i, &vec![Object::Integer(0)], "/I follows the value");
+        let r = fs.iter().find(|f| f.field.name == "filing").unwrap();
+        let states: Vec<Vec<u8>> = r
+            .widgets
+            .iter()
+            .map(|w| {
+                d.get_dictionary(*w)
+                    .unwrap()
+                    .get(b"AS")
+                    .unwrap()
+                    .as_name()
+                    .unwrap()
+                    .to_vec()
+            })
+            .collect();
+        assert_eq!(
+            states,
+            [b"Off".to_vec(), b"2".to_vec()],
+            "the second box is on"
+        );
     }
 
     #[test]

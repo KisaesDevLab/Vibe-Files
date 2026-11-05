@@ -2357,7 +2357,7 @@ mod tests {
                 text: "Signed copy".into(),
             },
         );
-        h.run();
+        h.run_steps(4); // the renderer may still be drawing: fixed steps, not run()
         click(&mut h, "Save as…");
         h.step();
         // The OCR worker may be swapping the file in at this moment: read again shortly.

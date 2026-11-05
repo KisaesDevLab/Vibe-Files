@@ -30,4 +30,8 @@ To lock the document itself once it is final, use **Flatten** on the toolbar (se
 
 The [audit trail](help:audit) records that a form was filled and how many fields changed. It never records what was typed.
 
+Some government forms also hold a second, Adobe-only copy of their fields (XFA). Saving a filled form removes that copy, so Acrobat shows what you typed rather than the old values.
+
+A password-protected PDF can't be filled here: the **Form** tab says so. Fill it in the PDF program that has its password.
+
 > Characters outside the usual Western European ones (for example Greek or Chinese) are kept in the field but show as `?` on the page.

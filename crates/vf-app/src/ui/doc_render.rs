@@ -18,8 +18,10 @@ pub use vf_pdf::text::WordBox;
 pub struct DocInfo {
     pub geoms: Vec<Geometry>,
     pub bytes: usize,
-    /// Its fillable fields (PA-27).
-    pub fields: Vec<vf_pdf::forms::Field>,
+    /// Its fillable fields (PA-27); shared, the Viewer reads them every frame.
+    pub fields: std::sync::Arc<Vec<vf_pdf::forms::Field>>,
+    /// Password protected: its form can't be filled (saving would be refused).
+    pub locked: bool,
 }
 
 pub enum Job {
@@ -131,9 +133,15 @@ fn run(jobs: &Receiver<Job>, out: &Sender<Done>, ctx: &egui::Context) {
                         .map_err(|e| format!("cannot read {}: {e}", path.display()))
                         .and_then(|bytes| {
                             let n = bytes.len();
-                            let (geoms, fields) = lopdf::Document::load_mem(&bytes)
+                            let (geoms, fields, locked) = lopdf::Document::load_mem(&bytes)
                                 .map(|d| {
-                                    (vf_pdf::layer::geometries(&d), vf_pdf::forms::read_doc(&d))
+                                    let locked = d.is_encrypted();
+                                    let fields = if locked {
+                                        vec![]
+                                    } else {
+                                        vf_pdf::forms::read_doc(&d)
+                                    };
+                                    (vf_pdf::layer::geometries(&d), fields, locked)
                                 })
                                 .map_err(|e| format!("cannot read the PDF: {e}"))?;
                             let d = p
@@ -143,7 +151,8 @@ fn run(jobs: &Receiver<Job>, out: &Sender<Done>, ctx: &egui::Context) {
                             Ok(DocInfo {
                                 geoms,
                                 bytes: n,
-                                fields,
+                                fields: std::sync::Arc::new(fields),
+                                locked,
                             })
                         }),
                 };

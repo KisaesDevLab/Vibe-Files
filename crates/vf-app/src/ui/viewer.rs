@@ -948,97 +948,104 @@ fn pages_window(ctx: &egui::Context, v: &mut Viewer, env: &mut Env<'_>) {
 
 /// The Pages… window's thumbnails: the picked pages are the ones in its Pages box.
 fn page_picker(ui: &mut egui::Ui, v: &mut Viewer, d: &mut PagesDialog, count: usize) {
+    const PER_ROW: usize = 6;
     let picked: Vec<usize> = vf_pdf::pages::parse_ranges(&d.pages, count).unwrap_or_default();
     let mut clicked: Option<(usize, bool)> = None;
+    let rows = count.div_ceil(PER_ROW);
     egui::ScrollArea::vertical()
         .id_salt("vpages-pick")
         .max_height(260.0)
-        .max_width(560.0)
-        .show(ui, |ui| {
-            ui.horizontal_wrapped(|ui| {
-                for i in 0..count {
-                    want_thumb(v, i);
-                    let (rect, resp) = ui.allocate_exact_size(vec2(80.0, 110.0), Sense::click());
-                    let on = picked.contains(&i);
-                    let p = ui.painter();
-                    if on {
-                        p.rect_filled(rect, 3.0, theme::accent().gamma_multiply(0.25));
-                    }
-                    let img = Rect::from_min_size(rect.min + vec2(6.0, 4.0), vec2(68.0, 88.0));
-                    match v.thumbs.get(&i) {
-                        Some(t) => {
-                            let sz = t.size_vec2();
-                            let k = (img.width() / sz.x).min(img.height() / sz.y);
-                            let r = Rect::from_center_size(img.center(), sz * k);
-                            p.image(t.id(), r, uv(), Color32::WHITE);
-                        }
-                        None => {
-                            p.rect_filled(img, 2.0, theme::app_bg());
+        .max_width(PER_ROW as f32 * 84.0)
+        .show_rows(ui, 114.0, rows, |ui, range| {
+            // Only the rows on screen: thumbnails are rendered as they scroll into view.
+            for row in range {
+                ui.horizontal(|ui| {
+                    for i in row * PER_ROW..((row + 1) * PER_ROW).min(count) {
+                        if let Some(shift) = thumb_tile(ui, v, i, picked.contains(&i)) {
+                            clicked = Some((i, shift));
                         }
                     }
-                    p.rect_stroke(
-                        img,
-                        0.0,
-                        if on {
-                            Stroke::new(2.0, theme::accent())
-                        } else {
-                            Stroke::new(1.0, theme::border_pane())
-                        },
-                        egui::StrokeKind::Outside,
-                    );
-                    p.text(
-                        pos2(rect.center().x, rect.max.y - 2.0),
-                        egui::Align2::CENTER_BOTTOM,
-                        (i + 1).to_string(),
-                        egui::FontId::proportional(11.0),
-                        if on { theme::accent() } else { theme::ink() },
-                    );
-                    let name = format!("Page {}", i + 1);
-                    resp.widget_info(|| {
-                        egui::WidgetInfo::selected(egui::Role::CheckBox, true, on, &name)
-                    });
-                    if resp.clicked() {
-                        clicked = Some((i, ui.input(|inp| inp.modifiers.shift)));
-                    }
-                }
-            });
+                });
+            }
         });
     if let Some((i, shift)) = clicked {
-        let next = pick(&picked, i, v.pick_anchor, shift);
+        d.pages = pick_text(&d.pages, count, i, v.pick_anchor, shift);
         if !shift {
             v.pick_anchor = Some(i);
         }
-        d.pages = page_list(&next);
     }
 }
 
-/// The pages picked after clicking page `i`: Shift adds the run from the anchor; otherwise the
-/// page is added, or dropped when it was picked (a stray click never loses the others).
-fn pick(picked: &[usize], i: usize, anchor: Option<usize>, shift: bool) -> Vec<usize> {
-    let mut next: Vec<usize> = picked.to_vec();
+/// One page in the Pages… picker; `Some(shift)` when clicked.
+fn thumb_tile(ui: &mut egui::Ui, v: &mut Viewer, i: usize, on: bool) -> Option<bool> {
+    want_thumb(v, i);
+    let (rect, resp) = ui.allocate_exact_size(vec2(80.0, 110.0), Sense::click());
+    let p = ui.painter();
+    if on {
+        p.rect_filled(rect, 3.0, theme::accent().gamma_multiply(0.25));
+    }
+    let img = Rect::from_min_size(rect.min + vec2(6.0, 4.0), vec2(68.0, 88.0));
+    match v.thumbs.get(&i) {
+        Some(t) => {
+            let sz = t.size_vec2();
+            let k = (img.width() / sz.x).min(img.height() / sz.y);
+            let r = Rect::from_center_size(img.center(), sz * k);
+            p.image(t.id(), r, uv(), Color32::WHITE);
+        }
+        None => {
+            p.rect_filled(img, 2.0, theme::app_bg());
+        }
+    }
+    p.rect_stroke(
+        img,
+        0.0,
+        if on {
+            Stroke::new(2.0, theme::accent())
+        } else {
+            Stroke::new(1.0, theme::border_pane())
+        },
+        egui::StrokeKind::Outside,
+    );
+    p.text(
+        pos2(rect.center().x, rect.max.y - 2.0),
+        egui::Align2::CENTER_BOTTOM,
+        (i + 1).to_string(),
+        egui::FontId::proportional(11.0),
+        if on { theme::accent() } else { theme::ink() },
+    );
+    let name = format!("Page {}", i + 1);
+    resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::CheckBox, true, on, &name));
+    resp.clicked().then(|| ui.input(|inp| inp.modifiers.shift))
+}
+
+/// The Pages box after clicking page `i` (0-based). What was typed is kept, its ranges and
+/// order too (Split and Extract read them): a page not picked yet is added at the end (Shift:
+/// the run from the anchor); a picked one is taken out, the rest keeping their order.
+fn pick_text(text: &str, count: usize, i: usize, anchor: Option<usize>, shift: bool) -> String {
+    let picked = vf_pdf::pages::parse_ranges(text, count).unwrap_or_default();
+    let add = |part: String| {
+        let kept = text.trim().trim_end_matches(',').trim_end();
+        if kept.is_empty() {
+            part
+        } else {
+            format!("{kept}, {part}")
+        }
+    };
     match (shift, anchor) {
         (true, Some(a)) => {
-            for p in a.min(i)..=a.max(i) {
-                if !next.contains(&p) {
-                    next.push(p);
-                }
-            }
-        }
-        _ => {
-            if let Some(k) = next.iter().position(|&p| p == i) {
-                next.remove(k);
+            let (lo, hi) = (a.min(i), a.max(i));
+            if (lo..=hi).all(|p| picked.contains(&p)) {
+                text.to_string()
             } else {
-                next.push(i);
+                add(format!("{}-{}", lo + 1, hi + 1))
             }
         }
+        _ if picked.contains(&i) => {
+            let rest: Vec<usize> = picked.into_iter().filter(|&p| p != i).collect();
+            page_label(&rest).replace(',', ", ")
+        }
+        _ => add((i + 1).to_string()),
     }
-    next.sort_unstable();
-    next
-}
-
-/// `1-3, 5` for the Pages box.
-fn page_list(pages: &[usize]) -> String {
-    page_label(pages).replace(',', ", ")
 }
 
 /// Asks the renderer for page `i`'s thumbnail once.
@@ -1223,6 +1230,32 @@ fn run_page_op(
     }
 }
 
+/// The open document's catalog row: (rel_path, client_id, doc_type_id, tax_year, source).
+type DocRow = (
+    String,
+    Option<String>,
+    Option<String>,
+    Option<i32>,
+    Option<String>,
+);
+
+fn doc_row(env: &Env<'_>, doc_id: &str) -> Result<DocRow, String> {
+    env.conn
+        .query_row(
+            "SELECT rel_path, client_id, doc_type_id, tax_year, source FROM document WHERE id = ?1",
+            [doc_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+        )
+        .map_err(|e| e.to_string())
+}
+
+/// `name` without its `.pdf` (any case, once).
+fn stem_of(name: &str) -> String {
+    Path::new(name)
+        .file_stem()
+        .map_or_else(|| name.to_string(), |s| s.to_string_lossy().into_owned())
+}
+
 /// Each page list in `parts` becomes a new document (Filer's `split_pdf`), in the chosen
 /// client's folder (`Other/<year>`) or beside this one. This document is not changed.
 fn extract(
@@ -1231,21 +1264,7 @@ fn extract(
     parts: &[Vec<usize>],
     d: &PagesDialog,
 ) -> Result<Vec<String>, String> {
-    let row: (
-        String,
-        Option<String>,
-        Option<String>,
-        Option<i32>,
-        Option<String>,
-    ) = env
-        .conn
-        .query_row(
-            "SELECT rel_path, client_id, doc_type_id, tax_year, source FROM document WHERE id = ?1",
-            [&doc.doc_id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
-        )
-        .map_err(|e| e.to_string())?;
-    let (rel, own_client, doc_type, own_year, source) = row;
+    let (rel, own_client, doc_type, own_year, source) = doc_row(env, &doc.doc_id)?;
     let year = match d.year.trim() {
         "" => own_year,
         t if t.eq_ignore_ascii_case("permanent") => None,
@@ -1255,7 +1274,7 @@ fn extract(
         ),
     };
     let client = d.client.clone().or(own_client.clone());
-    let stem = doc.name.trim_end_matches(".pdf").to_string();
+    let stem = stem_of(&doc.name);
     // Same client and year: beside this one; otherwise that client's Other/<year> folder.
     let dir = if client == own_client && d.year.trim().is_empty() {
         rel.rsplit_once('/')
@@ -2954,22 +2973,10 @@ fn save_pending(
     let based_on = source_hash(env, doc, v.seen_hash().as_deref())?;
     let tmp = edited_copy(v, env, doc)?;
     if as_new {
-        let row: (
-            String,
-            Option<String>,
-            Option<String>,
-            Option<i32>,
-            Option<String>,
-        ) = env
-            .conn
-            .query_row(
-                "SELECT rel_path, client_id, doc_type_id, tax_year, source FROM document
-                 WHERE id = ?1",
-                [&doc.doc_id],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
-            )
-            .map_err(|e| e.to_string())?;
-        let (rel, client_id, doc_type_id, tax_year, source) = row;
+        let (rel, client_id, doc_type_id, tax_year, source) = doc_row(env, &doc.doc_id)
+            .inspect_err(|_| {
+                let _ = std::fs::remove_file(&tmp);
+            })?;
         let added = vf_fs::content::add_also(
             env.conn,
             env.root,
@@ -3041,7 +3048,9 @@ fn edited_copy(v: &Viewer, env: &Env<'_>, doc: &Doc) -> Result<PathBuf, String> 
     if v.form.is_empty() {
         return Ok(tmp);
     }
-    let filled = vf_fs::content::tmp_file(env.root, "pdf")?;
+    let filled = vf_fs::content::tmp_file(env.root, "pdf").inspect_err(|_| {
+        let _ = std::fs::remove_file(&tmp);
+    })?;
     let values: Vec<(String, String)> =
         v.form.iter().map(|(k, x)| (k.clone(), x.clone())).collect();
     let r = vf_pdf::forms::fill(&tmp, &filled, &values);
@@ -3062,29 +3071,19 @@ fn save_flattened(v: &mut Viewer, env: &mut Env<'_>) {
     let Some(doc) = v.doc.clone() else { return };
     let r = (|| -> Result<String, String> {
         source_hash(env, &doc, v.seen_hash().as_deref())?;
+        let (rel, client_id, doc_type_id, tax_year, source) = doc_row(env, &doc.doc_id)?;
         let tmp = edited_copy(v, env, &doc)?;
-        let flat = vf_fs::content::tmp_file(env.root, "pdf")?;
-        let r = vf_pdf::flatten::flatten(&tmp, &flat);
+        let flat = vf_fs::content::tmp_file(env.root, "pdf");
+        let r = flat
+            .clone()
+            .and_then(|flat| vf_pdf::flatten::flatten(&tmp, &flat));
         let _ = std::fs::remove_file(&tmp);
+        let flat = flat?;
         if let Err(e) = r {
             let _ = std::fs::remove_file(&flat);
             return Err(e);
         }
-        let (rel, client_id, doc_type_id, tax_year, source): (
-            String,
-            Option<String>,
-            Option<String>,
-            Option<i32>,
-            Option<String>,
-        ) = env
-            .conn
-            .query_row(
-                "SELECT rel_path, client_id, doc_type_id, tax_year, source FROM document WHERE id = ?1",
-                [&doc.doc_id],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
-            )
-            .map_err(|e| e.to_string())?;
-        let stem = doc.name.trim_end_matches(".pdf");
+        let stem = stem_of(&doc.name);
         let rel_path = match rel.rsplit_once('/') {
             Some((dir, _)) => format!("{dir}/{stem} (flattened).pdf"),
             None => format!("{stem} (flattened).pdf"),
@@ -3130,7 +3129,17 @@ fn save_flattened(v: &mut Viewer, env: &mut Env<'_>) {
 /// The Form tab: every fillable field, by page, with its value (PA-27).
 fn form_panel(ui: &mut egui::Ui, v: &mut Viewer, env: &mut Env<'_>) {
     use vf_pdf::forms::{Field, FieldKind};
-    let fields: Vec<Field> = v.fields().to_vec();
+    let fields = v
+        .info
+        .as_ref()
+        .map(|i| i.fields.clone())
+        .unwrap_or_default();
+    if v.info.as_ref().is_some_and(|i| i.locked) {
+        ui.label(widgets::caption(
+            "This PDF is password protected, so its form can't be filled or saved here. Open it in the PDF program that has its password.",
+        ));
+        return;
+    }
     if fields.is_empty() {
         ui.label(widgets::caption(
             "This document has no fillable fields. (A scanned form is a picture: use Text on the Annotate tab to write on it.)",
@@ -3160,7 +3169,7 @@ fn form_panel(ui: &mut egui::Ui, v: &mut Viewer, env: &mut Env<'_>) {
         .max_height(ui.available_height() - 60.0)
         .show(ui, |ui| {
             let mut page = usize::MAX;
-            for f in &fields {
+            for f in fields.iter() {
                 if f.page() != page {
                     page = f.page();
                     ui.add_space(4.0);
@@ -3267,13 +3276,15 @@ fn form_overlay(ui: &mut egui::Ui, v: &mut Viewer, page: usize, rect: Rect, s: f
     use vf_pdf::forms::{Field, FieldKind};
     const FILL: Color32 = Color32::from_rgb(0xE6, 0xEE, 0xFF);
     const EDGE: Color32 = Color32::from_rgb(0x6A, 0x8F, 0xD8);
-    let fields: Vec<Field> = v
-        .fields()
+    let fields = v
+        .info
+        .as_ref()
+        .map(|i| i.fields.clone())
+        .unwrap_or_default();
+    for f in fields
         .iter()
         .filter(|f| f.widgets.iter().any(|w| w.page == page))
-        .cloned()
-        .collect();
-    for f in &fields {
+    {
         let value = v.field_value(f).to_string();
         let mut changed: Option<String> = None;
         for (k, w) in f.widgets.iter().enumerate().filter(|(_, w)| w.page == page) {
@@ -3281,8 +3292,9 @@ fn form_overlay(ui: &mut egui::Ui, v: &mut Viewer, page: usize, rect: Rect, s: f
             let id = ui.scope_id().with(("vf-field", &f.name, k));
             match &f.kind {
                 FieldKind::Check { .. } | FieldKind::Radio { .. } => {
+                    // Each box turns on with its own value.
                     let on_state = match &f.kind {
-                        FieldKind::Check { on } => on.clone(),
+                        FieldKind::Check { on } => w.on.clone().unwrap_or_else(|| on.clone()),
                         _ => w.on.clone().unwrap_or_default(),
                     };
                     let on = Field::is_on(&value) && value == on_state;
@@ -4188,6 +4200,28 @@ mod tape_tests {
             rect,
             text: text.into(),
         }
+    }
+
+    #[test]
+    fn picking_keeps_what_was_typed() {
+        // Adding keeps the typed ranges and order (Split reads them).
+        assert_eq!(pick_text("1-2, 3-5", 9, 6, Some(0), false), "1-2, 3-5, 7");
+        assert_eq!(pick_text("3, 1", 9, 4, None, false), "3, 1, 5");
+        assert_eq!(pick_text("", 9, 1, None, false), "2");
+        assert_eq!(pick_text("2,", 9, 4, None, false), "2, 5");
+        // Shift: the run from the anchor; nothing new when it is all picked.
+        assert_eq!(pick_text("2", 9, 5, Some(1), true), "2, 2-6");
+        assert_eq!(pick_text("2-6", 9, 5, Some(1), true), "2-6");
+        // Taking one out keeps the rest in their order.
+        assert_eq!(pick_text("3, 1, 2", 9, 0, None, false), "3, 2");
+        assert_eq!(pick_text("1-3", 9, 1, None, false), "1, 3");
+    }
+
+    #[test]
+    fn stems() {
+        assert_eq!(stem_of("W2.PDF"), "W2");
+        assert_eq!(stem_of("x.pdf.pdf"), "x.pdf");
+        assert_eq!(stem_of("Form 1040.pdf"), "Form 1040");
     }
 
     #[test]
