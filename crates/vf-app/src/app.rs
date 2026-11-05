@@ -441,9 +441,7 @@ impl VibeFilesApp {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             return;
         }
-        if !self.closing
-            && ctx.input(|i| i.viewport().close_requested())
-            && !o.viewer.pending.is_empty()
+        if !self.closing && ctx.input(|i| i.viewport().close_requested()) && o.viewer.unsaved() > 0
         {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             self.tab = Tab::Viewer;
@@ -1779,8 +1777,10 @@ mod tests {
                     |r| r.get(0),
                 )
                 .ok();
-            if made.is_some() && h.query_by_label(label).is_none() {
-                assert!(root.join(made.unwrap()).is_dir(), "the client's folder");
+            if let Some(made) = &made
+                && h.query_by_label(label).is_none()
+            {
+                assert!(root.join(made).is_dir(), "the client's folder");
                 break;
             }
             assert!(
@@ -2538,6 +2538,166 @@ mod tests {
             !text.contains("987-65-4321") && text.contains("07-1234567"),
             "{text}"
         );
+    }
+
+    /// PA-27: a form filled in the Viewer's Form tab and saved (still fillable), a flattened
+    /// copy beside it; pages picked from thumbnails in Pages…, and a page deleted from its
+    /// right-click menu.
+    #[test]
+    fn form_filled_and_pages_picked_in_the_viewer() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("Clients");
+        std::fs::create_dir_all(root.join("Old")).unwrap();
+        vf_pdf::forms::write_test_form(&root.join("Old/form.pdf"));
+        filer_pdf::pdf::write_test_pdf(
+            &root.join("Old/a.pdf"),
+            &["Alpha one", "Alpha two", "Alpha three", "Alpha four"],
+        );
+        let req = CreateRequest {
+            root: &root,
+            name: "Firm",
+        };
+        drop(session::create(&tmp.path().join("pc1"), "dev-1", &req).unwrap());
+        let mut h = harness(&tmp.path().join("pc1"));
+        click(&mut h, "Open existing");
+        type_into(&mut h, "Cabinet folder", &root.display().to_string());
+        click(&mut h, "Open cabinet");
+        settle(&mut h);
+        let open = |h: &mut egui_kittest::Harness<'static, VibeFilesApp>, name: &str| {
+            click(h, "Browse");
+            h.run_steps(4);
+            h.get_by_label(name).click();
+            h.run_steps(4);
+            h.key_press(egui::Key::Enter);
+            let start = std::time::Instant::now();
+            loop {
+                h.step();
+                if let Screen::Open(o) = &h.state().screen
+                    && o.viewer.ready()
+                    && o.viewer.doc.as_ref().is_some_and(|d| d.name == name)
+                {
+                    break;
+                }
+                assert!(start.elapsed() < std::time::Duration::from_secs(20));
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+        };
+        let value = |name: &str| -> String {
+            vf_pdf::forms::read(&root.join("Old/form.pdf"))
+                .unwrap()
+                .into_iter()
+                .find(|f| f.name == name)
+                .unwrap()
+                .value
+        };
+
+        open(&mut h, "form.pdf");
+        if let Screen::Open(o) = &mut h.state_mut().screen {
+            assert_eq!(o.viewer.fields().len(), 6);
+            o.viewer.panel = crate::ui::viewer::Panel::Form;
+        }
+        h.run_steps(3);
+        // Typed on the page (the same field in the list carries the same name).
+        h.get_all_by_label("Client name").next().unwrap().click();
+        h.step();
+        h.get_all_by_label("Client name")
+            .next()
+            .unwrap()
+            .type_text("Sample Client");
+        h.step();
+        h.get_by_label("signed").click();
+        h.run_steps(2);
+        if let Screen::Open(o) = &mut h.state_mut().screen {
+            o.viewer.set_field("year", "2025".into());
+            o.viewer.set_field("form_id", "changed".into()); // read-only: ignored
+            assert_eq!(o.viewer.unsaved(), 3, "{:?}", o.viewer.form);
+        }
+        click(&mut h, "Save");
+        h.run_steps(3);
+        if let Screen::Open(o) = &h.state().screen {
+            assert_eq!(o.viewer.unsaved(), 0, "{:?}", o.viewer.error);
+        }
+        assert_eq!(value("client_name"), "Sample Client");
+        assert_eq!(value("signed"), "Yes");
+        assert_eq!(value("year"), "2025");
+        assert_eq!(value("form_id"), "F-100");
+
+        // A flattened copy: a new document, no fields; this one keeps its unsaved entry. (The
+        // saved file is read again first: its fields are back once the page shows.)
+        let start = std::time::Instant::now();
+        loop {
+            h.step();
+            if let Screen::Open(o) = &h.state().screen
+                && o.viewer.ready()
+                && o.viewer.fields().len() == 6
+            {
+                break;
+            }
+            assert!(start.elapsed() < std::time::Duration::from_secs(20));
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        if let Screen::Open(o) = &mut h.state_mut().screen {
+            o.viewer.set_field("client_name", "Other Sample".into());
+            assert_eq!(o.viewer.unsaved(), 1);
+        }
+        h.run_steps(2);
+        click(&mut h, "Save flattened copy");
+        h.run_steps(2);
+        let flat = root.join("Old/form (flattened).pdf");
+        assert!(flat.exists());
+        assert!(vf_pdf::forms::read(&flat).unwrap().is_empty());
+        let burnt = lopdf::Document::load(&flat).unwrap().objects.values().any(|o| {
+            matches!(o, lopdf::Object::Stream(s) if String::from_utf8_lossy(&s.content).contains("(Other Sample) Tj"))
+        });
+        assert!(burnt, "the typed value is on the flattened page");
+        assert_eq!(value("client_name"), "Sample Client", "this file unchanged");
+        if let Screen::Open(o) = &mut h.state_mut().screen {
+            assert_eq!(o.viewer.unsaved(), 1);
+            o.viewer.set_field("client_name", "Sample Client".into());
+            assert_eq!(
+                o.viewer.unsaved(),
+                0,
+                "typing the saved value back is no change"
+            );
+            o.viewer.panel = crate::ui::viewer::Panel::Annotate;
+        }
+
+        // Pages…: page 1 is picked; click page 3, then page 1 again: only page 3 is left.
+        open(&mut h, "a.pdf");
+        click(&mut h, "Pages…");
+        h.run_steps(3);
+        h.get_by_label("Page 3").click();
+        h.run_steps(2);
+        h.get_by_label("Page 1").click();
+        h.run_steps(2);
+        if let Screen::Open(o) = &h.state().screen {
+            assert_eq!(o.viewer.pages_dialog.as_ref().unwrap().pages, "3");
+        }
+        click(&mut h, "Delete pages");
+        h.run_steps(3);
+        let texts = |p: &std::path::Path| -> Vec<String> {
+            let d = lopdf::Document::load(p).unwrap();
+            (1..=d.get_pages().len() as u32)
+                .map(|n| d.extract_text(&[n]).unwrap_or_default().trim().to_string())
+                .collect()
+        };
+        assert_eq!(
+            texts(&root.join("Old/a.pdf")),
+            ["Alpha one", "Alpha two", "Alpha four"]
+        );
+
+        // Right-click a thumbnail: Delete page 2.
+        let start = std::time::Instant::now();
+        while h.query_by_label("Page 2 thumbnail").is_none() {
+            h.step();
+            assert!(start.elapsed() < std::time::Duration::from_secs(20));
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        h.get_by_label("Page 2 thumbnail").click_secondary();
+        h.run_steps(3);
+        click(&mut h, "Delete page 2");
+        h.run_steps(3);
+        assert_eq!(texts(&root.join("Old/a.pdf")), ["Alpha one", "Alpha four"]);
     }
 
     /// P04 step 6: rotate, extract and split from the Viewer's Pages window, Combine from

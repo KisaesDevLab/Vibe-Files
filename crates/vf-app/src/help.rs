@@ -89,7 +89,7 @@ articles! {
     Intake: "intake", "intake-rules", "just-filed", "scanning", "cover-sheets", "print-capture",
         "several-pcs";
     Search: "search", "ocr";
-    Viewer: "viewer", "annotations", "ten-key", "page-tools", "printing";
+    Viewer: "viewer", "annotations", "forms", "ten-key", "page-tools", "printing";
     Sync: "sync", "sync-key", "sync-conflicts";
     Admin: "admin", "admin-password", "doc-types", "folder-templates", "clients", "retention",
         "trash", "audit", "devices", "maintenance";

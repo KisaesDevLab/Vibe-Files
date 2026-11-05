@@ -5838,6 +5838,7 @@ dependencies = [
  "tempfile",
  "vf-fixtures",
  "vf-ingest",
+ "vf-pdf",
 ]
 
 [[package]]

@@ -18,6 +18,8 @@ pub use vf_pdf::text::WordBox;
 pub struct DocInfo {
     pub geoms: Vec<Geometry>,
     pub bytes: usize,
+    /// Its fillable fields (PA-27).
+    pub fields: Vec<vf_pdf::forms::Field>,
 }
 
 pub enum Job {
@@ -129,14 +131,20 @@ fn run(jobs: &Receiver<Job>, out: &Sender<Done>, ctx: &egui::Context) {
                         .map_err(|e| format!("cannot read {}: {e}", path.display()))
                         .and_then(|bytes| {
                             let n = bytes.len();
-                            let geoms = lopdf::Document::load_mem(&bytes)
-                                .map(|d| vf_pdf::layer::geometries(&d))
+                            let (geoms, fields) = lopdf::Document::load_mem(&bytes)
+                                .map(|d| {
+                                    (vf_pdf::layer::geometries(&d), vf_pdf::forms::read_doc(&d))
+                                })
                                 .map_err(|e| format!("cannot read the PDF: {e}"))?;
                             let d = p
                                 .load_pdf_from_byte_vec(bytes, None)
                                 .map_err(|e| format!("cannot open the PDF: {e}"))?;
                             doc = Some((generation, d));
-                            Ok(DocInfo { geoms, bytes: n })
+                            Ok(DocInfo {
+                                geoms,
+                                bytes: n,
+                                fields,
+                            })
                         }),
                 };
                 if info.is_err() {

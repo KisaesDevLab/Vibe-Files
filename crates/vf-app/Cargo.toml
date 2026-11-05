@@ -45,6 +45,7 @@ serde_json.workspace = true
 [dev-dependencies]
 pdf-writer.workspace = true
 filer-pdf = { path = "../filer-pdf", features = ["test-support"] }
+vf-pdf = { path = "../vf-pdf", features = ["test-support"] }
 egui_kittest.workspace = true
 tempfile.workspace = true
 serde_json.workspace = true

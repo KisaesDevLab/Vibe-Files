@@ -4,7 +4,9 @@ How to rotate, delete, reorder, extract and split pages, flatten, make PDF/A, co
 
 ## The Pages window
 
-In the [Viewer](help:viewer), click **Pages…**. Type the pages to work on in **Pages**, like `1-3, 5`; it starts with the page you are on.
+In the [Viewer](help:viewer), click **Pages…**. It starts with the page you are on picked.
+
+Pick the pages to work on by clicking their pictures at the top of the window: a click picks a page, a second click drops it, and **Shift**-click picks every page between it and the last one you clicked. Or type them in **Pages**, like `1-3, 5`. The two always agree.
 
 - **Rotate left** and **Rotate right** turn those pages in the file.
 - **Delete pages** removes them.
@@ -12,6 +14,16 @@ In the [Viewer](help:viewer), click **Pages…**. Type the pages to work on in *
 - **Insert blank page**: type the page it goes after in **Blank page after page** (it starts as the page you are on; `0` puts it before the first page), then click **Insert blank page**. The blank page has the size and turn of the page beside it.
 
 Each of these makes a new version of the file. The previous version is kept and can be restored from the document's details in [Browse](help:documents).
+
+## Right-click a page
+
+Right-click a page, or its picture in the page strip on the left, for:
+
+- **Delete page N**: a new version without that page (the previous version is kept).
+- **Extract page N…**: opens **Pages…** with that page picked, to choose the client and year and then click **Extract**.
+- **Pages…**: the Pages window, starting from that page.
+
+These are greyed out while changes are unsaved. A document's last page can't be deleted: delete the document instead.
 
 ## Extract and split
 
@@ -28,7 +40,7 @@ The document you are viewing is not changed. The new ones keep its doc type. Lea
 - **PDF/A** makes the file PDF/A-2b for long-term archiving. Pages whose fonts are not embedded become images with a searchable text layer.
 - **Compress** brings scanned images down to 200 dpi. If the file would not get smaller, it is left alone.
 
-Each makes a new version and keeps the current one. These buttons, and **Pages…**, are greyed out while annotations are unsaved: save or discard them first.
+Each makes a new version and keeps the current one. These buttons, and **Pages…**, are greyed out while annotations or [form entries](help:forms) are unsaved: save or discard them first.
 
 ## Combining PDFs
 

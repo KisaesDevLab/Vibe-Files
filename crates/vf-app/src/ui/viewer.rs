@@ -93,6 +93,8 @@ pub enum Panel {
     Redact,
     /// The ten-key tape (owner 2026-11-04: beside the other tools, not under the page).
     Tape,
+    /// Fill in the document's form fields (PA-27): typed on the page or in the list.
+    Form,
 }
 
 const COLORS: [(&str, annot::Rgb); 4] = [
@@ -203,6 +205,20 @@ pub struct Viewer {
     pub tape: TapeState,
     /// Print (PA-13).
     pub print: crate::ui::print_ui::PrintState,
+    /// Form fields typed in and not saved yet: field name → value (PA-27).
+    pub form: std::collections::BTreeMap<String, String>,
+    /// A page's right-click menu asked for something (PA-27): done after the canvas.
+    page_request: Option<(PageMenu, usize)>,
+    /// Pages… thumbnails: the page last clicked, for Shift-click ranges.
+    pick_anchor: Option<usize>,
+}
+
+/// A page's right-click menu (canvas or thumbnail strip).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PageMenu {
+    Delete,
+    Extract,
+    Pages,
 }
 
 /// A tape in the History menu: (menu label, tape name, lines).
@@ -322,13 +338,54 @@ impl Default for Viewer {
             pages_dialog: None,
             tape: TapeState::default(),
             print: Default::default(),
+            form: Default::default(),
+            page_request: None,
+            pick_anchor: None,
         }
     }
 }
 
 impl Viewer {
+    /// Unsaved changes: annotations, and form fields typed in.
+    pub fn unsaved(&self) -> usize {
+        self.pending.len() + self.form.len()
+    }
+
+    /// Drops unsaved annotations and form values.
+    fn discard(&mut self) {
+        self.pending.clear();
+        self.form.clear();
+    }
+
+    /// The document's fillable fields.
+    pub fn fields(&self) -> &[vf_pdf::forms::Field] {
+        self.info.as_ref().map_or(&[], |i| i.fields.as_slice())
+    }
+
+    /// A field's value as shown: typed in, else as in the file.
+    fn field_value<'a>(&'a self, f: &'a vf_pdf::forms::Field) -> &'a str {
+        self.form
+            .get(&f.name)
+            .map_or(f.value.as_str(), String::as_str)
+    }
+
+    /// Sets a field's value; typing the file's value back drops the change.
+    pub fn set_field(&mut self, name: &str, value: String) {
+        let Some(f) = self.fields().iter().find(|f| f.name == name) else {
+            return;
+        };
+        if f.read_only {
+            return;
+        }
+        if f.value == value {
+            self.form.remove(name);
+        } else {
+            self.form.insert(name.to_string(), value);
+        }
+    }
+
     pub fn open(&mut self, doc: Doc) {
-        if !self.pending.is_empty() {
+        if self.unsaved() > 0 {
             // Unsaved annotations are never dropped unasked: the other document waits.
             self.ask_open = Some(doc);
             return;
@@ -338,7 +395,7 @@ impl Viewer {
 
     /// Closes the document (owner 2026-11-04); asks first when annotations are unsaved.
     pub fn close(&mut self) {
-        if self.pending.is_empty() {
+        if self.unsaved() == 0 {
             self.close_now();
         } else {
             self.ask_close = true;
@@ -348,7 +405,7 @@ impl Viewer {
     fn close_now(&mut self) {
         self.closed = true;
         self.tape.tape.forget_sources();
-        self.pending.clear();
+        self.discard();
         self.ask_close = false;
         self.doc = None;
         self.notice = None;
@@ -360,12 +417,12 @@ impl Viewer {
 
     /// Opens `doc`, dropping unsaved annotations (asked first by [`Viewer::open`]).
     fn open_now(&mut self, doc: Doc) {
-        if !self.pending.is_empty() {
+        if self.unsaved() > 0 {
             self.notice = Some(format!(
-                "{} unsaved annotations were discarded.",
-                self.pending.len()
+                "{} unsaved changes were discarded.",
+                self.unsaved()
             ));
-            self.pending.clear();
+            self.discard();
         } else {
             self.notice = None;
         }
@@ -627,7 +684,7 @@ pub fn show(ui: &mut egui::Ui, v: &mut Viewer, env: &mut Env<'_>) {
         let mut answer = None;
         egui::Modal::new(egui::Id::unique("viewer-unsaved")).show(ui.ctx(), |ui| {
             ui.set_width(420.0);
-            ui.heading(format!("{} unsaved annotations", v.pending.len()));
+            ui.heading(format!("{} unsaved changes", v.unsaved()));
             ui.label(format!(
                 "Opening {} drops them. Keep editing to save them first.",
                 next.name
@@ -658,7 +715,7 @@ pub fn show(ui: &mut egui::Ui, v: &mut Viewer, env: &mut Env<'_>) {
         let mut answer = None;
         egui::Modal::new(egui::Id::unique("viewer-close")).show(ui.ctx(), |ui| {
             ui.set_width(420.0);
-            ui.heading(format!("{} unsaved annotations", v.pending.len()));
+            ui.heading(format!("{} unsaved changes", v.unsaved()));
             ui.label("Closing the document drops them. Keep editing to save them first.");
             ui.add_space(8.0);
             ui.horizontal(|ui| {
@@ -712,12 +769,15 @@ pub fn show(ui: &mut egui::Ui, v: &mut Viewer, env: &mut Env<'_>) {
             canvas(ui, v, &initials);
         });
     typing_window(ui.ctx(), v, &initials);
+    if let Some((what, page)) = v.page_request.take() {
+        page_menu_run(v, env, what, page);
+    }
     pages_window(ui.ctx(), v, env);
 }
 
 /// Closing the window with annotations unsaved: save them, drop them, or stay.
 fn quit_dialog(ui: &mut egui::Ui, v: &mut Viewer, env: &mut Env<'_>) {
-    if v.pending.is_empty() {
+    if v.unsaved() == 0 {
         v.quit_asked = false;
         v.quit_ok = true;
         return;
@@ -726,9 +786,9 @@ fn quit_dialog(ui: &mut egui::Ui, v: &mut Viewer, env: &mut Env<'_>) {
     egui::Modal::new(egui::Id::unique("viewer-quit")).show(ui.ctx(), |ui| {
         ui.set_width(440.0);
         ui.heading(format!(
-            "{} unsaved annotation{} on {}",
-            v.pending.len(),
-            if v.pending.len() == 1 { "" } else { "s" },
+            "{} unsaved change{} on {}",
+            v.unsaved(),
+            if v.unsaved() == 1 { "" } else { "s" },
             v.doc.as_ref().map_or("this document", |d| d.name.as_str())
         ));
         ui.label("Vibe Files is closing. Save them as a new version of the file first?");
@@ -750,10 +810,10 @@ fn quit_dialog(ui: &mut egui::Ui, v: &mut Viewer, env: &mut Env<'_>) {
             save(v, env, false);
             // Saved: the window closes; not saved: the error shows and nothing is lost.
             v.quit_asked = false;
-            v.quit_ok = v.pending.is_empty();
+            v.quit_ok = v.unsaved() == 0;
         }
         Some(1) => {
-            v.pending.clear();
+            v.discard();
             v.quit_asked = false;
             v.quit_ok = true;
         }
@@ -774,7 +834,10 @@ enum PageOp {
 }
 
 fn pages_window(ctx: &egui::Context, v: &mut Viewer, env: &mut Env<'_>) {
-    let Some(d) = &mut v.pages_dialog else { return };
+    let Some(mut dialog) = v.pages_dialog.take() else {
+        return;
+    };
+    let d = &mut dialog;
     let mut op = None;
     let mut close = false;
     let count = v.info.as_ref().map_or(0, |i| i.geoms.len());
@@ -783,7 +846,10 @@ fn pages_window(ctx: &egui::Context, v: &mut Viewer, env: &mut Env<'_>) {
         .resizable(false)
         .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
         .show(ctx, |ui| {
-            ui.label(widgets::caption(format!("{count} pages. Pages like 1-3, 5.")));
+            ui.label(widgets::caption(format!(
+                "{count} pages. Click pages to pick them (click again to drop one, Shift-click for a run), or type pages like 1-3, 5."
+            )));
+            page_picker(ui, v, d, count);
             let l = ui.label("Pages");
             ui.add(egui::TextEdit::singleline(&mut d.pages).desired_width(200.0))
                 .labelled_by(l.id);
@@ -865,19 +931,200 @@ fn pages_window(ctx: &egui::Context, v: &mut Viewer, env: &mut Env<'_>) {
             }
         });
     if close {
-        v.pages_dialog = None;
         return;
     }
     if let Some(op) = op {
-        let d = v.pages_dialog.clone().unwrap_or_default();
-        match run_page_op(v, env, &d, op, count) {
+        match run_page_op(v, env, &dialog, op, count) {
             Ok(msg) => {
                 v.notice = Some(msg);
                 v.catalog_changed = true;
-                v.pages_dialog = None;
+                return;
             }
             Err(e) => v.error = Some(e),
         }
+    }
+    v.pages_dialog = Some(dialog);
+}
+
+/// The Pages… window's thumbnails: the picked pages are the ones in its Pages box.
+fn page_picker(ui: &mut egui::Ui, v: &mut Viewer, d: &mut PagesDialog, count: usize) {
+    let picked: Vec<usize> = vf_pdf::pages::parse_ranges(&d.pages, count).unwrap_or_default();
+    let mut clicked: Option<(usize, bool)> = None;
+    egui::ScrollArea::vertical()
+        .id_salt("vpages-pick")
+        .max_height(260.0)
+        .max_width(560.0)
+        .show(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                for i in 0..count {
+                    want_thumb(v, i);
+                    let (rect, resp) = ui.allocate_exact_size(vec2(80.0, 110.0), Sense::click());
+                    let on = picked.contains(&i);
+                    let p = ui.painter();
+                    if on {
+                        p.rect_filled(rect, 3.0, theme::accent().gamma_multiply(0.25));
+                    }
+                    let img = Rect::from_min_size(rect.min + vec2(6.0, 4.0), vec2(68.0, 88.0));
+                    match v.thumbs.get(&i) {
+                        Some(t) => {
+                            let sz = t.size_vec2();
+                            let k = (img.width() / sz.x).min(img.height() / sz.y);
+                            let r = Rect::from_center_size(img.center(), sz * k);
+                            p.image(t.id(), r, uv(), Color32::WHITE);
+                        }
+                        None => {
+                            p.rect_filled(img, 2.0, theme::app_bg());
+                        }
+                    }
+                    p.rect_stroke(
+                        img,
+                        0.0,
+                        if on {
+                            Stroke::new(2.0, theme::accent())
+                        } else {
+                            Stroke::new(1.0, theme::border_pane())
+                        },
+                        egui::StrokeKind::Outside,
+                    );
+                    p.text(
+                        pos2(rect.center().x, rect.max.y - 2.0),
+                        egui::Align2::CENTER_BOTTOM,
+                        (i + 1).to_string(),
+                        egui::FontId::proportional(11.0),
+                        if on { theme::accent() } else { theme::ink() },
+                    );
+                    let name = format!("Page {}", i + 1);
+                    resp.widget_info(|| {
+                        egui::WidgetInfo::selected(egui::Role::CheckBox, true, on, &name)
+                    });
+                    if resp.clicked() {
+                        clicked = Some((i, ui.input(|inp| inp.modifiers.shift)));
+                    }
+                }
+            });
+        });
+    if let Some((i, shift)) = clicked {
+        let next = pick(&picked, i, v.pick_anchor, shift);
+        if !shift {
+            v.pick_anchor = Some(i);
+        }
+        d.pages = page_list(&next);
+    }
+}
+
+/// The pages picked after clicking page `i`: Shift adds the run from the anchor; otherwise the
+/// page is added, or dropped when it was picked (a stray click never loses the others).
+fn pick(picked: &[usize], i: usize, anchor: Option<usize>, shift: bool) -> Vec<usize> {
+    let mut next: Vec<usize> = picked.to_vec();
+    match (shift, anchor) {
+        (true, Some(a)) => {
+            for p in a.min(i)..=a.max(i) {
+                if !next.contains(&p) {
+                    next.push(p);
+                }
+            }
+        }
+        _ => {
+            if let Some(k) = next.iter().position(|&p| p == i) {
+                next.remove(k);
+            } else {
+                next.push(i);
+            }
+        }
+    }
+    next.sort_unstable();
+    next
+}
+
+/// `1-3, 5` for the Pages box.
+fn page_list(pages: &[usize]) -> String {
+    page_label(pages).replace(',', ", ")
+}
+
+/// Asks the renderer for page `i`'s thumbnail once.
+fn want_thumb(v: &mut Viewer, i: usize) {
+    if !v.thumbs.contains_key(&i)
+        && v.thumbs_requested.insert(i)
+        && let Some(r) = &v.renderer
+    {
+        // `rotate: u16::MAX` marks a thumbnail (always upright).
+        r.send(Job::Page {
+            generation: v.generation,
+            page: i,
+            width: THUMB_W,
+            rotate: u16::MAX,
+            terms: vec![],
+        });
+    }
+}
+
+fn open_pages_dialog(v: &mut Viewer, page: usize) {
+    v.pages_dialog = Some(PagesDialog {
+        pages: (page + 1).to_string(),
+        blank_after: (page + 1).to_string(),
+        ..PagesDialog::default()
+    });
+    v.pick_anchor = Some(page);
+}
+
+/// Right-click on a page (canvas or thumbnail): delete it, extract it, or the Pages… window.
+fn page_menu(resp: &egui::Response, v: &mut Viewer, page: usize) {
+    resp.context_menu(|ui| {
+        let clean = v.unsaved() == 0;
+        let n = page + 1;
+        let items = [
+            (
+                PageMenu::Delete,
+                format!("Delete page {n}"),
+                "A new version without this page; the current one is kept.",
+            ),
+            (
+                PageMenu::Extract,
+                format!("Extract page {n}…"),
+                "Copy this page to a new document (choose the client and year).",
+            ),
+            (
+                PageMenu::Pages,
+                "Pages…".to_string(),
+                "Pick several pages to delete, extract, rotate or reorder.",
+            ),
+        ];
+        for (what, label, hover) in items {
+            if ui
+                .add_enabled(clean, egui::Button::new(label))
+                .on_hover_text(hover)
+                .on_disabled_hover_text("Save or discard the unsaved changes first.")
+                .clicked()
+            {
+                v.page_request = Some((what, page));
+                ui.close();
+            }
+        }
+    });
+}
+
+fn page_menu_run(v: &mut Viewer, env: &mut Env<'_>, what: PageMenu, page: usize) {
+    match what {
+        PageMenu::Delete => {
+            let count = v.pages();
+            if count <= 1 {
+                v.error =
+                    Some("A document keeps at least one page: delete the document instead.".into());
+                return;
+            }
+            let d = PagesDialog {
+                pages: (page + 1).to_string(),
+                ..PagesDialog::default()
+            };
+            match run_page_op(v, env, &d, PageOp::Delete, count) {
+                Ok(msg) => {
+                    v.notice = Some(msg);
+                    v.catalog_changed = true;
+                }
+                Err(e) => v.error = Some(e),
+            }
+        }
+        PageMenu::Extract | PageMenu::Pages => open_pages_dialog(v, page),
     }
 }
 
@@ -1139,10 +1386,10 @@ fn toolbar(ui: &mut egui::Ui, v: &mut Viewer, env: &mut Env<'_>, doc: &Doc) {
         .show(ui, |ui| {
             ui.horizontal_wrapped(|ui| {
                 ui.label(RichText::new(&doc.name).monospace().strong());
-                if !v.pending.is_empty() {
+                if v.unsaved() > 0 {
                     widgets::pill(
                         ui,
-                        &format!("{} unsaved", v.pending.len()),
+                        &format!("{} unsaved", v.unsaved()),
                         Color32::from_rgb(0xFF, 0xF1, 0xC9),
                         Color32::from_rgb(0x7A, 0x52, 0x00),
                     );
@@ -1223,11 +1470,11 @@ fn toolbar(ui: &mut egui::Ui, v: &mut Viewer, env: &mut Env<'_>, doc: &Doc) {
                     v.goto_page(doc.page + 1);
                 }
                 ui.separator();
-                let clean = v.pending.is_empty();
+                let clean = v.unsaved() == 0;
                 if ui
                     .add_enabled(clean, egui::Button::new("Flatten"))
                     .on_hover_text("Burn annotations and form fields into the pages (a new version; the current one is kept).")
-                    .on_disabled_hover_text("Save or discard the unsaved annotations first.")
+                    .on_disabled_hover_text("Save or discard the unsaved changes first.")
                     .clicked()
                 {
                     convert(v, env, Convert::Flatten);
@@ -1235,7 +1482,7 @@ fn toolbar(ui: &mut egui::Ui, v: &mut Viewer, env: &mut Env<'_>, doc: &Doc) {
                 if ui
                     .add_enabled(clean, egui::Button::new("PDF/A"))
                     .on_hover_text("Make this file PDF/A-2b for archiving (a new version; the current one is kept). Pages whose fonts are not embedded become images with a searchable text layer.")
-                    .on_disabled_hover_text("Save or discard the unsaved annotations first.")
+                    .on_disabled_hover_text("Save or discard the unsaved changes first.")
                     .clicked()
                 {
                     convert(v, env, Convert::PdfA);
@@ -1243,19 +1490,15 @@ fn toolbar(ui: &mut egui::Ui, v: &mut Viewer, env: &mut Env<'_>, doc: &Doc) {
                 if ui
                     .add_enabled(clean, egui::Button::new("Pages…"))
                     .on_hover_text("Rotate, delete, reorder, extract or split pages.")
-                    .on_disabled_hover_text("Save or discard the unsaved annotations first.")
+                    .on_disabled_hover_text("Save or discard the unsaved changes first.")
                     .clicked()
                 {
-                    v.pages_dialog = Some(PagesDialog {
-                        pages: (doc.page + 1).to_string(),
-                        blank_after: (doc.page + 1).to_string(),
-                        ..PagesDialog::default()
-                    });
+                    open_pages_dialog(v, doc.page);
                 }
                 if ui
                     .add_enabled(clean, egui::Button::new("Compress"))
                     .on_hover_text("Bring scanned images down to 200 dpi and re-encode them (a new version; the current one is kept).")
-                    .on_disabled_hover_text("Save or discard the unsaved annotations first.")
+                    .on_disabled_hover_text("Save or discard the unsaved changes first.")
                     .clicked()
                 {
                     convert(v, env, Convert::Compress);
@@ -1282,7 +1525,7 @@ fn toolbar(ui: &mut egui::Ui, v: &mut Viewer, env: &mut Env<'_>, doc: &Doc) {
                 if ui.button("Open in PDF app").clicked() {
                     v.open_request = Some(doc.path.clone());
                 }
-                let can = !v.pending.is_empty();
+                let can = v.unsaved() > 0;
                 if ui
                     .add_enabled(can, egui::Button::new("Save as…"))
                     .on_hover_text("A new document beside this one; this file is not changed.")
@@ -1300,7 +1543,7 @@ fn toolbar(ui: &mut egui::Ui, v: &mut Viewer, env: &mut Env<'_>, doc: &Doc) {
                 ui.separator();
                 if ui
                     .button("Close")
-                    .on_hover_text("Close this document (asks first when annotations are unsaved).")
+                    .on_hover_text("Close this document (asks first when changes are unsaved).")
                     .clicked()
                 {
                     v.close();
@@ -1370,19 +1613,7 @@ fn thumbnails(ui: &mut egui::Ui, v: &mut Viewer) {
                 .auto_shrink(false)
                 .show_rows(ui, row_h, n, |ui, range| {
                     for i in range {
-                        if !v.thumbs.contains_key(&i)
-                            && v.thumbs_requested.insert(i)
-                            && let Some(r) = &v.renderer
-                        {
-                            // `rotate: u16::MAX` marks a thumbnail (always upright).
-                            r.send(Job::Page {
-                                generation: v.generation,
-                                page: i,
-                                width: THUMB_W,
-                                rotate: u16::MAX,
-                                terms: vec![],
-                            });
-                        }
+                        want_thumb(v, i);
                         let (rect, resp) = ui
                             .allocate_exact_size(vec2(THUMB_W as f32, row_h - 8.0), Sense::click());
                         let p = ui.painter();
@@ -1407,9 +1638,14 @@ fn thumbnails(ui: &mut egui::Ui, v: &mut Viewer) {
                             egui::FontId::proportional(11.0),
                             theme::ink_muted(),
                         );
+                        let name = format!("Page {} thumbnail", i + 1);
+                        resp.widget_info(|| {
+                            egui::WidgetInfo::labeled(egui::Role::Button, true, &name)
+                        });
                         if resp.clicked() {
                             v.goto_page(i);
                         }
+                        page_menu(&resp, v, i);
                     }
                 });
         });
@@ -1529,7 +1765,17 @@ fn canvas(ui: &mut egui::Ui, v: &mut Viewer, initials: &str) {
                 if v.tape.open {
                     draw_tape_marks(ui, v, i, rect, s, &g);
                 }
-                interact(ui, v, i, rect, s, &g, initials);
+                if v.panel == Panel::Form {
+                    let resp = ui.interact(
+                        rect,
+                        ui.scope_id().with(("vf-form-page", i)),
+                        Sense::click(),
+                    );
+                    page_menu(&resp, v, i);
+                    form_overlay(ui, v, i, rect, s, &g);
+                } else {
+                    interact(ui, v, i, rect, s, &g, initials);
+                }
             }
         }
         // The page indicator follows the scroll (not on the frame a jump was asked for).
@@ -1828,6 +2074,7 @@ fn interact(
         ui.scope_id().with(("vf-page", page)),
         Sense::click_and_drag(),
     );
+    page_menu(&resp, v, page);
     let to_display = |pos: Pos2| {
         let d = (pos - rect.min) / s;
         [d.x, d.y]
@@ -2019,12 +2266,19 @@ fn tool_panel(ui: &mut egui::Ui, v: &mut Viewer, env: &mut Env<'_>) {
         .resizable(false)
         .frame(egui::Frame::new().fill(theme::pane()).inner_margin(12))
         .show(ui, |ui| {
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 ui.selectable_value(&mut v.panel, Panel::Annotate, "Annotate");
                 ui.selectable_value(&mut v.panel, Panel::Stamps, "Stamps");
                 ui.selectable_value(&mut v.panel, Panel::Redact, "Redact");
                 ui.selectable_value(&mut v.panel, Panel::Tape, "10-key")
                     .on_hover_text("Ten-key tape: type or pick amounts off the page, paste the tape onto the PDF.");
+                let n = v.fields().len();
+                ui.selectable_value(
+                    &mut v.panel,
+                    Panel::Form,
+                    if n > 0 { format!("Form ({n})") } else { "Form".into() },
+                )
+                .on_hover_text("Fill in the document's form fields, on the page or in a list.");
             });
             ui.separator();
             match v.panel {
@@ -2036,6 +2290,18 @@ fn tool_panel(ui: &mut egui::Ui, v: &mut Viewer, env: &mut Env<'_>) {
                         tape_panel(ui, v, env, &doc);
                     }
                 }
+                Panel::Form => form_panel(ui, v, env),
+            }
+            if !v.form.is_empty() {
+                ui.separator();
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(
+                        RichText::new(format!("Form: {} fields changed", v.form.len())).strong(),
+                    );
+                    if ui.small_button("Undo form changes").clicked() {
+                        v.form.clear();
+                    }
+                });
             }
             if !v.pending.is_empty() {
                 ui.separator();
@@ -2645,9 +2911,10 @@ fn save(v: &mut Viewer, env: &mut Env<'_>, as_new: bool) {
         }
         v.tape.history = None;
     }
+    let fields = v.form.len();
     match r {
         Ok(new_doc) => {
-            v.pending.clear();
+            v.discard();
             v.catalog_changed = true;
             match new_doc {
                 Some(d) => {
@@ -2657,9 +2924,17 @@ fn save(v: &mut Viewer, env: &mut Env<'_>, as_new: bool) {
                 }
                 None => {
                     v.reload();
-                    v.notice = Some(format!(
-                        "Saved {n} annotations as a new version; the previous one is kept."
-                    ));
+                    v.notice = Some(match (n, fields) {
+                        (0, f) => format!(
+                            "Saved {f} form fields as a new version; the previous one is kept."
+                        ),
+                        (n, 0) => format!(
+                            "Saved {n} annotations as a new version; the previous one is kept."
+                        ),
+                        (n, f) => format!(
+                            "Saved {n} annotations and {f} form fields as a new version; the previous one is kept."
+                        ),
+                    });
                 }
             }
         }
@@ -2675,13 +2950,9 @@ fn save_pending(
     also: vf_fs::content::AlsoAudit,
 ) -> Result<Option<Doc>, String> {
     let n = v.pending.len();
+    let fields = v.form.len();
     let based_on = source_hash(env, doc, v.seen_hash().as_deref())?;
-    let tmp = vf_fs::content::tmp_file(env.root, "pdf")?;
-    let now = vf_core::now_rfc3339();
-    if let Err(e) = annot::add(&doc.path, &tmp, &v.pending, &now) {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(e);
-    }
+    let tmp = edited_copy(v, env, doc)?;
     if as_new {
         let row: (
             String,
@@ -2712,7 +2983,7 @@ fn save_pending(
                 source,
                 tags: vec![format!("copy-of:{}", doc.doc_id)],
                 label: "save_as".into(),
-                detail: serde_json::json!({ "from": doc.doc_id, "annotations": n }),
+                detail: serde_json::json!({ "from": doc.doc_id, "annotations": n, "form_fields": fields }),
             },
             also,
         )?;
@@ -2724,11 +2995,17 @@ fn save_pending(
             vec![],
         )));
     }
+    // Field names and counts only in the audit: the values are the client's data.
+    let (label, reason) = if n == 0 {
+        ("fill_form", "before form filled")
+    } else {
+        ("annotate", "before annotations")
+    };
     let change = vf_fs::content::Change {
-        label: "annotate",
-        created_by: "annotate",
-        reason: "before annotations",
-        detail: serde_json::json!({ "annotations": n }),
+        label,
+        created_by: label,
+        reason,
+        detail: serde_json::json!({ "annotations": n, "form_fields": fields }),
         extra: vec![],
         based_on: Some(based_on),
     };
@@ -2743,6 +3020,364 @@ fn save_pending(
     )? {
         Ok(_) => Ok(None),
         Err(why) => Err(format!("Not saved: {why}.")),
+    }
+}
+
+/// The open document with the unsaved annotations and form values written in, as a temporary
+/// file in the cabinet (the caller files or removes it).
+fn edited_copy(v: &Viewer, env: &Env<'_>, doc: &Doc) -> Result<PathBuf, String> {
+    let tmp = vf_fs::content::tmp_file(env.root, "pdf")?;
+    let annotated = if v.pending.is_empty() {
+        std::fs::copy(&doc.path, &tmp)
+            .map(|_| ())
+            .map_err(|e| format!("cannot read {}: {e}", doc.name))
+    } else {
+        annot::add(&doc.path, &tmp, &v.pending, &vf_core::now_rfc3339()).map(|_| ())
+    };
+    if let Err(e) = annotated {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    if v.form.is_empty() {
+        return Ok(tmp);
+    }
+    let filled = vf_fs::content::tmp_file(env.root, "pdf")?;
+    let values: Vec<(String, String)> =
+        v.form.iter().map(|(k, x)| (k.clone(), x.clone())).collect();
+    let r = vf_pdf::forms::fill(&tmp, &filled, &values);
+    let _ = std::fs::remove_file(&tmp);
+    match r {
+        Ok(_) => Ok(filled),
+        Err(e) => {
+            let _ = std::fs::remove_file(&filled);
+            Err(format!("The form was not filled: {e}."))
+        }
+    }
+}
+
+/// "Save flattened copy": the document as shown (unsaved annotations and form values in), with
+/// everything burnt into the pages, as a new document `<name> (flattened).pdf` beside it. This
+/// document is not changed; what was typed stays unsaved here.
+fn save_flattened(v: &mut Viewer, env: &mut Env<'_>) {
+    let Some(doc) = v.doc.clone() else { return };
+    let r = (|| -> Result<String, String> {
+        source_hash(env, &doc, v.seen_hash().as_deref())?;
+        let tmp = edited_copy(v, env, &doc)?;
+        let flat = vf_fs::content::tmp_file(env.root, "pdf")?;
+        let r = vf_pdf::flatten::flatten(&tmp, &flat);
+        let _ = std::fs::remove_file(&tmp);
+        if let Err(e) = r {
+            let _ = std::fs::remove_file(&flat);
+            return Err(e);
+        }
+        let (rel, client_id, doc_type_id, tax_year, source): (
+            String,
+            Option<String>,
+            Option<String>,
+            Option<i32>,
+            Option<String>,
+        ) = env
+            .conn
+            .query_row(
+                "SELECT rel_path, client_id, doc_type_id, tax_year, source FROM document WHERE id = ?1",
+                [&doc.doc_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )
+            .map_err(|e| e.to_string())?;
+        let stem = doc.name.trim_end_matches(".pdf");
+        let rel_path = match rel.rsplit_once('/') {
+            Some((dir, _)) => format!("{dir}/{stem} (flattened).pdf"),
+            None => format!("{stem} (flattened).pdf"),
+        };
+        let added = vf_fs::content::add(
+            env.conn,
+            env.root,
+            env.device_id,
+            &flat,
+            vf_fs::content::NewDoc {
+                rel_path,
+                client_id,
+                doc_type_id,
+                tax_year,
+                source,
+                tags: vec![format!("copy-of:{}", doc.doc_id)],
+                label: "flatten_copy".into(),
+                detail: serde_json::json!({
+                    "from": doc.doc_id,
+                    "annotations": v.pending.len(),
+                    "form_fields": v.form.len(),
+                }),
+            },
+        )?;
+        Ok(widgets::file_name(&added.rel_path).to_string())
+    })();
+    match r {
+        Ok(name) => {
+            v.catalog_changed = true;
+            v.error = None;
+            v.notice = Some(if v.unsaved() > 0 {
+                format!(
+                    "Saved a flattened copy: {name}. This document is not changed; Save keeps your entries here too, still fillable."
+                )
+            } else {
+                format!("Saved a flattened copy: {name}. This document is not changed.")
+            });
+        }
+        Err(e) => v.error = Some(e),
+    }
+}
+
+/// The Form tab: every fillable field, by page, with its value (PA-27).
+fn form_panel(ui: &mut egui::Ui, v: &mut Viewer, env: &mut Env<'_>) {
+    use vf_pdf::forms::{Field, FieldKind};
+    let fields: Vec<Field> = v.fields().to_vec();
+    if fields.is_empty() {
+        ui.label(widgets::caption(
+            "This document has no fillable fields. (A scanned form is a picture: use Text on the Annotate tab to write on it.)",
+        ));
+        return;
+    }
+    ui.label(widgets::caption(
+        "Type into the fields on the page or here; Tab moves to the next one. Save keeps the form fillable (a new version; the current one is kept).",
+    ));
+    let rotated = v.rotate != 0;
+    if rotated {
+        ui.label(widgets::caption(
+            "Rotate the view back to type on the page.",
+        ));
+    }
+    if ui
+        .button("Save flattened copy")
+        .on_hover_text("A new document beside this one with the values burnt into the pages (cannot be edited); this file is not changed.")
+        .clicked()
+    {
+        save_flattened(v, env);
+    }
+    ui.separator();
+    egui::ScrollArea::vertical()
+        .id_salt("vform-list")
+        .auto_shrink([false, true])
+        .max_height(ui.available_height() - 60.0)
+        .show(ui, |ui| {
+            let mut page = usize::MAX;
+            for f in &fields {
+                if f.page() != page {
+                    page = f.page();
+                    ui.add_space(4.0);
+                    if ui
+                        .link(RichText::new(format!("Page {}", page + 1)).strong())
+                        .clicked()
+                    {
+                        v.goto_page(page);
+                    }
+                }
+                let value = v.field_value(f).to_string();
+                let title = f.title().to_string();
+                let mut changed: Option<String> = None;
+                ui.add_enabled_ui(!f.read_only, |ui| match &f.kind {
+                    FieldKind::Check { on } => {
+                        let mut b = Field::is_on(&value);
+                        if ui.checkbox(&mut b, &title).changed() {
+                            changed = Some(if b { on.clone() } else { "Off".into() });
+                        }
+                    }
+                    FieldKind::Radio { options } => {
+                        let l = ui.label(&title);
+                        ui.horizontal_wrapped(|ui| {
+                            for o in options {
+                                if ui
+                                    .radio(value == *o, o)
+                                    .on_hover_text(format!("{title}: {o}"))
+                                    .clicked()
+                                {
+                                    changed = Some(o.clone());
+                                }
+                            }
+                            if ui.small_button("Clear").clicked() {
+                                changed = Some("Off".into());
+                            }
+                        })
+                        .response
+                        .labelled_by(l.id);
+                    }
+                    FieldKind::Choice {
+                        options, editable, ..
+                    } => {
+                        let l = ui.label(&title);
+                        let shown = options
+                            .iter()
+                            .find(|o| o.value == value)
+                            .map_or(value.clone(), |o| o.label.clone());
+                        egui::ComboBox::from_id_salt(("vform-ch", &f.name))
+                            .selected_text(shown)
+                            .width(260.0)
+                            .show_ui(ui, |ui| {
+                                for o in options {
+                                    if ui.selectable_label(o.value == value, &o.label).clicked() {
+                                        changed = Some(o.value.clone());
+                                    }
+                                }
+                            })
+                            .response
+                            .labelled_by(l.id);
+                        if *editable {
+                            let mut t = value.clone();
+                            if ui
+                                .add(egui::TextEdit::singleline(&mut t).desired_width(260.0))
+                                .labelled_by(l.id)
+                                .changed()
+                            {
+                                changed = Some(t);
+                            }
+                        }
+                    }
+                    FieldKind::Text {
+                        multiline,
+                        max_len,
+                        password,
+                        ..
+                    } => {
+                        let l = ui.label(&title);
+                        let mut t = value.clone();
+                        let mut te = if *multiline {
+                            egui::TextEdit::multiline(&mut t).desired_rows(3)
+                        } else {
+                            egui::TextEdit::singleline(&mut t)
+                        }
+                        .desired_width(260.0)
+                        .password(*password)
+                        .id_salt(("vform-list", &f.name));
+                        if let Some(m) = max_len {
+                            te = te.char_limit(*m);
+                        }
+                        if ui.add(te).labelled_by(l.id).changed() {
+                            changed = Some(t);
+                        }
+                    }
+                });
+                if let Some(x) = changed {
+                    v.set_field(&f.name, x);
+                }
+            }
+        });
+}
+
+/// While the Form tab is open: the fields drawn over the page, to type into (PA-27).
+fn form_overlay(ui: &mut egui::Ui, v: &mut Viewer, page: usize, rect: Rect, s: f32, g: &Geometry) {
+    use vf_pdf::forms::{Field, FieldKind};
+    const FILL: Color32 = Color32::from_rgb(0xE6, 0xEE, 0xFF);
+    const EDGE: Color32 = Color32::from_rgb(0x6A, 0x8F, 0xD8);
+    let fields: Vec<Field> = v
+        .fields()
+        .iter()
+        .filter(|f| f.widgets.iter().any(|w| w.page == page))
+        .cloned()
+        .collect();
+    for f in &fields {
+        let value = v.field_value(f).to_string();
+        let mut changed: Option<String> = None;
+        for (k, w) in f.widgets.iter().enumerate().filter(|(_, w)| w.page == page) {
+            let sr = user_rect_to_screen(rect, s, g, w.rect);
+            let id = ui.scope_id().with(("vf-field", &f.name, k));
+            match &f.kind {
+                FieldKind::Check { .. } | FieldKind::Radio { .. } => {
+                    let on_state = match &f.kind {
+                        FieldKind::Check { on } => on.clone(),
+                        _ => w.on.clone().unwrap_or_default(),
+                    };
+                    let on = Field::is_on(&value) && value == on_state;
+                    let resp = ui.interact(sr, id, Sense::click());
+                    let p = ui.painter();
+                    p.rect(
+                        sr,
+                        1.0,
+                        FILL,
+                        Stroke::new(1.0, EDGE),
+                        egui::StrokeKind::Inside,
+                    );
+                    if on {
+                        let c = sr.center();
+                        let r = sr.width().min(sr.height()) * 0.3;
+                        if matches!(f.kind, FieldKind::Radio { .. }) {
+                            p.circle_filled(c, r, theme::PAGE_INK);
+                        } else {
+                            let st = Stroke::new((r * 0.35).max(1.2), theme::PAGE_INK);
+                            p.line_segment([c + vec2(-r, 0.0), c + vec2(-r * 0.3, r * 0.8)], st);
+                            p.line_segment([c + vec2(-r * 0.3, r * 0.8), c + vec2(r, -r)], st);
+                        }
+                    }
+                    let name = format!("{} on the page", f.title());
+                    resp.widget_info(|| {
+                        egui::WidgetInfo::selected(egui::Role::CheckBox, !f.read_only, on, &name)
+                    });
+                    if resp.clicked() && !f.read_only {
+                        changed = Some(if on {
+                            "Off".to_string()
+                        } else {
+                            on_state.clone()
+                        });
+                    }
+                }
+                FieldKind::Choice { options, .. } => {
+                    let shown = options
+                        .iter()
+                        .find(|o| o.value == value)
+                        .map_or(value.clone(), |o| o.label.clone());
+                    ui.painter().rect_filled(sr, 1.0, FILL);
+                    ui.scope_builder(egui::UiBuilder::new().max_rect(sr), |ui| {
+                        ui.add_enabled_ui(!f.read_only, |ui| {
+                            egui::ComboBox::from_id_salt(id)
+                                .selected_text(RichText::new(shown).color(theme::PAGE_INK))
+                                .width(sr.width())
+                                .show_ui(ui, |ui| {
+                                    for o in options {
+                                        if ui.selectable_label(o.value == value, &o.label).clicked()
+                                        {
+                                            changed = Some(o.value.clone());
+                                        }
+                                    }
+                                });
+                        });
+                    });
+                }
+                FieldKind::Text {
+                    multiline,
+                    max_len,
+                    password,
+                    ..
+                } => {
+                    let mut t = value.clone();
+                    let size = if *multiline {
+                        (10.0 * s).clamp(6.0, 28.0)
+                    } else {
+                        (sr.height() * 0.62).clamp(6.0, 28.0)
+                    };
+                    let mut te = if *multiline {
+                        egui::TextEdit::multiline(&mut t)
+                    } else {
+                        egui::TextEdit::singleline(&mut t)
+                    }
+                    .id(id)
+                    .font(egui::FontId::proportional(size))
+                    .text_color(theme::PAGE_INK)
+                    .background_color(FILL)
+                    .margin(egui::Margin::symmetric(2, 0))
+                    .password(*password)
+                    .interactive(!f.read_only);
+                    if let Some(m) = max_len {
+                        te = te.char_limit(*m);
+                    }
+                    let resp = ui.put(sr, te);
+                    if resp.changed() {
+                        changed = Some(t);
+                    }
+                    resp.on_hover_text(f.title());
+                }
+            }
+        }
+        if let Some(x) = changed {
+            v.set_field(&f.name, x);
+        }
     }
 }
 
