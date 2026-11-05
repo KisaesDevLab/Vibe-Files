@@ -8,6 +8,14 @@ Import the client list first if you have one (Browse › **Import clients CSV…
 
 No client list? You can still import: the folders can become clients of their own (see below).
 
+A very large old tree? **vibe-move.exe**, in the same folder as Vibe Files, can first move only the files you still work with into a new folder, and leave the rest as an archive:
+
+- each client's **Permanent** folder;
+- files modified on or after a date;
+- files with a recent year in their name or folders.
+
+Each step shows a preview first, and every move is logged in a CSV file beside the new folder. There is no undo. Then import the new folder.
+
 ## Scan the cabinet
 
 Open **Admin** › **Folder import** and press **Scan the cabinet**. Nothing is changed by the scan. Each top-level folder is matched to a client by its ID or its name, and each file gets:

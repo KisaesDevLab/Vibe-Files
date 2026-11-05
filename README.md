@@ -84,6 +84,29 @@ Do these in order.
    name**. Files inside are not moved.
 6. Click **Import N folders**. **Undo the last import** reverses it.
 
+### A very large old tree: move the active files first (vibe-move)
+
+If the old client tree is huge, you can bring only the files you still work with into Vibe
+Files and leave the rest as an archive. **vibe-move.exe**, beside vibe-files.exe, does this
+before step 2. It works on plain folders, and Vibe Files doesn't need to be open.
+
+1. Choose the **Old folder** (it becomes the archive) and a **New folder** (your active
+   cabinet), then click **Scan the old folder**. Every client folder is ticked; untick any to
+   leave out.
+2. Run each of the three steps, in any order. Each shows a **Preview** of what would move
+   before you confirm:
+   - **Permanent folders**: each client's top-level folder with the name you type (default
+     `Permanent`) moves whole.
+   - **Recently modified**: files modified on or after a date.
+   - **Year in the name**: files with that year or later in the file name or in a folder
+     inside the client folder (`Taxes\2024\…`).
+3. Files keep their paths under the new folder. Moves between drives are copied, checked and
+   only then removed from the old folder. A name already taken keeps both files (` (2)`).
+   Folders a move empties are removed. Every move is written to a CSV log beside the new folder.
+   There is no undo.
+
+Then import the **new** folder as your cabinet (steps 1–6 above).
+
 New clients after that: **+ New client** in Browse creates the client's folder from the firm's
 folder template. To fix a client's name later, use **Rename client…** in the client panel; its
 folder is renamed to match.

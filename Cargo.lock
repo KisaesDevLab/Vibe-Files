@@ -5731,6 +5731,7 @@ dependencies = [
  "lopdf",
  "pdf-writer",
  "pdfium-render",
+ "serde_json",
  "tempfile",
  "time",
  "uuid",
@@ -5799,6 +5800,19 @@ dependencies = [
  "vf-ocr",
  "vf-pdf",
  "windows",
+]
+
+[[package]]
+name = "vf-move"
+version = "0.1.6"
+dependencies = [
+ "chrono",
+ "eframe",
+ "egui",
+ "egui_kittest",
+ "filer-intake",
+ "rfd",
+ "tempfile",
 ]
 
 [[package]]

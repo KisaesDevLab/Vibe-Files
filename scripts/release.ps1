@@ -4,7 +4,7 @@
 #   pwsh scripts/release.ps1 -SkipBuild # reuse the last release build (a trial: not for publishing)
 #
 # Output in <target>/dist/:
-#   vibe-files-<ver>-win64/      the portable folder: vibe-files.exe (static CRT), pdfium.dll,
+#   vibe-files-<ver>-win64/      the portable folder: vibe-files.exe and vibe-move.exe (static CRT), pdfium.dll,
 #                                TWAINDSM.dll, tesseract\ (English), licenses
 #   vibe-files-<ver>-win64.zip   what the GitHub release and winget serve
 #   SHA256SUMS.txt               SHA-256 of the zip and of the exe (published with the release)
@@ -36,12 +36,15 @@ if (-not $SkipBuild) {
     # Static C runtime: the exe runs on a PC without the VC++ redistributable.
     $env:RUSTFLAGS = '-C target-feature=+crt-static'
     # --locked: the build never rewrites Cargo.lock after the clean-tree check (QA2 #8).
-    try { cargo build --release --locked -p vf-app; if ($LASTEXITCODE) { throw 'build failed' } }
+    try { cargo build --release --locked -p vf-app -p vf-move; if ($LASTEXITCODE) { throw 'build failed' } }
     finally { Remove-Item Env:RUSTFLAGS -ErrorAction SilentlyContinue }
 }
 $target = $meta.target_directory
 $exe = Join-Path $target 'release\vibe-files.exe'
 if (-not (Test-Path $exe)) { throw "no release build at $exe" }
+# The tree-splitting utility (PA-35), shipped beside the program.
+$moveExe = Join-Path $target 'release\vibe-move.exe'
+if (-not (Test-Path $moveExe)) { throw "no release build at $moveExe" }
 
 $name = "vibe-files-$ver-win64"
 $dist = Join-Path $target 'dist'
@@ -50,6 +53,7 @@ if (Test-Path $stage) { Remove-Item -Recurse -Force $stage }
 New-Item -ItemType Directory -Force $stage | Out-Null
 
 Copy-Item $exe $stage
+Copy-Item $moveExe $stage
 Copy-Item crates\filer-pdf\assets\pdfium.dll, crates\filer-pdf\assets\pdfium-LICENSE $stage
 if (Test-Path crates\filer-pdf\assets\pdfium-licenses) {
     Copy-Item -Recurse crates\filer-pdf\assets\pdfium-licenses (Join-Path $stage 'pdfium-licenses')
@@ -78,7 +82,8 @@ $zipHash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower()
 $exeHash = (Get-FileHash (Join-Path $stage 'vibe-files.exe') -Algorithm SHA256).Hash.ToLower()
 @(
     "$zipHash  $name.zip",
-    "$exeHash  $name/vibe-files.exe"
+    "$exeHash  $name/vibe-files.exe",
+    "$((Get-FileHash (Join-Path $stage 'vibe-move.exe') -Algorithm SHA256).Hash.ToLower())  $name/vibe-move.exe"
 ) | Set-Content -Encoding ascii (Join-Path $dist 'SHA256SUMS.txt')
 
 # winget manifests (portable zip; the data folder then lives in %LOCALAPPDATA%\Vibe Files).
@@ -100,6 +105,8 @@ NestedInstallerType: portable
 NestedInstallerFiles:
   - RelativeFilePath: vibe-files.exe
     PortableCommandAlias: vibe-files
+  - RelativeFilePath: vibe-move.exe
+    PortableCommandAlias: vibe-move
 ArchiveBinariesDependOnPath: true
 Installers:
   - Architecture: x64
