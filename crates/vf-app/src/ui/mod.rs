@@ -18,6 +18,7 @@ pub mod ingest;
 pub mod intake;
 pub mod merge_page;
 pub mod meta_editor;
+pub mod move_to;
 pub mod new_client;
 pub mod ocr;
 pub mod pages;

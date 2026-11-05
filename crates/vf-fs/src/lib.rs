@@ -6,6 +6,7 @@ pub mod cabinet;
 pub mod changes;
 pub mod clients;
 pub mod content;
+pub mod copymove;
 pub mod disposition;
 pub mod docmeta;
 pub mod doctypes;

@@ -43,6 +43,17 @@ Double-click a document, or press Enter, to open it: PDFs open in the [Viewer](h
 
 **Pin** lists the selected documents under **Pinned** on this PC; **Unpin** takes them off.
 
+### Moving and copying documents
+
+- **Drag** the selected documents onto a folder in the tree to move them there, also into another client's folder. Hold **Ctrl** as you drop to copy instead.
+- **Right-click** › **Move to…** or **Copy to…** lets you pick a cabinet (this one, or **Another cabinet…** for a different Vibe Files cabinet), a client and one of its folders.
+
+You confirm before anything changes. A name that is already taken keeps both files (` (2)`).
+
+A copy is a new document with the original's doc type, year, status, source and tags. Moved into another cabinet, a document leaves this one; that cabinet gives it the same doc type and year when it next reads that folder. **Undo last** (Ctrl+Z) puts moves back and removes copies.
+
+A file deleted or moved with Windows Explorer leaves Browse, or shows in its new place, when its client folder is next looked at. If it is put back from the Recycle Bin, it returns with its doc type and year.
+
 ## The preview
 
 When one document is selected, the right pane shows its first page. **Previous** and **Next** step through the documents in the grid (as do the arrow keys), and **<** and **>** turn its pages. **Open in Viewer** opens the full Viewer at the page shown. Files that are not PDFs open in their own program.

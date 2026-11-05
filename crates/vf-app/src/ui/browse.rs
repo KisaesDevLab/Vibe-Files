@@ -78,9 +78,14 @@ struct DocDrag(Vec<String>);
 
 /// Asking whether to move dragged documents into a folder.
 struct MoveAsk {
-    /// Cabinet-relative destination folder.
+    /// Destination folder, relative to its cabinet.
     dest: String,
     rows: Vec<vf_fs::rename::Row>,
+    /// `None`: a move within the document's own client folder (PA-23). Else a move or copy to
+    /// another folder, client or cabinet (Q-74).
+    mode: Option<vf_fs::copymove::Mode>,
+    /// The destination cabinet; `None` = this one.
+    dest_root: Option<std::path::PathBuf>,
 }
 
 /// What the folder-listing thread found: each client folder's folders, and files in client
@@ -230,6 +235,8 @@ pub struct Browse {
     missing_in: Option<String>,
     /// A drop on a folder waiting for "Move" (PA-23).
     move_ask: Option<MoveAsk>,
+    /// Right-click › Move to… / Copy to…: picking where (Q-74).
+    move_to: Option<crate::ui::move_to::PickDest>,
     disk_listed: Option<std::time::Instant>,
     combining: Option<Combining>,
     /// For a repaint when a listing arrives.
@@ -399,6 +406,7 @@ impl Browse {
             new_files: vec![],
             missing_in: None,
             move_ask: None,
+            move_to: None,
             disk_job: None,
             disk_listed: None,
             combining: None,
@@ -1464,11 +1472,56 @@ impl Browse {
         }
     }
 
-    /// Plans moving `ids` into `dest` (a folder dropped on) and asks first (PA-23).
-    fn ask_move(&mut self, conn: &Connection, root: &Path, ids: Vec<String>, dest: String) {
-        match vf_fs::moveto::plan(conn, root, &ids, &dest) {
+    /// Plans moving (or, `copy`: Ctrl held, copying) `ids` into `dest` (a folder dropped on)
+    /// and asks first (PA-23). A folder of another client goes through the copy/move of Q-74.
+    fn ask_move(
+        &mut self,
+        conn: &Connection,
+        root: &Path,
+        ids: Vec<String>,
+        dest: String,
+        copy: bool,
+    ) {
+        let other_client = |rows: &[vf_fs::rename::Row]| {
+            rows.iter().any(|r| {
+                matches!(&r.outcome, vf_fs::rename::Outcome::Skip(w) if w.contains("another client"))
+            })
+        };
+        let planned = if copy {
+            None
+        } else {
+            match vf_fs::moveto::plan(conn, root, &ids, &dest) {
+                Ok(rows) if !other_client(&rows) => Some(Ok(rows)),
+                Ok(_) => None,
+                Err(e) => Some(Err(e)),
+            }
+        };
+        let Some(planned) = planned else {
+            let mode = if copy {
+                vf_fs::copymove::Mode::Copy
+            } else {
+                vf_fs::copymove::Mode::Move
+            };
+            self.ask_copy_move(
+                conn,
+                root,
+                ids,
+                vf_fs::copymove::Dest {
+                    root: root.to_path_buf(),
+                    folder: dest,
+                },
+                mode,
+            );
+            return;
+        };
+        match planned {
             Ok(rows) if rows.iter().any(vf_fs::rename::Row::renames) => {
-                self.move_ask = Some(MoveAsk { dest, rows });
+                self.move_ask = Some(MoveAsk {
+                    dest,
+                    rows,
+                    mode: None,
+                    dest_root: None,
+                });
             }
             Ok(rows) => {
                 let why = rows.iter().find_map(|r| match &r.outcome {
@@ -1481,6 +1534,43 @@ impl Browse {
                 });
             }
             Err(e) => self.error = Some(format!("Not moved: {e}")),
+        }
+    }
+
+    /// Plans a move or copy to `dest` (any client, this or another cabinet) and asks first.
+    fn ask_copy_move(
+        &mut self,
+        conn: &Connection,
+        root: &Path,
+        ids: Vec<String>,
+        dest: vf_fs::copymove::Dest,
+        mode: vf_fs::copymove::Mode,
+    ) {
+        let what = match mode {
+            vf_fs::copymove::Mode::Move => "moved",
+            vf_fs::copymove::Mode::Copy => "copied",
+        };
+        match vf_fs::copymove::plan(conn, root, &ids, &dest, mode) {
+            Ok(rows) if rows.iter().any(vf_fs::rename::Row::renames) => {
+                let other = !dest.root.as_os_str().is_empty() && dest.root != root;
+                self.move_ask = Some(MoveAsk {
+                    dest: dest.folder,
+                    rows,
+                    mode: Some(mode),
+                    dest_root: other.then_some(dest.root),
+                });
+            }
+            Ok(rows) => {
+                let why = rows.iter().find_map(|r| match &r.outcome {
+                    vf_fs::rename::Outcome::Skip(w) => Some(w.clone()),
+                    _ => None,
+                });
+                self.notice = Some(match why {
+                    Some(w) => format!("Not {what}: {w}."),
+                    None => "Already in that folder.".into(),
+                });
+            }
+            Err(e) => self.error = Some(format!("Not {what}: {e}")),
         }
     }
 
@@ -1733,7 +1823,30 @@ pub fn show(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env) {
     egui::CentralPanel::default().show(ui, |ui| grid(ui, b, env.conn));
     drag_label(ui.ctx());
     if let Some((ids, dest)) = b.drop_request.take() {
-        b.ask_move(env.conn, env.root, ids, dest);
+        // Ctrl held on the drop: copy (Q-74).
+        let copy = ui.input(|i| i.modifiers.ctrl);
+        b.ask_move(env.conn, env.root, ids, dest, copy);
+    }
+    if let Some(p) = &mut b.move_to {
+        let here: Vec<(String, String)> = b
+            .snap
+            .clients
+            .iter()
+            .filter_map(|c| {
+                c.folder_rel
+                    .clone()
+                    .filter(|f| !f.is_empty())
+                    .map(|f| (format!("{}  {}", c.name, c.ext_id), f))
+            })
+            .collect();
+        match crate::ui::move_to::show(ui.ctx(), p, env.root, &here) {
+            crate::ui::move_to::PickOutcome::Open => {}
+            crate::ui::move_to::PickOutcome::Cancelled => b.move_to = None,
+            crate::ui::move_to::PickOutcome::Chosen(dest) => {
+                let p = b.move_to.take().expect("open");
+                b.ask_copy_move(env.conn, env.root, p.ids, dest, p.mode);
+            }
+        }
     }
     move_dialog(ui.ctx(), b, env);
     if let Some(d) = &mut b.folder_dialog {
@@ -2758,6 +2871,7 @@ fn grid(ui: &mut egui::Ui, b: &mut Browse, conn: &Connection) {
     let mut clicked: Option<(usize, egui::Modifiers)> = None;
     let mut file_req: Option<(usize, FileAct)> = None;
     let mut trash_row: Option<usize> = None;
+    let mut move_to_row: Option<(usize, vf_fs::copymove::Mode)> = None;
     let mut goto_client: Option<usize> = None;
     let mut toggled: Option<usize> = None;
     let mut sort: Option<SortCol> = None;
@@ -2932,6 +3046,15 @@ fn grid(ui: &mut egui::Ui, b: &mut Browse, conn: &Connection) {
                         ui.close();
                     }
                     ui.separator();
+                    if ui.button("Move to…").clicked() {
+                        move_to_row = Some((di, vf_fs::copymove::Mode::Move));
+                        ui.close();
+                    }
+                    if ui.button("Copy to…").clicked() {
+                        move_to_row = Some((di, vf_fs::copymove::Mode::Copy));
+                        ui.close();
+                    }
+                    ui.separator();
                     if ui.button("Move to trash").clicked() {
                         trash_row = Some(di);
                         ui.close();
@@ -2960,6 +3083,28 @@ fn grid(ui: &mut egui::Ui, b: &mut Browse, conn: &Connection) {
             b.selected = [di].into_iter().collect();
         }
         b.trash_requested = true;
+    }
+    if let Some((di, mode)) = move_to_row {
+        if !b.selected.contains(&di) {
+            b.selected = [di].into_iter().collect();
+        }
+        let ids: Vec<String> = b
+            .selected
+            .iter()
+            .filter_map(|&i| b.snap.docs.get(i).map(|d| d.id.clone()))
+            .collect();
+        let here: Vec<(String, String)> = b
+            .snap
+            .clients
+            .iter()
+            .filter_map(|c| {
+                c.folder_rel
+                    .clone()
+                    .filter(|f| !f.is_empty())
+                    .map(|f| (format!("{}  {}", c.name, c.ext_id), f))
+            })
+            .collect();
+        b.move_to = Some(crate::ui::move_to::PickDest::new(ids, mode, here));
     }
 }
 
@@ -3586,15 +3731,23 @@ fn move_dialog(ctx: &egui::Context, b: &mut Browse, env: &mut Env) {
             _ => None,
         })
         .collect();
+    let copying = ask.mode == Some(vf_fs::copymove::Mode::Copy);
+    let verb = if copying { "Copy" } else { "Move" };
     let mut answer = None;
     egui::Modal::new(egui::Id::unique("move-confirm")).show(ctx, |ui| {
         ui.set_width(460.0);
         ui.heading(if moving == 1 {
-            "Move 1 document?".to_string()
+            format!("{verb} 1 document?")
         } else {
-            format!("Move {moving} documents?")
+            format!("{verb} {moving} documents?")
         });
         ui.label(format!("To {}", ask.dest.replace('/', " / ")));
+        if let Some(r) = &ask.dest_root {
+            ui.label(widgets::caption(format!(
+                "In the cabinet {} (it takes the doc type, year and tags when it next reads that folder).",
+                r.display()
+            )));
+        }
         if !kept.is_empty() {
             ui.label(format!(
                 "A file with the same name is there already, so these keep both: {}",
@@ -3602,12 +3755,19 @@ fn move_dialog(ctx: &egui::Context, b: &mut Browse, env: &mut Env) {
             ));
         }
         for w in skipped.iter().take(5) {
-            ui.label(RichText::new(format!("Not moved: {w}")).color(theme::warn()));
+            ui.label(
+                RichText::new(format!("Not {}: {w}", if copying { "copied" } else { "moved" }))
+                    .color(theme::warn()),
+            );
         }
-        ui.label(widgets::caption("Undo last (Ctrl+Z) puts them back."));
+        ui.label(widgets::caption(if copying {
+            "Undo last (Ctrl+Z) removes the copies."
+        } else {
+            "Undo last (Ctrl+Z) puts them back."
+        }));
         ui.add_space(8.0);
         ui.horizontal(|ui| {
-            if ui.add(widgets::primary_button("Move")).clicked() {
+            if ui.add(widgets::primary_button(verb)).clicked() {
                 answer = Some(true);
             }
             if ui.button("Cancel").clicked() {
@@ -3618,19 +3778,46 @@ fn move_dialog(ctx: &egui::Context, b: &mut Browse, env: &mut Env) {
     match answer {
         Some(true) => {
             let ask = b.move_ask.take().expect("checked");
-            match vf_fs::moveto::commit(env.conn, env.root, &ask.rows, env.device_id) {
+            let done = match ask.mode {
+                None => vf_fs::moveto::commit(env.conn, env.root, &ask.rows, env.device_id),
+                Some(mode) => vf_fs::copymove::commit(
+                    env.conn,
+                    env.root,
+                    &ask.rows,
+                    &vf_fs::copymove::Dest {
+                        root: ask
+                            .dest_root
+                            .clone()
+                            .unwrap_or_else(|| env.root.to_path_buf()),
+                        folder: ask.dest.clone(),
+                    },
+                    mode,
+                    env.device_id,
+                ),
+            };
+            let (did, not) = if copying {
+                ("Copied", "Not copied")
+            } else {
+                ("Moved", "Not moved")
+            };
+            match done {
                 Ok((_, n)) => {
                     let ids: Vec<String> = ask.rows.iter().map(|r| r.doc_id.clone()).collect();
                     b.prefs.touch(&ids);
                     b.prefs_dirty = true;
                     b.reload(env.conn);
                     b.notice = Some(format!(
-                        "Moved {n} document{} to {}.",
+                        "{did} {n} document{} to {}{}.",
                         if n == 1 { "" } else { "s" },
-                        ask.dest.replace('/', " / ")
+                        ask.dest.replace('/', " / "),
+                        if ask.dest_root.is_some() {
+                            " in the other cabinet"
+                        } else {
+                            ""
+                        }
                     ));
                 }
-                Err(e) => b.error = Some(format!("Not moved: {e}")),
+                Err(e) => b.error = Some(format!("{not}: {e}")),
             }
         }
         Some(false) => b.move_ask = None,
@@ -4302,6 +4489,102 @@ mod tests {
             )
             .ok();
         assert_eq!(t.as_deref(), Some("W-2"));
+    }
+
+    /// Q-74: Ctrl+drop on another client's folder copies; the copy keeps the original's
+    /// client-free metadata and Undo removes it. (Right-click › Copy to… opens the same
+    /// confirm with the destination picked in its dialog.)
+    #[test]
+    fn copying_documents_to_another_client() {
+        let mut h = harness(2, 1);
+        let (id, dest) = {
+            let s = h.state_mut();
+            vf_fs::cabinet::create(
+                &s.root,
+                &vf_fs::cabinet::CabinetFile {
+                    cabinet_id: vf_core::new_id(),
+                    firm_id: uuid::Uuid::new_v4().to_string(),
+                    schema_version: vf_core::db::SCHEMA_VERSION,
+                    layout_version: 1,
+                    created: vf_core::now_rfc3339(),
+                    name: None,
+                },
+            )
+            .unwrap();
+            for c in &s.b.snap.clients {
+                let folder = s.root.join(c.folder_rel.as_deref().unwrap());
+                std::fs::create_dir_all(folder.join("Income Tax")).unwrap();
+                filer_intake::sentinel::write_sentinel(
+                    &s.root,
+                    &folder,
+                    &filer_core::clients::Client {
+                        id: c.ext_id.clone(),
+                        uuid: uuid::Uuid::new_v4(),
+                        name: c.name.clone(),
+                        extra: Default::default(),
+                    },
+                    uuid::Uuid::new_v4(),
+                )
+                .unwrap();
+            }
+            for d in &s.b.snap.docs {
+                let p = s.root.join(&d.rel_path);
+                std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+                std::fs::write(&p, &d.id).unwrap();
+            }
+            let first = s.b.snap.docs[0].clone();
+            let other =
+                s.b.snap
+                    .clients
+                    .iter()
+                    .find(|c| Some(&c.id) != first.client_id.as_ref())
+                    .unwrap()
+                    .folder_rel
+                    .clone()
+                    .unwrap();
+            let root = s.root.clone();
+            let mut env = Env {
+                conn: &mut s.conn,
+                root: &root,
+                device_id: "dev-test",
+            };
+            s.b.ask_move(
+                env.conn,
+                env.root,
+                vec![first.id.clone()],
+                format!("{other}/Income Tax"),
+                true,
+            );
+            let _ = &mut env;
+            (first.id, other)
+        };
+        h.run();
+        assert!(
+            h.query_by_label("Copy 1 document?").is_some(),
+            "{:?}",
+            h.state().b.error
+        );
+        click(&mut h, "Copy");
+        let s = h.state();
+        assert!(s.b.error.is_none(), "{:?}", s.b.error);
+        let n: i64 = s
+            .conn
+            .query_row(
+                "SELECT count(*) FROM document WHERE deleted_at IS NULL AND rel_path LIKE ?1",
+                [format!("{dest}/Income Tax/%")],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 1, "the copy is in the other client's folder");
+        let still: i64 = s
+            .conn
+            .query_row(
+                "SELECT count(*) FROM document WHERE id = ?1 AND deleted_at IS NULL",
+                [&id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(still, 1, "the original stays");
     }
 
     #[test]
