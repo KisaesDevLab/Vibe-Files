@@ -83,6 +83,15 @@ pub struct IntakeTab {
     read_asked: std::collections::HashSet<PathBuf>,
     /// What the form reading found, from its thread.
     reads: Option<Reads>,
+    /// Tells the reading threads to stop (the cabinet closed).
+    read_stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl Drop for IntakeTab {
+    fn drop(&mut self) {
+        self.read_stop
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
 }
 
 /// The form reading's channel: its threads send, the tab takes.
@@ -659,10 +668,8 @@ impl IntakeTab {
             // Move to trash: the files go to the cabinet trash, restorable to the inbox (Q-61).
             f.offer_trash(true);
             if let Some(files) = f.take_trash_request() {
-                let dirs: Vec<PathBuf> = files
-                    .iter()
-                    .filter_map(|p| p.parent().map(Path::to_path_buf))
-                    .collect();
+                // Only from the inboxes Intake is set to (the check inside refuses others).
+                let dirs = vf_fs::trash::inboxes(root);
                 match vf_fs::trash::delete_inbox_files(conn, root, device_id, &files, &dirs) {
                     Ok(_) => {
                         f.files_taken(&files);
@@ -684,8 +691,11 @@ impl IntakeTab {
                 }
             }
             // Form reading for files whose name no rule names (Q-61): on a thread, once each.
-            let new: Vec<PathBuf> = f
-                .unnamed_files()
+            let unnamed = f.unnamed_files();
+            // A file that left the list (filed, trashed) is forgotten: a later file of the same
+            // name (scanners reuse names) is read again (QA 2026-11-05).
+            self.read_asked.retain(|p| unnamed.contains(p));
+            let new: Vec<PathBuf> = unnamed
                 .into_iter()
                 .filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("pdf")))
                 .filter(|p| self.read_asked.insert(p.clone()))
@@ -696,21 +706,30 @@ impl IntakeTab {
                 let (root, device) = (root.to_path_buf(), device_id.to_string());
                 let tesseract = self.ingest.tesseract.clone();
                 let ctx = ui.ctx().clone();
+                let stop = self.read_stop.clone();
                 let _ = std::thread::Builder::new()
                     .name("intake-form-reading".into())
                     .spawn(move || {
                         let pdfium = pdfium_dir().and_then(|d| filer_pdf::pdf::pdfium(&d).ok());
                         let ocr = vf_ocr::Tesseract::locate(tesseract.as_deref()).ok();
                         for p in new {
-                            let got = pdfium.and_then(|pdfium| {
-                                vf_ingest::recognize::read_inbox_file(
-                                    pdfium,
-                                    &root,
-                                    &p,
-                                    ocr.as_ref().map(|t| t as &dyn vf_ocr::OcrEngine),
-                                    &device,
-                                )
-                            });
+                            if stop.load(std::sync::atomic::Ordering::Relaxed) {
+                                return;
+                            }
+                            // A broken PDF must not end the reading of the files after it.
+                            let got =
+                                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                    pdfium.and_then(|pdfium| {
+                                        vf_ingest::recognize::read_inbox_file(
+                                            pdfium,
+                                            &root,
+                                            &p,
+                                            ocr.as_ref().map(|t| t as &dyn vf_ocr::OcrEngine),
+                                            &device,
+                                        )
+                                    })
+                                }))
+                                .unwrap_or(None);
                             if tx.send((p, got)).is_err() {
                                 return;
                             }

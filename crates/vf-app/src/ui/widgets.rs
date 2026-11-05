@@ -155,11 +155,13 @@ pub fn search_combo(
                     words.iter().all(|w| l.contains(w.as_str()))
                 })
                 .collect();
-            if te.lost_focus()
-                && ui.input(|i| i.key_pressed(egui::Key::Enter))
-                && let Some(&h) = hits.first()
-            {
-                pick = Some(Some(h));
+            if te.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                // Nothing typed: the first row shown, which is the `none` choice when offered.
+                pick = match (words.is_empty() && none.is_some(), hits.first()) {
+                    (true, _) => Some(None),
+                    (false, Some(&h)) => Some(Some(h)),
+                    (false, None) => None,
+                };
             }
             if !words.is_empty() {
                 ui.label(caption(format!("{} of {}", hits.len(), items.len())));

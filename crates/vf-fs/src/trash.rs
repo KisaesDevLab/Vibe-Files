@@ -117,6 +117,24 @@ pub fn delete_as(
     Ok(crate::fileops::commit(conn, root, tx, device_id)?.tx_id)
 }
 
+/// Intake's inbox folders, as the cabinet's shared Intake settings name them.
+pub fn inboxes(root: &Path) -> Vec<PathBuf> {
+    filer_intake::config::Settings::load_or_default(&crate::clients::master_dir(root))
+        .0
+        .inboxes
+}
+
+/// Whether `p` is inside one of `dirs` (any case, as Windows paths are).
+fn inside_any(p: &Path, dirs: &[PathBuf]) -> bool {
+    let low = |p: &Path| p.to_string_lossy().replace('/', "\\").to_lowercase();
+    let p = low(p);
+    dirs.iter().any(|d| {
+        let d = low(d);
+        let d = d.trim_end_matches('\\');
+        p.starts_with(&format!("{d}\\"))
+    })
+}
+
 /// Why an Intake file is in the trash (its row's `tombstone_reason`).
 pub const FROM_INTAKE: &str = "removed from Intake";
 
@@ -137,6 +155,9 @@ pub fn delete_inbox_files(
     let now = vf_core::now_rfc3339();
     let mut tx = Transaction::new(DELETE_LABEL);
     for f in files {
+        if !inside_any(f, inbox_dirs) {
+            return Err(format!("{} is not in an Intake inbox", f.display()));
+        }
         if !f.is_file() {
             return Err(format!("{} is not in the inbox any more", f.display()));
         }
@@ -263,14 +284,36 @@ pub fn restore(
         // From Intake: back to its inbox, where Intake files it (its row stays in the trash's
         // history, never live).
         if Path::new(&t.rel_path).is_absolute() {
-            let mut dst = PathBuf::from(&t.rel_path);
-            if dst.exists() || taken.contains(&dst) {
+            // Back where it was when that is still an inbox Intake watches; else into the
+            // first inbox (the inbox was changed since). Never a folder made up again.
+            let boxes = inboxes(root);
+            let was = PathBuf::from(&t.rel_path);
+            let mut dst = if inside_any(&was, &boxes) && was.parent().is_some_and(Path::is_dir) {
+                was
+            } else {
+                let name = was.file_name().ok_or("no file name")?;
+                boxes
+                    .iter()
+                    .find(|b| b.is_dir())
+                    .ok_or("Intake has no inbox folder to return it to (Intake › Setup).")?
+                    .join(name)
+            };
+            while dst.exists() || taken.contains(&dst) {
                 dst = filer_intake::commit::free_path(&dst);
+                if taken.contains(&dst) {
+                    // free_path looks at the disk only: step past names this batch took.
+                    let stem = dst.file_stem().map(|s| s.to_string_lossy().into_owned());
+                    let ext = dst.extension().map(|e| e.to_string_lossy().into_owned());
+                    let n = taken.len() + 2;
+                    let name = match ext {
+                        Some(e) => format!("{} ({n}).{e}", stem.unwrap_or_default()),
+                        None => format!("{} ({n})", stem.unwrap_or_default()),
+                    };
+                    dst = dst.with_file_name(name);
+                }
             }
             taken.push(dst.clone());
             if let Some(dir) = dst.parent() {
-                std::fs::create_dir_all(dir)
-                    .map_err(|e| format!("cannot open {}: {e}", dir.display()))?;
                 allowed_extra.push(dir.to_path_buf());
             }
             tx = tx
@@ -615,8 +658,27 @@ mod tests {
         let (t, root, mut conn) = fx();
         let inbox = t.path().join("inbox");
         std::fs::create_dir_all(&inbox).unwrap();
+        // Intake's settings name the inbox (Restore returns files only to an inbox it has).
+        let master = crate::clients::master_dir(&root);
+        std::fs::create_dir_all(&master).unwrap();
+        let (mut st, _) = filer_intake::config::Settings::load_or_default(&master);
+        st.inboxes = vec![inbox.clone()];
+        st.save(&master).unwrap();
         let f = inbox.join("scan0001.pdf");
         std::fs::write(&f, b"invented").unwrap();
+        // Not from an inbox: refused.
+        let elsewhere = t.path().join("elsewhere.pdf");
+        std::fs::write(&elsewhere, b"x").unwrap();
+        assert!(
+            delete_inbox_files(
+                &mut conn,
+                &root,
+                "dev",
+                std::slice::from_ref(&elsewhere),
+                std::slice::from_ref(&inbox)
+            )
+            .is_err()
+        );
         let tx = delete_inbox_files(
             &mut conn,
             &root,
@@ -666,6 +728,56 @@ mod tests {
         let placed = restore(&mut conn, &root, "dev", &[it]).unwrap();
         assert_eq!(placed, [f.to_string_lossy().into_owned()]);
         assert!(f.is_file());
+        // Two trashed files of one name restored together: both come back, side by side.
+        delete_inbox_files(
+            &mut conn,
+            &root,
+            "dev",
+            std::slice::from_ref(&f),
+            std::slice::from_ref(&inbox),
+        )
+        .unwrap();
+        std::fs::write(&f, b"invented again").unwrap();
+        delete_inbox_files(
+            &mut conn,
+            &root,
+            "dev",
+            std::slice::from_ref(&f),
+            std::slice::from_ref(&inbox),
+        )
+        .unwrap();
+        let both: Vec<Trashed> = list(&conn, &root)
+            .unwrap()
+            .into_iter()
+            .filter(|x| x.rel_path.ends_with("scan0001.pdf"))
+            .collect();
+        assert_eq!(both.len(), 2);
+        let placed = restore(&mut conn, &root, "dev", &both).unwrap();
+        assert_eq!(placed.len(), 2);
+        assert_ne!(placed[0], placed[1]);
+        assert!(placed.iter().all(|p| Path::new(p).is_file()));
+        // The inbox moved since: the file goes to the inbox Intake has now.
+        let new_inbox = t.path().join("inbox2");
+        std::fs::create_dir_all(&new_inbox).unwrap();
+        let g = inbox.join("late.pdf");
+        std::fs::write(&g, b"late").unwrap();
+        delete_inbox_files(
+            &mut conn,
+            &root,
+            "dev",
+            std::slice::from_ref(&g),
+            std::slice::from_ref(&inbox),
+        )
+        .unwrap();
+        st.inboxes = vec![new_inbox.clone()];
+        st.save(&master).unwrap();
+        let it = list(&conn, &root)
+            .unwrap()
+            .into_iter()
+            .find(|x| x.rel_path.ends_with("late.pdf"))
+            .unwrap();
+        restore(&mut conn, &root, "dev", &[it]).unwrap();
+        assert!(new_inbox.join("late.pdf").is_file());
         assert!(
             list(&conn, &root)
                 .unwrap()

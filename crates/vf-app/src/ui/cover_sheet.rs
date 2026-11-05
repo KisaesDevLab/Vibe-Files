@@ -335,7 +335,15 @@ pub fn show(ctx: &egui::Context, d: &mut CoverSheetDialog, dir: &Path) -> Dialog
             if ui.add(widgets::primary_button(label)).clicked() {
                 let r = if d.several {
                     d.bulk_pages().and_then(|pages| {
-                        let p = out_path(dir, &format!("cover sheets {} clients.pdf", d.ticked()))?;
+                        // Its own name: an earlier batch may still be open in the PDF app.
+                        let p = out_path(
+                            dir,
+                            &format!(
+                                "cover sheets {} clients {}.pdf",
+                                d.ticked(),
+                                chrono::Local::now().format("%Y-%m-%d %H%M%S")
+                            ),
+                        )?;
                         sheet::write_pdf(&p, &pages)?;
                         Ok(p)
                     })
@@ -374,7 +382,14 @@ fn several_list(ui: &mut egui::Ui, d: &mut CoverSheetDialog) {
             egui::TextEdit::singleline(&mut d.find)
                 .hint_text("Find client by name or ID")
                 .desired_width(260.0),
-        );
+        )
+        .widget_info(|| {
+            egui::WidgetInfo::labeled(
+                egui::accesskit::Role::TextInput,
+                true,
+                "Find client by name or ID",
+            )
+        });
         if ui.button("Tick all shown").clicked() {
             for &i in &shown {
                 d.rows[i].ticked = true;
@@ -456,6 +471,7 @@ fn several_list(ui: &mut egui::Ui, d: &mut CoverSheetDialog) {
                                 .desired_width(80.0),
                         )
                         .on_hover_text("This client's tax year (empty: the year above)")
+                        .labelled_by(r.id)
                         .changed()
                     {
                         row.year = (!y.trim().is_empty()).then_some(y);
@@ -468,6 +484,7 @@ fn several_list(ui: &mut egui::Ui, d: &mut CoverSheetDialog) {
                                 .desired_width(36.0),
                         )
                         .on_hover_text("Sheets for this client (empty: the number above)")
+                        .labelled_by(r.id)
                         .changed()
                     {
                         row.copies = (!c.trim().is_empty()).then_some(c);

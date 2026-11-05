@@ -233,8 +233,11 @@ pub struct Browse {
     /// `expanded` by client id while the catalog is re-read.
     expanded_ids: Vec<(String, Option<String>)>,
     pub client_filter: String,
-    /// A client to scroll the tree to once (Go to client's folder).
-    reveal: Option<usize>,
+    /// A client (uuid) to scroll the tree to once (Go to client's folder); by id, so a reload
+    /// that shifts the list does not scroll to another client.
+    reveal: Option<String>,
+    /// A pane width being dragged, saved when the drag ends (tree, details).
+    width_drag: (Option<u16>, Option<u16>),
     pub name_filter: String,
     pub sort: (SortCol, bool),
     /// Doc indices shown in the grid, filtered and sorted.
@@ -383,6 +386,7 @@ impl Browse {
             expanded_ids: vec![],
             client_filter: String::new(),
             reveal: None,
+            width_drag: (None, None),
             name_filter: String::new(),
             sort: (SortCol::Name, true),
             visible: Vec::new(),
@@ -772,7 +776,7 @@ impl Browse {
                 self.client_filter.clear();
             }
             self.expanded.insert(Node::Client(ci));
-            self.reveal = Some(ci);
+            self.reveal = Some(c.id.clone());
             self.set_scope(Scope::Client(ci));
         }
     }
@@ -1409,6 +1413,7 @@ pub fn show(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env) {
             .width();
         remember_width(
             &mut b.prefs.tree_width,
+            &mut b.width_drag.0,
             w,
             272.0,
             dragging,
@@ -1449,6 +1454,7 @@ pub fn show(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env) {
             .width();
         remember_width(
             &mut b.prefs.details_width,
+            &mut b.width_drag.1,
             w,
             400.0,
             dragging,
@@ -1467,14 +1473,18 @@ pub fn show(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env) {
             DialogOutcome::Cancelled => b.folder_dialog = None,
             DialogOutcome::Done(msg) => {
                 b.folder_dialog = None;
-                // Folder paths changed: show the client, by id (indices can shift).
-                let client = b.scope_client().map(|c| b.snap.clients[c].id.clone());
+                // The view stays (reload keeps it by client id), unless it was a folder that is
+                // not there any more (renamed or deleted): then its client (QA 2026-11-05).
                 b.reload(env.conn);
-                b.set_scope(Scope::Cabinet);
-                if let Some(c) =
-                    client.and_then(|id| b.snap.clients.iter().position(|c| c.id == id))
+                if let Scope::Folder { client, folder } = b.scope.clone()
+                    && !b
+                        .ix
+                        .clients
+                        .get(client)
+                        .is_some_and(|n| n.folders.contains_key(&folder))
                 {
-                    b.go_to_client(c);
+                    b.set_scope(Scope::Cabinet);
+                    b.go_to_client(client);
                 }
                 b.notice = Some(msg);
             }
@@ -1570,15 +1580,29 @@ fn paint_chevron(ui: &egui::Ui, rect: egui::Rect, open: bool) {
     ));
 }
 
-/// Keeps a pane's dragged width in the prefs once the drag ends (not every frame of it).
-fn remember_width(slot: &mut Option<u16>, w: f32, default: f32, dragging: bool, dirty: &mut bool) {
-    if dragging {
-        return;
-    }
+/// Keeps a pane's width in the prefs when the person dragged it, once the drag ends (not every
+/// frame of it). A width that changes with no drag (the window made narrower squeezes the
+/// pane) is not kept: the chosen width comes back when there is room (QA 2026-11-05).
+fn remember_width(
+    slot: &mut Option<u16>,
+    pending: &mut Option<u16>,
+    w: f32,
+    default: f32,
+    dragging: bool,
+    dirty: &mut bool,
+) {
     let w = w.round().clamp(0.0, f32::from(u16::MAX)) as u16;
     let old = slot.unwrap_or(default.round() as u16);
-    if w.abs_diff(old) >= 2 {
-        *slot = Some(w);
+    if dragging {
+        if w.abs_diff(old) >= 2 {
+            *pending = Some(w);
+        }
+        return;
+    }
+    if let Some(p) = pending.take()
+        && p.abs_diff(old) >= 2
+    {
+        *slot = Some(p);
         *dirty = true;
     }
 }
@@ -1809,7 +1833,7 @@ fn tree(ui: &mut egui::Ui, b: &mut Browse) {
                     asks.push(("New folder…", FolderAsk::NewFolder { parent: cf.clone() }));
                 }
                 fav_menu(&resp, Scope::Client(ci), &mut fav_scope, asks, &mut ask);
-                if b.reveal == Some(ci) {
+                if b.reveal.as_deref() == Some(c.id.as_str()) {
                     resp.scroll_to_me(Some(egui::Align::Center));
                     b.reveal = None;
                 }
@@ -3697,17 +3721,21 @@ mod tests {
     /// A dragged pane width is kept once the drag ends, not on every frame of it.
     #[test]
     fn pane_widths_are_kept_after_a_drag() {
-        let (mut slot, mut dirty) = (None, false);
-        remember_width(&mut slot, 520.0, 400.0, true, &mut dirty);
+        let (mut slot, mut pending, mut dirty) = (None, None, false);
+        // The window squeezes the pane with no drag: not kept.
+        remember_width(&mut slot, &mut pending, 320.0, 400.0, false, &mut dirty);
+        assert_eq!((slot, dirty), (None, false), "a squeeze is not a choice");
+        remember_width(&mut slot, &mut pending, 520.4, 400.0, true, &mut dirty);
         assert_eq!((slot, dirty), (None, false), "still dragging");
-        remember_width(&mut slot, 401.0, 400.0, false, &mut dirty);
+        remember_width(&mut slot, &mut pending, 520.4, 400.0, false, &mut dirty);
+        assert_eq!((slot, dirty), (Some(520), true), "kept when the drag ends");
+        dirty = false;
+        remember_width(&mut slot, &mut pending, 300.0, 400.0, false, &mut dirty);
         assert_eq!(
             (slot, dirty),
-            (None, false),
-            "the default, give or take a point"
+            (Some(520), false),
+            "the window shrank: still 520"
         );
-        remember_width(&mut slot, 520.4, 400.0, false, &mut dirty);
-        assert_eq!((slot, dirty), (Some(520), true));
         let cfg = crate::config::Prefs {
             details_width: Some(520),
             folded: vec!["views".into()],

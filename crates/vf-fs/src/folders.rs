@@ -53,11 +53,15 @@ fn client_folder_of(conn: &Connection, rel: &str) -> Result<Option<String>, Stri
     conn.query_row(
         "SELECT folder_rel FROM client
          WHERE deleted_at IS NULL AND folder_rel IS NOT NULL AND folder_rel <> ''
-           AND (?1 = folder_rel OR substr(?1, 1, length(folder_rel) + 1) = folder_rel || '/')
+           AND (lower(?1) = lower(folder_rel)
+                OR lower(substr(?1, 1, length(folder_rel) + 1)) = lower(folder_rel || '/'))
          ORDER BY length(folder_rel) DESC LIMIT 1",
         [rel],
-        |r| r.get(0),
+        |r| r.get::<_, String>(0),
     )
+    // As `rel` spells it (Windows paths are not case-sensitive; SQLite's lower() is ASCII-only,
+    // so the lengths agree).
+    .map(|cf| rel.get(..cf.len()).map_or(cf.clone(), str::to_owned))
     .map(Some)
     .or_else(|e| {
         if e.to_string().contains("no rows") {
@@ -177,7 +181,9 @@ fn move_folder(
             "{f} would get a path longer than {MAX_PATH} characters; use a shorter name."
         ));
     }
-    let under = |col: &str| format!("substr({col}, 1, length(?1) + 1) = ?1 || '/'");
+    // Any case: the catalog may spell a folder as the template does (`Income Tax`) while the
+    // disk has `income tax` (QA 2026-11-05).
+    let under = |col: &str| format!("lower(substr({col}, 1, length(?1) + 1)) = lower(?1 || '/')");
     let locked: Option<String> = conn
         .query_row(
             &format!(
@@ -224,7 +230,7 @@ fn move_folder(
                 continue;
             }
             let moved = docmeta::Meta {
-                rel_path: format!("{new}{}", &m.rel_path[old.len()..]),
+                rel_path: format!("{new}{}", m.rel_path.get(old.len()..).unwrap_or("")),
                 ..m.clone()
             };
             let (file, line) = docmeta::record_line(root, &moved, &now, device_id);
@@ -255,7 +261,7 @@ fn move_folder(
             &format!(
                 "UPDATE document SET rel_path = ?2 || substr(rel_path, length(?1) + 1),
                    device_id = ?3, updated_at = ?4, rev = rev + 1
-                 WHERE deleted_at IS NULL AND {}",
+                 WHERE {}",
                 under("rel_path")
             ),
             vec![from.into(), to.into(), device_id.into(), now.clone().into()],
@@ -636,6 +642,22 @@ mod tests {
         assert!(new_folder(&mut c.conn, &c.root, "", "Loose", "dev").is_err());
         assert!(new_folder(&mut c.conn, &c.root, &format!("{cf}/_Vibe"), "x", "dev").is_err());
 
+        // A trashed document of the folder, and a row spelt in another case (the catalog says
+        // `correspondence`, the disk `Correspondence`): both follow the rename (QA 2026-11-05).
+        c.conn
+            .execute(
+                "INSERT INTO document (id, client_id, rel_path, hash, size, filed_at, device_id, updated_at, deleted_at)
+                 VALUES ('gone', NULL, ?1, 'h', 1, 't', 'dev', 't', 't')",
+                [format!("{cf}/Correspondence/old.pdf")],
+            )
+            .unwrap();
+        c.conn
+            .execute(
+                "INSERT INTO document (id, client_id, rel_path, hash, size, filed_at, device_id, updated_at)
+                 VALUES ('lower', NULL, ?1, 'h2', 1, 't', 'dev', 't')",
+                [format!("{cf}/correspondence/note.pdf")],
+            )
+            .unwrap();
         // Renaming moves the documents' catalog paths with the folder.
         let to = rename_folder(
             &mut c.conn,
@@ -647,6 +669,15 @@ mod tests {
         .unwrap();
         assert_eq!(to, format!("{cf}/Letters"));
         assert_eq!(doc_path(&c), format!("{cf}/Letters/letter.pdf"));
+        let path_of = |id: &str| -> String {
+            c.conn
+                .query_row("SELECT rel_path FROM document WHERE id = ?1", [id], |r| {
+                    r.get(0)
+                })
+                .unwrap()
+        };
+        assert_eq!(path_of("gone"), format!("{cf}/Letters/old.pdf"));
+        assert_eq!(path_of("lower"), format!("{cf}/Letters/note.pdf"));
         assert!(c.root.join(format!("{cf}/Letters/letter.pdf")).is_file());
         assert!(rename_folder(&mut c.conn, &c.root, cf, "Other", "dev").is_err());
 
