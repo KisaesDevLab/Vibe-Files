@@ -1269,6 +1269,111 @@ ANDE1042,Anderson Farms LLC
         assert!(!vf_fs::sweep::due(&s.conn), "the sweep time is recorded");
     }
 
+    /// PA-28: the folder list filtered by match %, ticked in bulk and by Shift-click.
+    #[test]
+    fn folder_import_filters_by_match_and_ticks_in_bulk() {
+        use egui::accesskit::Role;
+        let mut h = harness();
+        {
+            let s = h.state_mut();
+            vf_fs::cabinet::create(
+                &s.root,
+                &vf_fs::cabinet::CabinetFile {
+                    cabinet_id: vf_core::new_id(),
+                    firm_id: uuid::Uuid::new_v4().to_string(),
+                    schema_version: vf_core::db::SCHEMA_VERSION,
+                    layout_version: 1,
+                    created: vf_core::now_rfc3339(),
+                    name: None,
+                },
+            )
+            .unwrap();
+            let csv = s.root.parent().unwrap().join("clients.csv");
+            std::fs::write(
+                &csv,
+                "ID,Name\nHALV1001,\"Halvorsen, Dana\"\nLIND1002,Lindqvist\nODUY1003,\"Oduya, Mara\"\nTOMA1004,\"Tomas, Pell\"\n",
+            )
+            .unwrap();
+            let map = filer_core::config::ColumnMap {
+                id: Some("ID".into()),
+                name: Some("Name".into()),
+                extras: vec![],
+            };
+            vf_fs::clients::import_csv(&s.root, &csv, &map, &Default::default()).unwrap();
+            for f in [
+                "Archive Misc",
+                "Dana Halvorsen",
+                "Lindqvist",
+                "Mara Oduya",
+                "Pell Tomas",
+            ] {
+                std::fs::create_dir_all(s.root.join(f)).unwrap();
+            }
+        }
+        click(&mut h, "Folder import");
+        click(&mut h, "Scan the cabinet");
+        assert!(h.query_by_label("Showing 5 of 5 folders").is_some());
+        let ticked = |h: &Harness<'static, State>| -> Vec<String> {
+            h.state()
+                .a
+                .import
+                .plan
+                .as_ref()
+                .unwrap()
+                .folders
+                .iter()
+                .filter(|r| r.include)
+                .map(|r| r.rel.clone())
+                .collect()
+        };
+        // Two-word names that agree are ticked; the one-word name is not.
+        assert_eq!(ticked(&h), ["Dana Halvorsen", "Mara Oduya", "Pell Tomas"]);
+
+        // 90 % and up: the three sure ones.
+        h.state_mut().a.import.min_pct = 90;
+        h.run();
+        assert!(h.query_by_label("Showing 3 of 5 folders").is_some());
+        click(&mut h, "Untick all shown");
+        assert!(ticked(&h).is_empty());
+
+        // All shown again: click one, Shift-click another: the folders between are ticked too.
+        h.state_mut().a.import.min_pct = 0;
+        h.run();
+        // Row boxes, by their hover text: Archive Misc, Dana Halvorsen, Lindqvist, Mara Oduya,
+        // Pell Tomas.
+        let row_box = |h: &Harness<'static, State>, k: usize, shift: bool| {
+            let rows: Vec<_> = h
+                .get_all_by_label(
+                    "Bind this folder to the client (Shift-click: the folders between too)",
+                )
+                .collect();
+            assert_eq!(rows.len(), 5);
+            if shift {
+                rows[k].click_modifiers(egui::Modifiers::SHIFT);
+            } else {
+                rows[k].click();
+            }
+        };
+        row_box(&h, 1, false);
+        h.run();
+        row_box(&h, 4, true);
+        h.run();
+        assert_eq!(
+            ticked(&h),
+            ["Dana Halvorsen", "Lindqvist", "Mara Oduya", "Pell Tomas"]
+        );
+
+        // Ticked folders the filter hides still import, and the button says so.
+        h.state_mut().a.import.min_pct = 90;
+        h.run();
+        assert!(h.query_by_label("Import 4 folders (1 not shown)").is_some());
+        // The Bind header unticks every folder shown.
+        h.get_by_role_and_label(Role::CheckBox, "Bind").click();
+        h.run();
+        assert_eq!(ticked(&h), ["Lindqvist"]);
+        assert!(h.query_by_label("Import 1 folders (1 not shown)").is_some());
+    }
+
     /// P10: Scan proposes the folder's client, Import binds it on its own thread, Undo reverses.
     #[test]
     fn folder_import_binds_and_undoes() {

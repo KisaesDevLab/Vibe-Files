@@ -21,6 +21,14 @@ const SHOWN: usize = 300;
 pub struct ImportPage {
     pub plan: Option<Plan>,
     pub rename: bool,
+    /// Folders shown: a match of at least this many % (PA-28).
+    pub min_pct: u8,
+    /// Folders already bound are not shown.
+    pub hide_bound: bool,
+    /// Folders with no client are not shown.
+    pub hide_none: bool,
+    /// The row whose Bind box was clicked last, for Shift-click ranges.
+    last_tick: Option<usize>,
     job: Option<Receiver<Result<Applied, String>>>,
     /// The last import on this cabinet (from `_Vibe/import_last.json`).
     pub last: Option<Applied>,
@@ -40,7 +48,10 @@ impl ImportPage {
         self.error = None;
         self.notice = None;
         match import::plan(env.conn, env.root) {
-            Ok(p) => self.plan = Some(p),
+            Ok(p) => {
+                self.plan = Some(p);
+                self.last_tick = None;
+            }
             Err(e) => self.error = Some(format!("Scan failed: {e}")),
         }
     }
@@ -132,6 +143,18 @@ impl ImportPage {
     }
 }
 
+/// Whether the filter shows folder row `r`: matched at least `min_pct` (bound folders always
+/// pass it), and not hidden as bound or as matching no client.
+fn shows(r: &import::FolderRow, min_pct: u8, hide_bound: bool, hide_none: bool) -> bool {
+    if r.bound {
+        return !hide_bound;
+    }
+    if r.client.is_none() {
+        return !hide_none && min_pct == 0;
+    }
+    (r.confidence * 100.0).round() >= f32::from(min_pct)
+}
+
 pub fn show(ui: &mut egui::Ui, p: &mut ImportPage, env: &mut Env, catalog: &Path) {
     if !p.loaded_last {
         p.last = import::load_last(env.root);
@@ -216,6 +239,54 @@ pub fn show(ui: &mut egui::Ui, p: &mut ImportPage, env: &mut Env, catalog: &Path
     ));
     ui.add_space(6.0);
 
+    // Filter by match % and kind (PA-28); ticking acts on the folders shown.
+    let shown: Vec<usize> = (0..plan.folders.len())
+        .filter(|&i| shows(&plan.folders[i], p.min_pct, p.hide_bound, p.hide_none))
+        .collect();
+    let can_tick = |r: &import::FolderRow| !r.bound && r.client.is_some();
+    ui.horizontal_wrapped(|ui| {
+        ui.label("Show matches from");
+        ui.add(
+            egui::DragValue::new(&mut p.min_pct)
+                .range(0..=100)
+                .speed(1.0)
+                .suffix("%"),
+        )
+        .on_hover_text("Only folders matched at least this well");
+        ui.label("up");
+        ui.checkbox(&mut p.hide_bound, "Hide already bound");
+        ui.checkbox(&mut p.hide_none, "Hide folders with no match");
+        ui.label(widgets::caption(format!(
+            "Showing {} of {} folders",
+            shown.len(),
+            plan.folders.len()
+        )));
+    });
+    ui.horizontal(|ui| {
+        let tickable: Vec<usize> = shown
+            .iter()
+            .copied()
+            .filter(|&i| can_tick(&plan.folders[i]))
+            .collect();
+        if ui
+            .add_enabled(!tickable.is_empty(), egui::Button::new("Tick all shown"))
+            .clicked()
+        {
+            for &i in &tickable {
+                plan.folders[i].include = true;
+            }
+        }
+        if ui
+            .add_enabled(!tickable.is_empty(), egui::Button::new("Untick all shown"))
+            .clicked()
+        {
+            for &i in &tickable {
+                plan.folders[i].include = false;
+            }
+        }
+    });
+    let shift = ui.input(|i| i.modifiers.shift);
+
     let clients = plan.clients.clone();
     egui::ScrollArea::vertical()
         .id_salt("import-folders")
@@ -227,19 +298,48 @@ pub fn show(ui: &mut egui::Ui, p: &mut ImportPage, env: &mut Env, catalog: &Path
                 .num_columns(6)
                 .spacing([12.0, 4.0])
                 .show(ui, |ui| {
-                    for h in ["Bind", "Folder", "Client", "Found by", "Sure", "Files"] {
+                    // Bind header: ticks or unticks every folder shown.
+                    let tickable: Vec<usize> = shown
+                        .iter()
+                        .copied()
+                        .filter(|&i| can_tick(&plan.folders[i]))
+                        .collect();
+                    let mut all = !tickable.is_empty()
+                        && tickable.iter().all(|&i| plan.folders[i].include);
+                    let mixed = !all && tickable.iter().any(|&i| plan.folders[i].include);
+                    let head = ui
+                        .add_enabled(
+                            !tickable.is_empty(),
+                            egui::Checkbox::new(&mut all, RichText::new("Bind").strong())
+                                .indeterminate(mixed),
+                        )
+                        .on_hover_text("Tick or untick every folder shown");
+                    if head.changed() {
+                        for &i in &tickable {
+                            plan.folders[i].include = all;
+                        }
+                    }
+                    for h in ["Folder", "Client", "Found by", "Match", "Files"] {
                         ui.label(RichText::new(h).strong());
                     }
                     ui.end_row();
-                    for (i, r) in plan.folders.iter_mut().enumerate() {
+                    let mut ticked: Option<(usize, bool)> = None;
+                    for &i in &shown {
+                        let r = &mut plan.folders[i];
                         if r.bound {
                             ui.label("✓");
                         } else {
-                            ui.add_enabled(
-                                r.client.is_some(),
-                                egui::Checkbox::without_text(&mut r.include),
-                            )
-                            .on_hover_text("Bind this folder to the client");
+                            let resp = ui
+                                .add_enabled(
+                                    r.client.is_some(),
+                                    egui::Checkbox::without_text(&mut r.include),
+                                )
+                                .on_hover_text(
+                                    "Bind this folder to the client (Shift-click: the folders between too)",
+                                );
+                            if resp.changed() {
+                                ticked = Some((i, r.include));
+                            }
                         }
                         let folder = ui.label(&r.rel);
                         if r.bound {
@@ -298,6 +398,23 @@ pub fn show(ui: &mut egui::Ui, p: &mut ImportPage, env: &mut Env, catalog: &Path
                         ui.label(r.files.to_string());
                         ui.end_row();
                     }
+                    if let Some((i, on)) = ticked {
+                        // Shift-click: the shown folders between the last one clicked and this.
+                        if shift
+                            && let Some(a) = p.last_tick
+                            && let (Some(pa), Some(pi)) = (
+                                shown.iter().position(|&x| x == a),
+                                shown.iter().position(|&x| x == i),
+                            )
+                        {
+                            for &j in &shown[pa.min(pi)..=pa.max(pi)] {
+                                if can_tick(&plan.folders[j]) {
+                                    plan.folders[j].include = on;
+                                }
+                            }
+                        }
+                        p.last_tick = Some(i);
+                    }
                 });
         });
     ui.add_space(6.0);
@@ -307,7 +424,23 @@ pub fn show(ui: &mut egui::Ui, p: &mut ImportPage, env: &mut Env, catalog: &Path
     );
     ui.horizontal(|ui| {
         let label = if to_bind > 0 {
-            format!("Import {to_bind} folders")
+            // Ticked folders the filter hides are imported too: say so.
+            let hidden = p.plan.as_ref().map_or(0, |plan| {
+                plan.folders
+                    .iter()
+                    .filter(|r| {
+                        r.include
+                            && !r.bound
+                            && r.client.is_some()
+                            && !shows(r, p.min_pct, p.hide_bound, p.hide_none)
+                    })
+                    .count()
+            });
+            if hidden > 0 {
+                format!("Import {to_bind} folders ({hidden} not shown)")
+            } else {
+                format!("Import {to_bind} folders")
+            }
         } else {
             format!("Set doc types and years ({to_type} files)")
         };

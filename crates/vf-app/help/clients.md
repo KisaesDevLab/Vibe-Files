@@ -37,6 +37,11 @@ Intake uses relationships to file copies, for example a K-1 filed to the entity 
 
 When the cabinet already holds client folders that are not tied to clients (an older firm tree), open **Admin** › **Folder import** and press **Scan the cabinet**. Each top-level folder is matched to a client and each file gets a doc type and tax year where its name or folder says so. Review the **Bind** and **Client** columns, then press **Import N folders**. Files are not moved.
 
+- **Match** shows how well each folder matches its client. **90–100%**: the ID and the name agree, or the same name of two words or more; these are ticked for you. **60–84%**: the same one-word name, or only a similar name; check these, then tick them. **50% or less**: two folders point at the same client, several clients have the folder's name, the ID is the client's but the name is not, or the client already has a folder.
+- **Show matches from N% up** lists only folders matched at least that well. **Hide already bound** and **Hide folders with no match** shorten the list further.
+- **Tick all shown** and **Untick all shown**, or the **Bind** box at the top of the column, tick or untick every folder listed. Click one folder's box, then Shift-click another to tick or untick all the folders between.
+- Ticked folders the filter hides are still imported; the button then says how many, for example **Import 12 folders (3 not shown)**.
+
 - Tick **Rename bound folders to the firm template's name ("{Client} ({ID})"); files inside are not moved** to give them the template's folder name.
 - **Export the remainder (CSV)…** lists files left for a person to handle.
 - **Undo the last import** reverses it.

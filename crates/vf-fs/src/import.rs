@@ -542,6 +542,28 @@ fn looks_like_client_id(id: &str) -> bool {
         && !(id.len() == 4 && id.parse::<u32>().is_ok_and(|y| (1990..=2100).contains(&y)))
 }
 
+/// How sure a folder whose ID is a list client's is, by how close the names are (0–1): the
+/// names agree (score 0.6 or more) → 90–100 %, ticked; they do not → 10–40 %, with no "how"
+/// (the caller names the client).
+fn id_match(name_score: f32) -> (Option<String>, f32) {
+    let ns = name_score.clamp(0.0, 1.0);
+    if ns >= 0.6 {
+        (
+            Some("client ID and name".into()),
+            0.9 + (ns - 0.6) / 0.4 * 0.1,
+        )
+    } else {
+        (None, 0.1 + ns / 0.6 * 0.3)
+    }
+}
+
+/// How sure a folder is that only looks like a client's name (Filer's fuzzy score, from its
+/// suggest threshold up to 1): 60–84 %, never ticked on its own, closer names higher.
+fn fuzzy_match(score: f32) -> f32 {
+    let s = score.clamp(0.0, 1.0);
+    0.6 + s * s * 0.24
+}
+
 /// The client a top-level folder is for, with how and how sure.
 fn folder_client(
     b: &filer_intake::sentinel::FolderBinding,
@@ -556,14 +578,13 @@ fn folder_client(
             let base = id_in_name(id_pattern, &name).map_or(name.clone(), |(_, rest)| rest);
             return match c {
                 // The name must agree too: an old tree's IDs can be another client's now.
-                Some(c) if vf_extract::matching::name_score(&base, &c.name) >= 0.6 => {
-                    (Some(pick(c, false)), "client ID and name".into(), 0.97)
+                Some(c) => {
+                    let ns = vf_extract::matching::name_score(&base, &c.name);
+                    let (how, conf) = id_match(ns);
+                    let how =
+                        how.unwrap_or_else(|| format!("the ID is {}'s, the name is not", c.name));
+                    (Some(pick(c, false)), how, conf)
                 }
-                Some(c) => (
-                    Some(pick(c, false)),
-                    format!("the ID is {}'s, the name is not", c.name),
-                    0.4,
-                ),
                 None => (None, String::new(), 0.0),
             };
         }
@@ -643,7 +664,7 @@ fn folder_client(
         return (
             Some(pick(c, false)),
             format!("similar name ({:.0}%)", b.score.unwrap_or_default() * 100.0),
-            0.6,
+            fuzzy_match(b.score.unwrap_or_default() as f32),
         );
     }
     (None, "no client matches".into(), 0.0)
@@ -1118,6 +1139,23 @@ mod tests {
             Some(("1001".into(), "Reyes, Dana".into()))
         );
         assert_eq!(id_in_name(pat, "Reyes, Dana"), None);
+    }
+
+    #[test]
+    fn match_percentages_follow_how_close_the_names_are() {
+        // ID and name: 90-100 %, ticked; closer names higher.
+        let (how, full) = id_match(1.0);
+        assert_eq!(how.as_deref(), Some("client ID and name"));
+        assert!((full - 1.0).abs() < 1e-6);
+        let (_, part) = id_match(0.7);
+        assert!(part >= 0.9 && part < full && part >= AUTO);
+        // The ID is someone else's name: 10-40 %, never ticked, never dropped.
+        let (how, off) = id_match(0.3);
+        assert!(how.is_none() && off > 0.0 && off <= 0.4);
+        assert!(id_match(0.59).1 <= 0.4 && id_match(0.0).1 > 0.0);
+        // Only a similar name: below the tick line, closer higher.
+        let (lo, hi) = (fuzzy_match(0.85), fuzzy_match(0.97));
+        assert!(lo >= 0.6 && lo < hi && hi < AUTO && fuzzy_match(1.0) < AUTO);
     }
 
     #[test]
