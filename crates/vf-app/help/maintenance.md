@@ -16,7 +16,7 @@ Anything wrong shows on Browse as "Startup check:" followed by what failed, for 
 
 ## The integrity sweep
 
-People sometimes open a file from Explorer and save it, or move or delete files there. The sweep finds those changes. It re-checks the content of every file in the client folders against the catalog. It runs on its own when the cabinet opens if the last sweep is 7 days old; open **Admin** › **Integrity sweep** and press **Sweep now** to run it at once.
+People sometimes open a file from Explorer and save it, or move or delete files there. The sweep finds those changes. It checks every file in the client folders against the catalog: a file whose size or date changed is read in full, and so is one thirteenth of the others each week, so every file's content is re-checked at least once a quarter. A folder that cannot be read is listed and the sweep goes on. It runs on its own when the cabinet opens if the last sweep is 7 days old; open **Admin** › **Integrity sweep** and press **Sweep now** to run it at once.
 
 The result lists:
 

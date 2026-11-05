@@ -79,9 +79,39 @@ impl Drift {
 }
 
 /// Re-hashes every file in the bound client folders and compares with the live documents.
+/// A file listed by the sweep: path, cabinet-relative path, client, size and time.
+type Listed = (PathBuf, String, Option<String>, Option<(u64, i64)>);
+
+/// Weeks a full re-read of every file is spread over (PA-34): each week the files of one slice
+/// are read whole; the others are checked by size and time.
+pub const SLICES: u64 = 13;
+
+/// Whether `rel` is read whole this week (its slice is this week's).
+fn in_slice(rel: &str, week: u64) -> bool {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    rel.to_lowercase().hash(&mut h);
+    h.finish() % SLICES == week % SLICES
+}
+
+/// This week's number (weeks since 1970).
+fn this_week() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs() / (7 * 86_400))
+}
+
 pub fn scan(conn: &Connection, root: &Path) -> Result<Drift, String> {
+    scan_week(conn, root, this_week())
+}
+
+/// [`scan`] for week `week`: a file whose size and time are the catalog's is taken as
+/// unchanged unless it is in this week's slice; the rest are read on several threads. A
+/// folder that cannot be read is listed, not fatal. Each file's time as read is recorded.
+pub fn scan_week(conn: &Connection, root: &Path, week: u64) -> Result<Drift, String> {
     let mut rep = RebuildReport::default();
     let (_, folders) = rebuild::scan_folders(root, &mut rep).map_err(|e| e.to_string())?;
+    let known = rebuild::known_files(conn).map_err(|e| e.to_string())?;
     let mut live: HashMap<String, (String, String, i64)> = HashMap::new(); // rel -> id, hash, size
     {
         let mut st = conn
@@ -97,21 +127,62 @@ pub fn scan(conn: &Connection, root: &Path) -> Result<Drift, String> {
     }
     let mut d = Drift::default();
     let mut seen: Vec<String> = Vec::new();
+    let mut todo: Vec<Listed> = Vec::new();
     for (folder, client_id) in &folders {
         let mut paths = Vec::new();
-        rebuild::files_under(folder, &mut paths).map_err(|e| e.to_string())?;
+        let mut bad = Vec::new();
+        rebuild::files_under_lenient(folder, &mut paths, &mut bad);
+        d.unreadable.extend(bad);
         for p in paths {
             let rel = rebuild::rel(root, &p);
-            let hash = match sha256_file(&p) {
-                Ok(h) => h,
-                Err(e) => {
-                    d.unreadable.push(format!("{rel}: {e}"));
-                    seen.push(rel);
-                    continue;
-                }
-            };
-            d.checked += 1;
-            let size = std::fs::metadata(&p).map(|m| m.len()).unwrap_or(0);
+            todo.push((p.clone(), rel, client_id.clone(), rebuild::stat(&p)));
+        }
+    }
+    // Which to read whole: changed size or time, no time recorded yet, or this week's slice.
+    let read_whole: Vec<bool> = todo
+        .iter()
+        .map(|(_, rel, _, st)| match (known.get(rel), st) {
+            (Some((_, size, Some(t))), Some((s, mt))) => {
+                *size as u64 != *s || t != mt || in_slice(rel, week)
+            }
+            _ => true,
+        })
+        .collect();
+    let to_read: Vec<PathBuf> = todo
+        .iter()
+        .zip(&read_whole)
+        .filter(|(_, r)| **r)
+        .map(|(t, _)| t.0.clone())
+        .collect();
+    let mut read = rebuild::read_all(&to_read).into_iter();
+    let mut times: Vec<(String, i64)> = Vec::new();
+    for ((p, rel, client_id, st), whole) in todo.into_iter().zip(read_whole) {
+        let got = if whole {
+            read.next().flatten().map(|(h, _)| h)
+        } else {
+            known.get(&rel).map(|k| k.0.clone())
+        };
+        let hash = match got {
+            Some(h) => h,
+            None => {
+                d.unreadable.push(format!("{rel}: cannot be read"));
+                seen.push(rel);
+                continue;
+            }
+        };
+        d.checked += 1;
+        let size = st.map_or_else(
+            || std::fs::metadata(&p).map(|m| m.len()).unwrap_or(0),
+            |s| s.0,
+        );
+        if let Some((_, t)) = st
+            && known
+                .get(&rel)
+                .is_some_and(|k| k.0 == hash && k.2 != Some(t))
+        {
+            times.push((rel.clone(), t));
+        }
+        {
             match live.get(&rel) {
                 Some((_, h, _)) if *h == hash => {}
                 Some((id, h, s)) => d.modified.push(Modified {
@@ -131,6 +202,19 @@ pub fn scan(conn: &Connection, root: &Path) -> Result<Drift, String> {
             }
             seen.push(rel);
         }
+    }
+    // Times of files read and found unchanged: the next sweep checks them by size and time.
+    if !times.is_empty() {
+        let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
+        {
+            let mut st = tx
+                .prepare("UPDATE document SET file_mtime = ?2 WHERE rel_path = ?1 AND deleted_at IS NULL")
+                .map_err(|e| e.to_string())?;
+            for (rel, t) in &times {
+                st.execute((rel, t)).map_err(|e| e.to_string())?;
+            }
+        }
+        tx.commit().map_err(|e| e.to_string())?;
     }
     let seen: std::collections::HashSet<String> = seen.into_iter().collect();
     let mut missing: Vec<Missing> = live
@@ -621,6 +705,31 @@ mod tests {
 
     fn count(c: &Connection, sql: &str) -> i64 {
         c.query_row(sql, [], |r| r.get(0)).unwrap()
+    }
+
+    /// PA-34: a file with the catalog's size and time is read whole only in its week of the
+    /// rotation; in other weeks it is taken as unchanged.
+    #[test]
+    fn files_are_read_whole_in_their_week() {
+        let (_t, root, conn) = fx();
+        let rel = "Anderson Farms LLC (ANDE1042)/Income Tax/2025/w2.pdf";
+        let p = root.join(rel);
+        let when = std::fs::metadata(&p).unwrap().modified().unwrap();
+        // Same size and time, other bytes (as a bit flip on disk would leave them).
+        std::fs::write(&p, "W2").unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&p)
+            .unwrap()
+            .set_modified(when)
+            .unwrap();
+        let mine = (0..SLICES).find(|w| in_slice(rel, *w)).unwrap();
+        let other = (0..SLICES).find(|w| !in_slice(rel, *w)).unwrap();
+        let quiet = scan_week(&conn, &root, other).unwrap();
+        assert!(quiet.modified.is_empty(), "not read this week");
+        assert_eq!(quiet.checked, 3);
+        let found = scan_week(&conn, &root, mine).unwrap();
+        assert_eq!(found.modified.len(), 1, "read whole in its week");
     }
 
     /// PHASES P05 done-when: a file edited in Explorer is detected by the sweep and adopted as

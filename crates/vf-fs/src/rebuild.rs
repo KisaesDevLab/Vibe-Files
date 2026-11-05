@@ -14,6 +14,9 @@ use vf_core::tx::{Actor, NoFileOps, Stmt, Transaction};
 
 use crate::cabinet::{self, VersionSidecar};
 
+/// Catalog statements per Transaction when a rebuild commits in parts (PA-34).
+const CHUNK: usize = 20_000;
+
 /// How far the running rebuild is (owner 2026-11-05: a first index of thousands of client
 /// folders showed only a spinner): client folders walked, files found, files read. One per
 /// process; the open-cabinet screen shows it.
@@ -35,7 +38,7 @@ type Read = (usize, Option<(String, u64)>);
 
 /// Reads (SHA-256 and size) every file of `todo` on up to 8 threads, in order; a file that
 /// cannot be read is `None`. Counts into [`PROGRESS`].
-fn read_all(todo: &[PathBuf]) -> Vec<Option<(String, u64)>> {
+pub(crate) fn read_all(todo: &[PathBuf]) -> Vec<Option<(String, u64)>> {
     use std::sync::atomic::Ordering;
     let threads = std::thread::available_parallelism()
         .map_or(4, |n| n.get())
@@ -223,6 +226,63 @@ struct Found {
     client_id: Option<String>,
     hash: String,
     size: u64,
+    /// Last-modified time (seconds since 1970).
+    mtime: Option<i64>,
+}
+
+/// A file's size and last-modified time (seconds since 1970).
+pub(crate) fn stat(p: &Path) -> Option<(u64, i64)> {
+    let m = std::fs::metadata(p).ok()?;
+    let t = m
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_secs() as i64;
+    Some((m.len(), t))
+}
+
+/// path → (hash, size, file_mtime) of the catalog's live documents.
+pub(crate) type Known = HashMap<String, (String, i64, Option<i64>)>;
+
+/// The catalog's live documents: path → (hash, size, file_mtime), for the size/time check.
+pub(crate) fn known_files(conn: &Connection) -> Result<Known, RebuildError> {
+    let mut st = conn.prepare(
+        "SELECT rel_path, hash, size, file_mtime FROM document WHERE deleted_at IS NULL",
+    )?;
+    let mut out = HashMap::new();
+    for r in st.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))? {
+        let (p, h, s, t): (String, String, i64, Option<i64>) = r?;
+        out.insert(p, (h, s, t));
+    }
+    Ok(out)
+}
+
+/// Like [`files_under`], but a folder that cannot be read is noted in `bad` and skipped, not
+/// fatal (one locked folder no longer stops a rebuild or sweep of a large cabinet, PA-34).
+pub(crate) fn files_under_lenient(dir: &Path, out: &mut Vec<PathBuf>, bad: &mut Vec<String>) {
+    let mut entries: Vec<_> = match std::fs::read_dir(dir) {
+        Ok(rd) => rd.filter_map(|e| e.ok()).collect(),
+        Err(e) => {
+            bad.push(format!("{}: {e}", dir.display()));
+            return;
+        }
+    };
+    entries.sort_by_key(|e| e.file_name());
+    for e in entries {
+        let name = e.file_name().to_string_lossy().into_owned();
+        let Ok(ft) = e.file_type() else { continue };
+        if ft.is_symlink() {
+            continue;
+        }
+        if ft.is_dir() {
+            if name != cabinet::VIBE_DIR {
+                files_under_lenient(&e.path(), out, bad);
+            }
+        } else if !name.starts_with("~vfd-partial-") {
+            out.push(e.path());
+        }
+    }
 }
 
 /// Cabinet-relative path with forward slashes (stable across Windows/UNC roots).
@@ -609,22 +669,48 @@ pub fn rebuild(
         c.store(0, Ordering::Relaxed);
     }
     let (bound, folders) = scan_folders(root, &mut rep)?;
+    // What the catalog knows: a file of the same size and time is not read again (PA-34).
+    let known = known_files(conn)?;
     // Every file first (the count shows while they are read), then read on several threads:
     // on a share most of the time is waiting for the network.
     let mut todo: Vec<(PathBuf, Option<String>)> = Vec::new();
     for (folder, client_id) in &folders {
         let mut paths = Vec::new();
-        files_under(folder, &mut paths)?;
+        let mut bad = Vec::new();
+        files_under_lenient(folder, &mut paths, &mut bad);
+        rep.unreadable.extend(bad);
         todo.extend(paths.into_iter().map(|p| (p, client_id.clone())));
         PROGRESS.folders.fetch_add(1, Ordering::Relaxed);
         PROGRESS.found.store(todo.len(), Ordering::Relaxed);
     }
-    let paths: Vec<PathBuf> = todo.iter().map(|(p, _)| p.clone()).collect();
+    let stats: Vec<Option<(u64, i64)>> = todo.iter().map(|(p, _)| stat(p)).collect();
+    let mut reuse: Vec<Option<String>> = Vec::with_capacity(todo.len());
+    let mut to_read: Vec<PathBuf> = Vec::new();
+    for ((p, _), st) in todo.iter().zip(&stats) {
+        let r = rel(root, p);
+        let same = match (known.get(&r), st) {
+            (Some((h, size, Some(t))), Some((s, mt))) if *size as u64 == *s && t == mt => {
+                Some(h.clone())
+            }
+            _ => None,
+        };
+        if same.is_none() {
+            to_read.push(p.clone());
+        } else {
+            PROGRESS.read.fetch_add(1, Ordering::Relaxed);
+        }
+        reuse.push(same);
+    }
+    let mut read = read_all(&to_read).into_iter();
     let mut found: Vec<Found> = Vec::new();
-    for ((p, client_id), r) in todo.into_iter().zip(read_all(&paths)) {
+    for (((p, client_id), st), same) in todo.into_iter().zip(stats).zip(reuse) {
+        let got = match same {
+            Some(h) => Some((h, st.map_or(0, |s| s.0))),
+            None => read.next().flatten(),
+        };
         // One file that cannot be read (open in QuickBooks, a denied ACL) does not stop the
         // rebuild: it is listed and left as the catalog has it.
-        let Some((hash, size)) = r else {
+        let Some((hash, size)) = got else {
             rep.unreadable.push(rel(root, &p));
             continue;
         };
@@ -633,6 +719,7 @@ pub fn rebuild(
             client_id,
             hash,
             size,
+            mtime: st.map(|s| s.1),
         });
     }
 
@@ -893,8 +980,29 @@ pub fn rebuild(
     }
     let before_versions: i64 = conn.query_row("SELECT count(*) FROM version", [], |r| r.get(0))?;
 
+    // Each file's time as read, for the next size/time check.
+    for f in &found {
+        let had = known.get(&f.rel).and_then(|k| k.2);
+        if f.mtime.is_some() && had != f.mtime {
+            stmts.push(Stmt::new(
+                "UPDATE document SET file_mtime = ?2 WHERE rel_path = ?1 AND deleted_at IS NULL",
+                vec![f.rel.clone().into(), f.mtime.into()],
+            ));
+        }
+    }
     let changed =
         rep.docs_new + rep.docs_changed + rep.docs_moved + rep.docs_rebound + rep.docs_tombstoned;
+    // Committed in parts: one Transaction for ~900K documents held the write lock for minutes
+    // (PA-34); a rebuild is idempotent, so a part cut short is finished by the next one.
+    let actor = Actor::device(device_id);
+    while stmts.len() > CHUNK {
+        let rest = stmts.split_off(CHUNK);
+        let mut part = Transaction::new("rebuild");
+        for s in std::mem::replace(&mut stmts, rest) {
+            part = part.catalog(s);
+        }
+        part.commit(conn, &mut NoFileOps, &actor)?;
+    }
     let mut tx = Transaction::new("rebuild").audit(AuditEntry::new(
         "rebuild",
         None,
@@ -908,7 +1016,6 @@ pub fn rebuild(
     for s in stmts {
         tx = tx.catalog(s);
     }
-    let actor = Actor::device(device_id);
     tx.commit(conn, &mut NoFileOps, &actor)?;
     let after_versions: i64 = conn.query_row("SELECT count(*) FROM version", [], |r| r.get(0))?;
     rep.versions_new = (after_versions - before_versions).max(0) as usize;
@@ -986,6 +1093,51 @@ mod tests {
 
     fn open(c: &Cab) -> Connection {
         vf_core::db::open(&c.data.join("catalog.db"), Storage::Local).unwrap()
+    }
+
+    /// PA-34: a file of the same size and time is not read again; a new time is.
+    #[test]
+    fn unchanged_files_are_not_read_again() {
+        let c = cab();
+        let mut conn = open(&c);
+        rebuild(&mut conn, &c.root, "dev").unwrap();
+        let w2 = c.root.join("Smith, John (1001)/Income Tax/2025/w2.pdf");
+        let when = std::fs::metadata(&w2).unwrap().modified().unwrap();
+        let hash_of = |conn: &Connection| -> String {
+            conn.query_row(
+                "SELECT hash FROM document WHERE rel_path LIKE '%2025/w2.pdf'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        let before = hash_of(&conn);
+        assert!(
+            n(
+                &conn,
+                "SELECT count(*) FROM document WHERE file_mtime IS NULL"
+            ) == 0
+        );
+        // Same size and time, other bytes: taken as unchanged (not read).
+        std::fs::write(&w2, "W2 2025").unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&w2)
+            .unwrap()
+            .set_modified(when)
+            .unwrap();
+        rebuild(&mut conn, &c.root, "dev").unwrap();
+        assert_eq!(hash_of(&conn), before, "not read again");
+        // A new time: read, and the change found.
+        std::fs::File::options()
+            .write(true)
+            .open(&w2)
+            .unwrap()
+            .set_modified(when + std::time::Duration::from_secs(60))
+            .unwrap();
+        let rep = rebuild(&mut conn, &c.root, "dev").unwrap();
+        assert_ne!(hash_of(&conn), before);
+        assert_eq!(rep.docs_changed, 1);
     }
 
     fn n(conn: &Connection, sql: &str) -> i64 {

@@ -25,6 +25,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/010_disposition_hash.sql"),
     include_str!("../migrations/011_doc_type_archived.sql"),
     include_str!("../migrations/012_client_partner.sql"),
+    include_str!("../migrations/013_file_mtime.sql"),
 ];
 
 /// Schema version this build writes.

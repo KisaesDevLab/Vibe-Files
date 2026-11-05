@@ -182,7 +182,11 @@ impl Stmt {
 
     fn run(&self, conn: &Connection) -> Result<usize> {
         let vals: Vec<rusqlite::types::Value> = self.params.iter().map(to_sql).collect();
-        Ok(conn.execute(&self.sql, rusqlite::params_from_iter(vals))?)
+        // Prepared once per connection and reused: a rebuild runs the same few statements
+        // hundreds of thousands of times (PA-34).
+        Ok(conn
+            .prepare_cached(&self.sql)?
+            .execute(rusqlite::params_from_iter(vals))?)
     }
 }
 
