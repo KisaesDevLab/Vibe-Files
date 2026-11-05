@@ -53,7 +53,7 @@ On a Remote Desktop server where several people use one cabinet, each login woul
 
 ## Several Remote Desktop servers
 
-When Vibe Files runs from a network folder (for example `\\server\share\APPS\Vibe Files`) and people log into several servers, each server works like this:
+When Vibe Files runs from a network folder (for example `\\server\share\APPS\Vibe Files`) on Remote Desktop servers (Windows Server), and people log into several of them, each server works like this. Office PCs that run Vibe Files from the same folder keep working as before.
 
 - **Your settings stay on the server you are on**, in `%LOCALAPPDATA%\Vibe Files\data`. Nothing is kept in the network folder. The first time, the settings from the old data folder beside the program are copied over for its owner.
 - **Each server keeps one catalog for everyone who logs into it.** The first server indexes the cabinet once and leaves a copy in the cabinet's `_Vibe\catalog-seed` folder (refreshed weekly). The other servers start from that copy and then only check file sizes and dates, so they don't index everything again.

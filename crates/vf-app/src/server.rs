@@ -38,15 +38,44 @@ pub fn is_network(p: &Path) -> bool {
     false
 }
 
-/// Server mode: Vibe Files runs from a network path. `VIBE_FILES_SERVER=1` or `0` decides
-/// instead (for trying it out, and tests).
+/// Server mode: a Remote Desktop server (Windows Server) running Vibe Files from a network
+/// path. An office PC running it from the same folder keeps its usual data folder and
+/// catalog (owner 2026-11-05). `VIBE_FILES_SERVER=1` or `0` decides instead.
 pub fn server_mode() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     *ON.get_or_init(|| match std::env::var("VIBE_FILES_SERVER").as_deref() {
         Ok("1") => true,
         Ok("0") => false,
-        _ => vf_core::exe_dir().is_some_and(|d| is_network(&d)),
+        _ => is_windows_server() && vf_core::exe_dir().is_some_and(|d| is_network(&d)),
     })
+}
+
+/// Whether this is Windows Server (where Remote Desktop session hosts run), from
+/// `HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\InstallationType`.
+pub fn is_windows_server() -> bool {
+    use windows::Win32::System::Registry::{HKEY_LOCAL_MACHINE, RRF_RT_REG_SZ, RegGetValueW};
+    use windows::core::HSTRING;
+    let key = HSTRING::from(r"SOFTWARE\Microsoft\Windows NT\CurrentVersion");
+    let name = HSTRING::from("InstallationType");
+    let mut buf = [0u16; 64];
+    let mut len = (buf.len() * 2) as u32;
+    // SAFETY: valid wide strings and a buffer of `len` bytes for the call's duration.
+    let ok = unsafe {
+        RegGetValueW(
+            HKEY_LOCAL_MACHINE,
+            &key,
+            &name,
+            RRF_RT_REG_SZ,
+            None,
+            Some(buf.as_mut_ptr().cast()),
+            Some(&mut len),
+        )
+    };
+    if ok.is_err() {
+        return false;
+    }
+    let n = (len as usize / 2).saturating_sub(1).min(buf.len());
+    String::from_utf16_lossy(&buf[..n]).eq_ignore_ascii_case("Server")
 }
 
 /// This computer's name.
@@ -415,6 +444,25 @@ mod tests {
     use vf_core::db::Storage;
 
     use super::*;
+
+    /// The registry read agrees with Windows' own `reg query` of InstallationType.
+    #[test]
+    fn server_detection_matches_windows() {
+        let out = std::process::Command::new("reg")
+            .args([
+                "query",
+                r"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion",
+                "/v",
+                "InstallationType",
+            ])
+            .output()
+            .unwrap();
+        let text = String::from_utf8_lossy(&out.stdout);
+        let server = text
+            .lines()
+            .any(|l| l.contains("InstallationType") && l.trim_end().ends_with("Server"));
+        assert_eq!(is_windows_server(), server, "{text}");
+    }
 
     #[test]
     fn network_paths_are_told_apart() {
