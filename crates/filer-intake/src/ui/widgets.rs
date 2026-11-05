@@ -24,6 +24,74 @@ pub fn show_in_explorer(path: &Path) {
     }
 }
 
+/// Inside an open menu: a "Type to search" box (the cursor in it when the menu opens) over a
+/// scrolled list of `items`. Every word typed must appear in an item (any case, any order);
+/// Enter picks the first match. Returns the item picked; the caller closes the menu.
+pub fn search_list(
+    ui: &mut egui::Ui,
+    key: egui::Id,
+    items: &[String],
+    current: Option<usize>,
+) -> Option<usize> {
+    let (q_id, seen_id) = (key.with("q"), key.with("seen"));
+    // A menu shown again after a frame shut starts empty, with the cursor in the box.
+    let pass = ui.ctx().cumulative_pass_nr();
+    let fresh = ui
+        .data(|d| d.get_temp::<u64>(seen_id))
+        .is_none_or(|seen| seen + 1 < pass);
+    ui.data_mut(|d| d.insert_temp(seen_id, pass));
+    let mut q: String = if fresh {
+        String::new()
+    } else {
+        ui.data(|d| d.get_temp(q_id)).unwrap_or_default()
+    };
+    let te = ui.add(
+        egui::TextEdit::singleline(&mut q)
+            .hint_text("Type to search")
+            .desired_width(f32::INFINITY),
+    );
+    te.widget_info(|| egui::WidgetInfo::labeled(egui::Role::TextInput, true, "Type to search"));
+    if fresh {
+        te.request_focus();
+    }
+    let words: Vec<String> = q
+        .to_lowercase()
+        .split_whitespace()
+        .map(String::from)
+        .collect();
+    ui.data_mut(|d| d.insert_temp(q_id, q));
+    let hits: Vec<usize> = (0..items.len())
+        .filter(|&i| {
+            let l = items[i].to_lowercase();
+            words.iter().all(|w| l.contains(w.as_str()))
+        })
+        .collect();
+    let mut pick = None;
+    if te.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+        pick = hits.first().copied();
+    }
+    if !words.is_empty() {
+        ui.label(
+            egui::RichText::new(format!("{} of {}", hits.len(), items.len()))
+                .small()
+                .weak(),
+        );
+    }
+    let row_h = ui.spacing().interact_size.y;
+    egui::ScrollArea::vertical()
+        .id_salt(key.with("list"))
+        .max_height(360.0)
+        .auto_shrink([false, true])
+        .show_rows(ui, row_h, hits.len(), |ui, range| {
+            for &i in &hits[range] {
+                if ui.selectable_label(current == Some(i), &items[i]).clicked() {
+                    pick = Some(i);
+                }
+            }
+        });
+    pick
+}
+
 pub enum PickerOutcome {
     Open,
     Cancel,

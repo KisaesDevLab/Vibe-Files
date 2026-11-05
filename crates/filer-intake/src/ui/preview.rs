@@ -1012,6 +1012,62 @@ impl PreviewScreen {
         self.edit(file).client_id = Some(client_id.to_string());
     }
 
+    /// Rows whose file name no rule names (the rule came from the page text or the catch-all,
+    /// and none was chosen on the row): what a host may read the file for (Vibe Files' form
+    /// reading).
+    // Used by a host that embeds Filer (Vibe Files), not by this program.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn unnamed_files(&self) -> Vec<PathBuf> {
+        self.proposals
+            .iter()
+            .filter(|p| matches!(p.rule_source, RuleSource::PageText | RuleSource::CatchAll))
+            .filter(|p| {
+                !self
+                    .edits
+                    .get(&p.file.path)
+                    .is_some_and(|e| e.rule_id.is_some())
+            })
+            .map(|p| p.file.path.clone())
+            .collect()
+    }
+
+    /// What a host read from `file`: the client when the row has none, the year when it has
+    /// none. Nothing a person chose on the row is changed.
+    // Used by a host that embeds Filer (Vibe Files), not by this program.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn suggest(&mut self, file: &Path, client_id: Option<&str>, year: Option<u16>) {
+        let Some(p) = self.proposals.iter().find(|p| p.file.path == file) else {
+            return;
+        };
+        let (has_client, has_year) = (p.client.is_some(), p.year.is_some());
+        let e = self.edit(file);
+        if let Some(c) = client_id
+            && !has_client
+            && e.client_id.is_none()
+        {
+            e.client_id = Some(c.to_string());
+        }
+        if let Some(y) = year
+            && !has_year
+            && e.year.is_none()
+        {
+            e.year = Some(y);
+        }
+    }
+
+    /// Files the host took out of the inbox: no longer ticked, focused or edited.
+    // Used by a host that embeds Filer (Vibe Files), not by this program.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn forget(&mut self, files: &[PathBuf]) {
+        self.selected.retain(|s| !files.contains(s));
+        for f in files {
+            self.edits.remove(f);
+        }
+        if self.focused.as_ref().is_some_and(|f| files.contains(f)) {
+            self.focused = None;
+        }
+    }
+
     /// The pane's row: the one last clicked while it is in the batch, else the first row.
     fn keep_focus(&mut self) {
         let listed = |f: &PathBuf| self.proposals.iter().any(|p| &p.file.path == f);
@@ -1021,7 +1077,7 @@ impl PreviewScreen {
     }
 
     /// With rows ticked: one client or one rule for all of them (owner 2026-11-04).
-    fn ticked_ui(&mut self, ui: &mut egui::Ui, state: &AppState, filing: bool) {
+    fn ticked_ui(&mut self, ui: &mut egui::Ui, state: &mut AppState, filing: bool) {
         let ticked: Vec<PathBuf> = self
             .selected
             .iter()
@@ -1056,25 +1112,30 @@ impl PreviewScreen {
                     .iter()
                     .map(|r| (r.id.clone(), r.name.clone()))
                     .collect();
+                let names: Vec<String> = rules.iter().map(|(_, n)| n.clone()).collect();
                 let menu = ui.menu_button("Apply rule…", |ui| {
-                    egui::ScrollArea::vertical()
-                        .max_height(360.0)
-                        .show(ui, |ui| {
-                            for (id, name) in &rules {
-                                if ui.button(name).clicked() {
-                                    for t in &ticked {
-                                        self.edit(t).rule_id = Some(id.clone());
-                                    }
-                                    ui.close();
-                                }
-                            }
-                        });
+                    ui.set_min_width(280.0);
+                    let key = ui.make_persistent_id("ticked_rule_search");
+                    if let Some(k) = crate::ui::widgets::search_list(ui, key, &names, None) {
+                        for t in &ticked {
+                            self.edit(t).rule_id = Some(rules[k].0.clone());
+                        }
+                        ui.close();
+                    }
                 });
                 let r = menu.response;
                 r.widget_info(|| {
                     egui::WidgetInfo::labeled(egui::Role::Button, true, "Apply rule to ticked")
                 });
                 r.on_hover_text("File every ticked file by this rule (its folder and name)");
+                if state.host_trash
+                    && ui
+                        .button("Move to trash")
+                        .on_hover_text("Take every ticked file out of the inbox into the trash")
+                        .clicked()
+                {
+                    state.trash_request = Some(ticked.clone());
+                }
                 if ui.button("Untick all").clicked() {
                     self.selected.clear();
                 }
@@ -1785,6 +1846,8 @@ impl PreviewScreen {
                     page_counts: &self.page_counts,
                     renaming: self.renaming.as_ref(),
                     host_new_client: state.host_new_client,
+                    host_trash: state.host_trash,
+                    host_notes: &state.host_notes,
                 };
                 for (i, pr) in self.proposals.iter().enumerate() {
                     let edits = self.edits.get(&pr.file.path);
@@ -1911,6 +1974,7 @@ impl PreviewScreen {
                     }
                 }
                 RowAction::RemoveRouted(path) => state.intake.remove_routed(&path),
+                RowAction::Trash(path) => state.trash_request = Some(vec![path]),
                 RowAction::AddRelationship(parent, query) => {
                     state.relationship_prefill = Some((parent, query));
                     state.goto = Some(crate::app::Tab::Relationships);
@@ -2617,6 +2681,10 @@ struct RowCtx<'a> {
     renaming: Option<&'a Renaming>,
     /// The host can create clients ("New client…").
     host_new_client: bool,
+    /// The host takes files out to its trash ("Move to trash").
+    host_trash: bool,
+    /// What the host read from a file, shown on its row.
+    host_notes: &'a HashMap<PathBuf, String>,
 }
 
 /// The file name being edited in a row's Destination cell (V5).
@@ -2664,6 +2732,8 @@ enum RowAction {
     AddRelationship(String, String),
     /// A zip-routed file leaves the queue without being filed (P07b).
     RemoveRouted(PathBuf),
+    /// The host takes the file out of the inbox into its trash.
+    Trash(PathBuf),
     /// Start editing the file name (V5).
     StartRename(PathBuf),
     RenameText(String),
@@ -2846,6 +2916,15 @@ fn row_ui(
                 actions.push(RowAction::PickClient(path.clone(), p.parsed.name.clone()));
                 ui.close();
             }
+            if ctx.host_trash
+                && group.is_none()
+                && split.is_none()
+                && !matches!(p.file.source, Source::Zip { .. })
+                && ui.button("Move to trash").clicked()
+            {
+                actions.push(RowAction::Trash(path.clone()));
+                ui.close();
+            }
             if p.client.is_some() {
                 ui.separator();
                 if p.dest.is_some() && ui.button("Rename…").clicked() {
@@ -2964,14 +3043,16 @@ fn row_ui(
             ui.visuals_mut().widgets.inactive.bg_stroke = Stroke::NONE;
             ui.visuals_mut().widgets.inactive.weak_bg_fill = egui::Color32::TRANSPARENT;
             let resp = ui.menu_button(p.rule_name.clone(), |ui| {
-                for (id, name) in ctx.rules {
-                    if ui
-                        .selectable_label(p.rule_id.as_deref() == Some(id.as_str()), name)
-                        .clicked()
-                    {
-                        actions.push(RowAction::SetRule(path.clone(), id.clone()));
-                        ui.close();
-                    }
+                ui.set_min_width(280.0);
+                let names: Vec<String> = ctx.rules.iter().map(|(_, n)| n.clone()).collect();
+                let current = ctx
+                    .rules
+                    .iter()
+                    .position(|(id, _)| p.rule_id.as_deref() == Some(id.as_str()));
+                let key = ui.make_persistent_id(("rule_search", i));
+                if let Some(k) = crate::ui::widgets::search_list(ui, key, &names, current) {
+                    actions.push(RowAction::SetRule(path.clone(), ctx.rules[k].0.clone()));
+                    ui.close();
                 }
             });
             resp.response
@@ -2980,6 +3061,9 @@ fn row_ui(
                 pill(ui, PillKind::Neutral, "sniffed").on_hover_text(
                     "No rule matched the file name, so this rule was picked from the first page's text.",
                 );
+            }
+            if let Some(note) = ctx.host_notes.get(path) {
+                pill(ui, PillKind::Neutral, "read").on_hover_text(note.as_str());
             }
         });
     });

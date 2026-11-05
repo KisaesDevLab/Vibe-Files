@@ -136,6 +136,13 @@ pub struct AppState {
     pub host_new_client: bool,
     /// The row a "New client…" was pressed on, for the host to take.
     pub new_client_request: Option<NewClientRequest>,
+    /// A host with its own trash (Vibe Files): rows offer "Move to trash", which hands the host
+    /// the files ([`FilerApp::take_trash_request`]). Off on its own: Filer never deletes a file.
+    pub host_trash: bool,
+    /// Files whose "Move to trash" was pressed, for the host to take.
+    pub trash_request: Option<Vec<PathBuf>>,
+    /// What the host read from a file (Vibe Files' form reading), shown on its row.
+    pub host_notes: std::collections::HashMap<PathBuf, String>,
 }
 
 /// "New client…" pressed on a row (host only, [`AppState::host_new_client`]): the file, and
@@ -211,6 +218,9 @@ impl AppState {
             setup_locked: None,
             host_new_client: false,
             new_client_request: None,
+            host_trash: false,
+            trash_request: None,
+            host_notes: Default::default(),
         }
     }
 
@@ -453,6 +463,58 @@ impl FilerApp {
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn offer_new_client(&mut self, on: bool) {
         self.shared.host_new_client = on;
+    }
+
+    /// Lets rows (and ticked rows) offer "Move to trash" (see [`Self::take_trash_request`]).
+    // Used by a host that embeds Filer (Vibe Files), not by this program.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn offer_trash(&mut self, on: bool) {
+        self.shared.host_trash = on;
+    }
+
+    /// The files whose "Move to trash" was pressed, once. The host moves them out of the inbox,
+    /// then calls [`Self::files_taken`].
+    // Used by a host that embeds Filer (Vibe Files), not by this program.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn take_trash_request(&mut self) -> Option<Vec<PathBuf>> {
+        self.shared.trash_request.take()
+    }
+
+    /// The host took `files` out of the inbox: they leave the queue and their rows forget them.
+    // Used by a host that embeds Filer (Vibe Files), not by this program.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn files_taken(&mut self, files: &[PathBuf]) {
+        self.preview.forget(files);
+        for f in files {
+            self.shared.host_notes.remove(f);
+            self.shared.intake.remove(f);
+        }
+    }
+
+    /// Rows whose file name no rule names, for a host to read (Vibe Files' form reading).
+    // Used by a host that embeds Filer (Vibe Files), not by this program.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn unnamed_files(&self) -> Vec<PathBuf> {
+        self.preview.unnamed_files()
+    }
+
+    /// What the host read from `file`: the client and year when its row has none (nothing a
+    /// person chose is changed), and a note shown on the row.
+    // Used by a host that embeds Filer (Vibe Files), not by this program.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn suggest(
+        &mut self,
+        file: &std::path::Path,
+        client_id: Option<&str>,
+        year: Option<u16>,
+        note: &str,
+    ) {
+        self.preview.suggest(file, client_id, year);
+        if !note.is_empty() {
+            self.shared
+                .host_notes
+                .insert(file.to_path_buf(), note.to_string());
+        }
     }
 
     /// The row whose "New client…" was pressed, once.
@@ -2676,6 +2738,124 @@ mod combine_ui_tests {
                     .and_then(|p| p.client.as_ref())
                     .is_some_and(|c| c.id == "2002")
         });
+    }
+
+    /// Host hooks (owner 2026-11-05): "Move to trash" hands the host the files and they leave
+    /// the queue once taken; rows no rule names by file name are listed for the host to read,
+    /// and what it read fills only what the row lacks; long rule menus have a search box.
+    #[test]
+    fn host_trash_reading_and_rule_search() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data = tmp.path().join("data");
+        let root = tmp.path().join("root");
+        let inbox = tmp.path().join("inbox");
+        for d in [&data, &root, &inbox] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let csv = tmp.path().join("clients.csv");
+        std::fs::write(
+            &csv,
+            "id,name
+1001,\"Smith, John\"
+",
+        )
+        .unwrap();
+        let scan = inbox.join("scan0001.pdf");
+        let named = inbox.join("Smith, John_1001_2025 Organizer.pdf");
+        crate::pdf::write_test_pdf(&scan, &["x"]);
+        crate::pdf::write_test_pdf(&named, &["x"]);
+        let settings = Settings {
+            root: Some(root.clone()),
+            inboxes: vec![inbox.clone()],
+            csv_path: Some(csv.clone()),
+            column_map: ColumnMap {
+                id: Some("id".into()),
+                name: Some("name".into()),
+                extras: vec![],
+            },
+            ..Settings::default()
+        };
+        let d = data.clone();
+        let mut h = HarnessBuilder::default()
+            .with_theme(egui::Theme::Light)
+            .with_size([1600.0, 1000.0])
+            .build_eframe(move |cc| {
+                crate::rules::seed_tax(&d);
+                let mut app = FilerApp::new(&cc.egui_ctx, AppState::load(d, settings, true, None));
+                app.offer_trash(true);
+                app
+            });
+        settle(&mut h, "queue", |a| {
+            a.shared.intake.queue().len() == 2 && a.shared.clients.list().is_some()
+        });
+        h.get_by_label("Preview").click();
+        settle(&mut h, "plan", |a| plan_ready(a, 2));
+        h.step();
+
+        // Only the file whose name no rule names is offered for reading.
+        assert_eq!(h.state().unnamed_files(), vec![scan.clone()]);
+        // What the host read fills the client and year; a note shows on the row.
+        h.state_mut().suggest(
+            &scan,
+            Some("1001"),
+            Some(2024),
+            "W-2 2024 read from the form",
+        );
+        settle(&mut h, "suggested", |a| {
+            a.preview.plan_idle()
+                && a.preview.proposals().iter().any(|p| {
+                    p.file.path == scan
+                        && p.client.as_ref().is_some_and(|c| c.id == "1001")
+                        && p.year == Some(2024)
+                })
+        });
+        assert!(h.query_by_label("read").is_some());
+        // A row already named keeps what it has.
+        h.state_mut().suggest(&named, None, Some(2019), "");
+        settle(&mut h, "kept", |a| a.preview.plan_idle());
+        assert!(
+            h.state()
+                .preview
+                .proposals()
+                .iter()
+                .any(|p| p.file.path == named && p.year == Some(2025))
+        );
+
+        // The rule menu searches.
+        let rule = h
+            .state()
+            .preview
+            .proposals()
+            .iter()
+            .find(|p| p.file.path == named)
+            .unwrap()
+            .rule_name
+            .clone();
+        h.get_all_by_label(&rule).next().unwrap().click();
+        h.step();
+        h.step();
+        assert!(h.query_by_label("Type to search").is_some(), "searchable");
+        h.get_by_label("Type to search")
+            .type_text("zzzz-no-such-rule");
+        h.step();
+        h.step();
+        assert!(h.query_by_label_contains("0 of").is_some());
+        h.key_press(egui::Key::Escape);
+        h.step();
+        h.step();
+
+        // Right-click › Move to trash hands the host the file; taken, it leaves the queue.
+        h.get_by_label("scan0001.pdf").click_secondary();
+        h.step();
+        h.step();
+        h.get_by_label("Move to trash").click();
+        h.step();
+        let asked = h.state_mut().take_trash_request().expect("asked");
+        assert_eq!(asked, vec![scan.clone()]);
+        std::fs::rename(&scan, tmp.path().join("trashed.pdf")).unwrap();
+        h.state_mut().files_taken(&asked);
+        settle(&mut h, "taken", |a| a.shared.intake.queue().len() == 1);
+        assert!(h.state().shared.host_notes.is_empty());
     }
 
     /// The side pane shows the row last clicked; ticked rows get one client and one rule at once

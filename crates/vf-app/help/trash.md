@@ -16,6 +16,8 @@ The files move to the cabinet's `_Vibe\trash` folder; nothing is deleted yet. **
 
 Each goes back to where it was. If another file now has that name, the restored one gets a ` (2)` after its name.
 
+A file moved to the trash from Intake (right-click › **Move to trash**) is listed with where it was in the inbox. **Restore** puts it back in the inbox, where Intake picks it up again.
+
 ## Emptying the trash
 
 Documents are emptied on their own once they have been in the trash for 90 days. This happens when the cabinet is opened.

@@ -117,6 +117,68 @@ pub fn delete_as(
     Ok(crate::fileops::commit(conn, root, tx, device_id)?.tx_id)
 }
 
+/// Why an Intake file is in the trash (its row's `tombstone_reason`).
+pub const FROM_INTAKE: &str = "removed from Intake";
+
+/// Moves files out of Intake's inbox into the cabinet trash (owner 2026-11-05, Q-61), as one
+/// Transaction. Each gets a document row that is in the trash from the start (never live, never
+/// synced) whose path is where it was in the inbox, so **Restore** puts it back there for
+/// Intake. `inbox_dirs`: the folders the files may be taken from. Returns the Transaction id.
+pub fn delete_inbox_files(
+    conn: &mut Connection,
+    root: &Path,
+    device_id: &str,
+    files: &[PathBuf],
+    inbox_dirs: &[PathBuf],
+) -> Result<String, String> {
+    if files.is_empty() {
+        return Err("nothing selected".into());
+    }
+    let now = vf_core::now_rfc3339();
+    let mut tx = Transaction::new(DELETE_LABEL);
+    for f in files {
+        if !f.is_file() {
+            return Err(format!("{} is not in the inbox any more", f.display()));
+        }
+        let id = vf_core::new_id();
+        let at = f.to_string_lossy().into_owned();
+        let size = std::fs::metadata(f).map(|m| m.len() as i64).unwrap_or(0);
+        let hash = filer_intake::commit::sha256_file(f)
+            .map_err(|e| format!("cannot read {}: {e}", f.display()))?;
+        tx = tx
+            .file(FileOp::Move {
+                src: f.clone(),
+                dst: trash_file(root, &id, &at),
+            })
+            .catalog(Stmt::new(
+                "INSERT INTO document (id, client_id, rel_path, hash, size, status, source,
+                   filed_by, filed_at, device_id, updated_at, deleted_at, tombstone_reason)
+                 VALUES (?1, NULL, ?2, ?3, ?4, 'received', 'client', 'intake', ?5, ?6, ?5, ?5, ?7)",
+                vec![
+                    id.clone().into(),
+                    at.clone().into(),
+                    hash.into(),
+                    size.into(),
+                    now.clone().into(),
+                    device_id.into(),
+                    FROM_INTAKE.into(),
+                ],
+            ))
+            .catalog_undo(Stmt::new(
+                "DELETE FROM document WHERE id = ?1",
+                vec![id.clone().into()],
+            ))
+            .audit(AuditEntry::new(
+                "trash",
+                Some(&id),
+                json!({ "from": "intake", "reason": FROM_INTAKE }),
+            ));
+    }
+    let mut allowed: Vec<&Path> = vec![root];
+    allowed.extend(inbox_dirs.iter().map(PathBuf::as_path));
+    Ok(crate::fileops::commit_in(conn, &allowed, tx, device_id)?.tx_id)
+}
+
 /// Whether a legal hold that is not released covers `doc_id` (the document or its client).
 pub fn held(conn: &Connection, doc_id: &str) -> bool {
     conn.query_row(
@@ -196,7 +258,43 @@ pub fn restore(
     let mut tx = Transaction::new(RESTORE_LABEL);
     let mut placed = Vec::new();
     let mut taken: Vec<PathBuf> = Vec::new();
+    let mut allowed_extra: Vec<PathBuf> = vec![];
     for t in items {
+        // From Intake: back to its inbox, where Intake files it (its row stays in the trash's
+        // history, never live).
+        if Path::new(&t.rel_path).is_absolute() {
+            let mut dst = PathBuf::from(&t.rel_path);
+            if dst.exists() || taken.contains(&dst) {
+                dst = filer_intake::commit::free_path(&dst);
+            }
+            taken.push(dst.clone());
+            if let Some(dir) = dst.parent() {
+                std::fs::create_dir_all(dir)
+                    .map_err(|e| format!("cannot open {}: {e}", dir.display()))?;
+                allowed_extra.push(dir.to_path_buf());
+            }
+            tx = tx
+                .file(FileOp::Move {
+                    src: t.file.clone(),
+                    dst: dst.clone(),
+                })
+                .catalog(Stmt::new(
+                    "UPDATE document SET tombstone_reason = 'returned to Intake', rev = rev + 1,
+                     updated_at = ?2 WHERE id = ?1",
+                    vec![t.doc_id.clone().into(), now.clone().into()],
+                ))
+                .catalog_undo(Stmt::new(
+                    "UPDATE document SET tombstone_reason = ?2, rev = rev + 1 WHERE id = ?1",
+                    vec![t.doc_id.clone().into(), t.reason.clone().into()],
+                ))
+                .audit(AuditEntry::new(
+                    "trash_restore",
+                    Some(&t.doc_id),
+                    json!({ "to": "intake" }),
+                ));
+            placed.push(dst.to_string_lossy().into_owned());
+            continue;
+        }
         let mut dst = root.join(&t.rel_path);
         // Free on disk, in the catalog, and among the ones restored together.
         let live = |c: &Connection, p: &Path| -> bool {
@@ -264,7 +362,9 @@ pub fn restore(
             ));
         placed.push(rel);
     }
-    crate::fileops::commit(conn, root, tx, device_id)?;
+    let mut allowed: Vec<&Path> = vec![root];
+    allowed.extend(allowed_extra.iter().map(PathBuf::as_path));
+    crate::fileops::commit_in(conn, &allowed, tx, device_id)?;
     Ok(placed)
 }
 
@@ -506,6 +606,59 @@ mod tests {
             .unwrap();
         }
         (t, root, conn)
+    }
+
+    /// Q-61: a file taken out of Intake's inbox is in the trash (never live), Undo puts it back
+    /// in the inbox, and Restore returns it there too.
+    #[test]
+    fn intake_files_go_to_the_trash_and_back_to_the_inbox() {
+        let (t, root, mut conn) = fx();
+        let inbox = t.path().join("inbox");
+        std::fs::create_dir_all(&inbox).unwrap();
+        let f = inbox.join("scan0001.pdf");
+        std::fs::write(&f, b"invented").unwrap();
+        let tx =
+            delete_inbox_files(&mut conn, &root, "dev", &[f.clone()], &[inbox.clone()]).unwrap();
+        assert!(!f.exists());
+        let listed = list(&conn, &root).unwrap();
+        let it = listed
+            .iter()
+            .find(|x| x.rel_path.ends_with("scan0001.pdf"))
+            .unwrap();
+        assert_eq!(it.reason.as_deref(), Some(FROM_INTAKE));
+        let live: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM document WHERE deleted_at IS NULL AND rel_path LIKE '%scan0001%'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(live, 0, "never a live document");
+        // Undo: back in the inbox, no row left.
+        crate::fileops::undo(&mut conn, &root, &tx, "dev").unwrap();
+        assert!(f.is_file());
+        assert!(
+            list(&conn, &root)
+                .unwrap()
+                .iter()
+                .all(|x| !x.rel_path.ends_with("scan0001.pdf"))
+        );
+        // Again, then Restore from the trash: back to the inbox.
+        delete_inbox_files(&mut conn, &root, "dev", &[f.clone()], &[inbox.clone()]).unwrap();
+        let it = list(&conn, &root)
+            .unwrap()
+            .into_iter()
+            .find(|x| x.rel_path.ends_with("scan0001.pdf"))
+            .unwrap();
+        let placed = restore(&mut conn, &root, "dev", &[it]).unwrap();
+        assert_eq!(placed, [f.to_string_lossy().into_owned()]);
+        assert!(f.is_file());
+        assert!(
+            list(&conn, &root)
+                .unwrap()
+                .iter()
+                .all(|x| !x.rel_path.ends_with("scan0001.pdf"))
+        );
     }
 
     #[test]

@@ -142,6 +142,47 @@ fn label_for(runs: &[([f32; 4], String)], [l, b, r, t]: [f32; 4]) -> Option<Stri
         .map(|(_, s)| s.clone())
 }
 
+/// What the form reading found in a file waiting in Intake's inbox (Q-61): for Intake's row,
+/// the client (its list ID, only when sure) and year, and the note; the doc type, year and
+/// reading are kept as a hint for when the file is filed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InboxReading {
+    pub client_ext_id: Option<String>,
+    pub year: Option<u16>,
+    pub note: String,
+}
+
+/// Reads a file in Intake's inbox whose name no rule names; records the hint (by the file's
+/// SHA-256) so filing it sets the doc type, year and reading. `None`: not a form read here.
+pub fn read_inbox_file(
+    pdfium: &Pdfium,
+    root: &Path,
+    file: &Path,
+    ocr: Option<&dyn vf_ocr::OcrEngine>,
+    device_id: &str,
+) -> Option<InboxReading> {
+    let lookup = Lookup::load(root).ok()?;
+    let original = file.file_name()?.to_string_lossy().into_owned();
+    let read = form_read(pdfium, file, ocr)?;
+    let o = decide_read(root, &lookup, &read, &original)?;
+    let mut hint = o.hint;
+    hint.sha256 = filer_intake::commit::sha256_file(file).ok()?;
+    hint.name = original;
+    hint.device = device_id.into();
+    if hint.is_useful() {
+        vf_fs::hints::append(root, &hint).ok()?;
+    }
+    Some(InboxReading {
+        client_ext_id: o
+            .proposal
+            .confident()
+            .then(|| o.proposal.primary.as_ref().map(|m| m.ext_id.clone()))
+            .flatten(),
+        year: hint.tax_year.and_then(|y| u16::try_from(y).ok()),
+        note: o.note,
+    })
+}
+
 /// Page 1's text: its own text layer, else OCR (when an engine is given).
 pub fn page_one_text(
     pdfium: &Pdfium,

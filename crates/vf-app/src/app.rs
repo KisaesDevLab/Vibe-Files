@@ -1791,6 +1791,78 @@ mod tests {
         }
     }
 
+    /// Q-61 (owner 2026-11-05): a file in Intake's inbox whose name no rule names has its form
+    /// read (the row shows "read"; filing it will set the doc type and year); right-click ›
+    /// Move to trash takes a file into the cabinet trash, restorable to the inbox.
+    #[test]
+    fn intake_reads_unnamed_forms_and_trashes_a_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("Clients");
+        let inbox = tmp.path().join("Inbox");
+        std::fs::create_dir_all(&inbox).unwrap();
+        let req = CreateRequest {
+            root: &root,
+            name: "Firm",
+        };
+        drop(session::create(&tmp.path().join("pc1"), "dev-1", &req).unwrap());
+        let master = vf_fs::clients::master_dir(&root);
+        let (mut fs, _) = filer_intake::config::Settings::load_or_default(&master);
+        fs.inboxes = vec![inbox.clone()];
+        fs.save(&master).unwrap();
+        let form = inbox.join("scan0001.pdf");
+        let junk = inbox.join("junk.pdf");
+        filer_pdf::pdf::write_test_pdf(&form, &["Form W-2 Wage and Tax Statement 2025"]);
+        filer_pdf::pdf::write_test_pdf(&junk, &["nothing to see"]);
+        let mut h = harness(&tmp.path().join("pc1b"));
+        click(&mut h, "Open existing");
+        type_into(&mut h, "Cabinet folder", &root.display().to_string());
+        click(&mut h, "Open cabinet");
+        settle(&mut h);
+        h.state_mut().tab = Tab::Intake;
+        h.run_steps(10);
+        h.get_by_label("Preview").click();
+        let wait =
+            |h: &mut egui_kittest::Harness<'static, VibeFilesApp>,
+             what: &str,
+             ok: &dyn Fn(&egui_kittest::Harness<'static, VibeFilesApp>) -> bool| {
+                let start = std::time::Instant::now();
+                while !ok(h) {
+                    assert!(
+                        start.elapsed() < std::time::Duration::from_secs(30),
+                        "{what}"
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(30));
+                    h.step();
+                }
+            };
+        wait(&mut h, "the form read", &|h| {
+            h.query_by_label("read").is_some()
+        });
+        let sha = filer_intake::commit::sha256_file(&form).unwrap();
+        let hint = vf_fs::hints::load(&root)
+            .get(&sha)
+            .cloned()
+            .expect("hint kept");
+        assert_eq!(hint.tax_year, Some(2025));
+        assert!(hint.extract.is_some_and(|x| x.form == "w2"));
+
+        // Move to trash: out of the inbox, into the cabinet trash.
+        wait(&mut h, "junk listed", &|h| {
+            h.query_by_label("junk.pdf").is_some()
+        });
+        h.get_by_label("junk.pdf").click_secondary();
+        h.run_steps(3);
+        h.get_by_label("Move to trash").click();
+        h.run_steps(3);
+        wait(&mut h, "trashed", &|_| !junk.exists());
+        let Screen::Open(o) = &h.state().screen else {
+            unreachable!()
+        };
+        let listed = vf_fs::trash::list(&o.opened.conn, &root).unwrap();
+        assert!(listed.iter().any(|t| t.rel_path.ends_with("junk.pdf")
+            && t.reason.as_deref() == Some(vf_fs::trash::FROM_INTAKE)));
+    }
+
     /// P02 step 1: the Intake tab mounts Filer Desktop on the open cabinet: its data folder is
     /// `<cabinet>/_Vibe/` (Q-19), and its settings carry this cabinet's root and firm id.
     #[test]
