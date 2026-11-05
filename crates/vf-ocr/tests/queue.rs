@@ -400,9 +400,7 @@ fn new_filings_only_and_looks_since_the_last_change() {
     f.add("q", "queued.pdf", 1, true);
     queue::enqueue_missing(&f.conn, queue::BACKLOG).unwrap();
     f.conn
-        .execute_batch(
-            "UPDATE document SET filed_by = 'rebuild', filed_at = '2026-01-01T00:00:00Z'",
-        )
+        .execute_batch("UPDATE document SET filed_by = 'import', filed_at = '2026-01-01T00:00:00Z'")
         .unwrap();
     queue::set_reads(
         &f.conn,
@@ -424,8 +422,13 @@ fn new_filings_only_and_looks_since_the_last_change() {
             )
             .unwrap();
     };
-    file("x", "rebuild", "2026-07-01T00:00:00Z");
+    // Found by a folder import: not read. Dropped in through Explorer later: read (Q-68).
+    file("x", "import", "2026-07-01T00:00:00Z");
     assert_eq!(queue::enqueue_missing(&f.conn, queue::INTAKE).unwrap(), 0);
+    f.add("w", "w.pdf", 1, true);
+    file("w", "rebuild", "2026-07-01T12:00:00Z");
+    assert_eq!(queue::enqueue_missing(&f.conn, queue::INTAKE).unwrap(), 1);
+    assert_eq!(f.state("w"), "queued");
     f.add("y", "y.pdf", 1, true);
     file("y", "intake", "2026-07-02T00:00:00Z");
     f.add("z", "z.pdf", 1, true);

@@ -13,7 +13,7 @@ The words are saved in this PC's catalog as soon as each page is read, so the do
 A large cabinet (hundreds of thousands of files) would keep the PCs busy reading old scans for weeks. **Admin** › **Devices** › **Text recognition** sets what this catalog reads:
 
 - **Read every PDF document**: documents already in the cabinet are read too, a few at a time, with new filings first.
-- **Read only documents filed from now on**: only documents Vibe Files files from then on (Intake, scans, page tools) are read. Older files, and files put into the client folders outside Vibe Files, can still be found by file name and details, just not by the words on their pages.
+- **Read only documents filed from now on**: documents filed from then on are read, whether through Vibe Files (Intake, scans, page tools) or put into the client folders outside it. Older files, and the files a [folder import](help:folder-import) found, can still be found by file name and details, just not by the words on their pages.
 
 Switching to new filings only takes the waiting backlog off the queue; pages already read stay searchable. A [folder import](help:folder-import) of more than 50,000 files chooses new filings only for you unless you tick **Read the text of the imported PDFs**.
 

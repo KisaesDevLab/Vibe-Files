@@ -22,7 +22,7 @@ fn reads_section(ui: &mut egui::Ui, p: &mut DevicesPage, env: &mut Env) {
     ui.label(widgets::caption(match &now {
         Reads::All => "Documents already in the cabinet are read too, a few at a time, Intake filings first.".to_string(),
         Reads::NewSince(t) => format!(
-            "Documents filed by Vibe Files (Intake, scans, page tools) since {} are read. Older files, and files put in the folders outside Vibe Files, are found by name and details only.",
+            "Documents filed since {} are read, through Vibe Files or put in the client folders outside it. The files a folder import found are searchable by name and details only.",
             widgets::local_time(t)
         ),
     }));

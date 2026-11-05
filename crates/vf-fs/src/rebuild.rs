@@ -14,6 +14,10 @@ use vf_core::tx::{Actor, NoFileOps, Stmt, Transaction};
 
 use crate::cabinet::{self, VersionSidecar};
 
+/// `document.filed_by` of the files a folder import, or a catalog made from nothing, found:
+/// the cabinet's existing files (PA-34, Q-68).
+pub const FILED_BY_IMPORT: &str = "import";
+
 /// Catalog statements per Transaction when a rebuild commits in parts (PA-34).
 const CHUNK: usize = 20_000;
 
@@ -703,6 +707,14 @@ fn rebuild_scoped(
     folders.retain(|(f, _)| in_scope(&rel(root, f)));
     // What the catalog knows: a file of the same size and time is not read again (PA-34).
     let mut known = known_files(conn)?;
+    // Who files the documents found: a folder import, or a catalog made from nothing (a new
+    // PC), is FILED_BY_IMPORT, the cabinet's existing files; later finds are files put in the
+    // folders outside Vibe Files, which text recognition set to new filings reads (Q-68).
+    let filed_by = if only.is_some() || known.is_empty() {
+        FILED_BY_IMPORT
+    } else {
+        "rebuild"
+    };
     known.retain(|p, _| in_scope(p));
     // Every file first (the count shows while they are read), then read on several threads:
     // on a share most of the time is waiting for the network.
@@ -895,12 +907,12 @@ fn rebuild_scoped(
                     };
                     stmts.push(Stmt::new(
                         "INSERT INTO document (id, client_id, doc_type_id, tax_year, rel_path, hash, size, mime, status, source, filed_by, filed_at, device_id, updated_at)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'rebuild', ?11, ?12, ?11)",
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?13, ?11, ?12, ?11)",
                         vec![
                             id.clone().into(), f.client_id.clone().into(), doc_type.into(), year,
                             f.rel.clone().into(), f.hash.clone().into(), f.size.into(),
                             mime(&f.rel).into(), status.into(), source.into(), now.clone().into(),
-                            device_id.into(),
+                            device_id.into(), filed_by.into(),
                         ],
                     ));
                     for t in tags {

@@ -44,8 +44,9 @@ pub struct Job {
 pub enum Reads {
     /// Every PDF document.
     All,
-    /// Only documents filed by Vibe Files (Intake, a page tool, a scan) since this time
-    /// (RFC 3339): a cabinet of ~900K files is not read from the start.
+    /// Only documents filed since this time (RFC 3339), by Vibe Files or put in the folders
+    /// outside it, not the files a folder import found (`filed_by` `import`): a cabinet of
+    /// ~900K files is not read from the start (Q-66, Q-68).
     NewSince(String),
 }
 
@@ -80,7 +81,7 @@ pub fn set_reads(conn: &Connection, r: &Reads) -> vf_core::Result<()> {
     if let Reads::NewSince(t) = r {
         conn.execute(
             "DELETE FROM ocr_job WHERE state = 'queued' AND doc_id IN
-               (SELECT id FROM document WHERE filed_by = 'rebuild' OR filed_at < ?1)",
+               (SELECT id FROM document WHERE filed_by = 'import' OR filed_at < ?1)",
             [t],
         )?;
     }
@@ -125,7 +126,7 @@ fn enqueue(
     if let Reads::NewSince(t) = reads {
         p.push(t.clone());
         wh.push_str(&format!(
-            " AND d.filed_at >= ?{} AND d.filed_by IS NOT 'rebuild'",
+            " AND d.filed_at >= ?{} AND d.filed_by IS NOT 'import'",
             p.len() + 2
         ));
     }
