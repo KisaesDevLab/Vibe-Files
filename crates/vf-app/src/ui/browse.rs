@@ -4383,13 +4383,16 @@ mod tests {
             s.b.reload(&s.conn);
             s.b.selected = s.b.visible.iter().copied().collect();
         }
-        h.run();
+        // The preview pane renders on its own thread and keeps asking for frames: a fixed
+        // number of frames, not "until still" (failed under a loaded test run).
+        h.run_steps(8);
         assert!(h.query_by_label("Earlier versions").is_some());
         assert!(h.query_by_label_contains("before annotations").is_some());
         h.get_by_role_and_label(Role::Button, "Restore")
             .scroll_to_me();
-        h.run();
-        click(&mut h, "Restore");
+        h.run_steps(8);
+        h.get_by_role_and_label(Role::Button, "Restore").click();
+        h.run_steps(8);
         let s = h.state();
         assert!(s.b.error.is_none(), "{:?}", s.b.error);
         assert!(s.b.notice.is_some(), "restore ran: {:?}", s.b.notice);

@@ -2942,25 +2942,14 @@ mod tests {
         type_into(&mut h, "Cabinet folder", &root.display().to_string());
         click(&mut h, "Open cabinet");
         settle(&mut h);
-        let dir = filer_pdf::pdf::find_pdfium(Path::new("")).unwrap();
-        let pdfium = filer_pdf::pdf::pdfium(&dir).unwrap();
+        // Page text read with lopdf: pdfium is shared with the Viewer's render thread, and
+        // opening through it failed now and then under a fully loaded test run.
         let texts = |p: &std::path::Path| -> Vec<String> {
-            // The Viewer's render thread shares pdfium; under a loaded test run an open can
-            // fail for a moment, so try a few times before failing.
-            let mut tries = 0;
-            let d = loop {
-                match pdfium.load_pdf_from_file(p, None) {
-                    Ok(d) => break d,
-                    Err(e) if tries == 50 => panic!("cannot open {}: {e}", p.display()),
-                    Err(_) => {
-                        tries += 1;
-                        std::thread::sleep(std::time::Duration::from_millis(100));
-                    }
-                }
-            };
-            d.pages()
-                .iter()
-                .map(|pg| vf_pdf::text::page_text(&pg).trim().to_string())
+            let d = lopdf::Document::load(p)
+                .unwrap_or_else(|e| panic!("cannot open {}: {e}", p.display()));
+            let n = d.get_pages().len() as u32;
+            (1..=n)
+                .map(|i| d.extract_text(&[i]).unwrap_or_default().trim().to_string())
                 .collect()
         };
 
@@ -2979,6 +2968,17 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
         let open_pages = |h: &mut egui_kittest::Harness<'static, VibeFilesApp>, pages: &str| {
+            // The last page edit reloads the document on the render thread: wait for it, or
+            // the next edit is refused (failed under a loaded test run).
+            let start = std::time::Instant::now();
+            while !matches!(&h.state().screen, Screen::Open(o) if o.viewer.ready()) {
+                assert!(
+                    start.elapsed() < std::time::Duration::from_secs(30),
+                    "viewer ready"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(20));
+                h.step();
+            }
             if let Screen::Open(o) = &mut h.state_mut().screen {
                 o.viewer.pages_dialog = Some(crate::ui::viewer::PagesDialog {
                     pages: pages.into(),
