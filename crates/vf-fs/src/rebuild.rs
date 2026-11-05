@@ -19,7 +19,8 @@ use crate::cabinet::{self, VersionSidecar};
 pub const FILED_BY_IMPORT: &str = "import";
 
 /// Catalog statements per Transaction when a rebuild commits in parts (PA-34).
-const CHUNK: usize = 20_000;
+// Tests: a few statements, so every rebuild test commits in parts too.
+const CHUNK: usize = if cfg!(test) { 4 } else { 20_000 };
 
 /// How far the running rebuild is (owner 2026-11-05: a first index of thousands of client
 /// folders showed only a spinner): client folders walked, files found, files read. One per
@@ -1043,9 +1044,16 @@ fn rebuild_scoped(
     // Committed in parts: one Transaction for ~900K documents held the write lock for minutes
     // (PA-34); a rebuild is idempotent, so a part cut short is finished by the next one.
     let actor = Actor::device(device_id);
+    let mut part_no = 0;
     while stmts.len() > CHUNK {
         let rest = stmts.split_off(CHUNK);
-        let mut part = Transaction::new("rebuild");
+        part_no += 1;
+        // Every Transaction carries its audit row.
+        let mut part = Transaction::new("rebuild").audit(AuditEntry::new(
+            "rebuild",
+            None,
+            json!({ "part": part_no, "statements": CHUNK }),
+        ));
         for s in std::mem::replace(&mut stmts, rest) {
             part = part.catalog(s);
         }
