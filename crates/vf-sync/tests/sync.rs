@@ -869,3 +869,21 @@ fn a_local_metadata_edit_survives_remote_content() {
     );
     assert!(!vf_sync::catalog::pending(&a.conn).unwrap().is_empty());
 }
+
+/// PA-34: many changed clients go up in rounds, each its own HEAD; another PC gets them all.
+#[test]
+fn a_push_in_rounds_commits_each_and_delivers_everything() {
+    let t = tempfile::tempdir().unwrap();
+    let store = Remote::memory();
+    let mut a = pc_a(t.path(), store.clone());
+    let r = vf_sync::push::push_in_rounds(&mut a.conn, &a.root, &a.sync, None, 1).unwrap();
+    assert!(r.head_rev >= 2, "one HEAD per round: {r:?}");
+    assert!(r.segments >= 3, "both clients and the cabinet: {r:?}");
+    assert!(r.objects >= 3, "{r:?}");
+    assert!(vf_sync::catalog::pending(&a.conn).unwrap().is_empty());
+    // Nothing left: a second push sends nothing.
+    let again = vf_sync::push::push_in_rounds(&mut a.conn, &a.root, &a.sync, None, 1).unwrap();
+    assert_eq!((again.objects, again.segments), (0, 0), "{again:?}");
+    let b = pc_b(t.path(), store.clone(), &a);
+    assert_eq!(snapshot(&b.root), snapshot(&a.root));
+}

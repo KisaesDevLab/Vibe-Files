@@ -3,8 +3,9 @@
 //! the cabinet segment, then `manifest/HEAD`. B2 has no conditional PUT, so HEAD is written and
 //! read back: when another workstation's HEAD is there instead, this push pulls and tries again.
 
-use std::collections::BTreeMap;
-use std::path::Path;
+use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use serde_json::json;
 use vf_core::audit::AuditEntry;
@@ -65,43 +66,104 @@ pub fn files_hashes(files: &BTreeMap<String, String>) -> BTreeMap<String, String
         .collect()
 }
 
+/// Clients sent per round: each round is its own commit of `manifest/HEAD`, so a first push of
+/// thousands of clients is saved as it goes and another workstation's push only redoes one
+/// round (PA-34).
+const ROUND_CLIENTS: usize = 100;
+/// Documents per round (a round also ends at this many changed documents).
+const ROUND_DOCS: usize = 5_000;
+/// Uploads at once.
+const UPLOADERS: usize = 8;
+/// Files at or above this size are uploaded one at a time (each is held in memory whole while
+/// sealed and sent).
+const BIG: u64 = 32 * 1024 * 1024;
+/// Uploads needing a look at the bucket beyond which the bucket's objects are listed once
+/// instead of asked about one by one.
+const LIST_ABOVE: usize = 200;
+
+/// Upload cap, bytes a second (0 = none); set from this PC's sync settings.
+static UPLOAD_CAP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Caps uploads at `mbps` megabits a second (0 = no cap), so a first upload of a large cabinet
+/// leaves the office line usable.
+pub fn set_upload_cap(mbps: u32) {
+    UPLOAD_CAP.store(
+        u64::from(mbps) * 1_000_000 / 8,
+        std::sync::atomic::Ordering::Relaxed,
+    );
+}
+
 /// Sends what changed. `only` limits the push to one client (Browse's "Push this client now";
-/// the cabinet's master files go with it when they changed).
+/// the cabinet's master files go with it when they changed). Many changed clients go up in
+/// rounds, each committed on its own.
 pub fn push(
     conn: &mut Connection,
     root: &Path,
     s: &Sync,
     only: Option<&str>,
 ) -> Result<PushReport> {
-    let mut rep = PushReport::default();
-    for attempt in 0..TRIES {
-        // Up to date with the bucket first: a push never hides another workstation's work.
-        let head = s.head()?.unwrap_or_default();
-        if head.rev > catalog::last_rev(conn, &s.device_id)? {
-            rep.pulled = Some(crate::pull::pull(conn, root, s)?);
-        }
-        match push_once(conn, root, s, only, &mut rep) {
-            Err(SyncError::Raced) if attempt + 1 < TRIES => {
-                tracing::info!(attempt, "sync push raced another workstation; retrying");
-                continue;
-            }
-            r => return r.map(|()| rep),
-        }
-    }
-    Err(SyncError::Raced)
+    push_in_rounds(conn, root, s, only, ROUND_CLIENTS)
 }
 
+/// [`push`] with at most `round_clients` clients per round.
+pub fn push_in_rounds(
+    conn: &mut Connection,
+    root: &Path,
+    s: &Sync,
+    only: Option<&str>,
+    round_clients: usize,
+) -> Result<PushReport> {
+    let mut rep = PushReport::default();
+    let mut done: BTreeSet<String> = BTreeSet::new();
+    let mut listed: Option<Mutex<HashSet<String>>> = None;
+    loop {
+        let mut attempt = 0;
+        let more = loop {
+            // Up to date with the bucket first: a push never hides another workstation's work.
+            let head = s.head()?.unwrap_or_default();
+            if head.rev > catalog::last_rev(conn, &s.device_id)? {
+                rep.pulled = Some(crate::pull::pull(conn, root, s)?);
+            }
+            match push_once(
+                conn,
+                root,
+                s,
+                only,
+                round_clients.max(1),
+                &mut rep,
+                &mut done,
+                &mut listed,
+            ) {
+                Err(SyncError::Raced) if attempt + 1 < TRIES => {
+                    attempt += 1;
+                    tracing::info!(attempt, "sync push raced another workstation; retrying");
+                    continue;
+                }
+                r => break r?,
+            }
+        };
+        if !more {
+            return Ok(rep);
+        }
+    }
+}
+
+/// One round. `Ok(true)`: clients are left for another round.
+#[allow(clippy::too_many_arguments)]
 fn push_once(
     conn: &mut Connection,
     root: &Path,
     s: &Sync,
     only: Option<&str>,
+    round_clients: usize,
     rep: &mut PushReport,
-) -> Result<()> {
+    done: &mut BTreeSet<String>,
+    listed: &mut Option<Mutex<HashSet<String>>>,
+) -> Result<bool> {
     let head = s.head()?.unwrap_or_default();
     let writer = vf_core::new_id();
     let pending = catalog::pending(conn)?;
-    let mut uploaded = catalog::uploaded(conn)?;
+    let uploaded = catalog::uploaded(conn)?;
     // The admin password file deleted here after it was exchanged (the forgotten-password
     // reset): sent as removed, so the other places drop it too (owner 2026-11-04).
     let pin = vf_fs::trash::pin_file(root);
@@ -117,29 +179,7 @@ fn push_once(
     // What was sent, as sent (the live rows may change while the push runs): the base later.
     let mut sent_docs: Vec<SentDoc> = vec![];
     let mut sent_segments: Vec<(String, u64, Option<String>, Option<String>)> = vec![];
-
-    // `Ok(false)`: the local file cannot be read or no longer has this content (edited outside
-    // Vibe Files); bucket errors are errors.
-    let mut upload = |hash: &str, path: &Path, rep: &mut PushReport| -> Result<bool> {
-        if uploaded.contains(hash) {
-            return Ok(true);
-        }
-        let key = layout::object_key(&s.keys.object_name(hash));
-        if !s.remote.exists(&key)? {
-            let Ok(bytes) = std::fs::read(path) else {
-                return Ok(false);
-            };
-            if sha256(&bytes) != hash {
-                return Ok(false);
-            }
-            rep.bytes += bytes.len() as u64;
-            s.remote.put(&key, s.keys.seal(&bytes, &key))?;
-            rep.objects += 1;
-        }
-        conn_note_uploaded(conn, hash)?;
-        uploaded.insert(hash.to_string());
-        Ok(true)
-    };
+    let mut segments = 0;
 
     // A segment this PC has not applied (a pull left documents for later) is never sent: it
     // would put back what the other workstation changed.
@@ -151,13 +191,37 @@ fn push_once(
         };
         Ok(theirs == catalog::segment_rev(conn, c)? || theirs == 0)
     };
-    let clients: Vec<String> = pending
+    // This round's clients.
+    let waiting: Vec<String> = pending
         .keys()
+        .filter(|c| c.as_str() != CABINET && !done.contains(*c))
         .filter(|c| only.is_none_or(|o| o == c.as_str()))
         .cloned()
         .collect();
-    let cabinet_too = (files_dirty || clients.iter().any(|c| c == CABINET)) && applied(CABINET)?;
-    'clients: for client in clients.iter().filter(|c| c.as_str() != CABINET) {
+    let mut round: Vec<String> = vec![];
+    let mut docs_in_round = 0;
+    for c in &waiting {
+        if round.len() >= round_clients || (docs_in_round >= ROUND_DOCS && !round.is_empty()) {
+            break;
+        }
+        docs_in_round += pending.get(c).copied().unwrap_or(0);
+        round.push(c.clone());
+    }
+    let more = waiting.len() > round.len();
+    let cabinet_too = !done.contains(CABINET)
+        && (files_dirty || (pending.contains_key(CABINET) && only.is_none_or(|o| o == CABINET)))
+        && applied(CABINET)?;
+
+    // Each client's entries, and the contents they need up.
+    struct Part {
+        client: String,
+        folder: String,
+        sentinel: String,
+        docs: Vec<crate::layout::DocEntry>,
+    }
+    let mut parts: Vec<Part> = vec![];
+    let mut jobs: BTreeMap<String, PathBuf> = BTreeMap::new();
+    for client in &round {
         if !applied(client)? {
             rep.skipped += pending.get(client).copied().unwrap_or(0);
             continue;
@@ -169,67 +233,107 @@ fn push_once(
         let Ok(sentinel) = std::fs::read_to_string(&sentinel_path) else {
             continue;
         };
-        let mut docs = catalog::entries(conn, &s.keys, client, &folder)?;
-        for e in &mut docs {
-            if e.deleted_at.is_none()
-                && !upload(&e.hash, &root.join(&folder).join(&e.rel_path), rep)?
-            {
+        let docs = catalog::entries(conn, &s.keys, client, &folder)?;
+        for e in &docs {
+            if e.deleted_at.is_none() && !uploaded.contains(&e.hash) {
+                jobs.entry(e.hash.clone())
+                    .or_insert_with(|| root.join(&folder).join(&e.rel_path));
+            }
+            for v in &e.versions {
+                if !uploaded.contains(&v.hash) {
+                    jobs.entry(v.hash.clone())
+                        .or_insert_with(|| vf_fs::cabinet::version_path(root, &v.hash));
+                }
+            }
+        }
+        parts.push(Part {
+            client: client.clone(),
+            folder,
+            sentinel,
+            docs,
+        });
+    }
+    let cabinet_docs = if cabinet_too {
+        let docs = catalog::entries(conn, &s.keys, CABINET, "")?;
+        for e in &docs {
+            if e.deleted_at.is_none() && !uploaded.contains(&e.hash) {
+                jobs.entry(e.hash.clone())
+                    .or_insert_with(|| root.join(&e.rel_path));
+            }
+            for v in &e.versions {
+                if !uploaded.contains(&v.hash) {
+                    jobs.entry(v.hash.clone())
+                        .or_insert_with(|| vf_fs::cabinet::version_path(root, &v.hash));
+                }
+            }
+        }
+        Some(docs)
+    } else {
+        None
+    };
+
+    // Contents up, several at once. Many to send: the bucket's objects are listed once
+    // rather than asked about one by one.
+    if jobs.len() > LIST_ABOVE && listed.is_none() {
+        let keys: HashSet<String> = s.remote.list("objects")?.into_iter().collect();
+        *listed = Some(Mutex::new(keys));
+    }
+    let up = upload_all(s, jobs, listed.as_ref())?;
+    rep.objects += up.objects;
+    rep.bytes += up.bytes;
+    {
+        let tx = vf_core::db::begin_write(conn)?;
+        for (h, ok) in &up.done {
+            if *ok {
+                tx.execute("INSERT OR IGNORE INTO sync_object (hash) VALUES (?1)", [h])?;
+            }
+        }
+        tx.commit()?;
+    }
+    let sent = |h: &str| uploaded.contains(h) || up.done.get(h).copied().unwrap_or(false);
+
+    'clients: for mut p in parts {
+        for e in &mut p.docs {
+            if e.deleted_at.is_none() && !sent(&e.hash) {
                 // A file that cannot be read now: the client's segment waits (the bucket keeps
                 // its previous one, nothing is dropped from it).
-                rep.skipped += pending.get(client).copied().unwrap_or(1);
+                rep.skipped += pending.get(&p.client).copied().unwrap_or(1);
                 continue 'clients;
             }
-            let mut kept = Vec::with_capacity(e.versions.len());
-            for v in std::mem::take(&mut e.versions) {
-                if upload(&v.hash, &vf_fs::cabinet::version_path(root, &v.hash), rep)? {
-                    kept.push(v);
-                }
-            }
-            e.versions = kept;
+            e.versions.retain(|v| sent(&v.hash));
         }
-        for e in &docs {
-            sent_docs.push(SentDoc::of(e, Some(client), &folder));
+        for e in &p.docs {
+            sent_docs.push(SentDoc::of(e, Some(&p.client), &p.folder));
         }
-        let rev = head.segments.get(client).copied().unwrap_or(0) + 1;
+        let rev = head.segments.get(&p.client).copied().unwrap_or(0) + 1;
         let seg = ClientSegment {
-            client_id: client.clone(),
+            client_id: p.client.clone(),
             segment_rev: rev,
-            folder_rel: folder.clone(),
-            sentinel,
-            documents: docs,
-            empty_dirs: catalog::empty_dirs(root, &folder),
+            folder_rel: p.folder.clone(),
+            sentinel: p.sentinel,
+            documents: p.docs,
+            empty_dirs: catalog::empty_dirs(root, &p.folder),
             written_by: s.device_name.clone(),
         };
-        s.put_json(&layout::segment_key_by(client, rev, &writer), &seg)?;
-        new_head.segments.insert(client.clone(), rev);
+        s.put_json(&layout::segment_key_by(&p.client, rev, &writer), &seg)?;
+        new_head.segments.insert(p.client.clone(), rev);
         new_head
             .segment_writers
-            .insert(client.clone(), writer.clone());
+            .insert(p.client.clone(), writer.clone());
         sent_segments.push((
-            client.clone(),
+            p.client.clone(),
             rev,
-            Some(folder),
+            Some(p.folder),
             Some(sha256(seg.sentinel.as_bytes())),
         ));
-        rep.segments += 1;
+        segments += 1;
     }
-    if cabinet_too {
-        let mut docs = catalog::entries(conn, &s.keys, CABINET, "")?;
-        let mut ok = true;
-        for e in &mut docs {
-            if e.deleted_at.is_none() && !upload(&e.hash, &root.join(&e.rel_path), rep)? {
-                ok = false;
-                break;
-            }
-            let mut kept = Vec::with_capacity(e.versions.len());
-            for v in std::mem::take(&mut e.versions) {
-                if upload(&v.hash, &vf_fs::cabinet::version_path(root, &v.hash), rep)? {
-                    kept.push(v);
-                }
-            }
-            e.versions = kept;
-        }
+    if let Some(mut docs) = cabinet_docs {
+        let ok = docs.iter().all(|e| e.deleted_at.is_some() || sent(&e.hash));
         if ok {
+            for e in &mut docs {
+                e.versions.retain(|v| sent(&v.hash));
+            }
             for e in &docs {
                 sent_docs.push(SentDoc::of(e, None, ""));
             }
@@ -244,15 +348,22 @@ fn push_once(
             new_head.cabinet_segment_rev = rev;
             new_head.cabinet_writer = writer.clone();
             sent_segments.push((CABINET.into(), rev, None, None));
-            rep.segments += 1;
+            segments += 1;
         } else {
             rep.skipped += 1;
         }
     }
     push_audit(conn, root, s)?;
-    if rep.segments == 0 {
+    let mark_done = |done: &mut BTreeSet<String>| {
+        done.extend(round.iter().cloned());
+        if cabinet_too {
+            done.insert(CABINET.into());
+        }
+    };
+    if segments == 0 {
         rep.head_rev = head.rev;
-        return Ok(());
+        mark_done(done);
+        return Ok(more);
     }
 
     // The commit point. Another push that committed while this one uploaded (its HEAD moved
@@ -301,7 +412,9 @@ fn push_once(
     }
     catalog::set_state(&tx, &s.device_id, new_head.rev, "push")?;
     tx.commit()?;
-    rep.documents = sent_docs.len();
+    mark_done(done);
+    rep.segments += segments;
+    rep.documents += sent_docs.len();
     rep.head_rev = new_head.rev;
     write_device(s, new_head.rev)?;
     Transaction::new(LABEL)
@@ -309,18 +422,115 @@ fn push_once(
             LABEL,
             None,
             json!({
-                "objects": rep.objects, "bytes": rep.bytes, "segments": rep.segments,
-                "documents": rep.documents, "rev": rep.head_rev, "skipped": rep.skipped,
+                "objects": up.objects, "bytes": up.bytes, "segments": segments,
+                "documents": sent_docs.len(), "rev": rep.head_rev, "skipped": rep.skipped,
             }),
         ))
         .commit(conn, &mut NoFileOps, &Actor::device(&s.device_id))?;
     tracing::info!(
-        objects = rep.objects,
-        segments = rep.segments,
+        objects = up.objects,
+        segments,
         rev = rep.head_rev,
         "sync push"
     );
-    Ok(())
+    Ok(more)
+}
+
+/// What [`upload_all`] did.
+struct Uploaded {
+    /// Content hash → sent or already in the bucket (`true`), or the local file cannot be
+    /// read or no longer has this content (`false`: edited outside Vibe Files).
+    done: BTreeMap<String, bool>,
+    objects: usize,
+    bytes: u64,
+}
+
+/// Sends the contents `jobs` (hash → file) not in the bucket yet, [`UPLOADERS`] at a time;
+/// files of [`BIG`] or more one at a time; at most [`set_upload_cap`]'s rate. A bucket error
+/// stops the lot and is returned.
+fn upload_all(
+    s: &Sync,
+    jobs: BTreeMap<String, PathBuf>,
+    listed: Option<&Mutex<HashSet<String>>>,
+) -> Result<Uploaded> {
+    use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+    let queue = Mutex::new(jobs.into_iter().collect::<Vec<_>>());
+    let done = Mutex::new(BTreeMap::new());
+    let failed: Mutex<Option<SyncError>> = Mutex::new(None);
+    let stop = AtomicBool::new(false);
+    let big = Mutex::new(());
+    let (objects, bytes) = (AtomicUsize::new(0), AtomicU64::new(0));
+    let start = std::time::Instant::now();
+    let one = |hash: &str, path: &Path| -> Result<bool> {
+        let key = layout::object_key(&s.keys.object_name(hash));
+        let there = match listed {
+            Some(l) => l.lock().map(|l| l.contains(&key)).unwrap_or(false),
+            None => s.remote.exists(&key)?,
+        };
+        if there {
+            return Ok(true);
+        }
+        let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+        let _one_big = (size >= BIG).then(|| big.lock());
+        let Ok(body) = std::fs::read(path) else {
+            return Ok(false);
+        };
+        if sha256(&body) != hash {
+            return Ok(false);
+        }
+        let n = body.len() as u64;
+        s.remote.put(&key, s.keys.seal(&body, &key))?;
+        drop(body);
+        objects.fetch_add(1, Ordering::Relaxed);
+        let total = bytes.fetch_add(n, Ordering::Relaxed) + n;
+        if let Some(l) = listed
+            && let Ok(mut l) = l.lock()
+        {
+            l.insert(key);
+        }
+        // The cap: wait until the bytes sent so far are due.
+        let cap = UPLOAD_CAP.load(Ordering::Relaxed);
+        if cap > 0 {
+            let due = std::time::Duration::from_secs_f64(total as f64 / cap as f64);
+            if let Some(wait) = due.checked_sub(start.elapsed()) {
+                std::thread::sleep(wait);
+            }
+        }
+        Ok(true)
+    };
+    std::thread::scope(|sc| {
+        for _ in 0..UPLOADERS {
+            sc.spawn(|| {
+                while !stop.load(Ordering::Relaxed) {
+                    let Some((hash, path)) = queue.lock().ok().and_then(|mut q| q.pop()) else {
+                        break;
+                    };
+                    match one(&hash, &path) {
+                        Ok(ok) => {
+                            if let Ok(mut d) = done.lock() {
+                                d.insert(hash, ok);
+                            }
+                        }
+                        Err(e) => {
+                            stop.store(true, Ordering::Relaxed);
+                            if let Ok(mut f) = failed.lock() {
+                                f.get_or_insert(e);
+                            }
+                        }
+                    }
+                }
+            });
+        }
+    });
+    let done = done.into_inner().unwrap_or_default();
+    if let Some(e) = failed.into_inner().ok().flatten() {
+        return Err(e);
+    }
+    Ok(Uploaded {
+        done,
+        objects: objects.into_inner(),
+        bytes: bytes.into_inner(),
+    })
 }
 
 /// A document as it went into a segment.
@@ -349,14 +559,6 @@ impl SentDoc {
             deleted: e.deleted_at.is_some(),
         }
     }
-}
-
-fn conn_note_uploaded(conn: &Connection, hash: &str) -> Result<()> {
-    conn.execute(
-        "INSERT OR IGNORE INTO sync_object (hash) VALUES (?1)",
-        [hash],
-    )?;
-    Ok(())
 }
 
 pub(crate) fn write_device(s: &Sync, acked: u64) -> Result<()> {

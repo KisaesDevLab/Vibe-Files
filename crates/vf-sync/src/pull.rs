@@ -133,7 +133,10 @@ pub(crate) fn apply_head(
         seg.check()
             .map_err(|what| SyncError::Format(format!("{key}: refused {what}")))?;
         let folder = ensure_folder(conn, root, s, &seg)?;
-        let deferred = apply_docs(conn, root, s, Some(client), &folder, &seg.documents, rep)?;
+        prefetch(conn, s, root, &seg.documents);
+        let deferred = apply_docs(conn, root, s, Some(client), &folder, &seg.documents, rep);
+        drop_prefetched();
+        let deferred = deferred?;
         if !deferred {
             let sh = vf_core::db::OptionalExtension::optional(conn.query_row(
                 "SELECT sentinel_hash FROM client WHERE id = ?1",
@@ -348,7 +351,93 @@ fn rename_folder(
 }
 
 /// Downloads `object` (content `hash`) into the cabinet's temp folder, checked.
+/// Downloads fetched ahead of a segment's documents, by content hash (PA-34: one at a time,
+/// a pull of thousands of new files waited on each in turn). Temporary files in `_Vibe/tmp`.
+static PREFETCHED: std::sync::Mutex<Option<std::collections::HashMap<String, PathBuf>>> =
+    std::sync::Mutex::new(None);
+/// Downloads at once.
+const FETCHERS: usize = 8;
+/// Entries at or above this size are not fetched ahead (each is held in memory whole).
+const PREFETCH_BELOW: i64 = 32 * 1024 * 1024;
+
+/// Fetches, several at once, the contents of `entries` this catalog has no copy of, for
+/// [`fetch`] to take. A failure here is not an error: [`fetch`] then downloads as before.
+fn prefetch(conn: &Connection, s: &Sync, root: &Path, entries: &[DocEntry]) {
+    let mut want: Vec<(String, String)> = vec![];
+    let mut seen = std::collections::HashSet::new();
+    let mut have = match conn.prepare_cached(
+        "SELECT EXISTS (SELECT 1 FROM document WHERE hash = ?1 AND deleted_at IS NULL)",
+    ) {
+        Ok(st) => st,
+        Err(_) => return,
+    };
+    for e in entries {
+        if e.deleted_at.is_some() || e.size >= PREFETCH_BELOW || !seen.insert(e.hash.clone()) {
+            continue;
+        }
+        let here: bool = have.query_row([&e.hash], |r| r.get(0)).unwrap_or(true);
+        if !here {
+            want.push((e.object.clone(), e.hash.clone()));
+        }
+    }
+    if want.len() < 2 {
+        return;
+    }
+    let queue = std::sync::Mutex::new(want);
+    let got = std::sync::Mutex::new(std::collections::HashMap::new());
+    std::thread::scope(|sc| {
+        for _ in 0..FETCHERS {
+            sc.spawn(|| {
+                while let Some((object, hash)) = queue.lock().ok().and_then(|mut q| q.pop()) {
+                    match download(s, root, &object, &hash) {
+                        Ok(p) => {
+                            if let Ok(mut g) = got.lock() {
+                                g.insert(ahead_key(root, &hash), p);
+                            }
+                        }
+                        // The bucket is unreachable: the rest is left to fetch.
+                        Err(SyncError::Remote(_)) => break,
+                        Err(_) => {}
+                    }
+                }
+            });
+        }
+    });
+    if let (Ok(mut p), Ok(got)) = (PREFETCHED.lock(), got.into_inner()) {
+        p.get_or_insert_with(Default::default).extend(got);
+    }
+}
+
+/// [`PREFETCHED`]'s key: the cabinet and the content.
+fn ahead_key(root: &Path, hash: &str) -> String {
+    format!("{}|{hash}", root.display())
+}
+
+/// Deletes downloads [`prefetch`] made that nothing took.
+fn drop_prefetched() {
+    if let Ok(mut p) = PREFETCHED.lock()
+        && let Some(m) = p.take()
+    {
+        for path in m.into_values() {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
 fn fetch(s: &Sync, root: &Path, object: &str, hash: &str) -> Result<PathBuf> {
+    let ahead = PREFETCHED
+        .lock()
+        .ok()
+        .and_then(|mut p| p.as_mut().and_then(|m| m.remove(&ahead_key(root, hash))));
+    if let Some(p) = ahead
+        && p.is_file()
+    {
+        return Ok(p);
+    }
+    download(s, root, object, hash)
+}
+
+fn download(s: &Sync, root: &Path, object: &str, hash: &str) -> Result<PathBuf> {
     let key = layout::object_key(object);
     let body = s
         .remote

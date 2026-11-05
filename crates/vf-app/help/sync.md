@@ -30,6 +30,12 @@ Under **Settings** (admin password needed), **Push automatically every (minutes,
 
 **Pause** (admin password needed) stops the automatic pushes; **Resume** starts them again. **Push now** still works while paused.
 
+## A large cabinet's first upload
+
+The first push of a large cabinet (hundreds of gigabytes) can take days. It goes up 100 clients at a time, and each group is saved in the bucket as it finishes: stopping, closing Vibe Files or losing the connection loses at most the group being sent, and the next push carries on from there. Eight files are sent at once; files over 32 MB are sent one at a time.
+
+**Upload at most (megabits a second, 0 = no limit)** under **Settings** keeps the office line usable meanwhile. It applies to this PC only. **Only push automatically between** can also keep the first upload to the evening and night.
+
 ## What is never synced
 
 - `_Vibe\keys\`: the sync key files.

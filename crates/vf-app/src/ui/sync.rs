@@ -99,6 +99,8 @@ pub struct SyncTab {
     pub filter_client: Option<String>,
     form: Form,
     refreshed: Option<Instant>,
+    /// The counts being made on their own thread (PA-34: they read every document).
+    counting: Option<Receiver<Counted>>,
     last_auto: Option<Instant>,
     /// When the remembered key was last tried.
     recall_at: Option<Instant>,
@@ -116,6 +118,13 @@ pub struct SyncTab {
     /// The cabinet keeps the key for everyone (`_Vibe/keys/sync-shared.json`).
     pub shared: bool,
 }
+
+/// Pending per client, open conflicts, and this PC's last exchange (rev, push, pull).
+type Counted = (
+    BTreeMap<String, usize>,
+    Vec<Conflict>,
+    Option<(i64, Option<String>, Option<String>)>,
+);
 
 const SHARE_LABEL: &str = "Let everyone who opens this cabinet sync without the passphrase";
 const SHARE_HELP: &str = "Keeps the sync key and the bucket settings in the cabinet's _Vibe\\keys folder, which is never uploaded: the Backblaze copy stays encrypted, and anyone who can open the cabinet on the network can sync. Keep the passphrase with the firm's recovery papers.";
@@ -177,7 +186,24 @@ impl SyncTab {
     /// Every frame (whatever the tab): picks up finished work, refreshes the counts, and starts
     /// the automatic push when it is due.
     pub fn tick(&mut self, ctx: &egui::Context, env: &Env, catalog: &Path, cfg: &SyncConfig) {
+        vf_sync::push::set_upload_cap(cfg.upload_mbps);
         self.recall(env.root, data_dir(catalog), cfg, env.device_id);
+        if let Some(rx) = &self.counting {
+            match rx.try_recv() {
+                Ok((pending, conflicts, st)) => {
+                    self.counting = None;
+                    self.pending = pending;
+                    self.conflicts = conflicts;
+                    if let Some((rev, p, l)) = st {
+                        self.head_rev = rev as u64;
+                        self.last_push = p;
+                        self.last_pull = l;
+                    }
+                }
+                Err(TryRecvError::Disconnected) => self.counting = None,
+                Err(TryRecvError::Empty) => {}
+            }
+        }
         if let Some((_, rx)) = &self.job {
             match rx.try_recv() {
                 Err(TryRecvError::Empty) => {}
@@ -202,7 +228,7 @@ impl SyncTab {
                 .refreshed
                 .is_none_or(|t| t.elapsed() >= Duration::from_secs(3))
         {
-            self.refresh(env);
+            self.refresh(ctx, env, catalog);
         }
         if self.session.is_some() && self.last_auto.is_none() {
             // The first automatic push comes one interval after unlocking.
@@ -224,22 +250,39 @@ impl SyncTab {
         }
     }
 
-    fn refresh(&mut self, env: &Env) {
+    /// Counts again on a thread with its own catalog connection (the pending count reads
+    /// every document: ~900K in a large cabinet, PA-34); [`SyncTab::tick`] picks them up.
+    fn refresh(&mut self, ctx: &egui::Context, env: &Env, catalog: &Path) {
         self.refreshed = Some(Instant::now());
-        self.pending = vf_sync::catalog::pending(env.conn).unwrap_or_default();
-        self.conflicts = vf_sync::restore::conflicts(env.conn).unwrap_or_default();
-        let st: Option<(i64, Option<String>, Option<String>)> = env
-            .conn
-            .query_row(
-                "SELECT last_manifest_rev, last_push, last_pull FROM sync_state WHERE device_id = ?1",
-                [env.device_id],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-            )
-            .ok();
-        if let Some((rev, p, l)) = st {
-            self.head_rev = rev as u64;
-            self.last_push = p;
-            self.last_pull = l;
+        if self.counting.is_some() {
+            return;
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (catalog, device, ctx) = (
+            catalog.to_path_buf(),
+            env.device_id.to_string(),
+            ctx.clone(),
+        );
+        let spawned = std::thread::Builder::new()
+            .name("sync-counts".into())
+            .spawn(move || {
+                let Ok(conn) = vf_core::db::open(&catalog, Storage::Local) else {
+                    return;
+                };
+                let pending = vf_sync::catalog::pending(&conn).unwrap_or_default();
+                let conflicts = vf_sync::restore::conflicts(&conn).unwrap_or_default();
+                let st = conn
+                    .query_row(
+                        "SELECT last_manifest_rev, last_push, last_pull FROM sync_state WHERE device_id = ?1",
+                        [&device],
+                        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                    )
+                    .ok();
+                let _ = tx.send((pending, conflicts, st));
+                ctx.request_repaint();
+            });
+        if spawned.is_ok() {
+            self.counting = Some(rx);
         }
     }
 
@@ -1019,6 +1062,16 @@ fn settings_section(ui: &mut egui::Ui, t: &mut SyncTab, v: &View<'_>) {
         changed |= ui
             .add(egui::DragValue::new(&mut cfg.auto_minutes).range(0..=1440))
             .labelled_by(l.id)
+            .changed();
+    });
+    ui.horizontal(|ui| {
+        let l = ui.label("Upload at most (megabits a second, 0 = no limit)");
+        changed |= ui
+            .add(egui::DragValue::new(&mut cfg.upload_mbps).range(0..=10_000))
+            .labelled_by(l.id)
+            .on_hover_text(
+                "A first upload of a large cabinet can take days; a limit leaves the office line usable meanwhile. This PC only.",
+            )
             .changed();
     });
     ui.horizontal(|ui| {

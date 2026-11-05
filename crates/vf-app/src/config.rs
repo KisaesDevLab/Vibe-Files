@@ -69,10 +69,17 @@ pub struct SyncConfig {
     pub window: Option<(u8, u8)>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub paused: bool,
+    /// Upload cap on this PC, megabits a second; 0 = none (PA-34).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub upload_mbps: u32,
     /// B2 Object Lock days the firm set on the bucket (QUESTIONS Q-10: off by default; 30
     /// suggested).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub object_lock_days: Option<u32>,
+}
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
 }
 
 fn default_auto() -> u32 {
@@ -91,6 +98,7 @@ impl Default for SyncConfig {
             auto_minutes: default_auto(),
             window: None,
             paused: false,
+            upload_mbps: 0,
             object_lock_days: None,
         }
     }

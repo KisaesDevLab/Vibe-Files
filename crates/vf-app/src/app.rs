@@ -1532,14 +1532,17 @@ mod tests {
             )
         };
         let _ = cabinet_id;
-        for _ in 0..3 {
+        // The counts are made on their own thread (PA-34).
+        let start = std::time::Instant::now();
+        while h.query_by_label("4 pending").is_none() {
             h.step();
+            assert!(
+                start.elapsed() < std::time::Duration::from_secs(20),
+                "the pill counts the client's documents"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
         }
         h.run();
-        assert!(
-            h.query_by_label("4 pending").is_some(),
-            "the pill counts the client's documents"
-        );
         h.get_by_role_and_label(Role::Button, "Sync to B2").click();
         h.run();
         h.get_by_role_and_label(Role::Button, "Push this client now")

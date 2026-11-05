@@ -163,14 +163,20 @@ pub fn entries(
     client: &str,
     folder: &str,
 ) -> Result<Vec<DocEntry>> {
-    let mut st = conn.prepare(
+    // By the client index (PA-34): `coalesce(client_id, '')` read every document per client.
+    let which = if client.is_empty() {
+        "d.client_id IS NULL AND ?1 = ''"
+    } else {
+        "d.client_id = ?1"
+    };
+    let mut st = conn.prepare(&format!(
         "SELECT d.id, d.rel_path, d.hash, d.size, d.mime, d.doc_type_id, d.tax_year, d.status,
                 d.source, d.filed_by, d.filed_at, d.device_id, d.rev, d.deleted_at,
                 d.tombstone_reason
          FROM document d LEFT JOIN sync_base b ON b.doc_id = d.id
-         WHERE coalesce(d.client_id, '') = ?1 AND (d.deleted_at IS NULL OR b.doc_id IS NOT NULL)
-         ORDER BY d.rel_path, d.id",
-    )?;
+         WHERE {which} AND (d.deleted_at IS NULL OR b.doc_id IS NOT NULL)
+         ORDER BY d.rel_path, d.id"
+    ))?;
     let strip = |rel: &str| -> String {
         if folder.is_empty() {
             rel.to_string()
