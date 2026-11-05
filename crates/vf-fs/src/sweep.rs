@@ -506,11 +506,28 @@ pub fn adopt_unknown(
     for u in items {
         // A document marked gone from another client folder whose content turns up here (moved
         // in Explorer): the same document again, with its id, metadata, holds and history (QA).
-        let back: Option<String> = vf_core::db::OptionalExtension::optional(
-            revive.query_row([&u.hash], |r| r.get::<_, String>(0)),
-        )
-        .map_err(|e| e.to_string())?
-        .filter(|id| !revived.contains(id));
+        // The id the folder's docmeta.jsonl gives this file (shared between servers).
+        let recorded: Option<String> = ix
+            .get_at(&u.rel_path, &u.hash)
+            .and_then(|m| m.id.clone())
+            .filter(|id| !revived.contains(id));
+        let recorded_state: Option<bool> = match &recorded {
+            Some(rid) => vf_core::db::OptionalExtension::optional(conn.query_row(
+                "SELECT deleted_at IS NOT NULL FROM document WHERE id = ?1",
+                [rid],
+                |r| r.get::<_, bool>(0),
+            ))
+            .map_err(|e| e.to_string())?,
+            None => None,
+        };
+        let back: Option<String> = match (&recorded, recorded_state) {
+            (Some(rid), Some(true)) => Some(rid.clone()),
+            _ => vf_core::db::OptionalExtension::optional(
+                revive.query_row([&u.hash], |r| r.get::<_, String>(0)),
+            )
+            .map_err(|e| e.to_string())?
+            .filter(|id| !revived.contains(id)),
+        };
         if let Some(id) = back {
             tx = tx
                 .catalog(Stmt::new(
@@ -533,8 +550,35 @@ pub fn adopt_unknown(
             revived.insert(id);
             continue;
         }
-        let id = vf_core::new_id();
+        let id = match (recorded, recorded_state) {
+            (Some(rid), None) => rid,
+            _ => vf_core::new_id(),
+        };
+        revived.insert(id.clone());
         let m = ix.get_at(&u.rel_path, &u.hash);
+        // A file with no record yet: one is written with the id given here, so the other
+        // servers catalog it under the same id (owner 2026-11-05).
+        if m.is_none() {
+            let folder_rel = u.rel_path.split_once('/').map(|(f, _)| f.to_string());
+            let rec = crate::docmeta::Meta {
+                id: id.clone(),
+                rel_path: u.rel_path.clone(),
+                hash: u.hash.clone(),
+                folder_rel: folder_rel.filter(|_| u.client_id.is_some()),
+                doc_type: None,
+                doc_type_name: None,
+                tax_year: rebuild::year_from_path(&u.rel_path).map(|y| y as i32),
+                status: "received".into(),
+                source: None,
+                tags: vec![],
+            };
+            let (path, line) = crate::docmeta::record_line(root, &rec, &now, device_id);
+            tx = tx.file(FileOp::AppendLines {
+                path,
+                lines: vec![line],
+                undo_lines: vec![],
+            });
+        }
         let year: Option<i64> = match m {
             Some(m) => m.tax_year.map(i64::from),
             None => rebuild::year_from_path(&u.rel_path),

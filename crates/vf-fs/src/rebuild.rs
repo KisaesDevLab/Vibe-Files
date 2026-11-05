@@ -935,6 +935,9 @@ fn rebuild_scoped(
          ORDER BY deleted_at DESC LIMIT 1",
     )?;
     let mut revived: HashSet<String> = HashSet::new();
+    // Whether an id is in this catalog: Some(true) marked deleted, Some(false) live.
+    let mut id_state = conn.prepare("SELECT deleted_at IS NOT NULL FROM document WHERE id = ?1")?;
+    let mut used_ids: HashSet<String> = HashSet::new();
     let on_disk: HashSet<&str> = found.iter().map(|f| f.rel.as_str()).collect();
     // Missing rows, by hash, available to absorb a move.
     let mut missing_by_hash: BTreeMap<String, Vec<String>> = BTreeMap::new(); // hash -> ids
@@ -999,10 +1002,24 @@ fn rebuild_scoped(
                 // A document gone from where it was (deleted, or moved to another client
                 // folder in Explorer) whose content turns up here: the same document again,
                 // with its id, metadata, holds and history (QA).
-                let back: Option<String> = vf_core::db::OptionalExtension::optional(
-                    revive.query_row([&f.hash], |r| r.get::<_, String>(0)),
-                )?
-                .filter(|id| !revived.contains(id));
+                // The id its folder's docmeta.jsonl gives this file (shared between servers).
+                let recorded: Option<String> = meta
+                    .get_at(&f.rel, &f.hash)
+                    .and_then(|m| m.id.clone())
+                    .filter(|id| !revived.contains(id) && !used_ids.contains(id));
+                let recorded_state: Option<bool> = match &recorded {
+                    Some(rid) => vf_core::db::OptionalExtension::optional(
+                        id_state.query_row([rid], |r| r.get::<_, bool>(0)),
+                    )?,
+                    None => None,
+                };
+                let back: Option<String> = match (&recorded, recorded_state) {
+                    (Some(rid), Some(true)) => Some(rid.clone()),
+                    _ => vf_core::db::OptionalExtension::optional(
+                        revive.query_row([&f.hash], |r| r.get::<_, String>(0)),
+                    )?
+                    .filter(|id| !revived.contains(id)),
+                };
                 if let Some(id) = missing_by_hash.get_mut(&f.hash).and_then(|v| v.pop()) {
                     stmts.push(Stmt::new(
                         "UPDATE document SET rel_path = ?2, client_id = ?3, device_id = ?4, updated_at = ?5, rev = rev + 1 WHERE id = ?1 AND updated_at = ?6",
@@ -1022,7 +1039,12 @@ fn rebuild_scoped(
                     rep.docs_moved += 1;
                     doc_id_by_rel.insert(f.rel.clone(), id);
                 } else {
-                    let id = vf_core::new_id();
+                    // The recorded id when no row has it; else a new one.
+                    let id = match (recorded, recorded_state) {
+                        (Some(rid), None) => rid,
+                        _ => vf_core::new_id(),
+                    };
+                    used_ids.insert(id.clone());
                     // Q-22: metadata kept on disk wins over what the path suggests.
                     let m = meta.get(&f.rel, &f.hash);
                     let (year, status, source, doc_type, tags) = match m {
@@ -1147,6 +1169,7 @@ fn rebuild_scoped(
         }
     }
     drop(revive);
+    drop(id_state);
     let mut gone_ids: Vec<String> = vec![];
     for id in missing_ids.iter().filter(|id| !moved.contains(*id)) {
         // A document under legal hold is never marked deleted: its file is reported missing

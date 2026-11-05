@@ -87,3 +87,71 @@ fn an_edit_on_one_server_reaches_the_other() {
             .is_empty()
     );
 }
+
+/// Owner 2026-11-05: one trash for every server. A document trashed on A is in B's Trash and
+/// B restores it under the same id, with its doc type; a document B catalogs again after a
+/// re-read keeps the id its record gives.
+#[test]
+fn one_trash_and_one_id_for_every_server() {
+    let t = tempfile::tempdir().unwrap();
+    let root = t.path().join("Clients");
+    vf_fixtures::generate(&root, 7).unwrap();
+    vf_fs::doctypes::seed_if_missing(&root).unwrap();
+    let mut a = catalog(&t.path().join("a.db"));
+    vf_fs::doctypes::sync(&mut a, &root, "dev-a", "seed").unwrap();
+    vf_fs::rebuild::rebuild(&mut a, &root, "dev-a").unwrap();
+    // B: its own catalog, built from the disk (no seed): ids differ until records say.
+    let mut b = catalog(&t.path().join("b.db"));
+    vf_fs::doctypes::sync(&mut b, &root, "dev-b", "seed").unwrap();
+    vf_fs::rebuild::rebuild(&mut b, &root, "dev-b").unwrap();
+    let (id, rel): (String, String) = a
+        .query_row(
+            "SELECT d.id, d.rel_path FROM document d WHERE d.client_id IS NOT NULL
+             AND d.deleted_at IS NULL ORDER BY d.rel_path LIMIT 1",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    let w2: String = a
+        .query_row("SELECT id FROM doc_type WHERE name = 'W-2'", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    vf_fs::docmeta::edit(
+        &mut a,
+        &root,
+        std::slice::from_ref(&id),
+        &MetaEdit {
+            doc_type: Some(Some(w2)),
+            ..Default::default()
+        },
+        "dev-a",
+    )
+    .unwrap();
+    vf_fs::trash::delete(
+        &mut a,
+        &root,
+        "dev-a",
+        std::slice::from_ref(&id),
+        "invented",
+    )
+    .unwrap();
+    // B's Trash lists it (trashed on A).
+    let items = vf_fs::trash::list(&b, &root).unwrap();
+    let it = items.iter().find(|i| i.doc_id == id).expect("in B's trash");
+    assert!(it.item.is_some());
+    vf_fs::trash::restore(&mut b, &root, "dev-b", std::slice::from_ref(it)).unwrap();
+    assert!(root.join(&rel).is_file(), "back where it was");
+    assert_eq!(
+        doc_type_of(&b, &id).as_deref(),
+        Some("W-2"),
+        "same id, same doc type"
+    );
+    assert!(
+        vf_fs::trash::list(&a, &root)
+            .unwrap()
+            .iter()
+            .all(|i| i.doc_id != id),
+        "out of A's trash too"
+    );
+}

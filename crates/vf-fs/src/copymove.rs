@@ -217,8 +217,15 @@ pub fn commit(
             Mode::Move => FileOp::Move { src, dst },
             Mode::Copy => FileOp::Copy { src, dst },
         });
+        // A copy is a new document: its own id from the start (recorded with it).
+        let copy_id = vf_core::new_id();
         // The metadata travels in the destination folder's docmeta.jsonl.
         let there = docmeta::Meta {
+            id: if mode == Mode::Copy {
+                copy_id.clone()
+            } else {
+                m.id.clone()
+            },
             rel_path: new_rel.clone(),
             folder_rel: Some(t.client_folder.clone()),
             ..m.clone()
@@ -266,7 +273,7 @@ pub fn commit(
                 ));
             }
             (Mode::Copy, false) => {
-                let id = vf_core::new_id();
+                let id = copy_id.clone();
                 tx = tx
                     .catalog(Stmt::new(
                         "INSERT INTO document (id, client_id, doc_type_id, tax_year, rel_path, hash,

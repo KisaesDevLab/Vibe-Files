@@ -646,7 +646,9 @@ fn record(
                 } else {
                     vec![]
                 };
-                if hint.is_some_and(Hint::is_useful) {
+                // Every filed document gets its docmeta record (its id included), so the other
+                // servers and a rebuilt catalog know it by the same id (owner 2026-11-05).
+                {
                     let meta = crate::docmeta::Meta {
                         id: id.clone(),
                         rel_path: f.rel.clone(),
@@ -1276,8 +1278,10 @@ mod tests {
         assert_eq!(row("other.pdf"), (None, Some(2025), "client".into()));
         let meta =
             std::fs::read_to_string(f.root.join("Acme LLC (1001)/_Vibe/docmeta.jsonl")).unwrap();
-        assert_eq!(meta.lines().count(), 1);
+        // Every filed document has its record (with its id, shared between servers).
+        assert_eq!(meta.lines().count(), 2);
         assert!(meta.contains(&w2_type.id) && meta.contains("\"firm\""));
+        assert!(meta.lines().all(|l| l.contains("\"id\":")));
     }
 
     /// P08 steps 2 and 4: a recognized form's reading is kept with the document; filed to a

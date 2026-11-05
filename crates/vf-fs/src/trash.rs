@@ -34,6 +34,49 @@ pub struct Trashed {
     pub file: PathBuf,
     /// Under an active legal hold: kept until released.
     pub held: bool,
+    /// Trashed on another server (not in this catalog): what its record in the cabinet's
+    /// trash folder says (owner 2026-11-05: one trash for every server).
+    pub item: Option<Item>,
+}
+
+/// A trashed document's record beside its file, `_Vibe/trash/<doc id>/item.jsonl` (one line
+/// per event, `trashed` or `restored`): every server's Trash lists it and can restore it with
+/// its doc type and year, under the same id.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Item {
+    pub event: String,
+    pub doc_id: String,
+    pub rel_path: String,
+    pub deleted_at: String,
+    pub reason: Option<String>,
+    pub size: i64,
+    pub hash: String,
+    /// The client folder it was in.
+    pub client_folder: Option<String>,
+    pub doc_type: Option<String>,
+    pub doc_type_name: Option<String>,
+    pub tax_year: Option<i32>,
+    pub status: String,
+    pub source: Option<String>,
+    #[serde(default)]
+    pub tags: Vec<String>,
+}
+
+/// The record file of trashed document `doc_id`.
+pub fn item_path(root: &Path, doc_id: &str) -> PathBuf {
+    cabinet::trash_dir(root).join(doc_id).join("item.jsonl")
+}
+
+/// The last event in `doc_id`'s record.
+fn last_item(root: &Path, doc_id: &str) -> Option<Item> {
+    let text = std::fs::read_to_string(item_path(root, doc_id)).ok()?;
+    text.lines()
+        .rev()
+        .find_map(|l| serde_json::from_str::<Item>(l).ok())
+}
+
+fn item_line(i: &Item) -> String {
+    serde_json::to_string(i).expect("serializes")
 }
 
 /// The file of trashed document `doc_id` that used to be at `rel_path`.
@@ -76,10 +119,42 @@ pub fn delete_as(
                 |r| r.get(0),
             )
             .map_err(|_| "a document is not in the catalog any more".to_string())?;
+        // Its record beside the file, for every server's Trash.
+        let m = crate::docmeta::load(conn, id)?;
+        let size: i64 = conn
+            .query_row("SELECT size FROM document WHERE id = ?1", [id], |r| {
+                r.get(0)
+            })
+            .unwrap_or(0);
+        let item = Item {
+            event: "trashed".into(),
+            doc_id: id.clone(),
+            rel_path: rel.clone(),
+            deleted_at: now.clone(),
+            reason: Some(reason.to_string()),
+            size,
+            hash: m.hash.clone(),
+            client_folder: m.folder_rel.clone(),
+            doc_type: m.doc_type.clone(),
+            doc_type_name: m.doc_type_name.clone(),
+            tax_year: m.tax_year,
+            status: m.status.clone(),
+            source: m.source.clone(),
+            tags: m.tags.clone(),
+        };
+        let back = Item {
+            event: "restored".into(),
+            ..item.clone()
+        };
         tx = tx
             .file(FileOp::Move {
                 src: root.join(&rel),
                 dst: trash_file(root, id, &rel),
+            })
+            .file(FileOp::AppendLines {
+                path: item_path(root, id),
+                lines: vec![item_line(&item)],
+                undo_lines: vec![item_line(&back)],
             })
             .catalog(Stmt::new(
                 "UPDATE document SET deleted_at = ?2, tombstone_reason = ?3, rev = rev + 1,
@@ -244,7 +319,12 @@ fn held_in_cabinet(conn: &Connection, root: &Path, t: &Trashed) -> bool {
             [&t.doc_id],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
-        .unwrap_or((None, String::new()));
+        .unwrap_or_else(|_| {
+            (
+                None,
+                t.item.as_ref().map(|i| i.hash.clone()).unwrap_or_default(),
+            )
+        });
     crate::holds::covers(root, client.as_deref(), &t.rel_path, &hash)
 }
 
@@ -281,9 +361,43 @@ pub fn list(conn: &Connection, root: &Path) -> Result<Vec<Trashed>, String> {
                 size,
                 file,
                 held,
+                item: None,
             });
         }
     }
+    // What other servers trashed: the records in the cabinet's trash folder (owner
+    // 2026-11-05: one trash for every server).
+    let known: std::collections::HashSet<String> = out.iter().map(|t| t.doc_id.clone()).collect();
+    for e in std::fs::read_dir(cabinet::trash_dir(root))
+        .into_iter()
+        .flatten()
+        .flatten()
+    {
+        let id = e.file_name().to_string_lossy().into_owned();
+        if known.contains(&id) || !e.file_type().is_ok_and(|t| t.is_dir()) {
+            continue;
+        }
+        let Some(i) = last_item(root, &id).filter(|i| i.event == "trashed" && i.doc_id == id)
+        else {
+            continue;
+        };
+        let file = trash_file(root, &id, &i.rel_path);
+        if !file.is_file() {
+            continue;
+        }
+        let held = crate::holds::covers(root, None, &i.rel_path, &i.hash);
+        out.push(Trashed {
+            doc_id: id,
+            rel_path: i.rel_path.clone(),
+            deleted_at: i.deleted_at.clone(),
+            reason: i.reason.clone(),
+            size: i.size,
+            file,
+            held,
+            item: Some(i),
+        });
+    }
+    out.sort_by(|a, b| b.deleted_at.cmp(&a.deleted_at));
     Ok(out)
 }
 
@@ -378,10 +492,29 @@ pub fn restore(
             )
             .is_ok()
         };
-        if dst.exists() || live(conn, &dst) || taken.contains(&dst) {
-            dst = filer_intake::commit::free_path(&dst);
-            while live(conn, &dst) || taken.contains(&dst) {
-                dst = filer_intake::commit::free_path(&dst);
+        // A catalog row at that path whose file is gone (another server moved or trashed it,
+        // not re-read here yet) does not hold the name: it is marked missing below.
+        let held_name = |c: &Connection, p: &Path| live(c, p) && p.exists();
+        if dst.exists() || held_name(conn, &dst) || taken.contains(&dst) {
+            // Names numbered past what the disk, the catalog and this batch hold (free_path
+            // looks at the disk only, so it alone could return the same name: QA).
+            let base = dst.clone();
+            let stem = base
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let ext = base
+                .extension()
+                .map(|e| format!(".{}", e.to_string_lossy()))
+                .unwrap_or_default();
+            let dir = base.parent().map(Path::to_path_buf).unwrap_or_default();
+            let mut n = 2;
+            loop {
+                dst = dir.join(format!("{stem} ({n}){ext}"));
+                if !dst.exists() && !live(conn, &dst) && !taken.contains(&dst) {
+                    break;
+                }
+                n += 1;
             }
         }
         taken.push(dst.clone());
@@ -390,6 +523,66 @@ pub fn restore(
             .map_err(|_| "outside the cabinet".to_string())?
             .to_string_lossy()
             .replace('\\', "/");
+        // A row of this catalog still at that path with its file gone: marked missing, so the
+        // restored document takes the path.
+        if !dst.exists() {
+            tx = tx.catalog(Stmt::new(
+                "UPDATE document SET deleted_at = ?3, tombstone_reason = 'missing', rev = rev + 1,
+                   updated_at = ?3 WHERE rel_path = ?1 AND id <> ?2 AND deleted_at IS NULL",
+                vec![
+                    rel.clone().into(),
+                    t.doc_id.clone().into(),
+                    now.clone().into(),
+                ],
+            ));
+        }
+        // Trashed on another server: this catalog gets the document under the same id, with
+        // what its record says (doc type, year, status, source, tags).
+        if let Some(i) = &t.item {
+            tx = tx.catalog(Stmt::new(
+                "INSERT OR IGNORE INTO document (id, client_id, doc_type_id, tax_year, rel_path,
+                   hash, size, mime, status, source, filed_by, filed_at, device_id, updated_at,
+                   deleted_at)
+                 VALUES (?1, (SELECT id FROM client WHERE folder_rel = ?2 AND deleted_at IS NULL),
+                   (SELECT id FROM doc_type WHERE id = ?3 OR lower(name) = lower(?4)
+                    ORDER BY id = ?3 DESC LIMIT 1),
+                   ?5, ?6, ?7, ?8, ?9, ?10, ?11, 'restore', ?12, ?13, ?12, ?12)",
+                vec![
+                    t.doc_id.clone().into(),
+                    i.client_folder.clone().into(),
+                    i.doc_type.clone().unwrap_or_default().into(),
+                    i.doc_type_name.clone().unwrap_or_default().into(),
+                    i.tax_year.map(i64::from).into(),
+                    t.rel_path.clone().into(),
+                    i.hash.clone().into(),
+                    i.size.into(),
+                    crate::rebuild::mime(&t.rel_path).into(),
+                    i.status.clone().into(),
+                    i.source.clone().into(),
+                    now.clone().into(),
+                    device_id.into(),
+                ],
+            ));
+            for tag in &i.tags {
+                tx = tx.catalog(Stmt::new(
+                    "INSERT OR IGNORE INTO document_tag (doc_id, tag) VALUES (?1, ?2)",
+                    vec![t.doc_id.clone().into(), tag.clone().into()],
+                ));
+            }
+        }
+        // The record says it is back (and the trash again on undo).
+        if let Some(mut i) = t.item.clone().or_else(|| last_item(root, &t.doc_id)) {
+            i.event = "restored".into();
+            let again = Item {
+                event: "trashed".into(),
+                ..i.clone()
+            };
+            tx = tx.file(FileOp::AppendLines {
+                path: item_path(root, &t.doc_id),
+                lines: vec![item_line(&i)],
+                undo_lines: vec![item_line(&again)],
+            });
+        }
         tx = tx
             .file(FileOp::Move {
                 src: t.file.clone(),
@@ -477,6 +670,8 @@ pub fn purge(
             failed.push(format!("{}: {e}", t.file.display()));
             continue;
         }
+        // Its record goes with it (for every server).
+        let _ = std::fs::remove_file(item_path(root, &t.doc_id));
         if let Some(dir) = t.file.parent() {
             let _ = std::fs::remove_dir(dir); // only when empty
         }

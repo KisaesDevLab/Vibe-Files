@@ -40,6 +40,10 @@ pub struct Record {
     pub v: u32,
     pub ts: String,
     pub device: String,
+    /// The document's catalog id: every server (and a rebuilt catalog) catalogs the file under
+    /// this same id (owner 2026-11-05). Records written before have none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
     pub hash: String,
     /// Relative to the client folder (or the cabinet, for documents outside client folders),
     /// forward slashes, so renaming the client folder does not break it.
@@ -214,6 +218,7 @@ pub fn record_line(root: &Path, m: &Meta, ts: &str, device: &str) -> (PathBuf, S
         v: 1,
         ts: ts.into(),
         device: device.into(),
+        id: Some(m.id.clone()).filter(|i| !i.is_empty()),
         hash: m.hash.clone(),
         path,
         doc_type: m.doc_type.clone(),

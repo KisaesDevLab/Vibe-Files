@@ -41,3 +41,8 @@ Browse then shows a red "Legal hold:" line with the reason and date whenever tha
 ### Releasing a hold
 
 Press **Release hold** on that line in Browse, or **Release** beside it in **Admin** › **Legal holds**. You are asked "Release the legal hold …?"; type the admin password in **Password** if the firm has one, and press **Yes, release**. Everything the hold covered can then be emptied and disposed of again.
+
+## Several servers or PCs
+
+The trash is the cabinet's, not one computer's: a document moved to the trash on one server shows in the Trash on every server, and can be restored or emptied from any of them. Restored, it comes back with its doc type, year and tags, as the same document everywhere.
+
