@@ -46,8 +46,59 @@ pub fn server_mode() -> bool {
     *ON.get_or_init(|| match std::env::var("VIBE_FILES_SERVER").as_deref() {
         Ok("1") => true,
         Ok("0") => false,
-        _ => is_windows_server() && vf_core::exe_dir().is_some_and(|d| is_network(&d)),
+        _ => match mode_setting() {
+            Setting::On => true,
+            Setting::Off => false,
+            Setting::Auto => auto_detected(),
+        },
     })
+}
+
+/// What Windows says: a Windows Server running Vibe Files from a network folder.
+pub fn auto_detected() -> bool {
+    is_windows_server() && vf_core::exe_dir().is_some_and(|d| is_network(&d))
+}
+
+/// This computer's server-mode choice (Admin › Devices › Servers, owner 2026-11-05), kept in
+/// `%PROGRAMDATA%\Vibe Files\server-mode.txt`: it is read before the data folder is chosen,
+/// and it is the computer's, not one login's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Setting {
+    Auto,
+    On,
+    Off,
+}
+
+fn setting_path() -> Option<PathBuf> {
+    std::env::var_os("PROGRAMDATA")
+        .map(PathBuf::from)
+        .map(|p| p.join("Vibe Files").join("server-mode.txt"))
+}
+
+pub fn mode_setting() -> Setting {
+    match setting_path()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .as_deref()
+        .map(str::trim)
+    {
+        Some("on") => Setting::On,
+        Some("off") => Setting::Off,
+        _ => Setting::Auto,
+    }
+}
+
+/// Saves this computer's choice; takes effect at the next start of Vibe Files.
+pub fn set_mode_setting(s: Setting) -> Result<()> {
+    let p = setting_path().context("this computer has no ProgramData folder")?;
+    if let Some(d) = p.parent() {
+        std::fs::create_dir_all(d).with_context(|| format!("creating {}", d.display()))?;
+    }
+    let v = match s {
+        Setting::Auto => "auto",
+        Setting::On => "on",
+        Setting::Off => "off",
+    };
+    std::fs::write(&p, v).with_context(|| format!("writing {}", p.display()))
 }
 
 /// Whether this is Windows Server (where Remote Desktop session hosts run), from

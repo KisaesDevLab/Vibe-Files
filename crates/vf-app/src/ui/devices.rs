@@ -8,10 +8,41 @@ use crate::ui::{theme, widgets};
 
 /// Several Remote Desktop servers (PA-36): which one runs text recognition and B2 sync.
 fn servers_section(ui: &mut egui::Ui, p: &mut DevicesPage, env: &mut Env) {
+    use crate::server::Setting;
+    ui.label(RichText::new("Servers").strong().size(16.0));
+    // The choice for this computer (owner 2026-11-05): Windows decides, or always / never.
+    let now = crate::server::mode_setting();
+    let mut pick = now;
+    ui.horizontal(|ui| {
+        ui.label("Server mode on this computer");
+        ui.radio_value(&mut pick, Setting::Auto, "Automatic")
+            .on_hover_text(if crate::server::auto_detected() {
+                "Windows Server running Vibe Files from a network folder: on."
+            } else {
+                "Not a Windows Server running Vibe Files from a network folder: off."
+            });
+        ui.radio_value(&mut pick, Setting::On, "Always on");
+        ui.radio_value(&mut pick, Setting::Off, "Always off");
+    });
+    ui.label(widgets::caption(format!(
+        "Now {} in this session. A change takes effect when Vibe Files next starts on this computer. Server mode: each login's settings stay on this computer, one catalog for all its logins, other servers' changes read, text recognition and B2 sync on one main server.",
+        if crate::server::server_mode() { "on" } else { "off" }
+    )));
+    if pick != now {
+        match crate::server::set_mode_setting(pick) {
+            Ok(()) => {
+                p.notice = Some(
+                    "Server mode changes when Vibe Files next starts on this computer.".into(),
+                );
+                p.error = None;
+            }
+            Err(e) => p.error = Some(format!("Could not save it: {e}")),
+        }
+    }
     if !crate::server::server_mode() {
+        ui.add_space(12.0);
         return;
     }
-    ui.label(RichText::new("Servers").strong().size(16.0));
     ui.label(widgets::caption(
         "Vibe Files runs from a network folder, so each server keeps its own catalog of the cabinet and reads the other servers' changes (when a client is opened and every 15 minutes). Text recognition and B2 sync run on one of them.",
     ));
