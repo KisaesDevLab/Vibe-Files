@@ -374,6 +374,9 @@ fn reconcile_dir(
             // Filer already moved the files back: run only the catalog inverse.
             vf_core::tx::undo(conn, &mut NoFileOps, &Actor::device(device_id), &tx)
                 .map_err(|e| e.to_string())?;
+            // The client folders it emptied again, for the other servers (PA-36).
+            let filed = from_last_batch(&lb);
+            crate::changes::note_paths(filed.iter().map(|f| f.dst.as_path()));
             Ok(Reconciled {
                 undone: Some(batch),
                 ..Default::default()

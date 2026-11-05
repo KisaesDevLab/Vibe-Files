@@ -399,6 +399,12 @@ impl Index {
             .get(&(rel.to_owned(), hash.to_owned()))
             .or_else(|| self.by_hash.get(hash))
     }
+
+    /// The record for exactly this path and content (no fall-back by content: two files with
+    /// the same bytes, a K-1 copied to two clients, keep their own metadata).
+    pub fn get_at(&self, rel: &str, hash: &str) -> Option<&Record> {
+        self.by_path.get(&(rel.to_owned(), hash.to_owned()))
+    }
 }
 
 #[cfg(test)]

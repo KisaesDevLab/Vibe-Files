@@ -1642,12 +1642,19 @@ mod tests {
             assert!(start.elapsed() < std::time::Duration::from_secs(30));
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
-        h.run();
-        assert!(h.query_by_label("in sync").is_some());
-        assert!(
-            h.query_by_label("Nothing waiting: this PC and the bucket agree.")
-                .is_some()
-        );
+        // The counts are made on their own thread (PA-34): wait for them.
+        let start = std::time::Instant::now();
+        while h.query_by_label("in sync").is_none()
+            || h.query_by_label("Nothing waiting: this PC and the bucket agree.")
+                .is_none()
+        {
+            h.step();
+            assert!(
+                start.elapsed() < std::time::Duration::from_secs(30),
+                "counts never refreshed"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
     }
 
     /// Closing the window with annotations unsaved asks first: the window stays, the Viewer

@@ -997,7 +997,8 @@ fn rebuild_scoped(
             let Some(id) = doc_id_by_rel.get(&f.rel) else {
                 continue;
             };
-            let Some(m) = meta.get(&f.rel, &f.hash) else {
+            // By path only: a copy with the same bytes elsewhere keeps its own (code review).
+            let Some(m) = meta.get_at(&f.rel, &f.hash) else {
                 continue;
             };
             // New rows are not in the catalog yet (they were made from docmeta already).
@@ -1887,6 +1888,59 @@ mod tests {
             ),
             1
         );
+    }
+
+    /// Code review (PA-36): a scoped re-index takes a document's own docmeta record only; a
+    /// copy with the same bytes in another client keeps its metadata.
+    #[test]
+    fn a_scoped_rebuild_takes_metadata_by_path_only() {
+        let c = cab();
+        crate::doctypes::seed_if_missing(&c.root).unwrap();
+        put(
+            &c.root.join("Acme LLC (1002)/Payroll/2025/k1.pdf"),
+            "same k-1",
+        );
+        put(
+            &c.root.join("Smith, John (1001)/Income Tax/2025/k1.pdf"),
+            "same k-1",
+        );
+        let mut conn = open(&c);
+        rebuild(&mut conn, &c.root, "dev").unwrap();
+        let id_of = |conn: &Connection, like: &str| -> String {
+            conn.query_row(
+                "SELECT id FROM document WHERE rel_path LIKE ?1",
+                [like],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        let smith = id_of(&conn, "Smith%k1.pdf");
+        let acme = id_of(&conn, "Acme%k1.pdf");
+        let k1: String = conn
+            .query_row("SELECT id FROM doc_type WHERE name = 'W-2'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        crate::docmeta::edit(
+            &mut conn,
+            &c.root,
+            &[smith],
+            &crate::docmeta::MetaEdit {
+                doc_type: Some(Some(k1)),
+                ..Default::default()
+            },
+            "dev",
+        )
+        .unwrap();
+        rebuild_folders(&mut conn, &c.root, "dev", &["Acme LLC (1002)".into()]).unwrap();
+        let t: Option<String> = conn
+            .query_row(
+                "SELECT doc_type_id FROM document WHERE id = ?1",
+                [&acme],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(t, None, "the Acme copy keeps no doc type");
     }
 
     /// Q-22: metadata edits come back from the client folder's `_Vibe/docmeta.jsonl`, also for

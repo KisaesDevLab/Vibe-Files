@@ -26,10 +26,7 @@ pub fn shared_catalog(cabinet_id: &str) -> Option<PathBuf> {
 }
 
 fn shared_catalog_in(base: &Path, cabinet_id: &str) -> Option<PathBuf> {
-    let safe: String = cabinet_id
-        .chars()
-        .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
-        .collect();
+    let safe = vf_fs::changes::safe_id(cabinet_id);
     let p = base.join(safe).join(CATALOG_FILE);
     p.is_file().then_some(p)
 }
@@ -44,10 +41,7 @@ pub fn share(conn: &vf_core::db::Connection, cabinet_id: &str) -> Result<PathBuf
 /// This cabinet's shared-catalog folder under `base`, made writable for every login of this
 /// PC (made if missing).
 pub fn prepare_dir(base: &Path, cabinet_id: &str) -> Result<PathBuf> {
-    let safe: String = cabinet_id
-        .chars()
-        .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
-        .collect();
+    let safe = vf_fs::changes::safe_id(cabinet_id);
     let dir = base.join(&safe);
     std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
     grant_users(&dir)?;
@@ -55,10 +49,7 @@ pub fn prepare_dir(base: &Path, cabinet_id: &str) -> Result<PathBuf> {
 }
 
 fn share_in(conn: &vf_core::db::Connection, base: &Path, cabinet_id: &str) -> Result<PathBuf> {
-    let safe: String = cabinet_id
-        .chars()
-        .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
-        .collect();
+    let safe = vf_fs::changes::safe_id(cabinet_id);
     let target = base.join(&safe).join(CATALOG_FILE);
     if target.exists() {
         anyhow::bail!(

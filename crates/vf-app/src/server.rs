@@ -114,13 +114,23 @@ fn provision_in(
     }
     let part = dir.join(format!("{CATALOG_FILE}.part"));
     let seed = seed_path(root);
-    for from in [Some(seed.as_path()), legacy].into_iter().flatten() {
-        if !from.is_file() {
+    for (from, is_seed) in [(Some(seed.as_path()), true), (legacy, false)] {
+        let Some(from) = from.filter(|f| f.is_file()) else {
             continue;
-        }
+        };
         match copy_catalog(from, &part) {
             Ok(()) if belongs(&part, cabinet_id) => {
-                tracing::info!("server catalog started from a copy");
+                tracing::info!(seed = is_seed, "server catalog started from a copy");
+                if !is_seed {
+                    // The old catalog beside the exe was not kept up to date by the change
+                    // logs: the first open re-indexes the cabinet by size and date.
+                    let c = Connection::open(&part)?;
+                    c.execute(
+                        "INSERT INTO local_state (k, v) VALUES ('rebuild_unfinished', 'rebuild')
+                         ON CONFLICT(k) DO UPDATE SET v = excluded.v",
+                        [],
+                    )?;
+                }
                 std::fs::rename(&part, &target)?;
                 return Ok(target);
             }
@@ -148,7 +158,7 @@ fn belongs(p: &Path, cabinet_id: &str) -> bool {
         .is_ok_and(|n| n > 0)
 }
 
-/// A lock file held with no sharing, waited for up to a minute.
+/// A lock file held with no sharing, waited for up to 30 minutes.
 fn lock(p: &Path) -> Result<std::fs::File> {
     use std::os::windows::fs::OpenOptionsExt;
     let start = std::time::Instant::now();
@@ -162,7 +172,8 @@ fn lock(p: &Path) -> Result<std::fs::File> {
             .open(p)
         {
             Ok(f) => return Ok(f),
-            Err(e) if start.elapsed() > std::time::Duration::from_secs(60) => {
+            // Long enough for another login copying a seed of a few GB over the network.
+            Err(e) if start.elapsed() > std::time::Duration::from_secs(30 * 60) => {
                 return Err(e).with_context(|| format!("waiting for {}", p.display()));
             }
             Err(_) => std::thread::sleep(std::time::Duration::from_millis(250)),
@@ -203,14 +214,14 @@ pub fn publish_seed(catalog: &Path, root: &Path, writer: &str) -> Result<bool> {
         "{CATALOG_FILE}.{}.part",
         vf_fs::changes::safe_id(writer)
     ));
+    // This server's own log as far as it reaches before the copy starts: changes noted while
+    // the copy runs (minutes for GBs) are read again by whoever starts from it.
+    let own = vf_fs::changes::log_len(root, writer);
     copy_catalog(catalog, &part)?;
     {
         let c = Connection::open(&part)?;
         let mut seen = vf_fs::changes::load_seen(&c).unwrap_or_default();
-        seen.insert(
-            vf_fs::changes::safe_id(writer),
-            vf_fs::changes::log_len(root, writer),
-        );
+        seen.insert(vf_fs::changes::safe_id(writer), own);
         vf_fs::changes::save_seen(&c, &seen).map_err(anyhow::Error::msg)?;
     }
     std::fs::rename(&part, &seed)?;
@@ -250,7 +261,40 @@ pub fn runs_here(root: &Path) -> bool {
     }
     match main_server(root) {
         Some(m) => m.computer.eq_ignore_ascii_case(&computer()),
-        None => set_main(root).is_ok(),
+        // No main server recorded: the first to make the file takes the role (made only if it
+        // is not there, so two servers starting together cannot both take it). A file that
+        // cannot be read for a moment (the share, another server writing it) never makes this
+        // one main.
+        None if !main_path(root).exists() => claim_main(root),
+        None => false,
+    }
+}
+
+/// Makes this computer the main server only if none is recorded.
+fn claim_main(root: &Path) -> bool {
+    use std::io::Write;
+    let m = MainServer {
+        computer: computer(),
+        since: vf_core::now_rfc3339(),
+    };
+    let path = main_path(root);
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+    {
+        Ok(mut f) => {
+            let ok = serde_json::to_vec_pretty(&m)
+                .ok()
+                .is_some_and(|b| f.write_all(&b).and_then(|()| f.sync_all()).is_ok());
+            if !ok {
+                drop(f);
+                let _ = std::fs::remove_file(&path);
+            }
+            ok
+        }
+        // Another server made it first.
+        Err(_) => main_server(root).is_some_and(|m| m.computer.eq_ignore_ascii_case(&computer())),
     }
 }
 
@@ -273,7 +317,6 @@ pub fn personal_data(beside: &Path, personal: &Path, login: Option<&str>) -> Pat
 /// Keeps a server's catalog up to date with the others (PA-36): reads their change logs every
 /// 15 minutes and when a different client is opened (at most every 30 s), on a thread with
 /// its own connection; then leaves a seed copy when the cabinet has none or it is a week old.
-#[derive(Default)]
 pub struct Watch {
     job: Option<std::sync::mpsc::Receiver<Vec<String>>>,
     last: Option<std::time::Instant>,
@@ -282,6 +325,17 @@ pub struct Watch {
 
 const EVERY: std::time::Duration = std::time::Duration::from_secs(15 * 60);
 const AT_MOST: std::time::Duration = std::time::Duration::from_secs(30);
+
+impl Default for Watch {
+    /// Counting from now: opening the cabinet has just caught up.
+    fn default() -> Self {
+        Watch {
+            job: None,
+            last: Some(std::time::Instant::now()),
+            client: None,
+        }
+    }
+}
 
 impl Watch {
     /// Every frame. True when a catch-up re-read folders (Browse should read the catalog).
@@ -429,6 +483,28 @@ mod tests {
             !other.exists(),
             "nothing to start from: empty, indexed at open"
         );
+    }
+
+    /// Code review: the main server is taken only when none is recorded, and a file that
+    /// cannot be read never hands this server the role.
+    #[test]
+    fn the_main_server_is_claimed_once() {
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path();
+        std::fs::create_dir_all(root.join("_Vibe")).unwrap();
+        assert!(claim_main(root));
+        assert_eq!(main_server(root).unwrap().computer, computer());
+        // Someone else's.
+        std::fs::write(
+            main_path(root),
+            r#"{"computer": "OTHER-SERVER", "since": "t"}"#,
+        )
+        .unwrap();
+        assert!(!claim_main(root), "already taken");
+        // Unreadable for a moment: not taken over.
+        std::fs::write(main_path(root), "{half").unwrap();
+        assert!(main_server(root).is_none());
+        assert!(main_path(root).exists());
     }
 
     #[test]

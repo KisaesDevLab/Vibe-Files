@@ -6,7 +6,6 @@ use egui::RichText;
 use crate::ui::browse::Env;
 use crate::ui::{theme, widgets};
 
-/// This PC's shared catalog (Q-67: a Remote Desktop server's logins index the cabinet once).
 /// Several Remote Desktop servers (PA-36): which one runs text recognition and B2 sync.
 fn servers_section(ui: &mut egui::Ui, p: &mut DevicesPage, env: &mut Env) {
     if !crate::server::server_mode() {
@@ -85,6 +84,7 @@ fn reads_section(ui: &mut egui::Ui, p: &mut DevicesPage, env: &mut Env) {
     }
 }
 
+/// This PC's shared catalog (Q-67: a Remote Desktop server's logins index the cabinet once).
 fn shared_section(ui: &mut egui::Ui, p: &mut DevicesPage, env: &mut Env) {
     ui.label(RichText::new("This PC's catalog").strong().size(16.0));
     let Ok(cab) = vf_fs::cabinet::read(env.root) else {

@@ -420,6 +420,9 @@ fn open_log(dirs: &[PathBuf], name: &str, kind: &str) -> Option<(PathBuf, std::f
     None
 }
 
+/// A log row written before its file moves.
+const MOVING: &str = "moving";
+
 /// The log's columns (the undo reads them by name).
 const LOG_HEADER: &str =
     "old path,new path,path in folder,size,modified,modified (seconds),step,reason,result";
@@ -604,7 +607,26 @@ pub fn apply(
         }
         let src = old.join(&item.rel);
         let want = new.join(&item.rel);
-        let (new_path, size, modified, result) = match move_one(&src, &want, true, opts, stop) {
+        // Logged before it moves ("moving", to the name it will have): a log that cannot be
+        // written stops the run before the file moves, so no move is ever off the record.
+        let planned = filer_intake::commit::free_path(&want);
+        let intent = [
+            src.to_string_lossy().into_owned(),
+            planned.to_string_lossy().into_owned(),
+            item.rel.to_string_lossy().into_owned(),
+            item.size.to_string(),
+            String::new(),
+            String::new(),
+            rule.label(),
+            item.why.clone(),
+            MOVING.to_string(),
+        ];
+        if let Err(e) = log_row(&mut log, &intent) {
+            rep.log_error = Some(e);
+            rep.stopped = true;
+            break;
+        }
+        let (new_path, size, modified, result) = match move_one(&src, &planned, true, opts, stop) {
             Ok(done) => {
                 rep.moved += 1;
                 rep.bytes += done.size;
@@ -739,19 +761,40 @@ pub fn read_log(log: &Path) -> Result<Vec<Moved>, String> {
     };
     let m = col("modified (seconds)");
     let mut out = vec![];
+    let mut pending: std::collections::BTreeMap<PathBuf, Moved> = Default::default();
     for line in lines.filter(|l| !l.trim().is_empty()) {
         let f = csv_fields(line);
         let get = |i: usize| f.get(i).map(String::as_str).unwrap_or_default();
-        if !get(res).starts_with("moved") {
-            continue;
-        }
-        out.push(Moved {
+        let row = Moved {
             old: PathBuf::from(get(o)),
             new: PathBuf::from(get(n)),
             rel: PathBuf::from(get(r)),
             size: get(z).parse().unwrap_or(0),
             modified: m.and_then(|i| get(i).parse().ok()),
-        });
+        };
+        let key = row.old.clone();
+        let result = get(res);
+        if result == MOVING {
+            // About to move; its outcome follows (or the run stopped right there).
+            pending.insert(key, row);
+        } else if result.starts_with("moved") {
+            pending.remove(&key);
+            out.push(row);
+        } else {
+            pending.remove(&key);
+        }
+    }
+    // A move whose outcome was never written (the log failed or the program stopped just
+    // then): it happened if the file is at its new path and not at its old one. Its size is
+    // what is there now.
+    for (_, mut row) in pending {
+        if !row.old.exists()
+            && let Ok(m) = std::fs::metadata(&row.new)
+        {
+            row.size = m.len();
+            row.modified = m.modified().ok().map(secs);
+            out.push(row);
+        }
     }
     let mut roots: Option<(PathBuf, PathBuf)> = None;
     for row in &out {
@@ -1066,7 +1109,9 @@ mod tests {
         let log = rep.log.unwrap();
         assert_eq!(log.parent().unwrap(), t.path());
         let text = std::fs::read_to_string(&log).unwrap();
-        assert_eq!(text.lines().count(), 4, "{text}");
+        // Each file: a "moving" row before it moves, then its outcome.
+        assert_eq!(text.lines().count(), 7, "{text}");
+        assert_eq!(text.lines().filter(|l| l.ends_with(",moving")).count(), 3);
         assert!(text.contains("kept both"));
     }
 
@@ -1272,7 +1317,7 @@ mod tests {
         )
         .unwrap();
         let mut lines: Vec<String> = text.lines().map(String::from).collect();
-        let row = lines[1].clone();
+        let row = lines[2].clone(); // the "moved" row
         lines.push(row.replace(
             &new2.to_string_lossy().into_owned(),
             &elsewhere.to_string_lossy(),
@@ -1324,6 +1369,31 @@ mod tests {
             "no empty folder for it"
         );
         assert!(new4.join("Sample, Pat/Taxes/2019/W2 2024.pdf").is_file());
+    }
+
+    /// Code review: a move logged as "moving" whose outcome row never got written is still
+    /// undone when the file is at its new path.
+    #[test]
+    fn a_move_without_its_outcome_row_is_undone() {
+        let (_t, old, new) = tree();
+        let rep = run(&old, &new, &Rule::YearFrom(2023), false);
+        assert_eq!(rep.moved, 3);
+        let log = rep.log.unwrap();
+        // As if the program stopped after one file moved, before its outcome was written.
+        let text = std::fs::read_to_string(&log).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        std::fs::write(&log, format!("{}\n{}\n", lines[0], lines[1])).unwrap();
+        let rows = read_log(&log).unwrap();
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        let back = undo(
+            &log,
+            &Options::default(),
+            &AtomicUsize::new(0),
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        assert_eq!(back.moved, 1, "{back:?}");
+        assert!(rows[0].old.is_file());
     }
 
     #[test]

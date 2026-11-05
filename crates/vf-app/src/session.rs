@@ -212,6 +212,14 @@ pub fn open(data: &Path, device_id: &str, root: &Path) -> Result<Opened> {
             .map_err(anyhow::Error::msg)?;
     }
     // A first index cut short (it commits in parts, PA-34) runs again until it finishes.
+    // Several servers (PA-36): before a first index (hours) or after starting from a copy, the
+    // change logs' ends are marked, so what other servers do meanwhile is read afterwards.
+    if server {
+        let w = crate::server::writer_id(&conn);
+        if let Err(e) = vf_fs::changes::mark_start(&conn, root, &w) {
+            tracing::warn!(kind = crate::logging::kind(&e), "change logs not marked");
+        }
+    }
     let rebuild = if known == 0 || vf_fs::rebuild::unfinished(&conn) {
         Some(vf_fs::rebuild::rebuild(&mut conn, root, device_id)?)
     } else {

@@ -945,6 +945,9 @@ pub fn destroy_due(
     ));
     tx.commit(conn, &mut NoFileOps, &Actor::device(device_id))
         .map_err(|e| e.to_string())?;
+    // The files it destroyed, for the other servers (PA-36).
+    let gone: Vec<std::path::PathBuf> = done.iter().map(|v| root.join(&v.rel_path)).collect();
+    crate::changes::note_paths(gone.iter().map(|p| p.as_path()));
     rep.run_id = Some(run_id);
     rep.destroyed = done.len();
     rep.certificate = Some(cert_rel);

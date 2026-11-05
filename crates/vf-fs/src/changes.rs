@@ -179,19 +179,41 @@ pub fn changed_since(root: &Path, me: &str, seen: &mut Seen, from_start: bool) -
         if f.seek(std::io::SeekFrom::Start(start)).is_err() {
             continue;
         }
+        // Whole lines only: a last line still being written (no newline yet) is read next time.
         let mut read = start;
-        for line in std::io::BufReader::new(f).lines() {
-            let Ok(line) = line else { break };
-            read += line.len() as u64 + 1;
-            if let Some((_, folder)) = line.split_once('\t')
-                && !folder.trim().is_empty()
-            {
-                out.insert(folder.trim().to_string());
+        let mut r = std::io::BufReader::new(f);
+        let mut buf = Vec::new();
+        loop {
+            buf.clear();
+            match r.read_until(b'\n', &mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(_) if buf.last() != Some(&b'\n') => break,
+                Ok(n) => {
+                    read += n as u64;
+                    let line = String::from_utf8_lossy(&buf);
+                    if let Some((_, folder)) = line.trim_end().split_once('\t')
+                        && !folder.trim().is_empty()
+                    {
+                        out.insert(folder.trim().to_string());
+                    }
+                }
             }
         }
-        seen.insert(writer.to_string(), read.min(len));
+        seen.insert(writer.to_string(), read);
     }
     out
+}
+
+/// A catalog's first look, made before it is built (a first index takes hours; a copy may be
+/// old): every log's current end is marked as read, so changes noted from now on, during the
+/// build, are read afterwards. Nothing when the catalog has looked before.
+pub fn mark_start(conn: &vf_core::db::Connection, root: &Path, me: &str) -> Result<(), String> {
+    if load_seen(conn).is_some() {
+        return Ok(());
+    }
+    let mut seen = Seen::new();
+    changed_since(root, me, &mut seen, false);
+    save_seen(conn, &seen)
 }
 
 /// Brings this catalog up to date with the other servers' changes: re-indexes the folders
@@ -226,6 +248,22 @@ pub fn catch_up(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Code review: a line still being written (no newline yet) is not read until it is whole.
+    #[test]
+    fn a_half_written_line_waits() {
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path();
+        let log = log_path(root, "server-a");
+        std::fs::create_dir_all(log.parent().unwrap()).unwrap();
+        std::fs::write(&log, "t1\tAcme LLC (1002)\nt2\tSmith, Jo").unwrap();
+        let mut seen = Seen::new();
+        let got = changed_since(root, "server-b", &mut seen, true);
+        assert_eq!(got.into_iter().collect::<Vec<_>>(), ["Acme LLC (1002)"]);
+        std::fs::write(&log, "t1\tAcme LLC (1002)\nt2\tSmith, John (1001)\n").unwrap();
+        let got = changed_since(root, "server-b", &mut seen, true);
+        assert_eq!(got.into_iter().collect::<Vec<_>>(), ["Smith, John (1001)"]);
+    }
 
     #[test]
     fn logs_name_the_folders_and_are_read_once() {
