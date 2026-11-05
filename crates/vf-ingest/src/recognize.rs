@@ -6,7 +6,9 @@
 //! threshold it keeps its name and only the doc type and year are hinted: never auto-filed on
 //! a guess.
 //!
-//! Only page 1 is read: its text layer, or OCR when it has none (a scan).
+//! Only page 1 is read: its text layer, or OCR when it has none (a scan). A filled-in fillable
+//! PDF is read at the page with its filled fields, each value with its printed label
+//! ([`form_read`]).
 
 use std::path::Path;
 
@@ -20,6 +22,125 @@ use crate::pipeline::{Lookup, clean};
 const TEXT_MIN: usize = 40;
 /// Resolution page 1 is read at when it needs OCR.
 const DPI: f32 = 300.0;
+
+/// What form recognition reads from a file: page text, and for a filled-in fillable PDF each
+/// filled field's printed label and value.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct FormRead {
+    pub text: String,
+    /// (printed label, value typed in), top to bottom.
+    pub fields: Vec<(String, String)>,
+}
+
+/// What to read: a filled-in fillable PDF at the page with the most filled fields (Q-61: a
+/// value typed into a field is drawn by the field, not part of the page's text), each value
+/// with the printed label nearest above it (or just left of it); otherwise page 1
+/// ([`page_one_text`]).
+pub fn form_read(
+    pdfium: &Pdfium,
+    pdf: &Path,
+    ocr: Option<&dyn vf_ocr::OcrEngine>,
+) -> Option<FormRead> {
+    if let Some(r) = filled_read(pdfium, pdf) {
+        return Some(r);
+    }
+    page_one_text(pdfium, pdf, ocr).map(|text| FormRead {
+        text,
+        fields: vec![],
+    })
+}
+
+fn filled_read(pdfium: &Pdfium, pdf: &Path) -> Option<FormRead> {
+    use vf_pdf::forms::FieldKind;
+    let fields = vf_pdf::forms::read(pdf).ok()?;
+    let typed = |f: &vf_pdf::forms::Field| {
+        !f.value.trim().is_empty()
+            && matches!(f.kind, FieldKind::Text { .. } | FieldKind::Choice { .. })
+    };
+    let mut per_page: std::collections::BTreeMap<usize, usize> = Default::default();
+    for f in fields.iter().filter(|f| typed(f)) {
+        *per_page.entry(f.page()).or_default() += 1;
+    }
+    let page = per_page
+        .iter()
+        .max_by_key(|(p, n)| (**n, std::cmp::Reverse(**p)))
+        .map(|(p, _)| *p)?;
+    let doc = pdfium.load_pdf_from_file(pdf, None).ok()?;
+    let p = doc.pages().get(page as _).ok()?;
+    let text = vf_pdf::text::page_text(&p);
+    // The page's printed text runs: [left, bottom, right, top] and the text.
+    let runs: Vec<([f32; 4], String)> = p
+        .text()
+        .ok()?
+        .segments()
+        .iter()
+        .filter_map(|s| {
+            let b = s.bounds();
+            let t = s.text().trim().to_string();
+            (!t.is_empty()).then_some((
+                [
+                    b.left().value,
+                    b.bottom().value,
+                    b.right().value,
+                    b.top().value,
+                ],
+                t,
+            ))
+        })
+        .collect();
+    let mut out: Vec<(f32, f32, String, String)> = vec![];
+    for f in &fields {
+        let ticked =
+            matches!(f.kind, FieldKind::Check { .. }) && vf_pdf::forms::Field::is_on(&f.value);
+        if !(typed(f) || ticked) {
+            continue;
+        }
+        let Some(w) = f.widgets.iter().find(|w| w.page == page) else {
+            continue;
+        };
+        let [x0, y0, x1, y1] = w.rect;
+        let (l, b, r, t) = (x0.min(x1), y0.min(y1), x0.max(x1), y0.max(y1));
+        let Some(label) = label_for(&runs, [l, b, r, t]) else {
+            continue;
+        };
+        let value = if ticked {
+            "X".to_string()
+        } else {
+            f.value.clone()
+        };
+        out.push((t, l, label, value));
+    }
+    out.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.total_cmp(&b.1)));
+    Some(FormRead {
+        text,
+        fields: out.into_iter().map(|(_, _, l, v)| (l, v)).collect(),
+    })
+}
+
+/// The printed label of a field whose widget is `[left, bottom, right, top]`: the nearest run
+/// above it that starts over it (a box's caption sits at its top left, the value under it),
+/// else the nearest run just left of it on its line (a check box's caption).
+fn label_for(runs: &[([f32; 4], String)], [l, b, r, t]: [f32; 4]) -> Option<String> {
+    let above = runs
+        .iter()
+        .filter(|([rl, rb, _, _], _)| {
+            *rb >= t - 4.0 && *rb - t <= 40.0 && *rl >= l - 16.0 && *rl <= r - 2.0
+        })
+        .min_by(|a, b| {
+            let d = |x: &([f32; 4], String)| (x.0[1] - t).abs() + 0.05 * (x.0[0] - l).abs();
+            d(a).total_cmp(&d(b))
+        });
+    if let Some((_, s)) = above {
+        return Some(s.clone());
+    }
+    let mid = (b + t) / 2.0;
+    runs.iter()
+        .filter(|([_, rb, rr, rt], _)| {
+            *rb <= mid && *rt >= mid && *rr <= l + 2.0 && l - *rr <= 200.0
+        })
+        .min_by(|a, b| (l - a.0[2]).total_cmp(&(l - b.0[2])))
+        .map(|(_, s)| s.clone())
+}
 
 /// Page 1's text: its own text layer, else OCR (when an engine is given).
 pub fn page_one_text(
@@ -95,7 +216,25 @@ pub struct Outcome {
 
 /// Reads `text` (page 1) and decides the file's name and hint. `None`: not a form.
 pub fn decide(root: &Path, lookup: &Lookup, text: &str, original: &str) -> Option<Outcome> {
-    let e = vf_extract::recognize(text)?;
+    decide_extract(root, lookup, vf_extract::recognize(text)?, original)
+}
+
+/// [`decide`] for what [`form_read`] read (a fillable form's fields included).
+pub fn decide_read(root: &Path, lookup: &Lookup, r: &FormRead, original: &str) -> Option<Outcome> {
+    decide_extract(
+        root,
+        lookup,
+        vf_extract::recognize_filled(&r.text, &r.fields)?,
+        original,
+    )
+}
+
+fn decide_extract(
+    root: &Path,
+    lookup: &Lookup,
+    e: vf_extract::Extract,
+    original: &str,
+) -> Option<Outcome> {
     let clients = client_refs(root);
     let aliases: Vec<matching::Alias> = vf_fs::aliases::load(root)
         .into_iter()

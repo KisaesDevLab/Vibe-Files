@@ -55,8 +55,8 @@ fn recognized(
     pdf: &Path,
     original: &str,
 ) -> Option<crate::recognize::Outcome> {
-    let text = crate::recognize::page_one_text(ctx.pdfium?, pdf, ctx.ocr)?;
-    crate::recognize::decide(ctx.root, lookup, &text, original)
+    let read = crate::recognize::form_read(ctx.pdfium?, pdf, ctx.ocr)?;
+    crate::recognize::decide_read(ctx.root, lookup, &read, original)
 }
 
 /// Delivers `tmp` under `file` with `note`, unless recognition knows better.

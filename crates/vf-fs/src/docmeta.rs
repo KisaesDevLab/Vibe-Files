@@ -54,9 +54,9 @@ pub struct Record {
     pub tags: Vec<String>,
 }
 
-/// Tag on a document whose doc type or tax year a folder import guessed (a year from the file
-/// name, a doc type from a folder name): it is not disposed of until a person sets them; doing
-/// so removes the tag (QA P12).
+/// Tag on a document whose doc type or tax year was guessed (a folder import: a year from the
+/// file name, a doc type from a folder name; Intake: read from the form, Q-61): it is not
+/// disposed of until a person sets them; doing so removes the tag (QA P12).
 pub const GUESSED_TAG: &str = "import:guessed";
 
 /// A document's current metadata, from the catalog.

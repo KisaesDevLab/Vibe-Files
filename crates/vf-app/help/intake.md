@@ -43,6 +43,7 @@ Open **History** and press **Undo last batch** (Ctrl+Z). The files go back to th
 
 - Each filed file becomes a document in the catalog, with an audit entry. Browse shows it at once.
 - Files that came from a [cover sheet](help:cover-sheets) or [print capture](help:print-capture) arrive with their doc type, tax year and source already set. Others get the year from their folder and no doc type: set them in the [Just filed](help:just-filed) panel that opens after each batch.
+- **Tax forms are read.** A scan, or a PDF from the Scans folder, with no client in its name and no cover sheet has its form read: W-2, 1099 (INT, DIV, B, R, NEC, MISC), 1098, SSA-1099 and K-1. A fillable PDF's typed-in values are read too. The form gives the doc type and tax year, and the recipient's name and the last four digits of their tax ID propose the client. When the client is clear, the row arrives already named for that client. Either way you confirm it in the preview, and the filed document is tagged `import:guessed` so someone checks it: it is not disposed of until its doc type or year is set by hand, which removes the tag.
 - **Already in the cabinet**: a filed file with the same content as an existing document. Choose **Remove new copy**, **Keep both** or **Replace old**. Removed copies go to the [trash](help:trash).
 - A banner with **Reload Intake** appears when the client list, Intake's settings or the print capture folders change. Reloading reads the inbox again: changes you made on rows but did not commit are lost.
 

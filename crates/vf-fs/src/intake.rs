@@ -631,6 +631,13 @@ fn record(
                         ));
                     }
                 }
+                // Read from the form, not told (Q-61): flagged for a person to check, and kept
+                // out of disposition until someone sets its doc type or year.
+                let guessed: Vec<String> = if extract.is_some() {
+                    vec![crate::docmeta::GUESSED_TAG.into()]
+                } else {
+                    vec![]
+                };
                 if hint.is_some_and(Hint::is_useful) {
                     let meta = crate::docmeta::Meta {
                         id: id.clone(),
@@ -642,7 +649,7 @@ fn record(
                         tax_year: tax_year.map(|y| y as i32),
                         status: "received".into(),
                         source: Some(source.clone()),
-                        tags: vec![],
+                        tags: guessed.clone(),
                     };
                     let (path, line) = crate::docmeta::record_line(root, &meta, &now, device_id);
                     tx = tx.file(FileOp::AppendLines {
@@ -671,6 +678,12 @@ fn record(
                         ],
                     ))
                     .catalog(sync_put(&id, &now));
+                for t in &guessed {
+                    tx = tx.catalog(Stmt::new(
+                        "INSERT OR IGNORE INTO document_tag (doc_id, tag) VALUES (?1, ?2)",
+                        vec![id.clone().into(), t.clone().into()],
+                    ));
+                }
                 if let Some(x) = extract {
                     tx = tx
                         .catalog(Stmt::new(
@@ -1293,6 +1306,14 @@ mod tests {
             ("1099-nec", "Summit Brokerage LLC")
         );
         assert!((conf - 0.7).abs() < 1e-6);
+        // Read, not told: flagged for a person to check (Q-61).
+        assert_eq!(
+            n(
+                &f.conn,
+                "SELECT count(*) FROM document_tag WHERE tag = 'import:guessed'"
+            ),
+            1
+        );
         let learned = crate::aliases::load(&f.root);
         assert_eq!(learned.len(), 1);
         assert_eq!(learned[0].client_id, bell.uuid.to_string());

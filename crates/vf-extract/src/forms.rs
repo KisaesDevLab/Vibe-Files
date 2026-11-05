@@ -428,17 +428,11 @@ pub fn recognize(text: &str) -> Option<Extract> {
         .flatten();
     let recipient_name = name_for(&lines, &originals, lab.recip_name);
     let tax_year = year(&head);
+    // The box's printed caption "CORRECTED (if checked)" is on every copy: not a correction.
     let corrected = head
         .iter()
-        .any(|l| l.split_whitespace().any(|w| w == "CORRECTED"));
-    let parts = [
-        tax_year.is_some(),
-        recipient_tin4.is_some(),
-        recipient_name.is_some(),
-        payer_name.is_some() || form == Form::Ssa1099,
-    ];
-    let confidence = 0.4 + 0.15 * parts.iter().filter(|p| **p).count() as f32;
-    Some(Extract {
+        .any(|l| l.split_whitespace().any(|w| w == "CORRECTED") && !l.contains("IF CHECKED"));
+    let mut e = Extract {
         form,
         tax_year,
         payer_name,
@@ -446,8 +440,70 @@ pub fn recognize(text: &str) -> Option<Extract> {
         recipient_name,
         recipient_tin4,
         corrected,
-        confidence: confidence.min(1.0),
-    })
+        confidence: 0.0,
+    };
+    e.confidence = confidence(&e);
+    Some(e)
+}
+
+/// 0.4, and 0.15 for each of: the year, the client side's TIN and name, the issuer's name.
+fn confidence(e: &Extract) -> f32 {
+    let parts = [
+        e.tax_year.is_some(),
+        e.recipient_tin4.is_some(),
+        e.recipient_name.is_some(),
+        e.payer_name.is_some() || e.form == Form::Ssa1099,
+    ];
+    (0.4 + 0.15 * parts.iter().filter(|p| **p).count() as f32).min(1.0)
+}
+
+/// A filled-in fillable PDF (Q-61): `text` is the page's own printed text (which says which
+/// form it is), `fields` each filled field's printed label and the value typed into it (a
+/// ticked check box's value is `X`). What the fields say wins over what the printed text
+/// suggests: a value typed into a field is not part of the page's text.
+pub fn recognize_filled(text: &str, fields: &[(String, String)]) -> Option<Extract> {
+    let mut e = recognize(text)?;
+    if fields.is_empty() {
+        return Some(e);
+    }
+    let originals: Vec<String> = fields
+        .iter()
+        .flat_map(|(l, v)| std::iter::once(l.as_str()).chain(v.lines()))
+        .map(|l| l.split_whitespace().collect::<Vec<_>>().join(" "))
+        .filter(|l| !l.is_empty())
+        .collect();
+    let lines: Vec<String> = originals.iter().map(|l| normalize(l)).collect();
+    let lab = e.form.labels();
+    if !lab.payer_tin.is_empty()
+        && let Some(t) = tin_for(&lines, lab.payer_tin, lab.recip_tin)
+    {
+        e.payer_tin4 = Some(t);
+    }
+    if let Some(t) = tin_for(&lines, lab.recip_tin, lab.payer_tin) {
+        e.recipient_tin4 = Some(t);
+    }
+    if !lab.payer_name.is_empty()
+        && let Some(n) = name_for(&lines, &originals, lab.payer_name)
+    {
+        e.payer_name = Some(n);
+    }
+    if let Some(n) = name_for(&lines, &originals, lab.recip_name) {
+        e.recipient_name = Some(n);
+    }
+    for (l, v) in fields {
+        let l = normalize(l);
+        if l.contains("CALENDAR YEAR") || l.contains("TAX YEAR") {
+            if let Ok(y) = v.trim().parse::<i32>()
+                && (2000..=2100).contains(&y)
+            {
+                e.tax_year = Some(y);
+            }
+        } else if l.split_whitespace().any(|w| w == "CORRECTED") && !v.trim().is_empty() {
+            e.corrected = true;
+        }
+    }
+    e.confidence = confidence(&e);
+    Some(e)
 }
 
 #[cfg(test)]
@@ -460,6 +516,42 @@ mod tests {
         assert_eq!(Last4::of("XXX-XX-1234").unwrap().as_str(), "1234");
         assert!(Last4::of("12").is_none());
         assert_eq!(format!("{:?}", Last4::of("900123456").unwrap()), "…3456");
+    }
+
+    /// Q-61: a fillable form's typed values, by their printed labels, win over the page text;
+    /// the printed "CORRECTED (if checked)" caption is not a correction.
+    #[test]
+    fn filled_fields_are_read_by_their_labels() {
+        let text = "CORRECTED (if checked)\nPAYER'S name\nForm 1099-NEC\n(Rev. April 2026)\nFor calendar year\nNonemployee Compensation\nPAYER'S TIN RECIPIENT'S TIN\nRECIPIENT'S name\nStreet address";
+        let plain = recognize(text).unwrap();
+        assert!(!plain.corrected);
+        assert_eq!(
+            plain.tax_year,
+            Some(2026),
+            "only the revision date to go on"
+        );
+        let f = |l: &str, v: &str| (l.to_string(), v.to_string());
+        let e = recognize_filled(
+            text,
+            &[
+                f("For calendar year", "2025"),
+                f("PAYER'S name", "Invented Payer LLC\n1 Sample Way"),
+                f("PAYER'S TIN", "00-0000123"),
+                f("RECIPIENT'S TIN", "987-65-4321"),
+                f("RECIPIENT'S name", "Pat Q Sample"),
+            ],
+        )
+        .unwrap();
+        assert_eq!(e.form, Form::Nec);
+        assert_eq!(e.tax_year, Some(2025));
+        assert_eq!(e.payer_name.as_deref(), Some("Invented Payer LLC"));
+        assert_eq!(e.recipient_name.as_deref(), Some("Pat Q Sample"));
+        assert_eq!(e.recipient_tin4.unwrap().as_str(), "4321");
+        assert_eq!(e.payer_tin4.unwrap().as_str(), "0123");
+        assert!(!e.corrected);
+        assert!((e.confidence - 1.0).abs() < 1e-6);
+        let c = recognize_filled(text, &[f("CORRECTED (if checked)", "X")]).unwrap();
+        assert!(c.corrected);
     }
 
     #[test]

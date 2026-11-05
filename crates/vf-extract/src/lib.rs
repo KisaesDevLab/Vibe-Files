@@ -7,4 +7,4 @@ pub mod matching;
 #[cfg(any(test, feature = "test-support"))]
 pub mod synthetic;
 
-pub use forms::{Extract, Form, Last4, recognize};
+pub use forms::{Extract, Form, Last4, recognize, recognize_filled};
