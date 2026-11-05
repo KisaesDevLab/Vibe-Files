@@ -1379,24 +1379,77 @@ pub fn show(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env) {
     b.keys(ui.ctx());
     b.saved_requests(env);
     b.combine_requested(env);
-    // Either side can be collapsed to give the list more room (owner 2026-11-04).
-    if !b.prefs.hide_tree {
-        egui::Panel::left("browse-tree")
-            .default_size(272.0)
-            .size_range(200.0..=480.0)
-            .frame(egui::Frame::new().fill(theme::pane()).inner_margin(8))
-            .show(ui, |ui| tree(ui, b));
-    }
-    if !b.prefs.hide_details {
-        egui::Panel::right("browse-inspector")
-            .exact_size(400.0)
+    // Either side can be collapsed to give the list more room (owner 2026-11-04), from the
+    // pane's own « / » or the list's Hide buttons; both are dragged wider or narrower and
+    // keep their width on this PC (owner 2026-11-05).
+    let dragging = ui.input(|i| i.pointer.any_down());
+    if b.prefs.hide_tree {
+        egui::Panel::left("browse-tree-folded")
+            .exact_size(28.0)
             .resizable(false)
+            .frame(egui::Frame::new().fill(theme::pane()).inner_margin(4))
+            .show(ui, |ui| {
+                if ui.small_button("»").on_hover_text("Show folders").clicked() {
+                    b.prefs.hide_tree = false;
+                    b.prefs_changed();
+                }
+            });
+    } else {
+        let w = egui::Panel::left("browse-tree")
+            .default_size(b.prefs.tree_width.map_or(272.0, f32::from))
+            .size_range(200.0..=640.0)
+            .frame(egui::Frame::new().fill(theme::pane()).inner_margin(8))
+            .show(ui, |ui| tree(ui, b))
+            .response
+            .rect
+            .width();
+        remember_width(
+            &mut b.prefs.tree_width,
+            w,
+            272.0,
+            dragging,
+            &mut b.prefs_dirty,
+        );
+    }
+    if b.prefs.hide_details {
+        egui::Panel::right("browse-inspector-folded")
+            .exact_size(28.0)
+            .resizable(false)
+            .frame(egui::Frame::new().fill(theme::pane()).inner_margin(4))
+            .show(ui, |ui| {
+                if ui.small_button("«").on_hover_text("Show details").clicked() {
+                    b.prefs.hide_details = false;
+                    b.prefs_changed();
+                }
+            });
+    } else {
+        let w = egui::Panel::right("browse-inspector")
+            .default_size(b.prefs.details_width.map_or(400.0, f32::from))
+            .size_range(300.0..=900.0)
+            .resizable(true)
             .frame(egui::Frame::new().fill(theme::pane()).inner_margin(12))
             .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    if ui.small_button("»").on_hover_text("Hide details").clicked() {
+                        b.prefs.hide_details = true;
+                        b.prefs_changed();
+                    }
+                    ui.label(widgets::caption("DETAILS · drag the edge to resize"));
+                });
                 egui::ScrollArea::vertical()
                     .id_salt("inspector-scroll")
                     .show(ui, |ui| inspector(ui, b, env))
-            });
+            })
+            .response
+            .rect
+            .width();
+        remember_width(
+            &mut b.prefs.details_width,
+            w,
+            400.0,
+            dragging,
+            &mut b.prefs_dirty,
+        );
     }
     egui::CentralPanel::default().show(ui, |ui| grid(ui, b, env.conn));
     drag_label(ui.ctx());
@@ -1471,11 +1524,95 @@ fn folderless_selected(b: &Browse) -> Option<String> {
     }
 }
 
+/// The tree's open (pointing down) or shut (pointing right) triangle in `rect`.
+fn paint_chevron(ui: &egui::Ui, rect: egui::Rect, open: bool) {
+    let c = rect.center();
+    let pts = if open {
+        vec![
+            c + egui::vec2(-4.0, -2.0),
+            c + egui::vec2(4.0, -2.0),
+            c + egui::vec2(0.0, 3.0),
+        ]
+    } else {
+        vec![
+            c + egui::vec2(-2.0, -4.0),
+            c + egui::vec2(3.0, 0.0),
+            c + egui::vec2(-2.0, 4.0),
+        ]
+    };
+    ui.painter().add(egui::Shape::convex_polygon(
+        pts,
+        theme::ink_muted(),
+        egui::Stroke::NONE,
+    ));
+}
+
+/// Keeps a pane's dragged width in the prefs once the drag ends (not every frame of it).
+fn remember_width(slot: &mut Option<u16>, w: f32, default: f32, dragging: bool, dirty: &mut bool) {
+    if dragging {
+        return;
+    }
+    let w = w.round().clamp(0.0, f32::from(u16::MAX)) as u16;
+    let old = slot.unwrap_or(default.round() as u16);
+    if w.abs_diff(old) >= 2 {
+        *slot = Some(w);
+        *dirty = true;
+    }
+}
+
+/// A left-pane section heading that folds its section shut or open (kept on this PC).
+/// Returns whether the section is open. `extra` draws on the heading's right.
+fn section_head(
+    ui: &mut egui::Ui,
+    b: &mut Browse,
+    key: &str,
+    label: &str,
+    extra: impl FnOnce(&mut egui::Ui, &mut Browse),
+) -> bool {
+    let open = !b.prefs.folded.iter().any(|k| k == key);
+    ui.horizontal(|ui| {
+        let (rect, chev) = ui.allocate_exact_size(egui::vec2(14.0, 14.0), Sense::click());
+        paint_chevron(ui, rect, open);
+        let what = if open { "Fold" } else { "Open" };
+        chev.widget_info(|| {
+            egui::WidgetInfo::labeled(
+                egui::accesskit::Role::Button,
+                true,
+                format!("{what} {label}"),
+            )
+        });
+        let head = ui
+            .add(egui::Button::new(widgets::caption(label)).frame(false))
+            .on_hover_text(format!("{what} this section"));
+        let resp = chev.union(head);
+        if resp.clicked() {
+            if open {
+                b.prefs.folded.push(key.to_owned());
+            } else {
+                b.prefs.folded.retain(|k| k != key);
+            }
+            b.prefs_dirty = true;
+        }
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| extra(ui, b));
+    });
+    open
+}
+
 fn tree(ui: &mut egui::Ui, b: &mut Browse) {
     let mut pick: Option<Scope> = None;
     let mut fav_remove: Option<usize> = None;
-    ui.label(widgets::caption("VIEWS"));
-    for (i, (label, scope, warn)) in b.views().into_iter().enumerate() {
+    let views_open = section_head(ui, b, "views", "VIEWS", |ui, b| {
+        if ui.small_button("«").on_hover_text("Hide folders").clicked() {
+            b.prefs.hide_tree = true;
+            b.prefs_changed();
+        }
+    });
+    let views: Vec<_> = if views_open {
+        b.views().into_iter().collect()
+    } else {
+        vec![]
+    };
+    for (i, (label, scope, warn)) in views.into_iter().enumerate() {
         let sel = std::mem::discriminant(&b.scope) == std::mem::discriminant(&scope)
             && match (&b.scope, &scope) {
                 (Scope::Ids { list: a, .. }, Scope::Ids { list: c, .. }) => a == c,
@@ -1488,8 +1625,7 @@ fn tree(ui: &mut egui::Ui, b: &mut Browse) {
             pick = Some(scope);
         }
     }
-    if !b.prefs.favorites.is_empty() {
-        ui.label(widgets::caption("FAVORITES"));
+    if !b.prefs.favorites.is_empty() && section_head(ui, b, "favorites", "FAVORITES", |_, _| {}) {
         for (i, f) in b.prefs.favorites.iter().enumerate() {
             let target = b.favorite_scope(f);
             let label = b.favorite_label(f);
@@ -1509,8 +1645,7 @@ fn tree(ui: &mut egui::Ui, b: &mut Browse) {
             });
         }
     }
-    if !b.saved.is_empty() {
-        ui.label(widgets::caption("SAVED SEARCHES"));
+    if !b.saved.is_empty() && section_head(ui, b, "saved", "SAVED SEARCHES", |_, _| {}) {
         for i in 0..b.saved.len() {
             let name = b.saved[i].name.clone();
             // Selected: its hit count (the grid shows its results).
@@ -1831,25 +1966,7 @@ fn tree_row(
             chev.widget_info(|| {
                 egui::WidgetInfo::labeled(egui::accesskit::Role::Button, true, &name)
             });
-            let c = rect.center();
-            let pts = if open {
-                vec![
-                    c + egui::vec2(-4.0, -2.0),
-                    c + egui::vec2(4.0, -2.0),
-                    c + egui::vec2(0.0, 3.0),
-                ]
-            } else {
-                vec![
-                    c + egui::vec2(-2.0, -4.0),
-                    c + egui::vec2(3.0, 0.0),
-                    c + egui::vec2(-2.0, 4.0),
-                ]
-            };
-            ui.painter().add(egui::Shape::convex_polygon(
-                pts,
-                theme::ink_muted(),
-                egui::Stroke::NONE,
-            ));
+            paint_chevron(ui, rect, open);
         }
         let resp = ui.selectable_label(sel, label);
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -3481,6 +3598,57 @@ mod tests {
         h.run();
         assert!(!h.state().b.prefs.hide_tree && !h.state().b.prefs.hide_details);
         assert!(h.query_by_label("All documents").is_some());
+
+        // On the panes themselves (owner 2026-11-05): « folds the tree, » the details; the
+        // strips left behind open them again.
+        h.get_by_label("«").click();
+        h.run();
+        assert!(h.state().b.prefs.hide_tree);
+        // The tree's strip comes first, then the details pane's own ».
+        h.get_all_by_label("»").last().unwrap().click();
+        h.run();
+        assert!(h.state().b.prefs.hide_details);
+        h.get_by_label("»").click(); // only the tree's strip is left
+        h.run();
+        assert!(!h.state().b.prefs.hide_tree);
+        h.get_all_by_label("«").last().unwrap().click(); // the details strip
+        h.run();
+        assert!(!h.state().b.prefs.hide_tree && !h.state().b.prefs.hide_details);
+
+        // VIEWS folds shut and opens again; kept in the prefs.
+        assert!(h.query_by_label("Recent").is_some());
+        h.get_by_label("VIEWS").click();
+        h.run();
+        assert!(h.query_by_label("Recent").is_none());
+        assert_eq!(h.state().b.prefs.folded, ["views"]);
+        assert!(h.state().b.prefs_dirty);
+        h.get_by_label("VIEWS").click();
+        h.run();
+        assert!(h.query_by_label("Recent").is_some());
+        assert!(h.state().b.prefs.folded.is_empty());
+    }
+
+    /// A dragged pane width is kept once the drag ends, not on every frame of it.
+    #[test]
+    fn pane_widths_are_kept_after_a_drag() {
+        let (mut slot, mut dirty) = (None, false);
+        remember_width(&mut slot, 520.0, 400.0, true, &mut dirty);
+        assert_eq!((slot, dirty), (None, false), "still dragging");
+        remember_width(&mut slot, 401.0, 400.0, false, &mut dirty);
+        assert_eq!(
+            (slot, dirty),
+            (None, false),
+            "the default, give or take a point"
+        );
+        remember_width(&mut slot, 520.4, 400.0, false, &mut dirty);
+        assert_eq!((slot, dirty), (Some(520), true));
+        let cfg = crate::config::Prefs {
+            details_width: Some(520),
+            folded: vec!["views".into()],
+            ..Default::default()
+        };
+        let back: crate::config::Prefs = toml::from_str(&toml::to_string(&cfg).unwrap()).unwrap();
+        assert_eq!(back, cfg);
     }
 
     /// Browse has a Scan button (owner 2026-11-04); the app starts it with Intake's scanner.

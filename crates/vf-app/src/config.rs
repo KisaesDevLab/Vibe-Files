@@ -316,6 +316,15 @@ pub struct Prefs {
     /// Browse's details pane on the right is collapsed.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub hide_details: bool,
+    /// Browse's details pane width in points, as last dragged (owner 2026-11-05).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub details_width: Option<u16>,
+    /// Browse's folder tree width in points, as last dragged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tree_width: Option<u16>,
+    /// Sections of Browse's left pane folded shut ("views", "favorites", "saved").
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub folded: Vec<String>,
 }
 
 pub const RECENT_MAX: usize = 50;
