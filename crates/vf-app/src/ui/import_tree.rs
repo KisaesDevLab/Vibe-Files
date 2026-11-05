@@ -27,6 +27,8 @@ pub struct ImportPage {
     pub default_source: Option<String>,
     /// The cabinet's doc types (id, name), read at the scan.
     types: Vec<(String, String)>,
+    /// A new client's ID being typed on its row (folder row → text).
+    id_drafts: std::collections::HashMap<usize, String>,
     /// Folders shown: a match of at least this many % (PA-28).
     pub min_pct: u8,
     /// Folders already bound are not shown.
@@ -57,6 +59,7 @@ impl ImportPage {
             Ok(p) => {
                 self.plan = Some(p);
                 self.last_tick = None;
+                self.id_drafts.clear();
                 self.types = vf_fs::doctypes::load(env.root)
                     .ok()
                     .flatten()
@@ -263,6 +266,35 @@ pub fn show(ui: &mut egui::Ui, p: &mut ImportPage, env: &mut Env, catalog: &Path
     ));
     ui.add_space(6.0);
 
+    // No client list, or folders no client matches (Q-63): point to the CSV import, and offer
+    // a client made from each folder's name.
+    let unmatched = plan
+        .folders
+        .iter()
+        .filter(|r| !r.bound && r.client.is_none())
+        .count();
+    if plan.clients.is_empty() {
+        ui.label(
+            RichText::new(
+                "No client list is imported yet. Import it first (Browse › Import clients CSV…) so folders are matched to your clients by name and ID, then scan again; or create clients from the folder names below.",
+            )
+            .color(theme::warn()),
+        );
+    }
+    if unmatched > 0 {
+        let make = ui
+            .button(format!("Create a client for each unmatched folder ({unmatched})"))
+            .on_hover_text(
+                "The folder name becomes the client name and an ID is made from it (you can change it on the row); the clients are added when you import.",
+            );
+        if make.clicked() {
+            p.id_drafts.clear();
+            match import::new_clients_from_folders(env.root, plan) {
+                Ok(n) => p.notice = Some(format!("{n} new clients proposed; check their IDs.")),
+                Err(e) => p.error = Some(e),
+            }
+        }
+    }
     // Filter by match % and kind (PA-28); ticking acts on the folders shown.
     let shown: Vec<usize> = (0..plan.folders.len())
         .filter(|&i| shows(&plan.folders[i], p.min_pct, p.hide_bound, p.hide_none))
@@ -310,6 +342,7 @@ pub fn show(ui: &mut egui::Ui, p: &mut ImportPage, env: &mut Env, catalog: &Path
         }
     });
     let shift = ui.input(|i| i.modifiers.shift);
+    let mut id_edit: Option<(usize, String)> = None;
 
     let clients = plan.clients.clone();
     egui::ScrollArea::vertical()
@@ -403,12 +436,35 @@ pub fn show(ui: &mut egui::Ui, p: &mut ImportPage, env: &mut Env, catalog: &Path
                             if let Some(p) = pick {
                                 chosen = Some(p.map(|k| clients[k].clone()));
                             }
+                            // A new client's ID, typed on the row (Q-63); Enter or leaving the
+                            // box sets it.
+                            if let Some(c) = r.client.as_ref().filter(|c| c.new) {
+                                let d = p.id_drafts.entry(i).or_insert_with(|| c.ext_id.clone());
+                                let name = format!("New client ID for {}", r.rel);
+                                let resp = ui
+                                    .add(egui::TextEdit::singleline(d).desired_width(90.0))
+                                    .on_hover_text("This new client's ID");
+                                resp.widget_info(|| {
+                                    egui::WidgetInfo::labeled(
+                                        egui::accesskit::Role::TextInput,
+                                        true,
+                                        &name,
+                                    )
+                                });
+                                if resp.lost_focus() && !d.eq_ignore_ascii_case(&c.ext_id) {
+                                    id_edit = Some((i, d.clone()));
+                                }
+                            }
                             if let Some(c) = chosen {
                                 r.include = c.is_some();
                                 r.how = "chosen".into();
                                 r.confidence = if c.is_some() { 1.0 } else { 0.0 };
-                                r.template_name = None;
+                                // The template's name for the client picked (Rename uses it).
+                                r.template_name = c
+                                    .as_ref()
+                                    .and_then(|c| import::template_name_for(env.root, c, &r.rel));
                                 r.client = c;
+                                p.id_drafts.remove(&i);
                             }
                         }
                         ui.label(widgets::caption(&r.how));
@@ -439,6 +495,12 @@ pub fn show(ui: &mut egui::Ui, p: &mut ImportPage, env: &mut Env, catalog: &Path
                     }
                 });
         });
+    if let Some((i, id)) = id_edit {
+        if let Err(e) = import::set_new_id(env.root, plan, i, &id) {
+            p.error = Some(e);
+        }
+        p.id_drafts.remove(&i);
+    }
     ui.add_space(6.0);
     ui.checkbox(
         &mut p.rename,

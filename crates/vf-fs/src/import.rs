@@ -670,6 +670,106 @@ fn folder_client(
     (None, "no client matches".into(), 0.0)
 }
 
+/// A client ID made from a name (owner 2026-11-05, Q-63): its first four letters or digits,
+/// upper case (padded with X), then the first number from 1001 not in `taken` (upper case):
+/// `1 Farm Poultry LLC` → `1FAR1001`.
+pub fn id_from_name(name: &str, taken: &HashSet<String>) -> String {
+    let mut base: String = name
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .take(4)
+        .collect::<String>()
+        .to_ascii_uppercase();
+    while base.len() < 4 {
+        base.push('X');
+    }
+    (1001..)
+        .map(|n| format!("{base}{n}"))
+        .find(|id| !taken.contains(id))
+        .expect("a free number")
+}
+
+/// The firm template's folder name for `c` (`{Client} ({ID})`), unless it is `rel` already.
+pub fn template_name_for(root: &Path, c: &ClientPick, rel: &str) -> Option<String> {
+    let (tree, _, err) = template::load_or_seed(&master_dir(root));
+    if err.is_some() {
+        return None;
+    }
+    let cl = Client {
+        id: c.ext_id.clone(),
+        uuid: c.uuid,
+        name: c.name.clone(),
+        extra: Default::default(),
+    };
+    template::client_folder_name(&tree, &cl)
+        .ok()
+        .filter(|n| n != rel)
+}
+
+/// Gives every folder that matches no client a new client of its own (Q-63): the folder name
+/// as the client's name, an ID made from it ([`id_from_name`]), ticked to bind. Returns how
+/// many. The IDs can be changed per row ([`set_new_id`]) before the import.
+pub fn new_clients_from_folders(root: &Path, plan: &mut Plan) -> Result<usize, String> {
+    let list = client_list(root)?;
+    let mut taken: HashSet<String> = list.clients.iter().map(|c| c.id.to_uppercase()).collect();
+    taken.extend(
+        plan.folders
+            .iter()
+            .filter_map(|r| r.client.as_ref().map(|c| c.ext_id.to_uppercase())),
+    );
+    let mut n = 0;
+    for r in plan
+        .folders
+        .iter_mut()
+        .filter(|r| !r.bound && r.client.is_none())
+    {
+        let id = id_from_name(&r.rel, &taken);
+        taken.insert(id.clone());
+        let c = ClientPick {
+            ext_id: id,
+            uuid: Uuid::new_v4(),
+            name: r.rel.clone(),
+            new: true,
+        };
+        r.template_name = template_name_for(root, &c, &r.rel);
+        r.client = Some(c);
+        r.how = "new client from the folder name".into();
+        r.confidence = 1.0;
+        r.include = true;
+        n += 1;
+    }
+    Ok(n)
+}
+
+/// Changes the ID of folder row `i`'s new client (typed on the row). Refused when it is empty or
+/// another client (in the list or this plan) has it.
+pub fn set_new_id(root: &Path, plan: &mut Plan, i: usize, id: &str) -> Result<(), String> {
+    let id = id.trim().to_uppercase();
+    if id.is_empty() {
+        return Err("Type a client ID.".into());
+    }
+    let list = client_list(root)?;
+    if let Some(c) = list.match_by_id(&id) {
+        return Err(format!("{id} is {}'s ID already.", c.name));
+    }
+    if plan.folders.iter().enumerate().any(|(j, r)| {
+        j != i
+            && r.client
+                .as_ref()
+                .is_some_and(|c| c.ext_id.eq_ignore_ascii_case(&id))
+    }) {
+        return Err(format!("{id} is chosen for another folder."));
+    }
+    let r = plan.folders.get_mut(i).ok_or("no such folder")?;
+    let Some(c) = r.client.as_mut().filter(|c| c.new) else {
+        return Err("Only a new client's ID can be changed here.".into());
+    };
+    c.ext_id = id;
+    let c = c.clone();
+    r.template_name = template_name_for(root, &c, &r.rel);
+    Ok(())
+}
+
 /// The cabinet's client list (an empty one when no CSV has been imported).
 fn client_list(root: &Path) -> Result<ClientList, String> {
     Ok(clients::load(root)?
@@ -954,6 +1054,16 @@ pub fn apply(
     let new: Vec<&ClientPick> = chosen.iter().filter(|c| c.2.new).map(|c| c.2).collect();
     if !new.is_empty() {
         let mut list = client_list(root)?;
+        if let Some((c, l)) = new.iter().find_map(|c| {
+            list.match_by_id(&c.ext_id)
+                .filter(|l| l.uuid != c.uuid)
+                .map(|l| (c, l))
+        }) {
+            return Err(format!(
+                "{} is {}'s ID already: give the new client {} another ID.",
+                c.ext_id, l.name, c.name
+            ));
+        }
         for c in &new {
             if list.match_by_id(&c.ext_id).is_none() {
                 list.clients.push(Client {
@@ -1156,6 +1266,16 @@ mod tests {
             Some(("1001".into(), "Reyes, Dana".into()))
         );
         assert_eq!(id_in_name(pat, "Reyes, Dana"), None);
+    }
+
+    #[test]
+    fn ids_are_made_from_names() {
+        let mut taken = HashSet::new();
+        assert_eq!(id_from_name("1 Farm Poultry LLC", &taken), "1FAR1001");
+        taken.insert("1FAR1001".to_string());
+        assert_eq!(id_from_name("1 Farm Poultry LLC", &taken), "1FAR1002");
+        assert_eq!(id_from_name("O'Neil", &taken), "ONEI1001");
+        assert_eq!(id_from_name("Al", &taken), "ALXX1001");
     }
 
     #[test]

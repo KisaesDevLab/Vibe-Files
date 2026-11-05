@@ -43,13 +43,4 @@ Intake uses relationships to file copies, for example a K-1 filed to the entity 
 
 ## Importing an existing folder tree
 
-When the cabinet already holds client folders that are not tied to clients (an older firm tree, often without client IDs in the folder names), do this in order:
-
-1. Import the client list (**The client list**, above). This only saves the list: no folder is renamed, moved or tied to a client yet. Until step 2, Browse shows these clients as **No folder yet**; do not press **Create folder…** for them, or you get a second, empty folder beside the old one.
-2. Open **Admin** › **Folder import** and press **Scan the cabinet**. Each top-level folder is matched to a client by its ID or its name, and each file gets a doc type and tax year where its name or folder says so.
-3. Check the matches. **Match** shows how well each folder matches its client. **90–100%**: the ID and the name agree, or the same name of two words or more; these are ticked for you. **60–84%**: the same one-word name, or only a similar name. **50% or less**: two folders point at the same client, several clients have the folder's name, the ID is the client's but the name is not, or the client already has a folder. To change a folder's client, pick another in its **Client** column.
-4. Tick the folders to import. **Show matches from N% up** lists only folders matched at least that well; **Hide already bound** and **Hide folders with no match** shorten the list. **Tick all shown** and **Untick all shown**, or the **Bind** box at the top of the column, tick or untick every folder listed. Click one folder's box, then Shift-click another to tick or untick all the folders between.
-5. To add the client ID to the folder names, tick **Rename bound folders to the firm template's name ("{Client} ({ID})"); files inside are not moved**. For example, `Smith, John` becomes `Smith, John (SMIT1001)`. Left unticked, folders keep their names and are still tied to their clients.
-6. Press **Import N folders**. Files are not moved. Ticked folders the filter hides are imported too; the button then says how many, for example **Import 12 folders (3 not shown)**.
-
-**Export the remainder (CSV)…** lists files left for a person to handle. **Undo the last import** removes the ties and puts the old folder names back.
+Client folders already in the cabinet (an older firm tree) are adopted with **Admin** › **Folder import**: see [Importing an existing folder tree](help:folder-import).

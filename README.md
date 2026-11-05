@@ -73,7 +73,9 @@ Do these in order.
    type and tax year where its name or folder says so.
 3. **Check the matches.** The **Match** column shows how sure each match is: 90–100% are ticked
    for you, 60–84% need a look, 50% or less mean something is off. To change a folder's
-   client, pick another in its **Client** column.
+   client, pick another in its **Client** column. No client list? **Create a client for each
+   unmatched folder** makes a client from each folder's name, with an ID you can change.
+   Files with no doc type found can all be given one doc type and source.
 4. **Tick the folders to import.** **Show matches from N% up** filters the list; **Tick all
    shown**, **Untick all shown**, the **Bind** box at the top of the column, and Shift-click
    tick or untick many at once.

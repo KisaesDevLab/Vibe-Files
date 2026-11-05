@@ -1272,6 +1272,93 @@ ANDE1042,Anderson Farms LLC
         assert!(!vf_fs::sweep::due(&s.conn), "the sweep time is recorded");
     }
 
+    /// Q-63 (owner 2026-11-05): with no client list the scan says so, and creates a client
+    /// from each unmatched folder's name; a row's ID can be changed; Import adds them.
+    #[test]
+    fn folder_import_creates_clients_from_folder_names() {
+        use egui::accesskit::Role;
+        let mut h = harness();
+        {
+            let s = h.state_mut();
+            vf_fs::cabinet::create(
+                &s.root,
+                &vf_fs::cabinet::CabinetFile {
+                    cabinet_id: vf_core::new_id(),
+                    firm_id: uuid::Uuid::new_v4().to_string(),
+                    schema_version: vf_core::db::SCHEMA_VERSION,
+                    layout_version: 1,
+                    created: vf_core::now_rfc3339(),
+                    name: None,
+                },
+            )
+            .unwrap();
+            for f in ["1 Farm Poultry LLC/Income Tax/2022", "Acme Ranch"] {
+                std::fs::create_dir_all(s.root.join(f)).unwrap();
+            }
+            std::fs::write(
+                s.root.join("1 Farm Poultry LLC/Income Tax/2022/1 Farm Poultry LLC_2022_1065_Tax_Return.pdf"),
+                b"invented",
+            )
+            .unwrap();
+        }
+        click(&mut h, "Folder import");
+        click(&mut h, "Scan the cabinet");
+        assert!(
+            h.query_by_label_contains("No client list is imported yet")
+                .is_some()
+        );
+        click(&mut h, "Create a client for each unmatched folder (2)");
+        let ids = |h: &Harness<'static, State>| -> Vec<String> {
+            h.state()
+                .a
+                .import
+                .plan
+                .as_ref()
+                .unwrap()
+                .folders
+                .iter()
+                .filter_map(|r| r.client.as_ref().map(|c| c.ext_id.clone()))
+                .collect()
+        };
+        assert_eq!(ids(&h), ["1FAR1001", "ACME1001"]);
+        // Change one row's ID.
+        type_into(&mut h, "New client ID for Acme Ranch", "9");
+        h.key_press(egui::Key::Enter);
+        h.run();
+        let acme = ids(&h)[1].clone();
+        assert!(acme != "ACME1001" && acme.contains('9'), "{acme}");
+        h.get_by_role_and_label(Role::Button, "Import 2 folders")
+            .click();
+        h.step();
+        let start = std::time::Instant::now();
+        while h.state().a.import.last.is_none() {
+            h.step();
+            assert!(
+                start.elapsed() < std::time::Duration::from_secs(20),
+                "{:?}",
+                h.state().a.import.error
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        h.run();
+        let s = h.state();
+        let list = vf_fs::clients::load(&s.root).unwrap();
+        let mut got: Vec<(String, String)> = list
+            .clients()
+            .iter()
+            .map(|c| (c.id.clone(), c.name.clone()))
+            .collect();
+        got.sort();
+        assert_eq!(
+            got,
+            [
+                ("1FAR1001".to_string(), "1 Farm Poultry LLC".to_string()),
+                (acme.clone(), "Acme Ranch".to_string())
+            ]
+        );
+        assert!(s.root.join("Acme Ranch/_Vibe/client.json").is_file());
+    }
+
     /// PA-28: the folder list filtered by match %, ticked in bulk and by Shift-click.
     #[test]
     fn folder_import_filters_by_match_and_ticks_in_bulk() {
