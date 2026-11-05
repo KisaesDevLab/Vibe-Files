@@ -445,7 +445,11 @@ mod scale {
             kept = Some((b, opened));
         }
         let (mut b, opened) = kept.unwrap();
-        assert!(b.large, "a cabinet this size is read in windows");
+        assert_eq!(
+            b.large,
+            total > crate::ui::browse::LARGE,
+            "read in windows above LARGE"
+        );
         check(
             "Browse opens the cabinet (median of 3)",
             median(opens),
@@ -475,8 +479,10 @@ mod scale {
 
         // 3. Search.
         let client = b.snap.clients[clients / 3].id.clone();
+        // A word in one document of 1,000, from the middle of the catalog.
+        let rare = format!("quillfeather{}", total / 2000);
         for (text, client) in [
-            ("quillfeather42", None),
+            (rare.as_str(), None),
             ("mortgage interest", None),
             ("withheld", Some(client.clone())),
             ("doc 7", None),

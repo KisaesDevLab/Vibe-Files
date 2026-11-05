@@ -54,9 +54,15 @@ The pages went to the printer, but the audit row could not be written, often bec
 
 ## Starting Vibe Files
 
+### "Vibe Files is already open in your session on this computer"
+
+Vibe Files is already running for your Windows login on this computer, in another window. Switch to that window (check the taskbar), or close it first.
+
+Someone else having Vibe Files open never stops you: when another person, or you on another computer, is using the data folder beside the program, Vibe Files uses your own data folder (`%LOCALAPPDATA%\Vibe Files\data`) instead. On a server where several people work, share the cabinet's catalog once (Admin › Devices › **This PC's catalog** › Share) so that everyone uses the same catalog instead of each indexing the cabinet. See [several PCs](help:several-pcs).
+
 ### "Vibe Files is already open with this data folder"
 
-The app is already running for your Windows login, perhaps in another window or session. Close it there first.
+You started Vibe Files with `--data` and that folder is in use by another running copy. Close it there, or use another folder.
 
 ### "The catalog in … belongs to a different cabinet"
 

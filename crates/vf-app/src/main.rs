@@ -37,16 +37,50 @@ struct Args {
 
 fn main() -> anyhow::Result<std::process::ExitCode> {
     let args = Args::parse();
-    let data = match args.data {
+    let chosen = args.data.is_some();
+    let personal = std::env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .map(|l| l.join("Vibe Files").join("data"));
+    let mut data = match args.data {
         Some(d) => d,
         None => datalock::default_data(
             &vf_core::exe_dir()
                 .context("locating the exe")?
                 .join("vibe-files.exe"),
-            std::env::var_os("LOCALAPPDATA").map(PathBuf::from),
+            personal.clone(),
             vf_core::windows_login().as_deref(),
         ),
     };
+    // The window: one copy per data folder. The default folder held by another login or PC
+    // (a shared program folder) means this login's own folder, not a refusal (owner
+    // 2026-11-05); taken before logging starts so the log goes to the folder used.
+    let mut window_lock = None;
+    if args.command.is_none() {
+        let taken = if chosen {
+            datalock::acquire(&data).map(|l| (l, data.clone()))
+        } else {
+            datalock::acquire_default(
+                &data,
+                personal.as_deref(),
+                vf_core::windows_login().as_deref(),
+                &std::env::var("COMPUTERNAME").unwrap_or_default(),
+            )
+        };
+        match taken {
+            Ok((l, at)) => {
+                data = at;
+                window_lock = Some(l);
+            }
+            Err(e) => {
+                rfd::MessageDialog::new()
+                    .set_title("Vibe Files")
+                    .set_description(&e)
+                    .set_level(rfd::MessageLevel::Warning)
+                    .show();
+                return Ok(std::process::ExitCode::from(7));
+            }
+        }
+    }
     let _log = logging::init(&data);
     if let Some(cmd) = &args.command {
         // The release exe is a windowed program: typed in a console, its output goes there.
@@ -72,18 +106,8 @@ fn main() -> anyhow::Result<std::process::ExitCode> {
         let code = cli::run(cmd, &data, &mut std::io::stdout())?;
         return Ok(std::process::ExitCode::from(code as u8));
     }
-    // One window per data folder: a second copy would share the catalog and the crash journal.
-    let _lock = match datalock::acquire(&data) {
-        Ok(l) => l,
-        Err(e) => {
-            rfd::MessageDialog::new()
-                .set_title("Vibe Files")
-                .set_description(&e)
-                .set_level(rfd::MessageLevel::Warning)
-                .show();
-            return Ok(std::process::ExitCode::from(7));
-        }
-    };
+    // Held for as long as the window is open.
+    let _lock = window_lock;
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Vibe Files")
