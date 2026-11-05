@@ -864,7 +864,7 @@ impl Browse {
             }
         };
         match got {
-            Ok(rep) if rep.docs_tombstoned + rep.docs_moved > 0 => {
+            Ok(rep) if rep.docs_tombstoned + rep.docs_moved + rep.held_missing > 0 => {
                 self.reload(env.conn);
                 let mut parts = vec![];
                 if rep.docs_tombstoned > 0 {
@@ -882,6 +882,15 @@ impl Browse {
                     parts.push(format!(
                         "{} moved outside Vibe Files now show where they are",
                         rep.docs_moved
+                    ));
+                }
+                if rep.held_missing > 0 {
+                    parts.push(format!(
+                        "{} under a legal hold {} missing on disk and {} kept: put the file{} back",
+                        rep.held_missing,
+                        if rep.held_missing == 1 { "is" } else { "are" },
+                        if rep.held_missing == 1 { "is" } else { "are" },
+                        if rep.held_missing == 1 { "" } else { "s" }
                     ));
                 }
                 self.notice = Some(format!(

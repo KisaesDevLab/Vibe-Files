@@ -495,7 +495,44 @@ pub fn adopt_unknown(
              ORDER BY id = ?1 DESC LIMIT 1",
         )
         .map_err(|e| e.to_string())?;
+    let mut revive = conn
+        .prepare_cached(
+            "SELECT id FROM document WHERE hash = ?1 AND deleted_at IS NOT NULL
+               AND tombstone_reason IN ('missing on rebuild', 'missing')
+             ORDER BY deleted_at DESC LIMIT 1",
+        )
+        .map_err(|e| e.to_string())?;
+    let mut revived: std::collections::HashSet<String> = Default::default();
     for u in items {
+        // A document marked gone from another client folder whose content turns up here (moved
+        // in Explorer): the same document again, with its id, metadata, holds and history (QA).
+        let back: Option<String> = vf_core::db::OptionalExtension::optional(
+            revive.query_row([&u.hash], |r| r.get::<_, String>(0)),
+        )
+        .map_err(|e| e.to_string())?
+        .filter(|id| !revived.contains(id));
+        if let Some(id) = back {
+            tx = tx
+                .catalog(Stmt::new(
+                    "UPDATE document SET deleted_at = NULL, tombstone_reason = NULL, rel_path = ?2,
+                       client_id = ?3, device_id = ?4, updated_at = ?5, rev = rev + 1
+                     WHERE id = ?1 AND deleted_at IS NOT NULL",
+                    vec![
+                        id.clone().into(),
+                        u.rel_path.clone().into(),
+                        u.client_id.clone().into(),
+                        device_id.into(),
+                        now.clone().into(),
+                    ],
+                ))
+                .audit(AuditEntry::new(
+                    "adopt",
+                    Some(&id),
+                    json!({ "rel_path": u.rel_path, "found_again": true }),
+                ));
+            revived.insert(id);
+            continue;
+        }
         let id = vf_core::new_id();
         let m = ix.get_at(&u.rel_path, &u.hash);
         let year: Option<i64> = match m {
@@ -558,6 +595,7 @@ pub fn adopt_unknown(
         }
     }
     drop(type_id);
+    drop(revive);
     crate::fileops::commit(conn, root, tx, device_id)?;
     Ok(items.len())
 }

@@ -406,6 +406,16 @@ impl MoveApp {
         if let Some(e) = &self.error {
             ui.label(RichText::new(e).color(egui::Color32::from_rgb(0xb4, 0x23, 0x18)));
         }
+        // The old folder is already a Vibe Files cabinet (QA): its catalog will see the moved
+        // files as deleted (and send that to other offices when it syncs).
+        if self.old_path().join("_Vibe").join("cabinet.json").is_file() {
+            ui.label(
+                RichText::new(
+                    "The old folder is a Vibe Files cabinet. Files moved out of it are removed from that cabinet when Vibe Files next looks at their folders (and from the other offices' copies when it syncs). Use Browse › Move to… in Vibe Files to move documents between cabinets with their doc type and year.",
+                )
+                .color(egui::Color32::from_rgb(0x9a, 0x5b, 0x00)),
+            );
+        }
         ui.separator();
         ui.columns(2, |cols| {
             self.client_list(&mut cols[0], busy);

@@ -224,6 +224,10 @@ pub fn catch_up(
     me: &str,
     device_id: &str,
 ) -> Result<Vec<String>, String> {
+    // Intake moving files here right now: looked at next time (nothing marked as read).
+    if crate::intake::filing_now(root) {
+        return Ok(vec![]);
+    }
     let loaded = load_seen(conn);
     let first = loaded.is_none();
     let mut seen = loaded.unwrap_or_default();
@@ -238,7 +242,9 @@ pub fn catch_up(
         return Ok(vec![]);
     }
     if !folders.is_empty() {
-        crate::rebuild::rebuild_folders(conn, root, device_id, &folders)
+        // As files found in the folders (not a folder import's): text recognition set to new
+        // filings reads them on the main server (QA).
+        crate::rebuild::reread_folders(conn, root, device_id, &folders)
             .map_err(|e| e.to_string())?;
     }
     save_seen(conn, &seen)?;
