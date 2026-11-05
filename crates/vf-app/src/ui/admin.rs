@@ -22,6 +22,8 @@ pub enum Page {
     Holds,
     Safeguards,
     Import,
+    /// Admin › Merge cabinets (owner 2026-11-05).
+    Merge,
     /// Admin › Admin password (PA-24).
     Password,
     /// Admin › Devices (PA-24).
@@ -36,7 +38,13 @@ pub enum Page {
 const NAV: &[(&str, &[&str])] = &[
     (
         "FIRM",
-        &["Devices", "Doc types", "Folder templates", "Folder import"],
+        &[
+            "Devices",
+            "Doc types",
+            "Folder templates",
+            "Folder import",
+            "Merge cabinets",
+        ],
     ),
     ("INTAKE", &["Print capture & parsers"]),
     (
@@ -99,6 +107,7 @@ pub struct Admin {
     pub safeguards: crate::ui::disposition::SafeguardsPage,
     /// Folder import (P10).
     pub import: crate::ui::import_tree::ImportPage,
+    pub merge: crate::ui::merge_page::MergePage,
     /// The editor above the table.
     pub editing: Editing,
     /// Asking before removing a doc type documents use.
@@ -146,6 +155,7 @@ impl Admin {
             holds: Default::default(),
             safeguards: Default::default(),
             import: Default::default(),
+            merge: Default::default(),
             editing: Editing::Closed,
             confirm_remove: false,
             form: Form::default(),
@@ -332,6 +342,12 @@ pub fn show(ui: &mut egui::Ui, a: &mut Admin, env: &mut Env, sweep: SweepEnv) {
                 a.changed = true;
             }
         }
+        Page::Merge => {
+            crate::ui::merge_page::show(ui, &mut a.merge, env, sweep.catalog);
+            if std::mem::take(&mut a.merge.changed) {
+                a.changed = true;
+            }
+        }
         Page::Safeguards => {
             crate::ui::disposition::safeguards(ui, &mut a.safeguards, env);
             if let Some(p) = a.safeguards.open_request.take() {
@@ -418,6 +434,10 @@ fn nav(ui: &mut egui::Ui, a: &mut Admin, has_password: bool) {
             } else if *item == "Folder import" {
                 if ui.selectable_label(a.page == Page::Import, *item).clicked() {
                     a.page = Page::Import;
+                }
+            } else if *item == "Merge cabinets" {
+                if ui.selectable_label(a.page == Page::Merge, *item).clicked() {
+                    a.page = Page::Merge;
                 }
             } else if *item == "Legal holds" {
                 if ui.selectable_label(a.page == Page::Holds, *item).clicked() {
@@ -1270,6 +1290,92 @@ ANDE1042,Anderson Farms LLC
             .unwrap();
         assert_eq!(n, 1);
         assert!(!vf_fs::sweep::due(&s.conn), "the sweep time is recorded");
+    }
+
+    /// Owner 2026-11-05 (Q-62, Q-65): Admin › Merge cabinets scans another cabinet, lists its
+    /// clients and, confirmed, moves their files into this one.
+    #[test]
+    fn merge_cabinets_page_moves_another_cabinets_clients_in() {
+        let mut h = harness();
+        let make = |root: &std::path::Path| {
+            vf_fs::cabinet::create(
+                root,
+                &vf_fs::cabinet::CabinetFile {
+                    cabinet_id: vf_core::new_id(),
+                    firm_id: uuid::Uuid::new_v4().to_string(),
+                    schema_version: vf_core::db::SCHEMA_VERSION,
+                    layout_version: 1,
+                    created: vf_core::now_rfc3339(),
+                    name: None,
+                },
+            )
+            .unwrap();
+        };
+        let other = h.state().root.parent().unwrap().join("Other cabinet");
+        make(&h.state().root);
+        make(&other);
+        let mut oc = vf_core::db::open(
+            &other.parent().unwrap().join("other.db"),
+            vf_core::db::Storage::Local,
+        )
+        .unwrap();
+        let np = vf_fs::newclient::plan(
+            &oc,
+            &other,
+            &vf_fs::newclient::NewClient {
+                ext_id: "ACME1002".into(),
+                name: "Acme LLC".into(),
+                entity_type: None,
+            },
+        )
+        .unwrap();
+        vf_fs::newclient::create(&mut oc, &other, &np, "dev").unwrap();
+        let src = other.join(&np.folder_rel).join("Correspondence/letter.pdf");
+        std::fs::create_dir_all(src.parent().unwrap()).unwrap();
+        std::fs::write(&src, b"invented").unwrap();
+
+        click(&mut h, "Merge cabinets");
+        type_into(
+            &mut h,
+            "Other cabinet's folder",
+            &other.display().to_string(),
+        );
+        click(&mut h, "Scan");
+        assert!(
+            h.query_by_label("Acme LLC (ACME1002) — new client")
+                .is_some()
+        );
+        click(&mut h, "Merge 1 clients (1 files)");
+        h.get_by_role_and_label(egui::accesskit::Role::Button, "Yes, merge")
+            .click();
+        h.step();
+        let start = std::time::Instant::now();
+        while h.state().a.merge.last.is_none() {
+            h.step();
+            assert!(
+                start.elapsed() < std::time::Duration::from_secs(20),
+                "{:?}",
+                h.state().a.merge.error
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        h.run();
+        assert!(
+            h.query_by_label_contains("Merged 1 clients (1 new)")
+                .is_some()
+        );
+        assert!(!src.exists(), "moved out of the other cabinet");
+        let s = h.state();
+        let rel: String = s
+            .conn
+            .query_row(
+                "SELECT rel_path FROM document WHERE filed_by = 'merge'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(rel.ends_with("Correspondence/letter.pdf"), "{rel}");
+        assert!(s.root.join(&rel).is_file());
     }
 
     /// Q-63 (owner 2026-11-05): with no client list the scan says so, and creates a client

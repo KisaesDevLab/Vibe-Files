@@ -16,6 +16,7 @@ pub mod import_csv;
 pub mod import_tree;
 pub mod ingest;
 pub mod intake;
+pub mod merge_page;
 pub mod meta_editor;
 pub mod new_client;
 pub mod ocr;

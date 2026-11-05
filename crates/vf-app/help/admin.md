@@ -14,6 +14,7 @@ With no password set, the top of the list shows **No admin password: set one**, 
 - **Doc types**: the list of document kinds, with their default folder and retention. The count is in the name. See [doc types](help:doc-types).
 - **Folder templates**: the folders a new client gets. See [folder templates](help:folder-templates).
 - **Folder import**: adopts folders already in the cabinet and binds them to clients. See [Importing an existing folder tree](help:folder-import).
+- **Merge cabinets**: moves another cabinet's client folders into this one. See [Merging cabinets](help:merge-cabinets).
 
 ## INTAKE
 

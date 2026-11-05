@@ -15,6 +15,7 @@ pub mod hints;
 pub mod holds;
 pub mod import;
 pub mod intake;
+pub mod merge;
 pub mod moveto;
 pub mod newclient;
 pub mod rebuild;
