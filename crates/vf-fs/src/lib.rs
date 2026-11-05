@@ -3,6 +3,7 @@
 
 pub mod aliases;
 pub mod cabinet;
+pub mod changes;
 pub mod clients;
 pub mod content;
 pub mod disposition;

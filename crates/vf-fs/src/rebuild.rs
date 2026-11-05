@@ -123,6 +123,9 @@ pub struct RebuildReport {
     pub doc_types_error: Option<String>,
     /// New document rows whose metadata came from a `docmeta.jsonl` record.
     pub docmeta_restored: usize,
+    /// Documents already cataloged whose metadata was brought in line with `docmeta.jsonl`
+    /// (a scoped rebuild: another server's edit, PA-36).
+    pub docs_meta_updated: usize,
     /// `docmeta.jsonl` lines that could not be read (skipped).
     pub docmeta_bad_lines: usize,
     /// Files that could not be read (cabinet paths); their catalog rows were left as they were.
@@ -840,7 +843,12 @@ fn rebuild_scoped(
         Err(e) => rep.doc_types_error = Some(e),
     }
 
-    let folder_rels: Vec<String> = bound.iter().map(|b| b.folder_rel.clone()).collect();
+    // Scoped: only the folders in scope (a cabinet of 7,600 clients, PA-34).
+    let folder_rels: Vec<String> = bound
+        .iter()
+        .map(|b| b.folder_rel.clone())
+        .filter(|f| only.is_none() || in_scope(f))
+        .collect();
     let meta = crate::docmeta::Index::load(root, &folder_rels);
     rep.docmeta_bad_lines = meta.bad_lines;
 
@@ -973,6 +981,74 @@ fn rebuild_scoped(
                     }
                     rep.docs_new += 1;
                     doc_id_by_rel.insert(f.rel.clone(), id);
+                }
+            }
+        }
+    }
+    // Scoped (another server's change, a folder import): documents already cataloged take the
+    // doc type, year, status, source and tags their folder's docmeta.jsonl now says, so an
+    // edit made on another server reaches this catalog (PA-36). Every edit writes docmeta.
+    if only.is_some() {
+        let mut row_meta = conn
+            .prepare("SELECT doc_type_id, tax_year, status, source FROM document WHERE id = ?1")?;
+        let mut row_tags =
+            conn.prepare("SELECT tag FROM document_tag WHERE doc_id = ?1 ORDER BY tag")?;
+        for f in &found {
+            let Some(id) = doc_id_by_rel.get(&f.rel) else {
+                continue;
+            };
+            let Some(m) = meta.get(&f.rel, &f.hash) else {
+                continue;
+            };
+            // New rows are not in the catalog yet (they were made from docmeta already).
+            let Ok((dt, ty, st, so)) = row_meta.query_row([id], |r| {
+                Ok((
+                    r.get::<_, Option<String>>(0)?,
+                    r.get::<_, Option<i64>>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, Option<String>>(3)?,
+                ))
+            }) else {
+                continue;
+            };
+            let want_dt = m
+                .doc_type
+                .as_ref()
+                .and_then(|t| type_ids.get(t))
+                .or_else(|| {
+                    m.doc_type_name
+                        .as_ref()
+                        .and_then(|n| type_names.get(&n.trim().to_lowercase()))
+                })
+                .cloned();
+            if dt != want_dt || ty != m.tax_year.map(i64::from) || st != m.status || so != m.source
+            {
+                stmts.push(Stmt::new(
+                    "UPDATE document SET doc_type_id = ?2, tax_year = ?3, status = ?4, source = ?5, device_id = ?6, updated_at = ?7, rev = rev + 1 WHERE id = ?1",
+                    vec![
+                        id.clone().into(), want_dt.into(), m.tax_year.map(i64::from).into(),
+                        m.status.clone().into(), m.source.clone().into(), device_id.into(),
+                        now.clone().into(),
+                    ],
+                ));
+                rep.docs_meta_updated += 1;
+            }
+            let tags: Vec<String> = row_tags
+                .query_map([id], |r| r.get(0))?
+                .collect::<Result<_, _>>()?;
+            let mut want_tags = m.tags.clone();
+            want_tags.sort();
+            want_tags.dedup();
+            if tags != want_tags {
+                stmts.push(Stmt::new(
+                    "DELETE FROM document_tag WHERE doc_id = ?1",
+                    vec![id.clone().into()],
+                ));
+                for t in want_tags {
+                    stmts.push(Stmt::new(
+                        "INSERT OR IGNORE INTO document_tag (doc_id, tag) VALUES (?1, ?2)",
+                        vec![id.clone().into(), t.into()],
+                    ));
                 }
             }
         }

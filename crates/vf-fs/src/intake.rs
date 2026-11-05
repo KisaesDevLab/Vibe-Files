@@ -767,6 +767,8 @@ fn record(
     ));
     // The only file operations are docmeta lines for hinted documents (Filer moved the files).
     crate::fileops::commit(conn, root, tx, device_id)?;
+    // Filer's moves, for the other servers (PA-36).
+    crate::changes::note_paths(files.iter().map(|f| f.dst.as_path()));
     for (payer, client) in learned {
         let _ = crate::aliases::learn(root, &payer, &client);
     }

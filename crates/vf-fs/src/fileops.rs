@@ -80,8 +80,11 @@ pub fn commit(
     device_id: &str,
 ) -> Result<vf_core::tx::Committed, String> {
     let mut fs = FilerFileOps::new(&[root]).map_err(|e| format!("cannot open the cabinet: {e}"))?;
-    tx.commit(conn, &mut fs, &vf_core::tx::Actor::device(device_id))
-        .map_err(|e| e.to_string())
+    let done = tx
+        .commit(conn, &mut fs, &vf_core::tx::Actor::device(device_id))
+        .map_err(|e| e.to_string())?;
+    crate::changes::note(done.applied.iter().map(|a| &a.op));
+    Ok(done)
 }
 
 /// Like [`commit`], with file ops allowed under each of `allowed` (the cabinet and an inbox).
@@ -92,8 +95,11 @@ pub fn commit_in(
     device_id: &str,
 ) -> Result<vf_core::tx::Committed, String> {
     let mut fs = FilerFileOps::new(allowed).map_err(|e| format!("cannot open the cabinet: {e}"))?;
-    tx.commit(conn, &mut fs, &vf_core::tx::Actor::device(device_id))
-        .map_err(|e| e.to_string())
+    let done = tx
+        .commit(conn, &mut fs, &vf_core::tx::Actor::device(device_id))
+        .map_err(|e| e.to_string())?;
+    crate::changes::note(done.applied.iter().map(|a| &a.op));
+    Ok(done)
 }
 
 /// Undoes the transaction `tx_id` against the cabinet at `root`, as this device.
@@ -104,9 +110,22 @@ pub fn undo(
     device_id: &str,
 ) -> Result<(), String> {
     let mut fs = FilerFileOps::new(&[root]).map_err(|e| format!("cannot open the cabinet: {e}"))?;
+    // The folders it touches, for the other servers (PA-36).
+    let ops: Vec<vf_core::tx::FileOp> = conn
+        .query_row(
+            "SELECT record FROM undo_record WHERE tx_id = ?1",
+            [tx_id],
+            |r| r.get::<_, String>(0),
+        )
+        .ok()
+        .and_then(|r| serde_json::from_str::<vf_core::tx::UndoRecord>(&r).ok())
+        .map(|r| r.applied.into_iter().map(|a| a.op).collect())
+        .unwrap_or_default();
     vf_core::tx::undo(conn, &mut fs, &vf_core::tx::Actor::device(device_id), tx_id)
         .map(|_| ())
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    crate::changes::note(&ops);
+    Ok(())
 }
 
 /// Transactions the undo stack leaves out (P05 step 4): Intake batches (Filer's own Undo),
