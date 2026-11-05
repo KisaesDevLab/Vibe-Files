@@ -82,10 +82,36 @@ pub fn new_id() -> String {
 pub fn exe_dir() -> Option<std::path::PathBuf> {
     let exe = std::env::current_exe().ok()?;
     let real = std::fs::canonicalize(&exe).unwrap_or(exe);
-    let s = real.to_string_lossy();
-    let plain = match s.strip_prefix(r"\\?\UNC\") {
-        Some(rest) => std::path::PathBuf::from(format!(r"\{rest}")),
+    plain_path(&real).parent().map(std::path::Path::to_path_buf)
+}
+
+/// `p` without Windows' `\\?\` prefix: `\\?\C:\x` → `C:\x`, and a network path
+/// `\\?\UNC\server\share\x` → `\\server\share\x` (two backslashes: with one, a program run from
+/// a mapped network drive looked for its DLLs and data folder in the wrong place, owner
+/// 2026-11-05).
+pub fn plain_path(p: &std::path::Path) -> std::path::PathBuf {
+    let s = p.to_string_lossy();
+    match s.strip_prefix(r"\\?\UNC\") {
+        Some(rest) => std::path::PathBuf::from(format!(r"\\{rest}")),
         None => std::path::PathBuf::from(s.strip_prefix(r"\\?\").unwrap_or(&s)),
-    };
-    plain.parent().map(std::path::Path::to_path_buf)
+    }
+}
+
+#[cfg(test)]
+mod path_tests {
+    use super::plain_path;
+    use std::path::Path;
+
+    #[test]
+    fn network_paths_keep_both_backslashes() {
+        assert_eq!(
+            plain_path(Path::new(r"\\?\UNC\xc.lan\APPS$\Vibe Files\vibe-files.exe")),
+            Path::new(r"\\xc.lan\APPS$\Vibe Files\vibe-files.exe")
+        );
+        assert_eq!(
+            plain_path(Path::new(r"\\?\C:\Vibe Files\vibe-files.exe")),
+            Path::new(r"C:\Vibe Files\vibe-files.exe")
+        );
+        assert_eq!(plain_path(Path::new(r"T:\x.exe")), Path::new(r"T:\x.exe"));
+    }
 }
