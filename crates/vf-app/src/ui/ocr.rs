@@ -66,9 +66,13 @@ impl OcrState {
         s
     }
 
-    /// Job counts, looked up at most every 2 s.
+    /// Job counts: the workers' own count; looked up here (at most every 2 s) only before
+    /// they have one (PA-34: not a count of a long queue on the window's thread).
     pub fn counts(&mut self, conn: &Connection) -> &Counts {
-        if self.counted.is_none_or(|t| t.elapsed() >= RECOUNT) {
+        if let Some(c) = self.queue.as_ref().and_then(|q| q.status().counts) {
+            self.counts = c;
+            self.counted = Some(Instant::now());
+        } else if self.counted.is_none_or(|t| t.elapsed() >= RECOUNT) {
             self.counted = Some(Instant::now());
             if let Ok(c) = Counts::load(conn) {
                 self.counts = c;

@@ -17,6 +17,9 @@ use crate::ui::{theme, widgets};
 /// Rows of the remainder shown on the page (the CSV has all of them).
 const SHOWN: usize = 300;
 
+/// Files an import reads the text of by default (PA-34: not ~900K files at once).
+const READ_UP_TO: usize = 50_000;
+
 #[derive(Default)]
 pub struct ImportPage {
     pub plan: Option<Plan>,
@@ -38,6 +41,8 @@ pub struct ImportPage {
     /// The row whose Bind box was clicked last, for Shift-click ranges.
     last_tick: Option<usize>,
     job: Option<Receiver<Result<Applied, String>>>,
+    /// Read the text of the imported PDFs (OCR); unset = yes up to [`READ_UP_TO`] files.
+    read_text: Option<bool>,
     /// Folders done of the running import, and how many it has (PA-34).
     progress: std::sync::Arc<(
         std::sync::atomic::AtomicUsize,
@@ -82,6 +87,7 @@ impl ImportPage {
         let Some(plan) = self.plan.clone() else {
             return;
         };
+        let read = self.read_text.unwrap_or(plan.files.len() <= READ_UP_TO);
         let opts = Options {
             rename: self.rename,
             default_doc_type: self.default_type.clone(),
@@ -102,6 +108,18 @@ impl ImportPage {
                 let r = vf_core::db::open(&catalog, Storage::Local)
                     .map_err(|e| e.to_string())
                     .and_then(|mut conn| {
+                        // Not read: the cabinet's text recognition turns to new filings only
+                        // before the import, so its files are not queued as they come in.
+                        if !read
+                            && vf_ocr::queue::reads(&conn).map_err(|e| e.to_string())?
+                                == vf_ocr::queue::Reads::All
+                        {
+                            vf_ocr::queue::set_reads(
+                                &conn,
+                                &vf_ocr::queue::Reads::NewSince(vf_core::now_rfc3339()),
+                            )
+                            .map_err(|e| e.to_string())?;
+                        }
                         let mut a = import::apply_with(
                             &mut conn,
                             &root,
@@ -111,9 +129,11 @@ impl ImportPage {
                             &progress.0,
                             &progress.1,
                         )?;
-                        a.ocr_queued =
-                            vf_ocr::queue::enqueue_missing(&conn, vf_ocr::queue::BACKLOG)
-                                .unwrap_or(0);
+                        a.ocr_queued = if read {
+                            vf_ocr::queue::enqueue_every(&conn, vf_ocr::queue::BACKLOG).unwrap_or(0)
+                        } else {
+                            0
+                        };
                         Ok(a)
                     });
                 let _ = tx.send(r);
@@ -531,6 +551,21 @@ pub fn show(ui: &mut egui::Ui, p: &mut ImportPage, env: &mut Env, catalog: &Path
         &mut p.rename,
         "Rename bound folders to the firm template's name (\"{Client} ({ID})\"); files inside are not moved",
     );
+    let mut read = p.read_text.unwrap_or(plan.files.len() <= READ_UP_TO);
+    if ui
+        .checkbox(
+            &mut read,
+            "Read the text of the imported PDFs (OCR), so the words on their pages can be searched",
+        )
+        .on_hover_text(format!(
+            "Unticked (the default above {READ_UP_TO} files), file names and details are still \
+             searchable, and text recognition reads only documents filed from now on (Admin \
+             \u{203a} Devices)."
+        ))
+        .changed()
+    {
+        p.read_text = Some(read);
+    }
     if untyped > 0 {
         ui.horizontal_wrapped(|ui| {
             ui.label(format!("{untyped} files with no doc type found get:"));

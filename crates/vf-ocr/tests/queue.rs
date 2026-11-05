@@ -390,3 +390,56 @@ fn a_document_that_crashes_the_app_fails_after_three_tries() {
     assert!(queue::claim(&f.conn).unwrap().is_none());
     assert_eq!(f.state("d1"), "failed");
 }
+
+/// PA-34 (Q-66): a cabinet set to read new filings only does not queue the files it already
+/// had, nor files only found on disk; a look for arrivals reads only documents changed since.
+#[test]
+fn new_filings_only_and_looks_since_the_last_change() {
+    let f = fx();
+    f.add("old", "old.pdf", 1, true);
+    f.add("q", "queued.pdf", 1, true);
+    queue::enqueue_missing(&f.conn, queue::BACKLOG).unwrap();
+    f.conn
+        .execute_batch(
+            "UPDATE document SET filed_by = 'rebuild', filed_at = '2026-01-01T00:00:00Z'",
+        )
+        .unwrap();
+    queue::set_reads(
+        &f.conn,
+        &queue::Reads::NewSince("2026-06-01T00:00:00Z".into()),
+    )
+    .unwrap();
+    assert_eq!(
+        queue::reads(&f.conn).unwrap(),
+        queue::Reads::NewSince("2026-06-01T00:00:00Z".into())
+    );
+    // The waiting backlog left the queue.
+    assert_eq!(queue::Counts::load(&f.conn).unwrap().queued, 0);
+    f.add("x", "x.pdf", 1, true);
+    let file = |id: &str, by: &str, at: &str| {
+        f.conn
+            .execute(
+                "UPDATE document SET filed_by = ?2, filed_at = ?3, updated_at = ?3 WHERE id = ?1",
+                (id, by, at),
+            )
+            .unwrap();
+    };
+    file("x", "rebuild", "2026-07-01T00:00:00Z");
+    assert_eq!(queue::enqueue_missing(&f.conn, queue::INTAKE).unwrap(), 0);
+    f.add("y", "y.pdf", 1, true);
+    file("y", "intake", "2026-07-02T00:00:00Z");
+    f.add("z", "z.pdf", 1, true);
+    file("z", "intake", "2026-07-03T00:00:00Z");
+    // Only what changed since the last look.
+    assert_eq!(
+        queue::enqueue_changed(&f.conn, queue::INTAKE, Some("2026-07-03T00:00:00Z")).unwrap(),
+        1
+    );
+    assert_eq!(f.state("z"), "queued");
+    assert_eq!(queue::enqueue_missing(&f.conn, queue::INTAKE).unwrap(), 1);
+    assert_eq!(f.state("y"), "queued");
+    // A folder import asked to read its files queues them whatever the setting.
+    assert_eq!(queue::enqueue_every(&f.conn, queue::BACKLOG).unwrap(), 3);
+    queue::set_reads(&f.conn, &queue::Reads::All).unwrap();
+    assert_eq!(queue::reads(&f.conn).unwrap(), queue::Reads::All);
+}

@@ -40,6 +40,7 @@ When some files have no doc type found, the line **N files with no doc type foun
 - To add the client ID to the folder names, tick **Rename bound folders to the firm template's name**. For example, `Smith, John` becomes `Smith, John (SMIT1001)`. Left unticked, folders keep their names and are still tied to their clients. Files inside are never moved.
 - Press **Import N folders**. Ticked folders the filter hides are imported too; the button then says how many, for example **Import 12 folders (3 not shown)**.
 - **Export the remainder (CSV)…** lists files still missing a client, doc type or year, for a person to handle.
+- **Read the text of the imported PDFs (OCR)** queues the imported files for [text recognition](help:ocr). It is ticked by default up to 50,000 files. Left unticked, text recognition reads only documents filed from now on; the imported files are still found by name and details.
 - **Undo the last import** removes the ties and puts the old folder names back.
 
 ## Large cabinets: batches, stopping and continuing

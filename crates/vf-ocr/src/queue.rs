@@ -39,21 +39,109 @@ pub struct Job {
     pub rel_path: String,
 }
 
-/// Queues every live PDF document that has no job for its current content. Returns how many.
+/// Which documents text recognition reads, for the whole cabinet (PA-34, Q-66).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Reads {
+    /// Every PDF document.
+    All,
+    /// Only documents filed by Vibe Files (Intake, a page tool, a scan) since this time
+    /// (RFC 3339): a cabinet of ~900K files is not read from the start.
+    NewSince(String),
+}
+
+/// `local_state` key of [`Reads`]: `all` or `new:<time>`. Missing = all.
+const READS_KEY: &str = "ocr_reads";
+
+/// What text recognition reads in this cabinet.
+pub fn reads(conn: &Connection) -> vf_core::Result<Reads> {
+    let v: Option<String> = conn
+        .query_row("SELECT v FROM local_state WHERE k = ?1", [READS_KEY], |r| {
+            r.get(0)
+        })
+        .optional()?;
+    Ok(match v.as_deref().and_then(|v| v.strip_prefix("new:")) {
+        Some(t) => Reads::NewSince(t.to_string()),
+        None => Reads::All,
+    })
+}
+
+/// Sets what text recognition reads. Turning to new-only takes documents still waiting off
+/// the queue (pages already read stay searchable); turning to all queues the rest on the
+/// next look.
+pub fn set_reads(conn: &Connection, r: &Reads) -> vf_core::Result<()> {
+    let v = match r {
+        Reads::All => "all".to_string(),
+        Reads::NewSince(t) => format!("new:{t}"),
+    };
+    conn.execute(
+        "INSERT INTO local_state (k, v) VALUES (?1, ?2) ON CONFLICT(k) DO UPDATE SET v = excluded.v",
+        params![READS_KEY, v],
+    )?;
+    if let Reads::NewSince(t) = r {
+        conn.execute(
+            "DELETE FROM ocr_job WHERE state = 'queued' AND doc_id IN
+               (SELECT id FROM document WHERE filed_by = 'rebuild' OR filed_at < ?1)",
+            [t],
+        )?;
+    }
+    Ok(())
+}
+
+/// Queues every live PDF document that has no job for its current content (only new ones
+/// when [`reads`] says so). Returns how many.
 pub fn enqueue_missing(conn: &Connection, priority: i64) -> vf_core::Result<usize> {
+    enqueue_changed(conn, priority, None)
+}
+
+/// [`enqueue_missing`] of the documents changed at or after `since` (`updated_at`, indexed):
+/// the queue's look for new arrivals reads only those, not the whole cabinet (PA-34).
+pub fn enqueue_changed(
+    conn: &Connection,
+    priority: i64,
+    since: Option<&str>,
+) -> vf_core::Result<usize> {
+    enqueue(conn, priority, since, &reads(conn)?)
+}
+
+/// Queues every live PDF document without a job, whatever [`reads`] says (a folder import
+/// asked to read the text of its files).
+pub fn enqueue_every(conn: &Connection, priority: i64) -> vf_core::Result<usize> {
+    enqueue(conn, priority, None, &Reads::All)
+}
+
+fn enqueue(
+    conn: &Connection,
+    priority: i64,
+    since: Option<&str>,
+    reads: &Reads,
+) -> vf_core::Result<usize> {
     let now = vf_core::now_rfc3339();
-    let n = conn.execute(
+    let mut wh = String::new();
+    let mut p: Vec<String> = vec![];
+    if let Some(s) = since {
+        p.push(s.to_string());
+        wh.push_str(&format!(" AND d.updated_at >= ?{}", p.len() + 2));
+    }
+    if let Reads::NewSince(t) = reads {
+        p.push(t.clone());
+        wh.push_str(&format!(
+            " AND d.filed_at >= ?{} AND d.filed_by IS NOT 'rebuild'",
+            p.len() + 2
+        ));
+    }
+    let sql = format!(
         "INSERT INTO ocr_job (doc_id, hash, priority, state, queued_at, updated_at)
          SELECT d.id, d.hash, ?1, 'queued', ?2, ?2 FROM document d
-         WHERE d.deleted_at IS NULL AND lower(d.rel_path) LIKE '%.pdf'
+         WHERE d.deleted_at IS NULL AND lower(d.rel_path) LIKE '%.pdf'{wh}
            AND NOT EXISTS (SELECT 1 FROM ocr_job j WHERE j.doc_id = d.id AND j.hash = d.hash)
          ON CONFLICT(doc_id) DO UPDATE SET
            hash = excluded.hash, priority = excluded.priority, state = 'queued', pages = NULL,
            ocr_pages = 0, attempts = 0, error = NULL, queued_at = excluded.queued_at,
-           updated_at = excluded.updated_at",
-        params![priority, now],
-    )?;
-    Ok(n)
+           updated_at = excluded.updated_at"
+    );
+    let mut vals: Vec<vf_core::db::SqlValue> = vec![priority.into(), now.into()];
+    vals.extend(p.into_iter().map(Into::into));
+    Ok(conn.execute(&sql, vf_core::db::params_from_iter(vals))?)
 }
 
 /// After a crash or a quit mid-job: running jobs go back to the queue (their finished pages
@@ -74,13 +162,15 @@ pub fn any_queued(conn: &Connection) -> vf_core::Result<bool> {
     )?)
 }
 
-/// A cheap fingerprint of the document table (rows, last change, last filing): when it has
-/// not moved, [`enqueue_missing`] has nothing to find. Indexed reads only.
+/// A cheap fingerprint of the document table (last row, last change, last filing): when it
+/// has not moved, [`enqueue_missing`] has nothing to find. Indexed reads only (no count of
+/// ~900K rows, PA-34).
 pub fn documents_stamp(
     conn: &Connection,
 ) -> vf_core::Result<(i64, Option<String>, Option<String>)> {
     Ok(conn.query_row(
-        "SELECT count(*), max(updated_at), max(filed_at) FROM document",
+        "SELECT (SELECT coalesce(max(rowid), 0) FROM document),
+                (SELECT max(updated_at) FROM document), (SELECT max(filed_at) FROM document)",
         [],
         |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
     )?)
@@ -89,28 +179,39 @@ pub fn documents_stamp(
 /// Takes the next job (intake first, then oldest).
 pub fn claim(conn: &Connection) -> vf_core::Result<Option<Job>> {
     let now = vf_core::now_rfc3339();
-    // A job still queued after MAX_ATTEMPTS claims was running when the app stopped (crashed)
-    // that many times: it is failed, not tried on every start (QA I10). A stop asked for or a
-    // missing engine gives its attempt back.
-    conn.execute(
-        "UPDATE ocr_job SET state = 'failed', updated_at = ?1,
-           error = 'Vibe Files stopped while reading this document ' || attempts || ' times'
-         WHERE state = 'queued' AND attempts >= ?2",
-        params![now, MAX_ATTEMPTS],
-    )?;
+    // The next job, by the (state, priority, queued_at) index: one row read, however long the
+    // queue (PA-34).
     let job = conn
         .query_row(
             "UPDATE ocr_job SET state = 'running', attempts = attempts + 1, updated_at = ?1
              WHERE doc_id = (SELECT doc_id FROM ocr_job WHERE state = 'queued'
                              ORDER BY priority, queued_at LIMIT 1)
-             RETURNING doc_id, hash",
+             RETURNING doc_id, hash, attempts",
             [&now],
-            |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, i64>(2)?,
+                ))
+            },
         )
         .optional()?;
-    let Some((doc_id, hash)) = job else {
+    let Some((doc_id, hash, attempts)) = job else {
         return Ok(None);
     };
+    // A job claimed MAX_ATTEMPTS times before was running when the app stopped (crashed) that
+    // many times: it is failed, not tried on every start (QA I10). A stop asked for or a
+    // missing engine gives its attempt back.
+    if attempts > MAX_ATTEMPTS {
+        conn.execute(
+            "UPDATE ocr_job SET state = 'failed', updated_at = ?2, attempts = ?3,
+               error = 'Vibe Files stopped while reading this document ' || ?3 || ' times'
+             WHERE doc_id = ?1",
+            params![doc_id, now, MAX_ATTEMPTS],
+        )?;
+        return claim(conn);
+    }
     let rel_path: Option<String> = conn
         .query_row(
             "SELECT rel_path FROM document WHERE id = ?1 AND deleted_at IS NULL",
@@ -447,6 +548,8 @@ pub struct Status {
     /// Text layers written since the queue started.
     pub written: usize,
     pub last_error: Option<String>,
+    /// Job counts, recounted by a worker every few seconds (not by the window, PA-34).
+    pub counts: Option<Counts>,
 }
 
 impl Default for Status {
@@ -456,6 +559,7 @@ impl Default for Status {
             indexed: 0,
             written: 0,
             last_error: None,
+            counts: None,
         }
     }
 }
@@ -610,16 +714,37 @@ fn worker(
     }
     let mut last_scan = Instant::now();
     let mut stamp = documents_stamp(&conn).ok();
+    // Documents changed from this time on are looked at (a margin for a slow clock).
+    let mut since = stamp.as_ref().and_then(|s| s.1.clone());
+    let mut last_count: Option<Instant> = None;
+    // A whole look now and then: rows a sync brought in carry their own (older) times.
+    let mut last_full = Instant::now();
     let mut last_writeback: Option<Instant> = None;
     while !stop.load(Ordering::Relaxed) {
-        // New arrivals: worker 0 looks every 2 s, and queues only when the documents moved.
+        // New arrivals: worker 0 looks every 2 s, and queues only when the documents moved,
+        // and only the documents changed since its last look (PA-34).
         if n == 0 && last_scan.elapsed() >= Duration::from_secs(2) {
             last_scan = Instant::now();
             let now = documents_stamp(&conn).ok();
-            if now != stamp {
+            let full = last_full.elapsed() >= Duration::from_secs(600);
+            if now != stamp || full {
+                let next = now.as_ref().and_then(|s| s.1.clone());
+                let look = if full { None } else { since.as_deref() };
+                if enqueue_changed(&conn, INTAKE, look).is_ok() {
+                    since = next;
+                }
+                if full {
+                    last_full = Instant::now();
+                }
                 stamp = now;
-                let _ = enqueue_missing(&conn, INTAKE);
             }
+        }
+        if n == 0 && last_count.is_none_or(|t| t.elapsed() >= Duration::from_secs(3)) {
+            last_count = Some(Instant::now());
+            if let (Ok(c), Ok(mut s)) = (Counts::load(&conn), status.lock()) {
+                s.counts = Some(c);
+            }
+            wake();
         }
         // Text layers held back (Filer's undoable batch, a lock): worker 0 retries every 30 s.
         if n == 0 && last_writeback.is_none_or(|t| t.elapsed() >= Duration::from_secs(30)) {

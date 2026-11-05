@@ -8,6 +8,15 @@ Every PDF in the cabinet is checked page by page. A page that already carries it
 
 The words are saved in this PC's catalog as soon as each page is read, so the document can be found on the [Search](help:search) tab right away. Documents filed while Vibe Files is running are read before the older backlog.
 
+## Every document, or new filings only
+
+A large cabinet (hundreds of thousands of files) would keep the PCs busy reading old scans for weeks. **Admin** › **Devices** › **Text recognition** sets what this catalog reads:
+
+- **Read every PDF document**: documents already in the cabinet are read too, a few at a time, with new filings first.
+- **Read only documents filed from now on**: only documents Vibe Files files from then on (Intake, scans, page tools) are read. Older files, and files put into the client folders outside Vibe Files, can still be found by file name and details, just not by the words on their pages.
+
+Switching to new filings only takes the waiting backlog off the queue; pages already read stay searchable. A [folder import](help:folder-import) of more than 50,000 files chooses new filings only for you unless you tick **Read the text of the imported PDFs**.
+
 ## The text layer in the file
 
 Once every page of a document is read, Vibe Files writes the words into the PDF itself as an invisible text layer. The page looks the same, but now the text can be selected and searched in any PDF program, in Explorer and in email. The file before the change is kept as a version, so nothing is lost (see [documents](help:documents)).
