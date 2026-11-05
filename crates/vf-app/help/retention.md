@@ -13,7 +13,7 @@ Open **Admin** › **Retention classes**. Each class says how many years a docum
 - **Correspondence**: 4 years from the end of the tax year.
 - **Notices**: 7 years from the end of the tax year.
 
-Press **Add class**, or click a class to edit it. Fill in **Class name**, choose **Counted** (**From the end of the tax year**, **From the engagement's close**, **From the day it was filed** or **Kept permanently**) and type the **Years**. Press **Add** or **Save**; **Remove** deletes a class.
+To change how long a class is kept, press **Edit…** on its row (or click its name); **Add class** makes a new one. Fill in **Class name**, choose **Counted** (**From the end of the tax year**, **From the engagement's close**, **From the day it was filed** or **Kept permanently**) and type the **Years**. Press **Add** or **Save**; **Remove** deletes a class.
 
 Each [doc type](help:doc-types) picks its class in its **Retention** field. A document without a doc type, or whose doc type has no class, is never disposed of. The page lists doc types with no class.
 

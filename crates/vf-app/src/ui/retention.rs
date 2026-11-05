@@ -21,7 +21,7 @@ pub struct RetentionPage {
     editing: Option<String>,
     adding: bool,
     name: String,
-    years: String,
+    pub years: String,
     anchor: String,
     pub error: Option<String>,
 }
@@ -57,24 +57,23 @@ pub fn show(
     env: &mut Env,
 ) -> bool {
     let mut changed = false;
-    ui.horizontal(|ui| {
-        ui.label(RichText::new("Retention classes").strong().size(16.0));
-        ui.label(widgets::caption(
-            "Kept in _Vibe\\retention.json and the catalog. Doc types pick their class; a document without a doc type is never disposed.",
-        ));
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if ui.add(widgets::primary_button("Add class")).clicked() {
-                p.open(None);
-            }
-        });
-    });
+    // The button under the heading, not at the far right where a narrow window hid it (owner
+    // 2026-11-05: "add the ability to edit the retention periods").
+    ui.label(RichText::new("Retention classes").strong().size(16.0));
+    ui.label(widgets::caption(
+        "How long each kind of document is kept. Press Edit… on a class to change its years or how they are counted. Doc types pick their class (Admin › Doc types); a document without a doc type is never disposed. Kept in _Vibe\\retention.json and the catalog.",
+    ));
+    ui.add_space(4.0);
+    if ui.add(widgets::primary_button("Add class")).clicked() {
+        p.open(None);
+    }
     ui.add_space(6.0);
     egui::Grid::new("retention-classes")
         .striped(true)
-        .num_columns(3)
+        .num_columns(4)
         .spacing([16.0, 6.0])
         .show(ui, |ui| {
-            for h in ["Class", "Kept", "Doc types"] {
+            for h in ["Class", "Kept", "Doc types", ""] {
                 ui.label(RichText::new(h).small().strong());
             }
             ui.end_row();
@@ -91,6 +90,17 @@ pub fn show(
                     .filter(|t| t.retention.as_deref() == Some(c.id.as_str()))
                     .count();
                 ui.label(n.to_string());
+                let e = ui.small_button("Edit…");
+                e.widget_info(|| {
+                    egui::WidgetInfo::labeled(
+                        egui::accesskit::Role::Button,
+                        true,
+                        format!("Edit {}", c.name),
+                    )
+                });
+                if e.clicked() {
+                    p.open(Some(c));
+                }
                 ui.end_row();
             }
         });

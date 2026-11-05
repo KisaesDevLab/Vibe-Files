@@ -1573,6 +1573,28 @@ HALV1001,\"Halvorsen, Dana\"
         assert_eq!(n, 7);
         let w2 = h.state().a.types.iter().find(|t| t.name == "W-2").unwrap();
         assert!(w2.retention.is_some(), "seeded doc types have their class");
+
+        // Edit… on a row changes its years (owner 2026-11-05).
+        click(&mut h, "Edit Correspondence");
+        assert_eq!(h.state().a.retention.years, "4");
+        h.state_mut().a.retention.years = "6".into();
+        h.run();
+        click(&mut h, "Save");
+        assert!(h.state().a.retention.error.is_none());
+        assert!(
+            h.query_by_label("6 years from the end of the tax year")
+                .is_some()
+        );
+        let years: i64 = h
+            .state()
+            .conn
+            .query_row(
+                "SELECT years FROM retention_class WHERE name = 'Correspondence' AND deleted_at IS NULL",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(years, 6);
     }
 
     /// P07 steps 2-4: an old W-2 is on the report; approving it puts it in the wait list;
