@@ -162,7 +162,7 @@ no names, paths or document contents.
 
 ## 7. Release (Kisaes)
 
-1. Bump `version` in `Cargo.toml`; update STATE.md.
+1. Bump `version` in `Cargo.toml`; record the release in the internal notes.
 2. Commit everything, then `pwsh scripts/release.ps1`: static-CRT build, the portable folder
    with pdfium, TWAINDSM and Tesseract (only the DLLs it loads), `vibe-files-<ver>-win64.zip`
    (no top folder: the exe is at its root), `SHA256SUMS.txt`, and the winget manifests under

@@ -1,96 +1,108 @@
 # Vibe Files
 
-A Windows desktop document management system for small CPA and tax firms, written in Rust
-([egui](https://github.com/emilk/egui)). Vibe Files is a cabinet layer over a plain client folder
-tree. It adds browsing, intake, OCR, full-text search, PDF tools, versions, an audit trail,
-retention, and two-way sync to Backblaze B2.
+Document management for small CPA and tax firms, on Windows. Vibe Files works over a plain
+client folder tree: your files stay ordinary PDFs and Office files in ordinary Windows folders,
+and Vibe Files adds browsing, intake, OCR, full-text search, PDF tools (annotate, fill forms,
+page tools), versions, an audit trail, retention and legal hold, and optional two-way sync to
+your own Backblaze B2 bucket.
 
-It works on the client folder tree, sentinels and document-moving engine of
-[Vibe Filer Desktop](https://github.com/KisaesDevLab/Vibe-Filer-Desktop). Filer's engine is
-vendored here, and Filer itself runs as the Intake tab.
+Its client folder tree and document-filing engine come from
+[Vibe Filer Desktop](https://github.com/KisaesDevLab/Vibe-Filer-Desktop), which runs inside
+Vibe Files as the **Intake** tab.
 
-> **Status: in development, not released.** Built phase by phase, see [PHASES.md](PHASES.md).
-> [STATE.md](STATE.md) says what is done and what comes next. v1 is for internal use at
-> Kisaes LLC.
+> **Pre-release.** In use at Kisaes LLC for its live run. Releases are on the
+> [Releases page](https://github.com/KisaesDevLab/Vibe-Files/releases).
 
-## Principles
+## Install
 
-- **Files stay plain files.** Every PDF or Office file in the cabinet opens in Explorer without
-  Vibe Files. Vibe Files never uses a blob store or a proprietary container.
-- **The catalog is a rebuildable index.** It is a SQLite database beside the exe.
-  `vibe-files rebuild` recreates it from the folder tree, the client sentinels and the
-  `_Vibe/` sidecar files.
-- **Offline first.** Every v1 feature works with no network. B2 sync is additive.
-- **Portable.** It ships as `vibe-files.exe` plus a `data/` folder beside it. There is no
-  installer and no registry writes, except an optional Explorer menu entry.
-- **Every change is a transaction.** A change writes the file, the catalog row, the audit row and
-  the undo record together, or none of them.
-- **No telemetry.** The only network calls go to the firm's own B2 bucket.
+Windows 10 or 11, 64-bit. Everything Vibe Files needs is included: PDF viewing (pdfium),
+scanning (TWAIN), and OCR (Tesseract with English).
 
-## What works today
+### With winget (available soon)
 
-| Area | |
-|---|---|
-| Cabinet | Create or open a cabinet over an existing Filer client tree, with nothing to type but the folder. |
-| Browse | Client, year and folder tree, views (Recent, Pinned, Needs doc type, …), metadata editing, bulk edit, rename, undo. |
-| Clients | Filer client master, CSV import, relationships, doc types and tax years. |
-| Intake | The Filer Desktop app mounted unchanged: rules, preview and confirm, collisions, undo of the last batch. Every batch is recorded in the catalog. |
-| Scanning | WIA scanner profiles (feeder, duplex, dpi, color, blank-page drop, deskew), barcode cover and separator sheets that split a scanned stack, photo and HEIC → PDF, and a print-capture folder with an UltraTax CS filename parser. |
-| OCR | Tesseract (separate program) through a job queue that resumes after a restart. Scans get an invisible text layer written into the PDF, and the original is kept as a version. |
-| Search | FTS5 full text, with partial matches, combined with metadata filters (client, year, doc type, status, source, dates, tag). Snippets, and results open at the matching page. |
-
-Planned next: the PDF viewer and annotations, versions UI, retention and legal hold, form
-extraction, an import wizard, B2 sync, and hardening.
-[PHASES.md](PHASES.md) lists the deferred items and v2 candidates.
-
-## Building
-
-Requirements:
-
-- Windows 10 or 11, x64
-- Rust stable (2024 edition) with the MSVC toolchain
-- For OCR: Tesseract 5 with English data. Install it with
-  `winget install UB-Mannheim.TesseractOCR`, or put a `tesseract\` folder beside `vibe-files.exe`.
+Vibe Files is being added to the Windows Package Manager. Once it is listed:
 
 ```powershell
-cargo build --release -p vf-app             # target\release\vibe-files.exe
-cargo test --workspace                      # the test suite (OCR tests need Tesseract)
-cargo clippy --workspace --all-targets -- -D warnings
-cargo run -p vf-fixtures                    # synthetic test cabinet in fixtures\cabinet\
+winget install Kisaes.VibeFiles      # install
+winget upgrade Kisaes.VibeFiles      # update to the newest release
 ```
 
-`pdfium.dll` ships in `crates/filer-pdf/assets/` and the 64-bit TWAIN manager
-`TWAINDSM.dll` in `crates/vf-ingest/assets/`. Copy both beside the exe for a portable build
-(TWAINDSM.dll is also found in Windows' System32 when a scanner driver installed it).
+Start it with `vibe-files` or from the Start menu. Its data folder is
+`%LOCALAPPDATA%\Vibe Files\data`; upgrades never touch it.
 
-## Repository layout
+### From the release zip (available now)
 
-```
-crates/
-  filer-core, filer-pdf, filer-intake   vendored Vibe Filer Desktop (see each VENDORED.md)
-  vf-core      catalog schema, documents, Transaction, audit
-  vf-fs        tree walker, rebuild, file operations through Filer's move engine
-  vf-ingest    scanner, barcode sheets, image → PDF, print capture
-  vf-ocr       OCR engine trait, Tesseract, job queue, text-layer write-back
-  vf-index     full-text and metadata search
-  vf-app       the egui application and the CLI
-  vf-fixtures  synthetic cabinet generator (no real client data)
-docs/          UI spec, bucket layout, sentinel format
-```
+1. Download `vibe-files-<version>-win64.zip` from the
+   [latest release](https://github.com/KisaesDevLab/Vibe-Files/releases).
+2. Check the download. In PowerShell:
+   `Get-FileHash vibe-files-<version>-win64.zip`
+   must show the SHA-256 given in the release notes (and in `SHA256SUMS.txt`).
+3. Unzip it into a folder of your choice, for example `C:\Vibe Files`, and run
+   `vibe-files.exe`.
 
-Contributors start with [CLAUDE.md](CLAUDE.md), the standing project brief, then
-[STATE.md](STATE.md), [PHASES.md](PHASES.md) and [QUESTIONS.md](QUESTIONS.md).
+The data folder (`data\`) is created beside `vibe-files.exe`. To upgrade, replace everything in
+the folder except `data\`.
 
-## Test data
+## First setup
 
-Fixtures, tests and logs never contain real client data. The fixture generator uses only
-synthetic names, SSNs in the never-issued 987-65-432x range, and EIN prefixes the IRS never
-assigned.
+Vibe Files needs a **cabinet**: the folder that holds your client folders, on this PC
+(`C:\Clients`) or on a share (`\\server\share\Clients`).
+
+1. Start Vibe Files. The **Cabinet** screen opens.
+2. Click **Create new**, choose the **Cabinet folder** with **Browse…**, type a **Cabinet name**
+   (shown in the header), and click **Create cabinet**.
+   - The folder may already hold client folders. They are indexed where they are; nothing is
+     moved.
+3. On the other PCs in the office, click **Open existing** instead and choose the same folder.
+
+Vibe Files remembers the cabinet and opens it on its own the next time.
+
+## Bring in your clients and an existing client folder tree
+
+Do these in order.
+
+1. **Import the client list.** Export the client list from your tax software as CSV. In
+   **Browse**, click **Import clients CSV…**, choose the file and click **Read**. Pick the
+   **Client ID column** and the **Name column**. For a taxpayer-ID column, tick **keep the last 4
+   digits only** (full SSNs and EINs are never copied in). Click **Import N rows**.
+   - This only saves the list. No folder is renamed, moved or tied to a client yet.
+   - Until step 2, Browse shows these clients as **No folder yet**. Don't click
+     **Create folder…** for them, or you get a second, empty folder beside the old one.
+2. **Scan the existing folders.** Open **Admin › Folder import** and click **Scan the cabinet**.
+   Each top-level folder is matched to a client by its ID or its name, and each file gets a doc
+   type and tax year where its name or folder says so.
+3. **Check the matches.** The **Match** column shows how sure each match is: 90–100% are ticked
+   for you, 60–84% need a look, 50% or less mean something is off. To change a folder's
+   client, pick another in its **Client** column.
+4. **Tick the folders to import.** **Show matches from N% up** filters the list; **Tick all
+   shown**, **Untick all shown**, the **Bind** box at the top of the column, and Shift-click
+   tick or untick many at once.
+5. **Optionally rename the folders** to the firm's naming, `{Client} ({ID})`, for example
+   `Smith, John` → `Smith, John (SMIT1001)`: tick **Rename bound folders to the firm template's
+   name**. Files inside are not moved.
+6. Click **Import N folders**. **Undo the last import** reverses it.
+
+New clients after that: **+ New client** in Browse creates the client's folder from the firm's
+folder template. To fix a client's name later, use **Rename client…** in the client panel; its
+folder is renamed to match.
+
+## Day to day
+
+- **Help** (top right in the app) covers every screen: browsing, Intake rules, scanning, the
+  Viewer, search, versions and undo, retention, sync, and troubleshooting.
+- `OPERATIONS.md` in the release zip is for whoever sets up and looks after the office's PCs:
+  several PCs on one cabinet, backups, B2 sync, and upgrades.
+
+## Privacy
+
+- No telemetry. The only network calls go to your own B2 bucket, when you turn sync on.
+- Files sent to B2 are encrypted on your PC first, with a key only your firm holds.
+- Full SSNs and EINs are never stored in the client list or the catalog; only the last four
+  digits are kept.
 
 ## License
 
 [GNU Affero General Public License v3.0 or later](LICENSE) (`AGPL-3.0-or-later`).
-Third-party components keep their own licenses. pdfium's licenses are in
-`crates/filer-pdf/assets/`. The TWAIN Data Source Manager (TWAIN Working Group, 2.5.1) is
-LGPL-2.1-or-later, licence in `crates/vf-ingest/assets/`. Tesseract is installed separately
-and is Apache-2.0.
+Third-party components keep their own licenses: pdfium (in `crates/filer-pdf/assets/`), the TWAIN
+Data Source Manager (LGPL-2.1-or-later, in `crates/vf-ingest/assets/`) and Tesseract
+(Apache-2.0, in the release's `tesseract\` folder).

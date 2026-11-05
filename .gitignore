@@ -30,3 +30,17 @@
 Thumbs.db
 desktop.ini
 .DS_Store
+
+# Internal working notes (project brief, phase plan, state, Q&A, QA notes): kept on the
+# developer's PC, not in the repository
+/CLAUDE.md
+/KICKOFF_PROMPT.md
+/PHASES.md
+/STATE.md
+/QUESTIONS.md
+/docs/QA-*.md
+/docs/UI_SPEC.md
+.claude/
+
+# Python caches
+__pycache__/
