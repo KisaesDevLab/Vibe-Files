@@ -871,6 +871,10 @@ fn collect_files(root: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {
 pub struct Options {
     /// Rename bound folders to the firm template's name (`{Client} ({ID})`).
     pub rename: bool,
+    /// Doc type (id) for files the scan found none for (owner 2026-11-05); `None`: left unset.
+    pub default_doc_type: Option<String>,
+    /// Source (`client`, `firm`, …) for those files; `None`: left as it is.
+    pub default_source: Option<String>,
 }
 
 /// What [`apply`] did; keep it to [`undo`] the import.
@@ -1035,6 +1039,18 @@ pub fn apply(
         {
             e.doc_type = Some(Some(t.clone()));
         }
+        // No doc type found: the defaults chosen for the scan, if any (a blanket choice, so
+        // flagged to check like a guess).
+        let mut defaulted = false;
+        if e.doc_type.is_none() {
+            if let Some(t) = &opts.default_doc_type {
+                e.doc_type = Some(Some(t.clone()));
+                defaulted = true;
+            }
+            if let Some(s) = &opts.default_source {
+                e.source = Some(Some(s.clone()));
+            }
+        }
         match f.year_from {
             "permanent" => e.tax_year = Some(None),
             "" => {}
@@ -1043,7 +1059,8 @@ pub fn apply(
         // A year from the file name ("W2 1999 Oak St") or a doc type from a folder name (a
         // "Bank" folder) is a guess: kept out of disposition until someone sets it (QA P12).
         let guessed = (e.tax_year.is_some() && f.year_from == "file name")
-            || (e.doc_type.is_some() && f.type_how.starts_with("folder"));
+            || (e.doc_type.is_some() && f.type_how.starts_with("folder"))
+            || defaulted;
         if guessed {
             let mut tags = crate::docmeta::load(conn, &id)?.tags;
             if !tags.iter().any(|t| t == crate::docmeta::GUESSED_TAG) {

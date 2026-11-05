@@ -21,6 +21,12 @@ const SHOWN: usize = 300;
 pub struct ImportPage {
     pub plan: Option<Plan>,
     pub rename: bool,
+    /// For files the scan found no doc type for (owner 2026-11-05): a doc type (id) and a
+    /// source to give them.
+    pub default_type: Option<String>,
+    pub default_source: Option<String>,
+    /// The cabinet's doc types (id, name), read at the scan.
+    types: Vec<(String, String)>,
     /// Folders shown: a match of at least this many % (PA-28).
     pub min_pct: u8,
     /// Folders already bound are not shown.
@@ -51,6 +57,14 @@ impl ImportPage {
             Ok(p) => {
                 self.plan = Some(p);
                 self.last_tick = None;
+                self.types = vf_fs::doctypes::load(env.root)
+                    .ok()
+                    .flatten()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|t| !t.archived)
+                    .map(|t| (t.id, t.name))
+                    .collect();
             }
             Err(e) => self.error = Some(format!("Scan failed: {e}")),
         }
@@ -62,6 +76,8 @@ impl ImportPage {
         };
         let opts = Options {
             rename: self.rename,
+            default_doc_type: self.default_type.clone(),
+            default_source: self.default_source.clone(),
         };
         let (tx, rx) = std::sync::mpsc::channel();
         let (catalog, root, device, ctx) = (
@@ -224,8 +240,16 @@ pub fn show(ui: &mut egui::Ui, p: &mut ImportPage, env: &mut Env, catalog: &Path
                 let r = &plan.folders[i];
                 r.bound || (r.include && r.client.is_some())
             }) && ((f.doc_type.is_some() && f.type_confidence >= import::AUTO)
-                || !f.year_from.is_empty())
+                || !f.year_from.is_empty()
+                || p.default_type.is_some()
+                || p.default_source.is_some())
         })
+        .count();
+    // Files the scan found no doc type for: the defaults below are for them.
+    let untyped = plan
+        .files
+        .iter()
+        .filter(|f| f.doc_type.is_none() || f.type_confidence < import::AUTO)
         .count();
     ui.label(format!(
         "{} folders ({} already bound, {} to bind) · {} files · {} fully mapped ({:.0}%) · {} for manual handling",
@@ -420,6 +444,62 @@ pub fn show(ui: &mut egui::Ui, p: &mut ImportPage, env: &mut Env, catalog: &Path
         &mut p.rename,
         "Rename bound folders to the firm template's name (\"{Client} ({ID})\"); files inside are not moved",
     );
+    if untyped > 0 {
+        ui.horizontal_wrapped(|ui| {
+            ui.label(format!("{untyped} files with no doc type found get:"));
+            let l = ui.label(widgets::caption("Doc type"));
+            let shown = p
+                .default_type
+                .as_ref()
+                .and_then(|id| p.types.iter().find(|(i, _)| i == id))
+                .map_or("Leave unset".to_string(), |(_, n)| n.clone());
+            let current = p
+                .default_type
+                .as_ref()
+                .and_then(|id| p.types.iter().position(|(i, _)| i == id));
+            let types = &p.types;
+            let (r, pick) = widgets::search_combo(
+                ui,
+                "import-default-type",
+                200.0,
+                shown,
+                || types.iter().map(|(_, n)| n.clone()).collect(),
+                current,
+                Some("Leave unset"),
+            );
+            r.labelled_by(l.id).on_hover_text(
+                "Given to every file the scan found no doc type for; flagged to check",
+            );
+            if let Some(k) = pick {
+                p.default_type = k.map(|k| p.types[k].0.clone());
+            }
+            let l = ui.label(widgets::caption("Source"));
+            let sources = &vf_fs::docmeta::SOURCES;
+            let shown = p
+                .default_source
+                .as_deref()
+                .and_then(|s| sources.iter().find(|(k, _)| *k == s))
+                .map_or("Leave unset", |(_, n)| *n)
+                .to_string();
+            let current = p
+                .default_source
+                .as_deref()
+                .and_then(|s| sources.iter().position(|(k, _)| *k == s));
+            let (r, pick) = widgets::search_combo(
+                ui,
+                "import-default-source",
+                140.0,
+                shown,
+                || sources.iter().map(|(_, n)| n.to_string()).collect(),
+                current,
+                Some("Leave unset"),
+            );
+            r.labelled_by(l.id);
+            if let Some(k) = pick {
+                p.default_source = k.map(|k| sources[k].0.to_string());
+            }
+        });
+    }
     ui.horizontal(|ui| {
         let label = if to_bind > 0 {
             // Ticked folders the filter hides are imported too: say so.

@@ -427,7 +427,10 @@ fn rename_to_the_template_moves_folders_and_undo_puts_them_back() {
         &mut f.conn,
         &f.root,
         &plan,
-        &Options { rename: true },
+        &Options {
+            rename: true,
+            ..Default::default()
+        },
         "dev",
     )
     .unwrap();
@@ -448,6 +451,56 @@ fn rename_to_the_template_moves_folders_and_undo_puts_them_back() {
     assert!(typed > 0);
     import::undo(&mut f.conn, &f.root, &applied, "dev").unwrap();
     assert_eq!(snapshot(&f.root), before);
+}
+
+/// Owner 2026-11-05: files the scan finds no doc type for get the doc type and source chosen
+/// for the scan, flagged to check; typed files keep theirs.
+#[test]
+fn untyped_files_get_the_scans_default_doc_type_and_source() {
+    let mut f = tree(60);
+    let plan = import::plan(&f.conn, &f.root).unwrap();
+    let untyped = plan
+        .files
+        .iter()
+        .filter(|x| {
+            x.folder.is_some_and(|i| plan.folders[i].include)
+                && (x.doc_type.is_none() || x.type_confidence < import::AUTO)
+        })
+        .count();
+    assert!(untyped > 0, "the tree has files with no doc type word");
+    let misc: String = f
+        .conn
+        .query_row(
+            "SELECT id FROM doc_type WHERE name = 'Notice / correspondence'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    import::apply(
+        &mut f.conn,
+        &f.root,
+        &plan,
+        &Options {
+            default_doc_type: Some(misc.clone()),
+            default_source: Some("client".into()),
+            ..Default::default()
+        },
+        "dev",
+    )
+    .unwrap();
+    let (given, sourced, flagged): (i64, i64, i64) = f
+        .conn
+        .query_row(
+            "SELECT count(*), sum(d.source = 'client'),
+                    sum(EXISTS (SELECT 1 FROM document_tag t WHERE t.doc_id = d.id AND t.tag = 'import:guessed'))
+             FROM document d WHERE d.doc_type_id = ?1",
+            [&misc],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap();
+    assert!(given as usize >= untyped, "{given} < {untyped}");
+    assert_eq!(sourced, given);
+    assert!(flagged as usize >= untyped);
 }
 
 /// QA 2026-11-03: a Filer Desktop tree with sentinels but no client list imported yet. Its
