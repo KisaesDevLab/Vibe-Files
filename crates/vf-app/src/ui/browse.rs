@@ -15,6 +15,7 @@ use crate::config::{Favorite, Prefs};
 use crate::shell::{self, ShellAction};
 use crate::ui::client_panel::{self, RelForm};
 use crate::ui::cover_sheet::{self, CoverSheetDialog};
+use crate::ui::folder_dialogs::{FolderAsk, FolderDialog};
 use crate::ui::import_csv::{self, ImportDialog};
 use crate::ui::meta_editor::{self, MetaForm};
 use crate::ui::new_client::{self, NewClientDialog};
@@ -249,6 +250,8 @@ pub struct Browse {
     pub notice: Option<String>,
     /// The `+ New client` dialog, while open.
     pub new_client: Option<NewClientDialog>,
+    /// Rename client, new / rename / delete folder (PA-29).
+    pub folder_dialog: Option<FolderDialog>,
     /// The "Import clients CSV…" dialog, while open.
     pub import: Option<ImportDialog>,
     /// The client inspector's add-relationship form.
@@ -390,6 +393,7 @@ impl Browse {
             error: None,
             notice: None,
             new_client: None,
+            folder_dialog: None,
             import: None,
             rel_form: RelForm::new(),
             meta_form: MetaForm::default(),
@@ -1457,6 +1461,25 @@ pub fn show(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env) {
         b.ask_move(env.conn, env.root, ids, dest);
     }
     move_dialog(ui.ctx(), b, env);
+    if let Some(d) = &mut b.folder_dialog {
+        match crate::ui::folder_dialogs::show(ui.ctx(), d, env) {
+            DialogOutcome::Open => {}
+            DialogOutcome::Cancelled => b.folder_dialog = None,
+            DialogOutcome::Done(msg) => {
+                b.folder_dialog = None;
+                // Folder paths changed: show the client, by id (indices can shift).
+                let client = b.scope_client().map(|c| b.snap.clients[c].id.clone());
+                b.reload(env.conn);
+                b.set_scope(Scope::Cabinet);
+                if let Some(c) =
+                    client.and_then(|id| b.snap.clients.iter().position(|c| c.id == id))
+                {
+                    b.go_to_client(c);
+                }
+                b.notice = Some(msg);
+            }
+        }
+    }
     if let Some(d) = &mut b.new_client {
         match new_client::show(ui.ctx(), d, env) {
             DialogOutcome::Open => {}
@@ -1715,11 +1738,26 @@ fn tree(ui: &mut egui::Ui, b: &mut Browse) {
     ui.add_space(4.0);
     let mut toggle: Option<Node> = None;
     // Right-click on a client, year or folder: add it to favorites.
-    let fav_menu = |resp: &egui::Response, scope: Scope, out: &mut Option<Scope>| {
+    // ...and on a client or a folder on disk: rename it, add a folder in it, delete it (PA-29).
+    let mut ask: Option<FolderAsk> = None;
+    let fav_menu = |resp: &egui::Response,
+                    scope: Scope,
+                    out: &mut Option<Scope>,
+                    asks: Vec<(&'static str, FolderAsk)>,
+                    ask: &mut Option<FolderAsk>| {
         resp.context_menu(|ui| {
             if ui.button("Add to favorites").clicked() {
                 *out = Some(scope);
                 ui.close();
+            }
+            if !asks.is_empty() {
+                ui.separator();
+            }
+            for (label, a) in asks {
+                if ui.button(label).clicked() {
+                    *ask = Some(a);
+                    ui.close();
+                }
             }
         });
     };
@@ -1760,7 +1798,17 @@ fn tree(ui: &mut egui::Ui, b: &mut Browse) {
                 if let Some(cf) = &c.folder_rel {
                     drop_target(&resp, cf, &mut dropped);
                 }
-                fav_menu(&resp, Scope::Client(ci), &mut fav_scope);
+                let mut asks = vec![(
+                    "Rename client…",
+                    FolderAsk::RenameClient {
+                        client_id: c.id.clone(),
+                        name: c.name.clone(),
+                    },
+                )];
+                if let Some(cf) = &c.folder_rel {
+                    asks.push(("New folder…", FolderAsk::NewFolder { parent: cf.clone() }));
+                }
+                fav_menu(&resp, Scope::Client(ci), &mut fav_scope, asks, &mut ask);
                 if b.reveal == Some(ci) {
                     resp.scroll_to_me(Some(egui::Align::Center));
                     b.reveal = None;
@@ -1794,7 +1842,7 @@ fn tree(ui: &mut egui::Ui, b: &mut Browse) {
                             y.count,
                             b.scope == here,
                         );
-                        fav_menu(&resp, here.clone(), &mut fav_scope);
+                        fav_menu(&resp, here.clone(), &mut fav_scope, vec![], &mut ask);
                         if chev {
                             toggle = Some(ynode.clone());
                         }
@@ -1835,7 +1883,7 @@ fn tree(ui: &mut egui::Ui, b: &mut Browse) {
                                     drop_target(&resp, &format!("{cf}/{real}"), &mut dropped);
                                 }
                             }
-                            fav_menu(&resp, here.clone(), &mut fav_scope);
+                            fav_menu(&resp, here.clone(), &mut fav_scope, vec![], &mut ask);
                             if resp.clicked() {
                                 pick = Some(here);
                             }
@@ -1868,10 +1916,25 @@ fn tree(ui: &mut egui::Ui, b: &mut Browse) {
                         n,
                         b.scope == here,
                     );
+                    let mut asks = vec![];
                     if let Some(cf) = &c.folder_rel {
-                        drop_target(&resp, &format!("{cf}/{f}"), &mut dropped);
+                        let rel = format!("{cf}/{f}");
+                        drop_target(&resp, &rel, &mut dropped);
+                        asks = vec![
+                            (
+                                "New folder…",
+                                FolderAsk::NewFolder {
+                                    parent: rel.clone(),
+                                },
+                            ),
+                            (
+                                "Rename folder…",
+                                FolderAsk::RenameFolder { rel: rel.clone() },
+                            ),
+                            ("Delete folder", FolderAsk::DeleteFolder { rel }),
+                        ];
                     }
-                    fav_menu(&resp, here.clone(), &mut fav_scope);
+                    fav_menu(&resp, here.clone(), &mut fav_scope, asks, &mut ask);
                     if chev {
                         toggle = Some(fnode.clone());
                     }
@@ -1921,6 +1984,9 @@ fn tree(ui: &mut egui::Ui, b: &mut Browse) {
     if let Some(i) = fav_remove {
         b.prefs.favorites.remove(i);
         b.prefs_changed();
+    }
+    if let Some(a) = ask {
+        b.folder_dialog = Some(FolderDialog::new(a));
     }
     if let Some(s) = pick {
         b.set_scope(s);
@@ -3847,6 +3913,104 @@ mod tests {
     }
 
     /// P01 step 3: `+ New client` previews the template folders, then creates them.
+    /// PA-29 (owner 2026-11-05): right-click a client or folder in the tree to add, rename
+    /// or delete a folder; Rename… in the client panel renames the client and its folder.
+    #[test]
+    fn folders_and_client_name_edited_from_the_tree() {
+        let mut h = harness(0, 0);
+        let root = h.state().root.clone();
+        vf_fs::cabinet::create(
+            &root,
+            &vf_fs::cabinet::CabinetFile {
+                cabinet_id: vf_core::new_id(),
+                firm_id: vf_core::new_id(),
+                schema_version: vf_core::db::SCHEMA_VERSION,
+                layout_version: 1,
+                created: vf_core::now_rfc3339(),
+                name: None,
+            },
+        )
+        .unwrap();
+        h.state_mut().b.set_root(&root);
+        click(&mut h, "+ New client");
+        type_into(&mut h, "Client ID", "1042");
+        type_into(&mut h, "Client name", "Anderson Farms LLC");
+        h.run();
+        click(&mut h, "Create client (one transaction)");
+        let cf = root.join("Anderson Farms LLC (1042)");
+        assert!(cf.is_dir());
+
+        // New folder in the client folder.
+        h.get_by_role_and_label(Role::Button, "Anderson Farms LLC  1042")
+            .click_secondary();
+        h.run();
+        click(&mut h, "New folder…");
+        type_into(&mut h, "Folder name", "Bank");
+        click(&mut h, "Create folder");
+        assert!(cf.join("Bank").is_dir(), "{:?}", h.state().b.notice);
+        assert!(h.state().b.folder_dialog.is_none());
+
+        // Rename it (the name typed is added to the one shown).
+        h.get_by_role_and_label(Role::Button, "Bank")
+            .click_secondary();
+        h.run();
+        click(&mut h, "Rename folder…");
+        type_into(&mut h, "Folder name", " Records");
+        click(&mut h, "Rename");
+        assert!(cf.join("Bank Records").is_dir());
+        assert!(!cf.join("Bank").exists());
+
+        // Delete it: empty, so it goes.
+        h.get_by_role_and_label(Role::Button, "Bank Records")
+            .click_secondary();
+        h.run();
+        click(&mut h, "Delete folder");
+        assert!(
+            h.query_by_label_contains("Delete the empty folder")
+                .is_some()
+        );
+        click(&mut h, "Delete folder");
+        assert!(!cf.join("Bank Records").exists());
+
+        // A folder with a file is not deleted; the dialog says why.
+        std::fs::write(cf.join("Correspondence/note.txt"), b"invented").unwrap();
+        h.get_by_role_and_label(Role::Button, "Correspondence")
+            .click_secondary();
+        h.run();
+        click(&mut h, "Delete folder");
+        click(&mut h, "Delete folder");
+        assert!(cf.join("Correspondence/note.txt").is_file());
+        assert!(
+            h.query_by_label_contains("still holds 1 file").is_some(),
+            "the reason is shown"
+        );
+        click(&mut h, "Cancel");
+
+        // Rename the client from its panel: the folder follows.
+        h.get_by_role_and_label(Role::Button, "Anderson Farms LLC  1042")
+            .click();
+        h.run();
+        click(&mut h, "Rename client…");
+        type_into(&mut h, "Client name", " II");
+        h.run();
+        assert!(
+            h.query_by_label_contains("Anderson Farms LLC II (1042)")
+                .is_some(),
+            "the new folder name is previewed"
+        );
+        click(&mut h, "Rename");
+        let renamed = root.join("Anderson Farms LLC II (1042)");
+        assert!(renamed.join("Correspondence/note.txt").is_file());
+        assert!(!cf.exists());
+        let b = &h.state().b;
+        assert_eq!(b.snap.clients[0].name, "Anderson Farms LLC II");
+        assert_eq!(
+            b.snap.clients[0].folder_rel.as_deref(),
+            Some("Anderson Farms LLC II (1042)")
+        );
+        assert_eq!(b.scope, Scope::Client(0), "the client is still shown");
+    }
+
     #[test]
     fn new_client_dialog_previews_and_creates() {
         let mut h = harness(0, 0);

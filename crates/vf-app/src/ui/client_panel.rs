@@ -49,7 +49,21 @@ fn synced(b: &mut Browse, env: &mut Env, action: &str) {
 
 pub fn show(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env, ci: usize) {
     let c = b.snap.clients[ci].clone();
-    ui.label(RichText::new(&c.name).strong().size(14.0));
+    ui.horizontal_wrapped(|ui| {
+        ui.label(RichText::new(&c.name).strong().size(14.0));
+        if ui
+            .small_button("Rename client…")
+            .on_hover_text("Change the client's name; its folder is renamed to match")
+            .clicked()
+        {
+            b.folder_dialog = Some(crate::ui::folder_dialogs::FolderDialog::new(
+                crate::ui::folder_dialogs::FolderAsk::RenameClient {
+                    client_id: c.id.clone(),
+                    name: c.name.clone(),
+                },
+            ));
+        }
+    });
     ui.label(
         RichText::new(format!("ID {}", c.ext_id))
             .monospace()

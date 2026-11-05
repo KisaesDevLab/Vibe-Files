@@ -246,6 +246,8 @@ pub fn recover(conn: &vf_core::db::Connection, root: &Path) -> Result<Recovered,
                         !filer_intake::sentinel::sentinel_path(folder).exists()
                     }
                     FileOp::Mkdir { .. } => false,
+                    // The undo put the folder back: take it away again.
+                    FileOp::Rmdir { path } => path.is_dir(),
                 };
                 if again {
                     match fs.apply(&j.op) {
@@ -285,6 +287,15 @@ pub fn recover(conn: &vf_core::db::Connection, root: &Path) -> Result<Recovered,
                     }
                 }
                 FileOp::Mkdir { path } => Ok(!j.existed && std::fs::remove_dir(path).is_ok()),
+                FileOp::Rmdir { path } => {
+                    if j.existed && !path.exists() {
+                        std::fs::create_dir(path)
+                            .map(|()| true)
+                            .map_err(|err| format!("cannot create {}: {err}", path.display()))
+                    } else {
+                        Ok(false)
+                    }
+                }
                 FileOp::AppendLines {
                     path,
                     lines,
@@ -421,6 +432,19 @@ impl FileOps for FilerFileOps {
                 method: "mkdir".into(),
                 created_dirs: self.make_dirs(path)?,
             }),
+            FileOp::Rmdir { path } => {
+                self.check_inside(path, path)?;
+                // remove_dir refuses a folder that holds anything (never remove_dir_all).
+                std::fs::remove_dir(path)
+                    .map_err(|e| format!("cannot remove the folder {}: {e}", path.display()))?;
+                Ok(AppliedOp {
+                    op: op.clone(),
+                    bytes: 0,
+                    sha256: None,
+                    method: "rmdir".into(),
+                    created_dirs: vec![],
+                })
+            }
             FileOp::AppendLines { path, lines, .. } => {
                 let created = self.make_parents(path)?;
                 if let Err(e) = append(path, lines) {
@@ -498,6 +522,13 @@ impl FileOps for FilerFileOps {
                 )),
             },
             FileOp::Mkdir { .. } => Ok(()),
+            FileOp::Rmdir { path } => {
+                if path.exists() {
+                    Err(format!("{} exists again", path.display()))
+                } else {
+                    Ok(())
+                }
+            }
             FileOp::AppendLines { path, .. } => {
                 if path.is_file() {
                     Ok(())
@@ -533,6 +564,8 @@ impl FileOps for FilerFileOps {
             FileOp::Copy { dst, .. } => std::fs::remove_file(dst)
                 .map_err(|e| format!("cannot remove {}: {e}", dst.display()))?,
             FileOp::Mkdir { .. } => {}
+            FileOp::Rmdir { path } => std::fs::create_dir(path)
+                .map_err(|e| format!("cannot create {}: {e}", path.display()))?,
             FileOp::AppendLines {
                 path, undo_lines, ..
             } => append(path, undo_lines)?,

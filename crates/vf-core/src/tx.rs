@@ -36,6 +36,8 @@ pub enum FileOp {
     Copy { src: PathBuf, dst: PathBuf },
     /// Create one folder (and missing parents).
     Mkdir { path: PathBuf },
+    /// Remove one empty folder (never one holding anything). Undo creates it again.
+    Rmdir { path: PathBuf },
     /// Append `lines` to an append-only JSONL file (created with its folders if missing).
     /// Undo appends `undo_lines` instead of cutting the file, so the file only ever grows.
     AppendLines {
@@ -81,7 +83,9 @@ impl FileOp {
     pub fn target(&self) -> PathBuf {
         match self {
             FileOp::Move { dst, .. } | FileOp::Copy { dst, .. } => dst.clone(),
-            FileOp::Mkdir { path } | FileOp::AppendLines { path, .. } => path.clone(),
+            FileOp::Mkdir { path } | FileOp::Rmdir { path } | FileOp::AppendLines { path, .. } => {
+                path.clone()
+            }
             FileOp::WriteSentinel { folder, .. } => folder.join("_Vibe").join("client.json"),
         }
     }

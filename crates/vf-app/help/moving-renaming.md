@@ -29,6 +29,16 @@ After the move, **Undo last** (or Ctrl and Z) puts the files back. See [Undoing 
 
 Files stay in their folders. A name that is taken gets ` (2)`.
 
+## Folders in a client folder
+
+Right-click a client or a folder in the tree on the left:
+
+- **New folder…** makes a folder inside it.
+- **Rename folder…** gives a folder a new name; the documents in it move with it.
+- **Delete folder** removes a folder with no files in it (empty folders inside it go too). A folder that still holds files says how many; move them or put them in the trash first.
+
+Each of these can be undone with **Undo**.
+
 ## Combining PDFs
 
 Select two or more PDFs and click **Combine**. You get one new PDF of them, in the order shown in the grid, with a bookmark for each document. It is named after the first one, such as `Combined 2025 W-2.pdf`, saved in that document's folder and tagged `combined`. The originals are left as they are.

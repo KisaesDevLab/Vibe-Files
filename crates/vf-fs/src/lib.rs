@@ -10,6 +10,7 @@ pub mod docmeta;
 pub mod doctypes;
 pub mod dupes;
 pub mod fileops;
+pub mod folders;
 pub mod hints;
 pub mod holds;
 pub mod import;

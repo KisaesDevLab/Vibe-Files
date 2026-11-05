@@ -10,6 +10,7 @@ pub mod devices;
 pub mod disposition;
 pub mod doc_render;
 pub mod filed_details;
+pub mod folder_dialogs;
 pub mod help;
 pub mod import_csv;
 pub mod import_tree;
