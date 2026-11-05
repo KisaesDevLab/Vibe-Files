@@ -644,6 +644,37 @@ pub fn rebuild(
     root: &Path,
     device_id: &str,
 ) -> Result<RebuildReport, RebuildError> {
+    rebuild_scoped(conn, root, device_id, None)
+}
+
+/// [`rebuild`] of only these top-level folders (cabinet-relative): their files are cataloged,
+/// documents elsewhere are left as they are. The folder import catalogs its batches this way
+/// instead of reading the whole cabinet each time (PA-34).
+pub fn rebuild_folders(
+    conn: &mut Connection,
+    root: &Path,
+    device_id: &str,
+    folders: &[String],
+) -> Result<RebuildReport, RebuildError> {
+    rebuild_scoped(conn, root, device_id, Some(folders))
+}
+
+fn rebuild_scoped(
+    conn: &mut Connection,
+    root: &Path,
+    device_id: &str,
+    only: Option<&[String]>,
+) -> Result<RebuildReport, RebuildError> {
+    let in_scope = |rel: &str| {
+        only.is_none_or(|o| {
+            o.iter().any(|f| {
+                rel == f
+                    || rel
+                        .strip_prefix(f.as_str())
+                        .is_some_and(|r| r.starts_with('/'))
+            })
+        })
+    };
     let cab = cabinet::read(root).map_err(RebuildError::Cabinet)?;
     let now = vf_core::now_rfc3339();
     let mut rep = RebuildReport::default();
@@ -668,9 +699,11 @@ pub fn rebuild(
     for c in [&PROGRESS.folders, &PROGRESS.found, &PROGRESS.read] {
         c.store(0, Ordering::Relaxed);
     }
-    let (bound, folders) = scan_folders(root, &mut rep)?;
+    let (bound, mut folders) = scan_folders(root, &mut rep)?;
+    folders.retain(|(f, _)| in_scope(&rel(root, f)));
     // What the catalog knows: a file of the same size and time is not read again (PA-34).
-    let known = known_files(conn)?;
+    let mut known = known_files(conn)?;
+    known.retain(|p, _| in_scope(p));
     // Every file first (the count shows while they are read), then read on several threads:
     // on a share most of the time is waiting for the network.
     let mut todo: Vec<(PathBuf, Option<String>)> = Vec::new();
@@ -765,7 +798,10 @@ pub fn rebuild(
         )?;
         for r in st.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))? {
             let (p, id, h, c): (String, String, String, Option<String>) = r?;
-            live.insert(p, (id, h, c));
+            // Scoped: documents of other folders are neither missing nor moved here.
+            if in_scope(&p) {
+                live.insert(p, (id, h, c));
+            }
         }
     }
     let on_disk: HashSet<&str> = found.iter().map(|f| f.rel.as_str()).collect();
@@ -1093,6 +1129,39 @@ mod tests {
 
     fn open(c: &Cab) -> Connection {
         vf_core::db::open(&c.data.join("catalog.db"), Storage::Local).unwrap()
+    }
+
+    /// PA-34: a rebuild of some folders catalogs only them; other folders' documents stay as
+    /// they are even when their files are gone (they are not this rebuild's to tombstone).
+    #[test]
+    fn rebuild_of_some_folders_leaves_the_others() {
+        let c = cab();
+        let mut conn = open(&c);
+        rebuild(&mut conn, &c.root, "dev").unwrap();
+        let live = |conn: &Connection, like: &str| -> i64 {
+            conn.query_row(
+                "SELECT count(*) FROM document WHERE deleted_at IS NULL AND rel_path LIKE ?1",
+                [like],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        std::fs::remove_file(c.root.join("Acme LLC (1002)/Payroll/2025/941 Q1.pdf")).unwrap();
+        put(
+            &c.root.join("Smith, John (1001)/Income Tax/2025/1099.pdf"),
+            "1099",
+        );
+        let rep =
+            rebuild_folders(&mut conn, &c.root, "dev", &["Smith, John (1001)".into()]).unwrap();
+        assert_eq!(rep.docs_new, 1, "{rep}");
+        assert_eq!(rep.docs_tombstoned, 0, "{rep}");
+        assert_eq!(live(&conn, "Acme LLC (1002)/%"), 1);
+        assert_eq!(live(&conn, "Smith, John (1001)/%"), 4);
+        // A name that only starts like the folder is not inside it.
+        let rep = rebuild_folders(&mut conn, &c.root, "dev", &["Acme".into()]).unwrap();
+        assert_eq!(rep.docs_tombstoned, 0, "{rep}");
+        let rep = rebuild_folders(&mut conn, &c.root, "dev", &["Acme LLC (1002)".into()]).unwrap();
+        assert_eq!(rep.docs_tombstoned, 1, "{rep}");
     }
 
     /// PA-34: a file of the same size and time is not read again; a new time is.

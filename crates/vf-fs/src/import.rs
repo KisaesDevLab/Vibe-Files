@@ -980,8 +980,16 @@ pub struct Options {
 /// What [`apply`] did; keep it to [`undo`] the import.
 #[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Applied {
+    /// Before PA-34: one of each. Kept for an undo record written by an older build.
+    #[serde(default)]
     pub bind_tx: Option<String>,
+    #[serde(default)]
     pub meta_tx: Option<String>,
+    /// One per batch (PA-34).
+    #[serde(default)]
+    pub bind_txs: Vec<String>,
+    #[serde(default)]
+    pub meta_txs: Vec<String>,
     pub bound: usize,
     pub renamed: usize,
     pub new_clients: usize,
@@ -1003,6 +1011,9 @@ pub fn load_last(root: &Path) -> Option<Applied> {
     serde_json::from_slice(&std::fs::read(last_path(root)).ok()?).ok()
 }
 
+/// Folders per batch of an import (PA-34).
+pub const BATCH: usize = 500;
+
 /// Applies `plan`: binds the included folders, catalogs, sets doc types and years, queues OCR.
 pub fn apply(
     conn: &mut Connection,
@@ -1010,6 +1021,23 @@ pub fn apply(
     plan: &Plan,
     opts: &Options,
     device_id: &str,
+) -> Result<Applied, String> {
+    let (done, total) = (
+        std::sync::atomic::AtomicUsize::new(0),
+        std::sync::atomic::AtomicUsize::new(0),
+    );
+    apply_with(conn, root, plan, opts, device_id, &done, &total)
+}
+
+/// [`apply`], counting the folders done into `progress` (of `progress_total`).
+pub fn apply_with(
+    conn: &mut Connection,
+    root: &Path,
+    plan: &Plan,
+    opts: &Options,
+    device_id: &str,
+    progress: &std::sync::atomic::AtomicUsize,
+    progress_total: &std::sync::atomic::AtomicUsize,
 ) -> Result<Applied, String> {
     let cab = crate::cabinet::read(root)?;
     let mut out = Applied::default();
@@ -1079,12 +1107,32 @@ pub fn apply(
         clients::save_list(root, &list)?;
     }
 
-    // Where each folder ends up.
-    let mut new_rel: HashMap<usize, String> = HashMap::new();
+    // In batches of folders (PA-34: ~7,600 client folders, ~900K files): each batch binds its
+    // folders, catalogs only their files and sets their doc types and years, each step its own
+    // Transaction, and the record is saved after it. A stop leaves whole batches done: scanned
+    // again, those folders show bound and Import goes on with the rest.
+    let chosen_at: HashMap<usize, (&FolderRow, &ClientPick)> =
+        chosen.iter().map(|(i, r, c)| (*i, (*r, *c))).collect();
+    let mut files_of: HashMap<usize, Vec<&FileRow>> = HashMap::new();
+    for f in &plan.files {
+        if let Some(i) = f.folder {
+            files_of.entry(i).or_default().push(f);
+        }
+    }
+    let work: Vec<usize> = (0..plan.folders.len())
+        .filter(|i| chosen_at.contains_key(i) || plan.folders[*i].bound)
+        .collect();
+    progress_total.store(work.len(), std::sync::atomic::Ordering::Relaxed);
     let mut taken: HashSet<String> = plan.folders.iter().map(|r| r.rel.to_lowercase()).collect();
-    if !chosen.is_empty() {
+    for batch in work.chunks(BATCH) {
+        // Bind the batch's chosen folders (and rename them, when asked).
+        let mut new_rel: HashMap<usize, String> = HashMap::new();
         let mut tx = Transaction::new(LABEL);
-        for (i, r, c) in &chosen {
+        let (mut bound, mut renamed) = (0, 0);
+        for &i in batch {
+            let Some((r, c)) = chosen_at.get(&i) else {
+                continue;
+            };
             let mut dest = r.rel.clone();
             if opts.rename
                 && let Some(t) = &r.template_name
@@ -1097,7 +1145,7 @@ pub fn apply(
                 });
                 taken.insert(t.to_lowercase());
                 dest = t.clone();
-                out.renamed += 1;
+                renamed += 1;
             }
             tx = tx.file(FileOp::WriteSentinel {
                 root: root.to_owned(),
@@ -1107,92 +1155,109 @@ pub fn apply(
                 name: c.name.clone(),
                 firm_id: cab.firm_id.clone(),
             });
-            new_rel.insert(*i, dest);
-            out.bound += 1;
+            new_rel.insert(i, dest);
+            bound += 1;
         }
-        tx = tx.audit(AuditEntry::new(
-            LABEL,
-            None,
-            json!({ "folders": out.bound, "renamed": out.renamed, "new_clients": out.new_clients }),
-        ));
-        out.bind_tx = Some(crate::fileops::commit(conn, root, tx, device_id)?.tx_id);
-    }
+        if bound > 0 {
+            tx = tx.audit(AuditEntry::new(
+                LABEL,
+                None,
+                json!({ "folders": bound, "renamed": renamed, "new_clients": out.new_clients }),
+            ));
+            out.bind_txs
+                .push(crate::fileops::commit(conn, root, tx, device_id)?.tx_id);
+            out.bound += bound;
+            out.renamed += renamed;
+        }
 
-    // Catalog rows for every file (the rebuild attaches them to their new clients).
-    rebuild::rebuild(conn, root, device_id).map_err(|e| e.to_string())?;
+        // Catalog rows for the batch's files, attached to their new clients (old names too: a
+        // renamed folder's rows are found again as moved).
+        let mut scope: Vec<String> = Vec::new();
+        for &i in batch {
+            scope.push(plan.folders[i].rel.clone());
+            if let Some(d) = new_rel.get(&i) {
+                scope.push(d.clone());
+            }
+        }
+        rebuild::rebuild_folders(conn, root, device_id, &scope).map_err(|e| e.to_string())?;
 
-    // Each file's doc type and year.
-    let mut items: Vec<(String, MetaEdit)> = vec![];
-    for f in &plan.files {
-        let Some(i) = f.folder else { continue };
-        let r = &plan.folders[i];
-        if !(r.bound || new_rel.contains_key(&i)) {
-            continue;
-        }
-        let dest = new_rel.get(&i).unwrap_or(&r.rel);
-        let rel_now = match f.rel.split_once('/') {
-            Some((_, rest)) => format!("{dest}/{rest}"),
-            None => continue,
-        };
-        let id: Option<String> = conn
-            .query_row(
-                "SELECT id FROM document WHERE rel_path = ?1 AND deleted_at IS NULL",
-                [&rel_now],
-                |r| r.get(0),
-            )
-            .ok();
-        let Some(id) = id else { continue };
-        out.documents += 1;
-        let mut e = MetaEdit::default();
-        if let Some((t, _)) = &f.doc_type
-            && f.type_confidence >= AUTO
-        {
-            e.doc_type = Some(Some(t.clone()));
-        }
-        // No doc type found: the defaults chosen for the scan, if any (a blanket choice, so
-        // flagged to check like a guess).
-        let mut defaulted = false;
-        if e.doc_type.is_none() {
-            if let Some(t) = &opts.default_doc_type {
-                e.doc_type = Some(Some(t.clone()));
-                defaulted = true;
+        // Each file's doc type and year.
+        let mut items: Vec<(String, MetaEdit)> = vec![];
+        for &i in batch {
+            let r = &plan.folders[i];
+            let dest = new_rel.get(&i).unwrap_or(&r.rel);
+            for f in files_of.get(&i).map(Vec::as_slice).unwrap_or_default() {
+                let rel_now = match f.rel.split_once('/') {
+                    Some((_, rest)) => format!("{dest}/{rest}"),
+                    None => continue,
+                };
+                let id: Option<String> = conn
+                    .query_row(
+                        "SELECT id FROM document WHERE rel_path = ?1 AND deleted_at IS NULL",
+                        [&rel_now],
+                        |r| r.get(0),
+                    )
+                    .ok();
+                let Some(id) = id else { continue };
+                out.documents += 1;
+                let mut e = MetaEdit::default();
+                if let Some((t, _)) = &f.doc_type
+                    && f.type_confidence >= AUTO
+                {
+                    e.doc_type = Some(Some(t.clone()));
+                }
+                // No doc type found: the defaults chosen for the scan, if any (a blanket
+                // choice, so flagged to check like a guess).
+                let mut defaulted = false;
+                if e.doc_type.is_none() {
+                    if let Some(t) = &opts.default_doc_type {
+                        e.doc_type = Some(Some(t.clone()));
+                        defaulted = true;
+                    }
+                    if let Some(s) = &opts.default_source {
+                        e.source = Some(Some(s.clone()));
+                    }
+                }
+                match f.year_from {
+                    "permanent" => e.tax_year = Some(None),
+                    "" => {}
+                    _ => e.tax_year = Some(f.tax_year),
+                }
+                // A year from the file name ("W2 1999 Oak St") or a doc type from a folder
+                // name (a "Bank" folder) is a guess: kept out of disposition until someone
+                // sets it (QA P12).
+                let guessed = (e.tax_year.is_some() && f.year_from == "file name")
+                    || (e.doc_type.is_some() && f.type_how.starts_with("folder"))
+                    || defaulted;
+                if guessed {
+                    let mut tags = crate::docmeta::load(conn, &id)?.tags;
+                    if !tags.iter().any(|t| t == crate::docmeta::GUESSED_TAG) {
+                        tags.push(crate::docmeta::GUESSED_TAG.into());
+                    }
+                    e.tags = Some(tags);
+                    out.guessed += 1;
+                }
+                if plan.gaps(f).is_empty() {
+                    out.mapped += 1;
+                }
+                if !e.is_empty() {
+                    items.push((id, e));
+                }
             }
-            if let Some(s) = &opts.default_source {
-                e.source = Some(Some(s.clone()));
+        }
+        if !items.is_empty() {
+            match crate::docmeta::edit_each(conn, root, &items, META_LABEL, device_id) {
+                Ok((tx, _)) => out.meta_txs.push(tx),
+                // Every file already had these values (an import run twice).
+                Err(e) if e.contains("already have") => {}
+                Err(e) => return Err(e),
             }
         }
-        match f.year_from {
-            "permanent" => e.tax_year = Some(None),
-            "" => {}
-            _ => e.tax_year = Some(f.tax_year),
-        }
-        // A year from the file name ("W2 1999 Oak St") or a doc type from a folder name (a
-        // "Bank" folder) is a guess: kept out of disposition until someone sets it (QA P12).
-        let guessed = (e.tax_year.is_some() && f.year_from == "file name")
-            || (e.doc_type.is_some() && f.type_how.starts_with("folder"))
-            || defaulted;
-        if guessed {
-            let mut tags = crate::docmeta::load(conn, &id)?.tags;
-            if !tags.iter().any(|t| t == crate::docmeta::GUESSED_TAG) {
-                tags.push(crate::docmeta::GUESSED_TAG.into());
-            }
-            e.tags = Some(tags);
-            out.guessed += 1;
-        }
-        if plan.gaps(f).is_empty() {
-            out.mapped += 1;
-        }
-        if !e.is_empty() {
-            items.push((id, e));
-        }
-    }
-    if !items.is_empty() {
-        match crate::docmeta::edit_each(conn, root, &items, META_LABEL, device_id) {
-            Ok((tx, _)) => out.meta_tx = Some(tx),
-            // Every file already had these values (an import run twice).
-            Err(e) if e.contains("already have") => {}
-            Err(e) => return Err(e),
-        }
+        progress.fetch_add(batch.len(), std::sync::atomic::Ordering::Relaxed);
+        let _ = crate::cabinet::write_replace(
+            &last_path(root),
+            &serde_json::to_vec_pretty(&out).expect("serializes"),
+        );
     }
     let _ = crate::cabinet::write_replace(
         &last_path(root),
@@ -1220,20 +1285,33 @@ pub fn undo(
         .unwrap_or(true)
     };
     let mut left = applied.clone();
-    if let Some(t) = &applied.meta_tx {
+    let metas: Vec<String> = applied
+        .meta_tx
+        .iter()
+        .chain(&applied.meta_txs)
+        .cloned()
+        .collect();
+    for t in metas.iter().rev() {
         if !undone(conn, t) {
             crate::fileops::undo(conn, root, t, device_id)?;
         }
         left.meta_tx = None;
+        left.meta_txs.retain(|x| x != t);
         let _ = crate::cabinet::write_replace(
             &last_path(root),
             &serde_json::to_vec_pretty(&left).expect("serializes"),
         );
     }
-    if let Some(t) = &applied.bind_tx
-        && !undone(conn, t)
-    {
-        crate::fileops::undo(conn, root, t, device_id)?;
+    let binds: Vec<String> = applied
+        .bind_tx
+        .iter()
+        .chain(&applied.bind_txs)
+        .cloned()
+        .collect();
+    for t in binds.iter().rev() {
+        if !undone(conn, t) {
+            crate::fileops::undo(conn, root, t, device_id)?;
+        }
     }
     rebuild::rebuild(conn, root, device_id).map_err(|e| e.to_string())?;
     let _ = std::fs::remove_file(last_path(root));

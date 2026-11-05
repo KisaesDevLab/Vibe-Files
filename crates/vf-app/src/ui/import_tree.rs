@@ -38,6 +38,11 @@ pub struct ImportPage {
     /// The row whose Bind box was clicked last, for Shift-click ranges.
     last_tick: Option<usize>,
     job: Option<Receiver<Result<Applied, String>>>,
+    /// Folders done of the running import, and how many it has (PA-34).
+    progress: std::sync::Arc<(
+        std::sync::atomic::AtomicUsize,
+        std::sync::atomic::AtomicUsize,
+    )>,
     /// The last import on this cabinet (from `_Vibe/import_last.json`).
     pub last: Option<Applied>,
     loaded_last: bool,
@@ -83,6 +88,8 @@ impl ImportPage {
             default_source: self.default_source.clone(),
         };
         let (tx, rx) = std::sync::mpsc::channel();
+        self.progress = Default::default();
+        let progress = self.progress.clone();
         let (catalog, root, device, ctx) = (
             catalog.to_path_buf(),
             root.to_path_buf(),
@@ -95,7 +102,15 @@ impl ImportPage {
                 let r = vf_core::db::open(&catalog, Storage::Local)
                     .map_err(|e| e.to_string())
                     .and_then(|mut conn| {
-                        let mut a = import::apply(&mut conn, &root, &plan, &opts, &device)?;
+                        let mut a = import::apply_with(
+                            &mut conn,
+                            &root,
+                            &plan,
+                            &opts,
+                            &device,
+                            &progress.0,
+                            &progress.1,
+                        )?;
                         a.ocr_queued =
                             vf_ocr::queue::enqueue_missing(&conn, vf_ocr::queue::BACKLOG)
                                 .unwrap_or(0);
@@ -214,7 +229,17 @@ pub fn show(ui: &mut egui::Ui, p: &mut ImportPage, env: &mut Env, catalog: &Path
         }
         if p.running() {
             ui.spinner();
-            ui.label("Importing: binding folders, cataloging and hashing files…");
+            use std::sync::atomic::Ordering::Relaxed;
+            let (done, total) = (p.progress.0.load(Relaxed), p.progress.1.load(Relaxed));
+            ui.label(if total > 0 {
+                format!(
+                    "Importing: {done} of {total} folders done (in batches of {}; each batch is saved as it finishes)…",
+                    import::BATCH
+                )
+            } else {
+                "Importing: binding folders, cataloging and hashing files…".into()
+            });
+            ui.ctx().request_repaint_after(std::time::Duration::from_millis(500));
         }
     });
     if let Some(n) = &p.notice {
