@@ -108,6 +108,7 @@ impl ImportPage {
                 let r = vf_core::db::open(&catalog, Storage::Local)
                     .map_err(|e| e.to_string())
                     .and_then(|mut conn| {
+                        let started = vf_core::now_rfc3339();
                         // Not read: the cabinet's text recognition turns to new filings only
                         // before the import, so its files are not queued as they come in.
                         if !read
@@ -130,7 +131,8 @@ impl ImportPage {
                             &progress.1,
                         )?;
                         a.ocr_queued = if read {
-                            vf_ocr::queue::enqueue_every(&conn, vf_ocr::queue::BACKLOG).unwrap_or(0)
+                            vf_ocr::queue::enqueue_every(&conn, vf_ocr::queue::BACKLOG, &started)
+                                .unwrap_or(0)
                         } else {
                             0
                         };

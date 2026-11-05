@@ -634,8 +634,28 @@ impl SyncTab {
     }
 }
 
+/// Held while a push or pull runs on this catalog: on a server whose sessions share one
+/// catalog, one session syncs it at a time (PA-34 review).
+fn sync_lock(catalog: &Path) -> Result<std::fs::File, String> {
+    use std::os::windows::fs::OpenOptionsExt;
+    std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .share_mode(0)
+        .open(data_dir(catalog).join("sync.lock"))
+        .map_err(|_| {
+            "Another session on this computer is syncing this cabinet now; its changes and yours go up together next time.".to_string()
+        })
+}
+
 fn run(catalog: &Path, root: &Path, s: &Sync, op: Op) -> Result<Done, String> {
     let e = |e: vf_sync::SyncError| e.to_string();
+    let _one_at_a_time = match op {
+        Op::Push(_) | Op::Pull => Some(sync_lock(catalog)?),
+        _ => None,
+    };
     match op {
         Op::Verify => vf_sync::restore::verify(s, VERIFY_SAMPLE)
             .map(|(n, b)| Done::Verify(n, b))

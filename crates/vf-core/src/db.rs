@@ -28,6 +28,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/013_file_mtime.sql"),
     include_str!("../migrations/014_fts_doc_index.sql"),
     include_str!("../migrations/015_scale_indexes.sql"),
+    include_str!("../migrations/016_journal_owner.sql"),
 ];
 
 /// Schema version this build writes.
@@ -118,17 +119,21 @@ pub fn health_check_due(conn: &Connection) -> bool {
 }
 
 /// SQLite's `quick_check` of the catalog (PA-34): the problems it finds, none when the file is
-/// sound. Records the month it ran.
+/// sound. A sound check records the month; damage is reported again at every start until
+/// the catalog is rebuilt.
 pub fn health_check(conn: &Connection) -> Result<Vec<String>> {
     let mut st = conn.prepare("PRAGMA quick_check(20)")?;
     let rows: Vec<String> = st
         .query_map([], |r| r.get(0))?
         .collect::<std::result::Result<_, _>>()?;
+    if rows != ["ok"] {
+        return Ok(rows);
+    }
     conn.execute(
         "INSERT INTO local_state (k, v) VALUES (?1, ?2) ON CONFLICT(k) DO UPDATE SET v = excluded.v",
         [HEALTH_KEY, &crate::now_rfc3339()[..7]],
     )?;
-    Ok(if rows == ["ok"] { vec![] } else { rows })
+    Ok(vec![])
 }
 
 pub fn user_version(conn: &Connection) -> Result<u32> {

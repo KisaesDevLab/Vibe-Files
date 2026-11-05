@@ -759,7 +759,7 @@ impl eframe::App for VibeFilesApp {
                     &mut browse::Env {
                         conn: &mut o.opened.conn,
                         root: &o.opened.root,
-                        device_id: &self.config.device_id,
+                        device_id: &o.opened.sync_device,
                     },
                     crate::ui::sync::View {
                         catalog: &o.opened.catalog,
@@ -1048,7 +1048,7 @@ impl eframe::App for VibeFilesApp {
                 &browse::Env {
                     conn: &mut o.opened.conn,
                     root: &o.opened.root,
-                    device_id: &self.config.device_id,
+                    device_id: &o.opened.sync_device,
                 },
                 &o.opened.catalog,
                 &self.config.sync,

@@ -88,10 +88,14 @@ pub const SLICES: u64 = 13;
 
 /// Whether `rel` is read whole this week (its slice is this week's).
 fn in_slice(rel: &str, week: u64) -> bool {
-    use std::hash::{Hash, Hasher};
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    rel.to_lowercase().hash(&mut h);
-    h.finish() % SLICES == week % SLICES
+    // FNV-1a: the same slices whatever the Rust release (DefaultHasher may change).
+    let h = rel
+        .to_lowercase()
+        .bytes()
+        .fold(0xcbf2_9ce4_8422_2325_u64, |h, b| {
+            (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3)
+        });
+    h % SLICES == week % SLICES
 }
 
 /// This week's number (weeks since 1970).
@@ -128,11 +132,15 @@ pub fn scan_week(conn: &Connection, root: &Path, week: u64) -> Result<Drift, Str
     let mut d = Drift::default();
     let mut seen: Vec<String> = Vec::new();
     let mut todo: Vec<Listed> = Vec::new();
+    let mut unread_dirs: Vec<String> = Vec::new();
     for (folder, client_id) in &folders {
         let mut paths = Vec::new();
         let mut bad = Vec::new();
         rebuild::files_under_lenient(folder, &mut paths, &mut bad);
-        d.unreadable.extend(bad);
+        for (dir, why) in bad {
+            unread_dirs.push(rebuild::rel(root, &dir));
+            d.unreadable.push(why);
+        }
         for p in paths {
             let rel = rebuild::rel(root, &p);
             todo.push((p.clone(), rel, client_id.clone(), rebuild::stat(&p)));
@@ -219,7 +227,14 @@ pub fn scan_week(conn: &Connection, root: &Path, week: u64) -> Result<Drift, Str
     let seen: std::collections::HashSet<String> = seen.into_iter().collect();
     let mut missing: Vec<Missing> = live
         .into_iter()
-        .filter(|(rel, _)| !seen.contains(rel))
+        // A folder that could not be read: its documents are not missing (PA-34 review).
+        .filter(|(rel, _)| {
+            !seen.contains(rel)
+                && !unread_dirs.iter().any(|d| {
+                    rel.strip_prefix(d.as_str())
+                        .is_some_and(|r| r.starts_with('/'))
+                })
+        })
         .map(|(rel, (id, hash, _))| Missing {
             doc_id: id,
             rel_path: rel,

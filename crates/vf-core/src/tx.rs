@@ -76,6 +76,23 @@ pub struct JournalEntry {
     pub ts: String,
     pub label: String,
     pub ops: Vec<JournalOp>,
+    /// The running copy that wrote it ([`set_journal_owner`]); `None` before PA-34.
+    pub owner: Option<String>,
+}
+
+/// This process's id in `tx_journal.owner` (set when a cabinet opens).
+static JOURNAL_OWNER: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// Marks the journal rows this process writes from now on as its own.
+pub fn set_journal_owner(owner: Option<String>) {
+    if let Ok(mut o) = JOURNAL_OWNER.lock() {
+        *o = owner;
+    }
+}
+
+/// This process's journal owner id.
+pub fn journal_owner() -> Option<String> {
+    JOURNAL_OWNER.lock().ok().and_then(|o| o.clone())
 }
 
 impl FileOp {
@@ -93,18 +110,20 @@ impl FileOp {
 
 /// Transactions killed between their file changes and their catalog commit.
 pub fn journal(conn: &Connection) -> Result<Vec<JournalEntry>> {
-    let mut st = conn.prepare("SELECT tx_id, ts, label, ops FROM tx_journal ORDER BY tx_id")?;
+    let mut st =
+        conn.prepare("SELECT tx_id, ts, label, ops, owner FROM tx_journal ORDER BY tx_id")?;
     let rows = st.query_map([], |r| {
         Ok((
             r.get::<_, String>(0)?,
             r.get::<_, String>(1)?,
             r.get::<_, String>(2)?,
             r.get::<_, String>(3)?,
+            r.get::<_, Option<String>>(4)?,
         ))
     })?;
     let mut out = vec![];
     for r in rows {
-        let (tx_id, ts, label, ops) = r?;
+        let (tx_id, ts, label, ops, owner) = r?;
         let ops = serde_json::from_str(&ops)
             .map_err(|e| Error::Tx(format!("tx_journal {tx_id}: {e}")))?;
         out.push(JournalEntry {
@@ -112,6 +131,7 @@ pub fn journal(conn: &Connection) -> Result<Vec<JournalEntry>> {
             ts,
             label,
             ops,
+            owner,
         });
     }
     Ok(out)
@@ -381,12 +401,13 @@ impl Transaction {
                 })
                 .collect();
             conn.execute(
-                "INSERT INTO tx_journal (tx_id, ts, label, ops) VALUES (?1, ?2, ?3, ?4)",
+                "INSERT INTO tx_journal (tx_id, ts, label, ops, owner) VALUES (?1, ?2, ?3, ?4, ?5)",
                 rusqlite::params![
                     tx_id,
                     ts,
                     self.label,
-                    serde_json::to_string(&ops).expect("journal serializes")
+                    serde_json::to_string(&ops).expect("journal serializes"),
+                    journal_owner()
                 ],
             )?;
         }
@@ -549,12 +570,13 @@ pub fn undo(
         })
         .collect();
     conn.execute(
-        "INSERT INTO tx_journal (tx_id, ts, label, ops) VALUES (?1, ?2, ?3, ?4)",
+        "INSERT INTO tx_journal (tx_id, ts, label, ops, owner) VALUES (?1, ?2, ?3, ?4, ?5)",
         rusqlite::params![
             journal_id,
             crate::now_rfc3339(),
             format!("undo {label}"),
-            serde_json::to_string(&ops).expect("journal serializes")
+            serde_json::to_string(&ops).expect("journal serializes"),
+            journal_owner(),
         ],
     )?;
     let forget = |conn: &Connection| {

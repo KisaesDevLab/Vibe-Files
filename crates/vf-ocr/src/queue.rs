@@ -66,9 +66,9 @@ pub fn reads(conn: &Connection) -> vf_core::Result<Reads> {
     })
 }
 
-/// Sets what text recognition reads. Turning to new-only takes documents still waiting off
-/// the queue (pages already read stay searchable); turning to all queues the rest on the
-/// next look.
+/// Sets what text recognition reads. Turning to new-only takes the waiting backlog off the
+/// queue (pages already read stay searchable; new filings waiting keep their place); turning
+/// to all queues the rest on the next look.
 pub fn set_reads(conn: &Connection, r: &Reads) -> vf_core::Result<()> {
     let v = match r {
         Reads::All => "all".to_string(),
@@ -78,11 +78,10 @@ pub fn set_reads(conn: &Connection, r: &Reads) -> vf_core::Result<()> {
         "INSERT INTO local_state (k, v) VALUES (?1, ?2) ON CONFLICT(k) DO UPDATE SET v = excluded.v",
         params![READS_KEY, v],
     )?;
-    if let Reads::NewSince(t) = r {
+    if matches!(r, Reads::NewSince(_)) {
         conn.execute(
-            "DELETE FROM ocr_job WHERE state = 'queued' AND doc_id IN
-               (SELECT id FROM document WHERE filed_by = 'import' OR filed_at < ?1)",
-            [t],
+            "DELETE FROM ocr_job WHERE state = 'queued' AND priority = ?1",
+            [BACKLOG],
         )?;
     }
     Ok(())
@@ -104,10 +103,11 @@ pub fn enqueue_changed(
     enqueue(conn, priority, since, &reads(conn)?)
 }
 
-/// Queues every live PDF document without a job, whatever [`reads`] says (a folder import
-/// asked to read the text of its files).
-pub fn enqueue_every(conn: &Connection, priority: i64) -> vf_core::Result<usize> {
-    enqueue(conn, priority, None, &Reads::All)
+/// Queues the live PDF documents changed at or after `since` that have no job, whatever
+/// [`reads`] says: a folder import asked to read the text of its files (the documents it
+/// cataloged or typed, not the rest of the cabinet).
+pub fn enqueue_every(conn: &Connection, priority: i64, since: &str) -> vf_core::Result<usize> {
+    enqueue(conn, priority, Some(since), &Reads::All)
 }
 
 fn enqueue(
@@ -715,8 +715,9 @@ fn worker(
     }
     let mut last_scan = Instant::now();
     let mut stamp = documents_stamp(&conn).ok();
-    // Documents changed from this time on are looked at (a margin for a slow clock).
-    let mut since = stamp.as_ref().and_then(|s| s.1.clone());
+    // Documents changed from this time on are looked at: two minutes back from each look, so
+    // another session's change committed a little after its own timestamp is still seen.
+    let mut since = Some(vf_core::rfc3339_secs_ago(120));
     let mut last_count: Option<Instant> = None;
     // A whole look now and then: rows a sync brought in carry their own (older) times.
     let mut last_full = Instant::now();
@@ -729,7 +730,7 @@ fn worker(
             let now = documents_stamp(&conn).ok();
             let full = last_full.elapsed() >= Duration::from_secs(600);
             if now != stamp || full {
-                let next = now.as_ref().and_then(|s| s.1.clone());
+                let next = Some(vf_core::rfc3339_secs_ago(120));
                 let look = if full { None } else { since.as_deref() };
                 if enqueue_changed(&conn, INTAKE, look).is_ok() {
                     since = next;

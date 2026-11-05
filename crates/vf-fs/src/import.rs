@@ -990,6 +990,10 @@ pub struct Applied {
     pub bind_txs: Vec<String>,
     #[serde(default)]
     pub meta_txs: Vec<String>,
+    /// Every batch done. An import stopped part way is continued by the next one, which adds
+    /// its batches to this record, so Undo still undoes all of them (PA-34 review).
+    #[serde(default)]
+    pub finished: bool,
     pub bound: usize,
     pub renamed: usize,
     pub new_clients: usize,
@@ -1040,7 +1044,31 @@ pub fn apply_with(
     progress_total: &std::sync::atomic::AtomicUsize,
 ) -> Result<Applied, String> {
     let cab = crate::cabinet::read(root)?;
-    let mut out = Applied::default();
+    // An import stopped part way: this one continues its record.
+    let mut out = match load_last(root) {
+        Some(l)
+            if !l.finished
+                && l.bind_tx.is_none()
+                && l.meta_tx.is_none()
+                && !(l.bind_txs.is_empty() && l.meta_txs.is_empty()) =>
+        {
+            // Counted again below over every bound folder.
+            Applied {
+                documents: 0,
+                mapped: 0,
+                guessed: 0,
+                ocr_queued: 0,
+                ..l
+            }
+        }
+        _ => Applied::default(),
+    };
+    let save = |out: &Applied| {
+        let _ = crate::cabinet::write_replace(
+            &last_path(root),
+            &serde_json::to_vec_pretty(out).expect("serializes"),
+        );
+    };
     // Chosen by hand too: two folders for one client, or a client that has a folder already,
     // would leave duplicate sentinels.
     {
@@ -1168,6 +1196,8 @@ pub fn apply_with(
                 .push(crate::fileops::commit(conn, root, tx, device_id)?.tx_id);
             out.bound += bound;
             out.renamed += renamed;
+            // Saved at once: a failure later in the batch still leaves these ties undoable.
+            save(&out);
         }
 
         // Catalog rows for the batch's files, attached to their new clients (old names too: a
@@ -1254,15 +1284,10 @@ pub fn apply_with(
             }
         }
         progress.fetch_add(batch.len(), std::sync::atomic::Ordering::Relaxed);
-        let _ = crate::cabinet::write_replace(
-            &last_path(root),
-            &serde_json::to_vec_pretty(&out).expect("serializes"),
-        );
+        save(&out);
     }
-    let _ = crate::cabinet::write_replace(
-        &last_path(root),
-        &serde_json::to_vec_pretty(&out).expect("serializes"),
-    );
+    out.finished = true;
+    save(&out);
     Ok(out)
 }
 

@@ -400,7 +400,7 @@ fn new_filings_only_and_looks_since_the_last_change() {
     f.add("q", "queued.pdf", 1, true);
     queue::enqueue_missing(&f.conn, queue::BACKLOG).unwrap();
     f.conn
-        .execute_batch("UPDATE document SET filed_by = 'import', filed_at = '2026-01-01T00:00:00Z'")
+        .execute_batch("UPDATE document SET filed_by = 'import', filed_at = '2026-01-01T00:00:00Z', updated_at = '2026-01-01T00:00:00Z'")
         .unwrap();
     queue::set_reads(
         &f.conn,
@@ -442,7 +442,15 @@ fn new_filings_only_and_looks_since_the_last_change() {
     assert_eq!(queue::enqueue_missing(&f.conn, queue::INTAKE).unwrap(), 1);
     assert_eq!(f.state("y"), "queued");
     // A folder import asked to read its files queues them whatever the setting.
-    assert_eq!(queue::enqueue_every(&f.conn, queue::BACKLOG).unwrap(), 3);
+    // Only what it touched: here everything changed since "t" (the fixture's time).
+    assert_eq!(
+        queue::enqueue_every(&f.conn, queue::BACKLOG, "2026-07-02T00:00:00Z").unwrap(),
+        0
+    );
+    assert_eq!(
+        queue::enqueue_every(&f.conn, queue::BACKLOG, "").unwrap(),
+        3
+    );
     queue::set_reads(&f.conn, &queue::Reads::All).unwrap();
     assert_eq!(queue::reads(&f.conn).unwrap(), queue::Reads::All);
 }

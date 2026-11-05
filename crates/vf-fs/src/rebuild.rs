@@ -14,6 +14,20 @@ use vf_core::tx::{Actor, NoFileOps, Stmt, Transaction};
 
 use crate::cabinet::{self, VersionSidecar};
 
+/// `local_state` key present while a whole-cabinet rebuild has not finished (its value: the
+/// `filed_by` it files new documents with). See [`unfinished`].
+const UNFINISHED: &str = "rebuild_unfinished";
+
+/// Whether a whole-cabinet rebuild was cut short (closed, crashed) and should run again.
+pub fn unfinished(conn: &Connection) -> bool {
+    conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM local_state WHERE k = ?1)",
+        [UNFINISHED],
+        |r| r.get(0),
+    )
+    .unwrap_or(false)
+}
+
 /// `document.filed_by` of the files a folder import, or a catalog made from nothing, found:
 /// the cabinet's existing files (PA-34, Q-68).
 pub const FILED_BY_IMPORT: &str = "import";
@@ -265,11 +279,15 @@ pub(crate) fn known_files(conn: &Connection) -> Result<Known, RebuildError> {
 
 /// Like [`files_under`], but a folder that cannot be read is noted in `bad` and skipped, not
 /// fatal (one locked folder no longer stops a rebuild or sweep of a large cabinet, PA-34).
-pub(crate) fn files_under_lenient(dir: &Path, out: &mut Vec<PathBuf>, bad: &mut Vec<String>) {
+pub(crate) fn files_under_lenient(
+    dir: &Path,
+    out: &mut Vec<PathBuf>,
+    bad: &mut Vec<(PathBuf, String)>,
+) {
     let mut entries: Vec<_> = match std::fs::read_dir(dir) {
         Ok(rd) => rd.filter_map(|e| e.ok()).collect(),
         Err(e) => {
-            bad.push(format!("{}: {e}", dir.display()));
+            bad.push((dir.to_path_buf(), format!("{}: {e}", dir.display())));
             return;
         }
     };
@@ -711,20 +729,43 @@ fn rebuild_scoped(
     // Who files the documents found: a folder import, or a catalog made from nothing (a new
     // PC), is FILED_BY_IMPORT, the cabinet's existing files; later finds are files put in the
     // folders outside Vibe Files, which text recognition set to new filings reads (Q-68).
-    let filed_by = if only.is_some() || known.is_empty() {
-        FILED_BY_IMPORT
-    } else {
-        "rebuild"
-    };
+    // A whole-cabinet rebuild cut short (it commits in parts) left UNFINISHED with its label:
+    // the next open runs it again, and its files keep that label.
+    let resumed: Option<String> = conn
+        .query_row(
+            "SELECT v FROM local_state WHERE k = ?1",
+            [UNFINISHED],
+            |r| r.get(0),
+        )
+        .ok();
+    let filed_by =
+        if only.is_some() || known.is_empty() || resumed.as_deref() == Some(FILED_BY_IMPORT) {
+            FILED_BY_IMPORT
+        } else {
+            "rebuild"
+        };
+    if only.is_none() {
+        conn.execute(
+            "INSERT INTO local_state (k, v) VALUES (?1, ?2) ON CONFLICT(k) DO UPDATE SET v = excluded.v",
+            [UNFINISHED, filed_by],
+        )?;
+    }
     known.retain(|p, _| in_scope(p));
     // Every file first (the count shows while they are read), then read on several threads:
     // on a share most of the time is waiting for the network.
     let mut todo: Vec<(PathBuf, Option<String>)> = Vec::new();
+    // Folders and files that could not be read: their documents are not "missing" (a denied
+    // folder or a network blip must not tombstone them; review of PA-34).
+    let mut unread_dirs: Vec<String> = Vec::new();
+    let mut unread_files: HashSet<String> = HashSet::new();
     for (folder, client_id) in &folders {
         let mut paths = Vec::new();
         let mut bad = Vec::new();
         files_under_lenient(folder, &mut paths, &mut bad);
-        rep.unreadable.extend(bad);
+        for (d, why) in bad {
+            unread_dirs.push(rel(root, &d));
+            rep.unreadable.push(why);
+        }
         todo.extend(paths.into_iter().map(|p| (p, client_id.clone())));
         PROGRESS.folders.fetch_add(1, Ordering::Relaxed);
         PROGRESS.found.store(todo.len(), Ordering::Relaxed);
@@ -757,6 +798,7 @@ fn rebuild_scoped(
         // One file that cannot be read (open in QuickBooks, a denied ACL) does not stop the
         // rebuild: it is listed and left as the catalog has it.
         let Some((hash, size)) = got else {
+            unread_files.insert(rel(root, &p));
             rep.unreadable.push(rel(root, &p));
             continue;
         };
@@ -823,8 +865,15 @@ fn rebuild_scoped(
     let mut missing_ids: Vec<String> = Vec::new();
     let mut live_paths: Vec<_> = live.iter().collect();
     live_paths.sort();
+    let unread = |p: &str| {
+        unread_files.contains(p)
+            || unread_dirs.iter().any(|d| {
+                p.strip_prefix(d.as_str())
+                    .is_some_and(|r| r.starts_with('/'))
+            })
+    };
     for (p, (id, h, _)) in live_paths {
-        if !on_disk.contains(p.as_str()) {
+        if !on_disk.contains(p.as_str()) && !unread(p) {
             missing_by_hash
                 .entry(h.clone())
                 .or_default()
@@ -1073,6 +1122,9 @@ fn rebuild_scoped(
         tx = tx.catalog(s);
     }
     tx.commit(conn, &mut NoFileOps, &actor)?;
+    if only.is_none() {
+        conn.execute("DELETE FROM local_state WHERE k = ?1", [UNFINISHED])?;
+    }
     let after_versions: i64 = conn.query_row("SELECT count(*) FROM version", [], |r| r.get(0))?;
     rep.versions_new = (after_versions - before_versions).max(0) as usize;
     Ok(rep)
@@ -1149,6 +1201,69 @@ mod tests {
 
     fn open(c: &Cab) -> Connection {
         vf_core::db::open(&c.data.join("catalog.db"), Storage::Local).unwrap()
+    }
+
+    /// PA-34 review: a first index cut short is marked unfinished, run again, and keeps
+    /// filing the cabinet's existing files as `import`; a finished one clears the mark.
+    #[test]
+    fn a_first_index_cut_short_is_finished_next_time() {
+        let c = cab();
+        let mut conn = open(&c);
+        rebuild(&mut conn, &c.root, "dev").unwrap();
+        assert!(!unfinished(&conn));
+        // As if the first index had stopped after a part: the mark is there, files remain.
+        conn.execute(
+            "INSERT INTO local_state (k, v) VALUES ('rebuild_unfinished', 'import')",
+            [],
+        )
+        .unwrap();
+        put(
+            &c.root.join("Acme LLC (1002)/Payroll/2025/941 Q2.pdf"),
+            "941 q2",
+        );
+        assert!(unfinished(&conn));
+        rebuild(&mut conn, &c.root, "dev").unwrap();
+        assert!(!unfinished(&conn));
+        let by: String = conn
+            .query_row(
+                "SELECT filed_by FROM document WHERE rel_path LIKE '%941 Q2.pdf'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(by, FILED_BY_IMPORT);
+    }
+
+    /// PA-34 review: a folder that cannot be read (a denied ACL, a network blip) is listed,
+    /// and its documents are not tombstoned as missing.
+    #[test]
+    fn an_unreadable_folder_keeps_its_documents() {
+        let c = cab();
+        let mut conn = open(&c);
+        rebuild(&mut conn, &c.root, "dev").unwrap();
+        let dir = c.root.join("Smith, John (1001)").join("Income Tax");
+        let icacls = |args: &[&str]| {
+            std::process::Command::new("icacls")
+                .arg(&dir)
+                .args(args)
+                .output()
+                .unwrap()
+        };
+        // Everyone (S-1-1-0) denied listing the folder.
+        assert!(icacls(&["/deny", "*S-1-1-0:(RD)"]).status.success());
+        let rep = rebuild(&mut conn, &c.root, "dev");
+        icacls(&["/remove:d", "*S-1-1-0"]);
+        let rep = rep.unwrap();
+        assert_eq!(rep.docs_tombstoned, 0, "{rep}");
+        assert!(!rep.unreadable.is_empty(), "{rep}");
+        let live: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM document WHERE deleted_at IS NULL AND rel_path LIKE '%Income Tax%'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(live, 2);
     }
 
     /// PA-34: a rebuild of some folders catalogs only them; other folders' documents stay as

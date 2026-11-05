@@ -27,6 +27,27 @@ pub struct Opened {
     pub set_aside: Option<PathBuf>,
     /// The catalog is this PC's shared one (every login of the PC uses it, Q-67).
     pub shared: bool,
+    /// This copy marked as running on the catalog (other sessions' recovery leaves its
+    /// changes in progress alone).
+    pub _live: Option<vf_fs::fileops::Live>,
+    /// The device id B2 sync uses for this catalog: on a shared catalog one for the catalog
+    /// (every login of the server shares its sync state, PA-34 review); else this PC's.
+    pub sync_device: String,
+}
+
+/// The device id sync uses for `conn`'s catalog: kept in the catalog, set by the first login
+/// that opens it.
+fn catalog_sync_device(conn: &Connection, device_id: &str) -> String {
+    let _ = conn.execute(
+        "INSERT OR IGNORE INTO local_state (k, v) VALUES ('sync_device_id', ?1)",
+        [device_id],
+    );
+    conn.query_row(
+        "SELECT v FROM local_state WHERE k = 'sync_device_id'",
+        [],
+        |r| r.get(0),
+    )
+    .unwrap_or_else(|_| device_id.to_string())
 }
 
 /// What the wizard asks for when creating.
@@ -75,6 +96,7 @@ pub fn create(data: &Path, device_id: &str, r: &CreateRequest) -> Result<Opened>
     vf_fs::retention::seed_if_missing(r.root).map_err(anyhow::Error::msg)?;
     std::fs::create_dir_all(data).with_context(|| format!("creating {}", data.display()))?;
     let mut conn = db::open(&catalog, Storage::Local)?;
+    let live = vf_fs::fileops::hold_live(data);
     let rep = vf_fs::rebuild::rebuild(&mut conn, r.root, device_id)?;
     Ok(Opened {
         root: r.root.to_owned(),
@@ -84,6 +106,8 @@ pub fn create(data: &Path, device_id: &str, r: &CreateRequest) -> Result<Opened>
         rebuild: Some(rep),
         set_aside: None,
         shared: false,
+        _live: live,
+        sync_device: device_id.to_string(),
     })
 }
 
@@ -136,7 +160,10 @@ pub fn open(data: &Path, device_id: &str, root: &Path) -> Result<Opened> {
             "taxpayer ID columns removed from the client list"
         );
     }
-    // A change cut short by a crash is put back before anything else reads the cabinet.
+    // This copy marked as running first: its own rows from now on are not another's to
+    // recover. Then a change cut short by a crash is put back before anything else reads the
+    // cabinet (on a shared catalog, only those of copies no longer running).
+    let live = vf_fs::fileops::hold_live(catalog.parent().unwrap_or(data));
     let rec = vf_fs::fileops::recover(&conn, root).map_err(anyhow::Error::msg)?;
     if rec.transactions > 0 {
         tracing::warn!(
@@ -166,10 +193,16 @@ pub fn open(data: &Path, device_id: &str, root: &Path) -> Result<Opened> {
         vf_fs::retention::sync(&mut conn, root, device_id, "retention_seed")
             .map_err(anyhow::Error::msg)?;
     }
-    let rebuild = if known == 0 {
+    // A first index cut short (it commits in parts, PA-34) runs again until it finishes.
+    let rebuild = if known == 0 || vf_fs::rebuild::unfinished(&conn) {
         Some(vf_fs::rebuild::rebuild(&mut conn, root, device_id)?)
     } else {
         None
+    };
+    let sync_device = if shared {
+        catalog_sync_device(&conn, device_id)
+    } else {
+        device_id.to_string()
     };
     Ok(Opened {
         root: root.to_owned(),
@@ -179,6 +212,8 @@ pub fn open(data: &Path, device_id: &str, root: &Path) -> Result<Opened> {
         rebuild,
         set_aside,
         shared,
+        _live: live,
+        sync_device,
     })
 }
 

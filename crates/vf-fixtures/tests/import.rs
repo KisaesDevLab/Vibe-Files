@@ -690,3 +690,45 @@ fn import_guesses_wait_for_a_person_before_disposition() {
             .any(|t| t == vf_fs::docmeta::GUESSED_TAG)
     );
 }
+
+/// PA-34 review: an import stopped part way, then continued, is undone whole: the second run
+/// adds its batches to the first one's record.
+#[test]
+fn a_continued_import_is_undone_whole() {
+    let mut f = tree(60);
+    let before = snapshot(&f.root);
+    let mut plan = import::plan(&f.conn, &f.root).unwrap();
+    let chosen: Vec<usize> = (0..plan.folders.len())
+        .filter(|&i| plan.folders[i].include)
+        .collect();
+    assert!(chosen.len() >= 2);
+    // The first run binds only the first folder, then "stops" (its record left unfinished).
+    for &i in &chosen[1..] {
+        plan.folders[i].include = false;
+    }
+    import::apply(&mut f.conn, &f.root, &plan, &Options::default(), "dev").unwrap();
+    let mut last = import::load_last(&f.root).unwrap();
+    assert!(last.finished);
+    last.finished = false;
+    std::fs::write(
+        import::last_path(&f.root),
+        serde_json::to_vec(&last).unwrap(),
+    )
+    .unwrap();
+    // Scanned again: the rest.
+    let plan = import::plan(&f.conn, &f.root).unwrap();
+    let second = import::apply(&mut f.conn, &f.root, &plan, &Options::default(), "dev").unwrap();
+    assert!(second.finished);
+    assert_eq!(second.bound, chosen.len(), "both runs counted");
+    assert!(second.bind_txs.len() >= 2, "{second:?}");
+    import::undo(&mut f.conn, &f.root, &second, "dev").unwrap();
+    assert_eq!(snapshot(&f.root), before);
+    let plan = import::plan(&f.conn, &f.root).unwrap();
+    for &i in &chosen {
+        assert!(
+            !plan.folders[i].bound,
+            "{} still bound",
+            plan.folders[i].rel
+        );
+    }
+}

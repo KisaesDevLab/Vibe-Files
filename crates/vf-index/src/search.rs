@@ -160,17 +160,18 @@ pub fn search(conn: &Connection, q: &Query, limit: usize) -> vf_core::Result<Vec
             names.join(" AND ")
         ));
     }
-    // Short words (1-2 characters, too short for the trigram index): in the name, or in a
-    // page the long words matched. Never a scan of every page's text (PA-34: ~900K documents).
-    let mut short_pages: Vec<String> = Vec::new();
+    // Short words (1-2 characters, too short for the trigram index): in the name, or on a page
+    // of a document the long words matched (looked up by that document's index rows only).
+    // Never a scan of every page's text (PA-34: ~900K documents).
     for w in &short {
         let l = p(V::Text(like(w)));
         if long.is_empty() {
             wh.push(format!("d.rel_path LIKE {l} ESCAPE '\\'"));
         } else {
-            short_pages.push(format!(" AND text LIKE {l} ESCAPE '\\'"));
             wh.push(format!(
-                "(d.rel_path LIKE {l} ESCAPE '\\' OR b.doc_id IS NOT NULL)"
+                "(d.rel_path LIKE {l} ESCAPE '\\' OR (b.doc_id IS NOT NULL AND EXISTS (
+                   SELECT 1 FROM doc_fts_doc x JOIN doc_fts f ON f.rowid = x.fts_row
+                   WHERE x.doc_id = d.id AND f.text LIKE {l} ESCAPE '\\')))"
             ));
         }
     }
@@ -249,8 +250,7 @@ pub fn search(conn: &Connection, q: &Query, limit: usize) -> vf_core::Result<Vec
         // Snippets are made afterwards, for the hits returned only (P13: a common word
         // matches every page of a 50,000-document cabinet).
         Some(m) => sql.push_str(&format!(
-            "SELECT doc_id, page, rank, rowid AS fts_row FROM doc_fts WHERE doc_fts MATCH {m}{}{cand}",
-            short_pages.concat()
+            "SELECT doc_id, page, rank, rowid AS fts_row FROM doc_fts WHERE doc_fts MATCH {m}{cand}"
         )),
         None => sql
             .push_str("SELECT NULL AS doc_id, NULL AS page, NULL AS rank, NULL AS fts_row WHERE 0"),
@@ -422,8 +422,10 @@ mod tests {
         // A short word alone matches names only, never every page's text (PA-34).
         assert!(search(&c, &q("52"), 50).unwrap().is_empty());
         assert_eq!(ids(&search(&c, &q("W"), 50).unwrap()), ["b"]);
-        // With a long word, only that word's pages are checked for it.
+        // With a long word, only the pages of documents it matched are checked for it.
         assert!(search(&c, &q("tips 99"), 50).unwrap().is_empty());
+        // A long word on the page and a short one in the file name (PA-34 review).
+        assert_eq!(ids(&search(&c, &q("tips Jo"), 50).unwrap()), ["b"]);
         // Replacing a document's pages drops its old ones.
         crate::fts::replace_doc(&c, "b", &[(0, "Box 12 code DD".into())]).unwrap();
         assert!(search(&c, &q("tips"), 50).unwrap().is_empty());

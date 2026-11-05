@@ -202,12 +202,96 @@ fn remove_partials(dst: &Path) -> usize {
 /// SQLite transaction); the data folder is held by one copy of the program, so no other one is
 /// mid-change. Every step checks what is on disk now: a copy is removed only if it is still the
 /// same content, a sentinel only if it still names the same client.
+/// Where the running copies of Vibe Files using this catalog hold their `live/<id>.lock`.
+static LIVE_DIR: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
+
+/// This running copy, for as long as it holds its catalog open: a lock file held with no
+/// sharing beside the catalog, whose name is this copy's journal owner id. Dropped: removed.
+pub struct Live {
+    _file: std::fs::File,
+    path: PathBuf,
+}
+
+impl Drop for Live {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+/// Marks this process as running on the catalog in `catalog_dir` (several sessions of one
+/// server share a catalog, PA-34): its journal rows carry its id, and [`recover`] in another
+/// session leaves them alone while it runs. `None` when the folder cannot be written (rows
+/// then carry no owner and are recovered as before).
+pub fn hold_live(catalog_dir: &Path) -> Option<Live> {
+    use std::os::windows::fs::OpenOptionsExt;
+    let dir = catalog_dir.join("live");
+    std::fs::create_dir_all(&dir).ok()?;
+    let id = vf_core::new_id();
+    let path = dir.join(format!("{id}.lock"));
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .share_mode(0)
+        .open(&path)
+        .ok()?;
+    vf_core::tx::set_journal_owner(Some(id));
+    if let Ok(mut d) = LIVE_DIR.lock() {
+        *d = Some(dir);
+    }
+    Some(Live { _file: file, path })
+}
+
+/// Whether the copy `owner` is still running (its lock file is held). A lock file nobody holds
+/// is left over from a crash and is removed.
+fn still_running(owner: &str) -> bool {
+    use std::os::windows::fs::OpenOptionsExt;
+    if vf_core::tx::journal_owner().as_deref() == Some(owner) {
+        // This copy's own rows: it is starting, so none of them is in progress.
+        return false;
+    }
+    let Some(dir) = LIVE_DIR.lock().ok().and_then(|d| d.clone()) else {
+        return false;
+    };
+    let path = dir.join(format!("{owner}.lock"));
+    if !path.exists() {
+        return false;
+    }
+    match std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(0)
+        .open(&path)
+    {
+        Ok(f) => {
+            drop(f);
+            let _ = std::fs::remove_file(&path);
+            false
+        }
+        Err(_) => true,
+    }
+}
+
+/// Journal rows older than `secs` whose copy is no longer running: changes cut short that
+/// recovery has not put back (the startup check).
+pub fn interrupted(conn: &vf_core::db::Connection, secs: i64) -> Result<usize, String> {
+    let before = vf_core::rfc3339_secs_ago(secs);
+    Ok(vf_core::tx::journal(conn)
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .filter(|e| e.ts < before && !e.owner.as_deref().is_some_and(still_running))
+        .count())
+}
+
 pub fn recover(conn: &vf_core::db::Connection, root: &Path) -> Result<Recovered, String> {
     let mut out = Recovered::default();
     let same = |a: &Path, b: &Path| -> bool {
         matches!((commit::sha256_file(a), commit::sha256_file(b)), (Ok(x), Ok(y)) if x == y)
     };
     for e in vf_core::tx::journal(conn).map_err(|e| e.to_string())? {
+        // Another session's change in progress on a shared catalog: not interrupted.
+        if e.owner.as_deref().is_some_and(still_running) {
+            continue;
+        }
         out.transactions += 1;
         if e.ops.iter().any(|j| j.undo) {
             // An undo cut short: its reversals that landed are applied again, oldest first.
@@ -707,6 +791,43 @@ mod tests {
     }
 
     /// P00 done-when: commit → undo → commit through Transaction, same-volume rename.
+    /// PA-34 review: on a catalog shared by several sessions, a change another running copy has
+    /// in progress is not recovered; once that copy is gone, it is.
+    #[test]
+    fn recovery_leaves_running_copies_alone() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let t = tempfile::tempdir().unwrap();
+        let conn = vf_core::db::open(&t.path().join("c.db"), vf_core::db::Storage::Local).unwrap();
+        let _me = hold_live(t.path()).unwrap();
+        let other = t.path().join("live").join("other-copy.lock");
+        let held = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .share_mode(0)
+            .open(&other)
+            .unwrap();
+        conn.execute(
+            "INSERT INTO tx_journal (tx_id, ts, label, ops, owner)
+             VALUES ('t1', 't', 'move', '[]', 'other-copy')",
+            [],
+        )
+        .unwrap();
+        let rows = |c: &vf_core::db::Connection| -> i64 {
+            c.query_row("SELECT count(*) FROM tx_journal", [], |r| r.get(0))
+                .unwrap()
+        };
+        let r = recover(&conn, t.path()).unwrap();
+        assert_eq!(r.transactions, 0, "running: left alone");
+        assert_eq!(rows(&conn), 1);
+        drop(held);
+        let r = recover(&conn, t.path()).unwrap();
+        assert_eq!(r.transactions, 1, "gone: recovered");
+        assert_eq!(rows(&conn), 0);
+        assert!(!other.exists(), "its leftover lock file is removed");
+    }
+
     #[test]
     fn commit_undo_commit_rename() {
         round_trip(false);

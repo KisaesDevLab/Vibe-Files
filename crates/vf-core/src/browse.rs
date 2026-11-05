@@ -274,8 +274,16 @@ pub fn load_window_reusing(
     }
     if let Some(kind) = &w.page {
         let (cond, extra) = page_cond(kind);
-        let needle = format!("%{}%", w.name_filter.trim().to_lowercase());
-        let cond = format!("({cond}) AND lower(d.rel_path) LIKE ?1");
+        // `%` and `_` typed in the filter are themselves, not wildcards.
+        let typed = w
+            .name_filter
+            .trim()
+            .to_lowercase()
+            .replace('\\', "\\\\")
+            .replace('%', "\\%")
+            .replace('_', "\\_");
+        let needle = format!("%{typed}%");
+        let cond = format!("({cond}) AND lower(d.rel_path) LIKE ?1 ESCAPE '\\'");
         let extra = extra.unwrap_or_default();
         let p: [&dyn rusqlite::ToSql; 2] = [&needle, &extra];
         let used: &[&dyn rusqlite::ToSql] = if cond.contains("?2") { &p } else { &p[..1] };
