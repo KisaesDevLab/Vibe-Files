@@ -33,6 +33,8 @@ pub struct Opened {
     /// The device id B2 sync uses for this catalog: on a shared catalog one for the catalog
     /// (every login of the server shares its sync state, PA-34 review); else this PC's.
     pub sync_device: String,
+    /// Server mode (PA-36): this catalog's id in the cabinet's change logs.
+    pub writer: Option<String>,
 }
 
 /// The device id sync uses for `conn`'s catalog: kept in the catalog, set by the first login
@@ -108,6 +110,7 @@ pub fn create(data: &Path, device_id: &str, r: &CreateRequest) -> Result<Opened>
         shared: false,
         _live: live,
         sync_device: device_id.to_string(),
+        writer: None,
     })
 }
 
@@ -147,6 +150,21 @@ pub fn open(data: &Path, device_id: &str, root: &Path) -> Result<Opened> {
     std::fs::create_dir_all(data).with_context(|| format!("creating {}", data.display()))?;
     // This PC's shared catalog for the cabinet, when an admin shared one (Q-67).
     let shared_at = crate::shared::shared_catalog(&cab.cabinet_id);
+    // Several servers (PA-36): every login of this server uses one catalog, made now if
+    // needed (started from the cabinet's seed copy or the old catalog beside the exe).
+    let server = crate::server::server_mode();
+    let shared_at = match shared_at {
+        Some(p) => Some(p),
+        None if server => {
+            let legacy = vf_core::exe_dir().map(|d| d.join("data").join(CATALOG_FILE));
+            Some(crate::server::provision(
+                &cab.cabinet_id,
+                root,
+                legacy.as_deref(),
+            )?)
+        }
+        None => None,
+    };
     let shared = shared_at.is_some();
     let catalog = shared_at.unwrap_or_else(|| data.join(CATALOG_FILE));
     let set_aside = set_aside_encrypted(&catalog)?;
@@ -199,6 +217,22 @@ pub fn open(data: &Path, device_id: &str, root: &Path) -> Result<Opened> {
     } else {
         None
     };
+    // Several servers (PA-36): this catalog notes its changes for the others, and takes
+    // theirs since it last looked.
+    let writer = server.then(|| crate::server::writer_id(&conn));
+    if let Some(w) = &writer {
+        vf_fs::changes::set_writer(root, w);
+        match vf_fs::changes::catch_up(&mut conn, root, w, device_id) {
+            Ok(f) if !f.is_empty() => {
+                tracing::info!(folders = f.len(), "other servers' changes read")
+            }
+            Ok(_) => {}
+            Err(e) => tracing::warn!(
+                kind = crate::logging::kind(&e),
+                "other servers' changes not read"
+            ),
+        }
+    }
     let sync_device = if shared {
         catalog_sync_device(&conn, device_id)
     } else {
@@ -214,6 +248,7 @@ pub fn open(data: &Path, device_id: &str, root: &Path) -> Result<Opened> {
         shared,
         _live: live,
         sync_device,
+        writer,
     })
 }
 

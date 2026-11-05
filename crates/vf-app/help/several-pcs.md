@@ -51,3 +51,12 @@ Intake's Preview then has two tabs, **Shared inbox (n)** and **My inbox (n)**. E
 
 On a Remote Desktop server where several people use one cabinet, each login would otherwise build its own catalog by reading the whole cabinet. Instead, once: **Admin** › **Devices** › **Share this catalog with everyone on this PC**. The catalog is copied to the PC's own disk (`ProgramData\Vibe Files\catalogs`) and every login of the PC uses it from their next open. Each person keeps their own settings, undo and cache, and sees the others' changes within a few seconds.
 
+## Several Remote Desktop servers
+
+When Vibe Files runs from a network folder (for example `\server\share\APPS\Vibe Files`) and people log into several servers, each server works like this:
+
+- **Your settings stay on the server you are on**, in `%LOCALAPPDATA%\Vibe Files\data`. Nothing is kept in the network folder. The first time, the settings from the old data folder beside the program are copied over for its owner.
+- **Each server keeps one catalog for everyone who logs into it.** The first server indexes the cabinet once and leaves a copy in the cabinet's `_Vibe\catalog-seed` folder (refreshed weekly). The other servers start from that copy and then only check file sizes and dates, so they don't index everything again.
+- **Changes reach the other servers.** A move, a rename, or a doc type or year set on one server shows on another when that client is opened there, or within 15 minutes.
+- **Text recognition and B2 sync run on one server.** On the others, scans become searchable once that server has read them and written their text into the files. **Admin** › **Devices** › **Servers** shows which server it is, and **Run them on this server** moves the job (from the next start of Vibe Files).
+

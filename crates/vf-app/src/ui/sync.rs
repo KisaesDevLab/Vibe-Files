@@ -157,6 +157,16 @@ impl SyncTab {
             return;
         }
         self.error = None;
+        // Several servers (PA-36): B2 sync runs on the main server only.
+        if matches!(op, Op::Push(_) | Op::Pull) && !crate::server::runs_here(root) {
+            self.error = Some(format!(
+                "B2 sync runs on {} for this cabinet (Admin › Devices).",
+                crate::server::main_server(root)
+                    .map(|m| m.computer)
+                    .unwrap_or_else(|| "another server".into())
+            ));
+            return;
+        }
         self.running_for = match &op {
             Op::Push(c) => Some(c.clone().unwrap_or_default()),
             Op::Pull => Some(String::new()),
@@ -244,7 +254,8 @@ impl SyncTab {
         {
             self.last_auto = Some(Instant::now());
             let hour = chrono::Timelike::hour(&chrono::Local::now()) as u8;
-            if cfg.in_window(hour) {
+            // Several servers: only the main server pushes (PA-36).
+            if cfg.in_window(hour) && crate::server::runs_here(env.root) {
                 self.start(ctx, catalog, env.root, Op::Push(None));
             }
         }

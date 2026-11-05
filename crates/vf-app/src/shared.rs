@@ -41,25 +41,45 @@ pub fn share(conn: &vf_core::db::Connection, cabinet_id: &str) -> Result<PathBuf
     share_in(conn, &base, cabinet_id)
 }
 
-fn share_in(conn: &vf_core::db::Connection, base: &Path, cabinet_id: &str) -> Result<PathBuf> {
+/// This cabinet's shared-catalog folder under `base`, made writable for every login of this
+/// PC (made if missing).
+pub fn prepare_dir(base: &Path, cabinet_id: &str) -> Result<PathBuf> {
     let safe: String = cabinet_id
         .chars()
         .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
         .collect();
     let dir = base.join(&safe);
-    let target = dir.join(CATALOG_FILE);
+    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+    grant_users(&dir)?;
+    Ok(dir)
+}
+
+fn share_in(conn: &vf_core::db::Connection, base: &Path, cabinet_id: &str) -> Result<PathBuf> {
+    let safe: String = cabinet_id
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
+        .collect();
+    let target = base.join(&safe).join(CATALOG_FILE);
     if target.exists() {
         anyhow::bail!(
             "This PC already shares a catalog for this cabinet: {}",
             target.display()
         );
     }
-    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+    prepare_dir(base, cabinet_id)?;
+    // A consistent copy, WAL included.
+    conn.execute("VACUUM INTO ?1", [target.to_string_lossy().as_ref()])
+        .with_context(|| format!("copying the catalog to {}", target.display()))?;
+    Ok(target)
+}
+
+/// Lets every login of this PC change `dir`.
+fn grant_users(dir: &Path) -> Result<()> {
     // Every login of this PC may change it (BUILTIN\Users, by SID: names differ by language).
     #[cfg(windows)]
     {
         let ok = std::process::Command::new("icacls")
-            .arg(&dir)
+            .arg(dir)
             .args(["/grant", "*S-1-5-32-545:(OI)(CI)M", "/T", "/Q"])
             .status()
             .map(|s| s.success())
@@ -71,10 +91,7 @@ fn share_in(conn: &vf_core::db::Connection, base: &Path, cabinet_id: &str) -> Re
             );
         }
     }
-    // A consistent copy, WAL included.
-    conn.execute("VACUUM INTO ?1", [target.to_string_lossy().as_ref()])
-        .with_context(|| format!("copying the catalog to {}", target.display()))?;
-    Ok(target)
+    Ok(())
 }
 
 #[cfg(test)]

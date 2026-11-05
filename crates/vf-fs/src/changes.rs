@@ -25,7 +25,7 @@ static WRITER: Mutex<Option<(PathBuf, String)>> = Mutex::new(None);
 /// Notes this catalog's changes to `root` from now on, as `writer` (one per server catalog).
 pub fn set_writer(root: &Path, writer: &str) {
     if let Ok(mut w) = WRITER.lock() {
-        *w = Some((root.to_path_buf(), safe(writer)));
+        *w = Some((root.to_path_buf(), safe_id(writer)));
     }
 }
 
@@ -36,10 +36,18 @@ pub fn clear_writer() {
     }
 }
 
-fn safe(s: &str) -> String {
+/// A writer id as used in log file names.
+pub fn safe_id(s: &str) -> String {
     s.chars()
         .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
         .collect()
+}
+
+/// The length of `writer`'s log (how far a catalog copy made now has seen it).
+pub fn log_len(root: &Path, writer: &str) -> u64 {
+    std::fs::metadata(log_path(root, &safe_id(writer)))
+        .map(|m| m.len())
+        .unwrap_or(0)
 }
 
 fn log_path(root: &Path, writer: &str) -> PathBuf {
@@ -144,7 +152,7 @@ pub fn save_seen(conn: &vf_core::db::Connection, seen: &Seen) -> Result<(), Stri
 /// seen for the first time is read from its start only when `from_start`; else from its end
 /// (a new server seeded from a catalog copy starts where the copy left off).
 pub fn changed_since(root: &Path, me: &str, seen: &mut Seen, from_start: bool) -> BTreeSet<String> {
-    let me = safe(me);
+    let me = safe_id(me);
     let mut out = BTreeSet::new();
     let Ok(rd) = std::fs::read_dir(root.join(VIBE_DIR).join(DIR)) else {
         return out;

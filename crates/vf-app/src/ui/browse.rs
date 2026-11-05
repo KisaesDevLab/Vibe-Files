@@ -879,6 +879,13 @@ impl Browse {
         self.refresh();
     }
 
+    /// The catalog id of the client shown, if any.
+    pub fn client_shown(&self) -> Option<String> {
+        self.scope_client()
+            .and_then(|c| self.snap.clients.get(c))
+            .map(|c| c.id.clone())
+    }
+
     fn scope_client(&self) -> Option<usize> {
         match &self.scope {
             Scope::Client(c)

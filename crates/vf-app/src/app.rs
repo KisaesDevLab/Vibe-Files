@@ -96,6 +96,8 @@ pub struct OpenCabinet {
     pub sweep: crate::ui::sweep::SweepState,
     /// B2 sync (P11).
     pub sync: crate::ui::sync::SyncTab,
+    /// Several servers (PA-36): the other servers' changes, read now and then.
+    pub servers: crate::server::Watch,
     /// The admin password was given in this session (PA-24): Admin and Sync settings open
     /// until Vibe Files closes or Lock Admin.
     pub admin_unlocked: bool,
@@ -412,6 +414,7 @@ impl VibeFilesApp {
                     mirror_wait: std::time::Duration::from_secs(2),
                     sweep,
                     sync: Default::default(),
+                    servers: Default::default(),
                     checks,
                     opened,
                     browse,
@@ -1043,6 +1046,18 @@ impl eframe::App for VibeFilesApp {
         }
         if let Screen::Open(o) = &mut self.screen {
             let o = &mut **o;
+            if let Some(w) = o.opened.writer.clone()
+                && o.servers.tick(
+                    &ctx,
+                    &o.opened.catalog,
+                    &o.opened.root,
+                    &w,
+                    &self.config.device_id,
+                    o.browse.client_shown(),
+                )
+            {
+                o.browse.reload(&o.opened.conn);
+            }
             o.sync.tick(
                 &ctx,
                 &browse::Env {

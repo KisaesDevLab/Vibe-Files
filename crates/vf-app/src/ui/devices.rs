@@ -7,6 +7,52 @@ use crate::ui::browse::Env;
 use crate::ui::{theme, widgets};
 
 /// This PC's shared catalog (Q-67: a Remote Desktop server's logins index the cabinet once).
+/// Several Remote Desktop servers (PA-36): which one runs text recognition and B2 sync.
+fn servers_section(ui: &mut egui::Ui, p: &mut DevicesPage, env: &mut Env) {
+    if !crate::server::server_mode() {
+        return;
+    }
+    ui.label(RichText::new("Servers").strong().size(16.0));
+    ui.label(widgets::caption(
+        "Vibe Files runs from a network folder, so each server keeps its own catalog of the cabinet and reads the other servers' changes (when a client is opened and every 15 minutes). Text recognition and B2 sync run on one of them.",
+    ));
+    let here = crate::server::computer();
+    let main = crate::server::main_server(env.root);
+    ui.horizontal(|ui| {
+        ui.label(match &main {
+            Some(m) if m.computer.eq_ignore_ascii_case(&here) => {
+                format!("Text recognition and B2 sync run on this server ({here}).")
+            }
+            Some(m) => format!(
+                "Text recognition and B2 sync run on {} (since {}).",
+                m.computer,
+                widgets::local_time(&m.since)
+            ),
+            None => "No server runs text recognition and B2 sync yet; the first to start Vibe Files takes it on.".into(),
+        });
+        let is_here = main
+            .as_ref()
+            .is_some_and(|m| m.computer.eq_ignore_ascii_case(&here));
+        if !is_here
+            && ui
+                .button("Run them on this server")
+                .on_hover_text("Takes effect when Vibe Files next starts on each server.")
+                .clicked()
+        {
+            match crate::server::set_main(env.root) {
+                Ok(()) => {
+                    p.notice = Some(format!(
+                        "Text recognition and B2 sync now run on {here} from the next start of Vibe Files."
+                    ));
+                    p.error = None;
+                }
+                Err(e) => p.error = Some(format!("Could not change it: {e}")),
+            }
+        }
+    });
+    ui.add_space(12.0);
+}
+
 /// What text recognition reads in this catalog (PA-34, Q-66).
 fn reads_section(ui: &mut egui::Ui, p: &mut DevicesPage, env: &mut Env) {
     use vf_ocr::queue::{self, Reads};
@@ -88,6 +134,7 @@ pub fn show(ui: &mut egui::Ui, p: &mut DevicesPage, env: &mut Env) {
     ui.add_space(12.0);
     reads_section(ui, p, env);
     ui.add_space(12.0);
+    servers_section(ui, p, env);
     ui.label(RichText::new("Devices").strong().size(16.0));
     ui.label(widgets::caption(
         "Workstations that have opened this cabinet. Each is recorded when it opens it; a PC \

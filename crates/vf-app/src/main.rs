@@ -13,6 +13,7 @@ mod print;
 mod redact;
 mod screens;
 mod selfcheck;
+mod server;
 mod session;
 mod shared;
 mod shell;
@@ -41,12 +42,17 @@ fn main() -> anyhow::Result<std::process::ExitCode> {
     let personal = std::env::var_os("LOCALAPPDATA")
         .map(PathBuf::from)
         .map(|l| l.join("Vibe Files").join("data"));
-    let mut data = match args.data {
-        Some(d) => d,
-        None => datalock::default_data(
-            &vf_core::exe_dir()
-                .context("locating the exe")?
-                .join("vibe-files.exe"),
+    let exe_dir = vf_core::exe_dir().context("locating the exe")?;
+    let mut data = match (args.data, &personal) {
+        (Some(d), _) => d,
+        // Run from a network path (several servers, PA-36): never a data folder on the share.
+        (None, Some(p)) if server::server_mode() => server::personal_data(
+            &exe_dir.join("data"),
+            p,
+            vf_core::windows_login().as_deref(),
+        ),
+        (None, _) => datalock::default_data(
+            &exe_dir.join("vibe-files.exe"),
             personal.clone(),
             vf_core::windows_login().as_deref(),
         ),
