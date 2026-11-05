@@ -187,3 +187,5 @@ Anyone can open Intake and file, on any PC, at the same time. Each PC's Intake w
 
 - Two people changing Intake's rules or settings at the same moment: the last save wins.
 - Two people filing the same file from a shared inbox: the second gets "file not found" for it (the first already filed it). Nothing is lost. Separate inbox folders per person avoid it.
+
+**On a Remote Desktop server** each person keeps their own data folder (the first login uses `data\` beside the exe, the others `%LOCALAPPDATA%\Vibe Files\data`) and their own Intake folder. Each can add personal inboxes (Intake › **My inboxes** › **Add folder…**), kept for their Windows login only and never in the cabinet's shared settings; Intake shows them on a **My inbox** tab, filed separately from the **Shared inbox** tab.

@@ -137,6 +137,8 @@ fn inside_any(p: &Path, dirs: &[PathBuf]) -> bool {
 
 /// Why an Intake file is in the trash (its row's `tombstone_reason`).
 pub const FROM_INTAKE: &str = "removed from Intake";
+/// A file from a person's own inbox (Q-64): Restore puts it back in that folder.
+pub const FROM_MY_INBOX: &str = "removed from Intake (my inbox)";
 
 /// Moves files out of Intake's inbox into the cabinet trash (owner 2026-11-05, Q-61), as one
 /// Transaction. Each gets a document row that is in the trash from the start (never live, never
@@ -149,6 +151,22 @@ pub fn delete_inbox_files(
     files: &[PathBuf],
     inbox_dirs: &[PathBuf],
 ) -> Result<String, String> {
+    delete_inbox_files_with(conn, root, device_id, files, inbox_dirs, &[])
+}
+
+/// [`delete_inbox_files`], with this person's own inboxes (Q-64) too: a file from one of them
+/// is restored to it.
+pub fn delete_inbox_files_with(
+    conn: &mut Connection,
+    root: &Path,
+    device_id: &str,
+    files: &[PathBuf],
+    inbox_dirs: &[PathBuf],
+    personal: &[PathBuf],
+) -> Result<String, String> {
+    let mut all: Vec<PathBuf> = inbox_dirs.to_vec();
+    all.extend(personal.iter().cloned());
+    let inbox_dirs = all.as_slice();
     if files.is_empty() {
         return Err("nothing selected".into());
     }
@@ -163,6 +181,11 @@ pub fn delete_inbox_files(
         }
         let id = vf_core::new_id();
         let at = f.to_string_lossy().into_owned();
+        let reason = if inside_any(f, personal) {
+            FROM_MY_INBOX
+        } else {
+            FROM_INTAKE
+        };
         let size = std::fs::metadata(f).map(|m| m.len() as i64).unwrap_or(0);
         let hash = filer_intake::commit::sha256_file(f)
             .map_err(|e| format!("cannot read {}: {e}", f.display()))?;
@@ -182,7 +205,7 @@ pub fn delete_inbox_files(
                     size.into(),
                     now.clone().into(),
                     device_id.into(),
-                    FROM_INTAKE.into(),
+                    reason.into(),
                 ],
             ))
             .catalog_undo(Stmt::new(
@@ -192,7 +215,7 @@ pub fn delete_inbox_files(
             .audit(AuditEntry::new(
                 "trash",
                 Some(&id),
-                json!({ "from": "intake", "reason": FROM_INTAKE }),
+                json!({ "from": "intake", "reason": reason }),
             ));
     }
     let mut allowed: Vec<&Path> = vec![root];
@@ -288,16 +311,19 @@ pub fn restore(
             // first inbox (the inbox was changed since). Never a folder made up again.
             let boxes = inboxes(root);
             let was = PathBuf::from(&t.rel_path);
-            let mut dst = if inside_any(&was, &boxes) && was.parent().is_some_and(Path::is_dir) {
-                was
-            } else {
-                let name = was.file_name().ok_or("no file name")?;
-                boxes
-                    .iter()
-                    .find(|b| b.is_dir())
-                    .ok_or("Intake has no inbox folder to return it to (Intake › Setup).")?
-                    .join(name)
-            };
+            // A person's own inbox is not in the shared settings: back there while it exists.
+            let mine = t.reason.as_deref() == Some(FROM_MY_INBOX);
+            let mut dst =
+                if (mine || inside_any(&was, &boxes)) && was.parent().is_some_and(Path::is_dir) {
+                    was
+                } else {
+                    let name = was.file_name().ok_or("no file name")?;
+                    boxes
+                        .iter()
+                        .find(|b| b.is_dir())
+                        .ok_or("Intake has no inbox folder to return it to (Intake › Setup).")?
+                        .join(name)
+                };
             while dst.exists() || taken.contains(&dst) {
                 dst = filer_intake::commit::free_path(&dst);
                 if taken.contains(&dst) {

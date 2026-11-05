@@ -237,6 +237,10 @@ pub struct Ingest {
     /// this `config.toml`; each session's remote-scanning source is its own).
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub scanner_by_user: std::collections::BTreeMap<String, String>,
+    /// Each Windows user's own Intake inboxes (owner 2026-11-05, Q-64: several people on one
+    /// Remote Desktop server), watched besides the cabinet's shared inboxes for that user only.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub inboxes_by_user: std::collections::BTreeMap<String, Vec<PathBuf>>,
     /// TWAIN: show the driver's own window, so its settings and profiles (PaperStream IP)
     /// drive the scan instead of the Vibe Files profile. On unless turned off (owner
     /// 2026-11-04).
@@ -257,6 +261,7 @@ impl Default for Ingest {
             print_capture: None,
             scanner: None,
             scanner_by_user: Default::default(),
+            inboxes_by_user: Default::default(),
             driver_ui: true,
             scan_profile: None,
             scan_profiles: vec![],
@@ -276,6 +281,20 @@ impl Ingest {
             .get(user)
             .or(self.scanner.as_ref())
             .map(String::as_str)
+    }
+
+    /// `user`'s own Intake inboxes.
+    pub fn my_inboxes(&self, user: &str) -> &[PathBuf] {
+        self.inboxes_by_user.get(user).map_or(&[], Vec::as_slice)
+    }
+
+    /// Sets `user`'s own Intake inboxes (none: forgotten).
+    pub fn set_my_inboxes(&mut self, user: &str, dirs: Vec<PathBuf>) {
+        if dirs.is_empty() {
+            self.inboxes_by_user.remove(user);
+        } else {
+            self.inboxes_by_user.insert(user.to_string(), dirs);
+        }
     }
 
     /// Remembers `id` for `user` and as the workstation's default.

@@ -1882,6 +1882,86 @@ mod tests {
             && t.reason.as_deref() == Some(vf_fs::trash::FROM_INTAKE)));
     }
 
+    /// Q-64 (owner 2026-11-05): a person's own inbox, kept for their Windows login only, gives
+    /// Intake a My inbox tab with its own queue; Move to trash from it restores back there.
+    #[test]
+    fn intake_has_a_my_inbox_tab_for_this_login() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("Clients");
+        let inbox = tmp.path().join("Inbox");
+        let mine = tmp.path().join("Mine");
+        std::fs::create_dir_all(&inbox).unwrap();
+        std::fs::create_dir_all(&mine).unwrap();
+        let req = CreateRequest {
+            root: &root,
+            name: "Firm",
+        };
+        drop(session::create(&tmp.path().join("pc1"), "dev-1", &req).unwrap());
+        let master = vf_fs::clients::master_dir(&root);
+        let (mut fs, _) = filer_intake::config::Settings::load_or_default(&master);
+        fs.inboxes = vec![inbox.clone()];
+        fs.save(&master).unwrap();
+        filer_pdf::pdf::write_test_pdf(&inbox.join("shared.pdf"), &["x"]);
+        let own = mine.join("own.pdf");
+        filer_pdf::pdf::write_test_pdf(&own, &["y"]);
+        let mut h = harness(&tmp.path().join("pc1b"));
+        let login = vf_core::windows_login().unwrap_or_default();
+        h.state_mut()
+            .config
+            .ingest
+            .set_my_inboxes(&login, vec![mine.clone()]);
+        click(&mut h, "Open existing");
+        type_into(&mut h, "Cabinet folder", &root.display().to_string());
+        click(&mut h, "Open cabinet");
+        settle(&mut h);
+        h.state_mut().tab = Tab::Intake;
+        h.run_steps(10);
+        h.get_by_label("Preview").click();
+        let wait =
+            |h: &mut egui_kittest::Harness<'static, VibeFilesApp>,
+             what: &str,
+             ok: &dyn Fn(&egui_kittest::Harness<'static, VibeFilesApp>) -> bool| {
+                let start = std::time::Instant::now();
+                while !ok(h) {
+                    assert!(
+                        start.elapsed() < std::time::Duration::from_secs(30),
+                        "{what}"
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(30));
+                    h.step();
+                }
+            };
+        wait(&mut h, "both tabs", &|h| {
+            h.query_by_label("My inbox (1)").is_some()
+        });
+        assert!(h.query_by_label("Shared inbox (1)").is_some());
+        assert!(
+            h.query_by_label("own.pdf").is_none(),
+            "not on the shared tab"
+        );
+        h.get_by_label("My inbox (1)").click();
+        wait(&mut h, "my file listed", &|h| {
+            h.query_by_label("own.pdf").is_some()
+        });
+        assert!(h.query_by_label("shared.pdf").is_none());
+        h.get_by_label("own.pdf").click_secondary();
+        h.run_steps(3);
+        h.get_by_label("Move to trash").click();
+        h.run_steps(3);
+        wait(&mut h, "trashed", &|_| !own.exists());
+        let Screen::Open(o) = &mut h.state_mut().screen else {
+            unreachable!()
+        };
+        let it = vf_fs::trash::list(&o.opened.conn, &root)
+            .unwrap()
+            .into_iter()
+            .find(|t| t.rel_path.ends_with("own.pdf"))
+            .unwrap();
+        assert_eq!(it.reason.as_deref(), Some(vf_fs::trash::FROM_MY_INBOX));
+        vf_fs::trash::restore(&mut o.opened.conn, &root, "dev-1", &[it]).unwrap();
+        assert!(own.is_file(), "back in my inbox");
+    }
+
     /// P02 step 1: the Intake tab mounts Filer Desktop on the open cabinet: its data folder is
     /// `<cabinet>/_Vibe/` (Q-19), and its settings carry this cabinet's root and firm id.
     #[test]

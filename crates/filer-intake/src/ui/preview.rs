@@ -43,6 +43,9 @@ const PANE_AUTO_WIDTH: f32 = 1800.0;
 type PageCounts = Vec<(PathBuf, (u64, Option<usize>))>;
 
 pub struct PreviewScreen {
+    /// "My inbox" tab (this person's own inboxes) instead of "Shared inbox"; only offered
+    /// when the host gave personal inboxes. Each tab is its own batch.
+    mine: bool,
     /// Files in this batch, in queue order. `None`: take the whole queue on the next frame.
     batch_files: Option<Vec<PathBuf>>,
     edits: HashMap<PathBuf, RowEdits>,
@@ -160,6 +163,7 @@ struct CommitJob {
 impl Default for PreviewScreen {
     fn default() -> Self {
         Self {
+            mine: false,
             batch_files: None,
             edits: HashMap::new(),
             batch: BatchSettings::default(),
@@ -546,11 +550,13 @@ impl PreviewScreen {
         // New arrivals wait for Refresh while there is a batch to review (X63); with nothing
         // left in the batch, the whole queue becomes the batch.
         if self.batch_files.is_none() || self.batch(state).is_empty() {
+            let mine = self.mine && !state.personal_inboxes.is_empty();
             self.batch_files = Some(
                 state
                     .intake
                     .queue()
                     .iter()
+                    .filter(|q| state.is_personal(q) == mine)
                     .map(|q| q.path.clone())
                     .collect(),
             );
@@ -774,6 +780,7 @@ impl PreviewScreen {
                 &format!("Not watching {}: {e}", inbox.display()),
             );
         }
+        self.inbox_tabs(ui, state);
         self.toolbar_ui(ui, state);
         self.arrivals_ui(ui, state);
         if let Some(job) = &self.commit_job {
@@ -985,14 +992,53 @@ impl PreviewScreen {
         });
     }
 
+    /// Shared inbox | My inbox, when the host gave this person inboxes of their own. Switching
+    /// starts that tab's batch (not while filing).
+    fn inbox_tabs(&mut self, ui: &mut egui::Ui, state: &AppState) {
+        if state.personal_inboxes.is_empty() {
+            return;
+        }
+        let (mut shared, mut mine) = (0, 0);
+        for q in state.intake.queue() {
+            if state.is_personal(q) {
+                mine += 1;
+            } else {
+                shared += 1;
+            }
+        }
+        let filing = self.commit_job.is_some();
+        ui.add_enabled_ui(!filing, |ui| {
+            ui.horizontal(|ui| {
+                for (on, text) in [
+                    (false, format!("Shared inbox ({shared})")),
+                    (true, format!("My inbox ({mine})")),
+                ] {
+                    if ui.selectable_label(self.mine == on, text).clicked() && self.mine != on {
+                        self.show_mine(on);
+                    }
+                }
+            });
+        });
+        ui.add_space(4.0);
+    }
+
+    /// Switches the tab: its own batch, nothing ticked.
+    pub fn show_mine(&mut self, on: bool) {
+        self.mine = on;
+        self.batch_files = None;
+        self.selected.clear();
+        self.focused = None;
+    }
+
     /// "N new files arrived · Refresh" (the batch is kept while reviewing, X63).
     fn arrivals_ui(&mut self, ui: &mut egui::Ui, state: &AppState) {
         let in_batch = self.batch_files.as_deref().unwrap_or(&[]);
+        let mine = self.mine && !state.personal_inboxes.is_empty();
         let new = state
             .intake
             .queue()
             .iter()
-            .filter(|q| !in_batch.contains(&q.path))
+            .filter(|q| state.is_personal(q) == mine && !in_batch.contains(&q.path))
             .count();
         if new > 0 {
             ui.horizontal(|ui| {
@@ -1128,13 +1174,31 @@ impl PreviewScreen {
                     egui::WidgetInfo::labeled(egui::Role::Button, true, "Apply rule to ticked")
                 });
                 r.on_hover_text("File every ticked file by this rule (its folder and name)");
+                // Only files from an inbox: a combined file, a split piece or a zip entry is a
+                // file Filer made, a dropped-in file is not the inbox's (QA 2026-11-05).
+                let from_inbox: Vec<PathBuf> = ticked
+                    .iter()
+                    .filter(|t| {
+                        self.proposals.iter().any(|p| {
+                            &p.file.path == *t && matches!(p.file.source, Source::Inbox(_))
+                        })
+                    })
+                    .cloned()
+                    .collect();
                 if state.host_trash
                     && ui
-                        .button("Move to trash")
-                        .on_hover_text("Take every ticked file out of the inbox into the trash")
+                        .add_enabled(!from_inbox.is_empty(), egui::Button::new("Move to trash"))
+                        .on_hover_text(if from_inbox.len() == ticked.len() {
+                            "Take every ticked file out of the inbox into the trash".to_string()
+                        } else {
+                            format!(
+                                "Take the {} ticked files from the inbox into the trash (combined, split or zip rows are left)",
+                                from_inbox.len()
+                            )
+                        })
                         .clicked()
                 {
-                    state.trash_request = Some(ticked.clone());
+                    state.trash_request = Some(from_inbox);
                 }
                 if ui.button("Untick all").clicked() {
                     self.selected.clear();
@@ -1852,12 +1916,20 @@ impl PreviewScreen {
                 for (i, pr) in self.proposals.iter().enumerate() {
                     let edits = self.edits.get(&pr.file.path);
                     let bg = ui.painter().add(egui::Shape::Noop);
-                    let row = Frame::new()
-                        .inner_margin(Margin::symmetric(10, 6))
-                        .show(ui, |ui| {
-                            ui.set_width(width - 20.0);
-                            ui.horizontal_top(|ui| row_ui(ui, i, pr, edits, &ctx, &mut actions));
-                        });
+                    // Ids by the row's file, not its place: a menu left open while the queue
+                    // re-plans stays on its file (QA 2026-11-05).
+                    let row = ui
+                        .push_id(&pr.file.path, |ui| {
+                            Frame::new()
+                                .inner_margin(Margin::symmetric(10, 6))
+                                .show(ui, |ui| {
+                                    ui.set_width(width - 20.0);
+                                    ui.horizontal_top(|ui| {
+                                        row_ui(ui, i, pr, edits, &ctx, &mut actions)
+                                    });
+                                })
+                        })
+                        .inner;
                     let rect = row.response.rect;
                     let attention = matches!(
                         pr.status,
@@ -2919,7 +2991,7 @@ fn row_ui(
             if ctx.host_trash
                 && group.is_none()
                 && split.is_none()
-                && !matches!(p.file.source, Source::Zip { .. })
+                && matches!(p.file.source, Source::Inbox(_))
                 && ui.button("Move to trash").clicked()
             {
                 actions.push(RowAction::Trash(path.clone()));
@@ -3049,7 +3121,7 @@ fn row_ui(
                     .rules
                     .iter()
                     .position(|(id, _)| p.rule_id.as_deref() == Some(id.as_str()));
-                let key = ui.make_persistent_id(("rule_search", i));
+                let key = ui.make_persistent_id(("rule_search", path));
                 if let Some(k) = crate::ui::widgets::search_list(ui, key, &names, current) {
                     actions.push(RowAction::SetRule(path.clone(), ctx.rules[k].0.clone()));
                     ui.close();

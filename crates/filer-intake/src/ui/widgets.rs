@@ -68,7 +68,12 @@ pub fn search_list(
         .collect();
     let mut pick = None;
     if te.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-        pick = hits.first().copied();
+        // Nothing typed: keep what is chosen (nothing for a menu with no current choice).
+        pick = if words.is_empty() {
+            current
+        } else {
+            hits.first().copied()
+        };
     }
     if !words.is_empty() {
         ui.label(

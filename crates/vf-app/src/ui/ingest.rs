@@ -128,6 +128,29 @@ pub fn check_staging(dir: &Path, root: &Path, inboxes: &[PathBuf]) -> Result<(),
     Ok(())
 }
 
+/// A folder for a person's own Intake inbox (Q-64): outside the cabinet, not one of the shared
+/// inboxes, not the Scans or print capture folder (those deliver into the shared inbox).
+pub fn check_my_inbox(
+    dir: &Path,
+    root: &Path,
+    shared: &[PathBuf],
+    staging: &[PathBuf],
+) -> Result<(), String> {
+    check_staging(dir, root, shared)?;
+    let canon = |p: &Path| std::fs::canonicalize(p).ok();
+    if staging
+        .iter()
+        .filter_map(|s| canon(s))
+        .any(|s| Some(s) == canon(dir))
+    {
+        return Err(format!(
+            "{} is the Scans or print capture folder. Pick another folder for your inbox.",
+            dir.display()
+        ));
+    }
+    Ok(())
+}
+
 /// Filer's inbox folders for this cabinet (its `config.json`).
 fn filer_inboxes(root: &Path) -> Vec<PathBuf> {
     filer_intake::config::Settings::load_or_default(&vf_fs::clients::master_dir(root))
@@ -517,6 +540,61 @@ impl IngestState {
         self.checked = None;
     }
 
+    /// My inboxes (Q-64): this Windows login's own Intake inboxes, added and removed here.
+    fn my_inboxes_row(&mut self, ui: &mut egui::Ui, prefs: &Ingest, root: &Path) {
+        let login = vf_core::windows_login().unwrap_or_default();
+        let mine = prefs.my_inboxes(&login).to_vec();
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new("My inboxes").strong())
+                .on_hover_text(
+                    "Folders only you watch, on Intake's My inbox tab (this Windows login only)",
+                );
+            if mine.is_empty() {
+                ui.label(widgets::caption("none"));
+            }
+            for (i, d) in mine.iter().enumerate() {
+                ui.label(RichText::new(d.display().to_string()).monospace());
+                let x = ui
+                    .small_button("×")
+                    .on_hover_text("Stop watching this folder");
+                let name = format!("Remove my inbox {}", d.display());
+                x.widget_info(|| {
+                    egui::WidgetInfo::labeled(egui::accesskit::Role::Button, true, &name)
+                });
+                if x.clicked() {
+                    let mut p = prefs.clone();
+                    let mut v = mine.clone();
+                    v.remove(i);
+                    p.set_my_inboxes(&login, v);
+                    self.changed = Some(p);
+                }
+            }
+            if ui
+                .button("Add folder…")
+                .on_hover_text("A folder only you file from (your Windows login)")
+                .clicked()
+                && let Some(dir) = rfd::FileDialog::new().pick_folder()
+            {
+                let staging: Vec<PathBuf> = [prefs.scans.clone(), prefs.print_capture.clone()]
+                    .into_iter()
+                    .flatten()
+                    .collect();
+                match check_my_inbox(&dir, root, &filer_inboxes(root), &staging) {
+                    Ok(()) if mine.contains(&dir) => {}
+                    Ok(()) => {
+                        let mut p = prefs.clone();
+                        let mut v = mine.clone();
+                        v.push(dir);
+                        p.set_my_inboxes(&login, v);
+                        self.changed = Some(p);
+                    }
+                    Err(e) => self.warning = Some(e),
+                }
+            }
+            ui.label(widgets::caption("only this Windows login"));
+        });
+    }
+
     pub fn strip(
         &mut self,
         ui: &mut egui::Ui,
@@ -581,6 +659,7 @@ impl IngestState {
                         }
                     }
                 });
+                self.my_inboxes_row(ui, prefs, root);
                 self.scan_row(ui, prefs);
                 for (i, d) in self.pre_dupes.iter().enumerate() {
                     ui.horizontal(|ui| {
@@ -629,6 +708,32 @@ fn file_name(p: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Q-64: a personal inbox is outside the cabinet and is not a shared inbox, the Scans folder
+    /// or the print capture folder.
+    #[test]
+    fn my_inbox_folders_are_checked() {
+        let t = tempfile::tempdir().unwrap();
+        let [root, shared, scans, mine] = ["cab", "shared", "scans", "mine"].map(|d| {
+            let p = t.path().join(d);
+            std::fs::create_dir_all(&p).unwrap();
+            p
+        });
+        let inside = root.join("Inbox");
+        std::fs::create_dir_all(&inside).unwrap();
+        let ok = |d: &Path| {
+            check_my_inbox(
+                d,
+                &root,
+                std::slice::from_ref(&shared),
+                std::slice::from_ref(&scans),
+            )
+        };
+        assert!(ok(&mine).is_ok());
+        assert!(ok(&inside).is_err(), "inside the cabinet");
+        assert!(ok(&shared).is_err(), "a shared inbox");
+        assert!(ok(&scans).is_err(), "the Scans folder");
+    }
 
     /// Browse's Scan (owner 2026-11-04) says why it cannot scan instead of doing nothing.
     #[test]

@@ -665,12 +665,18 @@ impl IntakeTab {
                 d.req.name = req.name.trim().to_string();
                 self.new_client = Some((d, req.file));
             }
+            // This Windows login's own inboxes (Q-64), besides the shared ones.
+            let login = vf_core::windows_login().unwrap_or_default();
+            let mine = prefs.my_inboxes(&login).to_vec();
+            f.set_personal_inboxes(mine.clone());
             // Move to trash: the files go to the cabinet trash, restorable to the inbox (Q-61).
             f.offer_trash(true);
             if let Some(files) = f.take_trash_request() {
                 // Only from the inboxes Intake is set to (the check inside refuses others).
                 let dirs = vf_fs::trash::inboxes(root);
-                match vf_fs::trash::delete_inbox_files(conn, root, device_id, &files, &dirs) {
+                match vf_fs::trash::delete_inbox_files_with(
+                    conn, root, device_id, &files, &dirs, &mine,
+                ) {
                     Ok(_) => {
                         f.files_taken(&files);
                         self.catalog_changed = true;

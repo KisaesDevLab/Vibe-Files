@@ -143,6 +143,10 @@ pub struct AppState {
     pub trash_request: Option<Vec<PathBuf>>,
     /// What the host read from a file (Vibe Files' form reading), shown on its row.
     pub host_notes: std::collections::HashMap<PathBuf, String>,
+    /// This person's own inboxes (owner 2026-11-05: several people on one Remote Desktop
+    /// server), from a host that keeps them per Windows login. Watched besides the shared ones,
+    /// never saved into the shared settings; Preview shows them on a "My inbox" tab.
+    pub personal_inboxes: Vec<PathBuf>,
 }
 
 /// "New client…" pressed on a row (host only, [`AppState::host_new_client`]): the file, and
@@ -157,6 +161,27 @@ pub struct NewClientRequest {
 }
 
 impl AppState {
+    /// The shared inboxes, then this person's own (each once).
+    pub fn watched_inboxes(&self) -> Vec<PathBuf> {
+        let mut v = self.settings.inboxes.clone();
+        for p in &self.personal_inboxes {
+            if !v.contains(p) {
+                v.push(p.clone());
+            }
+        }
+        v
+    }
+
+    /// Whether a queued file came from one of this person's own inboxes.
+    pub fn is_personal(&self, q: &crate::intake::QueuedFile) -> bool {
+        matches!(&q.source, crate::intake::Source::Inbox(i) if self.personal_inboxes.contains(i))
+            && !self
+                .settings
+                .inboxes
+                .iter()
+                .any(|s| matches!(&q.source, crate::intake::Source::Inbox(i) if i == s))
+    }
+
     /// Loads the template and folder index from `data_dir` (small local files).
     pub fn load(
         data_dir: PathBuf,
@@ -221,6 +246,7 @@ impl AppState {
             host_trash: false,
             trash_request: None,
             host_notes: Default::default(),
+            personal_inboxes: Vec::new(),
         }
     }
 
@@ -491,6 +517,19 @@ impl FilerApp {
         }
     }
 
+    /// This person's own inboxes (a host that keeps them per Windows login): watched besides the
+    /// shared ones, shown on Preview's "My inbox" tab, never saved into the shared settings.
+    // Used by a host that embeds Filer (Vibe Files), not by this program.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn set_personal_inboxes(&mut self, inboxes: Vec<PathBuf>) {
+        if self.shared.personal_inboxes != inboxes {
+            self.shared.personal_inboxes = inboxes;
+            if self.shared.personal_inboxes.is_empty() {
+                self.preview.show_mine(false);
+            }
+        }
+    }
+
     /// Rows whose file name no rule names, for a host to read (Vibe Files' form reading).
     // Used by a host that embeds Filer (Vibe Files), not by this program.
     #[cfg_attr(not(test), allow(dead_code))]
@@ -545,9 +584,10 @@ impl FilerApp {
         let rules = RulesScreen::new(&shared);
         shared.intake.start(ctx);
         shared.sniffer = Sniffer::new(ctx, shared.pdfium_dir.clone());
+        let watched = shared.watched_inboxes();
         shared
             .intake
-            .set_inboxes(&shared.settings.inboxes, shared.settings.inbox_subfolders);
+            .set_inboxes(&watched, shared.settings.inbox_subfolders);
         shared.clients.load(
             ctx,
             shared.data_dir.clone(),
@@ -957,9 +997,16 @@ impl eframe::App for FilerApp {
         }
         let data_dir = self.shared.data_dir.clone();
         self.shared.folders.poll(&ctx, &data_dir);
-        let inboxes = self.shared.settings.inboxes.clone();
+        let inboxes = self.shared.watched_inboxes();
         let subfolders = self.shared.settings.inbox_subfolders;
         self.shared.intake.set_inboxes(&inboxes, subfolders);
+        // A note on a file that left the queue (filed, skipped, taken) goes with it.
+        if !self.shared.host_notes.is_empty() {
+            let queue = self.shared.intake.queue();
+            self.shared
+                .host_notes
+                .retain(|p, _| queue.iter().any(|q| &q.path == p));
+        }
         self.shared.intake.poll();
         self.shared.sniffer.poll();
         self.handle_dropped_files(&ctx);
@@ -2843,6 +2890,28 @@ mod combine_ui_tests {
         h.key_press(egui::Key::Escape);
         h.step();
         h.step();
+        // Enter with nothing typed keeps the row's rule.
+        h.get_all_by_label(&rule).next().unwrap().click();
+        h.step();
+        h.step();
+        h.get_by_label("Type to search").focus();
+        h.step();
+        h.key_press(egui::Key::Enter);
+        h.step();
+        h.step();
+        assert_eq!(
+            h.state()
+                .preview
+                .proposals()
+                .iter()
+                .find(|p| p.file.path == named)
+                .unwrap()
+                .rule_name,
+            rule
+        );
+        h.key_press(egui::Key::Escape);
+        h.step();
+        h.step();
 
         // Right-click › Move to trash hands the host the file; taken, it leaves the queue.
         h.get_by_label("scan0001.pdf").click_secondary();
@@ -2856,6 +2925,79 @@ mod combine_ui_tests {
         h.state_mut().files_taken(&asked);
         settle(&mut h, "taken", |a| a.shared.intake.queue().len() == 1);
         assert!(h.state().shared.host_notes.is_empty());
+    }
+
+    /// Personal inboxes (owner 2026-11-05: several people on one Remote Desktop server): the
+    /// host's folders are watched besides the shared ones, never saved into the shared
+    /// settings, and Preview shows Shared inbox | My inbox, each tab its own batch.
+    #[test]
+    fn personal_inboxes_have_their_own_tab_and_batch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data = tmp.path().join("data");
+        let root = tmp.path().join("root");
+        let shared = tmp.path().join("shared");
+        let mine = tmp.path().join("mine");
+        for d in [&data, &root, &shared, &mine] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let csv = tmp.path().join("clients.csv");
+        std::fs::write(&csv, "id,name\n1001,\"Smith, John\"\n").unwrap();
+        crate::pdf::write_test_pdf(&shared.join("Smith, John_1001_2025 Organizer.pdf"), &["x"]);
+        crate::pdf::write_test_pdf(&mine.join("scan0001.pdf"), &["x"]);
+        let settings = Settings {
+            root: Some(root.clone()),
+            inboxes: vec![shared.clone()],
+            csv_path: Some(csv.clone()),
+            column_map: ColumnMap {
+                id: Some("id".into()),
+                name: Some("name".into()),
+                extras: vec![],
+            },
+            ..Settings::default()
+        };
+        let d = data.clone();
+        let m = mine.clone();
+        let mut h = HarnessBuilder::default()
+            .with_theme(egui::Theme::Light)
+            .with_size([1600.0, 1000.0])
+            .build_eframe(move |cc| {
+                crate::rules::seed_tax(&d);
+                let mut app = FilerApp::new(&cc.egui_ctx, AppState::load(d, settings, true, None));
+                app.set_personal_inboxes(vec![m]);
+                app
+            });
+        settle(&mut h, "queue", |a| {
+            a.shared.intake.queue().len() == 2 && a.shared.clients.list().is_some()
+        });
+        h.get_by_label("Preview").click();
+        settle(&mut h, "plan", |a| plan_ready(a, 1));
+        h.step();
+        assert!(h.query_by_label("Shared inbox (1)").is_some());
+        assert!(h.query_by_label("My inbox (1)").is_some());
+        let files = |h: &Harness<'_, FilerApp>| -> Vec<String> {
+            h.state()
+                .preview
+                .proposals()
+                .iter()
+                .map(|p| crate::ui::theme::file_name(&p.file.path))
+                .collect()
+        };
+        assert_eq!(files(&h), ["Smith, John_1001_2025 Organizer.pdf"]);
+        h.get_by_label("My inbox (1)").click();
+        settle(&mut h, "mine", |a| {
+            a.preview.plan_idle()
+                && a.preview.proposals().len() == 1
+                && a.preview.proposals()[0].file.path.starts_with(&mine)
+        });
+        assert_eq!(files(&h), ["scan0001.pdf"]);
+        // The personal inbox is never written into the shared settings.
+        assert_eq!(h.state().shared.settings.inboxes, vec![shared.clone()]);
+        // Taken away again: back to one queue.
+        h.state_mut().set_personal_inboxes(vec![]);
+        settle(&mut h, "shared only", |a| {
+            a.shared.intake.queue().len() == 1
+        });
+        assert!(h.query_by_label("My inbox (0)").is_none());
     }
 
     /// The side pane shows the row last clicked; ticked rows get one client and one rule at once

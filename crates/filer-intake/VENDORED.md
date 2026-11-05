@@ -6,9 +6,9 @@
 |---|---|
 | Repo | `KisaesDevLab/Vibe-Filer-Desktop` (private) |
 | Branch | `master` |
-| Commit | `29db764` on `master` ("feat(host): Move to trash, rows to read, searchable rule menus (V21)", 2026-11-05); before: `6433c04` on `master` ("feat(host): Setup lock and \"New client…\" for a program that embeds Filer", 0.2.6 + the Intake preview pane, ticked-row actions and host hooks, 2026-11-04) |
+| Commit | `f2504fe` on `master` ("feat(host): personal inboxes with a My inbox tab; QA of the V21 hooks (V22)", 2026-11-05); before: `29db764` (V21); `6433c04` on `master` ("feat(host): Setup lock and \"New client…\" for a program that embeds Filer", 0.2.6 + the Intake preview pane, ticked-row actions and host hooks, 2026-11-04) |
 | Vendored | 2026-11-02, P00 step 2 at `ea4e726` (0.2.4); re-vendored 2026-11-04, PHASES PA-26 |
-| Upstream tests | 207 at this commit; all pass after the split (filer-core 64 · filer-pdf 13 · filer-intake 130) |
+| Upstream tests | 208 at this commit; all pass after the split (filer-core 64 · filer-pdf 13 · filer-intake 131) |
 
 Upstream is one binary crate with no `lib.rs`. The three `filer-*` crates are a mechanical split
 of its `src/` (QUESTIONS Q-16). Upstream `main.rs` is not vendored; `vf-app` is the entry point.
@@ -65,6 +65,14 @@ the rest of intake. Moving it would need a logic edit (Q-16: merge rather than e
   menu and Apply rule… with a Type to search box. `app.rs`, `ui/preview.rs`, `ui/widgets.rs`
   copied; the diff against upstream is still only the four attribute lines; upstream's 207 tests
   pass.
+
+- **2026-11-05, PA-32: `29db764` → `f2504fe`: personal inboxes and V21 QA (V22).**
+  `set_personal_inboxes` (a person's own inboxes, watched besides the shared ones, never saved
+  into the shared settings; Preview's Shared inbox | My inbox tabs, each its own batch); files of
+  an inbox no longer watched leave the queue; rows keep their ids by file; Enter with nothing
+  typed keeps a menu's choice; Move to trash only for files from an inbox; host notes leave with
+  their files. `app.rs`, `intake.rs`, `ui/preview.rs`, `ui/widgets.rs` copied; still only the
+  four attribute lines differ; upstream's 208 tests pass.
 
 ## Re-vendoring
 

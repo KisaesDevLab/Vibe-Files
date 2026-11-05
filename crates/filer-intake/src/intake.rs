@@ -530,6 +530,17 @@ impl IntakeManager {
         }
         self.inboxes = Some((inboxes.to_vec(), subfolders));
         self.send(Msg::SetInboxes(inboxes.to_vec(), subfolders));
+        // Files of an inbox no longer watched leave the queue (a host took a personal inbox
+        // away); they are listed again if it comes back.
+        let gone: Vec<PathBuf> = self
+            .queue
+            .iter()
+            .filter(|q| matches!(&q.source, Source::Inbox(i) if !inboxes.contains(i)))
+            .map(|q| q.path.clone())
+            .collect();
+        for p in gone {
+            self.remove(&p);
+        }
     }
 
     /// Files or folders (recursively) from drag-drop or Browse.
