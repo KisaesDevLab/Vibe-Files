@@ -327,7 +327,7 @@ pub fn show(ui: &mut egui::Ui, a: &mut Admin, env: &mut Env, sweep: SweepEnv) {
         Page::Audit => crate::ui::audit::show(ui, &mut a.audit, env, a.chain.as_ref()),
         Page::Sweep => crate::ui::sweep::show(ui, sweep.state, env, sweep.catalog),
         Page::Disposition => {
-            crate::ui::disposition::show(ui, &mut a.disposition, env);
+            crate::ui::disposition::show(ui, &mut a.disposition, env, sweep.catalog);
             if std::mem::take(&mut a.disposition.changed) {
                 a.changed = true;
             }

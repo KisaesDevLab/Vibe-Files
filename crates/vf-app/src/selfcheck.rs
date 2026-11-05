@@ -29,22 +29,40 @@ fn check(name: &'static str, r: Result<String, String>) -> Check {
     }
 }
 
-/// Runs every check. `sync_configured`: sync is set up for this cabinet on this PC.
+/// Runs every check when a cabinet opens. The catalog integrity check reads the whole file
+/// (a minute or more for ~900K documents, PA-34): once a month (Q-68).
 pub fn run(conn: &Connection, root: &Path, sync_configured: bool) -> Vec<Check> {
+    run_with(conn, root, sync_configured, false)
+}
+
+/// Runs every check. `sync_configured`: sync is set up for this cabinet on this PC.
+/// `catalog_always`: the catalog integrity check runs even when this month's has run
+/// (`vibe-files check`).
+pub fn run_with(
+    conn: &Connection,
+    root: &Path,
+    sync_configured: bool,
+    catalog_always: bool,
+) -> Vec<Check> {
     let mut out = vec![];
     out.push(check(
         "Catalog integrity",
-        conn.query_row("PRAGMA quick_check", [], |r| r.get::<_, String>(0))
-            .map_err(|e| e.to_string())
-            .and_then(|s| {
-                if s == "ok" {
-                    Ok("ok".into())
-                } else {
-                    Err(format!(
-                        "the catalog is damaged ({s}); run `vibe-files rebuild`"
-                    ))
-                }
-            }),
+        if catalog_always || vf_core::db::health_check_due(conn) {
+            vf_core::db::health_check(conn)
+                .map_err(|e| e.to_string())
+                .and_then(|problems| {
+                    if problems.is_empty() {
+                        Ok("ok".into())
+                    } else {
+                        Err(format!(
+                            "the catalog is damaged ({}); run `vibe-files rebuild`",
+                            problems.join("; ")
+                        ))
+                    }
+                })
+        } else {
+            Ok("checked this month".into())
+        },
     ));
     out.push(check(
         "Audit chain",

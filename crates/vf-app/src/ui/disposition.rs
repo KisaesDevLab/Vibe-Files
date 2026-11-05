@@ -6,7 +6,7 @@
 //! its own.
 
 use std::collections::BTreeSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use egui::{RichText, TextEdit};
 use vf_fs::disposition::{self, Line, Report};
@@ -17,6 +17,8 @@ use crate::ui::{theme, widgets};
 #[derive(Default)]
 pub struct DispositionPage {
     report: Option<Report>,
+    /// The list being made on its own thread (it reads every document, PA-34).
+    job: Option<std::sync::mpsc::Receiver<Result<Report, String>>>,
     picked: BTreeSet<String>,
     pin: String,
     /// Asking "Approve N for destruction?"
@@ -32,23 +34,66 @@ pub struct DispositionPage {
 impl DispositionPage {
     pub fn refresh(&mut self) {
         self.report = None;
+        self.job = None;
     }
 }
 
-pub fn show(ui: &mut egui::Ui, p: &mut DispositionPage, env: &mut Env) {
+pub fn show(ui: &mut egui::Ui, p: &mut DispositionPage, env: &mut Env, catalog: &Path) {
     let today = vf_core::retention::today();
-    if p.report.is_none() {
-        match disposition::eligible(env.conn, env.root, today) {
-            Ok(r) => {
-                let live: BTreeSet<String> = r.lines.iter().map(|l| l.doc_id.clone()).collect();
-                p.picked.retain(|id| live.contains(id));
-                p.report = Some(r);
+    if let Some(rx) = &p.job {
+        let got = match rx.try_recv() {
+            Ok(r) => Some(r),
+            Err(std::sync::mpsc::TryRecvError::Empty) => None,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                Some(Err("the list could not be made".to_string()))
             }
-            Err(e) => {
-                p.error = Some(e);
-                p.report = Some(Report::default());
+        };
+        if let Some(r) = got {
+            p.job = None;
+            match r {
+                Ok(r) => {
+                    let live: BTreeSet<String> = r.lines.iter().map(|l| l.doc_id.clone()).collect();
+                    p.picked.retain(|id| live.contains(id));
+                    p.report = Some(r);
+                }
+                Err(e) => {
+                    p.error = Some(e);
+                    p.report = Some(Report::default());
+                }
             }
         }
+    }
+    if p.report.is_none() && p.job.is_none() && cfg!(test) {
+        // Tests: at once (a result arriving between frames would land at a random step).
+        let (tx, rx) = std::sync::mpsc::channel();
+        let _ = tx.send(disposition::eligible(env.conn, env.root, today));
+        p.job = Some(rx);
+        return show(ui, p, env, catalog);
+    }
+    if p.report.is_none() {
+        if p.job.is_none() {
+            let (tx, rx) = std::sync::mpsc::channel();
+            let (catalog, root, ctx) = (
+                catalog.to_path_buf(),
+                env.root.to_path_buf(),
+                ui.ctx().clone(),
+            );
+            let _ = std::thread::Builder::new()
+                .name("disposition".into())
+                .spawn(move || {
+                    let r = vf_core::db::open(&catalog, vf_core::db::Storage::Local)
+                        .map_err(|e| e.to_string())
+                        .and_then(|conn| disposition::eligible(&conn, &root, today));
+                    let _ = tx.send(r);
+                    ctx.request_repaint();
+                });
+            p.job = Some(rx);
+        }
+        ui.horizontal(|ui| {
+            ui.spinner();
+            ui.label("Reading every document's retention\u{2026}");
+        });
+        return;
     }
     let rep = p.report.clone().unwrap_or_default();
     ui.horizontal(|ui| {

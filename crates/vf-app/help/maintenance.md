@@ -6,7 +6,7 @@ How Vibe Files keeps its catalog in step with the folders: the checks it runs wh
 
 Each time a cabinet opens, Vibe Files first puts back any change a crash cut short. Then it checks, in the background:
 
-- **Catalog integrity**: the catalog file is not damaged.
+- **Catalog integrity**: the catalog file is not damaged. This reads the whole catalog, so it runs on the first opening of each month; `vibe-files check` always runs it.
 - **Audit chain**: the [audit trail](help:audit) verifies.
 - **Cabinet reachable**: the cabinet folder can be read and written.
 - **Interrupted changes**: none were left half done.

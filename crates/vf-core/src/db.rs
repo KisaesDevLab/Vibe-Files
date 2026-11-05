@@ -27,6 +27,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/012_client_partner.sql"),
     include_str!("../migrations/013_file_mtime.sql"),
     include_str!("../migrations/014_fts_doc_index.sql"),
+    include_str!("../migrations/015_scale_indexes.sql"),
 ];
 
 /// Schema version this build writes.
@@ -89,8 +90,45 @@ pub fn open(path: &Path, storage: Storage) -> Result<Connection> {
         Storage::Network => "DELETE",
     };
     conn.pragma_update(None, "journal_mode", mode)?;
+    // A large catalog (PA-34): 32 MB of page cache per connection (the default is 2 MB),
+    // sorts and temporary indexes in memory.
+    conn.pragma_update(None, "cache_size", -32_768)?;
+    conn.pragma_update(None, "temp_store", "MEMORY")?;
     migrate(&conn, path)?;
+    // Statistics for the query planner, kept up to date cheaply (SQLite's advice for a
+    // connection that opens: analyse only what needs it, with a limit).
+    let _ = conn.execute_batch("PRAGMA optimize=0x10002;");
     Ok(conn)
+}
+
+/// `local_state` key: the month (`YYYY-MM`) of the last [`health_check`].
+const HEALTH_KEY: &str = "health_check_month";
+
+/// Whether this month's [`health_check`] has not run yet (Q-68: monthly, at startup).
+pub fn health_check_due(conn: &Connection) -> bool {
+    let month = &crate::now_rfc3339()[..7];
+    let last: Option<String> = conn
+        .query_row(
+            "SELECT v FROM local_state WHERE k = ?1",
+            [HEALTH_KEY],
+            |r| r.get(0),
+        )
+        .ok();
+    last.as_deref() != Some(month)
+}
+
+/// SQLite's `quick_check` of the catalog (PA-34): the problems it finds, none when the file is
+/// sound. Records the month it ran.
+pub fn health_check(conn: &Connection) -> Result<Vec<String>> {
+    let mut st = conn.prepare("PRAGMA quick_check(20)")?;
+    let rows: Vec<String> = st
+        .query_map([], |r| r.get(0))?
+        .collect::<std::result::Result<_, _>>()?;
+    conn.execute(
+        "INSERT INTO local_state (k, v) VALUES (?1, ?2) ON CONFLICT(k) DO UPDATE SET v = excluded.v",
+        [HEALTH_KEY, &crate::now_rfc3339()[..7]],
+    )?;
+    Ok(if rows == ["ok"] { vec![] } else { rows })
 }
 
 pub fn user_version(conn: &Connection) -> Result<u32> {
@@ -189,12 +227,31 @@ mod tests {
 
     fn tables(conn: &Connection) -> Vec<String> {
         let mut st = conn
-            .prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
+            .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name")
             .unwrap();
         st.query_map([], |r| r.get(0))
             .unwrap()
             .map(|r| r.unwrap())
             .collect()
+    }
+
+    /// PA-34 (Q-68): the integrity check runs once a month; the scale indexes exist.
+    #[test]
+    fn health_check_runs_monthly() {
+        let t = tempfile::tempdir().unwrap();
+        let conn = open(&t.path().join("c.db"), Storage::Local).unwrap();
+        assert!(health_check_due(&conn));
+        assert!(health_check(&conn).unwrap().is_empty());
+        assert!(!health_check_due(&conn));
+        let n: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type = 'index'
+                 AND name IN ('audit_tx', 'document_tag_tag', 'document_deleted')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 3);
     }
 
     /// P00 done-when (PA-18: a plain SQLite file now): the migrations apply to an empty DB.

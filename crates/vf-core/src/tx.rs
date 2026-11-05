@@ -240,18 +240,29 @@ pub struct Undoable {
 /// login on any workstation (Q-29); rows written before logins were recorded fall back to
 /// this workstation.
 pub fn undo_stack(conn: &Connection, actor: &Actor, except: &[&str]) -> Result<Vec<Undoable>> {
-    let mut st = conn.prepare(
-        "SELECT u.tx_id, u.ts, u.label,
-                (SELECT a.action FROM audit a WHERE json_extract(a.detail, '$.tx') = u.tx_id
+    // The labels left out and the depth are applied before the summaries are looked up, and
+    // those go by the audit_tx index (PA-34: years of audit rows).
+    let marks = vec!["?"; except.len()].join(", ");
+    let not_in = if except.is_empty() {
+        String::new()
+    } else {
+        format!(" AND u.label NOT IN ({marks})")
+    };
+    let mut st = conn.prepare(&format!(
+        "SELECT t.tx_id, t.ts, t.label,
+                (SELECT a.action FROM audit a WHERE json_extract(a.detail, '$.tx') = t.tx_id
                  ORDER BY a.seq LIMIT 1),
                 (SELECT count(DISTINCT a.doc_id) FROM audit a
-                 WHERE json_extract(a.detail, '$.tx') = u.tx_id)
-         FROM undo_record u
-         WHERE u.undone = 0
-           AND (u.user = ?1 OR (u.user IS NULL AND u.device_id = ?2))
-         ORDER BY u.rowid DESC",
-    )?;
-    let rows = st.query_map(rusqlite::params![actor.user, actor.device_id], |r| {
+                 WHERE json_extract(a.detail, '$.tx') = t.tx_id)
+         FROM (SELECT u.tx_id, u.ts, u.label, u.rowid AS r FROM undo_record u
+               WHERE u.undone = 0
+                 AND (u.user = ? OR (u.user IS NULL AND u.device_id = ?)){not_in}
+               ORDER BY u.rowid DESC LIMIT {UNDO_DEPTH}) t
+         ORDER BY t.r DESC"
+    ))?;
+    let mut params: Vec<&dyn rusqlite::ToSql> = vec![&actor.user, &actor.device_id];
+    params.extend(except.iter().map(|l| l as &dyn rusqlite::ToSql));
+    let rows = st.query_map(params.as_slice(), |r| {
         let action: Option<String> = r.get(3)?;
         let docs: i64 = r.get(4)?;
         Ok(Undoable {

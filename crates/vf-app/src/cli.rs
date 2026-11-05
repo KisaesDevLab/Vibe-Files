@@ -190,7 +190,7 @@ pub fn run(cmd: &Command, data: &Path, out: &mut dyn Write) -> Result<i32> {
             let synced = cab
                 .as_ref()
                 .is_ok_and(|c| config.sync.configured_for(&c.cabinet_id));
-            let checks = crate::selfcheck::run(&conn, cabinet, synced);
+            let checks = crate::selfcheck::run_with(&conn, cabinet, synced, true);
             for c in &checks {
                 writeln!(
                     out,
