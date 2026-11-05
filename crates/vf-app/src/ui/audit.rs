@@ -306,17 +306,25 @@ pub fn show(ui: &mut egui::Ui, p: &mut AuditPage, env: &mut Env, chain: Option<&
             .and_then(|c| p.clients.iter().find(|(id, _)| id == c))
             .map_or("Any client".to_string(), |(_, n)| n.clone());
         let l = ui.label("Client");
-        egui::ComboBox::from_id_salt("audit-client")
-            .selected_text(client_label)
-            .width(220.0)
-            .show_ui(ui, |ui| {
-                ui.selectable_value(&mut p.filter.client_id, None, "Any client");
-                for (id, name) in &p.clients {
-                    ui.selectable_value(&mut p.filter.client_id, Some(id.clone()), name);
-                }
-            })
-            .response
-            .labelled_by(l.id);
+        let current = p
+            .filter
+            .client_id
+            .as_ref()
+            .and_then(|c| p.clients.iter().position(|(id, _)| id == c));
+        let clients = &p.clients;
+        let (r, pick) = widgets::search_combo(
+            ui,
+            "audit-client",
+            220.0,
+            client_label,
+            || clients.iter().map(|(_, n)| n.clone()).collect(),
+            current,
+            Some("Any client"),
+        );
+        r.labelled_by(l.id);
+        if let Some(k) = pick {
+            p.filter.client_id = k.map(|k| p.clients[k].0.clone());
+        }
         let la = ui.label("Action");
         egui::ComboBox::from_id_salt("audit-action")
             .selected_text(p.filter.action.clone().unwrap_or_else(|| "Any".into()))

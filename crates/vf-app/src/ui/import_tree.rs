@@ -357,30 +357,28 @@ pub fn show(ui: &mut egui::Ui, p: &mut ImportPage, env: &mut Env, catalog: &Path
                                 })
                                 .unwrap_or_else(|| "(choose)".into());
                             let mut chosen: Option<Option<ClientPick>> = None;
-                            egui::ComboBox::from_id_salt(("import-client", i))
-                                .selected_text(shown)
-                                .width(260.0)
-                                .height(320.0)
-                                .show_ui(ui, |ui| {
-                                    if ui.selectable_label(r.client.is_none(), "(none)").clicked() {
-                                        chosen = Some(None);
-                                    }
-                                    for c in &clients {
-                                        let on =
-                                            r.client.as_ref().is_some_and(|x| x.ext_id == c.ext_id);
-                                        if ui
-                                            .selectable_label(
-                                                on,
-                                                format!("{} ({})", c.name, c.ext_id),
-                                            )
-                                            .clicked()
-                                        {
-                                            chosen = Some(Some(c.clone()));
-                                        }
-                                    }
-                                })
-                                .response
-                                .labelled_by(folder.id);
+                            let current = r
+                                .client
+                                .as_ref()
+                                .and_then(|x| clients.iter().position(|c| c.ext_id == x.ext_id));
+                            let (cr, pick) = widgets::search_combo(
+                                ui,
+                                ("import-client", i),
+                                260.0,
+                                shown,
+                                || {
+                                    clients
+                                        .iter()
+                                        .map(|c| format!("{} ({})", c.name, c.ext_id))
+                                        .collect()
+                                },
+                                current,
+                                Some("(none)"),
+                            );
+                            cr.labelled_by(folder.id);
+                            if let Some(p) = pick {
+                                chosen = Some(p.map(|k| clients[k].clone()));
+                            }
                             if let Some(c) = chosen {
                                 r.include = c.is_some();
                                 r.how = "chosen".into();

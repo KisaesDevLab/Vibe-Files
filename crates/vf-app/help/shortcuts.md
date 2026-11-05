@@ -62,5 +62,6 @@ See [The ten-key tape](help:ten-key).
 
 ## Dialogs and boxes
 
+- Lists of clients, doc types and folders open with a **Type to search** box, the cursor already in it. Every word you type must appear in the choice, in any order (`smith 1001`). Enter picks the first match; Esc or a click outside closes the list.
 - On **Admin is locked**, Enter in **Admin password** is the same as clicking **Unlock**. See [Admin password](help:admin-password).
 - In print capture's test box, Enter is the same as clicking **Try**. See [Print capture](help:print-capture).

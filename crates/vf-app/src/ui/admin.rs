@@ -601,21 +601,24 @@ fn editor(ui: &mut egui::Ui, a: &mut Admin, env: &mut Env) {
                 )
                 .labelled_by(l.id);
                 let pick = ui.label(RichText::new("or").color(theme::ink_muted()));
-                egui::ComboBox::from_id_salt("doc-type-folder-pick")
-                    .selected_text("Pick from template")
-                    .show_ui(ui, |ui| {
-                        if ui.selectable_label(false, "No default").clicked() {
-                            a.form.folder.clear();
-                        }
-                        for f in &a.folders {
-                            if ui.selectable_label(a.form.folder == *f, f).clicked() {
-                                a.form.folder = f.clone();
-                            }
-                        }
-                    })
-                    .response
-                    .labelled_by(pick.id)
+                let current = a.folders.iter().position(|f| *f == a.form.folder);
+                let folders = &a.folders;
+                let (r, chosen) = crate::ui::widgets::search_combo(
+                    ui,
+                    "doc-type-folder-pick",
+                    160.0,
+                    "Pick from template",
+                    || folders.clone(),
+                    current,
+                    Some("No default"),
+                );
+                r.labelled_by(pick.id)
                     .on_hover_text("Folders of the cabinet template");
+                match chosen {
+                    Some(Some(k)) => a.form.folder = a.folders[k].clone(),
+                    Some(None) => a.form.folder.clear(),
+                    None => {}
+                }
             });
             ui.end_row();
             ui.label("");

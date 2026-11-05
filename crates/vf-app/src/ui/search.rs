@@ -354,21 +354,28 @@ fn filters(ui: &mut egui::Ui, s: &mut SearchTab, snap: &Snapshot) {
             });
         ui.horizontal(|ui| {
             let l = ui.label("Client");
-            egui::ComboBox::from_id_salt("search-client")
-                .selected_text(client_name)
-                .width(180.0)
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut f.client, None, "Any client");
-                    for c in &snap.clients {
-                        ui.selectable_value(
-                            &mut f.client,
-                            Some(c.id.clone()),
-                            format!("{} ({})", c.name, c.ext_id),
-                        );
-                    }
-                })
-                .response
-                .labelled_by(l.id);
+            let current = f
+                .client
+                .as_ref()
+                .and_then(|id| snap.clients.iter().position(|c| &c.id == id));
+            let (r, pick) = widgets::search_combo(
+                ui,
+                "search-client",
+                180.0,
+                client_name,
+                || {
+                    snap.clients
+                        .iter()
+                        .map(|c| format!("{} ({})", c.name, c.ext_id))
+                        .collect()
+                },
+                current,
+                Some("Any client"),
+            );
+            r.labelled_by(l.id);
+            if let Some(k) = pick {
+                f.client = k.map(|k| snap.clients[k].id.clone());
+            }
         });
         ui.horizontal(|ui| {
             let yl = ui.label("Year");
@@ -401,24 +408,44 @@ fn filters(ui: &mut egui::Ui, s: &mut SearchTab, snap: &Snapshot) {
         };
         ui.horizontal(|ui| {
             let l = ui.label("Doc type");
-            egui::ComboBox::from_id_salt("search-doctype")
-                .selected_text(dt_name)
-                .width(160.0)
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut f.doc_type, None, "Any doc type");
-                    ui.selectable_value(&mut f.doc_type, Some(DocType::Needed), "Needs doc type");
-                    // Archived types stay searchable (older documents have them), marked.
-                    for (id, name) in &snap.doc_types {
-                        let label = if snap.archived_types.contains(id) {
-                            format!("{name} (archived)")
-                        } else {
-                            name.clone()
-                        };
-                        ui.selectable_value(&mut f.doc_type, Some(DocType::Is(id.clone())), label);
-                    }
-                })
-                .response
-                .labelled_by(l.id);
+            // "Needs doc type", then the doc types (archived ones stay searchable: older
+            // documents have them; marked).
+            let current = match &f.doc_type {
+                None => None,
+                Some(DocType::Needed) => Some(0),
+                Some(DocType::Is(id)) => snap
+                    .doc_types
+                    .iter()
+                    .position(|(i, _)| i == id)
+                    .map(|k| k + 1),
+            };
+            let (r, pick) = widgets::search_combo(
+                ui,
+                "search-doctype",
+                160.0,
+                dt_name,
+                || {
+                    std::iter::once("Needs doc type".to_string())
+                        .chain(snap.doc_types.iter().map(|(id, name)| {
+                            if snap.archived_types.contains(id) {
+                                format!("{name} (archived)")
+                            } else {
+                                name.clone()
+                            }
+                        }))
+                        .collect()
+                },
+                current,
+                Some("Any doc type"),
+            );
+            r.labelled_by(l.id);
+            if let Some(k) = pick {
+                f.doc_type = match k {
+                    None => None,
+                    Some(0) => Some(DocType::Needed),
+                    Some(k) => Some(DocType::Is(snap.doc_types[k - 1].0.clone())),
+                };
+            }
         });
         combo(
             ui,

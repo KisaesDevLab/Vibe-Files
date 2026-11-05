@@ -257,16 +257,25 @@ pub fn show(ctx: &egui::Context, d: &mut CoverSheetDialog, dir: &Path) -> Dialog
                         .and_then(|i| d.clients.get(i))
                         .map(|(id, n, _)| format!("{n} ({id})"))
                         .unwrap_or_else(|| "Choose…".into());
-                    egui::ComboBox::from_id_salt("cover-client")
-                        .width(300.0)
-                        .selected_text(current)
-                        .show_ui(ui, |ui| {
-                            for (i, (id, n, _)) in d.clients.iter().enumerate() {
-                                ui.selectable_value(&mut d.client, Some(i), format!("{n} ({id})"));
-                            }
-                        })
-                        .response
-                        .labelled_by(l.id);
+                    let clients = &d.clients;
+                    let (r, pick) = widgets::search_combo(
+                        ui,
+                        "cover-client",
+                        300.0,
+                        current,
+                        || {
+                            clients
+                                .iter()
+                                .map(|(id, n, _)| format!("{n} ({id})"))
+                                .collect()
+                        },
+                        d.client,
+                        None,
+                    );
+                    r.labelled_by(l.id);
+                    if let Some(p) = pick {
+                        d.client = p;
+                    }
                     ui.end_row();
                 }
                 let l = ui.label("Doc type");
@@ -275,17 +284,20 @@ pub fn show(ctx: &egui::Context, d: &mut CoverSheetDialog, dir: &Path) -> Dialog
                     .and_then(|i| d.doc_types.get(i))
                     .map(|t| t.1.clone())
                     .unwrap_or_else(|| "Not set".into());
-                egui::ComboBox::from_id_salt("cover-doc-type")
-                    .width(300.0)
-                    .selected_text(current)
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(&mut d.doc_type, None, "Not set");
-                        for (i, (_, n)) in d.doc_types.iter().enumerate() {
-                            ui.selectable_value(&mut d.doc_type, Some(i), n);
-                        }
-                    })
-                    .response
-                    .labelled_by(l.id);
+                let types = &d.doc_types;
+                let (r, pick) = widgets::search_combo(
+                    ui,
+                    "cover-doc-type",
+                    300.0,
+                    current,
+                    || types.iter().map(|t| t.1.clone()).collect(),
+                    d.doc_type,
+                    Some("Not set"),
+                );
+                r.labelled_by(l.id);
+                if let Some(p) = pick {
+                    d.doc_type = p;
+                }
                 ui.end_row();
                 let l = ui.label("Tax year");
                 ui.add(
@@ -416,19 +428,26 @@ fn several_list(ui: &mut egui::Ui, d: &mut CoverSheetDialog) {
                             d.doc_types.get(t).map(|t| t.1.clone()).unwrap_or_default()
                         }
                     };
-                    egui::ComboBox::from_id_salt(("cover-row-type", i))
-                        .width(170.0)
-                        .selected_text(text)
-                        .show_ui(ui, |ui| {
-                            ui.selectable_value(&mut row.doc_type, None, "Same as above");
-                            ui.selectable_value(&mut row.doc_type, Some(None), "Not set");
-                            for (t, (_, tn)) in d.doc_types.iter().enumerate() {
-                                ui.selectable_value(&mut row.doc_type, Some(Some(t)), tn);
-                            }
-                        })
-                        .response
-                        .on_hover_text("This client's doc type")
-                        .labelled_by(r.id);
+                    // "Not set", then the doc types; the `none` choice is "Same as above".
+                    let types = &d.doc_types;
+                    let current = row.doc_type.map(|t| t.map_or(0, |t| t + 1));
+                    let (tr, pick) = widgets::search_combo(
+                        ui,
+                        ("cover-row-type", i),
+                        170.0,
+                        text,
+                        || {
+                            std::iter::once("Not set".to_string())
+                                .chain(types.iter().map(|t| t.1.clone()))
+                                .collect()
+                        },
+                        current,
+                        Some("Same as above"),
+                    );
+                    tr.on_hover_text("This client's doc type").labelled_by(r.id);
+                    if let Some(p) = pick {
+                        row.doc_type = p.map(|k| k.checked_sub(1));
+                    }
                     let mut y = row.year.clone().unwrap_or_default();
                     if ui
                         .add(

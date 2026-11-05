@@ -102,6 +102,103 @@ pub fn message_line(ui: &mut egui::Ui, msg: Option<&str>) {
     );
 }
 
+/// A drop-down with a search box, for long lists (clients, doc types; owner 2026-11-05).
+///
+/// Opening it puts the cursor in **Type to search**: every word typed must appear in an item
+/// (any case, anywhere: `smith 1001`). **Enter** picks the first match; a click picks any.
+/// `items` gives the choices' labels (called only while the list is open); `current` the one chosen; `none` an extra first choice
+/// meaning "nothing" ("Not set", "Any client"), offered while nothing is typed. `shown` is the
+/// button's text. Returns the button and, when a choice was made, the new choice (`None` =
+/// the `none` choice).
+pub fn search_combo(
+    ui: &mut egui::Ui,
+    salt: impl std::hash::Hash + std::fmt::Debug,
+    width: f32,
+    shown: impl Into<String>,
+    items: impl FnOnce() -> Vec<String>,
+    current: Option<usize>,
+    none: Option<&str>,
+) -> (egui::Response, Option<Option<usize>>) {
+    let key = ui.make_persistent_id(("search-combo", &salt));
+    let (q_id, focus_id) = (key.with("q"), key.with("focused"));
+    let mut pick: Option<Option<usize>> = None;
+    let r = egui::ComboBox::from_id_salt(&salt)
+        .width(width)
+        .selected_text(shown.into())
+        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+        .show_ui(ui, |ui| {
+            ui.set_min_width(width.max(240.0));
+            let items = items();
+            let mut q: String = ui.data(|d| d.get_temp(q_id)).unwrap_or_default();
+            let te = ui.add(
+                egui::TextEdit::singleline(&mut q)
+                    .hint_text("Type to search")
+                    .desired_width(f32::INFINITY),
+            );
+            // Named for screen readers (a hint is not a name).
+            te.widget_info(|| {
+                egui::WidgetInfo::labeled(egui::accesskit::Role::TextInput, true, "Type to search")
+            });
+            if !ui.data(|d| d.get_temp::<bool>(focus_id).unwrap_or(false)) {
+                te.request_focus();
+                ui.data_mut(|d| d.insert_temp(focus_id, true));
+            }
+            let words: Vec<String> = q
+                .to_lowercase()
+                .split_whitespace()
+                .map(String::from)
+                .collect();
+            ui.data_mut(|d| d.insert_temp(q_id, q));
+            let hits: Vec<usize> = (0..items.len())
+                .filter(|&i| {
+                    let l = items[i].to_lowercase();
+                    words.iter().all(|w| l.contains(w.as_str()))
+                })
+                .collect();
+            if te.lost_focus()
+                && ui.input(|i| i.key_pressed(egui::Key::Enter))
+                && let Some(&h) = hits.first()
+            {
+                pick = Some(Some(h));
+            }
+            if !words.is_empty() {
+                ui.label(caption(format!("{} of {}", hits.len(), items.len())));
+            }
+            if let Some(n) = none.filter(|_| words.is_empty())
+                && ui.selectable_label(current.is_none(), n).clicked()
+            {
+                pick = Some(None);
+            }
+            let row_h = ui.spacing().interact_size.y;
+            egui::ScrollArea::vertical()
+                .id_salt(key.with("list"))
+                .max_height(320.0)
+                .auto_shrink([false, true])
+                .show_rows(ui, row_h, hits.len(), |ui, range| {
+                    for &i in &hits[range] {
+                        if ui.selectable_label(current == Some(i), &items[i]).clicked() {
+                            pick = Some(Some(i));
+                        }
+                    }
+                });
+            if pick.is_some() {
+                ui.close();
+            }
+        });
+    // Shut: the next opening starts with an empty search, cursor in it.
+    if !egui::ComboBox::is_open(ui.ctx(), r.response.id) || pick.is_some() {
+        ui.data_mut(|d| {
+            d.remove::<String>(q_id);
+            d.remove::<bool>(focus_id);
+        });
+    }
+    let mut resp = r.response;
+    if pick.is_some_and(|p| p != current) {
+        resp.mark_changed();
+    }
+    (resp, pick)
+}
+
 /// What a modal dialog did this frame.
 pub enum DialogOutcome<T> {
     Open,
@@ -169,5 +266,67 @@ mod tests {
     fn bad_time_shown_as_is() {
         assert_eq!(local_time("not a time"), "not a time");
         assert_eq!(local_time("2026-11-02T14:05:00Z").len(), 16);
+    }
+
+    /// The searchable drop-down (owner 2026-11-05): typing narrows a long list, Enter picks
+    /// the first match, the `none` choice is offered while nothing is typed.
+    #[test]
+    fn search_combo_narrows_and_picks() {
+        use egui::accesskit::Role;
+        use egui_kittest::kittest::Queryable;
+        let mut h = egui_kittest::HarnessBuilder::default()
+            .with_size([600.0, 600.0])
+            .build_ui_state(
+                |ui, chosen: &mut Option<usize>| {
+                    let names: Vec<String> =
+                        (0..500).map(|i| format!("Client {i:03} (ID{i})")).collect();
+                    let shown = chosen.map_or("Any client".to_string(), |i| names[i].clone());
+                    let l = ui.label("Client");
+                    let (r, pick) = search_combo(
+                        ui,
+                        "t",
+                        220.0,
+                        shown,
+                        || names.clone(),
+                        *chosen,
+                        Some("Any client"),
+                    );
+                    r.labelled_by(l.id);
+                    if let Some(p) = pick {
+                        *chosen = p;
+                    }
+                },
+                None,
+            );
+        crate::ui::theme::install(&h.ctx);
+        h.run();
+        h.get_by_role_and_label(Role::ComboBox, "Client").click();
+        h.run();
+        assert!(h.query_by_label("Any client").is_some());
+        h.get_by_label("Type to search").type_text("id42 client 4");
+        h.run();
+        assert!(
+            h.query_by_label("11 of 500").is_some(),
+            "Client 042 and 420-429"
+        );
+        assert!(h.query_by_label("Client 042 (ID42)").is_some());
+        h.key_press(egui::Key::Enter);
+        h.run();
+        assert_eq!(*h.state(), Some(42));
+        // Opened again: the search starts empty.
+        h.get_by_role_and_label(Role::ComboBox, "Client").click();
+        h.run();
+        assert!(h.query_by_label("Any client").is_some());
+        h.get_by_label("Any client").click();
+        h.run();
+        assert_eq!(*h.state(), None);
+        // Esc closes it, nothing chosen.
+        h.get_by_role_and_label(Role::ComboBox, "Client").click();
+        h.run();
+        assert!(h.query_by_label("Type to search").is_some());
+        h.key_press(egui::Key::Escape);
+        h.run();
+        assert!(h.query_by_label("Type to search").is_none(), "closed");
+        assert_eq!(*h.state(), None);
     }
 }

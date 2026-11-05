@@ -206,15 +206,21 @@ fn type_box(ui: &mut egui::Ui, id: &str, v: &mut Option<String>, types: &[(Strin
         .and_then(|t| types.iter().find(|(i, _)| i == t))
         .map_or("Needs doc type", |(_, n)| n.as_str())
         .to_string();
-    egui::ComboBox::from_id_salt(id)
-        .selected_text(shown)
-        .width(170.0)
-        .show_ui(ui, |ui| {
-            ui.selectable_value(v, None, "Needs doc type");
-            for (i, n) in types {
-                ui.selectable_value(v, Some(i.clone()), n);
-            }
-        });
+    let current = v
+        .as_deref()
+        .and_then(|t| types.iter().position(|(i, _)| i == t));
+    let (_, pick) = crate::ui::widgets::search_combo(
+        ui,
+        id,
+        170.0,
+        shown,
+        || types.iter().map(|(_, n)| n.clone()).collect(),
+        current,
+        Some("Needs doc type"),
+    );
+    if let Some(k) = pick {
+        *v = k.map(|k| types[k].0.clone());
+    }
 }
 
 /// The panel (a top panel on the Intake tab). `types`: (id, name) of the live doc types.

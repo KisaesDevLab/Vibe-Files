@@ -436,23 +436,28 @@ fn doc_rules(ui: &mut egui::Ui, draft: &mut Profile, types: &[DocType], folders:
                     format!("{} (not a doc type)", draft.doc[i].doc_type)
                 };
                 let name = format!("Rule {} doc type", i + 1);
-                egui::ComboBox::from_id_salt(("capture-doc-type", i))
-                    .selected_text(shown)
-                    .width(220.0)
-                    .show_ui(ui, |ui| {
-                        let current = draft.doc[i].doc_type.clone();
-                        for t in types.iter().filter(|t| !t.archived || t.name == current) {
-                            ui.selectable_value(
-                                &mut draft.doc[i].doc_type,
-                                t.name.clone(),
-                                &t.name,
-                            );
-                        }
-                    })
-                    .response
-                    .widget_info(|| {
-                        egui::WidgetInfo::labeled(egui::accesskit::Role::ComboBox, true, &name)
-                    });
+                let now = draft.doc[i].doc_type.clone();
+                let offered: Vec<String> = types
+                    .iter()
+                    .filter(|t| !t.archived || t.name == now)
+                    .map(|t| t.name.clone())
+                    .collect();
+                let current = offered.iter().position(|t| *t == now);
+                let (r, pick) = widgets::search_combo(
+                    ui,
+                    ("capture-doc-type", i),
+                    220.0,
+                    shown,
+                    || offered.clone(),
+                    current,
+                    None,
+                );
+                r.widget_info(|| {
+                    egui::WidgetInfo::labeled(egui::accesskit::Role::ComboBox, true, &name)
+                });
+                if let Some(Some(k)) = pick {
+                    draft.doc[i].doc_type = offered[k].clone();
+                }
                 let folder = parsers::folder_for(draft, &draft.doc[i].doc_type, types);
                 ui.label(if folder.is_empty() {
                     widgets::caption("Intake's rules decide")

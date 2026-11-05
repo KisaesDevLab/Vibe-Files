@@ -107,18 +107,22 @@ fn keep_combo<T: PartialEq + Clone>(
                 .unwrap_or_default(),
             None => kept.to_owned(),
         };
-        egui::ComboBox::from_id_salt(caption)
-            .selected_text(shown)
-            .width(width)
-            .height(320.0)
-            .show_ui(ui, |ui| {
-                ui.selectable_value(slot, None, "Keep");
-                for (v, label) in choices {
-                    ui.selectable_value(slot, Some(v.clone()), label);
-                }
-            })
-            .response
-            .labelled_by(l.id);
+        let current = slot
+            .as_ref()
+            .and_then(|v| choices.iter().position(|(c, _)| c == v));
+        let (r, pick) = widgets::search_combo(
+            ui,
+            caption,
+            width,
+            shown,
+            || choices.iter().map(|(_, l)| l.clone()).collect(),
+            current,
+            Some("Keep"),
+        );
+        r.labelled_by(l.id);
+        if let Some(k) = pick {
+            *slot = k.map(|k| choices[k].0.clone());
+        }
     });
 }
 
