@@ -10,8 +10,9 @@
 //! Files keep their path under the new folder. Moves go through Vibe Filer Desktop's engine
 //! (`transfer`: a rename on one drive; across drives a copy, SHA-256 check, then the original
 //! removed). A name already taken keeps both (` (2)`). Every move is written to a CSV log;
-//! folders the move emptied are removed. Windows clutter and `_Vibe` folders never move. No
-//! catalog: this works on plain folders, before Vibe Files imports the new one.
+//! folders the move emptied are removed. Windows clutter and `_Vibe` folders never move.
+//! [`undo`] puts a run back from its log (owner 2026-11-05), leaving any file changed since.
+//! No catalog: this works on plain folders, before Vibe Files imports the new one.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -333,15 +334,6 @@ pub fn plan(old: &Path, clients: &[String], rule: &Rule) -> Plan {
     p
 }
 
-/// How one file went.
-#[derive(Debug, Clone, PartialEq)]
-pub enum Outcome {
-    Moved,
-    /// Moved under another name: the new folder had that name already.
-    KeptBoth(PathBuf),
-    Failed(String),
-}
-
 /// What a run did.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Report {
@@ -396,7 +388,7 @@ fn csv(s: &str) -> String {
 
 /// Where the log of a run goes: beside the new folder (`<new name>-move-log-<time>.csv`), or
 /// inside it under `_Vibe\move-logs` when that place cannot be written.
-fn open_log(new: &Path, opts: &Options) -> Option<(PathBuf, std::fs::File)> {
+fn open_log(new: &Path, kind: &str, opts: &Options) -> Option<(PathBuf, std::fs::File)> {
     let stamp = Local::now().format("%Y%m%d-%H%M%S");
     let name = new
         .file_name()
@@ -414,7 +406,7 @@ fn open_log(new: &Path, opts: &Options) -> Option<(PathBuf, std::fs::File)> {
     tries.push(new.join("_Vibe").join("move-logs"));
     for dir in tries {
         let _ = std::fs::create_dir_all(&dir);
-        let path = dir.join(format!("{name}-move-log-{stamp}.csv"));
+        let path = dir.join(format!("{name}-{kind}-{stamp}.csv"));
         if let Ok(f) = std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -424,6 +416,82 @@ fn open_log(new: &Path, opts: &Options) -> Option<(PathBuf, std::fs::File)> {
         }
     }
     None
+}
+
+/// The log's columns (the undo reads them by name).
+const LOG_HEADER: &str =
+    "old path,new path,path in folder,size,modified,modified (seconds),step,reason,result";
+
+/// A file's last-modified time, seconds since 1970.
+fn secs(t: SystemTime) -> i64 {
+    t.duration_since(SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// Moves `src` to `want` (or a free name beside it): never replacing a file, trying again
+/// while it is open in another program, keeping its Date modified across drives. Returns
+/// where it went.
+fn move_one(src: &Path, want: &Path, opts: &Options, stop: &AtomicBool) -> Result<PathBuf, String> {
+    if !src.is_file() {
+        return Err("no longer there".into());
+    }
+    let modified = std::fs::metadata(src).and_then(|m| m.modified()).ok();
+    if let Some(parent) = want.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("cannot create the folder: {e}"))?;
+    }
+    let dst = filer_intake::commit::free_path(want);
+    if dst.as_os_str().len() > MAX_PATH {
+        return Err(format!(
+            "the new path would be {} characters long (limit {MAX_PATH})",
+            dst.as_os_str().len()
+        ));
+    }
+    // Open in another program (Excel, Acrobat): tried again a few times, then left.
+    let mut tries = 0;
+    let method = loop {
+        match filer_intake::commit::transfer(src, &dst, opts.force_copy) {
+            Ok((m, _, _)) => break m,
+            Err(e) if in_use(&e) && tries < opts.retries && !stop.load(Ordering::Relaxed) => {
+                tries += 1;
+                std::thread::sleep(opts.retry_wait);
+            }
+            Err(e) if in_use(&e) => return Err(format!("open in another program ({e})")),
+            Err(e) => return Err(e),
+        }
+    };
+    // A copy between drives is a new file: it gets the original's Date modified back.
+    if method == filer_intake::commit::Method::CopyVerifyDelete
+        && let Some(t) = modified
+        && let Ok(f) = std::fs::OpenOptions::new().write(true).open(&dst)
+    {
+        let _ = f.set_modified(t);
+    }
+    Ok(dst)
+}
+
+/// Removes the folders in `dirs` the run left empty, deepest first, going up while they are
+/// empty but never to or above `root`.
+fn remove_emptied(mut dirs: Vec<PathBuf>, root: &Path) -> usize {
+    let mut n = 0;
+    dirs.sort();
+    dirs.dedup();
+    dirs.sort_by_key(|p| std::cmp::Reverse(p.components().count()));
+    for dir in dirs {
+        let mut d = dir;
+        while d.starts_with(root) && d != root {
+            let empty = std::fs::read_dir(&d).is_ok_and(|mut r| r.next().is_none());
+            if !empty || std::fs::remove_dir(&d).is_err() {
+                break;
+            }
+            n += 1;
+            match d.parent() {
+                Some(p) => d = p.to_path_buf(),
+                None => break,
+            }
+        }
+    }
+    n
 }
 
 /// Moves `plan`'s files from `old` to the same paths under `new`. Counts finished files in
@@ -442,11 +510,10 @@ pub fn apply(
     check_folders(old, new)?;
     std::fs::create_dir_all(new).map_err(|e| format!("{}: {e}", new.display()))?;
     let mut rep = Report::default();
-    let (log_path, mut log) =
-        open_log(new, opts).ok_or("The move log could not be created; nothing was moved.")?;
+    let (log_path, mut log) = open_log(new, "move-log", opts)
+        .ok_or("The move log could not be created; nothing was moved.")?;
     rep.log = Some(log_path);
-    writeln!(log, "old path,new path,size,modified,step,reason,result")
-        .map_err(|e| e.to_string())?;
+    writeln!(log, "{LOG_HEADER}").map_err(|e| e.to_string())?;
     let mut emptied: Vec<PathBuf> = vec![];
     for item in &plan.items {
         if stop.load(Ordering::Relaxed) {
@@ -455,69 +522,25 @@ pub fn apply(
         }
         let src = old.join(&item.rel);
         let want = new.join(&item.rel);
-        let outcome = (|| -> Result<Outcome, String> {
-            if !src.is_file() {
-                return Err("no longer there".into());
-            }
-            if let Some(parent) = want.parent() {
-                std::fs::create_dir_all(parent)
-                    .map_err(|e| format!("cannot create the folder: {e}"))?;
-            }
-            let dst = filer_intake::commit::free_path(&want);
-            if dst.as_os_str().len() > MAX_PATH {
-                return Err(format!(
-                    "the new path would be {} characters long (limit {MAX_PATH})",
-                    dst.as_os_str().len()
-                ));
-            }
-            // Open in another program (Excel, Acrobat): tried again a few times, then left.
-            let mut tries = 0;
-            loop {
-                match filer_intake::commit::transfer(&src, &dst, opts.force_copy) {
-                    Ok(_) => break,
-                    Err(e)
-                        if in_use(&e) && tries < opts.retries && !stop.load(Ordering::Relaxed) =>
-                    {
-                        tries += 1;
-                        std::thread::sleep(opts.retry_wait);
-                    }
-                    Err(e) if in_use(&e) => {
-                        return Err(format!("open in another program ({e})"));
-                    }
-                    Err(e) => return Err(e),
+        let (new_path, result) = match move_one(&src, &want, opts, stop) {
+            Ok(dst) => {
+                rep.moved += 1;
+                rep.bytes += item.size;
+                if let Some(parent) = src.parent() {
+                    emptied.push(parent.to_path_buf());
+                }
+                if dst == want {
+                    (dst, "moved".to_string())
+                } else {
+                    rep.kept_both += 1;
+                    (dst, "moved; kept both (the name was taken)".to_string())
                 }
             }
-            Ok(if dst == want {
-                Outcome::Moved
-            } else {
-                Outcome::KeptBoth(dst)
-            })
-        })();
-        let (new_path, result) = match &outcome {
-            Ok(Outcome::Moved) => {
-                rep.moved += 1;
-                rep.bytes += item.size;
-                (want.clone(), "moved".to_string())
-            }
-            Ok(Outcome::KeptBoth(p)) => {
-                rep.moved += 1;
-                rep.kept_both += 1;
-                rep.bytes += item.size;
-                (
-                    p.clone(),
-                    "moved; kept both (the name was taken)".to_string(),
-                )
-            }
-            Ok(Outcome::Failed(e)) | Err(e) => {
+            Err(e) => {
                 rep.failed.push((item.rel.clone(), e.clone()));
                 (PathBuf::new(), format!("not moved: {e}"))
             }
         };
-        if matches!(outcome, Ok(Outcome::Moved | Outcome::KeptBoth(_)))
-            && let Some(parent) = src.parent()
-        {
-            emptied.push(parent.to_path_buf());
-        }
         let modified = item
             .modified
             .map(|t| {
@@ -527,11 +550,16 @@ pub fn apply(
             .unwrap_or_default();
         let _ = writeln!(
             log,
-            "{},{},{},{},{},{},{}",
+            "{},{},{},{},{},{},{},{},{}",
             csv(&src.to_string_lossy()),
             csv(&new_path.to_string_lossy()),
+            csv(&item.rel.to_string_lossy()),
             item.size,
             modified,
+            item.modified
+                .map(secs)
+                .map(|s| s.to_string())
+                .unwrap_or_default(),
             csv(&rule.label()),
             csv(&item.why),
             csv(&result)
@@ -540,23 +568,172 @@ pub fn apply(
     }
     let _ = log.flush();
     let _ = log.sync_all();
-    // Folders the move emptied, deepest first, up to (not including) the old folder.
-    emptied.sort();
-    emptied.dedup();
-    emptied.sort_by_key(|p| std::cmp::Reverse(p.components().count()));
-    for dir in emptied {
-        let mut d = dir;
-        while d.starts_with(old) && d != old {
-            let empty = std::fs::read_dir(&d).is_ok_and(|mut r| r.next().is_none());
-            if !empty || std::fs::remove_dir(&d).is_err() {
-                break;
+    rep.folders_removed = remove_emptied(emptied, old);
+    Ok(rep)
+}
+
+/// One line of a CSV file, split into fields (`"` quoting as [`csv`] writes it).
+fn csv_fields(line: &str) -> Vec<String> {
+    let mut out = vec![];
+    let mut cur = String::new();
+    let mut quoted = false;
+    let mut chars = line.chars().peekable();
+    while let Some(c) = chars.next() {
+        match (c, quoted) {
+            ('"', true) if chars.peek() == Some(&'"') => {
+                cur.push('"');
+                chars.next();
             }
-            rep.folders_removed += 1;
-            match d.parent() {
-                Some(p) => d = p.to_path_buf(),
-                None => break,
-            }
+            ('"', true) => quoted = false,
+            ('"', false) if cur.is_empty() => quoted = true,
+            (',', false) => out.push(std::mem::take(&mut cur)),
+            (c, _) => cur.push(c),
         }
+    }
+    out.push(cur);
+    out
+}
+
+/// A file a move log says was moved.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Moved {
+    pub old: PathBuf,
+    pub new: PathBuf,
+    /// Relative to the two folders.
+    pub rel: PathBuf,
+    pub size: u64,
+    pub modified: Option<i64>,
+}
+
+/// The files `log` (a move log) says were moved, in its order.
+pub fn read_log(log: &Path) -> Result<Vec<Moved>, String> {
+    let text = std::fs::read_to_string(log).map_err(|e| format!("{}: {e}", log.display()))?;
+    let mut lines = text.lines();
+    let head = csv_fields(lines.next().unwrap_or_default());
+    let col = |name: &str| head.iter().position(|h| h == name);
+    let (Some(o), Some(n), Some(r), Some(z), Some(res)) = (
+        col("old path"),
+        col("new path"),
+        col("path in folder"),
+        col("size"),
+        col("result"),
+    ) else {
+        return Err(format!(
+            "{} is not a vibe-move log this version can undo.",
+            log.display()
+        ));
+    };
+    let m = col("modified (seconds)");
+    let mut out = vec![];
+    for line in lines.filter(|l| !l.trim().is_empty()) {
+        let f = csv_fields(line);
+        let get = |i: usize| f.get(i).map(String::as_str).unwrap_or_default();
+        if !get(res).starts_with("moved") {
+            continue;
+        }
+        out.push(Moved {
+            old: PathBuf::from(get(o)),
+            new: PathBuf::from(get(n)),
+            rel: PathBuf::from(get(r)),
+            size: get(z).parse().unwrap_or(0),
+            modified: m.and_then(|i| get(i).parse().ok()),
+        });
+    }
+    Ok(out)
+}
+
+/// Puts back what the move logged in `log`: each moved file goes from its new path to its old
+/// one (a free name beside it if that is taken), but only when it is unchanged since the move
+/// (same size and Date modified). Changed or missing files are left and reported. Writes its
+/// own log beside `log`; removes the folders it empties in the new folder.
+pub fn undo(
+    log: &Path,
+    opts: &Options,
+    progress: &AtomicUsize,
+    stop: &AtomicBool,
+) -> Result<Report, String> {
+    use std::io::Write;
+    let rows = read_log(log)?;
+    let mut rep = Report::default();
+    let dir = log.parent().unwrap_or(Path::new("."));
+    let stem = log
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "vibe-move".into());
+    let undo_opts = Options {
+        log_dir: Some(dir.to_path_buf()),
+        ..opts.clone()
+    };
+    let (ulog_path, mut ulog) = open_log(Path::new(&stem), "undo", &undo_opts)
+        .ok_or("The undo log could not be created; nothing was put back.")?;
+    rep.log = Some(ulog_path);
+    writeln!(ulog, "{LOG_HEADER}").map_err(|e| e.to_string())?;
+    let mut emptied: Vec<(PathBuf, PathBuf)> = vec![];
+    // Newest first, so a file moved twice (keep both) comes back in order.
+    for row in rows.iter().rev() {
+        if stop.load(Ordering::Relaxed) {
+            rep.stopped = true;
+            break;
+        }
+        let check = || -> Result<(), String> {
+            let m = std::fs::metadata(&row.new).map_err(|_| "no longer in the new folder")?;
+            if m.len() != row.size {
+                return Err("changed since the move (size)".into());
+            }
+            if let (Some(want), Ok(t)) = (row.modified, m.modified())
+                && secs(t) != want
+            {
+                return Err("changed since the move (Date modified)".into());
+            }
+            Ok(())
+        };
+        let (back, result) = match check().and_then(|()| move_one(&row.new, &row.old, opts, stop)) {
+            Ok(dst) => {
+                rep.moved += 1;
+                rep.bytes += row.size;
+                // The new folder's root: the new path less the file's place in it.
+                if let Some(parent) = row.new.parent() {
+                    let depth = row.rel.components().count().saturating_sub(1);
+                    let root = parent.ancestors().nth(depth).map(Path::to_path_buf);
+                    if let Some(root) = root {
+                        emptied.push((parent.to_path_buf(), root));
+                    }
+                }
+                if dst == row.old {
+                    (dst, "put back".to_string())
+                } else {
+                    rep.kept_both += 1;
+                    (
+                        dst,
+                        "put back; kept both (the old name was taken)".to_string(),
+                    )
+                }
+            }
+            Err(e) => {
+                rep.failed.push((row.rel.clone(), e.clone()));
+                (PathBuf::new(), format!("not put back: {e}"))
+            }
+        };
+        let _ = writeln!(
+            ulog,
+            "{},{},{},{},,{},undo,,{}",
+            csv(&row.new.to_string_lossy()),
+            csv(&back.to_string_lossy()),
+            csv(&row.rel.to_string_lossy()),
+            row.size,
+            row.modified.map(|s| s.to_string()).unwrap_or_default(),
+            csv(&result)
+        );
+        progress.fetch_add(1, Ordering::Relaxed);
+    }
+    let _ = ulog.flush();
+    let _ = ulog.sync_all();
+    let mut by_root: std::collections::BTreeMap<PathBuf, Vec<PathBuf>> = Default::default();
+    for (d, root) in emptied {
+        by_root.entry(root).or_default().push(d);
+    }
+    for (root, dirs) in by_root {
+        rep.folders_removed += remove_emptied(dirs, &root);
     }
     Ok(rep)
 }
@@ -832,6 +1009,59 @@ mod tests {
         closer.join().unwrap();
         assert!(rep.failed.is_empty(), "{rep:?}");
         assert!(new.join("Sample, Pat/Taxes/2023/1099-2023.pdf").is_file());
+    }
+
+    /// A move is undone from its log: files back where they were (paths with commas, keep
+    /// both), Date modified kept across drives, a file changed since left; emptied folders
+    /// in the new folder removed.
+    #[test]
+    fn undo_puts_files_back_from_the_log() {
+        let (_t, old, new) = tree();
+        let before_t = std::fs::metadata(old.join("Sample, Pat/Taxes/2019/W2 2024.pdf"))
+            .unwrap()
+            .modified()
+            .unwrap();
+        set_modified(&old.join("Sample, Pat/Taxes/2019/W2 2024.pdf"), 2021, 6, 1);
+        let rep = run(&old, &new, &Rule::YearFrom(2023), true);
+        assert_eq!(rep.moved, 3, "{rep:?}");
+        let moved = new.join("Sample, Pat/Taxes/2019/W2 2024.pdf");
+        let t = std::fs::metadata(&moved).unwrap().modified().unwrap();
+        assert_ne!(t, before_t);
+        assert_eq!(
+            chrono::DateTime::<Local>::from(t)
+                .format("%Y-%m-%d")
+                .to_string(),
+            "2021-06-01",
+            "Date modified kept across drives"
+        );
+        // One file changed after the move: it stays.
+        std::fs::write(new.join("loose 2024.pdf"), "edited after the move").unwrap();
+        let log = rep.log.unwrap();
+        assert_eq!(read_log(&log).unwrap().len(), 3);
+        let back = undo(
+            &log,
+            &Options {
+                force_copy: true,
+                ..Default::default()
+            },
+            &AtomicUsize::new(0),
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        assert_eq!(back.moved, 2, "{back:?}");
+        assert_eq!(back.failed.len(), 1);
+        assert!(
+            back.failed[0].1.contains("changed since the move"),
+            "{back:?}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(old.join("Sample, Pat/Taxes/2019/W2 2024.pdf")).unwrap(),
+            "two years"
+        );
+        assert!(old.join("Sample, Pat/Taxes/2023/1099-2023.pdf").is_file());
+        assert!(!new.join("Sample, Pat").exists(), "emptied folders removed");
+        assert!(new.join("loose 2024.pdf").is_file(), "the edited one stays");
+        assert!(back.log.unwrap().to_string_lossy().contains("-undo-"));
     }
 
     #[test]

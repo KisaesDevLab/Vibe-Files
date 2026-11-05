@@ -14,7 +14,7 @@ A very large old tree? **vibe-move.exe**, in the same folder as Vibe Files, can 
 - files modified on or after a date;
 - files with a recent year in their name or folders.
 
-Each step shows a preview first, and every move is logged in a CSV file beside the new folder. There is no undo. Then import the new folder.
+Each step shows a preview first, and every move is logged in a CSV file beside the new folder. **Undo this move**, or **Undo a move from its log…** later, puts a step's files back; a file changed since the move is left. Then import the new folder.
 
 ## Scan the cabinet
 

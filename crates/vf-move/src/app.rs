@@ -74,6 +74,12 @@ pub struct MoveApp {
     stop: Arc<AtomicBool>,
     /// The last run's report.
     pub report: Option<Report>,
+    /// The last run was an undo (the report says "put back").
+    pub report_undo: bool,
+    /// Asking "put back N files from this log?": (log, files).
+    pub undo_ask: Option<(PathBuf, usize)>,
+    /// Files the running job has to do (for the progress bar).
+    total: usize,
     pub error: Option<String>,
     /// Tests: copy, check and delete even on one drive.
     pub force_copy: bool,
@@ -178,6 +184,8 @@ impl MoveApp {
             return;
         };
         self.confirm = false;
+        self.report_undo = false;
+        self.total = plan.items.len();
         self.progress.store(0, Ordering::Relaxed);
         self.stop.store(false, Ordering::Relaxed);
         let (old, new) = (self.old_path(), self.new_path());
@@ -188,6 +196,39 @@ impl MoveApp {
         };
         self.running = Some(Job::spawn(ctx, move || {
             vf_move::apply(&old, &new, &plan, &rule, &opts, &progress, &stop)
+        }));
+    }
+
+    /// Asks before putting back what `log` moved.
+    pub fn ask_undo(&mut self, log: PathBuf) {
+        match vf_move::read_log(&log) {
+            Ok(rows) if rows.is_empty() => {
+                self.error = Some("That log lists no moved files.".into());
+            }
+            Ok(rows) => {
+                self.error = None;
+                self.undo_ask = Some((log, rows.len()));
+            }
+            Err(e) => self.error = Some(e),
+        }
+    }
+
+    fn start_undo(&mut self, ctx: &egui::Context) {
+        let Some((log, n)) = self.undo_ask.take() else {
+            return;
+        };
+        self.report_undo = true;
+        self.total = n;
+        self.preview = None;
+        self.progress.store(0, Ordering::Relaxed);
+        self.stop.store(false, Ordering::Relaxed);
+        let (progress, stop) = (self.progress.clone(), self.stop.clone());
+        let opts = Options {
+            force_copy: self.force_copy,
+            ..Default::default()
+        };
+        self.running = Some(Job::spawn(ctx, move || {
+            vf_move::undo(&log, &opts, &progress, &stop)
         }));
     }
 
@@ -250,7 +291,7 @@ impl MoveApp {
         ui.label(
             "Moves files from an over-large client tree into a new folder, keeping their paths: \
              the old folder becomes the archive, the new one your active cabinet. Files are moved, \
-             not copied, and there is no undo; every move is written to a log.",
+             not copied; every move is written to a log, and a move can be undone from it.",
         );
         ui.add_space(6.0);
         egui::Grid::new("folders").num_columns(3).show(ui, |ui| {
@@ -286,6 +327,16 @@ impl MoveApp {
                 .clicked()
             {
                 self.start_scan(&ctx);
+            }
+            if ui
+                .add_enabled(!busy, egui::Button::new("Undo a move from its log…"))
+                .on_hover_text("Pick the CSV log a move wrote; the files it moved go back.")
+                .clicked()
+                && let Some(p) = rfd::FileDialog::new()
+                    .add_filter("Move log", &["csv"])
+                    .pick_file()
+            {
+                self.ask_undo(p);
             }
             if self.scanning.is_some() {
                 ui.spinner();
@@ -423,21 +474,48 @@ impl MoveApp {
             }
         });
         ui.separator();
-        if let Some(job) = &self.running {
-            let _ = job;
-            let total = self.preview.as_ref().map_or(0, |p| p.1.items.len()).max(1);
+        if let Some((log, n)) = self.undo_ask.clone() {
+            ui.label(format!(
+                "Put back the {n} files moved in {}? Each goes back to where it was; a file changed since the move is left where it is.",
+                log.display()
+            ));
+            ui.horizontal(|ui| {
+                if ui.button(format!("Yes, put back {n} files")).clicked() {
+                    self.start_undo(ctx);
+                }
+                if ui.button("Cancel").clicked() {
+                    self.undo_ask = None;
+                }
+            });
+            ui.separator();
+            return;
+        }
+        if self.running.is_some() {
+            let total = self.total.max(1);
             let done = self.progress.load(Ordering::Relaxed);
+            let what = if self.report_undo {
+                "Putting back"
+            } else {
+                "Moving"
+            };
             ui.add(
                 egui::ProgressBar::new(done as f32 / total as f32)
-                    .text(format!("Moving: {done} of {total} files")),
+                    .text(format!("{what}: {done} of {total} files")),
             );
             if ui.button("Stop after this file").clicked() {
                 self.stop.store(true, Ordering::Relaxed);
             }
             return;
         }
-        if let Some(rep) = &self.report {
-            report(ui, rep);
+        if let Some(rep) = self.report.clone() {
+            report(ui, &rep, self.report_undo);
+            if !self.report_undo
+                && rep.moved > 0
+                && let Some(log) = &rep.log
+                && ui.button("Undo this move").clicked()
+            {
+                self.ask_undo(log.clone());
+            }
             ui.separator();
         }
         let Some((rule, plan)) = self.preview.clone() else {
@@ -466,7 +544,7 @@ impl MoveApp {
         }
         if self.confirm {
             ui.label(format!(
-                "Move {n} files ({}) from {} to {}? They are moved, not copied, and there is no undo. A log of every move is kept.",
+                "Move {n} files ({}) from {} to {}? They are moved, not copied. A log of every move is kept; Undo puts them back from it.",
                 size(plan.bytes()),
                 self.old.trim(),
                 self.new.trim()
@@ -501,14 +579,15 @@ impl MoveApp {
     }
 }
 
-fn report(ui: &mut Ui, rep: &Report) {
+fn report(ui: &mut Ui, rep: &Report, undo: bool) {
     ui.label(
         RichText::new(format!(
             "{} {} files ({}){}; {} folders left empty were removed.",
-            if rep.stopped {
-                "Stopped after moving"
-            } else {
-                "Moved"
+            match (rep.stopped, undo) {
+                (true, false) => "Stopped after moving",
+                (false, false) => "Moved",
+                (true, true) => "Stopped after putting back",
+                (false, true) => "Put back",
             },
             rep.moved,
             size(rep.bytes),
@@ -525,7 +604,11 @@ fn report(ui: &mut Ui, rep: &Report) {
         .strong(),
     );
     if !rep.failed.is_empty() {
-        ui.label(format!("{} files were not moved:", rep.failed.len()));
+        ui.label(format!(
+            "{} files were not {}:",
+            rep.failed.len(),
+            if undo { "put back" } else { "moved" }
+        ));
         for (p, why) in rep.failed.iter().take(20) {
             ui.label(format!("{}: {why}", p.display()));
         }
@@ -628,6 +711,16 @@ mod tests {
             old.join("Sample, Pat/Taxes/2018/W2.pdf").is_file(),
             "2018 stays"
         );
+
+        // Undo it: both back where they were.
+        click(&mut h, "Undo this move");
+        click(&mut h, "Yes, put back 2 files");
+        wait(&mut h);
+        assert!(old.join("Sample, Pat/Taxes/2024/W2.pdf").is_file());
+        assert!(old.join("Example Co/Bank 2025-03.pdf").is_file());
+        assert!(!new.join("Example Co").exists());
+        assert_eq!(h.state().report.as_ref().unwrap().moved, 2);
+        assert!(h.state().report_undo);
 
         // 2: a date in the future moves nothing.
         click(&mut h, "2  Recently modified");

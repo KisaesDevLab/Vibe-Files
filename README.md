@@ -104,7 +104,8 @@ before step 2. It works on plain folders, and Vibe Files doesn't need to be open
    only then removed from the old folder. A name already taken keeps both files (` (2)`).
    A file open in another program is tried again for about 10 seconds, then left and listed.
    Folders a move empties are removed. Every move is written to a CSV log beside the new folder.
-   There is no undo.
+   **Undo this move** (or **Undo a move from its log…** later) puts a step's files back,
+   except any changed since the move.
 
 Then import the **new** folder as your cabinet (steps 1–6 above).
 
