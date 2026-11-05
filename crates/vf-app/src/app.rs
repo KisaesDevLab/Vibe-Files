@@ -1192,7 +1192,7 @@ fn prepare(opened: &mut Opened, device_id: &str) -> Prepared {
     }
     // Trash older than 90 days empties on its own (Q-15; held documents stay).
     let emptied = vf_fs::trash::auto_empty(&mut opened.conn, &root, device_id);
-    let chain = crate::ui::audit::ChainCheck::run(&opened.conn);
+    let chain = crate::ui::audit::ChainCheck::later();
     Prepared {
         rules_problem,
         emptied,

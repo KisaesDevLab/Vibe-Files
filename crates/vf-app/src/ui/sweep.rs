@@ -14,6 +14,24 @@ use vf_fs::sweep::{self, Drift};
 use crate::ui::browse::Env;
 use crate::ui::{theme, widgets};
 
+/// Another session on this computer is sweeping this catalog.
+const BUSY: &str =
+    "Another session on this computer is running the integrity sweep; its result shows there.";
+
+/// Held while a sweep runs on `catalog` (a file beside it, no sharing).
+fn sweep_lock(catalog: &Path) -> Option<std::fs::File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    let dir = catalog.parent()?;
+    std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .share_mode(0)
+        .open(dir.join("sweep.lock"))
+        .ok()
+}
+
 #[derive(Default)]
 pub struct SweepState {
     job: Option<Receiver<Result<Drift, String>>>,
@@ -46,9 +64,14 @@ impl SweepState {
         std::thread::Builder::new()
             .name("integrity-sweep".into())
             .spawn(move || {
-                let r = vf_core::db::open(&catalog, Storage::Local)
-                    .map_err(|e| e.to_string())
-                    .and_then(|conn| sweep::scan(&conn, &root));
+                // One sweep per catalog at a time: on a server, every login's Vibe Files would
+                // start the weekly one together (PA-34).
+                let r = match sweep_lock(&catalog) {
+                    Some(_held) => vf_core::db::open(&catalog, Storage::Local)
+                        .map_err(|e| e.to_string())
+                        .and_then(|conn| sweep::scan(&conn, &root)),
+                    None => Err(BUSY.to_string()),
+                };
                 let _ = tx.send(r);
                 ctx.request_repaint();
             })
@@ -68,6 +91,10 @@ impl SweepState {
         self.job = None;
         let mut d = match r {
             Ok(d) => d,
+            Err(e) if e == BUSY => {
+                self.notice = Some(BUSY.into());
+                return None;
+            }
             Err(e) => {
                 tracing::warn!(kind = crate::logging::kind(&e), "integrity sweep failed");
                 self.error = Some(format!("Integrity sweep failed: {e}"));
@@ -301,5 +328,25 @@ fn done(s: &mut SweepState, r: Result<usize, String>, what: &str, drop: impl FnO
             }
         }
         Err(e) => s.error = Some(e),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// One sweep per catalog at a time (several logins of a server share one).
+    #[test]
+    fn one_sweep_at_a_time() {
+        let t = tempfile::tempdir().unwrap();
+        let catalog = t.path().join("catalog.db");
+        let first = sweep_lock(&catalog);
+        assert!(first.is_some());
+        assert!(
+            sweep_lock(&catalog).is_none(),
+            "another session is sweeping"
+        );
+        drop(first);
+        assert!(sweep_lock(&catalog).is_some());
     }
 }

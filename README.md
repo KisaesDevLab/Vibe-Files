@@ -93,6 +93,8 @@ before step 2. It works on plain folders, and Vibe Files doesn't need to be open
 1. Choose the **Old folder** (it becomes the archive) and a **New folder** (your active
    cabinet), then click **Scan the old folder**. Every client folder is ticked; untick any to
    leave out.
+   **Clients per run** moves only that many clients' files at a time (blank = all), to try
+   the process on a few first; Preview again after a move for the next ones.
 2. Run each of the three steps, in any order. Each shows a **Preview** of what would move
    before you confirm:
    - **Permanent folders**: each client's top-level folder with the name you type (default

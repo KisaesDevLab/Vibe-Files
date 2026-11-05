@@ -76,6 +76,10 @@ pub struct Plan {
     pub clutter: usize,
     /// Folders that could not be read.
     pub unreadable: Vec<String>,
+    /// Clients with files in the plan.
+    pub clients: usize,
+    /// More ticked clients have files for this step than the run's limit took.
+    pub more: bool,
 }
 
 impl Plan {
@@ -258,6 +262,13 @@ pub fn newest_year(rel: &Path, next_year: i32) -> Option<(i32, &'static str)> {
 
 /// What `rule` moves from the ticked `clients` of `old` (names; "" for the loose files).
 pub fn plan(old: &Path, clients: &[String], rule: &Rule) -> Plan {
+    plan_some(old, clients, rule, None)
+}
+
+/// [`plan`] of at most `max` clients that have files for this step (owner 2026-11-05: move a
+/// few at a time to try it out). Clients with nothing to move do not count, so running the
+/// same step again takes the next ones.
+pub fn plan_some(old: &Path, clients: &[String], rule: &Rule, max: Option<usize>) -> Plan {
     let mut p = Plan::default();
     let next_year = Local::now().year() + 1;
     let since = match rule {
@@ -268,6 +279,18 @@ pub fn plan(old: &Path, clients: &[String], rule: &Rule) -> Plan {
         _ => None,
     };
     for c in clients {
+        if max.is_some_and(|m| p.clients >= m) {
+            // Only to say whether there is more: the next client with files.
+            if !plan_some(old, std::slice::from_ref(c), rule, None)
+                .items
+                .is_empty()
+            {
+                p.more = true;
+                break;
+            }
+            continue;
+        }
+        let before = p.items.len();
         let mut files = vec![];
         match rule {
             Rule::Permanent(name) => {
@@ -331,6 +354,9 @@ pub fn plan(old: &Path, clients: &[String], rule: &Rule) -> Plan {
                     why,
                 });
             }
+        }
+        if p.items.len() > before {
+            p.clients += 1;
         }
     }
     p
@@ -1394,6 +1420,47 @@ mod tests {
         .unwrap();
         assert_eq!(back.moved, 1, "{back:?}");
         assert!(rows[0].old.is_file());
+    }
+
+    /// Owner 2026-11-05: a few clients at a time; the next run takes the next ones.
+    #[test]
+    fn a_few_clients_per_run() {
+        let (_t, old, new) = tree();
+        let all: Vec<String> = scan(&old, &AtomicBool::new(false), &AtomicUsize::new(0))
+            .unwrap()
+            .into_iter()
+            .map(|c| c.name)
+            .collect();
+        let rule = Rule::Permanent("Permanent".into());
+        let first = plan_some(&old, &all, &rule, Some(1));
+        assert_eq!(first.clients, 1);
+        assert!(first.more, "the other client is left for the next run");
+        assert!(
+            first
+                .items
+                .iter()
+                .all(|i| i.rel.starts_with("2025 Holdings LLC"))
+        );
+        apply(
+            &old,
+            &new,
+            &first,
+            &rule,
+            &Options::default(),
+            &AtomicUsize::new(0),
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        // The loose files and the first client have nothing left for this step: skipped.
+        let next = plan_some(&old, &all, &rule, Some(1));
+        assert_eq!(next.clients, 1);
+        assert!(!next.more);
+        assert!(next.items.iter().all(|i| i.rel.starts_with("Sample, Pat")));
+        assert_eq!(next.items.len(), 2);
+        // Blank: all.
+        let (_t2, old2, _new2) = tree();
+        let p = plan_some(&old2, &all, &rule, None);
+        assert_eq!((p.clients, p.more), (2, false));
     }
 
     #[test]

@@ -65,6 +65,8 @@ pub struct MoveApp {
     pub permanent: String,
     pub date: String,
     pub year: String,
+    /// Clients per run (owner 2026-11-05: a few at a time to try it); blank = all.
+    pub per_run: String,
     /// The preview of the step: the rule and what it moves.
     pub preview: Option<(Rule, Plan)>,
     /// The folders the preview was made for: a move only ever runs on those.
@@ -175,6 +177,16 @@ impl MoveApp {
         self.preview = None;
         self.confirm = false;
         self.previewed = Some((self.old_path(), self.new_path()));
+        let max = match self.per_run.trim() {
+            "" => None,
+            t => match t.parse::<usize>() {
+                Ok(n) if n > 0 => Some(n),
+                _ => {
+                    self.error = Some("Clients per run: a number, or blank for all.".into());
+                    return;
+                }
+            },
+        };
         let old = self.old_path();
         let ticked: Vec<String> = self
             .clients
@@ -183,7 +195,7 @@ impl MoveApp {
             .map(|c| c.0.name.clone())
             .collect();
         self.planning = Some(Job::spawn(ctx, move || {
-            let p = vf_move::plan(&old, &ticked, &rule);
+            let p = vf_move::plan_some(&old, &ticked, &rule, max);
             (rule, p)
         }));
     }
@@ -492,6 +504,24 @@ impl MoveApp {
         });
         ui.label(RichText::new(help).small());
         ui.horizontal(|ui| {
+            let l = ui.label("Clients per run");
+            if ui
+                .add_enabled(
+                    !busy,
+                    egui::TextEdit::singleline(&mut self.per_run)
+                        .hint_text("all")
+                        .desired_width(60.0),
+                )
+                .labelled_by(l.id)
+                .on_hover_text(
+                    "Move only this many clients' files this time (counting only clients that have files for the step); blank moves them all. Preview again after a move for the next ones.",
+                )
+                .changed()
+            {
+                self.preview = None;
+            }
+        });
+        ui.horizontal(|ui| {
             let can = !busy && self.clients.iter().any(|c| c.1);
             if ui.add_enabled(can, egui::Button::new("Preview")).clicked() {
                 self.start_preview(ctx);
@@ -558,12 +588,18 @@ impl MoveApp {
         let n = plan.items.len();
         ui.label(
             RichText::new(format!(
-                "{n} files ({}) would move: {}",
+                "{n} files ({}) from {} clients would move: {}",
                 size(plan.bytes()),
+                plan.clients,
                 rule.label()
             ))
             .strong(),
         );
+        if plan.more {
+            ui.label(
+                "More ticked clients have files for this step: after this move, Preview again for the next ones.",
+            );
+        }
         if plan.clutter > 0 {
             ui.label(format!(
                 "{} Windows files (Thumbs.db, desktop.ini, ~$ and .tmp files) stay where they are.",

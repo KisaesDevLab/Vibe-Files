@@ -25,6 +25,8 @@ pub struct ChainCheck {
     pub result: Result<VerifyReport, String>,
     /// The weekly check running on its thread.
     next: Option<std::sync::mpsc::Receiver<ChainCheck>>,
+    /// Not checked yet: the first frame starts it on its thread.
+    due_now: bool,
 }
 
 /// A copy for the Audit page (without the running weekly check).
@@ -35,11 +37,27 @@ impl Clone for ChainCheck {
             when: self.when.clone(),
             result: self.result.clone(),
             next: None,
+            due_now: false,
         }
     }
 }
 
 impl ChainCheck {
+    /// Checked on its own thread once the window shows (it hashes every row: years of audit
+    /// rows made opening a cabinet wait, PA-34). No banner until it has run.
+    pub fn later() -> Self {
+        ChainCheck {
+            at: Instant::now(),
+            when: String::new(),
+            result: Ok(audit::VerifyReport {
+                rows: 0,
+                broken: None,
+            }),
+            next: None,
+            due_now: true,
+        }
+    }
+
     pub fn run(conn: &Connection) -> Self {
         let result = audit::verify(conn).map_err(|e| e.to_string());
         match &result {
@@ -54,6 +72,7 @@ impl ChainCheck {
             when: widgets::local_time(&vf_core::now_rfc3339()),
             result,
             next: None,
+            due_now: false,
         }
     }
 
@@ -68,9 +87,10 @@ impl ChainCheck {
             }
             return;
         }
-        if self.at.elapsed() < WEEK {
+        if !self.due_now && self.at.elapsed() < WEEK {
             return;
         }
+        self.due_now = false;
         let (tx, rx) = std::sync::mpsc::channel();
         let (catalog, ctx) = (catalog.to_path_buf(), ctx.clone());
         let check = move || {
@@ -81,6 +101,7 @@ impl ChainCheck {
                     when: widgets::local_time(&vf_core::now_rfc3339()),
                     result: Err(e.to_string()),
                     next: None,
+                    due_now: false,
                 })
         };
         if cfg!(test) {
@@ -114,6 +135,9 @@ impl ChainCheck {
     }
 
     pub fn summary(&self) -> String {
+        if self.due_now || (self.next.is_some() && self.when.is_empty()) {
+            return "Checking the audit chain…".into();
+        }
         match &self.result {
             Ok(r) if r.ok() => format!("Chain verified {}: {} rows, intact.", self.when, r.rows),
             _ => self.problem().unwrap_or_default(),
