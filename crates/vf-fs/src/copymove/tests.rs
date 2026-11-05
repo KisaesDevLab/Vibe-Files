@@ -212,3 +212,70 @@ fn move_to_another_cabinet_carries_the_metadata() {
             .contains(&"Baker Co (1002)/Income Tax/2025".to_string())
     );
 }
+
+/// Code review: a document under legal hold is not moved to another client or cabinet (a copy
+/// is fine); a bound folder the catalog does not know yet is refused.
+#[test]
+fn held_documents_stay_and_unknown_folders_are_refused() {
+    let t = tempfile::tempdir().unwrap();
+    let mut c = cabinet(t.path());
+    let (id, _, _) = doc(&c.conn, "Acme%k1.pdf").unwrap();
+    let root = c.root.clone();
+    crate::holds::place(
+        &mut c.conn,
+        &root,
+        "dev",
+        crate::holds::Target::Docs(vec![id.clone()]),
+        "invented matter",
+    )
+    .unwrap();
+    let dest = Dest {
+        root: root.clone(),
+        folder: "Baker Co (1002)/Income Tax".into(),
+    };
+    let rows = plan(&c.conn, &root, std::slice::from_ref(&id), &dest, Mode::Move).unwrap();
+    assert!(matches!(&rows[0].outcome, Outcome::Skip(w) if w.contains("legal hold")));
+    let rows = plan(&c.conn, &root, std::slice::from_ref(&id), &dest, Mode::Copy).unwrap();
+    assert!(rows[0].renames(), "a copy of a held document is fine");
+    // Within its own client folder it may move.
+    let own = Dest {
+        root: root.clone(),
+        folder: "Acme LLC (1001)/Income Tax".into(),
+    };
+    let rows = plan(&c.conn, &root, std::slice::from_ref(&id), &own, Mode::Move).unwrap();
+    assert!(rows[0].renames());
+    // A folder bound on disk but not in this catalog.
+    let firm = uuid::Uuid::new_v4();
+    let newc = root.join("Cole Inc (1003)");
+    std::fs::create_dir_all(&newc).unwrap();
+    filer_intake::sentinel::write_sentinel(
+        &root,
+        &newc,
+        &Client {
+            id: "1003".into(),
+            uuid: Uuid::new_v4(),
+            name: "Cole Inc".into(),
+            extra: BTreeMap::new(),
+        },
+        firm,
+    )
+    .unwrap();
+    let unknown = Dest {
+        root: root.clone(),
+        folder: "Cole Inc (1003)".into(),
+    };
+    let e = plan(&c.conn, &root, &[id], &unknown, Mode::Copy).unwrap_err();
+    assert!(e.contains("not in this catalog yet"), "{e}");
+    // Missing files count only inside the client's own folder.
+    let gone = crate::sweep::missing_files(
+        &root,
+        "Acme LLC (1001)",
+        &[
+            "Acme LLC (1001)/Income Tax/2025/k1.pdf".into(),
+            "Acme LLC (1001)/nope.pdf".into(),
+            "Elsewhere/x.pdf".into(),
+            "Acme LLC (1001) old/y.pdf".into(),
+        ],
+    );
+    assert_eq!(gone, ["Acme LLC (1001)/nope.pdf"]);
+}

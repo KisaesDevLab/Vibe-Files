@@ -48,6 +48,11 @@ struct Target {
     client_id: Option<String>,
 }
 
+/// Whether two paths are the same cabinet (a mapped drive and its network path, any case).
+pub fn same_cabinet(a: &Path, b: &Path) -> bool {
+    same_place(a, b)
+}
+
 fn same_place(a: &Path, b: &Path) -> bool {
     let norm = |p: &Path| {
         std::fs::canonicalize(p)
@@ -84,6 +89,14 @@ fn target(conn: &Connection, root: &Path, dest: &Dest) -> Result<Target, String>
         .map_err(|e| e.to_string())?
     };
     let bound = filer_intake::sentinel::sentinel_path(&dest.root.join(top)).is_file();
+    if !other_cabinet && client_id.is_none() {
+        // A bound folder the catalog has no client for yet would leave documents with none.
+        return Err(if bound {
+            format!("{top} is not in this catalog yet: open it in Browse first.")
+        } else {
+            format!("{top} is not a client folder.")
+        });
+    }
     if !bound && client_id.is_none() {
         return Err(format!("{top} is not a client folder."));
     }
@@ -123,8 +136,22 @@ pub fn plan(
             .query_row([id], |r| Ok((r.get(0)?, r.get(1)?)))
             .map_err(|e| format!("document {id}: {e}"))?;
         let (dir, name) = rel.rsplit_once('/').unwrap_or(("", &rel));
+        // A document under legal hold stays with its client and in this cabinet (a copy is fine).
+        let held = mode == Mode::Move
+            && crate::trash::held(conn, id)
+            && (t.other_cabinet || {
+                let c: Option<String> = conn
+                    .query_row("SELECT client_id FROM document WHERE id = ?1", [id], |r| {
+                        r.get(0)
+                    })
+                    .ok()
+                    .flatten();
+                c != t.client_id
+            });
         let outcome = if let Some(u) = locked_by {
             Outcome::Skip(format!("checked out by {u}"))
+        } else if held {
+            Outcome::Skip("under a legal hold: it stays with its client".into())
         } else if !t.other_cabinet && dir.eq_ignore_ascii_case(&folder) && mode == Mode::Move {
             Outcome::Same
         } else {

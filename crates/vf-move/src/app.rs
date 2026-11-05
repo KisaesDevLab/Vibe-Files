@@ -67,6 +67,9 @@ pub struct MoveApp {
     pub year: String,
     /// Clients per run (owner 2026-11-05: a few at a time to try it); blank = all.
     pub per_run: String,
+    /// Clients whose files could not all be moved this session: with a per-run limit they are
+    /// left out, so they do not take the next runs' places (code review). Scan clears it.
+    pub stuck: std::collections::BTreeSet<String>,
     /// The preview of the step: the rule and what it moves.
     pub preview: Option<(Rule, Plan)>,
     /// The folders the preview was made for: a move only ever runs on those.
@@ -126,6 +129,7 @@ impl MoveApp {
         }
         self.error = None;
         self.preview = None;
+        self.stuck.clear();
         self.scanned.store(0, Ordering::Relaxed);
         let done = self.scanned.clone();
         self.scanning = Some(Job::spawn(ctx, move || {
@@ -193,6 +197,7 @@ impl MoveApp {
             .iter()
             .filter(|c| c.1)
             .map(|c| c.0.name.clone())
+            .filter(|n| max.is_none() || !self.stuck.contains(n))
             .collect();
         self.planning = Some(Job::spawn(ctx, move || {
             let p = vf_move::plan_some(&old, &ticked, &rule, max);
@@ -299,7 +304,19 @@ impl MoveApp {
             self.running = None;
             self.preview = None;
             match r.unwrap_or_else(|| Err("the move stopped".into())) {
-                Ok(rep) => self.report = Some(rep),
+                Ok(rep) => {
+                    for (rel, _) in &rep.failed {
+                        // The client folder (first part), or "" for a loose file.
+                        let mut parts = rel.components();
+                        let first = parts.next();
+                        let client = match (first, parts.next()) {
+                            (Some(c), Some(_)) => c.as_os_str().to_string_lossy().into_owned(),
+                            _ => String::new(),
+                        };
+                        self.stuck.insert(client);
+                    }
+                    self.report = Some(rep);
+                }
                 Err(e) => self.error = Some(e),
             }
             // The counts changed.
@@ -595,6 +612,13 @@ impl MoveApp {
             ))
             .strong(),
         );
+        if !self.stuck.is_empty() && !self.per_run.trim().is_empty() {
+            ui.label(format!(
+                "{} client{} left out of these runs: some of their files could not be moved (see the log). Scan the old folder again to include them.",
+                self.stuck.len(),
+                if self.stuck.len() == 1 { " is" } else { "s are" }
+            ));
+        }
         if plan.more {
             ui.label(
                 "More ticked clients have files for this step: after this move, Preview again for the next ones.",

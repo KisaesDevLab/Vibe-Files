@@ -562,19 +562,32 @@ pub fn adopt_unknown(
     Ok(items.len())
 }
 
-/// Whether a live document of the client folder `folder` (cabinet-relative paths `known`) is
-/// gone from disk: deleted or moved in Explorer (owner 2026-11-05). False when the folder
-/// cannot be read completely (a denied folder, a network blip), so a hiccup removes nothing.
-pub fn any_missing(root: &Path, folder: &str, known: &[String]) -> bool {
+/// The live documents of the client folder `folder` (their cabinet-relative paths in `known`;
+/// only those inside the folder count) whose files are gone from disk: deleted or moved in
+/// Explorer (owner 2026-11-05). Empty when the folder cannot be read completely (a denied
+/// folder, a network blip), so a hiccup removes nothing.
+pub fn missing_files(root: &Path, folder: &str, known: &[String]) -> Vec<String> {
+    let inside = |k: &str| {
+        k.len() > folder.len()
+            && k[..folder.len()].eq_ignore_ascii_case(folder)
+            && k.as_bytes()[folder.len()] == b'/'
+    };
+    let known: Vec<&String> = known.iter().filter(|k| inside(k)).collect();
     let mut paths = Vec::new();
     if known.is_empty() || rebuild::files_under(&root.join(folder), &mut paths).is_err() {
-        return false;
+        return vec![];
     }
     let present: std::collections::HashSet<String> = paths
         .iter()
         .map(|p| rebuild::rel(root, p).to_lowercase())
         .collect();
-    known.iter().any(|k| !present.contains(&k.to_lowercase()))
+    let mut out: Vec<String> = known
+        .into_iter()
+        .filter(|k| !present.contains(&k.to_lowercase()))
+        .cloned()
+        .collect();
+    out.sort();
+    out
 }
 
 /// Files in the client folders that are not in the catalog: a file copied in through Explorer.

@@ -93,9 +93,9 @@ struct MoveAsk {
 struct Listing {
     dirs: DiskDirs,
     new_files: Vec<vf_fs::sweep::Unknown>,
-    /// The client folder shown has a document whose file is gone (deleted or moved in
-    /// Explorer): that folder is re-read.
-    missing_in: Option<String>,
+    /// The client folder shown, and its documents whose files are gone (deleted or moved in
+    /// Explorer).
+    missing: Option<(String, Vec<String>)>,
 }
 
 /// Files dragged in from Explorer (owner 2026-11-04): while they are over the window a hint
@@ -231,8 +231,15 @@ pub struct Browse {
     /// Files the last listing found in client folders and not in the catalog: added on the
     /// next frame (PA-23).
     new_files: Vec<vf_fs::sweep::Unknown>,
-    /// A client folder to re-read: a document's file is gone from it.
+    /// A client folder to re-read: a document's file is gone from it (seen twice).
     missing_in: Option<String>,
+    /// Files seen missing once, and when: a file gone for a moment (a program saving it by
+    /// rename, an antivirus scan) is not taken for deleted (code review).
+    missing_seen: Option<(String, Vec<String>, std::time::Instant)>,
+    /// The re-read running on its own thread.
+    missing_job: Option<std::sync::mpsc::Receiver<Result<vf_fs::rebuild::RebuildReport, String>>>,
+    /// The catalog file, for work on Browse's own threads (set by the app).
+    pub catalog: Option<PathBuf>,
     /// A drop on a folder waiting for "Move" (PA-23).
     move_ask: Option<MoveAsk>,
     /// Right-click › Move to… / Copy to…: picking where (Q-74).
@@ -405,6 +412,9 @@ impl Browse {
             disk_dirs: Default::default(),
             new_files: vec![],
             missing_in: None,
+            missing_seen: None,
+            missing_job: None,
+            catalog: None,
             move_ask: None,
             move_to: None,
             disk_job: None,
@@ -685,14 +695,14 @@ impl Browse {
                 })
                 .collect();
             let new_files = vf_fs::sweep::find_new(&root, &shown, &known, &hashes);
-            let missing_in = shown
-                .first()
-                .filter(|(folder, _)| vf_fs::sweep::any_missing(&root, folder, &known_paths))
-                .map(|(folder, _)| folder.clone());
+            let missing = shown.first().and_then(|(folder, _)| {
+                let gone = vf_fs::sweep::missing_files(&root, folder, &known_paths);
+                (!gone.is_empty()).then(|| (folder.clone(), gone))
+            });
             Listing {
                 dirs,
                 new_files,
-                missing_in,
+                missing,
             }
         };
         if cfg!(test) {
@@ -731,7 +741,33 @@ impl Browse {
         self.disk_dirs = got.dirs.into_iter().collect();
         self.disk_listed = Some(std::time::Instant::now());
         self.new_files = got.new_files;
-        self.missing_in = got.missing_in;
+        // Gone on two listings at least 25 s apart (the next one comes 30 s later): re-read.
+        match (got.missing, self.missing_seen.take()) {
+            (Some((folder, gone)), Some((f0, g0, at)))
+                if folder == f0
+                    && gone.iter().any(|g| g0.contains(g))
+                    && at.elapsed() >= std::time::Duration::from_secs(25) =>
+            {
+                self.missing_in = Some(folder);
+            }
+            (Some((folder, gone)), _) if cfg!(test) => {
+                let _ = gone;
+                self.missing_in = Some(folder);
+            }
+            (Some((folder, gone)), Some(prev)) if prev.0 == folder => {
+                // Still within the wait: keep the first sighting's time.
+                let keep = if gone.iter().any(|g| prev.1.contains(g)) {
+                    prev.2
+                } else {
+                    std::time::Instant::now()
+                };
+                self.missing_seen = Some((folder, gone, keep));
+            }
+            (Some((folder, gone)), _) => {
+                self.missing_seen = Some((folder, gone, std::time::Instant::now()));
+            }
+            (None, _) => {}
+        }
         let before = self.ix.clients.clone();
         self.apply_disk_dirs();
         if self.ix.clients != before {
@@ -761,14 +797,73 @@ impl Browse {
     /// Re-reads a client folder whose documents' files went missing (deleted or moved in
     /// Explorer, owner 2026-11-05): deleted ones leave Browse (their docmeta brings the doc
     /// type and year back if the file is put back), moved ones follow their file.
+    /// On its own thread with its own catalog connection (a large folder over the network
+    /// takes a while); the result is taken on a later frame.
     fn remove_missing(&mut self, env: &mut Env) {
-        let Some(folder) = self.missing_in.take() else {
-            return;
+        let got = match &self.missing_job {
+            Some(rx) => match rx.try_recv() {
+                Ok(r) => {
+                    self.missing_job = None;
+                    Some(r)
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    self.missing_job = None;
+                    None
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => return,
+            },
+            None => None,
         };
-        if vf_fs::intake::filing_now(env.root) {
-            return; // Intake is moving files: looked at again next time
-        }
-        match vf_fs::rebuild::rebuild_folders(env.conn, env.root, env.device_id, &[folder]) {
+        let got = match got {
+            Some(r) => r,
+            None => {
+                let Some(folder) = self.missing_in.take() else {
+                    return;
+                };
+                if vf_fs::intake::filing_now(env.root) {
+                    return; // Intake is moving files: looked at again next time
+                }
+                match self.catalog.clone().filter(|_| !cfg!(test)) {
+                    Some(catalog) => {
+                        let (tx, rx) = std::sync::mpsc::channel();
+                        let (root, device, ctx) = (
+                            env.root.to_path_buf(),
+                            env.device_id.to_string(),
+                            self.egui_ctx.clone(),
+                        );
+                        let started = std::thread::Builder::new()
+                            .name("browse-reread".into())
+                            .spawn(move || {
+                                let r = vf_core::db::open(&catalog, vf_core::db::Storage::Local)
+                                    .map_err(|e| e.to_string())
+                                    .and_then(|mut c| {
+                                        vf_fs::rebuild::reread_folders(
+                                            &mut c,
+                                            &root,
+                                            &device,
+                                            &[folder],
+                                        )
+                                        .map_err(|e| e.to_string())
+                                    });
+                                let _ = tx.send(r);
+                                if let Some(c) = ctx {
+                                    c.request_repaint();
+                                }
+                            });
+                        if started.is_ok() {
+                            self.missing_job = Some(rx);
+                        }
+                        return;
+                    }
+                    // Tests (and no catalog path): here.
+                    None => {
+                        vf_fs::rebuild::reread_folders(env.conn, env.root, env.device_id, &[folder])
+                            .map_err(|e| e.to_string())
+                    }
+                }
+            }
+        };
+        match got {
             Ok(rep) if rep.docs_tombstoned + rep.docs_moved > 0 => {
                 self.reload(env.conn);
                 let mut parts = vec![];
@@ -1537,6 +1632,21 @@ impl Browse {
         }
     }
 
+    /// This cabinet's clients with a folder, as (label, client folder): the Move to… / Copy
+    /// to… dialog's list.
+    fn client_choices(&self) -> Vec<(String, String)> {
+        self.snap
+            .clients
+            .iter()
+            .filter_map(|c| {
+                c.folder_rel
+                    .clone()
+                    .filter(|f| !f.is_empty())
+                    .map(|f| (format!("{}  {}", c.name, c.ext_id), f))
+            })
+            .collect()
+    }
+
     /// Plans a move or copy to `dest` (any client, this or another cabinet) and asks first.
     fn ask_copy_move(
         &mut self,
@@ -1552,7 +1662,7 @@ impl Browse {
         };
         match vf_fs::copymove::plan(conn, root, &ids, &dest, mode) {
             Ok(rows) if rows.iter().any(vf_fs::rename::Row::renames) => {
-                let other = !dest.root.as_os_str().is_empty() && dest.root != root;
+                let other = !vf_fs::copymove::same_cabinet(&dest.root, root);
                 self.move_ask = Some(MoveAsk {
                     dest: dest.folder,
                     rows,
@@ -1710,8 +1820,10 @@ pub fn show(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env) {
         b.list_disk(false);
     }
     b.poll_disk();
-    b.remove_missing(env);
+    // New files first: each is added as Explorer put it there (and read by text recognition as
+    // new), before a re-read for files gone from the same folder.
     b.add_new_files(env);
+    b.remove_missing(env);
     take_dropped_files(ui.ctx(), b, env);
     if std::mem::take(&mut b.print_request) {
         let docs: Vec<crate::ui::print_ui::PrintDoc> = b
@@ -1827,18 +1939,12 @@ pub fn show(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env) {
         let copy = ui.input(|i| i.modifiers.ctrl);
         b.ask_move(env.conn, env.root, ids, dest, copy);
     }
+    let here = if b.move_to.is_some() {
+        b.client_choices()
+    } else {
+        vec![]
+    };
     if let Some(p) = &mut b.move_to {
-        let here: Vec<(String, String)> = b
-            .snap
-            .clients
-            .iter()
-            .filter_map(|c| {
-                c.folder_rel
-                    .clone()
-                    .filter(|f| !f.is_empty())
-                    .map(|f| (format!("{}  {}", c.name, c.ext_id), f))
-            })
-            .collect();
         match crate::ui::move_to::show(ui.ctx(), p, env.root, &here) {
             crate::ui::move_to::PickOutcome::Open => {}
             crate::ui::move_to::PickOutcome::Cancelled => b.move_to = None,
@@ -3093,17 +3199,7 @@ fn grid(ui: &mut egui::Ui, b: &mut Browse, conn: &Connection) {
             .iter()
             .filter_map(|&i| b.snap.docs.get(i).map(|d| d.id.clone()))
             .collect();
-        let here: Vec<(String, String)> = b
-            .snap
-            .clients
-            .iter()
-            .filter_map(|c| {
-                c.folder_rel
-                    .clone()
-                    .filter(|f| !f.is_empty())
-                    .map(|f| (format!("{}  {}", c.name, c.ext_id), f))
-            })
-            .collect();
+        let here = b.client_choices();
         b.move_to = Some(crate::ui::move_to::PickDest::new(ids, mode, here));
     }
 }

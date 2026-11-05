@@ -670,7 +670,7 @@ pub fn rebuild(
     root: &Path,
     device_id: &str,
 ) -> Result<RebuildReport, RebuildError> {
-    rebuild_scoped(conn, root, device_id, None)
+    rebuild_scoped(conn, root, device_id, None, None)
 }
 
 /// [`rebuild`] of only these top-level folders (cabinet-relative): their files are cataloged,
@@ -682,7 +682,19 @@ pub fn rebuild_folders(
     device_id: &str,
     folders: &[String],
 ) -> Result<RebuildReport, RebuildError> {
-    rebuild_scoped(conn, root, device_id, Some(folders))
+    rebuild_scoped(conn, root, device_id, Some(folders), None)
+}
+
+/// [`rebuild_folders`] of folders already in the cabinet (Browse re-reading a client folder
+/// whose files changed in Explorer): new files found are filed as files put in the folders
+/// outside Vibe Files (`rebuild`), not as a folder import's.
+pub fn reread_folders(
+    conn: &mut Connection,
+    root: &Path,
+    device_id: &str,
+    folders: &[String],
+) -> Result<RebuildReport, RebuildError> {
+    rebuild_scoped(conn, root, device_id, Some(folders), Some("rebuild"))
 }
 
 fn rebuild_scoped(
@@ -690,6 +702,7 @@ fn rebuild_scoped(
     root: &Path,
     device_id: &str,
     only: Option<&[String]>,
+    filed_as: Option<&'static str>,
 ) -> Result<RebuildReport, RebuildError> {
     let in_scope = |rel: &str| {
         only.is_none_or(|o| {
@@ -741,12 +754,13 @@ fn rebuild_scoped(
             |r| r.get(0),
         )
         .ok();
-    let filed_by =
-        if only.is_some() || known.is_empty() || resumed.as_deref() == Some(FILED_BY_IMPORT) {
-            FILED_BY_IMPORT
-        } else {
-            "rebuild"
-        };
+    let filed_by = if let Some(f) = filed_as {
+        f
+    } else if only.is_some() || known.is_empty() || resumed.as_deref() == Some(FILED_BY_IMPORT) {
+        FILED_BY_IMPORT
+    } else {
+        "rebuild"
+    };
     if only.is_none() {
         conn.execute(
             "INSERT INTO local_state (k, v) VALUES (?1, ?2) ON CONFLICT(k) DO UPDATE SET v = excluded.v",

@@ -135,7 +135,8 @@ impl ChainCheck {
     }
 
     pub fn summary(&self) -> String {
-        if self.due_now || (self.next.is_some() && self.when.is_empty()) {
+        // Not checked yet (copies of this state included: the Admin page's, the PDF's).
+        if self.due_now || self.when.is_empty() {
             return "Checking the audit chain…".into();
         }
         match &self.result {
