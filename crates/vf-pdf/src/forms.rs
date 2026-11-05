@@ -133,20 +133,25 @@ pub fn fill(src: &Path, out: &Path, values: &[(String, String)]) -> Result<usize
 /// [`fill`] on a loaded document.
 pub fn fill_doc(doc: &mut Document, values: &[(String, String)]) -> Result<usize, String> {
     let fields = found(doc);
-    let by_name: HashMap<&str, &Found> =
-        fields.iter().map(|f| (f.field.name.as_str(), f)).collect();
+    // Two field dictionaries may carry the same full name (they are one field to a reader).
+    let mut by_name: HashMap<&str, Vec<&Found>> = HashMap::new();
+    for f in &fields {
+        by_name.entry(f.field.name.as_str()).or_default().push(f);
+    }
     let mut changed = 0;
     for (name, value) in values {
-        let f = by_name
+        let all = by_name
             .get(name.as_str())
             .ok_or_else(|| format!("the form has no field \"{name}\""))?;
-        if f.field.read_only {
+        if let Some(f) = all.iter().find(|f| f.field.read_only) {
             return Err(format!("\"{}\" is read-only", f.field.title()));
         }
-        if f.field.value == *value {
+        if all.iter().all(|f| f.field.value == *value) {
             continue;
         }
-        set_value(doc, f, value)?;
+        for f in all {
+            set_value(doc, f, value)?;
+        }
         changed += 1;
     }
     if changed > 0 {
@@ -312,7 +317,11 @@ fn walk(
     let field_kids: Vec<ObjectId> = kids
         .iter()
         .copied()
-        .filter(|k| doc.get_dictionary(*k).is_ok_and(|kd| kd.has(b"T")))
+        .filter(|k| {
+            // A field has /T or /Kids; a widget has a /Rect. A nameless grouping dict is a field.
+            doc.get_dictionary(*k)
+                .is_ok_and(|kd| kd.has(b"T") || kd.has(b"Kids") || !kd.has(b"Rect"))
+        })
         .collect();
     if !field_kids.is_empty() {
         for k in field_kids {
@@ -346,7 +355,7 @@ fn walk(
     let value = match &kind {
         FieldKind::Check { .. } | FieldKind::Radio { .. } => {
             match inh.v.as_ref().and_then(|v| v.as_name().ok()) {
-                Some(n) => String::from_utf8_lossy(n).into_owned(),
+                Some(n) => name_text(n),
                 None => "Off".into(),
             }
         }
@@ -382,7 +391,9 @@ fn kind_of(doc: &Document, inh: &Inherit, widgets: &[Widget]) -> Option<FieldKin
             Some(FieldKind::Text {
                 multiline: ff & (1 << 12) != 0,
                 max_len: inh.max_len.and_then(|m| usize::try_from(m).ok()),
-                comb: ff & (1 << 24) != 0 && inh.max_len.is_some_and(|m| m > 0),
+                comb: ff & (1 << 24) != 0
+                    && ff & (1 << 13) == 0
+                    && inh.max_len.is_some_and(|m| m > 0),
                 password: ff & (1 << 13) != 0,
             })
         }
@@ -464,7 +475,36 @@ fn on_state(doc: &Document, w: &Dictionary) -> Option<String> {
     n.iter()
         .map(|(k, _)| k)
         .find(|k| k.as_slice() != b"Off")
-        .map(|k| String::from_utf8_lossy(k).into_owned())
+        .map(|k| name_text(k))
+}
+
+/// A PDF name as text: UTF-8 when it is, else each byte as its Latin-1 character (so a state
+/// name like `S\xEDn` round-trips; [`state_bytes`] gives the widget's own bytes back).
+fn name_text(n: &[u8]) -> String {
+    match std::str::from_utf8(n) {
+        Ok(t) => t.to_string(),
+        Err(_) => n.iter().map(|&b| b as char).collect(),
+    }
+}
+
+/// The bytes of appearance state `state` as a widget of `f` names it.
+fn state_bytes(doc: &Document, f: &Found, state: &str) -> Vec<u8> {
+    for w in &f.widgets {
+        let Some(n) = doc
+            .get_dictionary(*w)
+            .ok()
+            .and_then(|wd| deref(doc, wd.get(b"AP").ok()?))
+            .and_then(|ap| ap.as_dict().ok())
+            .and_then(|ap| deref(doc, ap.get(b"N").ok()?))
+            .and_then(|n| n.as_dict().ok())
+        else {
+            continue;
+        };
+        if let Some((k, _)) = n.iter().find(|(k, _)| name_text(k) == state) {
+            return k.clone();
+        }
+    }
+    state.as_bytes().to_vec()
 }
 
 /// A PDF text string (or name) as text: UTF-16BE with its BOM, else PDFDocEncoding (read as
@@ -472,7 +512,7 @@ fn on_state(doc: &Document, w: &Dictionary) -> Option<String> {
 fn text_of(doc: &Document, o: &Object) -> Option<String> {
     match deref(doc, o)? {
         Object::String(b, _) => Some(decode_text(b)),
-        Object::Name(n) => Some(String::from_utf8_lossy(n).into_owned()),
+        Object::Name(n) => Some(name_text(n)),
         _ => None,
     }
 }
@@ -520,15 +560,16 @@ fn set_value(doc: &mut Document, f: &Found, value: &str) -> Result<(), String> {
             {
                 return Err(format!("\"{}\" has no choice \"{state}\"", f.field.title()));
             }
-            set(doc, f.id, "V", Object::Name(state.as_bytes().to_vec()))?;
+            let raw = state_bytes(doc, f, state);
+            set(doc, f.id, "V", Object::Name(raw.clone()))?;
             for w in &f.widgets {
                 let has = doc
                     .get_dictionary(*w)
                     .ok()
                     .and_then(|wd| on_state(doc, wd))
                     .is_some_and(|on| on == state);
-                let as_ = if has { state } else { "Off" };
-                set(doc, *w, "AS", Object::Name(as_.as_bytes().to_vec()))?;
+                let as_ = if has { raw.clone() } else { b"Off".to_vec() };
+                set(doc, *w, "AS", Object::Name(as_))?;
             }
         }
         FieldKind::Text { .. } | FieldKind::Choice { .. } => {
@@ -543,6 +584,9 @@ fn set_value(doc: &mut Document, f: &Found, value: &str) -> Result<(), String> {
                 ));
             }
             set(doc, f.id, "V", encode_text(value))?;
+            if let Ok(d) = doc.get_dictionary_mut(f.id) {
+                d.remove(b"RV");
+            }
             if let FieldKind::Choice { options, .. } = &f.field.kind {
                 // `/I`, the chosen options' indices, is what Acrobat highlights in a list.
                 let d = doc.get_dictionary_mut(f.id).map_err(|e| e.to_string())?;
@@ -554,36 +598,95 @@ fn set_value(doc: &mut Document, f: &Found, value: &str) -> Result<(), String> {
                 }
             }
             for w in &f.widgets {
-                let Ok(wd) = doc.get_dictionary(*w) else {
-                    continue;
-                };
-                let Some(rect) = rect_of(wd) else { continue };
-                let look = Look::of(doc, wd, f.da.as_deref());
-                let content = appearance(&f.field.kind, value, rect, &look, f.quad);
-                let stream = Stream::new(
-                    dictionary! {
-                        "Type" => "XObject",
-                        "Subtype" => "Form",
-                        "BBox" => vec![0.into(), 0.into(), (rect[2] - rect[0]).into(), (rect[3] - rect[1]).into()],
-                        "Resources" => dictionary! {
-                            "Font" => dictionary! {
-                                FONT => dictionary! {
-                                    "Type" => "Font",
-                                    "Subtype" => "Type1",
-                                    "BaseFont" => "Helvetica",
-                                    "Encoding" => "WinAnsiEncoding",
-                                },
-                            },
-                        },
-                    },
-                    content.into_bytes(),
-                );
-                let ap = doc.add_object(stream);
-                set(doc, *w, "AP", Object::Dictionary(dictionary! { "N" => ap }))?;
+                draw_widget(doc, f, *w, value)?;
             }
         }
     }
     Ok(())
+}
+
+/// A new normal appearance for text or choice widget `w` of `f`, showing `value`. A widget
+/// turned by `/MK /R` gets its text turned with it.
+fn draw_widget(doc: &mut Document, f: &Found, w: ObjectId, value: &str) -> Result<(), String> {
+    let Ok(wd) = doc.get_dictionary(w) else {
+        return Ok(());
+    };
+    let Some(rect) = rect_of(wd) else {
+        return Ok(());
+    };
+    let look = Look::of(doc, wd, f.da.as_deref());
+    let turn = wd
+        .get(b"MK")
+        .ok()
+        .and_then(|o| deref(doc, o))
+        .and_then(|o| o.as_dict().ok())
+        .and_then(|mk| mk.get(b"R").ok())
+        .and_then(|o| o.as_i64().ok())
+        .unwrap_or(0)
+        .rem_euclid(360);
+    let (rw, rh) = (rect[2] - rect[0], rect[3] - rect[1]);
+    // Drawn upright in the widget's own frame, then turned (§12.5.5 maps it onto /Rect).
+    let (w_, h_, matrix): (f32, f32, [f32; 6]) = match turn {
+        90 => (rh, rw, [0.0, 1.0, -1.0, 0.0, 0.0, 0.0]),
+        180 => (rw, rh, [-1.0, 0.0, 0.0, -1.0, 0.0, 0.0]),
+        270 => (rh, rw, [0.0, -1.0, 1.0, 0.0, 0.0, 0.0]),
+        _ => (rw, rh, [1.0, 0.0, 0.0, 1.0, 0.0, 0.0]),
+    };
+    let content = appearance(&f.field.kind, value, [0.0, 0.0, w_, h_], &look, f.quad);
+    let stream = Stream::new(
+        dictionary! {
+            "Type" => "XObject",
+            "Subtype" => "Form",
+            "BBox" => vec![0.into(), 0.into(), w_.into(), h_.into()],
+            "Matrix" => matrix.iter().map(|&x| Object::Real(x)).collect::<Vec<_>>(),
+            "Resources" => dictionary! {
+                "Font" => dictionary! {
+                    FONT => dictionary! {
+                        "Type" => "Font",
+                        "Subtype" => "Type1",
+                        "BaseFont" => "Helvetica",
+                        "Encoding" => "WinAnsiEncoding",
+                    },
+                },
+            },
+        },
+        content.into_bytes(),
+    );
+    let ap = doc.add_object(stream);
+    set(doc, w, "AP", Object::Dictionary(dictionary! { "N" => ap }))
+}
+
+/// Draws the appearance of every text and choice field that has a value but no appearance, or
+/// of all of them when the form asks viewers to (`/NeedAppearances true`). Forms filled by other
+/// programs are often left like that; Flatten calls this so their values are not lost.
+/// Returns how many widgets were drawn.
+pub fn draw_missing_appearances(doc: &mut Document) -> usize {
+    let need_all = acroform(doc)
+        .and_then(|f| f.get(b"NeedAppearances").ok())
+        .and_then(|o| o.as_bool().ok())
+        .unwrap_or(false);
+    let mut n = 0;
+    for f in found(doc) {
+        if !matches!(
+            f.field.kind,
+            FieldKind::Text { .. } | FieldKind::Choice { .. }
+        ) || f.field.value.is_empty()
+        {
+            continue;
+        }
+        for w in &f.widgets {
+            let has_ap = doc
+                .get_dictionary(*w)
+                .ok()
+                .and_then(|wd| deref(doc, wd.get(b"AP").ok()?))
+                .and_then(|ap| ap.as_dict().ok())
+                .is_some_and(|ap| ap.has(b"N"));
+            if (need_all || !has_ap) && draw_widget(doc, &f, *w, &f.field.value.clone()).is_ok() {
+                n += 1;
+            }
+        }
+    }
+    n
 }
 
 fn set(doc: &mut Document, id: ObjectId, key: &str, v: Object) -> Result<(), String> {
@@ -614,12 +717,16 @@ impl Look {
             .or_else(|| field_da.map(str::to_string))
             .unwrap_or_default();
         let toks: Vec<&str> = da.split_whitespace().collect();
-        let num = |i: usize| toks.get(i).and_then(|t| t.parse::<f32>().ok());
+        let num = |i: usize| {
+            toks.get(i)
+                .and_then(|t| t.parse::<f32>().ok())
+                .filter(|x| x.is_finite())
+        };
         let mut size = 0.0;
         let mut color = [0.0; 3];
         for (i, t) in toks.iter().enumerate() {
             match *t {
-                "Tf" if i >= 1 => size = num(i - 1).unwrap_or(0.0),
+                "Tf" if i >= 1 => size = num(i - 1).unwrap_or(0.0).min(200.0),
                 "g" if i >= 1 => {
                     let g = num(i - 1).unwrap_or(0.0);
                     color = [g; 3];
@@ -795,6 +902,7 @@ fn aligned(quad: i64, w: f32, tw: f32) -> f32 {
 /// Lines of `text` that fit `width` at `size` (breaking at spaces, and at newlines).
 fn wrap(text: &str, size: f32, width: f32) -> Vec<String> {
     let mut out = Vec::new();
+    let text = text.replace("\r\n", "\n").replace('\r', "\n");
     for para in text.split('\n') {
         let mut line = String::new();
         for word in para.split(' ') {
@@ -1274,6 +1382,114 @@ mod tests {
             [b"Off".to_vec(), b"2".to_vec()],
             "the second box is on"
         );
+    }
+
+    #[test]
+    fn turned_widgets_nameless_groups_and_missing_appearances() {
+        let t = tempfile::tempdir().unwrap();
+        let (src, out) = (t.path().join("f.pdf"), t.path().join("o.pdf"));
+        write_test_form(&src);
+        let mut doc = Document::load(&src).unwrap();
+        let fs = found(&doc);
+        let id = |n: &str| fs.iter().find(|f| f.field.name == n).unwrap().id;
+        // client_name turned 90°; notes filled by "another program": a value, no appearance,
+        // NeedAppearances false.
+        doc.get_dictionary_mut(id("client_name"))
+            .unwrap()
+            .set("MK", dictionary! { "R" => 90 });
+        doc.get_dictionary_mut(id("notes"))
+            .unwrap()
+            .set("V", Object::string_literal("Line one\rLine two"));
+        // A nameless group holding a named field.
+        let page = *doc.get_pages().values().next().unwrap();
+        let group = doc.new_object_id();
+        let inner = doc.add_object(dictionary! {
+            "Type" => "Annot", "Subtype" => "Widget", "FT" => "Tx", "T" => Object::string_literal("inner"),
+            "Parent" => group, "Rect" => vec![300.into(), 300.into(), 400.into(), 320.into()],
+        });
+        doc.objects.insert(
+            group,
+            Object::Dictionary(dictionary! { "Kids" => vec![inner.into()] }),
+        );
+        let outer = doc.add_object(dictionary! {
+            "T" => Object::string_literal("outer"), "Kids" => vec![group.into()],
+        });
+        doc.get_dictionary_mut(page)
+            .unwrap()
+            .get_mut(b"Annots")
+            .unwrap()
+            .as_array_mut()
+            .unwrap()
+            .push(inner.into());
+        let form = doc
+            .catalog()
+            .unwrap()
+            .get(b"AcroForm")
+            .unwrap()
+            .as_reference()
+            .unwrap();
+        doc.get_dictionary_mut(form)
+            .unwrap()
+            .get_mut(b"Fields")
+            .unwrap()
+            .as_array_mut()
+            .unwrap()
+            .push(outer.into());
+        doc.save(&src).unwrap();
+
+        assert!(read(&src).unwrap().iter().any(|f| f.name == "outer.inner"));
+        fill(&src, &out, &[("client_name".into(), "Turned".into())]).unwrap();
+        let mut d = Document::load(&out).unwrap();
+        let fs = found(&d);
+        let w = fs
+            .iter()
+            .find(|f| f.field.name == "client_name")
+            .unwrap()
+            .widgets[0];
+        let n = d
+            .get_dictionary(w)
+            .unwrap()
+            .get(b"AP")
+            .unwrap()
+            .as_dict()
+            .unwrap()
+            .get(b"N")
+            .unwrap()
+            .as_reference()
+            .unwrap();
+        let Object::Stream(st) = d.get_object(n).unwrap() else {
+            panic!()
+        };
+        let bbox: Vec<f32> = st
+            .dict
+            .get(b"BBox")
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|o| o.as_float().unwrap())
+            .collect();
+        assert_eq!(bbox, [0.0, 0.0, 20.0, 228.0], "drawn in the turned frame");
+        // notes, the drop-down and the read-only form_id have values and no look.
+        assert_eq!(draw_missing_appearances(&mut d), 3);
+        let flat = t.path().join("flat.pdf");
+        d.save(&out).unwrap();
+        crate::flatten::flatten(&out, &flat).unwrap();
+        let fd = Document::load(&flat).unwrap();
+        let has = |txt: &str| {
+            fd.objects.values().any(|o| matches!(o, Object::Stream(s) if String::from_utf8_lossy(&s.content).contains(txt)))
+        };
+        assert!(
+            has("(Line one) Tj") && has("(Line two) Tj"),
+            "CR breaks the line"
+        );
+        assert!(has("(Turned) Tj"));
+    }
+
+    #[test]
+    fn latin1_state_names_round_trip() {
+        assert_eq!(name_text(b"S\xEDn"), "Sín");
+        assert_eq!(name_text("Sí".as_bytes()), "Sí");
     }
 
     #[test]

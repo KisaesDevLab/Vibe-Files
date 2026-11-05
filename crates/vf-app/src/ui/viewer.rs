@@ -371,6 +371,9 @@ impl Viewer {
 
     /// Sets a field's value; typing the file's value back drops the change.
     pub fn set_field(&mut self, name: &str, value: String) {
+        if self.converting.is_some() {
+            return;
+        }
         let Some(f) = self.fields().iter().find(|f| f.name == name) else {
             return;
         };
@@ -412,6 +415,8 @@ impl Viewer {
         self.seen = None;
         self.pii_found = None;
         self.drawn.clear();
+        self.pages_dialog = None;
+        self.pick_anchor = None;
         self.reload();
     }
 
@@ -434,6 +439,8 @@ impl Viewer {
         self.find = doc.terms.join(" ");
         self.pii_found = None;
         self.drawn.clear();
+        self.pages_dialog = None;
+        self.pick_anchor = None;
         self.doc = Some(doc);
         self.reload();
     }
@@ -958,6 +965,7 @@ fn page_picker(ui: &mut egui::Ui, v: &mut Viewer, d: &mut PagesDialog, count: us
         .max_width(PER_ROW as f32 * 84.0)
         .show_rows(ui, 114.0, rows, |ui, range| {
             // Only the rows on screen: thumbnails are rendered as they scroll into view.
+            ui.spacing_mut().item_spacing.x = 4.0;
             for row in range {
                 ui.horizontal(|ui| {
                     for i in row * PER_ROW..((row + 1) * PER_ROW).min(count) {
@@ -1020,9 +1028,12 @@ fn thumb_tile(ui: &mut egui::Ui, v: &mut Viewer, i: usize, on: bool) -> Option<b
 
 /// The Pages box after clicking page `i` (0-based). What was typed is kept, its ranges and
 /// order too (Split and Extract read them): a page not picked yet is added at the end (Shift:
-/// the run from the anchor); a picked one is taken out, the rest keeping their order.
+/// the pages of the run from the anchor not picked yet); a picked one is taken out of the
+/// range that holds it, splitting it if needed. Text that is not a page list is replaced.
 fn pick_text(text: &str, count: usize, i: usize, anchor: Option<usize>, shift: bool) -> String {
-    let picked = vf_pdf::pages::parse_ranges(text, count).unwrap_or_default();
+    let Ok(picked) = vf_pdf::pages::parse_ranges(text, count) else {
+        return (i + 1).to_string();
+    };
     let add = |part: String| {
         let kept = text.trim().trim_end_matches(',').trim_end();
         if kept.is_empty() {
@@ -1033,16 +1044,60 @@ fn pick_text(text: &str, count: usize, i: usize, anchor: Option<usize>, shift: b
     };
     match (shift, anchor) {
         (true, Some(a)) => {
-            let (lo, hi) = (a.min(i), a.max(i));
-            if (lo..=hi).all(|p| picked.contains(&p)) {
+            let new: Vec<usize> = (a.min(i)..=a.max(i))
+                .filter(|p| !picked.contains(p))
+                .collect();
+            if new.is_empty() {
                 text.to_string()
             } else {
-                add(format!("{}-{}", lo + 1, hi + 1))
+                add(page_label(&new).replace(',', ", "))
             }
         }
         _ if picked.contains(&i) => {
-            let rest: Vec<usize> = picked.into_iter().filter(|&p| p != i).collect();
-            page_label(&rest).replace(',', ", ")
+            let n = i + 1;
+            let parts: Vec<String> = text
+                .split(',')
+                .map(str::trim)
+                .filter(|p| !p.is_empty())
+                .flat_map(|part| {
+                    let (a, b) = match part.split_once('-') {
+                        Some((a, b)) => (a.trim().parse::<usize>(), b.trim().parse::<usize>()),
+                        None => (part.parse::<usize>(), part.parse::<usize>()),
+                    };
+                    let (Ok(a), Ok(b)) = (a, b) else {
+                        return vec![part.to_string()];
+                    };
+                    if n < a.min(b) || n > a.max(b) {
+                        return vec![part.to_string()];
+                    }
+                    // Take n out of a..=b (either direction), keeping the direction.
+                    let run = |x: usize, y: usize| {
+                        if x == y {
+                            x.to_string()
+                        } else {
+                            format!("{x}-{y}")
+                        }
+                    };
+                    let mut out = Vec::new();
+                    if a <= b {
+                        if n > a {
+                            out.push(run(a, n - 1));
+                        }
+                        if n < b {
+                            out.push(run(n + 1, b));
+                        }
+                    } else {
+                        if n < a {
+                            out.push(run(a, n + 1));
+                        }
+                        if n > b {
+                            out.push(run(n - 1, b));
+                        }
+                    }
+                    out
+                })
+                .collect();
+            parts.join(", ")
         }
         _ => add((i + 1).to_string()),
     }
@@ -1066,6 +1121,15 @@ fn want_thumb(v: &mut Viewer, i: usize) {
 }
 
 fn open_pages_dialog(v: &mut Viewer, page: usize) {
+    if let Some(d) = &mut v.pages_dialog {
+        // Already open: the page joins what is picked there.
+        let count = v.info.as_ref().map_or(0, |i| i.geoms.len());
+        if !vf_pdf::pages::parse_ranges(&d.pages, count).is_ok_and(|p| p.contains(&page)) {
+            d.pages = pick_text(&d.pages, count, page, None, false);
+        }
+        v.pick_anchor = Some(page);
+        return;
+    }
     v.pages_dialog = Some(PagesDialog {
         pages: (page + 1).to_string(),
         blank_after: (page + 1).to_string(),
@@ -1127,6 +1191,8 @@ fn page_menu_run(v: &mut Viewer, env: &mut Env<'_>, what: PageMenu, page: usize)
                 Ok(msg) => {
                     v.notice = Some(msg);
                     v.catalog_changed = true;
+                    // Its page numbers no longer fit the document.
+                    v.pages_dialog = None;
                 }
                 Err(e) => v.error = Some(e),
             }
@@ -1143,6 +1209,12 @@ fn run_page_op(
     count: usize,
 ) -> Result<String, String> {
     let doc = v.doc.clone().ok_or("no document")?;
+    if v.unsaved() > 0 {
+        return Err(
+            "Save or discard the unsaved changes first: they are on the pages as they are now."
+                .into(),
+        );
+    }
     let pages = || vf_pdf::pages::parse_ranges(&d.pages, count);
     // Edits of this document: a new version.
     let edit = |v: &mut Viewer,
@@ -1166,6 +1238,7 @@ fn run_page_op(
         match vf_fs::content::replace(env.conn, env.root, env.device_id, &doc.doc_id, &tmp, change)?
         {
             Ok(_) => {
+                v.tape.tape.forget_sources();
                 v.reload();
                 Ok(format!("{what}; the previous version is kept."))
             }
@@ -1784,7 +1857,7 @@ fn canvas(ui: &mut egui::Ui, v: &mut Viewer, initials: &str) {
                 if v.tape.open {
                     draw_tape_marks(ui, v, i, rect, s, &g);
                 }
-                if v.panel == Panel::Form {
+                if v.panel == Panel::Form && !v.fields().is_empty() {
                     let resp = ui.interact(
                         rect,
                         ui.scope_id().with(("vf-form-page", i)),
@@ -2093,7 +2166,6 @@ fn interact(
         ui.scope_id().with(("vf-page", page)),
         Sense::click_and_drag(),
     );
-    page_menu(&resp, v, page);
     let to_display = |pos: Pos2| {
         let d = (pos - rect.min) / s;
         [d.x, d.y]
@@ -2103,6 +2175,7 @@ fn interact(
         tape_interact(ui, v, page, &resp, rect, s, g, initials);
         return;
     }
+    page_menu(&resp, v, page);
     if matches!(
         v.tool,
         Tool::Select | Tool::Highlight | Tool::Underline | Tool::StrikeOut | Tool::RedactText
@@ -3297,16 +3370,24 @@ fn form_overlay(ui: &mut egui::Ui, v: &mut Viewer, page: usize, rect: Rect, s: f
                         FieldKind::Check { on } => w.on.clone().unwrap_or_else(|| on.clone()),
                         _ => w.on.clone().unwrap_or_default(),
                     };
+                    if on_state.is_empty() {
+                        continue; // no "on" look to show: choose it in the list
+                    }
                     let on = Field::is_on(&value) && value == on_state;
                     let resp = ui.interact(sr, id, Sense::click());
                     let p = ui.painter();
-                    p.rect(
-                        sr,
-                        1.0,
-                        FILL,
-                        Stroke::new(1.0, EDGE),
-                        egui::StrokeKind::Inside,
-                    );
+                    if matches!(f.kind, FieldKind::Radio { .. }) {
+                        let r = sr.width().min(sr.height()) / 2.0 - 0.5;
+                        p.circle(sr.center(), r, FILL, Stroke::new(1.0, EDGE));
+                    } else {
+                        p.rect(
+                            sr,
+                            1.0,
+                            FILL,
+                            Stroke::new(1.0, EDGE),
+                            egui::StrokeKind::Inside,
+                        );
+                    }
                     if on {
                         let c = sr.center();
                         let r = sr.width().min(sr.height()) * 0.3;
@@ -4209,12 +4290,18 @@ mod tape_tests {
         assert_eq!(pick_text("3, 1", 9, 4, None, false), "3, 1, 5");
         assert_eq!(pick_text("", 9, 1, None, false), "2");
         assert_eq!(pick_text("2,", 9, 4, None, false), "2, 5");
-        // Shift: the run from the anchor; nothing new when it is all picked.
-        assert_eq!(pick_text("2", 9, 5, Some(1), true), "2, 2-6");
+        // Shift: the pages of the run not picked yet; nothing new when it is all picked.
+        assert_eq!(pick_text("2", 9, 5, Some(1), true), "2, 3-6");
+        assert_eq!(pick_text("2, 4", 9, 5, Some(1), true), "2, 4, 3, 5-6");
         assert_eq!(pick_text("2-6", 9, 5, Some(1), true), "2-6");
-        // Taking one out keeps the rest in their order.
+        // Taking one out edits only the range that holds it.
         assert_eq!(pick_text("3, 1, 2", 9, 0, None, false), "3, 2");
         assert_eq!(pick_text("1-3", 9, 1, None, false), "1, 3");
+        assert_eq!(pick_text("1-2, 3-5", 9, 4, None, false), "1-2, 3-4");
+        assert_eq!(pick_text("1-2, 3-5", 9, 2, None, false), "1-2, 4-5");
+        assert_eq!(pick_text("5-3", 9, 3, None, false), "5, 3");
+        // Not a page list (page 12 of 9): the click starts over.
+        assert_eq!(pick_text("12", 9, 1, None, false), "2");
     }
 
     #[test]

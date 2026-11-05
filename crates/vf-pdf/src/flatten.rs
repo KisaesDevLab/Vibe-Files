@@ -24,6 +24,8 @@ pub fn flatten(src: &Path, out: &Path) -> Result<usize, String> {
 
 /// Flattens in place (PDF/A uses this before its own checks).
 pub fn flatten_doc(doc: &mut Document) -> Result<usize, String> {
+    // Form values another program left without an appearance would be dropped below.
+    crate::forms::draw_missing_appearances(doc);
     let pages: Vec<ObjectId> = doc.get_pages().values().copied().collect();
     let mut total = 0;
     for page in pages {

@@ -2597,6 +2597,15 @@ mod tests {
             o.viewer.panel = crate::ui::viewer::Panel::Form;
         }
         h.run_steps(3);
+        // VF_SCREENS_DIR set: the screen as it looks (review aid).
+        let shot = |h: &mut egui_kittest::Harness<'static, VibeFilesApp>, name: &str| {
+            if let Ok(dir) = std::env::var("VF_SCREENS_DIR") {
+                h.run_steps(6);
+                if let Ok(img) = h.render() {
+                    let _ = img.save(std::path::Path::new(&dir).join(name));
+                }
+            }
+        };
         // Typed on the page (the same field in the list carries the same name).
         h.get_all_by_label("Client name").next().unwrap().click();
         h.step();
@@ -2612,6 +2621,7 @@ mod tests {
             o.viewer.set_field("form_id", "changed".into()); // read-only: ignored
             assert_eq!(o.viewer.unsaved(), 3, "{:?}", o.viewer.form);
         }
+        shot(&mut h, "42-viewer-form.png");
         click(&mut h, "Save");
         h.run_steps(3);
         if let Screen::Open(o) = &h.state().screen {
@@ -2673,6 +2683,7 @@ mod tests {
         if let Screen::Open(o) = &h.state().screen {
             assert_eq!(o.viewer.pages_dialog.as_ref().unwrap().pages, "3");
         }
+        shot(&mut h, "43-viewer-pages-picker.png");
         click(&mut h, "Delete pages");
         h.run_steps(3);
         let texts = |p: &std::path::Path| -> Vec<String> {
