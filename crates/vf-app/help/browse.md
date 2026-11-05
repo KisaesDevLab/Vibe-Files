@@ -39,7 +39,7 @@ The columns are **Name**, **Client**, **Doc type**, **Year**, **Status**, **Size
 - **Refresh** re-reads the catalog.
 - Click the box at the start of a row, or use Ctrl and Shift with the mouse, to select several documents. See [Keyboard shortcuts](help:shortcuts).
 
-Double-click a document, or press Enter, to open it: PDFs open in the [Viewer](help:viewer), other files in their own program. Right-click for **Open in PDF app**, **Open in Explorer** and **Copy path**.
+Double-click a document, or press Enter, to open it: PDFs open in the [Viewer](help:viewer), other files in their own program. Right-click for **Open in PDF app**, **Open in Explorer**, **Copy path** and **Go to client's folder**, which opens the document's client in the tree on the left.
 
 **Pin** lists the selected documents under **Pinned** on this PC; **Unpin** takes them off.
 

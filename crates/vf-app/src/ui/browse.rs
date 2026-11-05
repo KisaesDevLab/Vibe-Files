@@ -232,6 +232,8 @@ pub struct Browse {
     /// `expanded` by client id while the catalog is re-read.
     expanded_ids: Vec<(String, Option<String>)>,
     pub client_filter: String,
+    /// A client to scroll the tree to once (Go to client's folder).
+    reveal: Option<usize>,
     pub name_filter: String,
     pub sort: (SortCol, bool),
     /// Doc indices shown in the grid, filtered and sorted.
@@ -377,6 +379,7 @@ impl Browse {
             expanded: HashSet::new(),
             expanded_ids: vec![],
             client_filter: String::new(),
+            reveal: None,
             name_filter: String::new(),
             sort: (SortCol::Name, true),
             visible: Vec::new(),
@@ -755,10 +758,25 @@ impl Browse {
     /// Shows client `ci`'s folder, opened in the tree (a related client's link, owner
     /// 2026-11-04).
     pub fn go_to_client(&mut self, ci: usize) {
-        if ci < self.snap.clients.len() {
+        if let Some(c) = self.snap.clients.get(ci) {
+            // The tree's client search would hide it: cleared when it does not match.
+            let needle = self.client_filter.trim().to_lowercase();
+            if !needle.is_empty()
+                && !c.name.to_lowercase().contains(&needle)
+                && !c.ext_id.to_lowercase().contains(&needle)
+            {
+                self.client_filter.clear();
+            }
             self.expanded.insert(Node::Client(ci));
+            self.reveal = Some(ci);
             self.set_scope(Scope::Client(ci));
         }
+    }
+
+    /// The client of document `di`, as an index into the snapshot's clients.
+    fn client_of_doc(&self, di: usize) -> Option<usize> {
+        let id = self.snap.docs.get(di)?.client_id.as_deref()?;
+        self.snap.clients.iter().position(|c| c.id == id)
     }
 
     /// Shows `scope` in the grid and clears the selection.
@@ -1608,6 +1626,10 @@ fn tree(ui: &mut egui::Ui, b: &mut Browse) {
                     drop_target(&resp, cf, &mut dropped);
                 }
                 fav_menu(&resp, Scope::Client(ci), &mut fav_scope);
+                if b.reveal == Some(ci) {
+                    resp.scroll_to_me(Some(egui::Align::Center));
+                    b.reveal = None;
+                }
                 if chev {
                     toggle = Some(Node::Client(ci));
                 }
@@ -2195,6 +2217,7 @@ fn grid(ui: &mut egui::Ui, b: &mut Browse, conn: &Connection) {
     let mut clicked: Option<(usize, egui::Modifiers)> = None;
     let mut file_req: Option<(usize, FileAct)> = None;
     let mut trash_row: Option<usize> = None;
+    let mut goto_client: Option<usize> = None;
     let mut toggled: Option<usize> = None;
     let mut sort: Option<SortCol> = None;
     let mods = ui.input(|i| i.modifiers);
@@ -2358,6 +2381,15 @@ fn grid(ui: &mut egui::Ui, b: &mut Browse, conn: &Connection) {
                             ui.close();
                         }
                     }
+                    let client = b.client_of_doc(di);
+                    if ui
+                        .add_enabled(client.is_some(), egui::Button::new("Go to client's folder"))
+                        .on_disabled_hover_text("This document is not filed to a client.")
+                        .clicked()
+                    {
+                        goto_client = client;
+                        ui.close();
+                    }
                     ui.separator();
                     if ui.button("Move to trash").clicked() {
                         trash_row = Some(di);
@@ -2378,6 +2410,9 @@ fn grid(ui: &mut egui::Ui, b: &mut Browse, conn: &Connection) {
     }
     if file_req.is_some() {
         b.file_request = file_req;
+    }
+    if let Some(ci) = goto_client {
+        b.go_to_client(ci);
     }
     if let Some(di) = trash_row {
         if !b.selected.contains(&di) {
@@ -4130,6 +4165,35 @@ mod tests {
         h.run();
         click(&mut h, "Remove from favorites");
         assert!(h.state().b.prefs.favorites.is_empty());
+
+        // Right-click a document: Go to client's folder opens its client in the tree, clearing
+        // a client search that would hide it (owner 2026-11-05).
+        click(&mut h, "All documents");
+        // Names repeat across clients: the k-th row of that name in the list.
+        let (name, k, want) = {
+            let b = &h.state().b;
+            let p = b
+                .visible
+                .iter()
+                .position(|&i| b.client_of_doc(i).is_some_and(|c| c != 1))
+                .unwrap();
+            let di = b.visible[p];
+            let name = b.snap.docs[di].name().to_string();
+            let k = b.visible[..p]
+                .iter()
+                .filter(|&&i| b.snap.docs[i].name() == name)
+                .count();
+            (name, k, b.client_of_doc(di).unwrap())
+        };
+        h.state_mut().b.client_filter = "1001".into();
+        h.run();
+        h.get_all_by_label(&name).nth(k).unwrap().click_secondary();
+        h.run();
+        click(&mut h, "Go to client's folder");
+        let b = &h.state().b;
+        assert_eq!(b.scope, Scope::Client(want));
+        assert!(b.client_filter.is_empty(), "the search hid the client");
+        assert!(b.expanded.contains(&Node::Client(want)));
     }
 
     /// P02 step 3: `Print cover sheet` for the client in view writes a sheet whose barcode

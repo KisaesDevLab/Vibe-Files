@@ -27,7 +27,7 @@ With the mouse:
 - Ctrl and click — add a row to the selection, or take it out.
 - Shift and click — select every row from the last one you clicked.
 - Double-click — open the document.
-- Right-click — **Open**, **Open in PDF app**, **Open in Explorer**, **Copy path**, **Move to trash**.
+- Right-click — **Open**, **Open in PDF app**, **Open in Explorer**, **Copy path**, **Go to client's folder**, **Move to trash**.
 - Drag rows onto a folder in the tree — move them there. See [Moving, renaming and deleting](help:moving-renaming).
 
 ## Intake
