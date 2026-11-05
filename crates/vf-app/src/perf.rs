@@ -129,6 +129,11 @@ mod tests {
                         params![text, id],
                     )
                     .unwrap();
+                    tx.execute(
+                        "INSERT INTO doc_fts_doc (fts_row, doc_id) VALUES (last_insert_rowid(), ?1)",
+                        params![id],
+                    )
+                    .unwrap();
                 }
             }
             tx.commit().unwrap();

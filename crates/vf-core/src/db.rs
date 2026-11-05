@@ -26,6 +26,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/011_doc_type_archived.sql"),
     include_str!("../migrations/012_client_partner.sql"),
     include_str!("../migrations/013_file_mtime.sql"),
+    include_str!("../migrations/014_fts_doc_index.sql"),
 ];
 
 /// Schema version this build writes.
@@ -159,6 +160,7 @@ mod tests {
         "doc_fts_config",
         "doc_fts_content",
         "doc_fts_data",
+        "doc_fts_doc",
         "doc_fts_docsize",
         "doc_fts_idx",
         "doc_type",

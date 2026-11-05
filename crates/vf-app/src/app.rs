@@ -686,7 +686,6 @@ impl eframe::App for VibeFilesApp {
                 crate::ui::search::show(
                     ui,
                     &mut o.search,
-                    &o.opened.conn,
                     &o.opened.catalog,
                     &o.opened.root,
                     &o.browse.snap,
@@ -2153,7 +2152,20 @@ mod tests {
         }
         click(&mut h, "Search");
         type_into(&mut h, "Search for", &scan.ein);
-        h.run();
+        // The search runs on its own thread once typing pauses (PA-34).
+        let start = std::time::Instant::now();
+        loop {
+            h.step();
+            let Screen::Open(o) = &h.state().screen else {
+                unreachable!()
+            };
+            if !o.search.results.is_empty() && !o.search.searching() {
+                break;
+            }
+            assert!(start.elapsed() < std::time::Duration::from_secs(20));
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        h.run_steps(2);
         {
             let Screen::Open(o) = &h.state().screen else {
                 unreachable!()

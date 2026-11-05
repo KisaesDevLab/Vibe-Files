@@ -572,7 +572,7 @@ pub fn destroy_pulled(
             vec![doc_id.into()],
         ))
         .catalog(Stmt::new(
-            "DELETE FROM doc_fts WHERE doc_id = ?1",
+            "DELETE FROM doc_fts_doc WHERE doc_id = ?1",
             vec![doc_id.into()],
         ))
         .catalog(Stmt::new(
@@ -906,7 +906,7 @@ pub fn destroy_due(
                 ],
             ))
             .catalog(Stmt::new(
-                "DELETE FROM doc_fts WHERE doc_id = ?1",
+                "DELETE FROM doc_fts_doc WHERE doc_id = ?1",
                 vec![v.doc_id.clone().into()],
             ))
             .catalog(Stmt::new(
@@ -1262,7 +1262,8 @@ mod tests {
         f.conn
             .execute_batch(&format!(
                 "INSERT INTO page_text (hash, page, source, text) VALUES ('{h}', 0, 'pdf', 'Form 1040');
-                 INSERT INTO doc_fts (text, doc_id, page) VALUES ('Form 1040', 'ret-2018', 0);",
+                 INSERT INTO doc_fts (text, doc_id, page) VALUES ('Form 1040', 'ret-2018', 0);
+                 INSERT INTO doc_fts_doc (fts_row, doc_id) VALUES (last_insert_rowid(), 'ret-2018');",
                 h = rep.new_hash
             ))
             .unwrap();

@@ -6,9 +6,9 @@ How to find a document by the words on its pages, its file name or its details, 
 
 1. Open the **Search** tab.
 2. Type in **Search for**: a name, a word from the page, part of a number. Every word you type must appear, in the page text or in the file name.
-3. Results appear as you type. Each row shows a small picture of the best matching page, the file name, the client, the year, the doc type, which page matched, and a few words around the match, marked in yellow.
+3. Results appear when you pause typing. Each row shows a small picture of the best matching page, the file name, the client, the year, the doc type, which page matched, and a few words around the match, marked in yellow.
 
-Part of a number finds the whole number, so the last four digits of an account are enough. Scanned pages can be found too, once text recognition has read them (see [text recognition](help:ocr)).
+Part of a number finds the whole number, so the last four digits of an account are enough. Words of one or two letters are looked for in file names, or on the pages the longer words found; on their own they do not search page text. Scanned pages can be found too, once text recognition has read them (see [text recognition](help:ocr)).
 
 The line above the results says how many documents were found. Only the first 200 are listed; add a word or a filter if the count says "(first 200)".
 

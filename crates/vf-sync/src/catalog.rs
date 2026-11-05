@@ -398,10 +398,15 @@ pub fn rekey(conn: &Connection, old: &str, new: &str) -> Result<()> {
         )?;
     }
     tx.execute(
-        "UPDATE doc_fts SET doc_id = ?2 WHERE doc_id = ?1",
+        "UPDATE doc_fts SET doc_id = ?2
+         WHERE rowid IN (SELECT fts_row FROM doc_fts_doc WHERE doc_id = ?1)",
         [old, new],
     )
     .ok();
+    tx.execute(
+        "UPDATE doc_fts_doc SET doc_id = ?2 WHERE doc_id = ?1",
+        [old, new],
+    )?;
     tx.execute("DELETE FROM document WHERE id = ?1", [old])?;
     tx.commit()?;
     Ok(())

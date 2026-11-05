@@ -7,7 +7,6 @@ use std::time::{Duration, Instant};
 
 use egui::{Color32, RichText};
 use vf_core::browse::Snapshot;
-use vf_core::db::Connection;
 use vf_index::search::{self, DocType, Hit, Query, Scope, Year};
 
 use crate::ui::pages::{Renderer, Request};
@@ -15,6 +14,44 @@ use crate::ui::viewer::Doc;
 use crate::ui::{theme, widgets};
 
 const LIMIT: usize = 200;
+/// Typing pause before a search runs.
+const DEBOUNCE: Duration = Duration::from_millis(300);
+/// Least time between searches re-run because the catalog changed.
+const REFRESH: Duration = Duration::from_secs(5);
+
+type Answer = (Query, Result<Vec<Hit>, String>, Duration);
+
+/// The search thread, with its own catalog connection (PA-34: a search of a large cabinet
+/// no longer holds up the window). It ends when the tab is dropped.
+struct Worker {
+    tx: std::sync::mpsc::Sender<Query>,
+    rx: std::sync::mpsc::Receiver<Answer>,
+}
+
+impl Worker {
+    fn spawn(catalog: std::path::PathBuf, ui: egui::Context) -> Worker {
+        let (tx, qrx) = std::sync::mpsc::channel::<Query>();
+        let (rtx, rx) = std::sync::mpsc::channel::<Answer>();
+        let _ = std::thread::Builder::new()
+            .name("search".into())
+            .spawn(move || {
+                let conn = vf_core::db::open(&catalog, vf_core::db::Storage::Local)
+                    .map_err(|e| e.to_string());
+                while let Ok(q) = qrx.recv() {
+                    let t = Instant::now();
+                    let r = match &conn {
+                        Ok(c) => search::search(c, &q, LIMIT).map_err(|e| e.to_string()),
+                        Err(e) => Err(e.clone()),
+                    };
+                    if rtx.send((q, r, t.elapsed())).is_err() {
+                        break;
+                    }
+                    ui.request_repaint();
+                }
+            });
+        Worker { tx, rx }
+    }
+}
 const THUMB_WIDTH: u32 = 96;
 const ROW_HEIGHT: f32 = 132.0;
 const MARK_BG: Color32 = Color32::from_rgb(0xFF, 0xE8, 0x8A);
@@ -48,6 +85,14 @@ pub struct SearchTab {
     pub error: Option<String>,
     /// The query the results are for.
     ran: Option<Query>,
+    worker: Option<Worker>,
+    /// The query on the search thread now.
+    asked: Option<Query>,
+    /// A query typed and when, waiting for the typing to pause.
+    typed: Option<(Query, Instant)>,
+    /// The catalog changed since the results.
+    stale: bool,
+    last_run: Option<Instant>,
     renderer: Option<Renderer>,
     thumbs: HashMap<String, egui::TextureHandle>,
     requested: HashSet<String>,
@@ -88,35 +133,86 @@ impl SearchTab {
         q
     }
 
-    /// Runs the query when it changed since the last run.
-    pub fn run_if_changed(&mut self, conn: &Connection, ctx: &Context) {
+    /// Runs the query on the search thread when it changed: after typing stops for
+    /// [`DEBOUNCE`], one search at a time (PA-34: a cabinet of ~900K documents). Results
+    /// arrive on a later frame.
+    pub fn run_if_changed(&mut self, catalog: &Path, ctx: &Context, ui: &egui::Context) {
+        if let Some(w) = &self.worker {
+            while let Ok((q, r, took)) = w.rx.try_recv() {
+                self.asked = None;
+                match r {
+                    Ok(r) => {
+                        self.results = r;
+                        self.error = None;
+                    }
+                    Err(e) => {
+                        self.results.clear();
+                        self.error = Some(format!("Search failed: {e}"));
+                    }
+                }
+                self.elapsed = Some(took);
+                self.ran = Some(q);
+            }
+        }
         let q = self.query(ctx);
-        if self.ran.as_ref() == Some(&q) {
+        // The catalog changed: searched again, at most every REFRESH.
+        let stale = self.stale && self.last_run.is_none_or(|t| t.elapsed() >= REFRESH);
+        if self.ran.as_ref() == Some(&q) && !stale {
+            self.typed = None;
+            if self.stale {
+                ui.request_repaint_after(REFRESH);
+            }
             return;
         }
-        self.ran = Some(q.clone());
         if q.is_empty() {
             self.results.clear();
             self.elapsed = None;
+            self.ran = Some(q);
+            self.typed = None;
+            self.stale = false;
             return;
         }
-        let t = Instant::now();
-        match search::search(conn, &q, LIMIT) {
-            Ok(r) => {
-                self.results = r;
-                self.error = None;
-            }
-            Err(e) => {
-                self.results.clear();
-                self.error = Some(format!("Search failed: {e}"));
+        if self.asked.is_some() {
+            // One at a time: the newest query runs when this one is back.
+            return;
+        }
+        if self.ran.as_ref() != Some(&q) {
+            let at = match &self.typed {
+                Some((t, at)) if *t == q => *at,
+                _ => {
+                    self.typed = Some((q.clone(), Instant::now()));
+                    Instant::now()
+                }
+            };
+            let waited = at.elapsed();
+            if waited < DEBOUNCE {
+                ui.request_repaint_after(DEBOUNCE - waited);
+                return;
             }
         }
-        self.elapsed = Some(t.elapsed());
+        let w = self
+            .worker
+            .get_or_insert_with(|| Worker::spawn(catalog.to_path_buf(), ui.clone()));
+        if w.tx.send(q.clone()).is_err() {
+            self.error = Some("Search stopped; open the cabinet again.".into());
+            self.ran = Some(q);
+            return;
+        }
+        self.asked = Some(q);
+        self.typed = None;
+        self.stale = false;
+        self.last_run = Some(Instant::now());
     }
 
-    /// Searches again on the next frame (the catalog changed).
+    /// Whether a search is running.
+    pub fn searching(&self) -> bool {
+        self.asked.is_some()
+    }
+
+    /// The catalog changed: the results are searched again (not more often than every
+    /// [`REFRESH`], so OCR indexing pages does not re-run a search every second).
     pub fn refresh(&mut self) {
-        self.ran = None;
+        self.stale = true;
     }
 
     fn terms(&self) -> Vec<String> {
@@ -128,7 +224,6 @@ impl SearchTab {
 pub fn show(
     ui: &mut egui::Ui,
     s: &mut SearchTab,
-    conn: &Connection,
     catalog: &Path,
     root: &Path,
     snap: &Snapshot,
@@ -169,9 +264,16 @@ pub fn show(
             save_row(ui, s, root, ctx, device_id);
             near_row(ui, s, catalog, root);
         });
-    s.run_if_changed(conn, ctx);
+    s.run_if_changed(catalog, ctx, ui.ctx());
     egui::CentralPanel::default().show(ui, |ui| {
         widgets::message_line(ui, s.error.as_deref());
+        if s.ran.as_ref().is_none_or(Query::is_empty) && s.searching() {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label(widgets::caption("Searching…"));
+            });
+            return;
+        }
         if s.ran.as_ref().is_none_or(Query::is_empty) {
             ui.label(widgets::caption(
                 "Type to search the text of every document (scans too, once OCR has read them), file names and metadata.",
