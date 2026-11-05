@@ -269,34 +269,41 @@ pub fn undo_stack(conn: &Connection, actor: &Actor, except: &[&str]) -> Result<V
         format!(" AND u.label NOT IN ({marks})")
     };
     let mut st = conn.prepare(&format!(
-        "SELECT t.tx_id, t.ts, t.label,
-                (SELECT a.action FROM audit a WHERE json_extract(a.detail, '$.tx') = t.tx_id
-                 ORDER BY a.seq LIMIT 1),
-                (SELECT count(DISTINCT a.doc_id) FROM audit a
-                 WHERE json_extract(a.detail, '$.tx') = t.tx_id)
-         FROM (SELECT u.tx_id, u.ts, u.label, u.rowid AS r FROM undo_record u
-               WHERE u.undone = 0
-                 AND (u.user = ? OR (u.user IS NULL AND u.device_id = ?)){not_in}
-               ORDER BY u.rowid DESC LIMIT {UNDO_DEPTH}) t
-         ORDER BY t.r DESC"
+        "SELECT u.tx_id, u.ts, u.label FROM undo_record u
+         WHERE u.undone = 0
+           AND (u.user = ? OR (u.user IS NULL AND u.device_id = ?)){not_in}
+         ORDER BY u.rowid DESC LIMIT {UNDO_DEPTH}"
     ))?;
     let mut params: Vec<&dyn rusqlite::ToSql> = vec![&actor.user, &actor.device_id];
     params.extend(except.iter().map(|l| l as &dyn rusqlite::ToSql));
-    let rows = st.query_map(params.as_slice(), |r| {
-        let action: Option<String> = r.get(3)?;
-        let docs: i64 = r.get(4)?;
-        Ok(Undoable {
-            tx_id: r.get(0)?,
-            ts: r.get(1)?,
-            label: r.get(2)?,
-            summary: match (action, docs) {
+    let picked: Vec<(String, String, String)> = st
+        .query_map(params.as_slice(), |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+        .collect::<std::result::Result<_, _>>()?;
+    // Each summary by its own lookup: SQLite does not use the audit_tx expression index inside
+    // a correlated subquery, which read every audit row per entry (scale test: 0.6 s).
+    let mut first = conn.prepare_cached(
+        "SELECT action FROM audit WHERE json_extract(detail, '$.tx') = ?1 ORDER BY seq LIMIT 1",
+    )?;
+    let mut docs = conn.prepare_cached(
+        "SELECT count(DISTINCT doc_id) FROM audit WHERE json_extract(detail, '$.tx') = ?1",
+    )?;
+    let mut rows = Vec::with_capacity(picked.len());
+    for (tx_id, ts, label) in picked {
+        let action: Option<String> =
+            rusqlite::OptionalExtension::optional(first.query_row([&tx_id], |r| r.get(0)))?;
+        let n: i64 = docs.query_row([&tx_id], |r| r.get(0))?;
+        rows.push(Ok::<_, rusqlite::Error>(Undoable {
+            tx_id,
+            ts,
+            label,
+            summary: match (action, n) {
                 (Some(a), 0) => a,
                 (Some(a), 1) => format!("{a} · 1 document"),
                 (Some(a), n) => format!("{a} · {n} documents"),
                 (None, _) => String::new(),
             },
-        })
-    })?;
+        }));
+    }
     let mut out = Vec::new();
     for r in rows {
         let r = r?;

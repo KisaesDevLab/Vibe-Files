@@ -479,14 +479,47 @@ pub fn adopt_unknown(
     }
     let now = vf_core::now_rfc3339();
     let mut tx = Transaction::new("adopt");
+    // What the folders' docmeta.jsonl says about these files (a file put back from the Recycle
+    // Bin, one moved or copied in from another cabinet): its doc type, year, status, source and
+    // tags come back. By path and content only.
+    let folders: Vec<String> = items
+        .iter()
+        .filter_map(|u| u.rel_path.split_once('/').map(|(f, _)| f.to_string()))
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let ix = crate::docmeta::Index::load(root, &folders);
+    let mut type_id = conn
+        .prepare_cached(
+            "SELECT id FROM doc_type WHERE id = ?1 OR lower(name) = lower(?2)
+             ORDER BY id = ?1 DESC LIMIT 1",
+        )
+        .map_err(|e| e.to_string())?;
     for u in items {
         let id = vf_core::new_id();
-        let year = rebuild::year_from_path(&u.rel_path);
+        let m = ix.get_at(&u.rel_path, &u.hash);
+        let year: Option<i64> = match m {
+            Some(m) => m.tax_year.map(i64::from),
+            None => rebuild::year_from_path(&u.rel_path),
+        };
+        let doc_type: Option<String> = m.and_then(|m| {
+            vf_core::db::OptionalExtension::optional(type_id.query_row(
+                (
+                    m.doc_type.clone().unwrap_or_default(),
+                    m.doc_type_name.clone().unwrap_or_default(),
+                ),
+                |r| r.get(0),
+            ))
+            .ok()
+            .flatten()
+        });
+        let status = m.map_or_else(|| "received".to_string(), |m| m.status.clone());
+        let source = m.and_then(|m| m.source.clone());
         tx = tx
             .catalog(Stmt::new(
-                "INSERT INTO document (id, client_id, tax_year, rel_path, hash, size, mime, status,
-                   filed_by, filed_at, device_id, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'received', 'sweep', ?8, ?9, ?8)",
+                "INSERT INTO document (id, client_id, doc_type_id, tax_year, rel_path, hash, size,
+                   mime, status, source, filed_by, filed_at, device_id, updated_at)
+                 VALUES (?1, ?2, ?10, ?3, ?4, ?5, ?6, ?7, ?11, ?12, 'sweep', ?8, ?9, ?8)",
                 vec![
                     id.clone().into(),
                     u.client_id.clone().into(),
@@ -497,6 +530,9 @@ pub fn adopt_unknown(
                     rebuild::mime(&u.rel_path).into(),
                     now.clone().into(),
                     device_id.into(),
+                    doc_type.into(),
+                    status.into(),
+                    source.into(),
                 ],
             ))
             .catalog_undo(Stmt::new(
@@ -514,9 +550,31 @@ pub fn adopt_unknown(
                 Some(&id),
                 json!({ "rel_path": u.rel_path, "hash": u.hash }),
             ));
+        for t in m.map(|m| m.tags.clone()).unwrap_or_default() {
+            tx = tx.catalog(Stmt::new(
+                "INSERT OR IGNORE INTO document_tag (doc_id, tag) VALUES (?1, ?2)",
+                vec![id.clone().into(), t.into()],
+            ));
+        }
     }
+    drop(type_id);
     crate::fileops::commit(conn, root, tx, device_id)?;
     Ok(items.len())
+}
+
+/// Whether a live document of the client folder `folder` (cabinet-relative paths `known`) is
+/// gone from disk: deleted or moved in Explorer (owner 2026-11-05). False when the folder
+/// cannot be read completely (a denied folder, a network blip), so a hiccup removes nothing.
+pub fn any_missing(root: &Path, folder: &str, known: &[String]) -> bool {
+    let mut paths = Vec::new();
+    if known.is_empty() || rebuild::files_under(&root.join(folder), &mut paths).is_err() {
+        return false;
+    }
+    let present: std::collections::HashSet<String> = paths
+        .iter()
+        .map(|p| rebuild::rel(root, p).to_lowercase())
+        .collect();
+    known.iter().any(|k| !present.contains(&k.to_lowercase()))
 }
 
 /// Files in the client folders that are not in the catalog: a file copied in through Explorer.

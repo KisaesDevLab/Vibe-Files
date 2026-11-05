@@ -88,6 +88,9 @@ struct MoveAsk {
 struct Listing {
     dirs: DiskDirs,
     new_files: Vec<vf_fs::sweep::Unknown>,
+    /// The client folder shown has a document whose file is gone (deleted or moved in
+    /// Explorer): that folder is re-read.
+    missing_in: Option<String>,
 }
 
 /// Files dragged in from Explorer (owner 2026-11-04): while they are over the window a hint
@@ -223,6 +226,8 @@ pub struct Browse {
     /// Files the last listing found in client folders and not in the catalog: added on the
     /// next frame (PA-23).
     new_files: Vec<vf_fs::sweep::Unknown>,
+    /// A client folder to re-read: a document's file is gone from it.
+    missing_in: Option<String>,
     /// A drop on a folder waiting for "Move" (PA-23).
     move_ask: Option<MoveAsk>,
     disk_listed: Option<std::time::Instant>,
@@ -392,6 +397,7 @@ impl Browse {
         let mut b = Browse {
             disk_dirs: Default::default(),
             new_files: vec![],
+            missing_in: None,
             move_ask: None,
             disk_job: None,
             disk_listed: None,
@@ -654,6 +660,13 @@ impl Browse {
             .filter(mine)
             .map(|d| d.hash.clone())
             .collect();
+        let known_paths: Vec<String> = self
+            .snap
+            .docs
+            .iter()
+            .filter(mine)
+            .map(|d| d.rel_path.clone())
+            .collect();
         let list = move || -> Listing {
             let dirs = clients
                 .iter()
@@ -664,7 +677,15 @@ impl Browse {
                 })
                 .collect();
             let new_files = vf_fs::sweep::find_new(&root, &shown, &known, &hashes);
-            Listing { dirs, new_files }
+            let missing_in = shown
+                .first()
+                .filter(|(folder, _)| vf_fs::sweep::any_missing(&root, folder, &known_paths))
+                .map(|(folder, _)| folder.clone());
+            Listing {
+                dirs,
+                new_files,
+                missing_in,
+            }
         };
         if cfg!(test) {
             // Tests: at once, so the tree is complete on the next frame.
@@ -702,6 +723,7 @@ impl Browse {
         self.disk_dirs = got.dirs.into_iter().collect();
         self.disk_listed = Some(std::time::Instant::now());
         self.new_files = got.new_files;
+        self.missing_in = got.missing_in;
         let before = self.ix.clients.clone();
         self.apply_disk_dirs();
         if self.ix.clients != before {
@@ -725,6 +747,47 @@ impl Browse {
             if let Some(c) = &self.egui_ctx {
                 c.request_repaint_after(std::time::Duration::from_secs(30));
             }
+        }
+    }
+
+    /// Re-reads a client folder whose documents' files went missing (deleted or moved in
+    /// Explorer, owner 2026-11-05): deleted ones leave Browse (their docmeta brings the doc
+    /// type and year back if the file is put back), moved ones follow their file.
+    fn remove_missing(&mut self, env: &mut Env) {
+        let Some(folder) = self.missing_in.take() else {
+            return;
+        };
+        if vf_fs::intake::filing_now(env.root) {
+            return; // Intake is moving files: looked at again next time
+        }
+        match vf_fs::rebuild::rebuild_folders(env.conn, env.root, env.device_id, &[folder]) {
+            Ok(rep) if rep.docs_tombstoned + rep.docs_moved > 0 => {
+                self.reload(env.conn);
+                let mut parts = vec![];
+                if rep.docs_tombstoned > 0 {
+                    parts.push(format!(
+                        "{} deleted outside Vibe Files {} removed",
+                        rep.docs_tombstoned,
+                        if rep.docs_tombstoned == 1 {
+                            "was"
+                        } else {
+                            "were"
+                        }
+                    ));
+                }
+                if rep.docs_moved > 0 {
+                    parts.push(format!(
+                        "{} moved outside Vibe Files now show where they are",
+                        rep.docs_moved
+                    ));
+                }
+                self.notice = Some(format!(
+                    "Files in this client folder: {}.",
+                    parts.join("; ")
+                ));
+            }
+            Ok(_) => {}
+            Err(e) => self.error = Some(format!("This client folder could not be re-read: {e}")),
         }
     }
 
@@ -1557,6 +1620,7 @@ pub fn show(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env) {
         b.list_disk(false);
     }
     b.poll_disk();
+    b.remove_missing(env);
     b.add_new_files(env);
     take_dropped_files(ui.ctx(), b, env);
     if std::mem::take(&mut b.print_request) {
@@ -4136,6 +4200,108 @@ mod tests {
                 .unwrap_or("")
                 .contains("Added 1 new file")
         );
+    }
+
+    /// A file deleted in Explorer leaves Browse once its client folder is looked at again
+    /// (owner 2026-11-05); put back, it returns with the doc type it had.
+    #[test]
+    fn files_deleted_in_explorer_leave_and_come_back() {
+        let mut h = harness(1, 0);
+        let file = {
+            let s = h.state_mut();
+            vf_fs::cabinet::create(
+                &s.root,
+                &vf_fs::cabinet::CabinetFile {
+                    cabinet_id: vf_core::new_id(),
+                    firm_id: "firm".into(),
+                    schema_version: vf_core::db::SCHEMA_VERSION,
+                    layout_version: 1,
+                    created: vf_core::now_rfc3339(),
+                    name: None,
+                },
+            )
+            .unwrap();
+            let fin = s.root.join("Client 0000 (1000)/Financials");
+            std::fs::create_dir_all(&fin).unwrap();
+            std::fs::write(fin.join("invented 2024 return.pdf"), "invented").unwrap();
+            let root = s.root.clone();
+            s.b.set_root(&root);
+            fin.join("invented 2024 return.pdf")
+        };
+        h.run();
+        click(&mut h, "Client 0000  1000");
+        h.run();
+        assert_eq!(h.state().b.snap.docs.len(), 1);
+        // Give it a doc type (kept in the folder's docmeta.jsonl).
+        {
+            let s = h.state_mut();
+            let id = s.b.snap.docs[0].id.clone();
+            let w2 = "w2".to_string();
+            s.conn
+                .execute(
+                    "INSERT OR IGNORE INTO doc_type (id, name, device_id, updated_at)
+                     VALUES ('w2', 'W-2', 'dev', 't')",
+                    [],
+                )
+                .unwrap();
+            let root = s.root.clone();
+            vf_fs::docmeta::edit(
+                &mut s.conn,
+                &root,
+                &[id],
+                &vf_fs::docmeta::MetaEdit {
+                    doc_type: Some(Some(w2)),
+                    ..Default::default()
+                },
+                "dev",
+            )
+            .unwrap();
+        }
+        // Deleted in Explorer.
+        let bytes = std::fs::read(&file).unwrap();
+        std::fs::remove_file(&file).unwrap();
+        {
+            let b = &mut h.state_mut().b;
+            b.disk_listed = None;
+            b.list_disk(false);
+        }
+        h.run();
+        assert!(
+            h.state().b.snap.docs.is_empty(),
+            "gone from Browse: {:?} {:?}",
+            h.state().b.error,
+            h.state().b.missing_in
+        );
+        assert!(
+            h.state()
+                .b
+                .notice
+                .as_deref()
+                .unwrap_or("")
+                .contains("deleted outside Vibe Files"),
+            "{:?}",
+            h.state().b.notice
+        );
+        // Put back from the Recycle Bin: back, with its doc type.
+        std::fs::write(&file, bytes).unwrap();
+        {
+            let b = &mut h.state_mut().b;
+            b.disk_listed = None;
+            b.list_disk(false);
+        }
+        h.run();
+        let s = h.state();
+        assert_eq!(s.b.snap.docs.len(), 1);
+        let t: Option<String> = s
+            .conn
+            .query_row(
+                "SELECT t.name FROM document d JOIN doc_type t ON t.id = d.doc_type_id
+                 WHERE d.deleted_at IS NULL",
+                [],
+                |r| r.get(0),
+            )
+            .ok();
+        assert_eq!(t.as_deref(), Some("W-2"));
     }
 
     #[test]
