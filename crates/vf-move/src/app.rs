@@ -67,6 +67,8 @@ pub struct MoveApp {
     pub year: String,
     /// The preview of the step: the rule and what it moves.
     pub preview: Option<(Rule, Plan)>,
+    /// The folders the preview was made for: a move only ever runs on those.
+    previewed: Option<(PathBuf, PathBuf)>,
     planning: Option<Job<(Rule, Plan)>>,
     pub confirm: bool,
     running: Option<Job<Result<Report, String>>>,
@@ -137,6 +139,9 @@ impl MoveApp {
                 if n.is_empty() {
                     return Err("Type the permanent folder's name.".into());
                 }
+                if n.eq_ignore_ascii_case("_Vibe") {
+                    return Err("_Vibe folders never move.".into());
+                }
                 Ok(Rule::Permanent(n.into()))
             }
             Step::Date => vf_move::parse_date(&self.date)
@@ -166,6 +171,10 @@ impl MoveApp {
         }
         self.error = None;
         self.report = None;
+        // A new preview replaces the old one at once: nothing can be moved from a stale plan.
+        self.preview = None;
+        self.confirm = false;
+        self.previewed = Some((self.old_path(), self.new_path()));
         let old = self.old_path();
         let ticked: Vec<String> = self
             .clients
@@ -184,6 +193,12 @@ impl MoveApp {
             return;
         };
         self.confirm = false;
+        // Only on the folders previewed (they may have been edited since).
+        if self.previewed.as_ref() != Some(&(self.old_path(), self.new_path())) {
+            self.preview = None;
+            self.error = Some("The folders changed since the preview: preview again.".into());
+            return;
+        }
         self.report_undo = false;
         self.total = plan.items.len();
         self.progress.store(0, Ordering::Relaxed);
@@ -294,6 +309,7 @@ impl MoveApp {
              not copied; every move is written to a log, and a move can be undone from it.",
         );
         ui.add_space(6.0);
+        let mut changed: Vec<&str> = vec![];
         egui::Grid::new("folders").num_columns(3).show(ui, |ui| {
             for (label, field, hint) in [
                 ("Old folder (the archive)", &mut self.old, r"T:\Clients"),
@@ -304,6 +320,7 @@ impl MoveApp {
                 ),
             ] {
                 let l = ui.label(label);
+                let before = field.clone();
                 ui.add_enabled(
                     !busy,
                     egui::TextEdit::singleline(field)
@@ -318,9 +335,20 @@ impl MoveApp {
                 {
                     *field = p.display().to_string();
                 }
+                if *field != before {
+                    changed.push(label);
+                }
                 ui.end_row();
             }
         });
+        // Another folder: the preview (and, for the old folder, its client list) is gone.
+        if !changed.is_empty() {
+            self.preview = None;
+            self.confirm = false;
+            if changed.iter().any(|l| l.starts_with("Old")) {
+                self.clients.clear();
+            }
+        }
         ui.horizontal(|ui| {
             if ui
                 .add_enabled(!busy, egui::Button::new("Scan the old folder"))
@@ -480,7 +508,13 @@ impl MoveApp {
                 log.display()
             ));
             ui.horizontal(|ui| {
-                if ui.button(format!("Yes, put back {n} files")).clicked() {
+                if ui
+                    .add_enabled(
+                        !self.busy(),
+                        egui::Button::new(format!("Yes, put back {n} files")),
+                    )
+                    .clicked()
+                {
                     self.start_undo(ctx);
                 }
                 if ui.button("Cancel").clicked() {
@@ -550,7 +584,13 @@ impl MoveApp {
                 self.new.trim()
             ));
             ui.horizontal(|ui| {
-                if ui.button(format!("Yes, move {n} files")).clicked() {
+                if ui
+                    .add_enabled(
+                        !self.busy(),
+                        egui::Button::new(format!("Yes, move {n} files")),
+                    )
+                    .clicked()
+                {
                     self.start_move(ctx);
                 }
                 if ui.button("Cancel").clicked() {
@@ -603,6 +643,11 @@ fn report(ui: &mut Ui, rep: &Report, undo: bool) {
         ))
         .strong(),
     );
+    if let Some(e) = &rep.log_error {
+        ui.label(
+            RichText::new(format!("Stopped: {e}")).color(egui::Color32::from_rgb(0xb4, 0x23, 0x18)),
+        );
+    }
     if !rep.failed.is_empty() {
         ui.label(format!(
             "{} files were not {}:",
@@ -733,5 +778,63 @@ mod tests {
         click(&mut h, "Preview");
         h.run_steps(2);
         assert!(h.state().error.as_deref().unwrap_or("").contains("date"));
+    }
+}
+
+#[cfg(test)]
+mod review_tests {
+    use egui::accesskit::Role;
+    use egui_kittest::Harness;
+    use egui_kittest::kittest::Queryable;
+
+    use super::*;
+
+    /// Review fix: a folder edited after the preview drops it, so Move never runs a plan made
+    /// for other folders.
+    #[test]
+    fn editing_a_folder_drops_the_preview() {
+        let t = tempfile::tempdir().unwrap();
+        let old = t.path().join("Old");
+        std::fs::create_dir_all(old.join("Sample, Pat/Permanent")).unwrap();
+        std::fs::write(old.join("Sample, Pat/Permanent/EIN.pdf"), "ein").unwrap();
+        let mut app = MoveApp::new();
+        app.old = old.display().to_string();
+        app.new = t.path().join("New").display().to_string();
+        let mut h = Harness::builder()
+            .with_size(egui::vec2(1100.0, 800.0))
+            .build_ui_state(|ui, s: &mut MoveApp| s.ui(ui), app);
+        let settle = |h: &mut Harness<'_, MoveApp>| {
+            let t0 = std::time::Instant::now();
+            while h.state().busy() {
+                assert!(t0.elapsed() < std::time::Duration::from_secs(20));
+                std::thread::sleep(std::time::Duration::from_millis(20));
+                h.step();
+            }
+            h.run_steps(3);
+        };
+        h.get_by_role_and_label(Role::Button, "Scan the old folder")
+            .click();
+        h.run_steps(2);
+        settle(&mut h);
+        h.get_by_role_and_label(Role::Button, "Preview").click();
+        h.run_steps(2);
+        settle(&mut h);
+        assert!(h.state().preview.is_some());
+        h.get_by_label("New folder (active cabinet)").click();
+        h.step();
+        h.get_by_label("New folder (active cabinet)").type_text("2");
+        h.run_steps(3);
+        assert!(h.state().preview.is_none(), "the preview is gone");
+        assert!(h.query_by_label("Move 1 files").is_none());
+        // And a move started from a stale state is refused.
+        let s = h.state_mut();
+        s.preview = Some((
+            vf_move::Rule::Permanent("Permanent".into()),
+            vf_move::Plan::default(),
+        ));
+        s.new = t.path().join("Other").display().to_string();
+        let ctx = egui::Context::default();
+        s.start_move(&ctx);
+        assert!(s.error.as_deref().unwrap_or("").contains("preview again"));
     }
 }
