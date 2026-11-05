@@ -943,6 +943,25 @@ impl eframe::App for VibeFilesApp {
                             ui.spinner();
                             ui.label(*what);
                         });
+                        // A first index reads every file: say how far it is (owner 2026-11-05).
+                        use std::sync::atomic::Ordering;
+                        let p = &vf_fs::rebuild::PROGRESS;
+                        let (dirs, found, read) = (
+                            p.folders.load(Ordering::Relaxed),
+                            p.found.load(Ordering::Relaxed),
+                            p.read.load(Ordering::Relaxed),
+                        );
+                        if found > 0 {
+                            ui.label(crate::ui::widgets::caption(format!(
+                                "Indexing: {read} of {found} files read ({dirs} client folders). The first open on a PC reads every file once; later opens are quick."
+                            )));
+                        } else if dirs > 0 {
+                            ui.label(crate::ui::widgets::caption(format!(
+                                "Indexing: listing files ({dirs} client folders so far)…"
+                            )));
+                        }
+                        ui.ctx()
+                            .request_repaint_after(std::time::Duration::from_millis(250));
                         if back.mode == Mode::Open {
                             ui.add_space(8.0);
                             if ui.button("Open a different cabinet").clicked() {

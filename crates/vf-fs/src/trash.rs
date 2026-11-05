@@ -617,8 +617,14 @@ mod tests {
         std::fs::create_dir_all(&inbox).unwrap();
         let f = inbox.join("scan0001.pdf");
         std::fs::write(&f, b"invented").unwrap();
-        let tx =
-            delete_inbox_files(&mut conn, &root, "dev", &[f.clone()], &[inbox.clone()]).unwrap();
+        let tx = delete_inbox_files(
+            &mut conn,
+            &root,
+            "dev",
+            std::slice::from_ref(&f),
+            std::slice::from_ref(&inbox),
+        )
+        .unwrap();
         assert!(!f.exists());
         let listed = list(&conn, &root).unwrap();
         let it = listed
@@ -644,7 +650,14 @@ mod tests {
                 .all(|x| !x.rel_path.ends_with("scan0001.pdf"))
         );
         // Again, then Restore from the trash: back to the inbox.
-        delete_inbox_files(&mut conn, &root, "dev", &[f.clone()], &[inbox.clone()]).unwrap();
+        delete_inbox_files(
+            &mut conn,
+            &root,
+            "dev",
+            std::slice::from_ref(&f),
+            std::slice::from_ref(&inbox),
+        )
+        .unwrap();
         let it = list(&conn, &root)
             .unwrap()
             .into_iter()

@@ -14,6 +14,64 @@ use vf_core::tx::{Actor, NoFileOps, Stmt, Transaction};
 
 use crate::cabinet::{self, VersionSidecar};
 
+/// How far the running rebuild is (owner 2026-11-05: a first index of thousands of client
+/// folders showed only a spinner): client folders walked, files found, files read. One per
+/// process; the open-cabinet screen shows it.
+#[derive(Debug, Default)]
+pub struct Progress {
+    pub folders: std::sync::atomic::AtomicUsize,
+    pub found: std::sync::atomic::AtomicUsize,
+    pub read: std::sync::atomic::AtomicUsize,
+}
+
+pub static PROGRESS: Progress = Progress {
+    folders: std::sync::atomic::AtomicUsize::new(0),
+    found: std::sync::atomic::AtomicUsize::new(0),
+    read: std::sync::atomic::AtomicUsize::new(0),
+};
+
+/// One file read: its place in the list, and its SHA-256 and size (`None`: unreadable).
+type Read = (usize, Option<(String, u64)>);
+
+/// Reads (SHA-256 and size) every file of `todo` on up to 8 threads, in order; a file that
+/// cannot be read is `None`. Counts into [`PROGRESS`].
+fn read_all(todo: &[PathBuf]) -> Vec<Option<(String, u64)>> {
+    use std::sync::atomic::Ordering;
+    let threads = std::thread::available_parallelism()
+        .map_or(4, |n| n.get())
+        .clamp(2, 8)
+        .min(todo.len().max(1));
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let mut out: Vec<Option<(String, u64)>> = vec![None; todo.len()];
+    let parts: Vec<Vec<Read>> = std::thread::scope(|s| {
+        let handles: Vec<_> = (0..threads)
+            .map(|_| {
+                s.spawn(|| {
+                    let mut got = Vec::new();
+                    loop {
+                        let i = next.fetch_add(1, Ordering::Relaxed);
+                        let Some(p) = todo.get(i) else { break };
+                        let r = sha256_file(p)
+                            .ok()
+                            .map(|h| (h, std::fs::metadata(p).map(|m| m.len()).unwrap_or(0)));
+                        PROGRESS.read.fetch_add(1, Ordering::Relaxed);
+                        got.push((i, r));
+                    }
+                    got
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|h| h.join().unwrap_or_default())
+            .collect()
+    });
+    for (i, r) in parts.into_iter().flatten() {
+        out[i] = r;
+    }
+    out
+}
+
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct RebuildReport {
     pub clients: usize,
@@ -532,26 +590,36 @@ pub fn rebuild(
         ],
     ));
 
+    use std::sync::atomic::Ordering;
+    for c in [&PROGRESS.folders, &PROGRESS.found, &PROGRESS.read] {
+        c.store(0, Ordering::Relaxed);
+    }
     let (bound, folders) = scan_folders(root, &mut rep)?;
-    let mut found: Vec<Found> = Vec::new();
+    // Every file first (the count shows while they are read), then read on several threads:
+    // on a share most of the time is waiting for the network.
+    let mut todo: Vec<(PathBuf, Option<String>)> = Vec::new();
     for (folder, client_id) in &folders {
         let mut paths = Vec::new();
         files_under(folder, &mut paths)?;
-        for p in paths {
-            // One file that cannot be read (open in QuickBooks, a denied ACL) does not stop the
-            // rebuild: it is listed and left as the catalog has it.
-            let Ok(hash) = sha256_file(&p) else {
-                rep.unreadable.push(rel(root, &p));
-                continue;
-            };
-            let size = std::fs::metadata(&p).map(|m| m.len()).unwrap_or(0);
-            found.push(Found {
-                rel: rel(root, &p),
-                client_id: client_id.clone(),
-                hash,
-                size,
-            });
-        }
+        todo.extend(paths.into_iter().map(|p| (p, client_id.clone())));
+        PROGRESS.folders.fetch_add(1, Ordering::Relaxed);
+        PROGRESS.found.store(todo.len(), Ordering::Relaxed);
+    }
+    let paths: Vec<PathBuf> = todo.iter().map(|(p, _)| p.clone()).collect();
+    let mut found: Vec<Found> = Vec::new();
+    for ((p, client_id), r) in todo.into_iter().zip(read_all(&paths)) {
+        // One file that cannot be read (open in QuickBooks, a denied ACL) does not stop the
+        // rebuild: it is listed and left as the catalog has it.
+        let Some((hash, size)) = r else {
+            rep.unreadable.push(rel(root, &p));
+            continue;
+        };
+        found.push(Found {
+            rel: rel(root, &p),
+            client_id,
+            hash,
+            size,
+        });
     }
 
     stmts.extend(client_stmts(conn, root, &bound, &now, device_id, &mut rep)?);
