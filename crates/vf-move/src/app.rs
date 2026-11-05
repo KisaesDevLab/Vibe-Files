@@ -184,7 +184,7 @@ impl MoveApp {
         let (progress, stop) = (self.progress.clone(), self.stop.clone());
         let opts = Options {
             force_copy: self.force_copy,
-            log_dir: None,
+            ..Default::default()
         };
         self.running = Some(Job::spawn(ctx, move || {
             vf_move::apply(&old, &new, &plan, &rule, &opts, &progress, &stop)

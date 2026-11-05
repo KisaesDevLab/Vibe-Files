@@ -356,12 +356,33 @@ pub struct Report {
 }
 
 /// Run options.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct Options {
     /// Copy, check and delete even on one drive (tests).
     pub force_copy: bool,
     /// Where the CSV log goes; default beside the new folder.
     pub log_dir: Option<PathBuf>,
+    /// A file open in another program is tried again this many times (Q-72)…
+    pub retries: u32,
+    /// …this long apart.
+    pub retry_wait: std::time::Duration,
+}
+
+impl Default for Options {
+    fn default() -> Self {
+        Options {
+            force_copy: false,
+            log_dir: None,
+            retries: 3,
+            retry_wait: std::time::Duration::from_secs(3),
+        }
+    }
+}
+
+/// Whether a failed move is a file open in another program (Windows sharing or lock
+/// violation), worth trying again.
+fn in_use(e: &str) -> bool {
+    e.contains("os error 32") || e.contains("os error 33")
 }
 
 /// A CSV field.
@@ -449,7 +470,23 @@ pub fn apply(
                     dst.as_os_str().len()
                 ));
             }
-            filer_intake::commit::transfer(&src, &dst, opts.force_copy)?;
+            // Open in another program (Excel, Acrobat): tried again a few times, then left.
+            let mut tries = 0;
+            loop {
+                match filer_intake::commit::transfer(&src, &dst, opts.force_copy) {
+                    Ok(_) => break,
+                    Err(e)
+                        if in_use(&e) && tries < opts.retries && !stop.load(Ordering::Relaxed) =>
+                    {
+                        tries += 1;
+                        std::thread::sleep(opts.retry_wait);
+                    }
+                    Err(e) if in_use(&e) => {
+                        return Err(format!("open in another program ({e})"));
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
             Ok(if dst == want {
                 Outcome::Moved
             } else {
@@ -678,7 +715,7 @@ mod tests {
             rule,
             &Options {
                 force_copy,
-                log_dir: None,
+                ..Default::default()
             },
             &AtomicUsize::new(0),
             &AtomicBool::new(false),
@@ -740,6 +777,61 @@ mod tests {
             old.join("Sample, Pat/_Vibe/client.json").is_file(),
             "_Vibe stays"
         );
+    }
+
+    /// Q-72: a file open in another program is tried again, then moved once it is closed;
+    /// one that stays open is left and reported.
+    #[test]
+    fn a_file_open_elsewhere_is_retried() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let (_t, old, new) = tree();
+        let file = old.join("Sample, Pat/Taxes/2023/1099-2023.pdf");
+        let lock = |p: &Path| {
+            std::fs::OpenOptions::new()
+                .read(true)
+                .share_mode(0)
+                .open(p)
+                .unwrap()
+        };
+        let all = vec!["Sample, Pat".to_string()];
+        let rule = Rule::YearFrom(2023);
+        let run = |retries: u32| {
+            let p = plan(&old, &all, &rule);
+            apply(
+                &old,
+                &new,
+                &p,
+                &rule,
+                &Options {
+                    retries,
+                    retry_wait: std::time::Duration::from_millis(300),
+                    ..Default::default()
+                },
+                &AtomicUsize::new(0),
+                &AtomicBool::new(false),
+            )
+            .unwrap()
+        };
+        // Held throughout: left, and said why.
+        let held = lock(&file);
+        let rep = run(1);
+        assert_eq!(rep.failed.len(), 1, "{rep:?}");
+        assert!(
+            rep.failed[0].1.contains("open in another program"),
+            "{rep:?}"
+        );
+        assert!(file.is_file());
+        drop(held);
+        // Closed while it waits: moved.
+        let held = lock(&file);
+        let closer = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(400));
+            drop(held);
+        });
+        let rep = run(5);
+        closer.join().unwrap();
+        assert!(rep.failed.is_empty(), "{rep:?}");
+        assert!(new.join("Sample, Pat/Taxes/2023/1099-2023.pdf").is_file());
     }
 
     #[test]
