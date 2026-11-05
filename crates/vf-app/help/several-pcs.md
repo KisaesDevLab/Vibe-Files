@@ -47,3 +47,7 @@ When several people work on one Remote Desktop server, each can have inbox folde
 
 Intake's Preview then has two tabs, **Shared inbox (n)** and **My inbox (n)**. Each tab is its own batch: **Commit** files only that tab's rows, the same way in both. Scans and print captures still arrive in the shared inbox. A file moved to the trash from your inbox goes back to it on **Restore**.
 
+## One catalog on a server
+
+On a Remote Desktop server where several people use one cabinet, each login would otherwise build its own catalog by reading the whole cabinet. Instead, once: **Admin** › **Devices** › **Share this catalog with everyone on this PC**. The catalog is copied to the PC's own disk (`ProgramData\Vibe Files\catalogs`) and every login of the PC uses it from their next open. Each person keeps their own settings, undo and cache, and sees the others' changes within a few seconds.
+

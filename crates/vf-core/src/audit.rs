@@ -237,6 +237,16 @@ const MIRRORED: &str = "audit_mirrored_seq";
 /// Appends to `<dir>/<yyyy-mm>.jsonl` every row not mirrored yet, and remembers how far it got.
 /// Run after changes (the app calls it every few seconds); returns how many rows it wrote.
 pub fn mirror_pending(conn: &Connection, dir: &Path) -> Result<usize> {
+    // Several sessions can share one catalog (Q-67): the catalog's write lock is held while a
+    // session reads how far the mirror got, appends and records it, so rows are never written
+    // twice.
+    conn.execute_batch("BEGIN IMMEDIATE")?;
+    let r = mirror_locked(conn, dir);
+    conn.execute_batch(if r.is_ok() { "COMMIT" } else { "ROLLBACK" })?;
+    r
+}
+
+fn mirror_locked(conn: &Connection, dir: &Path) -> Result<usize> {
     let done: u64 = conn
         .query_row("SELECT v FROM local_state WHERE k = ?1", [MIRRORED], |r| {
             r.get::<_, String>(0)
@@ -648,5 +658,22 @@ mod tests {
             "one file per month and device"
         );
         assert!(dir.join("2026-11.d.jsonl").is_file());
+    }
+
+    /// Q-67: two sessions sharing one catalog mirror each row once.
+    #[test]
+    fn two_sessions_mirror_each_row_once() {
+        let tmp = tempfile::tempdir().unwrap();
+        let a = conn(tmp.path());
+        let b = conn(tmp.path());
+        let e = AuditEntry::new("login", None, serde_json::json!({}));
+        append(&a, "2026-11-05T10:00:00Z", None, "d", &e).unwrap();
+        append(&a, "2026-11-05T10:00:01Z", None, "d", &e).unwrap();
+        let dir = tmp.path().join("audit");
+        let n1 = mirror_pending(&a, &dir).unwrap();
+        let n2 = mirror_pending(&b, &dir).unwrap();
+        assert_eq!((n1, n2), (2, 0));
+        let text = std::fs::read_to_string(dir.join("2026-11.d.jsonl")).unwrap();
+        assert_eq!(text.lines().count(), 2);
     }
 }

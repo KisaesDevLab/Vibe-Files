@@ -25,6 +25,8 @@ pub struct Opened {
     pub rebuild: Option<RebuildReport>,
     /// An encrypted catalog from before PA-18, renamed to this before the rebuild.
     pub set_aside: Option<PathBuf>,
+    /// The catalog is this PC's shared one (every login of the PC uses it, Q-67).
+    pub shared: bool,
 }
 
 /// What the wizard asks for when creating.
@@ -81,6 +83,7 @@ pub fn create(data: &Path, device_id: &str, r: &CreateRequest) -> Result<Opened>
         catalog,
         rebuild: Some(rep),
         set_aside: None,
+        shared: false,
     })
 }
 
@@ -118,7 +121,10 @@ pub fn set_aside_encrypted(catalog: &Path) -> Result<Option<PathBuf>> {
 pub fn open(data: &Path, device_id: &str, root: &Path) -> Result<Opened> {
     let cab = cabinet::read(root).map_err(anyhow::Error::msg)?;
     std::fs::create_dir_all(data).with_context(|| format!("creating {}", data.display()))?;
-    let catalog = data.join(CATALOG_FILE);
+    // This PC's shared catalog for the cabinet, when an admin shared one (Q-67).
+    let shared_at = crate::shared::shared_catalog(&cab.cabinet_id);
+    let shared = shared_at.is_some();
+    let catalog = shared_at.unwrap_or_else(|| data.join(CATALOG_FILE));
     let set_aside = set_aside_encrypted(&catalog)?;
     let mut conn = db::open(&catalog, Storage::Local)?;
     // Taxpayer-ID columns a client list may carry (Filer's own wizard) are removed first.
@@ -172,6 +178,7 @@ pub fn open(data: &Path, device_id: &str, root: &Path) -> Result<Opened> {
         catalog,
         rebuild,
         set_aside,
+        shared,
     })
 }
 

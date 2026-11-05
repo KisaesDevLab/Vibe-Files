@@ -6,6 +6,45 @@ use egui::RichText;
 use crate::ui::browse::Env;
 use crate::ui::{theme, widgets};
 
+/// This PC's shared catalog (Q-67: a Remote Desktop server's logins index the cabinet once).
+fn shared_section(ui: &mut egui::Ui, p: &mut DevicesPage, env: &mut Env) {
+    ui.label(RichText::new("This PC's catalog").strong().size(16.0));
+    let Ok(cab) = vf_fs::cabinet::read(env.root) else {
+        return;
+    };
+    match crate::shared::shared_catalog(&cab.cabinet_id) {
+        Some(at) => {
+            ui.label(format!(
+                "Every Windows login of this PC uses one catalog for this cabinet: {}",
+                at.display()
+            ));
+            ui.label(widgets::caption(
+                "Each person keeps their own settings, undo and cache; changes made in one session show in the others within a few seconds.",
+            ));
+        }
+        None => {
+            ui.label(widgets::caption(
+                "On a Remote Desktop server where several people use this cabinet, share this login's catalog: the others then use it instead of each reading the whole cabinet. It is kept on this PC's own disk (ProgramData).",
+            ));
+            if ui
+                .button("Share this catalog with everyone on this PC")
+                .clicked()
+            {
+                match crate::shared::share(env.conn, &cab.cabinet_id) {
+                    Ok(at) => {
+                        p.notice = Some(format!(
+                            "Shared at {}. Close and open Vibe Files to use it; the other logins use it the next time they open the cabinet.",
+                            at.display()
+                        ));
+                        p.error = None;
+                    }
+                    Err(e) => p.error = Some(format!("Not shared: {e:#}")),
+                }
+            }
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct DevicesPage {
     pub notice: Option<String>,
@@ -13,6 +52,8 @@ pub struct DevicesPage {
 }
 
 pub fn show(ui: &mut egui::Ui, p: &mut DevicesPage, env: &mut Env) {
+    shared_section(ui, p, env);
+    ui.add_space(12.0);
     ui.label(RichText::new("Devices").strong().size(16.0));
     ui.label(widgets::caption(
         "Workstations that have opened this cabinet. Each is recorded when it opens it; a PC \

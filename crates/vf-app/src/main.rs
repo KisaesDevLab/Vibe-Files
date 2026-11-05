@@ -14,6 +14,7 @@ mod redact;
 mod screens;
 mod selfcheck;
 mod session;
+mod shared;
 mod shell;
 mod soak;
 mod ui;

@@ -86,6 +86,9 @@ pub struct OpenCabinet {
     pub chain: crate::ui::audit::ChainCheck,
     /// When new audit rows were last copied to `_Vibe/audit/<month>.jsonl`.
     mirrored_at: Option<std::time::Instant>,
+    /// A shared catalog (Q-67): its `data_version` when last seen, and when it was looked at;
+    /// another session's change makes Browse read the catalog again.
+    data_version: (i64, Option<std::time::Instant>),
     /// Wait before the next mirror write: 2 s, doubling to 2 min after failures, so a share
     /// that went away is not waited on every 2 s (QA A7).
     mirror_wait: std::time::Duration,
@@ -405,6 +408,7 @@ impl VibeFilesApp {
                 self.screen = Screen::Open(Box::new(OpenCabinet {
                     chain,
                     mirrored_at: None,
+                    data_version: (0, None),
                     mirror_wait: std::time::Duration::from_secs(2),
                     sweep,
                     sync: Default::default(),
@@ -550,6 +554,27 @@ impl eframe::App for VibeFilesApp {
             }
             if std::mem::take(&mut o.sweep.changed) {
                 o.browse.reload(&o.opened.conn);
+            }
+            // Another session on this PC changed the shared catalog: read it again (at most
+            // every 3 s).
+            if o.opened.shared
+                && o.data_version
+                    .1
+                    .is_none_or(|t| t.elapsed() >= std::time::Duration::from_secs(3))
+            {
+                o.data_version.1 = Some(std::time::Instant::now());
+                if let Ok(v) = o
+                    .opened
+                    .conn
+                    .query_row("PRAGMA data_version", [], |r| r.get::<_, i64>(0))
+                {
+                    if o.data_version.0 != 0 && v != o.data_version.0 {
+                        o.browse.reload(&o.opened.conn);
+                    }
+                    o.data_version.0 = v;
+                }
+                ui.ctx()
+                    .request_repaint_after(std::time::Duration::from_secs(3));
             }
             // Intake's reconcile runs on its own thread; its result is taken on any tab.
             if o.intake.poll_reconcile() {
