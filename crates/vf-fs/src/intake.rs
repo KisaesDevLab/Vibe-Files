@@ -607,6 +607,11 @@ fn record(
                     .filter(|t| doc_types.contains_key(t));
                 let tax_year = match hint {
                     Some(h) if h.permanent => None,
+                    // Read from the form: the year the person filed it under (its folder)
+                    // wins; the reading keeps its own (Q-62).
+                    Some(h) if h.origin == "recognized" && year_from_path(&f.rel).is_some() => {
+                        year_from_path(&f.rel)
+                    }
                     Some(Hint {
                         tax_year: Some(y), ..
                     }) => Some(i64::from(*y)),
@@ -1278,7 +1283,8 @@ mod tests {
         std::fs::write(f.inbox.join("1099.pdf"), "content of 1099.pdf").unwrap();
         let hash = filer_intake::commit::sha256_file(&f.inbox.join("1099.pdf")).unwrap();
         let mut h = crate::hints::Hint::new(&hash, "1099.pdf", "recognized", "dev");
-        h.tax_year = Some(2025);
+        // The form said 2024; it is filed under Income Tax/2025: the folder's year wins (Q-62).
+        h.tax_year = Some(2024);
         h.extract = Some(crate::hints::Recognized {
             form: "1099-nec".into(),
             payer_name: Some("Summit Brokerage LLC".into()),
@@ -1306,6 +1312,13 @@ mod tests {
             ("1099-nec", "Summit Brokerage LLC")
         );
         assert!((conf - 0.7).abs() < 1e-6);
+        assert_eq!(
+            n(
+                &f.conn,
+                "SELECT tax_year FROM document WHERE rel_path LIKE '%1099.pdf'"
+            ),
+            2025
+        );
         // Read, not told: flagged for a person to check (Q-61).
         assert_eq!(
             n(

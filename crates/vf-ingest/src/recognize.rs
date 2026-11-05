@@ -41,16 +41,26 @@ pub fn form_read(
     pdf: &Path,
     ocr: Option<&dyn vf_ocr::OcrEngine>,
 ) -> Option<FormRead> {
-    if let Some(r) = filled_read(pdfium, pdf) {
-        return Some(r);
+    let filled = filled_read(pdfium, pdf);
+    if let Some((_, r)) = &filled
+        && r.text.chars().filter(|c| !c.is_whitespace()).count() >= TEXT_MIN
+        && vf_extract::recognize(&r.text).is_some()
+    {
+        return filled.map(|(_, r)| r);
     }
-    page_one_text(pdfium, pdf, ocr).map(|text| FormRead {
-        text,
-        fields: vec![],
-    })
+    // The filled page's own text does not say which form it is (an image behind the fields,
+    // or a notes page): page 1 is read as before, OCR included; the fields still count when
+    // they are on page 1 (QA 2026-11-05).
+    let text = page_one_text(pdfium, pdf, ocr)?;
+    let fields = match filled {
+        Some((0, r)) => r.fields,
+        _ => vec![],
+    };
+    Some(FormRead { text, fields })
 }
 
-fn filled_read(pdfium: &Pdfium, pdf: &Path) -> Option<FormRead> {
+/// The page with the most filled fields (0-based) and what it says.
+fn filled_read(pdfium: &Pdfium, pdf: &Path) -> Option<(usize, FormRead)> {
     use vf_pdf::forms::FieldKind;
     let fields = vf_pdf::forms::read(pdf).ok()?;
     let typed = |f: &vf_pdf::forms::Field| {
@@ -111,10 +121,13 @@ fn filled_read(pdfium: &Pdfium, pdf: &Path) -> Option<FormRead> {
         out.push((t, l, label, value));
     }
     out.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.total_cmp(&b.1)));
-    Some(FormRead {
-        text,
-        fields: out.into_iter().map(|(_, _, l, v)| (l, v)).collect(),
-    })
+    Some((
+        page,
+        FormRead {
+            text,
+            fields: out.into_iter().map(|(_, _, l, v)| (l, v)).collect(),
+        },
+    ))
 }
 
 /// The printed label of a field whose widget is `[left, bottom, right, top]`: the nearest run

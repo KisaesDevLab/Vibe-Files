@@ -428,10 +428,15 @@ pub fn recognize(text: &str) -> Option<Extract> {
         .flatten();
     let recipient_name = name_for(&lines, &originals, lab.recip_name);
     let tax_year = year(&head);
-    // The box's printed caption "CORRECTED (if checked)" is on every copy: not a correction.
-    let corrected = head
-        .iter()
-        .any(|l| l.split_whitespace().any(|w| w == "CORRECTED") && !l.contains("IF CHECKED"));
+    // The box's printed caption ("CORRECTED (if checked)", Copy A's "VOID CORRECTED") is on
+    // every copy: a correction only with a mark (an X) on its line; a "CORRECTED" heading
+    // with no caption counts as it is.
+    let corrected = head.iter().any(|l| {
+        let words: Vec<&str> = l.split_whitespace().collect();
+        words.contains(&"CORRECTED")
+            && (!(l.contains("IF CHECKED") || words.contains(&"VOID"))
+                || words.iter().any(|w| *w == "X" || *w == "[X]" || *w == "☒"))
+    });
     let mut e = Extract {
         form,
         tax_year,
@@ -466,28 +471,44 @@ pub fn recognize_filled(text: &str, fields: &[(String, String)]) -> Option<Extra
     if fields.is_empty() {
         return Some(e);
     }
-    let originals: Vec<String> = fields
-        .iter()
-        .flat_map(|(l, v)| std::iter::once(l.as_str()).chain(v.lines()))
-        .map(|l| l.split_whitespace().collect::<Vec<_>>().join(" "))
-        .filter(|l| !l.is_empty())
-        .collect();
-    let lines: Vec<String> = originals.iter().map(|l| normalize(l)).collect();
+    // Each value is read against its own label (the first field whose label names it): a
+    // value is never mistaken for a label ("Joe's Plumbing LLC"), nor the next field's label
+    // for a value (QA 2026-11-05).
     let lab = e.form.labels();
+    let field_for = |labels: &[&str]| -> Option<&str> {
+        fields.iter().find_map(|(l, v)| {
+            let l = normalize(l);
+            labels
+                .iter()
+                .any(|lab| l.contains(lab))
+                .then_some(v.as_str())
+        })
+    };
+    let first_line = |v: &str| {
+        v.lines()
+            .map(str::trim)
+            .find(|l| !l.is_empty())
+            .map(clean_name)
+    };
     if !lab.payer_tin.is_empty()
-        && let Some(t) = tin_for(&lines, lab.payer_tin, lab.recip_tin)
+        && let Some(t) = field_for(lab.payer_tin).and_then(|v| tins(v).first().cloned())
     {
-        e.payer_tin4 = Some(t);
+        e.payer_tin4 = Last4::of(&t);
     }
-    if let Some(t) = tin_for(&lines, lab.recip_tin, lab.payer_tin) {
-        e.recipient_tin4 = Some(t);
+    if let Some(t) = field_for(lab.recip_tin).and_then(|v| tins(v).first().cloned()) {
+        e.recipient_tin4 = Last4::of(&t);
     }
     if !lab.payer_name.is_empty()
-        && let Some(n) = name_for(&lines, &originals, lab.payer_name)
+        && let Some(n) = field_for(lab.payer_name)
+            .and_then(first_line)
+            .filter(|n| n.len() > 1)
     {
         e.payer_name = Some(n);
     }
-    if let Some(n) = name_for(&lines, &originals, lab.recip_name) {
+    if let Some(n) = field_for(lab.recip_name)
+        .and_then(first_line)
+        .filter(|n| n.len() > 1)
+    {
         e.recipient_name = Some(n);
     }
     for (l, v) in fields {
@@ -552,6 +573,21 @@ mod tests {
         assert!((e.confidence - 1.0).abs() < 1e-6);
         let c = recognize_filled(text, &[f("CORRECTED (if checked)", "X")]).unwrap();
         assert!(c.corrected);
+        // A name with an apostrophe is a name; an address line after it is not.
+        let e = recognize_filled(
+            text,
+            &[
+                f("PAYER'S name", "Joe's Plumbing LLC\n1 Main St"),
+                f("RECIPIENT'S name", "O'Brien, Pat"),
+                f("Street address (including apt. no.)", "2 Example Rd"),
+            ],
+        )
+        .unwrap();
+        assert_eq!(e.payer_name.as_deref(), Some("Joe's Plumbing LLC"));
+        assert_eq!(e.recipient_name.as_deref(), Some("O'Brien, Pat"));
+        // A printed caption with its box ticked (an X on the line) is a correction.
+        let ticked = text.replace("CORRECTED (if checked)", "X CORRECTED (if checked)");
+        assert!(recognize(&ticked).unwrap().corrected);
     }
 
     #[test]
