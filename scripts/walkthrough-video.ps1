@@ -7,15 +7,19 @@
 #    the generated fixture cabinet (invented clients only). This PC's name, the Windows login and
 #    the temp path show in some screens, so the test runs with neutral ones (OFFICE-PC1\sam,
 #    C:\VibeDemo) and never with the real ones.
-# 2. Voice: scripts\walkthrough\tts.ps1 (Windows PowerShell, System.Speech), one WAV per scene;
-#    each scene lasts as long as its narration.
+# 2. Voice: one clip per scene; each scene lasts as long as its narration. Default: a Microsoft
+#    Edge neural voice through scripts\walkthrough\edge_tts_lines.py (-Python must be a Python
+#    with the `edge-tts` package; the narration text goes to Microsoft's read-aloud service).
+#    -Engine sapi uses the voices built into Windows (scripts\walkthrough\tts.ps1) offline.
 # 3. Video: ffmpeg, one segment per scene, joined.
 #
 # Output: target\walkthrough\vibe-files-walkthrough.mp4 (+ .srt, .vtt). Not committed.
 param(
     [Parameter(Mandatory)][string]$Ffmpeg,
     [string]$Out = '',
-    [string]$Voice = 'Microsoft David Desktop',
+    [ValidateSet('edge', 'sapi')][string]$Engine = 'edge',
+    [string]$Voice = '',
+    [string]$Python = 'python',
     [switch]$SkipFrames
 )
 $ErrorActionPreference = 'Stop'
@@ -29,7 +33,7 @@ $utf8 = New-Object System.Text.UTF8Encoding($false)
 # Scenes: frames (from the test, or 'card' over a blurred frame), what is said, the caption.
 $scenes = @(
     @{ name = '00-title'; frames = @('10-cabinet-dark'); card = @('Vibe Files', 'Document management for small CPA and tax firms')
-       say = 'Meet Vibe Files: document management for small C P A and tax firms.'; caption = '' },
+       say = 'Meet Vibe Files: document management for small CPA and tax firms.'; caption = '' },
     @{ name = '01'; frames = @('01-cabinet')
        say = 'Vibe Files works on the client folders you already have. Every document stays a plain file, in a plain Windows folder.'
        caption = 'Works on the client folders you already have. Every document stays a plain file, in a plain Windows folder.' },
@@ -46,10 +50,10 @@ $scenes = @(
        say = 'Search finds any document by name, client, year, or the words inside it, scanned pages included.'
        caption = 'Search by name, client, year, or the words inside a document, scanned pages included.' },
     @{ name = '06'; frames = @('06-viewer')
-       say = 'The built-in viewer lets you annotate, stamp, redact, and tick-mark P D Fs.'
+       say = 'The built-in viewer lets you annotate, stamp, redact, and tick-mark PDFs.'
        caption = 'The built-in viewer: annotate, stamp, redact and tick-mark PDFs.' },
     @{ name = '07'; frames = @('07-sync')
-       say = 'Optional sync to your own Backblaze B 2 bucket keeps an off-site copy, encrypted on your PC before it leaves.'
+       say = 'Optional sync to your own Backblaze B2 bucket keeps an off-site copy, encrypted on your PC before it leaves.'
        caption = 'Optional sync to your own Backblaze B2 bucket, encrypted on your PC before it leaves.' },
     @{ name = '08'; frames = @('08-servers')
        say = 'Run it on one PC, across the office network, or on several Remote Desktop servers sharing one cabinet.'
@@ -87,8 +91,19 @@ if (-not $SkipFrames) {
 # 2. Voice.
 $json = Join-Path $work 'narration.json'
 [IO.File]::WriteAllText($json, (ConvertTo-Json @($scenes | ForEach-Object { @{ name = $_.name; say = $_.say } })), $utf8)
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'walkthrough\tts.ps1') -Json $json -OutDir $work -Voice $Voice
-if ($LASTEXITCODE -ne 0) { throw 'speech failed' }
+if ($Engine -eq 'edge') {
+    if (-not $Voice) { $Voice = 'en-US-AndrewNeural' }
+    & $Python (Join-Path $PSScriptRoot 'walkthrough\edge_tts_lines.py') $json $work $Voice
+    if ($LASTEXITCODE -ne 0) { throw 'speech failed (is edge-tts installed in that Python?)' }
+    foreach ($s in $scenes) {
+        & $Ffmpeg -hide_banner -loglevel error -y -i (Join-Path $work "$($s.name).mp3") -ar 48000 -ac 1 -c:a pcm_s16le (Join-Path $work "$($s.name).wav")
+        if ($LASTEXITCODE -ne 0) { throw "converting $($s.name) failed" }
+    }
+} else {
+    if (-not $Voice) { $Voice = 'Microsoft David Desktop' }
+    powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'walkthrough\tts.ps1') -Json $json -OutDir $work -Voice $Voice
+    if ($LASTEXITCODE -ne 0) { throw 'speech failed' }
+}
 
 function WavSeconds([string]$path) {
     $b = [IO.File]::ReadAllBytes($path)
