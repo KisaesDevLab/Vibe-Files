@@ -43,7 +43,7 @@ A new client added in Browse also shows this banner: Intake offers the new clien
 
 ## Your own inbox (several people on one server)
 
-When several people work on one Remote Desktop server, each can have inbox folders of their own. On the Intake tab, **My inboxes** › **Add folder…** adds one (any folder you can write to, outside the cabinet; not a shared inbox, the Scans folder or the print capture folder); **×** stops watching it. Only your Windows login watches it; nobody else sees its files, and the cabinet's shared settings do not change.
+When several people work on one Remote Desktop server, each can have inbox folders of their own. On the Intake tab, **My inboxes** › **Add folder…** adds one (any folder you can write to, outside the cabinet; not a shared inbox, the Scans folder or the print capture folder); **×** stops watching it. Only your Windows login watches it; nobody else sees its files, and the cabinet's shared settings do not change. Only the files directly in it are taken, never the ones in folders inside it, so a Scans folder kept inside your inbox is not read as part of it.
 
 Intake's Preview then has two tabs, **Shared inbox (n)** and **My inbox (n)**. Each tab is its own batch: **Commit** files only that tab's rows, the same way in both. Scans and print captures still arrive in the shared inbox. A file moved to the trash from your inbox goes back to it on **Restore**.
 

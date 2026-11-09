@@ -253,8 +253,8 @@ fn locate(inboxes: &[PathBuf], canon: &[PathBuf], path: &Path) -> (Source, bool)
 // Worker
 
 enum Msg {
-    /// The inboxes, and whether their sub-folders count.
-    SetInboxes(Vec<PathBuf>, bool),
+    /// The inboxes, and for each whether its sub-folders count.
+    SetInboxes(Vec<PathBuf>, Vec<bool>),
     Add(Vec<PathBuf>),
     Forget(PathBuf),
     Fs(notify_debouncer_mini::DebounceEventResult),
@@ -278,7 +278,8 @@ struct Worker {
     inboxes: Vec<PathBuf>,
     /// `inboxes`, canonicalized once when they are set.
     canon: Vec<PathBuf>,
-    subfolders: bool,
+    /// For each inbox: its sub-folders count.
+    deep: Vec<bool>,
     watchers:
         Vec<notify_debouncer_mini::Debouncer<notify_debouncer_mini::notify::RecommendedWatcher>>,
     tracker: Tracker,
@@ -316,36 +317,58 @@ impl Worker {
     }
 
     fn list_inboxes(&mut self) {
-        let depth = if self.subfolders { MAX_DEPTH } else { 0 };
-        for inbox in self.inboxes.clone() {
+        for (inbox, deep) in self.inboxes.clone().into_iter().zip(self.deep.clone()) {
+            let depth = if deep { MAX_DEPTH } else { 0 };
             self.offer_tree(&inbox, Source::Inbox(inbox.clone()), depth);
         }
     }
 
-    fn set_inboxes(&mut self, inboxes: Vec<PathBuf>, subfolders: bool) {
+    /// Whether `source`'s sub-folders count.
+    fn deep(&self, source: &Source) -> bool {
+        match source {
+            Source::Inbox(i) => self
+                .inboxes
+                .iter()
+                .position(|x| x == i)
+                .is_none_or(|n| self.deep.get(n).copied().unwrap_or(true)),
+            _ => true,
+        }
+    }
+
+    fn set_inboxes(&mut self, inboxes: Vec<PathBuf>, deep: Vec<bool>) {
         self.watchers.clear();
         self.canon = inboxes
             .iter()
             .map(|i| std::fs::canonicalize(i).unwrap_or_else(|_| i.clone()))
             .collect();
         self.inboxes = inboxes;
-        self.subfolders = subfolders;
-        if !subfolders {
-            // Files already found in sub-folders leave the queue.
-            let (inboxes, canon) = (&self.inboxes, &self.canon);
-            let gone = self.tracker.drop_where(|p| locate(inboxes, canon, p).1);
-            for p in gone {
-                self.send(Event::Gone(p));
-            }
-        }
-        let mode = if subfolders {
-            notify_debouncer_mini::notify::RecursiveMode::Recursive
-        } else {
-            notify_debouncer_mini::notify::RecursiveMode::NonRecursive
+        self.deep = deep;
+        // Files already found in sub-folders that no longer count leave the queue.
+        let gone = {
+            let me = &*self;
+            let (inboxes, canon) = (me.inboxes.clone(), me.canon.clone());
+            let shallow: Vec<PathBuf> = inboxes
+                .iter()
+                .zip(&me.deep)
+                .filter(|(_, d)| !**d)
+                .map(|(i, _)| i.clone())
+                .collect();
+            self.tracker.drop_where(|p| {
+                let (source, in_sub) = locate(&inboxes, &canon, p);
+                in_sub && matches!(&source, Source::Inbox(i) if shallow.contains(i))
+            })
         };
+        for p in gone {
+            self.send(Event::Gone(p));
+        }
         let mut ok = Vec::new();
         let mut failed = Vec::new();
-        for inbox in self.inboxes.clone() {
+        for (inbox, deep) in self.inboxes.clone().into_iter().zip(self.deep.clone()) {
+            let mode = if deep {
+                notify_debouncer_mini::notify::RecursiveMode::Recursive
+            } else {
+                notify_debouncer_mini::notify::RecursiveMode::NonRecursive
+            };
             let tx = self.self_tx.clone();
             let watch = notify_debouncer_mini::new_debouncer(DEBOUNCE, move |r| {
                 let _ = tx.send(Msg::Fs(r));
@@ -379,11 +402,8 @@ impl Worker {
             match std::fs::metadata(&path) {
                 Ok(m) if m.is_dir() || m.is_file() => {
                     let (source, in_sub) = self.locate(&path);
-                    // Sub-folders off: only files directly in an inbox.
-                    if !self.subfolders
-                        && matches!(source, Source::Inbox(_))
-                        && (m.is_dir() || in_sub)
-                    {
+                    // Sub-folders off for this inbox: only files directly in it.
+                    if !self.deep(&source) && (m.is_dir() || in_sub) {
                         continue;
                     }
                     if m.is_dir() {
@@ -429,7 +449,7 @@ impl Worker {
         loop {
             let wait = next_tick.saturating_duration_since(Instant::now());
             match rx.recv_timeout(wait) {
-                Ok(Msg::SetInboxes(v, sub)) => self.set_inboxes(v, sub),
+                Ok(Msg::SetInboxes(v, deep)) => self.set_inboxes(v, deep),
                 Ok(Msg::Add(paths)) => {
                     for p in paths {
                         let (source, _) = self.locate(&p);
@@ -466,7 +486,7 @@ impl Worker {
 pub struct IntakeManager {
     tx: Option<Sender<Msg>>,
     rx: Option<Receiver<Event>>,
-    inboxes: Option<(Vec<PathBuf>, bool)>,
+    inboxes: Option<(Vec<PathBuf>, Vec<bool>)>,
     /// Types filed besides PDF (lower case), from [`Self::set_file_types`].
     file_types: Vec<String>,
     watching: Vec<PathBuf>,
@@ -502,7 +522,7 @@ impl IntakeManager {
         let worker = Worker {
             inboxes: Vec::new(),
             canon: Vec::new(),
-            subfolders: true,
+            deep: Vec::new(),
             watchers: Vec::new(),
             tracker: Tracker::default(),
             self_tx: tx.clone(),
@@ -563,16 +583,34 @@ impl IntakeManager {
             .is_some_and(|e| self.file_types.iter().any(|t| t.eq_ignore_ascii_case(e)))
     }
 
+    /// Every inbox alike (tests; the app passes its own inboxes as `flat`).
+    #[cfg(test)]
     pub fn set_inboxes(&mut self, inboxes: &[PathBuf], subfolders: bool) {
+        self.set_inboxes_with_flat(inboxes, subfolders, &[]);
+    }
+
+    /// As [`Self::set_inboxes`], except that the inboxes in `flat` never count their
+    /// sub-folders (a person's own inbox, owner 2026-11-09: a Scans folder inside it is not read
+    /// as part of it).
+    pub fn set_inboxes_with_flat(
+        &mut self,
+        inboxes: &[PathBuf],
+        subfolders: bool,
+        flat: &[PathBuf],
+    ) {
+        let deep: Vec<bool> = inboxes
+            .iter()
+            .map(|i| subfolders && !flat.contains(i))
+            .collect();
         if self
             .inboxes
             .as_ref()
-            .is_some_and(|(v, s)| v == inboxes && *s == subfolders)
+            .is_some_and(|(v, d)| v == inboxes && *d == deep)
         {
             return;
         }
-        self.inboxes = Some((inboxes.to_vec(), subfolders));
-        self.send(Msg::SetInboxes(inboxes.to_vec(), subfolders));
+        self.inboxes = Some((inboxes.to_vec(), deep.clone()));
+        self.send(Msg::SetInboxes(inboxes.to_vec(), deep));
         // Files of an inbox no longer watched leave the queue, the Import drafts and the
         // unsupported list (a host took a personal inbox away); they are listed again if it
         // comes back.
@@ -906,6 +944,45 @@ mod tests {
         assert_eq!(m.queue().len(), 2);
         m.add_paths(vec![elsewhere.join("a.pdf")]);
         wait_for(&mut m, Duration::from_secs(5), |m| m.queue().len() == 3).expect("re-queued");
+    }
+
+    /// Owner 2026-11-09: a person's own inbox never counts its sub-folders (the Scans folder
+    /// inside it, with its `_processed` copies), while a shared inbox still does.
+    #[test]
+    fn a_flat_inbox_skips_its_sub_folders_while_a_shared_one_reads_them() {
+        let tmp = tempfile::tempdir().unwrap();
+        let shared = tmp.path().join("shared");
+        let mine = tmp.path().join("mine");
+        std::fs::create_dir_all(shared.join("sub")).unwrap();
+        std::fs::create_dir_all(mine.join("SCANS").join("_processed")).unwrap();
+        std::fs::write(shared.join("sub").join("deep.pdf"), b"%PDF-1.4 deep").unwrap();
+        std::fs::write(mine.join("top.pdf"), b"%PDF-1.4 top").unwrap();
+        std::fs::write(mine.join("SCANS").join("raw.pdf"), b"%PDF-1.4 raw").unwrap();
+        std::fs::write(
+            mine.join("SCANS").join("_processed").join("old.pdf"),
+            b"%PDF-1.4 old",
+        )
+        .unwrap();
+        let ctx = egui::Context::default();
+        let mut m = manager(&ctx, std::slice::from_ref(&shared));
+        m.set_inboxes_with_flat(
+            &[shared.clone(), mine.clone()],
+            true,
+            std::slice::from_ref(&mine),
+        );
+        wait_for(&mut m, Duration::from_secs(5), |m| {
+            queued(m, "deep.pdf") && queued(m, "top.pdf")
+        })
+        .expect("shared sub-folder and my inbox's own files");
+        // A file arriving later in the Scans folder inside my inbox is not taken either.
+        std::fs::write(mine.join("SCANS").join("later.pdf"), b"%PDF-1.4 later").unwrap();
+        std::fs::write(mine.join("new.pdf"), b"%PDF-1.4 new").unwrap();
+        wait_for(&mut m, Duration::from_secs(6), |m| queued(m, "new.pdf")).expect("top file");
+        std::thread::sleep(Duration::from_millis(2200));
+        m.poll();
+        for n in ["raw.pdf", "old.pdf", "later.pdf"] {
+            assert!(!queued(&m, n), "{n} from the Scans folder inside my inbox");
+        }
     }
 
     /// Sub-folders off: only files directly in the inbox; turning it off drops sub-folder files

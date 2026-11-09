@@ -177,6 +177,16 @@ impl AppState {
         v
     }
 
+    /// This person's own inboxes that are not also shared ones: their sub-folders never count
+    /// (owner 2026-11-09).
+    pub fn flat_inboxes(&self) -> Vec<PathBuf> {
+        self.personal_inboxes
+            .iter()
+            .filter(|p| !self.settings.inboxes.contains(p))
+            .cloned()
+            .collect()
+    }
+
     /// Whether a queued file came from one of this person's own inboxes.
     pub fn is_personal(&self, q: &crate::intake::QueuedFile) -> bool {
         matches!(&q.source, crate::intake::Source::Inbox(i) if self.personal_inboxes.contains(i))
@@ -608,9 +618,10 @@ impl FilerApp {
         shared.sniffer = Sniffer::new(ctx, shared.pdfium_dir.clone());
         let watched = shared.watched_inboxes();
         shared.intake.set_file_types(&shared.settings.file_types);
+        let flat = shared.flat_inboxes();
         shared
             .intake
-            .set_inboxes(&watched, shared.settings.inbox_subfolders);
+            .set_inboxes_with_flat(&watched, shared.settings.inbox_subfolders, &flat);
         shared.clients.load(
             ctx,
             shared.data_dir.clone(),
@@ -1022,7 +1033,10 @@ impl eframe::App for FilerApp {
         self.shared.folders.poll(&ctx, &data_dir);
         let inboxes = self.shared.watched_inboxes();
         let subfolders = self.shared.settings.inbox_subfolders;
-        self.shared.intake.set_inboxes(&inboxes, subfolders);
+        let flat = self.shared.flat_inboxes();
+        self.shared
+            .intake
+            .set_inboxes_with_flat(&inboxes, subfolders, &flat);
         let types = self.shared.settings.file_types.clone();
         self.shared.intake.set_file_types(&types);
         // A note on a file that left the queue (filed, skipped, taken) goes with it.
@@ -3401,10 +3415,9 @@ My miles for 2025.
         assert!(year.right() < pane.left(), "{year:?} {pane:?}");
     }
 
-    /// Owner 2026-11-09: "Tick matched" ticks the rows with a client and a rule, not those
-    /// without a client or left to the Catch-all.
+    /// Owner 2026-11-09: "Tick ready" ticks the rows whose status is Ready, not the others.
     #[test]
-    fn tick_matched_ticks_rows_with_a_client_and_a_rule() {
+    fn tick_ready_ticks_only_ready_rows() {
         let tmp = tempfile::tempdir().unwrap();
         let data = tmp.path().join("data");
         let root = tmp.path().join("root");
@@ -3469,7 +3482,24 @@ My miles for 2025.
             rule_of(&h, catch_all),
             Some(crate::plan::RuleSource::CatchAll)
         );
-        h.get_by_label("Tick matched").click();
+        let status_of = |h: &Harness<'_, FilerApp>, n: &str| {
+            h.state()
+                .preview
+                .proposals()
+                .iter()
+                .find(|p| p.file.path == inbox.join(n))
+                .map(|p| p.status.clone())
+        };
+        assert_eq!(status_of(&h, ret), Some(crate::plan::RowStatus::Ready));
+        assert_ne!(
+            status_of(&h, no_client),
+            Some(crate::plan::RowStatus::Ready)
+        );
+        assert_ne!(
+            status_of(&h, catch_all),
+            Some(crate::plan::RowStatus::Ready)
+        );
+        h.get_by_label("Tick ready").click();
         h.step();
         h.step();
         assert_eq!(h.state().preview.ticked(), [inbox.join(ret)]);

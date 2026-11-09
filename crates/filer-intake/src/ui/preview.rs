@@ -1174,25 +1174,20 @@ impl PreviewScreen {
                 if self.merge_job.is_some() {
                     ui.spinner();
                 }
-                // Owner 2026-11-09: tick only the matched rows: a client and a rule (not the
-                // Catch-all).
-                let matched: Vec<PathBuf> = self
+                // Owner 2026-11-09: tick only the rows whose status is Ready.
+                let ready: Vec<PathBuf> = self
                     .proposals
                     .iter()
-                    .filter(|p| {
-                        p.client.is_some()
-                            && p.rule_source != RuleSource::CatchAll
-                            && p.rule_id.is_some()
-                    })
+                    .filter(|p| p.status == RowStatus::Ready)
                     .map(|p| p.file.path.clone())
                     .collect();
                 let tick = ui
-                    .add_enabled(!matched.is_empty(), egui::Button::new("Tick matched"))
+                    .add_enabled(!ready.is_empty(), egui::Button::new("Tick ready"))
                     .on_hover_text(
-                        "Tick every row with both a client and a rule; rows with no client, or left to the Catch-all, stay unticked",
+                        "Tick every row whose status is Ready; the others stay unticked",
                     );
                 if tick.clicked() {
-                    self.selected = matched;
+                    self.selected = ready;
                 }
                 ui.menu_button("Browse…", |ui| {
                     if ui.button("Add files…").clicked() {

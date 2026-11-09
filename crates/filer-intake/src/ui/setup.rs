@@ -321,7 +321,8 @@ impl SetupScreen {
         ui.checkbox(&mut self.draft.inbox_subfolders, "Include sub-folders")
             .on_hover_text(
                 "On: files in folders inside an inbox are queued too. Off: only files directly \
-                 in the inbox.",
+                 in the inbox. A person's own inbox (My inbox) only ever takes the files directly \
+                 in it.",
             );
         ui.add_space(6.0);
         ui.horizontal(|ui| {

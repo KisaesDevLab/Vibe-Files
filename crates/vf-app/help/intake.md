@@ -26,7 +26,7 @@ Click a column heading to sort the rows by it; click it again to reverse. **Date
 
 The toolbar has **Batch year** (used for any row without a year), **On collision** (**Keep both**, **Overwrite** or **Skip**) and **Keep all original names**.
 
-**Tick matched** ticks every row that has both a client and a rule (not the **Catch-all**); the other rows stay unticked.
+**Tick ready** ticks every row whose status is **Ready**; the other rows stay unticked.
 
 ## Fixing a row
 

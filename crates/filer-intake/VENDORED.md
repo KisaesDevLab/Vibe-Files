@@ -6,9 +6,9 @@
 |---|---|
 | Repo | `KisaesDevLab/Vibe-Filer-Desktop` (private) |
 | Branch | `master` |
-| Commit | `dd78a06` on `master` (V31: an ID-shaped part at the end, not the year; V32: Tick matched, 2026-11-09); before: `4a15680` (column lines); `bab3a61` (V30); `e80a8b1` (Unsupported strip width); `ac56db4` (V29); `c5e2f70` (QA of V27-V28); `e165e56` (V27-V28); `6417249` (V23-V26); `f2504fe` (V22); `29db764` (V21); `6433c04` on `master` ("feat(host): Setup lock and \"New client…\" for a program that embeds Filer", 0.2.6 + the Intake preview pane, ticked-row actions and host hooks, 2026-11-04) |
+| Commit | `d0068ae` on `master` (V32: Tick ready; V33: My inbox takes only its own files, 2026-11-09); before: `dd78a06` (V31); `4a15680` (column lines); `bab3a61` (V30); `e80a8b1` (Unsupported strip width); `ac56db4` (V29); `c5e2f70` (QA of V27-V28); `e165e56` (V27-V28); `6417249` (V23-V26); `f2504fe` (V22); `29db764` (V21); `6433c04` on `master` ("feat(host): Setup lock and \"New client…\" for a program that embeds Filer", 0.2.6 + the Intake preview pane, ticked-row actions and host hooks, 2026-11-04) |
 | Vendored | 2026-11-02, P00 step 2 at `ea4e726` (0.2.4); re-vendored 2026-11-04, PHASES PA-26 |
-| Upstream tests | 237 at this commit (236 at `4a15680`); all pass after the split (filer-core 65 · filer-pdf 32 · filer-intake 140) |
+| Upstream tests | 238 at this commit (237 at `dd78a06`); all pass after the split (filer-core 65 · filer-pdf 32 · filer-intake 141) |
 
 Upstream is one binary crate with no `lib.rs`. The three `filer-*` crates are a mechanical split
 of its `src/` (QUESTIONS Q-16). Upstream `main.rs` is not vendored; `vf-app` is the entry point.
@@ -118,6 +118,9 @@ the rest of intake. Moving it would need a logic edit (Q-16: merge rather than e
   Then `4a15680` → `dd78a06` (V31, V32): with no client's ID in a name, an ID-shaped part near the
   end (`HAWO6056`, `3280_TIAM`) instead of the year; the toolbar's Tick matched. `parse.rs`
   (filer-core), `app.rs`, `ui/preview.rs` (filer-intake) copied; upstream's 237 tests pass.
+  Then `dd78a06` → `d0068ae` (V32, V33): Tick matched became Tick ready (rows whose status is Ready);
+  a personal inbox never counts its sub-folders (the watcher keeps one setting per inbox).
+  `intake.rs`, `app.rs`, `ui/setup.rs`, `ui/preview.rs` (filer-intake) copied; upstream's 238 tests pass.
 
 ## Re-vendoring
 
