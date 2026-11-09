@@ -216,19 +216,59 @@ pub struct Devices {
     /// Why a kind is missing or a scanner cannot be used (no TWAIN manager, 32-bit-only
     /// sources, WIA failed). Shown under the Scanner row.
     pub notes: Vec<String>,
+    /// Everything the lookup checked, as lines of text: Scanner details, which a person can
+    /// copy and send when a scanner (a remote-scanning utility's in a server session) is
+    /// missing and they cannot open a command prompt there.
+    pub details: Vec<String>,
 }
 
 /// The scanners on this workstation: TWAIN sources (64-bit) and WIA scanners.
 pub fn devices() -> Devices {
     let mut d = Devices::default();
+    let mut details = session_details();
     match crate::twain::sources() {
-        Ok(sources) => d.list.extend(sources.into_iter().map(|s| Device {
-            id: format!("{TWAIN_PREFIX}{}", s.name),
-            name: format!("{} (TWAIN)", s.name),
-            kind: Kind::Twain,
-        })),
-        Err(e) => d.notes.push(e),
+        Ok(sources) => {
+            details.push(format!(
+                "TWAIN sources the 64-bit manager lists: {}",
+                sources.len()
+            ));
+            for s in &sources {
+                details.push(format!(
+                    "  {} | maker {} | family {} | TWAIN {}",
+                    s.name,
+                    s.manufacturer,
+                    s.family,
+                    if s.twain2 { "2" } else { "1" }
+                ));
+            }
+            d.list.extend(sources.into_iter().map(|s| Device {
+                id: format!("{TWAIN_PREFIX}{}", s.name),
+                name: format!("{} (TWAIN)", s.name),
+                kind: Kind::Twain,
+            }))
+        }
+        Err(e) => {
+            details.push(format!("TWAIN sources: none listed ({e})"));
+            d.notes.push(e)
+        }
     }
+    details.push("TWAIN manager (TWAINDSM.dll):".into());
+    details.extend(
+        crate::twain::dsm_report()
+            .into_iter()
+            .map(|l| format!("  {l}")),
+    );
+    for folder in ["twain_64", "twain_32"] {
+        let files = crate::twain::source_files(folder);
+        let count = if files.is_empty() {
+            "none".to_string()
+        } else {
+            files.len().to_string()
+        };
+        details.push(format!(r"Source files in %SystemRoot%\{folder}: {count}"));
+        details.extend(files.into_iter().map(|f| format!("  {f}")));
+    }
+    details.extend(installed_scan_software());
     // Drivers such as PaperStream IP install both; name the 32-bit ones only when no TWAIN
     // source could be listed (that is why the scanner is missing).
     let old = crate::twain::thirty_two_bit_only();
@@ -240,10 +280,185 @@ pub fn devices() -> Devices {
         ));
     }
     match wia_devices() {
-        Ok(w) => d.list.extend(w),
-        Err(e) => d.notes.push(e),
+        Ok(w) => {
+            details.push(format!("Windows (WIA) scanners: {}", w.len()));
+            details.extend(w.iter().map(|x| format!("  {} | {}", x.name, x.id)));
+            d.list.extend(w)
+        }
+        Err(e) => {
+            details.push(format!("Windows (WIA) scanners: cannot list ({e})"));
+            d.notes.push(e)
+        }
     }
+    d.details = details;
     d
+}
+
+/// Who and where: program, Windows login, computer, and whether this is a Remote Desktop
+/// session (a remote-scanning utility's source usually exists only inside one).
+fn session_details() -> Vec<String> {
+    use windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_REMOTESESSION};
+    let env = |k: &str| std::env::var(k).unwrap_or_else(|_| "?".into());
+    // SAFETY: GetSystemMetrics has no preconditions.
+    let remote = unsafe { GetSystemMetrics(SM_REMOTESESSION) } != 0;
+    vec![
+        format!(
+            "Vibe Files {} ({}-bit)",
+            env!("CARGO_PKG_VERSION"),
+            usize::BITS
+        ),
+        format!(
+            "Computer {} | login {} | session {} | {}",
+            env("COMPUTERNAME"),
+            env("USERNAME"),
+            env("SESSIONNAME"),
+            if remote {
+                "Remote Desktop session"
+            } else {
+                "local session"
+            }
+        ),
+    ]
+}
+
+/// Words that name scanning software in folder and registry key names.
+const SCAN_WORDS: [&str; 6] = ["scan", "twain", "voscan", "paperstream", "fujitsu", "pfu"];
+
+fn names_scanning(name: &str) -> bool {
+    let n = name.to_ascii_lowercase();
+    SCAN_WORDS.iter().any(|w| n.contains(w))
+}
+
+/// Scanning software installed on this computer: program folders and registry keys whose
+/// names mention scanning, and any TWAIN source or manager file inside those folders.
+fn installed_scan_software() -> Vec<String> {
+    let mut out = Vec::new();
+    let mut folders = Vec::new();
+    for var in ["ProgramFiles", "ProgramFiles(x86)", "ProgramData"] {
+        let Some(base) = std::env::var_os(var) else {
+            continue;
+        };
+        let Ok(rd) = std::fs::read_dir(PathBuf::from(base)) else {
+            continue;
+        };
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.is_dir() && names_scanning(&e.file_name().to_string_lossy()) {
+                folders.push(p);
+            }
+        }
+    }
+    out.push(format!("Scanning program folders: {}", folders.len()));
+    for f in &folders {
+        out.push(format!("  {}", f.display()));
+        for hit in twain_files_in(f, 4) {
+            out.push(format!("    {}", hit.display()));
+        }
+    }
+    let keys = scan_registry_keys();
+    out.push(format!("Scanning registry keys: {}", keys.len()));
+    out.extend(keys.into_iter().map(|k| format!("  {k}")));
+    out
+}
+
+/// `.ds` sources and `TWAINDSM.dll` copies under `dir`, `depth` folders deep at most.
+fn twain_files_in(dir: &Path, depth: usize) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let mut stack = vec![(dir.to_path_buf(), 0)];
+    while let Some((d, level)) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&d) else {
+            continue;
+        };
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                if level < depth {
+                    stack.push((p, level + 1));
+                }
+            } else if p.extension().is_some_and(|x| x.eq_ignore_ascii_case("ds"))
+                || p.file_name()
+                    .is_some_and(|n| n.eq_ignore_ascii_case("twaindsm.dll"))
+            {
+                out.push(p);
+                if out.len() >= 50 {
+                    return out;
+                }
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+/// Registry keys under SOFTWARE (64-bit, 32-bit and this login's) whose names mention
+/// scanning, with up to 20 of their sub-keys; makers' keys are searched one level down.
+fn scan_registry_keys() -> Vec<String> {
+    use windows::Win32::System::Registry::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
+    let mut out = Vec::new();
+    for (hive, hive_name, base) in [
+        (HKEY_LOCAL_MACHINE, "HKLM", r"SOFTWARE"),
+        (HKEY_LOCAL_MACHINE, "HKLM", r"SOFTWARE\WOW6432Node"),
+        (HKEY_CURRENT_USER, "HKCU", r"Software"),
+    ] {
+        // Classes holds COM registrations, not products.
+        for top in reg_subkeys(hive, base)
+            .into_iter()
+            .filter(|t| !t.eq_ignore_ascii_case("Classes"))
+        {
+            let path = format!(r"{base}\{top}");
+            if names_scanning(&top) {
+                out.push(format!(r"{hive_name}\{path}"));
+                for sub in reg_subkeys(hive, &path).into_iter().take(20) {
+                    out.push(format!(r"{hive_name}\{path}\{sub}"));
+                }
+            } else {
+                for sub in reg_subkeys(hive, &path) {
+                    if names_scanning(&sub) {
+                        out.push(format!(r"{hive_name}\{path}\{sub}"));
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+/// The names of the sub-keys of `hive\path` (empty when it cannot be opened).
+fn reg_subkeys(hive: windows::Win32::System::Registry::HKEY, path: &str) -> Vec<String> {
+    use windows::Win32::System::Registry::{
+        HKEY, KEY_READ, RegCloseKey, RegEnumKeyExW, RegOpenKeyExW,
+    };
+    use windows::core::{HSTRING, PWSTR};
+    let mut key = HKEY::default();
+    // SAFETY: `key` receives an open handle that is closed below.
+    if unsafe { RegOpenKeyExW(hive, &HSTRING::from(path), None, KEY_READ, &mut key) }.is_err() {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for i in 0.. {
+        let mut buf = [0u16; 256];
+        let mut len = buf.len() as u32;
+        // SAFETY: `buf` holds `len` UTF-16 units.
+        let rc = unsafe {
+            RegEnumKeyExW(
+                key,
+                i,
+                Some(PWSTR(buf.as_mut_ptr())),
+                &mut len,
+                None,
+                None,
+                None,
+                None,
+            )
+        };
+        if rc.is_err() {
+            break;
+        }
+        out.push(String::from_utf16_lossy(&buf[..len as usize]));
+    }
+    // SAFETY: `key` was opened above.
+    let _ = unsafe { RegCloseKey(key) };
+    out
 }
 
 /// The device `remembered` names, found again by its name after the list changed (a remote
@@ -616,6 +831,22 @@ mod tests {
             "{:?}",
             d.notes
         );
+        // Scanner details name every place looked at, and which manager loaded.
+        let text = d.details.join("\n");
+        println!("{text}");
+        for want in [
+            "-bit)",
+            "session",
+            "TWAIN manager (TWAINDSM.dll):",
+            " - loaded",
+            r"%SystemRoot%\twain_64",
+            r"%SystemRoot%\twain_32",
+            "Scanning program folders:",
+            "Scanning registry keys:",
+            "Windows (WIA) scanners:",
+        ] {
+            assert!(text.contains(want), "{want} missing from:\n{text}");
+        }
     }
 
     #[test]

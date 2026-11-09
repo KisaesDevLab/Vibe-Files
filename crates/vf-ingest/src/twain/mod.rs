@@ -72,6 +72,35 @@ pub fn dsm_candidates(exe_dir: &Path) -> Vec<PathBuf> {
 }
 
 static DSM: OnceLock<Dsm> = OnceLock::new();
+/// The file [`DSM`] was loaded from (Scanner details).
+static DSM_PATH: OnceLock<PathBuf> = OnceLock::new();
+
+/// Each place `TWAINDSM.dll` is looked for and what was found there (Scanner details).
+pub fn dsm_report() -> Vec<String> {
+    let exe_dir = vf_core::exe_dir().unwrap_or_default();
+    let loaded = DSM_PATH.get();
+    let mut out: Vec<String> = dsm_candidates(&exe_dir)
+        .iter()
+        .map(|p| {
+            let state = if loaded == Some(p) {
+                "loaded"
+            } else if p.is_file() {
+                "present, not used"
+            } else {
+                "missing"
+            };
+            format!("{} - {state}", p.display())
+        })
+        .collect();
+    let root = std::env::var_os("SystemRoot").unwrap_or_else(|| r"C:\Windows".into());
+    let wow = Path::new(&root).join(r"SysWOW64\TWAINDSM.dll");
+    out.push(format!(
+        "{} (32-bit manager, for 32-bit programs) - {}",
+        wow.display(),
+        if wow.is_file() { "present" } else { "missing" }
+    ));
+    out
+}
 
 /// Loads the DSM once per process (it is never unloaded: sources may keep threads in it).
 /// A failure is not remembered: after the DLL is put in place, "Look again" finds it.
@@ -82,6 +111,7 @@ pub fn dsm() -> Result<Dsm, String> {
     let exe_dir = vf_core::exe_dir().unwrap_or_default();
     for path in dsm_candidates(&exe_dir).iter().filter(|p| p.is_file()) {
         if let Ok(d) = load(path) {
+            let _ = DSM_PATH.set(path.clone());
             return Ok(*DSM.get_or_init(|| d));
         }
     }
@@ -345,6 +375,34 @@ pub fn sources() -> Result<Vec<SourceInfo>, String> {
 pub fn scan(source: &str, settings: &Settings) -> Result<Scanned, String> {
     let (source, settings) = (source.to_string(), settings.clone());
     on_twain_thread(dsm_entry, move |m| m.scan(&source, &settings))
+}
+
+/// Every TWAIN source file (`.ds`) under `%SystemRoot%\<folder>`, as paths relative to it
+/// (Scanner details; Microsoft's WIA bridge included).
+pub fn source_files(folder: &str) -> Vec<String> {
+    let root = std::env::var_os("SystemRoot").unwrap_or_else(|| r"C:\Windows".into());
+    let base = Path::new(&root).join(folder);
+    let mut out = Vec::new();
+    let mut stack = vec![base.clone()];
+    while let Some(dir) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                stack.push(p);
+            } else if p.extension().is_some_and(|x| x.eq_ignore_ascii_case("ds")) {
+                out.push(
+                    p.strip_prefix(&base)
+                        .map(|r| r.display().to_string())
+                        .unwrap_or_default(),
+                );
+            }
+        }
+    }
+    out.sort();
+    out
 }
 
 /// Sources installed only for 32-bit programs (`%SystemRoot%\twain_32`, Microsoft's WIA

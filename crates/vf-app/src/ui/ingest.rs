@@ -458,7 +458,7 @@ impl IngestState {
             let user = crate::config::windows_user();
             let Some(current) = scanner::pick(&devices, prefs.scanner_for(&user)).cloned() else {
                 ui.label(widgets::caption(
-                    "No scanner on this PC (a TWAIN driver such as PaperStream IP, or Windows › Settings › Printers & scanners). Scans saved into the Scans folder are still processed.",
+                    "No scanner found (a TWAIN driver such as PaperStream IP, Windows › Settings › Printers & scanners, or in a Remote Desktop session the remote-scanning utility connected for this session). Scans saved into the Scans folder are still processed. Scanner details below shows what was checked.",
                 ));
                 if ui.small_button("Look again").clicked() {
                     self.list_devices(ui.ctx());
@@ -530,9 +530,40 @@ impl IngestState {
                 ui.label(widgets::caption(n));
             }
         });
+        self.scanner_details(ui);
         if scan_now && let Err(e) = self.start_scan(ui.ctx(), prefs) {
             self.warning = Some(e);
         }
+    }
+
+    /// Scanner details: everything the lookup checked, folded away, with Copy, so a person in
+    /// a server session with no command prompt can send it (owner 2026-11-09).
+    fn scanner_details(&mut self, ui: &mut egui::Ui) {
+        let Some(found) = &self.devices else {
+            return;
+        };
+        let text = found.details.join("\n");
+        egui::CollapsingHeader::new("Scanner details")
+            .id_salt("vf-scanner-details")
+            .default_open(false)
+            .show(ui, |ui| {
+                if ui
+                    .small_button("Copy")
+                    .on_hover_text("Copy these lines to paste into an email or chat")
+                    .clicked()
+                {
+                    ui.ctx().copy_text(text.clone());
+                }
+                egui::ScrollArea::vertical()
+                    .id_salt("vf-scanner-details-text")
+                    .max_height(220.0)
+                    .show(ui, |ui| {
+                        ui.add(
+                            egui::Label::new(RichText::new(&text).monospace().size(11.0))
+                                .selectable(true),
+                        );
+                    });
+            });
     }
 
     /// Looks again at the next tick (a folder was chosen).
