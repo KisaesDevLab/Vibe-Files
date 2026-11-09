@@ -15,11 +15,14 @@ When a row says its client was not found, **New client…** beside **Choose clie
 The **Intake** tab opens on **Preview**. Every PDF in an inbox folder (set in **Setup**, see [rules and Setup](help:intake-rules)) shows as one row. Intake reads the client ID from the file name, picks a rule, and works out where the file will go. Each row has these columns:
 
 - **File**: the file name. Right-click it for the row menu.
+- **Date**: when the file was last changed (point at it for the time).
 - **Client**: the client the ID matched, for example `Smith, John (SMIT1001)`. A `fuzzy` pill with a score means it matched by name, not ID: check it.
 - **Rule**: the rule that sets the folder and name. Click it to choose another rule.
 - **Year**: the tax year. Amber when missing.
 - **Destination**: the folder and file name it will get.
 - **Status**: **Ready**, **Needs client**, **Needs year**, **Collision**, **Skipped**, **Paused · duplicate folder** or **Error**. Extra pills say **Will create** (a new client folder) or **Cross-drive**.
+
+Click a column heading to sort the rows by it; click it again to reverse. **Date** sorts newest first. Rows with nothing in that column (no client yet, no year) go last.
 
 The toolbar has **Batch year** (used for any row without a year), **On collision** (**Keep both**, **Overwrite** or **Skip**) and **Keep all original names**.
 

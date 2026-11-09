@@ -42,6 +42,21 @@ const PANE_AUTO_WIDTH: f32 = 1800.0;
 
 /// (file, page count or `None` when unreadable).
 type PageCounts = Vec<(PathBuf, (u64, Option<usize>))>;
+/// A file's last-modified date (`None`: unreadable), keyed by size like the page counts.
+type FileDate = (u64, Option<chrono::DateTime<chrono::Local>>);
+type FileDates = Vec<(PathBuf, FileDate)>;
+
+/// The queue column the rows are sorted by (owner 2026-11-09).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SortBy {
+    File,
+    Date,
+    Client,
+    Rule,
+    Year,
+    Destination,
+    Status,
+}
 
 pub struct PreviewScreen {
     /// "My inbox" tab (this person's own inboxes) instead of "Shared inbox"; only offered
@@ -67,6 +82,11 @@ pub struct PreviewScreen {
     /// Page counts of queued PDFs (`None`: unreadable), read on a worker (UI_SPEC §3 `· N pages`).
     page_counts: HashMap<PathBuf, (u64, Option<usize>)>,
     page_job: Option<Receiver<PageCounts>>,
+    /// Last-modified dates of queued files, read on a worker (the Date column).
+    file_dates: HashMap<PathBuf, FileDate>,
+    date_job: Option<Receiver<FileDates>>,
+    /// The column the queue is sorted by and whether ascending; `None`: the order files came in.
+    sort: Option<(SortBy, bool)>,
     /// Open the summary when the plan being built arrives.
     summary_pending: bool,
     summary_open: bool,
@@ -209,6 +229,9 @@ impl Default for PreviewScreen {
             folded: Vec::new(),
             page_counts: HashMap::new(),
             page_job: None,
+            file_dates: HashMap::new(),
+            date_job: None,
+            sort: None,
             message: None,
             focused: None,
             pane_open: false,
@@ -222,6 +245,24 @@ impl PreviewScreen {
     #[cfg(test)]
     pub fn proposals(&self) -> &[Proposal] {
         &self.proposals
+    }
+
+    /// The rows' files in the order the table shows them.
+    #[cfg(test)]
+    pub fn shown_order(&self) -> Vec<PathBuf> {
+        self.display_order()
+            .into_iter()
+            .map(|i| self.proposals[i].file.path.clone())
+            .collect()
+    }
+
+    #[cfg(test)]
+    pub fn dates_read(&self) -> bool {
+        self.proposals.iter().all(|p| {
+            self.file_dates
+                .get(&p.file.path)
+                .is_some_and(|(_, d)| d.is_some())
+        })
     }
 
     #[cfg(test)]
@@ -964,6 +1005,7 @@ impl PreviewScreen {
         self.update_plan(&ctx, state);
         self.poll_split();
         self.count_pages(&ctx);
+        self.read_dates(&ctx);
         // The Split screen takes the tab's body while open (UI_SPEC §10).
         if self.split_dialog.is_some() {
             self.split_screen(ui, state);
@@ -1316,7 +1358,10 @@ impl PreviewScreen {
     fn keep_focus(&mut self) {
         let listed = |f: &PathBuf| self.proposals.iter().any(|p| &p.file.path == f);
         if !self.focused.as_ref().is_some_and(listed) {
-            self.focused = self.proposals.first().map(|p| p.file.path.clone());
+            self.focused = self
+                .display_order()
+                .first()
+                .map(|&i| self.proposals[i].file.path.clone());
         }
     }
 
@@ -1624,6 +1669,119 @@ impl PreviewScreen {
                     .collect()
             }));
         }
+    }
+
+    /// Reads the last-modified date of rows that don't have one yet, on a worker (a network
+    /// inbox can be slow to answer).
+    fn read_dates(&mut self, ctx: &egui::Context) {
+        if let Some(rx) = &self.date_job {
+            match rx.try_recv() {
+                Ok(dates) => {
+                    self.file_dates.extend(dates);
+                    self.date_job = None;
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => return,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => self.date_job = None,
+            }
+        }
+        let missing: Vec<(PathBuf, u64)> = self
+            .proposals
+            .iter()
+            .filter(|p| {
+                self.file_dates
+                    .get(&p.file.path)
+                    .is_none_or(|(size, _)| *size != p.file.size)
+            })
+            .map(|p| (p.file.path.clone(), p.file.size))
+            .collect();
+        if !missing.is_empty() {
+            if self.file_dates.len() > 4 * self.proposals.len() + 64 {
+                let live: HashSet<&PathBuf> = self.proposals.iter().map(|p| &p.file.path).collect();
+                self.file_dates.retain(|k, _| live.contains(k));
+            }
+            self.date_job = Some(worker::background(ctx, move || {
+                missing
+                    .into_iter()
+                    .map(|(p, size)| {
+                        let d = std::fs::metadata(&p)
+                            .and_then(|m| m.modified())
+                            .ok()
+                            .map(chrono::DateTime::<chrono::Local>::from);
+                        (p, (size, d))
+                    })
+                    .collect()
+            }));
+        }
+    }
+
+    /// The rows in the order shown: sorted by the chosen column (ties by file name), else as
+    /// the files came in.
+    fn display_order(&self) -> Vec<usize> {
+        let mut order: Vec<usize> = (0..self.proposals.len()).collect();
+        let Some((by, ascending)) = self.sort else {
+            return order;
+        };
+        let name = |i: usize| file_name(&self.proposals[i].file.path).to_lowercase();
+        let date = |i: usize| {
+            self.file_dates
+                .get(&self.proposals[i].file.path)
+                .and_then(|(_, d)| *d)
+        };
+        let status = |i: usize| match &self.proposals[i].status {
+            RowStatus::Error(_) => 0,
+            RowStatus::NeedsClient => 1,
+            RowStatus::NeedsYear => 2,
+            RowStatus::Paused => 3,
+            RowStatus::Pending(_) => 4,
+            RowStatus::Ready => 5,
+            RowStatus::Skipped => 6,
+        };
+        // Rows without a value (no client, no year…) go last either way.
+        fn last_if_none<T: Ord>(a: Option<T>, b: Option<T>, ascending: bool) -> std::cmp::Ordering {
+            match (a, b) {
+                (Some(a), Some(b)) if ascending => a.cmp(&b),
+                (Some(a), Some(b)) => b.cmp(&a),
+                (Some(_), None) => std::cmp::Ordering::Less,
+                (None, Some(_)) => std::cmp::Ordering::Greater,
+                (None, None) => std::cmp::Ordering::Equal,
+            }
+        }
+        let p = &self.proposals;
+        order.sort_by(|&a, &b| {
+            let o = match by {
+                SortBy::File => {
+                    let o = name(a).cmp(&name(b));
+                    if ascending { o } else { o.reverse() }
+                }
+                SortBy::Date => last_if_none(date(a), date(b), ascending),
+                SortBy::Client => last_if_none(
+                    p[a].client.as_ref().map(|c| c.name.to_lowercase()),
+                    p[b].client.as_ref().map(|c| c.name.to_lowercase()),
+                    ascending,
+                ),
+                SortBy::Rule => last_if_none(
+                    Some(p[a].rule_name.to_lowercase()).filter(|r| !r.is_empty()),
+                    Some(p[b].rule_name.to_lowercase()).filter(|r| !r.is_empty()),
+                    ascending,
+                ),
+                SortBy::Year => last_if_none(p[a].year, p[b].year, ascending),
+                SortBy::Destination => last_if_none(
+                    p[a].dest
+                        .as_ref()
+                        .map(|d| d.to_string_lossy().to_lowercase()),
+                    p[b].dest
+                        .as_ref()
+                        .map(|d| d.to_string_lossy().to_lowercase()),
+                    ascending,
+                ),
+                SortBy::Status => {
+                    let o = status(a).cmp(&status(b));
+                    if ascending { o } else { o.reverse() }
+                }
+            };
+            o.then_with(|| name(a).cmp(&name(b)))
+        });
+        order
     }
 
     /// Takes a finished split (its pieces replace the original row).
@@ -2054,6 +2212,8 @@ impl PreviewScreen {
         let all_ticked =
             !selectable.is_empty() && selectable.iter().all(|s| self.selected.contains(s));
         let mut select_all: Option<bool> = None;
+        let current_sort = self.sort;
+        let mut sort_click: Option<SortBy> = None;
         let ctx = RowCtx {
             pal: p,
             rules: &rules,
@@ -2065,6 +2225,7 @@ impl PreviewScreen {
             batch_year,
             folded: &self.folded,
             page_counts: &self.page_counts,
+            file_dates: &self.file_dates,
             renaming: self.renaming.as_ref(),
             host_new_client: state.host_new_client,
             host_trash: state.host_trash,
@@ -2072,7 +2233,8 @@ impl PreviewScreen {
         };
         // The table's lines: each file, then its copies and its "+ Copy to…" line.
         let mut lines: Vec<TableLine> = Vec::new();
-        for (i, pr) in self.proposals.iter().enumerate() {
+        for i in self.display_order() {
+            let pr = &self.proposals[i];
             lines.push(TableLine::Main(i));
             if !self.folded.contains(&pr.file.path)
                 && (!pr.copies.is_empty()
@@ -2106,7 +2268,7 @@ impl PreviewScreen {
         let spacing = ui.spacing().item_spacing;
         // The table follows the space it has (the columns' least widths, about 800 points,
         // are the floor; below that it scrolls sideways).
-        let total = ui.available_width().max(800.0);
+        let total = ui.available_width().max(900.0);
         // Widths a person dragged are kept until the space changes (the side pane opens, the
         // window is resized); then the columns share it out again. The table keeps its id, so
         // its scroll position stays.
@@ -2119,7 +2281,7 @@ impl PreviewScreen {
                 ui.allocate_ui(egui::vec2(total, height), |ui| {
                     // Cells touch, so row tints and lines run unbroken; each cell pads itself.
                     ui.spacing_mut().item_spacing = egui::vec2(0.0, 0.0);
-                    let free = (total - 28.0 - 86.0).max(686.0);
+                    let free = (total - 28.0 - DATE_W - 86.0).max(690.0);
                     let col = |share: f32, min: f32| {
                         Column::initial(free * share).at_least(min).clip(true)
                     };
@@ -2135,6 +2297,7 @@ impl PreviewScreen {
                         .auto_shrink([false, true])
                         .column(Column::exact(28.0).resizable(false))
                         .column(col(0.22, 140.0))
+                        .column(Column::exact(DATE_W).resizable(false).clip(true))
                         .column(col(0.19, 140.0))
                         .column(col(0.12, 100.0))
                         .column(Column::exact(86.0).resizable(false).clip(true))
@@ -2169,13 +2332,23 @@ impl PreviewScreen {
                                     }
                                 });
                             });
-                            for t in ["File", "Client", "Rule", "Year", "Destination", "Status"] {
+                            for (t, by) in [
+                                ("File", SortBy::File),
+                                ("Date", SortBy::Date),
+                                ("Client", SortBy::Client),
+                                ("Rule", SortBy::Rule),
+                                ("Year", SortBy::Year),
+                                ("Destination", SortBy::Destination),
+                                ("Status", SortBy::Status),
+                            ] {
                                 header.col(|ui| {
                                     fill(ui);
                                     ui.add_space(8.0);
                                     ui.horizontal(|ui| {
                                         ui.add_space(6.0);
-                                        label_caps(ui, t);
+                                        if sort_heading(ui, t, current_sort, by) {
+                                            sort_click = Some(by);
+                                        }
                                     });
                                 });
                             }
@@ -2267,6 +2440,13 @@ impl PreviewScreen {
                 });
             });
         self.table_width_key = Some(width_key);
+        // A heading click sorts by that column; again, the other way. Dates start newest first.
+        if let Some(by) = sort_click {
+            self.sort = Some(match self.sort {
+                Some((b, asc)) if b == by => (by, !asc),
+                _ => (by, by != SortBy::Date),
+            });
+        }
         // A name being typed on a row scrolled out of view (only lines in view are drawn in a
         // long queue) is kept, as clicking away would.
         if let Some(r) = &self.renaming
@@ -3187,6 +3367,7 @@ struct RowCtx<'a> {
     batch_year: Option<u16>,
     folded: &'a [PathBuf],
     page_counts: &'a HashMap<PathBuf, (u64, Option<usize>)>,
+    file_dates: &'a HashMap<PathBuf, FileDate>,
     renaming: Option<&'a Renaming>,
     /// The host can create clients ("New client…").
     host_new_client: bool,
@@ -3262,6 +3443,59 @@ enum RowAction {
     Open(PathBuf),
     /// "New client…": (file, name in the file name, ID in the file name) for the host.
     NewClient(PathBuf, String, Option<String>),
+}
+
+/// The Date column's width.
+const DATE_W: f32 = 96.0;
+
+/// A column heading that sorts the queue when clicked; the sorted column shows its direction.
+fn sort_heading(
+    ui: &mut egui::Ui,
+    title: &str,
+    current: Option<(SortBy, bool)>,
+    by: SortBy,
+) -> bool {
+    let p = pal(ui);
+    let active = current.filter(|(b, _)| *b == by).map(|(_, asc)| asc);
+    let resp = ui
+        .add(
+            egui::Label::new(
+                RichText::new(title.to_uppercase())
+                    .size(11.0)
+                    .color(if active.is_some() { p.text } else { p.muted })
+                    .extra_letter_spacing(0.5),
+            )
+            .sense(egui::Sense::click()),
+        )
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .on_hover_text(format!("Sort by {}", title.to_lowercase()));
+    let name = match active {
+        Some(true) => format!("Sort by {title}, ascending"),
+        Some(false) => format!("Sort by {title}, descending"),
+        None => format!("Sort by {title}"),
+    };
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, name.clone()));
+    if let Some(asc) = active {
+        ui.add_space(3.0);
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(10.0, 12.0), egui::Sense::hover());
+        let m = rect.center();
+        let pts = if asc {
+            vec![
+                egui::pos2(m.x - 3.5, m.y + 2.0),
+                egui::pos2(m.x + 3.5, m.y + 2.0),
+                egui::pos2(m.x, m.y - 2.5),
+            ]
+        } else {
+            vec![
+                egui::pos2(m.x - 3.5, m.y - 2.0),
+                egui::pos2(m.x + 3.5, m.y - 2.0),
+                egui::pos2(m.x, m.y + 2.5),
+            ]
+        };
+        ui.painter()
+            .add(egui::Shape::convex_polygon(pts, p.text, Stroke::NONE));
+    }
+    resp.clicked()
 }
 
 /// One table row. Cells are top-aligned; text cells start a little lower so their first line sits
@@ -3475,6 +3709,24 @@ fn row_ui(
                 }
             }
         });
+    });
+
+    // Date: when the file was last changed.
+    cells.cell(|ui| {
+        ui.add_space(TEXT_TOP);
+        match ctx.file_dates.get(path).and_then(|(_, d)| *d) {
+            Some(d) => {
+                ui.label(
+                    RichText::new(d.format("%m/%d/%Y").to_string())
+                        .size(12.0)
+                        .color(pl.text),
+                )
+                .on_hover_text(d.format("Modified %b %-d, %Y %-I:%M %p").to_string());
+            }
+            None => {
+                ui.label(RichText::new("—").color(pl.muted));
+            }
+        }
     });
 
     // Client.
@@ -4046,6 +4298,7 @@ fn copy_row_ui(
             }
         });
     });
+    cells.cell(|_| {});
     cells.cell(|ui| match &c.client {
         Some(cl) => {
             ui.add_space(TEXT_TOP);
@@ -4243,7 +4496,8 @@ fn add_copy_line(cells: &mut Cells<'_, '_, '_>, pr: &Proposal, actions: &mut Vec
             actions.push(RowAction::AddCopy(pr.file.path.clone()));
         }
     });
-    for _ in 2..5 {
+    // Date, client, rule, year.
+    for _ in 0..4 {
         cells.cell(|_| {});
     }
     cells.cell(|ui| {

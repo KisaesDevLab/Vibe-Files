@@ -3401,6 +3401,89 @@ My miles for 2025.
         assert!(year.right() < pane.left(), "{year:?} {pane:?}");
     }
 
+    /// Owner 2026-11-09: the queue shows each file's date, and a click on a column heading
+    /// sorts by it (again: the other way).
+    #[test]
+    fn queue_shows_file_dates_and_sorts_by_column() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data = tmp.path().join("data");
+        let root = tmp.path().join("root");
+        let inbox = tmp.path().join("inbox");
+        for d in [&data, &root, &inbox] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let day = |d: u64| std::time::UNIX_EPOCH + std::time::Duration::from_secs(d * 86_400);
+        // Name order b, a, c; date order (oldest first) c, b, a.
+        for (n, d) in [("b.pdf", 20_000), ("a.pdf", 20_100), ("c.pdf", 19_000)] {
+            let f = inbox.join(n);
+            crate::pdf::write_test_pdf(&f, &[n]);
+            std::fs::File::options()
+                .write(true)
+                .open(&f)
+                .unwrap()
+                .set_modified(day(d))
+                .unwrap();
+        }
+        let settings = Settings {
+            root: Some(root.clone()),
+            inboxes: vec![inbox.clone()],
+            ..Settings::default()
+        };
+        let d = data.clone();
+        let mut h = HarnessBuilder::default()
+            .with_theme(egui::Theme::Light)
+            .with_size([1500.0, 1000.0])
+            .build_eframe(move |cc| {
+                FilerApp::new(&cc.egui_ctx, AppState::load(d, settings, true, None))
+            });
+        settle(&mut h, "queue", |a| a.shared.intake.queue().len() == 3);
+        h.get_by_label("Preview").click();
+        settle(&mut h, "plan", |a| plan_ready(a, 3));
+        settle(&mut h, "dates", |a| a.preview.dates_read());
+        h.step();
+        h.step();
+        let shown = |h: &Harness<'_, FilerApp>| -> Vec<String> {
+            h.state()
+                .preview
+                .shown_order()
+                .iter()
+                .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+                .collect()
+        };
+        // The date of a.pdf, as the Date column writes it.
+        let a_date = chrono::DateTime::<chrono::Local>::from(day(20_100))
+            .format("%m/%d/%Y")
+            .to_string();
+        assert!(
+            h.query_by_label(&a_date).is_some(),
+            "date {a_date} not shown"
+        );
+
+        h.get_by_label("Sort by File").click();
+        h.step();
+        h.step();
+        assert_eq!(shown(&h), ["a.pdf", "b.pdf", "c.pdf"]);
+        h.get_by_label("Sort by File, ascending").click();
+        h.step();
+        h.step();
+        assert_eq!(shown(&h), ["c.pdf", "b.pdf", "a.pdf"]);
+        // Dates: newest first, then oldest first.
+        h.get_by_label("Sort by Date").click();
+        h.step();
+        h.step();
+        assert_eq!(shown(&h), ["a.pdf", "b.pdf", "c.pdf"]);
+        h.get_by_label("Sort by Date, descending").click();
+        h.step();
+        h.step();
+        assert_eq!(shown(&h), ["c.pdf", "b.pdf", "a.pdf"]);
+        crate::app::snapshot(&mut h, "queue_sorted_by_date");
+        // Status (all need a client here): ties fall back to the file name.
+        h.get_by_label("Sort by Status").click();
+        h.step();
+        h.step();
+        assert_eq!(shown(&h), ["a.pdf", "b.pdf", "c.pdf"]);
+    }
+
     /// The side pane shows the row last clicked; ticked rows get one client and one rule at once
     /// (owner 2026-11-04).
     #[test]

@@ -6,9 +6,9 @@
 |---|---|
 | Repo | `KisaesDevLab/Vibe-Filer-Desktop` (private) |
 | Branch | `master` |
-| Commit | `e80a8b1` on `master` (a long Unsupported list no longer pushes the preview pane off screen, 2026-11-09); before: `ac56db4` (V29); `c5e2f70` (QA of V27-V28); `e165e56` (V27-V28); `6417249` (V23-V26); `f2504fe` (V22); `29db764` (V21); `6433c04` on `master` ("feat(host): Setup lock and \"New client…\" for a program that embeds Filer", 0.2.6 + the Intake preview pane, ticked-row actions and host hooks, 2026-11-04) |
+| Commit | `bab3a61` on `master` (V30: file date column and sorting by any column in the queue, 2026-11-09); before: `e80a8b1` (Unsupported strip width); `ac56db4` (V29); `c5e2f70` (QA of V27-V28); `e165e56` (V27-V28); `6417249` (V23-V26); `f2504fe` (V22); `29db764` (V21); `6433c04` on `master` ("feat(host): Setup lock and \"New client…\" for a program that embeds Filer", 0.2.6 + the Intake preview pane, ticked-row actions and host hooks, 2026-11-04) |
 | Vendored | 2026-11-02, P00 step 2 at `ea4e726` (0.2.4); re-vendored 2026-11-04, PHASES PA-26 |
-| Upstream tests | 235 at this commit (234 at `ac56db4`); all pass after the split (filer-core 65 · filer-pdf 32 · filer-intake 138) |
+| Upstream tests | 236 at this commit (235 at `e80a8b1`); all pass after the split (filer-core 65 · filer-pdf 32 · filer-intake 139) |
 
 Upstream is one binary crate with no `lib.rs`. The three `filer-*` crates are a mechanical split
 of its `src/` (QUESTIONS Q-16). Upstream `main.rs` is not vendored; `vf-app` is the entry point.
@@ -111,6 +111,8 @@ the rest of intake. Moving it would need a logic edit (Q-16: merge rather than e
   Then `ac56db4` → `e80a8b1`: the Unsupported strip's header is cut to the table's width and its
   list scrolls (21 long names widened the table past the window, hiding the scroll bar and the
   side pane). `app.rs`, `ui/preview.rs` (filer-intake) copied; upstream's 235 tests pass.
+  Then `e80a8b1` → `bab3a61` (V30): the queue's Date column (last-modified, read on a worker) and
+  headings that sort. `app.rs`, `ui/preview.rs` (filer-intake) copied; upstream's 236 tests pass.
 
 ## Re-vendoring
 
