@@ -3344,6 +3344,63 @@ My miles for 2025.
         assert!(h.query_by_label("My miles for 2025.").is_some());
     }
 
+    /// Owner 2026-11-09: 21 QuickBooks backups in the inbox, their names listed on one line,
+    /// widened the table past the window: no scroll bar, and the side pane off screen.
+    #[test]
+    fn many_unsupported_files_leave_the_pane_on_screen() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data = tmp.path().join("data");
+        let root = tmp.path().join("root");
+        let inbox = tmp.path().join("inbox");
+        for d in [&data, &root, &inbox] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        for n in ["scan0001.pdf", "scan0002.pdf"] {
+            crate::pdf::write_test_pdf(&inbox.join(n), &[n]);
+        }
+        for i in 0..21 {
+            std::fs::write(
+                inbox.join(format!(
+                    "Client Number {i} Feed Mill LLC (Backup Apr 15,2024 08 32 AM).QBB"
+                )),
+                b"x",
+            )
+            .unwrap();
+        }
+        let settings = Settings {
+            root: Some(root.clone()),
+            inboxes: vec![inbox.clone()],
+            ..Settings::default()
+        };
+        let pdfium = crate::pdf::find_pdfium(std::path::Path::new(""));
+        let d = data.clone();
+        let mut h = HarnessBuilder::default()
+            .with_theme(egui::Theme::Light)
+            .with_size([1500.0, 1000.0])
+            .build_eframe(move |cc| {
+                FilerApp::new(&cc.egui_ctx, AppState::load(d, settings, true, pdfium))
+            });
+        settle(&mut h, "queue", |a| {
+            a.shared.intake.queue().len() == 2 && a.shared.intake.unsupported().len() == 21
+        });
+        h.get_by_label("Preview").click();
+        settle(&mut h, "plan", |a| plan_ready(a, 2));
+        h.get_by_label("Preview pane").click();
+        for _ in 0..4 {
+            h.step();
+        }
+        h.get_by_label_contains("Unsupported (21)");
+        let pane = h.get_by_label_contains("Pages of ").rect();
+        assert!(
+            pane.right() <= 1500.0,
+            "the side pane is off screen: {pane:?}"
+        );
+        let next = h.get_by_label("Next page").rect();
+        assert!(next.right() <= 1500.0, "{next:?}");
+        let year = h.get_by_label("Year for scan0001.pdf").rect();
+        assert!(year.right() < pane.left(), "{year:?} {pane:?}");
+    }
+
     /// The side pane shows the row last clicked; ticked rows get one client and one rule at once
     /// (owner 2026-11-04).
     #[test]

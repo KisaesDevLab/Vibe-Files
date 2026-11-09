@@ -2426,27 +2426,55 @@ impl PreviewScreen {
             .inner_margin(Margin::symmetric(12, 6))
             .show(ui, |ui| {
                 ui.set_width(ui.available_width());
-                egui::CollapsingHeader::new(
-                    RichText::new(format!(
-                        "Unsupported ({}) — {} · inbox drops are PDF only; zips go to Import",
-                        unsupported.len(),
-                        names.join(", ")
-                    ))
-                    .size(12.0)
-                    .color(p.muted),
+                // One line, cut to the table's width: a long list of names written out in full
+                // widened the table past the window, hiding its scroll bar and the side pane
+                // (owner 2026-11-09, 21 QuickBooks backups).
+                let id = ui.make_persistent_id("unsupported_files");
+                egui::collapsing_header::CollapsingState::load_with_default_open(
+                    ui.ctx(),
+                    id,
+                    false,
                 )
-                .id_salt("unsupported_files")
-                .default_open(false)
-                .show(ui, |ui| {
-                    for f in &unsupported {
-                        ui.horizontal(|ui| {
-                            ui.label(mono(file_name(&f.path)));
-                            ui.label(RichText::new(parent(&f.path)).size(11.0).color(p.muted));
-                            if ui.small_button("Ignore").clicked() {
-                                state.intake.ignore_unsupported(&f.path);
+                .show_header(ui, |ui| {
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(format!(
+                                "Unsupported ({}) · inbox drops are PDF only; zips go to Import — {}",
+                                unsupported.len(),
+                                names.join(", ")
+                            ))
+                            .size(12.0)
+                            .color(p.muted),
+                        )
+                        .truncate(),
+                    );
+                })
+                .body(|ui| {
+                    // A long list scrolls inside the strip instead of pushing the table up.
+                    egui::ScrollArea::vertical()
+                        .id_salt("unsupported_list")
+                        .max_height(160.0)
+                        .show(ui, |ui| {
+                            for f in &unsupported {
+                                ui.horizontal(|ui| {
+                                    if ui.small_button("Ignore").clicked() {
+                                        state.intake.ignore_unsupported(&f.path);
+                                    }
+                                    ui.add(
+                                        egui::Label::new(
+                                            RichText::new(format!(
+                                                "{}   {}",
+                                                file_name(&f.path),
+                                                parent(&f.path)
+                                            ))
+                                            .monospace()
+                                            .size(12.0),
+                                        )
+                                        .truncate(),
+                                    );
+                                });
                             }
                         });
-                    }
                 });
             });
     }
