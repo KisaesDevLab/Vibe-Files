@@ -112,7 +112,11 @@ pub struct Scanned {
 }
 
 /// Largest page taken, bytes (a 600 dpi colour page of 17 × 44 inches is about 800 MB).
+#[cfg(target_pointer_width = "64")]
 const MAX_PAGE_BYTES: usize = 900 * 1024 * 1024;
+/// In the 32-bit scanning helper: what a 32-bit program can reliably get in one piece.
+#[cfg(target_pointer_width = "32")]
+const MAX_PAGE_BYTES: usize = 400 * 1024 * 1024;
 
 /// One scan at a time per process (the callback below is process-wide).
 static SCAN: Mutex<()> = Mutex::new(());
@@ -417,7 +421,11 @@ impl Ds<'_> {
         }
         .min(setup.max_buf_size.max(setup.min_buf_size).max(64 * 1024));
         let mut buf = vec![0u8; size as usize];
-        let mut data = vec![0u8; page_bytes];
+        // Memory that cannot be had is an error, not an abort (QA).
+        let mut data = Vec::new();
+        data.try_reserve_exact(page_bytes)
+            .map_err(|_| TWCC_LOWMEMORY)?;
+        data.resize(page_bytes, 0);
         let mut rows_seen = 0u32;
         loop {
             let mut x = ImageMemXfer {
@@ -463,6 +471,8 @@ impl Ds<'_> {
                         .filter(|&n| n <= MAX_PAGE_BYTES)
                         .ok_or(TWCC_LOWMEMORY)?;
                     if data.len() < need {
+                        data.try_reserve(need - data.len())
+                            .map_err(|_| TWCC_LOWMEMORY)?;
                         data.resize(need, 0);
                     }
                     for r in 0..rows {
