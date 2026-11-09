@@ -247,6 +247,11 @@ impl PreviewScreen {
         &self.proposals
     }
 
+    #[cfg(test)]
+    pub fn ticked(&self) -> &[PathBuf] {
+        &self.selected
+    }
+
     /// The rows' files in the order the table shows them.
     #[cfg(test)]
     pub fn shown_order(&self) -> Vec<PathBuf> {
@@ -1168,6 +1173,26 @@ impl PreviewScreen {
                 }
                 if self.merge_job.is_some() {
                     ui.spinner();
+                }
+                // Owner 2026-11-09: tick only the matched rows: a client and a rule (not the
+                // Catch-all).
+                let matched: Vec<PathBuf> = self
+                    .proposals
+                    .iter()
+                    .filter(|p| {
+                        p.client.is_some()
+                            && p.rule_source != RuleSource::CatchAll
+                            && p.rule_id.is_some()
+                    })
+                    .map(|p| p.file.path.clone())
+                    .collect();
+                let tick = ui
+                    .add_enabled(!matched.is_empty(), egui::Button::new("Tick matched"))
+                    .on_hover_text(
+                        "Tick every row with both a client and a rule; rows with no client, or left to the Catch-all, stay unticked",
+                    );
+                if tick.clicked() {
+                    self.selected = matched;
                 }
                 ui.menu_button("Browse…", |ui| {
                     if ui.button("Add files…").clicked() {

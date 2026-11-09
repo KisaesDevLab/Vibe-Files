@@ -3401,6 +3401,80 @@ My miles for 2025.
         assert!(year.right() < pane.left(), "{year:?} {pane:?}");
     }
 
+    /// Owner 2026-11-09: "Tick matched" ticks the rows with a client and a rule, not those
+    /// without a client or left to the Catch-all.
+    #[test]
+    fn tick_matched_ticks_rows_with_a_client_and_a_rule() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data = tmp.path().join("data");
+        let root = tmp.path().join("root");
+        let inbox = tmp.path().join("inbox");
+        for d in [&data, &root, &inbox] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let csv = tmp.path().join("clients.csv");
+        std::fs::write(
+            &csv,
+            "id,name
+1001,\"Smith, John\"
+",
+        )
+        .unwrap();
+        let ret = "Smith, John_1001_2025 1040 Tax Return.pdf";
+        // A rule but no client; a client but only the Catch-all.
+        let no_client = "Baker, Ann_7777_2025 1040 Tax Return.pdf";
+        let catch_all = "Smith, John_1001_misc.pdf";
+        for n in [ret, no_client, catch_all, "scan0001.pdf"] {
+            crate::pdf::write_test_pdf(&inbox.join(n), &[n]);
+        }
+        let settings = Settings {
+            root: Some(root.clone()),
+            inboxes: vec![inbox.clone()],
+            csv_path: Some(csv),
+            column_map: ColumnMap {
+                id: Some("id".into()),
+                name: Some("name".into()),
+                extras: vec![],
+            },
+            ..Settings::default()
+        };
+        let d = data.clone();
+        let mut h = HarnessBuilder::default()
+            .with_theme(egui::Theme::Light)
+            .with_size([1500.0, 1000.0])
+            .build_eframe(move |cc| {
+                crate::rules::seed_tax(&d);
+                FilerApp::new(&cc.egui_ctx, AppState::load(d, settings, true, None))
+            });
+        settle(&mut h, "queue", |a| {
+            a.shared.intake.queue().len() == 4 && a.shared.clients.list().is_some()
+        });
+        h.get_by_label("Preview").click();
+        settle(&mut h, "plan", |a| plan_ready(a, 4));
+        h.step();
+        let rule_of = |h: &Harness<'_, FilerApp>, n: &str| {
+            h.state()
+                .preview
+                .proposals()
+                .iter()
+                .find(|p| p.file.path == inbox.join(n))
+                .map(|p| p.rule_source)
+        };
+        assert_ne!(rule_of(&h, ret), Some(crate::plan::RuleSource::CatchAll));
+        assert_ne!(
+            rule_of(&h, no_client),
+            Some(crate::plan::RuleSource::CatchAll)
+        );
+        assert_eq!(
+            rule_of(&h, catch_all),
+            Some(crate::plan::RuleSource::CatchAll)
+        );
+        h.get_by_label("Tick matched").click();
+        h.step();
+        h.step();
+        assert_eq!(h.state().preview.ticked(), [inbox.join(ret)]);
+    }
+
     /// Owner 2026-11-09: the queue shows each file's date, and a click on a column heading
     /// sorts by it (again: the other way).
     #[test]

@@ -380,7 +380,26 @@ pub fn read_name(
         };
         fits && !(w.len() == 4 && detect_year(w, current_year).is_some())
     };
-    let Some((start, end, id)) = id_near_ends(stem, &is_client_id, word_ok) else {
+    // As written, the ID pattern (case-sensitive) and not a year.
+    let id_like = |w: &str| {
+        let fits = match re {
+            Some(re) => re
+                .captures(&format!("x_{w}_x.x"))
+                .is_some_and(|c| &c["id"] == w),
+            None => w.chars().count() >= 4,
+        };
+        fits && !(w.len() == 4 && detect_year(w, current_year).is_some())
+    };
+    let found = id_near_ends(stem, &is_client_id, word_ok).or_else(|| {
+        // No client's ID anywhere: when the reading took a year or nothing for the ID, an
+        // ID-shaped word near the end is what the row shows and "New client…" starts from
+        // (owner 2026-11-09: "Haworth, Dewayne L_2025_1040_…_HAWO6056" read as ID 2025).
+        if read.id.as_deref().is_some_and(id_like) {
+            return None;
+        }
+        id_shaped_near_ends(stem, |w| id_like(&w.replace(['_', '-', ' '], "")))
+    });
+    let Some((start, end, id)) = found else {
         return read;
     };
     // The name is the first `_` part before the ID; everything else is what rules read. With no
@@ -481,6 +500,73 @@ fn id_near_ends(
         }
         (word_ok(id) && is_client_id(id)).then(|| (single.0, single.1, id.to_string()))
     };
+    for i in (0..words.len()).rev() {
+        if words[i].1 <= tail {
+            break;
+        }
+        let pair = (i > 0).then(|| (words[i - 1], words[i]));
+        if let Some(hit) = try_at(pair, words[i]) {
+            return Some(hit);
+        }
+    }
+    for i in 0..words.len() {
+        if words[i].0 >= head {
+            break;
+        }
+        let pair = words.get(i + 1).map(|&next| (words[i], next));
+        if let Some(hit) = try_at(pair, words[i]) {
+            return Some(hit);
+        }
+    }
+    None
+}
+
+/// An ID-shaped word near an end of `stem` (searched as [`id_near_ends`] does), for a name whose
+/// ID is not a client's: letters and digits in one word (`HAWO6056`), or a word of letters next
+/// to a word of digits (`3280_TIAM`, `JONE-1234`), at least six characters; kept as written.
+/// `fits` checks it against the ID pattern.
+fn id_shaped_near_ends(stem: &str, fits: impl Fn(&str) -> bool) -> Option<(usize, usize, String)> {
+    let mut words: Vec<(usize, usize)> = Vec::new();
+    let mut open: Option<usize> = None;
+    for (i, c) in stem.char_indices() {
+        match (c.is_ascii_alphanumeric(), open) {
+            (true, None) => open = Some(i),
+            (false, Some(s)) => {
+                words.push((s, i));
+                open = None;
+            }
+            _ => {}
+        }
+    }
+    if let Some(s) = open {
+        words.push((s, stem.len()));
+    }
+    let letters = |w: &str| w.len() >= 2 && w.bytes().all(|b| b.is_ascii_alphabetic());
+    let digits = |w: &str| w.len() >= 2 && w.bytes().all(|b| b.is_ascii_digit());
+    let mixed = |w: &str| {
+        w.len() >= 6
+            && w.bytes().any(|b| b.is_ascii_alphabetic())
+            && w.bytes().any(|b| b.is_ascii_digit())
+    };
+    let try_at = |pair: Option<((usize, usize), (usize, usize))>, single: (usize, usize)| {
+        if let Some(((s, ae), (bs, e))) = pair {
+            let (a, b) = (&stem[s..ae], &stem[bs..e]);
+            let one_sep = matches!(&stem[ae..bs], "_" | "-" | " ");
+            if one_sep
+                && ((letters(a) && digits(b)) || (digits(a) && letters(b)))
+                && a.len() + b.len() >= 6
+                && fits(&stem[s..e])
+            {
+                return Some((s, e, stem[s..e].to_string()));
+            }
+        }
+        let w = &stem[single.0..single.1];
+        (mixed(w) && fits(w)).then(|| (single.0, single.1, w.to_string()))
+    };
+    let chars = stem.chars().count();
+    let byte_at = |n: usize| stem.char_indices().nth(n).map_or(stem.len(), |(i, _)| i);
+    let tail = byte_at(chars.saturating_sub(ID_SEARCH_CHARS));
+    let head = byte_at(ID_SEARCH_CHARS);
     for i in (0..words.len()).rev() {
         if words[i].1 <= tail {
             break;
@@ -802,9 +888,37 @@ mod tests {
         let mid = "Some Long Client Name 3280 then a long document name.pdf";
         let p = read_name(mid, Some(&re), &off, 2026, |id| id == "3280", |_| false);
         assert_eq!(p.id, None);
-        // No part is a client: as before.
-        let p = read_name(name, Some(&re), &off, 2026, |_| false, |_| false);
-        assert_eq!(p.id.as_deref(), Some("2025"));
+        // No part is a client: the ID-shaped part at the end, as written, not the year (owner
+        // 2026-11-09), so the row and "New client…" show it.
+        let none = |_: &str| false;
+        let p = read_name(name, Some(&re), &off, 2026, none, |_| false);
+        assert_eq!(p.id.as_deref(), Some("3280_TIAM"));
+        assert_eq!(p.name, "Tiam, Hrang & Tial Cin");
+        assert_eq!(p.rest, "2025_1040_Tax_Return");
+        let haworth = "Haworth, Dewayne L_2025_1040_GovernmentCopyTaxReturn_HAWO6056.pdf";
+        let p = read_name(haworth, Some(&re), &off, 2026, none, |_| false);
+        assert_eq!(p.id.as_deref(), Some("HAWO6056"));
+        assert_eq!(p.name, "Haworth, Dewayne L");
+        assert_eq!(p.year, Some(2025));
+        for (n, id) in [
+            ("Jones_2025_W-2_JONE-1234.pdf", "JONE-1234"),
+            ("JONE 1234 Tax Return 2025.pdf", "JONE 1234"),
+        ] {
+            let p = read_name(n, Some(&re), &off, 2026, none, |_| false);
+            assert_eq!(p.id.as_deref(), Some(id), "{n}");
+        }
+        // Not ID-shaped: lower case, a date, a scan number, a form; and an ID the reading
+        // already has (not a year) is kept.
+        for (n, id) in [
+            ("Payroll Details 2021-08-14.pdf", None),
+            ("Scan 2026-11-09 205432.pdf", None),
+            ("PrintForm1099.pdf", None),
+            ("Smith_2025_Form1099.pdf", Some("2025")),
+            ("Smith, John_1001_2025 1040 HAWO6056.pdf", Some("1001")),
+        ] {
+            let p = read_name(n, Some(&re), &off, 2026, none, |_| false);
+            assert_eq!(p.id.as_deref(), id, "{n}");
+        }
     }
 
     #[test]
