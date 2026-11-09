@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use egui::{Align, Layout, RichText};
 
 use crate::pdf::Thumbnailer;
+use crate::ui::fileview::FileViewer;
 use crate::ui::theme::{file_name, pal};
 
 /// Width of the pane, points.
@@ -19,6 +20,8 @@ pub struct PagePane {
     path: PathBuf,
     page: usize,
     renderer: Option<Thumbnailer>,
+    /// Anything not a PDF that can be read: a spreadsheet, document, mail or picture (V27).
+    viewer: Option<FileViewer>,
     /// The page drawn (index, texture) and the page asked for.
     shown: Option<(usize, egui::TextureHandle)>,
     asked: Option<usize>,
@@ -33,10 +36,12 @@ impl PagePane {
         let renderer = pdfium_dir
             .filter(|_| pdf)
             .map(|d| Thumbnailer::new(ctx, d, path.to_path_buf(), RENDER_WIDTH));
+        let viewer = (!pdf && crate::fileview::viewable(path)).then(|| FileViewer::open(ctx, path));
         Self {
             path: path.to_path_buf(),
             page: 0,
             renderer,
+            viewer,
             shown: None,
             asked: None,
             error: None,
@@ -46,6 +51,12 @@ impl PagePane {
     #[cfg(test)]
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    #[cfg(test)]
+    /// The contents of a file that is not a PDF are read (tests).
+    pub fn contents_ready(&self) -> bool {
+        self.viewer.as_ref().is_some_and(|v| v.ready())
     }
 
     #[cfg(test)]
@@ -103,6 +114,19 @@ pub fn show(ui: &mut egui::Ui, pane: &mut Option<PagePane>, pages: Option<usize>
         return;
     };
     pane.poll(ui.ctx());
+    if let Some(v) = &mut pane.viewer {
+        ui.label(RichText::new(format!("Inside {}", file_name(v.path()))).strong())
+            .on_hover_text(v.path().display().to_string());
+        ui.label(
+            RichText::new("Contents only. Double-click the file name to open it.")
+                .small()
+                .color(p.muted),
+        );
+        ui.add_space(4.0);
+        let h = ui.available_height();
+        v.show(ui, h);
+        return;
+    }
     // Worded unlike the row's own name and the Preview tab (one label each for automation).
     ui.label(RichText::new(format!("Pages of {}", file_name(&pane.path))).strong())
         .on_hover_text(pane.path.display().to_string());

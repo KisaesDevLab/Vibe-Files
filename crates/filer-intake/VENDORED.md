@@ -6,9 +6,9 @@
 |---|---|
 | Repo | `KisaesDevLab/Vibe-Filer-Desktop` (private) |
 | Branch | `master` |
-| Commit | `6417249` on `master` ("fix: QA of V23-V26 (table, image conversion, opening files)", 2026-11-09); before: `f2504fe` (V22); `29db764` (V21); `6433c04` on `master` ("feat(host): Setup lock and \"New client…\" for a program that embeds Filer", 0.2.6 + the Intake preview pane, ticked-row actions and host hooks, 2026-11-04) |
+| Commit | `e165e56` on `master` ("fix(parse): client ID in the last, then first, 14 characters; two-part IDs (V28)", 2026-11-09); before: `6417249` (V23-V26); `f2504fe` (V22); `29db764` (V21); `6433c04` on `master` ("feat(host): Setup lock and \"New client…\" for a program that embeds Filer", 0.2.6 + the Intake preview pane, ticked-row actions and host hooks, 2026-11-04) |
 | Vendored | 2026-11-02, P00 step 2 at `ea4e726` (0.2.4); re-vendored 2026-11-04, PHASES PA-26 |
-| Upstream tests | 215 at this commit (208 at `f2504fe`); all pass after the split (filer-core 64 · filer-pdf 13 · filer-intake 131) |
+| Upstream tests | 227 at this commit (215 at `6417249`); all pass after the split (filer-core 64 · filer-pdf 27 · filer-intake 136) |
 
 Upstream is one binary crate with no `lib.rs`. The three `filer-*` crates are a mechanical split
 of its `src/` (QUESTIONS Q-16). Upstream `main.rs` is not vendored; `vf-app` is the entry point.
@@ -34,7 +34,7 @@ No logic edits. Check with:
 | Upstream | Crate |
 |---|---|
 | `src/parse.rs` `config.rs` `datafile.rs` `clients.rs` `template.rs` `worker.rs` `rules.rs` `rulebuild.rs` `relationships.rs`, `assets/default_template.json` | `filer-core` |
-| `src/pdf.rs` `split.rs` `imagepdf.rs`, `assets/pdfium.dll` + licenses | `filer-pdf` |
+| `src/pdf.rs` `split.rs` `imagepdf.rs` `fileview.rs`, `assets/pdfium.dll` + licenses | `filer-pdf` |
 | `src/app.rs` `intake.rs` `sentinel.rs` `zipimport.rs` `plan.rs` `commit.rs` `undo.rs` `oplog.rs` `recovery.rs` `logging.rs` `pid.rs` `ui/*`, `assets/fonts/*`, `tests/fixtures/*`, `UI_SPEC.md` + `docs/mockups/` (reference) | `filer-intake` |
 | `src/main.rs` | not vendored |
 
@@ -86,6 +86,19 @@ the rest of intake. Moving it would need a logic edit (Q-16: merge rather than e
   `image` also a filer-intake dev-dependency for its tests), `commit.rs` too after the QA fixes;
   workspace `windows-sys` gains Win32_UI_Shell and Win32_UI_WindowsAndMessaging (ShellExecute).
   Still only the four attribute lines differ; upstream's 215 tests pass.
+
+- **2026-11-09, PA-38: `6417249` → `e165e56`: Office preview and client IDs (V27, V28).** The
+  Preview side pane shows the inside of spreadsheets, Word / PowerPoint, RTF / text, mail
+  (`.eml`, `.msg`) and pictures (new upstream modules `fileview.rs`, put in filer-pdf and
+  re-exported by filer-intake, and `ui/fileview.rs`, which Vibe's Browse preview also uses); a
+  name whose client ID is not where Name_ID_rest or the UltraTax layout expects it is searched
+  for a client's ID in its last 14 characters, then its first 14, two-part IDs first (`3280_TIAM`,
+  `3280TIAM`). `app.rs`, `plan.rs`, `ui/fileview.rs`, `ui/mod.rs`, `ui/peek.rs`,
+  `ui/preview.rs` (filer-intake), `parse.rs` (filer-core), `fileview.rs`, `imagepdf.rs`
+  (filer-pdf) copied. Workspace dependencies added: `calamine` 0.38 (dates), `cfb` 0.16,
+  `mailparse` 0.18, `quick-xml` 0.42 (filer-pdf; MIT / 0BSD), `rust_xlsxwriter` 0.102 (dev, MIT
+  OR Apache-2.0). Still only the four attribute lines differ (three UI files differ in line
+  endings only); upstream's 227 tests pass.
 
 ## Re-vendoring
 

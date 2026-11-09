@@ -65,16 +65,57 @@ fn main() -> anyhow::Result<std::process::ExitCode> {
     // 2026-11-05); taken before logging starts so the log goes to the folder used.
     let mut window_lock = None;
     if args.command.is_none() {
-        let taken = if chosen {
-            datalock::acquire(&data).map(|l| (l, data.clone()))
-        } else {
-            datalock::acquire_default(
-                &data,
-                personal.as_deref(),
-                vf_core::windows_login().as_deref(),
-                &std::env::var("COMPUTERNAME").unwrap_or_default(),
-            )
+        let login = vf_core::windows_login();
+        let computer = std::env::var("COMPUTERNAME").unwrap_or_default();
+        let take = || {
+            if chosen {
+                datalock::acquire(&data).map(|l| (l, data.clone()))
+            } else {
+                datalock::acquire_default(&data, personal.as_deref(), login.as_deref(), &computer)
+            }
         };
+        let mut taken = take();
+        // Held by this login's own copy (owner 2026-11-09, Citrix / Remote Desktop): its window
+        // in this session comes forward; a copy left in another (disconnected) session, or one
+        // with no window, can be closed so this one opens.
+        if taken.is_err()
+            && let Some(other) =
+                datalock::own_copy(&data, login.as_deref(), &computer).or_else(|| {
+                    personal
+                        .as_deref()
+                        .filter(|_| !chosen)
+                        .and_then(|p| datalock::own_copy(p, login.as_deref(), &computer))
+                })
+        {
+            if other.same_session && datalock::bring_to_front(other.pid) {
+                return Ok(std::process::ExitCode::SUCCESS);
+            }
+            let where_ = if other.same_session {
+                "in this session, but its window cannot be found (it may have stopped responding)"
+                    .to_string()
+            } else {
+                format!(
+                    "in another of your Windows sessions on this computer{}, probably one that was disconnected instead of signed out",
+                    other
+                        .session
+                        .map(|s| format!(" (session {s})"))
+                        .unwrap_or_default()
+                )
+            };
+            let answer = rfd::MessageDialog::new()
+                .set_title("Vibe Files")
+                .set_description(format!(
+                    "Vibe Files is still running under your login {where_}, since {}.\n\nClose that copy and open Vibe Files here? Work not saved in that copy is lost.",
+                    other.since
+                ))
+                .set_level(rfd::MessageLevel::Warning)
+                .set_buttons(rfd::MessageButtons::YesNo)
+                .show();
+            if answer != rfd::MessageDialogResult::Yes {
+                return Ok(std::process::ExitCode::from(7));
+            }
+            taken = datalock::close_copy(other.pid).and_then(|()| take());
+        }
         match taken {
             Ok((l, at)) => {
                 data = at;

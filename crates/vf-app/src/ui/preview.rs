@@ -14,6 +14,9 @@ use crate::ui::{theme, widgets};
 /// Page images kept (all documents together).
 const KEPT: usize = 60;
 
+/// Height of a sheet, document or picture shown for a file that is not a PDF, points.
+const VIEW_HEIGHT: f32 = 460.0;
+
 #[derive(Default)]
 pub struct Preview {
     renderer: Option<DocRenderer>,
@@ -27,6 +30,9 @@ pub struct Preview {
     cache: HashMap<(String, usize, u32), egui::TextureHandle>,
     order: VecDeque<(String, usize, u32)>,
     asked: Option<(u64, usize, u32)>,
+    /// A file that is not a PDF: what is inside it (a sheet, a document, a mail, a picture),
+    /// read by Filer's reader without Office.
+    viewer: Option<filer_intake::ui::fileview::FileViewer>,
 }
 
 /// What the pane asked for.
@@ -36,6 +42,8 @@ pub enum Act {
     Open(usize),
     /// The document stepper: `-1` / `1`.
     Step(i32),
+    /// "Open in program": the file in the program Windows has for it.
+    OpenExternal,
 }
 
 impl Preview {
@@ -54,7 +62,11 @@ impl Preview {
         self.page = 0;
         self.asked = None;
         self.doc = Some((id.to_string(), path.clone(), hash.to_string()));
+        self.viewer = None;
         if !is_pdf(rel) {
+            if filer_intake::fileview::viewable(&path) {
+                self.viewer = Some(filer_intake::ui::fileview::FileViewer::open(ctx, &path));
+            }
             return;
         }
         let r = self.renderer.get_or_insert_with(|| DocRenderer::new(ctx));
@@ -67,6 +79,7 @@ impl Preview {
     pub fn clear(&mut self) {
         self.doc = None;
         self.pages = None;
+        self.viewer = None;
     }
 
     fn pump(&mut self, ctx: &egui::Context) {
@@ -133,12 +146,30 @@ pub fn show(ui: &mut egui::Ui, p: &mut Preview, rel: &str, at: (usize, usize)) -
                 if next.clicked() {
                     act = Act::Step(1);
                 }
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if is_pdf(rel) && ui.small_button("Open in Viewer").clicked() {
-                        act = Act::Open(p.page);
-                    }
-                });
             });
+            // On a row of their own: a narrow pane keeps every button whole.
+            ui.horizontal_wrapped(|ui| {
+                if is_pdf(rel) && ui.small_button("Open in Viewer").clicked() {
+                    act = Act::Open(p.page);
+                }
+                if ui
+                    .small_button("Open in program")
+                    .on_hover_text("Open the file in the program Windows has for it")
+                    .clicked()
+                {
+                    act = Act::OpenExternal;
+                }
+            });
+            if !is_pdf(rel)
+                && let Some(v) = &mut p.viewer
+            {
+                ui.label(widgets::caption(
+                    "What is inside the file (contents only). Double-click it to open it.",
+                ));
+                ui.add_space(4.0);
+                v.show(ui, VIEW_HEIGHT);
+                return;
+            }
             if !is_pdf(rel) {
                 ui.add_space(20.0);
                 ui.vertical_centered(|ui| {

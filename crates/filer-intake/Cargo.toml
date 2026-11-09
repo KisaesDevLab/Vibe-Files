@@ -42,5 +42,6 @@ filer-pdf = { path = "../filer-pdf" }
 egui_kittest.workspace = true
 tempfile.workspace = true
 image.workspace = true
+rust_xlsxwriter.workspace = true
 filer-core = { path = "../filer-core", features = ["test-support"] }
 filer-pdf = { path = "../filer-pdf", features = ["test-support"] }

@@ -19,9 +19,12 @@ impl Drop for DataLock {
     }
 }
 
-/// Who holds `data` now, from `in-use.txt` (empty when unknown).
+/// Who holds `data` now, from `in-use.txt`'s first line (empty when unknown).
 pub fn holder(data: &Path) -> String {
     std::fs::read_to_string(data.join("in-use.txt"))
+        .unwrap_or_default()
+        .lines()
+        .next()
         .unwrap_or_default()
         .trim()
         .to_string()
@@ -50,12 +53,17 @@ fn acquire_as(data: &Path, login: Option<&str>, computer: &str) -> Result<DataLo
     {
         Ok(file) => {
             let who = data.join("in-use.txt");
+            // Second line: the process and its Windows session, so a second start can find this
+            // copy (bring its window forward, or close it when it was left in a disconnected
+            // session: Citrix, Remote Desktop, owner 2026-11-09).
             let _ = std::fs::write(
                 &who,
                 format!(
-                    "{} on {computer} since {}",
+                    "{} on {computer} since {}\nprocess {} session {}\n",
                     login.unwrap_or("someone"),
-                    crate::ui::widgets::local_time(&vf_core::now_rfc3339())
+                    crate::ui::widgets::local_time(&vf_core::now_rfc3339()),
+                    std::process::id(),
+                    session_of(std::process::id()).map_or("?".into(), |s| s.to_string()),
                 ),
             );
             Ok(DataLock { _file: file, who })
@@ -99,7 +107,7 @@ pub fn acquire_default(
             acquire_as(p, login, computer).map(|l| (l, p.to_path_buf()))
         }
         _ if mine => Err(format!(
-            "Vibe Files is already open in your session on this computer ({}). Switch to that window, or close it first.",
+            "Vibe Files is already open under your login on this computer ({}). Switch to that window, or close it first.",
             data.display()
         )),
         _ => Err(first),
@@ -142,9 +150,214 @@ pub fn default_data(exe: &Path, local_app_data: Option<PathBuf>, login: Option<&
     }
 }
 
+/// A copy of Vibe Files running under this login on this computer that holds a data folder.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OwnCopy {
+    pub pid: u32,
+    /// Its Windows session (Remote Desktop / Citrix: one per sign-in).
+    pub session: Option<u32>,
+    /// In this process's session.
+    pub same_session: bool,
+    /// Since when (`in-use.txt`'s first line).
+    pub since: String,
+}
+
+/// The copy that holds `data`, when `in-use.txt` names this login on this computer and its
+/// process is still a running Vibe Files (not a process that reused the number).
+pub fn own_copy(data: &Path, login: Option<&str>, computer: &str) -> Option<OwnCopy> {
+    let text = std::fs::read_to_string(data.join("in-use.txt")).ok()?;
+    let mut lines = text.lines();
+    let first = lines.next()?.trim().to_string();
+    let me = format!("{} on {computer} ", login?);
+    if !first.to_lowercase().starts_with(&me.to_lowercase()) {
+        return None;
+    }
+    let pid: u32 = lines
+        .next()?
+        .strip_prefix("process ")?
+        .split_whitespace()
+        .next()?
+        .parse()
+        .ok()?;
+    if pid == std::process::id() || !is_this_program(pid) {
+        return None;
+    }
+    let session = session_of(pid);
+    Some(OwnCopy {
+        pid,
+        session,
+        same_session: session.is_some() && session == session_of(std::process::id()),
+        since: first
+            .split_once(" since ")
+            .map(|(_, t)| t.to_string())
+            .unwrap_or_default(),
+    })
+}
+
+/// The Windows session a process runs in.
+pub fn session_of(pid: u32) -> Option<u32> {
+    use windows::Win32::System::RemoteDesktop::ProcessIdToSessionId;
+    let mut sid = 0u32;
+    // SAFETY: `sid` receives the session id.
+    unsafe { ProcessIdToSessionId(pid, &mut sid) }
+        .ok()
+        .map(|()| sid)
+}
+
+/// `pid` is running and is the same program file name as this one (`vibe-files.exe`).
+fn is_this_program(pid: u32) -> bool {
+    use windows::Win32::Foundation::{CloseHandle, STILL_ACTIVE};
+    use windows::Win32::System::Threading::{
+        GetExitCodeProcess, OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
+        QueryFullProcessImageNameW,
+    };
+    let Ok(me) = std::env::current_exe() else {
+        return false;
+    };
+    // SAFETY: plain Win32 calls on a handle closed below; `buf` holds `len` UTF-16 units.
+    unsafe {
+        let Ok(h) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else {
+            return false;
+        };
+        let mut code = 0u32;
+        let alive = GetExitCodeProcess(h, &mut code).is_ok() && code == STILL_ACTIVE.0 as u32;
+        let mut buf = vec![0u16; 1024];
+        let mut len = buf.len() as u32;
+        let named = QueryFullProcessImageNameW(
+            h,
+            PROCESS_NAME_WIN32,
+            windows::core::PWSTR(buf.as_mut_ptr()),
+            &mut len,
+        )
+        .is_ok();
+        let _ = CloseHandle(h);
+        if !alive || !named {
+            return false;
+        }
+        let theirs = PathBuf::from(String::from_utf16_lossy(&buf[..len as usize]));
+        theirs.file_name().map(|n| n.to_ascii_lowercase())
+            == me.file_name().map(|n| n.to_ascii_lowercase())
+    }
+}
+
+/// Brings `pid`'s main window forward (restored if minimised). False when it has no window
+/// (stuck, or in another session).
+pub fn bring_to_front(pid: u32) -> bool {
+    use windows::Win32::Foundation::{HWND, LPARAM};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        EnumWindows, GW_OWNER, GetWindow, GetWindowThreadProcessId, IsIconic, IsWindowVisible,
+        SW_RESTORE, SetForegroundWindow, ShowWindow,
+    };
+    struct Find {
+        pid: u32,
+        found: Option<HWND>,
+    }
+    unsafe extern "system" fn each(hwnd: HWND, l: LPARAM) -> windows::core::BOOL {
+        // SAFETY: `l` is the `Find` passed to EnumWindows below, alive for the call.
+        let f = unsafe { &mut *(l.0 as *mut Find) };
+        let mut owner = 0u32;
+        // SAFETY: plain Win32 calls on a window handle EnumWindows gave.
+        unsafe {
+            GetWindowThreadProcessId(hwnd, Some(&mut owner));
+            if owner == f.pid
+                && IsWindowVisible(hwnd).as_bool()
+                && GetWindow(hwnd, GW_OWNER).is_err()
+            {
+                f.found = Some(hwnd);
+                return false.into();
+            }
+        }
+        true.into()
+    }
+    let mut f = Find { pid, found: None };
+    // SAFETY: the callback only reads and writes `f`, which outlives the call.
+    let _ = unsafe { EnumWindows(Some(each), LPARAM(&mut f as *mut Find as isize)) };
+    let Some(hwnd) = f.found else {
+        return false;
+    };
+    // SAFETY: plain Win32 calls on a live window handle.
+    unsafe {
+        if IsIconic(hwnd).as_bool() {
+            let _ = ShowWindow(hwnd, SW_RESTORE);
+        }
+        let _ = SetForegroundWindow(hwnd);
+    }
+    true
+}
+
+/// Ends `pid` (the person's own leftover copy) and waits up to 15 s for it to go.
+pub fn close_copy(pid: u32) -> Result<(), String> {
+    use windows::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0};
+    use windows::Win32::System::Threading::{
+        OpenProcess, PROCESS_SYNCHRONIZE, PROCESS_TERMINATE, TerminateProcess, WaitForSingleObject,
+    };
+    // SAFETY: plain Win32 calls on a handle closed below.
+    unsafe {
+        let h = OpenProcess(PROCESS_TERMINATE | PROCESS_SYNCHRONIZE, false, pid)
+            .map_err(|e| format!("cannot reach the other copy: {e}"))?;
+        let r = TerminateProcess(h, 1).map_err(|e| format!("cannot close the other copy: {e}"));
+        let gone = WaitForSingleObject(h, 15_000) == WAIT_OBJECT_0;
+        let _ = CloseHandle(h);
+        r?;
+        if !gone {
+            return Err("the other copy did not close in time".into());
+        }
+    }
+    tracing::warn!(pid, "closed this login's other copy of Vibe Files");
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Owner 2026-11-09 (Citrix): the copy holding the folder is found by its process and
+    /// session; another login's or another computer's copy, or a process that is gone, is not.
+    #[test]
+    fn the_copy_holding_the_folder_is_found_by_process_and_session() {
+        let t = tempfile::tempdir().unwrap();
+        let data = t.path().join("data");
+        let lock = acquire_as(&data, Some(r"XC\kim"), "SERVER-1").unwrap();
+        assert!(holder(&data).starts_with(r"XC\kim on SERVER-1 since "));
+        // This process holds it: not "another copy".
+        assert_eq!(own_copy(&data, Some(r"XC\kim"), "SERVER-1"), None);
+        // As if another copy of this program held it: a child running this test exe, kept
+        // alive by its stdin until the checks are done.
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "datalock::tests::wait_for_stdin", "--nocapture"])
+            .env("VF_WAIT_FOR_STDIN", "1")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        let first = holder(&data);
+        std::fs::write(
+            data.join("in-use.txt"),
+            format!("{first}\nprocess {pid} session 0\n"),
+        )
+        .unwrap();
+        let c = own_copy(&data, Some(r"xc\KIM"), "SERVER-1").expect("found");
+        assert_eq!(c.pid, pid);
+        assert!(c.same_session);
+        assert!(!c.since.is_empty());
+        assert_eq!(own_copy(&data, Some(r"XC\pat"), "SERVER-1"), None);
+        assert_eq!(own_copy(&data, Some(r"XC\kim"), "SERVER-2"), None);
+        close_copy(pid).unwrap();
+        let _ = child.wait();
+        assert_eq!(own_copy(&data, Some(r"XC\kim"), "SERVER-1"), None, "gone");
+        drop(lock);
+    }
+
+    /// Helper for the test above: in the child, waits until its stdin closes.
+    #[test]
+    fn wait_for_stdin() {
+        if std::env::var_os("VF_WAIT_FOR_STDIN").is_some() {
+            use std::io::Read;
+            let _ = std::io::stdin().read_to_end(&mut Vec::new());
+        }
+    }
 
     #[test]
     fn data_folder_per_login_and_one_copy_at_a_time() {
@@ -200,7 +413,7 @@ mod tests {
         let e = acquire_default(&shared, Some(&kim), Some(r"xc\KIM"), "SERVER-1")
             .err()
             .unwrap();
-        assert!(e.contains("already open in your session"), "{e}");
+        assert!(e.contains("already open under your login"), "{e}");
         drop((k, p, k2));
     }
 }

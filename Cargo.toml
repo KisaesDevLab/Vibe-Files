@@ -55,6 +55,11 @@ pdf-writer = "0.14.0"
 rxing = { version = "0.9.3", default-features = false, features = ["encoders", "decoders", "qrcode", "oned", "encoding_rs"] }
 image = { version = "0.25.10", default-features = false, features = ["jpeg", "png", "tiff", "bmp", "gif"] }
 tiff = "0.11.3"
+calamine = { version = "0.38.0", features = ["dates"] }
+cfb = "0.16.0"
+mailparse = "0.18.0"
+quick-xml = "0.42.0"
+rust_xlsxwriter = { version = "0.102.0", default-features = false }
 windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_Registry", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging", "Win32_Graphics_Gdi", "Win32_UI_Controls_Dialogs", "Win32_Storage_Xps", "Win32_System_Memory", "Win32_System_LibraryLoader", "Win32_System_ProcessStatus", "Win32_System_Console", "Win32_Security_Cryptography", "Win32_System_Threading", "Win32_System_RemoteDesktop", "Win32_Graphics_Imaging", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_Variant", "Devices_Enumeration", "Devices_Scanners", "Storage", "Storage_Search", "Storage_Streams", "Foundation_Collections"] }
 
 # Argon2id is unusably slow unoptimized; tests and debug builds unwrap keys.

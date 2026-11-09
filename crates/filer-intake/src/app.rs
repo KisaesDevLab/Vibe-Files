@@ -3254,6 +3254,96 @@ mod combine_ui_tests {
         assert!(h.query_all_by_label_contains("office.zip").next().is_some());
     }
 
+    /// The side pane shows what is inside a spreadsheet, a Word file or a mail (V27).
+    #[test]
+    fn side_pane_shows_inside_office_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data = tmp.path().join("data");
+        let root = tmp.path().join("root");
+        let inbox = tmp.path().join("inbox");
+        for d in [&data, &root, &inbox] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let csv = tmp.path().join("clients.csv");
+        std::fs::write(
+            &csv,
+            "id,name
+1001,\"Smith, John\"
+",
+        )
+        .unwrap();
+        let book = "Smith, John_1001_2025 Trial balance.xlsx";
+        let mut wb = rust_xlsxwriter::Workbook::new();
+        let s = wb.add_worksheet().set_name("TB").unwrap();
+        s.write(0, 0, "Petty cash").unwrap();
+        s.write(0, 1, 1234.5).unwrap();
+        wb.add_worksheet()
+            .set_name("Adjustments")
+            .unwrap()
+            .write(0, 0, "AJE 1")
+            .unwrap();
+        wb.save(inbox.join(book)).unwrap();
+        let mail = "Smith, John_1001_2025 Question.eml";
+        std::fs::write(
+            inbox.join(mail),
+            "From: john@example.com
+Subject: Mileage log
+
+My miles for 2025.
+",
+        )
+        .unwrap();
+        let settings = Settings {
+            root: Some(root.clone()),
+            inboxes: vec![inbox.clone()],
+            csv_path: Some(csv),
+            column_map: ColumnMap {
+                id: Some("id".into()),
+                name: Some("name".into()),
+                extras: vec![],
+            },
+            ..Settings::default()
+        };
+        let d = data.clone();
+        let mut h = HarnessBuilder::default()
+            .with_theme(egui::Theme::Light)
+            .with_size([1800.0, 1200.0])
+            .build_eframe(move |cc| {
+                crate::rules::seed_tax(&d);
+                FilerApp::new(&cc.egui_ctx, AppState::load(d, settings, true, None))
+            });
+        settle(&mut h, "queue", |a| {
+            a.shared.intake.queue().len() == 2 && a.shared.clients.list().is_some()
+        });
+        h.get_by_label("Preview").click();
+        settle(&mut h, "plan", |a| plan_ready(a, 2));
+        h.step();
+        h.get_by_label("Preview pane").click();
+        h.step();
+        h.get_by_label(book).click();
+        h.step();
+        settle(&mut h, "workbook read", |a| a.preview.pane_contents_ready());
+        h.step();
+        h.step();
+        assert!(h.query_by_label(&format!("Inside {book}")).is_some());
+        assert!(h.query_by_label("Petty cash").is_some());
+        assert!(h.query_by_label("1234.5").is_some());
+        // A tab per sheet.
+        h.get_by_label("Adjustments").click();
+        h.step();
+        h.step();
+        assert!(h.query_by_label("AJE 1").is_some());
+        assert!(h.query_by_label("Petty cash").is_none());
+
+        h.get_by_label(mail).click();
+        h.step();
+        settle(&mut h, "mail read", |a| a.preview.pane_contents_ready());
+        h.step();
+        h.step();
+        assert!(h.query_by_label("Mileage log").is_some());
+        assert!(h.query_by_label("My miles for 2025.").is_some());
+    }
+
     /// The side pane shows the row last clicked; ticked rows get one client and one rule at once
     /// (owner 2026-11-04).
     #[test]

@@ -54,7 +54,11 @@ The pages went to the printer, but the audit row could not be written, often bec
 
 ## Starting Vibe Files
 
-### "Vibe Files is already open in your session on this computer"
+### "Vibe Files is still running under your login"
+
+Starting Vibe Files a second time brings the window already open in your session to the front. When the other copy is in another of your sessions on the server (with Citrix or Remote Desktop, a session that was disconnected instead of signed out keeps its programs running) or has stopped responding, Vibe Files asks **Close that copy and open Vibe Files here?** Yes closes it and opens Vibe Files; anything not saved in that copy is lost. To avoid it, sign out of the server (Start › your name › Sign out) instead of just closing the remote window.
+
+### "Vibe Files is already open under your login on this computer"
 
 Vibe Files is already running for your Windows login on this computer, in another window. Switch to that window (check the taskbar), or close it first.
 

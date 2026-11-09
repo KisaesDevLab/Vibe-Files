@@ -409,6 +409,12 @@ impl PreviewScreen {
             .map(|p| (p.path(), p.page(), p.has_image()))
     }
 
+    /// The side pane has read a file that is not a PDF (tests).
+    #[cfg(test)]
+    pub fn pane_contents_ready(&self) -> bool {
+        self.pane.as_ref().is_some_and(|p| p.contents_ready())
+    }
+
     #[cfg(test)]
     pub fn picker_open(&self) -> bool {
         self.picker.is_some()

@@ -3142,7 +3142,7 @@ fn grid(ui: &mut egui::Ui, b: &mut Browse, conn: &Connection) {
                 resp.context_menu(|ui| {
                     for (label, act) in [
                         ("Open", FileAct::Open),
-                        ("Open in PDF app", FileAct::OpenExternal),
+                        ("Open in Windows program", FileAct::OpenExternal),
                         ("Open in Explorer", FileAct::Reveal),
                         ("Copy path", FileAct::CopyPath),
                     ] {
@@ -3267,6 +3267,9 @@ fn inspector(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env) {
                     page,
                     vec![],
                 ));
+            }
+            crate::ui::preview::Act::OpenExternal => {
+                b.file_request = Some((di, FileAct::OpenExternal));
             }
             crate::ui::preview::Act::Step(by) => {
                 let to = (pos as i64 + i64::from(by)).clamp(0, b.visible.len() as i64 - 1);
@@ -4204,6 +4207,58 @@ mod tests {
             .take()
             .expect("open in the Viewer");
         assert!(req.path.ends_with("doc 001.pdf"));
+    }
+
+    /// A file that is not a PDF shows what is inside it (a CSV as a grid); "Open in program"
+    /// hands it to Windows (owner 2026-11-09).
+    #[test]
+    fn preview_pane_shows_inside_a_spreadsheet() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+        let mut h = harness(1, 1);
+        let ctx = h.ctx.clone();
+        let calls: Rc<RefCell<Vec<ShellAction>>> = Rc::default();
+        {
+            let rec = calls.clone();
+            let s = h.state_mut();
+            s.b.shell = Box::new(move |a| {
+                rec.borrow_mut().push(a.clone());
+                Ok(())
+            });
+            let d = &mut s.b.snap.docs[0];
+            d.rel_path = d.rel_path.replace(".pdf", ".csv");
+            let p = s.root.join(&d.rel_path);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(
+                &p,
+                "Account,Amount
+Petty cash,1234.50
+",
+            )
+            .unwrap();
+            s.b.egui_ctx = Some(ctx);
+        }
+        h.run_steps(2);
+        h.get_by_label("doc 000.csv").click();
+        h.run_steps(3);
+        let start = std::time::Instant::now();
+        while h.query_by_label("Petty cash").is_none() {
+            assert!(
+                start.elapsed() < std::time::Duration::from_secs(20),
+                "never read"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            h.step();
+        }
+        assert!(h.query_by_label("1234.50").is_some());
+        assert!(h.query_by_label("Open in Viewer").is_none(), "PDFs only");
+        h.get_by_role_and_label(Role::Button, "Open in program")
+            .click();
+        h.run_steps(2);
+        let ShellAction::Open(opened) = calls.borrow()[0].clone() else {
+            panic!("opened the file");
+        };
+        assert!(opened.ends_with("doc 000.csv"), "{}", opened.display());
     }
 
     /// The grid has a Client column (owner 2026-11-04: Views mix clients), and sorts by it.

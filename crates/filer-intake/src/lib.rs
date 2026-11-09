@@ -28,4 +28,4 @@ pub mod zipimport;
 pub use filer_core::{
     clients, config, datafile, parse, relationships, rulebuild, rules, template, worker,
 };
-pub use filer_pdf::{imagepdf, pdf, split};
+pub use filer_pdf::{fileview, imagepdf, pdf, split};

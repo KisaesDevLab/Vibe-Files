@@ -1720,11 +1720,13 @@ mod tests {
         assert_eq!(r.parsed.id.as_deref(), Some("1234"));
         assert_eq!(r.rule_name, "Tax Returns");
 
-        // Layout off: the UltraTax return is read as Name_ID_rest (ID 2025, no such client).
+        // Layout off: not read as UltraTax, but the part that is a client's ID is the ID, not
+        // the year in front of it (owner 2026-11-09).
         inp.ultratax.enabled = false;
         let out = build_plan(&inp);
         assert!(row(&out, ret).parsed.ultratax.is_none());
-        assert_eq!(row(&out, ret).parsed.id.as_deref(), Some("2025"));
+        assert_eq!(row(&out, ret).parsed.id.as_deref(), Some("4472"));
+        assert_eq!(row(&out, ret).client_match, ClientMatch::Exact);
     }
 
     #[test]

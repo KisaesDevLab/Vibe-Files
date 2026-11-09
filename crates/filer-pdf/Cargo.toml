@@ -37,9 +37,14 @@ windows-sys.workspace = true
 zip.workspace = true
 image.workspace = true
 tiff.workspace = true
+calamine.workspace = true
+cfb.workspace = true
+mailparse.workspace = true
+quick-xml.workspace = true
 filer-core = { path = "../filer-core" }
 
 [dev-dependencies]
 egui_kittest.workspace = true
 tempfile.workspace = true
+rust_xlsxwriter.workspace = true
 filer-core = { path = "../filer-core", features = ["test-support"] }

@@ -39,7 +39,7 @@ The columns are **Name**, **Client**, **Doc type**, **Year**, **Status**, **Size
 - **Refresh** re-reads the catalog.
 - Click the box at the start of a row, or use Ctrl and Shift with the mouse, to select several documents. See [Keyboard shortcuts](help:shortcuts).
 
-Double-click a document, or press Enter, to open it: PDFs open in the [Viewer](help:viewer), other files in their own program. Right-click for **Open in PDF app**, **Open in Explorer**, **Copy path** and **Go to client's folder**, which opens the document's client in the tree on the left.
+Double-click a document, or press Enter, to open it: PDFs open in the [Viewer](help:viewer), other files in their own program. Right-click for **Open in Windows program**, **Open in Explorer**, **Copy path** and **Go to client's folder**, which opens the document's client in the tree on the left.
 
 **Pin** lists the selected documents under **Pinned** on this PC; **Unpin** takes them off.
 
@@ -56,7 +56,9 @@ A file deleted or moved with Windows Explorer leaves Browse, or shows in its new
 
 ## The preview
 
-When one document is selected, the right pane shows its first page. **Previous** and **Next** step through the documents in the grid (as do the arrow keys), and **<** and **>** turn its pages. **Open in Viewer** opens the full Viewer at the page shown. Files that are not PDFs open in their own program.
+When one document is selected, the right pane shows its first page. **Previous** and **Next** step through the documents in the grid (as do the arrow keys), and **<** and **>** turn its pages. **Open in Viewer** opens the full Viewer at the page shown; **Open in program** opens the file in the program Windows has for it.
+
+For a file that is not a PDF the pane shows what is inside it, read without Office: an Excel workbook, CSV or `.iif` file as a grid with a tab per sheet (the first 2,000 rows and 60 columns), a Word or PowerPoint file, RTF or text file as its text, a mail (`.eml`, Outlook `.msg`) with From, To, Date, Subject and the names of its attachments above its text, and a picture. It shows contents only, not the page layout, fonts or pictures inside a document. Older `.doc` and `.ppt` files and files over 40 MB are not shown: open them in their program.
 
 Below the preview are the document's details. See [Document details](help:documents).
 

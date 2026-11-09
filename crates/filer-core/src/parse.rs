@@ -350,18 +350,113 @@ pub fn read_name(
             ultratax: Some(u),
         }
     };
-    match ut {
-        Some(u) if is_client_id(&u.client_id) => from_ut(u),
+    let read = match ut {
+        Some(u) if is_client_id(&u.client_id) => return from_ut(u),
         Some(u) => {
             let s = standard();
             if s.id.as_deref().is_some_and(&is_client_id) {
-                s
-            } else {
-                from_ut(u)
+                return s;
             }
+            from_ut(u)
         }
         None => standard(),
+    };
+    if read.id.as_deref().is_some_and(&is_client_id) {
+        return read;
     }
+    // Neither reading names a client (a year or a form number in front of the ID,
+    // "Name_2025_1040_Tax_Return_3280_TIAM"): a client's ID in the last 14 characters of the
+    // name, nearest the end first, then in the first 14 (owner 2026-11-09).
+    let Some((start, end, id)) = id_near_ends(stem, &is_client_id) else {
+        return read;
+    };
+    // The name is the first `_` part (else what is before the ID); the rest is everything else.
+    let name_end = stem.find('_').filter(|&i| i < start).unwrap_or(start);
+    let sep = |c: char| c == '_' || c == '-' || c.is_whitespace();
+    let rest = format!("{}_{}", &stem[name_end..start], &stem[end..])
+        .split('_')
+        .map(|p| p.trim_matches(sep))
+        .filter(|p| !p.is_empty())
+        .collect::<Vec<_>>()
+        .join("_");
+    let name = stem[..name_end].trim_matches(sep).to_string();
+    Parsed {
+        name: if name.is_empty() {
+            stem.to_string()
+        } else {
+            name
+        },
+        id: Some(id),
+        year: detect_year(&rest, current_year).or_else(|| detect_year(stem, current_year)),
+        rest,
+        ext: ext.to_string(),
+        stem: stem.to_string(),
+        ultratax: None,
+    }
+}
+
+/// Characters at each end of a name searched for a client ID ([`read_name`]).
+const ID_SEARCH_CHARS: usize = 14;
+
+/// A client's ID near an end of `stem`: its byte span and the ID as `is_client_id` accepted it.
+/// Words are runs of letters and digits. Looked for in the words ending in the last
+/// [`ID_SEARCH_CHARS`] characters (from the end), then the words starting in the first
+/// [`ID_SEARCH_CHARS`] (from the start). At each word, a two-part ID first (owner 2026-11-09:
+/// `@@@@_@@@@` or `@@@@@@@@`): the word with its neighbour as written ("3280_TIAM") and run
+/// together ("3280TIAM"), then the word alone.
+fn id_near_ends(stem: &str, is_client_id: impl Fn(&str) -> bool) -> Option<(usize, usize, String)> {
+    let mut words: Vec<(usize, usize)> = Vec::new();
+    let mut open: Option<usize> = None;
+    for (i, c) in stem.char_indices() {
+        match (c.is_alphanumeric(), open) {
+            (true, None) => open = Some(i),
+            (false, Some(s)) => {
+                words.push((s, i));
+                open = None;
+            }
+            _ => {}
+        }
+    }
+    if let Some(s) = open {
+        words.push((s, stem.len()));
+    }
+    let chars = stem.chars().count();
+    // Byte offset of the n-th character.
+    let byte_at = |n: usize| stem.char_indices().nth(n).map_or(stem.len(), |(i, _)| i);
+    let tail = byte_at(chars.saturating_sub(ID_SEARCH_CHARS));
+    let head = byte_at(ID_SEARCH_CHARS);
+    // The pair (a, b) as written and run together, then `single` alone.
+    let try_at = |pair: Option<((usize, usize), (usize, usize))>, single: (usize, usize)| {
+        if let Some(((s, first_end), (bs, e))) = pair {
+            let (first, second) = (&stem[s..first_end], &stem[bs..e]);
+            for id in [stem[s..e].to_string(), format!("{first}{second}")] {
+                if is_client_id(&id) {
+                    return Some((s, e, id));
+                }
+            }
+        }
+        let id = &stem[single.0..single.1];
+        is_client_id(id).then(|| (single.0, single.1, id.to_string()))
+    };
+    for i in (0..words.len()).rev() {
+        if words[i].1 <= tail {
+            break;
+        }
+        let pair = (i > 0).then(|| (words[i - 1], words[i]));
+        if let Some(hit) = try_at(pair, words[i]) {
+            return Some(hit);
+        }
+    }
+    for i in 0..words.len() {
+        if words[i].0 >= head {
+            break;
+        }
+        let pair = words.get(i + 1).map(|&next| (words[i], next));
+        if let Some(hit) = try_at(pair, words[i]) {
+            return Some(hit);
+        }
+    }
+    None
 }
 
 /// A filename split into its parts.
@@ -596,6 +691,55 @@ mod tests {
         let p = read("Smith, John_1001_2025 1040.pdf", &[]);
         assert!(p.ultratax.is_none());
         assert_eq!(p.id.as_deref(), Some("1001"));
+        // A year and a form before the ID, the layout off (as in Vibe Files): the part that is
+        // a client's ID, not the year (owner 2026-11-09).
+        let off = UltraTaxLayout {
+            enabled: false,
+            ..UltraTaxLayout::default()
+        };
+        let name = "Tiam, Hrang & Tial Cin_2025_1040_Tax_Return_3280_TIAM.pdf";
+        let p = read_name(name, Some(&re), &off, 2026, |id| id == "3280", |_| false);
+        assert_eq!(p.id.as_deref(), Some("3280"));
+        assert_eq!(p.name, "Tiam, Hrang & Tial Cin");
+        assert_eq!(p.rest, "2025_1040_Tax_Return_TIAM");
+        assert_eq!(p.year, Some(2025));
+        let p = read_name(name, Some(&re), &off, 2026, |id| id == "TIAM", |_| false);
+        assert_eq!(p.id.as_deref(), Some("TIAM"));
+        // A two-part ID, as written or run together, before either part alone.
+        let both = |id: &str| ["3280_TIAM", "3280", "TIAM"].contains(&id);
+        let p = read_name(name, Some(&re), &off, 2026, both, |_| false);
+        assert_eq!(p.id.as_deref(), Some("3280_TIAM"));
+        assert_eq!(p.rest, "2025_1040_Tax_Return");
+        let p = read_name(
+            name,
+            Some(&re),
+            &off,
+            2026,
+            |id| id == "3280TIAM",
+            |_| false,
+        );
+        assert_eq!(p.id.as_deref(), Some("3280TIAM"));
+        // Spaces instead of underscores; the ID at the front.
+        let ti = |id: &str| id == "TIAM";
+        let p = read_name(
+            "Tax Return 2025 1040 TIAM.pdf",
+            Some(&re),
+            &off,
+            2026,
+            ti,
+            |_| false,
+        );
+        assert_eq!(p.id.as_deref(), Some("TIAM"));
+        let long = "TIAM 2025 1040 Tax Return and a long description.pdf";
+        let p = read_name(long, Some(&re), &off, 2026, ti, |_| false);
+        assert_eq!(p.id.as_deref(), Some("TIAM"));
+        // An ID in the middle of a long name is not looked for.
+        let mid = "Some Long Client Name 3280 then a long document name.pdf";
+        let p = read_name(mid, Some(&re), &off, 2026, |id| id == "3280", |_| false);
+        assert_eq!(p.id, None);
+        // No part is a client: as before.
+        let p = read_name(name, Some(&re), &off, 2026, |_| false, |_| false);
+        assert_eq!(p.id.as_deref(), Some("2025"));
     }
 
     #[test]

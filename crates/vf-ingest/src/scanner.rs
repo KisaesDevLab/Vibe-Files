@@ -313,7 +313,7 @@ fn session_details() -> Vec<String> {
             "Computer {} | login {} | session {} | {}",
             env("COMPUTERNAME"),
             env("USERNAME"),
-            env("SESSIONNAME"),
+            session_label(),
             if remote {
                 "Remote Desktop session"
             } else {
@@ -321,6 +321,25 @@ fn session_details() -> Vec<String> {
             }
         ),
     ]
+}
+
+/// This process's Windows session: its number, and its name when Windows gives one
+/// (`SESSIONNAME`, e.g. `RDP-Tcp#3`; Citrix published programs often have none).
+fn session_label() -> String {
+    use windows::Win32::System::RemoteDesktop::ProcessIdToSessionId;
+    use windows::Win32::System::Threading::GetCurrentProcessId;
+    let mut sid = 0u32;
+    // SAFETY: plain Win32 calls; `sid` receives the session id.
+    let number = unsafe { ProcessIdToSessionId(GetCurrentProcessId(), &mut sid) }
+        .ok()
+        .map(|()| sid.to_string());
+    let name = std::env::var("SESSIONNAME").ok().filter(|n| !n.is_empty());
+    match (number, name) {
+        (Some(n), Some(name)) => format!("{n} ({name})"),
+        (Some(n), None) => n,
+        (None, Some(name)) => name,
+        (None, None) => "?".into(),
+    }
 }
 
 /// Words that name scanning software in folder and registry key names.

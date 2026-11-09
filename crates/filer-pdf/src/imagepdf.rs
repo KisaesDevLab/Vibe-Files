@@ -150,7 +150,7 @@ fn read_pictures(src: &Path) -> Result<Vec<Picture>, String> {
 }
 
 /// The image turned upright by its EXIF orientation.
-fn decode_upright(src: &Path) -> Result<DynamicImage, String> {
+pub(crate) fn decode_upright(src: &Path) -> Result<DynamicImage, String> {
     let bad = |e: image::ImageError| format!("cannot read {}: {e}", src.display());
     let mut decoder = ImageReader::open(src)
         .map_err(|e| format!("cannot open {}: {e}", src.display()))?

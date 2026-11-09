@@ -1,6 +1,7 @@
 pub mod chrome;
 pub mod conflicts;
 pub mod csv_wizard;
+pub mod fileview;
 pub mod history;
 pub mod import;
 pub mod peek;
