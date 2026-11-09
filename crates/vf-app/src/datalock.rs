@@ -67,8 +67,9 @@ fn acquire_as(
             // owner 2026-11-09). A file that cannot be written is removed: a stale one could
             // name another process (QA).
             let pid = std::process::id();
+            let tmp = data.join("in-use.txt.new");
             let written = std::fs::write(
-                &who,
+                &tmp,
                 format!(
                     "{} on {computer} since {}\nprocess {pid} session {} started {} {}\n",
                     login.unwrap_or("someone"),
@@ -78,7 +79,9 @@ fn acquire_as(
                     if window { "window" } else { "command" },
                 ),
             );
+            let written = written.and_then(|()| std::fs::rename(&tmp, &who));
             if written.is_err() {
+                let _ = std::fs::remove_file(&tmp);
                 let _ = std::fs::remove_file(&who);
             }
             Ok(DataLock { _file: file, who })
@@ -177,6 +180,8 @@ pub struct OwnCopy {
     pub since: String,
     /// The program's window (else a command, which is never offered for closing).
     pub window: bool,
+    /// When its process started: [`close_copy`] checks it is still that process.
+    pub started: u64,
 }
 
 /// The copy that holds `data`, when `in-use.txt` names this login on this computer and its
@@ -215,6 +220,7 @@ pub fn own_copy(data: &Path, login: Option<&str>, computer: &str) -> Option<OwnC
             .map(|(_, t)| t.to_string())
             .unwrap_or_default(),
         window: role == "window",
+        started: start,
     })
 }
 
@@ -343,16 +349,42 @@ pub fn bring_to_front(pid: u32) -> bool {
     true
 }
 
-/// Ends `pid` (the person's own leftover copy) and waits up to 15 s for it to go.
-pub fn close_copy(pid: u32) -> Result<(), String> {
-    use windows::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0};
+/// Ends `copy` (the person's own leftover copy) and waits up to 15 s for it to go. A copy
+/// that has already ended is fine; a process that only has its number now is left alone (QA:
+/// the dialog may have stayed open a long time).
+pub fn close_copy(copy: &OwnCopy) -> Result<(), String> {
+    use windows::Win32::Foundation::{CloseHandle, FILETIME, WAIT_OBJECT_0};
     use windows::Win32::System::Threading::{
-        OpenProcess, PROCESS_SYNCHRONIZE, PROCESS_TERMINATE, TerminateProcess, WaitForSingleObject,
+        GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
+        PROCESS_TERMINATE, TerminateProcess, WaitForSingleObject,
     };
+    let pid = copy.pid;
     // SAFETY: plain Win32 calls on a handle closed below.
     unsafe {
-        let h = OpenProcess(PROCESS_TERMINATE | PROCESS_SYNCHRONIZE, false, pid)
-            .map_err(|e| format!("cannot reach the other copy: {e}"))?;
+        let Ok(h) = OpenProcess(
+            PROCESS_TERMINATE | PROCESS_SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION,
+            false,
+            pid,
+        ) else {
+            // Gone already.
+            return Ok(());
+        };
+        let (mut c, mut e, mut k, mut u) = (
+            FILETIME::default(),
+            FILETIME::default(),
+            FILETIME::default(),
+            FILETIME::default(),
+        );
+        let same = GetProcessTimes(h, &mut c, &mut e, &mut k, &mut u).is_ok()
+            && ((u64::from(c.dwHighDateTime) << 32) | u64::from(c.dwLowDateTime)) == copy.started;
+        // Another process with its number now, or it has ended: nothing to close.
+        let mut code = 0u32;
+        let running = windows::Win32::System::Threading::GetExitCodeProcess(h, &mut code).is_ok()
+            && code == windows::Win32::Foundation::STILL_ACTIVE.0 as u32;
+        if !same || !running {
+            let _ = CloseHandle(h);
+            return Ok(());
+        }
         if let Err(e) = TerminateProcess(h, 1) {
             let _ = CloseHandle(h);
             return Err(format!("cannot close the other copy: {e}"));
@@ -411,9 +443,11 @@ mod tests {
         write(format!("process {pid} session 0 started {at} window"));
         assert_eq!(own_copy(&data, Some(r"XC\pat"), "SERVER-1"), None);
         assert_eq!(own_copy(&data, Some(r"XC\kim"), "SERVER-2"), None);
-        close_copy(pid).unwrap();
+        close_copy(&c).unwrap();
         let _ = child.wait();
         assert_eq!(own_copy(&data, Some(r"XC\kim"), "SERVER-1"), None, "gone");
+        // Closing a copy that has already gone is fine.
+        close_copy(&c).unwrap();
         // The lock not held (only a leftover in-use.txt): nothing to find.
         drop(lock);
         assert_eq!(own_copy(&data, Some(r"XC\kim"), "SERVER-1"), None, "free");

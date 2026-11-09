@@ -364,6 +364,11 @@ impl IngestState {
 
     /// Lists the scanners on a thread (TWAIN and WIA enumeration can take a moment).
     fn list_devices(&mut self, ctx: &egui::Context) {
+        // Never a second listing, nor one during a scan (the 32-bit helper would reach the
+        // scanner the scan is using, QA).
+        if self.devices_job.is_some() || self.scanning() {
+            return;
+        }
         let (tx, rx) = std::sync::mpsc::channel();
         let ctx = ctx.clone();
         std::thread::spawn(move || {

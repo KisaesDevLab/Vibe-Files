@@ -111,6 +111,9 @@ pub struct Scanned {
     pub cancelled: bool,
 }
 
+/// Largest page taken, bytes (a 600 dpi colour page of 17 × 44 inches is about 800 MB).
+const MAX_PAGE_BYTES: usize = 900 * 1024 * 1024;
+
 /// One scan at a time per process (the callback below is process-wide).
 static SCAN: Mutex<()> = Mutex::new(());
 /// The last message a TWAIN 2 source sent through the callback.
@@ -389,7 +392,15 @@ impl Ds<'_> {
         }
         let width = info.image_width.max(0) as u32;
         let known_height = (info.image_length > 0).then_some(info.image_length as u32);
+        // Sizes from the driver are checked, not trusted (QA: on 32-bit they could wrap).
+        if width > 100_000 || known_height.is_some_and(|h| h > 100_000) {
+            return Err(TWCC_BADVALUE);
+        }
         let row = pixel.row_bytes(width);
+        let page_bytes = row
+            .checked_mul(known_height.unwrap_or(0) as usize)
+            .filter(|&n| n <= MAX_PAGE_BYTES)
+            .ok_or(TWCC_LOWMEMORY)?;
         let mut setup = SetupMemXfer::default();
         if self.call(
             DG_CONTROL,
@@ -406,7 +417,7 @@ impl Ds<'_> {
         }
         .min(setup.max_buf_size.max(setup.min_buf_size).max(64 * 1024));
         let mut buf = vec![0u8; size as usize];
-        let mut data = vec![0u8; row * known_height.unwrap_or(0) as usize];
+        let mut data = vec![0u8; page_bytes];
         let mut rows_seen = 0u32;
         loop {
             let mut x = ImageMemXfer {
@@ -447,7 +458,10 @@ impl Ds<'_> {
                     if !fits {
                         return Err(TWCC_BADVALUE);
                     }
-                    let need = (y0 + rows) * row;
+                    let need = (y0 + rows)
+                        .checked_mul(row)
+                        .filter(|&n| n <= MAX_PAGE_BYTES)
+                        .ok_or(TWCC_LOWMEMORY)?;
                     if data.len() < need {
                         data.resize(need, 0);
                     }
@@ -506,13 +520,23 @@ impl Ds<'_> {
         0
     }
 
-    fn transfer_all(&mut self, out: &mut Scanned) {
+    /// Takes every page, handing each to `sink` as it ends (the 32-bit helper writes it to
+    /// disk at once, so a long batch never sits in memory whole).
+    fn transfer_all(
+        &mut self,
+        out: &mut Scanned,
+        sink: &mut dyn FnMut(Page) -> Result<(), String>,
+    ) {
         loop {
-            match self.transfer_page() {
-                Ok(Some(p)) => out.pages.push(p),
-                Ok(None) => {}
-                Err(cc) => {
-                    out.stopped = Some(condition(cc));
+            let failed = match self.transfer_page() {
+                Ok(Some(p)) => sink(p).err(),
+                Ok(None) => None,
+                Err(cc) => Some(condition(cc)),
+            };
+            match failed {
+                None => {}
+                Some(why) => {
+                    out.stopped = Some(why);
                     // Finish the page's transfer, then drop the rest.
                     let mut p = PendingXfers::default();
                     self.call(
@@ -565,6 +589,22 @@ impl Ds<'_> {
 impl Manager {
     /// Scans one batch from the source named `source` (state 3 → 4 … → 3).
     pub fn scan(&mut self, source: &str, s: &Settings) -> Result<Scanned, String> {
+        let mut pages = Vec::new();
+        let mut out = self.scan_each(source, s, &mut |p| {
+            pages.push(p);
+            Ok(())
+        })?;
+        out.pages = pages;
+        Ok(out)
+    }
+
+    /// [`Self::scan`], each page handed to `sink` as it ends instead of kept in the result.
+    pub fn scan_each(
+        &mut self,
+        source: &str,
+        s: &Settings,
+        sink: &mut dyn FnMut(Page) -> Result<(), String>,
+    ) -> Result<Scanned, String> {
         let _one = SCAN.lock().unwrap_or_else(|e| e.into_inner());
         let found = self
             .sources()?
@@ -616,7 +656,7 @@ impl Manager {
             match ds.wait() {
                 MSG_XFERREADY => {
                     ds.state = State::Ready;
-                    ds.transfer_all(&mut out);
+                    ds.transfer_all(&mut out, sink);
                 }
                 _ => out.cancelled = true,
             }

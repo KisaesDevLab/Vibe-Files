@@ -268,20 +268,6 @@ pub fn devices() -> Devices {
                 reply.sources.len()
             ));
             details.extend(reply.details.iter().map(|l| format!("  {l}")));
-            for s in &reply.sources {
-                // A scanner the 64-bit manager lists too is used that way.
-                if d.list
-                    .iter()
-                    .any(|x| x.kind == Kind::Twain && x.id == format!("{TWAIN_PREFIX}{}", s.name))
-                {
-                    continue;
-                }
-                d.list.push(Device {
-                    id: format!("{TWAIN32_PREFIX}{}", s.name),
-                    name: format!("{} (TWAIN, 32-bit)", s.name),
-                    kind: Kind::Twain,
-                });
-            }
         }
         Some(Err(e)) => {
             details.push(format!("32-bit scanning helper: {e}"));
@@ -310,8 +296,9 @@ pub fn devices() -> Devices {
     details.extend(dsm_log());
     // Drivers such as PaperStream IP install both; name the 32-bit ones only when no TWAIN
     // source could be listed (that is why the scanner is missing).
+    let helper_lists = matches!(&helper, Some(Ok(r)) if !r.sources.is_empty());
     let old = crate::twain::thirty_two_bit_only();
-    if !old.is_empty() && helper.is_none() && !d.list.iter().any(|x| x.kind == Kind::Twain) {
+    if !old.is_empty() && !helper_lists && !d.list.iter().any(|x| x.kind == Kind::Twain) {
         d.notes.push(format!(
             "Installed for 32-bit programs only, so Vibe Files (64-bit) cannot use: {}. \
              Install the scanner's 64-bit TWAIN driver.",
@@ -327,6 +314,22 @@ pub fn devices() -> Devices {
         Err(e) => {
             details.push(format!("Windows (WIA) scanners: cannot list ({e})"));
             d.notes.push(e)
+        }
+    }
+    // The helper's scanners after the native ones, so an ordinary PC's own scanner stays the
+    // first choice (QA). Windows' WIA bridge sources ("WIA-…") are its WIA scanners again,
+    // used directly above; a scanner the 64-bit manager lists is used that way.
+    if let Some(Ok(reply)) = &helper {
+        for s in &reply.sources {
+            let twain64 = format!("{TWAIN_PREFIX}{}", s.name);
+            if s.name.starts_with("WIA-") || d.list.iter().any(|x| x.id == twain64) {
+                continue;
+            }
+            d.list.push(Device {
+                id: format!("{TWAIN32_PREFIX}{}", s.name),
+                name: format!("{} (TWAIN, 32-bit)", s.name),
+                kind: Kind::Twain,
+            });
         }
     }
     d.details = details;

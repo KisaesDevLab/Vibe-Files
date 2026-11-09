@@ -108,25 +108,29 @@ fn main() -> anyhow::Result<std::process::ExitCode> {
                     if datalock::bring_to_front(other.pid) {
                         return Ok(std::process::ExitCode::SUCCESS);
                     }
-                    if std::time::Instant::now() >= until {
+                    // It may have closed meanwhile: then this copy opens (QA).
+                    taken = take();
+                    if taken.is_ok() || std::time::Instant::now() >= until {
                         break;
                     }
                     std::thread::sleep(std::time::Duration::from_millis(250));
                 }
             }
-            let where_ = if other.same_session {
-                "in this session, but its window cannot be found (it may have stopped responding)"
+            // Unless it closed while its window was waited for.
+            if taken.is_err() {
+                let where_ = if other.same_session {
+                    "in this session, but its window cannot be found (it may have stopped responding)"
                     .to_string()
-            } else {
-                format!(
-                    "in another of your Windows sessions on this computer{}, probably one that was disconnected instead of signed out",
-                    other
-                        .session
-                        .map(|s| format!(" (session {s})"))
-                        .unwrap_or_default()
-                )
-            };
-            let answer = rfd::MessageDialog::new()
+                } else {
+                    format!(
+                        "in another of your Windows sessions on this computer{}, probably one that was disconnected instead of signed out",
+                        other
+                            .session
+                            .map(|s| format!(" (session {s})"))
+                            .unwrap_or_default()
+                    )
+                };
+                let answer = rfd::MessageDialog::new()
                 .set_title("Vibe Files")
                 .set_description(format!(
                     "Vibe Files is still running under your login {where_}, since {}.\n\nClose that copy and open Vibe Files here? Work not saved in that copy is lost.",
@@ -135,21 +139,22 @@ fn main() -> anyhow::Result<std::process::ExitCode> {
                 .set_level(rfd::MessageLevel::Warning)
                 .set_buttons(rfd::MessageButtons::YesNo)
                 .show();
-            if answer != rfd::MessageDialogResult::Yes {
-                return Ok(std::process::ExitCode::from(7));
-            }
-            taken = datalock::close_copy(other.pid).and_then(|()| {
-                // Windows (or a virus scanner) may take a moment to let go of the lock file.
-                let mut r = take();
-                for _ in 0..4 {
-                    if r.is_ok() {
-                        break;
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(500));
-                    r = take();
+                if answer != rfd::MessageDialogResult::Yes {
+                    return Ok(std::process::ExitCode::from(7));
                 }
-                r
-            });
+                taken = datalock::close_copy(&other).and_then(|()| {
+                    // Windows (or a virus scanner) may take a moment to let go of the lock file.
+                    let mut r = take();
+                    for _ in 0..4 {
+                        if r.is_ok() {
+                            break;
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(500));
+                        r = take();
+                    }
+                    r
+                });
+            }
         }
         match taken {
             Ok((l, at)) => {

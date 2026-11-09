@@ -12,6 +12,7 @@
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
@@ -34,6 +35,9 @@ pub struct Listed {
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ListReply {
+    /// The helper's version (must be the program's: the request format follows it).
+    #[serde(default)]
+    pub version: String,
     pub sources: Vec<Listed>,
     /// What was tried, for Scanner details.
     pub details: Vec<String>,
@@ -67,19 +71,26 @@ pub struct ScanReply {
 
 // ---- In the helper (32-bit) ----
 
-/// The 32-bit managers, in the order tried: Windows' own (what remote-scanning tools hook),
-/// then a TWAINDSM.dll beside the helper or in Windows (a 32-bit program's System32 is
-/// SysWOW64).
-fn managers() -> Vec<PathBuf> {
+/// The 32-bit managers, in the order tried, as (what is loaded, the file it is): Windows' own
+/// `twain_32.dll` loaded by its bare name, as 32-bit programs load it (a remote-scanning hook
+/// may watch for that name, QA), then a 32-bit TWAINDSM.dll in the `twain32` folder beside the
+/// helper or in Windows (a 32-bit program's System32 is SysWOW64). The 64-bit TWAINDSM.dll
+/// beside the helper is not tried.
+fn managers() -> Vec<(PathBuf, PathBuf)> {
     let root = std::env::var_os("SystemRoot").unwrap_or_else(|| r"C:\Windows".into());
-    let mut v = vec![Path::new(&root).join("twain_32.dll")];
+    let mut v = vec![(
+        PathBuf::from("twain_32.dll"),
+        Path::new(&root).join("twain_32.dll"),
+    )];
     if let Some(dir) = std::env::current_exe()
         .ok()
         .and_then(|e| e.parent().map(Path::to_path_buf))
     {
-        v.push(dir.join("TWAINDSM.dll"));
+        let p = dir.join(r"twain32\TWAINDSM.dll");
+        v.push((p.clone(), p));
     }
-    v.push(Path::new(&root).join(r"System32\TWAINDSM.dll"));
+    let p = Path::new(&root).join(r"System32\TWAINDSM.dll");
+    v.push((p.clone(), p));
     v
 }
 
@@ -89,12 +100,12 @@ type Tried = (PathBuf, Result<(Dsm, Vec<super::SourceInfo>), String>);
 
 fn each_manager() -> Vec<Tried> {
     let mut out = Vec::new();
-    for path in managers() {
+    for (load, path) in managers() {
         if !path.is_file() {
             out.push((path, Err("missing".into())));
             continue;
         }
-        let r = super::load(&path).and_then(|dsm| {
+        let r = super::load(&load).and_then(|dsm| {
             super::on_twain_thread(move || Ok(Box::new(dsm) as Box<dyn Entry>), |m| m.sources())
                 .map(|s| (dsm, s))
         });
@@ -104,7 +115,10 @@ fn each_manager() -> Vec<Tried> {
 }
 
 fn list() -> ListReply {
-    let mut reply = ListReply::default();
+    let mut reply = ListReply {
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        ..ListReply::default()
+    };
     reply.details.push(format!(
         "helper {} ({}-bit)",
         env!("CARGO_PKG_VERSION"),
@@ -157,40 +171,41 @@ fn scan(req: &ScanRequest) -> ScanReply {
             ..ScanReply::default()
         };
     };
-    let (source, settings) = (req.source.clone(), req.settings.clone());
+    let (source, settings, out) = (req.source.clone(), req.settings.clone(), req.out.clone());
+    // Each page goes to disk as soon as it ends (QA: a long colour batch held whole would not
+    // fit a 32-bit program's memory).
     let scanned = super::on_twain_thread(
         move || Ok(Box::new(dsm) as Box<dyn Entry>),
-        move |m| m.scan(&source, &settings),
+        move |m| {
+            let mut files: Vec<PageFile> = Vec::new();
+            let r = m.scan_each(&source, &settings, &mut |p| {
+                let file = format!("page-{:04}.raw", files.len() + 1);
+                std::fs::write(out.join(&file), &p.data)
+                    .map_err(|e| format!("cannot keep page {}: {e}", files.len() + 1))?;
+                files.push(PageFile {
+                    file,
+                    width: p.width,
+                    height: p.height,
+                    dpi: p.dpi,
+                    pixel: p.pixel,
+                });
+                Ok(())
+            });
+            r.map(|s| (s, files))
+        },
     );
-    let scanned = match scanned {
-        Ok(s) => s,
-        Err(e) => {
-            return ScanReply {
-                error: Some(e),
-                ..ScanReply::default()
-            };
-        }
-    };
-    let mut reply = ScanReply {
-        stopped: scanned.stopped,
-        cancelled: scanned.cancelled,
-        ..ScanReply::default()
-    };
-    for (i, p) in scanned.pages.into_iter().enumerate() {
-        let file = format!("page-{:04}.raw", i + 1);
-        if let Err(e) = std::fs::write(req.out.join(&file), &p.data) {
-            reply.error = Some(format!("cannot keep page {}: {e}", i + 1));
-            break;
-        }
-        reply.pages.push(PageFile {
-            file,
-            width: p.width,
-            height: p.height,
-            dpi: p.dpi,
-            pixel: p.pixel,
-        });
+    match scanned {
+        Ok((s, pages)) => ScanReply {
+            pages,
+            stopped: s.stopped,
+            cancelled: s.cancelled,
+            error: None,
+        },
+        Err(e) => ScanReply {
+            error: Some(e),
+            ..ScanReply::default()
+        },
     }
-    reply
 }
 
 /// The helper program: `list`, or `scan <request.json>`. Prints one JSON reply.
@@ -233,6 +248,51 @@ pub fn helper_path() -> Option<PathBuf> {
     p.is_file().then_some(p)
 }
 
+/// One helper at a time (QA: a listing must not reach the scanner while a scan uses it).
+static ONE_HELPER: Mutex<()> = Mutex::new(());
+
+/// A job that ends every helper when Vibe Files ends (closed, crashed or closed from another
+/// session), so a scanner is never left held by an orphaned helper (QA).
+fn kill_with_us(child: &std::process::Child) {
+    use std::os::windows::io::AsRawHandle;
+    use std::sync::OnceLock;
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
+        SetInformationJobObject,
+    };
+    // The job's handle, kept open for the life of this process (as a number: HANDLE is not
+    // Sync).
+    static JOB: OnceLock<Option<isize>> = OnceLock::new();
+    let job = JOB.get_or_init(|| {
+        // SAFETY: plain Win32 calls; the handle is never closed (Windows closes it at exit,
+        // which ends the helpers).
+        unsafe {
+            let job = CreateJobObjectW(None, None).ok()?;
+            let mut info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            SetInformationJobObject(
+                job,
+                JobObjectExtendedLimitInformation,
+                &info as *const _ as *const std::ffi::c_void,
+                size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            )
+            .ok()?;
+            Some(job.0 as isize)
+        }
+    });
+    if let Some(job) = job {
+        // SAFETY: both handles are live; failure leaves the helper outside the job.
+        let _ = unsafe {
+            AssignProcessToJobObject(
+                HANDLE(*job as *mut std::ffi::c_void),
+                HANDLE(child.as_raw_handle()),
+            )
+        };
+    }
+}
+
 /// Runs the helper with `args`, without a console window, and reads its JSON reply. `timeout`:
 /// ended after this long (a listing; a scan waits for the person at the scanner).
 fn run<T: for<'de> Deserialize<'de>>(
@@ -242,6 +302,7 @@ fn run<T: for<'de> Deserialize<'de>>(
 ) -> Result<T, String> {
     use std::os::windows::process::CommandExt;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let _one = ONE_HELPER.lock().unwrap_or_else(|e| e.into_inner());
     let mut child = std::process::Command::new(exe)
         .args(args)
         .stdin(std::process::Stdio::null())
@@ -250,11 +311,13 @@ fn run<T: for<'de> Deserialize<'de>>(
         .creation_flags(CREATE_NO_WINDOW)
         .spawn()
         .map_err(|e| format!("cannot start {HELPER_EXE}: {e}"))?;
+    kill_with_us(&child);
     let mut stdout = child.stdout.take().ok_or("no output")?;
-    let reader = std::thread::spawn(move || {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
         let mut s = String::new();
         let _ = stdout.read_to_string(&mut s);
-        s
+        let _ = tx.send(s);
     });
     let started = Instant::now();
     loop {
@@ -273,7 +336,9 @@ fn run<T: for<'de> Deserialize<'de>>(
         }
         std::thread::sleep(Duration::from_millis(50));
     }
-    let out = reader.join().unwrap_or_default();
+    // The answer is in by the time the helper has ended, unless a program it started keeps its
+    // output open (QA): then not waited for long.
+    let out = rx.recv_timeout(Duration::from_secs(5)).unwrap_or_default();
     let line = out.lines().rev().find(|l| l.trim_start().starts_with('{'));
     let line = line.ok_or_else(|| format!("{HELPER_EXE} gave no answer"))?;
     serde_json::from_str(line).map_err(|e| format!("{HELPER_EXE} answered oddly: {e}"))
@@ -282,7 +347,18 @@ fn run<T: for<'de> Deserialize<'de>>(
 /// The 32-bit sources, from the helper. `None`: no helper beside the program.
 pub fn list32() -> Option<Result<ListReply, String>> {
     let exe = helper_path()?;
-    Some(run(&exe, &["list".as_ref()], Some(Duration::from_secs(45))))
+    Some(
+        run::<ListReply>(&exe, &["list".as_ref()], Some(Duration::from_secs(45))).and_then(|r| {
+            // Another version's helper may not read this version's requests (QA).
+            if r.version != env!("CARGO_PKG_VERSION") {
+                return Err(format!(
+                    "{HELPER_EXE} is from another version ({}); put the one from this version's zip beside vibe-files.exe",
+                    if r.version.is_empty() { "older" } else { r.version.as_str() }
+                ));
+            }
+            Ok(r)
+        }),
+    )
 }
 
 /// Scans one batch from the 32-bit source `source` through the helper.
