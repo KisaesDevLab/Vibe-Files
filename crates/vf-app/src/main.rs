@@ -69,7 +69,7 @@ fn main() -> anyhow::Result<std::process::ExitCode> {
         let computer = std::env::var("COMPUTERNAME").unwrap_or_default();
         let take = || {
             if chosen {
-                datalock::acquire(&data).map(|l| (l, data.clone()))
+                datalock::acquire(&data, true).map(|l| (l, data.clone()))
             } else {
                 datalock::acquire_default(&data, personal.as_deref(), login.as_deref(), &computer)
             }
@@ -87,8 +87,32 @@ fn main() -> anyhow::Result<std::process::ExitCode> {
                         .and_then(|p| datalock::own_copy(p, login.as_deref(), &computer))
                 })
         {
-            if other.same_session && datalock::bring_to_front(other.pid) {
-                return Ok(std::process::ExitCode::SUCCESS);
+            if !other.window {
+                // A command (sync, backup, a Task Scheduler run) is never closed from here: it
+                // may be writing the catalog (QA).
+                rfd::MessageDialog::new()
+                    .set_title("Vibe Files")
+                    .set_description(format!(
+                        "A Vibe Files task (such as a sync or backup) started at {} is using your data folder. Wait for it to finish, then open Vibe Files again.",
+                        other.since
+                    ))
+                    .set_level(rfd::MessageLevel::Info)
+                    .show();
+                return Ok(std::process::ExitCode::from(7));
+            }
+            // In this session: its window comes forward. A copy still starting (a double
+            // double-click) has no window yet: it is given 10 seconds (QA).
+            if other.same_session {
+                let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+                loop {
+                    if datalock::bring_to_front(other.pid) {
+                        return Ok(std::process::ExitCode::SUCCESS);
+                    }
+                    if std::time::Instant::now() >= until {
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(250));
+                }
             }
             let where_ = if other.same_session {
                 "in this session, but its window cannot be found (it may have stopped responding)"
@@ -114,7 +138,18 @@ fn main() -> anyhow::Result<std::process::ExitCode> {
             if answer != rfd::MessageDialogResult::Yes {
                 return Ok(std::process::ExitCode::from(7));
             }
-            taken = datalock::close_copy(other.pid).and_then(|()| take());
+            taken = datalock::close_copy(other.pid).and_then(|()| {
+                // Windows (or a virus scanner) may take a moment to let go of the lock file.
+                let mut r = take();
+                for _ in 0..4 {
+                    if r.is_ok() {
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(500));
+                    r = take();
+                }
+                r
+            });
         }
         match taken {
             Ok((l, at)) => {
@@ -143,7 +178,7 @@ fn main() -> anyhow::Result<std::process::ExitCode> {
         }
         // Commands that change the catalog or the cabinet need the data folder to themselves.
         let _lock = if cmd.changes_things() {
-            match datalock::acquire(&data) {
+            match datalock::acquire(&data, false) {
                 Ok(l) => Some(l),
                 Err(e) => {
                     eprintln!("{e}");

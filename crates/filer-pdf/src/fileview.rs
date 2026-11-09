@@ -91,7 +91,8 @@ enum Kind {
 fn kind(path: &Path) -> Option<Kind> {
     let ext = path.extension()?.to_str()?.to_ascii_lowercase();
     Some(match ext.as_str() {
-        "xlsx" | "xlsm" | "xlsb" | "xls" | "ods" => Kind::Workbook,
+        // Not OpenDocument (.ods): its repeated rows and columns cannot be capped while read.
+        "xlsx" | "xlsm" | "xlsb" | "xls" => Kind::Workbook,
         "csv" => Kind::Delimited(b','),
         "tsv" | "tab" | "iif" => Kind::Delimited(b'\t'),
         "docx" | "docm" => Kind::Docx,
@@ -202,13 +203,18 @@ fn plain_doc(text: &str) -> Doc {
     let mut doc = Doc::default();
     let mut chars = 0;
     for line in text.lines() {
-        if chars > MAX_CHARS {
+        if chars >= MAX_CHARS {
             doc.cut = true;
             break;
         }
-        chars += line.len() + 1;
+        // One long line (minified XML, a bank download with no line breaks) is cut too (QA).
+        let mut text = line.trim_end().to_string();
+        if clip(&mut text, MAX_CHARS - chars) {
+            doc.cut = true;
+        }
+        chars += text.chars().count() + 1;
         doc.paras.push(Para {
-            text: line.trim_end().to_string(),
+            text,
             heading: false,
         });
     }
@@ -221,50 +227,76 @@ fn plain_doc(text: &str) -> Doc {
 
 // ---- Spreadsheets ----
 
+/// Characters kept of one cell.
+const MAX_CELL: usize = 1000;
+/// An old `.xls` whose cells would fill more than this many grid places is not read: calamine
+/// builds every sheet as one block from its first to its last cell when the file is opened.
+const MAX_XLS_CELLS: u64 = 3_000_000;
+
 fn workbook(path: &Path) -> Result<Content, String> {
-    use calamine::Reader;
     let ext = path
         .extension()
         .and_then(|e| e.to_str())
         .unwrap_or_default()
         .to_ascii_lowercase();
-    if ext != "xls" {
-        check_unpacked(path)?;
-    }
-    let mut book = calamine::open_workbook_auto(path).map_err(|e| e.to_string())?;
-    let names = book.sheet_names();
-    let mut sheets = Vec::new();
-    for name in names.iter().take(MAX_SHEETS) {
-        let range = match book.worksheet_range(name) {
-            Ok(r) => r,
-            // A chart sheet or a sheet calamine cannot read: shown empty, not as an error.
-            Err(_) => calamine::Range::empty(),
-        };
-        let (height, width) = range.get_size();
-        let origin = range
-            .start()
-            .map(|(r, c)| (r as usize, c as usize))
-            .unwrap_or_default();
-        let cols = width.min(MAX_COLS);
-        let rows: Vec<Vec<String>> = range
-            .rows()
-            .take(MAX_ROWS)
-            .map(|r| {
-                let mut cells: Vec<String> = r.iter().take(cols).map(cell_text).collect();
-                while cells.last().is_some_and(|c| c.is_empty()) {
-                    cells.pop();
-                }
-                cells
-            })
-            .collect();
-        sheets.push(Sheet {
-            name: name.clone(),
-            rows,
-            cols,
-            origin,
-            cut: cut_note(height, width),
-        });
-    }
+    let (names, mut sheets) = match ext.as_str() {
+        "xls" => xls_sheets(path)?,
+        "xlsb" => {
+            use calamine::Reader;
+            check_unpacked(path)?;
+            let mut book: calamine::Xlsb<std::io::BufReader<std::fs::File>> =
+                calamine::open_workbook(path).map_err(|e: calamine::XlsbError| e.to_string())?;
+            let names = book.sheet_names();
+            let mut sheets = Vec::new();
+            for name in names.iter().take(MAX_SHEETS) {
+                let sheet = match book.worksheet_cells_reader(name) {
+                    Ok(mut r) => stream_sheet(name, || {
+                        r.next_cell()
+                            .map(|c| {
+                                c.map(|c| {
+                                    (
+                                        c.get_position(),
+                                        calamine::Data::from(c.get_value().clone()),
+                                    )
+                                })
+                            })
+                            .map_err(|e| e.to_string())
+                    })?,
+                    Err(_) => Sheet::named(name),
+                };
+                sheets.push(sheet);
+            }
+            (names, sheets)
+        }
+        _ => {
+            use calamine::Reader;
+            check_unpacked(path)?;
+            let mut book: calamine::Xlsx<std::io::BufReader<std::fs::File>> =
+                calamine::open_workbook(path).map_err(|e: calamine::XlsxError| e.to_string())?;
+            let names = book.sheet_names();
+            let mut sheets = Vec::new();
+            for name in names.iter().take(MAX_SHEETS) {
+                let sheet = match book.worksheet_cells_reader(name) {
+                    Ok(mut r) => stream_sheet(name, || {
+                        r.next_cell()
+                            .map(|c| {
+                                c.map(|c| {
+                                    (
+                                        c.get_position(),
+                                        calamine::Data::from(c.get_value().clone()),
+                                    )
+                                })
+                            })
+                            .map_err(|e| e.to_string())
+                    })?,
+                    // A chart sheet or a sheet calamine cannot read: shown empty, not an error.
+                    Err(_) => Sheet::named(name),
+                };
+                sheets.push(sheet);
+            }
+            (names, sheets)
+        }
+    };
     if names.len() > MAX_SHEETS
         && let Some(last) = sheets.last_mut()
     {
@@ -281,6 +313,176 @@ fn workbook(path: &Path) -> Result<Content, String> {
         return Ok(Content::Nothing("This workbook has no sheets.".into()));
     }
     Ok(Content::Sheets(sheets))
+}
+
+impl Sheet {
+    fn named(name: &str) -> Sheet {
+        Sheet {
+            name: name.to_string(),
+            ..Sheet::default()
+        }
+    }
+}
+
+/// One sheet read cell by cell (`next` gives each cell's 0-based (row, column) and value): only
+/// the cells inside the first [`MAX_ROWS`] × [`MAX_COLS`] from the first filled cell are kept,
+/// so a sheet with one stray value far down never builds a huge grid (QA).
+fn stream_sheet(
+    name: &str,
+    mut next: impl FnMut() -> Result<Option<((u32, u32), calamine::Data)>, String>,
+) -> Result<Sheet, String> {
+    let mut kept: Vec<(u32, u32, String)> = Vec::new();
+    let (mut r0, mut r1, mut c0, mut c1) = (u32::MAX, 0u32, u32::MAX, 0u32);
+    let limit = MAX_ROWS * MAX_COLS * 2;
+    while let Some(((r, c), v)) = next()? {
+        let mut text = cell_text(&v);
+        if text.is_empty() {
+            continue;
+        }
+        (r0, r1, c0, c1) = (r0.min(r), r1.max(r), c0.min(c), c1.max(c));
+        let inside = ((r - r0) as usize) < MAX_ROWS && ((c - c0) as usize) < MAX_COLS;
+        if inside && kept.len() < limit {
+            clip(&mut text, MAX_CELL);
+            kept.push((r, c, text));
+        }
+    }
+    if kept.is_empty() {
+        return Ok(Sheet::named(name));
+    }
+    let (height, width) = ((r1 - r0 + 1) as usize, (c1 - c0 + 1) as usize);
+    let (rows_n, cols) = (height.min(MAX_ROWS), width.min(MAX_COLS));
+    let mut rows = vec![Vec::<String>::new(); rows_n];
+    for (r, c, text) in kept {
+        let (ri, ci) = ((r - r0) as usize, (c - c0) as usize);
+        if ri < rows_n && ci < cols {
+            let row = &mut rows[ri];
+            if row.len() <= ci {
+                row.resize(ci + 1, String::new());
+            }
+            row[ci] = text;
+        }
+    }
+    Ok(Sheet {
+        name: name.to_string(),
+        rows,
+        cols,
+        origin: (r0 as usize, c0 as usize),
+        cut: cut_note(height, width),
+    })
+}
+
+/// An old `.xls`: refused when its sheets would build too large a grid (checked from its cell
+/// records before calamine opens it), else read whole.
+fn xls_sheets(path: &Path) -> Result<(Vec<String>, Vec<Sheet>), String> {
+    use calamine::Reader;
+    if xls_grid_cells(path)? > MAX_XLS_CELLS {
+        return Err("this workbook's sheets are too large to show here: open the file".into());
+    }
+    let mut book: calamine::Xls<std::io::BufReader<std::fs::File>> =
+        calamine::open_workbook(path).map_err(|e: calamine::XlsError| e.to_string())?;
+    let names = book.sheet_names();
+    let mut sheets = Vec::new();
+    for name in names.iter().take(MAX_SHEETS) {
+        let sheet = match book.worksheet_range(name) {
+            Ok(range) => {
+                let mut cells = range.cells();
+                stream_sheet(name, || {
+                    Ok(cells.next().map(|(r, c, v)| {
+                        let (r0, c0) = range.start().unwrap_or_default();
+                        ((r as u32 + r0, c as u32 + c0), v.clone())
+                    }))
+                })?
+            }
+            Err(_) => Sheet::named(name),
+        };
+        sheets.push(sheet);
+    }
+    Ok((names, sheets))
+}
+
+/// The grid places calamine would build for an `.xls`: per sheet, the box from its first to its
+/// last value cell (values and formulas), summed. Read from the BIFF records of the Workbook
+/// stream.
+fn xls_grid_cells(path: &Path) -> Result<u64, String> {
+    let mut c = cfb::open(path).map_err(|_| "not a valid Excel file".to_string())?;
+    let mut s = c
+        .open_stream("/Workbook")
+        .or_else(|_| c.open_stream("/Book"))
+        .map_err(|_| "not a valid Excel file".to_string())?;
+    let mut b = Vec::new();
+    s.by_ref()
+        .take(MAX_FILE)
+        .read_to_end(&mut b)
+        .map_err(|e| e.to_string())?;
+    let mut total = 0u64;
+    // (rows, cols) boxes of values and of formulas in the current sheet.
+    let mut boxes = [(u16::MAX, 0u16, u16::MAX, 0u16); 2];
+    let close = |boxes: &mut [(u16, u16, u16, u16); 2], total: &mut u64| {
+        for bx in boxes.iter_mut() {
+            if bx.0 != u16::MAX {
+                *total += (bx.1 - bx.0 + 1) as u64 * (bx.3 - bx.2 + 1) as u64;
+            }
+            *bx = (u16::MAX, 0, u16::MAX, 0);
+        }
+    };
+    let mut i = 0;
+    while i + 4 <= b.len() {
+        let typ = u16::from_le_bytes([b[i], b[i + 1]]);
+        let len = u16::from_le_bytes([b[i + 2], b[i + 3]]) as usize;
+        let data = b.get(i + 4..i + 4 + len).unwrap_or_default();
+        i += 4 + len;
+        let rc = |d: &[u8]| -> Option<(u16, u16)> {
+            Some((
+                u16::from_le_bytes(d.get(0..2)?.try_into().ok()?),
+                u16::from_le_bytes(d.get(2..4)?.try_into().ok()?),
+            ))
+        };
+        let mut add = |which: usize, r: u16, c: u16| {
+            let bx = &mut boxes[which];
+            *bx = (bx.0.min(r), bx.1.max(r), bx.2.min(c), bx.3.max(c));
+        };
+        match typ {
+            // BOF of a new sheet, EOF of one.
+            0x0809 | 0x000A => close(&mut boxes, &mut total),
+            0x0203 | 0x0204 | 0x00D6 | 0x0205 | 0x027E | 0x00FD => {
+                if let Some((r, c)) = rc(data) {
+                    add(0, r, c);
+                }
+            }
+            0x0006 => {
+                if let Some((r, c)) = rc(data) {
+                    add(0, r, c);
+                    add(1, r, c);
+                }
+            }
+            // MulRk: row, first column, …, last column.
+            0x00BD if data.len() >= 6 => {
+                if let Some((r, c)) = rc(data) {
+                    let last = u16::from_le_bytes([data[data.len() - 2], data[data.len() - 1]]);
+                    add(0, r, c);
+                    add(0, r, last.max(c));
+                }
+            }
+            _ => {}
+        }
+        if total > MAX_XLS_CELLS {
+            break;
+        }
+    }
+    close(&mut boxes, &mut total);
+    Ok(total)
+}
+
+/// Cuts `s` to at most `max` characters (on a character boundary). True when it was cut.
+fn clip(s: &mut String, max: usize) -> bool {
+    match s.char_indices().nth(max) {
+        Some((i, _)) => {
+            s.truncate(i);
+            s.push('…');
+            true
+        }
+        None => false,
+    }
 }
 
 fn cut_note(height: usize, width: usize) -> Option<String> {
@@ -373,7 +575,17 @@ fn delimited(path: &Path, delimiter: u8) -> Result<Content, String> {
         height += 1;
         width = width.max(record.len());
         if rows.len() < MAX_ROWS {
-            rows.push(record.iter().take(MAX_COLS).map(str::to_string).collect());
+            rows.push(
+                record
+                    .iter()
+                    .take(MAX_COLS)
+                    .map(|c| {
+                        let mut c = c.to_string();
+                        clip(&mut c, MAX_CELL);
+                        c
+                    })
+                    .collect(),
+            );
         }
     }
     let name = path
@@ -440,19 +652,31 @@ fn xml_ref(r: &quick_xml::events::BytesRef) -> String {
     .to_string()
 }
 
-/// Adds `para` unless it would pass [`MAX_CHARS`]; returns false once full.
-fn push_para(doc: &mut Doc, chars: &mut usize, text: String, heading: bool) -> bool {
-    if *chars > MAX_CHARS {
+/// Adds `para` (cut to what is left of [`MAX_CHARS`]); returns false once full.
+fn push_para(doc: &mut Doc, chars: &mut usize, mut text: String, heading: bool) -> bool {
+    if *chars >= MAX_CHARS {
         doc.cut = true;
         return false;
     }
-    *chars += text.len() + 1;
+    if clip(&mut text, MAX_CHARS - *chars) {
+        doc.cut = true;
+    }
+    *chars += text.chars().count() + 1;
     doc.paras.push(Para { text, heading });
     true
 }
 
+/// Adds `text` to a paragraph being read unless it has reached [`MAX_CHARS`] (QA: one huge
+/// paragraph must not grow without end).
+fn grow(para: &mut String, text: &str) {
+    if para.len() < MAX_CHARS * 4 {
+        para.push_str(text);
+    }
+}
+
 /// A Word document's text: paragraphs (headings marked), and each table row on one line with
-/// its cells between bars.
+/// its cells between bars. A text box's paragraphs are their own; Word's second (fallback) copy
+/// of a text box, tab-stop settings and field codes are left out.
 fn docx(path: &Path) -> Result<Doc, String> {
     let mut zip = open_zip(path)?;
     let xml = zip_part(&mut zip, "word/document.xml")?;
@@ -461,25 +685,55 @@ fn docx(path: &Path) -> Result<Doc, String> {
     let mut doc = Doc::default();
     let mut chars = 0usize;
     let (mut para, mut heading, mut in_text) = (String::new(), false, false);
-    // Inside a table: the row's cells and the cell being read.
+    // Paragraphs a text box interrupted (it sits inside one).
+    let mut outer: Vec<(String, bool)> = Vec::new();
+    // Inside a table: the row's cells and the cell being read; outer tables' while in a nested
+    // one.
     let mut table_depth = 0usize;
     let (mut cells, mut cell): (Vec<String>, String) = (Vec::new(), String::new());
+    let mut tables: Vec<(Vec<String>, String)> = Vec::new();
+    // Inside `mc:Fallback` (skipped) and `w:tabs` (tab stops, not tabs).
+    let (mut fallback, mut in_tabs) = (0usize, false);
     loop {
         let event = reader
             .read_event_into(&mut buf)
             .map_err(|e| e.to_string())?;
+        if fallback > 0 {
+            match &event {
+                Event::Start(e) if e.local_name().as_ref() == "Fallback" => fallback += 1,
+                Event::End(e) if e.local_name().as_ref() == "Fallback" => fallback -= 1,
+                Event::Eof => break,
+                _ => {}
+            }
+            buf.clear();
+            continue;
+        }
+        let mut full = false;
         match event {
             // An empty paragraph: a blank line (inside a table, nothing).
             Event::Empty(e) if e.local_name().as_ref() == "p" => {
-                if table_depth == 0 && !push_para(&mut doc, &mut chars, String::new(), false) {
-                    break;
+                if table_depth == 0 {
+                    full = !push_para(&mut doc, &mut chars, String::new(), false);
                 }
             }
-            Event::Start(e) | Event::Empty(e) => match e.local_name().as_ref() {
+            Event::Start(e) => match e.local_name().as_ref() {
                 "t" => in_text = true,
-                "tab" => para.push('\t'),
+                "Fallback" => fallback = 1,
+                "tabs" => in_tabs = true,
+                "tab" if !in_tabs => para.push('\t'),
+                "tbl" => {
+                    table_depth += 1;
+                    tables.push((std::mem::take(&mut cells), std::mem::take(&mut cell)));
+                }
+                "txbxContent" => {
+                    outer.push((std::mem::take(&mut para), heading));
+                    heading = false;
+                }
+                _ => {}
+            },
+            Event::Empty(e) => match e.local_name().as_ref() {
+                "tab" if !in_tabs => para.push('\t'),
                 "br" | "cr" => para.push('\n'),
-                "tbl" => table_depth += 1,
                 "pStyle" => {
                     let val = e
                         .attributes()
@@ -491,47 +745,59 @@ fn docx(path: &Path) -> Result<Doc, String> {
                 }
                 _ => {}
             },
-            Event::Text(t) if in_text => para.push_str(&t.xml10_content()),
-            Event::GeneralRef(r) if in_text => para.push_str(&xml_ref(&r)),
+            Event::Text(t) if in_text => grow(&mut para, &t.xml10_content()),
+            Event::GeneralRef(r) if in_text => grow(&mut para, &xml_ref(&r)),
             Event::End(e) => match e.local_name().as_ref() {
                 "t" => in_text = false,
+                "tabs" => in_tabs = false,
                 "p" => {
                     let text = std::mem::take(&mut para);
                     if table_depth > 0 {
                         if !cell.is_empty() && !text.is_empty() {
                             cell.push(' ');
                         }
-                        cell.push_str(text.trim());
-                    } else if !push_para(&mut doc, &mut chars, text, heading) {
-                        break;
+                        grow(&mut cell, text.trim());
+                    } else {
+                        full = !push_para(&mut doc, &mut chars, text, heading);
                     }
                     heading = false;
+                }
+                "txbxContent" => {
+                    if let Some((p, h)) = outer.pop() {
+                        (para, heading) = (p, h);
+                    }
                 }
                 "tc" if table_depth > 0 => cells.push(std::mem::take(&mut cell)),
                 "tr" if table_depth > 0 => {
                     let row = std::mem::take(&mut cells);
-                    if row.iter().any(|c| !c.is_empty())
-                        && !push_para(&mut doc, &mut chars, row.join("  |  "), false)
-                    {
-                        break;
+                    if row.iter().any(|c| !c.is_empty()) {
+                        full = !push_para(&mut doc, &mut chars, row.join("  |  "), false);
                     }
                 }
-                "tbl" => table_depth = table_depth.saturating_sub(1),
+                "tbl" => {
+                    table_depth = table_depth.saturating_sub(1);
+                    if let Some((c, x)) = tables.pop() {
+                        (cells, cell) = (c, x);
+                    }
+                }
                 _ => {}
             },
             Event::Eof => break,
             _ => {}
         }
         buf.clear();
+        if full {
+            break;
+        }
     }
     tidy(&mut doc);
     Ok(doc)
 }
 
-/// A presentation's text, slide by slide.
-fn pptx(path: &Path) -> Result<Doc, String> {
-    let mut zip = open_zip(path)?;
-    let mut slides: Vec<(u32, String)> = zip
+/// The slide parts in the presentation's own order (`p:sldIdLst` → relationships), else by
+/// their numbers.
+fn slide_parts(zip: &mut zip::ZipArchive<std::fs::File>) -> Vec<String> {
+    let mut by_number: Vec<(u32, String)> = zip
         .file_names()
         .filter_map(|n| {
             let n = n.ok()?;
@@ -543,10 +809,89 @@ fn pptx(path: &Path) -> Result<Doc, String> {
             Some((num, n.to_string()))
         })
         .collect();
-    slides.sort();
+    by_number.sort();
+    let attrs = |xml: &[u8], tag: &str, keys: &[&str]| -> Vec<Vec<String>> {
+        let mut out = Vec::new();
+        let mut reader = quick_xml::Reader::from_reader(xml);
+        let mut buf = Vec::new();
+        loop {
+            match reader.read_event_into(&mut buf) {
+                Ok(Event::Start(e) | Event::Empty(e)) if e.local_name().as_ref() == tag => {
+                    let all: Vec<(String, String)> = e
+                        .attributes()
+                        .flatten()
+                        .map(|a| (a.key.local_name().as_ref().to_string(), a.value.to_string()))
+                        .collect();
+                    out.push(
+                        keys.iter()
+                            .map(|k| {
+                                all.iter()
+                                    .find(|(n, _)| n == k)
+                                    .map(|(_, v)| v.clone())
+                                    .unwrap_or_default()
+                            })
+                            .collect(),
+                    );
+                }
+                Ok(Event::Eof) | Err(_) => break,
+                _ => {}
+            }
+            buf.clear();
+        }
+        out
+    };
+    let ordered = (|| {
+        let pres = zip_part(zip, "ppt/presentation.xml").ok()?;
+        let rels = zip_part(zip, "ppt/_rels/presentation.xml.rels").ok()?;
+        // `r:id` is read by its local name "id"; sldId also has a plain `id`: take the last.
+        let rids: Vec<String> = {
+            let mut reader = quick_xml::Reader::from_reader(pres.as_slice());
+            let mut buf = Vec::new();
+            let mut v = Vec::new();
+            loop {
+                match reader.read_event_into(&mut buf) {
+                    Ok(Event::Start(e) | Event::Empty(e)) if e.local_name().as_ref() == "sldId" => {
+                        if let Some(a) = e
+                            .attributes()
+                            .flatten()
+                            .find(|a| a.key.as_ref().ends_with(":id"))
+                        {
+                            v.push(a.value.to_string());
+                        }
+                    }
+                    Ok(Event::Eof) | Err(_) => break,
+                    _ => {}
+                }
+                buf.clear();
+            }
+            v
+        };
+        let targets = attrs(&rels, "Relationship", &["Id", "Target"]);
+        let parts: Vec<String> = rids
+            .iter()
+            .filter_map(|r| {
+                let t = &targets.iter().find(|t| &t[0] == r)?[1];
+                let t = t.trim_start_matches('/');
+                Some(if t.starts_with("ppt/") {
+                    t.to_string()
+                } else {
+                    format!("ppt/{t}")
+                })
+            })
+            .filter(|p| by_number.iter().any(|(_, n)| n == p))
+            .collect();
+        (!parts.is_empty()).then_some(parts)
+    })();
+    ordered.unwrap_or_else(|| by_number.into_iter().map(|(_, n)| n).collect())
+}
+
+/// A presentation's text, slide by slide.
+fn pptx(path: &Path) -> Result<Doc, String> {
+    let mut zip = open_zip(path)?;
+    let slides = slide_parts(&mut zip);
     let mut doc = Doc::default();
     let mut chars = 0usize;
-    'slides: for (i, (_, name)) in slides.iter().enumerate() {
+    'slides: for (i, name) in slides.iter().enumerate() {
         if !push_para(&mut doc, &mut chars, format!("Slide {}", i + 1), true) {
             break;
         }
@@ -561,8 +906,8 @@ fn pptx(path: &Path) -> Result<Doc, String> {
             {
                 Event::Start(e) if e.local_name().as_ref() == "t" => in_text = true,
                 Event::Empty(e) if e.local_name().as_ref() == "br" => para.push('\n'),
-                Event::Text(t) if in_text => para.push_str(&t.xml10_content()),
-                Event::GeneralRef(r) if in_text => para.push_str(&xml_ref(&r)),
+                Event::Text(t) if in_text => grow(&mut para, &t.xml10_content()),
+                Event::GeneralRef(r) if in_text => grow(&mut para, &xml_ref(&r)),
                 Event::End(e) => match e.local_name().as_ref() {
                     "t" => in_text = false,
                     "p" => {
@@ -638,6 +983,8 @@ fn rtf_text(b: &[u8]) -> String {
     let mut stack: Vec<(bool, usize)> = Vec::new();
     let (mut skip, mut uc) = (false, 1usize);
     let mut drop_next = 0usize;
+    // The first half of a character outside the 16-bit range (`\u-10179?\u-8704?`).
+    let mut high: Option<u32> = None;
     let mut i = 0;
     let emit = |out: &mut String, skip: bool, drop_next: &mut usize, c: char| {
         if *drop_next > 0 {
@@ -694,12 +1041,32 @@ fn rtf_text(b: &[u8]) -> String {
                         "uc" => uc = param.unwrap_or(1).max(0) as usize,
                         "u" => {
                             let n = param.unwrap_or(0);
-                            let n = if n < 0 { n + 65536 } else { n };
-                            if let Some(ch) = char::from_u32(n as u32) {
+                            let n = (if n < 0 { n + 65536 } else { n }) as u32;
+                            let ch = match (high.take(), n) {
+                                (_, 0xD800..=0xDBFF) => {
+                                    high = Some(n);
+                                    None
+                                }
+                                (Some(h), 0xDC00..=0xDFFF) => {
+                                    char::from_u32(0x10000 + ((h - 0xD800) << 10) + (n - 0xDC00))
+                                }
+                                (_, n) => char::from_u32(n),
+                            };
+                            if let Some(ch) = ch {
                                 emit(&mut out, skip, &mut 0, ch);
                             }
                             drop_next = uc;
                         }
+                        "lquote" => emit(&mut out, skip, &mut 0, '\u{2018}'),
+                        "rquote" => emit(&mut out, skip, &mut 0, '\u{2019}'),
+                        "ldblquote" => emit(&mut out, skip, &mut 0, '\u{201C}'),
+                        "rdblquote" => emit(&mut out, skip, &mut 0, '\u{201D}'),
+                        "emdash" => emit(&mut out, skip, &mut 0, '\u{2014}'),
+                        "endash" => emit(&mut out, skip, &mut 0, '\u{2013}'),
+                        "bullet" => emit(&mut out, skip, &mut 0, '\u{2022}'),
+                        "enspace" | "emspace" | "qmspace" => emit(&mut out, skip, &mut 0, ' '),
+                        // Binary data: its bytes are not text and may hold braces.
+                        "bin" => i = i.saturating_add(param.unwrap_or(0).max(0) as usize),
                         w if RTF_SKIP.contains(&w) => skip = true,
                         _ => {}
                     }
@@ -736,9 +1103,13 @@ fn rtf_text(b: &[u8]) -> String {
 
 fn html_text(html: &str) -> String {
     use std::sync::LazyLock;
+    // One pattern per element: the regex crate has no back-references (QA: `<head>` must end
+    // at `</head>`, not at the first `</style>`).
     static HIDDEN: LazyLock<regex::Regex> = LazyLock::new(|| {
-        regex::Regex::new(r"(?is)<(script|style|head)\b.*?</(script|style|head)\s*>|<!--.*?-->")
-            .expect("valid")
+        regex::Regex::new(
+            r"(?is)<head\b.*?</head\s*>|<script\b.*?</script\s*>|<style\b.*?</style\s*>|<!--.*?-->",
+        )
+        .expect("valid")
     });
     static BREAK: LazyLock<regex::Regex> = LazyLock::new(|| {
         regex::Regex::new(r"(?i)<br\s*/?>|</(p|div|tr|li|h[1-6]|table)\s*>").expect("valid")
@@ -772,6 +1143,15 @@ fn html_text(html: &str) -> String {
         .replace("&gt;", ">")
         .replace("&quot;", "\"")
         .replace("&apos;", "'")
+        .replace("&rsquo;", "\u{2019}")
+        .replace("&lsquo;", "\u{2018}")
+        .replace("&rdquo;", "\u{201D}")
+        .replace("&ldquo;", "\u{201C}")
+        .replace("&mdash;", "\u{2014}")
+        .replace("&ndash;", "\u{2013}")
+        .replace("&hellip;", "\u{2026}")
+        .replace("&bull;", "\u{2022}")
+        .replace("&copy;", "\u{00A9}")
         .replace("&amp;", "&");
     let lines: Vec<&str> = s.lines().map(str::trim).collect();
     BLANKS
@@ -1282,5 +1662,128 @@ Content-Transfer-Encoding: base64\r\n\r\nJVBERg==\r\n--b--\r\n",
         assert_eq!(number(-42.0), "-42");
         assert_eq!(number(1234567.891), "1234567.891");
         assert_eq!(thousands(1234567), "1,234,567");
+    }
+
+    /// QA: one stray value far down and right does not build a huge grid (calamine's whole-sheet
+    /// block ran out of memory on a 5 KB file).
+    #[test]
+    fn a_stray_far_cell_does_not_build_a_huge_grid() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("stray.xlsx");
+        let mut book = rust_xlsxwriter::Workbook::new();
+        let s = book.add_worksheet();
+        s.write(0, 0, "Top").unwrap();
+        s.write(1_048_575, 16_383, "Far").unwrap();
+        book.save(&path).unwrap();
+        let start = std::time::Instant::now();
+        let Content::Sheets(sheets) = read(&path) else {
+            panic!("expected sheets")
+        };
+        assert!(start.elapsed() < std::time::Duration::from_secs(10));
+        assert_eq!(sheets[0].rows.len(), MAX_ROWS);
+        assert_eq!(sheets[0].rows[0], vec!["Top"]);
+        assert_eq!(
+            sheets[0].cut.as_deref(),
+            Some(
+                "Only the first 2,000 of 1,048,576 rows and the first 60 of 16384 columns are shown."
+            )
+        );
+    }
+
+    /// QA: tab stops are not tabs; a text box once (not Word's fallback copy too), apart from
+    /// its paragraph; nested tables keep their rows; an empty `w:t` does not let field codes in.
+    #[test]
+    fn word_tab_stops_text_boxes_nested_tables_and_field_codes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("letter.docx");
+        let body = r#"<?xml version="1.0"?>
+<w:document xmlns:w="w" xmlns:mc="mc" xmlns:wps="wps" xmlns:v="v"><w:body>
+<w:p><w:pPr><w:tabs><w:tab w:val="left" w:pos="720"/></w:tabs></w:pPr><w:r><w:t>Dear client</w:t></w:r></w:p>
+<w:p><w:r><w:t>Before </w:t></w:r><w:r><mc:AlternateContent><mc:Choice><wps:txbx><w:txbxContent><w:p><w:r><w:t>Boxed</w:t></w:r></w:p></w:txbxContent></wps:txbx></mc:Choice><mc:Fallback><v:textbox><w:txbxContent><w:p><w:r><w:t>Boxed</w:t></w:r></w:p></w:txbxContent></v:textbox></mc:Fallback></mc:AlternateContent></w:r><w:r><w:t>after</w:t></w:r></w:p>
+<w:tbl><w:tr><w:tc><w:p><w:r><w:t>A</w:t></w:r></w:p></w:tc><w:tc><w:tbl><w:tr><w:tc><w:p><w:r><w:t>X</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>Y</w:t></w:r></w:p></w:tc></w:tr></w:tbl></w:tc><w:tc><w:p><w:r><w:t>C</w:t></w:r></w:p></w:tc></w:tr></w:tbl>
+<w:p><w:r><w:t/></w:r><w:r><w:instrText>PAGE \* MERGEFORMAT</w:instrText></w:r><w:r><w:t>Page 1</w:t></w:r></w:p>
+</w:body></w:document>"#;
+        write_zip(&path, &[("word/document.xml", body)]);
+        assert_eq!(
+            text_of(&read(&path)),
+            vec![
+                "Dear client",
+                "Boxed",
+                "Before after",
+                "X  |  Y",
+                "A  |    |  C",
+                "Page 1"
+            ]
+        );
+    }
+
+    /// QA: a single huge line is cut; RTF quotes, dashes and characters beyond 16 bits; HTML's
+    /// head is left out up to `</head>`.
+    #[test]
+    fn long_lines_rtf_symbols_and_html_head() {
+        let dir = tempfile::tempdir().unwrap();
+        let one = dir.path().join("bank.qbo");
+        std::fs::write(&one, "x".repeat(MAX_CHARS * 3)).unwrap();
+        let Content::Text(d) = read(&one) else {
+            panic!("expected text")
+        };
+        assert!(d.cut);
+        assert!(d.paras[0].text.chars().count() <= MAX_CHARS + 1);
+
+        let rtf = dir.path().join("memo.rtf");
+        std::fs::write(
+            &rtf,
+            r"{\rtf1\ansi\uc1 \ldblquote Hi\rdblquote \emdash  ok \u-10179?\u-8704? end\par}",
+        )
+        .unwrap();
+        assert_eq!(
+            text_of(&read(&rtf)),
+            vec!["\u{201C}Hi\u{201D}\u{2014} ok \u{1F600} end"]
+        );
+
+        let html = dir.path().join("page.htm");
+        std::fs::write(
+            &html,
+            "<html><head><style>p{}</style><title>Hidden title</title></head><body><p>Shown &rsquo;</p></body></html>",
+        )
+        .unwrap();
+        assert_eq!(text_of(&read(&html)), vec!["Shown \u{2019}"]);
+    }
+
+    /// QA: a picture wider than the limit is refused before its pixels are read.
+    #[test]
+    fn a_picture_too_large_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let png = dir.path().join("wide.png");
+        image::GrayImage::new(20_000, 1).save(&png).unwrap();
+        assert!(matches!(read(&png), Content::Nothing(why) if why.contains("too large")));
+    }
+
+    /// QA: slides in the presentation's own order, not their part numbers.
+    #[test]
+    fn slides_follow_the_presentations_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("deck.pptx");
+        let slide = |t: &str| {
+            format!(
+                r#"<p:sld xmlns:p="p" xmlns:a="a"><a:p><a:r><a:t>{t}</a:t></a:r></a:p></p:sld>"#
+            )
+        };
+        let (s1, s2) = (slide("Second"), slide("First"));
+        let pres = r#"<p:presentation xmlns:p="p" xmlns:r="r"><p:sldIdLst><p:sldId id="256" r:id="rId3"/><p:sldId id="257" r:id="rId2"/></p:sldIdLst></p:presentation>"#;
+        let rels = r#"<Relationships><Relationship Id="rId2" Target="slides/slide1.xml"/><Relationship Id="rId3" Target="slides/slide2.xml"/></Relationships>"#;
+        write_zip(
+            &path,
+            &[
+                ("ppt/presentation.xml", pres),
+                ("ppt/_rels/presentation.xml.rels", rels),
+                ("ppt/slides/slide1.xml", s1.as_str()),
+                ("ppt/slides/slide2.xml", s2.as_str()),
+            ],
+        );
+        assert_eq!(
+            text_of(&read(&path)),
+            vec!["Slide 1", "First", "Slide 2", "Second"]
+        );
     }
 }

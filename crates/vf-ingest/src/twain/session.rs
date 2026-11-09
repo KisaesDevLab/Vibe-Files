@@ -10,7 +10,7 @@ use super::ffi::*;
 use super::{Manager, condition};
 
 /// How the pixels come.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Pixel {
     /// 1 bit per pixel, 0 = black.
     Bw,
@@ -45,7 +45,7 @@ impl Pixel {
 }
 
 /// What to ask the source for.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Settings {
     /// `Some(true)` feeder, `Some(false)` flatbed, `None` the driver's choice.
     pub feeder: Option<bool>,
@@ -128,6 +128,33 @@ unsafe extern "system" fn callback(
     TWRC_SUCCESS
 }
 
+unsafe extern "system" fn global_alloc(size: u32) -> Handle {
+    use windows::Win32::System::Memory::{GHND, GlobalAlloc};
+    // SAFETY: plain Win32 allocation.
+    unsafe { GlobalAlloc(GHND, size as usize) }.map_or(std::ptr::null_mut(), |h| h.0)
+}
+
+unsafe extern "system" fn global_free(h: Handle) {
+    use windows::Win32::Foundation::GlobalFree;
+    use windows::Win32::Foundation::HGLOBAL;
+    // SAFETY: `h` came from `global_alloc`.
+    let _ = unsafe { GlobalFree(Some(HGLOBAL(h))) };
+}
+
+unsafe extern "system" fn global_lock(h: Handle) -> *mut c_void {
+    use windows::Win32::Foundation::HGLOBAL;
+    use windows::Win32::System::Memory::GlobalLock;
+    // SAFETY: `h` came from `global_alloc`.
+    unsafe { GlobalLock(HGLOBAL(h)) }
+}
+
+unsafe extern "system" fn global_unlock(h: Handle) {
+    use windows::Win32::Foundation::HGLOBAL;
+    use windows::Win32::System::Memory::GlobalUnlock;
+    // SAFETY: `h` came from `global_alloc` and was locked once.
+    let _ = unsafe { GlobalUnlock(HGLOBAL(h)) };
+}
+
 /// TWAIN state of the open source, so every exit closes what was opened.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum State {
@@ -158,13 +185,22 @@ impl Ds<'_> {
 
     /// Sets a one-value capability. `Err` carries the condition code.
     fn set(&mut self, cap: u16, item_type: u16, item: u32) -> Result<(), u16> {
-        let mem = self.m.mem.ok_or(TWCC_LOWMEMORY)?;
-        let (alloc, lock, unlock, free) = (
-            mem.mem_allocate.ok_or(TWCC_LOWMEMORY)?,
-            mem.mem_lock.ok_or(TWCC_LOWMEMORY)?,
-            mem.mem_unlock.ok_or(TWCC_LOWMEMORY)?,
-            mem.mem_free.ok_or(TWCC_LOWMEMORY)?,
-        );
+        let (alloc, lock, unlock, free) = match self.m.mem {
+            Some(mem) => (
+                mem.mem_allocate.ok_or(TWCC_LOWMEMORY)?,
+                mem.mem_lock.ok_or(TWCC_LOWMEMORY)?,
+                mem.mem_unlock.ok_or(TWCC_LOWMEMORY)?,
+                mem.mem_free.ok_or(TWCC_LOWMEMORY)?,
+            ),
+            // A TWAIN 1.x manager (Windows' own twain_32.dll, which remote-scanning tools hook)
+            // has no memory functions: containers are Windows global memory, as TWAIN 1.x says.
+            None => (
+                global_alloc as MemAllocate,
+                global_lock as MemLock,
+                global_unlock as MemUnlock,
+                global_free as MemFree,
+            ),
+        };
         let h = unsafe { alloc(size_of::<OneValue>() as u32) };
         if h.is_null() {
             return Err(TWCC_LOWMEMORY);
@@ -551,7 +587,9 @@ impl Manager {
             id,
             state: State::Open,
         };
-        if found.twain2 {
+        // Callbacks go through a TWAIN 2 manager only; under a 1.x manager a TWAIN 2 source
+        // sends its messages through the window, as a 1.x source does.
+        if found.twain2 && ds.m.mem.is_some() {
             let mut cb = Callback2 {
                 proc_: callback as *mut c_void,
                 ref_con: 0,
@@ -677,6 +715,27 @@ mod tests {
         assert_eq!(f.rgb.get_pixel(100, 6).0, [255, 255, 255]);
         assert_eq!(f.rgb.get_pixel(5, 0).0, [255, 255, 255], "margin");
         assert_eq!(f.dpi, Some(100.0));
+        assert!(!log.callback_registered);
+        assert_closed_in_order(&log);
+    }
+
+    /// The same source through a TWAIN 1.x manager (Windows' twain_32.dll, as in the 32-bit
+    /// scanning helper): no memory functions from the manager, so the settings go in Windows
+    /// global memory; no callback.
+    #[test]
+    fn a_twain1_manager_gets_settings_in_global_memory() {
+        let name = Scanner::fi7160().name;
+        let fake = Fake::legacy(vec![Scanner::fi7160()]);
+        let log = fake.log();
+        let r = on_twain_thread(
+            move || Ok(Box::new(fake) as Box<dyn Entry>),
+            move |m| m.scan(&name, &settings()),
+        );
+        let log = log.lock().unwrap().clone();
+        assert_eq!(r.unwrap().pages.len(), 4);
+        let set: HashMap<u16, u32> = log.caps.iter().copied().collect();
+        assert_eq!(set[&ICAP_XFERMECH], TWSX_MEMORY as u32);
+        assert_eq!(set[&ICAP_XRESOLUTION], 100);
         assert!(!log.callback_registered);
         assert_closed_in_order(&log);
     }

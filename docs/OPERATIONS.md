@@ -57,9 +57,13 @@ downloads or installs anything. `update_check = false` in `config.toml` turns th
 6. **Scanner**: Intake › Scanner on each scanning PC (TWAIN for the fi-7160, or WIA). When no
    scanner shows (for example a remote-scanning utility in a Remote Desktop session), open
    **Scanner details** under the Scanner row and **Copy** it: it lists every TWAIN file and
-   whether it is 32- or 64-bit (Vibe Files can use only 64-bit ones), why each TWAINDSM.dll did
-   or did not load, the TWAIN manager's own log, the scanning programs running in the session,
-   and the Windows (WIA) scanners.
+   whether it is 32- or 64-bit, why each TWAINDSM.dll did or did not load, what the 32-bit
+   scanning helper found, the TWAIN manager's own log, the scanning programs running in the
+   session, and the Windows (WIA) scanners.
+   On a Citrix or Remote Desktop server, scanner redirection (Citrix Workspace, a scanning
+   utility) usually reaches 32-bit programs only. `vibe-scan32.exe` beside `vibe-files.exe` is
+   Vibe Files' 32-bit scanning helper: it lists and scans through Windows' 32-bit TWAIN manager
+   (`twain_32.dll`), and its scanners show as "(TWAIN, 32-bit)". Keep it beside the program.
 7. **OCR**: needs nothing (the bundled `tesseract\`); an imported cabinet's backlog is read in
    the background, or at once with `vibe-files ocr backlog <cabinet>`.
 8. **Sync** (offsite copy in B2): see §4.

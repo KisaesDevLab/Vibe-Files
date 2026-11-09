@@ -107,6 +107,9 @@ pub struct Fake {
     /// Rows of the current page already sent.
     row: u32,
     event: Option<u16>,
+    /// Acts as a TWAIN 1.x manager (Windows' twain_32.dll): no DF_DSM2, no entry points, and
+    /// capability containers in Windows global memory.
+    legacy: bool,
 }
 
 // SAFETY: the parent window pointer is only used on the thread that makes the calls.
@@ -127,6 +130,15 @@ impl Fake {
             sent: 0,
             row: 0,
             event: None,
+            legacy: false,
+        }
+    }
+
+    /// A TWAIN 1.x manager with these scanners.
+    pub fn legacy(scanners: Vec<Scanner>) -> Self {
+        Fake {
+            legacy: true,
+            ..Fake::new(scanners)
         }
     }
 
@@ -247,7 +259,9 @@ impl Fake {
                 }
                 unsafe {
                     (*origin).id = 1;
-                    (*origin).supported_groups |= DF_DSM2;
+                    if !self.legacy {
+                        (*origin).supported_groups |= DF_DSM2;
+                    }
                 }
                 self.state = 3;
                 TWRC_SUCCESS
@@ -260,6 +274,7 @@ impl Fake {
                 self.state = 2;
                 TWRC_SUCCESS
             }
+            (DAT_ENTRYPOINT, MSG_GET) if self.legacy => self.fail(TWCC_BADPROTOCOL),
             (DAT_ENTRYPOINT, MSG_GET) => {
                 let ep = data as *mut EntryPoint;
                 unsafe {
@@ -352,7 +367,22 @@ impl Fake {
                 if c.con_type != TWON_ONEVALUE {
                     return self.fail(TWCC_BADVALUE);
                 }
-                let one = unsafe { (c.container as *mut OneValue).read_unaligned() };
+                let one = if self.legacy {
+                    use windows::Win32::Foundation::HGLOBAL;
+                    use windows::Win32::System::Memory::{GlobalLock, GlobalUnlock};
+                    // SAFETY: a TWAIN 1.x container is a global memory handle.
+                    unsafe {
+                        let p = GlobalLock(HGLOBAL(c.container)) as *mut OneValue;
+                        if p.is_null() {
+                            return self.fail(TWCC_BADVALUE);
+                        }
+                        let v = p.read_unaligned();
+                        let _ = GlobalUnlock(HGLOBAL(c.container));
+                        v
+                    }
+                } else {
+                    unsafe { (c.container as *mut OneValue).read_unaligned() }
+                };
                 self.log.lock().unwrap().caps.push((c.cap, one.item));
                 let s = self.scanner();
                 let refused = match c.cap {

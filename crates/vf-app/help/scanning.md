@@ -14,6 +14,8 @@ You can also save files into the Scans folder yourself, for example photos from 
 
 The **Scanner** row lists the scanners this PC can see, by their TWAIN or WIA driver. Pick yours from the list; Vibe Files remembers the choice for your Windows login on this PC. If yours is missing, plug it in and press **Look again**.
 
+On a Citrix or Remote Desktop server, the scanner at your desk usually reaches 32-bit programs only. Vibe Files finds it through its 32-bit scanning helper (`vibe-scan32.exe`, beside the program) and lists it as **(TWAIN, 32-bit)**; it scans like any TWAIN scanner, including the driver's own window. If it is still missing, open **Scanner details**, press **Copy** and send the text to support.
+
 ## Profiles
 
 The profile box sets the paper source, sides, color and resolution:

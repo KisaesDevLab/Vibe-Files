@@ -3,7 +3,9 @@
 //! thread ([`crate::fileview::read`]); the window is woken once when it is ready.
 
 use std::path::{Path, PathBuf};
-use std::sync::mpsc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Condvar, Mutex, mpsc};
+use std::time::Duration;
 
 use egui::{RichText, text::LayoutJob};
 use egui_extras::{Column, TableBuilder};
@@ -17,6 +19,51 @@ pub struct FileViewer {
     content: Option<Content>,
     texture: Option<egui::TextureHandle>,
     sheet: usize,
+    /// Set when the pane moves on: a read still waiting for its turn is dropped.
+    cancel: Arc<AtomicBool>,
+}
+
+impl Drop for FileViewer {
+    fn drop(&mut self) {
+        self.cancel.store(true, Ordering::Relaxed);
+    }
+}
+
+/// Files read at the same time, all panes together (QA: arrowing through a folder must not
+/// start a read per file).
+const READERS: usize = 2;
+static BUSY: Mutex<usize> = Mutex::new(0);
+static FREE: Condvar = Condvar::new();
+
+/// One of the [`READERS`] places, given back when dropped (a read that panics too).
+struct Turn;
+
+impl Turn {
+    /// Waits for a place; `None` when `cancel` is set first.
+    fn take(cancel: &AtomicBool) -> Option<Turn> {
+        let mut busy = BUSY.lock().unwrap_or_else(|e| e.into_inner());
+        loop {
+            if cancel.load(Ordering::Relaxed) {
+                return None;
+            }
+            if *busy < READERS {
+                *busy += 1;
+                return Some(Turn);
+            }
+            busy = FREE
+                .wait_timeout(busy, Duration::from_millis(100))
+                .unwrap_or_else(|e| e.into_inner())
+                .0;
+        }
+    }
+}
+
+impl Drop for Turn {
+    fn drop(&mut self) {
+        let mut busy = BUSY.lock().unwrap_or_else(|e| e.into_inner());
+        *busy = busy.saturating_sub(1);
+        FREE.notify_one();
+    }
 }
 
 impl FileViewer {
@@ -24,11 +71,18 @@ impl FileViewer {
     pub fn open(ctx: &egui::Context, path: &Path) -> Self {
         let (tx, rx) = mpsc::channel();
         let (p, ctx) = (path.to_path_buf(), ctx.clone());
+        let cancel = Arc::new(AtomicBool::new(false));
+        let stop = cancel.clone();
         let spawned = std::thread::Builder::new()
             .name("file-view".into())
             .spawn(move || {
-                // Nobody waiting (the pane moved on to another file): nothing to do.
-                if tx.send(crate::fileview::read(&p)).is_ok() {
+                // The pane moved on before this file's turn: nothing to do.
+                let Some(turn) = Turn::take(&stop) else {
+                    return;
+                };
+                let content = crate::fileview::read(&p);
+                drop(turn);
+                if !stop.load(Ordering::Relaxed) && tx.send(content).is_ok() {
                     ctx.request_repaint();
                 }
             });
@@ -45,6 +99,7 @@ impl FileViewer {
             content,
             texture: None,
             sheet: 0,
+            cancel,
         }
     }
 

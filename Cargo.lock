@@ -5995,6 +5995,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "vf-scan32"
+version = "0.1.8"
+dependencies = [
+ "vf-ingest",
+]
+
+[[package]]
 name = "vf-security"
 version = "0.1.8"
 dependencies = [

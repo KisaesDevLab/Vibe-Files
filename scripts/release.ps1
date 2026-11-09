@@ -4,7 +4,8 @@
 #   pwsh scripts/release.ps1 -SkipBuild # reuse the last release build (a trial: not for publishing)
 #
 # Output in <target>/dist/:
-#   vibe-files-<ver>-win64/      the portable folder: vibe-files.exe and vibe-move.exe (static CRT), pdfium.dll,
+#   vibe-files-<ver>-win64/      the portable folder: vibe-files.exe, vibe-move.exe and the 32-bit
+#                                scanning helper vibe-scan32.exe (static CRT), pdfium.dll,
 #                                TWAINDSM.dll, tesseract\ (English), licenses
 #   vibe-files-<ver>-win64.zip   what the GitHub release and winget serve
 #   SHA256SUMS.txt               SHA-256 of the zip and of the exe (published with the release)
@@ -36,7 +37,13 @@ if (-not $SkipBuild) {
     # Static C runtime: the exe runs on a PC without the VC++ redistributable.
     $env:RUSTFLAGS = '-C target-feature=+crt-static'
     # --locked: the build never rewrites Cargo.lock after the clean-tree check (QA2 #8).
-    try { cargo build --release --locked -p vf-app -p vf-move; if ($LASTEXITCODE) { throw 'build failed' } }
+    try {
+        cargo build --release --locked -p vf-app -p vf-move; if ($LASTEXITCODE) { throw 'build failed' }
+        # The 32-bit scanning helper (Citrix / Remote Desktop scanning reaches 32-bit programs
+        # only): needs `rustup target add i686-pc-windows-msvc`.
+        cargo build --release --locked -p vf-scan32 --target i686-pc-windows-msvc
+        if ($LASTEXITCODE) { throw 'helper build failed' }
+    }
     finally { Remove-Item Env:RUSTFLAGS -ErrorAction SilentlyContinue }
 }
 $target = $meta.target_directory
@@ -45,6 +52,8 @@ if (-not (Test-Path $exe)) { throw "no release build at $exe" }
 # The tree-splitting utility (PA-35), shipped beside the program.
 $moveExe = Join-Path $target 'release\vibe-move.exe'
 if (-not (Test-Path $moveExe)) { throw "no release build at $moveExe" }
+$scanExe = Join-Path $target 'i686-pc-windows-msvc\release\vibe-scan32.exe'
+if (-not (Test-Path $scanExe)) { throw "no 32-bit helper build at $scanExe" }
 
 $name = "vibe-files-$ver-win64"
 $dist = Join-Path $target 'dist'
@@ -54,6 +63,7 @@ New-Item -ItemType Directory -Force $stage | Out-Null
 
 Copy-Item $exe $stage
 Copy-Item $moveExe $stage
+Copy-Item $scanExe $stage
 Copy-Item crates\filer-pdf\assets\pdfium.dll, crates\filer-pdf\assets\pdfium-LICENSE $stage
 if (Test-Path crates\filer-pdf\assets\pdfium-licenses) {
     Copy-Item -Recurse crates\filer-pdf\assets\pdfium-licenses (Join-Path $stage 'pdfium-licenses')
@@ -84,6 +94,7 @@ $exeHash = (Get-FileHash (Join-Path $stage 'vibe-files.exe') -Algorithm SHA256).
     "$zipHash  $name.zip",
     "$exeHash  $name/vibe-files.exe",
     "$((Get-FileHash (Join-Path $stage 'vibe-move.exe') -Algorithm SHA256).Hash.ToLower())  $name/vibe-move.exe"
+    "$((Get-FileHash (Join-Path $stage 'vibe-scan32.exe') -Algorithm SHA256).Hash.ToLower())  $name/vibe-scan32.exe"
 ) | Set-Content -Encoding ascii (Join-Path $dist 'SHA256SUMS.txt')
 
 # winget manifests (portable zip; the data folder then lives in %LOCALAPPDATA%\Vibe Files).

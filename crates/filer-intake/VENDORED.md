@@ -6,9 +6,9 @@
 |---|---|
 | Repo | `KisaesDevLab/Vibe-Filer-Desktop` (private) |
 | Branch | `master` |
-| Commit | `e165e56` on `master` ("fix(parse): client ID in the last, then first, 14 characters; two-part IDs (V28)", 2026-11-09); before: `6417249` (V23-V26); `f2504fe` (V22); `29db764` (V21); `6433c04` on `master` ("feat(host): Setup lock and \"New client…\" for a program that embeds Filer", 0.2.6 + the Intake preview pane, ticked-row actions and host hooks, 2026-11-04) |
+| Commit | `c5e2f70` on `master` ("fix: QA of V27-V28 (capped spreadsheet and picture reads, Word/RTF/HTML text, ID search)", 2026-11-09); before: `e165e56` (V27-V28); `6417249` (V23-V26); `f2504fe` (V22); `29db764` (V21); `6433c04` on `master` ("feat(host): Setup lock and \"New client…\" for a program that embeds Filer", 0.2.6 + the Intake preview pane, ticked-row actions and host hooks, 2026-11-04) |
 | Vendored | 2026-11-02, P00 step 2 at `ea4e726` (0.2.4); re-vendored 2026-11-04, PHASES PA-26 |
-| Upstream tests | 227 at this commit (215 at `6417249`); all pass after the split (filer-core 64 · filer-pdf 27 · filer-intake 136) |
+| Upstream tests | 232 at this commit (227 at `e165e56`); all pass after the split (filer-core 64 · filer-pdf 32 · filer-intake 136) |
 
 Upstream is one binary crate with no `lib.rs`. The three `filer-*` crates are a mechanical split
 of its `src/` (QUESTIONS Q-16). Upstream `main.rs` is not vendored; `vf-app` is the entry point.
@@ -99,6 +99,11 @@ the rest of intake. Moving it would need a logic edit (Q-16: merge rather than e
   `mailparse` 0.18, `quick-xml` 0.42 (filer-pdf; MIT / 0BSD), `rust_xlsxwriter` 0.102 (dev, MIT
   OR Apache-2.0). Still only the four attribute lines differ (three UI files differ in line
   endings only); upstream's 227 tests pass.
+  Then `e165e56` → `c5e2f70` (QA of V27-V28): spreadsheets read cell by cell within the caps,
+  `.xls` size-checked before opening, `.ods` not shown, picture size limits (image-to-PDF too),
+  two reads at a time, Word/RTF/HTML text fixes, slide order, stricter ID search.
+  `fileview.rs`, `imagepdf.rs` (filer-pdf), `parse.rs` (filer-core), `ui/fileview.rs`
+  (filer-intake) copied; still only the four attribute lines differ; upstream's 232 tests pass.
 
 ## Re-vendoring
 

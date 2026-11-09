@@ -207,6 +207,9 @@ pub struct Device {
 }
 
 const TWAIN_PREFIX: &str = "twain:";
+/// A source the 32-bit scanning helper lists (`vibe-scan32.exe`: Citrix / Remote Desktop
+/// scanning that reaches 32-bit programs only, owner 2026-11-09).
+const TWAIN32_PREFIX: &str = "twain32:";
 
 /// What [`devices`] found.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -252,6 +255,40 @@ pub fn devices() -> Devices {
             d.notes.push(e)
         }
     }
+    // The 32-bit helper: remote-scanning set-ups that reach 32-bit programs only.
+    let helper = crate::twain::helper::list32();
+    match &helper {
+        None => details.push(format!(
+            "32-bit scanning helper ({}): not beside the program",
+            crate::twain::helper::HELPER_EXE
+        )),
+        Some(Ok(reply)) => {
+            details.push(format!(
+                "TWAIN sources the 32-bit helper lists: {}",
+                reply.sources.len()
+            ));
+            details.extend(reply.details.iter().map(|l| format!("  {l}")));
+            for s in &reply.sources {
+                // A scanner the 64-bit manager lists too is used that way.
+                if d.list
+                    .iter()
+                    .any(|x| x.kind == Kind::Twain && x.id == format!("{TWAIN_PREFIX}{}", s.name))
+                {
+                    continue;
+                }
+                d.list.push(Device {
+                    id: format!("{TWAIN32_PREFIX}{}", s.name),
+                    name: format!("{} (TWAIN, 32-bit)", s.name),
+                    kind: Kind::Twain,
+                });
+            }
+        }
+        Some(Err(e)) => {
+            details.push(format!("32-bit scanning helper: {e}"));
+            d.notes
+                .push(format!("The 32-bit scanning helper did not answer: {e}"));
+        }
+    }
     details.push("TWAIN manager (TWAINDSM.dll):".into());
     details.extend(
         crate::twain::dsm_report()
@@ -274,7 +311,7 @@ pub fn devices() -> Devices {
     // Drivers such as PaperStream IP install both; name the 32-bit ones only when no TWAIN
     // source could be listed (that is why the scanner is missing).
     let old = crate::twain::thirty_two_bit_only();
-    if !old.is_empty() && !d.list.iter().any(|x| x.kind == Kind::Twain) {
+    if !old.is_empty() && helper.is_none() && !d.list.iter().any(|x| x.kind == Kind::Twain) {
         d.notes.push(format!(
             "Installed for 32-bit programs only, so Vibe Files (64-bit) cannot use: {}. \
              Install the scanner's 64-bit TWAIN driver.",
@@ -782,6 +819,11 @@ pub fn scan_to(
     driver_ui: bool,
     scans_dir: &Path,
 ) -> Result<(PathBuf, Assembled), String> {
+    if let Some(source) = device_id.strip_prefix(TWAIN32_PREFIX) {
+        let scanned = crate::twain::helper::scan32(source, &twain_settings(profile, driver_ui))?;
+        let profile = for_twain(profile, driver_ui);
+        return deliver(scans_dir, |tmp| assemble_twain(scanned, &profile, tmp));
+    }
     if let Some(source) = device_id.strip_prefix(TWAIN_PREFIX) {
         let scanned = crate::twain::scan(source, &twain_settings(profile, driver_ui))?;
         let profile = for_twain(profile, driver_ui);

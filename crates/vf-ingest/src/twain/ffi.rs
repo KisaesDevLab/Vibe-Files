@@ -246,25 +246,39 @@ pub struct Status {
     pub data: u16,
 }
 
-// Sizes under `#pragma pack (2)` on 64-bit Windows.
+// Sizes under `#pragma pack (2)` on Windows: the same for both, except the structures holding
+// a pointer or handle (8 bytes on 64-bit, 4 on 32-bit: the 32-bit scanning helper).
 const _: () = {
     assert!(size_of::<Fix32>() == 4);
     assert!(size_of::<Version>() == 42);
     assert!(size_of::<Identity>() == 156);
-    assert!(size_of::<Capability>() == 12);
     assert!(size_of::<OneValue>() == 6);
     assert!(size_of::<EnumerationHead>() == 14);
     assert!(size_of::<Range>() == 22);
-    assert!(size_of::<UserInterface>() == 12);
     assert!(size_of::<PendingXfers>() == 6);
     assert!(size_of::<SetupMemXfer>() == 12);
+    assert!(size_of::<ImageInfo>() == 42);
+    assert!(size_of::<Status>() == 4);
+};
+#[cfg(target_pointer_width = "64")]
+const _: () = {
+    assert!(size_of::<Capability>() == 12);
+    assert!(size_of::<UserInterface>() == 12);
     assert!(size_of::<Memory>() == 16);
     assert!(size_of::<ImageMemXfer>() == 42);
-    assert!(size_of::<ImageInfo>() == 42);
     assert!(size_of::<Event>() == 10);
     assert!(size_of::<EntryPoint>() == 44);
     assert!(size_of::<Callback2>() == 18);
-    assert!(size_of::<Status>() == 4);
+};
+#[cfg(target_pointer_width = "32")]
+const _: () = {
+    assert!(size_of::<Capability>() == 8);
+    assert!(size_of::<UserInterface>() == 8);
+    assert!(size_of::<Memory>() == 12);
+    assert!(size_of::<ImageMemXfer>() == 38);
+    assert!(size_of::<Event>() == 6);
+    assert!(size_of::<EntryPoint>() == 24);
+    assert!(size_of::<Callback2>() == 10);
 };
 
 // Data groups and flags.

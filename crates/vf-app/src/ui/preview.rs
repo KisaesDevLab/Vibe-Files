@@ -49,14 +49,15 @@ pub enum Act {
 impl Preview {
     /// Shows `doc` (id, cabinet path, hash); the same one again changes nothing.
     pub fn set(&mut self, ctx: &egui::Context, root: &Path, id: &str, rel: &str, hash: &str) {
+        let path = root.join(rel);
+        // A rename or move keeps the id and hash but not the path (QA).
         if self
             .doc
             .as_ref()
-            .is_some_and(|(i, _, h)| i == id && h == hash)
+            .is_some_and(|(i, p, h)| i == id && h == hash && *p == path)
         {
             return;
         }
-        let path = root.join(rel);
         self.generation += 1;
         self.pages = None;
         self.page = 0;

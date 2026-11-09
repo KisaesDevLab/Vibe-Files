@@ -158,11 +158,38 @@ pub(crate) fn decode_upright(src: &Path) -> Result<DynamicImage, String> {
         .map_err(|e| format!("cannot open {}: {e}", src.display()))?
         .into_decoder()
         .map_err(bad)?;
+    within_limits(&mut decoder, src)?;
     let orientation = decoder.orientation().map_err(bad)?;
     let mut img = DynamicImage::from_decoder(decoder).map_err(bad)?;
     img.apply_orientation(orientation);
     Ok(img)
 }
+
+/// `from_decoder` does not check the image crate's own memory limit (QA: a small PNG of
+/// 40000 × 40000 pixels asked for 6 GB): checked before any pixel is read.
+fn within_limits(decoder: &mut impl ImageDecoder, src: &Path) -> Result<(), String> {
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(MAX_SIDE);
+    limits.max_image_height = Some(MAX_SIDE);
+    limits.max_alloc = Some(MAX_PIXEL_BYTES);
+    let (w, h) = decoder.dimensions();
+    let too_large = || {
+        format!(
+            "{} is too large a picture ({w} × {h} pixels)",
+            src.display()
+        )
+    };
+    decoder.set_limits(limits).map_err(|_| too_large())?;
+    if decoder.total_bytes() > MAX_PIXEL_BYTES {
+        return Err(too_large());
+    }
+    Ok(())
+}
+
+/// Largest picture side read, pixels (a 600 dpi scan of a 30-inch page).
+const MAX_SIDE: u32 = 18_000;
+/// Most memory one picture's pixels may take.
+const MAX_PIXEL_BYTES: u64 = 512 * 1024 * 1024;
 
 /// A JPEG keeps its own bytes when it is upright and gray or RGB; otherwise it is turned and
 /// saved again.
@@ -185,6 +212,7 @@ fn read_jpeg(src: &Path) -> Result<Vec<Picture>, String> {
         let gray = color == image::ExtendedColorType::L8;
         return Ok(vec![Picture::jpeg(width, height, gray, data)]);
     }
+    within_limits(&mut decoder, src)?;
     let mut img = DynamicImage::from_decoder(decoder).map_err(bad)?;
     img.apply_orientation(orientation);
     let gray = !img.color().has_color();

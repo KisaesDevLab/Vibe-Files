@@ -367,25 +367,46 @@ pub fn read_name(
     // Neither reading names a client (a year or a form number in front of the ID,
     // "Name_2025_1040_Tax_Return_3280_TIAM"): a client's ID in the last 14 characters of the
     // name, nearest the end first, then in the first 14 (owner 2026-11-09).
-    let Some((start, end, id)) = id_near_ends(stem, &is_client_id) else {
+    // A word alone must look like an ID (the ID pattern) and not be a year (QA: "Statement
+    // 12-31-2025" is not client 2025).
+    let word_ok = |w: &str| {
+        let fits = match re {
+            Some(re) => re
+                .captures(&format!("x_{w}_x.x"))
+                .is_some_and(|c| &c["id"] == w),
+            None => w.chars().count() >= 4,
+        };
+        fits && !(w.len() == 4 && detect_year(w, current_year).is_some())
+    };
+    let Some((start, end, id)) = id_near_ends(stem, &is_client_id, word_ok) else {
         return read;
     };
-    // The name is the first `_` part (else what is before the ID); the rest is everything else.
-    let name_end = stem.find('_').filter(|&i| i < start).unwrap_or(start);
+    // The name is the first `_` part before the ID; everything else is what rules read. With no
+    // `_` before the ID, the words before it are both (QA: never an empty rest).
     let sep = |c: char| c == '_' || c == '-' || c.is_whitespace();
-    let rest = format!("{}_{}", &stem[name_end..start], &stem[end..])
-        .split('_')
-        .map(|p| p.trim_matches(sep))
-        .filter(|p| !p.is_empty())
-        .collect::<Vec<_>>()
-        .join("_");
-    let name = stem[..name_end].trim_matches(sep).to_string();
+    let tidy = |s: String| {
+        s.split('_')
+            .map(|p| p.trim_matches(sep))
+            .filter(|p| !p.is_empty())
+            .collect::<Vec<_>>()
+            .join("_")
+    };
+    let (name, rest) = match stem.find('_').filter(|&i| i < start) {
+        Some(u) => (
+            stem[..u].trim_matches(sep).to_string(),
+            tidy(format!("{}_{}", &stem[u..start], &stem[end..])),
+        ),
+        None => {
+            let before = stem[..start].trim_matches(sep).to_string();
+            (before.clone(), tidy(format!("{before}_{}", &stem[end..])))
+        }
+    };
+    if rest.is_empty() {
+        // The name is the ID alone: nothing for rules to read.
+        return read;
+    }
     Parsed {
-        name: if name.is_empty() {
-            stem.to_string()
-        } else {
-            name
-        },
+        name: if name.is_empty() { rest.clone() } else { name },
         id: Some(id),
         year: detect_year(&rest, current_year).or_else(|| detect_year(stem, current_year)),
         rest,
@@ -402,9 +423,14 @@ const ID_SEARCH_CHARS: usize = 14;
 /// Words are runs of letters and digits. Looked for in the words ending in the last
 /// [`ID_SEARCH_CHARS`] characters (from the end), then the words starting in the first
 /// [`ID_SEARCH_CHARS`] (from the start). At each word, a two-part ID first (owner 2026-11-09:
-/// `@@@@_@@@@` or `@@@@@@@@`): the word with its neighbour as written ("3280_TIAM") and run
-/// together ("3280TIAM"), then the word alone.
-fn id_near_ends(stem: &str, is_client_id: impl Fn(&str) -> bool) -> Option<(usize, usize, String)> {
+/// `@@@@_@@@@` or `@@@@@@@@`, two 4-character parts): the word with its neighbour as written
+/// ("3280_TIAM", "3280 TIAM"), joined by `_` and run together ("3280TIAM"); an 8-character word
+/// also as its halves ("3280_TIAM"); then the word alone when `word_ok` accepts it.
+fn id_near_ends(
+    stem: &str,
+    is_client_id: impl Fn(&str) -> bool,
+    word_ok: impl Fn(&str) -> bool,
+) -> Option<(usize, usize, String)> {
     let mut words: Vec<(usize, usize)> = Vec::new();
     let mut open: Option<usize> = None;
     for (i, c) in stem.char_indices() {
@@ -426,17 +452,30 @@ fn id_near_ends(stem: &str, is_client_id: impl Fn(&str) -> bool) -> Option<(usiz
     let tail = byte_at(chars.saturating_sub(ID_SEARCH_CHARS));
     let head = byte_at(ID_SEARCH_CHARS);
     // The pair (a, b) as written and run together, then `single` alone.
+    let half = |w: &str| w.chars().count() == 4;
     let try_at = |pair: Option<((usize, usize), (usize, usize))>, single: (usize, usize)| {
         if let Some(((s, first_end), (bs, e))) = pair {
             let (first, second) = (&stem[s..first_end], &stem[bs..e]);
-            for id in [stem[s..e].to_string(), format!("{first}{second}")] {
-                if is_client_id(&id) {
-                    return Some((s, e, id));
+            if half(first) && half(second) {
+                for id in [
+                    stem[s..e].to_string(),
+                    format!("{first}_{second}"),
+                    format!("{first}{second}"),
+                ] {
+                    if is_client_id(&id) {
+                        return Some((s, e, id));
+                    }
                 }
             }
         }
         let id = &stem[single.0..single.1];
-        is_client_id(id).then(|| (single.0, single.1, id.to_string()))
+        if id.chars().count() == 8 && id.is_ascii() {
+            let split = format!("{}_{}", &id[..4], &id[4..]);
+            if is_client_id(&split) {
+                return Some((single.0, single.1, split));
+            }
+        }
+        (word_ok(id) && is_client_id(id)).then(|| (single.0, single.1, id.to_string()))
     };
     for i in (0..words.len()).rev() {
         if words[i].1 <= tail {
@@ -730,6 +769,28 @@ mod tests {
             |_| false,
         );
         assert_eq!(p.id.as_deref(), Some("TIAM"));
+        // QA: with no `_` before the ID the words before it are what rules read, never nothing.
+        assert_eq!(p.rest, "Tax Return 2025 1040");
+        // QA: the parts joined by a space or `-`, or run together, find `3280_TIAM`.
+        let under = |id: &str| id == "3280_TIAM";
+        for n in [
+            "Tiam Return 2025 3280 TIAM.pdf",
+            "Tiam Return 2025 3280-TIAM.pdf",
+            "Tiam_2025_Return_3280TIAM.pdf",
+        ] {
+            let p = read_name(n, Some(&re), &off, 2026, under, |_| false);
+            assert_eq!(p.id.as_deref(), Some("3280_TIAM"), "{n}");
+        }
+        // QA: a date, a year or a one-character word is not a client's ID.
+        let numbers = |id: &str| ["1231", "2025", "12312025", "1"].contains(&id);
+        for n in [
+            "Bank Statement 12-31-2025.pdf",
+            "Invoice (1).pdf",
+            "Smith W-1 2025.pdf",
+        ] {
+            let p = read_name(n, Some(&re), &off, 2026, numbers, |_| false);
+            assert_eq!(p.id, None, "{n}");
+        }
         let long = "TIAM 2025 1040 Tax Return and a long description.pdf";
         let p = read_name(long, Some(&re), &off, 2026, ti, |_| false);
         assert_eq!(p.id.as_deref(), Some("TIAM"));

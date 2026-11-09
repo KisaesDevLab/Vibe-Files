@@ -15,6 +15,7 @@
 #[cfg(any(test, feature = "test-support"))]
 pub mod fake;
 pub mod ffi;
+pub mod helper;
 mod session;
 
 use std::ffi::c_void;

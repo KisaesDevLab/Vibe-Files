@@ -30,16 +30,24 @@ pub fn holder(data: &Path) -> String {
         .to_string()
 }
 
-/// Takes the data folder for this process, or says who has it.
-pub fn acquire(data: &Path) -> Result<DataLock, String> {
+/// Takes the data folder for this process, or says who has it. `window`: the program's window
+/// (not a command such as a sync run from Task Scheduler), which a second start may close when
+/// it was left behind.
+pub fn acquire(data: &Path, window: bool) -> Result<DataLock, String> {
     acquire_as(
         data,
         vf_core::windows_login().as_deref(),
         &std::env::var("COMPUTERNAME").unwrap_or_default(),
+        window,
     )
 }
 
-fn acquire_as(data: &Path, login: Option<&str>, computer: &str) -> Result<DataLock, String> {
+fn acquire_as(
+    data: &Path,
+    login: Option<&str>,
+    computer: &str,
+    window: bool,
+) -> Result<DataLock, String> {
     use std::os::windows::fs::OpenOptionsExt;
     std::fs::create_dir_all(data).map_err(|e| format!("cannot create {}: {e}", data.display()))?;
     let lock = data.join("in-use.lock");
@@ -53,19 +61,26 @@ fn acquire_as(data: &Path, login: Option<&str>, computer: &str) -> Result<DataLo
     {
         Ok(file) => {
             let who = data.join("in-use.txt");
-            // Second line: the process and its Windows session, so a second start can find this
-            // copy (bring its window forward, or close it when it was left in a disconnected
-            // session: Citrix, Remote Desktop, owner 2026-11-09).
-            let _ = std::fs::write(
+            // Second line: the process, its Windows session, when it started and whether it is
+            // the window, so a second start can find this copy (bring its window forward, or
+            // close it when it was left in a disconnected session: Citrix, Remote Desktop,
+            // owner 2026-11-09). A file that cannot be written is removed: a stale one could
+            // name another process (QA).
+            let pid = std::process::id();
+            let written = std::fs::write(
                 &who,
                 format!(
-                    "{} on {computer} since {}\nprocess {} session {}\n",
+                    "{} on {computer} since {}\nprocess {pid} session {} started {} {}\n",
                     login.unwrap_or("someone"),
                     crate::ui::widgets::local_time(&vf_core::now_rfc3339()),
-                    std::process::id(),
-                    session_of(std::process::id()).map_or("?".into(), |s| s.to_string()),
+                    session_of(pid).map_or("?".into(), |s| s.to_string()),
+                    started(pid).unwrap_or(0),
+                    if window { "window" } else { "command" },
                 ),
             );
+            if written.is_err() {
+                let _ = std::fs::remove_file(&who);
+            }
             Ok(DataLock { _file: file, who })
         }
         Err(_) => {
@@ -94,7 +109,7 @@ pub fn acquire_default(
     login: Option<&str>,
     computer: &str,
 ) -> Result<(DataLock, PathBuf), String> {
-    let first = match acquire_as(data, login, computer) {
+    let first = match acquire_as(data, login, computer, true) {
         Ok(l) => return Ok((l, data.to_path_buf())),
         Err(e) => e,
     };
@@ -104,7 +119,7 @@ pub fn acquire_default(
     match personal {
         Some(p) if !mine && p != data => {
             tracing::info!("data folder held by another session; using this login's own");
-            acquire_as(p, login, computer).map(|l| (l, p.to_path_buf()))
+            acquire_as(p, login, computer, true).map(|l| (l, p.to_path_buf()))
         }
         _ if mine => Err(format!(
             "Vibe Files is already open under your login on this computer ({}). Switch to that window, or close it first.",
@@ -160,11 +175,18 @@ pub struct OwnCopy {
     pub same_session: bool,
     /// Since when (`in-use.txt`'s first line).
     pub since: String,
+    /// The program's window (else a command, which is never offered for closing).
+    pub window: bool,
 }
 
 /// The copy that holds `data`, when `in-use.txt` names this login on this computer and its
 /// process is still a running Vibe Files (not a process that reused the number).
 pub fn own_copy(data: &Path, login: Option<&str>, computer: &str) -> Option<OwnCopy> {
+    // Only when another process really holds the lock (a sharing violation), not when the
+    // folder could not be opened for another reason (QA).
+    if !held(data) {
+        return None;
+    }
     let text = std::fs::read_to_string(data.join("in-use.txt")).ok()?;
     let mut lines = text.lines();
     let first = lines.next()?.trim().to_string();
@@ -172,14 +194,15 @@ pub fn own_copy(data: &Path, login: Option<&str>, computer: &str) -> Option<OwnC
     if !first.to_lowercase().starts_with(&me.to_lowercase()) {
         return None;
     }
-    let pid: u32 = lines
-        .next()?
-        .strip_prefix("process ")?
-        .split_whitespace()
-        .next()?
-        .parse()
-        .ok()?;
-    if pid == std::process::id() || !is_this_program(pid) {
+    // "process <pid> session <s> started <time> <window|command>"
+    let words: Vec<&str> = lines.next()?.split_whitespace().collect();
+    let [_, pid, _, _, _, start, role] = words[..] else {
+        return None;
+    };
+    let pid: u32 = pid.parse().ok()?;
+    let start: u64 = start.parse().ok()?;
+    // The same process, not another that reused its number since (QA).
+    if pid == std::process::id() || !is_this_program(pid) || started(pid) != Some(start) {
         return None;
     }
     let session = session_of(pid);
@@ -191,7 +214,42 @@ pub fn own_copy(data: &Path, login: Option<&str>, computer: &str) -> Option<OwnC
             .split_once(" since ")
             .map(|(_, t)| t.to_string())
             .unwrap_or_default(),
+        window: role == "window",
     })
+}
+
+/// Another process has `data`'s lock file open (Windows' sharing violation, error 32).
+fn held(data: &Path) -> bool {
+    use std::os::windows::fs::OpenOptionsExt;
+    match std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(0)
+        .open(data.join("in-use.lock"))
+    {
+        Ok(_) => false,
+        Err(e) => e.raw_os_error() == Some(32),
+    }
+}
+
+/// When a process started (Windows FILETIME), to tell it from a later one with its number.
+fn started(pid: u32) -> Option<u64> {
+    use windows::Win32::Foundation::{CloseHandle, FILETIME};
+    use windows::Win32::System::Threading::{
+        GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+    // SAFETY: plain Win32 calls on a handle closed below.
+    unsafe {
+        let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
+        let (mut c, mut e, mut k, mut u) = (
+            FILETIME::default(),
+            FILETIME::default(),
+            FILETIME::default(),
+            FILETIME::default(),
+        );
+        let ok = GetProcessTimes(h, &mut c, &mut e, &mut k, &mut u).is_ok();
+        let _ = CloseHandle(h);
+        ok.then(|| (u64::from(c.dwHighDateTime) << 32) | u64::from(c.dwLowDateTime))
+    }
 }
 
 /// The Windows session a process runs in.
@@ -221,7 +279,7 @@ fn is_this_program(pid: u32) -> bool {
         };
         let mut code = 0u32;
         let alive = GetExitCodeProcess(h, &mut code).is_ok() && code == STILL_ACTIVE.0 as u32;
-        let mut buf = vec![0u16; 1024];
+        let mut buf = vec![0u16; 32_768];
         let mut len = buf.len() as u32;
         let named = QueryFullProcessImageNameW(
             h,
@@ -295,10 +353,12 @@ pub fn close_copy(pid: u32) -> Result<(), String> {
     unsafe {
         let h = OpenProcess(PROCESS_TERMINATE | PROCESS_SYNCHRONIZE, false, pid)
             .map_err(|e| format!("cannot reach the other copy: {e}"))?;
-        let r = TerminateProcess(h, 1).map_err(|e| format!("cannot close the other copy: {e}"));
+        if let Err(e) = TerminateProcess(h, 1) {
+            let _ = CloseHandle(h);
+            return Err(format!("cannot close the other copy: {e}"));
+        }
         let gone = WaitForSingleObject(h, 15_000) == WAIT_OBJECT_0;
         let _ = CloseHandle(h);
-        r?;
         if !gone {
             return Err("the other copy did not close in time".into());
         }
@@ -317,12 +377,12 @@ mod tests {
     fn the_copy_holding_the_folder_is_found_by_process_and_session() {
         let t = tempfile::tempdir().unwrap();
         let data = t.path().join("data");
-        let lock = acquire_as(&data, Some(r"XC\kim"), "SERVER-1").unwrap();
+        let lock = acquire_as(&data, Some(r"XC\kim"), "SERVER-1", true).unwrap();
         assert!(holder(&data).starts_with(r"XC\kim on SERVER-1 since "));
         // This process holds it: not "another copy".
         assert_eq!(own_copy(&data, Some(r"XC\kim"), "SERVER-1"), None);
         // As if another copy of this program held it: a child running this test exe, kept
-        // alive by its stdin until the checks are done.
+        // alive by its stdin until the checks are done. The lock stays held by this process.
         let mut child = std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "datalock::tests::wait_for_stdin", "--nocapture"])
             .env("VF_WAIT_FOR_STDIN", "1")
@@ -333,21 +393,30 @@ mod tests {
             .unwrap();
         let pid = child.id();
         let first = holder(&data);
-        std::fs::write(
-            data.join("in-use.txt"),
-            format!("{first}\nprocess {pid} session 0\n"),
-        )
-        .unwrap();
+        let at = started(pid).unwrap();
+        let write = |line: String| {
+            std::fs::write(data.join("in-use.txt"), format!("{first}\n{line}\n")).unwrap()
+        };
+        write(format!("process {pid} session 0 started {at} window"));
         let c = own_copy(&data, Some(r"xc\KIM"), "SERVER-1").expect("found");
         assert_eq!(c.pid, pid);
-        assert!(c.same_session);
+        assert!(c.same_session && c.window);
         assert!(!c.since.is_empty());
+        // A command (a sync from Task Scheduler) is found as one, never as a window.
+        write(format!("process {pid} session 0 started {at} command"));
+        assert!(!own_copy(&data, Some(r"XC\kim"), "SERVER-1").unwrap().window);
+        // Another start time: a later process with the same number, not the one that wrote it.
+        write(format!("process {pid} session 0 started {} window", at + 1));
+        assert_eq!(own_copy(&data, Some(r"XC\kim"), "SERVER-1"), None);
+        write(format!("process {pid} session 0 started {at} window"));
         assert_eq!(own_copy(&data, Some(r"XC\pat"), "SERVER-1"), None);
         assert_eq!(own_copy(&data, Some(r"XC\kim"), "SERVER-2"), None);
         close_copy(pid).unwrap();
         let _ = child.wait();
         assert_eq!(own_copy(&data, Some(r"XC\kim"), "SERVER-1"), None, "gone");
+        // The lock not held (only a leftover in-use.txt): nothing to find.
         drop(lock);
+        assert_eq!(own_copy(&data, Some(r"XC\kim"), "SERVER-1"), None, "free");
     }
 
     /// Helper for the test above: in the child, waits until its stdin closes.
@@ -384,12 +453,12 @@ mod tests {
             t.path().join("C").join("Vibe Files").join("data")
         );
         // One copy per data folder.
-        let first = acquire(&a).unwrap();
-        let second = acquire(&a);
+        let first = acquire(&a, true).unwrap();
+        let second = acquire(&a, true);
         assert!(second.is_err());
         assert!(second.err().unwrap().contains("already open"));
         drop(first);
-        assert!(acquire(&a).is_ok());
+        assert!(acquire(&a, true).is_ok());
     }
 
     /// Owner 2026-11-05: someone else's open copy never stops a person opening Vibe Files.
