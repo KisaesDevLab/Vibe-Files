@@ -41,7 +41,8 @@ pub struct IngestState {
     /// What the worker did, newest first.
     pub log: Vec<String>,
     pub cover: Option<CoverSheetDialog>,
-    /// A sheet PDF to open in the PDF app (the app runs it through Browse's shell).
+    /// A file to open in its Windows program (a cover sheet PDF, a file double-clicked in
+    /// Intake's queue); the app runs it through Browse's shell.
     pub open_request: Option<PathBuf>,
     /// The staging folders changed here; the app saves `config.toml`.
     pub changed: Option<Ingest>,
@@ -450,7 +451,12 @@ impl IngestState {
         let mut scan_now = false;
         ui.horizontal(|ui| {
             ui.label(RichText::new("Scanner").strong());
-            let Some(found) = self.devices.clone() else {
+            // The list and notes only: Scanner details' lines are not copied every frame.
+            let Some(found) = self.devices.as_ref().map(|d| Devices {
+                list: d.list.clone(),
+                notes: d.notes.clone(),
+                details: Vec::new(),
+            }) else {
                 ui.spinner();
                 return;
             };
@@ -542,11 +548,12 @@ impl IngestState {
         let Some(found) = &self.devices else {
             return;
         };
-        let text = found.details.join("\n");
         egui::CollapsingHeader::new("Scanner details")
             .id_salt("vf-scanner-details")
             .default_open(false)
             .show(ui, |ui| {
+                // Built only while open (not every frame).
+                let text = found.details.join("\n");
                 if ui
                     .small_button("Copy")
                     .on_hover_text("Copy these lines to paste into an email or chat")

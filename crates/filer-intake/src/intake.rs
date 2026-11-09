@@ -41,6 +41,8 @@ pub enum Kind {
     /// A `.zip`: an Import draft (P07b), not queued for filing.
     Zip,
     Unsupported,
+    /// Not a PDF but of a type Setup files (V25): queued, filed by its name, no PDF tools.
+    Other,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -465,6 +467,8 @@ pub struct IntakeManager {
     tx: Option<Sender<Msg>>,
     rx: Option<Receiver<Event>>,
     inboxes: Option<(Vec<PathBuf>, bool)>,
+    /// Types filed besides PDF (lower case), from [`Self::set_file_types`].
+    file_types: Vec<String>,
     watching: Vec<PathBuf>,
     watch_errors: Vec<(PathBuf, String)>,
     queue: Vec<QueuedFile>,
@@ -480,6 +484,7 @@ impl IntakeManager {
             tx: None,
             rx: None,
             inboxes: None,
+            file_types: Vec::new(),
             watching: Vec::new(),
             watch_errors: Vec::new(),
             queue: Vec::new(),
@@ -520,6 +525,44 @@ impl IntakeManager {
 
     /// Watches these inboxes, with their sub-folders when `subfolders` (restarting the watchers
     /// only when something changed).
+    /// Files of these types (besides PDF) are queued for filing; the rest are listed as
+    /// unsupported (V25). Moves files between the two lists when the types change.
+    pub fn set_file_types(&mut self, types: &[String]) {
+        let types: Vec<String> = types
+            .iter()
+            .map(|t| t.trim().trim_start_matches('.').to_ascii_lowercase())
+            .filter(|t| !t.is_empty() && !crate::zipimport::BLOCKED.contains(&t.as_str()))
+            .collect();
+        if self.file_types == types {
+            return;
+        }
+        self.file_types = types;
+        let (take, keep): (Vec<QueuedFile>, Vec<QueuedFile>) =
+            std::mem::take(&mut self.unsupported)
+                .into_iter()
+                .partition(|q| self.filed_type(&q.path));
+        self.unsupported = keep;
+        for mut q in take {
+            q.kind = Kind::Other;
+            self.queue.push(q);
+        }
+        // Taken off the list: back to unsupported (files a zip sent to the queue stay).
+        let (back, keep): (Vec<QueuedFile>, Vec<QueuedFile>) = std::mem::take(&mut self.queue)
+            .into_iter()
+            .partition(|q| q.kind == Kind::Other && !self.filed_type(&q.path));
+        self.queue = keep;
+        for mut q in back {
+            q.kind = Kind::Unsupported;
+            self.unsupported.push(q);
+        }
+    }
+
+    fn filed_type(&self, path: &Path) -> bool {
+        path.extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| self.file_types.iter().any(|t| t.eq_ignore_ascii_case(e)))
+    }
+
     pub fn set_inboxes(&mut self, inboxes: &[PathBuf], subfolders: bool) {
         if self
             .inboxes
@@ -530,14 +573,21 @@ impl IntakeManager {
         }
         self.inboxes = Some((inboxes.to_vec(), subfolders));
         self.send(Msg::SetInboxes(inboxes.to_vec(), subfolders));
-        // Files of an inbox no longer watched leave the queue (a host took a personal inbox
-        // away); they are listed again if it comes back.
+        // Files of an inbox no longer watched leave the queue, the Import drafts and the
+        // unsupported list (a host took a personal inbox away); they are listed again if it
+        // comes back.
+        let unwatched =
+            |q: &QueuedFile| matches!(&q.source, Source::Inbox(i) if !inboxes.contains(i));
         let gone: Vec<PathBuf> = self
             .queue
             .iter()
-            .filter(|q| matches!(&q.source, Source::Inbox(i) if !inboxes.contains(i)))
+            .chain(&self.zips)
+            .chain(&self.unsupported)
+            .filter(|q| unwatched(q))
             .map(|q| q.path.clone())
             .collect();
+        self.zips.retain(|q| !unwatched(q));
+        self.unsupported.retain(|q| !unwatched(q));
         for p in gone {
             self.remove(&p);
         }
@@ -556,10 +606,13 @@ impl IntakeManager {
         let events: Vec<Event> = rx.try_iter().collect();
         for e in events {
             match e {
-                Event::Queued(f) => {
+                Event::Queued(mut f) => {
+                    if f.kind == Kind::Unsupported && self.filed_type(&f.path) {
+                        f.kind = Kind::Other;
+                    }
                     tracing::info!(file = %f.path.display(), kind = ?f.kind, "queued");
                     let list = match f.kind {
-                        Kind::Pdf => &mut self.queue,
+                        Kind::Pdf | Kind::Other => &mut self.queue,
                         Kind::Zip => &mut self.zips,
                         Kind::Unsupported => &mut self.unsupported,
                     };

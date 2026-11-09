@@ -9,6 +9,7 @@
     clippy::new_without_default
 )]
 
+pub mod imagepdf;
 pub mod pdf;
 pub mod split;
 

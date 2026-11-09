@@ -249,7 +249,7 @@ impl CombinedOriginal {
     }
 
     /// The file on disk is still the one that was combined.
-    fn unchanged(&self) -> bool {
+    pub(crate) fn unchanged(&self) -> bool {
         std::fs::metadata(&self.path)
             .is_ok_and(|m| m.len() == self.size && m.modified().ok() == self.modified)
     }

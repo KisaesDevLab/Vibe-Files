@@ -35,6 +35,8 @@ uuid.workspace = true
 clap.workspace = true
 windows-sys.workspace = true
 zip.workspace = true
+image.workspace = true
+tiff.workspace = true
 filer-core = { path = "../filer-core" }
 
 [dev-dependencies]

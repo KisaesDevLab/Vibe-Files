@@ -6,9 +6,9 @@
 |---|---|
 | Repo | `KisaesDevLab/Vibe-Filer-Desktop` (private) |
 | Branch | `master` |
-| Commit | `f2504fe` on `master` ("feat(host): personal inboxes with a My inbox tab; QA of the V21 hooks (V22)", 2026-11-05); before: `29db764` (V21); `6433c04` on `master` ("feat(host): Setup lock and \"New client…\" for a program that embeds Filer", 0.2.6 + the Intake preview pane, ticked-row actions and host hooks, 2026-11-04) |
+| Commit | `6417249` on `master` ("fix: QA of V23-V26 (table, image conversion, opening files)", 2026-11-09); before: `f2504fe` (V22); `29db764` (V21); `6433c04` on `master` ("feat(host): Setup lock and \"New client…\" for a program that embeds Filer", 0.2.6 + the Intake preview pane, ticked-row actions and host hooks, 2026-11-04) |
 | Vendored | 2026-11-02, P00 step 2 at `ea4e726` (0.2.4); re-vendored 2026-11-04, PHASES PA-26 |
-| Upstream tests | 208 at this commit; all pass after the split (filer-core 64 · filer-pdf 13 · filer-intake 131) |
+| Upstream tests | 215 at this commit (208 at `f2504fe`); all pass after the split (filer-core 64 · filer-pdf 13 · filer-intake 131) |
 
 Upstream is one binary crate with no `lib.rs`. The three `filer-*` crates are a mechanical split
 of its `src/` (QUESTIONS Q-16). Upstream `main.rs` is not vendored; `vf-app` is the entry point.
@@ -34,7 +34,7 @@ No logic edits. Check with:
 | Upstream | Crate |
 |---|---|
 | `src/parse.rs` `config.rs` `datafile.rs` `clients.rs` `template.rs` `worker.rs` `rules.rs` `rulebuild.rs` `relationships.rs`, `assets/default_template.json` | `filer-core` |
-| `src/pdf.rs` `split.rs`, `assets/pdfium.dll` + licenses | `filer-pdf` |
+| `src/pdf.rs` `split.rs` `imagepdf.rs`, `assets/pdfium.dll` + licenses | `filer-pdf` |
 | `src/app.rs` `intake.rs` `sentinel.rs` `zipimport.rs` `plan.rs` `commit.rs` `undo.rs` `oplog.rs` `recovery.rs` `logging.rs` `pid.rs` `ui/*`, `assets/fonts/*`, `tests/fixtures/*`, `UI_SPEC.md` + `docs/mockups/` (reference) | `filer-intake` |
 | `src/main.rs` | not vendored |
 
@@ -73,6 +73,19 @@ the rest of intake. Moving it would need a logic edit (Q-16: merge rather than e
   typed keeps a menu's choice; Move to trash only for files from an inbox; host notes leave with
   their files. `app.rs`, `intake.rs`, `ui/preview.rs`, `ui/widgets.rs` copied; still only the
   four attribute lines differ; upstream's 208 tests pass.
+
+- **2026-11-09, PA-37: `f2504fe` → `6417249`: Preview grid, file types, Import tabs, open
+  (V23-V26).** The Preview table is an `egui_extras` table (columns stay aligned); Import has
+  Shared inbox | My inbox; a double-clicked file name opens through `offer_open` /
+  `take_open_request` (Vibe routes it to Browse's shell, not the Viewer, which edits catalogued
+  documents only); Setup › Inboxes › Also file and File images as PDFs (new upstream module
+  `imagepdf.rs`, put in filer-pdf and re-exported by filer-intake). `app.rs`, `intake.rs`,
+  `ui/import.rs`, `ui/preview.rs`, `ui/setup.rs`, `ui/widgets.rs` (filer-intake), `config.rs`
+  (filer-core), `pdf.rs` and `imagepdf.rs` (filer-pdf) copied; the two `pdf.rs` attributes
+  re-applied; workspace `image` gains png/tiff/bmp/gif and `tiff` 0.11.3 is added (filer-pdf;
+  `image` also a filer-intake dev-dependency for its tests), `commit.rs` too after the QA fixes;
+  workspace `windows-sys` gains Win32_UI_Shell and Win32_UI_WindowsAndMessaging (ShellExecute).
+  Still only the four attribute lines differ; upstream's 215 tests pass.
 
 ## Re-vendoring
 

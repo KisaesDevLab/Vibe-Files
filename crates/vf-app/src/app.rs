@@ -1017,7 +1017,7 @@ impl eframe::App for VibeFilesApp {
             if let Some(p) = o.intake.ingest.open_request.take()
                 && let Err(e) = (o.browse.shell)(&crate::shell::ShellAction::Open(p))
             {
-                o.intake.ingest.warning = Some(format!("The sheet did not open: {e}"));
+                o.intake.ingest.warning = Some(format!("The file did not open: {e}"));
             }
             if let Some(ingest) = o.intake.ingest.changed.take() {
                 self.config.ingest = ingest;

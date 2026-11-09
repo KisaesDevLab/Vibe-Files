@@ -32,6 +32,25 @@ pub struct SetupScreen {
     selected_node: Vec<usize>,
     /// Node being renamed and the text typed so far.
     renaming: Option<(Vec<usize>, String)>,
+    /// "Also file" as typed (V25); read into the draft's file types as it changes.
+    file_types_text: String,
+}
+
+/// The file types as Setup shows them: `docx, xlsx, jpg`.
+fn file_types_text(types: &[String]) -> String {
+    types.join(", ")
+}
+
+/// Typed file types: split on commas and spaces, dots and case dropped, each once.
+pub fn parse_file_types(text: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for t in text.split([',', ' ', ';']) {
+        let t = t.trim().trim_start_matches('.').to_ascii_lowercase();
+        if !t.is_empty() && !out.contains(&t) {
+            out.push(t);
+        }
+    }
+    out
 }
 
 impl SetupScreen {
@@ -46,6 +65,7 @@ impl SetupScreen {
             wizard: None,
             selected_node: Vec::new(),
             renaming: None,
+            file_types_text: file_types_text(&state.settings.file_types),
         }
     }
 
@@ -302,6 +322,60 @@ impl SetupScreen {
             .on_hover_text(
                 "On: files in folders inside an inbox are queued too. Off: only files directly \
                  in the inbox.",
+            );
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            let l = ui.label("Also file").on_hover_text(
+                "File types queued for filing besides PDF, separated by commas. Filed by their \
+                 name like PDFs (no page reading, combine or split). Program files (.exe, .bat \
+                 …) are never filed.",
+            );
+            let edit = ui.add(
+                egui::TextEdit::singleline(&mut self.file_types_text)
+                    .desired_width(ui.available_width() - 150.0)
+                    .hint_text("docx, xlsx, jpg"),
+            );
+            let edit = edit.labelled_by(l.id);
+            if edit.changed() {
+                self.draft.file_types = parse_file_types(&self.file_types_text);
+            }
+            if ui
+                .button("Default list")
+                .on_hover_text("Office files, images, text and mail")
+                .clicked()
+            {
+                self.draft.file_types = crate::config::DEFAULT_FILE_TYPES
+                    .iter()
+                    .map(|t| t.to_string())
+                    .collect();
+                self.file_types_text = file_types_text(&self.draft.file_types);
+            }
+        });
+        let blocked: Vec<&String> = self
+            .draft
+            .file_types
+            .iter()
+            .filter(|t| crate::zipimport::BLOCKED.contains(&t.as_str()))
+            .collect();
+        if !blocked.is_empty() {
+            ui.label(
+                RichText::new(format!(
+                    "Never filed (program files): {}",
+                    blocked
+                        .iter()
+                        .map(|t| t.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ))
+                .size(11.0)
+                .color(pal(ui).muted),
+            );
+        }
+        ui.checkbox(&mut self.draft.images_to_pdf, "File images as PDFs")
+            .on_hover_text(
+                "JPEG, PNG, TIFF (every page), BMP and GIF images are filed as PDFs, a phone photo \
+                 turned upright. The image goes to the inbox's _combined folder; Undo puts it \
+                 back. Off: images are filed as they are.",
             );
         ui.horizontal(|ui| {
             if ui.button("Add inbox…").clicked()
@@ -709,6 +783,7 @@ impl SetupScreen {
             }
             if ui.add_enabled(dirty, egui::Button::new("Revert")).clicked() {
                 self.draft = state.settings.clone();
+                self.file_types_text = file_types_text(&self.draft.file_types);
                 self.template_draft = state.template.clone();
                 self.selected_node.clear();
                 self.renaming = None;

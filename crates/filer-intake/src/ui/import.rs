@@ -73,6 +73,9 @@ struct UnpackJob {
 #[derive(Default)]
 pub struct ImportScreen {
     selected: Option<PathBuf>,
+    /// Shared inbox | My inbox (V23): the zips from this person's own inboxes, when the host
+    /// gave some, else the rest (shared inboxes, dropped on the window, Browse for zip…).
+    mine: bool,
     drafts: HashMap<PathBuf, Draft>,
     /// Destination key → collisions, and the job computing them.
     collisions: Option<(String, Collisions)>,
@@ -155,7 +158,17 @@ impl ImportScreen {
         if let Some((level, msg)) = &self.message {
             banner(ui, *level, msg);
         }
-        let zips: Vec<QueuedFile> = state.intake.zips().to_vec();
+        if state.personal_inboxes.is_empty() {
+            self.mine = false;
+        }
+        self.inbox_tabs(ui, state);
+        let zips: Vec<QueuedFile> = state
+            .intake
+            .zips()
+            .iter()
+            .filter(|z| state.is_personal(z) == self.mine)
+            .cloned()
+            .collect();
         if self
             .selected
             .as_ref()
@@ -194,6 +207,36 @@ impl ImportScreen {
                 self.recent_ui(ui, state, &zips);
             });
         });
+    }
+
+    /// Shared inbox (n) | My inbox (n), when the host gave this person inboxes of their own
+    /// (V23, as on Preview). Not while a zip is being unpacked or queued.
+    fn inbox_tabs(&mut self, ui: &mut egui::Ui, state: &AppState) {
+        if state.personal_inboxes.is_empty() {
+            return;
+        }
+        let mine = state
+            .intake
+            .zips()
+            .iter()
+            .filter(|z| state.is_personal(z))
+            .count();
+        let shared = state.intake.zips().len() - mine;
+        let busy = self.job.is_some() || self.queue_job.is_some();
+        ui.add_enabled_ui(!busy, |ui| {
+            ui.horizontal(|ui| {
+                for (on, text) in [
+                    (false, format!("Shared inbox ({shared})")),
+                    (true, format!("My inbox ({mine})")),
+                ] {
+                    if ui.selectable_label(self.mine == on, text).clicked() && self.mine != on {
+                        self.mine = on;
+                        self.selected = None;
+                    }
+                }
+            });
+        });
+        ui.add_space(4.0);
     }
 
     fn poll(&mut self, ctx: &egui::Context, state: &mut AppState) {

@@ -14,6 +14,7 @@ use std::sync::mpsc::Receiver;
 
 use chrono::Datelike;
 use egui::{Align, Color32, CornerRadius, Frame, Layout, Margin, RichText, Stroke};
+use egui_extras::{Column, TableBuilder};
 
 use crate::app::AppState;
 use crate::commit::{self, CombinedOriginal, CommitInput, CommitReport, SplitCommit};
@@ -76,6 +77,17 @@ pub struct PreviewScreen {
     selected: Vec<PathBuf>,
     combine: Option<CombineDialog>,
     merge_job: Option<Receiver<Result<Group, String>>>,
+    /// Measured height of each table line, used from the next frame (the table's rows have a
+    /// height before they are drawn).
+    row_heights: HashMap<LineKey, f32>,
+    /// The table's width bucket last frame; a new one shares the columns out again.
+    table_width_key: Option<i64>,
+    /// Images being turned into PDFs (V25), by image path.
+    convert_jobs: Vec<(PathBuf, Receiver<Result<Group, String>>)>,
+    /// Images filed as they are: "Keep as image" on the row, or the conversion failed.
+    keep_image: std::collections::HashSet<PathBuf>,
+    /// When converted images were last checked for changes on disk.
+    stamp_checked: Option<std::time::Instant>,
     /// Split PDFs: their pieces (in data/tmp) stand in for the original row.
     splits: Vec<SplitGroup>,
     split_dialog: Option<SplitDialog>,
@@ -110,6 +122,8 @@ struct Group {
     added: chrono::DateTime<chrono::Local>,
     /// Edits the combined row starts with (from the first member).
     edits: RowEdits,
+    /// An image turned into a PDF (V25), not files combined: one member, labelled as converted.
+    converted: bool,
 }
 
 /// A PDF split into pieces.
@@ -181,6 +195,11 @@ impl Default for PreviewScreen {
             selected: Vec::new(),
             combine: None,
             merge_job: None,
+            row_heights: HashMap::new(),
+            table_width_key: None,
+            convert_jobs: Vec::new(),
+            keep_image: std::collections::HashSet::new(),
+            stamp_checked: None,
             splits: Vec::new(),
             split_dialog: None,
             split_job: None,
@@ -208,6 +227,164 @@ impl PreviewScreen {
     #[cfg(test)]
     pub fn plan_idle(&self) -> bool {
         self.job.is_none()
+    }
+
+    /// Images in the queue are turned into PDFs on a worker when Setup says so (V25); each
+    /// becomes a one-member group, so the combine path files the PDF, parks the image in
+    /// `_combined`, and Undo puts it back.
+    fn convert_images(&mut self, ctx: &egui::Context, state: &AppState) {
+        let mut i = 0;
+        while i < self.convert_jobs.len() {
+            let result = match self.convert_jobs[i].1.try_recv() {
+                Ok(r) => r,
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    i += 1;
+                    continue;
+                }
+                // The worker stopped without an answer (a decoder panic): never wait on it.
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    Err("the conversion stopped unexpectedly".to_string())
+                }
+            };
+            let (image, _) = self.convert_jobs.remove(i);
+            let queued = state.intake.queue().iter().any(|q| q.path == image);
+            match result {
+                Ok(mut group) if queued && state.settings.images_to_pdf => {
+                    tracing::info!(image = %image.display(), pages = group.pages, "image to PDF");
+                    // What was set on the image's row while it converted carries over.
+                    if let Some(e) = self.edits.get(&image) {
+                        group.edits = e.clone();
+                    }
+                    self.edits.insert(group.merged.clone(), group.edits.clone());
+                    if let Some(k) = self.selected.iter().position(|p| p == &image) {
+                        self.selected[k] = group.merged.clone();
+                    }
+                    if self.focused.as_ref() == Some(&image) {
+                        self.focused = Some(group.merged.clone());
+                    }
+                    self.groups.push(group);
+                }
+                Ok(group) => remove_tmp_file(&group.merged),
+                Err(e) => {
+                    tracing::warn!(image = %image.display(), error = %e, "image to PDF failed");
+                    self.keep_image.insert(image.clone());
+                    self.message = Some((
+                        Level::Info,
+                        format!(
+                            "{} could not be turned into a PDF ({e}); it is filed as it is.",
+                            file_name(&image)
+                        ),
+                    ));
+                }
+            }
+        }
+        // Kept-as-image files that left the queue are forgotten: a later file of the same name
+        // (scanners reuse names) is converted again.
+        if !self.keep_image.is_empty() {
+            let queue = state.intake.queue();
+            self.keep_image
+                .retain(|p| queue.iter().any(|q| &q.path == p));
+        }
+        // An image changed on disk since it was converted: its PDF is stale, so it is made
+        // again (looked at every few seconds, not every frame).
+        if self
+            .stamp_checked
+            .is_none_or(|t| t.elapsed() > std::time::Duration::from_secs(3))
+            && self.commit_job.is_none()
+        {
+            self.stamp_checked = Some(std::time::Instant::now());
+            let stale: Vec<PathBuf> = self
+                .groups
+                .iter()
+                .filter(|g| g.converted && !g.stamps.iter().all(|s| s.unchanged()))
+                .map(|g| g.merged.clone())
+                .collect();
+            for merged in stale {
+                tracing::info!(pdf = %merged.display(), "image changed: converted again");
+                self.discard_group(&merged, false);
+            }
+        }
+        if !state.settings.images_to_pdf {
+            // Switched off: converted rows go back to their images.
+            let converted: Vec<PathBuf> = self
+                .groups
+                .iter()
+                .filter(|g| g.converted)
+                .map(|g| g.merged.clone())
+                .collect();
+            for merged in converted {
+                self.groups.retain(|g| g.merged != merged);
+                self.edits.remove(&merged);
+                remove_tmp_file(&merged);
+            }
+            return;
+        }
+        if self.commit_job.is_some() {
+            return;
+        }
+        // A few at a time; the rest start as these finish.
+        const AT_ONCE: usize = 4;
+        let waiting: Vec<QueuedFile> = state
+            .intake
+            .queue()
+            .iter()
+            .filter(|q| {
+                q.kind == crate::intake::Kind::Other
+                    && crate::imagepdf::convertible(&q.path)
+                    && !self.keep_image.contains(&q.path)
+                    && !self.convert_jobs.iter().any(|(p, _)| p == &q.path)
+                    && !self
+                        .groups
+                        .iter()
+                        .any(|g| g.members.iter().any(|m| m.path == q.path))
+            })
+            .take(AT_ONCE.saturating_sub(self.convert_jobs.len()))
+            .cloned()
+            .collect();
+        for image in waiting {
+            let edits = self.edits.get(&image.path).cloned().unwrap_or_default();
+            let tmp = state
+                .data_dir
+                .join(pdf::TMP_DIR)
+                .join(uuid::Uuid::new_v4().simple().to_string());
+            // Named like the image with .pdf, so the plan reads the same ID, rule and year.
+            let merged = tmp.join(
+                image
+                    .path
+                    .with_extension("pdf")
+                    .file_name()
+                    .unwrap_or_default(),
+            );
+            let path = image.path.clone();
+            let job = worker::background(ctx, move || {
+                std::fs::create_dir_all(&tmp)
+                    .map_err(|e| format!("cannot create {}: {e}", tmp.display()))?;
+                let stamp = match CombinedOriginal::stamp(&image.path, image.source.clone()) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        let _ = std::fs::remove_dir(&tmp);
+                        return Err(format!("cannot read it: {e}"));
+                    }
+                };
+                match crate::imagepdf::image_to_pdf(&image.path, &merged) {
+                    Ok(pages) => Ok(Group {
+                        size: std::fs::metadata(&merged).map_or(0, |m| m.len()),
+                        merged,
+                        members: vec![image],
+                        stamps: vec![stamp],
+                        pages,
+                        added: chrono::Local::now(),
+                        edits,
+                        converted: true,
+                    }),
+                    Err(e) => {
+                        let _ = std::fs::remove_dir(&tmp);
+                        Err(e)
+                    }
+                }
+            });
+            self.convert_jobs.push((path, job));
+        }
     }
 
     #[cfg(test)]
@@ -337,7 +514,16 @@ impl PreviewScreen {
     }
 
     /// Deletes a combined file the app built and brings its members back as rows.
-    fn discard_group(&mut self, merged: &Path) {
+    /// `keep_image`: a converted image's PDF was given up by the person ("Keep as image"), so
+    /// the image is not converted again; otherwise (it left the queue, it changed) it may be.
+    fn discard_group(&mut self, merged: &Path, keep_image: bool) {
+        if keep_image
+            && let Some(g) = self.group_of(merged)
+            && g.converted
+        {
+            let image = g.members[0].path.clone();
+            self.keep_image.insert(image);
+        }
         self.groups.retain(|g| g.merged != merged);
         self.edits.remove(merged);
         // Our own temp file (CLAUDE.md §7: app-created).
@@ -444,7 +630,7 @@ impl PreviewScreen {
             .map(|g| g.merged.clone())
             .collect();
         for merged in stale {
-            self.discard_group(&merged);
+            self.discard_group(&merged, false);
         }
         // Combined rows and split pieces live in data/tmp, not the queue: their ticks count too
         // (V3: they pick what Commit files).
@@ -599,6 +785,7 @@ impl PreviewScreen {
     fn can_commit(&self) -> bool {
         self.job.is_none()
             && self.commit_job.is_none()
+            && self.convert_jobs.is_empty()
             && !self.commit_rows().any(|p| p.status.blocks_commit())
             && self.commit_rows().any(|p| p.status == RowStatus::Ready)
     }
@@ -694,6 +881,10 @@ impl PreviewScreen {
                         for m in &g.members {
                             if report.unparked.contains(&m.path) {
                                 self.edit(&m.path).skip = true;
+                                if g.converted {
+                                    // Already filed as a PDF: not converted (and filed) again.
+                                    self.keep_image.insert(m.path.clone());
+                                }
                             } else {
                                 state.intake.remove(&m.path);
                                 self.edits.remove(&m.path);
@@ -763,6 +954,7 @@ impl PreviewScreen {
     pub fn show(&mut self, ui: &mut egui::Ui, state: &mut AppState) {
         let ctx = ui.ctx().clone();
         self.poll_commit(&ctx, state);
+        self.convert_images(&ctx, state);
         self.update_plan(&ctx, state);
         self.poll_split();
         self.count_pages(&ctx);
@@ -1824,6 +2016,7 @@ impl PreviewScreen {
                     pages,
                     added: chrono::Local::now(),
                     edits,
+                    converted: false,
                 }),
                 Err(e) => {
                     let _ = std::fs::remove_dir(&tmp);
@@ -1844,135 +2037,260 @@ impl PreviewScreen {
             .collect();
         let mut actions: Vec<RowAction> = Vec::new();
         let mut hovered: Option<PathBuf> = None;
-        let width = ui.available_width().max(1000.0);
-        let widths = column_widths(width - 20.0);
         let batch_year = self.batch.year;
         ui.style_mut().spacing.scroll = egui::style::ScrollStyle::solid();
-        // Header.
-        Frame::new()
-            .fill(p.tint_copy)
-            .inner_margin(Margin::symmetric(10, 6))
-            .show(ui, |ui| {
-                ui.set_width(width - 20.0);
-                ui.horizontal(|ui| {
-                    // Ticks pick the rows to commit (V3) and the rows to combine.
-                    let selectable: Vec<PathBuf> = self
-                        .proposals
-                        .iter()
-                        .map(|pr| pr.file.path.clone())
-                        .collect();
-                    cell(ui, widths[0], |ui| {
-                        let mut all = !selectable.is_empty()
-                            && selectable.iter().all(|s| self.selected.contains(s));
-                        let resp = ui.add(egui::Checkbox::without_text(&mut all));
-                        resp.widget_info(|| {
-                            egui::WidgetInfo::selected(
-                                egui::Role::CheckBox,
-                                true,
-                                all,
-                                "Select all",
-                            )
-                        });
-                        if resp.changed() {
-                            self.selected = if all { selectable.clone() } else { Vec::new() };
-                        }
-                    });
-                    for (w, t) in widths[1..].iter().zip([
-                        "File",
-                        "Client",
-                        "Rule",
-                        "Year",
-                        "Destination",
-                        "Status",
-                    ]) {
-                        cell(ui, *w, |ui| {
-                            label_caps(ui, t);
-                        });
-                    }
-                });
-            });
-        egui::ScrollArea::both()
-            .id_salt("preview_rows")
-            .max_height(height - 30.0)
+        // Ticks pick the rows to commit (V3) and the rows to combine.
+        let selectable: Vec<PathBuf> = self
+            .proposals
+            .iter()
+            .map(|pr| pr.file.path.clone())
+            .collect();
+        let all_ticked =
+            !selectable.is_empty() && selectable.iter().all(|s| self.selected.contains(s));
+        let mut select_all: Option<bool> = None;
+        let ctx = RowCtx {
+            pal: p,
+            rules: &rules,
+            root: root.as_deref(),
+            groups: &self.groups,
+            splits: &self.splits,
+            splitting: self.split_job.is_some() || self.split_dialog.is_some(),
+            selected: &self.selected,
+            batch_year,
+            folded: &self.folded,
+            page_counts: &self.page_counts,
+            renaming: self.renaming.as_ref(),
+            host_new_client: state.host_new_client,
+            host_trash: state.host_trash,
+            host_notes: &state.host_notes,
+        };
+        // The table's lines: each file, then its copies and its "+ Copy to…" line.
+        let mut lines: Vec<TableLine> = Vec::new();
+        for (i, pr) in self.proposals.iter().enumerate() {
+            lines.push(TableLine::Main(i));
+            if !self.folded.contains(&pr.file.path)
+                && (!pr.copies.is_empty()
+                    || matches!(pr.status, RowStatus::Ready | RowStatus::NeedsYear))
+                && pr.client.is_some()
+            {
+                lines.extend((0..pr.copies.len()).map(|k| TableLine::Copy(i, k)));
+                if !pr.copies.is_empty() || !pr.copy_notes.is_empty() {
+                    lines.push(TableLine::AddCopy(i));
+                }
+            }
+        }
+        let key = |l: &TableLine| -> LineKey {
+            match *l {
+                TableLine::Main(i) => (self.proposals[i].file.path.clone(), 0, 0),
+                TableLine::Copy(i, k) => (self.proposals[i].file.path.clone(), 1, k),
+                TableLine::AddCopy(i) => (self.proposals[i].file.path.clone(), 2, 0),
+            }
+        };
+        let keys: Vec<LineKey> = lines.iter().map(key).collect();
+        let heights: Vec<f32> = keys
+            .iter()
+            .map(|k| {
+                self.row_heights
+                    .get(k)
+                    .copied()
+                    .unwrap_or(if k.1 == 0 { 52.0 } else { 34.0 })
+            })
+            .collect();
+        let mut measured: Vec<f32> = vec![0.0; lines.len()];
+        let spacing = ui.spacing().item_spacing;
+        // The table follows the space it has (the columns' least widths, about 800 points,
+        // are the floor; below that it scrolls sideways).
+        let total = ui.available_width().max(800.0);
+        // Widths a person dragged are kept until the space changes (the side pane opens, the
+        // window is resized); then the columns share it out again. The table keeps its id, so
+        // its scroll position stays.
+        let width_key = (total / 40.0).round() as i64;
+        let reset_widths = self.table_width_key != Some(width_key);
+        egui::ScrollArea::horizontal()
+            .id_salt("preview_hscroll")
             .auto_shrink([false, true])
             .show(ui, |ui| {
-                ui.spacing_mut().item_spacing.y = 0.0;
-                let ctx = RowCtx {
-                    rules: &rules,
-                    root: root.as_deref(),
-                    groups: &self.groups,
-                    splits: &self.splits,
-                    splitting: self.split_job.is_some() || self.split_dialog.is_some(),
-                    selected: &self.selected,
-                    widths,
-                    batch_year,
-                    folded: &self.folded,
-                    page_counts: &self.page_counts,
-                    renaming: self.renaming.as_ref(),
-                    host_new_client: state.host_new_client,
-                    host_trash: state.host_trash,
-                    host_notes: &state.host_notes,
-                };
-                for (i, pr) in self.proposals.iter().enumerate() {
-                    let edits = self.edits.get(&pr.file.path);
-                    let bg = ui.painter().add(egui::Shape::Noop);
-                    // Ids by the row's file, not its place: a menu left open while the queue
-                    // re-plans stays on its file (QA 2026-11-05).
-                    let row = ui
-                        .push_id(&pr.file.path, |ui| {
-                            Frame::new()
-                                .inner_margin(Margin::symmetric(10, 6))
-                                .show(ui, |ui| {
-                                    ui.set_width(width - 20.0);
-                                    ui.horizontal_top(|ui| {
-                                        row_ui(ui, i, pr, edits, &ctx, &mut actions)
+                ui.allocate_ui(egui::vec2(total, height), |ui| {
+                    // Cells touch, so row tints and lines run unbroken; each cell pads itself.
+                    ui.spacing_mut().item_spacing = egui::vec2(0.0, 0.0);
+                    let free = (total - 28.0 - 86.0).max(686.0);
+                    let col = |share: f32, min: f32| {
+                        Column::initial(free * share).at_least(min).clip(true)
+                    };
+                    let builder = TableBuilder::new(ui).id_salt("preview_table");
+                    if reset_widths {
+                        builder.reset();
+                    }
+                    builder
+                        .cell_layout(Layout::top_down(Align::Min))
+                        .resizable(true)
+                        .vscroll(true)
+                        .max_scroll_height(height - 30.0)
+                        .auto_shrink([false, true])
+                        .column(Column::exact(28.0).resizable(false))
+                        .column(col(0.22, 140.0))
+                        .column(col(0.19, 140.0))
+                        .column(col(0.12, 100.0))
+                        .column(Column::exact(86.0).resizable(false).clip(true))
+                        .column(
+                            Column::remainder()
+                                .at_least(180.0)
+                                .resizable(false)
+                                .clip(true),
+                        )
+                        .column(col(0.18, 110.0))
+                        .header(30.0, |mut header| {
+                            let fill = |ui: &mut egui::Ui| {
+                                ui.painter().rect_filled(ui.max_rect(), 0.0, p.tint_copy);
+                            };
+                            header.col(|ui| {
+                                fill(ui);
+                                ui.add_space(6.0);
+                                ui.horizontal(|ui| {
+                                    ui.add_space(6.0);
+                                    let mut all = all_ticked;
+                                    let resp = ui.add(egui::Checkbox::without_text(&mut all));
+                                    resp.widget_info(|| {
+                                        egui::WidgetInfo::selected(
+                                            egui::Role::CheckBox,
+                                            true,
+                                            all,
+                                            "Select all",
+                                        )
                                     });
-                                })
+                                    if resp.changed() {
+                                        select_all = Some(all);
+                                    }
+                                });
+                            });
+                            for t in ["File", "Client", "Rule", "Year", "Destination", "Status"] {
+                                header.col(|ui| {
+                                    fill(ui);
+                                    ui.add_space(8.0);
+                                    ui.horizontal(|ui| {
+                                        ui.add_space(6.0);
+                                        label_caps(ui, t);
+                                    });
+                                });
+                            }
                         })
-                        .inner;
-                    let rect = row.response.rect;
-                    let attention = matches!(
-                        pr.status,
-                        RowStatus::NeedsClient
-                            | RowStatus::NeedsYear
-                            | RowStatus::Error(_)
-                            | RowStatus::Paused
-                    );
-                    if self.pane_open && self.focused.as_ref() == Some(&pr.file.path) {
-                        // The row shown in the side pane.
-                        let fill = ui.visuals().selection.bg_fill.gamma_multiply(0.25);
-                        ui.painter()
-                            .set(bg, egui::epaint::RectShape::filled(rect, 0.0, fill));
-                    } else if attention {
-                        ui.painter().set(
-                            bg,
-                            egui::epaint::RectShape::filled(rect, 0.0, p.tint_attention),
-                        );
-                    }
-                    ui.painter().hline(
-                        rect.x_range(),
-                        rect.bottom(),
-                        Stroke::new(1.0, p.border.gamma_multiply(0.6)),
-                    );
-                    // Layer-aware: a popup or dialog over the row does not count.
-                    if ui.rect_contains_pointer(rect) {
-                        hovered = Some(pr.file.path.clone());
-                    }
-                    if !self.folded.contains(&pr.file.path)
-                        && (!pr.copies.is_empty()
-                            || matches!(pr.status, RowStatus::Ready | RowStatus::NeedsYear))
-                        && pr.client.is_some()
-                    {
-                        let last = pr.copies.len().saturating_sub(1);
-                        for (k, c) in pr.copies.iter().enumerate() {
-                            copy_row_ui(ui, pr, c, k == last, &ctx, width, &mut actions);
-                        }
-                        if !pr.copies.is_empty() || !pr.copy_notes.is_empty() {
-                            add_copy_line(ui, pr, width, &mut actions);
-                        }
-                    }
-                }
+                        .body(|body| {
+                            let mut draw = |mut row: egui_extras::TableRow<'_, '_>| {
+                                let n = row.index();
+                                let pr = match lines[n] {
+                                    TableLine::Main(i)
+                                    | TableLine::Copy(i, _)
+                                    | TableLine::AddCopy(i) => &self.proposals[i],
+                                };
+                                let path = &pr.file.path;
+                                let attention = matches!(
+                                    pr.status,
+                                    RowStatus::NeedsClient
+                                        | RowStatus::NeedsYear
+                                        | RowStatus::Error(_)
+                                        | RowStatus::Paused
+                                );
+                                let (fill, line) = match lines[n] {
+                                    TableLine::Main(_) => {
+                                        let fill = if self.pane_open
+                                            && self.focused.as_ref() == Some(path)
+                                        {
+                                            // The row shown in the side pane.
+                                            Some(p.accent.gamma_multiply(0.12))
+                                        } else if attention {
+                                            Some(p.tint_attention)
+                                        } else {
+                                            None
+                                        };
+                                        (fill, LineStyle::Solid)
+                                    }
+                                    TableLine::Copy(_, k) if k + 1 < pr.copies.len() => {
+                                        (Some(p.tint_copy), LineStyle::Dashed)
+                                    }
+                                    _ => (Some(p.tint_copy), LineStyle::Solid),
+                                };
+                                let mut cells = Cells {
+                                    row: &mut row,
+                                    id: egui::Id::unique(("preview_line", &keys[n])),
+                                    col: 0,
+                                    fill,
+                                    line,
+                                    border: p.border,
+                                    spacing,
+                                    height: 0.0,
+                                    hovered: false,
+                                };
+                                match lines[n] {
+                                    TableLine::Main(_) => row_ui(
+                                        &mut cells,
+                                        pr,
+                                        self.edits.get(path),
+                                        &ctx,
+                                        &mut actions,
+                                    ),
+                                    TableLine::Copy(_, k) => copy_row_ui(
+                                        &mut cells,
+                                        pr,
+                                        &pr.copies[k],
+                                        &ctx,
+                                        &mut actions,
+                                    ),
+                                    TableLine::AddCopy(_) => {
+                                        add_copy_line(&mut cells, pr, &mut actions)
+                                    }
+                                }
+                                measured[n] = cells.height;
+                                // Layer-aware: a popup or dialog over the row does not count.
+                                // Only the file's own row: Del there skips the file, not from
+                                // its copy lines.
+                                if cells.hovered && matches!(lines[n], TableLine::Main(_)) {
+                                    hovered = Some(path.clone());
+                                }
+                            };
+                            // Few rows: all of them are laid out (and reachable by tests and
+                            // screen readers); many: only the ones in view.
+                            if lines.len() <= LAY_OUT_ALL_UP_TO {
+                                let mut body = body;
+                                for h in &heights {
+                                    body.row(*h, &mut draw);
+                                }
+                            } else {
+                                body.heterogeneous_rows(heights.iter().copied(), draw);
+                            }
+                        });
+                });
             });
+        self.table_width_key = Some(width_key);
+        // A name being typed on a row scrolled out of view (only lines in view are drawn in a
+        // long queue) is kept, as clicking away would.
+        if let Some(r) = &self.renaming
+            && let Some(n) = keys.iter().position(|k| k.1 == 0 && k.0 == r.path)
+            && measured[n] <= 0.0
+        {
+            actions.push(RowAction::RenameDone);
+        }
+        // Row heights follow their content: measured this frame, used from the next.
+        let mut changed = false;
+        for (k, h) in keys.iter().zip(&measured) {
+            if *h <= 0.0 {
+                continue; // not laid out (out of view)
+            }
+            let e = self.row_heights.entry(k.clone()).or_insert(0.0);
+            if (*e - *h).abs() > 0.5 {
+                *e = *h;
+                changed = true;
+            }
+        }
+        if changed {
+            ui.ctx().request_repaint();
+        }
+        if self.row_heights.len() > keys.len() * 2 + 64 {
+            let live: std::collections::HashSet<&LineKey> = keys.iter().collect();
+            self.row_heights.retain(|k, _| live.contains(k));
+        }
+        if let Some(all) = select_all {
+            self.selected = if all { selectable } else { Vec::new() };
+        }
         self.hovered = hovered;
         for a in actions {
             match a {
@@ -2053,6 +2371,13 @@ impl PreviewScreen {
                 }
                 RowAction::SetRule(path, id) => self.edit(&path).rule_id = Some(id),
                 RowAction::Focus(path) => self.focused = Some(path),
+                RowAction::Open(path) => {
+                    if state.host_open {
+                        state.open_request = Some(path);
+                    } else {
+                        crate::ui::widgets::open_file(&path);
+                    }
+                }
                 RowAction::NewClient(file, name, id) => {
                     state.new_client_request =
                         Some(crate::app::NewClientRequest { file, name, id });
@@ -2064,7 +2389,7 @@ impl PreviewScreen {
                 RowAction::Skip(path, on) => {
                     if self.group_of(&path).is_some() {
                         // Skip on a combined row discards the combination (X85).
-                        self.discard_group(&path);
+                        self.discard_group(&path, true);
                     } else {
                         self.edit(&path).skip = on;
                     }
@@ -2705,6 +3030,14 @@ fn short_file(root: &Path) -> impl Fn(&Path) -> String + '_ {
 }
 
 /// The first item, plus "+N more".
+/// Deletes a PDF the app made in data/tmp and its folder when that is empty.
+fn remove_tmp_file(path: &Path) {
+    let _ = std::fs::remove_file(path);
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::remove_dir(dir);
+    }
+}
+
 fn more(items: &[String]) -> String {
     match items.len() {
         0 => String::new(),
@@ -2713,32 +3046,103 @@ fn more(items: &[String]) -> String {
     }
 }
 
-/// Column widths for a table `total` wide: select, file, client, rule, year, destination, status.
-fn column_widths(total: f32) -> [f32; 7] {
-    let gaps = 6.0 * 8.0;
-    let free = (total - 36.0 - 78.0 - gaps).max(700.0);
-    [
-        28.0,
-        free * 0.22,
-        free * 0.19,
-        free * 0.12,
-        78.0,
-        free * 0.29,
-        free * 0.18,
-    ]
+/// Up to this many table lines every line is laid out each frame; above it only the lines in
+/// view are (a long queue stays quick to draw).
+const LAY_OUT_ALL_UP_TO: usize = 80;
+
+/// One line of the Preview table.
+#[derive(Clone, Copy)]
+enum TableLine {
+    /// A file's row (proposal index).
+    Main(usize),
+    /// Copy `k` of a file's row.
+    Copy(usize, usize),
+    /// "+ Copy to…" under a file's copies.
+    AddCopy(usize),
 }
 
-/// A fixed-width table cell, content top-down.
-fn cell<R>(ui: &mut egui::Ui, width: f32, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
-    ui.allocate_ui_with_layout(egui::vec2(width, 0.0), Layout::top_down(Align::Min), |ui| {
-        ui.set_width(width);
-        add(ui)
-    })
-    .inner
+/// A table line by its file, its kind (0 row, 1 copy, 2 add-copy) and copy index: what its
+/// measured height and its widgets' ids are kept by.
+type LineKey = (PathBuf, u8, usize);
+
+/// The rule under a table line.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LineStyle {
+    Solid,
+    /// Between copies of one file (UI_SPEC §1).
+    Dashed,
+}
+
+/// The cells of one table line, filled left to right. Each cell gets the line's tint and rule,
+/// padding, the window's spacing back, and ids by the line's file (not its place: a menu left
+/// open while the queue re-plans stays on its file, QA 2026-11-05). The tallest cell's height is
+/// kept for the next frame.
+struct Cells<'r, 'a, 'b> {
+    row: &'r mut egui_extras::TableRow<'a, 'b>,
+    id: egui::Id,
+    col: usize,
+    fill: Option<egui::Color32>,
+    line: LineStyle,
+    border: egui::Color32,
+    spacing: egui::Vec2,
+    height: f32,
+    hovered: bool,
+}
+
+impl Cells<'_, '_, '_> {
+    fn cell<R>(&mut self, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+        let id = self.id.with(self.col);
+        self.col += 1;
+        let (fill, line, border, spacing) = (self.fill, self.line, self.border, self.spacing);
+        let mut out = None;
+        let mut hovered = false;
+        let (used, _) = self.row.col(|ui| {
+            let rect = ui.max_rect();
+            if let Some(f) = fill {
+                ui.painter().rect_filled(rect, 0.0, f);
+            }
+            let y = rect.bottom() - 0.5;
+            match line {
+                LineStyle::Solid => {
+                    let stroke = Stroke::new(1.0, border.gamma_multiply(0.6));
+                    ui.painter().hline(rect.x_range(), y, stroke);
+                }
+                LineStyle::Dashed => {
+                    let stroke = Stroke::new(1.0, border.gamma_multiply(0.4));
+                    let mut x = rect.left();
+                    while x < rect.right() {
+                        let end = (x + 4.0).min(rect.right());
+                        ui.painter().hline(x..=end, y, stroke);
+                        x += 8.0;
+                    }
+                }
+            }
+            hovered = ui.rect_contains_pointer(rect);
+            ui.scope_builder(egui::UiBuilder::new().scope_id(id), |ui| {
+                ui.spacing_mut().item_spacing = spacing;
+                // Clipped columns truncate text by default; the rows grow to fit instead.
+                ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
+                Frame::new()
+                    .inner_margin(Margin {
+                        left: 6,
+                        right: 6,
+                        top: 6,
+                        bottom: 7,
+                    })
+                    .show(ui, |ui| {
+                        out = Some(add(ui));
+                    });
+            });
+        });
+        self.height = self.height.max(used.height());
+        self.hovered |= hovered;
+        out.expect("a table cell is always drawn")
+    }
 }
 
 /// What every row needs besides its own proposal.
 struct RowCtx<'a> {
+    pal: &'static crate::ui::theme::Palette,
     rules: &'a [(String, String)],
     root: Option<&'a Path>,
     groups: &'a [Group],
@@ -2746,7 +3150,6 @@ struct RowCtx<'a> {
     /// A split is being chosen or written: no second one.
     splitting: bool,
     selected: &'a [PathBuf],
-    widths: [f32; 7],
     batch_year: Option<u16>,
     folded: &'a [PathBuf],
     page_counts: &'a HashMap<PathBuf, (u64, Option<usize>)>,
@@ -2821,6 +3224,8 @@ enum RowAction {
     BuildRule(String),
     /// Show this row's pages in the side pane.
     Focus(PathBuf),
+    /// Double-click on the file name: open the file (V24).
+    Open(PathBuf),
     /// "New client…": (file, name in the file name, ID in the file name) for the host.
     NewClient(PathBuf, String, Option<String>),
 }
@@ -2828,15 +3233,13 @@ enum RowAction {
 /// One table row. Cells are top-aligned; text cells start a little lower so their first line sits
 /// level with the text in the year and rule controls.
 fn row_ui(
-    ui: &mut egui::Ui,
-    i: usize,
+    cells: &mut Cells<'_, '_, '_>,
     p: &Proposal,
     edits: Option<&RowEdits>,
     ctx: &RowCtx<'_>,
     actions: &mut Vec<RowAction>,
 ) {
-    let pl = pal(ui);
-    let w = ctx.widths;
+    let pl = ctx.pal;
     let path = &p.file.path;
     let group = ctx.groups.iter().find(|g| &g.merged == path);
     let split = ctx.splits.iter().find_map(|s| {
@@ -2849,7 +3252,7 @@ fn row_ui(
     const TEXT_TOP: f32 = 4.0;
 
     // Select.
-    cell(ui, w[0], |ui| {
+    cells.cell(|ui| {
         let mut ticked = ctx.selected.contains(path);
         let resp = ui.add(egui::Checkbox::without_text(&mut ticked));
         let name = format!("Select {}", file_name(path));
@@ -2862,7 +3265,7 @@ fn row_ui(
     });
 
     // File (right-click for the row menu, X125).
-    cell(ui, w[1], |ui| {
+    cells.cell(|ui| {
         ui.add_space(TEXT_TOP);
         let (text, sub, hover) = match (group, split) {
             (_, Some((s, pc))) => {
@@ -2877,6 +3280,14 @@ fn row_ui(
                     s.original.path.display().to_string(),
                 )
             }
+            (Some(g), None) if g.converted => (
+                file_name(&g.members[0].path),
+                Some(format!("image → PDF ({} page{})", g.pages, plural(g.pages))),
+                format!(
+                    "{}\nFiled as a PDF; the image goes to the inbox's _combined folder.",
+                    g.members[0].path.display()
+                ),
+            ),
             (Some(g), None) => {
                 let names: Vec<String> = g.members.iter().map(|m| file_name(&m.path)).collect();
                 (
@@ -2926,7 +3337,7 @@ fn row_ui(
                             .wrap()
                             .sense(egui::Sense::click()),
                     )
-                    .on_hover_text(hover);
+                    .on_hover_text(format!("{hover}\nDouble-click to open"));
                 if let Some((_, Some(n))) = ctx.page_counts.get(path)
                     && *n > 1
                 {
@@ -2945,8 +3356,13 @@ fn row_ui(
         if resp.clicked() {
             actions.push(RowAction::Focus(path.clone()));
         }
+        if resp.double_clicked() {
+            actions.push(RowAction::Open(path.clone()));
+        }
         resp.context_menu(|ui| {
-            let skip_text = if group.is_some() {
+            let skip_text = if group.is_some_and(|g| g.converted) {
+                "Keep as image (not a PDF)"
+            } else if group.is_some() {
                 "Discard combination"
             } else if skipped_by_user {
                 "Unskip row"
@@ -3028,7 +3444,7 @@ fn row_ui(
     });
 
     // Client.
-    cell(ui, w[2], |ui| {
+    cells.cell(|ui| {
         if p.client.is_some() {
             ui.add_space(TEXT_TOP);
         }
@@ -3109,7 +3525,7 @@ fn row_ui(
     });
 
     // Rule: the name opens a menu to override it.
-    cell(ui, w[3], |ui| {
+    cells.cell(|ui| {
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing.x = 4.0;
             ui.visuals_mut().widgets.inactive.bg_stroke = Stroke::NONE;
@@ -3141,9 +3557,10 @@ fn row_ui(
     });
 
     // Year: amber when missing.
-    cell(ui, w[4], |ui| {
+    cells.cell(|ui| {
         let mut year = p.year;
-        let resp = year_combo(ui, ("year", i), &mut year, None, p.year.is_none());
+        // By file, not place: an open year menu stays on its file through a re-plan.
+        let resp = year_combo(ui, ("year", path), &mut year, None, p.year.is_none());
         let name = format!("Year for {}", file_name(path));
         resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::ComboBox, true, name.clone()));
         if year != p.year {
@@ -3152,7 +3569,7 @@ fn row_ui(
     });
 
     // Destination, or what is missing.
-    cell(ui, w[5], |ui| {
+    cells.cell(|ui| {
         if !p.collides() {
             ui.add_space(TEXT_TOP);
         }
@@ -3160,7 +3577,7 @@ fn row_ui(
     });
 
     // Status pills.
-    cell(ui, w[6], |ui| {
+    cells.cell(|ui| {
         ui.add_space(TEXT_TOP);
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing = egui::vec2(4.0, 4.0);
@@ -3241,7 +3658,11 @@ fn row_ui(
                     "The inbox and the client folder are on different drives: the file is copied, its SHA-256 checked, then the original is deleted.",
                 );
             }
-            if group.is_some() {
+            if group.is_some_and(|g| g.converted) {
+                pill(ui, PillKind::Info, "Image → PDF").on_hover_text(
+                    "Filed as a PDF made from the image. The image goes to the inbox's _combined folder after filing; Undo puts it back. Right-click › Keep as image to file the image itself.",
+                );
+            } else if group.is_some() {
                 pill(ui, PillKind::Info, "Combined").on_hover_text(
                     "Several PDFs merged into one. The originals go to the inbox's _combined folder after filing.",
                 );
@@ -3558,17 +3979,14 @@ fn destination_cell(
 
 /// One copy of a row (P07a, UI_SPEC §3): `copy · role`, its client, destination and status, ×.
 fn copy_row_ui(
-    ui: &mut egui::Ui,
+    cells: &mut Cells<'_, '_, '_>,
     pr: &Proposal,
     c: &CopyProposal,
-    last: bool,
     ctx: &RowCtx<'_>,
-    width: f32,
     actions: &mut Vec<RowAction>,
 ) {
     const TEXT_TOP: f32 = 4.0;
-    let pl = pal(ui);
-    let w = ctx.widths;
+    let pl = ctx.pal;
     let path = &pr.file.path;
     let who = c
         .client
@@ -3576,169 +3994,156 @@ fn copy_row_ui(
         .map(|x| x.name.clone())
         .or_else(|| c.looked_for.clone())
         .unwrap_or_else(|| "unassigned".into());
-    let row = Frame::new()
-        .fill(pl.tint_copy)
-        .inner_margin(Margin::symmetric(10, 5))
-        .show(ui, |ui| {
-            ui.set_width(width - 20.0);
-            ui.horizontal_top(|ui| {
-                cell(ui, w[0], |_| {});
-                cell(ui, w[1], |ui| {
-                    ui.add_space(TEXT_TOP);
-                    ui.horizontal(|ui| {
-                        branch_icon(ui);
-                        let text = if c.role.is_empty() {
-                            "copy".to_string()
-                        } else {
-                            format!("copy · {}", c.role)
-                        };
-                        ui.label(RichText::new(text).size(12.0).color(pl.muted));
-                        if c.whole_of.is_some() {
-                            pill(ui, PillKind::Neutral, "whole PDF").on_hover_text(
-                                "On split: Whole. The unsplit original (all pages) is copied here once.",
-                            );
-                        }
-                    });
+    cells.cell(|_| {});
+    cells.cell(|ui| {
+        ui.add_space(TEXT_TOP);
+        ui.horizontal(|ui| {
+            branch_icon(ui);
+            let text = if c.role.is_empty() {
+                "copy".to_string()
+            } else {
+                format!("copy · {}", c.role)
+            };
+            ui.label(RichText::new(text).size(12.0).color(pl.muted));
+            if c.whole_of.is_some() {
+                pill(ui, PillKind::Neutral, "whole PDF").on_hover_text(
+                    "On split: Whole. The unsplit original (all pages) is copied here once.",
+                );
+            }
+        });
+    });
+    cells.cell(|ui| match &c.client {
+        Some(cl) => {
+            ui.add_space(TEXT_TOP);
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
+                ui.label(&cl.name);
+                ui.label(mono(&cl.id).color(pl.muted));
+                if let CopyMatch::Name { related: false, .. } = c.client_match {
+                    pill(ui, PillKind::Info, "not related");
+                    if let Some(primary) = &pr.client
+                        && ui.link("Add relationship…").clicked()
+                    {
+                        actions.push(RowAction::AddRelationship(
+                            primary.id.clone(),
+                            cl.id.clone(),
+                        ));
+                    }
+                }
+            });
+        }
+        None => {
+            let why = match &c.looked_for {
+                Some(n) => format!("\"{n}\" not found"),
+                None => "Pick the copy's client".into(),
+            };
+            ui.label(RichText::new(why).size(11.0).color(pl.muted));
+            if let Some((score, s)) = &c.suggestion {
+                let resp = ui.add(egui::Button::new(suggestion_job(ui, &s.name, *score)));
+                let name = format!("Use {} ({}) for the copy", s.name, s.id);
+                resp.widget_info(|| {
+                    egui::WidgetInfo::labeled(egui::Role::Button, true, name.clone())
                 });
-                cell(ui, w[2], |ui| match &c.client {
-                    Some(cl) => {
-                        ui.add_space(TEXT_TOP);
-                        ui.horizontal_wrapped(|ui| {
-                            ui.spacing_mut().item_spacing.x = 4.0;
-                            ui.label(&cl.name);
-                            ui.label(mono(&cl.id).color(pl.muted));
-                            if let CopyMatch::Name { related: false, .. } = c.client_match {
-                                pill(ui, PillKind::Info, "not related");
-                                if let Some(primary) = &pr.client
-                                    && ui.link("Add relationship…").clicked()
-                                {
-                                    actions.push(RowAction::AddRelationship(
-                                        primary.id.clone(),
-                                        cl.id.clone(),
-                                    ));
-                                }
-                            }
-                        });
-                    }
-                    None => {
-                        let why = match &c.looked_for {
-                            Some(n) => format!("\"{n}\" not found"),
-                            None => "Pick the copy's client".into(),
-                        };
-                        ui.label(RichText::new(why).size(11.0).color(pl.muted));
-                        if let Some((score, s)) = &c.suggestion {
-                            let resp =
-                                ui.add(egui::Button::new(suggestion_job(ui, &s.name, *score)));
-                            let name = format!("Use {} ({}) for the copy", s.name, s.id);
-                            resp.widget_info(|| {
-                                egui::WidgetInfo::labeled(egui::Role::Button, true, name.clone())
-                            });
-                            if resp.clicked() {
-                                actions.push(RowAction::CopyClient(
-                                    path.clone(),
-                                    c.key.clone(),
-                                    s.id.clone(),
-                                ));
-                            }
-                        }
-                        ui.horizontal_wrapped(|ui| {
-                            let pick = ui.small_button("Choose client…");
-                            let name = format!("Choose the copy client for {}", file_name(path));
-                            pick.widget_info(|| {
-                                egui::WidgetInfo::labeled(egui::Role::Button, true, name.clone())
-                            });
-                            if pick.clicked() {
-                                actions.push(RowAction::PickCopy(
-                                    path.clone(),
-                                    c.key.clone(),
-                                    c.looked_for.clone().unwrap_or_default(),
-                                ));
-                            }
-                            if let (Some(primary), Some(n)) = (&pr.client, &c.looked_for)
-                                && ui.link("Add relationship…").clicked()
-                            {
-                                actions.push(RowAction::AddRelationship(
-                                    primary.id.clone(),
-                                    n.clone(),
-                                ));
-                            }
-                        });
-                    }
+                if resp.clicked() {
+                    actions.push(RowAction::CopyClient(
+                        path.clone(),
+                        c.key.clone(),
+                        s.id.clone(),
+                    ));
+                }
+            }
+            ui.horizontal_wrapped(|ui| {
+                let pick = ui.small_button("Choose client…");
+                let name = format!("Choose the copy client for {}", file_name(path));
+                pick.widget_info(|| {
+                    egui::WidgetInfo::labeled(egui::Role::Button, true, name.clone())
                 });
-                cell(ui, w[3], |ui| {
-                    ui.add_space(TEXT_TOP);
-                    ui.label(RichText::new(format!("{} copy", pr.rule_name)).color(pl.muted));
-                });
-                cell(ui, w[4], |ui| {
-                    ui.add_space(TEXT_TOP);
-                    ui.label(pr.year.map_or_else(|| "—".to_string(), |y| y.to_string()));
-                });
-                cell(ui, w[5], |ui| match (&c.status, &c.dest) {
-                    (CopyStatus::Pending(why), _) => {
-                        ui.horizontal(|ui| {
-                            ui.spinner();
-                            ui.label(RichText::new(why).size(11.0).color(pl.muted));
-                        });
-                    }
-                    (CopyStatus::Error(e), _) => {
-                        ui.add(
-                            egui::Label::new(RichText::new(e).color(pl.pill(PillKind::Err).1))
-                                .wrap(),
-                        );
-                    }
-                    (_, Some(dest)) if c.collides() => {
-                        ui.label(mono("File already exists").color(pl.pill(PillKind::Err).1))
-                            .on_hover_text(dest.display().to_string());
-                        let mut choice = c.collision_choice;
-                        let options = [
-                            (CollisionChoice::Overwrite, "Overwrite"),
-                            (CollisionChoice::KeepBoth, "Keep both"),
-                            (CollisionChoice::Skip, "Skip"),
-                        ];
-                        if theme::segmented(ui, &mut choice, &options) {
-                            actions.push(RowAction::CopyCollision(
-                                path.clone(),
-                                c.key.clone(),
-                                choice,
-                            ));
-                        }
-                    }
-                    (_, Some(dest)) => {
-                        ui.add_space(TEXT_TOP);
-                        let shown = ctx
-                            .root
-                            .and_then(|r| dest.strip_prefix(r).ok())
-                            .unwrap_or(dest);
-                        let dir = shown
-                            .parent()
-                            .map(|d| d.display().to_string())
-                            .unwrap_or_default();
-                        let name = shown
-                            .file_name()
-                            .map(|n| n.to_string_lossy().into_owned())
-                            .unwrap_or_default();
-                        let font = egui::TextStyle::Monospace.resolve(ui.style());
-                        let bold = egui::FontId::new(
-                            font.size,
-                            egui::FontFamily::Name(theme::MONO_SEMIBOLD.into()),
-                        );
-                        let mut job = egui::text::LayoutJob::default();
-                        job.wrap.max_width = ui.available_width();
-                        job.append(
-                            &format!("…\\{dir}\\"),
-                            0.0,
-                            egui::TextFormat::simple(font, pl.text),
-                        );
-                        job.append(&name, 0.0, egui::TextFormat::simple(bold, pl.text));
-                        ui.add(egui::Label::new(job).wrap())
-                            .on_hover_text(dest.display().to_string());
-                    }
-                    _ => {
-                        ui.add_space(TEXT_TOP);
-                        ui.label(RichText::new("Pick a client to compute").color(pl.muted));
-                    }
-                });
-                cell(ui, w[6], |ui| {
+                if pick.clicked() {
+                    actions.push(RowAction::PickCopy(
+                        path.clone(),
+                        c.key.clone(),
+                        c.looked_for.clone().unwrap_or_default(),
+                    ));
+                }
+                if let (Some(primary), Some(n)) = (&pr.client, &c.looked_for)
+                    && ui.link("Add relationship…").clicked()
+                {
+                    actions.push(RowAction::AddRelationship(primary.id.clone(), n.clone()));
+                }
+            });
+        }
+    });
+    cells.cell(|ui| {
+        ui.add_space(TEXT_TOP);
+        ui.label(RichText::new(format!("{} copy", pr.rule_name)).color(pl.muted));
+    });
+    cells.cell(|ui| {
+        ui.add_space(TEXT_TOP);
+        ui.label(pr.year.map_or_else(|| "—".to_string(), |y| y.to_string()));
+    });
+    cells.cell(|ui| match (&c.status, &c.dest) {
+        (CopyStatus::Pending(why), _) => {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label(RichText::new(why).size(11.0).color(pl.muted));
+            });
+        }
+        (CopyStatus::Error(e), _) => {
+            ui.add(egui::Label::new(RichText::new(e).color(pl.pill(PillKind::Err).1)).wrap());
+        }
+        (_, Some(dest)) if c.collides() => {
+            ui.label(mono("File already exists").color(pl.pill(PillKind::Err).1))
+                .on_hover_text(dest.display().to_string());
+            let mut choice = c.collision_choice;
+            let options = [
+                (CollisionChoice::Overwrite, "Overwrite"),
+                (CollisionChoice::KeepBoth, "Keep both"),
+                (CollisionChoice::Skip, "Skip"),
+            ];
+            if theme::segmented(ui, &mut choice, &options) {
+                actions.push(RowAction::CopyCollision(
+                    path.clone(),
+                    c.key.clone(),
+                    choice,
+                ));
+            }
+        }
+        (_, Some(dest)) => {
+            ui.add_space(TEXT_TOP);
+            let shown = ctx
+                .root
+                .and_then(|r| dest.strip_prefix(r).ok())
+                .unwrap_or(dest);
+            let dir = shown
+                .parent()
+                .map(|d| d.display().to_string())
+                .unwrap_or_default();
+            let name = shown
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let font = egui::TextStyle::Monospace.resolve(ui.style());
+            let bold = egui::FontId::new(
+                font.size,
+                egui::FontFamily::Name(theme::MONO_SEMIBOLD.into()),
+            );
+            let mut job = egui::text::LayoutJob::default();
+            job.wrap.max_width = ui.available_width();
+            job.append(
+                &format!("…\\{dir}\\"),
+                0.0,
+                egui::TextFormat::simple(font, pl.text),
+            );
+            job.append(&name, 0.0, egui::TextFormat::simple(bold, pl.text));
+            ui.add(egui::Label::new(job).wrap())
+                .on_hover_text(dest.display().to_string());
+        }
+        _ => {
+            ui.add_space(TEXT_TOP);
+            ui.label(RichText::new("Pick a client to compute").color(pl.muted));
+        }
+    });
+    cells.cell(|ui| {
                     ui.add_space(TEXT_TOP);
                     ui.horizontal_wrapped(|ui| {
                         ui.spacing_mut().item_spacing = egui::vec2(4.0, 4.0);
@@ -3789,60 +4194,41 @@ fn copy_row_ui(
                         }
                     });
                 });
-            });
-        });
-    let rect = row.response.rect;
-    let stroke = Stroke::new(1.0, pl.border.gamma_multiply(if last { 0.8 } else { 0.4 }));
-    if last {
-        ui.painter().hline(rect.x_range(), rect.bottom(), stroke);
-    } else {
-        // Dashed line between copy rows (UI_SPEC §1).
-        let mut x = rect.left();
-        while x < rect.right() {
-            let end = (x + 4.0).min(rect.right());
-            ui.painter().hline(x..=end, rect.bottom(), stroke);
-            x += 8.0;
-        }
-    }
 }
 
-/// "+ Copy to…" and the notes about copies that were not made.
-fn add_copy_line(ui: &mut egui::Ui, pr: &Proposal, width: f32, actions: &mut Vec<RowAction>) {
-    let pl = pal(ui);
-    Frame::new()
-        .fill(pl.tint_copy)
-        .inner_margin(Margin::symmetric(10, 4))
-        .show(ui, |ui| {
-            ui.set_width(width - 20.0);
-            ui.horizontal_wrapped(|ui| {
-                ui.add_space(46.0);
-                let add = ui
-                    .link("+ Copy to…")
-                    .on_hover_text("Add a copy to another client for this batch");
-                let name = format!("Copy {} to another client", file_name(&pr.file.path));
-                add.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Link, true, name.clone()));
-                if add.clicked() {
-                    actions.push(RowAction::AddCopy(pr.file.path.clone()));
+/// "+ Copy to…" and the notes about copies that were not made, under a row's copies.
+fn add_copy_line(cells: &mut Cells<'_, '_, '_>, pr: &Proposal, actions: &mut Vec<RowAction>) {
+    cells.cell(|_| {});
+    cells.cell(|ui| {
+        let add = ui
+            .link("+ Copy to…")
+            .on_hover_text("Add a copy to another client for this batch");
+        let name = format!("Copy {} to another client", file_name(&pr.file.path));
+        add.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Link, true, name.clone()));
+        if add.clicked() {
+            actions.push(RowAction::AddCopy(pr.file.path.clone()));
+        }
+    });
+    for _ in 2..5 {
+        cells.cell(|_| {});
+    }
+    cells.cell(|ui| {
+        ui.horizontal_wrapped(|ui| {
+            for n in &pr.copy_notes {
+                pill(ui, PillKind::Info, n).on_hover_text(n.as_str());
+                if n == "no related clients"
+                    && let Some(primary) = &pr.client
+                    && ui.link("Add relationship…").clicked()
+                {
+                    actions.push(RowAction::AddRelationship(
+                        primary.id.clone(),
+                        String::new(),
+                    ));
                 }
-                for n in &pr.copy_notes {
-                    pill(ui, PillKind::Info, n);
-                    if n == "no related clients"
-                        && let Some(primary) = &pr.client
-                        && ui.link("Add relationship…").clicked()
-                    {
-                        actions.push(RowAction::AddRelationship(
-                            primary.id.clone(),
-                            String::new(),
-                        ));
-                    }
-                }
-            });
+            }
         });
-    ui.painter().hline(
-        ui.min_rect().x_range(),
-        ui.min_rect().bottom(),
-        Stroke::new(1.0, pl.border.gamma_multiply(0.6)),
-    );
+    });
+    cells.cell(|_| {});
 }
 
 /// A small triangle that folds a row's copies away (egui's fonts have no ▾ glyph).

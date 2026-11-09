@@ -669,6 +669,10 @@ impl IntakeTab {
             let login = vf_core::windows_login().unwrap_or_default();
             let mine = prefs.my_inboxes(&login).to_vec();
             f.set_personal_inboxes(mine.clone());
+            // A double-clicked file name opens in its Windows program through Browse's shell
+            // (testable). Not the Viewer: it edits catalogued documents, and an inbox file is
+            // not one yet (owner 2026-11-09, V24).
+            f.offer_open(true);
             // Move to trash: the files go to the cabinet trash, restorable to the inbox (Q-61).
             f.offer_trash(true);
             if let Some(files) = f.take_trash_request() {
@@ -758,7 +762,13 @@ impl IntakeTab {
         }
         self.new_client_dialog(ui.ctx(), root, conn, device_id);
         match (&mut self.filer, &self.error) {
-            (Some(f), _) => eframe::App::ui(f, ui, frame),
+            (Some(f), _) => {
+                eframe::App::ui(f, ui, frame);
+                // Taken in the frame the double-click happened (the app opens it below).
+                if let Some(p) = f.take_open_request() {
+                    self.ingest.open_request = Some(p);
+                }
+            }
             (None, Some(e)) => {
                 egui::CentralPanel::default().show(ui, |ui| {
                     ui.heading("Intake");

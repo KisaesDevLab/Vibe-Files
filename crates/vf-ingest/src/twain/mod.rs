@@ -74,6 +74,14 @@ pub fn dsm_candidates(exe_dir: &Path) -> Vec<PathBuf> {
 static DSM: OnceLock<Dsm> = OnceLock::new();
 /// The file [`DSM`] was loaded from (Scanner details).
 static DSM_PATH: OnceLock<PathBuf> = OnceLock::new();
+/// Why each place's `TWAINDSM.dll` did not load (Scanner details; a 32-bit copy fails here).
+static LOAD_ERRORS: std::sync::Mutex<Vec<(PathBuf, String)>> = std::sync::Mutex::new(Vec::new());
+
+/// The TWAIN manager's own log (it names every source it tried and why it left one out),
+/// written when the manager is first loaded (Scanner details).
+pub fn dsm_log_path() -> PathBuf {
+    std::env::temp_dir().join("vibe-files-twaindsm.log")
+}
 
 /// Each place `TWAINDSM.dll` is looked for and what was found there (Scanner details).
 pub fn dsm_report() -> Vec<String> {
@@ -82,14 +90,25 @@ pub fn dsm_report() -> Vec<String> {
     let mut out: Vec<String> = dsm_candidates(&exe_dir)
         .iter()
         .map(|p| {
+            let error = LOAD_ERRORS
+                .lock()
+                .ok()
+                .and_then(|e| e.iter().find(|(q, _)| q == p).map(|(_, e)| e.clone()));
             let state = if loaded == Some(p) {
-                "loaded"
+                "loaded".to_string()
+            } else if let Some(e) = error {
+                format!("present, did not load: {e}")
             } else if p.is_file() {
-                "present, not used"
+                "present, not used".to_string()
             } else {
-                "missing"
+                "missing".to_string()
             };
-            format!("{} - {state}", p.display())
+            let bits = if p.is_file() {
+                format!(" [{}]", pe_bits(p))
+            } else {
+                String::new()
+            };
+            format!("{}{bits} - {state}", p.display())
         })
         .collect();
     let root = std::env::var_os("SystemRoot").unwrap_or_else(|| r"C:\Windows".into());
@@ -109,14 +128,45 @@ pub fn dsm() -> Result<Dsm, String> {
         return Ok(*d);
     }
     let exe_dir = vf_core::exe_dir().unwrap_or_default();
-    for path in dsm_candidates(&exe_dir).iter().filter(|p| p.is_file()) {
-        if let Ok(d) = load(path) {
-            let _ = DSM_PATH.set(path.clone());
-            return Ok(*DSM.get_or_init(|| d));
+    // The manager reads these when it loads: its log is shown in Scanner details. A log the
+    // person set up themselves is left alone.
+    if std::env::var_os("TWAINDSM_LOG").is_none() {
+        // SAFETY: set before the manager is loaded; Windows' environment block is per process
+        // and read by the C runtime under its own lock.
+        unsafe {
+            std::env::set_var("TWAINDSM_LOG", dsm_log_path());
+            std::env::set_var("TWAINDSM_MODE", "w");
         }
     }
-    Err("TWAINDSM.dll was not found next to the program or in Windows' System32          folder, so TWAIN scanners cannot be used. Put the 64-bit TWAINDSM.dll beside          vibe-files.exe."
-        .into())
+    let mut errors = Vec::new();
+    let mut found = false;
+    for path in dsm_candidates(&exe_dir).iter().filter(|p| p.is_file()) {
+        found = true;
+        match load(path) {
+            Ok(d) => {
+                let _ = DSM_PATH.set(path.clone());
+                if let Ok(mut e) = LOAD_ERRORS.lock() {
+                    *e = errors;
+                }
+                return Ok(*DSM.get_or_init(|| d));
+            }
+            Err(e) => errors.push((path.clone(), e)),
+        }
+    }
+    let first = errors.first().map(|(_, e)| e.clone());
+    if let Ok(mut e) = LOAD_ERRORS.lock() {
+        *e = errors;
+    }
+    Err(match (found, first) {
+        (true, Some(e)) => format!(
+            "TWAINDSM.dll is there but did not load ({e}), so TWAIN scanners cannot be used. \
+             Vibe Files needs the 64-bit TWAINDSM.dll beside vibe-files.exe."
+        ),
+        _ => "TWAINDSM.dll was not found next to the program or in Windows' System32 folder, \
+              so TWAIN scanners cannot be used. Put the 64-bit TWAINDSM.dll beside \
+              vibe-files.exe."
+            .into(),
+    })
 }
 
 fn load(path: &Path) -> Result<Dsm, String> {
@@ -377,32 +427,67 @@ pub fn scan(source: &str, settings: &Settings) -> Result<Scanned, String> {
     on_twain_thread(dsm_entry, move |m| m.scan(&source, &settings))
 }
 
-/// Every TWAIN source file (`.ds`) under `%SystemRoot%\<folder>`, as paths relative to it
-/// (Scanner details; Microsoft's WIA bridge included).
+/// Every TWAIN source file (`.ds`) under `%SystemRoot%\<folder>`, as paths relative to it with
+/// the program's bitness read from the file (Scanner details; Microsoft's WIA bridge included).
+/// Folder links are not followed; at most six folders deep.
 pub fn source_files(folder: &str) -> Vec<String> {
     let root = std::env::var_os("SystemRoot").unwrap_or_else(|| r"C:\Windows".into());
     let base = Path::new(&root).join(folder);
     let mut out = Vec::new();
-    let mut stack = vec![base.clone()];
-    while let Some(dir) = stack.pop() {
+    let mut stack = vec![(base.clone(), 0)];
+    while let Some((dir, depth)) = stack.pop() {
         let Ok(rd) = std::fs::read_dir(&dir) else {
             continue;
         };
         for e in rd.flatten() {
             let p = e.path();
-            if p.is_dir() {
-                stack.push(p);
+            let Ok(kind) = e.file_type() else {
+                continue;
+            };
+            if kind.is_dir() {
+                if depth < 6 {
+                    stack.push((p, depth + 1));
+                }
             } else if p.extension().is_some_and(|x| x.eq_ignore_ascii_case("ds")) {
-                out.push(
-                    p.strip_prefix(&base)
-                        .map(|r| r.display().to_string())
-                        .unwrap_or_default(),
-                );
+                let rel = p
+                    .strip_prefix(&base)
+                    .map(|r| r.display().to_string())
+                    .unwrap_or_default();
+                out.push(format!("{rel} [{}]", pe_bits(&p)));
             }
         }
     }
     out.sort();
     out
+}
+
+/// "64-bit", "32-bit" or why not known, from a Windows program file's PE header (its Machine
+/// field): a 64-bit program such as Vibe Files can only load 64-bit TWAIN files.
+pub fn pe_bits(path: &Path) -> &'static str {
+    use std::io::{Read, Seek, SeekFrom};
+    let read = || -> std::io::Result<u16> {
+        let mut f = std::fs::File::open(path)?;
+        let mut mz = [0u8; 64];
+        f.read_exact(&mut mz)?;
+        if &mz[..2] != b"MZ" {
+            return Ok(0);
+        }
+        let pe = u32::from_le_bytes([mz[0x3c], mz[0x3d], mz[0x3e], mz[0x3f]]);
+        f.seek(SeekFrom::Start(pe as u64))?;
+        let mut head = [0u8; 6];
+        f.read_exact(&mut head)?;
+        if &head[..4] != b"PE\0\0" {
+            return Ok(0);
+        }
+        Ok(u16::from_le_bytes([head[4], head[5]]))
+    };
+    match read() {
+        Ok(0x8664) => "64-bit",
+        Ok(0x014c) => "32-bit",
+        Ok(0xaa64) => "ARM64",
+        Ok(_) => "not a Windows program",
+        Err(_) => "unreadable",
+    }
 }
 
 /// Sources installed only for 32-bit programs (`%SystemRoot%\twain_32`, Microsoft's WIA

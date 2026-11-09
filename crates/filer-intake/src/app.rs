@@ -141,6 +141,11 @@ pub struct AppState {
     pub host_trash: bool,
     /// Files whose "Move to trash" was pressed, for the host to take.
     pub trash_request: Option<Vec<PathBuf>>,
+    /// The host shows files itself (Vibe Files' Viewer): a double-clicked file name is handed
+    /// to it ([`FilerApp::take_open_request`]) instead of opening in the Windows program.
+    pub host_open: bool,
+    /// The file whose name was double-clicked, for the host to show.
+    pub open_request: Option<PathBuf>,
     /// What the host read from a file (Vibe Files' form reading), shown on its row.
     pub host_notes: std::collections::HashMap<PathBuf, String>,
     /// This person's own inboxes (owner 2026-11-05: several people on one Remote Desktop
@@ -245,6 +250,8 @@ impl AppState {
             new_client_request: None,
             host_trash: false,
             trash_request: None,
+            host_open: false,
+            open_request: None,
             host_notes: Default::default(),
             personal_inboxes: Vec::new(),
         }
@@ -498,6 +505,21 @@ impl FilerApp {
         self.shared.host_trash = on;
     }
 
+    /// The host shows double-clicked files itself (V24): Preview hands them over through
+    /// [`Self::take_open_request`] instead of opening them in the Windows program.
+    // Used by a host that embeds Filer (Vibe Files), not by this program.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn offer_open(&mut self, on: bool) {
+        self.shared.host_open = on;
+    }
+
+    /// The file whose name was double-clicked in Preview, once (host only).
+    // Used by a host that embeds Filer (Vibe Files), not by this program.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn take_open_request(&mut self) -> Option<PathBuf> {
+        self.shared.open_request.take()
+    }
+
     /// The files whose "Move to trash" was pressed, once. The host moves them out of the inbox,
     /// then calls [`Self::files_taken`].
     // Used by a host that embeds Filer (Vibe Files), not by this program.
@@ -585,6 +607,7 @@ impl FilerApp {
         shared.intake.start(ctx);
         shared.sniffer = Sniffer::new(ctx, shared.pdfium_dir.clone());
         let watched = shared.watched_inboxes();
+        shared.intake.set_file_types(&shared.settings.file_types);
         shared
             .intake
             .set_inboxes(&watched, shared.settings.inbox_subfolders);
@@ -1000,6 +1023,8 @@ impl eframe::App for FilerApp {
         let inboxes = self.shared.watched_inboxes();
         let subfolders = self.shared.settings.inbox_subfolders;
         self.shared.intake.set_inboxes(&inboxes, subfolders);
+        let types = self.shared.settings.file_types.clone();
+        self.shared.intake.set_file_types(&types);
         // A note on a file that left the queue (filed, skipped, taken) goes with it.
         if !self.shared.host_notes.is_empty() {
             let queue = self.shared.intake.queue();
@@ -1928,7 +1953,7 @@ mod preview_tests {
         std::fs::create_dir_all(&desk).unwrap();
         let pdf = desk.join("Smith, John_1234_2025_1040.pdf");
         std::fs::write(&pdf, b"%PDF-1.4 test").unwrap();
-        std::fs::write(desk.join("photo.jpg"), b"jpg").unwrap();
+        std::fs::write(desk.join("notes.xyz"), b"xyz").unwrap();
         let d = data.clone();
         let mut h = HarnessBuilder::default()
             .with_theme(egui::Theme::Light)
@@ -2511,6 +2536,133 @@ mod combine_ui_tests {
         assert!(!filed.exists());
     }
 
+    /// Every file under `dir`, recursively.
+    fn files_under(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+        let mut out = Vec::new();
+        let mut stack = vec![dir.to_path_buf()];
+        while let Some(d) = stack.pop() {
+            for e in std::fs::read_dir(&d).into_iter().flatten().flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    stack.push(p);
+                } else {
+                    out.push(p);
+                }
+            }
+        }
+        out
+    }
+
+    /// V25: a Word file is queued and filed as it is; a picture is filed as a PDF, the picture
+    /// parked in `_combined`; Undo puts both back. Unlisted types stay unsupported.
+    #[test]
+    fn office_files_are_filed_and_images_become_pdfs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data = tmp.path().join("data");
+        let root = tmp.path().join("root");
+        let inbox = tmp.path().join("inbox");
+        for d in [&data, &root, &inbox] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let csv = tmp.path().join("clients.csv");
+        std::fs::write(&csv, "id,name\n1001,\"Smith, John\"\n1004,Baker Farms\n").unwrap();
+        let word = "Smith, John_1001_2025 Questions.docx";
+        let photo = "Baker Farms_1004_2025 Receipt.png";
+        std::fs::write(inbox.join(word), b"PK\x03\x04 not really a docx").unwrap();
+        image::RgbImage::from_pixel(80, 120, image::Rgb([240, 240, 240]))
+            .save(inbox.join(photo))
+            .unwrap();
+        std::fs::write(inbox.join("notes.xyz"), b"?").unwrap();
+        let settings = Settings {
+            root: Some(root.clone()),
+            inboxes: vec![inbox.clone()],
+            csv_path: Some(csv),
+            column_map: ColumnMap {
+                id: Some("id".into()),
+                name: Some("name".into()),
+                extras: vec![],
+            },
+            ..Settings::default()
+        };
+        let d = data.clone();
+        let mut h = HarnessBuilder::default()
+            .with_theme(egui::Theme::Light)
+            .with_size([1800.0, 1200.0])
+            .build_eframe(move |cc| {
+                crate::rules::seed_tax(&d);
+                FilerApp::new(&cc.egui_ctx, AppState::load(d, settings, true, None))
+            });
+        settle(&mut h, "queue", |a| {
+            a.shared.intake.queue().len() == 2
+                && a.shared.intake.unsupported().len() == 1
+                && a.shared.clients.list().is_some()
+        });
+        h.get_by_label("Preview").click();
+        settle(&mut h, "converted", |a| a.preview.group_count() == 1);
+        settle(&mut h, "plan", |a| plan_ready(a, 2));
+        h.step();
+        let names: Vec<String> = h
+            .state()
+            .preview
+            .proposals()
+            .iter()
+            .map(|p| crate::ui::theme::file_name(&p.file.path))
+            .collect();
+        assert!(names.contains(&word.to_string()), "{names:?}");
+        assert!(
+            names.contains(&"Baker Farms_1004_2025 Receipt.pdf".to_string()),
+            "{names:?}"
+        );
+        h.get_by_label("Commit 2 files").click();
+        settle(&mut h, "summary", |a| a.preview.summary_is_open());
+        for _ in 0..4 {
+            h.step();
+        }
+        h.get_by_label("Confirm commit").click();
+        settle(&mut h, "filed", |a| {
+            a.shared.ops_generation > 0 && !a.preview.committing()
+        });
+        let filed = files_under(&root);
+        assert!(
+            filed
+                .iter()
+                .any(|p| p.ends_with(word) || p.extension().is_some_and(|e| e == "docx")),
+            "{filed:?}"
+        );
+        let pdf = filed
+            .iter()
+            .find(|p| p.extension().is_some_and(|e| e == "pdf"))
+            .expect("the picture filed as a PDF");
+        assert_eq!(crate::pdf::page_count(pdf).unwrap(), 1);
+        assert!(
+            !filed
+                .iter()
+                .any(|p| p.extension().is_some_and(|e| e == "png"))
+        );
+        let parked = inbox.join(crate::intake::COMBINED_DIR).join(photo);
+        assert!(parked.exists(), "picture parked");
+        assert!(inbox.join("notes.xyz").exists(), "unlisted type left alone");
+
+        h.step();
+        h.step();
+        h.get_by_label("History").click();
+        settle(&mut h, "history", |a| {
+            a.tab == Tab::History && !a.history.loading()
+        });
+        h.step();
+        h.get_by_label("Undo last batch…").click();
+        h.step();
+        h.step();
+        h.get_by_label("Confirm undo").click();
+        settle(&mut h, "undone", |a| {
+            a.shared.last_batch.as_ref().is_some_and(|b| b.undone)
+        });
+        assert!(inbox.join(word).exists());
+        assert!(inbox.join(photo).exists());
+        assert!(!parked.exists());
+        assert!(!pdf.exists());
+    }
+
     /// V5, V6, V8: click the name to rename (extension kept), "Change folder…" from the row
     /// menu with a new subfolder, and "Change…" on a name-matched client.
     #[test]
@@ -2998,6 +3150,108 @@ mod combine_ui_tests {
             a.shared.intake.queue().len() == 1
         });
         assert!(h.query_by_label("My inbox (0)").is_none());
+    }
+
+    /// V24: a double-click on a file name opens the file; a host that shows files itself gets it.
+    #[test]
+    fn double_click_on_a_file_name_hands_it_to_the_host() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data = tmp.path().join("data");
+        let root = tmp.path().join("root");
+        let inbox = tmp.path().join("inbox");
+        for d in [&data, &root, &inbox] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        crate::pdf::write_test_pdf(&inbox.join("scan0001.pdf"), &["x"]);
+        let settings = Settings {
+            root: Some(root.clone()),
+            inboxes: vec![inbox.clone()],
+            ..Settings::default()
+        };
+        let d = data.clone();
+        let mut h = HarnessBuilder::default()
+            .with_theme(egui::Theme::Light)
+            .with_size([1600.0, 1000.0])
+            .build_eframe(move |cc| {
+                crate::rules::seed_tax(&d);
+                let mut app = FilerApp::new(&cc.egui_ctx, AppState::load(d, settings, true, None));
+                app.offer_open(true);
+                app
+            });
+        settle(&mut h, "queue", |a| a.shared.intake.queue().len() == 1);
+        h.get_by_label("Preview").click();
+        settle(&mut h, "plan", |a| plan_ready(a, 1));
+        h.step();
+        // Both clicks in one frame (kittest's click() takes a frame per event).
+        let pos = h.get_by_label("scan0001.pdf").rect().center();
+        h.input_mut().events.push(egui::Event::PointerMoved(pos));
+        for pressed in [true, false, true, false] {
+            h.input_mut().events.push(egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::default(),
+            });
+        }
+        h.step();
+        h.step();
+        assert_eq!(
+            h.state_mut().take_open_request(),
+            Some(inbox.join("scan0001.pdf"))
+        );
+    }
+
+    /// V23: Import has the same Shared inbox | My inbox tabs, each showing its own zips.
+    #[test]
+    fn import_has_shared_and_my_inbox_tabs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data = tmp.path().join("data");
+        let root = tmp.path().join("root");
+        let shared = tmp.path().join("shared");
+        let mine = tmp.path().join("mine");
+        for d in [&data, &root, &shared, &mine] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        crate::zipimport::tests::make_zip(&shared.join("office.zip"), &[("a.pdf", b"a")]);
+        crate::zipimport::tests::make_zip(&mine.join("mine.zip"), &[("b.pdf", b"b")]);
+        let settings = Settings {
+            root: Some(root.clone()),
+            inboxes: vec![shared.clone()],
+            ..Settings::default()
+        };
+        let d = data.clone();
+        let m = mine.clone();
+        let mut h = HarnessBuilder::default()
+            .with_theme(egui::Theme::Light)
+            .with_size([1600.0, 1000.0])
+            .build_eframe(move |cc| {
+                let mut app = FilerApp::new(&cc.egui_ctx, AppState::load(d, settings, true, None));
+                app.set_personal_inboxes(vec![m]);
+                app
+            });
+        settle(&mut h, "zips", |a| a.shared.intake.zips().len() == 2);
+        h.get_by_label("Import").click();
+        for _ in 0..6 {
+            h.step();
+        }
+        assert!(h.query_by_label("Shared inbox (1)").is_some());
+        assert!(h.query_by_label("My inbox (1)").is_some());
+        assert!(h.query_all_by_label_contains("office.zip").next().is_some());
+        assert!(h.query_all_by_label_contains("mine.zip").next().is_none());
+        h.get_by_label("My inbox (1)").click();
+        for _ in 0..6 {
+            h.step();
+        }
+        assert!(h.query_all_by_label_contains("mine.zip").next().is_some());
+        assert!(h.query_all_by_label_contains("office.zip").next().is_none());
+        // No personal inboxes: no tabs, every zip.
+        h.state_mut().set_personal_inboxes(vec![]);
+        settle(&mut h, "shared only", |a| a.shared.intake.zips().len() == 1);
+        for _ in 0..6 {
+            h.step();
+        }
+        assert!(h.query_by_label("My inbox (0)").is_none());
+        assert!(h.query_all_by_label_contains("office.zip").next().is_some());
     }
 
     /// The side pane shows the row last clicked; ticked rows get one client and one rule at once

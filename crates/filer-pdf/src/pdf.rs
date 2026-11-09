@@ -525,7 +525,7 @@ pub fn split_pdf(
 }
 
 /// Saves `doc` to `out`, which must not exist yet.
-fn save_new(doc: &mut lopdf::Document, out: &Path) -> Result<(), String> {
+pub(crate) fn save_new(doc: &mut lopdf::Document, out: &Path) -> Result<(), String> {
     use std::io::Write;
     let file = std::fs::OpenOptions::new()
         .write(true)

@@ -269,6 +269,8 @@ pub fn devices() -> Devices {
         details.extend(files.into_iter().map(|f| format!("  {f}")));
     }
     details.extend(installed_scan_software());
+    details.extend(scan_processes());
+    details.extend(dsm_log());
     // Drivers such as PaperStream IP install both; name the 32-bit ones only when no TWAIN
     // source could be listed (that is why the scanner is missing).
     let old = crate::twain::thirty_two_bit_only();
@@ -352,13 +354,112 @@ fn installed_scan_software() -> Vec<String> {
     for f in &folders {
         out.push(format!("  {}", f.display()));
         for hit in twain_files_in(f, 4) {
-            out.push(format!("    {}", hit.display()));
+            out.push(format!(
+                "    {} [{}]",
+                hit.display(),
+                crate::twain::pe_bits(&hit)
+            ));
         }
     }
     let keys = scan_registry_keys();
     out.push(format!("Scanning registry keys: {}", keys.len()));
     out.extend(keys.into_iter().map(|k| format!("  {k}")));
     out
+}
+
+/// Running programs whose names mention scanning (a remote-scanning utility's agent has to run
+/// in the person's session for its scanner to appear there), with their session number.
+fn scan_processes() -> Vec<String> {
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::ProcessStatus::{EnumProcesses, GetModuleBaseNameW};
+    use windows::Win32::System::RemoteDesktop::ProcessIdToSessionId;
+    use windows::Win32::System::Threading::{
+        GetCurrentProcessId, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_VM_READ,
+    };
+    let mut pids = vec![0u32; 4096];
+    let mut used = 0u32;
+    // SAFETY: `pids` holds `len * 4` bytes; `used` receives the bytes written.
+    let ok = unsafe {
+        EnumProcesses(
+            pids.as_mut_ptr(),
+            (pids.len() * std::mem::size_of::<u32>()) as u32,
+            &mut used,
+        )
+    };
+    if ok.is_err() {
+        return vec!["Scanning programs running: cannot list programs".into()];
+    }
+    pids.truncate(used as usize / std::mem::size_of::<u32>());
+    let session_of = |pid: u32| {
+        let mut sid = 0u32;
+        // SAFETY: `sid` receives the session id.
+        unsafe { ProcessIdToSessionId(pid, &mut sid) }
+            .ok()
+            .map(|()| sid)
+    };
+    // SAFETY: no preconditions.
+    let mine = session_of(unsafe { GetCurrentProcessId() });
+    let mut found = Vec::new();
+    for pid in pids.into_iter().filter(|p| *p != 0) {
+        // SAFETY: the handle is closed below; failures (other users' programs) are skipped.
+        let Ok(h) = (unsafe {
+            OpenProcess(
+                PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ,
+                false,
+                pid,
+            )
+        }) else {
+            continue;
+        };
+        let mut buf = [0u16; 260];
+        // SAFETY: `buf` is a writable UTF-16 buffer.
+        let n = unsafe { GetModuleBaseNameW(h, None, &mut buf) } as usize;
+        // SAFETY: opened above.
+        let _ = unsafe { CloseHandle(h) };
+        let name = String::from_utf16_lossy(&buf[..n.min(buf.len())]);
+        if n > 0 && names_scanning(&name) {
+            let session = session_of(pid);
+            let here = if session.is_some() && session == mine {
+                " (this session)"
+            } else {
+                ""
+            };
+            let sid = session.map_or("?".to_string(), |s| s.to_string());
+            found.push(format!("  {name} | pid {pid} | session {sid}{here}"));
+        }
+    }
+    found.sort();
+    let mut out = vec![format!(
+        "Scanning programs running: {} (this session is {})",
+        found.len(),
+        mine.map_or("?".to_string(), |s| s.to_string())
+    )];
+    out.extend(found);
+    out
+}
+
+/// The TWAIN manager's own log from its last start (it lists each source it tried and why it
+/// left one out), last 80 lines.
+fn dsm_log() -> Vec<String> {
+    let path = crate::twain::dsm_log_path();
+    match std::fs::read(&path) {
+        Ok(bytes) => {
+            let text = String::from_utf8_lossy(&bytes);
+            let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
+            let skip = lines.len().saturating_sub(80);
+            let mut out = vec![format!(
+                "TWAIN manager log ({}, last {} lines):",
+                path.display(),
+                lines.len() - skip
+            )];
+            out.extend(lines[skip..].iter().map(|l| format!("  {l}")));
+            out
+        }
+        Err(_) => vec![format!(
+            "TWAIN manager log: none written ({}); the manager may not have started",
+            path.display()
+        )],
+    }
 }
 
 /// `.ds` sources and `TWAINDSM.dll` copies under `dir`, `depth` folders deep at most.
@@ -371,7 +472,8 @@ fn twain_files_in(dir: &Path, depth: usize) -> Vec<PathBuf> {
         };
         for e in rd.flatten() {
             let p = e.path();
-            if p.is_dir() {
+            // Folder links are not followed (a loop would never end).
+            if e.file_type().is_ok_and(|t| t.is_dir()) {
                 if level < depth {
                     stack.push((p, level + 1));
                 }
@@ -400,11 +502,10 @@ fn scan_registry_keys() -> Vec<String> {
         (HKEY_LOCAL_MACHINE, "HKLM", r"SOFTWARE\WOW6432Node"),
         (HKEY_CURRENT_USER, "HKCU", r"Software"),
     ] {
-        // Classes holds COM registrations, not products.
-        for top in reg_subkeys(hive, base)
-            .into_iter()
-            .filter(|t| !t.eq_ignore_ascii_case("Classes"))
-        {
+        // Classes holds COM registrations, not products; WOW6432Node is read as its own base.
+        for top in reg_subkeys(hive, base).into_iter().filter(|t| {
+            !t.eq_ignore_ascii_case("Classes") && !t.eq_ignore_ascii_case("WOW6432Node")
+        }) {
             let path = format!(r"{base}\{top}");
             if names_scanning(&top) {
                 out.push(format!(r"{hive_name}\{path}"));

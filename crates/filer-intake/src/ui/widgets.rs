@@ -24,6 +24,43 @@ pub fn show_in_explorer(path: &Path) {
     }
 }
 
+/// Opens `path` in the program Windows has for its type (Acrobat, Word, Excel, Photos …), as a
+/// double-click in Explorer would (ShellExecute "open": no command line, so commas and spaces in
+/// names are safe). Program files are never started.
+pub fn open_file(path: &Path) {
+    use std::os::windows::ffi::OsStrExt;
+    if !path.is_file() {
+        return;
+    }
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if crate::zipimport::BLOCKED.contains(&ext.as_str()) {
+        tracing::warn!(file = %path.display(), "not opened: a program file");
+        return;
+    }
+    let wide = |s: &std::ffi::OsStr| s.encode_wide().chain(Some(0)).collect::<Vec<u16>>();
+    let file = wide(path.as_os_str());
+    let verb = wide(std::ffi::OsStr::new("open"));
+    // SAFETY: both strings are NUL-terminated UTF-16 and outlive the call.
+    let r = unsafe {
+        windows_sys::Win32::UI::Shell::ShellExecuteW(
+            std::ptr::null_mut(),
+            verb.as_ptr(),
+            file.as_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL,
+        )
+    };
+    // Values above 32 mean it worked.
+    if (r as isize) <= 32 {
+        tracing::warn!(file = %path.display(), code = r as isize, "cannot open the file");
+    }
+}
+
 /// Inside an open menu: a "Type to search" box (the cursor in it when the menu opens) over a
 /// scrolled list of `items`. Every word typed must appear in an item (any case, any order);
 /// Enter picks the first match. Returns the item picked; the caller closes the menu.

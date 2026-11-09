@@ -13,6 +13,13 @@ pub const DEFAULT_FUZZY_SUGGEST: f32 = 0.85;
 pub const DEFAULT_FUZZY_AUTO: f32 = 0.97;
 pub const FUZZY_THRESHOLD_RANGE: std::ops::RangeInclusive<f32> = 0.70..=0.99;
 
+/// File types filed besides PDF, on a new install (V25, owner 2026-11-09): Office files, images,
+/// text and mail. Edited in Setup › Inboxes.
+pub const DEFAULT_FILE_TYPES: [&str; 22] = [
+    "doc", "docx", "xls", "xlsx", "xlsm", "csv", "ppt", "pptx", "rtf", "txt", "msg", "eml", "iif",
+    "jpg", "jpeg", "png", "tif", "tiff", "bmp", "gif", "heic", "xml",
+];
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct Settings {
@@ -35,6 +42,12 @@ pub struct Settings {
     pub window: Option<WindowState>,
     /// Theme and zoom: saved as soon as they change, not with Setup's Save (V1, V2).
     pub display: Display,
+    /// File types queued for filing besides PDF (lower case, no dot; V25). Program files
+    /// (`zipimport::BLOCKED`) are never filed even if listed.
+    pub file_types: Vec<String>,
+    /// JPEG, PNG, TIFF, BMP and GIF files are filed as PDFs (V25; the original goes to the
+    /// inbox's `_combined` folder, as combined originals do).
+    pub images_to_pdf: bool,
 }
 
 /// Light, dark, or whatever Windows uses (V1).
@@ -108,6 +121,8 @@ impl Default for Settings {
             firm_id: None,
             window: None,
             display: Display::default(),
+            file_types: DEFAULT_FILE_TYPES.iter().map(|s| s.to_string()).collect(),
+            images_to_pdf: true,
         }
     }
 }
