@@ -370,10 +370,12 @@ pub fn read_name(
     // A word alone must look like an ID (the ID pattern) and not be a year (QA: "Statement
     // 12-31-2025" is not client 2025).
     let word_ok = |w: &str| {
+        // In capitals: `jone1234` in a name is still an ID when a client has it.
+        let up = w.to_uppercase();
         let fits = match re {
             Some(re) => re
-                .captures(&format!("x_{w}_x.x"))
-                .is_some_and(|c| &c["id"] == w),
+                .captures(&format!("x_{up}_x.x"))
+                .is_some_and(|c| c["id"] == up),
             None => w.chars().count() >= 4,
         };
         fits && !(w.len() == 4 && detect_year(w, current_year).is_some())
@@ -452,11 +454,13 @@ fn id_near_ends(
     let tail = byte_at(chars.saturating_sub(ID_SEARCH_CHARS));
     let head = byte_at(ID_SEARCH_CHARS);
     // The pair (a, b) as written and run together, then `single` alone.
-    let half = |w: &str| w.chars().count() == 4;
+    // A part of a two-part ID: two characters or more, the two together six or more (QA:
+    // "12-31" in a date is not an ID).
+    let part = |w: &str| w.chars().count() >= 2;
     let try_at = |pair: Option<((usize, usize), (usize, usize))>, single: (usize, usize)| {
         if let Some(((s, first_end), (bs, e))) = pair {
             let (first, second) = (&stem[s..first_end], &stem[bs..e]);
-            if half(first) && half(second) {
+            if part(first) && part(second) && first.chars().count() + second.chars().count() >= 6 {
                 for id in [
                     stem[s..e].to_string(),
                     format!("{first}_{second}"),

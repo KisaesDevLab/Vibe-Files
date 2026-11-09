@@ -48,6 +48,9 @@ pub struct ClientList {
 #[derive(Debug, Clone, Default)]
 struct Index {
     by_id: HashMap<String, usize>,
+    /// IDs without `_`, `-` or spaces, in capitals ([`loose_id`]): the client, or `None` when
+    /// two clients' IDs read the same that way.
+    by_loose: HashMap<String, Option<usize>>,
     /// Normalized name variants per client, same order as `clients`.
     names: Vec<Vec<String>>,
 }
@@ -98,6 +101,14 @@ impl ClientList {
             .enumerate()
             .map(|(i, c)| (c.id.clone(), i))
             .collect();
+        self.index.by_loose = HashMap::new();
+        for (i, c) in self.clients.iter().enumerate() {
+            self.index
+                .by_loose
+                .entry(loose_id(&c.id))
+                .and_modify(|e| *e = None)
+                .or_insert(Some(i));
+        }
         self.index.names = self
             .clients
             .iter()
@@ -120,6 +131,24 @@ impl ClientList {
     /// Exact ID match (after trimming). Leading zeros are significant.
     pub fn match_by_id(&self, id: &str) -> Option<&Client> {
         self.index.by_id.get(id.trim()).map(|&i| &self.clients[i])
+    }
+
+    /// The client a file name's ID stands for, owner 2026-11-09: exactly as the list has it, else
+    /// the same letters and digits ignoring `_`, `-`, spaces and case (`JONE1234`, `JONE_1234`,
+    /// `jone-1234` all find `JONE-1234`), when only one client reads that way.
+    pub fn match_by_id_loose(&self, id: &str) -> Option<&Client> {
+        self.match_by_id(id).or_else(|| {
+            let key = loose_id(id);
+            if key.is_empty() {
+                return None;
+            }
+            self.index
+                .by_loose
+                .get(&key)
+                .copied()
+                .flatten()
+                .map(|i| &self.clients[i])
+        })
     }
 
     /// Some client's name is at least `threshold` similar to `query` (as [`Self::fuzzy_by_name`]
@@ -191,6 +220,14 @@ pub fn normalize_name(s: &str) -> String {
         }
     }
     out.trim().to_string()
+}
+
+/// An ID without `_`, `-` or spaces, in capitals: how [`ClientList::match_by_id_loose`] compares.
+pub fn loose_id(id: &str) -> String {
+    id.chars()
+        .filter(|c| !(*c == '_' || *c == '-' || c.is_whitespace()))
+        .flat_map(char::to_uppercase)
+        .collect()
 }
 
 /// The normalized name, plus "First Last" when the name is written "Last, First".
@@ -881,6 +918,38 @@ mod tests {
             0,
             clients,
         )
+    }
+
+    /// Owner 2026-11-09: `JONE1234`, `JONE_1234` and `JONE-1234` (any case) are the same
+    /// client's ID, read as the list writes it; two clients that would read the same are not
+    /// guessed between.
+    #[test]
+    fn an_id_written_another_way_finds_the_client() {
+        let list = list_of(&[
+            ("JONE-1234", "Jones, Pat"),
+            ("SMIT_0001", "Smith Co"),
+            ("AB12", "One"),
+            ("AB-12", "Two"),
+        ]);
+        for written in [
+            "JONE-1234",
+            "JONE1234",
+            "JONE_1234",
+            "jone 1234",
+            "Jone-1234",
+        ] {
+            assert_eq!(
+                list.match_by_id_loose(written).map(|c| c.id.as_str()),
+                Some("JONE-1234"),
+                "{written}"
+            );
+        }
+        assert_eq!(list.match_by_id_loose("SMIT0001").unwrap().id, "SMIT_0001");
+        // Exact first; the loose form is shared by two clients: neither.
+        assert_eq!(list.match_by_id_loose("AB-12").unwrap().name, "Two");
+        assert!(list.match_by_id_loose("ab_12").is_none());
+        assert!(list.match_by_id_loose("JONE12345").is_none());
+        assert!(list.match_by_id_loose("--").is_none());
     }
 
     #[test]

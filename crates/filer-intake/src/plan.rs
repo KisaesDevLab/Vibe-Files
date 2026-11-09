@@ -440,14 +440,27 @@ pub fn read_name(
     list: Option<&ClientList>,
     suggest: f32,
 ) -> Parsed {
-    parse::read_name(
+    let mut parsed = parse::read_name(
         name,
         re,
         layout,
         current_year,
-        |id| list.is_some_and(|l| l.match_by_id(id).is_some()),
+        |id| list.is_some_and(|l| l.match_by_id_loose(id).is_some()),
         |who| list.is_some_and(|l| l.any_name_at_least(who, f64::from(suggest))),
-    )
+    );
+    // An ID written another way (`JONE_1234` for the list's `JONE-1234`) becomes the list's own,
+    // so everything after (the client, the Client ID column) sees the client's ID.
+    if let Some(l) = list {
+        if let Some(c) = parsed.id.as_deref().and_then(|id| l.match_by_id_loose(id)) {
+            parsed.id = Some(c.id.clone());
+        }
+        if let Some(u) = parsed.ultratax.as_mut()
+            && let Some(c) = l.match_by_id_loose(&u.client_id)
+        {
+            u.client_id = c.id.clone();
+        }
+    }
+    parsed
 }
 
 /// `b` exists with the same bytes as `a` (size first, then SHA-256).
@@ -1385,6 +1398,49 @@ mod tests {
             inbox,
             clients,
         }
+    }
+
+    /// Owner 2026-11-09: a file name's ID written with or without `_` or `-`, in any case,
+    /// is read as the list writes it.
+    #[test]
+    fn an_id_written_another_way_is_read_as_the_list_has_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let csv = tmp.path().join("c.csv");
+        std::fs::write(&csv, "id,name\nJONE-1234,\"Jones, Pat\"\n").unwrap();
+        let map = ColumnMap {
+            id: Some("id".into()),
+            name: Some("name".into()),
+            extras: vec![],
+        };
+        let list =
+            crate::clients::apply_mapping(&crate::clients::read_csv(&csv).unwrap(), &map).unwrap();
+        let re = parse::filename_regex(parse::DEFAULT_ID_PATTERN).unwrap();
+        let off = parse::UltraTaxLayout {
+            enabled: false,
+            ..Default::default()
+        };
+        for name in [
+            "Jones_2025_1040_Tax_Return_JONE1234.pdf",
+            "Jones_2025_1040_Tax_Return_JONE_1234.pdf",
+            "Jones_2025_1040_Tax_Return_JONE-1234.pdf",
+            "Jones_2025_1040_Tax_Return_jone-1234.pdf",
+            "Jones, Pat_JONE_1234_2025 W-2.pdf",
+            "JONE1234 Jones 2025 W-2 and a long description.pdf",
+        ] {
+            let p = read_name(name, Some(&re), &off, 2026, Some(&list), 0.9);
+            assert_eq!(p.id.as_deref(), Some("JONE-1234"), "{name}");
+        }
+        // The UltraTax layout reads the last part as the ID: shown as the list has it too.
+        let on = parse::UltraTaxLayout::default();
+        let p = read_name(
+            "Jones_2025_1040_Tax_Return_jone1234.pdf",
+            Some(&re),
+            &on,
+            2026,
+            Some(&list),
+            0.9,
+        );
+        assert_eq!(p.id.as_deref(), Some("JONE-1234"));
     }
 
     fn queued(path: &Path) -> QueuedFile {
