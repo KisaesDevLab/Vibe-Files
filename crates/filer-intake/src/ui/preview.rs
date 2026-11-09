@@ -2309,11 +2309,12 @@ impl PreviewScreen {
                         )
                         .column(col(0.18, 110.0))
                         .header(30.0, |mut header| {
-                            let fill = |ui: &mut egui::Ui| {
+                            let fill = |ui: &mut egui::Ui, col: usize| {
                                 ui.painter().rect_filled(ui.max_rect(), 0.0, p.tint_copy);
+                                column_line(ui, col);
                             };
                             header.col(|ui| {
-                                fill(ui);
+                                fill(ui, 0);
                                 ui.add_space(6.0);
                                 ui.horizontal(|ui| {
                                     ui.add_space(6.0);
@@ -2332,7 +2333,7 @@ impl PreviewScreen {
                                     }
                                 });
                             });
-                            for (t, by) in [
+                            for (col, (t, by)) in [
                                 ("File", SortBy::File),
                                 ("Date", SortBy::Date),
                                 ("Client", SortBy::Client),
@@ -2340,9 +2341,12 @@ impl PreviewScreen {
                                 ("Year", SortBy::Year),
                                 ("Destination", SortBy::Destination),
                                 ("Status", SortBy::Status),
-                            ] {
+                            ]
+                            .into_iter()
+                            .enumerate()
+                            {
                                 header.col(|ui| {
-                                    fill(ui);
+                                    fill(ui, col + 1);
                                     ui.add_space(8.0);
                                     ui.horizontal(|ui| {
                                         ui.add_space(6.0);
@@ -3306,6 +3310,7 @@ struct Cells<'r, 'a, 'b> {
 impl Cells<'_, '_, '_> {
     fn cell<R>(&mut self, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
         let id = self.id.with(self.col);
+        let col = self.col;
         self.col += 1;
         let (fill, line, border, spacing) = (self.fill, self.line, self.border, self.spacing);
         let mut out = None;
@@ -3331,6 +3336,7 @@ impl Cells<'_, '_, '_> {
                     }
                 }
             }
+            column_line(ui, col);
             hovered = ui.rect_contains_pointer(rect);
             ui.scope_builder(egui::UiBuilder::new().scope_id(id), |ui| {
                 ui.spacing_mut().item_spacing = spacing;
@@ -3447,6 +3453,22 @@ enum RowAction {
 
 /// The Date column's width.
 const DATE_W: f32 = 96.0;
+
+/// Columns of fixed width (the tick box, Date, Year, Destination): egui draws the line after a
+/// column only where it can be dragged wider, so these draw their own (owner 2026-11-09).
+const FIXED_COLUMNS: [usize; 4] = [0, 2, 5, 6];
+
+/// The line on the right of a fixed-width column, as egui draws it after the others.
+fn column_line(ui: &egui::Ui, col: usize) {
+    if FIXED_COLUMNS.contains(&col) {
+        let r = ui.max_rect();
+        ui.painter().vline(
+            r.right() - 0.5,
+            r.y_range(),
+            ui.visuals().widgets.noninteractive.bg_stroke,
+        );
+    }
+}
 
 /// A column heading that sorts the queue when clicked; the sorted column shows its direction.
 fn sort_heading(

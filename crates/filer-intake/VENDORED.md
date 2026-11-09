@@ -6,7 +6,7 @@
 |---|---|
 | Repo | `KisaesDevLab/Vibe-Filer-Desktop` (private) |
 | Branch | `master` |
-| Commit | `bab3a61` on `master` (V30: file date column and sorting by any column in the queue, 2026-11-09); before: `e80a8b1` (Unsupported strip width); `ac56db4` (V29); `c5e2f70` (QA of V27-V28); `e165e56` (V27-V28); `6417249` (V23-V26); `f2504fe` (V22); `29db764` (V21); `6433c04` on `master` ("feat(host): Setup lock and \"New client…\" for a program that embeds Filer", 0.2.6 + the Intake preview pane, ticked-row actions and host hooks, 2026-11-04) |
+| Commit | `4a15680` on `master` (column lines on the queue's fixed-width columns, 2026-11-09); before: `bab3a61` (V30); `e80a8b1` (Unsupported strip width); `ac56db4` (V29); `c5e2f70` (QA of V27-V28); `e165e56` (V27-V28); `6417249` (V23-V26); `f2504fe` (V22); `29db764` (V21); `6433c04` on `master` ("feat(host): Setup lock and \"New client…\" for a program that embeds Filer", 0.2.6 + the Intake preview pane, ticked-row actions and host hooks, 2026-11-04) |
 | Vendored | 2026-11-02, P00 step 2 at `ea4e726` (0.2.4); re-vendored 2026-11-04, PHASES PA-26 |
 | Upstream tests | 236 at this commit (235 at `e80a8b1`); all pass after the split (filer-core 65 · filer-pdf 32 · filer-intake 139) |
 
@@ -113,6 +113,8 @@ the rest of intake. Moving it would need a logic edit (Q-16: merge rather than e
   side pane). `app.rs`, `ui/preview.rs` (filer-intake) copied; upstream's 235 tests pass.
   Then `e80a8b1` → `bab3a61` (V30): the queue's Date column (last-modified, read on a worker) and
   headings that sort. `app.rs`, `ui/preview.rs` (filer-intake) copied; upstream's 236 tests pass.
+  Then `bab3a61` → `4a15680`: lines after the tick box, Date, Year and Destination columns (egui draws
+  them only after resizable columns). `ui/preview.rs` (filer-intake) copied; upstream's 236 tests pass.
 
 ## Re-vendoring
 
