@@ -50,8 +50,16 @@ downloads or installs anything. `update_check = false` in `config.toml` turns th
    their names and folders, and lists what is left for a person (export the list as CSV). Undo
    the last import puts everything back.
 5. **Intake**: the Intake tab is Filer Desktop. Set its inbox folders. Several workstations may
-   file at once (owner 2026-11-04, Q-52); see "Several people filing at once" below.
-6. **Scanner**: Intake › Scanner on each scanning PC (TWAIN for the fi-7160, or WIA).
+   file at once (owner 2026-11-04, Q-52); see "Several people filing at once" below. Besides
+   PDFs it files the types in Setup › Inboxes › **Also file** (Office files, images, text and
+   mail by default; program files never); with **File images as PDFs** on, pictures are filed as
+   PDFs and the picture goes to the inbox's `_combined` folder (Undo puts it back).
+6. **Scanner**: Intake › Scanner on each scanning PC (TWAIN for the fi-7160, or WIA). When no
+   scanner shows (for example a remote-scanning utility in a Remote Desktop session), open
+   **Scanner details** under the Scanner row and **Copy** it: it lists every TWAIN file and
+   whether it is 32- or 64-bit (Vibe Files can use only 64-bit ones), why each TWAINDSM.dll did
+   or did not load, the TWAIN manager's own log, the scanning programs running in the session,
+   and the Windows (WIA) scanners.
 7. **OCR**: needs nothing (the bundled `tesseract\`); an imported cabinet's backlog is read in
    the background, or at once with `vibe-files ocr backlog <cabinet>`.
 8. **Sync** (offsite copy in B2): see §4.
