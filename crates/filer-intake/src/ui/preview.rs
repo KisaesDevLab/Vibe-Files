@@ -3641,25 +3641,30 @@ fn row_ui(
                         actions.push(RowAction::Fold(path.clone()));
                     }
                 }
-                let name = ui
-                    .add(
-                        egui::Label::new(mono(text).color(pl.text))
-                            .wrap()
-                            .sense(egui::Sense::click()),
-                    )
-                    .on_hover_text(format!("{hover}\nDouble-click to open"));
-                if let Some((_, Some(n))) = ctx.page_counts.get(path)
-                    && *n > 1
-                {
-                    ui.label(
-                        RichText::new(format!("· {n} pages"))
-                            .size(12.0)
-                            .color(pl.muted),
-                    );
-                }
-                name
+                ui.add(
+                    egui::Label::new(mono(text).color(pl.text))
+                        .wrap()
+                        .sense(egui::Sense::click()),
+                )
+                .on_hover_text(format!("{hover}\nDouble-click to open"))
             })
             .inner;
+        // The page count on its own line under the name, at the right (owner 2026-11-09: beside
+        // a long name it was squeezed to one letter a line).
+        if let Some((_, Some(n))) = ctx.page_counts.get(path)
+            && *n > 1
+        {
+            ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(format!("{n} pages"))
+                            .size(12.0)
+                            .color(pl.muted),
+                    )
+                    .extend(),
+                );
+            });
+        }
         if let Some(sub) = sub {
             ui.label(RichText::new(sub).size(11.0).color(pl.muted));
         }

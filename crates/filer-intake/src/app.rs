@@ -3433,12 +3433,12 @@ My miles for 2025.
 ",
         )
         .unwrap();
-        let ret = "Smith, John_1001_2025 1040 Tax Return.pdf";
+        let ret = "Smith, John_1001_2025_1040_GovernmentCopyTaxReturn_Long_Name.pdf";
         // A rule but no client; a client but only the Catch-all.
         let no_client = "Baker, Ann_7777_2025 1040 Tax Return.pdf";
         let catch_all = "Smith, John_1001_misc.pdf";
         for n in [ret, no_client, catch_all, "scan0001.pdf"] {
-            crate::pdf::write_test_pdf(&inbox.join(n), &[n]);
+            crate::pdf::write_test_pdf(&inbox.join(n), &[n, "second page"]);
         }
         let settings = Settings {
             root: Some(root.clone()),
@@ -3503,6 +3503,24 @@ My miles for 2025.
         h.step();
         h.step();
         assert_eq!(h.state().preview.ticked(), [inbox.join(ret)]);
+        // Owner 2026-11-09: the page count sits on its own line under the name, at the right
+        // of the File column (beside a long name it was squeezed to a letter a line).
+        settle(&mut h, "page counts", |_| true);
+        for _ in 0..6 {
+            h.step();
+        }
+        let name = h.get_by_label(ret).rect();
+        let pages: Vec<egui::Rect> = h.get_all_by_label("2 pages").map(|n| n.rect()).collect();
+        let row = pages
+            .iter()
+            .find(|r| r.top() >= name.bottom() - 1.0 && r.top() < name.bottom() + 30.0)
+            .expect("2 pages under the long name");
+        assert!(row.height() < 20.0, "on one line: {row:?}");
+        assert!(
+            row.left() > name.center().x,
+            "at the right: {row:?} {name:?}"
+        );
+        crate::app::snapshot(&mut h, "pages_under_name");
     }
 
     /// Owner 2026-11-09: the queue shows each file's date, and a click on a column heading
