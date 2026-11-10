@@ -78,6 +78,7 @@ pub fn show(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env, ci: usize) {
                     code: c.ext_id.clone(),
                     name: c.name.clone(),
                 },
+                b.portal.audit_out(),
             ));
         }
     });

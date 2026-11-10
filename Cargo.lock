@@ -6095,6 +6095,8 @@ dependencies = [
 name = "vf-portal"
 version = "0.1.12"
 dependencies = [
+ "filer-intake",
+ "getrandom 0.3.4",
  "serde",
  "serde_json",
  "sha2",

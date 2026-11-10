@@ -1052,8 +1052,8 @@ ANDE1042,Anderson Farms LLC
         );
     }
 
-    /// P05 step 2: the Audit trail page lists the rows, filters them, asks for a verify, and
-    /// its PDF export reads back.
+    /// PA-37: Admin › Portal checks the key, saves for every PC, adds the Portal inbox, audits
+    /// without the key, and stops only when confirmed.
     #[test]
     fn portal_page_saves_for_every_pc_and_adds_the_portal_inbox() {
         let mut h = harness();
@@ -1109,9 +1109,14 @@ ANDE1042,Anderson Farms LLC
         );
         // Stopping removes it for every PC.
         click(&mut h, "Stop using the portal");
+        // It asks first: nothing stopped yet.
+        assert!(vf_portal::settings::load(&root, "cab-portal").is_some());
+        click(&mut h, "Stop");
         assert!(vf_portal::settings::load(&root, "cab-portal").is_none());
     }
 
+    /// P05 step 2: the Audit trail page lists the rows, filters them, asks for a verify, and
+    /// its PDF export reads back.
     #[test]
     fn audit_trail_page_lists_filters_and_exports() {
         let mut h = harness();

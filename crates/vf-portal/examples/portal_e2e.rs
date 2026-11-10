@@ -7,6 +7,7 @@
 //!   invite <client-id> <email>
 //!   users <client-id>                                   -> one identity id per line
 //!   share <client-id> <doc-id> <path> <shown-id> [<hidden-id>]
+//!   vis <file-id> <identity-id> <true|false>
 //!   viewed <doc-id> <identity-id>                       -> "opened" or "not opened"
 //!   fetch <cabinet-root>                                -> one saved path per line
 
@@ -19,7 +20,8 @@ fn main() {
     let url = std::env::var("VF_PORTAL_URL").expect("VF_PORTAL_URL");
     let key = std::env::var("VF_PORTAL_KEY").expect("VF_PORTAL_KEY");
     let s = PortalSettings::new("e2e", &url, &key, 0).expect("settings");
-    let p = Portal::new(&s, "E2E-PC", "tester");
+    let pc = std::env::var("VF_PC").unwrap_or_else(|_| "E2E-PC".into());
+    let p = Portal::new(&s, &pc, "tester");
     let a: Vec<String> = std::env::args().skip(1).collect();
     let arg = |i: usize| a.get(i).map(String::as_str).unwrap_or_default();
     let fail = |e: vf_portal::PortalError| -> ! {
@@ -31,9 +33,12 @@ fn main() {
             let st = p.status().unwrap_or_else(|e| fail(e));
             println!("{} {}", st.firm_name, st.version);
         }
-        "client" => p.put_client(arg(1), arg(2), arg(3), None).unwrap_or_else(|e| fail(e)),
+        "client" => p
+            .put_client(arg(1), arg(2), arg(3), None)
+            .unwrap_or_else(|e| fail(e)),
         "invite" => {
-            p.invite(arg(1), Some(arg(2)), None, "", "").unwrap_or_else(|e| fail(e));
+            p.invite(arg(1), Some(arg(2)), None, "", "")
+                .unwrap_or_else(|e| fail(e));
         }
         "users" => {
             for u in p.users(arg(1)).unwrap_or_else(|e| fail(e)).users {
@@ -43,21 +48,36 @@ fn main() {
         "share" => {
             let path = Path::new(arg(3));
             let name = path.file_name().unwrap().to_string_lossy().to_string();
-            let added = p.add(arg(1), arg(2), &name, Some(2025), path).unwrap_or_else(|e| fail(e));
+            let added = p
+                .add(arg(1), arg(2), &name, Some(2025), path)
+                .unwrap_or_else(|e| fail(e));
             let mut vis = BTreeMap::new();
             vis.insert(arg(4).to_string(), true);
             if !arg(5).is_empty() {
                 vis.insert(arg(5).to_string(), false);
             }
-            p.set_visibility(added.file_id(), &vis).unwrap_or_else(|e| fail(e));
+            p.set_visibility(added.file_id(), &vis)
+                .unwrap_or_else(|e| fail(e));
             println!("{}", added.file_id());
         }
+        "vis" => {
+            let mut vis = BTreeMap::new();
+            vis.insert(arg(2).to_string(), arg(3) == "true");
+            p.set_visibility(arg(1), &vis).unwrap_or_else(|e| fail(e));
+        }
         "viewed" => {
-            let f = p.file_for_doc(arg(1)).unwrap_or_else(|e| fail(e)).expect("on the portal");
+            let f = p
+                .file_for_doc(arg(1))
+                .unwrap_or_else(|e| fail(e))
+                .expect("on the portal");
             let u = f.users.iter().find(|u| u.identity_id == arg(2));
             println!(
                 "{}",
-                if u.is_some_and(|u| u.viewed_at.is_some()) { "opened" } else { "not opened" }
+                if u.is_some_and(|u| u.viewed_at.is_some()) {
+                    "opened"
+                } else {
+                    "not opened"
+                }
             );
         }
         "fetch" => {

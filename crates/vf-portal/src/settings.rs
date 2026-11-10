@@ -14,7 +14,7 @@ pub const KEY_PREFIX: &str = "vpk_";
 /// Minutes between fetches of client uploads, unless the firm sets another.
 pub const DEFAULT_FETCH_MINUTES: u32 = 5;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PortalSettings {
     pub version: u32,
     /// The cabinet these settings belong to (a copied `_Vibe` folder does not carry them over).
@@ -30,6 +30,18 @@ pub struct PortalSettings {
 
 fn default_fetch() -> u32 {
     DEFAULT_FETCH_MINUTES
+}
+
+/// Never prints the key (QA 2026-11-09).
+impl std::fmt::Debug for PortalSettings {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PortalSettings")
+            .field("cabinet_id", &self.cabinet_id)
+            .field("url", &self.url)
+            .field("key", &"vpk_…")
+            .field("fetch_minutes", &self.fetch_minutes)
+            .finish()
+    }
 }
 
 impl Drop for PortalSettings {
@@ -74,9 +86,14 @@ pub fn normalize_url(raw: &str) -> Option<String> {
 impl PortalSettings {
     /// Checks and tidies what was typed in Admin › Portal.
     pub fn new(cabinet_id: &str, url: &str, key: &str, fetch_minutes: u32) -> Result<Self, String> {
-        let url = normalize_url(url).ok_or_else(|| {
-            "The portal address must start with https:// (or http://).".to_string()
-        })?;
+        let url = normalize_url(url)
+            .ok_or_else(|| "The portal address must start with https://.".to_string())?;
+        // The key and client files would cross the network in clear (QA 2026-11-09).
+        if url.starts_with("http://") && !crate::api::is_loopback(&url) {
+            return Err(
+                "The portal address must start with https:// (http:// only on this PC).".into(),
+            );
+        }
         let key = key.trim();
         if !key.starts_with(KEY_PREFIX) || key.len() < KEY_PREFIX.len() + 20 {
             return Err(format!(
@@ -111,8 +128,12 @@ pub fn save(root: &Path, s: &PortalSettings) -> Result<(), String> {
 }
 
 /// Stops using the portal on every PC (the portal keeps its files; Vibe Files stops calling it).
-pub fn clear(root: &Path) {
-    let _ = std::fs::remove_file(file(root));
+pub fn clear(root: &Path) -> Result<(), String> {
+    match std::fs::remove_file(file(root)) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e.to_string()),
+    }
 }
 
 #[cfg(test)]
@@ -137,6 +158,15 @@ mod tests {
     }
 
     #[test]
+    fn plain_http_only_on_this_pc_and_the_key_never_printed() {
+        assert!(PortalSettings::new("c", "http://files.example.test", KEY, 5).is_err());
+        assert!(PortalSettings::new("c", "http://localhost:3101", KEY, 5).is_ok());
+        assert!(PortalSettings::new("c", "http://127.0.0.1:3101", KEY, 5).is_ok());
+        let s = PortalSettings::new("c", "files.example.test", KEY, 5).unwrap();
+        assert!(!format!("{s:?}").contains(&KEY[4..]));
+    }
+
+    #[test]
     fn a_key_must_look_like_a_portal_key() {
         assert!(PortalSettings::new("c", "files.example.test", "secret", 5).is_err());
         let s = PortalSettings::new("c", "files.example.test", &format!(" {KEY} "), 5).unwrap();
@@ -150,7 +180,7 @@ mod tests {
         save(t.path(), &s).unwrap();
         assert_eq!(load(t.path(), "cab-1"), Some(s));
         assert_eq!(load(t.path(), "cab-2"), None);
-        clear(t.path());
+        clear(t.path()).unwrap();
         assert_eq!(load(t.path(), "cab-1"), None);
     }
 }

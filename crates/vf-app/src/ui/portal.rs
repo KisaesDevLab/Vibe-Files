@@ -1,11 +1,16 @@
 //! The firm's Vibe Portal in the app (PA-37): the Share window (Browse), the client's portal
 //! users (client panel), Admin › Portal and Admin › Portal requests, and the timed fetch of
 //! client uploads into the Portal inbox. Every call to the portal runs on a thread; the window
-//! shows "Working…" meanwhile. Each change is recorded in the audit trail.
+//! shows "Working…" meanwhile.
+//!
+//! Audit (QA 2026-11-09): each portal change is sent to [`PortalState`]'s channel by the thread
+//! the moment the portal accepted it, and the app records what the channel holds every frame.
+//! Closing a window, or an error part-way through a batch, never loses the record of what was
+//! already done.
 
 use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
-use std::sync::mpsc::{self, Receiver};
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, Instant};
 
 use egui::RichText;
@@ -53,24 +58,62 @@ fn cabinet_id(root: &Path) -> Option<String> {
     vf_fs::cabinet::read(root).ok().map(|c| c.cabinet_id)
 }
 
+/// Where a thread sends the audit row of each portal change it made.
+#[derive(Clone)]
+pub struct AuditOut(Sender<AuditEntry>);
+
+impl AuditOut {
+    fn send(&self, e: AuditEntry) {
+        let _ = self.0.send(e);
+    }
+}
+
 // ======================================================================================
 // State kept with Browse: settings, the timed fetch, the marks, the open windows.
 // ======================================================================================
 
-#[derive(Default)]
 pub struct PortalState {
     settings: Option<PortalSettings>,
     read_at: Option<Instant>,
     fetch: Option<Receiver<core::FetchReport>>,
     fetched_at: Option<Instant>,
-    /// Cabinet documents on the portal (Browse's marks), as of the last fetch.
+    marks: Option<Receiver<Option<HashSet<String>>>>,
+    /// Cabinet documents on the portal (Browse's marks), as of the last read.
     pub on_portal: HashSet<String>,
     pub share: Option<ShareWindow>,
     pub people: Option<PeopleWindow>,
     /// Admin › Portal's "Fetch now".
     pub fetch_now: bool,
+    /// Read the marks again (after the Share window closed); fetches nothing.
+    pub refresh_marks: bool,
     /// A line for Browse's notice bar.
     pub notice: Option<String>,
+    /// The last problem shown: the same one is not shown again until it changes.
+    last_problem: Option<String>,
+    audit_tx: Sender<AuditEntry>,
+    audit_rx: Receiver<AuditEntry>,
+}
+
+impl Default for PortalState {
+    fn default() -> Self {
+        let (audit_tx, audit_rx) = mpsc::channel();
+        Self {
+            settings: None,
+            read_at: None,
+            fetch: None,
+            fetched_at: None,
+            marks: None,
+            on_portal: HashSet::new(),
+            share: None,
+            people: None,
+            fetch_now: false,
+            refresh_marks: false,
+            notice: None,
+            last_problem: None,
+            audit_tx,
+            audit_rx,
+        }
+    }
 }
 
 impl PortalState {
@@ -100,9 +143,22 @@ impl PortalState {
         self.settings(root).is_some()
     }
 
-    /// The timed fetch of client uploads. Returns audit rows for what arrived.
+    pub fn audit_out(&self) -> AuditOut {
+        AuditOut(self.audit_tx.clone())
+    }
+
+    /// The timed fetch of client uploads, and the audit rows of every portal change made
+    /// since the last frame (fetches, and what the windows' threads did).
     pub fn tick(&mut self, ctx: &egui::Context, root: &Path) -> Vec<AuditEntry> {
-        let mut audit = Vec::new();
+        let mut audit: Vec<AuditEntry> = self.audit_rx.try_iter().collect();
+        if let Some(rx) = &self.marks
+            && let Ok(set) = rx.try_recv()
+        {
+            self.marks = None;
+            if let Some(set) = set {
+                self.on_portal = set;
+            }
+        }
         if let Some(rx) = &self.fetch
             && let Ok(report) = rx.try_recv()
         {
@@ -125,15 +181,22 @@ impl PortalState {
                 ));
             }
             let n = report.received.len();
-            self.notice = match (n, report.problems.first()) {
-                (0, None) => self.notice.take(),
-                (_, Some(p)) => Some(format!("Portal: {p}")),
-                (n, None) => Some(format!(
+            match report.problems.first() {
+                // A problem is said once, until it changes or a fetch works again.
+                Some(p) if self.last_problem.as_deref() != Some(p.as_str()) => {
+                    self.last_problem = Some(p.clone());
+                    self.notice = Some(format!("Portal: {p}"));
+                }
+                Some(_) => {}
+                None => self.last_problem = None,
+            }
+            if n > 0 {
+                self.notice = Some(format!(
                     "Portal: {n} file{} received into {}.",
                     if n == 1 { "" } else { "s" },
                     core::INBOX
-                )),
-            };
+                ));
+            }
         }
         let Some(s) = self.settings(root).cloned() else {
             return audit;
@@ -145,12 +208,18 @@ impl PortalState {
             self.fetched_at = Some(Instant::now());
             let root = root.to_path_buf();
             let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-            let minutes = s.fetch_minutes;
-            self.fetch = Some(spawn(ctx, move || core::fetch(&root, &s, &now)));
-            if minutes > 0 {
-                ctx.request_repaint_after(Duration::from_secs(30));
-            }
-        } else if s.fetch_minutes > 0 {
+            let s2 = s.clone();
+            self.fetch = Some(spawn(ctx, move || core::fetch(&root, &s2, &now)));
+        } else if std::mem::take(&mut self.refresh_marks) && self.marks.is_none() {
+            let s2 = s.clone();
+            self.marks = Some(spawn(ctx, move || {
+                core::client(&s2)
+                    .all_files()
+                    .ok()
+                    .map(|f| f.into_iter().map(|f| f.vf_document_id).collect())
+            }));
+        }
+        if s.fetch_minutes > 0 {
             ctx.request_repaint_after(Duration::from_secs(30));
         }
         audit
@@ -163,7 +232,6 @@ impl PortalState {
 
 #[derive(Default)]
 struct InviteForm {
-    open: bool,
     email: String,
     phone: String,
     name: String,
@@ -174,10 +242,10 @@ impl InviteForm {
     /// Draws the form; `true` when "Send invitation" was pressed.
     fn show(&mut self, ui: &mut egui::Ui, busy: bool) -> bool {
         let mut send = false;
-        egui::CollapsingHeader::new("Invite someone…")
-            .open(self.open.then_some(true))
-            .show(ui, |ui| {
-                egui::Grid::new("portal-invite").num_columns(2).show(ui, |ui| {
+        egui::CollapsingHeader::new("Invite someone…").show(ui, |ui| {
+            egui::Grid::new("portal-invite")
+                .num_columns(2)
+                .show(ui, |ui| {
                     for (label, value) in [
                         ("Email", &mut self.email),
                         ("Mobile number", &mut self.phone),
@@ -189,31 +257,37 @@ impl InviteForm {
                         ui.end_row();
                     }
                 });
-                ui.label(widgets::caption(
-                    "The invitation goes to the email when there is one, else by text. It works for 7 days.",
-                ));
-                let ok = !busy && !(self.email.trim().is_empty() && self.phone.trim().is_empty());
-                if ui.add_enabled(ok, egui::Button::new("Send invitation")).clicked() {
-                    send = true;
-                }
-            });
-        self.open = false;
+            ui.label(widgets::caption(
+                "The invitation goes to the email when there is one, else by text. It works for 7 days.",
+            ));
+            let ok = !busy && !(self.email.trim().is_empty() && self.phone.trim().is_empty());
+            if ui
+                .add_enabled(ok, egui::Button::new("Send invitation"))
+                .clicked()
+            {
+                send = true;
+            }
+        });
         send
     }
 
-    fn clear(&mut self) {
-        *self = Self::default();
+    fn email(&self) -> Option<String> {
+        Some(self.email.trim().to_string()).filter(|x| !x.is_empty())
+    }
+
+    fn phone(&self) -> Option<String> {
+        Some(self.phone.trim().to_string()).filter(|x| !x.is_empty())
     }
 }
 
-fn invite_audit(client_id: &str, f: &InviteForm) -> AuditEntry {
+fn invite_audit(client_id: &str, by_email: bool, role: &str) -> AuditEntry {
     AuditEntry::new(
         "portal_invite",
         None,
         serde_json::json!({
             "client_id": client_id,
-            "via": if f.email.trim().is_empty() { "text" } else { "email" },
-            "role": f.role.trim(),
+            "via": if by_email { "email" } else { "text" },
+            "role": role,
         }),
     )
 }
@@ -247,20 +321,47 @@ struct Loaded {
 
 enum Outcome {
     Loaded(Loaded),
-    Done { audit: Vec<AuditEntry>, msg: String },
+    Done(String),
+}
+
+/// Who sees the selected documents now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Sees {
+    All,
+    Some,
+    None,
+}
+
+fn sees(f: &Option<PortalFile>, id: &str) -> bool {
+    f.as_ref()
+        .is_some_and(|f| f.users.iter().any(|x| x.identity_id == id && x.visible))
+}
+
+/// What Save sends for one document: the people whose tick was changed in this window and
+/// whose state on this document differs (QA 2026-11-09: never the people left alone).
+pub fn visibility_changes(
+    file: &Option<PortalFile>,
+    chosen: &BTreeMap<String, bool>,
+) -> BTreeMap<String, bool> {
+    chosen
+        .iter()
+        .filter(|(id, w)| sees(file, id) != **w)
+        .map(|(id, w)| (id.clone(), *w))
+        .collect()
 }
 
 pub struct ShareWindow {
     client: ClientRef,
     docs: Vec<DocRef>,
     loaded: Option<Loaded>,
-    /// Who should see the documents (identity → shown).
-    want: BTreeMap<String, bool>,
+    /// The ticks changed in this window (identity → shown).
+    chosen: BTreeMap<String, bool>,
     /// Send the cabinet's newer content for documents changed since they were shared.
     update: bool,
     invite: InviteForm,
     confirm_remove: bool,
     job: Option<Receiver<Result<Outcome, String>>>,
+    audit: AuditOut,
     msg: Option<String>,
     err: Option<String>,
     pub closed: bool,
@@ -292,17 +393,19 @@ impl ShareWindow {
         s: &PortalSettings,
         client: ClientRef,
         docs: Vec<DocRef>,
+        audit: AuditOut,
     ) -> Self {
         let job = Some(load_job(ctx, s.clone(), client.clone(), docs.clone()));
         Self {
             client,
             docs,
             loaded: None,
-            want: BTreeMap::new(),
+            chosen: BTreeMap::new(),
             update: true,
             invite: InviteForm::default(),
             confirm_remove: false,
             job,
+            audit,
             msg: None,
             err: None,
             closed: false,
@@ -318,23 +421,15 @@ impl ShareWindow {
         ));
     }
 
-    /// Who sees the documents now: shown to a person only if shown in every selected document.
-    fn current(&self, l: &Loaded) -> BTreeMap<String, bool> {
-        l.users
-            .users
-            .iter()
-            .map(|u| {
-                let all = !l.files.is_empty()
-                    && l.files.iter().all(|f| {
-                        f.as_ref().is_some_and(|f| {
-                            f.users
-                                .iter()
-                                .any(|x| x.identity_id == u.identity_id && x.visible)
-                        })
-                    });
-                (u.identity_id.clone(), all)
-            })
-            .collect()
+    fn state(l: &Loaded, id: &str) -> Sees {
+        let n = l.files.iter().filter(|f| sees(f, id)).count();
+        if n == 0 {
+            Sees::None
+        } else if n == l.files.len() {
+            Sees::All
+        } else {
+            Sees::Some
+        }
     }
 
     fn changed_docs(&self, l: &Loaded) -> usize {
@@ -347,8 +442,7 @@ impl ShareWindow {
 
     fn apply(&mut self, ctx: &egui::Context, s: &PortalSettings) {
         let Some(l) = &self.loaded else { return };
-        let before = self.current(l);
-        let want = self.want.clone();
+        let chosen = self.chosen.clone();
         let update = self.update;
         let client = self.client.clone();
         let work: Vec<(DocRef, Option<PortalFile>)> = self
@@ -358,26 +452,19 @@ impl ShareWindow {
             .zip(l.files.iter().cloned())
             .collect();
         let s = s.clone();
+        let audit = self.audit.clone();
         self.msg = None;
         self.err = None;
         self.job = Some(spawn(ctx, move || {
             let p = core::client(&s);
-            let mut audit = Vec::new();
+            let mut changed = 0usize;
             let mut sent = 0usize;
             for (d, file) in work {
-                // Only the people whose choice changed (or everyone chosen, for a new file).
-                let mut vis: BTreeMap<String, bool> = BTreeMap::new();
-                for (id, &w) in &want {
-                    let was = file
-                        .as_ref()
-                        .is_some_and(|f| f.users.iter().any(|x| &x.identity_id == id && x.visible));
-                    if w != was && (w || before.get(id).copied().unwrap_or(false) || was) {
-                        vis.insert(id.clone(), w);
-                    }
-                }
-                let anyone = want.values().any(|&v| v);
+                let vis = visibility_changes(&file, &chosen);
+                let wants_it = vis.values().any(|&v| v);
                 let (file_id, added, updated) = match &file {
-                    None if !anyone => continue,
+                    // Nobody newly chosen: a document not on the portal stays off it.
+                    None if !wants_it => continue,
                     None => {
                         let a = p
                             .add(&client.id, &d.id, &d.name, d.tax_year, &d.path)
@@ -404,39 +491,42 @@ impl ShareWindow {
                         (f.file_id.clone(), false, updated)
                     }
                 };
+                if added || updated {
+                    audit.send(AuditEntry::new(
+                        "portal_share",
+                        Some(&d.id),
+                        serde_json::json!({ "client_id": client.id, "sent": added, "updated": updated }),
+                    ));
+                }
                 if !vis.is_empty() {
                     p.set_visibility(&file_id, &vis)
                         .map_err(|e| format!("{}: {}", d.name, e.message()))?;
-                }
-                if added || updated || !vis.is_empty() {
                     let shown: Vec<&String> = vis.iter().filter(|v| *v.1).map(|v| v.0).collect();
                     let hidden: Vec<&String> = vis.iter().filter(|v| !*v.1).map(|v| v.0).collect();
-                    audit.push(AuditEntry::new(
+                    audit.send(AuditEntry::new(
                         "portal_share",
                         Some(&d.id),
                         serde_json::json!({
                             "client_id": client.id,
                             "shown_to": shown,
                             "hidden_from": hidden,
-                            "sent": added,
-                            "updated": updated,
                         }),
                     ));
                 }
+                if added || updated || !vis.is_empty() {
+                    changed += 1;
+                }
             }
-            let msg = if audit.is_empty() {
+            Ok(Outcome::Done(if changed == 0 {
                 "Nothing to change.".to_string()
-            } else {
+            } else if sent > 0 {
                 format!(
-                    "Saved on the portal{}.",
-                    if sent > 0 {
-                        format!(" ({sent} file{} sent)", if sent == 1 { "" } else { "s" })
-                    } else {
-                        String::new()
-                    }
+                    "Saved on the portal ({sent} file{} sent).",
+                    if sent == 1 { "" } else { "s" }
                 )
-            };
-            Ok(Outcome::Done { audit, msg })
+            } else {
+                "Saved on the portal.".to_string()
+            }))
         }));
     }
 
@@ -450,63 +540,65 @@ impl ShareWindow {
             .collect();
         let client = self.client.id.clone();
         let s = s.clone();
+        let audit = self.audit.clone();
         self.job = Some(spawn(ctx, move || {
             let p = core::client(&s);
-            let mut audit = Vec::new();
             for (doc, file) in work {
                 p.remove(&file).map_err(|e| e.message())?;
-                audit.push(AuditEntry::new(
+                audit.send(AuditEntry::new(
                     "portal_remove",
                     Some(&doc),
                     serde_json::json!({ "client_id": client }),
                 ));
             }
-            Ok(Outcome::Done {
-                audit,
-                msg: "Removed from the portal (the cabinet keeps the files).".into(),
-            })
+            Ok(Outcome::Done(
+                "Removed from the portal (the cabinet keeps the files).".into(),
+            ))
         }));
     }
 
     fn send_invite(&mut self, ctx: &egui::Context, s: &PortalSettings) {
         let f = std::mem::take(&mut self.invite);
-        let entry = invite_audit(&self.client.id, &f);
         let client = self.client.id.clone();
         let s = s.clone();
+        let audit = self.audit.clone();
         self.job = Some(spawn(ctx, move || {
             core::client(&s)
                 .invite(
                     &client,
-                    Some(f.email.as_str()),
-                    Some(f.phone.as_str()),
+                    f.email().as_deref(),
+                    f.phone().as_deref(),
                     f.name.trim(),
                     f.role.trim(),
                 )
                 .map_err(|e| e.message())?;
-            Ok(Outcome::Done {
-                audit: vec![entry],
-                msg: "Invitation sent. They appear here once they accept.".into(),
-            })
+            audit.send(invite_audit(&client, f.email().is_some(), f.role.trim()));
+            Ok(Outcome::Done(
+                "Invitation sent. They appear here once they accept.".into(),
+            ))
         }));
     }
 
-    /// Draws the window; audit rows to record when a change finished.
-    pub fn show(&mut self, ctx: &egui::Context, env: &mut Env, s: &PortalSettings) {
+    /// Draws the window.
+    pub fn show(&mut self, ctx: &egui::Context, s: &PortalSettings) {
         if let Some(rx) = &self.job
             && let Ok(r) = rx.try_recv()
         {
             self.job = None;
             match r {
                 Ok(Outcome::Loaded(l)) => {
-                    self.want = self.current(&l);
+                    self.chosen.clear();
                     self.loaded = Some(l);
                 }
-                Ok(Outcome::Done { audit, msg }) => {
-                    let unrecorded = record(env, "portal", audit).unwrap_or_default();
-                    self.msg = Some(format!("{msg}{unrecorded}"));
+                Ok(Outcome::Done(msg)) => {
+                    self.msg = Some(msg);
                     self.reload(ctx, s);
                 }
-                Err(e) => self.err = Some(e),
+                Err(e) => {
+                    self.err = Some(e);
+                    // What was done before the error is on the portal (and audited): show it.
+                    self.reload(ctx, s);
+                }
             }
         }
         let busy = self.job.is_some();
@@ -521,7 +613,6 @@ impl ShareWindow {
             .resizable(true)
             .default_width(520.0)
             .show(ctx, |ui| {
-                // The documents and their state on the portal.
                 for (i, d) in self.docs.iter().enumerate() {
                     let state = match self.loaded.as_ref().map(|l| &l.files[i]) {
                         None => String::new(),
@@ -557,7 +648,12 @@ impl ShareWindow {
                 } else {
                     ui.label(RichText::new("Who sees it").strong());
                     for u in &l.users.users {
-                        let mut on = self.want.get(&u.identity_id).copied().unwrap_or(false);
+                        let now = Self::state(l, &u.identity_id);
+                        let mut on = self
+                            .chosen
+                            .get(&u.identity_id)
+                            .copied()
+                            .unwrap_or(now == Sees::All);
                         ui.horizontal_wrapped(|ui| {
                             let label = if u.role_label.is_empty() {
                                 u.label()
@@ -569,10 +665,13 @@ impl ShareWindow {
                                 egui::Checkbox::new(&mut on, label),
                             );
                             if r.changed() {
-                                self.want.insert(u.identity_id.clone(), on);
+                                self.chosen.insert(u.identity_id.clone(), on);
                             }
                             if !u.active {
                                 ui.label(widgets::caption("turned off"));
+                            } else if now == Sees::Some && !self.chosen.contains_key(&u.identity_id)
+                            {
+                                ui.label(widgets::caption("sees some of these (left as they are)"));
                             } else if single && let Some(Some(f)) = l.files.first() {
                                 let seen = f.users.iter().find(|x| x.identity_id == u.identity_id);
                                 let t = match seen {
@@ -673,69 +772,82 @@ impl ShareWindow {
 // A client's portal users (client panel › Portal users…).
 // ======================================================================================
 
-/// The users read again, audit rows to record, and a message.
-type PeopleDone = (Option<Users>, Vec<AuditEntry>, String);
+/// The users read again (when that worked), and what the action did.
+type PeopleDone = (Option<Users>, Result<String, String>);
 
 pub struct PeopleWindow {
     client: ClientRef,
     users: Option<Users>,
     invite: InviteForm,
-    job: Option<Receiver<Result<PeopleDone, String>>>,
+    job: Option<Receiver<PeopleDone>>,
+    audit: AuditOut,
     msg: Option<String>,
     err: Option<String>,
     pub closed: bool,
 }
 
 impl PeopleWindow {
-    pub fn new(ctx: &egui::Context, s: &PortalSettings, client: ClientRef) -> Self {
+    pub fn new(
+        ctx: &egui::Context,
+        s: &PortalSettings,
+        client: ClientRef,
+        audit: AuditOut,
+    ) -> Self {
         let mut w = Self {
             client,
             users: None,
             invite: InviteForm::default(),
             job: None,
+            audit,
             msg: None,
             err: None,
             closed: false,
         };
-        w.run(ctx, s, Vec::new(), String::new(), |_| Ok(()));
+        w.run(ctx, s, None, String::new(), |_| Ok(()));
         w
     }
 
-    /// Runs `act` on a thread, then reads the users again.
+    /// Runs `act` on a thread (recording `entry` once the portal took it), then reads the
+    /// users again, also after a failure.
     fn run(
         &mut self,
         ctx: &egui::Context,
         s: &PortalSettings,
-        audit: Vec<AuditEntry>,
+        entry: Option<AuditEntry>,
         msg: String,
         act: impl FnOnce(&vf_portal::Portal) -> vf_portal::api::Result<()> + Send + 'static,
     ) {
         let client = self.client.clone();
         let s = s.clone();
+        let audit = self.audit.clone();
         self.err = None;
         self.job = Some(spawn(ctx, move || {
             let p = core::client(&s);
-            p.put_client(&client.id, &client.code, &client.name, None)
-                .map_err(|e| e.message())?;
-            act(&p).map_err(|e| e.message())?;
-            let users = p.users(&client.id).map_err(|e| e.message())?;
-            Ok((Some(users), audit, msg))
+            let done = p
+                .put_client(&client.id, &client.code, &client.name, None)
+                .and_then(|()| act(&p))
+                .map(|()| {
+                    if let Some(e) = entry {
+                        audit.send(e);
+                    }
+                    msg
+                })
+                .map_err(|e| e.message());
+            (p.users(&client.id).ok(), done)
         }));
     }
 
-    pub fn show(&mut self, ctx: &egui::Context, env: &mut Env, s: &PortalSettings) {
+    pub fn show(&mut self, ctx: &egui::Context, s: &PortalSettings) {
         if let Some(rx) = &self.job
-            && let Ok(r) = rx.try_recv()
+            && let Ok((users, done)) = rx.try_recv()
         {
             self.job = None;
-            match r {
-                Ok((users, audit, msg)) => {
-                    let unrecorded = record(env, "portal", audit).unwrap_or_default();
-                    if !msg.is_empty() || !unrecorded.is_empty() {
-                        self.msg = Some(format!("{msg}{unrecorded}"));
-                    }
-                    self.users = users;
-                }
+            if users.is_some() {
+                self.users = users;
+            }
+            match done {
+                Ok(m) if !m.is_empty() => self.msg = Some(m),
+                Ok(_) => {}
                 Err(e) => self.err = Some(e),
             }
         }
@@ -820,8 +932,8 @@ impl PeopleWindow {
                 if self.invite.show(ui, busy) {
                     let f = std::mem::take(&mut self.invite);
                     resend = Some((
-                        Some(f.email.trim().to_string()).filter(|x| !x.is_empty()),
-                        Some(f.phone.trim().to_string()).filter(|x| !x.is_empty()),
+                        f.email(),
+                        f.phone(),
                         f.name.trim().to_string(),
                         f.role.trim().to_string(),
                     ));
@@ -849,7 +961,7 @@ impl PeopleWindow {
                 serde_json::json!({ "client_id": client, "identity_id": id }),
             );
             let c = client.clone();
-            self.run(ctx, s, vec![entry], String::new(), move |p| {
+            self.run(ctx, s, Some(entry), String::new(), move |p| {
                 p.set_user_active(&c, &id, on)
             });
         } else if let Some(inv) = withdraw {
@@ -862,22 +974,14 @@ impl PeopleWindow {
             self.run(
                 ctx,
                 s,
-                vec![entry],
+                Some(entry),
                 "Invitation withdrawn.".into(),
                 move |p| p.withdraw_invite(&c, &inv),
             );
         } else if let Some((email, phone, name, role)) = resend {
-            let entry = invite_audit(
-                &client,
-                &InviteForm {
-                    email: email.clone().unwrap_or_default(),
-                    role: role.clone(),
-                    ..Default::default()
-                },
-            );
+            let entry = invite_audit(&client, email.is_some(), &role);
             let c = client.clone();
-            self.invite.clear();
-            self.run(ctx, s, vec![entry], "Invitation sent.".into(), move |p| {
+            self.run(ctx, s, Some(entry), "Invitation sent.".into(), move |p| {
                 p.invite(&c, email.as_deref(), phone.as_deref(), &name, &role)
                     .map(|_| ())
             });
@@ -892,8 +996,8 @@ impl PeopleWindow {
 // Admin › Portal and Admin › Portal requests.
 // ======================================================================================
 
-/// The requests read again, and audit rows to record.
-type RequestsDone = (Option<Vec<AccessRequest>>, Vec<AuditEntry>);
+/// Requests read again (None after a failed read), and what the action did.
+type RequestsDone = (Option<Vec<AccessRequest>>, Result<(), String>);
 
 #[derive(Default)]
 pub struct AdminPortal {
@@ -903,12 +1007,23 @@ pub struct AdminPortal {
     minutes: String,
     status: Option<Receiver<Result<String, String>>>,
     requests: Option<Vec<AccessRequest>>,
-    req_job: Option<Receiver<Result<RequestsDone, String>>>,
+    req_job: Option<Receiver<RequestsDone>>,
     /// Per request: the client chosen and the role typed.
     pick: BTreeMap<String, (Option<usize>, String)>,
     clients: Vec<ClientRef>,
+    /// The portal settings and the received list, read at most every 10 s (the cabinet is
+    /// often on a share; QA 2026-11-09).
+    cached_settings: Option<PortalSettings>,
+    received: Vec<vf_portal::inbox::Received>,
+    read_at: Option<Instant>,
+    confirm_stop: bool,
+    /// Audit rows of request decisions when there is no app channel (tests).
+    local_audit: Option<Receiver<AuditEntry>>,
     msg: Option<String>,
     err: Option<String>,
+    /// Where the request threads send audit rows (the app's portal state); `None` in tests,
+    /// where they are recorded here.
+    pub audit: Option<AuditOut>,
     /// Admin › Portal changed the settings: Browse should read them again.
     pub changed: bool,
     /// "Fetch now" was pressed.
@@ -936,18 +1051,26 @@ impl AdminPortal {
         }
         self.clients.clear();
         self.err = None;
+        self.read_at = None;
     }
 
     fn load(&mut self, root: &Path) {
+        if self
+            .read_at
+            .is_none_or(|t| t.elapsed() >= Duration::from_secs(10))
+        {
+            self.read_at = Some(Instant::now());
+            self.cached_settings = cabinet_id(root).and_then(|id| settings::load(root, &id));
+            self.received = core::recent_received(root, 30);
+        }
         if self.loaded {
             return;
         }
         self.loaded = true;
-        let s = cabinet_id(root).and_then(|id| settings::load(root, &id));
-        self.url = s.as_ref().map(|s| s.url.clone()).unwrap_or_default();
-        self.key = s.as_ref().map(|s| s.key.clone()).unwrap_or_default();
+        let s = self.cached_settings.as_ref();
+        self.url = s.map(|s| s.url.clone()).unwrap_or_default();
+        self.key = s.map(|s| s.key.clone()).unwrap_or_default();
         self.minutes = s
-            .as_ref()
             .map_or(settings::DEFAULT_FETCH_MINUTES, |s| s.fetch_minutes)
             .to_string();
     }
@@ -1039,45 +1162,43 @@ pub fn admin_settings(ui: &mut egui::Ui, a: &mut AdminPortal, env: &mut Env) {
             a.fetch_now = true;
             a.msg = Some("Fetching; new files appear in Intake's Portal inbox.".into());
         }
-        if ui
-            .add_enabled(!busy, egui::Button::new("Stop using the portal"))
-            .on_hover_text("Every PC stops calling the portal. The portal keeps its files.")
-            .clicked()
+        if !a.confirm_stop
+            && ui
+                .add_enabled(!busy, egui::Button::new("Stop using the portal"))
+                .on_hover_text("Every PC stops calling the portal. The portal keeps its files.")
+                .clicked()
         {
-            settings::clear(env.root);
-            let unrecorded = record(
-                env,
-                "portal_settings",
-                vec![AuditEntry::new(
-                    "portal_settings",
-                    None,
-                    serde_json::json!({ "stopped": true }),
-                )],
-            )
-            .unwrap_or_default();
-            a.url.clear();
-            a.key.clear();
-            a.changed = true;
-            a.msg = Some(format!("The portal is no longer used.{unrecorded}"));
+            a.confirm_stop = true;
         }
         if busy {
             ui.spinner();
         }
     });
+    if a.confirm_stop {
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new("Stop using the portal on every PC?").color(theme::warn()));
+            if ui.button("Stop").clicked() {
+                a.confirm_stop = false;
+                stop(a, env);
+            }
+            if ui.button("Keep using it").clicked() {
+                a.confirm_stop = false;
+            }
+        });
+    }
     if let Some(m) = &a.msg {
         ui.label(m.as_str());
     }
     widgets::message_line(ui, a.err.as_deref());
     ui.separator();
     ui.label(RichText::new("Received from clients lately").strong());
-    let rows = core::recent_received(env.root, 30);
-    if rows.is_empty() {
+    if a.received.is_empty() {
         ui.label(widgets::caption("Nothing yet."));
     }
     egui::ScrollArea::vertical()
         .max_height(280.0)
         .show(ui, |ui| {
-            for r in rows {
+            for r in &a.received {
                 ui.horizontal_wrapped(|ui| {
                     ui.label(widgets::local_time(&r.at));
                     ui.label(RichText::new(&r.name).strong());
@@ -1088,6 +1209,31 @@ pub fn admin_settings(ui: &mut egui::Ui, a: &mut AdminPortal, env: &mut Env) {
                 });
             }
         });
+}
+
+fn stop(a: &mut AdminPortal, env: &mut Env) {
+    a.msg = None;
+    a.err = None;
+    // Said when it fails (a read-only share): every PC would otherwise keep using it.
+    if let Err(e) = settings::clear(env.root) {
+        a.err = Some(format!("Not stopped: {e}"));
+        return;
+    }
+    let unrecorded = record(
+        env,
+        "portal_settings",
+        vec![AuditEntry::new(
+            "portal_settings",
+            None,
+            serde_json::json!({ "stopped": true }),
+        )],
+    )
+    .unwrap_or_default();
+    a.url.clear();
+    a.key.clear();
+    a.changed = true;
+    a.read_at = None;
+    a.msg = Some(format!("The portal is no longer used.{unrecorded}"));
 }
 
 fn save(a: &mut AdminPortal, env: &mut Env) {
@@ -1135,6 +1281,7 @@ fn save(a: &mut AdminPortal, env: &mut Env) {
     .unwrap_or_default();
     a.url = s.url.clone();
     a.changed = true;
+    a.read_at = None;
     a.msg = Some(format!("Saved for every PC.{inbox}{unrecorded}"));
 }
 
@@ -1159,7 +1306,8 @@ fn load_clients(env: &mut Env) -> Vec<ClientRef> {
 
 /// Admin › Portal requests: confirmed "Request access" forms; link each to a client, or deny.
 pub fn admin_requests(ui: &mut egui::Ui, a: &mut AdminPortal, env: &mut Env) {
-    let Some(s) = cabinet_id(env.root).and_then(|id| settings::load(env.root, &id)) else {
+    a.load(env.root);
+    let Some(s) = a.cached_settings.clone() else {
         ui.heading("Portal requests");
         ui.label("Set up the portal in Admin › Portal first.");
         return;
@@ -1168,29 +1316,23 @@ pub fn admin_requests(ui: &mut egui::Ui, a: &mut AdminPortal, env: &mut Env) {
         a.clients = load_clients(env);
     }
     if let Some(rx) = &a.req_job
-        && let Ok(r) = rx.try_recv()
+        && let Ok((list, done)) = rx.try_recv()
     {
         a.req_job = None;
-        match r {
-            Ok((list, audit)) => {
-                let unrecorded = record(env, "portal", audit).unwrap_or_default();
-                if !unrecorded.is_empty() {
-                    a.err = Some(unrecorded);
-                }
-                if let Some(l) = list {
-                    a.requests = Some(l);
-                }
-            }
-            Err(e) => a.err = Some(e),
+        if let Err(e) = done {
+            a.err = Some(e);
+        }
+        if let Some(l) = list {
+            a.requests = Some(l);
         }
     }
-    if a.requests.is_none() && a.req_job.is_none() {
+    if a.requests.is_none() && a.req_job.is_none() && a.err.is_none() {
         let s2 = s.clone();
         a.req_job = Some(spawn(ui.ctx(), move || {
-            core::client(&s2)
-                .access_requests()
-                .map(|l| (Some(l), Vec::new()))
-                .map_err(|e| e.message())
+            match core::client(&s2).access_requests() {
+                Ok(l) => (Some(l), Ok(())),
+                Err(e) => (None, Err(e.message())),
+            }
         }));
     }
     ui.heading("Portal requests");
@@ -1203,9 +1345,10 @@ pub fn admin_requests(ui: &mut egui::Ui, a: &mut AdminPortal, env: &mut Env) {
         .add_enabled(!busy, egui::Button::new("Refresh"))
         .clicked()
     {
+        a.err = None;
         a.requests = None;
     }
-    let mut decision: Option<(String, Option<(String, String)>)> = None;
+    let mut decision: Option<(String, Option<(ClientRef, String)>)> = None;
     match &a.requests {
         None => {
             ui.label(widgets::caption("Reading the portal…"));
@@ -1262,7 +1405,7 @@ pub fn admin_requests(ui: &mut egui::Ui, a: &mut AdminPortal, env: &mut Env) {
                             && let Some(c) = pick.and_then(|i| a.clients.get(i))
                         {
                             decision =
-                                Some((r.id.clone(), Some((c.id.clone(), role.trim().to_string()))));
+                                Some((r.id.clone(), Some((c.clone(), role.trim().to_string()))));
                         }
                         if ui.add_enabled(!busy, egui::Button::new("Deny")).clicked() {
                             decision = Some((r.id.clone(), None));
@@ -1273,30 +1416,99 @@ pub fn admin_requests(ui: &mut egui::Ui, a: &mut AdminPortal, env: &mut Env) {
         }
     }
     if let Some((req, to)) = decision {
-        let client = to
-            .as_ref()
-            .and_then(|(id, _)| a.clients.iter().find(|c| &c.id == id).cloned());
+        let out = a.audit.clone();
+        // Without the app's channel (tests), the row comes back here to be recorded.
+        let (tx, rx) = mpsc::channel::<AuditEntry>();
+        let local = out.is_none();
+        let audit = out.unwrap_or(AuditOut(tx));
+        a.err = None;
         a.req_job = Some(spawn(ui.ctx(), move || {
             let p = core::client(&s);
-            let entry = match (&to, &client) {
-                (Some((_, role)), Some(c)) => {
-                    p.put_client(&c.id, &c.code, &c.name, None)
-                        .map_err(|e| e.message())?;
-                    p.approve(&req, &c.id, role).map_err(|e| e.message())?;
-                    AuditEntry::new(
-                        "portal_approve",
+            let done = match &to {
+                Some((c, role)) => p
+                    .put_client(&c.id, &c.code, &c.name, None)
+                    .and_then(|()| p.approve(&req, &c.id, role))
+                    .map(|()| {
+                        audit.send(AuditEntry::new(
+                            "portal_approve",
+                            None,
+                            serde_json::json!({ "request": req, "client_id": c.id, "role": role }),
+                        ));
+                    }),
+                None => p.deny(&req).map(|()| {
+                    audit.send(AuditEntry::new(
+                        "portal_deny",
                         None,
-                        serde_json::json!({ "request": req, "client_id": c.id, "role": role }),
-                    )
-                }
-                _ => {
-                    p.deny(&req).map_err(|e| e.message())?;
-                    AuditEntry::new("portal_deny", None, serde_json::json!({ "request": req }))
-                }
-            };
-            let list = p.access_requests().map_err(|e| e.message())?;
-            Ok((Some(list), vec![entry]))
+                        serde_json::json!({ "request": req }),
+                    ));
+                }),
+            }
+            .map_err(|e| e.message());
+            (p.access_requests().ok(), done)
         }));
+        if local {
+            a.local_audit = Some(rx);
+        }
+    }
+    if let Some(rx) = &a.local_audit {
+        let rows: Vec<AuditEntry> = rx.try_iter().collect();
+        if let Some(e) = record(env, "portal", rows) {
+            a.err = Some(e);
+        }
     }
     widgets::message_line(ui, a.err.as_deref());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use vf_portal::api::FileUser;
+
+    fn file(seen_by: &[&str]) -> Option<PortalFile> {
+        Some(PortalFile {
+            file_id: "f".into(),
+            client_id: "c".into(),
+            vf_document_id: "d".into(),
+            name: "a.pdf".into(),
+            size: 1,
+            sha256: "h".into(),
+            tax_year: None,
+            shared_at: "2026-11-09T00:00:00Z".into(),
+            shared_by: "x".into(),
+            content_updated_at: None,
+            users: seen_by
+                .iter()
+                .map(|id| FileUser {
+                    identity_id: (*id).into(),
+                    visible: true,
+                    viewed_at: None,
+                    first_viewed_at: None,
+                })
+                .collect(),
+        })
+    }
+
+    #[test]
+    fn save_sends_only_the_ticks_changed_in_the_window() {
+        // Spouse sees doc A, not doc B; only Mary's tick was changed.
+        let a = file(&["spouse"]);
+        let b = file(&[]);
+        let chosen: BTreeMap<String, bool> = [("mary".to_string(), true)].into();
+        assert_eq!(
+            visibility_changes(&a, &chosen),
+            [("mary".to_string(), true)].into()
+        );
+        assert_eq!(
+            visibility_changes(&b, &chosen),
+            [("mary".to_string(), true)].into()
+        );
+        // Spouse left alone is never sent (QA 2026-11-09: no silent unsharing).
+        assert!(!visibility_changes(&a, &chosen).contains_key("spouse"));
+        // Unticking someone hides only where they see it.
+        let off: BTreeMap<String, bool> = [("spouse".to_string(), false)].into();
+        assert_eq!(visibility_changes(&a, &off), off);
+        assert!(visibility_changes(&b, &off).is_empty());
+        // A document not on the portal: only people newly chosen.
+        assert!(visibility_changes(&None, &off).is_empty());
+    }
 }

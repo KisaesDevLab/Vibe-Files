@@ -588,6 +588,9 @@ impl eframe::App for VibeFilesApp {
             // The firm's Vibe Portal (PA-37): client uploads fetched into the Portal inbox on a
             // timer, on whatever tab is open.
             if let Some(a) = &mut o.admin {
+                if a.portal.audit.is_none() {
+                    a.portal.audit = Some(o.browse.portal.audit_out());
+                }
                 if std::mem::take(&mut a.portal.changed) {
                     o.browse.portal.reread();
                 }

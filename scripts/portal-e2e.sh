@@ -36,6 +36,11 @@ trap cleanup EXIT
 
 echo "== portal: fresh database, API on $URL"
 free_port
+# A stopped portal can hold the port for a moment.
+for _ in $(seq 1 20); do
+    netstat -ano 2>/dev/null | grep -q ':3101 .*LISTENING' || break
+    sleep 1
+done
 docker compose -f "$VP/ops/docker/docker-compose.dev.yml" down -v >/dev/null 2>&1 || true
 docker compose -f "$VP/ops/docker/docker-compose.dev.yml" up -d --wait >/dev/null 2>&1
 (cd "$VP/apps/api" && DATA_DIR="$WORK/data" PORTAL_URL="$URL" npx tsx --env-file-if-exists=../../.env src/server.ts >"$LOG" 2>&1) &
@@ -80,6 +85,13 @@ curl -fs -b "$WORK/a.jar" -o "$WORK/got.pdf" "$URL/api/portal/files/$FILE/conten
 code="$(curl -s -o /dev/null -w '%{http_code}' -b "$WORK/b.jar" "$URL/api/portal/files/$FILE/content")"
 [ "$code" = 404 ] || die "b got $code"
 pass "a lists and downloads it unchanged; b does not see it (404)"
+"$VF" vis "$FILE" "$B_ID" true
+[ "$(count b)" = 1 ] || die "b not shown"
+"$VF" vis "$FILE" "$B_ID" false
+[ "$(count b)" = 0 ] || die "b still sees it"
+code="$(curl -s -o /dev/null -w '%{http_code}' -b "$WORK/b.jar" "$URL/api/portal/files/$FILE/content")"
+[ "$code" = 404 ] || die "b got $code after hiding"
+pass "shown to b, then hidden from b again (404)"
 [ "$("$VF" viewed doc-1040 "$A_ID")" = opened ] || die "not marked opened"
 pass "Vibe Files sees that a opened it"
 
@@ -96,4 +108,27 @@ grep -q '"note":"Second job"' "$ROOT/_Vibe/portal/received.jsonl" || die "note n
 pass "a's upload is fetched once into _Portal inbox as 'Smith, John_1001_W-2.pdf', with its note"
 curl -fs -b "$WORK/a.jar" "$URL/api/portal/uploads" | grep -q '"received":true' || die "client not told"
 pass "the client sees it as received by the firm"
+
+# Two PCs fetching at the same moment: every upload arrives exactly once, nothing left behind.
+for n in 1 2 3; do
+    printf '%%PDF-1.7\n%s\n%%%%EOF\n' "synthetic 1099 $n" >"$WORK/1099-$n.pdf"
+    curl -fs -b "$WORK/a.jar" -H 'Content-Type: application/octet-stream' \
+        --data-binary @"$WORK/1099-$n.pdf" \
+        "$URL/api/portal/uploads?clientId=$C&batchId=$B&name=1099.pdf" >/dev/null
+done
+(VF_PC=PC-ONE "$VF" fetch "$ROOT" >"$WORK/one.txt" 2>&1 || true) &
+P1=$!
+(VF_PC=PC-TWO "$VF" fetch "$ROOT" >"$WORK/two.txt" 2>&1 || true) &
+P2=$!
+# Only these two: a bare `wait` would also wait for the portal server.
+wait "$P1" "$P2"
+VF_PC=PC-ONE "$VF" fetch "$ROOT" >>"$WORK/one.txt" 2>&1 || true
+N="$(ls "$ROOT/_Portal inbox" | grep -c '1099')"
+[ "$N" = 3 ] || die "$N copies of the three 1099s arrived ($(ls "$ROOT/_Portal inbox" | tr '\n' ','))"
+for n in 1 2 3; do
+    got="$(for f in "$ROOT/_Portal inbox/"*1099*; do sha256sum <"$f" | cut -c1-64; done | sort)"
+    echo "$got" | grep -q "$(sha256sum <"$WORK/1099-$n.pdf" | cut -c1-64)" || die "1099 $n missing or damaged"
+done
+[ -z "$(ls "$ROOT/_Vibe/tmp/portal" 2>/dev/null)" ] || die "left behind: $(ls "$ROOT/_Vibe/tmp/portal")"
+pass "two PCs fetching at once: three uploads of the same name arrive once each, intact, named apart"
 echo "== all passed"

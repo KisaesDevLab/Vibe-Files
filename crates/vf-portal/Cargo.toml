@@ -9,6 +9,8 @@ publish.workspace = true
 # calls go only to the portal address the firm sets in Admin > Portal.
 [dependencies]
 vf-fs = { path = "../vf-fs" }
+filer-intake = { path = "../filer-intake" }
+getrandom.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

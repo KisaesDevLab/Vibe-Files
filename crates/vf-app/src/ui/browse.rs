@@ -3271,6 +3271,7 @@ fn open_share(ctx: &egui::Context, b: &mut Browse, env: &mut Env) {
             name: c.name.clone(),
         },
         refs,
+        b.portal.audit_out(),
     ));
 }
 
@@ -3281,16 +3282,17 @@ fn portal_windows(ctx: &egui::Context, b: &mut Browse, env: &mut Env) {
         b.portal.people = None;
         return;
     };
+    // Audit rows of what the windows' threads did reach the app through PortalState's channel.
     if let Some(w) = &mut b.portal.share {
-        w.show(ctx, env, &s);
+        w.show(ctx, &s);
         if w.closed {
             b.portal.share = None;
-            // The marks: read the portal again soon.
-            b.portal.fetch_now = true;
+            // The marks only: never a fetch of uploads (QA 2026-11-09).
+            b.portal.refresh_marks = true;
         }
     }
     if let Some(w) = &mut b.portal.people {
-        w.show(ctx, env, &s);
+        w.show(ctx, &s);
         if w.closed {
             b.portal.people = None;
         }

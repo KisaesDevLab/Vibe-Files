@@ -25,6 +25,23 @@ pub fn client(s: &PortalSettings) -> Portal {
     Portal::new(s, &pc, &user)
 }
 
+/// The path as every PC can reach it: a mapped drive becomes its `\\server\share\…` form
+/// (Windows resolves that when the path is made canonical); a path that cannot be resolved
+/// stays as given.
+pub fn portable(p: &Path) -> std::path::PathBuf {
+    let Ok(c) = std::fs::canonicalize(p) else {
+        return p.to_path_buf();
+    };
+    let s = c.to_string_lossy();
+    if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+        std::path::PathBuf::from(format!(r"\\{rest}"))
+    } else if let Some(rest) = s.strip_prefix(r"\\?\") {
+        std::path::PathBuf::from(rest)
+    } else {
+        c
+    }
+}
+
 /// Adds the Portal inbox to Intake's shared inboxes (and makes the folder), once.
 pub fn register_inbox(root: &Path) -> Result<bool, String> {
     let dir = inbox(root);
@@ -32,7 +49,10 @@ pub fn register_inbox(root: &Path) -> Result<bool, String> {
     let master = vf_fs::clients::master_dir(root);
     std::fs::create_dir_all(&master).map_err(|e| e.to_string())?;
     let (mut fs, _) = filer_intake::config::Settings::load_or_default(&master);
-    if fs.inboxes.iter().any(|p| p == &dir) {
+    // Intake's settings are shared by every PC: keep the path every PC reaches (a mapped
+    // drive's \\server\share form), and compare in that form (QA 2026-11-09).
+    let dir = portable(&dir);
+    if fs.inboxes.iter().any(|p| portable(p) == dir) {
         return Ok(false);
     }
     fs.inboxes.push(dir);
@@ -57,7 +77,14 @@ mod tests {
         assert!(!register_inbox(root).unwrap());
         let (fs, _) =
             filer_intake::config::Settings::load_or_default(&vf_fs::clients::master_dir(root));
-        assert_eq!(fs.inboxes, vec![inbox(root)]);
+        assert_eq!(fs.inboxes, vec![portable(&inbox(root))]);
+        // The same folder reached another way is not added again.
+        let other = root.join(".").join(INBOX);
+        let (mut fs2, _) =
+            filer_intake::config::Settings::load_or_default(&vf_fs::clients::master_dir(root));
+        fs2.inboxes = vec![other];
+        fs2.save(&vf_fs::clients::master_dir(root)).unwrap();
+        assert!(!register_inbox(root).unwrap());
         assert!(vf_fs::cabinet::client_folders(root).unwrap().is_empty());
     }
 }

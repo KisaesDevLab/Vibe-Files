@@ -1,19 +1,29 @@
 //! Client uploads into the cabinet's Portal inbox (PA-37).
 //!
-//! Each waiting upload is downloaded into `_Vibe/tmp/portal/`, checked against the portal's
-//! sha256, marked fetched (one PC wins; the others drop their copy), then moved into
-//! `_Portal inbox` as `<Client name>_<Client ID>_<file name>`, so Intake's usual reading finds
-//! the client. What arrived is logged in `_Vibe/portal/received.jsonl` for every PC.
+//! One PC fetches at a time (a lock file in `_Vibe/tmp/portal`, taken over after 15 minutes).
+//! Each upload is downloaded into a file of this PC's own (`<upload>.<pc>-<random>.part`,
+//! created new) with a note beside it naming the upload, checked against the portal's sha256
+//! as it arrives, then claimed (`/fetched`). The claimed file is moved into `_Portal inbox` as
+//! `<Client name>_<Client ID>_<file name>` without ever replacing a file, and logged in
+//! `_Vibe/portal/received.jsonl`. A run that stops between the download and the move (a crash,
+//! a lost answer) is finished by the next run from the note: the portal says who claimed each
+//! upload, so a PC knows its own claim (QA 2026-11-09).
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime};
 
 use serde::{Deserialize, Serialize};
 
-use crate::api::Portal;
+use crate::api::{Claim, Portal, Upload};
 
 /// The Portal inbox at the cabinet root (a `_` folder: never taken for a client folder).
 pub const INBOX: &str = "_Portal inbox";
+/// A fetch lock older than this was left by a PC that stopped.
+pub const LOCK_STALE: Duration = Duration::from_secs(15 * 60);
+const LOCK: &str = "fetch.lock";
+/// Longest inbox file name (the share path comes on top).
+const MAX_NAME: usize = 150;
 
 pub fn inbox(root: &Path) -> PathBuf {
     root.join(INBOX)
@@ -45,6 +55,15 @@ fn safe_part(s: &str) -> String {
     t.trim().trim_end_matches(['.', ' ']).to_string()
 }
 
+/// Windows device names that cannot be a file name, with any extension.
+fn reserved(stem: &str) -> bool {
+    let u = stem.trim().to_ascii_uppercase();
+    matches!(u.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || ((u.starts_with("COM") || u.starts_with("LPT"))
+            && u.len() == 4
+            && u.as_bytes()[3].is_ascii_digit())
+}
+
 /// `<Client name>_<Client ID>_<file name>` (Vibe Portal P3), shortened to fit.
 pub fn inbox_name(client_name: &str, client_code: &str, name: &str) -> String {
     let file = safe_part(name);
@@ -57,29 +76,41 @@ pub fn inbox_name(client_name: &str, client_code: &str, name: &str) -> String {
     if !code.is_empty() {
         head = format!("{head}_{code}");
     }
-    let stem: String = stem.chars().take(120).collect();
-    let head: String = head.chars().take(80).collect();
-    if head.is_empty() {
+    let head: String = head.chars().take(60).collect();
+    let room = MAX_NAME.saturating_sub(head.chars().count() + ext.chars().count() + 1);
+    let stem: String = stem.chars().take(room.max(10)).collect();
+    let name = if head.is_empty() {
         format!("{stem}{ext}")
     } else {
         format!("{head}_{stem}{ext}")
+    };
+    let base = name.rsplit_once('.').map_or(name.as_str(), |(s, _)| s);
+    if name.is_empty() || reserved(base) {
+        format!("Client_{name}")
+    } else {
+        name
     }
 }
 
-/// `dir/name`, or `name (2)`, `name (3)`… when taken.
-pub fn free_path(dir: &Path, name: &str) -> PathBuf {
-    let first = dir.join(name);
-    if !first.exists() {
-        return first;
-    }
+/// Moves `src` into `dir` as `name`, or `name (2)`… — never replacing a file.
+fn move_into(src: &Path, dir: &Path, name: &str) -> std::io::Result<PathBuf> {
     let (stem, ext) = match name.rsplit_once('.') {
         Some((s, e)) => (s.to_string(), format!(".{e}")),
         None => (name.to_string(), String::new()),
     };
-    (2..10_000)
-        .map(|n| dir.join(format!("{stem} ({n}){ext}")))
-        .find(|p| !p.exists())
-        .unwrap_or(first)
+    for n in 1..10_000u32 {
+        let dest = if n == 1 {
+            dir.join(name)
+        } else {
+            dir.join(format!("{stem} ({n}){ext}"))
+        };
+        match filer_intake::commit::move_no_replace(src, &dest) {
+            Ok(()) => return Ok(dest),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists || dest.exists() => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Err(std::io::Error::other("no free name in the Portal inbox"))
 }
 
 /// One received upload, for the log and the audit trail.
@@ -104,6 +135,118 @@ pub struct FetchReport {
     pub problems: Vec<String>,
     /// Cabinet documents on the portal now (Browse's marks); `None` when not read.
     pub on_portal: Option<HashSet<String>>,
+    /// Another PC was fetching: nothing was fetched here this time.
+    pub busy: bool,
+}
+
+/// The fetch lock; removed when dropped.
+struct Lock(PathBuf);
+
+impl Drop for Lock {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+fn take_lock(tmp: &Path, who: &str) -> Option<Lock> {
+    let p = tmp.join(LOCK);
+    for _ in 0..2 {
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&p)
+        {
+            Ok(mut f) => {
+                use std::io::Write;
+                let _ = f.write_all(who.as_bytes());
+                return Some(Lock(p));
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                let stale = std::fs::metadata(&p)
+                    .and_then(|m| m.modified())
+                    .ok()
+                    .and_then(|t| SystemTime::now().duration_since(t).ok())
+                    .is_some_and(|age| age > LOCK_STALE);
+                if !stale {
+                    return None;
+                }
+                let _ = std::fs::remove_file(&p);
+            }
+            Err(_) => return None,
+        }
+    }
+    None
+}
+
+fn random_tag() -> String {
+    let mut b = [0u8; 4];
+    let _ = getrandom::fill(&mut b);
+    b.iter().map(|x| format!("{x:02x}")).collect()
+}
+
+fn from_label(u: &Upload) -> String {
+    if u.from.name.trim().is_empty() {
+        u.from
+            .email
+            .clone()
+            .or(u.from.phone.clone())
+            .unwrap_or_default()
+    } else {
+        u.from.name.clone()
+    }
+}
+
+/// Moves a claimed download into the inbox and logs it.
+fn finish(root: &Path, part: &Path, meta: &Path, u: &Upload, now: &str, report: &mut FetchReport) {
+    let dir = inbox(root);
+    match move_into(part, &dir, &inbox_name(&u.client_name, &u.client_code, &u.name)) {
+        Ok(dest) => {
+            let _ = std::fs::remove_file(meta);
+            let rel = dest
+                .strip_prefix(root)
+                .unwrap_or(&dest)
+                .to_string_lossy()
+                .replace('\\', "/");
+            let row = Received {
+                at: now.to_string(),
+                upload_id: u.upload_id.clone(),
+                client_id: u.client_id.clone(),
+                client: u.client_name.clone(),
+                name: u.original_name.clone().unwrap_or_else(|| u.name.clone()),
+                saved_as: rel,
+                note: u.note.clone(),
+                from: from_label(u),
+                size: u.size,
+            };
+            if let Err(e) = append_received(root, std::slice::from_ref(&row)) {
+                report.problems.push(format!("The received list could not be written: {e}"));
+            }
+            report.received.push(row);
+        }
+        // Claimed already: kept with its note, and moved by the next run.
+        Err(e) => report.problems.push(format!(
+            "{} was received but could not be moved to the Portal inbox yet ({e}); it will be tried again.",
+            u.name
+        )),
+    }
+}
+
+/// Claims a download; `true` when it is ours to move.
+fn claim(portal: &Portal, part: &Path, meta: &Path, u: &Upload, report: &mut FetchReport) -> bool {
+    match portal.mark_fetched(&u.upload_id) {
+        Ok(Claim::Ours) => true,
+        Ok(Claim::Other) => {
+            // Another PC has it.
+            let _ = std::fs::remove_file(part);
+            let _ = std::fs::remove_file(meta);
+            false
+        }
+        Err(e) => {
+            // Unknown whether the claim reached the portal: kept for the next run.
+            report.problems.push(format!("{}: {}", u.name, e.message()));
+            false
+        }
+    }
 }
 
 /// Fetches every waiting upload into the Portal inbox. Runs on a thread.
@@ -118,6 +261,68 @@ pub fn fetch(root: &Path, portal: &Portal, now: &str) -> FetchReport {
             return report;
         }
     }
+    let tmp = tmp_dir(root);
+    if let Err(e) =
+        std::fs::create_dir_all(&tmp).and_then(|()| std::fs::create_dir_all(inbox(root)))
+    {
+        report
+            .problems
+            .push(format!("The Portal inbox cannot be written: {e}"));
+        return report;
+    }
+    let Some(_lock) = take_lock(&tmp, &portal.actor_name()) else {
+        report.busy = true;
+        return report;
+    };
+
+    // Finish what an earlier run downloaded but did not move.
+    let mut done: HashSet<String> = HashSet::new();
+    if let Ok(entries) = std::fs::read_dir(&tmp) {
+        let metas: Vec<PathBuf> = entries
+            .filter_map(Result::ok)
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|x| x == "json"))
+            .collect();
+        for meta in metas {
+            let part = meta.with_extension("part");
+            let u: Option<Upload> = std::fs::read(&meta)
+                .ok()
+                .and_then(|b| serde_json::from_slice(&b).ok());
+            let Some(u) = u else {
+                let _ = std::fs::remove_file(&meta);
+                continue;
+            };
+            let whole = std::fs::metadata(&part).is_ok_and(|m| m.len() == u.size)
+                && crate::api::file_sha256(&part).is_ok_and(|h| h == u.sha256);
+            if !whole {
+                let _ = std::fs::remove_file(&part);
+                let _ = std::fs::remove_file(&meta);
+                continue;
+            }
+            done.insert(u.upload_id.clone());
+            if claim(portal, &part, &meta, &u, &mut report) {
+                finish(root, &part, &meta, &u, now, &mut report);
+            }
+        }
+    }
+    // Downloads cut off before their note was written.
+    if let Ok(entries) = std::fs::read_dir(&tmp) {
+        for e in entries.filter_map(Result::ok) {
+            let p = e.path();
+            if p.extension().is_some_and(|x| x == "part") && !p.with_extension("json").exists() {
+                let old = e
+                    .metadata()
+                    .and_then(|m| m.modified())
+                    .ok()
+                    .and_then(|t| SystemTime::now().duration_since(t).ok())
+                    .is_some_and(|age| age > LOCK_STALE);
+                if old {
+                    let _ = std::fs::remove_file(&p);
+                }
+            }
+        }
+    }
+
     let uploads = match portal.uploads() {
         Ok(u) => u,
         Err(e) => {
@@ -125,19 +330,11 @@ pub fn fetch(root: &Path, portal: &Portal, now: &str) -> FetchReport {
             return report;
         }
     };
-    if uploads.is_empty() {
-        return report;
-    }
-    let tmp = tmp_dir(root);
-    let dir = inbox(root);
-    if let Err(e) = std::fs::create_dir_all(&tmp).and_then(|()| std::fs::create_dir_all(&dir)) {
-        report
-            .problems
-            .push(format!("The Portal inbox cannot be written: {e}"));
-        return report;
-    }
-    for u in uploads {
-        let part = tmp.join(format!("{}.part", safe_part(&u.upload_id)));
+    let tag = format!("{}-{}", safe_part(&portal.pc()), random_tag());
+    for u in uploads.into_iter().filter(|u| !done.contains(&u.upload_id)) {
+        let stem = format!("{}.{tag}", safe_part(&u.upload_id));
+        let part = tmp.join(format!("{stem}.part"));
+        let meta = tmp.join(format!("{stem}.json"));
         if let Err(e) = portal.download_upload(&u, &part) {
             report.problems.push(format!(
                 "{} (from {}): {}",
@@ -147,69 +344,25 @@ pub fn fetch(root: &Path, portal: &Portal, now: &str) -> FetchReport {
             ));
             continue;
         }
-        match portal.mark_fetched(&u.upload_id) {
-            Ok(true) => {}
-            Ok(false) => {
-                // Another PC fetched it first: it has it.
-                let _ = std::fs::remove_file(&part);
-                continue;
-            }
-            Err(e) => {
-                let _ = std::fs::remove_file(&part);
-                report.problems.push(format!("{}: {}", u.name, e.message()));
-                continue;
-            }
+        if let Err(e) = std::fs::write(&meta, serde_json::to_vec(&u).expect("serializes")) {
+            let _ = std::fs::remove_file(&part);
+            report.problems.push(format!("{}: {e}", u.name));
+            continue;
         }
-        let dest = free_path(&dir, &inbox_name(&u.client_name, &u.client_code, &u.name));
-        let saved = match std::fs::rename(&part, &dest) {
-            Ok(()) => dest,
-            Err(e) => {
-                // Marked fetched already: keep it where it is and say where.
-                report.problems.push(format!(
-                    "{} was received but could not be moved to the Portal inbox ({e}); it is in {}",
-                    u.name,
-                    part.display()
-                ));
-                part
-            }
-        };
-        let rel = saved
-            .strip_prefix(root)
-            .unwrap_or(&saved)
-            .to_string_lossy()
-            .replace('\\', "/");
-        let from = if u.from.name.trim().is_empty() {
-            u.from
-                .email
-                .clone()
-                .or(u.from.phone.clone())
-                .unwrap_or_default()
-        } else {
-            u.from.name.clone()
-        };
-        report.received.push(Received {
-            at: now.to_string(),
-            upload_id: u.upload_id.clone(),
-            client_id: u.client_id.clone(),
-            client: u.client_name.clone(),
-            name: u.original_name.clone().unwrap_or_else(|| u.name.clone()),
-            saved_as: rel,
-            note: u.note.clone(),
-            from,
-            size: u.size,
-        });
+        if claim(portal, &part, &meta, &u, &mut report) {
+            finish(root, &part, &meta, &u, now, &mut report);
+        }
     }
-    append_received(root, &report.received);
     report
 }
 
-pub fn append_received(root: &Path, rows: &[Received]) {
+pub fn append_received(root: &Path, rows: &[Received]) -> std::io::Result<()> {
     if rows.is_empty() {
-        return;
+        return Ok(());
     }
     let p = received_log(root);
     if let Some(d) = p.parent() {
-        let _ = std::fs::create_dir_all(d);
+        std::fs::create_dir_all(d)?;
     }
     let mut text = String::new();
     for r in rows {
@@ -217,13 +370,12 @@ pub fn append_received(root: &Path, rows: &[Received]) {
         text.push('\n');
     }
     use std::io::Write;
-    if let Ok(mut f) = std::fs::OpenOptions::new()
+    // One write per call in append mode: rows from several PCs do not interleave.
+    std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(&p)
-    {
-        let _ = f.write_all(text.as_bytes());
-    }
+        .open(&p)?
+        .write_all(text.as_bytes())
 }
 
 /// The newest `n` received uploads, newest first.
@@ -252,17 +404,44 @@ mod tests {
         );
         assert_eq!(inbox_name("A/B: C", "", "x?.pdf."), "A-B- C_x-.pdf");
         assert_eq!(inbox_name("", "", "scan.jpg"), "scan.jpg");
+        assert_eq!(inbox_name(".", "", "CON.pdf"), "Client_CON.pdf");
+        assert_eq!(inbox_name("", "", "com1.txt"), "Client_com1.txt");
         let long = inbox_name(&"N".repeat(300), "1", &format!("{}.pdf", "f".repeat(300)));
-        assert!(long.chars().count() < 220 && long.ends_with(".pdf"));
+        assert!(
+            long.chars().count() <= MAX_NAME && long.ends_with(".pdf"),
+            "{long}"
+        );
     }
 
     #[test]
-    fn a_taken_name_gets_a_number() {
+    fn moving_into_the_inbox_never_replaces_a_file() {
         let t = tempfile::tempdir().unwrap();
-        std::fs::write(t.path().join("a.pdf"), b"x").unwrap();
-        std::fs::write(t.path().join("a (2).pdf"), b"x").unwrap();
-        assert_eq!(free_path(t.path(), "a.pdf"), t.path().join("a (3).pdf"));
-        assert_eq!(free_path(t.path(), "b.pdf"), t.path().join("b.pdf"));
+        let dir = t.path().join("in");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.pdf"), b"first").unwrap();
+        let src = t.path().join("x.part");
+        std::fs::write(&src, b"second").unwrap();
+        let dest = move_into(&src, &dir, "a.pdf").unwrap();
+        assert_eq!(dest, dir.join("a (2).pdf"));
+        assert_eq!(std::fs::read(dir.join("a.pdf")).unwrap(), b"first");
+        assert_eq!(std::fs::read(dest).unwrap(), b"second");
+    }
+
+    #[test]
+    fn one_pc_holds_the_fetch_lock_until_it_goes_stale() {
+        let t = tempfile::tempdir().unwrap();
+        let a = take_lock(t.path(), "PC1\\a").expect("first");
+        assert!(take_lock(t.path(), "PC2\\b").is_none());
+        drop(a);
+        assert!(take_lock(t.path(), "PC2\\b").is_some());
+        // A stale lock (a PC that stopped) is taken over.
+        let p = t.path().join(LOCK);
+        std::fs::write(&p, b"PC9\\x").unwrap();
+        let f = std::fs::File::options().write(true).open(&p).unwrap();
+        f.set_modified(SystemTime::now() - Duration::from_secs(16 * 60))
+            .unwrap();
+        drop(f);
+        assert!(take_lock(t.path(), "PC2\\b").is_some());
     }
 
     #[test]
@@ -279,8 +458,8 @@ mod tests {
             from: "Mary".into(),
             size: 1,
         };
-        append_received(t.path(), &[r("1"), r("2")]);
-        append_received(t.path(), &[r("3")]);
+        append_received(t.path(), &[r("1"), r("2")]).unwrap();
+        append_received(t.path(), &[r("3")]).unwrap();
         let got: Vec<String> = recent_received(t.path(), 2)
             .into_iter()
             .map(|x| x.name)

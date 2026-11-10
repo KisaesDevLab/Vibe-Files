@@ -6,8 +6,8 @@ use std::io::{Read, Write};
 use std::path::Path;
 use std::time::Duration;
 
-use serde::Deserialize;
 use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::settings::PortalSettings;
@@ -156,7 +156,7 @@ pub struct PortalFile {
     pub users: Vec<FileUser>,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct UploadFrom {
     pub identity_id: String,
@@ -165,7 +165,7 @@ pub struct UploadFrom {
     pub phone: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct Upload {
     pub upload_id: String,
@@ -201,6 +201,15 @@ pub struct Event {
     pub detail: serde_json::Value,
 }
 
+/// Who has an upload after `/fetched`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Claim {
+    /// This PC (now, or an earlier call whose answer was lost).
+    Ours,
+    /// Another PC, or the client removed it.
+    Other,
+}
+
 /// What adding a document to the portal did.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Added {
@@ -223,8 +232,8 @@ impl Added {
 #[derive(Deserialize)]
 struct ErrorBody {
     error: Option<String>,
-    #[serde(rename = "fileId")]
-    file_id: Option<String>,
+    #[serde(rename = "fetchedBy")]
+    fetched_by: Option<String>,
 }
 
 /// Largest JSON answer read (a big firm's file list).
@@ -241,11 +250,35 @@ pub struct Portal {
     bulk: ureq::Agent,
 }
 
-fn agent(global: Option<Duration>) -> ureq::Agent {
+/// The address is this PC (the only place plain http is allowed).
+pub fn is_loopback(url: &str) -> bool {
+    let rest = url
+        .strip_prefix("http://")
+        .or_else(|| url.strip_prefix("https://"))
+        .unwrap_or(url);
+    let host = rest.split('/').next().unwrap_or("");
+    let host = host.rsplit_once(':').map_or(host, |(h, _)| h);
+    matches!(host, "localhost" | "[::1]") || host.starts_with("127.")
+}
+
+fn agent(global: Option<Duration>, https_only: bool) -> ureq::Agent {
     ureq::Agent::config_builder()
         .http_status_as_error(false)
+        // The Windows certificate store, so a firm's own CA or an inspecting firewall works
+        // (QA 2026-11-09: the feature alone does not switch it on).
+        .tls_config(
+            ureq::tls::TlsConfig::builder()
+                .root_certs(ureq::tls::RootCerts::PlatformVerifier)
+                .build(),
+        )
+        .https_only(https_only)
+        // A redirect (http to https, another host) is an error to fix in the address.
+        .max_redirects(0)
         .timeout_connect(Some(Duration::from_secs(15)))
         .timeout_recv_response(Some(Duration::from_secs(120)))
+        // A transfer that stalls ends instead of holding the fetch forever.
+        .timeout_per_read(Some(Duration::from_secs(60)))
+        .timeout_per_write(Some(Duration::from_secs(60)))
         .timeout_global(global)
         .user_agent(format!("Vibe Files/{}", env!("CARGO_PKG_VERSION")))
         .build()
@@ -271,13 +304,34 @@ fn sha256_hex(bytes: &[u8]) -> String {
 impl Portal {
     /// A client for the portal in `s`, naming this PC and Windows user.
     pub fn new(s: &PortalSettings, pc: &str, user: &str) -> Self {
+        let https_only = !is_loopback(&s.url);
         Self {
             base: format!("{}/api/firm/v1", s.url.trim_end_matches('/')),
             key: zeroize::Zeroizing::new(s.key.clone()),
             pc: clean(pc),
             user: clean(user),
-            quick: agent(Some(Duration::from_secs(30))),
-            bulk: agent(None),
+            quick: agent(Some(Duration::from_secs(30)), https_only),
+            bulk: agent(None, https_only),
+        }
+    }
+
+    pub fn pc(&self) -> String {
+        self.pc.clone()
+    }
+
+    /// How the portal names this PC and user in its history (its keys.ts `PC\user`).
+    pub fn actor_name(&self) -> String {
+        if self.pc.is_empty() && self.user.is_empty() {
+            "Vibe Files".into()
+        } else {
+            let or = |s: &str| {
+                if s.is_empty() {
+                    "?".to_string()
+                } else {
+                    s.to_string()
+                }
+            };
+            format!("{}\\{}", or(&self.pc), or(&self.user))
         }
     }
 
@@ -297,6 +351,12 @@ impl Portal {
     ) -> Result<T> {
         let mut res = res.map_err(|e| PortalError::Network(e.to_string()))?;
         let status = res.status().as_u16();
+        if (300..400).contains(&status) {
+            return Err(PortalError::Local(
+                "The portal address redirects elsewhere: use the address it redirects to (https://…)."
+                    .into(),
+            ));
+        }
         let text = res
             .body_mut()
             .with_config()
@@ -474,7 +534,7 @@ impl Portal {
             r = r.query("taxYear", y);
         }
         let f = std::fs::File::open(path).map_err(|e| PortalError::Local(e.to_string()))?;
-        let res = r.send(ureq::SendBody::from_owned_reader(f));
+        let res = r.send(f);
         let mut res = res.map_err(|e| PortalError::Network(e.to_string()))?;
         let status = res.status().as_u16();
         let text = res
@@ -494,9 +554,19 @@ impl Portal {
             {
                 Ok(Added::Changed(f))
             }
+            (409, None) if body.get("error").and_then(|v| v.as_str()) == Some("already_added") => {
+                // Another PC added it at the same moment.
+                match self.file_for_doc(doc_id)? {
+                    Some(f) if f.sha256 == sha => Ok(Added::Existing(f.file_id)),
+                    Some(f) => Ok(Added::Changed(f.file_id)),
+                    None => Err(PortalError::Http {
+                        status,
+                        code: "already_added".into(),
+                    }),
+                }
+            }
             _ => {
                 let e: Option<ErrorBody> = serde_json::from_str(&text).ok();
-                let _ = e.as_ref().and_then(|e| e.file_id.as_ref());
                 Err(PortalError::Http {
                     status,
                     code: e.and_then(|e| e.error).unwrap_or_else(|| "error".into()),
@@ -517,7 +587,7 @@ impl Portal {
             .query("sha256", &sha)
             .query("name", name)
             .header("Content-Type", "application/octet-stream")
-            .send(ureq::SendBody::from_owned_reader(f));
+            .send(f);
         Self::read::<serde_json::Value>(res).map(|_| ())
     }
 
@@ -547,8 +617,17 @@ impl Portal {
         self.get::<R>("/uploads", &[]).map(|r| r.uploads)
     }
 
-    /// Writes a client upload to `dest` and checks it against the portal's sha256.
+    /// Writes a client upload to `dest` (a new file) and checks it against the portal's size and
+    /// sha256. Nothing is left at `dest` when it fails.
     pub fn download_upload(&self, u: &Upload, dest: &Path) -> Result<()> {
+        let r = self.download_inner(u, dest);
+        if r.is_err() {
+            let _ = std::fs::remove_file(dest);
+        }
+        r
+    }
+
+    fn download_inner(&self, u: &Upload, dest: &Path) -> Result<()> {
         let res = self
             .auth(
                 self.bulk
@@ -565,10 +644,16 @@ impl Portal {
                 .unwrap_or_else(|| "error".into());
             return Err(PortalError::Http { status, code });
         }
-        let mut out = std::fs::File::create(dest).map_err(|e| PortalError::Local(e.to_string()))?;
+        let mut out = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(dest)
+            .map_err(|e| PortalError::Local(e.to_string()))?;
         let mut hasher = Sha256::new();
-        let mut reader = res.body_mut().with_config().limit(u64::MAX).reader();
+        // Never more than the portal said (a bad answer cannot fill the disk).
+        let mut reader = res.body_mut().with_config().limit(u.size + 1).reader();
         let mut buf = vec![0u8; 256 * 1024];
+        let mut written = 0u64;
         loop {
             let n = reader
                 .read(&mut buf)
@@ -576,6 +661,7 @@ impl Portal {
             if n == 0 {
                 break;
             }
+            written += n as u64;
             hasher.update(&buf[..n]);
             out.write_all(&buf[..n])
                 .map_err(|e| PortalError::Local(e.to_string()))?;
@@ -587,9 +673,7 @@ impl Portal {
             .iter()
             .map(|b| format!("{b:02x}"))
             .collect();
-        if got != u.sha256 {
-            drop(out);
-            let _ = std::fs::remove_file(dest);
+        if written != u.size || got != u.sha256 {
             return Err(PortalError::Local(format!(
                 "{} arrived damaged (its checksum does not match); it will be fetched again.",
                 u.name
@@ -598,12 +682,37 @@ impl Portal {
         Ok(())
     }
 
-    /// Marks an upload fetched. `Ok(false)`: another PC fetched it first.
-    pub fn mark_fetched(&self, upload_id: &str) -> Result<bool> {
-        match self.post_empty::<serde_json::Value>(&format!("/uploads/{upload_id}/fetched")) {
-            Ok(_) => Ok(true),
-            Err(e) if e.status() == Some(409) => Ok(false),
-            Err(e) => Err(e),
+    /// Claims an upload. The portal says who has it when it was claimed already, so a claim
+    /// whose answer was lost is still known as this PC's.
+    pub fn mark_fetched(&self, upload_id: &str) -> Result<Claim> {
+        let res = self
+            .auth(
+                self.quick
+                    .post(&self.url(&format!("/uploads/{upload_id}/fetched"))),
+            )
+            .send_empty();
+        let mut res = res.map_err(|e| PortalError::Network(e.to_string()))?;
+        let status = res.status().as_u16();
+        let text = res.body_mut().read_to_string().unwrap_or_default();
+        match status {
+            200..=299 => Ok(Claim::Ours),
+            409 | 404 => {
+                let by = serde_json::from_str::<ErrorBody>(&text)
+                    .ok()
+                    .and_then(|b| b.fetched_by);
+                Ok(if by.as_deref() == Some(self.actor_name().as_str()) {
+                    Claim::Ours
+                } else {
+                    Claim::Other
+                })
+            }
+            _ => {
+                let code = serde_json::from_str::<ErrorBody>(&text)
+                    .ok()
+                    .and_then(|b| b.error)
+                    .unwrap_or_else(|| "error".into());
+                Err(PortalError::Http { status, code })
+            }
         }
     }
 
