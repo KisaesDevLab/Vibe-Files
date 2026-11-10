@@ -92,6 +92,20 @@ pub fn inbox_name(client_name: &str, client_code: &str, name: &str) -> String {
     }
 }
 
+/// Marks a client's file as downloaded from the internet (Windows' Zone.Identifier, zone 3), as a
+/// browser would: Office then opens it in Protected View and blocks its macros. Best effort: a
+/// cabinet on a drive without alternate data streams simply gets no mark.
+pub fn mark_from_internet(path: &Path) {
+    #[cfg(windows)]
+    {
+        let mut ads = path.as_os_str().to_owned();
+        ads.push(":Zone.Identifier");
+        let _ = std::fs::write(ads, "[ZoneTransfer]\r\nZoneId=3\r\n");
+    }
+    #[cfg(not(windows))]
+    let _ = path;
+}
+
 /// Moves `src` into `dir` as `name`, or `name (2)`… — never replacing a file.
 fn move_into(src: &Path, dir: &Path, name: &str) -> std::io::Result<PathBuf> {
     let (stem, ext) = match name.rsplit_once('.') {
@@ -105,7 +119,10 @@ fn move_into(src: &Path, dir: &Path, name: &str) -> std::io::Result<PathBuf> {
             dir.join(format!("{stem} ({n}){ext}"))
         };
         match filer_intake::commit::move_no_replace(src, &dest) {
-            Ok(()) => return Ok(dest),
+            Ok(()) => {
+                mark_from_internet(&dest);
+                return Ok(dest);
+            }
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists || dest.exists() => continue,
             Err(e) => return Err(e),
         }
@@ -394,6 +411,19 @@ pub fn recent_received(root: &Path, n: usize) -> Vec<Received> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(windows)]
+    #[test]
+    fn fetched_files_are_marked_from_the_internet() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("in.tmp");
+        std::fs::write(&src, b"x").unwrap();
+        let dest = super::move_into(&src, dir.path(), "Smith_1001_W-2.doc").unwrap();
+        let mut ads = dest.as_os_str().to_owned();
+        ads.push(":Zone.Identifier");
+        let mark = std::fs::read_to_string(ads).unwrap();
+        assert!(mark.contains("ZoneId=3"), "{mark}");
+    }
+
     use super::*;
 
     #[test]

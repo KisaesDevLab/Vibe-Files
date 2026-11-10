@@ -1094,8 +1094,8 @@ pub fn admin_settings(ui: &mut egui::Ui, a: &mut AdminPortal, env: &mut Env) {
     ui.heading("Portal");
     ui.label(widgets::caption(
         "Your firm's Vibe Portal: share files with clients and receive theirs. The address and key \
-         are kept in the cabinet for every PC; they come from the portal's installer \
-         (sudo vibe portal key create).",
+         are kept in the cabinet for every PC; make the key on the portal's staff page \
+         (Settings › Portal keys) or on the appliance (sudo vibe portal key create).",
     ));
     ui.add_space(6.0);
     egui::Grid::new("portal-settings")
