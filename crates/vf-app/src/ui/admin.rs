@@ -30,6 +30,10 @@ pub enum Page {
     Devices,
     /// Admin › Folder templates (PA-24).
     Templates,
+    /// Admin › Portal (PA-37).
+    Portal,
+    /// Admin › Portal requests (PA-37).
+    PortalRequests,
 }
 
 /// UI_SPEC §6 nav, grouped: the pages that are built. Version 2 pages (Users & roles, Client
@@ -47,6 +51,7 @@ const NAV: &[(&str, &[&str])] = &[
         ],
     ),
     ("INTAKE", &["Print capture & parsers"]),
+    ("PORTAL", &["Portal", "Portal requests"]),
     (
         "COMPLIANCE",
         &[
@@ -138,6 +143,8 @@ pub struct Admin {
     pub lock_requested: bool,
     pub devices: crate::ui::devices::DevicesPage,
     pub templates: crate::ui::templates::TemplatesPage,
+    /// Admin › Portal and Portal requests (PA-37).
+    pub portal: crate::ui::portal::AdminPortal,
     /// Doc types: archived ones listed too.
     pub show_archived: bool,
 }
@@ -173,6 +180,7 @@ impl Admin {
             lock_requested: false,
             devices: Default::default(),
             templates: Default::default(),
+            portal: Default::default(),
             show_archived: false,
         };
         a.reload(env);
@@ -361,6 +369,20 @@ pub fn show(ui: &mut egui::Ui, a: &mut Admin, env: &mut Env, sweep: SweepEnv) {
             }
         }
         Page::Password => crate::ui::admin_password::show(ui, &mut a.password, env),
+        Page::Portal => {
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    crate::ui::portal::admin_settings(ui, &mut a.portal, env)
+                });
+        }
+        Page::PortalRequests => {
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    crate::ui::portal::admin_requests(ui, &mut a.portal, env)
+                });
+        }
         Page::Devices => crate::ui::devices::show(ui, &mut a.devices, env),
         Page::Templates => {
             crate::ui::templates::show(ui, &mut a.templates, env);
@@ -430,6 +452,18 @@ fn nav(ui: &mut egui::Ui, a: &mut Admin, has_password: bool) {
                     .clicked()
                 {
                     a.page = Page::Safeguards;
+                }
+            } else if *item == "Portal" {
+                if ui.selectable_label(a.page == Page::Portal, *item).clicked() {
+                    a.page = Page::Portal;
+                }
+            } else if *item == "Portal requests" {
+                if ui
+                    .selectable_label(a.page == Page::PortalRequests, *item)
+                    .clicked()
+                {
+                    a.page = Page::PortalRequests;
+                    a.portal.refresh_requests();
                 }
             } else if *item == "Folder import" {
                 if ui.selectable_label(a.page == Page::Import, *item).clicked() {
@@ -1020,6 +1054,64 @@ ANDE1042,Anderson Farms LLC
 
     /// P05 step 2: the Audit trail page lists the rows, filters them, asks for a verify, and
     /// its PDF export reads back.
+    #[test]
+    fn portal_page_saves_for_every_pc_and_adds_the_portal_inbox() {
+        let mut h = harness();
+        let root = h.state().root.clone();
+        vf_fs::cabinet::create(
+            &root,
+            &vf_fs::cabinet::CabinetFile {
+                cabinet_id: "cab-portal".into(),
+                firm_id: "firm".into(),
+                schema_version: 1,
+                layout_version: 1,
+                created: "2026-11-09T00:00:00Z".into(),
+                name: None,
+            },
+        )
+        .unwrap();
+        click(&mut h, "Portal");
+        assert_eq!(h.state().a.page, Page::Portal);
+        // A wrong key is refused, nothing saved.
+        h.state_mut()
+            .a
+            .portal
+            .fill("files.example.test", "not-a-key", "5");
+        click(&mut h, "Save");
+        assert!(h.state().a.portal.error().unwrap().contains("vpk_"));
+        assert!(vf_portal::settings::load(&root, "cab-portal").is_none());
+        // A right one is saved in the cabinet, the Portal inbox joins Intake's inboxes, and the
+        // change is in the audit trail (without the key).
+        let key = "vpk_abcdefghijklmnopqrstuvwxyz0123456789";
+        h.state_mut().a.portal.fill("files.example.test", key, "10");
+        click(&mut h, "Save");
+        let s = vf_portal::settings::load(&root, "cab-portal").unwrap();
+        assert_eq!(
+            (s.url.as_str(), s.key.as_str(), s.fetch_minutes),
+            ("https://files.example.test", key, 10)
+        );
+        assert!(h.state().a.portal.changed);
+        let (fs, _) =
+            filer_intake::config::Settings::load_or_default(&vf_fs::clients::master_dir(&root));
+        assert!(fs.inboxes.contains(&root.join("_Portal inbox")));
+        let detail: String = h
+            .state()
+            .conn
+            .query_row(
+                "SELECT detail FROM audit WHERE action = 'portal_settings' ORDER BY seq DESC LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(
+            detail.contains("files.example.test") && !detail.contains("vpk_"),
+            "{detail}"
+        );
+        // Stopping removes it for every PC.
+        click(&mut h, "Stop using the portal");
+        assert!(vf_portal::settings::load(&root, "cab-portal").is_none());
+    }
+
     #[test]
     fn audit_trail_page_lists_filters_and_exports() {
         let mut h = harness();

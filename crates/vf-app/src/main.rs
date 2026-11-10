@@ -9,6 +9,7 @@ mod datalock;
 mod help;
 mod logging;
 mod perf;
+mod portal;
 mod print;
 mod redact;
 mod screens;

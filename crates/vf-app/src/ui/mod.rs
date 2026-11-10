@@ -22,6 +22,7 @@ pub mod move_to;
 pub mod new_client;
 pub mod ocr;
 pub mod pages;
+pub mod portal;
 pub mod preview;
 pub mod print_ui;
 pub mod rename;

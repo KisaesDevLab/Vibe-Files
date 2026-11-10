@@ -44,6 +44,8 @@ pub enum Act {
     Step(i32),
     /// "Open in program": the file in the program Windows has for it.
     OpenExternal,
+    /// "Share…": the firm's Vibe Portal (PA-37).
+    Share,
 }
 
 impl Preview {
@@ -123,7 +125,15 @@ fn is_pdf(rel: &str) -> bool {
 }
 
 /// The pane. `at`: (position in the grid, rows in the grid) for the document stepper.
-pub fn show(ui: &mut egui::Ui, p: &mut Preview, rel: &str, at: (usize, usize)) -> Act {
+/// `portal`: the firm's Vibe Portal is set up (the Share… button shows); `on_portal`: this
+/// document is on it.
+pub fn show(
+    ui: &mut egui::Ui,
+    p: &mut Preview,
+    rel: &str,
+    at: (usize, usize),
+    portal: (bool, bool),
+) -> Act {
     p.pump(ui.ctx());
     let mut act = Act::None;
     let w = ui.available_width();
@@ -159,6 +169,22 @@ pub fn show(ui: &mut egui::Ui, p: &mut Preview, rel: &str, at: (usize, usize)) -
                     .clicked()
                 {
                     act = Act::OpenExternal;
+                }
+                if portal.0 {
+                    let label = if portal.1 {
+                        "Share… (on portal)"
+                    } else {
+                        "Share…"
+                    };
+                    if ui
+                        .small_button(label)
+                        .on_hover_text(
+                            "Choose who sees the selected documents on the client portal",
+                        )
+                        .clicked()
+                    {
+                        act = Act::Share;
+                    }
                 }
             });
             if !is_pdf(rel)

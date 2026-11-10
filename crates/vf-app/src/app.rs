@@ -585,6 +585,35 @@ impl eframe::App for VibeFilesApp {
                 ui.ctx()
                     .request_repaint_after(std::time::Duration::from_millis(200));
             }
+            // The firm's Vibe Portal (PA-37): client uploads fetched into the Portal inbox on a
+            // timer, on whatever tab is open.
+            if let Some(a) = &mut o.admin {
+                if std::mem::take(&mut a.portal.changed) {
+                    o.browse.portal.reread();
+                }
+                if std::mem::take(&mut a.portal.fetch_now) {
+                    o.browse.portal.fetch_now = true;
+                }
+            }
+            let received = o.browse.portal.tick(ui.ctx(), &o.opened.root);
+            if !received.is_empty() {
+                let mut tx = vf_core::tx::Transaction::new("portal_receive");
+                for e in received {
+                    tx = tx.audit(e);
+                }
+                if let Err(e) = tx.commit(
+                    &mut o.opened.conn,
+                    &mut vf_core::tx::NoFileOps,
+                    &vf_core::tx::Actor::device(&self.config.device_id),
+                ) {
+                    o.browse.error = Some(format!(
+                        "Files received from the portal were NOT recorded in the audit trail: {e}"
+                    ));
+                }
+            }
+            if let Some(n) = o.browse.portal.notice.take() {
+                o.browse.notice = Some(n);
+            }
             // The audit trail's copy in the cabinet (CLAUDE.md layout: _Vibe/audit/*.jsonl).
             if o.mirrored_at.is_none_or(|t| t.elapsed() >= o.mirror_wait) {
                 o.mirrored_at = Some(std::time::Instant::now());

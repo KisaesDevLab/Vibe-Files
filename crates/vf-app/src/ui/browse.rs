@@ -288,6 +288,8 @@ pub struct Browse {
     pub error: Option<String>,
     /// Shown above the grid until dismissed (the rebuild report after create/first open).
     pub notice: Option<String>,
+    /// The firm's Vibe Portal (PA-37): settings, the timed fetch, the Share window.
+    pub portal: crate::ui::portal::PortalState,
     /// The `+ New client` dialog, while open.
     pub new_client: Option<NewClientDialog>,
     /// Rename client, new / rename / delete folder (PA-29).
@@ -409,6 +411,7 @@ impl Browse {
     pub fn new(snap: Snapshot) -> Self {
         let ix = Index::build(&snap);
         let mut b = Browse {
+            portal: Default::default(),
             disk_dirs: Default::default(),
             new_files: vec![],
             missing_in: None,
@@ -1829,6 +1832,7 @@ pub fn show(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env) {
         b.list_disk(false);
     }
     b.poll_disk();
+    portal_windows(ui.ctx(), b, env);
     // New files first: each is added as Explorer put it there (and read by text recognition as
     // new), before a re-read for files gone from the same folder.
     b.add_new_files(env);
@@ -3229,6 +3233,70 @@ fn sort_arrow(ui: &mut egui::Ui, asc: bool) {
     ));
 }
 
+/// Browse › Share…: the selected documents (all of one client) on the firm's Vibe Portal.
+fn open_share(ctx: &egui::Context, b: &mut Browse, env: &mut Env) {
+    let Some(s) = b.portal.settings(env.root).cloned() else {
+        return;
+    };
+    let docs = b.selected_docs();
+    let clients: std::collections::BTreeSet<Option<String>> =
+        docs.iter().map(|d| d.client_id.clone()).collect();
+    let client = match clients.into_iter().collect::<Vec<_>>().as_slice() {
+        [Some(id)] => b.snap.clients.iter().find(|c| &c.id == id).cloned(),
+        _ => None,
+    };
+    let Some(c) = client else {
+        b.error = Some(
+            "Share documents of one client at a time (documents not filed under a client cannot be shared)."
+                .into(),
+        );
+        return;
+    };
+    let refs = docs
+        .iter()
+        .map(|d| crate::ui::portal::DocRef {
+            id: d.id.clone(),
+            name: widgets::file_name(&d.rel_path).to_string(),
+            path: env.root.join(&d.rel_path),
+            hash: d.hash.clone(),
+            tax_year: d.tax_year,
+        })
+        .collect();
+    b.portal.share = Some(crate::ui::portal::ShareWindow::new(
+        ctx,
+        &s,
+        crate::ui::portal::ClientRef {
+            id: c.id.clone(),
+            code: c.ext_id.clone(),
+            name: c.name.clone(),
+        },
+        refs,
+    ));
+}
+
+/// The portal windows (Share…, Portal users…), drawn over Browse while open.
+fn portal_windows(ctx: &egui::Context, b: &mut Browse, env: &mut Env) {
+    let Some(s) = b.portal.settings(env.root).cloned() else {
+        b.portal.share = None;
+        b.portal.people = None;
+        return;
+    };
+    if let Some(w) = &mut b.portal.share {
+        w.show(ctx, env, &s);
+        if w.closed {
+            b.portal.share = None;
+            // The marks: read the portal again soon.
+            b.portal.fetch_now = true;
+        }
+    }
+    if let Some(w) = &mut b.portal.people {
+        w.show(ctx, env, &s);
+        if w.closed {
+            b.portal.people = None;
+        }
+    }
+}
+
 fn inspector(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env) {
     legal_holds(ui, b, env);
     if b.selected.is_empty()
@@ -3257,7 +3325,18 @@ fn inspector(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env) {
         b.preview
             .set(ui.ctx(), env.root, &d.id, &d.rel_path, &d.hash);
         let pos = b.visible.iter().position(|&i| i == di).unwrap_or(0);
-        match crate::ui::preview::show(ui, &mut b.preview, &d.rel_path, (pos, b.visible.len())) {
+        let portal = (
+            b.portal.is_set(env.root),
+            b.portal.on_portal.contains(&d.id),
+        );
+        match crate::ui::preview::show(
+            ui,
+            &mut b.preview,
+            &d.rel_path,
+            (pos, b.visible.len()),
+            portal,
+        ) {
+            crate::ui::preview::Act::Share => open_share(ui.ctx(), b, env),
             crate::ui::preview::Act::None => {}
             crate::ui::preview::Act::Open(page) => {
                 b.view_request = Some(crate::ui::viewer::Doc::at(

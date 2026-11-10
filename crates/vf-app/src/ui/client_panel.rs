@@ -63,6 +63,23 @@ pub fn show(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env, ci: usize) {
                 },
             ));
         }
+        // The firm's Vibe Portal (PA-37): who can sign in for this client.
+        if let Some(s) = b.portal.settings(env.root).cloned()
+            && ui
+                .small_button("Portal users…")
+                .on_hover_text("Invite people to the client portal, or turn their access off")
+                .clicked()
+        {
+            b.portal.people = Some(crate::ui::portal::PeopleWindow::new(
+                ui.ctx(),
+                &s,
+                crate::ui::portal::ClientRef {
+                    id: c.id.clone(),
+                    code: c.ext_id.clone(),
+                    name: c.name.clone(),
+                },
+            ));
+        }
     });
     ui.label(
         RichText::new(format!("ID {}", c.ext_id))

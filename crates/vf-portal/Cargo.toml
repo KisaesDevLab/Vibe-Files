@@ -1,0 +1,21 @@
+[package]
+name = "vf-portal"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# The firm's own Vibe Portal (PA-37): a client file portal on the firm's appliance. Network
+# calls go only to the portal address the firm sets in Admin > Portal.
+[dependencies]
+vf-fs = { path = "../vf-fs" }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+zeroize.workspace = true
+ureq = { version = "3.1", default-features = false, features = ["rustls", "json", "platform-verifier", "gzip"] }
+
+[dev-dependencies]
+tempfile.workspace = true
