@@ -62,6 +62,11 @@ pub struct IngestState {
     pre_action: Option<(usize, bool)>,
     /// A scan running on its own thread.
     scan_job: Option<Receiver<Result<(PathBuf, scanner::Assembled), String>>>,
+    /// The portal's line in the strip, set by the app each frame; `None` when no portal is set
+    /// up (PA-38).
+    pub portal: Option<crate::ui::portal::PortalLine>,
+    /// "Fetch uploads now" was pressed; the app takes it and starts the fetch (PA-38).
+    pub fetch_portal: bool,
 }
 
 /// A file in Filer's inbox with the same content as a document already filed.
@@ -638,6 +643,35 @@ impl IngestState {
         });
     }
 
+    /// Client uploads from the firm's Vibe Portal (PA-38): when they were last fetched on this
+    /// PC, and a button anyone can press (Admin › Portal's needs the admin password).
+    fn portal_row(&mut self, ui: &mut egui::Ui) {
+        let Some(p) = &self.portal else {
+            return;
+        };
+        let fetching = p.fetching;
+        let text = p.text.clone();
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Portal uploads").strong());
+            if ui
+                .add_enabled(!fetching, egui::Button::new("Fetch uploads now"))
+                .on_hover_text(
+                    "Collect the files clients sent through the portal now. They arrive in the Portal \
+                     inbox and show in the queue below.",
+                )
+                .clicked()
+            {
+                self.fetch_portal = true;
+            }
+            if fetching {
+                ui.spinner();
+                ui.label(widgets::caption("fetching…"));
+            }
+            // After the button, so a long message never moves it.
+            ui.label(widgets::caption(text));
+        });
+    }
+
     pub fn strip(
         &mut self,
         ui: &mut egui::Ui,
@@ -702,6 +736,7 @@ impl IngestState {
                         }
                     }
                 });
+                self.portal_row(ui);
                 self.my_inboxes_row(ui, prefs, root);
                 self.scan_row(ui, prefs);
                 for (i, d) in self.pre_dupes.iter().enumerate() {
@@ -751,6 +786,52 @@ fn file_name(p: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// PA-38: staff fetch portal uploads from Intake; the row shows only with a portal set up.
+    #[test]
+    fn intake_fetches_portal_uploads_on_request() {
+        use egui::accesskit::Role;
+        use egui_kittest::HarnessBuilder;
+        use egui_kittest::kittest::Queryable;
+
+        let mut h = HarnessBuilder::default()
+            .with_size([1200.0, 200.0])
+            .build_ui_state(
+                |ui, s: &mut IngestState| s.portal_row(ui),
+                IngestState::default(),
+            );
+        h.run();
+        assert!(
+            h.query_by_label("Fetch uploads now").is_none(),
+            "no portal: no row"
+        );
+
+        h.state_mut().portal = Some(crate::ui::portal::PortalLine {
+            fetching: false,
+            text: "not fetched yet on this PC · every 15 minutes".into(),
+        });
+        h.run();
+        h.get_by_label_contains("not fetched yet on this PC");
+        h.get_by_role_and_label(Role::Button, "Fetch uploads now")
+            .click();
+        h.run();
+        assert!(h.state().fetch_portal);
+
+        // While a fetch runs, the button waits.
+        let s = h.state_mut();
+        s.fetch_portal = false;
+        s.portal = Some(crate::ui::portal::PortalLine {
+            fetching: true,
+            text: "x".into(),
+        });
+        // The spinner repaints for ever: fixed steps, not run().
+        h.run_steps(3);
+        h.get_by_role_and_label(Role::Button, "Fetch uploads now")
+            .click();
+        h.run_steps(3);
+        assert!(!h.state().fetch_portal);
+        h.get_by_label("fetching…");
+    }
 
     /// Q-64: a personal inbox is outside the cabinet and is not a shared inbox, the Scans folder
     /// or the print capture folder.

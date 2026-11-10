@@ -72,6 +72,43 @@ impl AuditOut {
 // State kept with Browse: settings, the timed fetch, the marks, the open windows.
 // ======================================================================================
 
+/// The portal's line in Intake's strip (PA-38).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PortalLine {
+    /// A fetch is running (or was asked for) on this PC.
+    pub fetching: bool,
+    /// "last fetched 10:42: 2 files received · every 15 minutes".
+    pub text: String,
+}
+
+/// What one fetch did, in a few words.
+fn fetch_result(r: &core::FetchReport) -> String {
+    let n = r.received.len();
+    if n > 0 {
+        format!("{n} file{} received", if n == 1 { "" } else { "s" })
+    } else if r.busy {
+        "another PC was fetching".into()
+    } else if let Some(p) = r.problems.first() {
+        format!("problem: {p}")
+    } else {
+        "nothing new".into()
+    }
+}
+
+/// The strip's words: the last fetch on this PC and the timer.
+fn line_text(last: Option<&(String, String)>, fetch_minutes: u32) -> String {
+    let last = match last {
+        Some((at, what)) => format!("last fetched {at}: {what}"),
+        None => "not fetched yet on this PC".into(),
+    };
+    let timer = if fetch_minutes == 0 {
+        "by hand only (Admin › Portal sets a timer)".to_string()
+    } else {
+        format!("every {fetch_minutes} minutes")
+    };
+    format!("{last} · {timer}")
+}
+
 pub struct PortalState {
     settings: Option<PortalSettings>,
     read_at: Option<Instant>,
@@ -82,8 +119,10 @@ pub struct PortalState {
     pub on_portal: HashSet<String>,
     pub share: Option<ShareWindow>,
     pub people: Option<PeopleWindow>,
-    /// Admin › Portal's "Fetch now".
+    /// "Fetch uploads now" (Admin › Portal, or Intake's strip).
     pub fetch_now: bool,
+    /// The last fetch on this PC: (local time, what it did), for Intake's strip.
+    last_fetch: Option<(String, String)>,
     /// Read the marks again (after the Share window closed); fetches nothing.
     pub refresh_marks: bool,
     /// A line for Browse's notice bar.
@@ -107,6 +146,7 @@ impl Default for PortalState {
             share: None,
             people: None,
             fetch_now: false,
+            last_fetch: None,
             refresh_marks: false,
             notice: None,
             last_problem: None,
@@ -143,6 +183,15 @@ impl PortalState {
         self.settings(root).is_some()
     }
 
+    /// Intake's line, or `None` when no portal is set up (PA-38).
+    pub fn intake_line(&mut self, root: &Path) -> Option<PortalLine> {
+        let every = self.settings(root)?.fetch_minutes;
+        Some(PortalLine {
+            fetching: self.fetch.is_some() || self.fetch_now,
+            text: line_text(self.last_fetch.as_ref(), every),
+        })
+    }
+
     pub fn audit_out(&self) -> AuditOut {
         AuditOut(self.audit_tx.clone())
     }
@@ -163,6 +212,10 @@ impl PortalState {
             && let Ok(report) = rx.try_recv()
         {
             self.fetch = None;
+            self.last_fetch = Some((
+                chrono::Local::now().format("%H:%M").to_string(),
+                fetch_result(&report),
+            ));
             if let Some(set) = report.on_portal {
                 self.on_portal = set;
             }
@@ -1463,6 +1516,48 @@ pub fn admin_requests(ui: &mut egui::Ui, a: &mut AdminPortal, env: &mut Env) {
 mod tests {
     use super::*;
     use vf_portal::api::FileUser;
+
+    /// PA-38: Intake's portal line says what the last fetch here did and how often it runs.
+    #[test]
+    fn intake_line_reads_in_plain_words() {
+        let mut r = core::FetchReport::default();
+        assert_eq!(fetch_result(&r), "nothing new");
+        r.problems.push("The portal cannot be reached".into());
+        assert_eq!(fetch_result(&r), "problem: The portal cannot be reached");
+        r.busy = true;
+        assert_eq!(fetch_result(&r), "another PC was fetching");
+        let one = vf_portal::inbox::Received {
+            at: String::new(),
+            upload_id: "u".into(),
+            client_id: "c".into(),
+            client: "Smith, John".into(),
+            name: "W-2.pdf".into(),
+            saved_as: "x".into(),
+            note: String::new(),
+            from: "a".into(),
+            size: 1,
+        };
+        r.received = vec![one.clone()];
+        assert_eq!(fetch_result(&r), "1 file received");
+        r.received.push(one);
+        assert_eq!(fetch_result(&r), "2 files received");
+
+        assert_eq!(
+            line_text(None, 15),
+            "not fetched yet on this PC · every 15 minutes"
+        );
+        assert_eq!(
+            line_text(Some(&("10:42".into(), "nothing new".into())), 0),
+            "last fetched 10:42: nothing new · by hand only (Admin › Portal sets a timer)"
+        );
+    }
+
+    /// Without portal settings Intake shows no portal line.
+    #[test]
+    fn no_portal_no_intake_line() {
+        let t = tempfile::tempdir().unwrap();
+        assert!(PortalState::default().intake_line(t.path()).is_none());
+    }
 
     fn file(seen_by: &[&str]) -> Option<PortalFile> {
         Some(PortalFile {

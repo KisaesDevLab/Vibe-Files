@@ -21,6 +21,8 @@ The address and key are kept in the cabinet (`_Vibe\keys\portal.json`, never sen
 
 Saving also adds the **`_Portal inbox`** folder to Intake's shared inboxes. Press **Reload Intake** when Intake asks.
 
+Anyone can collect client uploads without the admin password: the **Intake** tab's **Portal uploads** line has its own **Fetch uploads now** button, and says when this PC last fetched and what came of it (files received, nothing new, or a problem).
+
 ## Inviting people
 
 Select a client in Browse and press **Portal users…** in the client panel. **Invite someone…** takes an email, a mobile number, or both; the invitation goes to the email when there is one, else by text, and works for 7 days. A mobile number given with an email is not used until the person confirms it: when they accept, the portal offers to text them a code, and once they type it back they can sign in by text too. People invited by email can also add a mobile number themselves on the portal's home page (**Sign in by text**). The portal offers this only when it is set up to send texts. **Resend** sends a new link (the old one stops working); **Withdraw** cancels it.

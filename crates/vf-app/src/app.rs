@@ -598,7 +598,12 @@ impl eframe::App for VibeFilesApp {
                     o.browse.portal.fetch_now = true;
                 }
             }
+            // Intake's "Fetch uploads now" (PA-38): open to everyone, unlike Admin › Portal.
+            if std::mem::take(&mut o.intake.ingest.fetch_portal) {
+                o.browse.portal.fetch_now = true;
+            }
             let received = o.browse.portal.tick(ui.ctx(), &o.opened.root);
+            o.intake.ingest.portal = o.browse.portal.intake_line(&o.opened.root);
             if !received.is_empty() {
                 let mut tx = vf_core::tx::Transaction::new("portal_receive");
                 for e in received {
