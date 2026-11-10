@@ -154,6 +154,39 @@ pub fn recover(conn: &Connection) -> vf_core::Result<usize> {
     )?)
 }
 
+/// Jobs set aside because their file was online only (PA-39) go back to the queue once the file
+/// is on this PC (at most `limit` looked at, oldest first). Reads attributes only.
+pub fn requeue_local(conn: &Connection, root: &Path, limit: usize) -> vf_core::Result<usize> {
+    let rows: Vec<(String, String)> = {
+        let mut st = conn.prepare(
+            "SELECT j.doc_id, d.rel_path FROM ocr_job j JOIN document d ON d.id = j.doc_id
+             WHERE j.state = 'skipped' AND j.error = ?1 ORDER BY j.updated_at LIMIT ?2",
+        )?;
+        st.query_map(params![ONLINE_ONLY, limit as i64], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })?
+        .collect::<Result<_, _>>()?
+    };
+    let now = vf_core::now_rfc3339();
+    let mut n = 0;
+    for (doc_id, rel) in rows {
+        if vf_fs::cloud::leave(&root.join(&rel)) {
+            // Still online only: looked at again after the others.
+            conn.execute(
+                "UPDATE ocr_job SET updated_at = ?2 WHERE doc_id = ?1",
+                params![doc_id, now],
+            )?;
+        } else {
+            n += conn.execute(
+                "UPDATE ocr_job SET state = 'queued', error = NULL, queued_at = ?2, updated_at = ?2
+                 WHERE doc_id = ?1 AND state = 'skipped'",
+                params![doc_id, now],
+            )?;
+        }
+    }
+    Ok(n)
+}
+
 /// Whether any job is queued (a read: idle workers ask this before taking the write lock).
 pub fn any_queued(conn: &Connection) -> vf_core::Result<bool> {
     Ok(conn.query_row(
@@ -259,8 +292,14 @@ pub enum Outcome {
     Stopped,
     /// Pages need OCR and no engine is available: back in the queue.
     Waiting(String),
+    /// The file is online only (a OneDrive or Dropbox cabinet, PA-39): reading it would
+    /// download it. Set aside until it is on this PC.
+    OnlineOnly,
     Failed(String),
 }
+
+/// The note on a job set aside because its file is online only (PA-39).
+pub const ONLINE_ONLY: &str = "online only: read once the file is on this PC";
 
 /// Reads every page of the job's PDF that has no saved text yet, then indexes the document.
 /// Every way out leaves the job in a settled state: a catalog error puts it back in the queue
@@ -332,6 +371,14 @@ fn settle(
                 params![job.doc_id, vf_core::now_rfc3339()],
             )?;
         }
+        Outcome::OnlineOnly => {
+            // Not an attempt: set aside until the file is on this PC (`requeue_local`).
+            conn.execute(
+                "UPDATE ocr_job SET state = 'skipped', attempts = max(attempts - 1, 0), error = ?2,
+                 updated_at = ?3 WHERE doc_id = ?1",
+                params![job.doc_id, ONLINE_ONLY, vf_core::now_rfc3339()],
+            )?;
+        }
         Outcome::Waiting(why) => {
             conn.execute(
                 "UPDATE ocr_job SET state = 'queued', attempts = max(attempts - 1, 0), error = ?2,
@@ -374,6 +421,9 @@ fn read_pages(
     stop: &AtomicBool,
 ) -> vf_core::Result<Outcome> {
     let path = root.join(&job.rel_path);
+    if vf_fs::cloud::leave(&path) {
+        return Ok(Outcome::OnlineOnly);
+    }
     let doc = match pdfium.load_pdf_from_file(&path, None) {
         Ok(d) => d,
         Err(e) => return Ok(Outcome::Failed(format!("cannot open the PDF: {e}"))),
@@ -499,17 +549,25 @@ pub struct Counts {
     pub indexed: usize,
     pub done: usize,
     pub failed: usize,
+    /// Set aside: online only on this PC (PA-39).
+    pub online_only: usize,
 }
 
 impl Counts {
     pub fn load(conn: &Connection) -> vf_core::Result<Counts> {
         let mut c = Counts::default();
-        let mut st = conn.prepare("SELECT state, count(*) FROM ocr_job GROUP BY state")?;
-        let rows = st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
+        let mut st = conn.prepare(
+            "SELECT CASE WHEN state = 'skipped' AND error = ?1 THEN 'online_only' ELSE state END,
+                    count(*) FROM ocr_job GROUP BY 1",
+        )?;
+        let rows = st.query_map([ONLINE_ONLY], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+        })?;
         for row in rows {
             let (state, n) = row?;
             let n = n as usize;
             match state.as_str() {
+                "online_only" => c.online_only = n,
                 "queued" => c.queued = n,
                 "running" => c.running = n,
                 "indexed" => c.indexed = n,
@@ -751,6 +809,8 @@ fn worker(
         // Text layers held back (Filer's undoable batch, a lock): worker 0 retries every 30 s.
         if n == 0 && last_writeback.is_none_or(|t| t.elapsed() >= Duration::from_secs(30)) {
             last_writeback = Some(Instant::now());
+            // Documents set aside as online only (PA-39) whose file is here now.
+            let _ = requeue_local(&conn, &config.root, 200);
             let (written, errors) =
                 crate::writeback::write_ready(&mut conn, &config.root, &config.device_id);
             if let Ok(mut s) = status.lock() {

@@ -33,6 +33,9 @@ pub struct Preview {
     /// A file that is not a PDF: what is inside it (a sheet, a document, a mail, a picture),
     /// read by Filer's reader without Office.
     viewer: Option<filer_intake::ui::fileview::FileViewer>,
+    /// The file is online only (OneDrive / Dropbox, PA-39): not read until asked, since
+    /// arrowing through a folder would download every file.
+    held: bool,
 }
 
 /// What the pane asked for.
@@ -66,6 +69,19 @@ impl Preview {
         self.asked = None;
         self.doc = Some((id.to_string(), path.clone(), hash.to_string()));
         self.viewer = None;
+        self.held = vf_fs::cloud::leave(&path);
+        if self.held {
+            return;
+        }
+        self.load(ctx, rel);
+    }
+
+    /// Reads the document shown (an online-only one is downloaded by this).
+    fn load(&mut self, ctx: &egui::Context, rel: &str) {
+        self.held = false;
+        let Some(path) = self.doc.as_ref().map(|d| d.1.clone()) else {
+            return;
+        };
         if !is_pdf(rel) {
             if filer_intake::fileview::viewable(&path) {
                 self.viewer = Some(filer_intake::ui::fileview::FileViewer::open(ctx, &path));
@@ -187,6 +203,20 @@ pub fn show(
                     }
                 }
             });
+            if p.held {
+                ui.add_space(20.0);
+                ui.vertical_centered(|ui| {
+                    ui.label(RichText::new(widgets::file_name(rel)).monospace());
+                    ui.label(widgets::caption(
+                        "Online only (OneDrive or Dropbox): showing it downloads it to this PC.",
+                    ));
+                    if ui.button("Show preview").clicked() {
+                        p.load(ui.ctx(), rel);
+                    }
+                });
+                ui.add_space(20.0);
+                return;
+            }
             if !is_pdf(rel)
                 && let Some(v) = &mut p.viewer
             {
@@ -279,4 +309,28 @@ pub fn show(
             });
         });
     act
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// PA-39: arrowing onto an online-only document does not read (download) it; it is read
+    /// once asked, and a document on this PC is read at once.
+    #[test]
+    fn an_online_only_document_waits_to_be_asked() {
+        let t = tempfile::tempdir().unwrap();
+        let ctx = egui::Context::default();
+        std::fs::write(t.path().join("far.pdf"), b"%PDF-1.4").unwrap();
+        std::fs::write(t.path().join("here.pdf"), b"%PDF-1.4").unwrap();
+        vf_fs::cloud::mark_online_only(&t.path().join("far.pdf"));
+        let mut p = Preview::default();
+        p.set(&ctx, t.path(), "d1", "far.pdf", "h1");
+        assert!(p.held && p.renderer.is_none());
+        p.load(&ctx, "far.pdf");
+        assert!(!p.held && p.renderer.is_some());
+        let mut q = Preview::default();
+        q.set(&ctx, t.path(), "d2", "here.pdf", "h2");
+        assert!(!q.held && q.renderer.is_some());
+    }
 }

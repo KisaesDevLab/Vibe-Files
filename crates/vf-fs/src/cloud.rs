@@ -60,8 +60,8 @@ pub fn is_online_only(p: &Path) -> bool {
 
 /// Marks a local file as a cloud service marks an online-only one (tests: `OFFLINE`, as Dropbox
 /// does). Its contents stay readable; Vibe Files must not read them.
-#[cfg(test)]
-pub(crate) fn mark_online_only(p: &Path) {
+#[doc(hidden)]
+pub fn mark_online_only(p: &Path) {
     use windows::Win32::Storage::FileSystem::{FILE_FLAGS_AND_ATTRIBUTES, SetFileAttributesW};
     use windows::core::HSTRING;
     let a = attributes(p).expect("file exists");
@@ -72,8 +72,8 @@ pub(crate) fn mark_online_only(p: &Path) {
 }
 
 /// The reverse: the file is on this PC now (as the cloud service marks it once downloaded).
-#[cfg(test)]
-pub(crate) fn mark_local(p: &Path) {
+#[doc(hidden)]
+pub fn mark_local(p: &Path) {
     use windows::Win32::Storage::FileSystem::{FILE_FLAGS_AND_ATTRIBUTES, SetFileAttributesW};
     use windows::core::HSTRING;
     let a = attributes(p).expect("file exists");

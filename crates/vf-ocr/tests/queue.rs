@@ -454,3 +454,28 @@ fn new_filings_only_and_looks_since_the_last_change() {
     queue::set_reads(&f.conn, &queue::Reads::All).unwrap();
     assert_eq!(queue::reads(&f.conn).unwrap(), queue::Reads::All);
 }
+
+/// PA-39: a document whose file is online only (OneDrive / Dropbox) is set aside, not read
+/// (reading would download it) and not failed; it goes back to the queue once on this PC.
+#[test]
+fn online_only_documents_wait_until_they_are_here() {
+    let f = fx();
+    f.add("d1", "scan.pdf", 1, true);
+    vf_fs::cloud::mark_online_only(&f.root.join("scan.pdf"));
+    assert_eq!(queue::enqueue_missing(&f.conn, queue::BACKLOG).unwrap(), 1);
+    let stop = AtomicBool::new(false);
+    let job = queue::claim(&f.conn).unwrap().unwrap();
+    let r = queue::run_job(&f.conn, &f.root, pdfium(), None, &job, &stop).unwrap();
+    assert_eq!(r, Outcome::OnlineOnly);
+    assert_eq!(f.state("d1"), "skipped");
+    let c = queue::Counts::load(&f.conn).unwrap();
+    assert_eq!((c.online_only, c.done, c.failed, c.pending()), (1, 0, 0, 0));
+    // Still online only: stays aside.
+    assert_eq!(queue::requeue_local(&f.conn, &f.root, 10).unwrap(), 0);
+    vf_fs::cloud::mark_local(&f.root.join("scan.pdf"));
+    assert_eq!(queue::requeue_local(&f.conn, &f.root, 10).unwrap(), 1);
+    assert_eq!(f.state("d1"), "queued");
+    let job = queue::claim(&f.conn).unwrap().unwrap();
+    let r = queue::run_job(&f.conn, &f.root, pdfium(), None, &job, &stop).unwrap();
+    assert!(matches!(r, Outcome::Indexed { .. }), "{r:?}");
+}

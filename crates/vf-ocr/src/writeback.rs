@@ -170,6 +170,10 @@ pub fn write_ready(conn: &mut Connection, root: &Path, device_id: &str) -> (usiz
     let mut written = 0;
     let mut errors = Vec::new();
     for (doc_id, rel) in pending(conn).unwrap_or_default() {
+        // Online only (PA-39): the layer waits until the file is on this PC.
+        if vf_fs::cloud::leave(&root.join(&rel)) {
+            continue;
+        }
         match write(conn, root, device_id, &doc_id, &undoable) {
             Ok(Written::Done) => written += 1,
             Ok(Written::Held(_)) => {}

@@ -301,13 +301,17 @@ pub fn show(
                         && let Some(r) = &s.renderer
                     {
                         s.requested.insert(key.clone());
-                        r.request(Request {
-                            key: key.clone(),
-                            path: root.join(&hit.rel_path),
-                            page: hit.page.unwrap_or(0) as usize,
-                            width: THUMB_WIDTH,
-                            terms: vec![],
-                        });
+                        // Online only (PA-39): a results list must not download its files;
+                        // the row shows without a thumbnail.
+                        if !vf_fs::cloud::leave(&root.join(&hit.rel_path)) {
+                            r.request(Request {
+                                key: key.clone(),
+                                path: root.join(&hit.rel_path),
+                                page: hit.page.unwrap_or(0) as usize,
+                                width: THUMB_WIDTH,
+                                terms: vec![],
+                            });
+                        }
                     }
                     if row(ui, &hit, s.thumbs.get(&key)).clicked() {
                         s.open = Some(Doc::at(

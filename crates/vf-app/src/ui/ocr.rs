@@ -134,6 +134,10 @@ impl OcrState {
                 let waiting = c.pending();
                 let missing = matches!(engine, Some(Err(_))) && waiting > 0;
                 match (waiting, missing) {
+                    (0, _) if c.online_only > 0 => format!(
+                        "Search index up to date · {} online-only documents read once they are on this PC",
+                        c.online_only
+                    ),
                     (0, _) if c.failed > 0 => {
                         format!("Search index up to date · {} could not be read", c.failed)
                     }
