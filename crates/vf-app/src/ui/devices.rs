@@ -45,33 +45,41 @@ fn servers_section(ui: &mut egui::Ui, p: &mut DevicesPage, env: &mut Env) {
             Err(e) => p.error = Some(format!("Could not save it: {e}")),
         }
     }
-    if !crate::server::server_mode() {
+    let cloud = crate::cloudmode::is_cloud(env.root);
+    if !crate::server::server_mode() && !cloud {
         ui.add_space(12.0);
         return;
     }
-    ui.label(widgets::caption(
-        "Vibe Files runs from a network folder, so each server keeps its own catalog of the cabinet and reads the other servers' changes (when a client is opened and every 15 minutes). Text recognition and B2 sync run on one of them.",
-    ));
+    ui.label(widgets::caption(if cloud && !crate::server::server_mode() {
+        "The cabinet is in a cloud folder, so each PC keeps its own catalog of the cabinet and reads the other PCs' changes (when a client is opened and every 15 minutes). Text recognition and B2 sync run on one of them."
+    } else {
+        "Vibe Files runs from a network folder, so each server keeps its own catalog of the cabinet and reads the other servers' changes (when a client is opened and every 15 minutes). Text recognition and B2 sync run on one of them."
+    }));
     let here = crate::server::computer();
     let main = crate::server::main_server(env.root);
+    let machine = if crate::server::server_mode() {
+        "server"
+    } else {
+        "PC"
+    };
     ui.horizontal(|ui| {
         ui.label(match &main {
             Some(m) if m.computer.eq_ignore_ascii_case(&here) => {
-                format!("Text recognition and B2 sync run on this server ({here}).")
+                format!("Text recognition and B2 sync run on this {machine} ({here}).")
             }
             Some(m) => format!(
                 "Text recognition and B2 sync run on {} (since {}).",
                 m.computer,
                 widgets::local_time(&m.since)
             ),
-            None => "No server runs text recognition and B2 sync yet; the first to start Vibe Files takes it on.".into(),
+            None => format!("No {machine} runs text recognition and B2 sync yet; the first to start Vibe Files takes it on."),
         });
         let is_here = main
             .as_ref()
             .is_some_and(|m| m.computer.eq_ignore_ascii_case(&here));
         if !is_here
             && ui
-                .button("Run them on this server")
+                .button(format!("Run them on this {machine}"))
                 .on_hover_text("Takes effect when Vibe Files next starts on each server.")
                 .clicked()
         {
@@ -86,6 +94,57 @@ fn servers_section(ui: &mut egui::Ui, p: &mut DevicesPage, env: &mut Env) {
             }
         }
     });
+    ui.add_space(12.0);
+}
+
+/// Cabinets in OneDrive or Dropbox (PA-39): this computer's choice, and what it found.
+fn cloud_section(ui: &mut egui::Ui, p: &mut DevicesPage, env: &mut Env) {
+    use crate::cloudmode::Setting;
+    ui.label(RichText::new("Cloud folders").strong().size(16.0));
+    let now = *p.cloud.get_or_insert_with(crate::cloudmode::setting);
+    let mut pick = now;
+    let found = crate::cloudmode::detected(env.root);
+    ui.horizontal(|ui| {
+        ui.label("Cloud folder handling on this computer");
+        ui.radio_value(&mut pick, Setting::Auto, "Automatic")
+            .on_hover_text(match &found {
+                Some(s) => format!("The cabinet is in a {s} folder: on."),
+                None => "The cabinet is not in a OneDrive or Dropbox folder: off.".into(),
+            });
+        ui.radio_value(&mut pick, Setting::On, "Always on")
+            .on_hover_text("For a folder Windows does not report, such as another sync service.");
+        ui.radio_value(&mut pick, Setting::Off, "Always off")
+            .on_hover_text(
+                "Every file is read, online only or not: each is downloaded to this PC.",
+            );
+    });
+    ui.label(widgets::caption(match crate::cloudmode::cabinet_provider(env.root) {
+        Some(s) => format!(
+            "Now on: the cabinet is in {s}. Files that are online only are not read in the background (indexing, text recognition, thumbnails, the weekly check) until they are on this PC; opening one downloads it. Each PC keeps its own catalog outside the cloud folder. A change takes effect when Vibe Files next starts."
+        ),
+        None => "Now off for this cabinet. A change takes effect when Vibe Files next starts.".into(),
+    }));
+    if crate::server::server_mode() && found.is_some() {
+        ui.label(
+            RichText::new(
+                "This is a Remote Desktop server and the cabinet is in a cloud folder: each person logged in syncs their own copy of it. Keep the cabinet on a file share for servers.",
+            )
+            .color(theme::error()),
+        );
+    }
+    if pick != now {
+        match crate::cloudmode::set_setting(pick) {
+            Ok(()) => {
+                p.cloud = Some(pick);
+                p.notice = Some(
+                    "Cloud folder handling changes when Vibe Files next starts on this computer."
+                        .into(),
+                );
+                p.error = None;
+            }
+            Err(e) => p.error = Some(format!("Could not save it: {e}")),
+        }
+    }
     ui.add_space(12.0);
 }
 
@@ -166,6 +225,8 @@ pub struct DevicesPage {
     pub error: Option<String>,
     /// This computer's server-mode choice and what Windows says, read once (not every frame).
     server: Option<(crate::server::Setting, bool)>,
+    /// This computer's cloud folder choice, read once (PA-39).
+    cloud: Option<crate::cloudmode::Setting>,
 }
 
 pub fn show(ui: &mut egui::Ui, p: &mut DevicesPage, env: &mut Env) {
@@ -174,6 +235,7 @@ pub fn show(ui: &mut egui::Ui, p: &mut DevicesPage, env: &mut Env) {
     reads_section(ui, p, env);
     ui.add_space(12.0);
     servers_section(ui, p, env);
+    cloud_section(ui, p, env);
     ui.label(RichText::new("Devices").strong().size(16.0));
     ui.label(widgets::caption(
         "Workstations that have opened this cabinet. Each is recorded when it opens it; a PC \

@@ -152,11 +152,20 @@ pub fn open(data: &Path, device_id: &str, root: &Path) -> Result<Opened> {
     let shared_at = crate::shared::shared_catalog(&cab.cabinet_id);
     // Several servers (PA-36): every login of this server uses one catalog, made now if
     // needed (started from the cabinet's seed copy or the old catalog beside the exe).
-    let server = crate::server::server_mode();
+    // A cabinet in OneDrive or Dropbox (PA-39) works the same way on each PC: its catalog
+    // outside the cloud folder, started from the cabinet's seed copy (nothing read again), or
+    // from this data folder's catalog when there is no seed yet.
+    let in_server_mode = crate::server::server_mode();
+    let cloud = !in_server_mode && crate::cloudmode::is_cloud(root);
+    let server = in_server_mode || cloud;
     let shared_at = match shared_at {
         Some(p) => Some(p),
         None if server => {
-            let legacy = vf_core::exe_dir().map(|d| d.join("data").join(CATALOG_FILE));
+            let legacy = if cloud {
+                Some(data.join(CATALOG_FILE))
+            } else {
+                vf_core::exe_dir().map(|d| d.join("data").join(CATALOG_FILE))
+            };
             Some(crate::server::provision(
                 &cab.cabinet_id,
                 root,

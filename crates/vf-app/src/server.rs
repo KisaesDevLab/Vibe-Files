@@ -339,7 +339,8 @@ pub fn set_main(root: &Path) -> Result<()> {
 /// Whether text recognition and B2 sync run here: always on a single PC; in server mode only on
 /// the main server (the first server to ask becomes it).
 pub fn runs_here(root: &Path) -> bool {
-    if !server_mode() {
+    // A cloud cabinet (PA-39) has one main PC as several servers have one main server.
+    if !server_mode() && !crate::cloudmode::is_cloud(root) {
         return true;
     }
     match main_server(root) {

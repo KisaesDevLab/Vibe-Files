@@ -404,6 +404,7 @@ impl VibeFilesApp {
                     }
                     Some(rx)
                 };
+                crate::cloudmode::check_conflicts(ctx, &opened.root);
                 let mut sweep = crate::ui::sweep::SweepState::default();
                 if vf_fs::sweep::due(&opened.conn) {
                     sweep.start(ctx, &opened.catalog, &opened.root);
@@ -1079,6 +1080,12 @@ impl eframe::App for VibeFilesApp {
         if let Screen::Open(o) = &mut self.screen
             && o.browse.notice.is_none()
             && let Some(n) = self.update_notice.take()
+        {
+            o.browse.notice = Some(n);
+        }
+        if let Screen::Open(o) = &mut self.screen
+            && o.browse.notice.is_none()
+            && let Some(n) = crate::cloudmode::take_conflicts()
         {
             o.browse.notice = Some(n);
         }

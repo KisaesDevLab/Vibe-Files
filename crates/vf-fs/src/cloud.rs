@@ -165,6 +165,66 @@ fn dropbox_paths(text: &str) -> Vec<PathBuf> {
         .collect()
 }
 
+/// Conflicted copies of Vibe Files' own files in a cloud cabinet: when two PCs change one of
+/// them between syncs, the service keeps both, Dropbox as `name (PC's conflicted copy
+/// date).ext`, OneDrive as `name-PC.ext`. `computers` are the PCs that open the cabinet (their
+/// names, for OneDrive's). Looked for in the cabinet's `_Vibe` folder and each client folder's.
+/// Cabinet-relative paths.
+pub fn conflicted_copies(root: &Path, computers: &[String]) -> Vec<String> {
+    let suffixes: Vec<String> = computers
+        .iter()
+        .filter(|c| !c.trim().is_empty())
+        .map(|c| format!("-{}", c.trim().to_lowercase()))
+        .collect();
+    let is_copy = |name: &str| {
+        let n = name.to_lowercase();
+        let stem = n.rsplit_once('.').map_or(n.as_str(), |(s, _)| s);
+        n.contains("conflicted copy") || suffixes.iter().any(|s| stem.ends_with(s.as_str()))
+    };
+    let mut out = Vec::new();
+    let look = |dir: &Path, depth: usize, out: &mut Vec<String>| {
+        let mut stack = vec![(dir.to_path_buf(), 0usize)];
+        while let Some((d, level)) = stack.pop() {
+            let Ok(entries) = std::fs::read_dir(&d) else {
+                continue;
+            };
+            for e in entries.flatten() {
+                let p = e.path();
+                let Ok(t) = e.file_type() else { continue };
+                if t.is_dir() {
+                    if level < depth {
+                        stack.push((p, level + 1));
+                    }
+                } else if is_copy(&e.file_name().to_string_lossy()) {
+                    out.push(
+                        p.strip_prefix(root)
+                            .unwrap_or(&p)
+                            .to_string_lossy()
+                            .replace('\\', "/"),
+                    );
+                }
+            }
+        }
+    };
+    let vibe = crate::cabinet::VIBE_DIR;
+    // The cabinet's own: audit, change logs, the client list, settings (not the version store).
+    look(&root.join(vibe), 1, &mut out);
+    if let Ok(entries) = std::fs::read_dir(root) {
+        for e in entries.flatten() {
+            if e.file_type().is_ok_and(|t| t.is_dir()) && e.file_name() != vibe {
+                look(&e.path().join(vibe), 0, &mut out);
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+/// The nearest folder of `p` that exists (a data folder may not be made yet).
+pub fn existing_ancestor(p: &Path) -> Option<PathBuf> {
+    p.ancestors().find(|a| a.exists()).map(Path::to_path_buf)
+}
+
 /// Whether `p` is `folder` or inside it (compared as Windows does, ignoring case).
 fn within(p: &Path, folder: &Path) -> bool {
     let norm = |x: &Path| {
@@ -220,5 +280,31 @@ mod tests {
         assert!(within(Path::new(r"\\?\C:\Users\Pat\Dropbox\x"), pat));
         assert!(!within(Path::new(r"C:\Users\Pat\Dropbox Old\x"), pat));
         assert!(dropbox_paths("not json").is_empty());
+    }
+
+    #[test]
+    fn conflicted_copies_of_vibe_files_are_found() {
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path();
+        let put = |rel: &str| {
+            let p = root.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, "x").unwrap();
+        };
+        put("_Vibe/audit/2026-11.jsonl");
+        put("_Vibe/audit/2026-11 (FRONT-DESK's conflicted copy 2026-11-10).jsonl");
+        put("_Vibe/clients-OFFICE-2.json");
+        put("Smith (1001)/_Vibe/docmeta.jsonl");
+        put("Smith (1001)/_Vibe/docmeta-office-2.jsonl");
+        put("Smith (1001)/Income Tax/w2-OFFICE-2.pdf");
+        let got = conflicted_copies(root, &["OFFICE-2".into(), "FRONT-DESK".into()]);
+        assert_eq!(
+            got,
+            [
+                "Smith (1001)/_Vibe/docmeta-office-2.jsonl",
+                "_Vibe/audit/2026-11 (FRONT-DESK's conflicted copy 2026-11-10).jsonl",
+                "_Vibe/clients-OFFICE-2.json",
+            ]
+        );
     }
 }

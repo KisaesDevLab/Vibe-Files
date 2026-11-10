@@ -737,6 +737,16 @@ pub fn show(ui: &mut egui::Ui, t: &mut SyncTab, env: &mut Env, v: View<'_>) {
              this PC before it leaves; the bucket's names reveal no clients. The sync passphrase is \
              the only way to the key: keep it with the firm's recovery papers.",
         ));
+        // PA-39 (Q-76): allowed, but sync reads every file, so the main PC downloads the whole
+        // cloud cabinet.
+        if let Some(svc) = crate::cloudmode::cabinet_provider(env.root) {
+            ui.label(
+                RichText::new(format!(
+                    "This cabinet is in {svc}. B2 sync reads every file to send it, so the PC that                      runs sync downloads the whole cabinet from {svc}. Use one or the other."
+                ))
+                .color(theme::error()),
+            );
+        }
         ui.add_space(6.0);
         if let Some((what, _)) = &t.job {
             ui.horizontal(|ui| {

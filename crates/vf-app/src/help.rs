@@ -87,7 +87,7 @@ articles! {
     Start: "welcome", "first-run", "screen-tour", "shortcuts";
     Browse: "browse", "documents", "moving-renaming", "new-files", "browse-scan-print", "undo";
     Intake: "intake", "intake-rules", "just-filed", "scanning", "cover-sheets", "print-capture",
-        "several-pcs";
+        "several-pcs", "cloud-folders";
     Search: "search", "ocr";
     Viewer: "viewer", "annotations", "forms", "ten-key", "page-tools", "printing";
     Sync: "sync", "sync-key", "sync-conflicts", "portal";

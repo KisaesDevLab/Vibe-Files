@@ -4,6 +4,7 @@
 
 mod app;
 mod cli;
+mod cloudmode;
 mod config;
 mod datalock;
 mod help;
@@ -61,6 +62,17 @@ fn main() -> anyhow::Result<std::process::ExitCode> {
             vf_core::windows_login().as_deref(),
         ),
     };
+    // PA-39: online-only files (OneDrive / Dropbox) left alone unless this computer says not;
+    // and never a catalog in a cloud folder (syncing a SQLite file while open damages it): a
+    // default data folder found in one moves to this login's own, its catalog with it.
+    cloudmode::apply();
+    if !chosen
+        && let Some(p) = &personal
+        && data != *p
+        && cloudmode::data_in_cloud(&data).is_some()
+    {
+        data = cloudmode::move_data(&data, p);
+    }
     // The window: one copy per data folder. The default folder held by another login or PC
     // (a shared program folder) means this login's own folder, not a refusal (owner
     // 2026-11-05); taken before logging starts so the log goes to the folder used.
