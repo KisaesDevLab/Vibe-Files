@@ -27,6 +27,21 @@ pub fn online_only_meta(m: &std::fs::Metadata) -> bool {
     online_only_attrs(m.file_attributes())
 }
 
+/// Whether background work leaves online-only files alone (PA-39). On unless this computer's
+/// setting says to read every file (Admin › Devices: Cloud folder handling, Always off).
+static LEAVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+/// Sets whether background work leaves online-only files alone (at start).
+pub fn set_leave_online_only(on: bool) {
+    LEAVE.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Whether background work must not read `p` now: it is online only and this computer leaves
+/// such files until they are on it.
+pub fn leave(p: &Path) -> bool {
+    LEAVE.load(std::sync::atomic::Ordering::Relaxed) && is_online_only(p)
+}
+
 /// A file's attributes, read by path (no handle is opened, so nothing is downloaded).
 /// `None` when the file cannot be reached.
 pub fn attributes(p: &Path) -> Option<u32> {
@@ -41,6 +56,31 @@ pub fn attributes(p: &Path) -> Option<u32> {
 /// Whether `p`'s contents are only in the cloud: reading it would download it.
 pub fn is_online_only(p: &Path) -> bool {
     attributes(p).is_some_and(online_only_attrs)
+}
+
+/// Marks a local file as a cloud service marks an online-only one (tests: `OFFLINE`, as Dropbox
+/// does). Its contents stay readable; Vibe Files must not read them.
+#[cfg(test)]
+pub(crate) fn mark_online_only(p: &Path) {
+    use windows::Win32::Storage::FileSystem::{FILE_FLAGS_AND_ATTRIBUTES, SetFileAttributesW};
+    use windows::core::HSTRING;
+    let a = attributes(p).expect("file exists");
+    let wide = HSTRING::from(p.as_os_str());
+    // SAFETY: a valid, NUL-terminated wide string for the call's duration.
+    unsafe { SetFileAttributesW(&wide, FILE_FLAGS_AND_ATTRIBUTES(a | OFFLINE)) }.unwrap();
+    assert!(is_online_only(p));
+}
+
+/// The reverse: the file is on this PC now (as the cloud service marks it once downloaded).
+#[cfg(test)]
+pub(crate) fn mark_local(p: &Path) {
+    use windows::Win32::Storage::FileSystem::{FILE_FLAGS_AND_ATTRIBUTES, SetFileAttributesW};
+    use windows::core::HSTRING;
+    let a = attributes(p).expect("file exists");
+    let wide = HSTRING::from(p.as_os_str());
+    // SAFETY: a valid, NUL-terminated wide string for the call's duration.
+    unsafe { SetFileAttributesW(&wide, FILE_FLAGS_AND_ATTRIBUTES(a & !OFFLINE)) }.unwrap();
+    assert!(!is_online_only(p));
 }
 
 /// The cloud service `p` is synced by ("OneDrive - …", "Dropbox", …); `None` for a local disk or

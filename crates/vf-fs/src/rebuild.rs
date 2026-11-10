@@ -132,6 +132,13 @@ pub struct RebuildReport {
     pub docmeta_bad_lines: usize,
     /// Files that could not be read (cabinet paths); their catalog rows were left as they were.
     pub unreadable: Vec<String>,
+    /// Online-only files (PA-39) not read: known ones kept as the catalog has them.
+    pub online_only_kept: usize,
+    /// Online-only files not in the catalog that took their fingerprint from the folder's
+    /// `docmeta.jsonl` (another PC filed them), without being read.
+    pub online_only_noted: usize,
+    /// Online-only files not in the catalog and not noted: listed once they are on this PC.
+    pub online_only_waiting: usize,
     /// Version sidecars that could not be read (skipped).
     pub bad_sidecars: usize,
 }
@@ -164,6 +171,14 @@ impl std::fmt::Display for RebuildReport {
                 f,
                 " · metadata restored for {} documents",
                 self.docmeta_restored
+            )?;
+        }
+        if self.online_only_kept + self.online_only_noted + self.online_only_waiting > 0 {
+            write!(
+                f,
+                " · online-only files not read (OneDrive / Dropbox): {} kept as cataloged, {} added \
+                 from another PC's notes, {} listed once they are on this PC",
+                self.online_only_kept, self.online_only_noted, self.online_only_waiting
             )?;
         }
         if self.docmeta_bad_lines > 0 {
@@ -831,16 +846,31 @@ fn rebuild_scoped(
             }
             _ => None,
         };
-        if same.is_none() {
+        // Online only (a OneDrive or Dropbox cabinet, PA-39): reading it would download it.
+        // Left unread, never taken for deleted or changed.
+        let left = same.is_none() && crate::cloud::leave(p);
+        if same.is_none() && !left {
             to_read.push(p.clone());
         } else {
             PROGRESS.read.fetch_add(1, Ordering::Relaxed);
         }
-        reuse.push(same);
+        reuse.push(if left { Some(String::new()) } else { same });
     }
     let mut read = read_all(&to_read).into_iter();
     let mut found: Vec<Found> = Vec::new();
+    // Online-only files not in the catalog: their fingerprint may be in docmeta (below).
+    let mut waiting: Vec<(PathBuf, Option<String>, Option<(u64, i64)>)> = Vec::new();
     for (((p, client_id), st), same) in todo.into_iter().zip(stats).zip(reuse) {
+        if same.as_deref() == Some("") {
+            let r = rel(root, &p);
+            if known.contains_key(&r) {
+                rep.online_only_kept += 1;
+                unread_files.insert(r);
+            } else {
+                waiting.push((p, client_id, st));
+            }
+            continue;
+        }
         let got = match same {
             Some(h) => Some((h, st.map_or(0, |s| s.0))),
             None => read.next().flatten(),
@@ -898,6 +928,35 @@ fn rebuild_scoped(
         .collect();
     let meta = crate::docmeta::Index::load(root, &folder_rels);
     rep.docmeta_bad_lines = meta.bad_lines;
+    // Online-only files new to this catalog (PA-39): another PC that filed or changed one noted
+    // its fingerprint in the folder's docmeta.jsonl. Trusted when the file is no newer than that
+    // note (two minutes' allowance for the note being written just after the file); a file
+    // changed since, or never noted, waits until it is on this PC.
+    for (p, client_id, st) in waiting {
+        let r = rel(root, &p);
+        let noted = meta.latest_at(&r).filter(|m| {
+            let ts =
+                time::OffsetDateTime::parse(&m.ts, &time::format_description::well_known::Rfc3339)
+                    .map(|t| t.unix_timestamp());
+            matches!((ts, st), (Ok(ts), Some((_, mt))) if mt <= ts + 120)
+        });
+        match (noted, st) {
+            (Some(m), Some((size, mt))) => {
+                rep.online_only_noted += 1;
+                found.push(Found {
+                    rel: r,
+                    client_id,
+                    hash: m.hash.clone(),
+                    size,
+                    mtime: Some(mt),
+                });
+            }
+            _ => {
+                rep.online_only_waiting += 1;
+                unread_files.insert(r);
+            }
+        }
+    }
 
     // Documents: compare with live catalog rows by path; re-link moves by hash.
     // rel -> (id, hash, client)
@@ -1532,6 +1591,96 @@ mod tests {
             )
             .unwrap();
         assert_eq!(by, FILED_BY_IMPORT);
+    }
+
+    /// PA-39: online-only files (a OneDrive or Dropbox cabinet) are never read by a rebuild. A
+    /// known one keeps its row even when its size changed; a new one takes its fingerprint from
+    /// the folder's docmeta.jsonl when another PC noted it, else waits; nothing is tombstoned.
+    #[test]
+    fn online_only_files_are_left_unread_and_kept() {
+        let c = cab();
+        let mut conn = open(&c);
+        rebuild(&mut conn, &c.root, "dev").unwrap();
+        let hash_of = |conn: &Connection, like: &str| -> Option<String> {
+            conn.query_row(
+                "SELECT hash FROM document WHERE deleted_at IS NULL AND rel_path LIKE ?1",
+                [like],
+                |r| r.get(0),
+            )
+            .ok()
+        };
+        let before = hash_of(&conn, "%2025/w2.pdf").unwrap();
+        let smith = c.root.join("Smith, John (1001)");
+        let acme = c.root.join("Acme LLC (1002)");
+        // Known, changed elsewhere, online only here.
+        put(&smith.join("Income Tax/2025/w2.pdf"), "w2 2025, corrected");
+        crate::cloud::mark_online_only(&smith.join("Income Tax/2025/w2.pdf"));
+        // New and never noted.
+        put(&acme.join("Payroll/2025/941 Q2.pdf"), "941 q2");
+        crate::cloud::mark_online_only(&acme.join("Payroll/2025/941 Q2.pdf"));
+        // New, noted by the PC that filed it (a fingerprint that is not this file's bytes:
+        // taken from the note, so the file was not read).
+        put(&acme.join("Payroll/2025/941 Q3.pdf"), "941 q3");
+        crate::cloud::mark_online_only(&acme.join("Payroll/2025/941 Q3.pdf"));
+        let noted = "ab".repeat(32);
+        let line = serde_json::json!({
+            "v": 1, "ts": vf_core::now_rfc3339(), "device": "pc-a", "hash": noted,
+            "path": "Payroll/2025/941 Q3.pdf", "doc_type": null, "doc_type_name": null,
+            "tax_year": 2025, "status": "received", "source": null, "tags": []
+        });
+        put(
+            &acme.join("_Vibe/docmeta.jsonl"),
+            &format!(
+                "{line}
+"
+            ),
+        );
+        // New, noted long before the file last changed: not trusted.
+        put(&acme.join("Payroll/2025/941 Q4.pdf"), "941 q4");
+        crate::cloud::mark_online_only(&acme.join("Payroll/2025/941 Q4.pdf"));
+        let old = serde_json::json!({
+            "v": 1, "ts": "2020-01-01T00:00:00Z", "device": "pc-a", "hash": "cd".repeat(32),
+            "path": "Payroll/2025/941 Q4.pdf", "doc_type": null, "doc_type_name": null,
+            "tax_year": 2025, "status": "received", "source": null, "tags": []
+        });
+        put(
+            &acme.join("_Vibe/docmeta.jsonl"),
+            &format!(
+                "{line}
+{old}
+"
+            ),
+        );
+
+        let rep = rebuild(&mut conn, &c.root, "dev").unwrap();
+        assert_eq!(rep.docs_tombstoned, 0, "{rep}");
+        assert_eq!(rep.docs_changed, 0, "{rep}");
+        assert_eq!(
+            (
+                rep.online_only_kept,
+                rep.online_only_noted,
+                rep.online_only_waiting
+            ),
+            (1, 1, 2),
+            "{rep}"
+        );
+        assert_eq!(hash_of(&conn, "%2025/w2.pdf").unwrap(), before);
+        assert_eq!(hash_of(&conn, "%941 Q3.pdf").unwrap(), noted);
+        assert_eq!(hash_of(&conn, "%941 Q2.pdf"), None);
+        assert_eq!(hash_of(&conn, "%941 Q4.pdf"), None);
+        let versions: i64 = conn
+            .query_row("SELECT count(*) FROM version", [], |r| r.get(0))
+            .unwrap_or(0);
+        assert_eq!(versions, 0);
+        // Once on this PC (no longer online only) the files are read as usual.
+        for f in ["Payroll/2025/941 Q2.pdf", "Payroll/2025/941 Q4.pdf"] {
+            crate::cloud::mark_local(&acme.join(f));
+        }
+        crate::cloud::mark_local(&smith.join("Income Tax/2025/w2.pdf"));
+        let rep = rebuild(&mut conn, &c.root, "dev").unwrap();
+        assert_eq!(rep.online_only_waiting + rep.online_only_kept, 0, "{rep}");
+        assert!(hash_of(&conn, "%941 Q2.pdf").is_some());
+        assert_ne!(hash_of(&conn, "%2025/w2.pdf").unwrap(), before);
     }
 
     /// PA-34 review: a folder that cannot be read (a denied ACL, a network blip) is listed,

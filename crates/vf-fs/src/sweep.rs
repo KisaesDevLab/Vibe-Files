@@ -67,6 +67,9 @@ pub struct Drift {
     pub unknown: Vec<Unknown>,
     /// Files that could not be read (open in another program, permissions).
     pub unreadable: Vec<String>,
+    /// Online-only files (a OneDrive or Dropbox cabinet, PA-39) not checked: reading them would
+    /// download them. Checked once they are on this PC.
+    pub online_only: usize,
 }
 
 impl Drift {
@@ -156,6 +159,17 @@ pub fn scan_week(conn: &Connection, root: &Path, week: u64) -> Result<Drift, Str
             _ => true,
         })
         .collect();
+    // Online only (PA-39): not read, and not reported as changed, new or missing: not checked.
+    let left: Vec<bool> = todo
+        .iter()
+        .zip(&read_whole)
+        .map(|((p, ..), whole)| *whole && crate::cloud::leave(p))
+        .collect();
+    let read_whole: Vec<bool> = read_whole
+        .iter()
+        .zip(&left)
+        .map(|(w, l)| *w && !*l)
+        .collect();
     let to_read: Vec<PathBuf> = todo
         .iter()
         .zip(&read_whole)
@@ -164,7 +178,12 @@ pub fn scan_week(conn: &Connection, root: &Path, week: u64) -> Result<Drift, Str
         .collect();
     let mut read = rebuild::read_all(&to_read).into_iter();
     let mut times: Vec<(String, i64)> = Vec::new();
-    for ((p, rel, client_id, st), whole) in todo.into_iter().zip(read_whole) {
+    for (((p, rel, client_id, st), whole), left) in todo.into_iter().zip(read_whole).zip(left) {
+        if left {
+            d.online_only += 1;
+            seen.push(rel);
+            continue;
+        }
         let got = if whole {
             read.next().flatten().map(|(h, _)| h)
         } else {
@@ -787,6 +806,10 @@ pub fn find_new(
             if known.contains(&rel.to_lowercase()) {
                 continue;
             }
+            // Online only (PA-39): reading it would download it; looked at once it is here.
+            if crate::cloud::leave(&p) {
+                continue;
+            }
             // A file still being copied in cannot be opened for reading: next time.
             let Ok(hash) = sha256_file(&p) else { continue };
             if known_hashes.contains(&hash) {
@@ -1029,6 +1052,40 @@ mod tests {
         assert!(
             !v[0].kept,
             "the content before the outside edit was never seen"
+        );
+    }
+
+    /// PA-39: online-only files are not read by the weekly check (not changed, not missing:
+    /// not checked), nor by Browse's look for new files.
+    #[test]
+    fn online_only_files_are_not_checked() {
+        let (_t, root, conn) = fx();
+        let client = "Anderson Farms LLC (ANDE1042)";
+        let w2 = root.join(client).join("Income Tax/2025/w2.pdf");
+        std::fs::write(&w2, "w2 changed on another PC").unwrap();
+        crate::cloud::mark_online_only(&w2);
+        let fin = root.join(client).join("Financials");
+        std::fs::create_dir_all(&fin).unwrap();
+        std::fs::write(fin.join("new.pdf"), "added on another PC").unwrap();
+        crate::cloud::mark_online_only(&fin.join("new.pdf"));
+        // Every file in this week's slice: a file left unread is never "read whole".
+        for week in 0..13 {
+            let d = scan_week(&conn, &root, week).unwrap();
+            assert!(d.modified.is_empty() && d.missing.is_empty(), "week {week}");
+            assert!(
+                d.unknown.is_empty() && d.unreadable.is_empty(),
+                "week {week}"
+            );
+            assert_eq!(d.online_only, 2, "week {week}");
+        }
+        let client_id: String = conn
+            .query_row("SELECT id FROM client", [], |r| r.get(0))
+            .unwrap();
+        let none = std::collections::HashSet::new();
+        assert!(
+            find_new(&root, &[(client.into(), client_id)], &none, &none)
+                .iter()
+                .all(|u| !u.rel_path.ends_with("new.pdf") && !u.rel_path.ends_with("w2.pdf"))
         );
     }
 

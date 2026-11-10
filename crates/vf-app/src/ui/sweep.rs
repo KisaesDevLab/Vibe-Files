@@ -189,6 +189,15 @@ pub fn show(ui: &mut egui::Ui, s: &mut SweepState, env: &mut Env, catalog: &Path
         .auto_shrink(false)
         .show(ui, |ui| {
             ui.label(format!("{} files checked.", d.checked));
+            if d.online_only > 0 {
+                ui.label(
+                    RichText::new(format!(
+                        "{} files not checked: they are online only (OneDrive or Dropbox) and                          would be downloaded. They are checked once they are on this PC.",
+                        d.online_only
+                    ))
+                    .color(theme::ink_secondary()),
+                );
+            }
             if !s.adopted.is_empty() {
                 section(
                     ui,
@@ -201,7 +210,7 @@ pub fn show(ui: &mut egui::Ui, s: &mut SweepState, env: &mut Env, catalog: &Path
                     ui.label(RichText::new(p).monospace().small());
                 }
             }
-            if d.is_clean() && d.unreadable.is_empty() {
+            if d.is_clean() && d.unreadable.is_empty() && d.online_only == 0 {
                 ui.label(
                     RichText::new("Everything matches the catalog.").color(theme::ink_secondary()),
                 );

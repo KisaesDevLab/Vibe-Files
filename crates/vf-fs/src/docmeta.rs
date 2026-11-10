@@ -363,6 +363,8 @@ pub const UNDOABLE: [&str; 3] = [LABEL, crate::rename::LABEL, crate::moveto::LAB
 pub struct Index {
     by_path: HashMap<(String, String), Record>,
     by_hash: HashMap<String, Record>,
+    /// The latest record per cabinet path, whatever its content (PA-39).
+    by_rel: HashMap<String, Record>,
     pub bad_lines: usize,
 }
 
@@ -390,6 +392,7 @@ impl Index {
                         format!("{folder}/{}", r.path)
                     };
                     self.by_hash.insert(r.hash.clone(), r.clone());
+                    self.by_rel.insert(rel.clone(), r.clone());
                     self.by_path.insert((rel, r.hash.clone()), r);
                 }
                 Err(_) => self.bad_lines += 1,
@@ -409,6 +412,12 @@ impl Index {
     /// the same bytes, a K-1 copied to two clients, keep their own metadata).
     pub fn get_at(&self, rel: &str, hash: &str) -> Option<&Record> {
         self.by_path.get(&(rel.to_owned(), hash.to_owned()))
+    }
+
+    /// The latest record written for the file at `rel` (cabinet-relative), whatever its content:
+    /// what another PC noted when it filed or changed the file (PA-39, a file not on this PC).
+    pub fn latest_at(&self, rel: &str) -> Option<&Record> {
+        self.by_rel.get(rel)
     }
 }
 
