@@ -52,6 +52,9 @@ pub static PROGRESS: Progress = Progress {
     read: std::sync::atomic::AtomicUsize::new(0),
 };
 
+/// An online-only file new to the catalog (PA-39): path, client, size and time.
+type Waiting = (PathBuf, Option<String>, Option<(u64, i64)>);
+
 /// One file read: its place in the list, and its SHA-256 and size (`None`: unreadable).
 type Read = (usize, Option<(String, u64)>);
 
@@ -859,7 +862,7 @@ fn rebuild_scoped(
     let mut read = read_all(&to_read).into_iter();
     let mut found: Vec<Found> = Vec::new();
     // Online-only files not in the catalog: their fingerprint may be in docmeta (below).
-    let mut waiting: Vec<(PathBuf, Option<String>, Option<(u64, i64)>)> = Vec::new();
+    let mut waiting: Vec<Waiting> = Vec::new();
     for (((p, client_id), st), same) in todo.into_iter().zip(stats).zip(reuse) {
         if same.as_deref() == Some("") {
             let r = rel(root, &p);
