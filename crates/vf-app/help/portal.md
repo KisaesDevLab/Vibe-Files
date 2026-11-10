@@ -4,7 +4,7 @@ How Vibe Files works with your firm's Vibe Portal: sending documents to clients,
 
 ## What the portal is
 
-Vibe Portal is your firm's own client portal, installed on your Vibe appliance at its own address (for example `https://files.yourfirm.com`). Clients sign in there with a link sent to their email or a code sent by text. Nothing is stored with anyone else: the portal keeps an encrypted copy of what you share, and your cabinet keeps the original.
+Vibe Portal is your firm's own client portal, installed on your Vibe appliance at its own address (for example `https://files.yourfirm.com`). Clients sign in there with a link sent to their email or a code sent by text. The portal keeps an encrypted copy of what you share, and your cabinet keeps the original. The portal's files are on the appliance unless an admin moves them to the firm's own Backblaze B2 bucket (the portal's staff page, **Settings › Storage**; a bucket of the portal's own, not the one Sync uses). They are encrypted on the appliance first, so B2 holds only files it cannot read. **Test** in **Admin › Portal** says where they are.
 
 Vibe Files talks to the portal only when it is set up, and only at the address you give it.
 

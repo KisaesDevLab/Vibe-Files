@@ -1198,8 +1198,10 @@ pub fn admin_settings(ui: &mut egui::Ui, a: &mut AdminPortal, env: &mut Env) {
                             .status()
                             .map(|st| {
                                 format!(
-                                    "Connected to {}'s portal (version {}).",
-                                    st.firm_name, st.version
+                                    "Connected to {}'s portal (version {}). {}",
+                                    st.firm_name,
+                                    st.version,
+                                    st.storage_words()
                                 )
                             })
                             .map_err(|e| e.message())

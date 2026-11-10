@@ -68,6 +68,24 @@ pub struct Status {
     pub version: String,
     pub firm_name: String,
     pub portal_url: String,
+    /// Where the portal keeps its (encrypted) files: "local" or "b2" (Vibe-Portal P51). Absent
+    /// from portals before P51, which keep them on the appliance.
+    #[serde(default)]
+    pub storage: Option<String>,
+    /// A move between the appliance and B2 is under way or not finished (P51).
+    #[serde(default)]
+    pub storage_moving: bool,
+}
+
+impl Status {
+    /// Where the portal's files are, in words for Admin › Portal.
+    pub fn storage_words(&self) -> &'static str {
+        match (self.storage.as_deref(), self.storage_moving) {
+            (_, true) => "Its files are being moved between the appliance and B2.",
+            (Some("b2"), false) => "Its files are kept, encrypted, in the firm's own B2 bucket.",
+            _ => "Its files are kept, encrypted, on the appliance.",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -767,6 +785,23 @@ pub fn file_sha256(path: &Path) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn status_says_where_the_files_are() {
+        let read = |json: &str| serde_json::from_str::<Status>(json).unwrap();
+        let base = r#""version":"1","firmName":"F","portalUrl":"https://p""#;
+        let old = read(&format!("{{{base}}}"));
+        assert_eq!(old.storage, None);
+        assert!(old.storage_words().contains("on the appliance"));
+        let b2 = read(&format!(
+            r#"{{{base},"storage":"b2","storageMoving":false}}"#
+        ));
+        assert!(b2.storage_words().contains("B2 bucket"));
+        let moving = read(&format!(
+            r#"{{{base},"storage":"b2","storageMoving":true}}"#
+        ));
+        assert!(moving.storage_words().contains("being moved"));
+    }
 
     #[test]
     fn names_are_percent_encoded_for_their_header() {
