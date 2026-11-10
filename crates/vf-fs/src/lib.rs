@@ -5,6 +5,7 @@ pub mod aliases;
 pub mod cabinet;
 pub mod changes;
 pub mod clients;
+pub mod cloud;
 pub mod content;
 pub mod copymove;
 pub mod disposition;

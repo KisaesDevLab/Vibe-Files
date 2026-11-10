@@ -5998,6 +5998,7 @@ dependencies = [
  "vf-extract",
  "vf-pdf",
  "vf-security",
+ "windows",
 ]
 
 [[package]]
