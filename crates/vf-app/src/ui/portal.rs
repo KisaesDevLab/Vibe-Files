@@ -258,7 +258,7 @@ impl InviteForm {
                     }
                 });
             ui.label(widgets::caption(
-                "The invitation goes to the email when there is one, else by text. It works for 7 days.",
+                "The invitation goes to the email when there is one, else by text. It works for 7 days.                  A mobile number given with an email is used only once the person confirms it.",
             ));
             let ok = !busy && !(self.email.trim().is_empty() && self.phone.trim().is_empty());
             if ui
