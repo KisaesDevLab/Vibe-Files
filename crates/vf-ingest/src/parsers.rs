@@ -398,7 +398,36 @@ pub fn table_rules(
             problems.push((p.name.clone(), format!("{label}: {}", errs.join("; "))));
             continue;
         }
+        // The same row for a print saved straight into an inbox (owner 2026-11-10: UltraTax
+        // saves there, not in the capture folder): same folder and copy, the printed name kept.
+        let inbox = layout.inbox_pattern(r, r.copy_to_partner).map(|pattern| {
+            let mut i = Rule::new(
+                &format!("{} · {} (inbox)", p.name, r.default_name),
+                &pattern,
+                &rule.dest_template,
+                "{Original}.{Ext}",
+                rule.requires_year,
+            );
+            i.next_year_folder = rule.next_year_folder;
+            i.id = format!(
+                "{MANAGED_PREFIX}{}",
+                stable_id(&p.name, &format!("{}\u{0}inbox", r.default_name))
+            );
+            i.copies = rule.copies.clone();
+            i
+        });
         out.push(rule);
+        if let Some(i) = inbox {
+            let errs = filer_core::rules::validate_rule(&i, extra_tokens);
+            if errs.is_empty() {
+                out.push(i);
+            } else {
+                problems.push((
+                    p.name.clone(),
+                    format!("{label} (inbox): {}", errs.join("; ")),
+                ));
+            }
+        }
     }
     (out, problems)
 }

@@ -35,6 +35,8 @@ The **Document Names** tab lists UltraTax's documents, grouped as government cop
 
 As set up for the office, government copies go to `Income Tax/{Year}/Government Copy`, preparer copies to `Workpapers & Support/{Year}`, and client copies to their doc type's folder. Only the client-copy K-1 package is copied to partners.
 
+**Prints saved straight into an Intake inbox** (UltraTax set to save its PDFs there, not in the capture folder) follow the same rows: same folder and partner copy, filed under the printed name. Their client ID is found in the client list, so one with an underscore (`2614_FOUR`) is read whole. **File name** and **Don't file** apply only to prints that come through the capture folder.
+
 **Documents not in UltraTax's list** holds extra rules for other document names.
 
 ## Trying a name and saving

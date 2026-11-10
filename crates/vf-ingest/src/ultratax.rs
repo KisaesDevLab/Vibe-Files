@@ -206,6 +206,42 @@ impl Layout {
         self.join(doc, false)
     }
 
+    /// What Intake's rules read from a printed name of `row` saved straight into an inbox
+    /// (owner 2026-11-10: UltraTax saves there): Filer takes the first `_` part for the client's
+    /// name and the client's ID (one part or two, `2614_FOUR`) off the end, and rules read the
+    /// rest, `2025_1065_GovernmentCopyK1Package_Chet A Hammen`. Anchored. `None` unless the
+    /// layout starts with the client name and ends with the ID (the only shape read that way).
+    pub fn inbox_pattern(&self, row: &Row, who: bool) -> Option<String> {
+        let order = self.order();
+        if order.first() != Some(&Var::ClientName)
+            || order.last() != Some(&Var::ClientId)
+            || matches!(
+                self.postal_code_after,
+                Some(Var::ClientName | Var::ClientId)
+            )
+        {
+            return None;
+        }
+        let mut names: Vec<String> = row.names();
+        names.sort_by_key(|d| std::cmp::Reverse(d.len()));
+        names.dedup();
+        let names: Vec<String> = names.iter().map(|d| regex::escape(d)).collect();
+        let mut doc = format!("(?:(?:Amended|Superseded)_)?(?:{})", names.join("|"));
+        if row.is_k1() && self.k1_recipient_after_document {
+            doc.push_str(if who {
+                "(?:_(?P<who>[^_]+?))??"
+            } else {
+                "(?:_[^_]+?)??"
+            });
+        }
+        let middle = Layout {
+            client_name: 0,
+            client_id: 0,
+            ..self.clone()
+        };
+        Some(format!("^{}$", middle.join(doc, false)))
+    }
+
     /// The layout's variables in order, `doc` standing for the document name.
     fn join(&self, doc: String, named: bool) -> String {
         let g = |name: &str, re: &str| {

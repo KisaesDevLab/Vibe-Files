@@ -377,3 +377,117 @@ fn t_dir(root: &Path, name: &str) -> std::path::PathBuf {
     std::fs::create_dir_all(&d).unwrap();
     d
 }
+
+/// Owner 2026-11-10: UltraTax saves its PDFs straight into an Intake inbox (not the capture
+/// folder). The Document Names rows still decide where they go: a government-copy K-1 for client
+/// `2614_FOUR` (an ID with an underscore) lands in the Government Copy folder under its printed
+/// name, not in Catch-all. Synthetic names; the shape is the office's.
+#[test]
+fn ultratax_prints_dropped_in_an_inbox_follow_their_rows() {
+    let t = tempfile::tempdir().unwrap();
+    let root = t.path().join("cabinet");
+    vf_fs::cabinet::create(
+        &root,
+        &vf_fs::cabinet::CabinetFile {
+            cabinet_id: vf_core::new_id(),
+            firm_id: uuid::Uuid::new_v4().to_string(),
+            schema_version: vf_core::db::SCHEMA_VERSION,
+            layout_version: 1,
+            created: vf_core::now_rfc3339(),
+            name: None,
+        },
+    )
+    .unwrap();
+    let mut conn = vf_core::db::open(&t.path().join("c.db"), Storage::Local).unwrap();
+    vf_fs::doctypes::seed_if_missing(&root).unwrap();
+    vf_fs::doctypes::sync(&mut conn, &root, "dev", "seed").unwrap();
+    let csv = t.path().join("clients.csv");
+    std::fs::write(
+        &csv,
+        "ID,Name\n2614_FOUR,Four State Barns LLC\nANDE1042,Anderson Farms LLC\n",
+    )
+    .unwrap();
+    let map = filer_core::config::ColumnMap {
+        id: Some("ID".into()),
+        name: Some("Name".into()),
+        extras: vec![],
+    };
+    vf_fs::clients::import_csv(&root, &csv, &map, &Default::default()).unwrap();
+    vf_ingest::parsers::seed_if_missing(&root).unwrap();
+    vf_ingest::parsers::sync_filer_rules(&root).unwrap();
+
+    let master = vf_fs::clients::master_dir(&root);
+    let (rules, _, _) = filer_core::rules::load_or_seed(&master);
+    let compiled = filer_core::rules::CompiledRules::new(rules.active_rules()).unwrap();
+    let list = vf_fs::clients::load(&root).unwrap().list.unwrap();
+    // The ID is found through the client list whatever Setup's ID pattern says: the default,
+    // and the one the owner considered (2026-11-10).
+    let patterns = [
+        vf_ingest::pipeline::filer_id_pattern(&root),
+        "[A-Z0-9]{4,9}".to_string(),
+    ];
+    // Vibe Files reads names with Filer's UltraTax layout off; its profiles read UltraTax.
+    let off = filer_core::parse::UltraTaxLayout {
+        enabled: false,
+        ..Default::default()
+    };
+    // Read and filed as Intake does for a file found in an inbox.
+    let file = |re: &regex::Regex, name: &str| {
+        let p = filer_core::parse::read_name(
+            name,
+            Some(re),
+            &off,
+            2026,
+            |id| list.match_by_id(id).is_some(),
+            |_| false,
+        );
+        let client = list
+            .match_by_id(p.id.as_deref().unwrap_or(""))
+            .unwrap()
+            .clone();
+        let rule = compiled.first_match(&p.rest, p.ultratax.is_some());
+        let hit = filer_core::rules::evaluate_rule(rule, &p, &client, p.year);
+        let r = hit.outcome.unwrap();
+        (
+            rule.name.clone(),
+            format!(
+                "{}/{}",
+                r.dest_rel.to_string_lossy().replace('\\', "/"),
+                r.filename
+            ),
+        )
+    };
+    for (name, rule, dest) in [
+        (
+            "Four State Barns LLC_2025_1065_GovernmentCopyK1Package_Chet A Hammen_2614_FOUR.pdf",
+            "UltraTax CS · GovernmentCopyK1Package (inbox)",
+            "Income Tax/2025/Government Copy/Four State Barns LLC_2025_1065_GovernmentCopyK1Package_Chet A Hammen_2614_FOUR.pdf",
+        ),
+        (
+            "Anderson Farms LLC_2025_1120S_GovernmentCopyK1Package_Pat Partner_ANDE1042.pdf",
+            "UltraTax CS · GovernmentCopyK1Package (inbox)",
+            "Income Tax/2025/Government Copy/Anderson Farms LLC_2025_1120S_GovernmentCopyK1Package_Pat Partner_ANDE1042.pdf",
+        ),
+        (
+            "Four State Barns LLC_2025_1065_GovernmentCopyTaxReturn_2614_FOUR.pdf",
+            "UltraTax CS · GovernmentCopyTaxReturn (inbox)",
+            "Income Tax/2025/Government Copy/Four State Barns LLC_2025_1065_GovernmentCopyTaxReturn_2614_FOUR.pdf",
+        ),
+    ] {
+        for pat in &patterns {
+            let re = filer_core::parse::filename_regex(pat).unwrap();
+            assert_eq!(
+                file(&re, name),
+                (rule.to_string(), dest.to_string()),
+                "{name} with {pat}"
+            );
+        }
+    }
+    // An ordinary file keeps Filer's own rules.
+    assert!(
+        !compiled
+            .first_match("2025 Tax Return signed", false)
+            .id
+            .starts_with(vf_ingest::parsers::MANAGED_PREFIX)
+    );
+}
