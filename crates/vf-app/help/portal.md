@@ -13,7 +13,7 @@ Vibe Files talks to the portal only when it is set up, and only at the address y
 In **Admin › Portal** (admin password needed):
 
 1. **Portal address**: the address clients use.
-2. **Portal key**: the key made on the appliance with `sudo vibe portal key create "Office"`. It is shown once; paste it whole (it starts with `vpk_`).
+2. **Portal key**: a key made on the portal's staff page (`https://<portal address>/staff`, **Settings › Portal keys › Make a key**) or on the appliance with `sudo vibe portal key create "Office"`. It is shown once; paste it whole (it starts with `vpk_`).
 3. **Fetch client uploads every**: how often Vibe Files collects what clients sent (5 minutes unless you change it; 0 means only when you press **Fetch uploads now**).
 4. Press **Test**, then **Save**.
 
@@ -53,4 +53,8 @@ What clients upload is collected into the **`_Portal inbox`** folder of the cabi
 
 ## In the audit trail
 
-Vibe Files records each portal action it takes: settings changes (never the key), sharing and unsharing, updates, removals, invitations, access changes, approvals and denials, and each file received. The portal keeps its own complete history, including every time a client opened or downloaded a file.
+Vibe Files records each portal action it takes: settings changes (never the key), sharing and unsharing, updates, removals, invitations, access changes, approvals and denials, and each file received. The portal keeps its own complete history, including every time a client opened or downloaded a file: see **History** on the portal's staff page.
+
+## The portal's staff page
+
+Staff can also work at `https://<portal address>/staff`, signing in with their email, password and an authenticator app code: from home or a PC without Vibe Files. There they can invite and turn off people, approve access requests, hide or remove shared files, download what clients sent (it still arrives in `_Portal inbox`), and change the firm's name, logo and upload limits, the portal keys and the staff accounts. Sharing new documents is done only from Vibe Files.
