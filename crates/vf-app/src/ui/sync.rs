@@ -742,7 +742,7 @@ pub fn show(ui: &mut egui::Ui, t: &mut SyncTab, env: &mut Env, v: View<'_>) {
         if let Some(svc) = crate::cloudmode::cabinet_provider(env.root) {
             ui.label(
                 RichText::new(format!(
-                    "This cabinet is in {svc}. B2 sync reads every file to send it, so the PC that                      runs sync downloads the whole cabinet from {svc}. Use one or the other."
+                    "This cabinet is in {svc}. B2 sync reads every file to send it, so the PC that runs sync downloads the whole cabinet from {svc}. Use one or the other."
                 ))
                 .color(theme::error()),
             );

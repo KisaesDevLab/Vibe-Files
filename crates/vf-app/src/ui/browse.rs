@@ -93,6 +93,8 @@ struct MoveAsk {
 struct Listing {
     dirs: DiskDirs,
     new_files: Vec<vf_fs::sweep::Unknown>,
+    /// Online-only files (PA-39) in the folders shown, not listed until they are on this PC.
+    online_waiting: usize,
     /// The client folder shown, and its documents whose files are gone (deleted or moved in
     /// Explorer).
     missing: Option<(String, Vec<String>)>,
@@ -231,6 +233,8 @@ pub struct Browse {
     /// Files the last listing found in client folders and not in the catalog: added on the
     /// next frame (PA-23).
     new_files: Vec<vf_fs::sweep::Unknown>,
+    /// Online-only files (PA-39) in the open client folders, not listed until on this PC.
+    online_waiting: usize,
     /// A client folder to re-read: a document's file is gone from it (seen twice).
     missing_in: Option<String>,
     /// Files seen missing once, and when: a file gone for a moment (a program saving it by
@@ -414,6 +418,7 @@ impl Browse {
             portal: Default::default(),
             disk_dirs: Default::default(),
             new_files: vec![],
+            online_waiting: 0,
             missing_in: None,
             missing_seen: None,
             missing_job: None,
@@ -697,7 +702,8 @@ impl Browse {
                     (rel.clone(), dirs)
                 })
                 .collect();
-            let new_files = vf_fs::sweep::find_new(&root, &shown, &known, &hashes);
+            let (new_files, online_waiting) =
+                vf_fs::sweep::find_new_counted(&root, &shown, &known, &hashes);
             let missing = shown.first().and_then(|(folder, _)| {
                 let gone = vf_fs::sweep::missing_files(&root, folder, &known_paths);
                 (!gone.is_empty()).then(|| (folder.clone(), gone))
@@ -705,6 +711,7 @@ impl Browse {
             Listing {
                 dirs,
                 new_files,
+                online_waiting,
                 missing,
             }
         };
@@ -744,6 +751,7 @@ impl Browse {
         self.disk_dirs = got.dirs.into_iter().collect();
         self.disk_listed = Some(std::time::Instant::now());
         self.new_files = got.new_files;
+        self.online_waiting = got.online_waiting;
         // Gone on two listings at least 25 s apart (the next one comes 30 s later): re-read.
         match (got.missing, self.missing_seen.take()) {
             (Some((folder, gone)), Some((f0, g0, at)))
@@ -2792,6 +2800,14 @@ fn grid(ui: &mut egui::Ui, b: &mut Browse, conn: &Connection) {
     }
     if dismiss {
         b.notice = None;
+    }
+    if b.online_waiting > 0 {
+        ui.label(widgets::caption(format!(
+            "{} file{} in this client's folder {} online only and not listed yet: added outside Vibe Files on another PC. They show once they are on this PC (open the folder in Explorer, or choose Always keep on this device).",
+            b.online_waiting,
+            if b.online_waiting == 1 { "" } else { "s" },
+            if b.online_waiting == 1 { "is" } else { "are" },
+        )));
     }
     ui.horizontal_wrapped(|ui| {
         if ui.add(widgets::primary_button("+ New client")).clicked() {

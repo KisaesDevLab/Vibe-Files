@@ -99,6 +99,8 @@ pub fn is_cloud(root: &Path) -> bool {
 
 /// Conflicted copies found by [`check_conflicts`], waiting to be shown.
 static CONFLICTS: Mutex<Option<Vec<String>>> = Mutex::new(None);
+/// The cloud cabinet opened has no main PC yet (shown once, after any conflicted copies).
+static NO_MAIN: Mutex<bool> = Mutex::new(false);
 
 /// On opening a cloud cabinet: looks for conflicted copies of Vibe Files' own files (two PCs
 /// changed one between syncs) on a thread; [`take_conflicts`] hands them over.
@@ -115,6 +117,9 @@ pub fn check_conflicts(ctx: &egui::Context, root: &Path) {
                 .map(|d| d.name)
                 .collect();
             let found = vf_fs::cloud::conflicted_copies(&root, &names);
+            if let Ok(mut g) = NO_MAIN.lock() {
+                *g = crate::server::main_server(&root).is_none();
+            }
             if let Ok(mut g) = CONFLICTS.lock() {
                 *g = Some(found);
             }
@@ -123,11 +128,20 @@ pub fn check_conflicts(ctx: &egui::Context, root: &Path) {
         .ok();
 }
 
-/// What [`check_conflicts`] found, once: a notice for Browse when there is any.
+/// What [`check_conflicts`] found, once: a notice for Browse when there is any; or, when the
+/// cabinet has no main PC yet, the reminder to choose one.
 pub fn take_conflicts() -> Option<String> {
-    let found = CONFLICTS.lock().ok()?.take()?;
+    let found = CONFLICTS
+        .lock()
+        .ok()
+        .and_then(|mut g| g.take())
+        .unwrap_or_default();
     if found.is_empty() {
-        return None;
+        let mut no_main = NO_MAIN.lock().ok()?;
+        return std::mem::take(&mut *no_main).then(|| {
+            "No PC runs text recognition and B2 sync for this cloud cabinet yet: choose one in Admin › Devices."
+                .to_string()
+        });
     }
     let shown: Vec<&str> = found.iter().take(5).map(String::as_str).collect();
     Some(format!(
@@ -160,10 +174,27 @@ pub fn move_data(old: &Path, personal: &Path) -> PathBuf {
     let moved = (|| -> Result<bool> {
         std::fs::create_dir_all(personal)?;
         let mut any = false;
-        let cfg = personal.join("config.toml");
-        if !cfg.exists() && old.join("config.toml").is_file() {
-            std::fs::copy(old.join("config.toml"), &cfg)?;
-            any = true;
+        // Settings, the remembered sync key (this login's, DPAPI), and the like: every file
+        // but the catalog (copied whole below) and this folder's own locks and notes.
+        let skip = |n: &str| {
+            let n = n.to_lowercase();
+            n.starts_with(&cat.to_lowercase())
+                || n.starts_with("in-use.")
+                || n == "owner.txt"
+                || n == "moved.txt"
+        };
+        for e in std::fs::read_dir(old)?.flatten() {
+            let name = e.file_name().to_string_lossy().to_string();
+            let to = personal.join(&name);
+            if e.file_type().is_ok_and(|t| t.is_file()) && !skip(&name) && !to.exists() {
+                std::fs::copy(e.path(), &to)?;
+                any = true;
+            }
+        }
+        // Cover sheets made here (the folder Browse prints from).
+        let sheets = old.join("sheets");
+        if sheets.is_dir() && !personal.join("sheets").exists() {
+            copy_dir(&sheets, &personal.join("sheets"))?;
         }
         let to = personal.join(cat);
         if !to.exists() && old.join(cat).is_file() {
@@ -206,6 +237,20 @@ pub fn move_data(old: &Path, personal: &Path) -> PathBuf {
             old.to_path_buf()
         }
     }
+}
+
+/// Copies the folder `from` (files and folders) to `to`.
+fn copy_dir(from: &Path, to: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(to)?;
+    for e in std::fs::read_dir(from)?.flatten() {
+        let dest = to.join(e.file_name());
+        if e.file_type()?.is_dir() {
+            copy_dir(&e.path(), &dest)?;
+        } else {
+            std::fs::copy(e.path(), &dest)?;
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -308,6 +353,10 @@ mod tests {
             .join("data");
         std::fs::create_dir_all(&old).unwrap();
         std::fs::write(old.join("config.toml"), "device_id = \"dev-1\"\n").unwrap();
+        std::fs::write(old.join("sync-key-cab1.dpapi"), "wrapped key").unwrap();
+        std::fs::write(old.join("in-use.txt"), "PC1").unwrap();
+        std::fs::create_dir_all(old.join("sheets")).unwrap();
+        std::fs::write(old.join("sheets").join("cover.pdf"), "sheet").unwrap();
         let c = vf_core::db::open(
             &old.join(crate::shared::CATALOG_FILE),
             vf_core::db::Storage::Local,
@@ -333,6 +382,9 @@ mod tests {
             .unwrap();
         assert_eq!(v, "kept");
         assert!(old.join("MOVED.txt").is_file());
+        assert!(personal.join("sync-key-cab1.dpapi").is_file());
+        assert!(personal.join("sheets").join("cover.pdf").is_file());
+        assert!(!personal.join("in-use.txt").exists());
         // Again: nothing is copied over what is there now.
         std::fs::write(old.join("config.toml"), "device_id = \"other\"\n").unwrap();
         assert_eq!(move_data(&old, &personal), personal);

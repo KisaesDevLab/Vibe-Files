@@ -784,8 +784,33 @@ pub fn find_new(
     known: &std::collections::HashSet<String>,
     known_hashes: &std::collections::HashSet<String>,
 ) -> Vec<Unknown> {
+    find_new_counted(root, clients, known, known_hashes).0
+}
+
+/// The fingerprint another PC noted for the online-only file at `rel` (cabinet-relative), when
+/// the file is no newer than the note (PA-39; the rule `rebuild` uses). Nothing is read.
+fn noted_hash(ix: &crate::docmeta::Index, root: &Path, rel: &str) -> Option<String> {
+    let m = ix.latest_at(rel)?;
+    let ts = time::OffsetDateTime::parse(&m.ts, &time::format_description::well_known::Rfc3339)
+        .ok()?
+        .unix_timestamp();
+    let (_, mt, _) = crate::cloud::stat(&root.join(rel))?;
+    (mt <= ts + 120).then(|| m.hash.clone())
+}
+
+/// [`find_new`], and how many online-only files (PA-39) wait to be on this PC: neither read nor
+/// noted by the PC that filed them. One another PC noted is found with that note's fingerprint.
+pub fn find_new_counted(
+    root: &Path,
+    clients: &[(String, String)],
+    known: &std::collections::HashSet<String>,
+    known_hashes: &std::collections::HashSet<String>,
+) -> (Vec<Unknown>, usize) {
     let mut out = Vec::new();
+    let mut waiting = 0;
     for (folder, client_id) in clients {
+        // This folder's notes, read once if an online-only file needs them.
+        let mut notes: Option<crate::docmeta::Index> = None;
         let mut paths = Vec::new();
         if rebuild::files_under(&root.join(folder), &mut paths).is_err() {
             continue;
@@ -806,8 +831,22 @@ pub fn find_new(
             if known.contains(&rel.to_lowercase()) {
                 continue;
             }
-            // Online only (PA-39): reading it would download it; looked at once it is here.
+            // Online only (PA-39): reading it would download it. Another PC's note gives its
+            // fingerprint; else it waits until it is here.
             if crate::cloud::leave(&p) {
+                let ix = notes.get_or_insert_with(|| {
+                    crate::docmeta::Index::load(root, std::slice::from_ref(folder))
+                });
+                match noted_hash(ix, root, &rel) {
+                    Some(h) if known_hashes.contains(&h) => {}
+                    Some(hash) => out.push(Unknown {
+                        rel_path: rel,
+                        client_id: Some(client_id.clone()),
+                        hash,
+                        size: crate::cloud::stat(&p).map_or(0, |s| s.0),
+                    }),
+                    None => waiting += 1,
+                }
                 continue;
             }
             // A file still being copied in cannot be opened for reading: next time.
@@ -824,7 +863,7 @@ pub fn find_new(
             });
         }
     }
-    out
+    (out, waiting)
 }
 
 /// Adds what [`find_new`] found, after checking again against the catalog now (Intake may have
@@ -854,7 +893,7 @@ pub fn adopt_new(
                 || st
                     .exists((&u.rel_path, &u.hash))
                     .map_err(|e| e.to_string())?
-                || sha256_file(&root.join(&u.rel_path)).ok().as_ref() != Some(&u.hash)
+                || !same_content(root, &u.rel_path, &u.hash)
             {
                 continue;
             }
@@ -863,6 +902,18 @@ pub fn adopt_new(
     }
     adopt_unknown(conn, root, device_id, &go)?;
     Ok(go.into_iter().map(|u| u.rel_path).collect())
+}
+
+/// Whether the file at `rel` still has content `hash`: read, or for an online-only file
+/// (PA-39), still noted so by the PC that filed it.
+fn same_content(root: &Path, rel: &str, hash: &str) -> bool {
+    let p = root.join(rel);
+    if crate::cloud::leave(&p) {
+        let folder = rel.split('/').next().unwrap_or_default().to_string();
+        let ix = crate::docmeta::Index::load(root, &[folder]);
+        return noted_hash(&ix, root, rel).as_deref() == Some(hash);
+    }
+    sha256_file(&p).ok().as_deref() == Some(hash)
 }
 
 /// Moves unknown files into Filer's `inbox`, to be filed by Intake like any new file.
@@ -1082,11 +1133,42 @@ mod tests {
             .query_row("SELECT id FROM client", [], |r| r.get(0))
             .unwrap();
         let none = std::collections::HashSet::new();
-        assert!(
-            find_new(&root, &[(client.into(), client_id)], &none, &none)
-                .iter()
-                .all(|u| !u.rel_path.ends_with("new.pdf") && !u.rel_path.ends_with("w2.pdf"))
-        );
+        let known: std::collections::HashSet<String> = {
+            let mut st = conn
+                .prepare("SELECT lower(rel_path) FROM document WHERE deleted_at IS NULL")
+                .unwrap();
+            st.query_map([], |r| r.get(0))
+                .unwrap()
+                .map(Result::unwrap)
+                .collect()
+        };
+        let clients = [(client.to_string(), client_id)];
+        let (found, waiting) = find_new_counted(&root, &clients, &known, &none);
+        assert!(found.is_empty());
+        assert_eq!(waiting, 1, "new.pdf: not noted, not read");
+        // Another PC that filed it noted its fingerprint: found with it, added without reading.
+        let noted = "ab".repeat(32);
+        let line = serde_json::json!({
+            "v": 1, "ts": vf_core::now_rfc3339(), "device": "pc-a", "hash": noted,
+            "path": "Financials/new.pdf", "doc_type": null, "doc_type_name": null,
+            "tax_year": 2025, "status": "received", "source": null, "tags": []
+        });
+        std::fs::create_dir_all(root.join(client).join("_Vibe")).unwrap();
+        std::fs::write(
+            root.join(client).join("_Vibe/docmeta.jsonl"),
+            format!(
+                "{line}
+"
+            ),
+        )
+        .unwrap();
+        let (found, waiting) = find_new_counted(&root, &clients, &known, &none);
+        assert_eq!(waiting, 0);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].hash, noted);
+        let mut conn = conn;
+        assert_eq!(adopt_new(&mut conn, &root, "dev", &found).unwrap().len(), 1);
+        assert!(crate::cloud::is_online_only(&fin.join("new.pdf")));
     }
 
     /// A file copied into a client folder through Explorer is found and added (PA-23); working

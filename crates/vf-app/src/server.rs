@@ -339,9 +339,15 @@ pub fn set_main(root: &Path) -> Result<()> {
 /// Whether text recognition and B2 sync run here: always on a single PC; in server mode only on
 /// the main server (the first server to ask becomes it).
 pub fn runs_here(root: &Path) -> bool {
-    // A cloud cabinet (PA-39) has one main PC as several servers have one main server.
-    if !server_mode() && !crate::cloudmode::is_cloud(root) {
+    // A cloud cabinet (PA-39) has one main PC as several servers have one main server; an admin
+    // chooses it (Admin › Devices): a file made "only if it is not there" is not exclusive in a
+    // folder synced seconds or minutes later, so two PCs could both take the role.
+    let cloud = !server_mode() && crate::cloudmode::is_cloud(root);
+    if !server_mode() && !cloud {
         return true;
+    }
+    if cloud {
+        return main_server(root).is_some_and(|m| m.computer.eq_ignore_ascii_case(&computer()));
     }
     match main_server(root) {
         Some(m) => m.computer.eq_ignore_ascii_case(&computer()),
@@ -478,7 +484,13 @@ impl Watch {
                         ),
                     }
                 }
-                if let Err(e) = publish_seed(&catalog, &root, &writer) {
+                // A cloud cabinet (PA-39): only the main PC leaves the copy, so two PCs never
+                // send one at once (the second would be a conflicted copy of a large file).
+                let leaves = !crate::cloudmode::is_cloud(&root) || runs_here(&root);
+                if let Err(e) = leaves
+                    .then(|| publish_seed(&catalog, &root, &writer))
+                    .transpose()
+                {
                     tracing::warn!(
                         kind = crate::logging::kind(&e.to_string()),
                         "catalog copy for other servers not left"

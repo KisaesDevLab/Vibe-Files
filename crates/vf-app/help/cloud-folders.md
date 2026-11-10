@@ -19,7 +19,7 @@ The catalog is a database that a sync service would damage while it is open, so 
 
 - Each PC keeps its catalog in `ProgramData\Vibe Files\catalogs`. The first PC indexes the cabinet and leaves a copy in the cabinet's `_Vibe\catalog-seed` folder (refreshed weekly); the others start from that copy, with every document's details and recognized text, so they read nothing again.
 - Each PC notes its changes in its own log in `_Vibe\changes`; the others read them when a client is opened and every 15 minutes.
-- Text recognition and B2 sync run on one main PC: **Admin** › **Devices** shows which, and **Run them on this PC** moves them.
+- Text recognition and B2 sync run on one main PC, chosen in **Admin** › **Devices** with **Run them on this PC**. In a cloud cabinet no PC takes this on by itself (two could, before the folder synced), so Browse reminds you until one is chosen. Only the main PC leaves the catalog copy.
 - A data folder found inside OneDrive or Dropbox (Vibe Files unzipped on a Desktop that OneDrive syncs, for example) is moved to `%LOCALAPPDATA%\Vibe Files\data` with its catalog and settings, and a `MOVED.txt` note is left behind.
 
 ## The setting
@@ -31,6 +31,13 @@ The catalog is a database that a sync service would damage while it is open, so 
 - **Always off**: every file is read as on an ordinary disk, so each online-only file is downloaded.
 
 A change takes effect when Vibe Files next starts on that computer. Remote Desktop and Citrix servers keep their own **Server mode** setting; a cabinet on a file share is not a cloud folder.
+
+## Not done (yet)
+
+- **Search text of new scans on other PCs.** Text recognition runs on the main PC and writes the text into the PDF. Another PC finds that text once the file is on it; while it is online only there, the scan is found by its name and details, not its words. Text known when the PC started from the catalog copy is searchable at once.
+- **Thumbnails** are made by each PC from the file itself, so online-only files have none.
+- **Keeping a client on this PC** is done in Explorer (above), not in Vibe Files.
+- **The audit trail and each client's `docmeta.jsonl`** are still one shared file each, so two PCs writing to the same one between syncs leave a conflicted copy (below).
 
 ## Things to know
 

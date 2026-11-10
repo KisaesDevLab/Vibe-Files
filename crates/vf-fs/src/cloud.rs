@@ -53,6 +53,27 @@ pub fn attributes(p: &Path) -> Option<u32> {
     (a != INVALID_FILE_ATTRIBUTES).then_some(a)
 }
 
+/// A file's size, last-modified time (seconds since 1970) and attributes, read by path with
+/// `GetFileAttributesExW`: from the folder's own records, without opening the file, so an
+/// online-only file is never downloaded for it (opening a handle may, with some services).
+pub fn stat(p: &Path) -> Option<(u64, i64, u32)> {
+    use windows::Win32::Storage::FileSystem::{
+        GetFileAttributesExW, GetFileExInfoStandard, WIN32_FILE_ATTRIBUTE_DATA,
+    };
+    use windows::core::HSTRING;
+    let wide = HSTRING::from(p.as_os_str());
+    let mut d = WIN32_FILE_ATTRIBUTE_DATA::default();
+    // SAFETY: a valid, NUL-terminated wide string and a buffer of the documented type for the
+    // call's duration.
+    unsafe { GetFileAttributesExW(&wide, GetFileExInfoStandard, (&raw mut d).cast()) }.ok()?;
+    let size = (u64::from(d.nFileSizeHigh) << 32) | u64::from(d.nFileSizeLow);
+    let ft = (u64::from(d.ftLastWriteTime.dwHighDateTime) << 32)
+        | u64::from(d.ftLastWriteTime.dwLowDateTime);
+    // 100 ns ticks since 1601 to seconds since 1970, as the standard library counts them.
+    let secs = (ft as i64 - 116_444_736_000_000_000).div_euclid(10_000_000);
+    Some((size, secs, d.dwFileAttributes))
+}
+
 /// Whether `p`'s contents are only in the cloud: reading it would download it.
 pub fn is_online_only(p: &Path) -> bool {
     attributes(p).is_some_and(online_only_attrs)
@@ -264,6 +285,18 @@ mod tests {
         assert!(attributes(&t.path().join("missing.pdf")).is_none());
         // The temp folder is not inside OneDrive or Dropbox on a build PC.
         assert_eq!(provider(t.path()), None);
+        // The same size and time as the standard library reads, without opening the file.
+        let m = std::fs::metadata(&f).unwrap();
+        let secs = m
+            .modified()
+            .unwrap()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let (size, t2, attrs) = stat(&f).unwrap();
+        assert_eq!((size, t2), (m.len(), secs));
+        assert!(!online_only_attrs(attrs));
+        assert!(stat(&t.path().join("missing.pdf")).is_none());
     }
 
     #[test]

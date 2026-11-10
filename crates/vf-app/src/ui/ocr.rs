@@ -58,7 +58,13 @@ impl OcrState {
             s.elsewhere = Some(
                 crate::server::main_server(&opened.root)
                     .map(|m| m.computer)
-                    .unwrap_or_else(|| "another server".into()),
+                    .unwrap_or_else(|| {
+                        if crate::cloudmode::is_cloud(&opened.root) {
+                            "the main PC, once one is chosen in Admin › Devices".into()
+                        } else {
+                            "another server".into()
+                        }
+                    }),
             );
         }
         let ctx = ctx.clone();

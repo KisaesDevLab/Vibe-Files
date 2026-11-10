@@ -52,8 +52,9 @@ pub static PROGRESS: Progress = Progress {
     read: std::sync::atomic::AtomicUsize::new(0),
 };
 
-/// An online-only file new to the catalog (PA-39): path, client, size and time.
-type Waiting = (PathBuf, Option<String>, Option<(u64, i64)>);
+/// An online-only file left unread (PA-39): path, client, size and time, and the catalog's
+/// fingerprint when it knows the path.
+type Waiting = (PathBuf, Option<String>, Option<(u64, i64)>, Option<String>);
 
 /// One file read: its place in the list, and its SHA-256 and size (`None`: unreadable).
 type Read = (usize, Option<(String, u64)>);
@@ -273,15 +274,9 @@ struct Found {
 }
 
 /// A file's size and last-modified time (seconds since 1970).
+/// Read without opening the file (PA-39: an online-only file is not downloaded for it).
 pub(crate) fn stat(p: &Path) -> Option<(u64, i64)> {
-    let m = std::fs::metadata(p).ok()?;
-    let t = m
-        .modified()
-        .ok()?
-        .duration_since(std::time::UNIX_EPOCH)
-        .ok()?
-        .as_secs() as i64;
-    Some((m.len(), t))
+    crate::cloud::stat(p).map(|(size, t, _)| (size, t))
 }
 
 /// path → (hash, size, file_mtime) of the catalog's live documents.
@@ -866,12 +861,8 @@ fn rebuild_scoped(
     for (((p, client_id), st), same) in todo.into_iter().zip(stats).zip(reuse) {
         if same.as_deref() == Some("") {
             let r = rel(root, &p);
-            if known.contains_key(&r) {
-                rep.online_only_kept += 1;
-                unread_files.insert(r);
-            } else {
-                waiting.push((p, client_id, st));
-            }
+            let had = known.get(&r).map(|k| k.0.clone());
+            waiting.push((p, client_id, st, had));
             continue;
         }
         let got = match same {
@@ -931,11 +922,11 @@ fn rebuild_scoped(
         .collect();
     let meta = crate::docmeta::Index::load(root, &folder_rels);
     rep.docmeta_bad_lines = meta.bad_lines;
-    // Online-only files new to this catalog (PA-39): another PC that filed or changed one noted
-    // its fingerprint in the folder's docmeta.jsonl. Trusted when the file is no newer than that
-    // note (two minutes' allowance for the note being written just after the file); a file
-    // changed since, or never noted, waits until it is on this PC.
-    for (p, client_id, st) in waiting {
+    // Online-only files left unread (PA-39): another PC that filed or changed one noted its
+    // fingerprint in the folder's docmeta.jsonl. Trusted when the file is no newer than that
+    // note (two minutes' allowance for the note being written just after the file). A known
+    // file with no such newer note keeps its row; a new one waits until it is on this PC.
+    for (p, client_id, st, had) in waiting {
         let r = rel(root, &p);
         let noted = meta.latest_at(&r).filter(|m| {
             let ts =
@@ -943,6 +934,8 @@ fn rebuild_scoped(
                     .map(|t| t.unix_timestamp());
             matches!((ts, st), (Ok(ts), Some((_, mt))) if mt <= ts + 120)
         });
+        // A note of the content the catalog already has: nothing new to learn.
+        let noted = noted.filter(|m| had.as_deref() != Some(m.hash.as_str()));
         match (noted, st) {
             (Some(m), Some((size, mt))) => {
                 rep.online_only_noted += 1;
@@ -953,6 +946,10 @@ fn rebuild_scoped(
                     size,
                     mtime: Some(mt),
                 });
+            }
+            _ if had.is_some() => {
+                rep.online_only_kept += 1;
+                unread_files.insert(r);
             }
             _ => {
                 rep.online_only_waiting += 1;
@@ -1618,6 +1615,25 @@ mod tests {
         // Known, changed elsewhere, online only here.
         put(&smith.join("Income Tax/2025/w2.pdf"), "w2 2025, corrected");
         crate::cloud::mark_online_only(&smith.join("Income Tax/2025/w2.pdf"));
+        // Known, changed by another PC that noted its new content (a text layer written there).
+        put(
+            &smith.join("Income Tax/2024/w2.pdf"),
+            "w2 2024 with its text layer",
+        );
+        crate::cloud::mark_online_only(&smith.join("Income Tax/2024/w2.pdf"));
+        let layered = "ef".repeat(32);
+        let note = serde_json::json!({
+            "v": 1, "ts": vf_core::now_rfc3339(), "device": "pc-a", "hash": layered,
+            "path": "Income Tax/2024/w2.pdf", "doc_type": null, "doc_type_name": null,
+            "tax_year": 2024, "status": "received", "source": null, "tags": []
+        });
+        put(
+            &smith.join("_Vibe/docmeta.jsonl"),
+            &format!(
+                "{note}
+"
+            ),
+        );
         // New and never noted.
         put(&acme.join("Payroll/2025/941 Q2.pdf"), "941 q2");
         crate::cloud::mark_online_only(&acme.join("Payroll/2025/941 Q2.pdf"));
@@ -1657,16 +1673,17 @@ mod tests {
 
         let rep = rebuild(&mut conn, &c.root, "dev").unwrap();
         assert_eq!(rep.docs_tombstoned, 0, "{rep}");
-        assert_eq!(rep.docs_changed, 0, "{rep}");
+        assert_eq!(rep.docs_changed, 1, "{rep}");
         assert_eq!(
             (
                 rep.online_only_kept,
                 rep.online_only_noted,
                 rep.online_only_waiting
             ),
-            (1, 1, 2),
+            (1, 2, 2),
             "{rep}"
         );
+        assert_eq!(hash_of(&conn, "%2024/w2.pdf").unwrap(), layered);
         assert_eq!(hash_of(&conn, "%2025/w2.pdf").unwrap(), before);
         assert_eq!(hash_of(&conn, "%941 Q3.pdf").unwrap(), noted);
         assert_eq!(hash_of(&conn, "%941 Q2.pdf"), None);
@@ -1674,7 +1691,8 @@ mod tests {
         let versions: i64 = conn
             .query_row("SELECT count(*) FROM version", [], |r| r.get(0))
             .unwrap_or(0);
-        assert_eq!(versions, 0);
+        // Only the 2024 change (taken from its note) keeps the earlier content as a version.
+        assert_eq!(versions, 1);
         // Once on this PC (no longer online only) the files are read as usual.
         for f in ["Payroll/2025/941 Q2.pdf", "Payroll/2025/941 Q4.pdf"] {
             crate::cloud::mark_local(&acme.join(f));

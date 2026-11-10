@@ -72,6 +72,7 @@ fn servers_section(ui: &mut egui::Ui, p: &mut DevicesPage, env: &mut Env) {
                 m.computer,
                 widgets::local_time(&m.since)
             ),
+            None if cloud && !crate::server::server_mode() => "No PC runs text recognition and B2 sync yet: press Run them on this PC on the one that should.".into(),
             None => format!("No {machine} runs text recognition and B2 sync yet; the first to start Vibe Files takes it on."),
         });
         let is_here = main
@@ -122,7 +123,8 @@ fn cloud_section(ui: &mut egui::Ui, p: &mut DevicesPage, env: &mut Env) {
         Some(s) => format!(
             "Now on: the cabinet is in {s}. Files that are online only are not read in the background (indexing, text recognition, thumbnails, the weekly check) until they are on this PC; opening one downloads it. Each PC keeps its own catalog outside the cloud folder. A change takes effect when Vibe Files next starts."
         ),
-        None => "Now off for this cabinet. A change takes effect when Vibe Files next starts.".into(),
+        None if crate::cloudmode::setting() == Setting::Off => "Now off: every file is read, online only or not (each is downloaded). A change takes effect when Vibe Files next starts.".into(),
+        None => "The cabinet is not in a OneDrive or Dropbox folder. A file that is online only anyway is still left until it is on this PC. A change takes effect when Vibe Files next starts.".into(),
     }));
     if crate::server::server_mode() && found.is_some() {
         ui.label(
