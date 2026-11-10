@@ -527,8 +527,8 @@ impl Portal {
             .auth(self.bulk.post(&self.url("/files")))
             .query("clientId", client_id)
             .query("vfDocumentId", doc_id)
-            .query("name", name)
             .query("sha256", &sha)
+            .header(NAME_HEADER, &header_text(name))
             .header("Content-Type", "application/octet-stream");
         if let Some(y) = &year {
             r = r.query("taxYear", y);
@@ -585,7 +585,7 @@ impl Portal {
                     .put(&self.url(&format!("/files/{file_id}/content"))),
             )
             .query("sha256", &sha)
-            .query("name", name)
+            .header(NAME_HEADER, &header_text(name))
             .header("Content-Type", "application/octet-stream")
             .send(f);
         Self::read::<serde_json::Value>(res).map(|_| ())
@@ -730,6 +730,24 @@ impl Portal {
 }
 
 /// sha256 of a file, hex.
+/// The portal reads a file's name from this header, not from the URL, so the name of a shared
+/// file stays out of the web server's access log (Vibe-Portal P47).
+const NAME_HEADER: &str = "X-Vibe-Name";
+
+/// Percent-encodes text for a header, as JavaScript's `encodeURIComponent` would read it back:
+/// every byte except ASCII letters, digits and `-_.~` becomes `%XX`.
+fn header_text(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for b in text.bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
 pub fn file_sha256(path: &Path) -> Result<String> {
     let mut f = std::fs::File::open(path).map_err(|e| PortalError::Local(e.to_string()))?;
     let mut h = Sha256::new();
@@ -749,6 +767,12 @@ pub fn file_sha256(path: &Path) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn names_are_percent_encoded_for_their_header() {
+        assert_eq!(header_text("Return 2025.pdf"), "Return%202025.pdf");
+        assert_eq!(header_text("Révisé\r\n.pdf"), "R%C3%A9vis%C3%A9%0D%0A.pdf");
+    }
 
     #[test]
     fn header_values_are_made_safe() {
