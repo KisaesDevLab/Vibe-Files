@@ -18,6 +18,7 @@ use vf_sync::restore::{Conflict, Keep};
 
 use crate::config::SyncConfig;
 use crate::ui::browse::Env;
+use crate::ui::widgets::UiExt as _;
 use crate::ui::{theme, widgets};
 
 /// Documents downloaded and checked by Verify now.
@@ -1177,7 +1178,7 @@ fn unlocked(ui: &mut egui::Ui, t: &mut SyncTab, env: &mut Env, v: &View<'_>) {
                 .map(|(_, n)| n.as_str())
                 .unwrap_or("?");
             ui.label(widgets::caption(format!("showing {name}")));
-            if ui.small_button("Show all").clicked() {
+            if ui.small_btn("Show all").clicked() {
                 t.filter_client = None;
             }
         }

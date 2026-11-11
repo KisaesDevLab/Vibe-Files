@@ -1002,7 +1002,7 @@ impl PeopleWindow {
                                     ("Turn on", true)
                                 };
                                 if ui
-                                    .add_enabled(!busy, egui::Button::new(text).small())
+                                    .add_enabled(!busy, egui::Button::new(text).small().min_size(crate::ui::widgets::MIN_TARGET))
                                     .clicked()
                                 {
                                     act = Some((x.identity_id.clone(), to));
@@ -1019,7 +1019,7 @@ impl PeopleWindow {
                                     format!("invited, until {}", widgets::local_time(&i.expires_at))
                                 }));
                                 if ui
-                                    .add_enabled(!busy, egui::Button::new("Resend").small())
+                                    .add_enabled(!busy, egui::Button::new("Resend").small().min_size(crate::ui::widgets::MIN_TARGET))
                                     .clicked()
                                 {
                                     resend = Some((
@@ -1030,7 +1030,7 @@ impl PeopleWindow {
                                     ));
                                 }
                                 if ui
-                                    .add_enabled(!busy, egui::Button::new("Withdraw").small())
+                                    .add_enabled(!busy, egui::Button::new("Withdraw").small().min_size(crate::ui::widgets::MIN_TARGET))
                                     .clicked()
                                 {
                                     withdraw = Some(i.invitation_id.clone());
@@ -1098,7 +1098,7 @@ impl PeopleWindow {
                                         if p.sees(&self.client.id) {
                                             ui.label(widgets::caption("already has access"));
                                         } else if ui
-                                            .add_enabled(!busy, egui::Button::new("Invite").small())
+                                            .add_enabled(!busy, egui::Button::new("Invite").small().min_size(crate::ui::widgets::MIN_TARGET))
                                             .on_hover_text(
                                                 "Fill in the invitation below with their details",
                                             )

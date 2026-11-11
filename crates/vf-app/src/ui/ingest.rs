@@ -14,6 +14,7 @@ use vf_ingest::worker::{self, Event, Worker};
 use crate::config::Ingest;
 use crate::ui::cover_sheet::{self, CoverSheetDialog};
 use crate::ui::theme;
+use crate::ui::widgets::UiExt as _;
 use crate::ui::widgets::{self, DialogOutcome};
 
 /// How often the worker's folders and Filer's inbox are looked up again.
@@ -459,7 +460,8 @@ impl IngestState {
             self.list_devices(ui.ctx());
         }
         let mut scan_now = false;
-        ui.horizontal(|ui| {
+        // Wrapped: the no-scanner explanation is long (it ran off the window, UI review).
+        ui.horizontal_wrapped(|ui| {
             ui.label(RichText::new("Scanner").strong());
             // The list and notes only: Scanner details' lines are not copied every frame.
             let Some(found) = self.devices.as_ref().map(|d| Devices {
@@ -476,7 +478,7 @@ impl IngestState {
                 ui.label(widgets::caption(
                     "No scanner found (a TWAIN driver such as PaperStream IP, Windows › Settings › Printers & scanners, or in a Remote Desktop session the remote-scanning utility connected for this session). Scans saved into the Scans folder are still processed. Scanner details below shows what was checked.",
                 ));
-                if ui.small_button("Look again").clicked() {
+                if ui.small_btn("Look again").clicked() {
                     self.list_devices(ui.ctx());
                 }
                 for n in &found.notes {
@@ -495,7 +497,7 @@ impl IngestState {
                     }
                 });
             if ui
-                .small_button("Look again")
+                .small_btn("Look again")
                 .on_hover_text("List the scanners again (after plugging one in or reconnecting a session).")
                 .clicked()
             {
@@ -565,7 +567,7 @@ impl IngestState {
                 // Built only while open (not every frame).
                 let text = found.details.join("\n");
                 if ui
-                    .small_button("Copy")
+                    .small_btn("Copy")
                     .on_hover_text("Copy these lines to paste into an email or chat")
                     .clicked()
                 {
@@ -602,9 +604,7 @@ impl IngestState {
             }
             for (i, d) in mine.iter().enumerate() {
                 ui.label(RichText::new(d.display().to_string()).monospace());
-                let x = ui
-                    .small_button("×")
-                    .on_hover_text("Stop watching this folder");
+                let x = ui.small_btn("×").on_hover_text("Stop watching this folder");
                 let name = format!("Remove my inbox {}", d.display());
                 x.widget_info(|| {
                     egui::WidgetInfo::labeled(egui::accesskit::Role::Button, true, &name)

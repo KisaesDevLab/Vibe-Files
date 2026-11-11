@@ -9,6 +9,7 @@ use vf_fs::clients::{self, ENTITY_TYPES};
 use crate::ui::browse::{Browse, Env};
 use crate::ui::new_client::NewClientDialog;
 use crate::ui::theme;
+use crate::ui::widgets::UiExt as _;
 
 /// The add-relationship form.
 #[derive(Debug, Clone, Default)]
@@ -52,7 +53,7 @@ pub fn show(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env, ci: usize) {
     ui.horizontal_wrapped(|ui| {
         ui.label(RichText::new(&c.name).strong().size(14.0));
         if ui
-            .small_button("Rename client…")
+            .small_btn("Rename client…")
             .on_hover_text("Change the client's name; its folder is renamed to match")
             .clicked()
         {
@@ -66,7 +67,7 @@ pub fn show(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env, ci: usize) {
         // The firm's Vibe Portal (PA-37): who can sign in for this client.
         if let Some(s) = b.portal.settings(env.root).cloned()
             && ui
-                .small_button("Portal users…")
+                .small_btn("Portal users…")
                 .on_hover_text("Invite people to the client portal, or turn their access off")
                 .clicked()
         {
@@ -239,7 +240,7 @@ pub fn show(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env, ci: usize) {
                 }
             }
             if ui
-                .small_button("Remove")
+                .small_btn("Remove")
                 .on_hover_text("Remove this relationship")
                 .clicked()
             {

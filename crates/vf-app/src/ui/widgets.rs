@@ -59,6 +59,30 @@ pub fn year_label(y: Option<i32>) -> String {
 }
 
 /// Small muted text: field captions, column headers, hints (UI_SPEC "labels 11px").
+/// The least a button may be to click (WCAG 2.5.8: 24 × 24 px).
+pub const MIN_TARGET: egui::Vec2 = egui::vec2(24.0, 24.0);
+
+/// Buttons on any `Ui`.
+pub trait UiExt {
+    /// egui's small button (small text, no padding), but at least [`MIN_TARGET`] to click.
+    fn small_btn(&mut self, text: impl Into<egui::WidgetText>) -> egui::Response;
+}
+
+impl UiExt for egui::Ui {
+    fn small_btn(&mut self, text: impl Into<egui::WidgetText>) -> egui::Response {
+        self.add(egui::Button::new(text).small().min_size(MIN_TARGET))
+    }
+}
+
+/// A button showing only a symbol (« » < > ↑ ↓ ×) gets a name screen readers say, and the same
+/// words as its tooltip.
+pub fn named(r: egui::Response, name: &str) -> egui::Response {
+    let enabled = r.enabled();
+    let n = name.to_string();
+    r.widget_info(move || egui::WidgetInfo::labeled(egui::accesskit::Role::Button, enabled, &n));
+    r.on_hover_text(name)
+}
+
 pub fn caption(text: impl Into<String>) -> RichText {
     RichText::new(text)
         .small()

@@ -20,6 +20,7 @@ use crate::ui::import_csv::{self, ImportDialog};
 use crate::ui::meta_editor::{self, MetaForm};
 use crate::ui::new_client::{self, NewClientDialog};
 use crate::ui::rename::{self as rename_ui, RenameDialog};
+use crate::ui::widgets::UiExt as _;
 use crate::ui::widgets::{DialogOutcome, status_rank, year_label};
 use crate::ui::{theme, widgets};
 
@@ -1889,7 +1890,7 @@ pub fn show(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env) {
             .resizable(false)
             .frame(egui::Frame::new().fill(theme::pane()).inner_margin(4))
             .show(ui, |ui| {
-                if ui.small_button("»").on_hover_text("Show folders").clicked() {
+                if widgets::named(ui.small_btn("»"), "Open the folder tree").clicked() {
                     b.prefs.hide_tree = false;
                     b.prefs_changed();
                 }
@@ -1918,7 +1919,7 @@ pub fn show(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env) {
             .resizable(false)
             .frame(egui::Frame::new().fill(theme::pane()).inner_margin(4))
             .show(ui, |ui| {
-                if ui.small_button("«").on_hover_text("Show details").clicked() {
+                if widgets::named(ui.small_btn("«"), "Open the details pane").clicked() {
                     b.prefs.hide_details = false;
                     b.prefs_changed();
                 }
@@ -1931,7 +1932,7 @@ pub fn show(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env) {
             .frame(egui::Frame::new().fill(theme::pane()).inner_margin(12))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    if ui.small_button("»").on_hover_text("Hide details").clicked() {
+                    if widgets::named(ui.small_btn("»"), "Fold the details pane").clicked() {
                         b.prefs.hide_details = true;
                         b.prefs_changed();
                     }
@@ -2168,7 +2169,7 @@ fn tree(ui: &mut egui::Ui, b: &mut Browse) {
     let mut pick: Option<Scope> = None;
     let mut fav_remove: Option<usize> = None;
     let views_open = section_head(ui, b, "views", "VIEWS", |ui, b| {
-        if ui.small_button("«").on_hover_text("Hide folders").clicked() {
+        if widgets::named(ui.small_btn("«"), "Fold the folder tree").clicked() {
             b.prefs.hide_tree = true;
             b.prefs_changed();
         }
@@ -2924,7 +2925,7 @@ fn grid(ui: &mut egui::Ui, b: &mut Browse, conn: &Connection) {
                 "Collapse the folder tree to give the list more room",
             )
         };
-        if ui.small_button(tree_text).on_hover_text(tree_tip).clicked() {
+        if ui.small_btn(tree_text).on_hover_text(tree_tip).clicked() {
             b.prefs.hide_tree = !b.prefs.hide_tree;
             b.prefs_changed();
         }
@@ -2943,7 +2944,7 @@ fn grid(ui: &mut egui::Ui, b: &mut Browse, conn: &Connection) {
                 )
             };
             if ui
-                .small_button(details_text)
+                .small_btn(details_text)
                 .on_hover_text(details_tip)
                 .clicked()
             {
@@ -3025,177 +3026,187 @@ fn grid(ui: &mut egui::Ui, b: &mut Browse, conn: &Connection) {
     // row's fill shows the selection.
     let selection_text = ui.visuals().selection.stroke.color;
     ui.visuals_mut().selection.stroke.color = theme::ink();
-    let mut table = TableBuilder::new(ui)
-        .striped(false)
-        .sense(Sense::click_and_drag())
-        .cell_layout(Layout::left_to_right(Align::Center))
-        .column(Column::exact(24.0))
-        .column(
-            Column::initial(260.0)
-                .at_least(160.0)
-                .clip(true)
-                .resizable(true),
-        )
-        .column(Column::initial(140.0).clip(true).resizable(true))
-        .column(Column::initial(120.0).clip(true).resizable(true))
-        .column(Column::exact(80.0))
-        .column(Column::exact(90.0))
-        .column(Column::exact(72.0))
-        .column(Column::exact(120.0))
-        .column(Column::initial(90.0).clip(true))
-        .column(Column::remainder().at_least(80.0));
-    if let Some(r) = b.scroll_to.take() {
-        table = table.scroll_to_row(r, None);
-    }
-    table
-        .header(28.0, |mut h| {
-            h.col(|_| {});
-            for (col, name) in SortCol::ALL {
-                h.col(|ui| {
-                    let t = RichText::new(name.to_uppercase())
-                        .small()
-                        .color(theme::ink_muted());
-                    if ui.add(egui::Button::new(t).frame(false)).clicked() {
-                        sort = Some(col);
-                    }
-                    if b.sort.0 == col {
-                        sort_arrow(ui, b.sort.1);
-                    }
-                });
+    // Wider than the pane (details open, a narrow window): it scrolls sideways, never cut off.
+    egui::ScrollArea::horizontal()
+        .id_salt("browse-table-x")
+        // Shown, not only on hover: columns past the edge are not missed.
+        .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded)
+        .show(ui, |ui| {
+            let mut table = TableBuilder::new(ui)
+                .striped(false)
+                .sense(Sense::click_and_drag())
+                .cell_layout(Layout::left_to_right(Align::Center))
+                .column(Column::exact(24.0))
+                .column(
+                    Column::initial(260.0)
+                        .at_least(160.0)
+                        .clip(true)
+                        .resizable(true),
+                )
+                .column(Column::initial(140.0).clip(true).resizable(true))
+                .column(Column::initial(120.0).clip(true).resizable(true))
+                .column(Column::exact(80.0))
+                .column(Column::exact(90.0))
+                .column(Column::exact(72.0))
+                .column(Column::exact(120.0))
+                .column(Column::initial(90.0).clip(true))
+                .column(Column::remainder().at_least(80.0));
+            if let Some(r) = b.scroll_to.take() {
+                table = table.scroll_to_row(r, None);
             }
-        })
-        .body(|body| {
-            body.rows(ROW_H, b.visible.len(), |mut row| {
-                let pos = row.index();
-                let di = b.visible[pos];
-                let d = &b.snap.docs[di];
-                let mut sel = b.selected.contains(&di);
-                row.set_selected(sel);
-                row.col(|ui| {
-                    let r = ui.add(egui::Checkbox::without_text(&mut sel));
-                    let now = sel;
-                    r.widget_info(|| {
-                        egui::WidgetInfo::selected(
-                            egui::accesskit::Role::CheckBox,
-                            true,
-                            now,
-                            format!("Select {}", d.name()),
-                        )
-                    });
-                    if r.changed() {
-                        toggled = Some(pos);
+            table
+                .header(28.0, |mut h| {
+                    h.col(|_| {});
+                    for (col, name) in SortCol::ALL {
+                        h.col(|ui| {
+                            let t = RichText::new(name.to_uppercase())
+                                .small()
+                                .color(theme::ink_muted());
+                            if ui.add(egui::Button::new(t).frame(false)).clicked() {
+                                sort = Some(col);
+                            }
+                            if b.sort.0 == col {
+                                sort_arrow(ui, b.sort.1);
+                            }
+                        });
                     }
-                });
-                row.col(|ui| {
-                    // The name in the normal text color (black / white), semibold; only the
-                    // pill is colored (owner 2026-11-04).
-                    ui.label(
-                        RichText::new(d.name())
-                            .family(theme::mono_semibold(ui))
-                            .color(theme::ink()),
-                    );
-                    if let Some(u) = &d.locked_by {
-                        widgets::lock_pill(ui, u);
-                    }
-                    if d.doc_type.is_none() {
-                        widgets::pill(
-                            ui,
-                            "Needs doc type",
-                            widgets::rgb(0xFBEFD5),
-                            widgets::rgb(0x7A4F07),
-                        );
-                    }
-                });
-                row.col(|ui| {
-                    let name = d
-                        .client_id
-                        .as_deref()
-                        .and_then(|id| client_names.get(id))
-                        .map_or("—", |n| n.as_str());
-                    ui.label(name);
-                });
-                row.col(|ui| {
-                    ui.label(d.doc_type.as_deref().unwrap_or("—"));
-                });
-                row.col(|ui| {
-                    ui.label(year_label(d.tax_year));
-                });
-                row.col(|ui| {
-                    widgets::status_pill(ui, &d.status);
-                });
-                row.col(|ui| {
-                    ui.label(RichText::new(widgets::size(d.size)).monospace());
-                });
-                row.col(|ui| {
-                    ui.label(widgets::local_time(&d.updated_at));
-                });
-                row.col(|ui| {
-                    ui.label(d.filed_by.as_deref().unwrap_or("—"));
-                });
-                row.col(|ui| {
-                    ui.label(
-                        RichText::new(&d.hash[..d.hash.len().min(8)])
-                            .monospace()
-                            .color(theme::ink_muted()),
-                    );
-                });
-                let resp = row.response();
-                // Drag rows onto a folder in the tree to move them (PA-23): the selection when
-                // this row is in it, otherwise this row.
-                if resp.drag_started() {
-                    let ids: Vec<String> = if sel {
-                        b.visible
-                            .iter()
-                            .filter(|i| b.selected.contains(i))
-                            .map(|&i| b.snap.docs[i].id.clone())
-                            .collect()
-                    } else {
-                        vec![d.id.clone()]
-                    };
-                    egui::DragAndDrop::set_payload(&resp.ctx, DocDrag(ids));
-                }
-                if resp.double_clicked() {
-                    file_req = Some((di, FileAct::Open));
-                } else if resp.clicked() {
-                    clicked = Some((pos, mods));
-                }
-                resp.context_menu(|ui| {
-                    for (label, act) in [
-                        ("Open", FileAct::Open),
-                        ("Open in Windows program", FileAct::OpenExternal),
-                        ("Open in Explorer", FileAct::Reveal),
-                        ("Copy path", FileAct::CopyPath),
-                    ] {
-                        if ui.button(label).clicked() {
-                            file_req = Some((di, act));
-                            ui.close();
+                })
+                .body(|body| {
+                    body.rows(ROW_H, b.visible.len(), |mut row| {
+                        let pos = row.index();
+                        let di = b.visible[pos];
+                        let d = &b.snap.docs[di];
+                        let mut sel = b.selected.contains(&di);
+                        row.set_selected(sel);
+                        row.col(|ui| {
+                            let r = ui.add(egui::Checkbox::without_text(&mut sel));
+                            let now = sel;
+                            r.widget_info(|| {
+                                egui::WidgetInfo::selected(
+                                    egui::accesskit::Role::CheckBox,
+                                    true,
+                                    now,
+                                    format!("Select {}", d.name()),
+                                )
+                            });
+                            if r.changed() {
+                                toggled = Some(pos);
+                            }
+                        });
+                        row.col(|ui| {
+                            // The name in the normal text color (black / white), semibold; only the
+                            // pill is colored (owner 2026-11-04).
+                            ui.label(
+                                RichText::new(d.name())
+                                    .family(theme::mono_semibold(ui))
+                                    .color(theme::ink()),
+                            );
+                            if let Some(u) = &d.locked_by {
+                                widgets::lock_pill(ui, u);
+                            }
+                            if d.doc_type.is_none() {
+                                widgets::pill(
+                                    ui,
+                                    "Needs doc type",
+                                    widgets::rgb(0xFBEFD5),
+                                    widgets::rgb(0x7A4F07),
+                                );
+                            }
+                        });
+                        row.col(|ui| {
+                            let name = d
+                                .client_id
+                                .as_deref()
+                                .and_then(|id| client_names.get(id))
+                                .map_or("—", |n| n.as_str());
+                            ui.label(name);
+                        });
+                        row.col(|ui| {
+                            ui.label(d.doc_type.as_deref().unwrap_or("—"));
+                        });
+                        row.col(|ui| {
+                            ui.label(year_label(d.tax_year));
+                        });
+                        row.col(|ui| {
+                            widgets::status_pill(ui, &d.status);
+                        });
+                        row.col(|ui| {
+                            ui.label(RichText::new(widgets::size(d.size)).monospace());
+                        });
+                        row.col(|ui| {
+                            ui.label(widgets::local_time(&d.updated_at));
+                        });
+                        row.col(|ui| {
+                            ui.label(d.filed_by.as_deref().unwrap_or("—"));
+                        });
+                        row.col(|ui| {
+                            ui.label(
+                                RichText::new(&d.hash[..d.hash.len().min(8)])
+                                    .monospace()
+                                    .color(theme::ink_muted()),
+                            );
+                        });
+                        let resp = row.response();
+                        // Drag rows onto a folder in the tree to move them (PA-23): the selection when
+                        // this row is in it, otherwise this row.
+                        if resp.drag_started() {
+                            let ids: Vec<String> = if sel {
+                                b.visible
+                                    .iter()
+                                    .filter(|i| b.selected.contains(i))
+                                    .map(|&i| b.snap.docs[i].id.clone())
+                                    .collect()
+                            } else {
+                                vec![d.id.clone()]
+                            };
+                            egui::DragAndDrop::set_payload(&resp.ctx, DocDrag(ids));
                         }
-                    }
-                    let client = b.client_of_doc(di);
-                    if ui
-                        .add_enabled(client.is_some(), egui::Button::new("Go to client's folder"))
-                        .on_disabled_hover_text("This document is not filed to a client.")
-                        .clicked()
-                    {
-                        goto_client = client;
-                        ui.close();
-                    }
-                    ui.separator();
-                    if ui.button("Move to…").clicked() {
-                        move_to_row = Some((di, vf_fs::copymove::Mode::Move));
-                        ui.close();
-                    }
-                    if ui.button("Copy to…").clicked() {
-                        move_to_row = Some((di, vf_fs::copymove::Mode::Copy));
-                        ui.close();
-                    }
-                    ui.separator();
-                    if ui.button("Move to trash").clicked() {
-                        trash_row = Some(di);
-                        ui.close();
-                    }
+                        if resp.double_clicked() {
+                            file_req = Some((di, FileAct::Open));
+                        } else if resp.clicked() {
+                            clicked = Some((pos, mods));
+                        }
+                        resp.context_menu(|ui| {
+                            for (label, act) in [
+                                ("Open", FileAct::Open),
+                                ("Open in Windows program", FileAct::OpenExternal),
+                                ("Open in Explorer", FileAct::Reveal),
+                                ("Copy path", FileAct::CopyPath),
+                            ] {
+                                if ui.button(label).clicked() {
+                                    file_req = Some((di, act));
+                                    ui.close();
+                                }
+                            }
+                            let client = b.client_of_doc(di);
+                            if ui
+                                .add_enabled(
+                                    client.is_some(),
+                                    egui::Button::new("Go to client's folder"),
+                                )
+                                .on_disabled_hover_text("This document is not filed to a client.")
+                                .clicked()
+                            {
+                                goto_client = client;
+                                ui.close();
+                            }
+                            ui.separator();
+                            if ui.button("Move to…").clicked() {
+                                move_to_row = Some((di, vf_fs::copymove::Mode::Move));
+                                ui.close();
+                            }
+                            if ui.button("Copy to…").clicked() {
+                                move_to_row = Some((di, vf_fs::copymove::Mode::Copy));
+                                ui.close();
+                            }
+                            ui.separator();
+                            if ui.button("Move to trash").clicked() {
+                                trash_row = Some(di);
+                                ui.close();
+                            }
+                        });
+                    });
                 });
-            });
         });
     ui.style_mut().interaction.selectable_labels = selectable;
     ui.visuals_mut().selection.stroke.color = selection_text;
@@ -3362,8 +3373,15 @@ fn portal_windows(ctx: &egui::Context, b: &mut Browse, env: &mut Env) {
     }
 }
 
+/// The details pane: an active legal hold first (it changes what may be done), then the
+/// client or the documents, then placing a hold (rare: last, not the first button seen).
 fn inspector(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env) {
     legal_holds(ui, b, env);
+    inspector_body(ui, b, env);
+    place_legal_hold(ui, b, env);
+}
+
+fn inspector_body(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env) {
     if b.selected.is_empty()
         && let Some(c) = b.scope_client()
     {
@@ -3693,7 +3711,7 @@ fn legal_holds(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env) {
                     ui.label(widgets::caption(
                         "Nothing here is disposed of or emptied from the trash while it holds.",
                     ));
-                    if ui.small_button("Release hold").clicked() {
+                    if ui.small_btn("Release hold").clicked() {
                         b.hold_releasing = Some((h.id.clone(), h.reason.clone()));
                         b.hold_pin.clear();
                     }
@@ -3720,6 +3738,20 @@ fn legal_holds(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env) {
         }
         b.holds_seen = None;
     }
+}
+
+/// Place legal hold on … (P07), at the foot of the details pane.
+fn place_legal_hold(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env) {
+    let client = if b.selected.is_empty() {
+        b.scope_client().map(|c| b.snap.clients[c].id.clone())
+    } else {
+        None
+    };
+    if client.is_none() && b.selected.is_empty() {
+        return;
+    }
+    ui.add_space(12.0);
+    ui.separator();
     let what = match (&client, b.selected.len()) {
         (Some(_), _) => "this client".to_string(),
         (None, 1) => "this document".to_string(),
@@ -3728,7 +3760,7 @@ fn legal_holds(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env) {
     match b.hold_reason.as_mut() {
         None => {
             if ui
-                .small_button(format!("Place legal hold on {what}…"))
+                .small_btn(format!("Place legal hold on {what}…"))
                 .clicked()
             {
                 b.hold_reason = Some(String::new());
@@ -3879,14 +3911,14 @@ fn versions_list(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env, doc_id: &str,
                     return;
                 }
                 if ui
-                    .small_button("Open")
+                    .small_btn("Open")
                     .on_hover_text("Open a read-only copy")
                     .clicked()
                 {
                     act = Some(VersionAct::Open(v.hash.clone()));
                 }
                 if ui
-                    .small_button("Restore")
+                    .small_btn("Restore")
                     .on_hover_text(
                         "Make this the current content again (the current one is kept as a version)",
                     )
@@ -3894,7 +3926,7 @@ fn versions_list(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env, doc_id: &str,
                 {
                     act = Some(VersionAct::Restore(v.hash.clone()));
                 }
-                if ui.small_button("Save a copy…").clicked() {
+                if ui.small_btn("Save a copy…").clicked() {
                     act = Some(VersionAct::SaveCopy(v.hash.clone()));
                 }
             });
@@ -4564,17 +4596,17 @@ Petty cash,1234.50
 
         // On the panes themselves (owner 2026-11-05): « folds the tree, » the details; the
         // strips left behind open them again.
-        h.get_by_label("«").click();
+        h.get_by_label("Fold the folder tree").click();
         h.run();
         assert!(h.state().b.prefs.hide_tree);
         // The tree's strip comes first, then the details pane's own ».
-        h.get_all_by_label("»").last().unwrap().click();
+        h.get_by_label("Fold the details pane").click();
         h.run();
         assert!(h.state().b.prefs.hide_details);
-        h.get_by_label("»").click(); // only the tree's strip is left
+        h.get_by_label("Open the folder tree").click(); // only the tree's strip is left
         h.run();
         assert!(!h.state().b.prefs.hide_tree);
-        h.get_all_by_label("«").last().unwrap().click(); // the details strip
+        h.get_by_label("Open the details pane").click(); // the details strip
         h.run();
         assert!(!h.state().b.prefs.hide_tree && !h.state().b.prefs.hide_details);
 

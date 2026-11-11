@@ -6,6 +6,7 @@ use vf_fs::doctypes::DocType;
 use vf_fs::retention::{self, Class, Edit};
 
 use crate::ui::browse::Env;
+use crate::ui::widgets::UiExt as _;
 use crate::ui::{theme, widgets};
 
 const ANCHORS: [(&str, &str); 4] = [
@@ -90,7 +91,7 @@ pub fn show(
                     .filter(|t| t.retention.as_deref() == Some(c.id.as_str()))
                     .count();
                 ui.label(n.to_string());
-                let e = ui.small_button("Edit…");
+                let e = ui.small_btn("Edit…");
                 e.widget_info(|| {
                     egui::WidgetInfo::labeled(
                         egui::accesskit::Role::Button,

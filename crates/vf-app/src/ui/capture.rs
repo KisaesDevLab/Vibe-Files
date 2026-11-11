@@ -14,6 +14,7 @@ use vf_ingest::ultratax::{self, Action, Layout, Var};
 
 use crate::ui::theme;
 use crate::ui::widgets;
+use crate::ui::widgets::UiExt as _;
 
 #[derive(Default)]
 pub struct CapturePage {
@@ -466,8 +467,13 @@ fn doc_rules(ui: &mut egui::Ui, draft: &mut Profile, types: &[DocType], folders:
                 });
                 ui.horizontal(|ui| {
                     if named(
-                        ui.add_enabled(i > 0, egui::Button::new("↑").small())
-                            .on_hover_text("Move up"),
+                        ui.add_enabled(
+                            i > 0,
+                            egui::Button::new("↑")
+                                .small()
+                                .min_size(crate::ui::widgets::MIN_TARGET),
+                        )
+                        .on_hover_text("Move up"),
                         i > 0,
                         format!("Move rule {} up", i + 1),
                     )
@@ -476,8 +482,13 @@ fn doc_rules(ui: &mut egui::Ui, draft: &mut Profile, types: &[DocType], folders:
                         action = Some((i, -1));
                     }
                     if named(
-                        ui.add_enabled(i + 1 < n, egui::Button::new("↓").small())
-                            .on_hover_text("Move down"),
+                        ui.add_enabled(
+                            i + 1 < n,
+                            egui::Button::new("↓")
+                                .small()
+                                .min_size(crate::ui::widgets::MIN_TARGET),
+                        )
+                        .on_hover_text("Move down"),
                         i + 1 < n,
                         format!("Move rule {} down", i + 1),
                     )
@@ -486,7 +497,7 @@ fn doc_rules(ui: &mut egui::Ui, draft: &mut Profile, types: &[DocType], folders:
                         action = Some((i, 1));
                     }
                     if named(
-                        ui.small_button("Remove")
+                        ui.small_btn("Remove")
                             .on_hover_text(format!("Remove rule {}", i + 1)),
                         true,
                         format!("Remove rule {}", i + 1),

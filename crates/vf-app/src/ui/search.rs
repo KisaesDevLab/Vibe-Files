@@ -11,6 +11,7 @@ use vf_index::search::{self, DocType, Hit, Query, Scope, Year};
 
 use crate::ui::pages::{Renderer, Request};
 use crate::ui::viewer::Doc;
+use crate::ui::widgets::UiExt as _;
 use crate::ui::{theme, widgets};
 
 const LIMIT: usize = 200;
@@ -421,7 +422,7 @@ fn near_row(ui: &mut egui::Ui, s: &mut SearchTab, catalog: &Path, root: &Path) {
             }
             None => {}
         }
-        if s.near.is_some() && ui.small_button("Close report").clicked() {
+        if s.near.is_some() && ui.small_btn("Close report").clicked() {
             s.near = None;
         }
     });
@@ -574,7 +575,7 @@ fn filters(ui: &mut egui::Ui, s: &mut SearchTab, snap: &Snapshot) {
         text_filter(ui, "Filed by", &mut f.filed_by, "anyone");
         text_filter(ui, "Tag", &mut f.tag, "any");
         ui.checkbox(&mut f.has_ssn, "Has SSN");
-        if *f != Query::default() && ui.small_button("Clear filters").clicked() {
+        if *f != Query::default() && ui.small_btn("Clear filters").clicked() {
             *f = Query::default();
             s.year_text.clear();
         }

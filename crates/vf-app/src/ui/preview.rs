@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use egui::{Color32, RichText, vec2};
 
 use crate::ui::doc_render::{DocRenderer, Done, Job};
+use crate::ui::widgets::UiExt as _;
 use crate::ui::{theme, widgets};
 
 /// Page images kept (all documents together).
@@ -163,14 +164,14 @@ pub fn show(
             ui.set_width(w - 12.0);
             ui.horizontal(|ui| {
                 let prev = ui
-                    .add_enabled(at.0 > 0, egui::Button::new("Previous").small())
+                    .add_enabled(at.0 > 0, egui::Button::new("Previous").small().min_size(crate::ui::widgets::MIN_TARGET))
                     .on_hover_text("Previous document (Up arrow)");
                 if prev.clicked() {
                     act = Act::Step(-1);
                 }
                 ui.label(widgets::caption(format!("{} of {}", at.0 + 1, at.1)));
                 let next = ui
-                    .add_enabled(at.0 + 1 < at.1, egui::Button::new("Next").small())
+                    .add_enabled(at.0 + 1 < at.1, egui::Button::new("Next").small().min_size(crate::ui::widgets::MIN_TARGET))
                     .on_hover_text("Next document (Down arrow)");
                 if next.clicked() {
                     act = Act::Step(1);
@@ -178,11 +179,11 @@ pub fn show(
             });
             // On a row of their own: a narrow pane keeps every button whole.
             ui.horizontal_wrapped(|ui| {
-                if is_pdf(rel) && ui.small_button("Open in Viewer").clicked() {
+                if is_pdf(rel) && ui.small_btn("Open in Viewer").clicked() {
                     act = Act::Open(p.page);
                 }
                 if ui
-                    .small_button("Open in program")
+                    .small_btn("Open in program")
                     .on_hover_text("Open the file in the program Windows has for it")
                     .clicked()
                 {
@@ -195,7 +196,7 @@ pub fn show(
                         "Share…"
                     };
                     if ui
-                        .small_button(label)
+                        .small_btn(label)
                         .on_hover_text(
                             "Choose who sees the selected documents on the client portal",
                         )
@@ -205,7 +206,7 @@ pub fn show(
                     }
                     if portal.2
                         && ui
-                        .small_button("Send secure link…")
+                        .small_btn("Send secure link…")
                         .on_hover_text(
                             "Send this document to someone outside the client (a lender, a lawyer) by a private link from the portal",
                         )
@@ -303,18 +304,30 @@ pub fn show(
                 }
             }
             ui.horizontal(|ui| {
-                if ui
-                    .add_enabled(p.page > 0, egui::Button::new("<").small())
-                    .on_hover_text("Previous page")
-                    .clicked()
+                if widgets::named(
+                    ui.add_enabled(
+                        p.page > 0,
+                        egui::Button::new("<")
+                            .small()
+                            .min_size(crate::ui::widgets::MIN_TARGET),
+                    ),
+                    "Previous page",
+                )
+                .clicked()
                 {
                     p.page -= 1;
                 }
                 ui.label(widgets::caption(format!("Page {} / {n}", p.page + 1)));
-                if ui
-                    .add_enabled(p.page + 1 < n, egui::Button::new(">").small())
-                    .on_hover_text("Next page")
-                    .clicked()
+                if widgets::named(
+                    ui.add_enabled(
+                        p.page + 1 < n,
+                        egui::Button::new(">")
+                            .small()
+                            .min_size(crate::ui::widgets::MIN_TARGET),
+                    ),
+                    "Next page",
+                )
+                .clicked()
                 {
                     p.page += 1;
                 }

@@ -66,11 +66,14 @@ pub fn border_pane() -> Color32 {
     pick(0xD5D9E0, 0x343A42)
 }
 pub fn health_ok() -> Color32 {
-    pick(0x2E7D4F, 0x7FD3A0)
+    // Light: 5.7:1 on the app background (was 0x2E7D4F, 4.4:1; UI review 2026-11-11).
+    pick(0x226B42, 0x7FD3A0)
 }
 /// Health "warn" dot / text that needs attention.
 pub fn warn() -> Color32 {
-    pick(0xB7791F, 0xD9A040)
+    // Light: 5.2:1 on the app background, 4.5:1 on the Viewer canvas (was 0xB7791F, 3.2:1;
+    // UI review 2026-11-11).
+    pick(0x8A5A0F, 0xD9A040)
 }
 /// Error text.
 pub fn error() -> Color32 {
@@ -122,6 +125,12 @@ pub fn install(ctx: &egui::Context) {
         ctx.style_mut_of(theme, |s| {
             s.visuals.panel_fill = bg;
             s.visuals.override_text_color = Some(text);
+            // Captions, hints and the footer at 12 px, not Filer's 11 (UI review 2026-11-11);
+            // the header's text size buttons scale them with the rest.
+            s.text_styles.insert(
+                egui::TextStyle::Small,
+                egui::FontId::new(12.0, egui::FontFamily::Proportional),
+            );
         });
     }
     set_theme(ctx, dark);

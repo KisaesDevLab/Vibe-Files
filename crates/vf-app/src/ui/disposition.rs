@@ -12,6 +12,7 @@ use egui::{RichText, TextEdit};
 use vf_fs::disposition::{self, Line, Report};
 
 use crate::ui::browse::Env;
+use crate::ui::widgets::UiExt as _;
 use crate::ui::{theme, widgets};
 
 #[derive(Default)]
@@ -131,10 +132,10 @@ pub fn show(ui: &mut egui::Ui, p: &mut DispositionPage, env: &mut Env, catalog: 
             ui.label(RichText::new("Nothing has reached the end of its retention.").color(theme::ink_muted()));
         } else {
             ui.horizontal(|ui| {
-                if ui.small_button("Select all").clicked() {
+                if ui.small_btn("Select all").clicked() {
                     p.picked = rep.lines.iter().map(|l| l.doc_id.clone()).collect();
                 }
-                if ui.small_button("Select none").clicked() {
+                if ui.small_btn("Select none").clicked() {
                     p.picked.clear();
                 }
             });
@@ -264,7 +265,7 @@ pub fn show(ui: &mut egui::Ui, p: &mut DispositionPage, env: &mut Env, catalog: 
                     .small(),
                 );
                 let b = ui
-                    .small_button("Cancel")
+                    .small_btn("Cancel")
                     .on_hover_text("Take back the approval: the document is not destroyed and comes back to the list above for a new decision.");
                 let name = format!("Cancel destruction of {}", x.rel_path);
                 b.widget_info(|| {
@@ -366,7 +367,7 @@ pub fn show(ui: &mut egui::Ui, p: &mut DispositionPage, env: &mut Env, catalog: 
                     r.documents,
                     r.by_user.as_deref().unwrap_or("—")
                 ));
-                if ui.small_button("Open certificate").clicked() {
+                if ui.small_btn("Open certificate").clicked() {
                     p.open_request = Some(env.root.join(&r.certificate));
                 }
             });
@@ -436,7 +437,7 @@ pub fn holds(ui: &mut egui::Ui, p: &mut HoldsPage, env: &mut Env) {
             );
             if h.active() {
                 ui.label(RichText::new(line).color(crate::ui::theme::error()));
-                if ui.small_button("Release").clicked() {
+                if ui.small_btn("Release").clicked() {
                     p.releasing = Some(h.id.clone());
                     p.pin.clear();
                 }

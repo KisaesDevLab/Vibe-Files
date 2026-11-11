@@ -4,6 +4,7 @@
 use egui::RichText;
 
 use crate::ui::browse::Env;
+use crate::ui::widgets::UiExt as _;
 use crate::ui::{theme, widgets};
 
 /// Several Remote Desktop servers (PA-36): which one runs text recognition and B2 sync.
@@ -272,7 +273,7 @@ pub fn show(ui: &mut egui::Ui, p: &mut DevicesPage, env: &mut Env) {
                 if this {
                     ui.label("");
                 } else if ui
-                    .small_button("Remove")
+                    .small_btn("Remove")
                     .on_hover_text("Take this PC off the list (it no longer opens the cabinet).")
                     .clicked()
                 {

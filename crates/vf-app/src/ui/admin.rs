@@ -621,7 +621,12 @@ fn doc_types(ui: &mut egui::Ui, a: &mut Admin, env: &mut Env) {
 
 /// A small button whose accessible name says which row it acts on.
 fn order_button(ui: &mut egui::Ui, enabled: bool, text: &str, name: &str) -> bool {
-    let r = ui.add_enabled(enabled, egui::Button::new(text).small());
+    let r = ui.add_enabled(
+        enabled,
+        egui::Button::new(text)
+            .small()
+            .min_size(crate::ui::widgets::MIN_TARGET),
+    );
     let name = name.to_owned();
     r.widget_info(|| egui::WidgetInfo::labeled(egui::accesskit::Role::Button, enabled, &name));
     r.on_hover_text(name.clone()).clicked()

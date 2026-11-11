@@ -19,6 +19,7 @@ use vf_pdf::pii::{self, Kind as Pii};
 use vf_pdf::redact::Redaction;
 
 use crate::ui::doc_render::{DocInfo, DocRenderer, Done, Job, WordBox};
+use crate::ui::widgets::UiExt as _;
 use crate::ui::{theme, widgets};
 
 /// Screen pixels per PDF point at 100 % (UI_SPEC: a Letter page is 640 px wide at 100 %).
@@ -1574,11 +1575,11 @@ fn toolbar(ui: &mut egui::Ui, v: &mut Viewer, env: &mut Env<'_>, doc: &Doc) {
                     && !pages.is_empty()
                 {
                     let n = pages.len();
-                    if ui.small_button("Previous match").clicked() {
+                    if ui.small_btn("Previous match").clicked() {
                         v.find_at = (v.find_at + n - 1) % n;
                         v.goto_page(pages[v.find_at].0);
                     }
-                    if ui.small_button("Next match").clicked() {
+                    if ui.small_btn("Next match").clicked() {
                         v.find_at = (v.find_at + 1) % n;
                         v.goto_page(pages[v.find_at].0);
                     }
@@ -2573,7 +2574,7 @@ fn tool_panel_body(ui: &mut egui::Ui, v: &mut Viewer, env: &mut Env<'_>) {
                     ui.label(
                         RichText::new(format!("Form: {} fields changed", v.form.len())).strong(),
                     );
-                    if ui.small_button("Undo form changes").clicked() {
+                    if ui.small_btn("Undo form changes").clicked() {
                         v.form.clear();
                     }
                 });
@@ -2597,7 +2598,12 @@ fn tool_panel_body(ui: &mut egui::Ui, v: &mut Viewer, env: &mut Env<'_>) {
                             {
                                 let next = tick_size_step(size, up);
                                 if ui
-                                    .add_enabled(next.is_some(), egui::Button::new(label).small())
+                                    .add_enabled(
+                                        next.is_some(),
+                                        egui::Button::new(label)
+                                            .small()
+                                            .min_size(crate::ui::widgets::MIN_TARGET),
+                                    )
                                     .on_hover_text(hint)
                                     .clicked()
                                 {
@@ -2605,7 +2611,7 @@ fn tool_panel_body(ui: &mut egui::Ui, v: &mut Viewer, env: &mut Env<'_>) {
                                 }
                             }
                         }
-                        if ui.small_button("Remove").clicked() {
+                        if ui.small_btn("Remove").clicked() {
                             remove = Some(i);
                         }
                     });
@@ -2622,7 +2628,7 @@ fn tool_panel_body(ui: &mut egui::Ui, v: &mut Viewer, env: &mut Env<'_>) {
                     v.moving = None;
                     v.pending.remove(i);
                 }
-                if ui.small_button("Discard all").clicked() {
+                if ui.small_btn("Discard all").clicked() {
                     v.moving = None;
                     v.pending.clear();
                 }
@@ -2822,7 +2828,7 @@ fn redact_panel(ui: &mut egui::Ui, v: &mut Viewer, env: &mut Env<'_>) {
         .fill(DANGER)
         .min_size(vec2(ui.available_width(), 40.0)),
     );
-    if !v.drawn.is_empty() && ui.small_button("Clear drawn boxes").clicked() {
+    if !v.drawn.is_empty() && ui.small_btn("Clear drawn boxes").clicked() {
         v.drawn.clear();
     }
     if apply.clicked() {
@@ -3541,7 +3547,7 @@ fn form_panel(ui: &mut egui::Ui, v: &mut Viewer, env: &mut Env<'_>) {
                                     changed = Some(o.clone());
                                 }
                             }
-                            if ui.small_button("Clear").clicked() {
+                            if ui.small_btn("Clear").clicked() {
                                 changed = Some("Off".into());
                             }
                         })
@@ -4325,33 +4331,43 @@ fn tape_panel(ui: &mut egui::Ui, v: &mut Viewer, env: &mut Env<'_>, doc: &Doc) {
                     }
                 });
             ui.horizontal_wrapped(|ui| {
-                if ui.small_button("=").clicked() {
+                if ui.small_btn("=").clicked() {
                     v.tape.tape.press(K::Equals);
                 }
-                if ui.small_button("GT").clicked() {
+                if ui.small_btn("GT").clicked() {
                     v.tape.tape.press(K::GrandTotal);
                 }
                 if ui
-                    .small_button("Del")
+                    .small_btn("Del")
                     .on_hover_text("Delete the last digit")
                     .clicked()
                 {
                     v.tape.tape.press(K::Backspace);
                 }
                 if ui
-                    .add_enabled(v.tape.tape.can_undo(), egui::Button::new("Undo").small())
+                    .add_enabled(
+                        v.tape.tape.can_undo(),
+                        egui::Button::new("Undo")
+                            .small()
+                            .min_size(crate::ui::widgets::MIN_TARGET),
+                    )
                     .clicked()
                 {
                     v.tape.tape.undo();
                 }
                 if ui
-                    .add_enabled(v.tape.tape.can_redo(), egui::Button::new("Redo").small())
+                    .add_enabled(
+                        v.tape.tape.can_redo(),
+                        egui::Button::new("Redo")
+                            .small()
+                            .min_size(crate::ui::widgets::MIN_TARGET),
+                    )
                     .clicked()
                 {
                     v.tape.tape.redo();
                 }
                 if ui
-                    .small_button("Copy")
+                    .small_btn("Copy")
                     .on_hover_text("The tape as text, and as columns for Excel")
                     .clicked()
                 {
@@ -4359,7 +4375,7 @@ fn tape_panel(ui: &mut egui::Ui, v: &mut Viewer, env: &mut Env<'_>, doc: &Doc) {
                     ui.ctx().copy_text(format!("{}\n{}", t.text(), t.tsv()));
                     v.notice = Some("Tape copied.".into());
                 }
-                if ui.small_button("Clear").clicked() {
+                if ui.small_btn("Clear").clicked() {
                     v.tape.tape.press(K::Clear);
                 }
                 let hist = v
@@ -4381,7 +4397,7 @@ fn tape_panel(ui: &mut egui::Ui, v: &mut Viewer, env: &mut Env<'_>, doc: &Doc) {
                     }
                 });
                 if ui
-                    .small_button("Save tape")
+                    .small_btn("Save tape")
                     .on_hover_text("Keep this tape with the document (History)")
                     .clicked()
                 {
