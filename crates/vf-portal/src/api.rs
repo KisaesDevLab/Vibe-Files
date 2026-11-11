@@ -127,6 +127,46 @@ pub struct Invitation {
     pub status: String,
 }
 
+/// A client someone on the portal can see.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct PersonClient {
+    pub id: String,
+    pub name: String,
+}
+
+/// Someone already on the portal (Vibe-Portal P63 `GET /people`).
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct Person {
+    pub identity_id: String,
+    pub name: String,
+    pub email: Option<String>,
+    pub phone: Option<String>,
+    #[serde(default)]
+    pub clients: Vec<PersonClient>,
+}
+
+impl Person {
+    /// The name, else the email, else the phone.
+    pub fn label(&self) -> String {
+        if !self.name.trim().is_empty() {
+            self.name.clone()
+        } else {
+            self.email
+                .clone()
+                .or_else(|| self.phone.clone())
+                .unwrap_or_default()
+        }
+    }
+
+    /// Whether they can already see client `client_id`.
+    pub fn sees(&self, client_id: &str) -> bool {
+        self.clients
+            .iter()
+            .any(|c| c.id.eq_ignore_ascii_case(client_id))
+    }
+}
+
 #[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
 pub struct Users {
     pub users: Vec<User>,
@@ -442,6 +482,18 @@ impl Portal {
 
     pub fn users(&self, client_id: &str) -> Result<Users> {
         self.get(&format!("/clients/{client_id}/users"), &[])
+    }
+
+    /// People already on the portal whose name, email or mobile number has every word of
+    /// `q` (2 characters or more; 20 at most come back), with the clients they can see. A
+    /// portal older than Vibe-Portal P63 answers 404.
+    pub fn people(&self, q: &str) -> Result<Vec<Person>> {
+        #[derive(Deserialize)]
+        struct R {
+            people: Vec<Person>,
+        }
+        self.get::<R>("/people", &[("q", q.trim())])
+            .map(|r| r.people)
     }
 
     /// Invites someone; the portal sends the link to the email when given, else by text.
@@ -801,6 +853,69 @@ mod tests {
             r#"{{{base},"storage":"b2","storageMoving":true}}"#
         ));
         assert!(moving.storage_words().contains("being moved"));
+    }
+
+    /// One answer from a portal on this PC: the request line it got, and the client to call it.
+    fn one_answer(status: &str, body: &'static str) -> (Portal, std::thread::JoinHandle<String>) {
+        use std::io::{BufRead, BufReader, Write};
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = l.local_addr().unwrap().port();
+        let status = status.to_string();
+        let seen = std::thread::spawn(move || {
+            let (s, _) = l.accept().unwrap();
+            let mut r = BufReader::new(s.try_clone().unwrap());
+            let mut first = String::new();
+            r.read_line(&mut first).unwrap();
+            let mut auth = String::new();
+            loop {
+                let mut line = String::new();
+                r.read_line(&mut line).unwrap();
+                if line.to_ascii_lowercase().starts_with("authorization:") {
+                    auth = line.trim().to_string();
+                }
+                if line == "\r\n" || line.is_empty() {
+                    break;
+                }
+            }
+            let mut w = s;
+            write!(
+                w,
+                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .unwrap();
+            format!("{} | {auth}", first.trim())
+        });
+        let s = PortalSettings {
+            version: 1,
+            cabinet_id: "c".into(),
+            url: format!("http://127.0.0.1:{port}"),
+            key: "vpk_test".into(),
+            fetch_minutes: 0,
+        };
+        (Portal::new(&s, "PC1", "kurt"), seen)
+    }
+
+    /// Vibe-Portal P63: people already on the portal, searched by what was typed.
+    #[test]
+    fn people_are_searched_on_the_portal() {
+        let (p, seen) = one_answer(
+            "200 OK",
+            r#"{"people":[{"identityId":"i1","name":"","email":"a@example.test","phone":null,
+                "clients":[{"id":"AB-1","name":"Smith, John"}]}]}"#,
+        );
+        let people = p.people("  john smith ").unwrap();
+        assert_eq!(
+            seen.join().unwrap(),
+            "GET /api/firm/v1/people?q=john%20smith HTTP/1.1 | authorization: Bearer vpk_test"
+        );
+        assert_eq!(people.len(), 1);
+        assert_eq!(people[0].label(), "a@example.test");
+        assert!(people[0].sees("ab-1"));
+        assert!(!people[0].sees("other"));
+        // A portal from before P63.
+        let (p, _) = one_answer("404 Not Found", r#"{"error":"not_found"}"#);
+        assert_eq!(p.people("john").unwrap_err().status(), Some(404));
     }
 
     #[test]

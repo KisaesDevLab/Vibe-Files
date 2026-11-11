@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 
 use egui::RichText;
 use vf_core::audit::AuditEntry;
-use vf_portal::api::{AccessRequest, PortalFile, Users};
+use vf_portal::api::{AccessRequest, Person, PortalFile, Users};
 use vf_portal::{PortalSettings, settings};
 
 use crate::portal as core;
@@ -292,10 +292,12 @@ struct InviteForm {
 }
 
 impl InviteForm {
-    /// Draws the form; `true` when "Send invitation" was pressed.
-    fn show(&mut self, ui: &mut egui::Ui, busy: bool) -> bool {
+    /// Draws the form (opened when `open`); `true` when "Send invitation" was pressed.
+    fn show(&mut self, ui: &mut egui::Ui, busy: bool, open: bool) -> bool {
         let mut send = false;
-        egui::CollapsingHeader::new("Invite someone…").show(ui, |ui| {
+        egui::CollapsingHeader::new("Invite someone…")
+            .open(open.then_some(true))
+            .show(ui, |ui| {
             egui::Grid::new("portal-invite")
                 .num_columns(2)
                 .show(ui, |ui| {
@@ -794,7 +796,7 @@ impl ShareWindow {
                     });
                 }
                 ui.separator();
-                if self.invite.show(ui, busy) {
+                if self.invite.show(ui, busy, false) {
                     pending = Some("invite");
                 }
                 if let Some(m) = &self.msg {
@@ -828,10 +830,45 @@ impl ShareWindow {
 /// The users read again (when that worked), and what the action did.
 type PeopleDone = (Option<Users>, Result<String, String>);
 
+/// A search of the portal's people: what was typed, and who matched (or why it failed).
+type PeopleFound = (String, Result<Vec<Person>, String>);
+
+/// How many people the portal answers with at most (Vibe-Portal `PEOPLE_SHOWN`).
+const PEOPLE_SHOWN: usize = 20;
+
+/// The invitation form filled in for someone already on the portal: their email (else their
+/// mobile, as an invitation with both waits for the mobile to be confirmed) and their name.
+fn invite_for(p: &Person) -> InviteForm {
+    let email = p.email.clone().unwrap_or_default();
+    InviteForm {
+        phone: if email.is_empty() {
+            p.phone.clone().unwrap_or_default()
+        } else {
+            String::new()
+        },
+        email,
+        name: p.name.clone(),
+        role: String::new(),
+    }
+}
+
+/// A failed search in plain words; a portal from before the search says to update it.
+fn people_error(e: &vf_portal::api::PortalError) -> String {
+    if e.status() == Some(404) {
+        "This portal can't search its people yet: update Vibe Portal, or invite them by their email or mobile number.".into()
+    } else {
+        e.message()
+    }
+}
+
 pub struct PeopleWindow {
     client: ClientRef,
     users: Option<Users>,
     invite: InviteForm,
+    /// The "Find" box of "Someone who already uses the portal…".
+    find: String,
+    finding: Option<Receiver<PeopleFound>>,
+    found: Option<(String, Vec<Person>)>,
     job: Option<Receiver<PeopleDone>>,
     audit: AuditOut,
     msg: Option<String>,
@@ -850,6 +887,9 @@ impl PeopleWindow {
             client,
             users: None,
             invite: InviteForm::default(),
+            find: String::new(),
+            finding: None,
+            found: None,
             job: None,
             audit,
             msg: None,
@@ -904,6 +944,19 @@ impl PeopleWindow {
                 Err(e) => self.err = Some(e),
             }
         }
+        if let Some(rx) = &self.finding
+            && let Ok((q, r)) = rx.try_recv()
+        {
+            self.finding = None;
+            match r {
+                Ok(people) => self.found = Some((q, people)),
+                Err(e) => {
+                    self.found = None;
+                    self.err = Some(e);
+                }
+            }
+        }
+        let finding = self.finding.is_some();
         let busy = self.job.is_some();
         let mut open = true;
         let mut act: Option<(String, bool)> = None;
@@ -982,7 +1035,101 @@ impl PeopleWindow {
                     }
                 }
                 ui.separator();
-                if self.invite.show(ui, busy) {
+                // Someone already on the portal (another client's): found by name, email or
+                // mobile, their details go into the invitation (Vibe-Portal P63; owner
+                // 2026-11-11). They still accept it, and keep one login.
+                let mut picked: Option<Person> = None;
+                let mut search = false;
+                egui::CollapsingHeader::new("Someone who already uses the portal…")
+                    .id_salt("portal-people-find")
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            let l = ui.label("Find");
+                            let r = ui
+                                .add(
+                                    egui::TextEdit::singleline(&mut self.find)
+                                        .hint_text("name, email or mobile")
+                                        .desired_width(220.0),
+                                )
+                                .labelled_by(l.id);
+                            let ok = self.find.trim().chars().count() >= 2 && !finding;
+                            let enter =
+                                r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                            if ui.add_enabled(ok, egui::Button::new("Search")).clicked()
+                                || (ok && enter)
+                            {
+                                search = true;
+                            }
+                        });
+                        if finding {
+                            ui.horizontal(|ui| {
+                                ui.spinner();
+                                ui.label(widgets::caption("Searching the portal…"));
+                            });
+                        }
+                        match &self.found {
+                            Some((q, people)) if people.is_empty() => {
+                                ui.label(widgets::caption(format!(
+                                    "Nobody on the portal matches \"{q}\"."
+                                )));
+                            }
+                            Some((_, people)) => {
+                                for p in people {
+                                    ui.horizontal_wrapped(|ui| {
+                                        ui.label(RichText::new(p.label()).strong());
+                                        let contact = p
+                                            .email
+                                            .clone()
+                                            .or(p.phone.clone())
+                                            .unwrap_or_default();
+                                        if contact != p.label() {
+                                            ui.label(widgets::caption(contact));
+                                        }
+                                        if !p.clients.is_empty() {
+                                            let names: Vec<&str> =
+                                                p.clients.iter().map(|c| c.name.as_str()).collect();
+                                            ui.label(widgets::caption(names.join(" · ")));
+                                        }
+                                        if p.sees(&self.client.id) {
+                                            ui.label(widgets::caption("already has access"));
+                                        } else if ui
+                                            .add_enabled(!busy, egui::Button::new("Invite").small())
+                                            .on_hover_text(
+                                                "Fill in the invitation below with their details",
+                                            )
+                                            .clicked()
+                                        {
+                                            picked = Some(p.clone());
+                                        }
+                                    });
+                                }
+                                if people.len() >= PEOPLE_SHOWN {
+                                    ui.label(widgets::caption(
+                                        "Only the first 20 are shown: type more to narrow it.",
+                                    ));
+                                }
+                            }
+                            None => {}
+                        }
+                    });
+                if search {
+                    let q = self.find.trim().to_string();
+                    let s = s.clone();
+                    self.err = None;
+                    self.finding = Some(spawn(ctx, move || {
+                        let r = core::client(&s).people(&q).map_err(|e| people_error(&e));
+                        (q, r)
+                    }));
+                }
+                let open_invite = picked.is_some();
+                if let Some(p) = picked {
+                    self.invite = invite_for(&p);
+                    self.msg = Some(format!(
+                        "{} is filled in below: add the role and press Send invitation. They accept it as usual and keep one login.",
+                        p.label()
+                    ));
+                }
+                if self.invite.show(ui, busy, open_invite) {
                     let f = std::mem::take(&mut self.invite);
                     resend = Some((
                         f.email(),
@@ -1517,6 +1664,7 @@ pub fn admin_requests(ui: &mut egui::Ui, a: &mut AdminPortal, env: &mut Env) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use egui_kittest::kittest::Queryable;
     use vf_portal::api::FileUser;
 
     /// PA-38: Intake's portal line says what the last fetch here did and how often it runs.
@@ -1583,6 +1731,163 @@ mod tests {
                 })
                 .collect(),
         })
+    }
+
+    /// A portal on this PC answering by path; every request is kept as "METHOD path body".
+    fn fake_portal(
+        answer: fn(&str, &str) -> (u16, String),
+    ) -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+        use std::io::{BufRead, BufReader, Read, Write};
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://127.0.0.1:{}", l.local_addr().unwrap().port());
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let log = seen.clone();
+        std::thread::spawn(move || {
+            for s in l.incoming().flatten() {
+                let mut r = BufReader::new(s.try_clone().unwrap());
+                let mut first = String::new();
+                if r.read_line(&mut first).is_err() {
+                    continue;
+                }
+                let mut len = 0usize;
+                loop {
+                    let mut line = String::new();
+                    if r.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
+                        break;
+                    }
+                    if let Some(v) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                        len = v.trim().parse().unwrap_or(0);
+                    }
+                }
+                let mut body = vec![0; len];
+                let _ = r.read_exact(&mut body);
+                let mut parts = first.split_whitespace();
+                let (method, path) = (
+                    parts.next().unwrap_or("").to_string(),
+                    parts.next().unwrap_or("").to_string(),
+                );
+                let body = String::from_utf8_lossy(&body).to_string();
+                log.lock().unwrap().push(format!("{method} {path} {body}"));
+                let (status, text) = answer(&method, &path);
+                let mut w = s;
+                let _ = write!(
+                    w,
+                    "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{text}",
+                    text.len()
+                );
+            }
+        });
+        (url, seen)
+    }
+
+    /// Steps until `label` shows (the portal answers on a thread).
+    fn wait_for<S>(h: &mut egui_kittest::Harness<'_, S>, label: &str) {
+        let start = Instant::now();
+        while h.query_by_label_contains(label).is_none() {
+            assert!(
+                start.elapsed() < Duration::from_secs(10),
+                "never showed {label}"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+            h.step();
+        }
+    }
+
+    /// Vibe-Portal P63 (owner 2026-11-11): someone who already uses the portal for another
+    /// client is found by name and invited with their own details; someone who already sees
+    /// this client cannot be invited again.
+    #[test]
+    fn someone_already_on_the_portal_is_found_and_invited() {
+        const CLIENT: &str = "0199aaaa-0000-7000-8000-000000000001";
+        let (url, seen) = fake_portal(|method, path| {
+            match (method, path) {
+            ("GET", p) if p.starts_with("/api/firm/v1/people") => (
+                200,
+                r#"{"people":[
+                  {"identityId":"j","name":"Jane Doe","email":"jane@example.test","phone":"+15552010001",
+                   "clients":[{"id":"other","name":"Doe Farms LLC"}]},
+                  {"identityId":"b","name":"Bob Roe","email":"bob@example.test","phone":null,
+                   "clients":[{"id":"0199AAAA-0000-7000-8000-000000000001","name":"Alerte Systems Inc."}]}
+                ]}"#
+                .into(),
+            ),
+            ("GET", _) => (200, r#"{"users":[],"invitations":[]}"#.into()),
+            ("POST", _) => (201, r#"{"invitationId":"i9"}"#.into()),
+            _ => (200, r#"{"ok":true}"#.into()),
+        }
+        });
+        let s = PortalSettings {
+            version: 1,
+            cabinet_id: "c".into(),
+            url,
+            key: "vpk_test".into(),
+            fetch_minutes: 0,
+        };
+        let (tx, audit) = mpsc::channel();
+        let w = PeopleWindow::new(
+            &egui::Context::default(),
+            &s,
+            ClientRef {
+                id: CLIENT.into(),
+                code: "ALER1176".into(),
+                name: "Alerte Systems Inc.".into(),
+            },
+            AuditOut(tx),
+        );
+        let mut h = egui_kittest::Harness::builder()
+            .with_size([700.0, 700.0])
+            .build_ui_state(move |ui, w: &mut PeopleWindow| w.show(ui.ctx(), &s), w);
+        wait_for(&mut h, "Nobody has portal access");
+        h.get_by_label("Someone who already uses the portal…")
+            .click();
+        h.run();
+        crate::ui::test_util::type_into(&mut h, "Find", "doe");
+        h.get_by_label("Search").click();
+        wait_for(&mut h, "Jane Doe");
+        assert!(
+            seen.lock()
+                .unwrap()
+                .iter()
+                .any(|r| r.starts_with("GET /api/firm/v1/people?q=doe ")),
+            "{:?}",
+            seen.lock().unwrap()
+        );
+        // Their other clients show; Bob already sees this client.
+        assert!(h.query_by_label("Doe Farms LLC").is_some());
+        assert!(h.query_by_label("already has access").is_some());
+        assert_eq!(h.query_all_by_label("Invite").count(), 1);
+        h.get_by_label("Invite").click();
+        h.run();
+        assert_eq!(h.state().invite.email, "jane@example.test");
+        assert_eq!(h.state().invite.phone, "", "the email is used, not both");
+        assert_eq!(h.state().invite.name, "Jane Doe");
+        crate::ui::test_util::type_into(&mut h, "Role (e.g. Spouse)", "Spouse");
+        h.get_by_label("Send invitation").click();
+        wait_for(&mut h, "Invitation sent.");
+        let invite = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|r| r.starts_with(&format!("POST /api/firm/v1/clients/{CLIENT}/invites")))
+            .cloned()
+            .expect("invitation sent");
+        let body: serde_json::Value =
+            serde_json::from_str(invite.splitn(3, ' ').nth(2).unwrap()).unwrap();
+        assert_eq!(
+            body,
+            serde_json::json!({"email":"jane@example.test","name":"Jane Doe","roleLabel":"Spouse"})
+        );
+        assert_eq!(audit.try_iter().count(), 1, "the invitation is audited");
+    }
+
+    /// A portal from before the search says to update it.
+    #[test]
+    fn an_old_portal_says_to_update_it() {
+        let e = vf_portal::api::PortalError::Http {
+            status: 404,
+            code: "not_found".into(),
+        };
+        assert!(people_error(&e).contains("update Vibe Portal"));
     }
 
     #[test]
