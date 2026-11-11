@@ -158,8 +158,49 @@ pub(crate) fn key_dir(catalog: &Path) -> PathBuf {
     let dir = data_dir(catalog);
     let shared = crate::shared::shared_root().is_some_and(|r| dir.starts_with(r));
     match vf_core::windows_login() {
-        Some(login) if shared => dir.join("logins").join(vf_fs::changes::safe_id(&login)),
+        Some(login) if shared => dir.join("logins").join(login_folder(&login)),
         _ => dir.to_path_buf(),
+    }
+}
+
+/// A login's own folder name: readable, and unique (`john.smith` and `john_smith`, or a name
+/// with no ASCII letters, never share one).
+fn login_folder(login: &str) -> String {
+    let readable: String = vf_fs::changes::safe_id(&login.to_lowercase())
+        .chars()
+        .take(32)
+        .collect();
+    let tag = &vf_sync::crypto::sha256(login.to_lowercase().as_bytes())[..12];
+    format!("{readable}-{tag}")
+}
+
+/// Makes a login's own key folder readable and writable by that login (and the system and
+/// administrators) only: the shared catalog's folder lets every login of the server write, and
+/// another login must not delete this one's key. Best effort; the key itself is sealed with
+/// Windows for this login either way.
+fn protect_login_folder(dir: &Path) {
+    use std::os::windows::process::CommandExt;
+    let (Ok(user), Some(_)) = (std::env::var("USERNAME"), legacy_dir(dir)) else {
+        return;
+    };
+    let me = match std::env::var("USERDOMAIN") {
+        Ok(d) if !d.is_empty() => format!("{d}\\{user}"),
+        _ => user,
+    };
+    let r = std::process::Command::new("icacls")
+        .arg(dir)
+        .args(["/inheritance:r", "/grant:r"])
+        .arg(format!("{me}:(OI)(CI)F"))
+        .args([
+            "/grant:r",
+            "*S-1-5-18:(OI)(CI)F",
+            "/grant:r",
+            "*S-1-5-32-544:(OI)(CI)F",
+        ])
+        .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
+        .output();
+    if !r.as_ref().is_ok_and(|o| o.status.success()) {
+        tracing::warn!("sync key folder left with the catalog folder's permissions");
     }
 }
 
@@ -583,6 +624,7 @@ impl SyncTab {
         match (self.form.remember, firm) {
             (true, Some(firm)) => match vf_sync::setup::remember(data, cabinet_id, firm) {
                 Ok(()) => {
+                    protect_login_folder(data);
                     self.remembered = true;
                     None
                 }
@@ -751,10 +793,12 @@ fn run(catalog: &Path, root: &Path, s: &Sync, op: Op, alone: bool) -> Result<Don
         }
         Op::Push(Some(client)) if alone => {
             let mut conn = caught_up(catalog, root, s, alone)?;
-            // The computers working in this same folder (a server's share): a segment one of
-            // them sent is taken as it is, nothing written into the folder (PA-41).
+            // The servers working in this same folder (server mode, on the share): a segment
+            // one of them sent is taken as it is, nothing written into the folder (PA-41). A
+            // PC or laptop with its own copy is not one of them.
             let same_folder: Vec<String> = vf_fs::safeguards::devices(root)
                 .into_iter()
+                .filter(|d| d.server)
                 .map(|d| d.name)
                 .collect();
             vf_sync::push::push_client(&mut conn, root, s, &client, &same_folder)
@@ -764,8 +808,9 @@ fn run(catalog: &Path, root: &Path, s: &Sync, op: Op, alone: bool) -> Result<Don
         Op::Push(only) => {
             let mut conn = caught_up(catalog, root, s, alone)?;
             let r = vf_sync::push::push(&mut conn, root, s, only.as_deref()).map_err(e)?;
-            // The whole cabinet went up: every computer's startup check sees when (PA-40).
-            if only.is_none() {
+            // The whole cabinet went up: every computer's startup check sees when (PA-40). Not
+            // when files were left (unreadable now): those are not in B2 yet.
+            if only.is_none() && r.skipped == 0 {
                 crate::lastpush::record(root);
             }
             Ok(Done::Push(r))
@@ -1364,6 +1409,21 @@ mod tests {
         assert_eq!(pending.len(), 1, "Bell Ranch still waits: {pending:?}");
         // One client is not the whole cabinet: no B2 backup time recorded.
         assert!(crate::lastpush::read(&root).is_none());
+    }
+
+    /// QA: login folder names never collide (punctuation, letter case, no ASCII letters).
+    #[test]
+    fn login_folders_are_distinct() {
+        let names = [
+            "OFFICE\\john.smith",
+            "OFFICE\\john_smith",
+            "OFFICE\\\u{5f20}\u{4f1f}",
+            "OFFICE\\\u{674e}\u{5a1c}",
+        ];
+        let folders: std::collections::BTreeSet<String> =
+            names.iter().map(|n| login_folder(n)).collect();
+        assert_eq!(folders.len(), names.len(), "{folders:?}");
+        assert_eq!(login_folder("OFFICE\\Jane"), login_folder("office\\jane"));
     }
 
     /// PA-40: on a server each login keeps its key in a folder of its own beside the shared

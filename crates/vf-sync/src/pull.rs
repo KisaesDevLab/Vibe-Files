@@ -115,52 +115,59 @@ pub(crate) fn apply_head(
     Ok(())
 }
 
-/// Brings in one client's segment of `head` only, when it differs from what this computer
-/// applied (a push of that client from a computer that does not run the cabinet's sync,
-/// PA-41). The cabinet's segment and the other clients' are left for a full pull.
+/// Brings in one client's segment of `head` for a push of that client from a computer that
+/// does not run the cabinet's sync (PA-41); the cabinet's segment and the other clients' are
+/// left for a full pull. Returns the bucket's latest segment of the client, if any.
 ///
-/// `same_folder`: the computers that work in this very cabinet folder (several servers on one
-/// share). A segment one of them wrote was sent from this folder, after its writer had applied
+/// `same_folder`: the computers that work in this very cabinet folder (servers on one share).
+/// A segment one of them wrote was sent from this folder, after its writer had applied
 /// everything before it: its files are here already, edited since perhaps. It is taken as the
 /// last exchange without writing a file ([`adopt_client_segment`]), so the folder as it is now
-/// goes up. A three-way apply would take an edit made here since as a change on both sides
-/// (this catalog's last exchange can be a week old, a seed copy) and leave conflict copies in
-/// the shared folder.
+/// goes up. A segment another computer wrote (one with its own copy of the cabinet) is not
+/// applied here: a three-way apply against this catalog's last exchange (a seed copy, a week
+/// old perhaps) would leave conflict copies in the shared folder. The push is refused until
+/// the main computer has brought it in.
 pub(crate) fn apply_client(
     conn: &mut Connection,
-    root: &Path,
     s: &Sync,
     head: &Head,
     client: &str,
     same_folder: &[String],
     rep: &mut PullReport,
-) -> Result<()> {
-    if let Some(rev) = head.segments.get(client)
-        && *rev != catalog::segment_rev(conn, client)?
-    {
-        let key = head.client_key(client, *rev);
-        let seg: ClientSegment = s
-            .get_json(&key)?
-            .ok_or_else(|| SyncError::Format(format!("{key} is missing")))?;
-        if seg.client_id != client {
-            return Err(SyncError::Format(format!("{key}: names another client")));
-        }
-        seg.check()
-            .map_err(|what| SyncError::Format(format!("{key}: refused {what}")))?;
-        let here = same_folder
+) -> Result<Option<ClientSegment>> {
+    let Some(rev) = head.segments.get(client).copied() else {
+        return Ok(None);
+    };
+    let key = head.client_key(client, rev);
+    let seg: ClientSegment = s
+        .get_json(&key)?
+        .ok_or_else(|| SyncError::Format(format!("{key} is missing")))?;
+    if seg.client_id != client {
+        return Err(SyncError::Format(format!("{key}: names another client")));
+    }
+    seg.check()
+        .map_err(|what| SyncError::Format(format!("{key}: refused {what}")))?;
+    if rev == catalog::segment_rev(conn, client)? {
+        return Ok(Some(seg));
+    }
+    let here = !seg.written_by.is_empty()
+        && same_folder
             .iter()
-            .any(|c| !seg.written_by.is_empty() && c.eq_ignore_ascii_case(&seg.written_by));
-        if here {
-            adopt_client_segment(conn, &seg)?;
-            rep.segments += 1;
-        } else {
-            apply_client_segment(conn, root, s, head, client, *rev, rep)?;
-        }
+            .any(|c| c.eq_ignore_ascii_case(&seg.written_by));
+    if !here {
+        return Err(SyncError::Local(format!(
+            "this client's latest copy in B2 came from {}, which keeps its own copy of the cabinet; the main server brings it into the shared folder when it syncs. Push this client again after that.",
+            if seg.written_by.is_empty() {
+                "another computer"
+            } else {
+                seg.written_by.as_str()
+            }
+        )));
     }
-    if rep.segments > 0 {
-        audit_pull(conn, s, rep)?;
-    }
-    Ok(())
+    adopt_client_segment(conn, &seg)?;
+    rep.segments += 1;
+    audit_pull(conn, s, rep)?;
+    Ok(Some(seg))
 }
 
 fn apply_client_segment(
@@ -220,11 +227,13 @@ fn adopt_client_segment(conn: &mut Connection, seg: &ClientSegment) -> Result<()
                 )
                 .optional()?;
             match other {
-                // Never sent under its own id: the same file, edited here perhaps.
-                Some(id) if catalog::base(conn, &id)?.is_none() => {
+                // Never sent under its own id: the same file, edited here perhaps. Never for a
+                // deleted document: a new file where it was is a new document.
+                Some(id) if e.deleted_at.is_none() && catalog::base(conn, &id)?.is_none() => {
                     catalog::rekey(conn, &id, &e.doc_id)?
                 }
-                // Not here (moved or deleted in this folder since): nothing to take.
+                // Not known here (a tombstone, a filing this catalog has not read yet): left
+                // as the bucket has it; the push carries the entry over unchanged.
                 _ => continue,
             }
         }
@@ -746,12 +755,21 @@ fn insert_new(
     folder: &str,
     e: &DocEntry,
 ) -> Result<String> {
-    // Already in the folder with this content, not yet in this catalog: another computer
-    // working in the same folder filed it and sent it (PA-41). Taken as it is: a download
-    // beside it would be a second copy, ` (2)`.
+    // Already in the folder with this content and no document of this catalog there: another
+    // computer working in the same folder filed it and sent it (PA-41). Taken as it is: a
+    // download beside it would be a second copy, ` (2)`. A file that is already another
+    // document of this catalog stays that document's; this one is downloaded beside it.
     let here = root.join(join(folder, &e.rel_path));
-    let there =
-        here.is_file() && filer_intake::commit::sha256_file(&here).is_ok_and(|h| h == e.hash);
+    let taken: bool = conn
+        .query_row(
+            "SELECT count(*) > 0 FROM document WHERE rel_path = ?1 AND deleted_at IS NULL",
+            [join(folder, &e.rel_path)],
+            |r| r.get(0),
+        )
+        .unwrap_or(true);
+    let there = !taken
+        && here.is_file()
+        && filer_intake::commit::sha256_file(&here).is_ok_and(|h| h == e.hash);
     let (tmp, dst) = if there {
         (None, here)
     } else {

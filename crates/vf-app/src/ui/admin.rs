@@ -1223,8 +1223,8 @@ ANDE1042,Anderson Farms LLC
         let mut h = harness();
         {
             let s = h.state_mut();
-            vf_fs::safeguards::register_device(&s.root, "dev").unwrap();
-            vf_fs::safeguards::register_device(&s.root, "old-pc").unwrap();
+            vf_fs::safeguards::register_device(&s.root, "dev", false).unwrap();
+            vf_fs::safeguards::register_device(&s.root, "old-pc", false).unwrap();
         }
         click(&mut h, "Devices");
         let both = vf_fs::safeguards::devices(&h.state().root).len();

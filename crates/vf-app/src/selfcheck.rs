@@ -95,18 +95,23 @@ pub fn run_with(
     // computer, or its scheduled push, stopped sending the cabinet to B2 (PA-40). The main one
     // itself is not told: it opens before its first push of the day (a Monday after a weekend
     // closed); its own Sync check covers it.
-    if another_pushes(root)
-        && let Some(r) = crate::lastpush::check(root)
-    {
-        out.push(check("B2 backup", r));
-    }
+    let one_main = crate::server::server_mode() || crate::cloudmode::is_cloud(root);
+    out.extend(backup_check(root, one_main));
     out
 }
 
-/// Another computer is recorded as the one that runs B2 sync (several servers, a cloud cabinet).
-fn another_pushes(root: &Path) -> bool {
-    crate::server::main_server(root)
-        .is_some_and(|m| !m.computer.eq_ignore_ascii_case(&crate::server::computer()))
+/// "B2 backup", when another computer runs the cabinet's B2 sync and it sent the whole cabinet
+/// once at least. `one_main`: the cabinet syncs on one main computer (several servers, a cloud
+/// cabinet); on a plain office share every PC syncs, and a main-server file left from before
+/// means nothing.
+fn backup_check(root: &Path, one_main: bool) -> Option<Check> {
+    let another = one_main
+        && crate::server::main_server(root)
+            .is_some_and(|m| !m.computer.eq_ignore_ascii_case(&crate::server::computer()));
+    if !another {
+        return None;
+    }
+    crate::lastpush::check(root).map(|r| check("B2 backup", r))
 }
 
 /// The cabinet file reads and the cabinet takes a write (a share gone read-only fails here).
@@ -204,12 +209,7 @@ mod tests {
             },
         )
         .unwrap();
-        let conn = vf_core::db::open(&t.path().join("c.db"), Storage::Local).unwrap();
-        let backup = |root: &Path| {
-            run(&conn, root, false)
-                .into_iter()
-                .find(|c| c.name == "B2 backup")
-        };
+        let backup = |root: &Path| backup_check(root, true);
         std::fs::write(
             root.join("_Vibe/sync-last-push.json"),
             r#"{"computer":"SERVER-1","at":"2026-01-01T00:00:00Z"}"#,
@@ -226,6 +226,8 @@ mod tests {
         .unwrap();
         let c = backup(&root).unwrap();
         assert!(!c.ok && c.detail.contains("SERVER-1"), "{c:?}");
+        // A plain office share (every PC syncs): a main-server file left from before says nothing.
+        assert!(backup_check(&root, false).is_none());
         // Never pushed in full: nothing to say.
         std::fs::remove_file(root.join("_Vibe/sync-last-push.json")).unwrap();
         assert!(backup(&root).is_none());

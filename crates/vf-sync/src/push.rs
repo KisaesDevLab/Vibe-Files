@@ -133,7 +133,7 @@ pub fn push_in_rounds(
                 &mut rep,
                 &mut done,
                 &mut listed,
-                false,
+                None,
             ) {
                 Err(SyncError::Raced) if attempt + 1 < TRIES => {
                     attempt += 1;
@@ -172,9 +172,22 @@ pub fn push_client(
             head_rev: head.rev,
             ..Default::default()
         };
-        crate::pull::apply_client(conn, root, s, &head, client, same_folder, &mut pulled)?;
+        let latest = crate::pull::apply_client(conn, s, &head, client, same_folder, &mut pulled)?;
         if pulled.segments > 0 {
             rep.pulled = Some(pulled);
+        }
+        // The bucket's entries this catalog has no row for (a filing not read here yet, a
+        // tombstone from before this catalog): sent again as they are, never dropped.
+        let mut carry: Vec<crate::layout::DocEntry> = vec![];
+        for e in latest.map(|seg| seg.documents).unwrap_or_default() {
+            let known: bool = conn.query_row(
+                "SELECT count(*) > 0 FROM document WHERE id = ?1",
+                [&e.doc_id],
+                |r| r.get(0),
+            )?;
+            if !known {
+                carry.push(e);
+            }
         }
         match push_once(
             conn,
@@ -185,7 +198,7 @@ pub fn push_client(
             &mut rep,
             &mut done,
             &mut listed,
-            true,
+            Some(&carry),
         ) {
             Err(SyncError::Raced) if attempt + 1 < TRIES => {
                 attempt += 1;
@@ -199,7 +212,8 @@ pub fn push_client(
     }
 }
 
-/// One round. `Ok(true)`: clients are left for another round. `client_only`: [`push_client`].
+/// One round. `Ok(true)`: clients are left for another round. `carry`: [`push_client`]'s
+/// entries to send unchanged (and then only that one client is pushed).
 #[allow(clippy::too_many_arguments)]
 fn push_once(
     conn: &mut Connection,
@@ -210,8 +224,9 @@ fn push_once(
     rep: &mut PushReport,
     done: &mut BTreeSet<String>,
     listed: &mut Option<Mutex<HashSet<String>>>,
-    client_only: bool,
+    carry: Option<&[crate::layout::DocEntry]>,
 ) -> Result<bool> {
+    let client_only = carry.is_some();
     let head = s.head()?.unwrap_or_default();
     let seen_before = catalog::last_rev(conn, &s.device_id)?;
     let writer = vf_core::new_id();
@@ -358,6 +373,13 @@ fn push_once(
         }
         for e in &p.docs {
             sent_docs.push(SentDoc::of(e, Some(&p.client), &p.folder));
+        }
+        // Entries this catalog does not know go up as the bucket had them (their objects are
+        // there already); they are not this catalog's to take as sent.
+        for c in carry.unwrap_or_default() {
+            if !p.docs.iter().any(|d| d.doc_id == c.doc_id) {
+                p.docs.push(c.clone());
+            }
         }
         let rev = head.segments.get(&p.client).copied().unwrap_or(0) + 1;
         let seg = ClientSegment {

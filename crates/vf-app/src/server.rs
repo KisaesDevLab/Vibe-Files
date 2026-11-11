@@ -549,6 +549,7 @@ mod tests {
                 first_seen: first.into(),
                 last_seen: first.into(),
                 version: String::new(),
+                server: false,
             };
             std::fs::write(
                 dir.join(format!("{id}.json")),

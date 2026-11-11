@@ -27,14 +27,19 @@ pub struct Device {
     pub last_seen: String,
     #[serde(default)]
     pub version: String,
+    /// A Remote Desktop server in server mode (PA-36): it works in the cabinet folder itself,
+    /// on the share, as the other servers do (PA-41).
+    #[serde(default)]
+    pub server: bool,
 }
 
 fn devices_dir(root: &Path) -> PathBuf {
     root.join(cabinet::VIBE_DIR).join(DEVICES_DIR)
 }
 
-/// Records this workstation in the cabinet (first seen kept, last seen now).
-pub fn register_device(root: &Path, device_id: &str) -> Result<(), String> {
+/// Records this workstation in the cabinet (first seen kept, last seen now). `server`: it runs
+/// in server mode.
+pub fn register_device(root: &Path, device_id: &str, server: bool) -> Result<(), String> {
     let dir = devices_dir(root);
     std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
     let file = dir.join(format!("{device_id}.json"));
@@ -50,6 +55,7 @@ pub fn register_device(root: &Path, device_id: &str) -> Result<(), String> {
         first_seen,
         last_seen: now,
         version: env!("CARGO_PKG_VERSION").into(),
+        server,
     };
     cabinet::write_replace(&file, &serde_json::to_vec_pretty(&d).expect("serializes"))
 }
@@ -443,9 +449,9 @@ mod tests {
         )
         .unwrap();
         crate::sweep::set_last_sweep(&conn, "2026-11-01T08:00:00Z").unwrap();
-        register_device(&root, "dev-1").unwrap();
+        register_device(&root, "dev-1", false).unwrap();
         let first = devices(&root)[0].first_seen.clone();
-        register_device(&root, "dev-1").unwrap();
+        register_device(&root, "dev-1", false).unwrap();
         assert_eq!(devices(&root).len(), 1);
         assert_eq!(devices(&root)[0].first_seen, first, "first seen kept");
 

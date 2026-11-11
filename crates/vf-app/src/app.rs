@@ -1233,7 +1233,9 @@ fn prepare(opened: &mut Opened, device_id: &str) -> Prepared {
         tracing::warn!(kind = crate::logging::kind(&e), "client list not completed");
     }
     // This workstation in the cabinet's list (the Safeguards appendix lists them).
-    if let Err(e) = vf_fs::safeguards::register_device(&root, device_id) {
+    if let Err(e) =
+        vf_fs::safeguards::register_device(&root, device_id, crate::server::server_mode())
+    {
         tracing::warn!(
             kind = crate::logging::kind(&e),
             "workstation not registered"

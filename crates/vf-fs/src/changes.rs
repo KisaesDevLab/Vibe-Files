@@ -216,6 +216,29 @@ pub fn mark_start(conn: &vf_core::db::Connection, root: &Path, me: &str) -> Resu
     save_seen(conn, &seen)
 }
 
+/// Waits (up to two minutes) to hold `lock` alone: open with no sharing, closed on drop.
+/// `None` when it cannot be had: the catch-up goes ahead (as before the lock).
+fn hold(lock: &Path) -> Option<std::fs::File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    let start = std::time::Instant::now();
+    loop {
+        match std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .share_mode(0)
+            .open(lock)
+        {
+            Ok(f) => return Some(f),
+            Err(_) if start.elapsed() < std::time::Duration::from_secs(120) => {
+                std::thread::sleep(std::time::Duration::from_millis(200))
+            }
+            Err(_) => return None,
+        }
+    }
+}
+
 /// Brings this catalog up to date with the other servers' changes: re-indexes the folders
 /// their logs name since last time. Returns the folders re-indexed.
 pub fn catch_up(
@@ -228,6 +251,11 @@ pub fn catch_up(
     if crate::intake::filing_now(root) {
         return Ok(vec![]);
     }
+    // One catch-up of this catalog at a time (the timer's, a sync's, another login's on a
+    // server's shared catalog): two would both find a new file unknown and add it twice.
+    let _one = conn
+        .path()
+        .map(|p| hold(&PathBuf::from(format!("{p}.catch-up.lock"))));
     let loaded = load_seen(conn);
     let first = loaded.is_none();
     let mut seen = loaded.unwrap_or_default();
@@ -308,5 +336,26 @@ mod tests {
         assert!(changed_since(root, "server-a", &mut Seen::new(), true).is_empty());
         // A log seen for the first time without from_start: from its end.
         assert!(changed_since(root, "server-c", &mut Seen::new(), false).is_empty());
+    }
+
+    /// QA of PA-41: a second catch-up of one catalog waits for the first.
+    #[test]
+    fn one_catch_up_at_a_time() {
+        let t = tempfile::tempdir().unwrap();
+        let lock = t.path().join("c.db.catch-up.lock");
+        let first = hold(&lock).unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let l2 = lock.clone();
+        std::thread::spawn(move || {
+            let _second = hold(&l2);
+            tx.send(()).unwrap();
+        });
+        assert!(
+            rx.recv_timeout(std::time::Duration::from_millis(600))
+                .is_err(),
+            "the second waits"
+        );
+        drop(first);
+        rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
     }
 }

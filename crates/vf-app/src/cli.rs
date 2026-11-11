@@ -464,13 +464,17 @@ fn ready_to_sync(data: &Path, catalog: &Path, cabinet: &Path) -> Result<Ready> {
                 .unwrap_or_else(|| "a main PC not chosen yet".into()),
         ));
     }
+    // Another session of this computer syncing now: nothing opened (its push takes these
+    // changes too).
+    let at = crate::shared::shared_catalog(&cab.cabinet_id).unwrap_or_else(|| catalog.to_owned());
+    let lock = match crate::ui::sync::sync_lock(&at) {
+        Ok(lock) => lock,
+        Err(why) => return Ok(Ready::Busy(why)),
+    };
     // Opened as the app opens it (PA-40): the server's shared catalog, interrupted changes put
     // back, and the other servers' changes read, or they would not go up.
     let opened = crate::session::open(data, &device_id(data)?, cabinet)?;
-    match crate::ui::sync::sync_lock(&opened.catalog) {
-        Ok(lock) => Ok(Ready::Go(Box::new(opened), lock)),
-        Err(why) => Ok(Ready::Busy(why)),
-    }
+    Ok(Ready::Go(Box::new(opened), lock))
 }
 
 /// The push or pull itself. A whole-cabinet push is recorded for every computer's startup
@@ -485,7 +489,9 @@ fn exchange(
     match cmd {
         SyncCmd::Push => {
             let r = vf_sync::push::push(conn, cabinet, s, None)?;
-            crate::lastpush::record(cabinet);
+            if r.skipped == 0 {
+                crate::lastpush::record(cabinet);
+            }
             writeln!(
                 out,
                 "pushed {} documents ({} objects, {} bytes) · rev {}",
