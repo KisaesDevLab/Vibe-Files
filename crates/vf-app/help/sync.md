@@ -24,6 +24,8 @@ Once sync is unlocked on a PC, anyone at that PC can press **Push now**, **Pull 
 
 The status grid shows **Status**, **Bucket**, **Last push**, **Last pull**, **Manifest rev** and **Automatic**.
 
+On several servers the whole cabinet syncs on the main server only. Anyone with sync unlocked on another server can still push one client: **Push this client now** in Browse, or **Push** beside it here. Vibe Files first reads what the other servers changed, then sends that client as it is in the shared folder; other clients wait for the main server. (In a OneDrive or Dropbox cabinet, only the main PC syncs.)
+
 ## Automatic push and pause
 
 Under **Settings** (admin password needed), **Push automatically every (minutes, 0 = by hand)** sets the timer. It is 15 minutes on a PC where sync was set up, and by hand on a PC that joined through the shared key until someone sets it there. **Only push automatically between** limits automatic pushes to a window of hours. **B2 Object Lock is on for this bucket** records that the bucket protects its objects for a number of days.

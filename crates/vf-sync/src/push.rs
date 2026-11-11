@@ -133,6 +133,7 @@ pub fn push_in_rounds(
                 &mut rep,
                 &mut done,
                 &mut listed,
+                false,
             ) {
                 Err(SyncError::Raced) if attempt + 1 < TRIES => {
                     attempt += 1;
@@ -148,7 +149,57 @@ pub fn push_in_rounds(
     }
 }
 
-/// One round. `Ok(true)`: clients are left for another round.
+/// Pushes one client from a computer that does not run the cabinet's sync (PA-41): only that
+/// client's segment is brought in first, never the other clients' (the main computer's pull
+/// writes those into the shared folder) nor the cabinet's master files, which are not sent
+/// either. `same_folder`: the computers working in this cabinet folder ([`crate::pull`]'s
+/// `apply_client`). The manifest rev this computer has seen stays where it was, so its next full
+/// exchange still pulls everything, and the bucket is not told it has seen more than it has.
+pub fn push_client(
+    conn: &mut Connection,
+    root: &Path,
+    s: &Sync,
+    client: &str,
+    same_folder: &[String],
+) -> Result<PushReport> {
+    let mut rep = PushReport::default();
+    let mut done: BTreeSet<String> = BTreeSet::new();
+    let mut listed: Option<Mutex<HashSet<String>>> = None;
+    let mut attempt = 0;
+    loop {
+        let head = s.head()?.unwrap_or_default();
+        let mut pulled = crate::pull::PullReport {
+            head_rev: head.rev,
+            ..Default::default()
+        };
+        crate::pull::apply_client(conn, root, s, &head, client, same_folder, &mut pulled)?;
+        if pulled.segments > 0 {
+            rep.pulled = Some(pulled);
+        }
+        match push_once(
+            conn,
+            root,
+            s,
+            Some(client),
+            1,
+            &mut rep,
+            &mut done,
+            &mut listed,
+            true,
+        ) {
+            Err(SyncError::Raced) if attempt + 1 < TRIES => {
+                attempt += 1;
+                tracing::info!(attempt, "sync push raced another workstation; retrying");
+            }
+            r => {
+                r?;
+                return Ok(rep);
+            }
+        }
+    }
+}
+
+/// One round. `Ok(true)`: clients are left for another round. `client_only`: [`push_client`].
 #[allow(clippy::too_many_arguments)]
 fn push_once(
     conn: &mut Connection,
@@ -159,8 +210,10 @@ fn push_once(
     rep: &mut PushReport,
     done: &mut BTreeSet<String>,
     listed: &mut Option<Mutex<HashSet<String>>>,
+    client_only: bool,
 ) -> Result<bool> {
     let head = s.head()?.unwrap_or_default();
+    let seen_before = catalog::last_rev(conn, &s.device_id)?;
     let writer = vf_core::new_id();
     let pending = catalog::pending(conn)?;
     let uploaded = catalog::uploaded(conn)?;
@@ -208,7 +261,8 @@ fn push_once(
         round.push(c.clone());
     }
     let more = waiting.len() > round.len();
-    let cabinet_too = !done.contains(CABINET)
+    let cabinet_too = !client_only
+        && !done.contains(CABINET)
         && (files_dirty || (pending.contains_key(CABINET) && only.is_none_or(|o| o == CABINET)))
         && applied(CABINET)?;
 
@@ -410,13 +464,22 @@ fn push_once(
     for d in &sent_docs {
         tx.execute("DELETE FROM sync_pending WHERE doc_id = ?1", [&d.doc_id])?;
     }
-    catalog::set_state(&tx, &s.device_id, new_head.rev, "push")?;
+    // One client pushed: this computer has still seen only what it had (the other segments of
+    // the revs between are not applied here).
+    let seen = if client_only {
+        seen_before
+    } else {
+        new_head.rev
+    };
+    catalog::set_state(&tx, &s.device_id, seen, "push")?;
     tx.commit()?;
     mark_done(done);
     rep.segments += segments;
     rep.documents += sent_docs.len();
     rep.head_rev = new_head.rev;
-    write_device(s, new_head.rev)?;
+    if !client_only {
+        write_device(s, new_head.rev)?;
+    }
     Transaction::new(LABEL)
         .audit(AuditEntry::new(
             LABEL,

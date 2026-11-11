@@ -887,3 +887,194 @@ fn a_push_in_rounds_commits_each_and_delivers_everything() {
     let b = pc_b(t.path(), store.clone(), &a);
     assert_eq!(snapshot(&b.root), snapshot(&a.root));
 }
+
+/// PA-41: a client pushed from a computer that does not run the cabinet's sync brings in that
+/// client's changes only (another client's stay in the bucket for a full pull), sends that
+/// client, and leaves the rev this computer has seen where it was.
+#[test]
+fn a_client_pushed_alone_pulls_only_that_client() {
+    let t = tempfile::tempdir().unwrap();
+    let store = Remote::memory();
+    let mut a = pc_a(t.path(), store.clone());
+    vf_sync::push::push(&mut a.conn, &a.root, &a.sync, None).unwrap();
+    let mut b = pc_b(t.path(), store.clone(), &a);
+    let seen = vf_sync::catalog::last_rev(&b.conn, "dev-b").unwrap();
+
+    // The main computer sends a document for each client.
+    put(
+        &a.root,
+        "Anderson Farms LLC (1042)/Income Tax/2025/1099 A.pdf",
+        "a 1099",
+    );
+    put(
+        &a.root,
+        "Bell Ranch Inc (2002)/Payroll/2025/941 Q2.pdf",
+        "b q2",
+    );
+    vf_fs::rebuild::rebuild(&mut a.conn, &a.root, "dev-a").unwrap();
+    vf_sync::push::push(&mut a.conn, &a.root, &a.sync, None).unwrap();
+
+    // Another computer files one for Anderson and pushes Anderson alone.
+    put(
+        &b.root,
+        "Anderson Farms LLC (1042)/Income Tax/2025/K-1 B.pdf",
+        "b k1",
+    );
+    vf_fs::rebuild::rebuild(&mut b.conn, &b.root, "dev-b").unwrap();
+    let anderson: String = b
+        .conn
+        .query_row("SELECT id FROM client WHERE ext_id = '1042'", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    let r = vf_sync::push::push_client(&mut b.conn, &b.root, &b.sync, &anderson, &[]).unwrap();
+    assert_eq!(r.documents, 4, "Anderson's segment: {r:?}");
+    assert_eq!(r.pulled.as_ref().map(|p| p.new), Some(1), "{r:?}");
+    assert!(
+        b.root
+            .join("Anderson Farms LLC (1042)/Income Tax/2025/1099 A.pdf")
+            .is_file()
+    );
+    assert!(
+        !b.root
+            .join("Bell Ranch Inc (2002)/Payroll/2025/941 Q2.pdf")
+            .exists(),
+        "another client's change waits for a full pull"
+    );
+    assert_eq!(vf_sync::catalog::last_rev(&b.conn, "dev-b").unwrap(), seen);
+    assert!(
+        !vf_sync::catalog::pending(&b.conn)
+            .unwrap()
+            .contains_key(&anderson)
+    );
+
+    // The main computer takes it in; a full pull there brings the rest.
+    vf_sync::pull::pull(&mut a.conn, &a.root, &a.sync).unwrap();
+    assert!(
+        a.root
+            .join("Anderson Farms LLC (1042)/Income Tax/2025/K-1 B.pdf")
+            .is_file()
+    );
+    vf_sync::pull::pull(&mut b.conn, &b.root, &b.sync).unwrap();
+    assert!(
+        b.root
+            .join("Bell Ranch Inc (2002)/Payroll/2025/941 Q2.pdf")
+            .is_file()
+    );
+    assert_eq!(snapshot(&a.root), snapshot(&b.root));
+}
+
+/// PA-41 on the real layout: two catalogs over ONE cabinet folder (several servers). The
+/// second started from a copy of the main one's catalog that is now old (a seed), or was built
+/// from the folder on its own; the main one pushed since. A client pushed from the second
+/// changes nothing in the folder (no conflict copies, no older content put back), and the main
+/// one's next pull, before it has read the folder again, adds nothing either.
+fn second_server_push(seeded: bool) {
+    let t = tempfile::tempdir().unwrap();
+    let store = Remote::memory();
+    let mut a = pc_a(t.path(), store.clone());
+    vf_sync::push::push(&mut a.conn, &a.root, &a.sync, None).unwrap();
+    let b_dir = t.path().join("server-b");
+    std::fs::create_dir_all(&b_dir).unwrap();
+    if seeded {
+        a.conn
+            .execute(
+                "VACUUM INTO ?1",
+                [b_dir.join("catalog.db").display().to_string()],
+            )
+            .unwrap();
+    }
+    let mut b_conn = catalog(&b_dir);
+    if !seeded {
+        vf_fs::rebuild::rebuild(&mut b_conn, &a.root, "dev-b").unwrap();
+    }
+    let b_sync = Sync::unlock(&a.root, store.clone(), PASS, "dev-b", "SERVER-2").unwrap();
+
+    // Since: the W-2 edited and pushed by A, then edited again (not pushed yet); a 1099 filed
+    // and pushed by A, then edited; the EIN letter edited; a K-1 filed (on B, say).
+    let w2 = "Anderson Farms LLC (1042)/Income Tax/2025/W-2 Northwind.pdf";
+    let f1099 = "Anderson Farms LLC (1042)/Income Tax/2025/1099 A.pdf";
+    put(&a.root, w2, "w2 v2");
+    put(&a.root, f1099, "1099 v1");
+    vf_fs::rebuild::rebuild(&mut a.conn, &a.root, "dev-a").unwrap();
+    vf_sync::push::push(&mut a.conn, &a.root, &a.sync, None).unwrap();
+    put(&a.root, w2, "w2 v3");
+    put(&a.root, f1099, "1099 v2");
+    put(
+        &a.root,
+        "Anderson Farms LLC (1042)/Permanent/Setup/EIN letter.pdf",
+        "ein v2",
+    );
+    put(
+        &a.root,
+        "Anderson Farms LLC (1042)/Income Tax/2025/K-1 new.pdf",
+        "k1 new",
+    );
+    let before = snapshot(&a.root);
+
+    // B reads the folder (what the change logs make it do), then pushes Anderson alone.
+    vf_fs::rebuild::rebuild(&mut b_conn, &a.root, "dev-b").unwrap();
+    let anderson: String = b_conn
+        .query_row("SELECT id FROM client WHERE ext_id = '1042'", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    let r = vf_sync::push::push_client(
+        &mut b_conn,
+        &a.root,
+        &b_sync,
+        &anderson,
+        &["OFFICE-PC".into()],
+    )
+    .unwrap();
+    assert_eq!(
+        r.pulled.as_ref().map(|p| p.conflicts).unwrap_or(0),
+        0,
+        "{r:?}"
+    );
+    assert_eq!(snapshot(&a.root), before, "the folder is as it was");
+    assert!(
+        !vf_sync::catalog::pending(&b_conn)
+            .unwrap()
+            .contains_key(&anderson)
+    );
+
+    // A pulls before reading the folder again: nothing written, nothing doubled.
+    let pulled = vf_sync::pull::pull(&mut a.conn, &a.root, &a.sync).unwrap();
+    assert_eq!(pulled.conflicts, 0, "{pulled:?}");
+    assert_eq!(snapshot(&a.root), before, "the folder is as it was");
+    let docs: i64 = a
+        .conn
+        .query_row(
+            "SELECT count(*) FROM document WHERE deleted_at IS NULL",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    // W-2, EIN, 941, 1099, K-1.
+    assert_eq!(docs, 5);
+    // Then its own full push: still nothing to change.
+    vf_fs::rebuild::rebuild(&mut a.conn, &a.root, "dev-a").unwrap();
+    let pushed = vf_sync::push::push(&mut a.conn, &a.root, &a.sync, None).unwrap();
+    assert_eq!(pushed.pulled.map(|p| p.conflicts).unwrap_or(0), 0);
+    assert_eq!(snapshot(&a.root), before);
+    // What the bucket holds is the folder: a bare PC restores the same files.
+    let c = restored(t.path(), store, &a.sync.cabinet_id, "bare");
+    drop(c);
+    let bare = t.path().join("bare").join("Clients");
+    let mut want = before.clone();
+    want.retain(|k, _| !k.starts_with("versions/"));
+    let mut got = snapshot(&bare);
+    got.retain(|k, _| !k.starts_with("versions/"));
+    assert_eq!(got, want);
+}
+
+#[test]
+fn a_client_pushed_from_a_seeded_second_server_leaves_the_shared_folder_alone() {
+    second_server_push(true);
+}
+
+#[test]
+fn a_client_pushed_from_a_second_server_indexed_alone_leaves_the_shared_folder_alone() {
+    second_server_push(false);
+}

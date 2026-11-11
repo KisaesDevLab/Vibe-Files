@@ -215,16 +215,31 @@ impl SyncTab {
             return;
         }
         self.error = None;
-        // Several servers (PA-36): B2 sync runs on the main server only.
-        if matches!(op, Op::Push(_) | Op::Pull) && !crate::server::runs_here(root) {
+        // Several servers (PA-36): the whole cabinet syncs on the main computer only. Any
+        // other computer may push one client (PA-41), bringing in that client's changes only.
+        let main_here = crate::server::runs_here(root);
+        // A cloud cabinet: each PC has its own copy of the folder, synced late perhaps, so a
+        // client is not pushed from one that is not the main PC.
+        let cloud = !crate::server::server_mode() && crate::cloudmode::is_cloud(root);
+        if !main_here && cloud && matches!(op, Op::Push(_) | Op::Pull) {
             self.error = Some(format!(
                 "B2 sync runs on {} for this cabinet (Admin › Devices).",
                 crate::server::main_server(root)
                     .map(|m| m.computer)
-                    .unwrap_or_else(|| "another server".into())
+                    .unwrap_or_else(|| "a main PC not chosen yet".into())
             ));
             return;
         }
+        if matches!(op, Op::Push(None) | Op::Pull) && !main_here {
+            self.error = Some(format!(
+                "The whole cabinet syncs on {} (Admin › Devices). From here, push one client: Push this client now in Browse, or Push beside it below.",
+                crate::server::main_server(root)
+                    .map(|m| m.computer)
+                    .unwrap_or_else(|| "another computer".into())
+            ));
+            return;
+        }
+        let alone = !main_here;
         self.running_for = match &op {
             Op::Push(c) => Some(c.clone().unwrap_or_default()),
             Op::Pull => Some(String::new()),
@@ -243,7 +258,7 @@ impl SyncTab {
         std::thread::Builder::new()
             .name("b2-sync".into())
             .spawn(move || {
-                let r = run(&catalog, &root, &s, op);
+                let r = run(&catalog, &root, &s, op, alone);
                 let _ = tx.send(r);
                 ctx.request_repaint();
             })
@@ -711,7 +726,9 @@ pub(crate) fn sync_lock(catalog: &Path) -> Result<std::fs::File, String> {
         })
 }
 
-fn run(catalog: &Path, root: &Path, s: &Sync, op: Op) -> Result<Done, String> {
+/// `alone`: this computer is not the cabinet's main one, so a client push brings in and sends
+/// that client only (PA-41).
+fn run(catalog: &Path, root: &Path, s: &Sync, op: Op, alone: bool) -> Result<Done, String> {
     let e = |e: vf_sync::SyncError| e.to_string();
     let _one_at_a_time = match op {
         Op::Push(_) | Op::Pull => Some(sync_lock(catalog)?),
@@ -732,8 +749,20 @@ fn run(catalog: &Path, root: &Path, s: &Sync, op: Op) -> Result<Done, String> {
             let _ = std::fs::remove_file(&tmp);
             r.map(|r| Done::Restored(r, dest)).map_err(e)
         }
+        Op::Push(Some(client)) if alone => {
+            let mut conn = caught_up(catalog, root, s, alone)?;
+            // The computers working in this same folder (a server's share): a segment one of
+            // them sent is taken as it is, nothing written into the folder (PA-41).
+            let same_folder: Vec<String> = vf_fs::safeguards::devices(root)
+                .into_iter()
+                .map(|d| d.name)
+                .collect();
+            vf_sync::push::push_client(&mut conn, root, s, &client, &same_folder)
+                .map(Done::Push)
+                .map_err(e)
+        }
         Op::Push(only) => {
-            let mut conn = vf_core::db::open(catalog, Storage::Local).map_err(|e| e.to_string())?;
+            let mut conn = caught_up(catalog, root, s, alone)?;
             let r = vf_sync::push::push(&mut conn, root, s, only.as_deref()).map_err(e)?;
             // The whole cabinet went up: every computer's startup check sees when (PA-40).
             if only.is_none() {
@@ -742,12 +771,29 @@ fn run(catalog: &Path, root: &Path, s: &Sync, op: Op) -> Result<Done, String> {
             Ok(Done::Push(r))
         }
         Op::Pull => {
-            let mut conn = vf_core::db::open(catalog, Storage::Local).map_err(|e| e.to_string())?;
+            let mut conn = caught_up(catalog, root, s, alone)?;
             vf_sync::pull::pull(&mut conn, root, s)
                 .map(Done::Pull)
                 .map_err(e)
         }
     }
+}
+
+/// The catalog, with the other computers' changes to the cabinet read first on several servers
+/// or a cloud cabinet (their change logs): a push sends the folder as it is, and a pull finds
+/// a file another computer filed here and sent as already here (PA-41).
+fn caught_up(
+    catalog: &Path,
+    root: &Path,
+    s: &Sync,
+    alone: bool,
+) -> Result<vf_core::db::Connection, String> {
+    let mut conn = vf_core::db::open(catalog, Storage::Local).map_err(|e| e.to_string())?;
+    if alone || crate::server::server_mode() || crate::cloudmode::is_cloud(root) {
+        let writer = crate::server::writer_id(&conn);
+        vf_fs::changes::catch_up(&mut conn, root, &writer, &s.device_id)?;
+    }
+    Ok(conn)
 }
 
 fn tempfile_catalog(catalog: &Path) -> Result<PathBuf, String> {
@@ -1229,6 +1275,96 @@ fn settings_section(ui: &mut egui::Ui, t: &mut SyncTab, v: &View<'_>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// PA-41: a computer that is not the main one pushes one client: what another server
+    /// filed there (its change log) is read first and goes up; the other client stays pending.
+    #[test]
+    fn a_client_pushed_off_the_main_computer_takes_other_servers_filings() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("Clients");
+        let data = tmp.path().join("pc1");
+        let mut o = crate::session::create(
+            &data,
+            "dev-1",
+            &crate::session::CreateRequest {
+                root: &root,
+                name: "Firm",
+            },
+        )
+        .unwrap();
+        for (id, name) in [("1042", "Anderson Farms LLC"), ("2002", "Bell Ranch Inc")] {
+            let p = vf_fs::newclient::plan(
+                &o.conn,
+                &root,
+                &vf_fs::newclient::NewClient {
+                    ext_id: id.into(),
+                    name: name.into(),
+                    entity_type: None,
+                },
+            )
+            .unwrap();
+            vf_fs::newclient::create(&mut o.conn, &root, &p, "dev-1").unwrap();
+        }
+        let put = |rel: &str, body: &str| {
+            let p = root.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, body).unwrap();
+            p
+        };
+        put(
+            "Anderson Farms LLC (1042)/Income Tax/2025/w2.pdf",
+            "invented w2",
+        );
+        put("Bell Ranch Inc (2002)/Payroll/2025/941.pdf", "invented 941");
+        vf_fs::rebuild::rebuild(&mut o.conn, &root, "dev-1").unwrap();
+        let w = crate::server::writer_id(&o.conn);
+        vf_fs::changes::mark_start(&o.conn, &root, &w).unwrap();
+        let anderson: String = o
+            .conn
+            .query_row("SELECT id FROM client WHERE ext_id = '1042'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        let catalog = o.catalog.clone();
+        drop(o);
+        // Another server files a K-1 for Anderson.
+        let k1 = put(
+            "Anderson Farms LLC (1042)/Income Tax/2025/k1.pdf",
+            "invented k1",
+        );
+        vf_fs::changes::set_writer(&root, "server-b-1234");
+        vf_fs::changes::note_paths([k1.as_path()]);
+        vf_fs::changes::clear_writer();
+
+        let cab = vf_fs::cabinet::read(&root).unwrap();
+        let remote = vf_sync::Remote::new(vf_sync::Remote::memory(), &cab.cabinet_id);
+        let keys = vf_sync::setup::init(
+            &root,
+            &remote,
+            "correct horse battery staple",
+            vf_sync::setup::DEFAULT_KDF,
+        )
+        .unwrap();
+        let s = Sync {
+            remote,
+            keys,
+            cabinet_id: cab.cabinet_id.clone(),
+            device_id: "dev-1".into(),
+            device_name: "SERVER-2".into(),
+        };
+        let Done::Push(r) =
+            run(&catalog, &root, &s, Op::Push(Some(anderson.clone())), true).unwrap()
+        else {
+            panic!("a push")
+        };
+        assert_eq!(r.documents, 2, "{r:?}");
+        let conn = vf_core::db::open(&catalog, Storage::Local).unwrap();
+        let pending = vf_sync::catalog::pending(&conn).unwrap();
+        assert!(!pending.contains_key(&anderson));
+        assert_eq!(pending.len(), 1, "Bell Ranch still waits: {pending:?}");
+        // One client is not the whole cabinet: no B2 backup time recorded.
+        assert!(crate::lastpush::read(&root).is_none());
+    }
 
     /// PA-40: on a server each login keeps its key in a folder of its own beside the shared
     /// catalog; a key this login left beside the catalog earlier still opens sync, and

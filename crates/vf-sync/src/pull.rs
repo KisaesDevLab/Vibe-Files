@@ -74,17 +74,7 @@ pub fn pull(conn: &mut Connection, root: &Path, s: &Sync) -> Result<PullReport> 
         crate::push::write_device(s, head.rev)?;
     }
     if rep.segments > 0 {
-        Transaction::new(LABEL)
-            .audit(AuditEntry::new(
-                LABEL,
-                None,
-                json!({
-                    "segments": rep.segments, "new": rep.new, "updated": rep.updated,
-                    "moved": rep.moved, "meta": rep.meta, "deleted": rep.deleted,
-                    "conflicts": rep.conflicts, "deferred": rep.deferred, "rev": rep.head_rev,
-                }),
-            ))
-            .commit(conn, &mut NoFileOps, &Actor::device(&s.device_id))?;
+        audit_pull(conn, s, &rep)?;
         tracing::info!(
             segments = rep.segments,
             changed = rep.changed(),
@@ -120,34 +110,158 @@ pub(crate) fn apply_head(
         rep.segments += 1;
     }
     for (client, rev) in &head.segments {
-        if *rev == catalog::segment_rev(conn, client)? {
-            continue;
-        }
+        apply_client_segment(conn, root, s, head, client, *rev, rep)?;
+    }
+    Ok(())
+}
+
+/// Brings in one client's segment of `head` only, when it differs from what this computer
+/// applied (a push of that client from a computer that does not run the cabinet's sync,
+/// PA-41). The cabinet's segment and the other clients' are left for a full pull.
+///
+/// `same_folder`: the computers that work in this very cabinet folder (several servers on one
+/// share). A segment one of them wrote was sent from this folder, after its writer had applied
+/// everything before it: its files are here already, edited since perhaps. It is taken as the
+/// last exchange without writing a file ([`adopt_client_segment`]), so the folder as it is now
+/// goes up. A three-way apply would take an edit made here since as a change on both sides
+/// (this catalog's last exchange can be a week old, a seed copy) and leave conflict copies in
+/// the shared folder.
+pub(crate) fn apply_client(
+    conn: &mut Connection,
+    root: &Path,
+    s: &Sync,
+    head: &Head,
+    client: &str,
+    same_folder: &[String],
+    rep: &mut PullReport,
+) -> Result<()> {
+    if let Some(rev) = head.segments.get(client)
+        && *rev != catalog::segment_rev(conn, client)?
+    {
         let key = head.client_key(client, *rev);
         let seg: ClientSegment = s
             .get_json(&key)?
             .ok_or_else(|| SyncError::Format(format!("{key} is missing")))?;
-        if seg.client_id != *client {
+        if seg.client_id != client {
             return Err(SyncError::Format(format!("{key}: names another client")));
         }
         seg.check()
             .map_err(|what| SyncError::Format(format!("{key}: refused {what}")))?;
-        let folder = ensure_folder(conn, root, s, &seg)?;
-        prefetch(conn, s, root, &seg.documents);
-        let deferred = apply_docs(conn, root, s, Some(client), &folder, &seg.documents, rep);
-        drop_prefetched();
-        let deferred = deferred?;
-        if !deferred {
-            let sh = vf_core::db::OptionalExtension::optional(conn.query_row(
-                "SELECT sentinel_hash FROM client WHERE id = ?1",
-                [client],
-                |r| r.get::<_, Option<String>>(0),
-            ))?
-            .flatten();
-            catalog::set_segment(conn, client, *rev, Some(&folder), sh.as_deref(), None)?;
+        let here = same_folder
+            .iter()
+            .any(|c| !seg.written_by.is_empty() && c.eq_ignore_ascii_case(&seg.written_by));
+        if here {
+            adopt_client_segment(conn, &seg)?;
+            rep.segments += 1;
+        } else {
+            apply_client_segment(conn, root, s, head, client, *rev, rep)?;
         }
-        rep.segments += 1;
     }
+    if rep.segments > 0 {
+        audit_pull(conn, s, rep)?;
+    }
+    Ok(())
+}
+
+fn apply_client_segment(
+    conn: &mut Connection,
+    root: &Path,
+    s: &Sync,
+    head: &Head,
+    client: &str,
+    rev: u64,
+    rep: &mut PullReport,
+) -> Result<()> {
+    if rev == catalog::segment_rev(conn, client)? {
+        return Ok(());
+    }
+    let key = head.client_key(client, rev);
+    let seg: ClientSegment = s
+        .get_json(&key)?
+        .ok_or_else(|| SyncError::Format(format!("{key} is missing")))?;
+    if seg.client_id != client {
+        return Err(SyncError::Format(format!("{key}: names another client")));
+    }
+    seg.check()
+        .map_err(|what| SyncError::Format(format!("{key}: refused {what}")))?;
+    let folder = ensure_folder(conn, root, s, &seg)?;
+    prefetch(conn, s, root, &seg.documents);
+    let deferred = apply_docs(conn, root, s, Some(client), &folder, &seg.documents, rep);
+    drop_prefetched();
+    let deferred = deferred?;
+    if !deferred {
+        let sh = vf_core::db::OptionalExtension::optional(conn.query_row(
+            "SELECT sentinel_hash FROM client WHERE id = ?1",
+            [client],
+            |r| r.get::<_, Option<String>>(0),
+        ))?
+        .flatten();
+        catalog::set_segment(conn, client, rev, Some(&folder), sh.as_deref(), None)?;
+    }
+    rep.segments += 1;
+    Ok(())
+}
+
+/// Takes `seg`, written from this same cabinet folder, as this catalog's last exchange for its
+/// client: each document's base becomes the segment's entry, and a document this catalog knows
+/// at the same path under another id (indexed here on its own) takes the bucket's id. No file
+/// is written or moved; what differs here is a change here, sent by the push that follows.
+fn adopt_client_segment(conn: &mut Connection, seg: &ClientSegment) -> Result<()> {
+    let client = seg.client_id.as_str();
+    let folder = catalog::client_folder(conn, client)?.unwrap_or_else(|| seg.folder_rel.clone());
+    for e in &seg.documents {
+        let want = join(&folder, &e.rel_path);
+        if catalog::doc(conn, &e.doc_id)?.is_none() {
+            let other: Option<String> = conn
+                .query_row(
+                    "SELECT id FROM document WHERE rel_path = ?1 AND deleted_at IS NULL",
+                    [&want],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            match other {
+                // Never sent under its own id: the same file, edited here perhaps.
+                Some(id) if catalog::base(conn, &id)?.is_none() => {
+                    catalog::rekey(conn, &id, &e.doc_id)?
+                }
+                // Not here (moved or deleted in this folder since): nothing to take.
+                _ => continue,
+            }
+        }
+        catalog::set_base_values(
+            conn,
+            &e.doc_id,
+            Some(client),
+            &want,
+            &e.hash,
+            e.rev,
+            e.deleted_at.is_some(),
+        )?;
+    }
+    let sh = sha256(seg.sentinel.as_bytes());
+    catalog::set_segment(
+        conn,
+        client,
+        seg.segment_rev,
+        Some(&folder),
+        Some(&sh),
+        None,
+    )?;
+    Ok(())
+}
+
+fn audit_pull(conn: &mut Connection, s: &Sync, rep: &PullReport) -> Result<()> {
+    Transaction::new(LABEL)
+        .audit(AuditEntry::new(
+            LABEL,
+            None,
+            json!({
+                "segments": rep.segments, "new": rep.new, "updated": rep.updated,
+                "moved": rep.moved, "meta": rep.meta, "deleted": rep.deleted,
+                "conflicts": rep.conflicts, "deferred": rep.deferred, "rev": rep.head_rev,
+            }),
+        ))
+        .commit(conn, &mut NoFileOps, &Actor::device(&s.device_id))?;
     Ok(())
 }
 
@@ -632,38 +746,50 @@ fn insert_new(
     folder: &str,
     e: &DocEntry,
 ) -> Result<String> {
-    let tmp = fetch(s, root, &e.object, &e.hash)?;
-    let dst = filer_intake::commit::free_path(&root.join(join(folder, &e.rel_path)));
+    // Already in the folder with this content, not yet in this catalog: another computer
+    // working in the same folder filed it and sent it (PA-41). Taken as it is: a download
+    // beside it would be a second copy, ` (2)`.
+    let here = root.join(join(folder, &e.rel_path));
+    let there =
+        here.is_file() && filer_intake::commit::sha256_file(&here).is_ok_and(|h| h == e.hash);
+    let (tmp, dst) = if there {
+        (None, here)
+    } else {
+        let tmp = fetch(s, root, &e.object, &e.hash)?;
+        (Some(tmp), filer_intake::commit::free_path(&here))
+    };
     let rel = vf_fs::rebuild::rel(root, &dst);
     let m = meta_of(conn, e, &rel, folder);
     let (file, line) = docmeta::record_line(root, &m, &vf_core::now_rfc3339(), &s.device_id);
     let now = vf_core::now_rfc3339();
-    let mut tx = Transaction::new(LABEL)
-        .file(FileOp::Move {
-            src: tmp.clone(),
+    let mut tx = Transaction::new(LABEL);
+    if let Some(src) = &tmp {
+        tx = tx.file(FileOp::Move {
+            src: src.clone(),
             dst,
-        })
-        .catalog(Stmt::new(
-            "INSERT INTO document (id, client_id, doc_type_id, tax_year, rel_path, hash, size, mime,
+        });
+    }
+    let mut tx = tx.catalog(Stmt::new(
+        "INSERT INTO document (id, client_id, doc_type_id, tax_year, rel_path, hash, size, mime,
                source, status, filed_by, filed_at, device_id, updated_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
-            vec![
-                e.doc_id.clone().into(),
-                client.map(str::to_owned).into(),
-                known_type(conn, &e.doc_type_id).into(),
-                e.tax_year.into(),
-                rel.clone().into(),
-                e.hash.clone().into(),
-                e.size.into(),
-                e.mime.clone().into(),
-                e.source.clone().into(),
-                e.status.clone().into(),
-                e.filed_by.clone().into(),
-                e.filed_at.clone().into(),
-                e.device_id.clone().into(),
-                now.into(),
-            ],
-        ));
+        vec![
+            e.doc_id.clone().into(),
+            client.map(str::to_owned).into(),
+            known_type(conn, &e.doc_type_id).into(),
+            e.tax_year.into(),
+            rel.clone().into(),
+            e.hash.clone().into(),
+            e.size.into(),
+            e.mime.clone().into(),
+            e.source.clone().into(),
+            e.status.clone().into(),
+            e.filed_by.clone().into(),
+            e.filed_at.clone().into(),
+            e.device_id.clone().into(),
+            now.into(),
+        ],
+    ));
     for t in &e.tags {
         tx = tx.catalog(Stmt::new(
             "INSERT INTO document_tag (doc_id, tag) VALUES (?1, ?2)",
@@ -678,7 +804,9 @@ fn insert_new(
         })
         .audit(AuditEntry::new(LABEL, Some(&e.doc_id), json!({ "new": 1 })));
     if let Err(err) = vf_fs::fileops::commit(conn, root, tx, &s.device_id) {
-        let _ = std::fs::remove_file(&tmp);
+        if let Some(t) = &tmp {
+            let _ = std::fs::remove_file(t);
+        }
         return Err(err.into());
     }
     Ok(rel)
