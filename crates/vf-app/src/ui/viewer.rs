@@ -113,6 +113,15 @@ struct Typing {
     text: String,
 }
 
+/// An unsaved annotation picked up by a drag.
+struct Moving {
+    /// Index in `Viewer::pending`.
+    index: usize,
+    page: usize,
+    /// The pointer's last place (user space).
+    last: [f32; 2],
+}
+
 struct Drag {
     page: usize,
     /// Display points.
@@ -178,6 +187,13 @@ pub struct Viewer {
     /// Tickmark color, an index into `annot::TICK_COLORS` (green first); the app keeps it in
     /// this PC's settings.
     pub tick_color: usize,
+    /// Tickmark size, an index into [`TICK_SIZES`]; the app keeps it in this PC's settings.
+    pub tick_size: usize,
+    /// An unsaved annotation being dragged to a new place.
+    moving: Option<Moving>,
+    /// Pages last drawn (page, screen rect, scale, geometry), for UI tests to point at.
+    #[cfg(test)]
+    pub drawn_pages: Vec<(usize, Rect, f32, Geometry)>,
     /// The "Signed" box while it is edited.
     signed_buf: Option<String>,
     /// New initials typed in the "Signed" box, for the app to save in this PC's settings.
@@ -324,6 +340,10 @@ impl Default for Viewer {
             tool: Tool::Select,
             color: 0,
             tick_color: 0,
+            tick_size: TICK_SIZE_DEFAULT,
+            moving: None,
+            #[cfg(test)]
+            drawn_pages: Vec::new(),
             signed_buf: None,
             signed: None,
             panel: Panel::Annotate,
@@ -1894,6 +1914,11 @@ fn canvas(ui: &mut egui::Ui, v: &mut Viewer, initials: &str) {
             }
             let geom = v.info.as_ref().and_then(|inf| inf.geoms.get(i).copied());
             if let (Some(g), true) = (geom, editable) {
+                #[cfg(test)]
+                {
+                    v.drawn_pages.retain(|d| d.0 != i);
+                    v.drawn_pages.push((i, rect, s, g));
+                }
                 draw_pending(ui, v, i, rect, s, &g);
                 if v.tape.open {
                     draw_tape_marks(ui, v, i, rect, s, &g);
@@ -1924,7 +1949,7 @@ fn canvas(ui: &mut egui::Ui, v: &mut Viewer, initials: &str) {
 }
 
 /// Screen point of user-space point `p` on page rect `rect`.
-fn screen(rect: Rect, s: f32, g: &Geometry, p: [f32; 2]) -> Pos2 {
+pub(crate) fn screen(rect: Rect, s: f32, g: &Geometry, p: [f32; 2]) -> Pos2 {
     let [u, v] = g.to_display(p[0], p[1]);
     rect.min + vec2(u * s, v * s)
 }
@@ -1944,8 +1969,78 @@ fn color32(c: annot::Rgb) -> Color32 {
     )
 }
 
+/// Where an unsaved annotation is on the screen, as [`draw_pending`] draws it; `None` for text
+/// markup (it stays on its words and is not moved).
+fn pending_screen_rect(a: &Annotation, rect: Rect, s: f32, g: &Geometry) -> Option<Rect> {
+    let centred = |at: &[f32; 2], w: f32, h: f32| {
+        Rect::from_center_size(screen(rect, s, g, *at), vec2(w * s, h * s))
+    };
+    Some(match &a.kind {
+        Kind::Highlight(_) | Kind::Underline(_) | Kind::StrikeOut(_) => return None,
+        Kind::Note { at, .. } => {
+            user_rect_to_screen(rect, s, g, [at[0], at[1] - 20.0, at[0] + 20.0, at[1]])
+        }
+        Kind::TextBox { rect: r, .. } => user_rect_to_screen(rect, s, g, *r),
+        Kind::Ink(strokes) => {
+            let pts: Vec<Pos2> = strokes
+                .iter()
+                .flatten()
+                .map(|q| screen(rect, s, g, *q))
+                .collect();
+            Rect::from_points(&pts).expand(4.0)
+        }
+        Kind::Arrow { from, to } => {
+            Rect::from_two_pos(screen(rect, s, g, *from), screen(rect, s, g, *to)).expand(6.0)
+        }
+        Kind::Tickmark { at, size, .. } => centred(at, *size, *size),
+        Kind::Tape {
+            at,
+            title,
+            rows,
+            footer,
+            labels,
+            ..
+        } => {
+            let (w, h) =
+                annot::tape_size(rows.len(), *labels, !title.is_empty(), !footer.is_empty());
+            centred(at, w, h)
+        }
+        Kind::Stamp { text, at, size } => {
+            let (w, h) = annot::stamp_size(text, *size);
+            centred(at, w, h)
+        }
+    })
+}
+
+/// The unsaved annotation under screen point `p` on `page` (the one drawn last wins).
+fn pending_at(v: &Viewer, page: usize, rect: Rect, s: f32, g: &Geometry, p: Pos2) -> Option<usize> {
+    v.pending
+        .iter()
+        .enumerate()
+        .rev()
+        .filter(|(_, a)| a.page as usize == page)
+        .find(|(_, a)| {
+            pending_screen_rect(a, rect, s, g).is_some_and(|r| r.expand(2.0).contains(p))
+        })
+        .map(|(i, _)| i)
+}
+
 fn draw_pending(ui: &egui::Ui, v: &Viewer, page: usize, rect: Rect, s: f32, g: &Geometry) {
     let p = ui.painter();
+    // The annotation being moved is outlined.
+    if let Some(m) = v.moving.as_ref().filter(|m| m.page == page)
+        && let Some(r) = v
+            .pending
+            .get(m.index)
+            .and_then(|a| pending_screen_rect(a, rect, s, g))
+    {
+        p.rect_stroke(
+            r.expand(2.0),
+            2.0,
+            Stroke::new(1.0, theme::accent()),
+            egui::StrokeKind::Outside,
+        );
+    }
     for a in v.pending.iter().filter(|a| a.page as usize == page) {
         let c = color32(a.color);
         let stroke = Stroke::new(1.5, c);
@@ -2223,6 +2318,42 @@ fn interact(
     ) {
         v.request_words(page);
     }
+    // An unsaved annotation (not a highlight, underline or strike-out) is moved by dragging it,
+    // whatever the tool (owner 2026-11-11).
+    if v.moving.is_none()
+        && v.drag.is_none()
+        && resp
+            .hover_pos()
+            .is_some_and(|p| pending_at(v, page, rect, s, g, p).is_some())
+    {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
+    }
+    if resp.drag_started()
+        && let Some(o) = ui.input(|i| i.pointer.press_origin())
+        && let Some(index) = pending_at(v, page, rect, s, g, o)
+    {
+        v.moving = Some(Moving {
+            index,
+            page,
+            last: to_user(to_display(o)),
+        });
+    }
+    if let Some(m) = v.moving.as_mut().filter(|m| m.page == page) {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+        if resp.dragged()
+            && let Some(pos) = resp.interact_pointer_pos()
+        {
+            let now = to_user(to_display(pos));
+            if let Some(a) = v.pending.get_mut(m.index) {
+                a.kind.shift(now[0] - m.last[0], now[1] - m.last[1]);
+            }
+            m.last = now;
+        }
+        if resp.drag_stopped() || !resp.dragged() {
+            v.moving = None;
+        }
+        return;
+    }
     let color = COLORS[v.color].1;
     let author = initials.to_string();
     if resp.clicked()
@@ -2243,7 +2374,7 @@ fn interact(
                 kind: Kind::Tickmark {
                     tick,
                     at,
-                    size: 28.0,
+                    size: TICK_SIZES[v.tick_size.min(TICK_SIZES.len() - 1)].1,
                 },
                 color: annot::TICK_COLORS[v.tick_color.min(annot::TICK_COLORS.len() - 1)].1,
                 author,
@@ -2414,6 +2545,17 @@ fn tool_panel(ui: &mut egui::Ui, v: &mut Viewer, env: &mut Env<'_>) {
                 .on_hover_text("Fill in the document's form fields, on the page or in a list.");
             });
             ui.separator();
+            // The tools scroll when the window is shorter than they are (owner 2026-11-11).
+            egui::ScrollArea::vertical()
+                .id_salt("vf-viewer-tools-scroll")
+                .auto_shrink(false)
+                .show(ui, |ui| tool_panel_body(ui, v, env));
+        });
+}
+
+fn tool_panel_body(ui: &mut egui::Ui, v: &mut Viewer, env: &mut Env<'_>) {
+    {
+        {
             match v.panel {
                 Panel::Annotate => annotate_panel(ui, v, env),
                 Panel::Stamps => stamps_panel(ui, v, env),
@@ -2440,6 +2582,7 @@ fn tool_panel(ui: &mut egui::Ui, v: &mut Viewer, env: &mut Env<'_>) {
                 ui.separator();
                 ui.label(RichText::new(format!("Unsaved ({})", v.pending.len())).strong());
                 let mut remove = None;
+                let mut resize = None;
                 for (i, a) in v.pending.iter().enumerate() {
                     ui.horizontal(|ui| {
                         ui.label(widgets::caption(format!(
@@ -2447,19 +2590,45 @@ fn tool_panel(ui: &mut egui::Ui, v: &mut Viewer, env: &mut Env<'_>) {
                             a.page + 1,
                             describe(&a.kind)
                         )));
+                        // A tickmark already placed: one size smaller or larger.
+                        if let Kind::Tickmark { size, .. } = a.kind {
+                            for (label, up, hint) in
+                                [("-", false, "Smaller"), ("+", true, "Larger")]
+                            {
+                                let next = tick_size_step(size, up);
+                                if ui
+                                    .add_enabled(next.is_some(), egui::Button::new(label).small())
+                                    .on_hover_text(hint)
+                                    .clicked()
+                                {
+                                    resize = next.map(|n| (i, n));
+                                }
+                            }
+                        }
                         if ui.small_button("Remove").clicked() {
                             remove = Some(i);
                         }
                     });
                 }
+                if let Some((i, n)) = resize
+                    && let Some(Annotation {
+                        kind: Kind::Tickmark { size, .. },
+                        ..
+                    }) = v.pending.get_mut(i)
+                {
+                    *size = n;
+                }
                 if let Some(i) = remove {
+                    v.moving = None;
                     v.pending.remove(i);
                 }
                 if ui.small_button("Discard all").clicked() {
+                    v.moving = None;
                     v.pending.clear();
                 }
             }
-        });
+        }
+    }
 }
 
 fn describe(k: &Kind) -> String {
@@ -2471,7 +2640,9 @@ fn describe(k: &Kind) -> String {
         Kind::TextBox { text, .. } => format!("text: {text}"),
         Kind::Ink(_) => "freehand".into(),
         Kind::Arrow { .. } => "arrow".into(),
-        Kind::Tickmark { tick, .. } => format!("tickmark: {}", tick.meaning()),
+        Kind::Tickmark { tick, size, .. } => {
+            format!("tickmark: {}, {size:.0} pt", tick.meaning())
+        }
         Kind::Stamp { text, .. } => format!("stamp: {text}"),
         Kind::Tape { title, rows, .. } => format!("tape: {title} ({} lines)", rows.len()),
     }
@@ -2500,10 +2671,17 @@ fn annotate_panel(ui: &mut egui::Ui, v: &mut Viewer, env: &Env<'_>) {
                     .char_limit(12),
             )
             .labelled_by(l.id);
+        let typed = buf.trim().to_string();
+        let login = crate::config::windows_user();
+        let valid = !typed.is_empty() && crate::config::initials_match_login(&typed, &login);
+        // Kept as it is typed, so a change is never lost by leaving the box some other way
+        // (another tab, closing the document) (owner 2026-11-11).
+        if r.changed() && valid && typed != env.initials {
+            v.error = None;
+            v.signed = Some(typed.clone());
+        }
         if r.lost_focus() {
-            let typed = buf.trim().to_string();
-            let login = crate::config::windows_user();
-            if !typed.is_empty() && !crate::config::initials_match_login(&typed, &login) {
+            if !typed.is_empty() && !valid {
                 // A sign-off starts with the user's own letter (owner 2026-11-04).
                 let letter = login
                     .chars()
@@ -2513,9 +2691,6 @@ fn annotate_panel(ui: &mut egui::Ui, v: &mut Viewer, env: &Env<'_>) {
                 v.error = Some(format!(
                     "Initials must start with {letter}, the first letter of your Windows login ({login}). Not changed."
                 ));
-            } else if !typed.is_empty() && typed != env.initials {
-                v.error = None;
-                v.signed = Some(typed);
             }
             v.signed_buf = None;
         } else if !r.has_focus() {
@@ -2562,8 +2737,15 @@ fn annotate_panel(ui: &mut egui::Ui, v: &mut Viewer, env: &Env<'_>) {
                 );
             }
         });
+    egui::ComboBox::new("vticksize", "Tickmark size")
+        .selected_text(tick_size_name(v.tick_size))
+        .show_ui(ui, |ui| {
+            for (i, (n, pt)) in TICK_SIZES.iter().enumerate() {
+                ui.selectable_value(&mut v.tick_size, i, format!("{n} ({pt:.0} pt)"));
+            }
+        });
     ui.label(widgets::caption(
-        "Stamped as real PDF annotations with author and date.",
+        "Stamped as real PDF annotations with author and date. Until saved, drag one to move it.",
     ));
 }
 
@@ -2705,6 +2887,45 @@ pub fn tick_color_index(name: Option<&str>) -> usize {
 /// The name of tickmark color `i`.
 pub fn tick_color_name(i: usize) -> &'static str {
     annot::TICK_COLORS[i.min(annot::TICK_COLORS.len() - 1)].0
+}
+
+/// Tickmark sizes offered: name, points across. Large (28 pt) is what every tickmark had before
+/// the choice existed.
+pub const TICK_SIZES: [(&str, f32); 5] = [
+    ("Extra small", 12.0),
+    ("Small", 16.0),
+    ("Medium", 22.0),
+    ("Large", 28.0),
+    ("Extra large", 36.0),
+];
+const TICK_SIZE_DEFAULT: usize = 3;
+
+/// The index in [`TICK_SIZES`] of a saved size name (Large when unknown).
+pub fn tick_size_index(name: Option<&str>) -> usize {
+    name.and_then(|n| {
+        TICK_SIZES
+            .iter()
+            .position(|(s, _)| s.eq_ignore_ascii_case(n))
+    })
+    .unwrap_or(TICK_SIZE_DEFAULT)
+}
+
+/// The name of tickmark size `i`.
+pub fn tick_size_name(i: usize) -> &'static str {
+    TICK_SIZES[i.min(TICK_SIZES.len() - 1)].0
+}
+
+/// The next size up (`up`) or down from `size` points, if there is one.
+fn tick_size_step(size: f32, up: bool) -> Option<f32> {
+    if up {
+        TICK_SIZES.iter().map(|t| t.1).find(|&x| x > size + 0.1)
+    } else {
+        TICK_SIZES
+            .iter()
+            .rev()
+            .map(|t| t.1)
+            .find(|&x| x < size - 0.1)
+    }
 }
 
 fn tick_name(t: Tick) -> &'static str {

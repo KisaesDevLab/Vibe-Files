@@ -277,6 +277,36 @@ fn capitalize(s: &str) -> String {
     }
 }
 
+/// Most clients listed under the relationship's client box.
+const MATCHES_SHOWN: usize = 8;
+
+/// Clients other than `this_id` whose name or ID contains every word typed (any case), as
+/// (name, ID); none while nothing is typed or the box already holds a client's exact ID.
+fn matching_clients(
+    clients: &[vf_core::browse::ClientRow],
+    this_id: &str,
+    typed: &str,
+) -> Vec<(String, String)> {
+    let typed = typed.trim();
+    if typed.is_empty() || clients.iter().any(|x| x.ext_id == typed) {
+        return Vec::new();
+    }
+    let words: Vec<String> = typed.split_whitespace().map(str::to_lowercase).collect();
+    let mut out: Vec<(String, String)> = clients
+        .iter()
+        .filter(|x| x.ext_id != this_id && !x.ext_id.is_empty())
+        .filter(|x| {
+            let hay = format!("{} {}", x.name, x.ext_id).to_lowercase();
+            words.iter().all(|w| hay.contains(w.as_str()))
+        })
+        .map(|x| (x.name.clone(), x.ext_id.clone()))
+        .collect();
+    out.sort_by_key(|(n, _)| n.to_lowercase());
+    out.dedup_by(|a, b| a.1 == b.1);
+    out.truncate(MATCHES_SHOWN);
+    out
+}
+
 fn add_form(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env, c: &vf_core::browse::ClientRow) {
     let f = &mut b.rel_form;
     ui.horizontal(|ui| {
@@ -293,9 +323,31 @@ fn add_form(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env, c: &vf_core::brows
                 "Entity client ID"
             };
             let l = ui.label(other);
-            ui.add(TextEdit::singleline(&mut f.other).desired_width(140.0))
-                .labelled_by(l.id);
+            ui.add(
+                TextEdit::singleline(&mut f.other)
+                    .hint_text("type a name or ID")
+                    .desired_width(180.0),
+            )
+            .labelled_by(l.id);
             ui.end_row();
+            // The client list searched by name or ID; a click fills in the ID (owner 2026-11-11).
+            let found = matching_clients(&b.snap.clients, &c.ext_id, &f.other);
+            if !found.is_empty() {
+                ui.label("");
+                ui.vertical(|ui| {
+                    for (name, id) in found {
+                        if ui
+                            .selectable_label(false, format!("{name} ({id})"))
+                            .on_hover_text("Use this client")
+                            .clicked()
+                        {
+                            f.other = id;
+                            f.error = None;
+                        }
+                    }
+                });
+                ui.end_row();
+            }
             let l = ui.label("Role");
             ui.add(
                 TextEdit::singleline(&mut f.role)
@@ -327,10 +379,20 @@ fn add_form(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env, c: &vf_core::brows
     if !ui.button("Add relationship").clicked() {
         return;
     }
-    let other = f.other.trim().to_owned();
+    let mut other = f.other.trim().to_owned();
     if !b.snap.clients.iter().any(|x| x.ext_id == other) {
-        b.rel_form.error = Some(format!("No client with ID \"{other}\" in this cabinet."));
-        return;
+        // A name typed that fits exactly one client is that client.
+        match matching_clients(&b.snap.clients, &c.ext_id, &other).as_slice() {
+            [(_, id)] => other = id.clone(),
+            [] => {
+                b.rel_form.error = Some(format!("No client matches \"{other}\" in this cabinet."));
+                return;
+            }
+            _ => {
+                b.rel_form.error = Some("Several clients match: click one in the list.".into());
+                return;
+            }
+        }
     }
     let share = match f.share.trim() {
         "" => None,

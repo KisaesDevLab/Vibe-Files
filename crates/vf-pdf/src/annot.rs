@@ -552,6 +552,36 @@ pub enum Kind {
     },
 }
 
+impl Kind {
+    /// Moves the annotation by `(dx, dy)` (user space). Highlight, underline and strike-out
+    /// belong to the words under them and are not moved: `false`.
+    pub fn shift(&mut self, dx: f32, dy: f32) -> bool {
+        let pt = |p: &mut [f32; 2]| {
+            p[0] += dx;
+            p[1] += dy;
+        };
+        match self {
+            Kind::Highlight(_) | Kind::Underline(_) | Kind::StrikeOut(_) => return false,
+            Kind::Note { at, .. }
+            | Kind::Tickmark { at, .. }
+            | Kind::Tape { at, .. }
+            | Kind::Stamp { at, .. } => pt(at),
+            Kind::TextBox { rect, .. } => {
+                rect[0] += dx;
+                rect[1] += dy;
+                rect[2] += dx;
+                rect[3] += dy;
+            }
+            Kind::Ink(strokes) => strokes.iter_mut().flatten().for_each(pt),
+            Kind::Arrow { from, to } => {
+                pt(from);
+                pt(to);
+            }
+        }
+        true
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Annotation {
     /// 0-based.
@@ -1309,6 +1339,53 @@ mod tape_spot_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Dragging moves every point of an annotation; text markup stays on its words.
+    #[test]
+    fn shift_moves_whole_annotations_only() {
+        let mut t = Kind::Tickmark {
+            tick: Tick::Check,
+            at: [100.0, 200.0],
+            size: 20.0,
+        };
+        assert!(t.shift(5.0, -10.0));
+        assert_eq!(
+            t,
+            Kind::Tickmark {
+                tick: Tick::Check,
+                at: [105.0, 190.0],
+                size: 20.0
+            }
+        );
+        let mut a = Kind::Arrow {
+            from: [0.0, 0.0],
+            to: [10.0, 10.0],
+        };
+        a.shift(1.0, 2.0);
+        assert_eq!(
+            a,
+            Kind::Arrow {
+                from: [1.0, 2.0],
+                to: [11.0, 12.0]
+            }
+        );
+        let mut b = Kind::TextBox {
+            rect: [0.0, 0.0, 50.0, 20.0],
+            text: "x".into(),
+            size: 10.0,
+        };
+        b.shift(-1.0, 1.0);
+        assert!(matches!(b, Kind::TextBox { rect, .. } if rect == [-1.0, 1.0, 49.0, 21.0]));
+        let mut ink = Kind::Ink(vec![vec![[0.0, 0.0], [1.0, 1.0]], vec![[2.0, 2.0]]]);
+        ink.shift(1.0, 1.0);
+        assert_eq!(
+            ink,
+            Kind::Ink(vec![vec![[1.0, 1.0], [2.0, 2.0]], vec![[3.0, 3.0]]])
+        );
+        let mut h = Kind::Highlight(vec![[0.0, 0.0, 1.0, 1.0]]);
+        assert!(!h.shift(5.0, 5.0));
+        assert_eq!(h, Kind::Highlight(vec![[0.0, 0.0, 1.0, 1.0]]));
+    }
 
     #[test]
     fn preset_texts() {

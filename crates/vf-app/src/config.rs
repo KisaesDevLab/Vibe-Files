@@ -172,6 +172,9 @@ pub struct ViewerPrefs {
     /// Tickmark color by name (`annot::TICK_COLORS`); none = green.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tick_color: Option<String>,
+    /// Tickmark size by name (`ui::viewer::TICK_SIZES`); none = Large.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tick_size: Option<String>,
 }
 
 /// Whether `initials` may sign for Windows login `login`: their first letter or digit is the

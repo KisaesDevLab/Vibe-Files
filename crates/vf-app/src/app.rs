@@ -748,6 +748,9 @@ impl eframe::App for VibeFilesApp {
                 let tick =
                     crate::ui::viewer::tick_color_index(self.config.viewer.tick_color.as_deref());
                 o.viewer.tick_color = tick;
+                let tick_size =
+                    crate::ui::viewer::tick_size_index(self.config.viewer.tick_size.as_deref());
+                o.viewer.tick_size = tick_size;
                 crate::ui::viewer::show(
                     ui,
                     &mut o.viewer,
@@ -766,14 +769,20 @@ impl eframe::App for VibeFilesApp {
                 if std::mem::take(&mut o.viewer.catalog_changed) {
                     o.browse.reload(&o.opened.conn);
                 }
-                // Initials and tickmark color are this PC's settings (owner 2026-11-04).
+                // Initials, tickmark color and size are this PC's settings (owner 2026-11-04,
+                // size 2026-11-11).
                 let signed = o.viewer.signed.take();
-                if signed.is_some() || o.viewer.tick_color != tick {
+                if signed.is_some()
+                    || o.viewer.tick_color != tick
+                    || o.viewer.tick_size != tick_size
+                {
                     if signed.is_some() {
                         self.config.viewer.initials = signed;
                     }
                     self.config.viewer.tick_color =
                         Some(crate::ui::viewer::tick_color_name(o.viewer.tick_color).into());
+                    self.config.viewer.tick_size =
+                        Some(crate::ui::viewer::tick_size_name(o.viewer.tick_size).into());
                     if let Err(e) = config::save(&self.data, &self.config) {
                         o.viewer.error = Some(format!("Settings not saved: {e:#}"));
                     }
@@ -2560,6 +2569,10 @@ mod tests {
             );
             o.viewer.tool = crate::ui::viewer::Tool::Select;
         }
+        // Tall enough that the tool panel's last list opens below its button.
+        h.set_size(egui::vec2(1440.0, 1100.0));
+        h.step();
+        h.step();
         h.get_by_role_and_label(Role::ComboBox, "Tickmark color")
             .click();
         h.step();
@@ -2569,6 +2582,28 @@ mod tests {
         h.step();
         let saved = config::load(&tmp.path().join("pc1")).unwrap();
         assert_eq!(saved.viewer.tick_color.as_deref(), Some("Purple"));
+        // Tickmark size, kept the same way (owner 2026-11-11).
+        h.get_by_role_and_label(Role::ComboBox, "Tickmark size")
+            .click();
+        h.step();
+        h.step();
+        h.get_by_label("Small (16 pt)").click();
+        h.step();
+        h.step();
+        let saved = config::load(&tmp.path().join("pc1")).unwrap();
+        assert_eq!(saved.viewer.tick_size.as_deref(), Some("Small"));
+        // Initials are kept as they are typed: going to another tab without leaving the box
+        // does not lose them (owner 2026-11-11).
+        let before = saved.viewer.initials();
+        type_into(&mut h, "Signed", "Q");
+        h.get_by_label("Stamps").click();
+        h.step();
+        h.step();
+        let saved = config::load(&tmp.path().join("pc1")).unwrap();
+        assert_eq!(saved.viewer.initials, Some(format!("{before}Q")));
+        h.get_by_label("Annotate").click();
+        h.step();
+        h.step();
         let pend = |h: &mut egui_kittest::Harness<'static, VibeFilesApp>, kind| {
             if let Screen::Open(o) = &mut h.state_mut().screen {
                 o.viewer.pending.push(Annotation {
@@ -2597,6 +2632,67 @@ mod tests {
         );
         h.run();
         h.get_by_label("2 unsaved");
+        // A placed tickmark is made one size smaller from the Unsaved list, and dragged to
+        // a new place; the stamp stays where it was (owner 2026-11-11).
+        h.get_by_label("-").click();
+        h.step();
+        let (from, to) = {
+            let Screen::Open(o) = &h.state().screen else {
+                unreachable!()
+            };
+            assert!(matches!(
+                o.viewer.pending[0].kind,
+                Kind::Tickmark { size, .. } if size == 22.0
+            ));
+            let (_, rect, s, g) = o.viewer.drawn_pages[0];
+            let from = crate::ui::viewer::screen(rect, s, &g, [100.0, 600.0]);
+            (from, from + egui::vec2(60.0, 30.0))
+        };
+        let pointer = |h: &mut egui_kittest::Harness<'static, VibeFilesApp>, e| {
+            h.input_mut().events.push(e);
+            h.step();
+        };
+        pointer(&mut h, egui::Event::PointerMoved(from));
+        pointer(
+            &mut h,
+            egui::Event::PointerButton {
+                pos: from,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::NONE,
+            },
+        );
+        for k in 1..=6 {
+            pointer(
+                &mut h,
+                egui::Event::PointerMoved(from + (to - from) * (k as f32 / 6.0)),
+            );
+        }
+        pointer(
+            &mut h,
+            egui::Event::PointerButton {
+                pos: to,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            },
+        );
+        {
+            let Screen::Open(o) = &h.state().screen else {
+                unreachable!()
+            };
+            let (_, rect, s, g) = o.viewer.drawn_pages[0];
+            let Kind::Tickmark { at, .. } = o.viewer.pending[0].kind else {
+                unreachable!()
+            };
+            let now = crate::ui::viewer::screen(rect, s, &g, at);
+            assert!((now - to).length() < 1.0, "moved to {now:?}, wanted {to:?}");
+            assert!(matches!(
+                o.viewer.pending[1].kind,
+                Kind::Stamp { at, .. } if at == [300.0, 700.0]
+            ));
+            assert_eq!(o.viewer.pending.len(), 2, "a drag adds nothing");
+        }
         click(&mut h, "Save");
         h.step();
         let path = root.join("Old/letter.pdf");

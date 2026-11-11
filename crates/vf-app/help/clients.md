@@ -36,7 +36,7 @@ Select a client in Browse to see its panel: **ID**, **FOLDER**, **ENTITY TYPE**,
 
 1. Open **New relationship…**.
 2. Choose **This client is the entity** or **This client is the owner**.
-3. Type the other client's ID (**Owner client ID** or **Entity client ID**), the **Role** (shareholder, partner, beneficiary…), the **Share %** and a **Note** if you like.
+3. In **Owner client ID** or **Entity client ID**, type part of the other client's name or ID and click the client in the list that appears (its ID is filled in). Then fill in the **Role** (shareholder, partner, beneficiary…), the **Share %** and a **Note** if you like.
 4. Press **Add relationship**.
 
 Intake uses relationships to file copies, for example a K-1 filed to the entity and copied to each owner (see [Intake rules](help:intake-rules)). **Remove** beside a relationship takes it off.

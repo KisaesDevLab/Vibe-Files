@@ -5272,7 +5272,18 @@ Petty cash,1234.50
 
         h.get_by_label("New relationship…").click();
         h.run();
-        type_into(&mut h, "Owner client ID", "1002");
+        // The client list is searched by name; a click fills in the ID (owner 2026-11-11).
+        type_into(&mut h, "Owner client ID", "bak");
+        assert!(
+            h.query_by_label("Acme LLC (1001)").is_none(),
+            "not itself, not a non-match"
+        );
+        click(&mut h, "Baker Trust (1002)");
+        assert_eq!(h.state().b.rel_form.other, "1002");
+        assert!(
+            h.query_by_label("Baker Trust (1002)").is_none(),
+            "list gone once an ID is in"
+        );
         type_into(&mut h, "Role", "shareholder");
         type_into(&mut h, "Share %", "40");
         click(&mut h, "Add relationship");

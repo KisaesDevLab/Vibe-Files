@@ -25,11 +25,13 @@ Under **Tickmarks**, click a mark, then click on the page wherever it goes. Each
 
 The row of letters **A** to **Z** gives you letter tickmarks for your own legend on a workpaper, for example A for "agreed to bank statement". **Tickmark color** sets their colour (**Green**, **Red**, **Blue**, **Black**, **Purple**, **Orange**). This PC remembers the colour.
 
+**Tickmark size** sets how big new tickmarks are: **Extra small** (12 pt), **Small** (16 pt), **Medium** (22 pt), **Large** (28 pt, the size used before this choice existed) or **Extra large** (36 pt). This PC remembers the size. To change one already placed but not saved, use the **-** and **+** buttons beside it under **Unsaved**.
+
 ## Your initials (Signed)
 
 Every annotation, stamp and tickmark carries your initials and the date as its author. **Signed** shows the initials used. They start out as the first three letters of your Windows login.
 
-To change them, type new initials in **Signed** and click elsewhere. The initials must start with the first letter of your Windows login: someone signed in as `jsmith` can use `JS` or `JMS`, but not `KW`. Other initials are refused with a message and nothing changes. The new initials are kept on this PC.
+To change them, type new initials in **Signed**. They are kept on this PC as you type. The initials must start with the first letter of your Windows login: someone signed in as `jsmith` can use `JS` or `JMS`, but not `KW`. Other initials are refused with a message when you leave the box, and the initials last kept stay in use.
 
 ## Stamps
 
@@ -37,7 +39,7 @@ On the **Stamps** tab, choose a stamp: **Client Copy**, **Draft**, **Filed {date
 
 ## Saving
 
-Marks you add wait under **Unsaved** on the panel; **Remove** takes one away and **Discard all** drops them all. Nothing is in the file until you save:
+Marks you add wait under **Unsaved** on the panel; **Remove** takes one away and **Discard all** drops them all. Until it is saved, a tickmark, stamp, note, text box, arrow, freehand mark or pasted tape can be dragged to a new place with any tool. The pointer turns into a hand over one. Highlights, underlines and strike-outs stay on their words. Once saved, a mark is part of the page and can't be dragged. Nothing is in the file until you save:
 
 1. **Save**: the marks go into this file as a new version; the version before is kept.
 2. **Save as…**: a new document beside this one gets the marks; this file stays as it was.
