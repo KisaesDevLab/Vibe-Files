@@ -11,6 +11,7 @@ Each time a cabinet opens, Vibe Files first puts back any change a crash cut sho
 - **Cabinet reachable**: the cabinet folder can be read and written.
 - **Interrupted changes**: none were left half done.
 - **Sync**: no conflicts are waiting and sync has run (when it is set up on this PC).
+- **B2 backup** (on computers other than the one that runs sync): the main computer sent the whole cabinet to B2 in the last 24 hours. Pushing a single client does not count.
 
 Anything wrong shows on Browse as "Startup check:" followed by what failed, for example "Sync: 2 conflicts to resolve (Sync tab)".
 

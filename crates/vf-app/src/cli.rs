@@ -314,36 +314,67 @@ fn read_secret(var: &str) -> std::io::Result<String> {
     Ok(l.trim_end_matches(['\r', '\n']).to_string())
 }
 
-/// An unlocked sync session from `config.toml [sync]` and the passphrase.
-fn sync_session(cabinet: &Path, data: &Path) -> Result<vf_sync::Sync> {
+/// An unlocked sync session, as the app unlocks it: the key the firm keeps in the cabinet
+/// (Q-43, its bucket settings too when this login never set sync up), else the key this login
+/// remembered beside the catalog (Q-38), else the passphrase from `VF_SYNC_PASSPHRASE` or a
+/// console. Never waits on an empty stdin (Task Scheduler).
+fn sync_session(
+    cabinet: &Path,
+    keys_dir: &Path,
+    data: &Path,
+    device_id: &str,
+) -> Result<vf_sync::Sync> {
+    use std::io::IsTerminal;
     let config = crate::config::load(data)?;
+    vf_sync::push::set_upload_cap(config.sync.upload_mbps);
     let cab = vf_fs::cabinet::read(cabinet).map_err(anyhow::Error::msg)?;
-    if !config.sync.configured_for(&cab.cabinet_id) {
-        bail!("sync is not set up for this cabinet on this PC (Sync tab)");
-    }
-    let connect = |keys| {
+    let connect = |keys, cfg: &crate::config::SyncConfig| {
         vf_sync::Sync::connect(
             keys,
-            &config.sync.s3(),
-            &config.sync.app_key_sealed,
+            &cfg.s3(),
+            &cfg.app_key_sealed,
             &cab.cabinet_id,
-            &config.device_id,
+            device_id,
         )
     };
-    // The key this login remembered on this PC (Q-38); a stale one (sync set up again since)
-    // falls back to the passphrase.
-    if let Some(keys) = vf_sync::setup::recall(data, &cab.cabinet_id)
-        && let Ok(s) = connect(keys)
+    if let Some((shared, keys)) = vf_sync::setup::shared(cabinet, &cab.cabinet_id) {
+        let cfg = if config.sync.configured_for(&cab.cabinet_id) {
+            config.sync.clone()
+        } else {
+            crate::ui::sync::config_from_shared(&shared, &cab.cabinet_id)
+        };
+        match connect(keys, &cfg) {
+            Ok(s) => return Ok(s),
+            Err(e) => tracing::warn!(
+                kind = crate::logging::kind(&e.to_string()),
+                "shared sync key did not open sync"
+            ),
+        }
+    }
+    if !config.sync.configured_for(&cab.cabinet_id) {
+        bail!(
+            "sync is not set up for this cabinet for this Windows login: unlock it once in the Sync tab"
+        );
+    }
+    // A stale remembered key (sync set up again since) falls back to the passphrase.
+    if let Some(keys) = crate::ui::sync::recall_key(keys_dir, &cab.cabinet_id)
+        && let Ok(s) = connect(keys, &config.sync)
     {
         return Ok(s);
     }
     let pass = match std::env::var("VF_SYNC_PASSPHRASE") {
         Ok(p) => p,
-        Err(_) => read_secret("VF_SYNC_PASSPHRASE")?,
+        Err(_) if std::io::stdin().is_terminal() => read_secret("VF_SYNC_PASSPHRASE")?,
+        Err(_) => bail!(
+            "no sync key for this Windows login on this computer: sign in as it, open Vibe Files and unlock sync with \"Remember on this PC for my Windows login\" ticked"
+        ),
     };
     let keys = vf_sync::setup::unlock_local(cabinet, &cab.cabinet_id, &pass)?;
-    Ok(connect(keys)?)
+    Ok(connect(keys, &config.sync)?)
 }
+
+/// Exit code of `sync push` / `sync pull` on a computer that is not the cabinet's main one.
+pub const NOT_MAIN: i32 = 8;
 
 fn sync(
     catalog: &Path,
@@ -352,36 +383,109 @@ fn sync(
     cmd: &SyncCmd,
     out: &mut dyn Write,
 ) -> Result<i32> {
-    if !catalog.is_file() {
-        bail!("no catalog at {}", catalog.display());
+    if let SyncCmd::Status = cmd {
+        // The catalog the app uses: this server's shared one when there is one.
+        let cab = vf_fs::cabinet::read(cabinet).map_err(anyhow::Error::msg)?;
+        let catalog =
+            crate::shared::shared_catalog(&cab.cabinet_id).unwrap_or_else(|| catalog.to_owned());
+        if !catalog.is_file() {
+            bail!("no catalog at {}", catalog.display());
+        }
+        let conn = db::open(&catalog, Storage::Local)?;
+        same_cabinet(&conn, cabinet)?;
+        let pending = vf_sync::catalog::pending(&conn)?;
+        let conflicts = vf_sync::restore::conflicts(&conn)?;
+        let (rev, push, pull): (i64, Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT last_manifest_rev, last_push, last_pull FROM sync_state LIMIT 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap_or((0, None, None));
+        writeln!(
+            out,
+            "{} documents pending in {} segments · {} conflicts · manifest rev {rev} · last push {} · last pull {}",
+            pending.values().sum::<usize>(),
+            pending.len(),
+            conflicts.len(),
+            push.as_deref().unwrap_or("never"),
+            pull.as_deref().unwrap_or("never"),
+        )?;
+        if let Some(l) = crate::lastpush::read(cabinet) {
+            writeln!(out, "cabinet last sent in full {} by {}", l.at, l.computer)?;
+        }
+        return Ok(0);
     }
-    let mut conn = db::open(catalog, Storage::Local)?;
-    same_cabinet(&conn, cabinet)?;
-    match cmd {
-        SyncCmd::Status => {
-            let pending = vf_sync::catalog::pending(&conn)?;
-            let conflicts = vf_sync::restore::conflicts(&conn)?;
-            let (rev, push, pull): (i64, Option<String>, Option<String>) = conn
-                .query_row(
-                    "SELECT last_manifest_rev, last_push, last_pull FROM sync_state LIMIT 1",
-                    [],
-                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-                )
-                .unwrap_or((0, None, None));
+    let (mut opened, _one_at_a_time) = match ready_to_sync(data, catalog, cabinet)? {
+        Ready::Go(o, lock) => (o, lock),
+        Ready::NotMain(main) => {
             writeln!(
                 out,
-                "{} documents pending in {} segments · {} conflicts · manifest rev {rev} · last push {} · last pull {}",
-                pending.values().sum::<usize>(),
-                pending.len(),
-                conflicts.len(),
-                push.as_deref().unwrap_or("never"),
-                pull.as_deref().unwrap_or("never"),
+                "not sent: B2 sync runs on {main} for this cabinet (Admin › Devices)"
             )?;
-            Ok(0)
+            return Ok(NOT_MAIN);
         }
+        Ready::Busy(why) => {
+            writeln!(out, "skipped: {why}")?;
+            return Ok(0);
+        }
+    };
+    let keys_dir = crate::ui::sync::key_dir(&opened.catalog);
+    let s = sync_session(cabinet, &keys_dir, data, &opened.sync_device)?;
+    exchange(&mut opened.conn, cabinet, &s, cmd, out)
+}
+
+/// What `sync push` / `sync pull` found before connecting to the bucket.
+enum Ready {
+    /// The cabinet opened as the app opens it, and this computer's sync lock.
+    Go(Box<crate::session::Opened>, std::fs::File),
+    /// Another computer is the main one (its name).
+    NotMain(String),
+    /// Another login of this computer is syncing now (its push takes these changes too).
+    Busy(String),
+}
+
+fn ready_to_sync(data: &Path, catalog: &Path, cabinet: &Path) -> Result<Ready> {
+    // Never a first index of hours from here (a mistyped cabinet, a wrong data folder): the
+    // app opened this cabinet here before.
+    let cab = vf_fs::cabinet::read(cabinet).map_err(anyhow::Error::msg)?;
+    let has_catalog = catalog.is_file() || crate::shared::shared_catalog(&cab.cabinet_id).is_some();
+    if !has_catalog {
+        bail!(
+            "no catalog at {}: open the cabinet in Vibe Files first",
+            catalog.display()
+        );
+    }
+    // B2 sync runs on the cabinet's main computer only (PA-36, PA-39).
+    if !crate::server::runs_here(cabinet) {
+        return Ok(Ready::NotMain(
+            crate::server::main_server(cabinet)
+                .map(|m| m.computer)
+                .unwrap_or_else(|| "a main PC not chosen yet".into()),
+        ));
+    }
+    // Opened as the app opens it (PA-40): the server's shared catalog, interrupted changes put
+    // back, and the other servers' changes read, or they would not go up.
+    let opened = crate::session::open(data, &device_id(data)?, cabinet)?;
+    match crate::ui::sync::sync_lock(&opened.catalog) {
+        Ok(lock) => Ok(Ready::Go(Box::new(opened), lock)),
+        Err(why) => Ok(Ready::Busy(why)),
+    }
+}
+
+/// The push or pull itself. A whole-cabinet push is recorded for every computer's startup
+/// check, even with nothing to send.
+fn exchange(
+    conn: &mut db::Connection,
+    cabinet: &Path,
+    s: &vf_sync::Sync,
+    cmd: &SyncCmd,
+    out: &mut dyn Write,
+) -> Result<i32> {
+    match cmd {
         SyncCmd::Push => {
-            let s = sync_session(cabinet, data)?;
-            let r = vf_sync::push::push(&mut conn, cabinet, &s, None)?;
+            let r = vf_sync::push::push(conn, cabinet, s, None)?;
+            crate::lastpush::record(cabinet);
             writeln!(
                 out,
                 "pushed {} documents ({} objects, {} bytes) · rev {}",
@@ -390,8 +494,7 @@ fn sync(
             Ok(0)
         }
         SyncCmd::Pull => {
-            let s = sync_session(cabinet, data)?;
-            let r = vf_sync::pull::pull(&mut conn, cabinet, &s)?;
+            let r = vf_sync::pull::pull(conn, cabinet, s)?;
             writeln!(
                 out,
                 "pulled: {} new, {} updated, {} moved, {} re-typed, {} deleted, {} conflicts · rev {}",
@@ -399,6 +502,7 @@ fn sync(
             )?;
             Ok(0)
         }
+        SyncCmd::Status => Ok(0),
     }
 }
 
@@ -772,5 +876,119 @@ mod tests {
         assert!(text.contains("iterations"), "{text}");
         assert!(code == 0 || code == 6);
         assert!(t.path().join("soak/soak.csv").is_file());
+    }
+
+    /// PA-40: the scheduled push (`vibe-files sync <cabinet> push`) opens the cabinet as the
+    /// app does, so a file another PC filed (noted in its change log) goes up; it refuses on a
+    /// computer that is not the main one and steps aside while another session syncs. Sets
+    /// PROGRAMDATA and the cloud choice:
+    /// `cargo test -p vf-app scheduled_push -- --ignored --test-threads=1`
+    #[test]
+    #[ignore = "sets process-wide environment; run alone"]
+    fn scheduled_push_sends_other_pcs_filings_on_the_main_pc_only() {
+        let t = tempfile::tempdir().unwrap();
+        // SAFETY: run alone (ignored, one thread): nothing else reads the environment.
+        unsafe { std::env::set_var("VIBE_FILES_CLOUD", "1") };
+        crate::cloudmode::apply();
+        let root = t.path().join("Dropbox").join("Cabinet");
+        let firm = uuid::Uuid::new_v4();
+        let cabinet_id = vf_core::new_id();
+        vf_fs::cabinet::create(
+            &root,
+            &vf_fs::cabinet::CabinetFile {
+                cabinet_id: cabinet_id.clone(),
+                firm_id: firm.to_string(),
+                schema_version: vf_core::db::SCHEMA_VERSION,
+                layout_version: 1,
+                created: vf_core::now_rfc3339(),
+                name: None,
+            },
+        )
+        .unwrap();
+        let folder = root.join("Smith, John (1001)");
+        std::fs::create_dir_all(folder.join("Income Tax/2025")).unwrap();
+        let c = filer_core::clients::Client {
+            id: "1001".into(),
+            uuid: uuid::Uuid::new_v4(),
+            name: "Smith, John".into(),
+            extra: Default::default(),
+        };
+        filer_intake::sentinel::write_sentinel(&root, &folder, &c, firm).unwrap();
+        std::fs::write(folder.join("Income Tax/2025/w2.pdf"), "synthetic w2").unwrap();
+        let (data_a, data_b) = (t.path().join("pc-a"), t.path().join("pc-b"));
+        for d in [&data_a, &data_b] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+
+        // PC A, the main PC: indexes the cabinet and leaves its seed copy.
+        // SAFETY: as above.
+        unsafe { std::env::set_var("PROGRAMDATA", t.path().join("pc-a-programdata")) };
+        crate::server::set_main(&root).unwrap();
+        let a = crate::session::open(&data_a, &device_id(&data_a).unwrap(), &root).unwrap();
+        let w = a.writer.clone().unwrap();
+        assert!(crate::server::publish_seed(&a.catalog, &root, &w).unwrap());
+        drop(a);
+        vf_fs::changes::clear_writer();
+
+        // PC B files a document while PC A's Vibe Files is closed.
+        // SAFETY: as above.
+        unsafe { std::env::set_var("PROGRAMDATA", t.path().join("pc-b-programdata")) };
+        let b = crate::session::open(&data_b, &device_id(&data_b).unwrap(), &root).unwrap();
+        let k1 = folder.join("Income Tax/2025/k1.pdf");
+        std::fs::write(&k1, "synthetic k1").unwrap();
+        vf_fs::changes::note_paths([k1.as_path()]);
+        drop(b);
+        vf_fs::changes::clear_writer();
+
+        // On PC A, the scheduled push: PC B's filing is read and goes up with the rest.
+        // SAFETY: as above.
+        unsafe { std::env::set_var("PROGRAMDATA", t.path().join("pc-a-programdata")) };
+        let cat_a = data_a.join("catalog.db");
+        let Ready::Go(mut o, lock) = ready_to_sync(&data_a, &cat_a, &root).unwrap() else {
+            panic!("the main PC syncs");
+        };
+        // Another session syncing on this computer: this run steps aside.
+        let Ready::Busy(_) = ready_to_sync(&data_a, &cat_a, &root).unwrap() else {
+            panic!("one sync at a time");
+        };
+        vf_fs::changes::clear_writer();
+        let remote = vf_sync::Remote::new(vf_sync::Remote::memory(), &cabinet_id);
+        let keys = vf_sync::setup::init(
+            &root,
+            &remote,
+            "correct horse battery staple",
+            vf_sync::setup::DEFAULT_KDF,
+        )
+        .unwrap();
+        let s = vf_sync::Sync {
+            remote,
+            keys,
+            cabinet_id: cabinet_id.clone(),
+            device_id: o.sync_device.clone(),
+            device_name: "PC-A".into(),
+        };
+        let mut out = Vec::new();
+        let code = exchange(&mut o.conn, &root, &s, &SyncCmd::Push, &mut out).unwrap();
+        assert_eq!(code, 0);
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.starts_with("pushed 2 documents"), "{text}");
+        assert!(crate::lastpush::check(&root).unwrap().is_ok());
+        // Nothing new: the push still counts, so a quiet weekend is not reported.
+        std::fs::remove_file(root.join("_Vibe/sync-last-push.json")).unwrap();
+        exchange(&mut o.conn, &root, &s, &SyncCmd::Push, &mut Vec::new()).unwrap();
+        assert!(crate::lastpush::read(&root).is_some());
+        drop((o, lock));
+        vf_fs::changes::clear_writer();
+
+        // Another computer is the main one: nothing is opened or sent from here.
+        std::fs::write(
+            root.join("_Vibe/main-server.json"),
+            r#"{"computer":"OTHER-PC","since":"2026-11-11T00:00:00Z"}"#,
+        )
+        .unwrap();
+        let Ready::NotMain(main) = ready_to_sync(&data_a, &cat_a, &root).unwrap() else {
+            panic!("not the main PC");
+        };
+        assert_eq!(main, "OTHER-PC");
     }
 }

@@ -134,7 +134,65 @@ computer and kept in this PC's data folder: sync unlocks itself when you start V
 login or another computer cannot open it. The passphrase stays the way back in.";
 
 /// This PC's data folder (the catalog's).
-fn data_dir(catalog: &Path) -> &Path {
+/// The bucket settings the firm keeps in the cabinet with its shared key (Q-43), for a login
+/// or PC that never set sync up.
+pub(crate) fn config_from_shared(s: &vf_sync::setup::Shared, cabinet_id: &str) -> SyncConfig {
+    SyncConfig {
+        endpoint: s.endpoint.clone(),
+        region: s.region.clone(),
+        bucket: s.bucket.clone(),
+        key_id: s.key_id.clone(),
+        app_key_sealed: s.app_key_sealed.clone(),
+        cabinet_id: cabinet_id.to_string(),
+        // Pushing on a timer stays a choice per PC: by hand until set here.
+        auto_minutes: 0,
+        ..SyncConfig::default()
+    }
+}
+
+/// Where this Windows login's remembered sync key is kept (Q-38): the catalog's folder; beside
+/// a server's shared catalog, a folder of the login's own, since every login of the server uses
+/// that catalog and one login's key must not replace another's (PA-40: the scheduled push's
+/// login keeps its key).
+pub(crate) fn key_dir(catalog: &Path) -> PathBuf {
+    let dir = data_dir(catalog);
+    let shared = crate::shared::shared_root().is_some_and(|r| dir.starts_with(r));
+    match vf_core::windows_login() {
+        Some(login) if shared => dir.join("logins").join(vf_fs::changes::safe_id(&login)),
+        _ => dir.to_path_buf(),
+    }
+}
+
+/// The folder a login's key was kept in before PA-40, when `dir` is a login's own.
+fn legacy_dir(dir: &Path) -> Option<&Path> {
+    let parent = dir.parent()?;
+    if parent.file_name()? == "logins" {
+        parent.parent()
+    } else {
+        None
+    }
+}
+
+/// This login's remembered key: its own, else one it left beside the shared catalog earlier
+/// (another login's there does not open for it).
+pub(crate) fn recall_key(dir: &Path, cabinet_id: &str) -> Option<vf_sync::Keys> {
+    vf_sync::setup::recall(dir, cabinet_id)
+        .or_else(|| vf_sync::setup::recall(legacy_dir(dir)?, cabinet_id))
+}
+
+/// Forgets this login's remembered key, and an earlier copy beside the shared catalog only when
+/// it is this login's.
+pub(crate) fn forget_key(dir: &Path, cabinet_id: &str) {
+    vf_sync::setup::forget(dir, cabinet_id);
+    if let Some(old) = legacy_dir(dir)
+        && vf_sync::setup::recall(old, cabinet_id).is_some()
+    {
+        vf_sync::setup::forget(old, cabinet_id);
+    }
+}
+
+/// The folder of `catalog` (this computer's sync lock is there).
+pub(crate) fn data_dir(catalog: &Path) -> &Path {
     catalog.parent().unwrap_or(Path::new("."))
 }
 
@@ -197,7 +255,7 @@ impl SyncTab {
     /// the automatic push when it is due.
     pub fn tick(&mut self, ctx: &egui::Context, env: &Env, catalog: &Path, cfg: &SyncConfig) {
         vf_sync::push::set_upload_cap(cfg.upload_mbps);
-        self.recall(env.root, data_dir(catalog), cfg, env.device_id);
+        self.recall(env.root, &key_dir(catalog), cfg, env.device_id);
         if let Some(rx) = &self.counting {
             match rx.try_recv() {
                 Ok((pending, conflicts, st)) => {
@@ -435,17 +493,7 @@ impl SyncTab {
         if let Some((s, keys)) = shared {
             let mut c = cfg.clone();
             if !cfg.configured_for(&cab.cabinet_id) {
-                c = SyncConfig {
-                    endpoint: s.endpoint.clone(),
-                    region: s.region.clone(),
-                    bucket: s.bucket.clone(),
-                    key_id: s.key_id.clone(),
-                    app_key_sealed: s.app_key_sealed.clone(),
-                    cabinet_id: cab.cabinet_id.clone(),
-                    // Pushing on a timer stays a choice per PC: by hand until set here.
-                    auto_minutes: 0,
-                    ..SyncConfig::default()
-                };
+                c = config_from_shared(&s, &cab.cabinet_id);
                 self.config_changed = Some(c.clone());
             }
             match Self::session_from(keys, &c, device_id) {
@@ -462,8 +510,10 @@ impl SyncTab {
         if !cfg.configured_for(&cab.cabinet_id) {
             return;
         }
-        self.remembered = vf_sync::setup::remembered_file(data, &cab.cabinet_id).exists();
-        if let Some(keys) = vf_sync::setup::recall(data, &cab.cabinet_id) {
+        let recalled = recall_key(data, &cab.cabinet_id);
+        self.remembered =
+            recalled.is_some() || vf_sync::setup::remembered_file(data, &cab.cabinet_id).exists();
+        if let Some(keys) = recalled {
             match Self::session_from(keys, cfg, device_id) {
                 Ok(s) => self.session = Some(s),
                 // A key from an earlier set-up: forget it, the passphrase opens the new one.
@@ -472,7 +522,7 @@ impl SyncTab {
                         kind = crate::logging::kind(&e),
                         "remembered sync key is stale"
                     );
-                    vf_sync::setup::forget(data, &cab.cabinet_id);
+                    forget_key(data, &cab.cabinet_id);
                     self.remembered = false;
                 }
             }
@@ -527,7 +577,7 @@ impl SyncTab {
             },
             (true, None) => None,
             (false, _) => {
-                vf_sync::setup::forget(data, cabinet_id);
+                forget_key(data, cabinet_id);
                 self.remembered = false;
                 None
             }
@@ -647,7 +697,7 @@ impl SyncTab {
 
 /// Held while a push or pull runs on this catalog: on a server whose sessions share one
 /// catalog, one session syncs it at a time (PA-34 review).
-fn sync_lock(catalog: &Path) -> Result<std::fs::File, String> {
+pub(crate) fn sync_lock(catalog: &Path) -> Result<std::fs::File, String> {
     use std::os::windows::fs::OpenOptionsExt;
     std::fs::OpenOptions::new()
         .read(true)
@@ -684,9 +734,12 @@ fn run(catalog: &Path, root: &Path, s: &Sync, op: Op) -> Result<Done, String> {
         }
         Op::Push(only) => {
             let mut conn = vf_core::db::open(catalog, Storage::Local).map_err(|e| e.to_string())?;
-            vf_sync::push::push(&mut conn, root, s, only.as_deref())
-                .map(Done::Push)
-                .map_err(e)
+            let r = vf_sync::push::push(&mut conn, root, s, only.as_deref()).map_err(e)?;
+            // The whole cabinet went up: every computer's startup check sees when (PA-40).
+            if only.is_none() {
+                crate::lastpush::record(root);
+            }
+            Ok(Done::Push(r))
         }
         Op::Pull => {
             let mut conn = vf_core::db::open(catalog, Storage::Local).map_err(|e| e.to_string())?;
@@ -788,7 +841,7 @@ pub fn show(ui: &mut egui::Ui, t: &mut SyncTab, env: &mut Env, v: View<'_>) {
                 .add_enabled(!t.running(), widgets::primary_button("Unlock"))
                 .clicked()
             {
-                t.unlock(ui.ctx(), env.root, data_dir(v.catalog), v.cfg, env.device_id);
+                t.unlock(ui.ctx(), env.root, &key_dir(v.catalog), v.cfg, env.device_id);
             }
         } else {
             unlocked(ui, t, env, &v);
@@ -838,7 +891,7 @@ fn setup_form(ui: &mut egui::Ui, t: &mut SyncTab, env: &Env, v: &View<'_>) {
         t.setup(
             ui.ctx(),
             env.root,
-            data_dir(v.catalog),
+            &key_dir(v.catalog),
             env.device_id,
             v.cabinet_id,
         );
@@ -948,7 +1001,7 @@ fn unlocked(ui: &mut egui::Ui, t: &mut SyncTab, env: &mut Env, v: &View<'_>) {
             t.session = None;
             t.locked_by_user = true;
         }
-        let data = data_dir(v.catalog);
+        let data = key_dir(v.catalog);
         if t.remembered
             && v.admin
             && ui
@@ -956,7 +1009,7 @@ fn unlocked(ui: &mut egui::Ui, t: &mut SyncTab, env: &mut Env, v: &View<'_>) {
                 .on_hover_text("Sync will ask for the passphrase again on this PC.")
                 .clicked()
         {
-            vf_sync::setup::forget(data, v.cabinet_id);
+            forget_key(&data, v.cabinet_id);
             t.remembered = false;
             t.notice = Some("The key is no longer remembered on this PC.".into());
         }
@@ -1176,6 +1229,24 @@ fn settings_section(ui: &mut egui::Ui, t: &mut SyncTab, v: &View<'_>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// PA-40: on a server each login keeps its key in a folder of its own beside the shared
+    /// catalog; a key this login left beside the catalog earlier still opens sync, and
+    /// forgetting removes both.
+    #[test]
+    fn each_login_keeps_its_own_key_and_an_old_one_still_works() {
+        let t = tempfile::tempdir().unwrap();
+        let mine = t.path().join("logins").join("me");
+        assert_eq!(legacy_dir(&mine), Some(t.path()));
+        assert_eq!(legacy_dir(t.path()), None);
+        let firm = [7u8; 32];
+        vf_sync::setup::remember(t.path(), "cab-1", &firm).unwrap();
+        assert!(recall_key(&mine, "cab-1").is_some(), "the earlier copy");
+        vf_sync::setup::remember(&mine, "cab-1", &firm).unwrap();
+        forget_key(&mine, "cab-1");
+        assert!(recall_key(&mine, "cab-1").is_none());
+        assert!(!vf_sync::setup::remembered_file(t.path(), "cab-1").exists());
+    }
 
     /// PA-20: the checkbox decides; unticked forgets a key remembered earlier.
     #[test]

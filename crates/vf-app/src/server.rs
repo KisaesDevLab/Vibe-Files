@@ -268,7 +268,9 @@ fn lock(p: &Path) -> Result<std::fs::File> {
 pub fn writer_id(conn: &Connection) -> String {
     let _ = conn.execute(
         "INSERT OR IGNORE INTO local_state (k, v) VALUES ('catalog_writer_id', ?1)",
-        [format!("{}-{}", computer(), &vf_core::new_id()[..8])],
+        // The id's random end: its start is a timestamp, the same for two catalogs made on
+        // one computer within a minute (each would then skip the other's log as its own).
+        [format!("{}-{}", computer(), &vf_core::new_id()[28..])],
     );
     conn.query_row(
         "SELECT v FROM local_state WHERE k = 'catalog_writer_id'",

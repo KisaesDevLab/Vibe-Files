@@ -30,6 +30,18 @@ Under **Settings** (admin password needed), **Push automatically every (minutes,
 
 **Pause** (admin password needed) stops the automatic pushes; **Resume** starts them again. **Push now** still works while paused.
 
+## Pushing while Vibe Files is closed
+
+Automatic pushes happen only while Vibe Files is open. On several servers, or a cabinet in OneDrive or Dropbox, only the main computer pushes (**Admin** › **Devices**). The cabinet is not lost while that computer's Vibe Files is closed, but B2 falls behind. Every computer's startup check says so when the cabinet was last sent over 24 hours ago.
+
+To push with nobody signed in, use Windows Task Scheduler on the main computer:
+
+1. Use a Windows login that does not keep Vibe Files open (a login of its own for the task is best). Sign in there as it, open Vibe Files, unlock sync with **Remember on this PC for my Windows login** ticked, and close it. A key kept in the cabinet also works.
+2. Create a task that runs as that login, **whether the user is logged on or not**, with its password stored, repeating every hour.
+3. Its action: `vibe-files.exe sync "<cabinet folder>" push`.
+
+The task first reads what the other computers changed, then pushes. It exits with 0 when it sent the changes (or another session was already syncing), 7 when Vibe Files is open for that login (nothing sent), and 8 on a computer that is not the main one.
+
 ## A large cabinet's first upload
 
 The first push of a large cabinet (hundreds of gigabytes) can take days. It goes up 100 clients at a time, and each group is saved in the bucket as it finishes: stopping, closing Vibe Files or losing the connection loses at most the group being sent, and the next push carries on from there. Eight files are sent at once; files over 32 MB are sent one at a time.

@@ -8,6 +8,7 @@ mod cloudmode;
 mod config;
 mod datalock;
 mod help;
+mod lastpush;
 mod logging;
 mod perf;
 mod portal;

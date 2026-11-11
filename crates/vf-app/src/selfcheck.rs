@@ -91,7 +91,22 @@ pub fn run_with(
     if sync_configured {
         out.push(check("Sync", sync_state(conn)));
     }
+    // On the computers that are not the main one (sync set up there or not): the main
+    // computer, or its scheduled push, stopped sending the cabinet to B2 (PA-40). The main one
+    // itself is not told: it opens before its first push of the day (a Monday after a weekend
+    // closed); its own Sync check covers it.
+    if another_pushes(root)
+        && let Some(r) = crate::lastpush::check(root)
+    {
+        out.push(check("B2 backup", r));
+    }
     out
+}
+
+/// Another computer is recorded as the one that runs B2 sync (several servers, a cloud cabinet).
+fn another_pushes(root: &Path) -> bool {
+    crate::server::main_server(root)
+        .is_some_and(|m| !m.computer.eq_ignore_ascii_case(&crate::server::computer()))
 }
 
 /// The cabinet file reads and the cabinet takes a write (a share gone read-only fails here).
@@ -169,5 +184,50 @@ mod tests {
         std::fs::remove_dir_all(&root).unwrap();
         let r = run(&conn, &root, false);
         assert!(!r.iter().find(|c| c.name == "Cabinet reachable").unwrap().ok);
+    }
+
+    /// PA-40: B2 falling behind is shown on the computers that are not the main one, not on
+    /// the main one (it opens before its first push of the day).
+    #[test]
+    fn a_stale_backup_is_reported_away_from_the_main_computer() {
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path().join("cab");
+        vf_fs::cabinet::create(
+            &root,
+            &vf_fs::cabinet::CabinetFile {
+                cabinet_id: vf_core::new_id(),
+                firm_id: uuid::Uuid::new_v4().to_string(),
+                schema_version: vf_core::db::SCHEMA_VERSION,
+                layout_version: 1,
+                created: vf_core::now_rfc3339(),
+                name: None,
+            },
+        )
+        .unwrap();
+        let conn = vf_core::db::open(&t.path().join("c.db"), Storage::Local).unwrap();
+        let backup = |root: &Path| {
+            run(&conn, root, false)
+                .into_iter()
+                .find(|c| c.name == "B2 backup")
+        };
+        std::fs::write(
+            root.join("_Vibe/sync-last-push.json"),
+            r#"{"computer":"SERVER-1","at":"2026-01-01T00:00:00Z"}"#,
+        )
+        .unwrap();
+        // This computer is the main one: not told.
+        crate::server::set_main(&root).unwrap();
+        assert!(backup(&root).is_none());
+        // Another computer is.
+        std::fs::write(
+            root.join("_Vibe/main-server.json"),
+            r#"{"computer":"SERVER-1","since":"2026-01-01T00:00:00Z"}"#,
+        )
+        .unwrap();
+        let c = backup(&root).unwrap();
+        assert!(!c.ok && c.detail.contains("SERVER-1"), "{c:?}");
+        // Never pushed in full: nothing to say.
+        std::fs::remove_file(root.join("_Vibe/sync-last-push.json")).unwrap();
+        assert!(backup(&root).is_none());
     }
 }
