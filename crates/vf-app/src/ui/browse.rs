@@ -3297,6 +3297,11 @@ fn open_send_link(ctx: &egui::Context, b: &mut Browse, env: &mut Env, d: &vf_cor
     let Some(s) = b.portal.settings(env.root).cloned() else {
         return;
     };
+    // A link being sent keeps its window: its result is shown there.
+    if b.portal.send_link.as_ref().is_some_and(|w| w.sending()) {
+        b.error = Some("Wait for the secure link being sent to finish.".into());
+        return;
+    }
     let client = d
         .client_id
         .as_ref()
@@ -3388,6 +3393,7 @@ fn inspector(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env) {
         let portal = (
             b.portal.is_set(env.root),
             b.portal.on_portal.contains(&d.id),
+            d.client_id.is_some(),
         );
         match crate::ui::preview::show(
             ui,

@@ -143,14 +143,14 @@ fn is_pdf(rel: &str) -> bool {
 }
 
 /// The pane. `at`: (position in the grid, rows in the grid) for the document stepper.
-/// `portal`: the firm's Vibe Portal is set up (the Share… button shows); `on_portal`: this
-/// document is on it.
+/// `portal`: the firm's Vibe Portal is set up (the Share… button shows); this document is on
+/// it; it is filed under a client (Send secure link… shows).
 pub fn show(
     ui: &mut egui::Ui,
     p: &mut Preview,
     rel: &str,
     at: (usize, usize),
-    portal: (bool, bool),
+    portal: (bool, bool, bool),
 ) -> Act {
     p.pump(ui.ctx());
     let mut act = Act::None;
@@ -203,7 +203,8 @@ pub fn show(
                     {
                         act = Act::Share;
                     }
-                    if ui
+                    if portal.2
+                        && ui
                         .small_button("Send secure link…")
                         .on_hover_text(
                             "Send this document to someone outside the client (a lender, a lawyer) by a private link from the portal",

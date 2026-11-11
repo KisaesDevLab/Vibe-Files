@@ -47,7 +47,7 @@ Tick or untick people and press **Save**. A document is sent to the portal the f
 
 Clients are told by email or text when files are shared with them, gathered into one message per few minutes. The message does not name the files.
 
-A document shared on the portal shows **Share… (on portal)** in the pane. To send one to someone outside the client, see [secure links](help:portal-secure-links).
+A document on the portal shows **Share… (on portal)** in the pane. To send one to someone outside the client, see [secure links](help:portal-secure-links).
 
 ## Receiving files from clients
 

@@ -272,14 +272,7 @@ impl PortalState {
                 core::client(&s2)
                     .all_files()
                     .ok()
-                    // Shared with the client's people: a document on the portal only for a
-                    // secure link (shown to nobody) is not marked (P68 QA).
-                    .map(|f| {
-                        f.into_iter()
-                            .filter(|f| f.users.iter().any(|u| u.visible))
-                            .map(|f| f.vf_document_id)
-                            .collect()
-                    })
+                    .map(|f| f.into_iter().map(|f| f.vf_document_id).collect())
             }));
         }
         if s.fetch_minutes > 0 {
@@ -1682,10 +1675,10 @@ pub const LINK_DAYS: u32 = 7;
 /// The most days Vibe Files offers (the portal allows more; the owner's choice).
 pub const LINK_MAX_DAYS: u32 = 30;
 
-/// Why the portal refused the link itself, in plain words. `added`: the document was put on
-/// the portal for this link (shown to nobody) before it failed; Send again does not send it
-/// twice.
-fn link_error(e: &vf_portal::api::PortalError, added: bool) -> String {
+/// Why the portal refused the link itself, in plain words, and what was already done on the
+/// portal for it: `added`, the document was put there shown to nobody (Send again does not
+/// send it twice); `updated`, the client's people's copy was brought up to date.
+fn link_error(e: &vf_portal::api::PortalError, added: bool, updated: bool) -> String {
     // An unknown route answers 404 not_found: a portal from before P68.
     let words = if e.status() == Some(404) && e.code() == Some("not_found") {
         "This portal cannot send secure links from Vibe Files yet: update Vibe Portal, or send it from the portal's staff page.".to_string()
@@ -1695,6 +1688,10 @@ fn link_error(e: &vf_portal::api::PortalError, added: bool) -> String {
     if added {
         format!(
             "{words} The document is on the portal now, shown to none of the client's people; Send again does not send it twice."
+        )
+    } else if updated {
+        format!(
+            "{words} The portal's copy was already brought up to date: the client's people have the newer version."
         )
     } else {
         words
@@ -1707,45 +1704,50 @@ pub enum PortalCopy {
     /// Not on the portal for this client: sent first, shown to nobody.
     Absent,
     /// On the portal as it is in the cabinet; `shown`: the client's people who see it.
-    Same { shown: usize },
+    Same { file_id: String, shown: usize },
     /// On the portal, older than the cabinet's.
-    Older { shown: usize },
+    Older { file_id: String, shown: usize },
 }
 
-/// What the portal has of `doc` for `client` (a copy filed under another client, the document
-/// having moved since, is not this client's: Absent).
+/// What the portal has of `doc` for `client`: this client's files only (a copy the document
+/// left under another client, having moved since, is not this client's).
 fn copy_of(
     p: &vf_portal::api::Portal,
     client: &ClientRef,
     d: &DocRef,
-) -> Result<(PortalCopy, Option<String>), String> {
-    let f = p
-        .file_for_doc(&d.id)
-        .map_err(|e| e.message())?
-        .filter(|f| f.client_id.eq_ignore_ascii_case(&client.id));
-    Ok(match f {
-        None => (PortalCopy::Absent, None),
+) -> Result<PortalCopy, String> {
+    let files = p.files_for_client(&client.id).map_err(|e| e.message())?;
+    Ok(match files.into_iter().find(|f| f.vf_document_id == d.id) {
+        None => PortalCopy::Absent,
         Some(f) => {
             let shown = f.users.iter().filter(|u| u.visible).count();
-            let c = if f.sha256 == d.hash {
-                PortalCopy::Same { shown }
+            if f.sha256 == d.hash {
+                PortalCopy::Same {
+                    file_id: f.file_id,
+                    shown,
+                }
             } else {
-                PortalCopy::Older { shown }
-            };
-            (c, Some(f.file_id))
+                PortalCopy::Older {
+                    file_id: f.file_id,
+                    shown,
+                }
+            }
         }
     })
 }
 
 enum LinkJob {
     Found(PortalCopy),
+    /// The portal's copy changed between the window's look and Send: nothing sent.
+    Changed(PortalCopy),
     Sent(String),
 }
 
 /// Sends one document of a client to someone outside the client by a secure link: the
 /// document goes to the portal first when it is not there (shown to nobody); an older portal
 /// copy is brought up to date first unless the client's people see it and the person chose not
-/// to change what they see; then the portal emails the link.
+/// to change what they see; then the portal emails the link. Nothing is sent from a copy the
+/// person was not shown.
 pub struct SendLinkWindow {
     client: ClientRef,
     doc: DocRef,
@@ -1766,6 +1768,8 @@ pub struct SendLinkWindow {
     /// too and are told it was updated). Off unless chosen.
     pub update_shared: bool,
     job: Option<Receiver<Result<LinkJob, String>>>,
+    /// The job running sends a link (not only reads the portal).
+    sending: bool,
     audit: AuditOut,
     pub msg: Option<String>,
     pub err: Option<String>,
@@ -1780,14 +1784,7 @@ impl SendLinkWindow {
         doc: DocRef,
         audit: AuditOut,
     ) -> Self {
-        let (s2, c2, d2) = (s.clone(), client.clone(), doc.clone());
-        let job = Some(spawn(ctx, move || {
-            let p = core::client(&s2);
-            p.put_client(&c2.id, &c2.code, &c2.name, None)
-                .map_err(|e| e.message())?;
-            copy_of(&p, &c2, &d2).map(|(c, _)| LinkJob::Found(c))
-        }));
-        Self {
+        let mut w = Self {
             client,
             doc,
             email: String::new(),
@@ -1801,12 +1798,20 @@ impl SendLinkWindow {
             consent_for: String::new(),
             copy: None,
             update_shared: false,
-            job,
+            job: None,
+            sending: false,
             audit,
             msg: None,
             err: None,
             closed: false,
-        }
+        };
+        w.read(ctx, s, true);
+        w
+    }
+
+    /// A link is being sent: the window stays, and no other replaces it.
+    pub fn sending(&self) -> bool {
+        self.sending
     }
 
     fn ready(&self) -> bool {
@@ -1818,7 +1823,24 @@ impl SendLinkWindow {
             && !e.contains(char::is_whitespace)
     }
 
+    /// Reads the portal copy (`first`: the client is put on the portal first, as Share… does).
+    fn read(&mut self, ctx: &egui::Context, s: &PortalSettings, first: bool) {
+        let (s2, c2, d2) = (s.clone(), self.client.clone(), self.doc.clone());
+        self.sending = false;
+        self.job = Some(spawn(ctx, move || {
+            let p = core::client(&s2);
+            if first {
+                p.put_client(&c2.id, &c2.code, &c2.name, None)
+                    .map_err(|e| e.message())?;
+            }
+            copy_of(&p, &c2, &d2).map(LinkJob::Found)
+        }));
+    }
+
     fn send(&mut self, ctx: &egui::Context, s: &PortalSettings) {
+        let Some(seen) = self.copy.clone() else {
+            return;
+        };
         let (s, client, d, audit) = (
             s.clone(),
             self.client.clone(),
@@ -1838,31 +1860,39 @@ impl SendLinkWindow {
         };
         self.msg = None;
         self.err = None;
+        self.sending = true;
         self.job = Some(spawn(ctx, move || {
             let p = core::client(&s);
             let plain = |e: vf_portal::api::PortalError| e.message();
-            // Read again now: another PC may have shared or changed it since the window opened.
-            let (copy, file_id) = copy_of(&p, &client, &d)?;
-            let (file_id, added, updated) = match (copy, file_id) {
-                (PortalCopy::Same { .. }, Some(f)) => (f, false, false),
+            // Read again now: another PC may have shared or changed it since the window looked.
+            // A copy other than the one shown is shown first; nothing is sent from it unseen.
+            let now = copy_of(&p, &client, &d)?;
+            if now != seen {
+                return Ok(LinkJob::Changed(now));
+            }
+            let (file_id, added, updated) = match now {
+                PortalCopy::Same { file_id, .. } => (file_id, false, false),
                 // The client's people see it: their copy changes only when chosen.
-                (PortalCopy::Older { shown }, Some(f)) if shown > 0 && !update_shared => {
-                    (f, false, false)
+                PortalCopy::Older { file_id, shown } if shown > 0 && !update_shared => {
+                    (file_id, false, false)
                 }
-                (PortalCopy::Older { .. }, Some(f)) => {
-                    p.replace(&f, &d.name, &d.path).map_err(plain)?;
-                    (f, false, true)
+                PortalCopy::Older { file_id, .. } => {
+                    p.replace(&file_id, &d.name, &d.path).map_err(plain)?;
+                    (file_id, false, true)
                 }
-                _ => {
-                    let a = p
+                PortalCopy::Absent => {
+                    match p
                         .add(&client.id, &d.id, &d.name, d.tax_year, &d.path)
-                        .map_err(plain)?;
-                    let mut updated = false;
-                    if let vf_portal::api::Added::Changed(f) = &a {
-                        p.replace(f, &d.name, &d.path).map_err(plain)?;
-                        updated = true;
+                        .map_err(plain)?
+                    {
+                        vf_portal::api::Added::New(f) => (f, true, false),
+                        // Another PC put this same content there a moment ago.
+                        vf_portal::api::Added::Existing(f) => (f, false, false),
+                        // Another PC put another version there a moment ago: shown first.
+                        vf_portal::api::Added::Changed(_) => {
+                            return copy_of(&p, &client, &d).map(LinkJob::Changed);
+                        }
                     }
-                    (a.file_id().to_string(), true, updated)
                 }
             };
             if added || updated {
@@ -1881,7 +1911,7 @@ impl SendLinkWindow {
             };
             let until = p
                 .send_outside(&client.id, &link)
-                .map_err(|e| link_error(&e, added))?;
+                .map_err(|e| link_error(&e, added, updated))?;
             audit.send(AuditEntry::new(
                 "portal_secure_link",
                 Some(&d.id),
@@ -1910,21 +1940,37 @@ impl SendLinkWindow {
             && let Ok(r) = rx.try_recv()
         {
             self.job = None;
+            let was_sending = std::mem::take(&mut self.sending);
             match r {
                 Ok(LinkJob::Found(c)) => self.copy = Some(c),
+                Ok(LinkJob::Changed(c)) => {
+                    self.copy = Some(c);
+                    self.update_shared = false;
+                    self.err = Some(
+                        "The portal's copy changed since this window looked: check it above, then press Send again. Nothing was sent.".into(),
+                    );
+                }
                 Ok(LinkJob::Sent(m)) => {
                     self.msg = Some(m);
                     // A second link is a new decision: asked again.
                     self.consent = false;
                     self.copy = None;
-                    self.reload(ctx, s);
+                    self.read(ctx, s, false);
                 }
-                Err(e) => self.err = Some(e),
+                Err(e) => {
+                    self.err = Some(e);
+                    // What the portal has now (a link that failed after the document went up).
+                    if was_sending {
+                        self.copy = None;
+                        self.read(ctx, s, false);
+                    }
+                }
             }
         }
         let busy = self.job.is_some();
         let mut open = true;
         let mut go = false;
+        let mut again = false;
         egui::Window::new(format!("Send secure link — {}", self.doc.name))
             .id(egui::Id::unique("portal-send-link"))
             .open(&mut open)
@@ -1936,10 +1982,15 @@ impl SendLinkWindow {
                     self.client.name
                 )));
                 match &self.copy {
-                    None if self.err.is_none() => {
+                    None if busy => {
                         ui.label(widgets::caption("Reading the portal…"));
                     }
-                    None => {}
+                    None => {
+                        // The portal could not be read: try again without reopening.
+                        if ui.button("Read the portal again").clicked() {
+                            again = true;
+                        }
+                    }
                     Some(PortalCopy::Absent) => {
                         ui.label(widgets::caption(
                             "Not on the portal yet: it is sent there first, shown to none of the client's portal people.",
@@ -1948,12 +1999,12 @@ impl SendLinkWindow {
                     Some(PortalCopy::Same { .. }) => {
                         ui.label(widgets::caption("On the portal as it is in the cabinet."));
                     }
-                    Some(PortalCopy::Older { shown: 0 }) => {
+                    Some(PortalCopy::Older { shown: 0, .. }) => {
                         ui.label(widgets::caption(
                             "The portal's copy is older than the cabinet's: the newer one goes up first.",
                         ));
                     }
-                    Some(PortalCopy::Older { shown }) => {
+                    Some(PortalCopy::Older { shown, .. }) => {
                         let n = *shown;
                         ui.label(
                             RichText::new(format!(
@@ -2039,7 +2090,7 @@ impl SendLinkWindow {
                     {
                         go = true;
                     }
-                    if busy && self.copy.is_some() {
+                    if self.sending {
                         ui.spinner();
                         ui.label(widgets::caption("Sending…"));
                     }
@@ -2051,19 +2102,15 @@ impl SendLinkWindow {
             });
         if go {
             self.send(ctx, s);
+        } else if again {
+            self.err = None;
+            self.read(ctx, s, true);
         }
         // Not closed while a link is being sent: its result (and its audit row) is shown here.
-        if !open && self.job.is_none() {
+        // Reading the portal does not hold it open.
+        if !open && !self.sending {
             self.closed = true;
         }
-    }
-
-    /// Reads the portal copy again (after a link: it may have just been sent there).
-    fn reload(&mut self, ctx: &egui::Context, s: &PortalSettings) {
-        let (s2, c2, d2) = (s.clone(), self.client.clone(), self.doc.clone());
-        self.job = Some(spawn(ctx, move || {
-            copy_of(&core::client(&s2), &c2, &d2).map(|(c, _)| LinkJob::Found(c))
-        }));
     }
 }
 
@@ -2383,7 +2430,9 @@ mod tests {
     #[test]
     fn a_secure_link_sends_the_document_first() {
         let (mut h, seen, audit, _t) = link_window(|method, path| match (method, path) {
-            ("GET", p) if p.contains("vfDocumentId") => (200, r#"{"files":[]}"#.into()),
+            ("GET", p) if p.starts_with("/api/firm/v1/files?clientId=AB-1") => {
+                (200, r#"{"files":[]}"#.into())
+            }
             ("POST", p) if p.starts_with("/api/firm/v1/files") => {
                 (201, r#"{"fileId":"f1"}"#.into())
             }
@@ -2454,7 +2503,7 @@ mod tests {
     fn an_older_copy_the_client_sees_changes_only_when_chosen() {
         fn answer(method: &str, path: &str) -> (u16, String) {
             match (method, path) {
-                ("GET", p) if p.contains("vfDocumentId") => {
+                ("GET", p) if p.starts_with("/api/firm/v1/files?clientId=AB-1") => {
                     (200, portal_copy("AB-1", &"0".repeat(64), 2))
                 }
                 ("POST", "/api/firm/v1/shares") => (
@@ -2504,8 +2553,12 @@ mod tests {
     #[test]
     fn a_copy_under_another_client_is_left_alone() {
         let (mut h, seen, _audit, _t) = link_window(|method, path| match (method, path) {
+            // The document's own lookup would find the other client's copy; this client has none.
             ("GET", p) if p.contains("vfDocumentId") => {
                 (200, portal_copy("OTHER-CLIENT", "1".repeat(64).as_str(), 1))
+            }
+            ("GET", p) if p.starts_with("/api/firm/v1/files?clientId=AB-1") => {
+                (200, r#"{"files":[]}"#.into())
             }
             ("POST", p) if p.starts_with("/api/firm/v1/files") => {
                 (201, r#"{"fileId":"f2"}"#.into())
@@ -2525,12 +2578,65 @@ mod tests {
         assert_eq!(link_files(&seen), serde_json::json!(["f2"]));
     }
 
+    /// Code review: the copy changed between the window's look and Send (another PC shared an
+    /// older version with the client's people): nothing is sent, the new state is shown.
+    #[test]
+    fn a_copy_changed_before_send_is_shown_first() {
+        static LOOKS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let (mut h, seen, audit, _t) = link_window(|method, path| match (method, path) {
+            ("GET", p) if p.starts_with("/api/firm/v1/files?clientId=AB-1") => {
+                if LOOKS.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                    (200, portal_copy("AB-1", DOC_SHA, 0))
+                } else {
+                    (200, portal_copy("AB-1", &"0".repeat(64), 2))
+                }
+            }
+            _ => (200, r#"{"ok":true}"#.into()),
+        });
+        wait_for(&mut h, "On the portal as it is in the cabinet");
+        fill_and_send(&mut h);
+        wait_for(&mut h, "changed since this window looked");
+        assert!(
+            requests(&seen, "POST").is_empty(),
+            "{:?}",
+            seen.lock().unwrap()
+        );
+        assert!(requests(&seen, "PUT /api/firm/v1/files/").is_empty());
+        assert!(
+            h.query_by_label_contains("2 of the client's portal people see it")
+                .is_some()
+        );
+        assert_eq!(audit.try_iter().count(), 0);
+    }
+
+    /// Code review: a failed first read can be tried again without reopening the window.
+    #[test]
+    fn a_failed_read_can_be_tried_again() {
+        static TRIES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let (mut h, _seen, _audit, _t) = link_window(|method, path| match (method, path) {
+            ("GET", p) if p.starts_with("/api/firm/v1/files?clientId=AB-1") => {
+                if TRIES.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                    (503, r#"{"error":"unavailable"}"#.into())
+                } else {
+                    (200, r#"{"files":[]}"#.into())
+                }
+            }
+            _ => (200, r#"{"ok":true}"#.into()),
+        });
+        wait_for(&mut h, "Read the portal again");
+        h.get_by_label("Read the portal again").click();
+        wait_for(&mut h, "Not on the portal yet");
+        assert!(h.state().err.is_none());
+    }
+
     /// Already on the portal as it is in the cabinet: not sent again. A portal from before P68
     /// says to update it, and a copy that was already there is not called hidden.
     #[test]
     fn a_secure_link_to_a_document_already_there_and_an_old_portal() {
         let (mut h, seen, audit, _t) = link_window(|method, path| match (method, path) {
-            ("GET", p) if p.contains("vfDocumentId") => (200, portal_copy("AB-1", DOC_SHA, 1)),
+            ("GET", p) if p.starts_with("/api/firm/v1/files?clientId=AB-1") => {
+                (200, portal_copy("AB-1", DOC_SHA, 1))
+            }
             ("POST", "/api/firm/v1/shares") => (404, r#"{"error":"not_found"}"#.into()),
             _ => (200, r#"{"ok":true}"#.into()),
         });
@@ -2550,12 +2656,14 @@ mod tests {
             status: 400,
             code: "view_only_needs_preview".into(),
         };
-        assert!(link_error(&e, false).contains("allow download"));
+        assert!(link_error(&e, false, false).contains("allow download"));
         let e = vf_portal::api::PortalError::Http {
             status: 404,
             code: "not_found".into(),
         };
-        assert!(link_error(&e, true).contains("shown to none"));
+        assert!(link_error(&e, true, false).contains("shown to none"));
+        // A failed link after the client's copy was updated says so.
+        assert!(link_error(&e, false, true).contains("the client's people have the newer version"));
         assert!(!e.message().contains("update Vibe Portal"));
     }
 

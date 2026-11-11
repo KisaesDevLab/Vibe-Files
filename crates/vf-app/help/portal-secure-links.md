@@ -21,7 +21,7 @@ Then tick **The client has consented to sending this to this person** and press 
 2. The portal emails the link. The email does not name the client or the file.
 3. The recipient opens the link and asks for a code; it is emailed to the same address. With it they can view (and download, when allowed) for 30 minutes at a time, until the link expires.
 
-If the email cannot be sent, no link is made. When the document was sent to the portal before something failed, it stays there, shown to none of the client's people, and **Send** again does not send it twice. A document on the portal only for a link is not marked **(on portal)** in Browse. **Remove from portal** in **Share…** also stops every link to it.
+If the email cannot be sent, no link is made. When the document was sent to the portal before something failed, it stays there, shown to none of the client's people, and **Send** again does not send it twice. Such a document shows **Share… (on portal)** in Browse, though no client person sees it until it is shared with them. **Remove from portal** in **Share…** also stops every link to it.
 
 ## Seeing and ending links
 
