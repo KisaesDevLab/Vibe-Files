@@ -49,6 +49,8 @@ pub enum Act {
     OpenExternal,
     /// "Share…": the firm's Vibe Portal (PA-37).
     Share,
+    /// "Send secure link…": this document to someone outside the client (Vibe-Portal P68).
+    SendLink,
 }
 
 impl Preview {
@@ -200,6 +202,15 @@ pub fn show(
                         .clicked()
                     {
                         act = Act::Share;
+                    }
+                    if ui
+                        .small_button("Send secure link…")
+                        .on_hover_text(
+                            "Send this document to someone outside the client (a lender, a lawyer) by a private link from the portal",
+                        )
+                        .clicked()
+                    {
+                        act = Act::SendLink;
                     }
                 }
             });

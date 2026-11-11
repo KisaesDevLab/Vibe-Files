@@ -3291,13 +3291,55 @@ fn open_share(ctx: &egui::Context, b: &mut Browse, env: &mut Env) {
     ));
 }
 
-/// The portal windows (Share…, Portal users…), drawn over Browse while open.
+/// The document pane's Send secure link… (Vibe-Portal P68): one document of a client, to
+/// someone outside the client.
+fn open_send_link(ctx: &egui::Context, b: &mut Browse, env: &mut Env, d: &vf_core::browse::DocRow) {
+    let Some(s) = b.portal.settings(env.root).cloned() else {
+        return;
+    };
+    let client = d
+        .client_id
+        .as_ref()
+        .and_then(|id| b.snap.clients.iter().find(|c| &c.id == id))
+        .cloned();
+    let Some(c) = client else {
+        b.error = Some("Only a document filed under a client can be sent by a secure link.".into());
+        return;
+    };
+    b.portal.send_link = Some(crate::ui::portal::SendLinkWindow::new(
+        ctx,
+        &s,
+        crate::ui::portal::ClientRef {
+            id: c.id.clone(),
+            code: c.ext_id.clone(),
+            name: c.name.clone(),
+        },
+        crate::ui::portal::DocRef {
+            id: d.id.clone(),
+            name: widgets::file_name(&d.rel_path).to_string(),
+            path: env.root.join(&d.rel_path),
+            hash: d.hash.clone(),
+            tax_year: d.tax_year,
+        },
+        b.portal.audit_out(),
+    ));
+}
+
+/// The portal windows (Share…, Portal users…, Send secure link…), drawn over Browse while open.
 fn portal_windows(ctx: &egui::Context, b: &mut Browse, env: &mut Env) {
     let Some(s) = b.portal.settings(env.root).cloned() else {
         b.portal.share = None;
         b.portal.people = None;
+        b.portal.send_link = None;
         return;
     };
+    if let Some(w) = &mut b.portal.send_link {
+        w.show(ctx, &s);
+        if w.closed {
+            b.portal.send_link = None;
+            b.portal.refresh_marks = true;
+        }
+    }
     // Audit rows of what the windows' threads did reach the app through PortalState's channel.
     if let Some(w) = &mut b.portal.share {
         w.show(ctx, &s);
@@ -3355,6 +3397,7 @@ fn inspector(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env) {
             portal,
         ) {
             crate::ui::preview::Act::Share => open_share(ui.ctx(), b, env),
+            crate::ui::preview::Act::SendLink => open_send_link(ui.ctx(), b, env, &d),
             crate::ui::preview::Act::None => {}
             crate::ui::preview::Act::Open(page) => {
                 b.view_request = Some(crate::ui::viewer::Doc::at(

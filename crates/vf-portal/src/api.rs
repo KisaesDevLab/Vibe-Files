@@ -55,12 +55,45 @@ impl PortalError {
                 "Someone chosen no longer has access to this client.".into()
             }
             Some("already_fetched") => "Another PC already fetched it.".into(),
+            // Secure links (Vibe-Portal P49, P68).
+            Some("file_not_found") => "The document is not on the portal any more.".into(),
+            Some("cannot_watermark") => {
+                "The PDF cannot be watermarked (locked with a password or damaged): send it without the watermark, or another copy.".into()
+            }
+            Some("too_many_shares") => {
+                "You have sent as many secure links as the portal allows today.".into()
+            }
+            Some("recipient_has_too_many") => {
+                "That person already has 5 working secure links for this client: end one on the portal's staff page first.".into()
+            }
+            Some("view_only_needs_preview") => {
+                "View only works for a PDF or a picture the portal page can show: allow download for this file.".into()
+            }
+            Some("too_large_to_watermark") => {
+                "The PDF is too large to watermark: send it without the watermark.".into()
+            }
+            Some("email_failed") => {
+                "The portal could not send the email, so no link was made. Try again.".into()
+            }
             _ => self.to_string(),
         }
     }
 }
 
 pub type Result<T> = std::result::Result<T, PortalError>;
+
+/// A secure link to someone outside the client (Vibe-Portal P49, P68).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutsideLink {
+    pub file_ids: Vec<String>,
+    pub email: String,
+    pub name: String,
+    pub organization: String,
+    pub message: String,
+    pub can_download: bool,
+    pub watermark: bool,
+    pub days: u32,
+}
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -521,6 +554,30 @@ impl Portal {
             .map(|r| r.invitation_id)
     }
 
+    /// Sends a secure link to someone outside the client (Vibe-Portal P68) for files already on
+    /// the portal; the portal emails it. Returns when the link expires (RFC 3339). A portal
+    /// older than P68 answers 404.
+    pub fn send_outside(&self, client_id: &str, l: &OutsideLink) -> Result<String> {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct R {
+            expires_at: String,
+        }
+        let body = serde_json::json!({
+            "clientId": client_id,
+            "fileIds": l.file_ids,
+            "email": l.email.trim(),
+            "name": l.name.trim(),
+            "organization": l.organization.trim(),
+            "message": l.message.trim(),
+            "canDownload": l.can_download,
+            "watermark": l.watermark,
+            "days": l.days,
+        });
+        self.send_json::<R>("POST", "/shares", &body)
+            .map(|r| r.expires_at)
+    }
+
     pub fn withdraw_invite(&self, client_id: &str, invitation_id: &str) -> Result<()> {
         self.delete::<serde_json::Value>(&format!("/clients/{client_id}/invites/{invitation_id}"))
             .map(|_| ())
@@ -867,16 +924,24 @@ mod tests {
             let mut first = String::new();
             r.read_line(&mut first).unwrap();
             let mut auth = String::new();
+            let mut len = 0usize;
             loop {
                 let mut line = String::new();
                 r.read_line(&mut line).unwrap();
-                if line.to_ascii_lowercase().starts_with("authorization:") {
+                let lower = line.to_ascii_lowercase();
+                if lower.starts_with("authorization:") {
                     auth = line.trim().to_string();
+                }
+                if let Some(n) = lower.strip_prefix("content-length:") {
+                    len = n.trim().parse().unwrap_or(0);
                 }
                 if line == "\r\n" || line.is_empty() {
                     break;
                 }
             }
+            let mut sent = vec![0u8; len];
+            std::io::Read::read_exact(&mut r, &mut sent).unwrap();
+            let sent = String::from_utf8(sent).unwrap();
             let mut w = s;
             write!(
                 w,
@@ -884,7 +949,11 @@ mod tests {
                 body.len()
             )
             .unwrap();
-            format!("{} | {auth}", first.trim())
+            if sent.is_empty() {
+                format!("{} | {auth}", first.trim())
+            } else {
+                format!("{} | {auth} | {sent}", first.trim())
+            }
         });
         let s = PortalSettings {
             version: 1,
@@ -916,6 +985,59 @@ mod tests {
         // A portal from before P63.
         let (p, _) = one_answer("404 Not Found", r#"{"error":"not_found"}"#);
         assert_eq!(p.people("john").unwrap_err().status(), Some(404));
+    }
+
+    /// Vibe-Portal P68: a secure link to someone outside, for files already on the portal.
+    #[test]
+    fn a_secure_link_is_sent_through_the_portal() {
+        let (p, seen) = one_answer(
+            "201 Created",
+            r#"{"shareId":"s1","expiresAt":"2026-11-18T15:00:00.000Z"}"#,
+        );
+        let l = OutsideLink {
+            file_ids: vec!["f1".into()],
+            email: " pat@first-bank.test ".into(),
+            name: "Pat Roe".into(),
+            organization: "First Bank".into(),
+            message: "".into(),
+            can_download: true,
+            watermark: true,
+            days: 7,
+        };
+        assert_eq!(
+            p.send_outside("AB-1", &l).unwrap(),
+            "2026-11-18T15:00:00.000Z"
+        );
+        let seen = seen.join().unwrap();
+        assert!(
+            seen.starts_with(
+                "POST /api/firm/v1/shares HTTP/1.1 | authorization: Bearer vpk_test | "
+            ),
+            "{seen}"
+        );
+        let body: serde_json::Value =
+            serde_json::from_str(seen.rsplit(" | ").next().unwrap()).unwrap();
+        assert_eq!(
+            body,
+            serde_json::json!({
+                "clientId": "AB-1", "fileIds": ["f1"], "email": "pat@first-bank.test",
+                "name": "Pat Roe", "organization": "First Bank", "message": "",
+                "canDownload": true, "watermark": true, "days": 7
+            })
+        );
+        // A portal from before P68.
+        let (p, _) = one_answer("404 Not Found", r#"{"error":"not_found"}"#);
+        assert_eq!(p.send_outside("AB-1", &l).unwrap_err().status(), Some(404));
+        let (p, _) = one_answer(
+            "429 Too Many Requests",
+            r#"{"error":"recipient_has_too_many"}"#,
+        );
+        assert!(
+            p.send_outside("AB-1", &l)
+                .unwrap_err()
+                .message()
+                .contains("5 working")
+        );
     }
 
     #[test]

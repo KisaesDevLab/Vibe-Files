@@ -118,6 +118,8 @@ pub struct PortalState {
     /// Cabinet documents on the portal (Browse's marks), as of the last read.
     pub on_portal: HashSet<String>,
     pub share: Option<ShareWindow>,
+    /// The document pane's Send secure link… (Vibe-Portal P68).
+    pub send_link: Option<SendLinkWindow>,
     pub people: Option<PeopleWindow>,
     /// "Fetch uploads now" (Admin › Portal, or Intake's strip).
     pub fetch_now: bool,
@@ -144,6 +146,7 @@ impl Default for PortalState {
             marks: None,
             on_portal: HashSet::new(),
             share: None,
+            send_link: None,
             people: None,
             fetch_now: false,
             last_fetch: None,
@@ -269,7 +272,14 @@ impl PortalState {
                 core::client(&s2)
                     .all_files()
                     .ok()
-                    .map(|f| f.into_iter().map(|f| f.vf_document_id).collect())
+                    // Shared with the client's people: a document on the portal only for a
+                    // secure link (shown to nobody) is not marked (P68 QA).
+                    .map(|f| {
+                        f.into_iter()
+                            .filter(|f| f.users.iter().any(|u| u.visible))
+                            .map(|f| f.vf_document_id)
+                            .collect()
+                    })
             }));
         }
         if s.fetch_minutes > 0 {
@@ -784,7 +794,9 @@ impl ShareWindow {
                 if self.confirm_remove {
                     ui.horizontal_wrapped(|ui| {
                         ui.label(
-                            RichText::new("Remove from the portal for everyone?")
+                            RichText::new(
+                                "Remove from the portal for everyone? Secure links sent to people outside the client stop giving it too.",
+                            )
                                 .color(theme::warn()),
                         );
                         if ui.button("Remove").clicked() {
@@ -1661,6 +1673,400 @@ pub fn admin_requests(ui: &mut egui::Ui, a: &mut AdminPortal, env: &mut Env) {
     widgets::message_line(ui, a.err.as_deref());
 }
 
+// ======================================================================================
+// Send secure link window (the document pane's Send secure link…, Vibe-Portal P68).
+// ======================================================================================
+
+/// Days a new secure link works (owner 2026-11-11: view and download, 7 days).
+pub const LINK_DAYS: u32 = 7;
+/// The most days Vibe Files offers (the portal allows more; the owner's choice).
+pub const LINK_MAX_DAYS: u32 = 30;
+
+/// Why the portal refused the link itself, in plain words. `added`: the document was put on
+/// the portal for this link (shown to nobody) before it failed; Send again does not send it
+/// twice.
+fn link_error(e: &vf_portal::api::PortalError, added: bool) -> String {
+    // An unknown route answers 404 not_found: a portal from before P68.
+    let words = if e.status() == Some(404) && e.code() == Some("not_found") {
+        "This portal cannot send secure links from Vibe Files yet: update Vibe Portal, or send it from the portal's staff page.".to_string()
+    } else {
+        e.message()
+    };
+    if added {
+        format!(
+            "{words} The document is on the portal now, shown to none of the client's people; Send again does not send it twice."
+        )
+    } else {
+        words
+    }
+}
+
+/// The client's portal copy of the document, as the window found it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PortalCopy {
+    /// Not on the portal for this client: sent first, shown to nobody.
+    Absent,
+    /// On the portal as it is in the cabinet; `shown`: the client's people who see it.
+    Same { shown: usize },
+    /// On the portal, older than the cabinet's.
+    Older { shown: usize },
+}
+
+/// What the portal has of `doc` for `client` (a copy filed under another client, the document
+/// having moved since, is not this client's: Absent).
+fn copy_of(
+    p: &vf_portal::api::Portal,
+    client: &ClientRef,
+    d: &DocRef,
+) -> Result<(PortalCopy, Option<String>), String> {
+    let f = p
+        .file_for_doc(&d.id)
+        .map_err(|e| e.message())?
+        .filter(|f| f.client_id.eq_ignore_ascii_case(&client.id));
+    Ok(match f {
+        None => (PortalCopy::Absent, None),
+        Some(f) => {
+            let shown = f.users.iter().filter(|u| u.visible).count();
+            let c = if f.sha256 == d.hash {
+                PortalCopy::Same { shown }
+            } else {
+                PortalCopy::Older { shown }
+            };
+            (c, Some(f.file_id))
+        }
+    })
+}
+
+enum LinkJob {
+    Found(PortalCopy),
+    Sent(String),
+}
+
+/// Sends one document of a client to someone outside the client by a secure link: the
+/// document goes to the portal first when it is not there (shown to nobody); an older portal
+/// copy is brought up to date first unless the client's people see it and the person chose not
+/// to change what they see; then the portal emails the link.
+pub struct SendLinkWindow {
+    client: ClientRef,
+    doc: DocRef,
+    pub email: String,
+    pub name: String,
+    pub organization: String,
+    pub message: String,
+    pub can_download: bool,
+    pub watermark: bool,
+    pub days: u32,
+    /// The client consented to sending this to this person (IRS 7216): asked every time, and
+    /// again when the address changes.
+    pub consent: bool,
+    consent_for: String,
+    /// The portal copy, once read.
+    pub copy: Option<PortalCopy>,
+    /// An older copy the client's people see: send the cabinet's newer version (they see it
+    /// too and are told it was updated). Off unless chosen.
+    pub update_shared: bool,
+    job: Option<Receiver<Result<LinkJob, String>>>,
+    audit: AuditOut,
+    pub msg: Option<String>,
+    pub err: Option<String>,
+    pub closed: bool,
+}
+
+impl SendLinkWindow {
+    pub fn new(
+        ctx: &egui::Context,
+        s: &PortalSettings,
+        client: ClientRef,
+        doc: DocRef,
+        audit: AuditOut,
+    ) -> Self {
+        let (s2, c2, d2) = (s.clone(), client.clone(), doc.clone());
+        let job = Some(spawn(ctx, move || {
+            let p = core::client(&s2);
+            p.put_client(&c2.id, &c2.code, &c2.name, None)
+                .map_err(|e| e.message())?;
+            copy_of(&p, &c2, &d2).map(|(c, _)| LinkJob::Found(c))
+        }));
+        Self {
+            client,
+            doc,
+            email: String::new(),
+            name: String::new(),
+            organization: String::new(),
+            message: String::new(),
+            can_download: true,
+            watermark: true,
+            days: LINK_DAYS,
+            consent: false,
+            consent_for: String::new(),
+            copy: None,
+            update_shared: false,
+            job,
+            audit,
+            msg: None,
+            err: None,
+            closed: false,
+        }
+    }
+
+    fn ready(&self) -> bool {
+        let e = self.email.trim();
+        self.job.is_none()
+            && self.copy.is_some()
+            && self.consent
+            && e.contains('@')
+            && !e.contains(char::is_whitespace)
+    }
+
+    fn send(&mut self, ctx: &egui::Context, s: &PortalSettings) {
+        let (s, client, d, audit) = (
+            s.clone(),
+            self.client.clone(),
+            self.doc.clone(),
+            self.audit.clone(),
+        );
+        let update_shared = self.update_shared;
+        let link = vf_portal::api::OutsideLink {
+            file_ids: vec![],
+            email: self.email.trim().to_string(),
+            name: self.name.trim().to_string(),
+            organization: self.organization.trim().to_string(),
+            message: self.message.trim().to_string(),
+            can_download: self.can_download,
+            watermark: self.watermark,
+            days: self.days.clamp(1, LINK_MAX_DAYS),
+        };
+        self.msg = None;
+        self.err = None;
+        self.job = Some(spawn(ctx, move || {
+            let p = core::client(&s);
+            let plain = |e: vf_portal::api::PortalError| e.message();
+            // Read again now: another PC may have shared or changed it since the window opened.
+            let (copy, file_id) = copy_of(&p, &client, &d)?;
+            let (file_id, added, updated) = match (copy, file_id) {
+                (PortalCopy::Same { .. }, Some(f)) => (f, false, false),
+                // The client's people see it: their copy changes only when chosen.
+                (PortalCopy::Older { shown }, Some(f)) if shown > 0 && !update_shared => {
+                    (f, false, false)
+                }
+                (PortalCopy::Older { .. }, Some(f)) => {
+                    p.replace(&f, &d.name, &d.path).map_err(plain)?;
+                    (f, false, true)
+                }
+                _ => {
+                    let a = p
+                        .add(&client.id, &d.id, &d.name, d.tax_year, &d.path)
+                        .map_err(plain)?;
+                    let mut updated = false;
+                    if let vf_portal::api::Added::Changed(f) = &a {
+                        p.replace(f, &d.name, &d.path).map_err(plain)?;
+                        updated = true;
+                    }
+                    (a.file_id().to_string(), true, updated)
+                }
+            };
+            if added || updated {
+                audit.send(AuditEntry::new(
+                    "portal_share",
+                    Some(&d.id),
+                    serde_json::json!({
+                        "client_id": client.id, "sent": added, "updated": updated,
+                        "for_secure_link": true,
+                    }),
+                ));
+            }
+            let link = vf_portal::api::OutsideLink {
+                file_ids: vec![file_id],
+                ..link
+            };
+            let until = p
+                .send_outside(&client.id, &link)
+                .map_err(|e| link_error(&e, added))?;
+            audit.send(AuditEntry::new(
+                "portal_secure_link",
+                Some(&d.id),
+                serde_json::json!({
+                    "client_id": client.id,
+                    "to": link.email,
+                    "name": link.name,
+                    "organization": link.organization,
+                    "days": link.days,
+                    "can_download": link.can_download,
+                    "watermark": link.watermark,
+                    "expires_at": until,
+                    "client_consent_confirmed": true,
+                }),
+            ));
+            Ok(LinkJob::Sent(format!(
+                "Secure link sent to {} (works until {}).",
+                link.email,
+                widgets::local_time(&until)
+            )))
+        }));
+    }
+
+    pub fn show(&mut self, ctx: &egui::Context, s: &PortalSettings) {
+        if let Some(rx) = &self.job
+            && let Ok(r) = rx.try_recv()
+        {
+            self.job = None;
+            match r {
+                Ok(LinkJob::Found(c)) => self.copy = Some(c),
+                Ok(LinkJob::Sent(m)) => {
+                    self.msg = Some(m);
+                    // A second link is a new decision: asked again.
+                    self.consent = false;
+                    self.copy = None;
+                    self.reload(ctx, s);
+                }
+                Err(e) => self.err = Some(e),
+            }
+        }
+        let busy = self.job.is_some();
+        let mut open = true;
+        let mut go = false;
+        egui::Window::new(format!("Send secure link — {}", self.doc.name))
+            .id(egui::Id::unique("portal-send-link"))
+            .open(&mut open)
+            .collapsible(false)
+            .default_width(480.0)
+            .show(ctx, |ui| {
+                ui.label(widgets::caption(format!(
+                    "Sends this document of {} to someone outside the client (a lender, a lawyer). They get an email with a private link, and a code sent to that address opens it.",
+                    self.client.name
+                )));
+                match &self.copy {
+                    None if self.err.is_none() => {
+                        ui.label(widgets::caption("Reading the portal…"));
+                    }
+                    None => {}
+                    Some(PortalCopy::Absent) => {
+                        ui.label(widgets::caption(
+                            "Not on the portal yet: it is sent there first, shown to none of the client's portal people.",
+                        ));
+                    }
+                    Some(PortalCopy::Same { .. }) => {
+                        ui.label(widgets::caption("On the portal as it is in the cabinet."));
+                    }
+                    Some(PortalCopy::Older { shown: 0 }) => {
+                        ui.label(widgets::caption(
+                            "The portal's copy is older than the cabinet's: the newer one goes up first.",
+                        ));
+                    }
+                    Some(PortalCopy::Older { shown }) => {
+                        let n = *shown;
+                        ui.label(
+                            RichText::new(format!(
+                                "The portal's copy is older than the cabinet's, and {n} of the client's portal people see it."
+                            ))
+                            .color(theme::warn()),
+                        );
+                        ui.add_enabled(
+                            !busy,
+                            egui::Checkbox::new(
+                                &mut self.update_shared,
+                                "Send the cabinet's newer version (the client's people see it too and are told it was updated)",
+                            ),
+                        );
+                        if !self.update_shared {
+                            ui.label(widgets::caption(
+                                "Unticked: the link gives the portal's older copy, and what the client sees does not change.",
+                            ));
+                        }
+                    }
+                }
+                ui.add_space(4.0);
+                egui::Grid::new("portal-send-link-grid")
+                    .num_columns(2)
+                    .show(ui, |ui| {
+                        for (label, value) in [
+                            ("Their email", &mut self.email),
+                            ("Their name", &mut self.name),
+                            ("Organization", &mut self.organization),
+                        ] {
+                            let l = ui.label(label);
+                            ui.add_enabled(!busy, egui::TextEdit::singleline(value))
+                                .labelled_by(l.id);
+                            ui.end_row();
+                        }
+                        let l = ui.label("Message");
+                        ui.add_enabled(
+                            !busy,
+                            egui::TextEdit::multiline(&mut self.message).desired_rows(3),
+                        )
+                        .labelled_by(l.id);
+                        ui.end_row();
+                        let l = ui.label("Days the link works");
+                        ui.add_enabled(
+                            !busy,
+                            egui::DragValue::new(&mut self.days).range(1..=LINK_MAX_DAYS),
+                        )
+                        .labelled_by(l.id);
+                        ui.end_row();
+                    });
+                ui.add_enabled(
+                    !busy,
+                    egui::Checkbox::new(&mut self.can_download, "Allow download (not only view)"),
+                )
+                .on_hover_text("View only works for PDFs and pictures the page can show");
+                ui.add_enabled(
+                    !busy,
+                    egui::Checkbox::new(&mut self.watermark, "Watermark PDFs with their name"),
+                );
+                ui.separator();
+                // The consent is for this address: changing it asks again.
+                if self.email.trim() != self.consent_for {
+                    self.consent = false;
+                }
+                let tick = ui
+                    .add_enabled(
+                        !busy,
+                        egui::Checkbox::new(
+                            &mut self.consent,
+                            "The client has consented to sending this to this person",
+                        ),
+                    )
+                    .on_hover_text(
+                        "Tax return information may be given to someone else only with the client's consent (IRS section 7216). Recorded in the audit trail with your name.",
+                    );
+                if tick.changed() {
+                    self.consent_for = self.email.trim().to_string();
+                }
+                ui.horizontal(|ui| {
+                    if ui
+                        .add_enabled(self.ready(), widgets::primary_button("Send"))
+                        .clicked()
+                    {
+                        go = true;
+                    }
+                    if busy && self.copy.is_some() {
+                        ui.spinner();
+                        ui.label(widgets::caption("Sending…"));
+                    }
+                });
+                if let Some(m) = &self.msg {
+                    ui.label(m.as_str());
+                }
+                widgets::message_line(ui, self.err.as_deref());
+            });
+        if go {
+            self.send(ctx, s);
+        }
+        // Not closed while a link is being sent: its result (and its audit row) is shown here.
+        if !open && self.job.is_none() {
+            self.closed = true;
+        }
+    }
+
+    /// Reads the portal copy again (after a link: it may have just been sent there).
+    fn reload(&mut self, ctx: &egui::Context, s: &PortalSettings) {
+        let (s2, c2, d2) = (s.clone(), self.client.clone(), self.doc.clone());
+        self.job = Some(spawn(ctx, move || {
+            copy_of(&core::client(&s2), &c2, &d2).map(|(c, _)| LinkJob::Found(c))
+        }));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1878,6 +2284,279 @@ mod tests {
             serde_json::json!({"email":"jane@example.test","name":"Jane Doe","roleLabel":"Spouse"})
         );
         assert_eq!(audit.try_iter().count(), 1, "the invitation is audited");
+    }
+
+    /// The window under test, the requests the fake portal saw, the audit rows, the folder.
+    type LinkTest = (
+        egui_kittest::Harness<'static, SendLinkWindow>,
+        std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+        mpsc::Receiver<AuditEntry>,
+        tempfile::TempDir,
+    );
+
+    /// The cabinet file's content and its SHA-256.
+    const DOC_BODY: &[u8] = b"%PDF-1.4 invented";
+    const DOC_SHA: &str = "d3dd4eff6b51659883754487ab7a122ab89ccecc30afad6c7e34947decefbb3f";
+
+    /// The portal's answer for the document: one copy for `client`, with `sha` and `visible`
+    /// people.
+    fn portal_copy(client: &str, sha: &str, visible: usize) -> String {
+        let users: Vec<String> = (0..visible)
+            .map(|i| {
+                format!(
+                    r#"{{"identityId":"p{i}","visible":true,"viewedAt":null,"firstViewedAt":null}}"#
+                )
+            })
+            .collect();
+        format!(
+            r#"{{"files":[{{"fileId":"f9","clientId":"{client}","vfDocumentId":"doc-1","name":"Return 2025.pdf","size":17,"sha256":"{sha}","taxYear":2025,"sharedAt":"2026-11-01T00:00:00Z","sharedBy":"PC kurt","contentUpdatedAt":null,"users":[{}]}}]}}"#,
+            users.join(",")
+        )
+    }
+
+    fn link_window(answer: fn(&str, &str) -> (u16, String)) -> LinkTest {
+        let (url, seen) = fake_portal(answer);
+        let s = PortalSettings {
+            version: 1,
+            cabinet_id: "c".into(),
+            url,
+            key: "vpk_test".into(),
+            fetch_minutes: 0,
+        };
+        let t = tempfile::tempdir().unwrap();
+        let path = t.path().join("Return 2025.pdf");
+        std::fs::write(&path, DOC_BODY).unwrap();
+        assert_eq!(vf_portal::api::file_sha256(&path).unwrap(), DOC_SHA);
+        let (tx, audit) = mpsc::channel();
+        let w = SendLinkWindow::new(
+            &egui::Context::default(),
+            &s,
+            ClientRef {
+                id: "AB-1".into(),
+                code: "1001".into(),
+                name: "Smith, John".into(),
+            },
+            DocRef {
+                id: "doc-1".into(),
+                name: "Return 2025.pdf".into(),
+                path,
+                hash: DOC_SHA.into(),
+                tax_year: Some(2025),
+            },
+            AuditOut(tx),
+        );
+        let h = egui_kittest::Harness::builder()
+            .with_size([700.0, 800.0])
+            .build_ui_state(move |ui, w: &mut SendLinkWindow| w.show(ui.ctx(), &s), w);
+        (h, seen, audit, t)
+    }
+
+    fn fill_and_send(h: &mut egui_kittest::Harness<'static, SendLinkWindow>) {
+        crate::ui::test_util::type_into(h, "Their email", "pat@first-bank.test");
+        h.get_by_label("The client has consented to sending this to this person")
+            .click();
+        h.run();
+        h.get_by_label("Send").click();
+    }
+
+    fn requests(seen: &std::sync::Arc<std::sync::Mutex<Vec<String>>>, start: &str) -> Vec<String> {
+        seen.lock()
+            .unwrap()
+            .iter()
+            .filter(|r| r.starts_with(start))
+            .cloned()
+            .collect()
+    }
+
+    /// The file ids of the link the window asked for.
+    fn link_files(seen: &std::sync::Arc<std::sync::Mutex<Vec<String>>>) -> serde_json::Value {
+        let r = requests(seen, "POST /api/firm/v1/shares");
+        let body: serde_json::Value =
+            serde_json::from_str(r[0].splitn(3, ' ').nth(2).unwrap()).unwrap();
+        body["fileIds"].clone()
+    }
+
+    /// Vibe-Portal P68 (owner 2026-11-11): Send secure link… puts a document that is not on the
+    /// portal there first (shown to nobody), then has the portal email the link; view and
+    /// download for 7 days and a watermark unless changed; the client's consent ticked each time,
+    /// and again when the address changes.
+    #[test]
+    fn a_secure_link_sends_the_document_first() {
+        let (mut h, seen, audit, _t) = link_window(|method, path| match (method, path) {
+            ("GET", p) if p.contains("vfDocumentId") => (200, r#"{"files":[]}"#.into()),
+            ("POST", p) if p.starts_with("/api/firm/v1/files") => {
+                (201, r#"{"fileId":"f1"}"#.into())
+            }
+            ("POST", "/api/firm/v1/shares") => (
+                201,
+                r#"{"shareId":"s1","expiresAt":"2026-11-18T15:00:00.000Z"}"#.into(),
+            ),
+            _ => (200, r#"{"ok":true}"#.into()),
+        });
+        wait_for(&mut h, "Not on the portal yet");
+        crate::ui::test_util::type_into(&mut h, "Their email", "pat@first-bank.test");
+        crate::ui::test_util::type_into(&mut h, "Their name", "Pat Roe");
+        // Not without the client's consent.
+        h.get_by_label("Send").click();
+        h.run();
+        assert!(
+            requests(&seen, "POST").is_empty(),
+            "nothing sent without consent"
+        );
+        h.get_by_label("The client has consented to sending this to this person")
+            .click();
+        h.run();
+        assert!(h.state().consent);
+        // Another address: asked again.
+        crate::ui::test_util::type_into(&mut h, "Their email", "x");
+        assert!(!h.state().consent, "the consent was for another address");
+        h.state_mut().email = "pat@first-bank.test".into();
+        h.run();
+        h.get_by_label("The client has consented to sending this to this person")
+            .click();
+        h.run();
+        h.get_by_label("Send").click();
+        wait_for(&mut h, "Secure link sent to pat@first-bank.test");
+        let all = seen.lock().unwrap().clone();
+        let upload = all
+            .iter()
+            .position(|r| r.starts_with("POST /api/firm/v1/files"))
+            .expect("uploaded");
+        let link = all
+            .iter()
+            .position(|r| r.starts_with("POST /api/firm/v1/shares"))
+            .expect("link made");
+        assert!(upload < link, "{all:?}");
+        assert!(
+            !all.iter().any(|r| r.contains("/visibility")),
+            "shown to nobody: {all:?}"
+        );
+        let body: serde_json::Value =
+            serde_json::from_str(all[link].splitn(3, ' ').nth(2).unwrap()).unwrap();
+        assert_eq!(body["fileIds"], serde_json::json!(["f1"]));
+        assert_eq!(body["clientId"], "AB-1");
+        assert_eq!(body["canDownload"], true);
+        assert_eq!(body["watermark"], true);
+        assert_eq!(body["days"], 7);
+        assert_eq!(body["name"], "Pat Roe");
+        let rows: Vec<AuditEntry> = audit.try_iter().collect();
+        let kinds: Vec<&str> = rows.iter().map(|e| e.action.as_str()).collect();
+        assert_eq!(kinds, ["portal_share", "portal_secure_link"]);
+        assert_eq!(rows[1].detail["client_consent_confirmed"], true);
+        assert_eq!(rows[1].detail["to"], "pat@first-bank.test");
+        // Asked again for the next link.
+        assert!(!h.state().consent);
+    }
+
+    /// QA: an older copy the client's people see is not changed unless chosen; chosen, the
+    /// newer version goes up before the link.
+    #[test]
+    fn an_older_copy_the_client_sees_changes_only_when_chosen() {
+        fn answer(method: &str, path: &str) -> (u16, String) {
+            match (method, path) {
+                ("GET", p) if p.contains("vfDocumentId") => {
+                    (200, portal_copy("AB-1", &"0".repeat(64), 2))
+                }
+                ("POST", "/api/firm/v1/shares") => (
+                    201,
+                    r#"{"shareId":"s1","expiresAt":"2026-11-18T15:00:00.000Z"}"#.into(),
+                ),
+                _ => (200, r#"{"ok":true}"#.into()),
+            }
+        }
+        // Left unticked: the link gives the portal's copy, nothing replaced.
+        let (mut h, seen, _audit, _t) = link_window(answer);
+        wait_for(&mut h, "2 of the client's portal people see it");
+        assert!(!h.state().update_shared);
+        fill_and_send(&mut h);
+        wait_for(&mut h, "Secure link sent");
+        assert!(
+            requests(&seen, "PUT /api/firm/v1/files/").is_empty(),
+            "{:?}",
+            seen.lock().unwrap()
+        );
+        assert!(requests(&seen, "POST /api/firm/v1/files").is_empty());
+        assert_eq!(link_files(&seen), serde_json::json!(["f9"]));
+        // Ticked: the newer version first.
+        let (mut h, seen, audit, _t) = link_window(answer);
+        wait_for(&mut h, "2 of the client's portal people see it");
+        h.get_by_label_contains("Send the cabinet's newer version")
+            .click();
+        h.run();
+        fill_and_send(&mut h);
+        wait_for(&mut h, "Secure link sent");
+        let all = seen.lock().unwrap().clone();
+        let replace = all
+            .iter()
+            .position(|r| r.starts_with("PUT /api/firm/v1/files/f9/content"))
+            .expect("replaced");
+        let link = all
+            .iter()
+            .position(|r| r.starts_with("POST /api/firm/v1/shares"))
+            .unwrap();
+        assert!(replace < link);
+        let first = audit.try_iter().next().unwrap();
+        assert_eq!(first.detail["updated"], true);
+    }
+
+    /// QA: a copy filed under another client (the document moved since) is not this client's:
+    /// the document is sent for this client, the other client's copy is left alone.
+    #[test]
+    fn a_copy_under_another_client_is_left_alone() {
+        let (mut h, seen, _audit, _t) = link_window(|method, path| match (method, path) {
+            ("GET", p) if p.contains("vfDocumentId") => {
+                (200, portal_copy("OTHER-CLIENT", "1".repeat(64).as_str(), 1))
+            }
+            ("POST", p) if p.starts_with("/api/firm/v1/files") => {
+                (201, r#"{"fileId":"f2"}"#.into())
+            }
+            ("POST", "/api/firm/v1/shares") => (
+                201,
+                r#"{"shareId":"s1","expiresAt":"2026-11-18T15:00:00.000Z"}"#.into(),
+            ),
+            _ => (200, r#"{"ok":true}"#.into()),
+        });
+        wait_for(&mut h, "Not on the portal yet");
+        fill_and_send(&mut h);
+        wait_for(&mut h, "Secure link sent");
+        assert!(requests(&seen, "PUT /api/firm/v1/files/").is_empty());
+        let add = requests(&seen, "POST /api/firm/v1/files");
+        assert!(add[0].contains("clientId=AB-1"), "{add:?}");
+        assert_eq!(link_files(&seen), serde_json::json!(["f2"]));
+    }
+
+    /// Already on the portal as it is in the cabinet: not sent again. A portal from before P68
+    /// says to update it, and a copy that was already there is not called hidden.
+    #[test]
+    fn a_secure_link_to_a_document_already_there_and_an_old_portal() {
+        let (mut h, seen, audit, _t) = link_window(|method, path| match (method, path) {
+            ("GET", p) if p.contains("vfDocumentId") => (200, portal_copy("AB-1", DOC_SHA, 1)),
+            ("POST", "/api/firm/v1/shares") => (404, r#"{"error":"not_found"}"#.into()),
+            _ => (200, r#"{"ok":true}"#.into()),
+        });
+        wait_for(&mut h, "On the portal as it is in the cabinet");
+        fill_and_send(&mut h);
+        wait_for(&mut h, "update Vibe Portal");
+        assert!(!h.state().err.as_deref().unwrap().contains("shown to none"));
+        assert!(requests(&seen, "POST /api/firm/v1/files").is_empty());
+        assert_eq!(audit.try_iter().count(), 0, "no link, no row");
+    }
+
+    /// QA: a refusal before the link (the file removed meanwhile) is not taken for an old
+    /// portal.
+    #[test]
+    fn a_refused_update_is_not_called_an_old_portal() {
+        let e = vf_portal::api::PortalError::Http {
+            status: 400,
+            code: "view_only_needs_preview".into(),
+        };
+        assert!(link_error(&e, false).contains("allow download"));
+        let e = vf_portal::api::PortalError::Http {
+            status: 404,
+            code: "not_found".into(),
+        };
+        assert!(link_error(&e, true).contains("shown to none"));
+        assert!(!e.message().contains("update Vibe Portal"));
     }
 
     /// A portal from before the search says to update it.

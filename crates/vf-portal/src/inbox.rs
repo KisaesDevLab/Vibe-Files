@@ -271,7 +271,15 @@ pub fn fetch(root: &Path, portal: &Portal, now: &str) -> FetchReport {
     let mut report = FetchReport::default();
     match portal.all_files() {
         Ok(files) => {
-            report.on_portal = Some(files.into_iter().map(|f| f.vf_document_id).collect());
+            // Shared with the client's people (a document on the portal only for a secure link
+            // is not marked: P68 QA).
+            report.on_portal = Some(
+                files
+                    .into_iter()
+                    .filter(|f| f.users.iter().any(|u| u.visible))
+                    .map(|f| f.vf_document_id)
+                    .collect(),
+            );
         }
         Err(e) => {
             report.problems.push(e.message());

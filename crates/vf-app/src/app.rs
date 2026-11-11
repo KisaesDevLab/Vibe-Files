@@ -160,6 +160,8 @@ pub struct VibeFilesApp {
     closing: bool,
     /// "Tip VibeMyFirm" was pressed (tests).
     tip_clicked: bool,
+    /// The portal staff page the header's Portal button opened (tests).
+    portal_opened: Option<String>,
 }
 
 /// Asks GitHub for the latest release, once per start, on a thread (never in tests: no network).
@@ -230,6 +232,7 @@ impl VibeFilesApp {
             help: Default::default(),
             closing: false,
             tip_clicked: false,
+            portal_opened: None,
         };
         // Tests drive the wizard themselves; `open_last` has its own test.
         if !cfg!(test) {
@@ -497,6 +500,18 @@ impl eframe::App for VibeFilesApp {
         let shown = dark;
         let mut help = ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::F1));
         let mut tip = false;
+        // The portal's staff sign-in page, when the open cabinet has a portal set up.
+        let staff_page = match &mut self.screen {
+            Screen::Open(o) => o
+                .browse
+                .portal
+                .settings(&o.opened.root)
+                .map(|s| format!("{}/staff", s.url.trim_end_matches('/')))
+                // Only a web page the browser is opened on (a test portal on http is not).
+                .filter(|u| u.starts_with("https://")),
+            _ => None,
+        };
+        let mut open_portal = false;
         chrome::header(
             ui,
             name.as_deref(),
@@ -504,7 +519,18 @@ impl eframe::App for VibeFilesApp {
             &mut dark,
             &mut help,
             &mut tip,
+            staff_page.is_some(),
+            &mut open_portal,
         );
+        if open_portal && let Some(url) = &staff_page {
+            self.portal_opened = Some(url.clone());
+            // Tests never start a browser.
+            if !cfg!(test)
+                && let Err(e) = crate::shell::open_url(url)
+            {
+                tracing::info!(error = %e, "portal staff page not opened");
+            }
+        }
         if tip {
             self.tip_clicked = true;
             // Tests never start a browser.
@@ -1783,6 +1809,41 @@ mod tests {
         assert!(closed, "the window closes after Discard and quit");
     }
 
+    /// Owner 2026-11-11: with a portal set up, the header's Portal button (left of Tip) opens
+    /// the portal's staff sign-in page.
+    #[test]
+    fn portal_button_opens_the_staff_page() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("Clients");
+        let req = CreateRequest {
+            root: &root,
+            name: "Firm",
+        };
+        let o = session::create(&tmp.path().join("pc1"), "dev-1", &req).unwrap();
+        vf_portal::settings::save(
+            &root,
+            &vf_portal::settings::PortalSettings {
+                version: 1,
+                cabinet_id: o.cabinet.cabinet_id.clone(),
+                url: "https://files.example-cpa.test".into(),
+                key: "vpk_test".into(),
+                fetch_minutes: 0,
+            },
+        )
+        .unwrap();
+        drop(o);
+        let mut h = harness(&tmp.path().join("pc1b"));
+        click(&mut h, "Open existing");
+        type_into(&mut h, "Cabinet folder", &root.display().to_string());
+        click(&mut h, "Open cabinet");
+        settle(&mut h);
+        click(&mut h, "Portal");
+        assert_eq!(
+            h.state().portal_opened.as_deref(),
+            Some("https://files.example-cpa.test/staff")
+        );
+    }
+
     /// PA-25: F1 (or Help) opens the article about the tab shown; searching and links move
     /// between articles, Back returns.
     #[test]
@@ -1820,6 +1881,8 @@ mod tests {
         h.run_steps(2);
         assert_eq!(h.state().help.current, Some("browse"));
 
+        // No portal set up: no Portal button (owner 2026-11-11).
+        assert!(h.query_by_label("Portal").is_none());
         // The tip button (owner 2026-11-04): pressed, the Ko-fi page is opened (not in tests).
         click(&mut h, "Tip VibeMyFirm");
         assert!(h.state().tip_clicked);

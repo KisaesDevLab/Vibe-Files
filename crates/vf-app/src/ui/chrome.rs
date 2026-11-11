@@ -6,7 +6,9 @@ use crate::app::Tab;
 use crate::ui::theme;
 
 /// The header; `text_size` is this PC's text size in percent, changed by its − / + buttons;
-/// `help` is set when its **Help** button is pressed.
+/// `help` is set when its **Help** button is pressed. `portal`: the cabinet has a Vibe Portal
+/// set up, so **Portal** shows (left of Tip) and sets `open_portal` when pressed.
+#[allow(clippy::too_many_arguments)]
 pub fn header(
     ui: &mut egui::Ui,
     cabinet: Option<&str>,
@@ -14,6 +16,8 @@ pub fn header(
     dark: &mut bool,
     help: &mut bool,
     tip: &mut bool,
+    portal: bool,
+    open_portal: &mut bool,
 ) {
     egui::Panel::top("vf-header")
         .exact_size(44.0)
@@ -56,6 +60,20 @@ pub fn header(
                         *tip = true;
                     }
                     ui.add_space(8.0);
+                    // The portal's staff sign-in page (owner 2026-11-11), when one is set up.
+                    if portal
+                        && ui
+                            .add(header_button(white("Portal")))
+                            .on_hover_text(
+                                "The client portal's staff page: sign in there (opens your browser)",
+                            )
+                            .clicked()
+                    {
+                        *open_portal = true;
+                    }
+                    if portal {
+                        ui.add_space(8.0);
+                    }
                     // Help (PA-25): the article about the tab shown; F1 too.
                     if ui
                         .add(header_button(white("Help")))
