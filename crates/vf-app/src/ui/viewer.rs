@@ -800,10 +800,14 @@ pub fn show(ui: &mut egui::Ui, v: &mut Viewer, env: &mut Env<'_>) {
     }
     let Some(doc) = v.doc.clone() else {
         egui::CentralPanel::default().show(ui, |ui| {
-            ui.heading("Viewer");
-            ui.label(widgets::caption(
-                "Open a document from Browse or Search to see it here.",
-            ));
+            widgets::empty_state(
+                ui,
+                "No document open",
+                &[
+                    "Open a PDF from Browse (double-click it, or Open in Viewer in its details) or from Search.",
+                    "Its pages, annotations, stamps, redaction and the ten-key tape are here.",
+                ],
+            );
         });
         return;
     };

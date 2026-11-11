@@ -276,9 +276,14 @@ pub fn show(
             return;
         }
         if s.ran.as_ref().is_none_or(Query::is_empty) {
-            ui.label(widgets::caption(
-                "Type to search the text of every document (scans too, once OCR has read them), file names and metadata.",
-            ));
+            widgets::empty_state(
+                ui,
+                "Search the cabinet",
+                &[
+                    "Type in Search for above: words in the documents (scans too, once OCR has read them), file names and details.",
+                    "The filters narrow it to a client, a year, a doc type or a status.",
+                ],
+            );
             return;
         }
         ui.label(widgets::caption(format!(

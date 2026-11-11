@@ -23,7 +23,8 @@ pub fn status_style(status: &str) -> (&'static str, Color32, Color32) {
         "in_work" => (rgb(0xFBEFD5), rgb(0x7A4F07)),
         "final" => (rgb(0xDDF2E4), rgb(0x1D5C38)),
         "delivered" => (rgb(0xE6EEF9), rgb(0x1F56A8)),
-        _ => (rgb(0xEEF0F3), rgb(0x3F4753)),
+        // Darker than the app background: on the white table it reads as a tag (UI review).
+        _ => (rgb(0xE2E6EC), rgb(0x3F4753)),
     };
     (label, bg, fg)
 }
@@ -81,6 +82,20 @@ pub fn named(r: egui::Response, name: &str) -> egui::Response {
     let n = name.to_string();
     r.widget_info(move || egui::WidgetInfo::labeled(egui::accesskit::Role::Button, enabled, &n));
     r.on_hover_text(name)
+}
+
+/// An empty screen's message (UI review 2026-11-11): centred in the space, a title and what to
+/// do next in body-size text, not a small line in a corner.
+pub fn empty_state(ui: &mut egui::Ui, title: &str, lines: &[&str]) {
+    let h = ui.available_height();
+    ui.vertical_centered(|ui| {
+        ui.add_space((h * 0.3).max(24.0));
+        ui.label(RichText::new(title).heading());
+        ui.add_space(6.0);
+        for l in lines {
+            ui.label(RichText::new(*l).color(crate::ui::theme::ink_secondary()));
+        }
+    });
 }
 
 pub fn caption(text: impl Into<String>) -> RichText {

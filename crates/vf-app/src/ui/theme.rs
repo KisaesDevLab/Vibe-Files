@@ -131,6 +131,9 @@ pub fn install(ctx: &egui::Context) {
                 egui::TextStyle::Small,
                 egui::FontId::new(12.0, egui::FontFamily::Proportional),
             );
+            // A widget with keyboard focus is drawn as "active": its accent outline 2 px, not
+            // 1, so Tab's place is easy to follow (UI review 2026-11-11).
+            s.visuals.widgets.active.bg_stroke.width = 2.0;
         });
     }
     set_theme(ctx, dark);

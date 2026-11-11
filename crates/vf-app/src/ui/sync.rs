@@ -850,7 +850,17 @@ fn tempfile_catalog(catalog: &Path) -> Result<PathBuf, String> {
 
 fn field(ui: &mut egui::Ui, label: &str, value: &mut String, password: bool, hint: &str) {
     ui.horizontal(|ui| {
-        let l = ui.add_sized([150.0, 20.0], egui::Label::new(label));
+        // Left-aligned in a fixed column, as the app's other forms (UI review 2026-11-11).
+        let l = ui
+            .allocate_ui_with_layout(
+                egui::vec2(150.0, 20.0),
+                egui::Layout::left_to_right(egui::Align::Center),
+                |ui| {
+                    ui.set_min_width(150.0);
+                    ui.label(label)
+                },
+            )
+            .inner;
         ui.add(
             egui::TextEdit::singleline(value)
                 .password(password)

@@ -592,10 +592,11 @@ fn doc_types(ui: &mut egui::Ui, a: &mut Admin, env: &mut Env) {
                         };
                         ui.label(RichText::new(folder).monospace().small());
                         ui.label(match (t.client_visible, t.cover_default) {
-                            (true, true) => "Yes · cover default",
-                            (true, false) => "Yes",
-                            (false, true) => "Cover default",
-                            (false, false) => "",
+                            (true, true) => RichText::new("Yes · cover default"),
+                            (true, false) => RichText::new("Yes"),
+                            (false, true) => RichText::new("No · cover default"),
+                            // Said, not left blank (UI review 2026-11-11).
+                            (false, false) => RichText::new("No").color(theme::ink_muted()),
                         });
                         ui.label(a.usage.get(&t.id).copied().unwrap_or(0).to_string());
                         ui.horizontal(|ui| {
