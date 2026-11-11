@@ -123,7 +123,7 @@ fn cloud_section(ui: &mut egui::Ui, p: &mut DevicesPage, env: &mut Env) {
         Some(s) => format!(
             "Now on: the cabinet is in {s}. Files that are online only are not read in the background (indexing, text recognition, thumbnails, the weekly check) until they are on this PC; opening one downloads it. Each PC keeps its own catalog outside the cloud folder. A change takes effect when Vibe Files next starts."
         ),
-        None if crate::cloudmode::setting() == Setting::Off => "Now off: every file is read, online only or not (each is downloaded). A change takes effect when Vibe Files next starts.".into(),
+        None if crate::cloudmode::running() == Setting::Off => "Now off: every file is read, online only or not (each is downloaded). A change takes effect when Vibe Files next starts.".into(),
         None => "The cabinet is not in a OneDrive or Dropbox folder. A file that is online only anyway is still left until it is on this PC. A change takes effect when Vibe Files next starts.".into(),
     }));
     if crate::server::server_mode() && found.is_some() {

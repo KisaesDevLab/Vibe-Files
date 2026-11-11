@@ -364,6 +364,7 @@ pub fn apply(
                     status,
                     source,
                     tags,
+                    stamp: None,
                 };
                 let (file, line) = docmeta::record_line(root, &m, &now, device_id);
                 meta_lines.entry(file).or_default().push(line);

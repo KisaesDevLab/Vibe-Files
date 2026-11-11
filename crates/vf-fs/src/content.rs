@@ -372,6 +372,8 @@ fn add_inner(
         status: "received".into(),
         source: d.source.clone(),
         tags: d.tags.clone(),
+        // The new content is not written yet: its size and time are not known here.
+        stamp: None,
     };
     let (meta_file, meta_line) = docmeta::record_line(root, &meta, &now, device_id);
     let mime = rel

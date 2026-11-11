@@ -58,6 +58,11 @@ fn chosen() -> Setting {
     })
 }
 
+/// The choice this run uses (read at start; a saved change takes effect at the next one).
+pub fn running() -> Setting {
+    chosen()
+}
+
 /// At start: online-only files are left alone unless this computer reads every file.
 pub fn apply() {
     vf_fs::cloud::set_leave_online_only(chosen() != Setting::Off);
@@ -166,65 +171,109 @@ pub fn data_in_cloud(data: &Path) -> Option<String> {
 }
 
 /// Moves a default data folder found in a cloud folder to `personal` (this login's
-/// `%LOCALAPPDATA%\Vibe Files\data`) once: its settings and a consistent copy of its catalog,
-/// so the catalog's history comes along. A note is left in the old folder. Returns the folder
-/// to use: `personal`, or `old` when nothing could be moved (logged; the app still opens).
+/// `%LOCALAPPDATA%\Vibe Files\data`): its catalog (a consistent copy, so its history comes
+/// along), settings, remembered sync key and cover sheets. What `personal` held before is set
+/// aside (`*.before-move-<secs>`), not used: the folder being moved is the one this login used.
+/// Only when no other copy of Vibe Files has the old folder or its catalog open; the old
+/// catalog is then renamed (`catalog.db.moved-<secs>`), so nothing writes to it afterwards and
+/// it is never moved twice. Returns the folder to use: `personal`, or `old` when it could not be
+/// moved now (logged; tried again at the next start).
 pub fn move_data(old: &Path, personal: &Path) -> PathBuf {
     let cat = crate::shared::CATALOG_FILE;
-    let moved = (|| -> Result<bool> {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let has_catalog = old.join(cat).is_file();
+    // Another copy holding the folder (its window, a scheduled command): not now.
+    let _lock = if has_catalog {
+        match crate::datalock::acquire(old, false) {
+            Ok(l) => Some(l),
+            Err(_) => {
+                tracing::warn!("data folder in a cloud folder is in use; not moved this time");
+                return old.to_path_buf();
+            }
+        }
+    } else {
+        None
+    };
+    let moved = (|| -> Result<()> {
         std::fs::create_dir_all(personal)?;
-        let mut any = false;
+        if has_catalog {
+            // Writes still in the catalog's journal go into the file first.
+            {
+                let c = vf_core::db::Connection::open(old.join(cat))?;
+                let _ = c.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()));
+            }
+            // Renaming fails while any program has the catalog open (Windows): then not now.
+            let held = old.join(format!("{cat}.moved-{secs}"));
+            std::fs::rename(old.join(cat), &held)
+                .context("the catalog is open in another copy of Vibe Files")?;
+            let copied = (|| -> Result<()> {
+                set_aside(personal, cat, secs)?;
+                let part = personal.join(format!("{cat}.part"));
+                let _ = std::fs::remove_file(&part);
+                let src = vf_core::db::Connection::open_with_flags(
+                    &held,
+                    vf_core::db::OpenFlags::SQLITE_OPEN_READ_ONLY,
+                )?;
+                src.execute("VACUUM INTO ?1", [part.to_string_lossy().as_ref()])?;
+                drop(src);
+                std::fs::rename(&part, personal.join(cat))?;
+                Ok(())
+            })();
+            if let Err(e) = copied {
+                // Put back as it was: the old folder stays in use until the next try.
+                let _ = std::fs::rename(&held, old.join(cat));
+                return Err(e);
+            }
+        }
         // Settings, the remembered sync key (this login's, DPAPI), and the like: every file
-        // but the catalog (copied whole below) and this folder's own locks and notes.
+        // but the catalog and this folder's own locks and notes. With a catalog moved, the old
+        // folder's win (set aside what was here); else only what is missing here is copied.
         let skip = |n: &str| {
             let n = n.to_lowercase();
             n.starts_with(&cat.to_lowercase())
                 || n.starts_with("in-use.")
                 || n == "owner.txt"
                 || n == "moved.txt"
+                || n.contains(".before-move-")
         };
         for e in std::fs::read_dir(old)?.flatten() {
             let name = e.file_name().to_string_lossy().to_string();
-            let to = personal.join(&name);
-            if e.file_type().is_ok_and(|t| t.is_file()) && !skip(&name) && !to.exists() {
-                std::fs::copy(e.path(), &to)?;
-                any = true;
+            if !e.file_type().is_ok_and(|t| t.is_file()) || skip(&name) {
+                continue;
             }
+            let to = personal.join(&name);
+            if to.exists() {
+                if !has_catalog {
+                    continue;
+                }
+                set_aside(personal, &name, secs)?;
+            }
+            std::fs::copy(e.path(), &to)?;
         }
         // Cover sheets made here (the folder Browse prints from).
         let sheets = old.join("sheets");
-        if sheets.is_dir() && !personal.join("sheets").exists() {
+        if sheets.is_dir() {
             copy_dir(&sheets, &personal.join("sheets"))?;
         }
-        let to = personal.join(cat);
-        if !to.exists() && old.join(cat).is_file() {
-            let part = personal.join(format!("{cat}.part"));
-            let _ = std::fs::remove_file(&part);
-            let src = vf_core::db::Connection::open_with_flags(
-                old.join(cat),
-                vf_core::db::OpenFlags::SQLITE_OPEN_READ_ONLY,
-            )?;
-            src.execute("VACUUM INTO ?1", [part.to_string_lossy().as_ref()])?;
-            drop(src);
-            std::fs::rename(&part, &to)?;
-            any = true;
-        }
-        if any {
+        if has_catalog {
             let _ = std::fs::write(
                 old.join("MOVED.txt"),
                 format!(
                     "Vibe Files moved this data folder to {} on {}: this folder is in a OneDrive \
-                     or Dropbox folder, where its catalog would be damaged by syncing.\r\n",
+                     or Dropbox folder, where its catalog would be damaged by syncing. The catalog \
+                     left here (catalog.db.moved-*) is no longer used.\r\n",
                     personal.display(),
                     vf_core::now_rfc3339()
                 ),
             );
         }
-        Ok(any)
+        Ok(())
     })();
     match moved {
-        Ok(any) => {
-            if any {
+        Ok(()) => {
+            if has_catalog {
                 tracing::warn!("data folder moved out of a cloud folder");
             }
             personal.to_path_buf()
@@ -237,6 +286,20 @@ pub fn move_data(old: &Path, personal: &Path) -> PathBuf {
             old.to_path_buf()
         }
     }
+}
+
+/// Renames `dir/name` (and a catalog's journal files) to `name.before-move-<secs>`.
+fn set_aside(dir: &Path, name: &str, secs: u64) -> std::io::Result<()> {
+    for suffix in ["", "-wal", "-shm"] {
+        let from = dir.join(format!("{name}{suffix}"));
+        if from.exists() {
+            std::fs::rename(
+                &from,
+                dir.join(format!("{name}{suffix}.before-move-{secs}")),
+            )?;
+        }
+    }
+    Ok(())
 }
 
 /// Copies the folder `from` (files and folders) to `to`.
@@ -369,7 +432,35 @@ mod tests {
         .unwrap();
         drop(c);
         let personal = t.path().join("Local").join("Vibe Files").join("data");
+        // An older catalog and settings already in this login's own folder: set aside, not used.
+        std::fs::create_dir_all(&personal).unwrap();
+        std::fs::write(personal.join(crate::shared::CATALOG_FILE), "older catalog").unwrap();
+        std::fs::write(personal.join("config.toml"), "device_id = \"older\"\n").unwrap();
+        // Another copy holding the old folder: not moved now.
+        {
+            let _held = crate::datalock::acquire(&old, true).unwrap();
+            assert_eq!(move_data(&old, &personal), old);
+            assert!(old.join(crate::shared::CATALOG_FILE).is_file());
+        }
+        // The catalog open in another program (a scheduled command): not moved now either.
+        {
+            let _open =
+                vf_core::db::Connection::open(old.join(crate::shared::CATALOG_FILE)).unwrap();
+            assert_eq!(move_data(&old, &personal), old);
+            assert!(old.join(crate::shared::CATALOG_FILE).is_file());
+        }
         assert_eq!(move_data(&old, &personal), personal);
+        assert!(
+            !old.join(crate::shared::CATALOG_FILE).exists(),
+            "renamed: no longer used"
+        );
+        let aside: Vec<String> = std::fs::read_dir(&personal)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|n| n.contains(".before-move-"))
+            .collect();
+        assert_eq!(aside.len(), 2, "{aside:?}");
         assert_eq!(
             std::fs::read_to_string(personal.join("config.toml")).unwrap(),
             "device_id = \"dev-1\"\n"

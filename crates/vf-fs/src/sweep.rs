@@ -135,6 +135,8 @@ pub fn scan_week(conn: &Connection, root: &Path, week: u64) -> Result<Drift, Str
     let mut d = Drift::default();
     let mut seen: Vec<String> = Vec::new();
     let mut todo: Vec<Listed> = Vec::new();
+    // Each listed file's attributes (online only or not, PA-39), in step with `todo`.
+    let mut attrs: Vec<u32> = Vec::new();
     let mut unread_dirs: Vec<String> = Vec::new();
     for (folder, client_id) in &folders {
         let mut paths = Vec::new();
@@ -146,7 +148,15 @@ pub fn scan_week(conn: &Connection, root: &Path, week: u64) -> Result<Drift, Str
         }
         for p in paths {
             let rel = rebuild::rel(root, &p);
-            todo.push((p.clone(), rel, client_id.clone(), rebuild::stat(&p)));
+            // Size, time and attributes in one call (nothing opened, PA-39).
+            let st = crate::cloud::stat(&p);
+            attrs.push(st.map_or(0, |s| s.2));
+            todo.push((
+                p.clone(),
+                rel,
+                client_id.clone(),
+                st.map(|(s, t, _)| (s, t)),
+            ));
         }
     }
     // Which to read whole: changed size or time, no time recorded yet, or this week's slice.
@@ -160,10 +170,10 @@ pub fn scan_week(conn: &Connection, root: &Path, week: u64) -> Result<Drift, Str
         })
         .collect();
     // Online only (PA-39): not read, and not reported as changed, new or missing: not checked.
-    let left: Vec<bool> = todo
+    let left: Vec<bool> = attrs
         .iter()
         .zip(&read_whole)
-        .map(|((p, ..), whole)| *whole && crate::cloud::leave(p))
+        .map(|(a, whole)| *whole && crate::cloud::leave_attrs(*a))
         .collect();
     let read_whole: Vec<bool> = read_whole
         .iter()
@@ -665,6 +675,8 @@ pub fn adopt_unknown(
                 status: "received".into(),
                 source: None,
                 tags: vec![],
+                // Read (or matched to its note) just now (PA-39).
+                stamp: crate::cloud::stat(&root.join(&u.rel_path)).map(|(s, t, _)| (s, t)),
             };
             let (path, line) = crate::docmeta::record_line(root, &rec, &now, device_id);
             tx = tx.file(FileOp::AppendLines {
@@ -788,14 +800,11 @@ pub fn find_new(
 }
 
 /// The fingerprint another PC noted for the online-only file at `rel` (cabinet-relative), when
-/// the file is no newer than the note (PA-39; the rule `rebuild` uses). Nothing is read.
-fn noted_hash(ix: &crate::docmeta::Index, root: &Path, rel: &str) -> Option<String> {
+/// the file still has the size and time the note gives (PA-39; the rule `rebuild` uses).
+/// Nothing is read.
+fn noted_hash(ix: &crate::docmeta::Index, rel: &str, size: u64, mt: i64) -> Option<String> {
     let m = ix.latest_at(rel)?;
-    let ts = time::OffsetDateTime::parse(&m.ts, &time::format_description::well_known::Rfc3339)
-        .ok()?
-        .unix_timestamp();
-    let (_, mt, _) = crate::cloud::stat(&root.join(rel))?;
-    (mt <= ts + 120).then(|| m.hash.clone())
+    m.describes(size, mt).then(|| m.hash.clone())
 }
 
 /// [`find_new`], and how many online-only files (PA-39) wait to be on this PC: neither read nor
@@ -833,17 +842,20 @@ pub fn find_new_counted(
             }
             // Online only (PA-39): reading it would download it. Another PC's note gives its
             // fingerprint; else it waits until it is here.
-            if crate::cloud::leave(&p) {
+            let st = crate::cloud::stat(&p);
+            if let Some((size, mt, a)) = st
+                && crate::cloud::leave_attrs(a)
+            {
                 let ix = notes.get_or_insert_with(|| {
                     crate::docmeta::Index::load(root, std::slice::from_ref(folder))
                 });
-                match noted_hash(ix, root, &rel) {
+                match noted_hash(ix, &rel, size, mt) {
                     Some(h) if known_hashes.contains(&h) => {}
                     Some(hash) => out.push(Unknown {
                         rel_path: rel,
                         client_id: Some(client_id.clone()),
                         hash,
-                        size: crate::cloud::stat(&p).map_or(0, |s| s.0),
+                        size,
                     }),
                     None => waiting += 1,
                 }
@@ -881,6 +893,8 @@ pub fn adopt_new(
     }
     let pending = crate::intake::unrecorded_paths(conn, root);
     let mut go = Vec::new();
+    // Each client folder's notes, read once (online-only files, PA-39).
+    let mut notes: HashMap<String, crate::docmeta::Index> = HashMap::new();
     {
         let mut st = conn
             .prepare_cached(
@@ -893,7 +907,7 @@ pub fn adopt_new(
                 || st
                     .exists((&u.rel_path, &u.hash))
                     .map_err(|e| e.to_string())?
-                || !same_content(root, &u.rel_path, &u.hash)
+                || !same_content(root, &u.rel_path, &u.hash, &mut notes)
             {
                 continue;
             }
@@ -906,12 +920,21 @@ pub fn adopt_new(
 
 /// Whether the file at `rel` still has content `hash`: read, or for an online-only file
 /// (PA-39), still noted so by the PC that filed it.
-fn same_content(root: &Path, rel: &str, hash: &str) -> bool {
+fn same_content(
+    root: &Path,
+    rel: &str,
+    hash: &str,
+    notes: &mut HashMap<String, crate::docmeta::Index>,
+) -> bool {
     let p = root.join(rel);
-    if crate::cloud::leave(&p) {
+    if let Some((size, mt, a)) = crate::cloud::stat(&p)
+        && crate::cloud::leave_attrs(a)
+    {
         let folder = rel.split('/').next().unwrap_or_default().to_string();
-        let ix = crate::docmeta::Index::load(root, &[folder]);
-        return noted_hash(&ix, root, rel).as_deref() == Some(hash);
+        let ix = notes
+            .entry(folder.clone())
+            .or_insert_with(|| crate::docmeta::Index::load(root, &[folder]));
+        return noted_hash(ix, rel, size, mt).as_deref() == Some(hash);
     }
     sha256_file(&p).ok().as_deref() == Some(hash)
 }
@@ -1148,10 +1171,12 @@ mod tests {
         assert_eq!(waiting, 1, "new.pdf: not noted, not read");
         // Another PC that filed it noted its fingerprint: found with it, added without reading.
         let noted = "ab".repeat(32);
+        let (size, mtime, _) = crate::cloud::stat(&fin.join("new.pdf")).unwrap();
         let line = serde_json::json!({
             "v": 1, "ts": vf_core::now_rfc3339(), "device": "pc-a", "hash": noted,
             "path": "Financials/new.pdf", "doc_type": null, "doc_type_name": null,
-            "tax_year": 2025, "status": "received", "source": null, "tags": []
+            "tax_year": 2025, "status": "received", "source": null, "tags": [],
+            "size": size, "mtime": mtime
         });
         std::fs::create_dir_all(root.join(client).join("_Vibe")).unwrap();
         std::fs::write(

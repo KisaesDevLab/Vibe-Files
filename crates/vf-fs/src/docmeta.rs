@@ -56,6 +56,13 @@ pub struct Record {
     pub status: String,
     pub source: Option<String>,
     pub tags: Vec<String>,
+    /// The size and last-modified time (seconds since 1970) of the file `hash` was read from
+    /// (PA-39): a PC that has the file only online trusts `hash` when the file still has both.
+    /// Records written before have none, and are not trusted for that.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mtime: Option<i64>,
 }
 
 /// Tag on a document whose doc type or tax year was guessed (a folder import: a year from the
@@ -77,6 +84,9 @@ pub struct Meta {
     pub status: String,
     pub source: Option<String>,
     pub tags: Vec<String>,
+    /// The size and modified time of the file `hash` was read from, when known (PA-39): written
+    /// into the record so another PC can trust `hash` without reading the file.
+    pub stamp: Option<(u64, i64)>,
 }
 
 /// What to change. `None` leaves a field as it is (the inspector's "Mixed").
@@ -102,7 +112,7 @@ pub fn load(conn: &Connection, id: &str) -> Result<Meta, String> {
     let mut m = conn
         .query_row(
             "SELECT d.id, d.rel_path, d.hash, c.folder_rel, d.doc_type_id, t.name, d.tax_year,
-                    d.status, d.source
+                    d.status, d.source, d.size, d.file_mtime
              FROM document d
              LEFT JOIN client c ON c.id = d.client_id
              LEFT JOIN doc_type t ON t.id = d.doc_type_id
@@ -120,6 +130,12 @@ pub fn load(conn: &Connection, id: &str) -> Result<Meta, String> {
                     status: r.get(7)?,
                     source: r.get(8)?,
                     tags: vec![],
+                    // The catalog's size and time for this hash (the rebuild's size/time
+                    // check pairs them).
+                    stamp: match (r.get::<_, i64>(9)?, r.get::<_, Option<i64>>(10)?) {
+                        (s, Some(t)) => Some((s as u64, t)),
+                        _ => None,
+                    },
                 })
             },
         )
@@ -227,6 +243,8 @@ pub fn record_line(root: &Path, m: &Meta, ts: &str, device: &str) -> (PathBuf, S
         status: m.status.clone(),
         source: m.source.clone(),
         tags: m.tags.clone(),
+        size: m.stamp.map(|s| s.0),
+        mtime: m.stamp.map(|s| s.1),
     };
     (file, serde_json::to_string(&r).expect("serializes"))
 }
@@ -356,6 +374,18 @@ pub fn edit_each(
 
 /// Labels of the Browse changes "Undo last" offers (metadata edits, renames, moves).
 pub const UNDOABLE: [&str; 3] = [LABEL, crate::rename::LABEL, crate::moveto::LABEL];
+
+impl Record {
+    /// Whether this record's `hash` can be taken for a file now `size` bytes, last modified at
+    /// `mtime`, without reading it (PA-39): the record says the hash was read from a file of that
+    /// very size and time (the rebuild's own size/time rule), and the hash is a SHA-256. A record
+    /// without them (an older one, or new content not yet written) is not trusted.
+    pub fn describes(&self, size: u64, mtime: i64) -> bool {
+        self.size == Some(size)
+            && self.mtime == Some(mtime)
+            && crate::cabinet::is_sha256(&self.hash)
+    }
+}
 
 /// Every `docmeta.jsonl` record of the cabinet, for rebuild: the latest per (cabinet path, hash)
 /// and per hash.

@@ -483,6 +483,7 @@ fn meta_of(conn: &Connection, e: &DocEntry, rel: &str, folder: &str) -> Meta {
         status: e.status.clone(),
         source: e.source.clone(),
         tags: e.tags.clone(),
+        stamp: None,
     }
 }
 

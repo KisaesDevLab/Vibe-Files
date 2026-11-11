@@ -347,7 +347,15 @@ pub fn runs_here(root: &Path) -> bool {
         return true;
     }
     if cloud {
-        return main_server(root).is_some_and(|m| m.computer.eq_ignore_ascii_case(&computer()));
+        return match main_server(root) {
+            Some(m) => m.computer.eq_ignore_ascii_case(&computer()),
+            // No main PC yet: one that alone has ever opened the cabinet, for a day at least,
+            // takes the role (a one-PC firm upgrading keeps its text recognition and B2 sync).
+            // A second PC seen, or two new ones set up the same day (neither sees the other
+            // yet): an admin chooses.
+            None if !main_path(root).exists() && only_pc_for_a_day(root) => claim_main(root),
+            None => false,
+        };
     }
     match main_server(root) {
         Some(m) => m.computer.eq_ignore_ascii_case(&computer()),
@@ -358,6 +366,17 @@ pub fn runs_here(root: &Path) -> bool {
         None if !main_path(root).exists() => claim_main(root),
         None => false,
     }
+}
+
+/// Whether this computer is the only one that has opened the cabinet (`_Vibe/devices`), and
+/// has been for a day at least.
+fn only_pc_for_a_day(root: &Path) -> bool {
+    let list = vf_fs::safeguards::devices(root);
+    let [me] = list.as_slice() else {
+        return false;
+    };
+    let day_ago = vf_core::rfc3339_days_ago(1);
+    me.name.eq_ignore_ascii_case(&computer()) && me.first_seen.as_str() <= day_ago.as_str()
 }
 
 /// Makes this computer the main server only if none is recorded.
@@ -513,6 +532,37 @@ mod tests {
     use super::*;
 
     /// The registry read agrees with Windows' own `reg query` of InstallationType.
+    /// Code review (PA-39): in a cloud cabinet a PC takes the main role by itself only when it
+    /// alone has opened the cabinet, for a day at least.
+    #[test]
+    fn only_a_lone_long_standing_pc_is_main_by_itself() {
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path();
+        let dir = root.join("_Vibe").join("devices");
+        std::fs::create_dir_all(&dir).unwrap();
+        let rec = |id: &str, name: &str, first: &str| {
+            let d = vf_fs::safeguards::Device {
+                id: id.into(),
+                name: name.into(),
+                first_seen: first.into(),
+                last_seen: first.into(),
+                version: String::new(),
+            };
+            std::fs::write(
+                dir.join(format!("{id}.json")),
+                serde_json::to_vec(&d).unwrap(),
+            )
+            .unwrap();
+        };
+        let me = computer();
+        rec("a", &me, &vf_core::now_rfc3339());
+        assert!(!only_pc_for_a_day(root), "new today");
+        rec("a", &me, &vf_core::rfc3339_days_ago(30));
+        assert!(only_pc_for_a_day(root));
+        rec("b", "OTHER-PC", &vf_core::rfc3339_days_ago(2));
+        assert!(!only_pc_for_a_day(root), "another PC has opened it");
+    }
+
     #[test]
     fn server_detection_matches_windows() {
         let out = std::process::Command::new("reg")

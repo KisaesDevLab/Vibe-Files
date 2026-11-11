@@ -273,12 +273,6 @@ struct Found {
     mtime: Option<i64>,
 }
 
-/// A file's size and last-modified time (seconds since 1970).
-/// Read without opening the file (PA-39: an online-only file is not downloaded for it).
-pub(crate) fn stat(p: &Path) -> Option<(u64, i64)> {
-    crate::cloud::stat(p).map(|(size, t, _)| (size, t))
-}
-
 /// path → (hash, size, file_mtime) of the catalog's live documents.
 pub(crate) type Known = HashMap<String, (String, i64, Option<i64>)>;
 
@@ -833,10 +827,16 @@ fn rebuild_scoped(
         PROGRESS.folders.fetch_add(1, Ordering::Relaxed);
         PROGRESS.found.store(todo.len(), Ordering::Relaxed);
     }
-    let stats: Vec<Option<(u64, i64)>> = todo.iter().map(|(p, _)| stat(p)).collect();
+    // Size, time and attributes in one call per file (nothing opened, PA-39).
+    let stats3: Vec<Option<(u64, i64, u32)>> =
+        todo.iter().map(|(p, _)| crate::cloud::stat(p)).collect();
+    let attrs: Vec<u32> = stats3.iter().map(|s| s.map_or(0, |s| s.2)).collect();
+    let stats: Vec<Option<(u64, i64)>> = stats3.iter().map(|s| s.map(|(a, b, _)| (a, b))).collect();
+    // Every path found, to tell a file gone from one only left unread (PA-39).
+    let listed: HashSet<String> = todo.iter().map(|(p, _)| rel(root, p)).collect();
     let mut reuse: Vec<Option<String>> = Vec::with_capacity(todo.len());
     let mut to_read: Vec<PathBuf> = Vec::new();
-    for ((p, _), st) in todo.iter().zip(&stats) {
+    for (((p, _), st), a) in todo.iter().zip(&stats).zip(&attrs) {
         let r = rel(root, p);
         let same = match (known.get(&r), st) {
             (Some((h, size, Some(t))), Some((s, mt))) if *size as u64 == *s && t == mt => {
@@ -846,7 +846,7 @@ fn rebuild_scoped(
         };
         // Online only (a OneDrive or Dropbox cabinet, PA-39): reading it would download it.
         // Left unread, never taken for deleted or changed.
-        let left = same.is_none() && crate::cloud::leave(p);
+        let left = same.is_none() && crate::cloud::leave_attrs(*a);
         if same.is_none() && !left {
             to_read.push(p.clone());
         } else {
@@ -923,17 +923,17 @@ fn rebuild_scoped(
     let meta = crate::docmeta::Index::load(root, &folder_rels);
     rep.docmeta_bad_lines = meta.bad_lines;
     // Online-only files left unread (PA-39): another PC that filed or changed one noted its
-    // fingerprint in the folder's docmeta.jsonl. Trusted when the file is no newer than that
-    // note (two minutes' allowance for the note being written just after the file). A known
-    // file with no such newer note keeps its row; a new one waits until it is on this PC.
+    // fingerprint in the folder's docmeta.jsonl, with the size and time of the file it was read
+    // from. Trusted when the file still has that size and time (`Record::describes`). A known
+    // file with no such note keeps its row; a new one waits until it is on this PC.
+    // Online-only files neither known nor noted, by client folder: (size, time). A document
+    // whose file is gone may be one of them, moved or renamed on another PC (code review).
+    let mut unmatched: HashMap<String, Vec<(u64, i64)>> = HashMap::new();
     for (p, client_id, st, had) in waiting {
         let r = rel(root, &p);
-        let noted = meta.latest_at(&r).filter(|m| {
-            let ts =
-                time::OffsetDateTime::parse(&m.ts, &time::format_description::well_known::Rfc3339)
-                    .map(|t| t.unix_timestamp());
-            matches!((ts, st), (Ok(ts), Some((_, mt))) if mt <= ts + 120)
-        });
+        let noted = meta
+            .latest_at(&r)
+            .filter(|m| st.is_some_and(|(size, mt)| m.describes(size, mt)));
         // A note of the content the catalog already has: nothing new to learn.
         let noted = noted.filter(|m| had.as_deref() != Some(m.hash.as_str()));
         match (noted, st) {
@@ -953,7 +953,30 @@ fn rebuild_scoped(
             }
             _ => {
                 rep.online_only_waiting += 1;
+                if let Some(s) = st {
+                    let top = r.split('/').next().unwrap_or_default().to_string();
+                    unmatched.entry(top).or_default().push(s);
+                }
                 unread_files.insert(r);
+            }
+        }
+    }
+    // A document whose file is gone from its path while an online-only file of the same size
+    // and time appeared in the same client folder: moved or renamed elsewhere, not deleted.
+    // Kept as it is until that file is on this PC and is matched by its content.
+    if !unmatched.is_empty() {
+        for (path, (_, size, mt)) in &known {
+            if listed.contains(path) {
+                continue;
+            }
+            let top = path.split('/').next().unwrap_or_default();
+            let maybe = unmatched.get(top).is_some_and(|v| {
+                v.iter()
+                    .any(|(s, t)| *s == *size as u64 && mt.is_none_or(|m| m == *t))
+            });
+            if maybe {
+                rep.online_only_kept += 1;
+                unread_files.insert(path.clone());
             }
         }
     }
@@ -1621,11 +1644,15 @@ mod tests {
             "w2 2024 with its text layer",
         );
         crate::cloud::mark_online_only(&smith.join("Income Tax/2024/w2.pdf"));
+        // What the PC that read a file notes with its fingerprint: the file's size and time.
+        let stamp = |p: &Path| crate::cloud::stat(p).map(|(s, t, _)| (s, t)).unwrap();
         let layered = "ef".repeat(32);
+        let (size, mtime) = stamp(&smith.join("Income Tax/2024/w2.pdf"));
         let note = serde_json::json!({
             "v": 1, "ts": vf_core::now_rfc3339(), "device": "pc-a", "hash": layered,
             "path": "Income Tax/2024/w2.pdf", "doc_type": null, "doc_type_name": null,
-            "tax_year": 2024, "status": "received", "source": null, "tags": []
+            "tax_year": 2024, "status": "received", "source": null, "tags": [],
+            "size": size, "mtime": mtime
         });
         put(
             &smith.join("_Vibe/docmeta.jsonl"),
@@ -1642,10 +1669,12 @@ mod tests {
         put(&acme.join("Payroll/2025/941 Q3.pdf"), "941 q3");
         crate::cloud::mark_online_only(&acme.join("Payroll/2025/941 Q3.pdf"));
         let noted = "ab".repeat(32);
+        let (size, mtime) = stamp(&acme.join("Payroll/2025/941 Q3.pdf"));
         let line = serde_json::json!({
             "v": 1, "ts": vf_core::now_rfc3339(), "device": "pc-a", "hash": noted,
             "path": "Payroll/2025/941 Q3.pdf", "doc_type": null, "doc_type_name": null,
-            "tax_year": 2025, "status": "received", "source": null, "tags": []
+            "tax_year": 2025, "status": "received", "source": null, "tags": [],
+            "size": size, "mtime": mtime
         });
         put(
             &acme.join("_Vibe/docmeta.jsonl"),
@@ -1654,19 +1683,41 @@ mod tests {
 "
             ),
         );
-        // New, noted long before the file last changed: not trusted.
+        // New, noted for other bytes than those there now (a different size): not trusted;
+        // nor one whose hash is no SHA-256 (a path, say).
         put(&acme.join("Payroll/2025/941 Q4.pdf"), "941 q4");
         crate::cloud::mark_online_only(&acme.join("Payroll/2025/941 Q4.pdf"));
+        let (size, mtime) = stamp(&acme.join("Payroll/2025/941 Q4.pdf"));
         let old = serde_json::json!({
-            "v": 1, "ts": "2020-01-01T00:00:00Z", "device": "pc-a", "hash": "cd".repeat(32),
+            "v": 1, "ts": vf_core::now_rfc3339(), "device": "pc-a", "hash": "cd".repeat(32),
             "path": "Payroll/2025/941 Q4.pdf", "doc_type": null, "doc_type_name": null,
-            "tax_year": 2025, "status": "received", "source": null, "tags": []
+            "tax_year": 2025, "status": "received", "source": null, "tags": [],
+            "size": size + 1, "mtime": mtime
         });
+        put(&acme.join("Payroll/2025/941 Q5.pdf"), "941 q5");
+        crate::cloud::mark_online_only(&acme.join("Payroll/2025/941 Q5.pdf"));
+        let (size5, mtime5) = stamp(&acme.join("Payroll/2025/941 Q5.pdf"));
+        let bad = serde_json::json!({
+            "v": 1, "ts": vf_core::now_rfc3339(), "device": "pc-a", "hash": "../../../x/y",
+            "path": "Payroll/2025/941 Q5.pdf", "doc_type": null, "doc_type_name": null,
+            "tax_year": 2025, "status": "received", "source": null, "tags": [],
+            "size": size5, "mtime": mtime5
+        });
+        // Known, moved into another folder on another PC (same size and time), online only
+        // here and not noted: its document is kept, not taken for deleted.
+        std::fs::create_dir_all(acme.join("Payroll/2025/Filed")).unwrap();
+        std::fs::rename(
+            acme.join("Payroll/2025/941 Q1.pdf"),
+            acme.join("Payroll/2025/Filed/941 Q1.pdf"),
+        )
+        .unwrap();
+        crate::cloud::mark_online_only(&acme.join("Payroll/2025/Filed/941 Q1.pdf"));
         put(
             &acme.join("_Vibe/docmeta.jsonl"),
             &format!(
                 "{line}
 {old}
+{bad}
 "
             ),
         );
@@ -1680,9 +1731,14 @@ mod tests {
                 rep.online_only_noted,
                 rep.online_only_waiting
             ),
-            (1, 2, 2),
+            (2, 2, 4),
             "{rep}"
         );
+        assert!(
+            hash_of(&conn, "%Payroll/2025/941 Q1.pdf").is_some(),
+            "moved, kept"
+        );
+        assert_eq!(hash_of(&conn, "%941 Q5.pdf"), None);
         assert_eq!(hash_of(&conn, "%2024/w2.pdf").unwrap(), layered);
         assert_eq!(hash_of(&conn, "%2025/w2.pdf").unwrap(), before);
         assert_eq!(hash_of(&conn, "%941 Q3.pdf").unwrap(), noted);
@@ -1694,13 +1750,22 @@ mod tests {
         // Only the 2024 change (taken from its note) keeps the earlier content as a version.
         assert_eq!(versions, 1);
         // Once on this PC (no longer online only) the files are read as usual.
-        for f in ["Payroll/2025/941 Q2.pdf", "Payroll/2025/941 Q4.pdf"] {
+        for f in [
+            "Payroll/2025/941 Q2.pdf",
+            "Payroll/2025/941 Q4.pdf",
+            "Payroll/2025/941 Q5.pdf",
+            "Payroll/2025/Filed/941 Q1.pdf",
+        ] {
             crate::cloud::mark_local(&acme.join(f));
         }
         crate::cloud::mark_local(&smith.join("Income Tax/2025/w2.pdf"));
         let rep = rebuild(&mut conn, &c.root, "dev").unwrap();
         assert_eq!(rep.online_only_waiting + rep.online_only_kept, 0, "{rep}");
         assert!(hash_of(&conn, "%941 Q2.pdf").is_some());
+        // The moved file, read now, is matched to its document by content: a move.
+        assert_eq!(rep.docs_tombstoned, 0, "{rep}");
+        assert!(rep.docs_moved >= 1, "{rep}");
+        assert!(hash_of(&conn, "%Payroll/2025/Filed/941 Q1.pdf").is_some());
         assert_ne!(hash_of(&conn, "%2025/w2.pdf").unwrap(), before);
     }
 

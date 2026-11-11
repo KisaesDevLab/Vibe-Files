@@ -42,15 +42,39 @@ pub fn leave(p: &Path) -> bool {
     LEAVE.load(std::sync::atomic::Ordering::Relaxed) && is_online_only(p)
 }
 
+/// [`leave`] for attributes already read (a folder listing's, [`stat`]'s).
+pub fn leave_attrs(a: u32) -> bool {
+    LEAVE.load(std::sync::atomic::Ordering::Relaxed) && online_only_attrs(a)
+}
+
 /// A file's attributes, read by path (no handle is opened, so nothing is downloaded).
 /// `None` when the file cannot be reached.
 pub fn attributes(p: &Path) -> Option<u32> {
     use windows::Win32::Storage::FileSystem::{GetFileAttributesW, INVALID_FILE_ATTRIBUTES};
     use windows::core::HSTRING;
-    let wide = HSTRING::from(p.as_os_str());
+    let wide = HSTRING::from(long_path(p).as_os_str());
     // SAFETY: a valid, NUL-terminated wide string for the call's duration.
     let a = unsafe { GetFileAttributesW(&wide) };
     (a != INVALID_FILE_ATTRIBUTES).then_some(a)
+}
+
+/// `p` in the `\\?\` form when it is long: Win32 calls given a plain path fail past 260
+/// characters (the app has no long-path manifest), and a cabinet deep in a OneDrive folder
+/// reaches that. As Filer's `commit::verbatim` (vendored, private there).
+pub fn long_path(p: &Path) -> PathBuf {
+    let s = p.as_os_str().to_string_lossy();
+    if s.len() < 240 || s.starts_with(r"\\?\") || !p.is_absolute() {
+        return p.to_path_buf();
+    }
+    // `\\?\` turns off Win32 normalization, so normalize first (`/`, `.` and `..`).
+    let Ok(full) = std::path::absolute(p) else {
+        return p.to_path_buf();
+    };
+    let s = full.as_os_str().to_string_lossy();
+    match s.strip_prefix(r"\\") {
+        Some(unc) => PathBuf::from(format!(r"\\?\UNC\{unc}")),
+        None => PathBuf::from(format!(r"\\?\{s}")),
+    }
 }
 
 /// A file's size, last-modified time (seconds since 1970) and attributes, read by path with
@@ -61,7 +85,7 @@ pub fn stat(p: &Path) -> Option<(u64, i64, u32)> {
         GetFileAttributesExW, GetFileExInfoStandard, WIN32_FILE_ATTRIBUTE_DATA,
     };
     use windows::core::HSTRING;
-    let wide = HSTRING::from(p.as_os_str());
+    let wide = HSTRING::from(long_path(p).as_os_str());
     let mut d = WIN32_FILE_ATTRIBUTE_DATA::default();
     // SAFETY: a valid, NUL-terminated wide string and a buffer of the documented type for the
     // call's duration.
@@ -86,7 +110,7 @@ pub fn mark_online_only(p: &Path) {
     use windows::Win32::Storage::FileSystem::{FILE_FLAGS_AND_ATTRIBUTES, SetFileAttributesW};
     use windows::core::HSTRING;
     let a = attributes(p).expect("file exists");
-    let wide = HSTRING::from(p.as_os_str());
+    let wide = HSTRING::from(long_path(p).as_os_str());
     // SAFETY: a valid, NUL-terminated wide string for the call's duration.
     unsafe { SetFileAttributesW(&wide, FILE_FLAGS_AND_ATTRIBUTES(a | OFFLINE)) }.unwrap();
     assert!(is_online_only(p));
@@ -98,7 +122,7 @@ pub fn mark_local(p: &Path) {
     use windows::Win32::Storage::FileSystem::{FILE_FLAGS_AND_ATTRIBUTES, SetFileAttributesW};
     use windows::core::HSTRING;
     let a = attributes(p).expect("file exists");
-    let wide = HSTRING::from(p.as_os_str());
+    let wide = HSTRING::from(long_path(p).as_os_str());
     // SAFETY: a valid, NUL-terminated wide string for the call's duration.
     unsafe { SetFileAttributesW(&wide, FILE_FLAGS_AND_ATTRIBUTES(a & !OFFLINE)) }.unwrap();
     assert!(!is_online_only(p));
@@ -132,7 +156,7 @@ pub fn sync_root_provider(p: &Path) -> Option<String> {
         let f = GetProcAddress(lib, s!("CfGetSyncRootInfoByPath"))?;
         std::mem::transmute::<unsafe extern "system" fn() -> isize, GetInfo>(f)
     };
-    let wide = HSTRING::from(p.as_os_str());
+    let wide = HSTRING::from(long_path(p).as_os_str());
     // SAFETY: zeroed is a valid value of this plain-data struct; the buffer and its length are
     // the struct's own, and the path is NUL-terminated for the call's duration.
     let info = unsafe {
@@ -228,8 +252,13 @@ pub fn conflicted_copies(root: &Path, computers: &[String]) -> Vec<String> {
         }
     };
     let vibe = crate::cabinet::VIBE_DIR;
-    // The cabinet's own: audit, change logs, the client list, settings (not the version store).
-    look(&root.join(vibe), 1, &mut out);
+    // The cabinet's own files: the client list, settings, and its bookkeeping folders. Not the
+    // folders that hold client documents (trash, overwritten, split originals, versions, tmp):
+    // a client's file there may have any name (code review).
+    look(&root.join(vibe), 0, &mut out);
+    for sub in ["audit", "changes", "devices", "parsers", "catalog-seed"] {
+        look(&root.join(vibe).join(sub), 0, &mut out);
+    }
     if let Ok(entries) = std::fs::read_dir(root) {
         for e in entries.flatten() {
             if e.file_type().is_ok_and(|t| t.is_dir()) && e.file_name() != vibe {
@@ -299,6 +328,27 @@ mod tests {
         assert!(stat(&t.path().join("missing.pdf")).is_none());
     }
 
+    /// Code review: a file past 260 characters (deep in a OneDrive folder) is still read by its
+    /// attributes, not taken for unreadable (and so read whole).
+    #[test]
+    fn long_paths_are_read_too() {
+        let t = tempfile::tempdir().unwrap();
+        let mut dir = t.path().to_path_buf();
+        for i in 0..8 {
+            dir = dir.join(format!("Income Tax and Workpapers folder {i:02}"));
+        }
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("Smith, John_1001_2025_1040_GovernmentCopyTaxReturn.pdf");
+        assert!(f.as_os_str().len() > 300);
+        std::fs::write(&f, b"x").unwrap();
+        assert_eq!(stat(&f).map(|s| s.0), Some(1));
+        assert!(!is_online_only(&f));
+        mark_online_only(&f);
+        assert!(is_online_only(&f));
+        mark_local(&f);
+        assert!(!is_online_only(&f));
+    }
+
     #[test]
     fn dropbox_folders_come_from_its_info_file() {
         let text = r#"{"personal": {"path": "C:\\Users\\Pat\\Dropbox", "host": 1},
@@ -327,6 +377,9 @@ mod tests {
         put("_Vibe/audit/2026-11.jsonl");
         put("_Vibe/audit/2026-11 (FRONT-DESK's conflicted copy 2026-11-10).jsonl");
         put("_Vibe/clients-OFFICE-2.json");
+        // Client documents kept by Vibe Files may have any name: not its own files.
+        put("_Vibe/trash/w2-OFFICE-2.pdf");
+        put("_Vibe/overwritten/scan (FRONT-DESK's conflicted copy 2026-11-10).pdf");
         put("Smith (1001)/_Vibe/docmeta.jsonl");
         put("Smith (1001)/_Vibe/docmeta-office-2.jsonl");
         put("Smith (1001)/Income Tax/w2-OFFICE-2.pdf");

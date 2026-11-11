@@ -679,6 +679,8 @@ fn record(
                         status: "received".into(),
                         source: Some(source.clone()),
                         tags: guessed.clone(),
+                        // The file just filed, whose content `hash` is (PA-39).
+                        stamp: crate::cloud::stat(&root.join(&f.rel)).map(|(s, t, _)| (s, t)),
                     };
                     let (path, line) = crate::docmeta::record_line(root, &meta, &now, device_id);
                     tx = tx.file(FileOp::AppendLines {
