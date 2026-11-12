@@ -10,10 +10,10 @@ Browse has three panes: the tree on the left, the documents of what you picked i
 
 The tree lists, from the top:
 
-- **VIEWS** — ready-made lists across all clients: **Recent** (documents you opened or changed lately), **Pinned**, **Needs doc type**, **Needs tax year** and **Received this week**. Each shows a count.
+- **VIEWS** — ready-made lists across all clients: **Recent** (documents you opened or changed lately), **Pinned**, **Needs doc type**, **Needs tax year**, **Received this week** and **Folders with no client ID** (files in cabinet folders bound to no client; bind them with Admin › Folder import). Each shows a count.
 - **FAVORITES** — clients, years or folders you added. Right-click one and choose **Remove from favorites** to drop it.
 - **SAVED SEARCHES** — searches saved on the Search tab. See [Search](help:search).
-- **CABINET** — **All documents**, then every client, then **Not in a client folder** for files outside any client folder.
+- **CABINET** — **All documents**, then every client.
 
 Type in **Find client by name or ID** to shorten the client list, for example `smith` or `1004`. When clients have partners, **Partner** at the top of the pane, above **VIEWS**, shows only one partner's clients, or **No partner**. It also keeps the Views (Recent, Pinned, Needs doc type, Needs tax year, Received this week) to those clients' documents, counts included. Each Windows user's choice comes back the next time they open Vibe Files.
 

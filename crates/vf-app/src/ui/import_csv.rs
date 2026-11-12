@@ -24,6 +24,11 @@ pub struct ImportDialog {
     known: BTreeMap<String, uuid::Uuid>,
     /// A taxpayer ID column whose last 4 digits are kept (Q-27, P08).
     pub tin: Option<String>,
+    /// The catalog file: the import runs on a thread with its own connection (it reads every
+    /// client folder); without it (tests), on this one.
+    pub catalog: Option<PathBuf>,
+    /// The import running (owner 2026-11-12: a spinner, not a frozen window).
+    job: Option<crate::ui::job::Job<Result<String, String>>>,
 }
 
 impl ImportDialog {
@@ -35,6 +40,8 @@ impl ImportDialog {
             error: None,
             known,
             tin: None,
+            catalog: None,
+            job: None,
         }
     }
 }
@@ -82,6 +89,12 @@ fn column_combo(
 
 pub fn show(ctx: &egui::Context, d: &mut ImportDialog, env: &mut Env) -> DialogOutcome<String> {
     let mut out = DialogOutcome::Open;
+    if let Some(r) = crate::ui::job::take(&mut d.job) {
+        match r.and_then(|r| r) {
+            Ok(msg) => return DialogOutcome::Done(msg),
+            Err(e) => d.error = Some(e),
+        }
+    }
     egui::Modal::new(egui::Id::unique("import-clients")).show(ctx, |ui| {
         ui.set_width(560.0);
         ui.heading("Import clients CSV");
@@ -190,6 +203,10 @@ pub fn show(ctx: &egui::Context, d: &mut ImportDialog, env: &mut Env) -> DialogO
         });
         ui.add_space(6.0);
         widgets::message_line(ui, d.error.as_deref());
+        if let Some(j) = &d.job {
+            j.show(ui);
+            return;
+        }
         ui.horizontal(|ui| {
             let n = d.table.as_ref().map(|t| t.rows.len()).unwrap_or(0);
             let go = ui.add_enabled(
@@ -197,9 +214,33 @@ pub fn show(ctx: &egui::Context, d: &mut ImportDialog, env: &mut Env) -> DialogO
                 widgets::primary_button(format!("Import {n} rows (one transaction)")),
             );
             if go.clicked() {
-                match run(d, env) {
-                    Ok(msg) => out = DialogOutcome::Done(msg),
-                    Err(e) => d.error = Some(e),
+                let input = Input {
+                    path: PathBuf::from(d.path.trim()),
+                    map: d.map.clone(),
+                    known: d.known.clone(),
+                    tin: d.tin.clone(),
+                };
+                match d.catalog.clone() {
+                    Some(catalog) => {
+                        let (root, device) = (env.root.to_path_buf(), env.device_id.to_string());
+                        match crate::ui::job::Job::start(
+                            ui.ctx(),
+                            format!("Importing {n} clients and matching their folders…"),
+                            move || {
+                                let mut conn =
+                                    vf_core::db::open(&catalog, vf_core::db::Storage::Local)
+                                        .map_err(|e| e.to_string())?;
+                                run(&input, &mut conn, &root, &device)
+                            },
+                        ) {
+                            Ok(j) => d.job = Some(j),
+                            Err(e) => d.error = Some(e),
+                        }
+                    }
+                    None => match run(&input, env.conn, env.root, env.device_id) {
+                        Ok(msg) => out = DialogOutcome::Done(msg),
+                        Err(e) => d.error = Some(e),
+                    },
                 }
             }
             if ui.button("Cancel").clicked() {
@@ -210,15 +251,22 @@ pub fn show(ctx: &egui::Context, d: &mut ImportDialog, env: &mut Env) -> DialogO
     out
 }
 
-fn run(d: &ImportDialog, env: &mut Env) -> Result<String, String> {
-    let list = clients::import_csv_tin(
-        env.root,
-        &PathBuf::from(d.path.trim()),
-        &d.map,
-        &d.known,
-        d.tin.as_deref(),
-    )?;
-    let rep = vf_fs::rebuild::sync_clients(env.conn, env.root, env.device_id, "clients_import")
+/// What the import needs, taken from the dialog.
+struct Input {
+    path: PathBuf,
+    map: ColumnMap,
+    known: BTreeMap<String, uuid::Uuid>,
+    tin: Option<String>,
+}
+
+fn run(
+    d: &Input,
+    conn: &mut vf_core::db::Connection,
+    root: &std::path::Path,
+    device_id: &str,
+) -> Result<String, String> {
+    let list = clients::import_csv_tin(root, &d.path, &d.map, &d.known, d.tin.as_deref())?;
+    let rep = vf_fs::rebuild::sync_clients(conn, root, device_id, "clients_import")
         .map_err(|e| format!("The client list was saved but the catalog was not updated: {e}"))?;
     let mut msg = format!(
         "Imported {} clients ({} without a folder yet).",
@@ -237,7 +285,7 @@ fn run(d: &ImportDialog, env: &mut Env) -> Result<String, String> {
             rep.uuid_mismatches.join(", ")
         ));
     }
-    match clients::unbound_matches(env.root, &list) {
+    match clients::unbound_matches(root, &list) {
         Ok(m) if !m.is_empty() => {
             let names: Vec<_> = m.iter().map(|(f, id)| format!("{f} (ID {id})")).collect();
             msg.push_str(&format!(

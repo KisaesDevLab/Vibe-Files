@@ -78,6 +78,20 @@ enum Node {
 struct DocDrag(Vec<String>);
 
 /// Asking whether to move dragged documents into a folder.
+/// A move, copy or undo running on its thread (owner 2026-11-12: a spinner, not a frozen
+/// window): what to do once it is done.
+enum FileDone {
+    Moved {
+        ask: MoveAsk,
+        copying: bool,
+        r: Result<usize, String>,
+    },
+    Undid {
+        label: String,
+        r: Result<(), String>,
+    },
+}
+
 struct MoveAsk {
     /// Destination folder, relative to its cabinet.
     dest: String,
@@ -265,6 +279,14 @@ pub struct Browse {
     reveal: Option<String>,
     /// The client panel's Partner box while typing: (client uuid, text).
     pub partner_draft: Option<(String, String)>,
+    /// A client edit's catalog update running (it reads every client folder), and whether
+    /// another edit came in meanwhile.
+    pub client_sync: Option<crate::ui::job::Job<Result<usize, String>>>,
+    pub client_sync_again: bool,
+    /// A saved search running on its thread: its name and the documents it found.
+    saved_job: Option<crate::ui::job::Job<SavedRun>>,
+    /// A move, copy or undo running.
+    file_job: Option<crate::ui::job::Job<FileDone>>,
     /// A pane width being dragged, saved when the drag ends (tree, details).
     width_drag: (Option<u16>, Option<u16>),
     pub name_filter: String,
@@ -353,7 +375,7 @@ pub struct Browse {
     pub prefs_dirty: bool,
     /// Document counts per entry of [`Browse::views`] and per favorite, and the start of
     /// "this week"; recomputed by `recount` when the catalog or the lists change.
-    view_counts: [usize; 5],
+    view_counts: [usize; 6],
     fav_counts: Vec<usize>,
     /// The firm's saved searches (`_Vibe/saved_searches.json`), set by the app.
     pub saved: Vec<vf_index::saved::SavedSearch>,
@@ -439,6 +461,10 @@ impl Browse {
             reveal: None,
             width_drag: (None, None),
             partner_draft: None,
+            client_sync: None,
+            client_sync_again: false,
+            saved_job: None,
+            file_job: None,
             name_filter: String::new(),
             large: false,
             loaded: None,
@@ -480,7 +506,7 @@ impl Browse {
             rename: None,
             prefs: Prefs::default(),
             prefs_dirty: false,
-            view_counts: [0; 5],
+            view_counts: [0; 6],
             fav_counts: Vec::new(),
             saved: Vec::new(),
             view_request: None,
@@ -1140,6 +1166,110 @@ impl Browse {
         })
     }
 
+    /// Runs a move, copy or undo: on its thread with its own catalog connection when Browse
+    /// knows the catalog file, else here.
+    fn run_file_job(
+        &mut self,
+        env: &mut Env,
+        what: String,
+        work: impl FnOnce(&mut Connection, &std::path::Path, &str) -> FileDone + Send + 'static,
+    ) {
+        match (self.catalog.clone(), self.ctx()) {
+            (Some(catalog), Some(ctx)) => {
+                let (root, device) = (env.root.to_path_buf(), env.device_id.to_string());
+                match crate::ui::job::Job::start(&ctx, what, move || {
+                    match vf_core::db::open(&catalog, vf_core::db::Storage::Local) {
+                        Ok(mut conn) => work(&mut conn, &root, &device),
+                        Err(e) => FileDone::Undid {
+                            label: String::new(),
+                            r: Err(e.to_string()),
+                        },
+                    }
+                }) {
+                    Ok(j) => self.file_job = Some(j),
+                    Err(e) => self.error = Some(e),
+                }
+            }
+            _ => {
+                let done = work(env.conn, env.root, env.device_id);
+                self.file_done(env, done);
+            }
+        }
+    }
+
+    /// Each frame: a finished move, copy or undo.
+    fn poll_file_job(&mut self, env: &mut Env) {
+        if let Some(r) = crate::ui::job::take(&mut self.file_job) {
+            match r {
+                Ok(done) => self.file_done(env, done),
+                Err(e) => self.error = Some(e),
+            }
+        }
+    }
+
+    fn file_done(&mut self, env: &mut Env, done: FileDone) {
+        match done {
+            FileDone::Moved { ask, copying, r } => {
+                let (did, not) = if copying {
+                    ("Copied", "Not copied")
+                } else {
+                    ("Moved", "Not moved")
+                };
+                match r {
+                    Ok(n) => {
+                        let ids: Vec<String> = ask.rows.iter().map(|r| r.doc_id.clone()).collect();
+                        self.prefs.touch(&ids);
+                        self.prefs_dirty = true;
+                        self.reload(env.conn);
+                        self.notice = Some(format!(
+                            "{did} {n} document{} to {}{}.",
+                            if n == 1 { "" } else { "s" },
+                            ask.dest.replace('/', " / "),
+                            if ask.dest_root.is_some() {
+                                " in the other cabinet"
+                            } else {
+                                ""
+                            }
+                        ));
+                    }
+                    Err(e) => self.error = Some(format!("{not}: {e}")),
+                }
+            }
+            FileDone::Undid { label, r } => {
+                match r {
+                    Ok(()) => {
+                        self.reload(env.conn);
+                        self.notice = Some(format!("Undid {label}."));
+                    }
+                    Err(e) => self.error = Some(format!("Undo failed: {e}")),
+                }
+                self.undo_stack = None;
+                self.meta_form.for_selection.clear();
+            }
+        }
+    }
+
+    /// Undoes the change `u` (Undo last, Ctrl+Z).
+    fn start_undo(&mut self, env: &mut Env, u: vf_core::tx::Undoable) {
+        if self.file_job.is_some() {
+            return;
+        }
+        let label = undo_label(&u);
+        self.run_file_job(
+            env,
+            format!("Undoing {label}…"),
+            move |conn, root, device| FileDone::Undid {
+                r: vf_fs::fileops::undo(conn, root, &u.tx_id, device),
+                label,
+            },
+        );
+    }
+
+    /// The window's context, once Browse has been shown.
+    pub fn ctx(&self) -> Option<egui::Context> {
+        self.egui_ctx.clone()
+    }
+
     /// Shows client `ci`'s folder, opened in the tree (a related client's link, owner
     /// 2026-11-04).
     pub fn go_to_client(&mut self, ci: usize) {
@@ -1183,7 +1313,7 @@ impl Browse {
     }
 
     /// The Views section: (label, scope, warn when non-zero), in display order.
-    fn views(&self) -> [(&'static str, Scope, bool); 5] {
+    fn views(&self) -> [(&'static str, Scope, bool); 6] {
         [
             (
                 IdList::Recent.label(),
@@ -1202,6 +1332,8 @@ impl Browse {
                 Scope::ReceivedSince(self.week_start.clone()),
                 false,
             ),
+            // Files in cabinet folders bound to no client (owner 2026-11-12).
+            (NO_CLIENT_ID, Scope::Unassigned, true),
         ]
     }
 
@@ -1216,6 +1348,7 @@ impl Browse {
                 (Some(w), Scope::NeedsDocType) => w.needs_doc_type,
                 (Some(w), Scope::NeedsTaxYear) => w.needs_tax_year,
                 (Some(w), Scope::ReceivedSince(_)) => w.received,
+                (Some(w), Scope::Unassigned) => w.unassigned,
                 _ => self.view_docs(v).len(),
             };
         }
@@ -1451,12 +1584,45 @@ impl Browse {
         if let Some(i) = self.saved_open.take()
             && let Some(s) = self.saved.get(i).cloned()
         {
-            match vf_index::search::search(env.conn, &s.query, 100_000) {
-                Ok(hits) => self.set_scope(Scope::Saved {
-                    name: s.name,
-                    ids: hits.into_iter().map(|h| h.doc_id).collect(),
-                }),
-                Err(e) => self.error = Some(format!("The saved search did not run: {e}")),
+            let ids = |conn: &Connection| {
+                vf_index::search::search(conn, &s.query, 100_000)
+                    .map(|hits| hits.into_iter().map(|h| h.doc_id).collect::<Vec<_>>())
+                    .map_err(|e| e.to_string())
+            };
+            // On its thread with a spinner (owner 2026-11-12); here without the catalog file.
+            match (self.catalog.clone(), self.ctx()) {
+                (Some(catalog), Some(ctx)) => {
+                    let (name, query) = (s.name.clone(), s.query.clone());
+                    match crate::ui::job::Job::start(
+                        &ctx,
+                        format!("Running \"{}\"…", s.name),
+                        move || {
+                            let r = vf_core::db::open(&catalog, vf_core::db::Storage::Local)
+                                .map_err(|e| e.to_string())
+                                .and_then(|conn| {
+                                    vf_index::search::search(&conn, &query, 100_000)
+                                        .map(|hits| hits.into_iter().map(|h| h.doc_id).collect())
+                                        .map_err(|e| e.to_string())
+                                });
+                            (name, r)
+                        },
+                    ) {
+                        Ok(j) => self.saved_job = Some(j),
+                        Err(e) => self.error = Some(format!("The saved search did not run: {e}")),
+                    }
+                }
+                _ => match ids(env.conn) {
+                    Ok(ids) => self.set_scope(Scope::Saved { name: s.name, ids }),
+                    Err(e) => self.error = Some(format!("The saved search did not run: {e}")),
+                },
+            }
+        }
+        if let Some(r) = crate::ui::job::take(&mut self.saved_job) {
+            match r {
+                Ok((name, Ok(ids))) => self.set_scope(Scope::Saved { name, ids }),
+                Ok((_, Err(e))) | Err(e) => {
+                    self.error = Some(format!("The saved search did not run: {e}"))
+                }
             }
         }
         if let Some(id) = self.saved_delete.take() {
@@ -1870,6 +2036,8 @@ pub fn show(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env) {
         b.list_disk(false);
     }
     b.poll_disk();
+    b.poll_file_job(env);
+    crate::ui::client_panel::poll_sync(b, env);
     portal_windows(ui.ctx(), b, env);
     // New files first: each is added as Explorer put it there (and read by text recognition as
     // new), before a re-read for files gone from the same folder.
@@ -2240,6 +2408,12 @@ fn partner_pick(ui: &mut egui::Ui, b: &mut Browse) {
     }
 }
 
+/// A saved search's run: its name and the documents it found.
+type SavedRun = (String, Result<Vec<String>, String>);
+
+/// The View of files in folders bound to no client (no client ID).
+const NO_CLIENT_ID: &str = "Folders with no client ID";
+
 fn tree(ui: &mut egui::Ui, b: &mut Browse) {
     let mut pick: Option<Scope> = None;
     let mut fav_remove: Option<usize> = None;
@@ -2309,6 +2483,9 @@ fn tree(ui: &mut egui::Ui, b: &mut Browse) {
                 }
             });
         }
+    }
+    if let Some(j) = &b.saved_job {
+        j.show(ui);
     }
     ui.add_space(8.0);
     ui.horizontal(|ui| {
@@ -2575,21 +2752,6 @@ fn tree(ui: &mut egui::Ui, b: &mut Browse) {
                     }
                 }
             }
-            if b.ix.unassigned > 0
-                && tree_row(
-                    ui,
-                    0,
-                    None,
-                    false,
-                    "Not in a client folder",
-                    b.ix.unassigned,
-                    b.scope == Scope::Unassigned,
-                )
-                .1
-                .clicked()
-            {
-                pick = Some(Scope::Unassigned);
-            }
         });
     if let Some(n) = toggle
         && !b.expanded.remove(&n)
@@ -2770,14 +2932,7 @@ fn undo_newest(b: &mut Browse, env: &mut Env) {
         .ok()
         .and_then(|s| s.into_iter().next());
     let Some(u) = top else { return };
-    match vf_fs::fileops::undo(env.conn, env.root, &u.tx_id, env.device_id) {
-        Ok(()) => {
-            b.reload(env.conn);
-            b.notice = Some(format!("Undid {}.", undo_label(&u)));
-        }
-        Err(e) => b.error = Some(format!("Undo failed: {e}")),
-    }
-    b.undo_stack = None;
+    b.start_undo(env, u);
 }
 
 fn breadcrumb(b: &Browse) -> String {
@@ -2787,7 +2942,7 @@ fn breadcrumb(b: &Browse) -> String {
     };
     match &b.scope {
         Scope::Cabinet => "Cabinet".into(),
-        Scope::Unassigned => "Cabinet / Not in a client folder".into(),
+        Scope::Unassigned => format!("Views / {NO_CLIENT_ID}"),
         Scope::NeedsDocType => "Views / Needs doc type".into(),
         Scope::NeedsTaxYear => "Views / Needs tax year".into(),
         Scope::ReceivedSince(_) => "Views / Received this week".into(),
@@ -2814,6 +2969,9 @@ fn breadcrumb(b: &Browse) -> String {
 }
 
 fn grid(ui: &mut egui::Ui, b: &mut Browse, conn: &Connection) {
+    if let Some(j) = &b.file_job {
+        j.show(ui);
+    }
     if let Some(e) = &b.error {
         ui.label(RichText::new(e).color(crate::ui::theme::error()));
     }
@@ -2855,7 +3013,9 @@ fn grid(ui: &mut egui::Ui, b: &mut Browse, conn: &Connection) {
                 .iter()
                 .filter_map(|c| Some((c.ext_id.clone(), uuid::Uuid::parse_str(&c.id).ok()?)))
                 .collect();
-            b.import = Some(ImportDialog::new(known));
+            let mut d = ImportDialog::new(known);
+            d.catalog = b.catalog.clone();
+            b.import = Some(d);
         }
         if ui
             .button("Print cover sheet")
@@ -3514,7 +3674,10 @@ fn inspector_body(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env) {
                 None => "Nothing to undo".into(),
             };
             if ui
-                .add_enabled(top.is_some(), egui::Button::new("Undo last"))
+                .add_enabled(
+                    top.is_some() && b.file_job.is_none(),
+                    egui::Button::new("Undo last"),
+                )
                 .on_hover_text(hover)
                 .clicked()
             {
@@ -3523,14 +3686,7 @@ fn inspector_body(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env) {
         });
     });
     if undo && let Some(u) = top {
-        match vf_fs::fileops::undo(env.conn, env.root, &u.tx_id, env.device_id) {
-            Ok(()) => {
-                b.reload(env.conn);
-                b.notice = Some(format!("Undid {}.", undo_label(&u)));
-            }
-            Err(e) => b.error = Some(format!("Undo failed: {e}")),
-        }
-        b.meta_form.for_selection.clear();
+        b.start_undo(env, u);
         return;
     }
     ui.add_space(8.0);
@@ -4096,50 +4252,34 @@ fn move_dialog(ctx: &egui::Context, b: &mut Browse, env: &mut Env) {
         });
     });
     match answer {
-        Some(true) => {
+        Some(true) if b.file_job.is_none() => {
             let ask = b.move_ask.take().expect("checked");
-            let done = match ask.mode {
-                None => vf_fs::moveto::commit(env.conn, env.root, &ask.rows, env.device_id),
-                Some(mode) => vf_fs::copymove::commit(
-                    env.conn,
-                    env.root,
-                    &ask.rows,
-                    &vf_fs::copymove::Dest {
-                        root: ask
-                            .dest_root
-                            .clone()
-                            .unwrap_or_else(|| env.root.to_path_buf()),
-                        folder: ask.dest.clone(),
-                    },
-                    mode,
-                    env.device_id,
-                ),
-            };
-            let (did, not) = if copying {
-                ("Copied", "Not copied")
-            } else {
-                ("Moved", "Not moved")
-            };
-            match done {
-                Ok((_, n)) => {
-                    let ids: Vec<String> = ask.rows.iter().map(|r| r.doc_id.clone()).collect();
-                    b.prefs.touch(&ids);
-                    b.prefs_dirty = true;
-                    b.reload(env.conn);
-                    b.notice = Some(format!(
-                        "{did} {n} document{} to {}{}.",
-                        if n == 1 { "" } else { "s" },
-                        ask.dest.replace('/', " / "),
-                        if ask.dest_root.is_some() {
-                            " in the other cabinet"
-                        } else {
-                            ""
-                        }
-                    ));
+            let n = ask.rows.len();
+            let what = format!(
+                "{} {n} document{}…",
+                if copying { "Copying" } else { "Moving" },
+                if n == 1 { "" } else { "s" }
+            );
+            b.run_file_job(env, what, move |conn, root, device| {
+                let r = match ask.mode {
+                    None => vf_fs::moveto::commit(conn, root, &ask.rows, device),
+                    Some(mode) => vf_fs::copymove::commit(
+                        conn,
+                        root,
+                        &ask.rows,
+                        &vf_fs::copymove::Dest {
+                            root: ask.dest_root.clone().unwrap_or_else(|| root.to_path_buf()),
+                            folder: ask.dest.clone(),
+                        },
+                        mode,
+                        device,
+                    ),
                 }
-                Err(e) => b.error = Some(format!("{not}: {e}")),
-            }
+                .map(|(_, n)| n);
+                FileDone::Moved { ask, copying, r }
+            });
         }
+        Some(true) => {}
         Some(false) => b.move_ask = None,
         None => {}
     }
@@ -4869,6 +5009,9 @@ Petty cash,1234.50
     #[test]
     fn copying_documents_to_another_client() {
         let mut h = harness(2, 1);
+        // With the catalog file: the copy runs as a job (owner 2026-11-12), then an undo too.
+        let catalog = h.state()._tmp.path().join("c.db");
+        h.state_mut().b.catalog = Some(catalog);
         let (id, dest) = {
             let s = h.state_mut();
             vf_fs::cabinet::create(
@@ -4937,8 +5080,16 @@ Petty cash,1234.50
             h.state().b.error
         );
         click(&mut h, "Copy");
+        h.run();
         let s = h.state();
         assert!(s.b.error.is_none(), "{:?}", s.b.error);
+        assert!(
+            s.b.notice
+                .as_deref()
+                .is_some_and(|n| n.starts_with("Copied 1 document")),
+            "{:?}",
+            s.b.notice
+        );
         let n: i64 = s
             .conn
             .query_row(
@@ -4957,6 +5108,30 @@ Petty cash,1234.50
             )
             .unwrap();
         assert_eq!(still, 1, "the original stays");
+        // Undo the copy, as a job too.
+        {
+            let s = h.state_mut();
+            let root = s.root.clone();
+            let mut env = Env {
+                conn: &mut s.conn,
+                root: &root,
+                device_id: "dev-test",
+            };
+            undo_newest(&mut s.b, &mut env);
+            assert!(s.b.file_job.is_some());
+        }
+        h.run();
+        let s = h.state();
+        assert!(s.b.error.is_none(), "{:?}", s.b.error);
+        let n: i64 = s
+            .conn
+            .query_row(
+                "SELECT count(*) FROM document WHERE deleted_at IS NULL AND rel_path LIKE ?1",
+                [format!("{dest}/Income Tax/%")],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 0, "the copy is gone");
     }
 
     #[test]
@@ -5128,6 +5303,40 @@ Petty cash,1234.50
         h.run();
         assert_eq!(h.state().b.prefs.partner, None);
         assert!(h.query_by_label("3 clients").is_some());
+    }
+
+    /// Files in folders bound to no client are a View of their own (owner 2026-11-12), in a
+    /// small cabinet and a large one.
+    #[test]
+    fn folders_with_no_client_id_are_a_view() {
+        for large_above in [LARGE, 1] {
+            let mut h = harness_from(2, 1, large_above);
+            {
+                let s = h.state_mut();
+                s.conn
+                    .execute(
+                        "INSERT INTO document (id, client_id, rel_path, hash, size, filed_at,
+                                               device_id, updated_at)
+                         VALUES ('loose', NULL, 'Old Drawer/scan.pdf', 'h', 1,
+                                 '2026-11-02T00:00:00Z', 'd', '2026-11-02T00:00:00Z')",
+                        [],
+                    )
+                    .unwrap();
+                s.b.reload(&s.conn);
+            }
+            h.run();
+            let b = &h.state().b;
+            let i = b.views().iter().position(|v| v.0 == NO_CLIENT_ID).unwrap();
+            assert_eq!(b.view_counts[i], 1, "large_above {large_above}");
+            h.get_by_label(NO_CLIENT_ID).click();
+            for _ in 0..3 {
+                h.run();
+            }
+            let b = &h.state().b;
+            assert_eq!(b.scope, Scope::Unassigned);
+            assert_eq!(b.visible.len(), 1);
+            assert_eq!(b.snap.docs[b.visible[0]].id, "loose");
+        }
     }
 
     /// The Partner filter keeps the Views to that partner's clients too, counts and rows
@@ -5444,6 +5653,9 @@ Petty cash,1234.50
 1002,Baker Trust,
 ",
         );
+        // With the catalog file: the import runs as a job with its own connection.
+        let catalog = h.state()._tmp.path().join("c.db");
+        h.state_mut().b.catalog = Some(catalog);
         click(&mut h, "Import clients CSV…");
         type_into(&mut h, "CSV file", &csv);
         click(&mut h, "Read");
@@ -5458,6 +5670,7 @@ Petty cash,1234.50
             Some("Preparer")
         );
         click(&mut h, "Import 2 rows (one transaction)");
+        h.run();
         let b = &h.state().b;
         assert!(b.import.is_none(), "dialog closed");
         let partner = |ext: &str| {
@@ -5475,6 +5688,9 @@ Petty cash,1234.50
     #[test]
     fn client_inspector_edits_entity_type_and_relationships() {
         let mut h = cabinet_harness();
+        // With the catalog file: each edit's catalog update runs as a job (owner 2026-11-12).
+        let catalog = h.state()._tmp.path().join("c.db");
+        h.state_mut().b.catalog = Some(catalog);
         let csv = write_csv(&h, "ClientID,Name\n1001,Acme LLC\n1002,Baker Trust\n");
         click(&mut h, "Import clients CSV…");
         type_into(&mut h, "CSV file", &csv);

@@ -32,9 +32,23 @@ fn sweep_lock(catalog: &Path) -> Option<std::fs::File> {
         .ok()
 }
 
+/// Which list a finished action clears from the result shown.
+enum Act {
+    Moves,
+    Missing,
+    /// Unknown files adopted or sent to Intake (their cabinet paths).
+    Unknown(BTreeSet<String>),
+}
+
+/// An action's result: files done (or why not), what it did, and the list it clears.
+type ActDone = (Result<usize, String>, &'static str, Act);
+
 #[derive(Default)]
 pub struct SweepState {
     job: Option<Receiver<Result<Drift, String>>>,
+    /// Follow moves / Mark deleted / Adopt / Send to Intake running on its thread (they hash
+    /// or move every file listed; owner 2026-11-12: a spinner, not a frozen window).
+    act: Option<crate::ui::job::Job<ActDone>>,
     /// The last result, after adopting the modified files.
     pub drift: Option<Drift>,
     /// When it finished (RFC 3339).
@@ -145,6 +159,47 @@ impl SweepState {
     }
 }
 
+/// Starts an action on its own thread with its own catalog connection.
+fn act(
+    s: &mut SweepState,
+    ctx: &egui::Context,
+    catalog: &Path,
+    running: String,
+    what: &'static str,
+    clears: Act,
+    work: impl FnOnce(&mut Connection) -> Result<usize, String> + Send + 'static,
+) {
+    let catalog = catalog.to_path_buf();
+    match crate::ui::job::Job::start(ctx, running, move || {
+        let r = vf_core::db::open(&catalog, Storage::Local)
+            .map_err(|e| e.to_string())
+            .and_then(|mut conn| work(&mut conn));
+        (r, what, clears)
+    }) {
+        Ok(j) => {
+            s.error = None;
+            s.notice = None;
+            s.act = Some(j);
+        }
+        Err(e) => s.error = Some(e),
+    }
+}
+
+/// Takes a finished action and applies it to the page.
+fn poll_act(s: &mut SweepState) {
+    let Some(r) = crate::ui::job::take(&mut s.act) else {
+        return;
+    };
+    match r {
+        Ok((r, what, clears)) => done(s, r, what, |d| match clears {
+            Act::Moves => d.moved.clear(),
+            Act::Missing => d.missing.clear(),
+            Act::Unknown(paths) => d.unknown.retain(|u| !paths.contains(&u.rel_path)),
+        }),
+        Err(e) => s.error = Some(e),
+    }
+}
+
 /// Filer's first inbox (where "Send to Intake" puts a file).
 fn first_inbox(root: &Path) -> Option<PathBuf> {
     let (s, _) = filer_core::config::Settings::load_or_default(&vf_fs::clients::master_dir(root));
@@ -152,6 +207,8 @@ fn first_inbox(root: &Path) -> Option<PathBuf> {
 }
 
 pub fn show(ui: &mut egui::Ui, s: &mut SweepState, env: &mut Env, catalog: &Path) {
+    poll_act(s);
+    let idle = s.act.is_none() && !s.running();
     ui.horizontal(|ui| {
         ui.label(RichText::new("Integrity sweep").strong().size(16.0));
         ui.label(widgets::caption(format!(
@@ -171,10 +228,16 @@ pub fn show(ui: &mut egui::Ui, s: &mut SweepState, env: &mut Env, catalog: &Path
         if s.running() {
             ui.spinner();
             ui.label("Sweeping…");
-        } else if ui.button("Sweep now").clicked() {
+        } else if ui
+            .add_enabled(s.act.is_none(), egui::Button::new("Sweep now"))
+            .clicked()
+        {
             s.start(ui.ctx(), catalog, env.root);
         }
     });
+    if let Some(j) = &s.act {
+        j.show(ui);
+    }
     if let Some(n) = &s.notice {
         ui.label(RichText::new(n).color(theme::ink_secondary()));
     }
@@ -225,11 +288,23 @@ pub fn show(ui: &mut egui::Ui, s: &mut SweepState, env: &mut Env, catalog: &Path
                     );
                 }
                 if ui
-                    .button(format!("Follow {} moves", d.moved.len()))
+                    .add_enabled(
+                        idle,
+                        egui::Button::new(format!("Follow {} moves", d.moved.len())),
+                    )
                     .clicked()
                 {
-                    let r = sweep::follow_moves(env.conn, env.root, env.device_id, &d.moved);
-                    done(s, r, "moves followed", |d| d.moved.clear());
+                    let (root, device, moved) =
+                        (env.root.to_path_buf(), env.device_id.to_string(), d.moved.clone());
+                    act(
+                        s,
+                        ui.ctx(),
+                        catalog,
+                        format!("Following {} moves (each file is checked)…", moved.len()),
+                        "moves followed",
+                        Act::Moves,
+                        move |conn| sweep::follow_moves(conn, &root, &device, &moved),
+                    );
                 }
             }
             if !d.missing.is_empty() {
@@ -238,12 +313,27 @@ pub fn show(ui: &mut egui::Ui, s: &mut SweepState, env: &mut Env, catalog: &Path
                     ui.label(RichText::new(&m.rel_path).monospace().small());
                 }
                 if ui
-                    .button(format!("Mark {} as deleted", d.missing.len()))
+                    .add_enabled(
+                        idle,
+                        egui::Button::new(format!("Mark {} as deleted", d.missing.len())),
+                    )
                     .on_hover_text("Their rows stay as tombstones; Undo takes it back.")
                     .clicked()
                 {
-                    let r = sweep::mark_missing(env.conn, env.root, env.device_id, &d.missing);
-                    done(s, r, "marked deleted", |d| d.missing.clear());
+                    let (root, device, missing) = (
+                        env.root.to_path_buf(),
+                        env.device_id.to_string(),
+                        d.missing.clone(),
+                    );
+                    act(
+                        s,
+                        ui.ctx(),
+                        catalog,
+                        format!("Marking {} files as deleted…", missing.len()),
+                        "marked deleted",
+                        Act::Missing,
+                        move |conn| sweep::mark_missing(conn, &root, &device, &missing),
+                    );
                 }
             }
             if !d.unknown.is_empty() {
@@ -269,7 +359,7 @@ pub fn show(ui: &mut egui::Ui, s: &mut SweepState, env: &mut Env, catalog: &Path
                     let n = chosen.len();
                     if ui
                         .add_enabled(
-                            n > 0,
+                            n > 0 && idle,
                             egui::Button::new(format!("Adopt {n} where they are")),
                         )
                         .on_hover_text(
@@ -277,16 +367,25 @@ pub fn show(ui: &mut egui::Ui, s: &mut SweepState, env: &mut Env, catalog: &Path
                         )
                         .clicked()
                     {
-                        let r = sweep::adopt_unknown(env.conn, env.root, env.device_id, &chosen);
-                        let picked = s.picked.clone();
-                        done(s, r, "adopted", |d| {
-                            d.unknown.retain(|u| !picked.contains(&u.rel_path))
-                        });
+                        let (root, device, files) = (
+                            env.root.to_path_buf(),
+                            env.device_id.to_string(),
+                            chosen.clone(),
+                        );
+                        act(
+                            s,
+                            ui.ctx(),
+                            catalog,
+                            format!("Adopting {n} files (each file is read)…"),
+                            "adopted",
+                            Act::Unknown(s.picked.clone()),
+                            move |conn| sweep::adopt_unknown(conn, &root, &device, &files),
+                        );
                     }
                     let inbox = first_inbox(env.root);
                     let send = ui
                         .add_enabled(
-                            n > 0 && inbox.is_some(),
+                            n > 0 && idle && inbox.is_some(),
                             egui::Button::new(format!("Send {n} to Intake")),
                         )
                         .on_disabled_hover_text(
@@ -295,18 +394,23 @@ pub fn show(ui: &mut egui::Ui, s: &mut SweepState, env: &mut Env, catalog: &Path
                     if send.clicked()
                         && let Some(inbox) = inbox
                     {
-                        let r = sweep::refile_unknown(
-                            env.conn,
-                            env.root,
-                            &inbox,
-                            env.device_id,
-                            &chosen,
-                        )
-                        .map(|v| v.len());
-                        let picked = s.picked.clone();
-                        done(s, r, "sent to Intake's inbox", |d| {
-                            d.unknown.retain(|u| !picked.contains(&u.rel_path))
-                        });
+                        let (root, device, files) = (
+                            env.root.to_path_buf(),
+                            env.device_id.to_string(),
+                            chosen.clone(),
+                        );
+                        act(
+                            s,
+                            ui.ctx(),
+                            catalog,
+                            format!("Sending {n} files to Intake's inbox…"),
+                            "sent to Intake's inbox",
+                            Act::Unknown(s.picked.clone()),
+                            move |conn| {
+                                sweep::refile_unknown(conn, &root, &inbox, &device, &files)
+                                    .map(|v| v.len())
+                            },
+                        );
                     }
                 });
             }

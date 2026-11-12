@@ -33,6 +33,9 @@ pub struct CoverSheetDialog {
     pub rows: Vec<RowPick>,
     /// The row whose box was clicked last, for Shift-click runs.
     last_tick: Option<usize>,
+    /// Several clients' sheets being written on their thread (thousands of pages for every
+    /// client; owner 2026-11-12: a spinner, not a frozen window).
+    job: Option<crate::ui::job::Job<Result<PathBuf, String>>>,
 }
 
 /// A client's row in **Several clients**: ticked, and what it prints when not the settings
@@ -97,6 +100,7 @@ impl CoverSheetDialog {
             find: String::new(),
             rows: vec![RowPick::default(); n_clients],
             last_tick: None,
+            job: None,
         }
     }
 
@@ -234,6 +238,12 @@ pub fn separators(dir: &Path) -> Result<PathBuf, String> {
 /// The dialog; `Done` carries the written PDF.
 pub fn show(ctx: &egui::Context, d: &mut CoverSheetDialog, dir: &Path) -> DialogOutcome<PathBuf> {
     let mut out = DialogOutcome::Open;
+    if let Some(r) = crate::ui::job::take(&mut d.job) {
+        match r.and_then(|r| r) {
+            Ok(p) => return DialogOutcome::Done(p),
+            Err(e) => d.error = Some(e),
+        }
+    }
     egui::Modal::new(egui::Id::unique("cover-sheet")).show(ctx, |ui| {
         ui.set_width(if d.several { 760.0 } else { 460.0 });
         ui.heading(if d.several { "Cover sheets" } else { "Cover sheet" });
@@ -326,6 +336,10 @@ pub fn show(ctx: &egui::Context, d: &mut CoverSheetDialog, dir: &Path) -> Dialog
         }
         ui.add_space(4.0);
         widgets::message_line(ui, d.error.as_deref());
+        if let Some(j) = &d.job {
+            j.show(ui);
+            return;
+        }
         ui.horizontal(|ui| {
             let label = if d.several {
                 format!("Create cover sheets ({} clients)", d.ticked())
@@ -334,19 +348,31 @@ pub fn show(ctx: &egui::Context, d: &mut CoverSheetDialog, dir: &Path) -> Dialog
             };
             if ui.add(widgets::primary_button(label)).clicked() {
                 let r = if d.several {
-                    d.bulk_pages().and_then(|pages| {
+                    // The pages are worked out here (quick); written on a thread.
+                    let n = d.ticked();
+                    let start = d.bulk_pages().and_then(|pages| {
                         // Its own name: an earlier batch may still be open in the PDF app.
                         let p = out_path(
                             dir,
                             &format!(
-                                "cover sheets {} clients {}.pdf",
-                                d.ticked(),
+                                "cover sheets {n} clients {}.pdf",
                                 chrono::Local::now().format("%Y-%m-%d %H%M%S")
                             ),
                         )?;
-                        sheet::write_pdf(&p, &pages)?;
-                        Ok(p)
-                    })
+                        crate::ui::job::Job::start(
+                            ui.ctx(),
+                            format!("Writing {} cover sheets for {n} clients…", pages.len()),
+                            move || sheet::write_pdf(&p, &pages).map(|()| p),
+                        )
+                    });
+                    match start {
+                        Ok(j) => {
+                            d.job = Some(j);
+                            d.error = None;
+                        }
+                        Err(e) => d.error = Some(e),
+                    }
+                    return;
                 } else {
                     d.sheet().and_then(|(s, l)| {
                         let id = s.0.as_ref().map(|c| c.client_id.clone()).unwrap_or_default();

@@ -22,15 +22,88 @@ pub struct TrashPage {
     pub error: Option<String>,
     /// The catalog changed (restore / empty): Browse re-reads.
     pub changed: bool,
+    /// Restore or Empty running on its thread (each file is moved or deleted on the share;
+    /// owner 2026-11-12: a spinner, not a frozen window).
+    job: Option<crate::ui::job::Job<Done>>,
+}
+
+/// What Restore and Empty give back from their thread.
+enum Done {
+    Restored(Result<Vec<String>, String>),
+    /// Documents emptied, and how many of those asked for are under a legal hold.
+    Emptied(Result<usize, String>, usize),
 }
 
 impl TrashPage {
     pub fn refresh(&mut self) {
         self.items = None;
     }
+
+    /// `work` on its own thread with its own catalog connection; here when no catalog file is
+    /// known.
+    fn run(
+        &mut self,
+        ctx: &egui::Context,
+        env: &mut Env,
+        catalog: Option<&std::path::Path>,
+        what: String,
+        work: impl FnOnce(&mut vf_core::db::Connection, &std::path::Path, &str) -> Done + Send + 'static,
+    ) {
+        let (root, device) = (env.root.to_path_buf(), env.device_id.to_string());
+        let Some(catalog) = catalog.map(std::path::Path::to_path_buf) else {
+            let d = work(env.conn, &root, &device);
+            self.finished(d);
+            return;
+        };
+        match crate::ui::job::Job::start(ctx, what, move || {
+            match vf_core::db::open(&catalog, vf_core::db::Storage::Local) {
+                Ok(mut conn) => work(&mut conn, &root, &device),
+                Err(e) => Done::Restored(Err(e.to_string())),
+            }
+        }) {
+            Ok(j) => self.job = Some(j),
+            Err(e) => self.error = Some(e),
+        }
+    }
+
+    fn finished(&mut self, d: Done) {
+        match d {
+            Done::Restored(Ok(placed)) => {
+                self.notice = Some(format!(
+                    "Restored {} documents: {}",
+                    placed.len(),
+                    placed.join(", ")
+                ));
+                self.error = None;
+                self.changed = true;
+                self.picked.clear();
+            }
+            Done::Emptied(Ok(n), held) => {
+                tracing::info!(documents = n, held, "trash emptied by hand");
+                self.notice = Some(if held > 0 {
+                    format!("Emptied {n} documents; {held} under a legal hold stay.")
+                } else {
+                    format!("Emptied {n} documents.")
+                });
+                self.error = None;
+                self.changed = true;
+                self.picked.clear();
+            }
+            Done::Restored(Err(e)) | Done::Emptied(Err(e), _) => self.error = Some(e),
+        }
+        self.refresh();
+    }
 }
 
-pub fn show(ui: &mut egui::Ui, p: &mut TrashPage, env: &mut Env) {
+pub fn show(
+    ui: &mut egui::Ui,
+    p: &mut TrashPage,
+    env: &mut Env,
+    catalog: Option<&std::path::Path>,
+) {
+    if let Some(r) = crate::ui::job::take(&mut p.job) {
+        p.finished(r.unwrap_or_else(|e| Done::Restored(Err(e))));
+    }
     if p.items.is_none() {
         match trash::list(env.conn, env.root) {
             Ok(v) => p.items = Some(v),
@@ -52,9 +125,10 @@ pub fn show(ui: &mut egui::Ui, p: &mut TrashPage, env: &mut Env) {
     });
     ui.add_space(6.0);
     let has_pin = trash::has_pin(env.root);
+    let idle = p.job.is_none();
     ui.horizontal(|ui| {
         let restore = ui.add_enabled(
-            !p.picked.is_empty(),
+            idle && !p.picked.is_empty(),
             egui::Button::new(format!("Restore {}", p.picked.len())),
         );
         if restore.clicked() {
@@ -63,20 +137,15 @@ pub fn show(ui: &mut egui::Ui, p: &mut TrashPage, env: &mut Env) {
                 .filter(|t| p.picked.contains(&t.doc_id))
                 .cloned()
                 .collect();
-            match trash::restore(env.conn, env.root, env.device_id, &chosen) {
-                Ok(placed) => {
-                    p.notice = Some(format!(
-                        "Restored {} documents: {}",
-                        placed.len(),
-                        placed.join(", ")
-                    ));
-                    p.error = None;
-                    p.changed = true;
-                    p.picked.clear();
-                    p.refresh();
-                }
-                Err(e) => p.error = Some(e),
-            }
+            p.run(
+                ui.ctx(),
+                env,
+                catalog,
+                format!("Restoring {} documents…", chosen.len()),
+                move |conn, root, device| {
+                    Done::Restored(trash::restore(conn, root, device, &chosen))
+                },
+            );
         }
         ui.separator();
         if has_pin {
@@ -94,7 +163,7 @@ pub fn show(ui: &mut egui::Ui, p: &mut TrashPage, env: &mut Env) {
             };
             let go = ui
                 .add_enabled(
-                    !items.is_empty() && !p.pin.is_empty(),
+                    idle && !items.is_empty() && !p.pin.is_empty(),
                     egui::Button::new(what),
                 )
                 .on_hover_text(
@@ -113,27 +182,18 @@ pub fn show(ui: &mut egui::Ui, p: &mut TrashPage, env: &mut Env) {
                         .cloned()
                         .collect();
                     let held = chosen.iter().filter(|t| t.held).count();
-                    match trash::purge(
-                        env.conn,
-                        env.root,
-                        env.device_id,
-                        &chosen,
-                        "emptied by hand",
-                    ) {
-                        Ok(n) => {
-                            tracing::info!(documents = n, held, "trash emptied by hand");
-                            p.notice = Some(if held > 0 {
-                                format!("Emptied {n} documents; {held} under a legal hold stay.")
-                            } else {
-                                format!("Emptied {n} documents.")
-                            });
-                            p.error = None;
-                            p.changed = true;
-                            p.picked.clear();
-                        }
-                        Err(e) => p.error = Some(e),
-                    }
-                    p.refresh();
+                    p.run(
+                        ui.ctx(),
+                        env,
+                        catalog,
+                        format!("Emptying {} documents from the trash…", chosen.len()),
+                        move |conn, root, device| {
+                            Done::Emptied(
+                                trash::purge(conn, root, device, &chosen, "emptied by hand"),
+                                held,
+                            )
+                        },
+                    );
                 }
                 p.pin.clear();
             }
@@ -143,6 +203,9 @@ pub fn show(ui: &mut egui::Ui, p: &mut TrashPage, env: &mut Env) {
             ));
         }
     });
+    if let Some(j) = &p.job {
+        j.show(ui);
+    }
     if let Some(n) = &p.notice {
         ui.label(RichText::new(n).color(theme::ink_secondary()));
     }

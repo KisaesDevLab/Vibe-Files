@@ -914,7 +914,7 @@ impl eframe::App for VibeFilesApp {
                         *admin_unlocked = false;
                     }
                     if std::mem::take(&mut a.audit.verify_requested) {
-                        *o_chain = crate::ui::audit::ChainCheck::run(env.conn);
+                        o_chain.verify_now();
                     }
                     if let Some(dir) = a.open_request.take()
                         && let Err(e) = (tab_browse.shell)(&crate::shell::ShellAction::Open(dir))

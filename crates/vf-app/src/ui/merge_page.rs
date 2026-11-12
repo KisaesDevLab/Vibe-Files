@@ -17,6 +17,12 @@ use crate::ui::{theme, widgets};
 /// A merge running: its result, files done, files in all.
 type Job = (Receiver<Result<Merged, String>>, Arc<AtomicUsize>, usize);
 
+/// What Scan and Undo give back from their thread.
+enum Side {
+    Scanned(Result<MergePlan, String>),
+    Undone(Result<(), String>),
+}
+
 #[derive(Default)]
 pub struct MergePage {
     pub source: String,
@@ -24,6 +30,9 @@ pub struct MergePage {
     /// "Merge" pressed: asked to confirm.
     confirm: bool,
     job: Option<Job>,
+    /// A scan or an undo running on its thread (owner 2026-11-12: a spinner, not a frozen
+    /// window).
+    side: Option<crate::ui::job::Job<Side>>,
     pub last: Option<Merged>,
     loaded_last: bool,
     pub notice: Option<String>,
@@ -34,7 +43,46 @@ pub struct MergePage {
 
 impl MergePage {
     pub fn running(&self) -> bool {
-        self.job.is_some()
+        self.job.is_some() || self.side.is_some()
+    }
+
+    /// `work` on a thread with its own catalog connection.
+    fn run_side(
+        &mut self,
+        ctx: &egui::Context,
+        what: &str,
+        catalog: &Path,
+        work: impl FnOnce(&mut vf_core::db::Connection) -> Side + Send + 'static,
+    ) {
+        self.error = None;
+        self.notice = None;
+        let catalog = catalog.to_path_buf();
+        match crate::ui::job::Job::start(ctx, what, move || {
+            match vf_core::db::open(&catalog, Storage::Local) {
+                Ok(mut conn) => work(&mut conn),
+                Err(e) => Side::Undone(Err(e.to_string())),
+            }
+        }) {
+            Ok(j) => self.side = Some(j),
+            Err(e) => self.error = Some(e),
+        }
+    }
+
+    fn poll_side(&mut self) {
+        let Some(r) = crate::ui::job::take(&mut self.side) else {
+            return;
+        };
+        match r.unwrap_or_else(|e| Side::Undone(Err(e))) {
+            Side::Scanned(Ok(pl)) => self.plan = Some(pl),
+            Side::Scanned(Err(e)) => self.error = Some(e),
+            Side::Undone(Ok(())) => {
+                self.notice =
+                    Some("The merge was undone: the files are back in the other cabinet.".into());
+                self.last = None;
+                self.changed = true;
+            }
+            Side::Undone(Err(e)) => self.error = Some(format!("Undo failed: {e}")),
+        }
     }
 
     fn start(&mut self, ctx: &egui::Context, catalog: &Path, root: &Path, device: &str) {
@@ -107,6 +155,7 @@ pub fn show(ui: &mut egui::Ui, p: &mut MergePage, env: &mut Env, catalog: &Path)
         p.loaded_last = true;
     }
     p.poll();
+    p.poll_side();
     ui.heading("Merge cabinets");
     ui.label(widgets::caption(
         "Moves another Vibe Files cabinet's client folders into this one. A client with the same ID here is the same client; its files go to the same sub-folders of its folder here. A different file already at the same place: the incoming one gets \" (2)\". The same file already here: left in the other cabinet. Each document keeps its doc type, year and tags; the other cabinet's audit trail is kept as history. Folders left empty there are removed.",
@@ -128,12 +177,13 @@ pub fn show(ui: &mut egui::Ui, p: &mut MergePage, env: &mut Env, catalog: &Path)
             )
             .clicked()
         {
-            p.error = None;
-            p.notice = None;
-            match merge::plan(env.conn, env.root, &PathBuf::from(p.source.trim())) {
-                Ok(pl) => p.plan = Some(pl),
-                Err(e) => p.error = Some(e),
-            }
+            let (root, source) = (env.root.to_path_buf(), PathBuf::from(p.source.trim()));
+            p.run_side(
+                ui.ctx(),
+                "Scanning the other cabinet…",
+                catalog,
+                move |conn| Side::Scanned(merge::plan(conn, &root, &source)),
+            );
         }
         if let Some(m) = p.last.clone()
             && !p.running()
@@ -145,18 +195,18 @@ pub fn show(ui: &mut egui::Ui, p: &mut MergePage, env: &mut Env, catalog: &Path)
                 ))
                 .clicked()
         {
-            match merge::undo(env.conn, env.root, &m, env.device_id) {
-                Ok(()) => {
-                    p.notice = Some(
-                        "The merge was undone: the files are back in the other cabinet.".into(),
-                    );
-                    p.last = None;
-                    p.changed = true;
-                }
-                Err(e) => p.error = Some(format!("Undo failed: {e}")),
-            }
+            let (root, device) = (env.root.to_path_buf(), env.device_id.to_string());
+            p.run_side(
+                ui.ctx(),
+                "Moving the files back to the other cabinet…",
+                catalog,
+                move |conn| Side::Undone(merge::undo(conn, &root, &m, &device)),
+            );
         }
     });
+    if let Some(j) = &p.side {
+        j.show(ui);
+    }
     if let Some(n) = &p.notice {
         ui.label(RichText::new(n).color(theme::ink()));
     }

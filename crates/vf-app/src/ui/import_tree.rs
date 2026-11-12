@@ -20,6 +20,12 @@ const SHOWN: usize = 300;
 /// Files an import reads the text of by default (PA-34: not ~900K files at once).
 const READ_UP_TO: usize = 50_000;
 
+/// What Scan and Undo give back from their thread (owner 2026-11-12: no frozen window).
+enum Side {
+    Scanned(Result<(Plan, Vec<(String, String)>), String>),
+    Undone(Result<(), String>),
+}
+
 #[derive(Default)]
 pub struct ImportPage {
     pub plan: Option<Plan>,
@@ -41,6 +47,8 @@ pub struct ImportPage {
     /// The row whose Bind box was clicked last, for Shift-click ranges.
     last_tick: Option<usize>,
     job: Option<Receiver<Result<Applied, String>>>,
+    /// A scan or an undo running on its thread, and what it says while it runs.
+    side: Option<(&'static str, Receiver<Side>)>,
     /// Read the text of the imported PDFs (OCR); unset = yes up to [`READ_UP_TO`] files.
     read_text: Option<bool>,
     /// Folders done of the running import, and how many it has (PA-34).
@@ -59,27 +67,94 @@ pub struct ImportPage {
 
 impl ImportPage {
     pub fn running(&self) -> bool {
-        self.job.is_some()
+        self.job.is_some() || self.side.is_some()
     }
 
-    fn scan(&mut self, env: &Env) {
+    /// Runs `work` on its own thread with its own catalog connection (in tests, at once);
+    /// [`Self::poll_side`] takes the result.
+    fn run_side(
+        &mut self,
+        ctx: &egui::Context,
+        what: &'static str,
+        catalog: &Path,
+        work: impl FnOnce(&mut vf_core::db::Connection) -> Side + Send + 'static,
+    ) {
         self.error = None;
         self.notice = None;
-        match import::plan(env.conn, env.root) {
-            Ok(p) => {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (catalog, ctx2) = (catalog.to_path_buf(), ctx.clone());
+        let job = move || {
+            let r = match vf_core::db::open(&catalog, Storage::Local) {
+                Ok(mut conn) => work(&mut conn),
+                Err(e) => Side::Undone(Err(e.to_string())),
+            };
+            let _ = tx.send(r);
+            ctx2.request_repaint();
+        };
+        if cfg!(test) {
+            job();
+        } else if let Err(e) = std::thread::Builder::new()
+            .name("folder-import-side".into())
+            .spawn(job)
+        {
+            self.error = Some(format!("{what} could not start: {e}"));
+            return;
+        }
+        self.side = Some((what, rx));
+    }
+
+    fn scan(&mut self, ctx: &egui::Context, env: &Env, catalog: &Path) {
+        let root = env.root.to_path_buf();
+        self.run_side(
+            ctx,
+            "Scanning the cabinet's folders…",
+            catalog,
+            move |conn| {
+                Side::Scanned(import::plan(conn, &root).map(|p| {
+                    let types = vf_fs::doctypes::load(&root)
+                        .ok()
+                        .flatten()
+                        .unwrap_or_default()
+                        .into_iter()
+                        .filter(|t| !t.archived)
+                        .map(|t| (t.id, t.name))
+                        .collect();
+                    (p, types)
+                }))
+            },
+        );
+    }
+
+    fn undo(&mut self, ctx: &egui::Context, env: &Env, catalog: &Path, a: Applied) {
+        let (root, device) = (env.root.to_path_buf(), env.device_id.to_string());
+        self.run_side(ctx, "Undoing the last import…", catalog, move |conn| {
+            Side::Undone(import::undo(conn, &root, &a, &device))
+        });
+    }
+
+    fn poll_side(&mut self) {
+        let Some((_, rx)) = &self.side else { return };
+        let r = match rx.try_recv() {
+            Ok(r) => r,
+            Err(TryRecvError::Empty) => return,
+            Err(TryRecvError::Disconnected) => Side::Undone(Err("the work stopped".into())),
+        };
+        self.side = None;
+        match r {
+            Side::Scanned(Ok((p, types))) => {
                 self.plan = Some(p);
                 self.last_tick = None;
                 self.id_drafts.clear();
-                self.types = vf_fs::doctypes::load(env.root)
-                    .ok()
-                    .flatten()
-                    .unwrap_or_default()
-                    .into_iter()
-                    .filter(|t| !t.archived)
-                    .map(|t| (t.id, t.name))
-                    .collect();
+                self.types = types;
             }
-            Err(e) => self.error = Some(format!("Scan failed: {e}")),
+            Side::Scanned(Err(e)) => self.error = Some(format!("Scan failed: {e}")),
+            Side::Undone(Ok(())) => {
+                self.notice = Some("The import was undone.".into());
+                self.last = None;
+                self.plan = None;
+                self.changed = true;
+            }
+            Side::Undone(Err(e)) => self.error = Some(format!("Undo failed: {e}")),
         }
     }
 
@@ -217,6 +292,7 @@ pub fn show(ui: &mut egui::Ui, p: &mut ImportPage, env: &mut Env, catalog: &Path
         p.loaded_last = true;
     }
     p.poll();
+    p.poll_side();
     ui.heading("Folder import");
     ui.label(widgets::caption(
         "Adopts the folders already in this cabinet (a FileCenter cabinet's drawers, an old firm \
@@ -227,7 +303,7 @@ pub fn show(ui: &mut egui::Ui, p: &mut ImportPage, env: &mut Env, catalog: &Path
     ui.horizontal(|ui| {
         let scan = ui.add_enabled(!p.running(), egui::Button::new("Scan the cabinet"));
         if scan.clicked() {
-            p.scan(env);
+            p.scan(ui.ctx(), env, catalog);
         }
         if let Some(a) = p.last.clone()
             && !p.running()
@@ -239,17 +315,15 @@ pub fn show(ui: &mut egui::Ui, p: &mut ImportPage, env: &mut Env, catalog: &Path
                 ))
                 .clicked()
         {
-            match import::undo(env.conn, env.root, &a, env.device_id) {
-                Ok(()) => {
-                    p.notice = Some("The import was undone.".into());
-                    p.last = None;
-                    p.plan = None;
-                    p.changed = true;
-                }
-                Err(e) => p.error = Some(format!("Undo failed: {e}")),
-            }
+            p.undo(ui.ctx(), env, catalog, a);
         }
-        if p.running() {
+        if let Some((what, _)) = &p.side {
+            ui.spinner();
+            ui.label(*what);
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_millis(250));
+        }
+        if p.job.is_some() {
             ui.spinner();
             use std::sync::atomic::Ordering::Relaxed;
             let (done, total) = (p.progress.0.load(Relaxed), p.progress.1.load(Relaxed));

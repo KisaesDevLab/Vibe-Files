@@ -30,6 +30,9 @@ pub struct DispositionPage {
     pub changed: bool,
     /// A certificate to open (the app runs it through Browse's shell).
     pub open_request: Option<PathBuf>,
+    /// "Destroy due now" running on its thread (it re-hashes and wipes every due file and
+    /// its copies; owner 2026-11-12: a spinner, not a frozen window).
+    destroy: Option<crate::ui::job::Job<Result<disposition::RunReport, String>>>,
 }
 
 impl DispositionPage {
@@ -37,10 +40,75 @@ impl DispositionPage {
         self.report = None;
         self.job = None;
     }
+
+    /// Starts the destruction of what is due on its thread with its own catalog connection.
+    fn start_destroy(&mut self, ctx: &egui::Context, catalog: &Path, root: &Path, device: &str) {
+        let today = vf_core::retention::today();
+        let name = vf_fs::cabinet::read(root)
+            .map(|c| c.display_name(root))
+            .unwrap_or_default();
+        let (catalog, root, device) = (
+            catalog.to_path_buf(),
+            root.to_path_buf(),
+            device.to_string(),
+        );
+        match crate::ui::job::Job::start(
+            ctx,
+            "Destroying the documents due and every copy of them…",
+            move || {
+                let mut conn = vf_core::db::open(&catalog, vf_core::db::Storage::Local)
+                    .map_err(|e| e.to_string())?;
+                disposition::destroy_due(&mut conn, &root, &device, today, &name)
+            },
+        ) {
+            Ok(j) => self.destroy = Some(j),
+            Err(e) => self.error = Some(e),
+        }
+    }
+
+    /// Takes a finished destruction run.
+    fn take_destroy(&mut self) {
+        let Some(r) = crate::ui::job::take(&mut self.destroy) else {
+            return;
+        };
+        match r.and_then(|r| r) {
+            Ok(r) => {
+                tracing::info!(
+                    documents = r.destroyed,
+                    copies = r.copies,
+                    held = r.held,
+                    failed = r.failed.len(),
+                    "disposition run"
+                );
+                let mut msg = format!(
+                    "Destroyed {} documents ({} other copies); the certificate is filed.",
+                    r.destroyed, r.copies
+                );
+                if r.held > 0 {
+                    msg.push_str(&format!(" {} kept: under a legal hold.", r.held));
+                }
+                if !r.failed.is_empty() {
+                    msg.push_str(&format!(
+                        " Not destroyed (try again): {}",
+                        r.failed.join("; ")
+                    ));
+                }
+                self.notice = Some(msg);
+                self.error = None;
+                self.changed = true;
+                self.refresh();
+            }
+            Err(e) => {
+                self.error = Some(e);
+                self.changed = true;
+            }
+        }
+    }
 }
 
 pub fn show(ui: &mut egui::Ui, p: &mut DispositionPage, env: &mut Env, catalog: &Path) {
     let today = vf_core::retention::today();
+    p.take_destroy();
     if let Some(rx) = &p.job {
         let got = match rx.try_recv() {
             Ok(r) => Some(r),
@@ -285,7 +353,9 @@ pub fn show(ui: &mut egui::Ui, p: &mut DispositionPage, env: &mut Env, catalog: 
                 Err(e) => p.error = Some(e),
             }
         }
-        if due > 0 {
+        if let Some(j) = &p.destroy {
+            j.show(ui);
+        } else if due > 0 {
             ui.horizontal(|ui| {
                 if vf_fs::trash::has_pin(env.root) {
                     let l = ui.label("Password");
@@ -304,44 +374,7 @@ pub fn show(ui: &mut egui::Ui, p: &mut DispositionPage, env: &mut Env, catalog: 
                                 w => format!("Too many wrong passwords: try again in {w} s."),
                             });
                         } else {
-                            let name = vf_fs::cabinet::read(env.root)
-                                .map(|c| c.display_name(env.root))
-                                .unwrap_or_default();
-                            match disposition::destroy_due(
-                                env.conn,
-                                env.root,
-                                env.device_id,
-                                today,
-                                &name,
-                            ) {
-                                Ok(r) => {
-                                    tracing::info!(
-                                        documents = r.destroyed,
-                                        copies = r.copies,
-                                        held = r.held,
-                                        failed = r.failed.len(),
-                                        "disposition run"
-                                    );
-                                    let mut msg = format!(
-                                        "Destroyed {} documents ({} other copies); the certificate is filed.",
-                                        r.destroyed, r.copies
-                                    );
-                                    if r.held > 0 {
-                                        msg.push_str(&format!(" {} kept: under a legal hold.", r.held));
-                                    }
-                                    if !r.failed.is_empty() {
-                                        msg.push_str(&format!(
-                                            " Not destroyed (try again): {}",
-                                            r.failed.join("; ")
-                                        ));
-                                    }
-                                    p.notice = Some(msg);
-                                    p.error = None;
-                                    p.changed = true;
-                                    p.refresh();
-                                }
-                                Err(e) => p.error = Some(e),
-                            }
+                            p.start_destroy(ui.ctx(), catalog, env.root, env.device_id);
                         }
                         p.pin.clear();
                     }
@@ -527,9 +560,56 @@ pub struct SafeguardsPage {
     pub error: Option<String>,
     /// The PDF just written, to open.
     pub open_request: Option<PathBuf>,
+    /// The appendix being built and written on its thread (it verifies the whole audit
+    /// trail and counts every document).
+    job: Option<crate::ui::job::Job<Result<PathBuf, String>>>,
 }
 
-pub fn safeguards(ui: &mut egui::Ui, p: &mut SafeguardsPage, env: &mut Env) {
+impl SafeguardsPage {
+    /// Builds the appendix from `from` (yyyy-mm-dd) and writes it to `dest`, on its thread
+    /// with its own catalog connection.
+    fn start(&mut self, ctx: &egui::Context, catalog: &Path, root: &Path, dest: PathBuf) {
+        let name = vf_fs::cabinet::read(root)
+            .map(|c| c.display_name(root))
+            .unwrap_or_default();
+        let from = format!("{}T00:00:00Z", self.from.trim());
+        let (catalog, root) = (catalog.to_path_buf(), root.to_path_buf());
+        match crate::ui::job::Job::start(ctx, "Building the safeguards appendix…", move || {
+            let conn = vf_core::db::open(&catalog, vf_core::db::Storage::Local)
+                .map_err(|e| e.to_string())?;
+            let bytes = vf_fs::safeguards::appendix(
+                &conn,
+                &root,
+                &vf_fs::safeguards::Inputs {
+                    cabinet_name: &name,
+                    period_from: &from,
+                },
+            )?;
+            std::fs::write(&dest, bytes).map_err(|e| e.to_string())?;
+            Ok(dest)
+        }) {
+            Ok(j) => self.job = Some(j),
+            Err(e) => self.error = Some(e),
+        }
+    }
+
+    fn take(&mut self) {
+        let Some(r) = crate::ui::job::take(&mut self.job) else {
+            return;
+        };
+        match r.and_then(|r| r) {
+            Ok(dest) => {
+                self.notice = Some(format!("Saved {}", dest.display()));
+                self.error = None;
+                self.open_request = Some(dest);
+            }
+            Err(e) => self.error = Some(e),
+        }
+    }
+}
+
+pub fn safeguards(ui: &mut egui::Ui, p: &mut SafeguardsPage, env: &mut Env, catalog: &Path) {
+    p.take();
     if p.from.is_empty() {
         p.from = vf_core::rfc3339_days_ago(365)[..10].to_string();
     }
@@ -549,34 +629,17 @@ pub fn safeguards(ui: &mut egui::Ui, p: &mut SafeguardsPage, env: &mut Env) {
         )
         .labelled_by(l.id);
         if ui
-            .add(widgets::primary_button("Export appendix…"))
+            .add_enabled(p.job.is_none(), widgets::primary_button("Export appendix…"))
             .clicked()
             && let Some(dest) = rfd::FileDialog::new()
                 .set_file_name("Safeguards appendix.pdf")
                 .add_filter("PDF", &["pdf"])
                 .save_file()
         {
-            let name = vf_fs::cabinet::read(env.root)
-                .map(|c| c.display_name(env.root))
-                .unwrap_or_default();
-            let from = format!("{}T00:00:00Z", p.from.trim());
-            let r = vf_fs::safeguards::appendix(
-                env.conn,
-                env.root,
-                &vf_fs::safeguards::Inputs {
-                    cabinet_name: &name,
-                    period_from: &from,
-                },
-            )
-            .and_then(|bytes| std::fs::write(&dest, bytes).map_err(|e| e.to_string()));
-            match r {
-                Ok(()) => {
-                    p.notice = Some(format!("Saved {}", dest.display()));
-                    p.error = None;
-                    p.open_request = Some(dest);
-                }
-                Err(e) => p.error = Some(e),
-            }
+            p.start(ui.ctx(), catalog, env.root, dest);
+        }
+        if let Some(j) = &p.job {
+            j.show(ui);
         }
     });
     if let Some(n) = &p.notice {
@@ -584,5 +647,58 @@ pub fn safeguards(ui: &mut egui::Ui, p: &mut SafeguardsPage, env: &mut Env) {
     }
     if let Some(e) = &p.error {
         ui.label(RichText::new(e).color(crate::ui::theme::error()));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A cabinet folder and its catalog file.
+    fn cabinet() -> (tempfile::TempDir, PathBuf, PathBuf) {
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path().join("cabinet");
+        std::fs::create_dir_all(&root).unwrap();
+        let catalog = t.path().join("c.db");
+        drop(vf_core::db::open(&catalog, vf_core::db::Storage::Local).unwrap());
+        (t, root, catalog)
+    }
+
+    /// "Destroy due now" runs as a job and reports when it is done (owner 2026-11-12).
+    #[test]
+    fn destroy_due_runs_as_a_job() {
+        let (_t, root, catalog) = cabinet();
+        let ctx = egui::Context::default();
+        let mut p = DispositionPage::default();
+        p.start_destroy(&ctx, &catalog, &root, "dev");
+        assert!(p.destroy.is_some(), "{:?}", p.error);
+        p.take_destroy();
+        assert!(p.destroy.is_none());
+        let n = p.notice.clone().unwrap_or_default();
+        assert!(
+            n.starts_with("Destroyed 0 documents"),
+            "{n} / {:?}",
+            p.error
+        );
+        assert!(p.changed);
+    }
+
+    /// The safeguards appendix is built and written as a job.
+    #[test]
+    fn safeguards_appendix_is_written_as_a_job() {
+        crate::ui::test_util::pdfium_first();
+        let (t, root, catalog) = cabinet();
+        let ctx = egui::Context::default();
+        let dest = t.path().join("appendix.pdf");
+        let mut p = SafeguardsPage {
+            from: "2026-01-01".into(),
+            ..Default::default()
+        };
+        p.start(&ctx, &catalog, &root, dest.clone());
+        assert!(p.job.is_some(), "{:?}", p.error);
+        p.take();
+        assert!(p.job.is_none());
+        assert!(dest.is_file(), "{:?}", p.error);
+        assert_eq!(p.open_request.as_deref(), Some(dest.as_path()));
     }
 }

@@ -332,7 +332,9 @@ pub fn show(ui: &mut egui::Ui, a: &mut Admin, env: &mut Env, sweep: SweepEnv) {
                 .auto_shrink([false, false])
                 .show(ui, |ui| print_capture(ui, a, env));
         }
-        Page::Audit => crate::ui::audit::show(ui, &mut a.audit, env, a.chain.as_ref()),
+        Page::Audit => {
+            crate::ui::audit::show(ui, &mut a.audit, env, sweep.catalog, a.chain.as_ref())
+        }
         Page::Sweep => crate::ui::sweep::show(ui, sweep.state, env, sweep.catalog),
         Page::Disposition => {
             crate::ui::disposition::show(ui, &mut a.disposition, env, sweep.catalog);
@@ -357,7 +359,7 @@ pub fn show(ui: &mut egui::Ui, a: &mut Admin, env: &mut Env, sweep: SweepEnv) {
             }
         }
         Page::Safeguards => {
-            crate::ui::disposition::safeguards(ui, &mut a.safeguards, env);
+            crate::ui::disposition::safeguards(ui, &mut a.safeguards, env, sweep.catalog);
             if let Some(p) = a.safeguards.open_request.take() {
                 a.open_request = Some(p);
             }
@@ -393,7 +395,7 @@ pub fn show(ui: &mut egui::Ui, a: &mut Admin, env: &mut Env, sweep: SweepEnv) {
             }
         }
         Page::Trash => {
-            crate::ui::trash::show(ui, &mut a.trash, env);
+            crate::ui::trash::show(ui, &mut a.trash, env, Some(sweep.catalog));
             if std::mem::take(&mut a.trash.changed) {
                 a.changed = true;
             }
@@ -1463,6 +1465,47 @@ ANDE1042,Anderson Farms LLC
             .unwrap();
         assert_eq!(n, 1);
         assert!(!vf_fs::sweep::due(&s.conn), "the sweep time is recorded");
+
+        // Adopt runs as a job (owner 2026-11-12): the unknown file becomes a document of the
+        // folder's client (in the catalog, as a rebuild would have it).
+        {
+            let s = h.state_mut();
+            let folder = s.root.join("Anderson Farms LLC (ANDE1042)");
+            let id = filer_intake::sentinel::read_sentinel(&folder)
+                .unwrap()
+                .unwrap()
+                .client_id
+                .to_string();
+            s.conn
+                .execute(
+                    "INSERT INTO client (id, ext_id, name, folder_rel, device_id, updated_at)
+                     VALUES (?1, 'ANDE1042', 'Anderson Farms LLC', 'Anderson Farms LLC (ANDE1042)', 'dev', 't')",
+                    [id],
+                )
+                .unwrap();
+        }
+        h.get_by_label("Anderson Farms LLC (ANDE1042)/Income Tax/2025/notice.pdf")
+            .click();
+        h.run();
+        click(&mut h, "Adopt 1 where they are");
+        h.run();
+        let s = h.state();
+        assert_eq!(
+            s.sweep.notice.as_deref(),
+            Some("1 files adopted."),
+            "{:?}",
+            s.sweep.error
+        );
+        let n: i64 = s
+            .conn
+            .query_row(
+                "SELECT count(*) FROM document WHERE rel_path LIKE '%notice.pdf' AND deleted_at IS NULL",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 1);
+        assert!(h.query_by_label("Not in the catalog (1)").is_none());
     }
 
     /// Owner 2026-11-05 (Q-62, Q-65): Admin › Merge cabinets scans another cabinet, lists its

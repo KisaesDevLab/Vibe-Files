@@ -32,15 +32,46 @@ impl RelForm {
     }
 }
 
-/// Writes the catalog after a master-file change and re-reads Browse.
+/// Writes the catalog after a master-file change and re-reads Browse. It reads every client
+/// folder, so with the catalog file it runs as a job with a spinner (owner 2026-11-12); an
+/// edit made meanwhile is brought in by another run once this one is done.
 fn synced(b: &mut Browse, env: &mut Env, action: &str) {
-    match vf_fs::rebuild::sync_clients(env.conn, env.root, env.device_id, action) {
-        Ok(rep) => {
+    if b.client_sync.is_some() {
+        b.client_sync_again = true;
+        return;
+    }
+    let (Some(catalog), Some(ctx)) = (b.catalog.clone(), b.ctx()) else {
+        let r = vf_fs::rebuild::sync_clients(env.conn, env.root, env.device_id, action)
+            .map(|rep| rep.dangling_relationships)
+            .map_err(|e| e.to_string());
+        client_synced(b, env, r);
+        return;
+    };
+    let (root, device, action) = (
+        env.root.to_path_buf(),
+        env.device_id.to_string(),
+        action.to_string(),
+    );
+    match crate::ui::job::Job::start(&ctx, "Saving the client…", move || {
+        let mut conn =
+            vf_core::db::open(&catalog, vf_core::db::Storage::Local).map_err(|e| e.to_string())?;
+        vf_fs::rebuild::sync_clients(&mut conn, &root, &device, &action)
+            .map(|rep| rep.dangling_relationships)
+            .map_err(|e| e.to_string())
+    }) {
+        Ok(j) => b.client_sync = Some(j),
+        Err(e) => b.error = Some(format!("The catalog was not updated: {e}")),
+    }
+}
+
+/// A client edit's catalog update finished (or failed): Browse re-reads.
+fn client_synced(b: &mut Browse, env: &mut Env, r: Result<usize, String>) {
+    match r {
+        Ok(dangling) => {
             b.reload(env.conn);
-            if rep.dangling_relationships > 0 {
+            if dangling > 0 {
                 b.notice = Some(format!(
-                    "{} relationships name a client ID that is not in the cabinet.",
-                    rep.dangling_relationships
+                    "{dangling} relationships name a client ID that is not in the cabinet."
                 ));
             }
         }
@@ -48,8 +79,23 @@ fn synced(b: &mut Browse, env: &mut Env, action: &str) {
     }
 }
 
+/// Each frame: takes a finished client edit's catalog update; runs another for edits made
+/// while it ran.
+pub fn poll_sync(b: &mut Browse, env: &mut Env) {
+    let Some(r) = crate::ui::job::take(&mut b.client_sync) else {
+        return;
+    };
+    client_synced(b, env, r.and_then(|r| r));
+    if std::mem::take(&mut b.client_sync_again) {
+        synced(b, env, "client_edit");
+    }
+}
+
 pub fn show(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env, ci: usize) {
     let c = b.snap.clients[ci].clone();
+    if let Some(j) = &b.client_sync {
+        j.show(ui);
+    }
     ui.horizontal_wrapped(|ui| {
         ui.label(RichText::new(&c.name).strong().size(14.0));
         if ui
