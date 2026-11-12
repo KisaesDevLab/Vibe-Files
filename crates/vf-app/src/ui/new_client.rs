@@ -35,6 +35,8 @@ impl NewClientDialog {
 pub struct Created {
     pub client_id: String,
     pub folder: String,
+    /// What became of the client in the client CSV (added, or why not), for the notice.
+    pub csv_note: Option<String>,
 }
 
 pub fn show(ctx: &egui::Context, d: &mut NewClientDialog, env: &mut Env) -> DialogOutcome<Created> {
@@ -172,9 +174,32 @@ pub fn show(ctx: &egui::Context, d: &mut NewClientDialog, env: &mut Env) -> Dial
             {
                 match newclient::create(env.conn, env.root, p, env.device_id) {
                     Ok(_) => {
+                        // Not in the client CSV yet: added there too, so a re-import keeps it
+                        // (owner 2026-11-12).
+                        let csv_note = (!p.in_master).then(|| {
+                            match vf_fs::clients::append_to_csv(
+                                env.root,
+                                &p.client.id,
+                                &p.client.name,
+                                p.partner.as_deref(),
+                            ) {
+                                Ok(Some(csv)) => format!(
+                                    "Added to the client list file {}.",
+                                    csv.file_name()
+                                        .map(|n| n.to_string_lossy().into_owned())
+                                        .unwrap_or_default()
+                                ),
+                                Ok(None) => String::new(),
+                                Err(e) => format!(
+                                    "Not added to the client CSV ({e}): add it there, or the next import of the CSV leaves it out of Intake's client list."
+                                ),
+                            }
+                        })
+                        .filter(|n| !n.is_empty());
                         out = DialogOutcome::Done(Created {
                             client_id: p.client.uuid.to_string(),
                             folder: p.folder_rel.clone(),
+                            csv_note,
                         })
                     }
                     Err(e) => d.error = Some(e),

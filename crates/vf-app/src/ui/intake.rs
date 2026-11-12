@@ -56,8 +56,12 @@ pub struct IntakeTab {
     just_filed: Option<crate::ui::filed_details::JustFiled>,
     /// A batch was recorded: list it on the next frame.
     want_details: bool,
-    /// Filer's client list changed after Intake loaded it (a new client): reload offered.
+    /// Intake's settings, template or folder index changed after Intake loaded them: reload
+    /// offered.
     clients_stale: bool,
+    /// The client list or relationships changed (Browse, another PC, a re-import): read again
+    /// in place, the review kept (Filer V36; owner 2026-11-12).
+    refresh_clients: bool,
     /// "New client…" pressed on a row Filer found no client for: Vibe's New client dialog, for
     /// that file (owner 2026-11-04).
     new_client: Option<(crate::ui::new_client::NewClientDialog, PathBuf)>,
@@ -387,13 +391,14 @@ impl IntakeTab {
                     if ch.to_cabinet.contains(&"clients.json") {
                         self.clients_at = at(filer_core::clients::cache_path(&master));
                     }
-                    // Changed elsewhere: rules and clients are noticed below; the others offer
-                    // the reload here.
-                    if ch
-                        .from_cabinet
-                        .iter()
-                        .any(|f| !matches!(*f, "rules.json" | "clients.json"))
-                    {
+                    // Changed elsewhere: rules and clients are noticed below; relationships are
+                    // read again in place; the others offer the reload here.
+                    if ch.from_cabinet.contains(&"relationships.json") {
+                        self.refresh_clients = true;
+                    }
+                    if ch.from_cabinet.iter().any(|f| {
+                        !matches!(*f, "rules.json" | "clients.json" | "relationships.json")
+                    }) {
                         self.clients_stale = true;
                     }
                 }
@@ -433,7 +438,7 @@ impl IntakeTab {
         let p = filer_core::clients::cache_path(&vf_fs::clients::master_dir(root));
         let now = std::fs::metadata(p).and_then(|m| m.modified()).ok();
         if now.is_some() && now != self.clients_at {
-            self.clients_stale = true;
+            self.refresh_clients = true;
         }
     }
 
@@ -482,7 +487,10 @@ impl IntakeTab {
                     f.client_created(ctx, &file, &ext);
                 }
                 self.catalog_changed = true;
-                self.message = Some(format!("Created {}.", created.folder));
+                self.message = Some(match &created.csv_note {
+                    Some(n) => format!("Created {}. {n}", created.folder),
+                    None => format!("Created {}.", created.folder),
+                });
             }
         }
     }
@@ -734,6 +742,21 @@ impl IntakeTab {
                 }
                 Err(e) => self.error = Some(e),
             }
+        }
+        // The client list or relationships changed: Filer reads them again where it stands
+        // (not while it files a batch).
+        if self.refresh_clients
+            && self.filer.is_some()
+            && !filer_committing(&self.filer_dir(root))
+            && let Some(f) = &mut self.filer
+        {
+            f.reload_clients(ui.ctx());
+            self.refresh_clients = false;
+            self.clients_at = std::fs::metadata(filer_core::clients::cache_path(
+                &vf_fs::clients::master_dir(root),
+            ))
+            .and_then(|m| m.modified())
+            .ok();
         }
         if let Some(f) = &mut self.filer {
             // Intake › Setup changes the cabinet's shared settings and folder template: behind

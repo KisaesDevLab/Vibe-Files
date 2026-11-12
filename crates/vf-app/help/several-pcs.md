@@ -27,7 +27,7 @@ Intake reads a copy of each when it loads. Every few seconds, a change saved on 
 
 ## Reload Intake
 
-When the client list, settings, rules or template change somewhere else (another PC, or Admin on this one), a banner appears above Intake, for example: "The client list or Intake's settings changed (another PC, or Admin). Reload Intake to use them…". Press **Reload Intake** to load the new ones.
+A changed client list or relationships reach Intake on their own. When settings, rules or the template change somewhere else (another PC, or Admin on this one), a banner appears above Intake, for example: "The client list or Intake's settings changed (another PC, or Admin). Reload Intake to use them…". Press **Reload Intake** to load the new ones.
 
 - The button is greyed out while this PC is filing a batch. Wait for it to finish.
 - Reloading reads the inbox again. Changes you made on rows in **Preview** and did not commit (a client you chose, a rename, a skip) are lost, so commit first if you can.

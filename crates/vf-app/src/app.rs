@@ -3593,6 +3593,50 @@ mod tests {
         assert!(!scan_dir.exists(), "the private scan folder is cleared");
     }
 
+    /// A relationship saved in Browse reaches Intake in place (owner 2026-11-12, Filer V36):
+    /// no Reload Intake bar, Filer not loaded again, its copy of the file the new one.
+    #[test]
+    fn a_relationship_saved_in_browse_reaches_intake_in_place() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("Clients");
+        let req = CreateRequest {
+            root: &root,
+            name: "Firm",
+        };
+        drop(session::create(&tmp.path().join("pc1"), "dev-1", &req).unwrap());
+        let mut h = harness(&tmp.path().join("pc1"));
+        click(&mut h, "Open existing");
+        type_into(&mut h, "Cabinet folder", &root.display().to_string());
+        click(&mut h, "Open cabinet");
+        settle(&mut h);
+        click(&mut h, "Intake");
+        h.run_steps(8);
+        let master = vf_fs::clients::master_dir(&root);
+        filer_core::relationships::save(
+            &master,
+            &filer_core::relationships::Relationships {
+                records: vec![filer_core::relationships::Relationship {
+                    parent_id: "2002".into(),
+                    child_id: "1001".into(),
+                    role: "Shareholder".into(),
+                    note: String::new(),
+                }],
+            },
+        )
+        .unwrap();
+        // Intake looks at the shared files every 2 seconds.
+        std::thread::sleep(std::time::Duration::from_millis(2100));
+        h.run_steps(8);
+        let Screen::Open(o) = &h.state().screen else {
+            unreachable!()
+        };
+        assert_eq!(o.intake.mounts, 1, "not loaded again");
+        assert!(h.query_by_label("Reload Intake").is_none());
+        let pc = vf_fs::intake::pc_dir(&root, &h.state().config.device_id);
+        let (rels, _, _) = filer_core::relationships::load(&pc);
+        assert_eq!(rels.records.len(), 1, "Intake's copy is the new one");
+    }
+
     /// Filer's screen loads once on the Intake tab, not on every frame (regression found
     /// 2026-11-04); what the removed check-out build left is cleared at open (Q-52).
     #[test]

@@ -6,7 +6,7 @@ Messages you may meet in Vibe Files, what they mean and what to do. The words in
 
 ### "The client list or Intake's settings changed… Reload Intake to use them"
 
-Someone added a client or changed Intake's rules, settings or folder template, on this PC or another one. Press **Reload Intake**. Files you had not yet confirmed in Intake's review are read again from the inbox; nothing filed is lost. If the button is greyed ("Intake is filing a batch: wait for it to finish."), wait a moment. A similar banner appears after **Print capture & parsers** changes. See [several PCs](help:several-pcs).
+Someone changed Intake's rules, settings or folder template, on this PC or another one (new clients and relationships come in on their own). Press **Reload Intake**. Files you had not yet confirmed in Intake's review are read again from the inbox; nothing filed is lost. If the button is greyed ("Intake is filing a batch: wait for it to finish."), wait a moment. A similar banner appears after **Print capture & parsers** changes. See [several PCs](help:several-pcs).
 
 ### "Intake batch not recorded yet (trying again in N s)"
 

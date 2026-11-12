@@ -6,7 +6,7 @@
 |---|---|
 | Repo | `KisaesDevLab/Vibe-Filer-Desktop` (private) |
 | Branch | `master` |
-| Commit | `229354a` on `master` (V35: a Partner column by any name, 2026-11-12); before: `374edfd` (V34); `d48341f` (page count under the file name); `d0068ae` (V32, V33); `dd78a06` (V31); `4a15680` (column lines); `bab3a61` (V30); `e80a8b1` (Unsupported strip width); `ac56db4` (V29); `c5e2f70` (QA of V27-V28); `e165e56` (V27-V28); `6417249` (V23-V26); `f2504fe` (V22); `29db764` (V21); `6433c04` on `master` ("feat(host): Setup lock and \"New client…\" for a program that embeds Filer", 0.2.6 + the Intake preview pane, ticked-row actions and host hooks, 2026-11-04) |
+| Commit | `9f40157` on `master` (V36: reload_clients, 2026-11-12); before: `229354a` (V35); `374edfd` (V34); `d48341f` (page count under the file name); `d0068ae` (V32, V33); `dd78a06` (V31); `4a15680` (column lines); `bab3a61` (V30); `e80a8b1` (Unsupported strip width); `ac56db4` (V29); `c5e2f70` (QA of V27-V28); `e165e56` (V27-V28); `6417249` (V23-V26); `f2504fe` (V22); `29db764` (V21); `6433c04` on `master` ("feat(host): Setup lock and \"New client…\" for a program that embeds Filer", 0.2.6 + the Intake preview pane, ticked-row actions and host hooks, 2026-11-04) |
 | Vendored | 2026-11-02, P00 step 2 at `ea4e726` (0.2.4); re-vendored 2026-11-04, PHASES PA-26 |
 | Upstream tests | 238 at this commit (237 at `dd78a06`); all pass after the split (filer-core 65 · filer-pdf 32 · filer-intake 141) |
 
@@ -134,6 +134,9 @@ the rest of intake. Moving it would need a logic edit (Q-16: merge rather than e
   (filer-pdf), `app.rs`, `plan.rs`, `sentinel.rs`, `undo.rs`, `ui/csv_wizard.rs`, `ui/setup.rs`,
   `docs/UI_SPEC.md` (filer-intake) copied (most only gain `partner: None` in test literals); still
   only the four attribute lines differ; upstream's 240 tests pass.
+- **2026-11-12, PA-49: `229354a` → `9f40157` (V36).** `FilerApp::reload_clients`: the client list and
+  relationships read again in place, the review kept. `app.rs` (filer-intake) copied; still only
+  the four attribute lines differ; upstream's 240 tests pass.
 
 ## Re-vendoring
 

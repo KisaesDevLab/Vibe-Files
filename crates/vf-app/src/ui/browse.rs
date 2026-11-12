@@ -2201,14 +2201,21 @@ pub fn show(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env) {
         match new_client::show(ui.ctx(), d, env) {
             DialogOutcome::Open => {}
             DialogOutcome::Cancelled => b.new_client = None,
-            DialogOutcome::Done(new_client::Created { client_id, folder }) => {
+            DialogOutcome::Done(new_client::Created {
+                client_id,
+                folder,
+                csv_note,
+            }) => {
                 b.new_client = None;
                 b.reload(env.conn);
                 if let Some(c) = b.snap.clients.iter().position(|c| c.id == client_id) {
                     b.set_scope(Scope::Client(c));
                     b.expanded.insert(Node::Client(c));
                 }
-                b.notice = Some(format!("Created {folder}."));
+                b.notice = Some(match csv_note {
+                    Some(n) => format!("Created {folder}. {n}"),
+                    None => format!("Created {folder}."),
+                });
             }
         }
     }
@@ -5682,6 +5689,39 @@ Petty cash,1234.50
         };
         assert_eq!(partner("1001").as_deref(), Some("KW"));
         assert_eq!(partner("1002"), None);
+    }
+
+    /// + New client adds the client to the client CSV too (owner 2026-11-12), and says so.
+    #[test]
+    fn a_new_client_goes_into_the_csv() {
+        let mut h = cabinet_harness();
+        let csv = write_csv(
+            &h,
+            "ClientID,Name
+1001,Acme LLC
+",
+        );
+        click(&mut h, "Import clients CSV…");
+        type_into(&mut h, "CSV file", &csv);
+        click(&mut h, "Read");
+        click(&mut h, "Import 1 rows (one transaction)");
+        click(&mut h, "+ New client");
+        type_into(&mut h, "Client ID", "2002");
+        type_into(&mut h, "Client name", "Baker Trust");
+        h.run();
+        click(&mut h, "Create client (one transaction)");
+        let n = h.state().b.notice.clone().unwrap_or_default();
+        assert!(
+            n.contains("Added to the client list file clients.csv"),
+            "{n}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&csv).unwrap(),
+            "ClientID,Name
+1001,Acme LLC
+2002,Baker Trust
+"
+        );
     }
 
     /// P01 step 3: entity type and relationships from the client inspector.

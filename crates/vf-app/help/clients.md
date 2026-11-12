@@ -14,7 +14,7 @@ Press **Import N rows (one transaction)**. Re-importing an updated export keeps 
 
 ## Adding a client
 
-Press **+ New client** in Browse. Type the **Client ID**, the **Client name** (filled in for you when the ID is already in the client list) and, if you like, the **Entity type** and the **Partner** (type it or **Pick…** one other clients have; left empty, the client list's partner is used). Under **Creates** you see the folder the [folder template](help:folder-templates) gives, for example `Smith, John (SMIT1001)` with its sub-folders. Press **Create client (one transaction)**.
+Press **+ New client** in Browse. Type the **Client ID**, the **Client name** (filled in for you when the ID is already in the client list) and, if you like, the **Entity type** and the **Partner** (type it or **Pick…** one other clients have; left empty, the client list's partner is used). Under **Creates** you see the folder the [folder template](help:folder-templates) gives, for example `Smith, John (SMIT1001)` with its sub-folders. Press **Create client (one transaction)**. A client that is not in your client CSV yet is also added to that file (its ID, name and partner; the other columns left blank), so the next import of the CSV keeps it; the notice says so, or why it could not (the file open in Excel, for example: then add it there yourself).
 
 A client from the list that has no folder yet shows **No folder yet (from the client list).** in the client panel, with **Create folder…**.
 

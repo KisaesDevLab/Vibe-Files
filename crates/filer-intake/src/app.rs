@@ -588,6 +588,32 @@ impl FilerApp {
         }
     }
 
+    /// The host changed the client list or the relationships on disk (`clients.json`,
+    /// `relationships.json` in the data folder): both are read again, and the review keeps
+    /// what was chosen and plans again with them (V36).
+    // Used by a host that embeds Filer (Vibe Files), not by this program.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn reload_clients(&mut self, ctx: &egui::Context) {
+        let s = &self.shared;
+        self.shared.clients.load(
+            ctx,
+            s.data_dir.clone(),
+            s.settings.csv_path.clone(),
+            s.settings.column_map.clone(),
+        );
+        let data_dir = self.shared.data_dir.clone();
+        let (relationships, savable, error) = crate::relationships::load(&data_dir);
+        let s = &mut self.shared;
+        s.relationships = relationships;
+        s.relationships_savable = savable;
+        s.relationships_error = error;
+        s.relationships_saved_at = std::fs::metadata(crate::relationships::path(&data_dir))
+            .and_then(|m| m.modified())
+            .ok()
+            .map(chrono::DateTime::from);
+        s.relationships_generation += 1;
+    }
+
     /// The row whose "New client…" was pressed, once.
     // Used by a host that embeds Filer (Vibe Files), not by this program.
     #[cfg_attr(not(test), allow(dead_code))]
@@ -2997,6 +3023,33 @@ mod combine_ui_tests {
                     .and_then(|p| p.client.as_ref())
                     .is_some_and(|c| c.id == "2002")
         });
+
+        // V36: the host saved a relationship (and the list) on disk: read again in place; the
+        // review keeps its row and its client.
+        let rel = crate::relationships::Relationships {
+            records: vec![crate::relationships::Relationship {
+                parent_id: "2002".into(),
+                child_id: "1001".into(),
+                role: "Shareholder".into(),
+                note: String::new(),
+            }],
+        };
+        crate::relationships::save(&data, &rel).unwrap();
+        h.state_mut().reload_clients(&ctx);
+        settle(&mut h, "reloaded", |a| {
+            a.shared.clients.list().is_some()
+                && a.preview.plan_idle()
+                && a.preview
+                    .proposals()
+                    .first()
+                    .and_then(|p| p.client.as_ref())
+                    .is_some_and(|c| c.id == "2002")
+        });
+        assert_eq!(h.state().shared.relationships.records.len(), 1);
+        assert_eq!(
+            h.state().shared.relationships.records[0].role,
+            "Shareholder"
+        );
     }
 
     /// Host hooks (owner 2026-11-05): "Move to trash" hands the host the files and they leave

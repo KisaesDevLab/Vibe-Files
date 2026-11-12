@@ -222,6 +222,108 @@ pub fn import_csv(
     import_csv_tin(root, csv, map, known, None)
 }
 
+/// A Windows-1252 byte for `c`, when the code page has one.
+fn to_1252(c: char) -> Option<u8> {
+    const HIGH: [char; 32] = [
+        '\u{20AC}', '\u{0081}', '\u{201A}', '\u{0192}', '\u{201E}', '\u{2026}', '\u{2020}',
+        '\u{2021}', '\u{02C6}', '\u{2030}', '\u{0160}', '\u{2039}', '\u{0152}', '\u{008D}',
+        '\u{017D}', '\u{008F}', '\u{0090}', '\u{2018}', '\u{2019}', '\u{201C}', '\u{201D}',
+        '\u{2022}', '\u{2013}', '\u{2014}', '\u{02DC}', '\u{2122}', '\u{0161}', '\u{203A}',
+        '\u{0153}', '\u{009D}', '\u{017E}', '\u{0178}',
+    ];
+    let n = c as u32;
+    if n < 0x80 || (0xA0..=0xFF).contains(&n) {
+        return Some(n as u8);
+    }
+    HIGH.iter().position(|&h| h == c).map(|i| 0x80 + i as u8)
+}
+
+/// One CSV field, quoted when it holds a comma, a quote, a line break or edge spaces.
+fn csv_field(s: &str) -> String {
+    if s.contains([',', '"', '\n', '\r']) || s.trim() != s {
+        format!("\"{}\"", s.replace('"', "\"\""))
+    } else {
+        s.to_string()
+    }
+}
+
+/// Adds a client made in Vibe Files (+ New client) to the client CSV the list was imported
+/// from (owner 2026-11-12), so a later re-import keeps it: its ID, name and partner in the
+/// mapped columns, the others blank, in the file's own encoding and line endings. `None`: no
+/// CSV (a list made in Vibe Files only) or the ID is in it already.
+pub fn append_to_csv(
+    root: &Path,
+    id: &str,
+    name: &str,
+    partner: Option<&str>,
+) -> Result<Option<PathBuf>, String> {
+    let Some(list) = load(root)?.list else {
+        return Ok(None);
+    };
+    let csv = list.source.clone();
+    if csv.as_os_str().is_empty() || !csv.is_file() {
+        return Ok(None);
+    }
+    let map = &list.column_map;
+    let table = clients::read_csv(&csv).map_err(|e| format!("{}: {e}", csv.display()))?;
+    let (Some(id_h), Some(name_h)) = (map.id.as_deref(), map.name.as_deref()) else {
+        return Err("the client list has no ID and name columns mapped".into());
+    };
+    let col = |h: &str| table.headers.iter().position(|x| x == h);
+    let id_col = col(id_h).ok_or_else(|| format!("no column {id_h} in {}", csv.display()))?;
+    if table.rows.iter().any(|r| {
+        r.get(id_col)
+            .is_some_and(|v| v.trim().eq_ignore_ascii_case(id.trim()))
+    }) {
+        return Ok(None);
+    }
+    let fields: Vec<String> = table
+        .headers
+        .iter()
+        .map(|h| {
+            if h == id_h {
+                id.trim().to_string()
+            } else if h == name_h {
+                name.trim().to_string()
+            } else if map.partner.as_deref() == Some(h.as_str()) {
+                partner.unwrap_or("").trim().to_string()
+            } else {
+                String::new()
+            }
+        })
+        .collect();
+    let line: String = fields
+        .iter()
+        .map(|f| csv_field(f))
+        .collect::<Vec<_>>()
+        .join(",");
+    let raw = std::fs::read(&csv).map_err(|e| format!("{}: {e}", csv.display()))?;
+    let crlf = raw.windows(2).any(|w| w == b"\r\n") || !raw.contains(&b'\n');
+    let eol: &[u8] = if crlf { b"\r\n" } else { b"\n" };
+    let mut bytes: Vec<u8> = vec![];
+    if !raw.is_empty() && !raw.ends_with(b"\n") {
+        bytes.extend_from_slice(eol);
+    }
+    match table.encoding {
+        clients::Encoding::Windows1252 => {
+            for c in line.chars() {
+                bytes.push(to_1252(c).ok_or_else(|| {
+                    format!("\"{c}\" cannot be written in this CSV's Windows-1252 text")
+                })?);
+            }
+        }
+        _ => bytes.extend_from_slice(line.as_bytes()),
+    }
+    bytes.extend_from_slice(eol);
+    use std::io::Write;
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(&csv)
+        .and_then(|mut f| f.write_all(&bytes).and_then(|()| f.sync_all()))
+        .map_err(|e| format!("{}: {e}", csv.display()))?;
+    Ok(Some(csv))
+}
+
 /// [`import_csv`], also keeping the last 4 digits of `tin_column` (a taxpayer ID column) per
 /// client in `clients.vf.json`. The full numbers are read from the CSV and dropped at once;
 /// Filer's client list never gets the column.
@@ -733,6 +835,75 @@ mod tests {
             ..map(&[])
         };
         assert_eq!(tin_extras(&as_partner), ["Tax ID"]);
+    }
+
+    /// The New client dialog adds the client to the client CSV (owner 2026-11-12): mapped
+    /// columns filled, others blank, quoted where needed, in the file's encoding and line
+    /// endings; a re-import then keeps it.
+    #[test]
+    fn a_new_client_is_added_to_the_csv() {
+        let cab = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(master_dir(cab.path())).unwrap();
+        let csv = cab.path().join("c.csv");
+        // Windows-1252 (é is one byte), CRLF, no line break at the end.
+        let mut raw = b"IDNUM,Name,Preparer,City
+1001,Caf"
+            .to_vec();
+        raw.push(0xE9);
+        raw.extend_from_slice(b" LLC,KW,Ames");
+        std::fs::write(&csv, &raw).unwrap();
+        let m = ColumnMap {
+            id: Some("IDNUM".into()),
+            name: Some("Name".into()),
+            extras: vec![],
+            partner: Some("Preparer".into()),
+        };
+        import_csv(cab.path(), &csv, &m, &Default::default()).unwrap();
+
+        let got = append_to_csv(cab.path(), "2002", "Smith, José", Some("AB")).unwrap();
+        assert_eq!(got.as_deref(), Some(csv.as_path()));
+        let bytes = std::fs::read(&csv).unwrap();
+        let mut want = raw.clone();
+        want.extend_from_slice(
+            b"
+2002,\"Smith, Jos",
+        );
+        want.push(0xE9);
+        want.extend_from_slice(
+            b"\",AB,
+",
+        );
+        assert_eq!(bytes, want);
+        // Already there: nothing added.
+        assert_eq!(append_to_csv(cab.path(), "2002", "x", None).unwrap(), None);
+        // A character the code page lacks is refused, the file untouched.
+        let e = append_to_csv(cab.path(), "3003", "Zhang 张", None).unwrap_err();
+        assert!(e.contains("Windows-1252"), "{e}");
+        assert_eq!(std::fs::read(&csv).unwrap(), want);
+        // Re-imported: the client is in the list, with its partner.
+        let list = import_csv(cab.path(), &csv, &m, &Default::default()).unwrap();
+        let c = list.match_by_id("2002").unwrap();
+        assert_eq!(c.name, "Smith, José");
+        assert_eq!(c.extra["Partner"], "AB");
+
+        // UTF-8 with LF.
+        std::fs::write(
+            &csv,
+            "IDNUM,Name
+1001,Acme
+",
+        )
+        .unwrap();
+        let m = ColumnMap { partner: None, ..m };
+        import_csv(cab.path(), &csv, &m, &Default::default()).unwrap();
+        append_to_csv(cab.path(), "4004", "Zhang 张", Some("AB")).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&csv).unwrap(),
+            "IDNUM,Name
+1001,Acme
+4004,Zhang 张
+"
+        );
     }
 
     /// A Partner column holding SSNs is refused, whatever its header.
