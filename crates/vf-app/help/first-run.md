@@ -34,13 +34,19 @@ If something is missing, the screen tells you: **Choose the cabinet folder.**, *
 
 ## Later starts
 
-Vibe Files remembers the last cabinet this PC opened and opens it on its own when you start the program. You do not see the **Cabinet** screen at all.
+Vibe Files remembers the last cabinet each Windows login opened and opens it on its own when you start the program. You do not see the **Cabinet** screen at all.
 
 While it is opening, the **Open a different cabinet** button is shown under **Opening the cabinet…**. Click it to go back to the **Cabinet** screen and pick another folder.
 
 If the last cabinet cannot be opened (the share is down, or the folder was moved), the **Cabinet** screen shows with the reason, and the folder filled in so you can try again or change it.
 
 > Each PC keeps one catalog for one cabinet. If the screen says the catalog belongs to a different cabinet, that PC's data folder is already used for another cabinet; ask whoever set up the PC. See [Data and backups](help:data-and-backups).
+
+## The firm's cabinet for every login
+
+So that nobody has to pick the cabinet the first time, an admin can name it once: put a file called `firm.toml` beside `vibe-files.exe` (in the folder on the share, or in each PC's copy) holding one line, for example `cabinet = '\\server\share\Documents'`.
+
+Keep the single quotes. A login that has not opened a cabinet yet then opens that one straight away; after that, its own last cabinet. **Open a different cabinet** still works. A winget install replaces its program folder on each update, so there put the file back after updating.
 
 ## Next
 

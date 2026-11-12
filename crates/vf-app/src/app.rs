@@ -1,6 +1,6 @@
 //! Top-level app: tab routing over the shared chrome. Each tab is a stub until its phase.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 
 use crate::config::{self, Config};
@@ -188,6 +188,14 @@ fn check_for_update(enabled: bool) -> Option<mpsc::Receiver<Option<vf_sync::upda
 
 impl VibeFilesApp {
     pub fn new(ctx: &egui::Context, data: PathBuf) -> Self {
+        let exe_dir = std::env::current_exe()
+            .ok()
+            .and_then(|e| e.parent().map(Path::to_path_buf));
+        Self::new_in(ctx, data, exe_dir.as_deref())
+    }
+
+    /// [`Self::new`] with the folder `firm.toml` is read from (beside the exe).
+    pub fn new_in(ctx: &egui::Context, data: PathBuf, firm_dir: Option<&Path>) -> Self {
         let (config, error) = match config::load(&data) {
             Ok(c) => (c, None),
             // Never saved over: the unreadable file is kept aside, the device id carried over.
@@ -218,7 +226,13 @@ impl VibeFilesApp {
         // This PC's theme from the first paint (no flash of the light one).
         theme::set_dark(config.look.dark);
         theme::install(ctx);
-        let mut w = Wizard::new(config.last_cabinet.as_deref());
+        // A login's first start: the firm's cabinet (firm.toml beside the exe, owner
+        // 2026-11-12), when the admin named one; its own last cabinet after that.
+        let start = config
+            .last_cabinet
+            .clone()
+            .or_else(|| firm_dir.and_then(config::firm_cabinet));
+        let mut w = Wizard::new(start.as_deref());
         w.error = error;
         let update = check_for_update(config.update_check);
         let mut app = Self {
@@ -248,7 +262,8 @@ impl VibeFilesApp {
         let Screen::Wizard(w) = &self.screen else {
             return;
         };
-        if self.config.last_cabinet.is_some() && w.error.is_none() {
+        // The last cabinet, or the firm's (the only way the wizard starts with a path).
+        if !w.root.trim().is_empty() && w.error.is_none() {
             self.start(Mode::Open, ctx);
         }
     }
@@ -3418,6 +3433,48 @@ mod tests {
         h.state_mut().open_last(&ctx);
         settle(&mut h);
         assert!(matches!(h.state().screen, Screen::Open(_)));
+    }
+
+    /// A login with no cabinet yet opens the firm's, named in firm.toml beside the exe (owner
+    /// 2026-11-12), without the opening screen; then it is this login's last cabinet.
+    #[test]
+    fn a_new_login_opens_the_firms_cabinet() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (data, root) = (tmp.path().join("data"), tmp.path().join("Clients"));
+        let made = tmp.path().join("made");
+        drop(
+            session::create(
+                &made,
+                "dev-0",
+                &CreateRequest {
+                    root: &root,
+                    name: "Firm Cabinet",
+                },
+            )
+            .unwrap(),
+        );
+        let exe = tmp.path().join("app");
+        std::fs::create_dir_all(&exe).unwrap();
+        std::fs::write(
+            exe.join(config::FIRM_FILE),
+            format!("cabinet = '{}'\n", root.display()),
+        )
+        .unwrap();
+        crate::ui::test_util::pdfium_first();
+        let (d, e) = (data.clone(), exe.clone());
+        let mut h = HarnessBuilder::default()
+            .with_theme(egui::Theme::Light)
+            .with_size([1440.0, 900.0])
+            .build_eframe(move |cc| VibeFilesApp::new_in(&cc.egui_ctx, d.clone(), Some(&e)));
+        h.run();
+        let ctx = h.ctx.clone();
+        h.state_mut().open_last(&ctx);
+        settle(&mut h);
+        assert!(matches!(h.state().screen, Screen::Open(_)));
+        assert_eq!(
+            config::load(&data).unwrap().last_cabinet.as_deref(),
+            Some(root.as_path())
+        );
     }
 
     /// Dark mode (owner 2026-11-04): the header's button switches the theme, this PC keeps

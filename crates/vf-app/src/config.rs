@@ -280,6 +280,37 @@ impl Default for Ingest {
     }
 }
 
+/// The firm's defaults for every login, in `firm.toml` beside `vibe-files.exe` (owner
+/// 2026-11-12): written once by the admin, read only.
+pub const FIRM_FILE: &str = "firm.toml";
+
+#[derive(Debug, Default, Deserialize)]
+struct Firm {
+    /// The cabinet a login with none yet opens, e.g. `cabinet = '\\server\share\Documents'`.
+    #[serde(default)]
+    cabinet: Option<PathBuf>,
+}
+
+/// The firm's cabinet named in `dir`'s `firm.toml`, when there is one. A file that cannot be
+/// read is left out (logged); the opening screen shows as before.
+pub fn firm_cabinet(dir: &Path) -> Option<PathBuf> {
+    let p = dir.join(FIRM_FILE);
+    let text = std::fs::read_to_string(&p).ok()?;
+    match toml::from_str::<Firm>(&text) {
+        Ok(f) => f
+            .cabinet
+            .map(|c| PathBuf::from(c.to_string_lossy().trim()))
+            .filter(|c| !c.as_os_str().is_empty()),
+        Err(e) => {
+            tracing::warn!(
+                kind = crate::logging::kind(&e.to_string()),
+                "firm.toml not read"
+            );
+            None
+        }
+    }
+}
+
 /// The Windows user name (`USERNAME`), or "" when unset.
 pub fn windows_user() -> String {
     std::env::var("USERNAME").unwrap_or_default()
@@ -561,6 +592,27 @@ mod tests {
         assert!(!initials_match_login("JS", "kwkcpa"));
         assert!(!initials_match_login("", "kwkcpa"));
         assert!(initials_match_login("ANY", ""), "no login known");
+    }
+
+    /// firm.toml beside the exe names the firm's cabinet (owner 2026-11-12); blank, missing
+    /// or unreadable gives none.
+    #[test]
+    fn the_firm_names_its_cabinet() {
+        let t = tempfile::tempdir().unwrap();
+        assert_eq!(firm_cabinet(t.path()), None);
+        let f = t.path().join(FIRM_FILE);
+        std::fs::write(&f, "cabinet = '\\\\server\\share\\Documents'\n").unwrap();
+        assert_eq!(
+            firm_cabinet(t.path()),
+            Some(PathBuf::from(r"\\server\share\Documents"))
+        );
+        // A double-quoted string with doubled backslashes reads the same.
+        std::fs::write(&f, "cabinet = \"S:\\\\Documents \"\n").unwrap();
+        assert_eq!(firm_cabinet(t.path()), Some(PathBuf::from(r"S:\Documents")));
+        std::fs::write(&f, "cabinet = ''\n").unwrap();
+        assert_eq!(firm_cabinet(t.path()), None);
+        std::fs::write(&f, "cabinet = S:\\Documents\n").unwrap();
+        assert_eq!(firm_cabinet(t.path()), None, "not TOML");
     }
 
     /// QA A2: a config.toml that cannot be read is never saved over; the device id stays.
