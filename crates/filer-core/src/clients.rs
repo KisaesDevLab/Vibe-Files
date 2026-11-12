@@ -398,6 +398,9 @@ fn windows_1252(b: u8) -> char {
 // ---------------------------------------------------------------------------
 // Mapping
 
+/// The token the Partner column's values become (V35).
+pub const PARTNER_TOKEN: &str = "Partner";
+
 /// Template token for a CSV header: ASCII letters, digits and `_`; any other run of characters
 /// becomes one `_`; leading/trailing `_` trimmed. "Client Type" → `Client_Type`.
 pub fn token_name(header: &str) -> String {
@@ -437,9 +440,20 @@ pub fn validate_mapping(headers: &[String], map: &ColumnMap) -> Vec<String> {
     }
 
     let mut tokens: Vec<(String, &str)> = Vec::new();
+    if let Some(h) = &map.partner {
+        check_column(h, &mut errors);
+        if Some(h) == map.id.as_ref() || Some(h) == map.name.as_ref() {
+            errors.push("The partner column must not be the ID or name column.".into());
+        }
+        tokens.push((PARTNER_TOKEN.into(), h));
+    }
     for h in extras_in_use(map) {
         check_column(h, &mut errors);
         let token = token_name(h);
+        // The Partner column also ticked as a token under the same name: one {Partner}.
+        if Some(h) == map.partner.as_ref() && token.eq_ignore_ascii_case(PARTNER_TOKEN) {
+            continue;
+        }
         if token.is_empty() {
             errors.push(format!(
                 "Column \"{h}\" has no letters or digits to use as a token name."
@@ -466,12 +480,18 @@ pub fn validate_mapping(headers: &[String], map: &ColumnMap) -> Vec<String> {
     errors
 }
 
-/// Template tokens the column map's extra columns provide.
+/// Template tokens the column map's extra columns (and its Partner column) provide.
 pub fn extra_tokens(map: &ColumnMap) -> Vec<String> {
-    extras_in_use(map)
-        .map(|h| token_name(h))
-        .filter(|t| !t.is_empty())
-        .collect()
+    let mut out: Vec<String> = Vec::new();
+    if map.partner.is_some() {
+        out.push(PARTNER_TOKEN.into());
+    }
+    for t in extras_in_use(map).map(|h| token_name(h)) {
+        if !t.is_empty() && !out.iter().any(|o| o.eq_ignore_ascii_case(&t)) {
+            out.push(t);
+        }
+    }
+    out
 }
 
 /// Extra columns, minus any that are also the ID or name column.
@@ -497,8 +517,11 @@ pub fn apply_mapping(table: &CsvTable, map: &ColumnMap) -> Result<ClientList, Im
     };
     let id_col = col(map.id.as_ref().expect("validated"));
     let name_col = col(map.name.as_ref().expect("validated"));
-    let extras: Vec<(String, usize)> = extras_in_use(map)
-        .map(|h| (token_name(h), col(h)))
+    let extras: Vec<(String, usize)> = map
+        .partner
+        .iter()
+        .map(|h| (PARTNER_TOKEN.to_string(), col(h)))
+        .chain(extras_in_use(map).map(|h| (token_name(h), col(h))))
         .collect();
     let cell = |row: &[String], i: usize| row.get(i).map_or("", |s| s.trim()).to_string();
 
@@ -889,6 +912,7 @@ mod tests {
 
     fn map(id: &str, name: &str, extras: &[&str]) -> ColumnMap {
         ColumnMap {
+            partner: None,
             id: Some(id.into()),
             name: Some(name.into()),
             extras: extras.iter().map(|s| s.to_string()).collect(),
@@ -1011,6 +1035,72 @@ mod tests {
         assert_eq!(c.extra["Partner"], "KW");
         // Short row: missing cells read as empty.
         assert_eq!(list.match_by_id("1002").unwrap().extra["Partner"], "");
+    }
+
+    #[test]
+    fn partner_column_becomes_the_partner_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let csv = write_csv(
+            dir.path(),
+            "IDNUM,Name,Preparer,Partner\n1001,Acme LLC, KW ,X\n1002,Baker Trust,,Y\n",
+        );
+        let table = read_csv(&csv).unwrap();
+        let with = |extras: &[&str], partner: Option<&str>| ColumnMap {
+            partner: partner.map(String::from),
+            ..map("IDNUM", "Name", extras)
+        };
+
+        // Preparer is the Partner column: {Partner} holds its values, whatever the header.
+        let m = with(&[], Some("Preparer"));
+        assert!(validate_mapping(&table.headers, &m).is_empty());
+        assert_eq!(extra_tokens(&m), vec!["Partner".to_string()]);
+        let list = apply_mapping(&table, &m).unwrap();
+        let c = list.match_by_id("1001").unwrap();
+        assert_eq!(c.extra["Partner"], "KW");
+        assert!(!c.extra.contains_key("Preparer"));
+        assert_eq!(list.match_by_id("1002").unwrap().extra["Partner"], "");
+
+        // Also ticked as a token: {Preparer} too, same values.
+        let m = with(&["Preparer"], Some("Preparer"));
+        assert_eq!(
+            extra_tokens(&m),
+            vec!["Partner".to_string(), "Preparer".into()]
+        );
+        let c = apply_mapping(&table, &m).unwrap().clients[0].clone();
+        assert_eq!(
+            (c.extra["Partner"].as_str(), c.extra["Preparer"].as_str()),
+            ("KW", "KW")
+        );
+
+        // A ticked column named Partner would clash with the Partner column.
+        let e = validate_mapping(&table.headers, &with(&["Partner"], Some("Preparer")));
+        assert!(e[0].contains("would both become {Partner}"), "{e:?}");
+        // ...unless it is the Partner column itself.
+        let m = with(&["Partner"], Some("Partner"));
+        assert!(validate_mapping(&table.headers, &m).is_empty());
+        assert_eq!(extra_tokens(&m), vec!["Partner".to_string()]);
+        assert_eq!(
+            apply_mapping(&table, &m).unwrap().clients[0].extra["Partner"],
+            "X"
+        );
+
+        // Not the ID or name column, and it must exist.
+        let e = validate_mapping(&table.headers, &with(&[], Some("Name")));
+        assert!(
+            e.iter().any(|e| e.contains("must not be the ID or name")),
+            "{e:?}"
+        );
+        let e = validate_mapping(&table.headers, &with(&[], Some("Gone")));
+        assert!(
+            e.iter().any(|e| e.contains("\"Gone\" is not in this CSV")),
+            "{e:?}"
+        );
+
+        // Saved without the field (an older settings file) reads as no Partner column.
+        let old: ColumnMap =
+            serde_json::from_str(r#"{"id":"IDNUM","name":"Name","extras":[]}"#).unwrap();
+        assert_eq!(old.partner, None);
+        assert!(!serde_json::to_string(&old).unwrap().contains("partner"));
     }
 
     #[test]

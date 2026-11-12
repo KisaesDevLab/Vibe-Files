@@ -806,6 +806,7 @@ mod tests {
                 &o.conn,
                 &root,
                 &vf_fs::newclient::NewClient {
+                    partner: String::new(),
                     ext_id: "1042".into(),
                     name: "Anderson Farms LLC".into(),
                     entity_type: None,

@@ -1013,6 +1013,7 @@ ANDE1042,Anderson Farms LLC
         )
         .unwrap();
         let map = filer_core::config::ColumnMap {
+            partner: None,
             id: Some("ID".into()),
             name: Some("Name".into()),
             extras: vec![],
@@ -1495,6 +1496,7 @@ ANDE1042,Anderson Farms LLC
             &oc,
             &other,
             &vf_fs::newclient::NewClient {
+                partner: String::new(),
                 ext_id: "ACME1002".into(),
                 name: "Acme LLC".into(),
                 entity_type: None,
@@ -1663,6 +1665,7 @@ ANDE1042,Anderson Farms LLC
             )
             .unwrap();
             let map = filer_core::config::ColumnMap {
+                partner: None,
                 id: Some("ID".into()),
                 name: Some("Name".into()),
                 extras: vec![],
@@ -1769,6 +1772,7 @@ HALV1001,\"Halvorsen, Dana\"
             )
             .unwrap();
             let map = filer_core::config::ColumnMap {
+                partner: None,
                 id: Some("ID".into()),
                 name: Some("Name".into()),
                 extras: vec![],

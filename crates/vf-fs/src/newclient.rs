@@ -23,6 +23,8 @@ pub struct NewClient {
     pub name: String,
     /// Key from [`clients::ENTITY_TYPES`].
     pub entity_type: Option<String>,
+    /// The firm's partner for the client (owner 2026-11-12); blank: the client list's, if any.
+    pub partner: String,
 }
 
 /// What [`create`] will do, for the preview.
@@ -33,6 +35,10 @@ pub struct Plan {
     /// The client is already in the master list (its name there is used).
     pub in_master: bool,
     pub entity_type: Option<String>,
+    /// The partner typed in the dialog (kept in `clients.vf.json`, winning over the list's).
+    pub partner_set: Option<String>,
+    /// The client's partner: typed, else the client list's Partner column.
+    pub partner: Option<String>,
     pub folder: PathBuf,
     pub folder_rel: String,
     /// Folders to create, cabinet-relative, parents first (the client folder first).
@@ -108,9 +114,15 @@ pub fn plan(conn: &Connection, root: &Path, req: &NewClient) -> Result<Plan, Str
         .iter()
         .map(|d| d.to_string_lossy().replace('\\', "/"))
         .collect();
+    let partner_set = Some(req.partner.trim().to_owned()).filter(|p| !p.is_empty());
+    let partner = partner_set
+        .clone()
+        .or_else(|| clients::partner_of(&master.meta, &uuid.to_string(), listed.as_ref()));
     Ok(Plan {
         in_master: listed.is_some(),
         entity_type: req.entity_type.clone().filter(|e| !e.is_empty()),
+        partner_set,
+        partner,
         client,
         folder,
         folder_rel: folder_name,
@@ -155,6 +167,11 @@ pub fn create(
             .meta
             .entity_types
             .insert(c.uuid.to_string(), et.clone());
+    }
+    if let Some(p) = &plan.partner_set {
+        master.meta.partners.insert(c.uuid.to_string(), p.clone());
+    }
+    if plan.entity_type.is_some() || plan.partner_set.is_some() {
         clients::save_meta(root, &master.meta)?;
     }
 
@@ -183,11 +200,12 @@ pub fn create(
             firm_id: plan.firm_id.clone(),
         })
         .catalog(Stmt::new(
-            "INSERT INTO client (id, ext_id, name, entity_type, folder_rel, extra, device_id, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+            "INSERT INTO client (id, ext_id, name, entity_type, folder_rel, extra, device_id, updated_at, partner)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
              ON CONFLICT(id) DO UPDATE SET
                ext_id = excluded.ext_id, name = excluded.name, entity_type = excluded.entity_type,
                folder_rel = excluded.folder_rel, extra = excluded.extra, deleted_at = NULL,
+               partner = excluded.partner,
                device_id = excluded.device_id, updated_at = excluded.updated_at, rev = client.rev + 1",
             vec![
                 id.clone().into(),
@@ -198,6 +216,7 @@ pub fn create(
                 serde_json::to_string(&c.extra).expect("serializes").into(),
                 device_id.into(),
                 now.clone().into(),
+                plan.partner.clone().into(),
             ],
         ))
         // Undo takes the folder away; the client stays in the master list (written above), so
@@ -262,7 +281,60 @@ mod tests {
             ext_id: ext.into(),
             name: name.into(),
             entity_type: Some("s_corp".into()),
+            partner: String::new(),
         }
+    }
+
+    /// The New client dialog's partner (owner 2026-11-12): typed, it is kept beside the client
+    /// list and goes into the catalog; blank, the client list's Partner column is used.
+    #[test]
+    fn a_new_clients_partner() {
+        let mut c = cab();
+        let mut r = req("2001", "Dale Farms");
+        r.partner = " KW ".into();
+        let p = plan(&c.conn, &c.root, &r).unwrap();
+        assert_eq!(
+            (p.partner_set.as_deref(), p.partner.as_deref()),
+            (Some("KW"), Some("KW"))
+        );
+        create(&mut c.conn, &c.root, &p, "dev").unwrap();
+        let got: Option<String> = c
+            .conn
+            .query_row(
+                "SELECT partner FROM client WHERE ext_id = '2001'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(got.as_deref(), Some("KW"));
+        let m = clients::load(&c.root).unwrap();
+        assert_eq!(m.meta.partners[&p.client.uuid.to_string()], "KW");
+
+        // In the client list with a Partner column (Preparer, Filer V35), nothing typed.
+        let csv = c.root.parent().unwrap().join("p.csv");
+        std::fs::write(&csv, "ClientID,Name,Preparer\n3001,Cole Farms,AB\n").unwrap();
+        let map = filer_core::config::ColumnMap {
+            id: Some("ClientID".into()),
+            name: Some("Name".into()),
+            extras: vec![],
+            partner: Some("Preparer".into()),
+        };
+        clients::import_csv(&c.root, &csv, &map, &Default::default()).unwrap();
+        let p = plan(&c.conn, &c.root, &req("3001", "")).unwrap();
+        assert_eq!(
+            (p.partner_set.as_deref(), p.partner.as_deref()),
+            (None, Some("AB"))
+        );
+        create(&mut c.conn, &c.root, &p, "dev").unwrap();
+        let got: Option<String> = c
+            .conn
+            .query_row(
+                "SELECT partner FROM client WHERE ext_id = '3001'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(got.as_deref(), Some("AB"));
     }
 
     /// Every folder under `dir`, relative, forward slashes.
@@ -369,6 +441,7 @@ mod tests {
         let csv = c.root.parent().unwrap().join("c.csv");
         std::fs::write(&csv, "ClientID,Name\n3001,Cole Farms\n").unwrap();
         let map = filer_core::config::ColumnMap {
+            partner: None,
             id: Some("ClientID".into()),
             name: Some("Name".into()),
             extras: vec![],

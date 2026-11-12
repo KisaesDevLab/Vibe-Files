@@ -2078,6 +2078,7 @@ mod tests {
             ("1002".to_string(), sentinel_uuid(c, "Acme LLC (1002)")),
         ]);
         let map = filer_core::config::ColumnMap {
+            partner: None,
             id: Some("ClientID".into()),
             name: Some("Name".into()),
             extras: vec![],
@@ -2168,6 +2169,7 @@ mod tests {
             ("1002".to_string(), sentinel_uuid(&c, "Acme LLC (1002)")),
         ]);
         let map = filer_core::config::ColumnMap {
+            partner: None,
             id: Some("ClientID".into()),
             name: Some("Name".into()),
             extras: vec!["Partner".into()],
@@ -2329,6 +2331,7 @@ mod tests {
         let csv = c.root.parent().unwrap().join("clients.csv");
         std::fs::write(&csv, "ClientID,Name\n1001,John Smith\n").unwrap();
         let map = filer_core::config::ColumnMap {
+            partner: None,
             id: Some("ClientID".into()),
             name: Some("Name".into()),
             extras: vec![],

@@ -55,6 +55,7 @@ fn guess(headers: &[String]) -> ColumnMap {
             .cloned()
     };
     ColumnMap {
+        partner: None,
         id: find(&["clientid", "id", "clientnumber", "client", "number"]),
         name: find(&["name", "clientname", "displayname", "fullname"]),
         extras: vec![],
@@ -136,6 +137,21 @@ pub fn show(ctx: &egui::Context, d: &mut ImportDialog, env: &mut Env) -> DialogO
                     let l = ui.label("Name column");
                     column_combo(ui, "import-name", l.id, &t.headers, &mut d.map.name);
                     ui.end_row();
+                    // The partner (or preparer) column, whatever its header (Filer V35).
+                    let l = ui.label("Partner column");
+                    egui::ComboBox::from_id_salt("import-partner")
+                        .selected_text(d.map.partner.clone().unwrap_or_else(|| "None".into()))
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut d.map.partner, None, "None");
+                            // A taxpayer ID column is never copied into the client list.
+                            for h in t.headers.iter().filter(|h| !clients::looks_like_tin(h)) {
+                                ui.selectable_value(&mut d.map.partner, Some(h.clone()), h);
+                            }
+                        })
+                        .response
+                        .labelled_by(l.id)
+                        .on_hover_text("Browse's Partner filter and the {Partner} token read it");
+                    ui.end_row();
                 });
             ui.add_space(6.0);
             ui.label(widgets::caption(
@@ -168,7 +184,9 @@ pub fn show(ctx: &egui::Context, d: &mut ImportDialog, env: &mut Env) -> DialogO
                     }
                 }
             }
-            ready = d.map.id.is_some() && d.map.name.is_some();
+            ready = d.map.id.is_some()
+                && d.map.name.is_some()
+                && d.map.partner.as_ref().is_none_or(|p| Some(p) != d.map.id.as_ref() && Some(p) != d.map.name.as_ref());
         });
         ui.add_space(6.0);
         widgets::message_line(ui, d.error.as_deref());

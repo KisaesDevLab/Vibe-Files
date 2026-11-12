@@ -448,6 +448,9 @@ impl SetupScreen {
                 label_caps(ui, "Columns");
                 pill(ui, PillKind::Neutral, format!("ID → {id}"));
                 pill(ui, PillKind::Neutral, format!("Name → {name}"));
+                if let Some(partner) = &map.partner {
+                    pill(ui, PillKind::Neutral, format!("Partner → {partner}"));
+                }
                 if !map.extras.is_empty() {
                     pill(
                         ui,

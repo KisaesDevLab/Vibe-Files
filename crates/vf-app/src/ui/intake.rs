@@ -21,6 +21,9 @@ use crate::ui::ingest::IngestState;
 use crate::ui::theme;
 use vf_core::browse::Snapshot;
 
+/// The client-list sync thread's result.
+type SyncRx = std::sync::mpsc::Receiver<Result<(), String>>;
+
 #[derive(Default)]
 pub struct IntakeTab {
     /// How many times Filer's screen was loaded (tests: once, not every frame).
@@ -60,6 +63,12 @@ pub struct IntakeTab {
     new_client: Option<(crate::ui::new_client::NewClientDialog, PathBuf)>,
     /// `clients.json`'s modified time when Filer loaded it.
     clients_at: Option<std::time::SystemTime>,
+    /// The cabinet's `clients.json` modified time when the catalog's clients were last brought
+    /// in line with it (a re-import, a new Partner column: Browse sees it without a batch).
+    clients_synced: Option<std::time::SystemTime>,
+    clients_looked: bool,
+    /// The catalog's clients being brought in line on their thread, for this modified time.
+    clients_syncing: Option<(Option<std::time::SystemTime>, SyncRx)>,
     /// rules.json's modified time when last brought in line, and when it was last looked at:
     /// a save from Filer's own Rules screen (with the rules it loaded) is noticed and the
     /// print capture rules put back (QA2 U5).
@@ -224,6 +233,79 @@ impl IntakeTab {
         )
     }
 
+    /// The cabinet's client list changed (Intake Setup re-imported or re-mapped it, here or on
+    /// another PC) since this window first looked: the catalog's clients follow (partners,
+    /// names) on a thread with its own catalog connection (it reads every client folder), then
+    /// Browse reloads.
+    fn sync_client_list(&mut self, catalog: &Path, root: &Path, device_id: &str) {
+        if let Some((at, rx)) = &self.clients_syncing {
+            match rx.try_recv() {
+                Ok(r) => {
+                    if let Err(e) = r {
+                        tracing::warn!(
+                            kind = crate::logging::kind(&e),
+                            "client list not brought into the catalog"
+                        );
+                    }
+                    // Not tried again until the list changes again.
+                    self.clients_synced = *at;
+                    self.clients_syncing = None;
+                    self.catalog_changed = true;
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                // The thread died: not started again until the list changes again.
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    self.clients_synced = *at;
+                    self.clients_syncing = None;
+                }
+            }
+            return;
+        }
+        let p = filer_core::clients::cache_path(&vf_fs::clients::master_dir(root));
+        let now = std::fs::metadata(p).and_then(|m| m.modified()).ok();
+        if now.is_none() || now == self.clients_synced {
+            return;
+        }
+        // One catalog writer at a time: after a batch being recorded.
+        if self.reconciling.is_some() {
+            return;
+        }
+        // The first look at opening only records the time.
+        if !std::mem::replace(&mut self.clients_looked, true) {
+            self.clients_synced = now;
+            return;
+        }
+        let sync = {
+            let (catalog, root, device) = (
+                catalog.to_path_buf(),
+                root.to_path_buf(),
+                device_id.to_string(),
+            );
+            move || {
+                vf_core::db::open(&catalog, vf_core::db::Storage::Local)
+                    .map_err(|e| e.to_string())
+                    .and_then(|mut c| {
+                        vf_fs::rebuild::sync_clients(&mut c, &root, &device, "intake_clients")
+                            .map(|_| ())
+                            .map_err(|e| e.to_string())
+                    })
+            }
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        if cfg!(test) {
+            let _ = tx.send(sync());
+        } else if let Err(e) = std::thread::Builder::new()
+            .name("client-list-sync".into())
+            .spawn(move || {
+                let _ = tx.send(sync());
+            })
+        {
+            tracing::warn!(kind = crate::logging::kind(&e.to_string()), "no thread");
+            return;
+        }
+        self.clients_syncing = Some((now, rx));
+    }
+
     /// The folder this PC's Filer works in (its own once loaded; the cabinet's before).
     fn filer_dir(&self, root: &Path) -> PathBuf {
         self.pc
@@ -244,7 +326,8 @@ impl IntakeTab {
         device_id: &str,
     ) {
         self.apply_dupe_action(conn, root, device_id);
-        if self.poll_reconcile() {
+        self.sync_client_list(catalog, root, device_id);
+        if self.poll_reconcile() || self.clients_syncing.is_some() {
             return;
         }
         // Every PC's last batch (Q-53): any of them changing is looked at.
@@ -834,5 +917,63 @@ mod tests {
         assert_eq!(s.display.theme, ThemeChoice::Dark);
         assert!((s.display.zoom - 1.35).abs() < 0.001);
         assert_eq!(std::fs::read(dir.join("config.json")).unwrap(), before);
+    }
+
+    /// The client list re-imported with a Partner column (Intake Setup, Filer V35): the
+    /// catalog's clients get their partners without a batch, and Browse is told to reload
+    /// (owner 2026-11-12). Opening only notes the list.
+    #[test]
+    fn a_changed_client_list_reaches_the_catalog() {
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path().join("cabinet");
+        let cabinet = CabinetFile {
+            cabinet_id: vf_core::new_id(),
+            firm_id: uuid::Uuid::new_v4().to_string(),
+            schema_version: vf_core::db::SCHEMA_VERSION,
+            layout_version: 1,
+            created: vf_core::now_rfc3339(),
+            name: None,
+        };
+        vf_fs::cabinet::create(&root, &cabinet).unwrap();
+        let catalog = t.path().join("catalog.db");
+        let mut conn = vf_core::db::open(&catalog, vf_core::db::Storage::Local).unwrap();
+        let csv = t.path().join("c.csv");
+        std::fs::write(
+            &csv,
+            "IDNUM,Name,Preparer
+1001,Acme LLC,KW
+",
+        )
+        .unwrap();
+        let mut map = filer_core::config::ColumnMap {
+            id: Some("IDNUM".into()),
+            name: Some("Name".into()),
+            extras: vec![],
+            partner: None,
+        };
+        vf_fs::clients::import_csv(&root, &csv, &map, &Default::default()).unwrap();
+        vf_fs::rebuild::sync_clients(&mut conn, &root, "dev", "clients_import").unwrap();
+        let partner = |conn: &Connection| -> Option<String> {
+            conn.query_row(
+                "SELECT partner FROM client WHERE ext_id = '1001'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+
+        let mut i = IntakeTab::default();
+        i.reconcile(&mut conn, &catalog, &root, "dev");
+        i.reconcile(&mut conn, &catalog, &root, "dev");
+        assert!(!i.catalog_changed, "opening only notes the list");
+        assert_eq!(partner(&conn), None);
+
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        map.partner = Some("Preparer".into());
+        vf_fs::clients::import_csv(&root, &csv, &map, &Default::default()).unwrap();
+        i.reconcile(&mut conn, &catalog, &root, "dev");
+        i.reconcile(&mut conn, &catalog, &root, "dev");
+        assert!(i.catalog_changed);
+        assert_eq!(partner(&conn).as_deref(), Some("KW"));
     }
 }

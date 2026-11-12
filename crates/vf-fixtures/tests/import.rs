@@ -202,6 +202,7 @@ fn tree(target: usize) -> Fx {
     }
     std::fs::write(&csv, text).unwrap();
     let map = filer_core::config::ColumnMap {
+        partner: None,
         id: Some("ID".into()),
         name: Some("Name".into()),
         extras: vec![],
@@ -559,6 +560,7 @@ fn look_alike_folders_wait_for_a_person() {
     )
     .unwrap();
     let map = filer_core::config::ColumnMap {
+        partner: None,
         id: Some("ID".into()),
         name: Some("Name".into()),
         extras: vec![],
@@ -629,6 +631,7 @@ fn import_guesses_wait_for_a_person_before_disposition() {
     let csv = t.path().join("clients.csv");
     std::fs::write(&csv, "ID,Name\nSMIT1001,\"Smith, John\"\n").unwrap();
     let map = filer_core::config::ColumnMap {
+        partner: None,
         id: Some("ID".into()),
         name: Some("Name".into()),
         extras: vec![],

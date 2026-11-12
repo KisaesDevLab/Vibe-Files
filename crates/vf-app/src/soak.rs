@@ -54,6 +54,7 @@ pub fn run(dir: &Path, hours: f64, out: &mut dyn Write) -> Result<i32> {
                 &o.conn,
                 &root,
                 &vf_fs::newclient::NewClient {
+                    partner: String::new(),
                     ext_id: format!("{:04}", 1000 + c),
                     name: format!("Soak Client {c:02}"),
                     entity_type: None,

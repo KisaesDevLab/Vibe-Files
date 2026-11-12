@@ -289,6 +289,7 @@ mod tests {
         std::fs::write(&f, csv).unwrap();
         let table = crate::clients::read_csv(&f).unwrap();
         let map = ColumnMap {
+            partner: None,
             id: Some("id".into()),
             name: Some("name".into()),
             extras: vec![],

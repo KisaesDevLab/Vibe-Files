@@ -1385,6 +1385,7 @@ mod tests {
         )
         .unwrap();
         let map = ColumnMap {
+            partner: None,
             id: Some("id".into()),
             name: Some("name".into()),
             extras: vec![],
@@ -1408,6 +1409,7 @@ mod tests {
         let csv = tmp.path().join("c.csv");
         std::fs::write(&csv, "id,name\nJONE-1234,\"Jones, Pat\"\n").unwrap();
         let map = ColumnMap {
+            partner: None,
             id: Some("id".into()),
             name: Some("name".into()),
             extras: vec![],
@@ -1581,6 +1583,7 @@ mod tests {
         .unwrap();
         let table = crate::clients::read_csv(&csv).unwrap();
         let map = ColumnMap {
+            partner: None,
             id: Some("id".into()),
             name: Some("name".into()),
             extras: vec![],

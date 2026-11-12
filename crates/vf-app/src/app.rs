@@ -339,7 +339,7 @@ impl VibeFilesApp {
                 browse.set_root(&opened.root);
                 browse.catalog = Some(opened.catalog.clone());
                 browse.sheets_dir = self.data.join("sheets");
-                browse.set_prefs(self.config.prefs.clone());
+                browse.set_prefs(self.config.prefs.clone().for_user(&config::windows_user()));
                 browse.saved = vf_index::saved::load(&opened.root);
                 if let Some(e) = rules_problem {
                     browse.error = Some(format!(
@@ -1180,7 +1180,15 @@ impl eframe::App for VibeFilesApp {
         if let Screen::Open(o) = &mut self.screen
             && std::mem::take(&mut o.browse.prefs_dirty)
         {
-            self.config.prefs = o.browse.prefs.clone();
+            let mut prefs = o.browse.prefs.clone();
+            // Several people on one server share config.toml: the others' partner choices as
+            // the file has them now, with this user's put in.
+            if let Ok(on_disk) = config::load(&self.data) {
+                prefs.partner_by_user = on_disk.prefs.partner_by_user;
+            }
+            prefs.store_user(&config::windows_user());
+            o.browse.prefs.partner_by_user = prefs.partner_by_user.clone();
+            self.config.prefs = prefs;
             if let Err(e) = config::save(&self.data, &self.config) {
                 o.browse.error = Some(format!("Pinned/Favorites could not be saved: {e:#}"));
             }
@@ -1566,6 +1574,7 @@ mod tests {
                     &o.conn,
                     &root,
                     &vf_fs::newclient::NewClient {
+                        partner: String::new(),
                         ext_id: id.into(),
                         name: name.into(),
                         entity_type: None,
@@ -3467,6 +3476,7 @@ mod tests {
             &o.conn,
             &root,
             &vf_fs::newclient::NewClient {
+                partner: String::new(),
                 ext_id: "INVE1001".into(),
                 name: "Invented Family".into(),
                 entity_type: None,

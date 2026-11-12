@@ -465,6 +465,7 @@ mod tests {
         )
         .unwrap();
         let map = ColumnMap {
+            partner: None,
             id: Some("id".into()),
             name: Some("name".into()),
             extras: vec![],
@@ -629,6 +630,7 @@ mod tests {
         )
         .unwrap();
         let map = ColumnMap {
+            partner: None,
             id: Some("id".into()),
             name: Some("name".into()),
             extras: vec![],
@@ -1009,6 +1011,7 @@ mod tests {
         copy_tree(&kit.join("inbox"), &inbox);
         let table = crate::clients::read_csv(&kit.join("clients.csv")).unwrap();
         let map = ColumnMap {
+            partner: None,
             id: Some("id".into()),
             name: Some("name".into()),
             extras: vec!["Partner".into()],

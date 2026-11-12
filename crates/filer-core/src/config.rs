@@ -134,6 +134,10 @@ pub struct ColumnMap {
     pub id: Option<String>,
     pub name: Option<String>,
     pub extras: Vec<String>,
+    /// The column holding the client's partner (or preparer), whatever its header; its values
+    /// become the `{Partner}` token (owner 2026-11-12, V35).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub partner: Option<String>,
 }
 
 /// Outer position and inner size, in egui points.

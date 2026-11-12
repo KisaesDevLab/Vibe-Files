@@ -33,6 +33,7 @@ fn ultratax_print_lands_as_a_federal_return_copy() {
     let csv = t.path().join("clients.csv");
     std::fs::write(&csv, "ID,Name\nANDE1042,Anderson Farms LLC\n").unwrap();
     let map = filer_core::config::ColumnMap {
+        partner: None,
         id: Some("ID".into()),
         name: Some("Name".into()),
         extras: vec![],
@@ -162,6 +163,7 @@ fn ultratax_prints_go_to_their_doc_types_folder() {
     let csv = t.path().join("clients.csv");
     std::fs::write(&csv, "ID,Name\nANDE1042,Anderson Farms LLC\n").unwrap();
     let map = filer_core::config::ColumnMap {
+        partner: None,
         id: Some("ID".into()),
         name: Some("Name".into()),
         extras: vec![],
@@ -408,6 +410,7 @@ fn ultratax_prints_dropped_in_an_inbox_follow_their_rows() {
     )
     .unwrap();
     let map = filer_core::config::ColumnMap {
+        partner: None,
         id: Some("ID".into()),
         name: Some("Name".into()),
         extras: vec![],

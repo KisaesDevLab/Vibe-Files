@@ -1353,6 +1353,7 @@ mod tests {
                 &o.conn,
                 &root,
                 &vf_fs::newclient::NewClient {
+                    partner: String::new(),
                     ext_id: id.into(),
                     name: name.into(),
                     entity_type: None,

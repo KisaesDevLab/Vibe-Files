@@ -1,4 +1,4 @@
-//! `+ New client` (P01 step 3): ID, name, entity type → preview of the folder the cabinet
+//! `+ New client` (P01 step 3): ID, name, entity type, partner → preview of the folder the cabinet
 //! template gives → create in one Transaction (`vf_fs::newclient`).
 
 use egui::{RichText, TextEdit};
@@ -15,6 +15,8 @@ pub struct NewClientDialog {
     /// Recomputed whenever a field changes.
     plan: Option<Result<Plan, String>>,
     pub error: Option<String>,
+    /// Partners other clients have, for the pick list (read when the dialog first shows).
+    partners: Option<Vec<String>>,
 }
 
 impl NewClientDialog {
@@ -38,6 +40,9 @@ pub struct Created {
 pub fn show(ctx: &egui::Context, d: &mut NewClientDialog, env: &mut Env) -> DialogOutcome<Created> {
     if d.plan.is_none() {
         d.plan = Some(newclient::plan(env.conn, env.root, &d.req));
+    }
+    if d.partners.is_none() {
+        d.partners = Some(vf_core::browse::client_partners(env.conn).unwrap_or_default());
     }
     let mut out = DialogOutcome::Open;
     egui::Modal::new(egui::Id::unique("new-client")).show(ctx, |ui| {
@@ -88,6 +93,45 @@ pub fn show(ctx: &egui::Context, d: &mut NewClientDialog, env: &mut Env) -> Dial
                     })
                     .response
                     .labelled_by(l.id);
+                ui.end_row();
+                // Partner (owner 2026-11-12): typed, or one other clients have; blank keeps
+                // the client list's.
+                let l = ui.label("Partner");
+                let listed = match &d.plan {
+                    Some(Ok(p)) if p.partner_set.is_none() => p.partner.clone(),
+                    _ => None,
+                };
+                ui.horizontal(|ui| {
+                    let hint = match &listed {
+                        Some(p) => format!("{p} (from the client list)"),
+                        None => "Not set".into(),
+                    };
+                    changed |= ui
+                        .add(
+                            TextEdit::singleline(&mut d.req.partner)
+                                .hint_text(hint)
+                                .desired_width(200.0),
+                        )
+                        .labelled_by(l.id)
+                        .changed();
+                    let partners = d.partners.clone().unwrap_or_default();
+                    if !partners.is_empty() {
+                        let (r, pick) = widgets::search_combo(
+                            ui,
+                            "new-client-partner-pick",
+                            90.0,
+                            "Pick…",
+                            || partners.clone(),
+                            partners.iter().position(|p| *p == d.req.partner.trim()),
+                            Some("Not set"),
+                        );
+                        r.on_hover_text("A partner other clients have");
+                        if let Some(p) = pick {
+                            d.req.partner = p.map(|k| partners[k].clone()).unwrap_or_default();
+                            changed = true;
+                        }
+                    }
+                });
                 ui.end_row();
             });
         if changed {

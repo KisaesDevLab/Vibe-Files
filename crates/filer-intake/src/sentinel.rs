@@ -1021,6 +1021,7 @@ mod tests {
         .unwrap();
         let table = crate::clients::read_csv(&csv).unwrap();
         let map = ColumnMap {
+            partner: None,
             id: Some("id".into()),
             name: Some("name".into()),
             extras: vec![],

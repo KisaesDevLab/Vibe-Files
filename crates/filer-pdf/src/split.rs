@@ -232,6 +232,7 @@ mod tests {
         )
         .unwrap();
         let map = ColumnMap {
+            partner: None,
             id: Some("id".into()),
             name: Some("name".into()),
             extras: vec![],

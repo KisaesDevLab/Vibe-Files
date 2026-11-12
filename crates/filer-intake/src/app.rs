@@ -1452,6 +1452,44 @@ mod import_tests {
     }
 
     #[test]
+    fn wizard_maps_a_preparer_column_as_partner() {
+        let (data, root, src) = (
+            tempfile::tempdir().unwrap(),
+            tempfile::tempdir().unwrap(),
+            tempfile::tempdir().unwrap(),
+        );
+        let csv = src.path().join("clients.csv");
+        std::fs::write(
+            &csv,
+            "Client ID,Client Name,Preparer\n1001,Acme LLC,KW\n1002,Baker Trust,AB\n",
+        )
+        .unwrap();
+        let mut h = harness(data.path(), root.path());
+        open_wizard(&mut h, &csv);
+        h.get_by_role_and_label(egui::accesskit::Role::ComboBox, "Partner")
+            .click();
+        h.step();
+        h.step();
+        h.get_by_label("Preparer").click();
+        h.step();
+        h.step();
+        h.get_by_label("Import 2 clients").click();
+        settle(&mut h, |h| h.state().shared.settings.csv_path.is_some());
+        h.step();
+
+        let list = h.state().shared.clients.list().unwrap();
+        assert_eq!(list.match_by_id("1002").unwrap().extra["Partner"], "AB");
+        let (saved, _) = Settings::load_or_default(data.path());
+        assert_eq!(saved.column_map.partner.as_deref(), Some("Preparer"));
+        assert!(saved.column_map.extras.is_empty());
+        // Setup shows it with the other columns.
+        h.state_mut().tab = Tab::Setup;
+        h.step();
+        h.step();
+        assert!(h.query_by_label("Partner → Preparer").is_some());
+    }
+
+    #[test]
     fn wizard_shows_duplicate_ids_and_imports_nothing() {
         let (data, root, src) = (
             tempfile::tempdir().unwrap(),
@@ -1552,6 +1590,7 @@ mod conflict_tests {
             root: Some(root.clone()),
             csv_path: Some(csv),
             column_map: ColumnMap {
+                partner: None,
                 id: Some("id".into()),
                 name: Some("name".into()),
                 extras: vec![],
@@ -1651,6 +1690,7 @@ mod conflict_tests {
             root: Some(root.clone()),
             csv_path: Some(csv),
             column_map: ColumnMap {
+                partner: None,
                 id: Some("id".into()),
                 name: Some("name".into()),
                 extras: vec![],
@@ -2118,6 +2158,7 @@ mod plan_ui_tests {
             inboxes: vec![inbox.clone()],
             csv_path: Some(csv),
             column_map: ColumnMap {
+                partner: None,
                 id: Some("id".into()),
                 name: Some("name".into()),
                 extras: vec![],
@@ -2456,6 +2497,7 @@ mod combine_ui_tests {
             inboxes: vec![inbox.clone()],
             csv_path: Some(csv),
             column_map: ColumnMap {
+                partner: None,
                 id: Some("id".into()),
                 name: Some("name".into()),
                 extras: vec![],
@@ -2592,6 +2634,7 @@ mod combine_ui_tests {
             inboxes: vec![inbox.clone()],
             csv_path: Some(csv),
             column_map: ColumnMap {
+                partner: None,
                 id: Some("id".into()),
                 name: Some("name".into()),
                 extras: vec![],
@@ -2710,6 +2753,7 @@ mod combine_ui_tests {
             inboxes: vec![inbox.clone()],
             csv_path: Some(csv),
             column_map: ColumnMap {
+                partner: None,
                 id: Some("id".into()),
                 name: Some("name".into()),
                 extras: vec![],
@@ -2816,6 +2860,7 @@ mod combine_ui_tests {
             inboxes: vec![inbox.clone()],
             csv_path: Some(csv),
             column_map: ColumnMap {
+                partner: None,
                 id: Some("id".into()),
                 name: Some("name".into()),
                 extras: vec![],
@@ -2895,6 +2940,7 @@ mod combine_ui_tests {
             inboxes: vec![inbox.clone()],
             csv_path: Some(csv.clone()),
             column_map: ColumnMap {
+                partner: None,
                 id: Some("id".into()),
                 name: Some("name".into()),
                 extras: vec![],
@@ -2982,6 +3028,7 @@ mod combine_ui_tests {
             inboxes: vec![inbox.clone()],
             csv_path: Some(csv.clone()),
             column_map: ColumnMap {
+                partner: None,
                 id: Some("id".into()),
                 name: Some("name".into()),
                 extras: vec![],
@@ -3115,6 +3162,7 @@ mod combine_ui_tests {
             inboxes: vec![shared.clone()],
             csv_path: Some(csv.clone()),
             column_map: ColumnMap {
+                partner: None,
                 id: Some("id".into()),
                 name: Some("name".into()),
                 extras: vec![],
@@ -3312,6 +3360,7 @@ My miles for 2025.
             inboxes: vec![inbox.clone()],
             csv_path: Some(csv),
             column_map: ColumnMap {
+                partner: None,
                 id: Some("id".into()),
                 name: Some("name".into()),
                 extras: vec![],
@@ -3445,6 +3494,7 @@ My miles for 2025.
             inboxes: vec![inbox.clone()],
             csv_path: Some(csv),
             column_map: ColumnMap {
+                partner: None,
                 id: Some("id".into()),
                 name: Some("name".into()),
                 extras: vec![],
@@ -3639,6 +3689,7 @@ My miles for 2025.
             inboxes: vec![inbox.clone()],
             csv_path: Some(csv),
             column_map: ColumnMap {
+                partner: None,
                 id: Some("id".into()),
                 name: Some("name".into()),
                 extras: vec![],
@@ -3837,6 +3888,7 @@ mod split_ui_tests {
             inboxes: vec![inbox.clone()],
             csv_path: Some(csv),
             column_map: ColumnMap {
+                partner: None,
                 id: Some("id".into()),
                 name: Some("name".into()),
                 extras: vec![],
@@ -4065,6 +4117,7 @@ mod p10_tests {
             inboxes: vec![inbox],
             csv_path: Some(csv),
             column_map: ColumnMap {
+                partner: None,
                 id: Some("id".into()),
                 name: Some("name".into()),
                 extras: vec![],
@@ -4182,6 +4235,7 @@ mod r1c_tests {
             inboxes: vec![inbox, other],
             csv_path: Some(csv),
             column_map: ColumnMap {
+                partner: None,
                 id: Some("ID".into()),
                 name: Some("Name".into()),
                 extras: vec!["Partner".into()],
@@ -4295,6 +4349,7 @@ mod r2_tests {
             inboxes: vec![inbox],
             csv_path: Some(csv),
             column_map: ColumnMap {
+                partner: None,
                 id: Some("id".into()),
                 name: Some("name".into()),
                 extras: vec![],
@@ -4416,6 +4471,7 @@ mod r2_tests {
             inboxes: vec![inbox.clone()],
             csv_path: Some(csv),
             column_map: ColumnMap {
+                partner: None,
                 id: Some("id".into()),
                 name: Some("name".into()),
                 extras: vec![],
@@ -4500,6 +4556,7 @@ mod r2_tests {
             inboxes: vec![inbox.clone()],
             csv_path: Some(csv),
             column_map: ColumnMap {
+                partner: None,
                 id: Some("id".into()),
                 name: Some("name".into()),
                 extras: vec![],
@@ -4715,6 +4772,7 @@ mod r2_tests {
         let settings = Settings {
             csv_path: Some(csv.clone()),
             column_map: ColumnMap {
+                partner: None,
                 id: Some("id".into()),
                 name: Some("name".into()),
                 extras: vec![],

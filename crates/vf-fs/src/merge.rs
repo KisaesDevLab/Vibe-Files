@@ -233,6 +233,7 @@ pub fn apply(
                         ext_id: c.ext_id.clone(),
                         name: c.name.clone(),
                         entity_type: None,
+                        partner: String::new(),
                     },
                 )
                 .map_err(|e| format!("{} ({}): {e}", c.name, c.ext_id))?;
@@ -522,6 +523,7 @@ mod tests {
                 ext_id: ext.into(),
                 name: name.into(),
                 entity_type: None,
+                partner: String::new(),
             },
         )
         .unwrap();

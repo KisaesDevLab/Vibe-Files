@@ -387,6 +387,7 @@ mod tests {
         }
         std::fs::write(&csv, text).unwrap();
         let map = filer_core::config::ColumnMap {
+            partner: None,
             id: Some("ID".into()),
             name: Some("Name".into()),
             extras: vec![],

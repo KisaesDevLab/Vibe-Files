@@ -529,6 +529,7 @@ impl Browse {
     pub fn window(&self) -> vf_core::browse::Window {
         let mut w = vf_core::browse::Window {
             since: self.week_start.clone(),
+            partner: self.prefs.partner.clone(),
             ..Default::default()
         };
         let id_of = |c: usize| self.snap.clients.get(c).map(|c| c.id.clone());
@@ -987,7 +988,7 @@ impl Browse {
                 // "Received this week" counts from a time that moves on.
                 self.loaded
                     .as_ref()
-                    .is_some_and(|l| l.since == self.week_start)
+                    .is_some_and(|l| l.since == self.week_start && l.partner == self.prefs.partner)
                     && w.client_counts.len() <= self.snap.clients.len()
             });
         let loaded = match &window {
@@ -1151,12 +1152,14 @@ impl Browse {
             {
                 self.client_filter.clear();
             }
-            if !partner_shows(self.prefs.partner.as_deref(), c.partner.as_deref()) {
+            let hidden = !partner_shows(self.prefs.partner.as_deref(), c.partner.as_deref());
+            self.reveal = Some(c.id.clone());
+            if hidden {
+                // The Views count all partners again.
                 self.prefs.partner = None;
-                self.prefs_dirty = true;
+                self.prefs_changed();
             }
             self.expanded.insert(Node::Client(ci));
-            self.reveal = Some(c.id.clone());
             self.set_scope(Scope::Client(ci));
         }
     }
@@ -1213,7 +1216,7 @@ impl Browse {
                 (Some(w), Scope::NeedsDocType) => w.needs_doc_type,
                 (Some(w), Scope::NeedsTaxYear) => w.needs_tax_year,
                 (Some(w), Scope::ReceivedSince(_)) => w.received,
-                _ => self.ix.docs_in(&self.snap, v).len(),
+                _ => self.view_docs(v).len(),
             };
         }
         self.fav_counts = self
@@ -1235,7 +1238,7 @@ impl Browse {
             self.scope = self.ids_scope(*list);
         }
         let needle = self.name_filter.trim().to_lowercase();
-        let mut v = self.ix.docs_in(&self.snap, &self.scope);
+        let mut v = self.view_docs(&self.scope);
         if !needle.is_empty() {
             v.retain(|&i| self.snap.docs[i].name().to_lowercase().contains(&needle));
         }
@@ -1291,6 +1294,32 @@ impl Browse {
         if self.anchor.is_some_and(|a| a >= self.visible.len()) {
             self.anchor = None;
         }
+    }
+
+    /// The documents of `scope`; a View's (Recent, Pinned, Needs doc type, Needs tax year,
+    /// Received this week) only of the chosen partner's clients (owner 2026-11-12).
+    fn view_docs(&self, scope: &Scope) -> Vec<usize> {
+        let mut v = self.ix.docs_in(&self.snap, scope);
+        let view = matches!(
+            scope,
+            Scope::Ids { .. } | Scope::NeedsDocType | Scope::NeedsTaxYear | Scope::ReceivedSince(_)
+        );
+        if let (true, Some(f)) = (view, self.prefs.partner.as_deref()) {
+            let keep: HashSet<&str> = self
+                .snap
+                .clients
+                .iter()
+                .filter(|c| partner_shows(Some(f), c.partner.as_deref()))
+                .map(|c| c.id.as_str())
+                .collect();
+            v.retain(|&i| {
+                self.snap.docs[i]
+                    .client_id
+                    .as_deref()
+                    .is_some_and(|c| keep.contains(c))
+            });
+        }
+        v
     }
 
     fn ids_scope(&self, list: IdList) -> Scope {
@@ -2165,9 +2194,56 @@ fn section_head(
     open
 }
 
+/// The Partner filter (owner 2026-11-05; the Views too, 2026-11-12), when any client has a
+/// partner. Kept for each Windows user.
+fn partner_pick(ui: &mut egui::Ui, b: &mut Browse) {
+    let partners = b.snap.partners();
+    if !partners.is_empty() || b.prefs.partner.is_some() {
+        ui.horizontal(|ui| {
+            let l = ui.label(widgets::caption("Partner"));
+            let shown = match b.prefs.partner.as_deref() {
+                None => "All partners".to_string(),
+                Some("") => "No partner".to_string(),
+                Some(p) => p.to_string(),
+            };
+            let current = match b.prefs.partner.as_deref() {
+                None => None,
+                Some("") => Some(0),
+                Some(p) => partners.iter().position(|x| x == p).map(|k| k + 1),
+            };
+            let (r, pick) = widgets::search_combo(
+                ui,
+                "tree-partner",
+                ui.available_width() - 8.0,
+                shown,
+                || {
+                    std::iter::once("No partner".to_string())
+                        .chain(partners.iter().cloned())
+                        .collect()
+                },
+                current,
+                Some("All partners"),
+            );
+            r.labelled_by(l.id)
+                .on_hover_text("Show only one partner's clients, here and in the Views");
+            if let Some(p) = pick {
+                b.prefs.partner = p.map(|k| {
+                    if k == 0 {
+                        String::new()
+                    } else {
+                        partners[k - 1].clone()
+                    }
+                });
+                b.prefs_changed();
+            }
+        });
+    }
+}
+
 fn tree(ui: &mut egui::Ui, b: &mut Browse) {
     let mut pick: Option<Scope> = None;
     let mut fav_remove: Option<usize> = None;
+    partner_pick(ui, b);
     let views_open = section_head(ui, b, "views", "VIEWS", |ui, b| {
         if widgets::named(ui.small_btn("«"), "Fold the folder tree").clicked() {
             b.prefs.hide_tree = true;
@@ -2260,48 +2336,6 @@ fn tree(ui: &mut egui::Ui, b: &mut Browse) {
             }
         });
     });
-    // Only one partner's clients (owner 2026-11-05), when any client has a partner.
-    let partners = b.snap.partners();
-    if !partners.is_empty() || b.prefs.partner.is_some() {
-        ui.horizontal(|ui| {
-            let l = ui.label(widgets::caption("Partner"));
-            let shown = match b.prefs.partner.as_deref() {
-                None => "All partners".to_string(),
-                Some("") => "No partner".to_string(),
-                Some(p) => p.to_string(),
-            };
-            let current = match b.prefs.partner.as_deref() {
-                None => None,
-                Some("") => Some(0),
-                Some(p) => partners.iter().position(|x| x == p).map(|k| k + 1),
-            };
-            let (r, pick) = widgets::search_combo(
-                ui,
-                "tree-partner",
-                ui.available_width() - 8.0,
-                shown,
-                || {
-                    std::iter::once("No partner".to_string())
-                        .chain(partners.iter().cloned())
-                        .collect()
-                },
-                current,
-                Some("All partners"),
-            );
-            r.labelled_by(l.id)
-                .on_hover_text("Show only the clients of one partner");
-            if let Some(p) = pick {
-                b.prefs.partner = p.map(|k| {
-                    if k == 0 {
-                        String::new()
-                    } else {
-                        partners[k - 1].clone()
-                    }
-                });
-                b.prefs_dirty = true;
-            }
-        });
-    }
     ui.add(
         egui::TextEdit::singleline(&mut b.client_filter)
             .hint_text("Find client by name or ID")
@@ -5096,6 +5130,80 @@ Petty cash,1234.50
         assert!(h.query_by_label("3 clients").is_some());
     }
 
+    /// The Partner filter keeps the Views to that partner's clients too, counts and rows
+    /// (owner 2026-11-12), in a small cabinet and in a large one read in windows.
+    #[test]
+    fn views_follow_the_partner_filter() {
+        for large_above in [LARGE, 1] {
+            let mut h = harness_from(3, 2, large_above);
+            {
+                let s = h.state_mut();
+                s.conn
+                    .execute(
+                        "UPDATE client SET partner = 'K''W' WHERE ext_id = '1000'",
+                        [],
+                    )
+                    .unwrap();
+                s.conn
+                    .execute("UPDATE client SET partner = 'JD' WHERE ext_id = '1001'", [])
+                    .unwrap();
+                s.b.prefs.pinned = vec!["c0000-0".into(), "c0001-0".into()];
+                s.b.reload(&s.conn);
+            }
+            h.run();
+            let count = |h: &Harness<'static, State>, label: &str| {
+                let b = &h.state().b;
+                let i = b.views().iter().position(|v| v.0 == label).unwrap();
+                b.view_counts[i]
+            };
+            assert_eq!(count(&h, "Needs doc type"), 6, "large_above {large_above}");
+            assert_eq!(count(&h, "Pinned"), 2);
+            // The picker sits above the Views.
+            h.get_by_role_and_label(Role::ComboBox, "Partner").click();
+            h.run();
+            h.get_by_label("K'W").click();
+            for _ in 0..3 {
+                h.run();
+            }
+            assert_eq!(count(&h, "Needs doc type"), 2, "large_above {large_above}");
+            assert_eq!(count(&h, "Pinned"), 1);
+            h.state_mut().b.set_scope(Scope::NeedsDocType);
+            for _ in 0..3 {
+                h.run();
+            }
+            let b = &h.state().b;
+            assert_eq!(b.visible.len(), 2);
+            assert!(
+                b.visible
+                    .iter()
+                    .all(|&i| b.snap.docs[i].client_id.as_deref() == Some("c0000"))
+            );
+            // No partner: the third client's documents.
+            h.get_by_role_and_label(Role::ComboBox, "Partner").click();
+            h.run();
+            h.get_by_label("No partner").click();
+            for _ in 0..3 {
+                h.run();
+            }
+            assert_eq!(count(&h, "Needs doc type"), 2);
+            assert_eq!(count(&h, "Pinned"), 0);
+            let b = &h.state().b;
+            assert!(
+                b.visible
+                    .iter()
+                    .all(|&i| b.snap.docs[i].client_id.as_deref() == Some("c0002"))
+            );
+            // All partners again.
+            h.get_by_role_and_label(Role::ComboBox, "Partner").click();
+            h.run();
+            h.get_by_label("All partners").click();
+            for _ in 0..3 {
+                h.run();
+            }
+            assert_eq!(count(&h, "Needs doc type"), 6);
+        }
+    }
+
     /// PA-29 (owner 2026-11-05): right-click a client or folder in the tree to add, rename
     /// or delete a folder; Rename… in the client panel renames the client and its folder.
     #[test]
@@ -5219,6 +5327,8 @@ Petty cash,1234.50
         click(&mut h, "+ New client");
         type_into(&mut h, "Client ID", "1042");
         type_into(&mut h, "Client name", "Anderson Farms LLC");
+        // The partner (owner 2026-11-12).
+        type_into(&mut h, "Partner", "KW");
         h.run();
         assert!(
             h.query_by_label("Anderson Farms LLC (1042)/Permanent/Setup")
@@ -5242,6 +5352,7 @@ Petty cash,1234.50
         let b = &h.state().b;
         assert!(b.new_client.is_none(), "dialog closed");
         assert_eq!(b.snap.clients.len(), 1);
+        assert_eq!(b.snap.clients[0].partner.as_deref(), Some("KW"));
         assert_eq!(b.scope, Scope::Client(0));
         assert_eq!(
             b.notice.as_deref(),
@@ -5319,6 +5430,45 @@ Petty cash,1234.50
             raw.contains("Partner") && !raw.contains("000-00-0001"),
             "no TINs"
         );
+    }
+
+    /// Import clients CSV…: a Preparer column chosen as the Partner column gives each client's
+    /// partner (owner 2026-11-12, Filer V35).
+    #[test]
+    fn import_clients_csv_with_a_partner_column() {
+        let mut h = cabinet_harness();
+        let csv = write_csv(
+            &h,
+            "ClientID,Name,Preparer
+1001,Acme LLC,KW
+1002,Baker Trust,
+",
+        );
+        click(&mut h, "Import clients CSV…");
+        type_into(&mut h, "CSV file", &csv);
+        click(&mut h, "Read");
+        h.get_by_role_and_label(Role::ComboBox, "Partner column")
+            .click();
+        h.run();
+        // The pick list's entry (the other is the column's token box).
+        h.get_all_by_label("Preparer").next().unwrap().click();
+        h.run();
+        assert_eq!(
+            h.state().b.import.as_ref().unwrap().map.partner.as_deref(),
+            Some("Preparer")
+        );
+        click(&mut h, "Import 2 rows (one transaction)");
+        let b = &h.state().b;
+        assert!(b.import.is_none(), "dialog closed");
+        let partner = |ext: &str| {
+            b.snap
+                .clients
+                .iter()
+                .find(|c| c.ext_id == ext)
+                .and_then(|c| c.partner.clone())
+        };
+        assert_eq!(partner("1001").as_deref(), Some("KW"));
+        assert_eq!(partner("1002"), None);
     }
 
     /// P01 step 3: entity type and relationships from the client inspector.

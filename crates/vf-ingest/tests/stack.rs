@@ -71,6 +71,7 @@ fn cabinet(t: &Path) -> PathBuf {
         .collect();
     std::fs::write(&csv, format!("ID,Name\n{rows}")).unwrap();
     let map = filer_core::config::ColumnMap {
+        partner: None,
         id: Some("ID".into()),
         name: Some("Name".into()),
         extras: vec![],

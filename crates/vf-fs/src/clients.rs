@@ -247,6 +247,7 @@ pub fn import_csv_tin(
         .iter()
         .chain(map.name.iter())
         .chain(map.extras.iter())
+        .chain(map.partner.iter())
     {
         if let Some(i) = col(h)
             && values_look_like_tins(
@@ -257,7 +258,7 @@ pub fn import_csv_tin(
             )
         {
             return Err(format!(
-                "The column {h} holds taxpayer IDs (SSNs or EINs): it cannot be the client ID, the name or a kept column. Full TINs stay in the documents only."
+                "The column {h} holds taxpayer IDs (SSNs or EINs): it cannot be the client ID, the name, the partner or a kept column. Full TINs stay in the documents only."
             ));
         }
     }
@@ -506,6 +507,7 @@ pub fn tin_extras(map: &ColumnMap) -> Vec<String> {
     // (headers only; the import also checks the values)
     map.extras
         .iter()
+        .chain(map.partner.iter())
         .filter(|h| looks_like_tin(h))
         .cloned()
         .collect()
@@ -549,6 +551,7 @@ mod tests {
 
     fn map(extras: &[&str]) -> ColumnMap {
         ColumnMap {
+            partner: None,
             id: Some("ClientID".into()),
             name: Some("Name".into()),
             extras: extras.iter().map(|s| s.to_string()).collect(),
@@ -724,6 +727,33 @@ mod tests {
             assert!(!looks_like_tin(h), "{h}");
         }
         assert_eq!(tin_extras(&map(&["Partner", "SSN"])), ["SSN"]);
+        // The Partner column too (Filer V35).
+        let as_partner = ColumnMap {
+            partner: Some("Tax ID".into()),
+            ..map(&[])
+        };
+        assert_eq!(tin_extras(&as_partner), ["Tax ID"]);
+    }
+
+    /// A Partner column holding SSNs is refused, whatever its header.
+    #[test]
+    fn a_partner_column_of_taxpayer_ids_is_refused() {
+        let cab = tempfile::tempdir().unwrap();
+        let csv = cab.path().join("c.csv");
+        std::fs::write(
+            &csv,
+            "ID,Name,Preparer
+1001,Acme,123-45-6789
+1002,Baker,987-65-4321
+",
+        )
+        .unwrap();
+        let m = ColumnMap {
+            partner: Some("Preparer".into()),
+            ..map(&[])
+        };
+        let e = import_csv(cab.path(), &csv, &m, &Default::default()).unwrap_err();
+        assert!(e.contains("holds taxpayer IDs"), "{e}");
     }
 
     fn rel(p: &str, c: &str, role: &str) -> relationships::Relationship {

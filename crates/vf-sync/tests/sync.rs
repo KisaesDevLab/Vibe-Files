@@ -59,6 +59,7 @@ fn pc_a(t: &Path, store: Arc<dyn ObjectStore>) -> Pc {
                 ext_id: id.into(),
                 name: name.into(),
                 entity_type: None,
+                partner: String::new(),
             },
         )
         .unwrap();

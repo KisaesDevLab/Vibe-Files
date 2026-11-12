@@ -97,6 +97,7 @@ Two-column card grid. A full-width amber banner at top when any inbox is on a di
 
 860px. Title `Map CSV columns` · subtitle path · rows · columns · "header row detected".
 Left: Required mapping — Client ID dropdown with `1,284 unique` ok pill; Client name dropdown with `3 blank → skipped` warn pill.
+Optional — Partner dropdown (`(none)` or any column, e.g. Preparer): its values become `{Partner}` whatever the header (V35); Setup's Columns line then shows `Partner → Preparer`.
 "Keep as template tokens" checkboxes per remaining column with `→ {Token}` preview; note about token naming.
 Right: first 10 rows table; mapped ID column tinted, name column tinted, token columns tinted; a blank-ID row tinted red.
 Footer: "Mapping is saved; later edits to the CSV re-import silently on launch." · Cancel · primary `Import N clients`.

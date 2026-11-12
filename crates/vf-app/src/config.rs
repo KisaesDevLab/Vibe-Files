@@ -355,12 +355,56 @@ pub struct Prefs {
     /// Sections of Browse's left pane folded shut ("views", "favorites", "saved").
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub folded: Vec<String>,
-    /// Browse's tree shows only this partner's clients (`""`: clients with no partner).
+    /// Browse shows only this partner's clients and their documents in the Views (`""`:
+    /// clients with no partner): the Windows user's choice while Vibe Files runs (see
+    /// [`Prefs::for_user`]); never saved (a file from before 0.1.21 may hold a PC-wide one,
+    /// which is dropped).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub partner: Option<String>,
+    /// Each Windows user's partner choice (owner 2026-11-12: kept per user, several people on
+    /// one Remote Desktop server); absent = all partners.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub partner_by_user: std::collections::BTreeMap<String, String>,
 }
 
 pub const RECENT_MAX: usize = 50;
+
+#[cfg(test)]
+mod partner_tests {
+    use super::Prefs;
+
+    /// Each Windows user's Partner choice comes back for them only (owner 2026-11-12).
+    #[test]
+    fn the_partner_choice_is_each_windows_users() {
+        // An older file's PC-wide choice is dropped: everyone starts with all partners.
+        let file = Prefs {
+            partner: Some("KW".into()),
+            ..Default::default()
+        };
+        let mut ann = file.clone().for_user("ann");
+        assert_eq!(ann.partner, None);
+        ann.partner = Some("JD".into());
+        ann.store_user("ann");
+        assert_eq!(ann.partner, None, "not saved PC-wide");
+        // bob picks No partner; ann keeps hers.
+        let mut bob = ann.clone().for_user("bob");
+        assert_eq!(bob.partner, None);
+        bob.partner = Some(String::new());
+        bob.store_user("bob");
+        assert_eq!(bob.clone().for_user("bob").partner.as_deref(), Some(""));
+        assert_eq!(bob.clone().for_user("ann").partner.as_deref(), Some("JD"));
+        // Survives the settings file.
+        let toml = toml::to_string(&bob).unwrap();
+        let back: Prefs = toml::from_str(&toml).unwrap();
+        assert_eq!(back.clone().for_user("ann").partner.as_deref(), Some("JD"));
+        // ann goes back to All partners.
+        let mut ann = back.for_user("ann");
+        ann.partner = None;
+        ann.store_user("ann");
+        assert_eq!(ann.clone().for_user("ann").partner, None);
+        assert_eq!(ann.for_user("bob").partner.as_deref(), Some(""));
+    }
+}
 
 /// A place in the Browse tree. `client` is the client uuid.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -385,6 +429,24 @@ pub enum Favorite {
 }
 
 impl Prefs {
+    /// The prefs as `user` sees them: their own partner choice (none: all partners).
+    pub fn for_user(mut self, user: &str) -> Self {
+        self.partner = self.partner_by_user.get(user).cloned();
+        self
+    }
+
+    /// Keeps the partner choice as `user`'s, for saving.
+    pub fn store_user(&mut self, user: &str) {
+        match self.partner.take() {
+            Some(p) => {
+                self.partner_by_user.insert(user.to_string(), p);
+            }
+            None => {
+                self.partner_by_user.remove(user);
+            }
+        }
+    }
+
     /// Puts `ids` at the front of Recent (newest first, no repeats, capped).
     pub fn touch(&mut self, ids: &[String]) {
         self.recent.retain(|r| !ids.contains(r));

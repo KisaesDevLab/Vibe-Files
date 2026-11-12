@@ -112,6 +112,26 @@ pub struct Window {
     pub ids: BTreeSet<String>,
     /// "Received this week" counts from this time.
     pub since: String,
+    /// The cabinet-wide views' pages and counts hold only this partner's clients' documents
+    /// (`""`: clients with no partner); `None`: all (owner 2026-11-12).
+    pub partner: Option<String>,
+}
+
+/// SQL over `d` keeping the documents of `partner`'s clients (any case; `""`: clients with no
+/// partner). The name is written into the SQL as a quoted literal (`'` doubled).
+fn partner_cond(partner: &str) -> String {
+    let p = partner.trim();
+    if p.is_empty() {
+        "d.client_id IN (SELECT id FROM client WHERE deleted_at IS NULL \
+         AND (partner IS NULL OR trim(partner) = ''))"
+            .into()
+    } else {
+        format!(
+            "d.client_id IN (SELECT id FROM client WHERE deleted_at IS NULL \
+             AND lower(trim(partner)) = lower('{}'))",
+            p.replace('\'', "''")
+        )
+    }
 }
 
 /// What a windowed snapshot knows beyond its documents.
@@ -248,9 +268,13 @@ pub fn load_window_reusing(
                 (None, n) => win.unassigned = n,
             }
         }
-        win.needs_doc_type = count(page_cond(&PageKind::NeedsDocType).0, &[])?;
-        win.needs_tax_year = count(page_cond(&PageKind::NeedsTaxYear).0, &[])?;
-        win.received = count("d.filed_at >= ?1", &[&w.since])?;
+        let only = |cond: &str| match &w.partner {
+            Some(p) => format!("({cond}) AND {}", partner_cond(p)),
+            None => cond.to_string(),
+        };
+        win.needs_doc_type = count(&only(page_cond(&PageKind::NeedsDocType).0), &[])?;
+        win.needs_tax_year = count(&only(page_cond(&PageKind::NeedsTaxYear).0), &[])?;
+        win.received = count(&only("d.filed_at >= ?1"), &[&w.since])?;
     }
 
     let mut docs: BTreeMap<String, DocRow> = BTreeMap::new();
@@ -283,7 +307,13 @@ pub fn load_window_reusing(
             .replace('%', "\\%")
             .replace('_', "\\_");
         let needle = format!("%{typed}%");
-        let cond = format!("({cond}) AND lower(d.rel_path) LIKE ?1 ESCAPE '\\'");
+        let mut cond = format!("({cond}) AND lower(d.rel_path) LIKE ?1 ESCAPE '\\'");
+        // The views (not the whole cabinet or Unassigned) keep to the partner's clients.
+        if let Some(p) = &w.partner
+            && !matches!(kind, PageKind::Cabinet | PageKind::Unassigned)
+        {
+            cond = format!("{cond} AND {}", partner_cond(p));
+        }
         let extra = extra.unwrap_or_default();
         let p: [&dyn rusqlite::ToSql; 2] = [&needle, &extra];
         let used: &[&dyn rusqlite::ToSql] = if cond.contains("?2") { &p } else { &p[..1] };
@@ -320,6 +350,11 @@ pub fn load(conn: &Connection) -> Result<Snapshot> {
     let mut s = load_base(conn)?;
     s.docs = docs_where(conn, "1", &[], "ORDER BY d.rel_path")?;
     Ok(s)
+}
+
+/// The partners clients have (see [`Snapshot::partners`]), without reading documents.
+pub fn client_partners(conn: &Connection) -> Result<Vec<String>> {
+    Ok(load_base(conn)?.partners())
 }
 
 /// Everything but the documents.

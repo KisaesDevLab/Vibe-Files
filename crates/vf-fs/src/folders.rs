@@ -517,6 +517,7 @@ mod tests {
             ext_id: "SMIT1001".into(),
             name: "Smith, Pat".into(),
             entity_type: None,
+            partner: String::new(),
         };
         let p = newclient::plan(&conn, &root, &req).unwrap();
         newclient::create(&mut conn, &root, &p, "dev").unwrap();

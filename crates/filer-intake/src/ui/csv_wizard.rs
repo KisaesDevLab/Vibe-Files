@@ -1,4 +1,5 @@
-//! CSV import wizard: pick the ID and name columns and which extra columns become template tokens,
+//! CSV import wizard: pick the ID and name columns, optionally the Partner column, and which extra
+//! columns become template tokens,
 //! with a preview of the first rows. Reading the file and the import itself run on worker threads;
 //! the wizard stays open until the import is saved, so a failure keeps the user's choices.
 
@@ -326,6 +327,20 @@ fn mapping_ui(ui: &mut egui::Ui, table: &CsvTable, map: &mut ColumnMap, stats: O
             ui.end_row();
         });
     ui.add_space(8.0);
+    label_caps(ui, "Optional");
+    egui::Grid::new("csv_optional")
+        .num_columns(2)
+        .spacing([12.0, 8.0])
+        .show(ui, |ui| {
+            let l = ui.label("Partner");
+            optional_combo(ui, "csv_partner_col", &table.headers, &mut map.partner, l.id)
+                .on_hover_text(format!(
+                    "The partner (or preparer) of each client, whatever the column is called; it becomes {{{}}}.",
+                    clients::PARTNER_TOKEN
+                ));
+            ui.end_row();
+        });
+    ui.add_space(8.0);
     label_caps(ui, "Keep as template tokens");
     egui::ScrollArea::vertical()
         .id_salt("csv_extras")
@@ -437,7 +452,10 @@ fn preview_or_duplicates(
                         egui::Sense::hover(),
                     );
                     let painter = ui.painter_at(rect);
-                    let mapped = |c: usize| Some(c) == id_col || Some(c) == name_col;
+                    let partner_col = col_of(&map.partner);
+                    let mapped = |c: usize| {
+                        Some(c) == id_col || Some(c) == name_col || Some(c) == partner_col
+                    };
                     let token = |c: usize| map.extras.contains(&table.headers[c]);
                     let mut x = rect.left();
                     for (c, w) in widths.iter().enumerate() {
@@ -545,6 +563,27 @@ fn column_combo(
         .labelled_by(label);
 }
 
+/// A column, or none ("(none)").
+fn optional_combo(
+    ui: &mut egui::Ui,
+    salt: &str,
+    headers: &[String],
+    value: &mut Option<String>,
+    label: egui::Id,
+) -> egui::Response {
+    egui::ComboBox::from_id_salt(salt)
+        .width(150.0)
+        .selected_text(value.as_deref().unwrap_or("(none)"))
+        .show_ui(ui, |ui| {
+            ui.selectable_value(value, None, "(none)");
+            for h in headers.iter().filter(|h| !h.is_empty()) {
+                ui.selectable_value(value, Some(h.clone()), h);
+            }
+        })
+        .response
+        .labelled_by(label)
+}
+
 /// Saved columns when they still exist; otherwise a guess from common header names.
 fn initial_map(headers: &[String], saved: &ColumnMap) -> ColumnMap {
     let has = |h: &String| headers.contains(h);
@@ -571,6 +610,7 @@ fn initial_map(headers: &[String], saved: &ColumnMap) -> ColumnMap {
             .filter(has)
             .or_else(|| guess(&["name", "client name", "clientname", "client_name", "client"])),
         extras: saved.extras.iter().filter(|h| has(h)).cloned().collect(),
+        partner: saved.partner.clone().filter(has),
     }
 }
 
@@ -591,6 +631,7 @@ mod tests {
         assert!(guessed.extras.is_empty());
 
         let saved = ColumnMap {
+            partner: None,
             id: Some("Client ID".into()),
             name: Some("Partner".into()),
             extras: vec!["Partner".into(), "Gone".into()],
@@ -604,6 +645,7 @@ mod tests {
     fn extra_survives_being_picked_as_id_briefly() {
         let h = headers(&["Client ID", "Client Name", "Partner", "Type"]);
         let mut map = ColumnMap {
+            partner: None,
             id: Some("Client ID".into()),
             name: Some("Client Name".into()),
             extras: vec!["Partner".into()],
