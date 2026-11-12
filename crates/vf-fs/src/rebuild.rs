@@ -59,14 +59,48 @@ type Waiting = (PathBuf, Option<String>, Option<(u64, i64)>, Option<String>);
 /// One file read: its place in the list, and its SHA-256 and size (`None`: unreadable).
 type Read = (usize, Option<(String, u64)>);
 
+/// Network reads at once (folder listings, file details, sentinels, file contents): a share
+/// answers each slowly, so many at a time go much faster (owner 2026-11-12: a folder import of
+/// ~486,000 files on ~3,300 folders).
+pub const READERS: usize = 12;
+
+/// `f` over `items` on up to [`READERS`] threads; the results in the items' order.
+pub(crate) fn par_map<T: Sync, R: Send>(items: &[T], f: impl Fn(&T) -> R + Sync) -> Vec<R> {
+    use std::sync::atomic::Ordering;
+    let threads = READERS.min(items.len());
+    if threads <= 1 {
+        return items.iter().map(&f).collect();
+    }
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let mut parts: Vec<Vec<(usize, R)>> = std::thread::scope(|s| {
+        let handles: Vec<_> = (0..threads)
+            .map(|_| {
+                s.spawn(|| {
+                    let mut got = Vec::new();
+                    loop {
+                        let i = next.fetch_add(1, Ordering::Relaxed);
+                        let Some(t) = items.get(i) else { break };
+                        got.push((i, f(t)));
+                    }
+                    got
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|h| h.join().expect("a reader thread"))
+            .collect()
+    });
+    let mut all: Vec<(usize, R)> = parts.drain(..).flatten().collect();
+    all.sort_by_key(|(i, _)| *i);
+    all.into_iter().map(|(_, r)| r).collect()
+}
+
 /// Reads (SHA-256 and size) every file of `todo` on up to 8 threads, in order; a file that
 /// cannot be read is `None`. Counts into [`PROGRESS`].
 pub(crate) fn read_all(todo: &[PathBuf]) -> Vec<Option<(String, u64)>> {
     use std::sync::atomic::Ordering;
-    let threads = std::thread::available_parallelism()
-        .map_or(4, |n| n.get())
-        .clamp(2, 8)
-        .min(todo.len().max(1));
+    let threads = READERS.min(todo.len().max(1));
     let next = std::sync::atomic::AtomicUsize::new(0);
     let mut out: Vec<Option<(String, u64)>> = vec![None; todo.len()];
     let parts: Vec<Vec<Read>> = std::thread::scope(|s| {
@@ -281,9 +315,24 @@ pub(crate) fn known_files(conn: &Connection) -> Result<Known, RebuildError> {
     known_files_in(conn, None)
 }
 
+/// Folders per scoped query: one `OR` term each, and SQLite refuses an expression deeper than
+/// 1,000 (owner 2026-11-12: a folder import batch of 500 folders, renamed, failed with
+/// "Expression tree is too large").
+const SCOPE_CHUNK: usize = 200;
+
+/// The scoped queries' folder lists: `[None]` for the whole cabinet, else `only` in chunks of
+/// [`SCOPE_CHUNK`] (an empty `only` gives one empty chunk: nothing in scope).
+fn scope_chunks(only: Option<&[String]>) -> Vec<Option<&[String]>> {
+    match only {
+        None => vec![None],
+        Some([]) => vec![Some(&[][..])],
+        Some(o) => o.chunks(SCOPE_CHUNK).map(Some).collect(),
+    }
+}
+
 /// SQL limiting `rel_path` to the folders `only` (index ranges: `f/` up to `f0`), and its
 /// parameters; nothing for a whole-cabinet rebuild. A re-read of one client folder no longer
-/// reads all ~900K rows (QA).
+/// reads all ~900K rows (QA). Callers pass at most [`SCOPE_CHUNK`] folders ([`scope_chunks`]).
 fn scope_sql(only: Option<&[String]>) -> (String, Vec<String>) {
     let Some(only) = only else {
         return (String::new(), vec![]);
@@ -306,16 +355,18 @@ fn scope_sql(only: Option<&[String]>) -> (String, Vec<String>) {
 }
 
 fn known_files_in(conn: &Connection, only: Option<&[String]>) -> Result<Known, RebuildError> {
-    let (wh, params) = scope_sql(only);
-    let mut st = conn.prepare(&format!(
-        "SELECT rel_path, hash, size, file_mtime FROM document WHERE deleted_at IS NULL{wh}"
-    ))?;
     let mut out = HashMap::new();
-    for r in st.query_map(vf_core::db::params_from_iter(params.iter()), |r| {
-        Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
-    })? {
-        let (p, h, s, t): (String, String, i64, Option<i64>) = r?;
-        out.insert(p, (h, s, t));
+    for chunk in scope_chunks(only) {
+        let (wh, params) = scope_sql(chunk);
+        let mut st = conn.prepare(&format!(
+            "SELECT rel_path, hash, size, file_mtime FROM document WHERE deleted_at IS NULL{wh}"
+        ))?;
+        for r in st.query_map(vf_core::db::params_from_iter(params.iter()), |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+        })? {
+            let (p, h, s, t): (String, String, i64, Option<i64>) = r?;
+            out.insert(p, (h, s, t));
+        }
     }
     Ok(out)
 }
@@ -441,17 +492,30 @@ pub(crate) fn scan_folders(
     let mut folders = Vec::with_capacity(tops.len());
     let mut seen_clients: HashSet<String> = HashSet::new();
     let mut seen_ext: HashSet<String> = HashSet::new();
-    for folder in tops {
+    // Each folder's sentinel and its hash, read [`READERS`] at a time (thousands of folders on
+    // a share); then taken in order as before.
+    let read = par_map(&tops, |folder| {
+        let s = sentinel::read_sentinel(folder);
+        let h = match &s {
+            Ok(Some(_)) => {
+                Some(sha256_file(&sentinel::sentinel_path(folder)).map_err(|e| e.to_string()))
+            }
+            _ => None,
+        };
+        (s, h)
+    });
+    for (folder, (sentinel_read, hash)) in tops.into_iter().zip(read) {
         let folder_rel = rel(root, &folder);
-        let client_id = match sentinel::read_sentinel(&folder) {
+        let client_id = match sentinel_read {
             Ok(Some(s)) => {
                 let id = s.client_id.to_string();
                 if !seen_clients.insert(id.clone()) || !seen_ext.insert(s.tax_software_id.clone()) {
                     rep.duplicate_folders.push(folder_rel);
                     None
                 } else {
-                    let sentinel_hash = sha256_file(&sentinel::sentinel_path(&folder))
-                        .map_err(|e| RebuildError::Io(e.to_string()))?;
+                    let sentinel_hash = hash
+                        .unwrap_or_else(|| Err("sentinel not read".into()))
+                        .map_err(RebuildError::Io)?;
                     bound.push(Bound {
                         id: id.clone(),
                         ext_id: s.tax_software_id,
@@ -815,21 +879,25 @@ fn rebuild_scoped(
     // folder or a network blip must not tombstone them; review of PA-34).
     let mut unread_dirs: Vec<String> = Vec::new();
     let mut unread_files: HashSet<String> = HashSet::new();
-    for (folder, client_id) in &folders {
+    // Each folder listed [`READERS`] at a time; taken in order.
+    let listed_dirs = par_map(&folders, |(folder, _)| {
         let mut paths = Vec::new();
         let mut bad = Vec::new();
         files_under_lenient(folder, &mut paths, &mut bad);
+        PROGRESS.folders.fetch_add(1, Ordering::Relaxed);
+        PROGRESS.found.fetch_add(paths.len(), Ordering::Relaxed);
+        (paths, bad)
+    });
+    for ((_, client_id), (paths, bad)) in folders.iter().zip(listed_dirs) {
         for (d, why) in bad {
             unread_dirs.push(rel(root, &d));
             rep.unreadable.push(why);
         }
         todo.extend(paths.into_iter().map(|p| (p, client_id.clone())));
-        PROGRESS.folders.fetch_add(1, Ordering::Relaxed);
-        PROGRESS.found.store(todo.len(), Ordering::Relaxed);
     }
-    // Size, time and attributes in one call per file (nothing opened, PA-39).
-    let stats3: Vec<Option<(u64, i64, u32)>> =
-        todo.iter().map(|(p, _)| crate::cloud::stat(p)).collect();
+    PROGRESS.found.store(todo.len(), Ordering::Relaxed);
+    // Size, time and attributes in one call per file (nothing opened, PA-39), several at once.
+    let stats3: Vec<Option<(u64, i64, u32)>> = par_map(&todo, |(p, _)| crate::cloud::stat(p));
     let attrs: Vec<u32> = stats3.iter().map(|s| s.map_or(0, |s| s.2)).collect();
     let stats: Vec<Option<(u64, i64)>> = stats3.iter().map(|s| s.map(|(a, b, _)| (a, b))).collect();
     // Every path found, to tell a file gone from one only left unread (PA-39).
@@ -987,8 +1055,8 @@ fn rebuild_scoped(
     // Each row's updated_at as read: a change made by someone else while this runs (a move, a
     // restore, an edit) wins; this rebuild's update of that row then does nothing (QA).
     let mut stamp: HashMap<String, String> = HashMap::new();
-    {
-        let (wh, params) = scope_sql(only);
+    for chunk in scope_chunks(only) {
+        let (wh, params) = scope_sql(chunk);
         let mut st = conn.prepare(&format!(
             "SELECT rel_path, id, hash, client_id, updated_at FROM document
              WHERE deleted_at IS NULL{wh}"
@@ -1521,6 +1589,40 @@ mod tests {
     use vf_core::db::Storage;
 
     use super::*;
+
+    /// A scope of more folders than one query takes (owner 2026-11-12: 500 folders renamed,
+    /// "Expression tree is too large"): read in chunks, every folder's rows found.
+    #[test]
+    fn a_scope_of_many_folders_is_read_in_chunks() {
+        let t = tempfile::tempdir().unwrap();
+        let conn = vf_core::db::open(&t.path().join("c.db"), vf_core::db::Storage::Local).unwrap();
+        conn.execute(
+            "INSERT INTO document (id, rel_path, hash, size, filed_at, device_id, updated_at)
+             VALUES ('d1', 'F1100/x.pdf', 'h', 1, 't', 'd', 't')",
+            [],
+        )
+        .unwrap();
+        let only: Vec<String> = (0..1200).map(|i| format!("F{i}")).collect();
+        assert_eq!(scope_chunks(Some(&only)).len(), 6);
+        let known = known_files_in(&conn, Some(&only)).unwrap();
+        assert!(known.contains_key("F1100/x.pdf"));
+        assert!(known_files_in(&conn, Some(&[])).unwrap().is_empty());
+    }
+
+    /// Several readers, the results still in the items' order (PA-55).
+    #[test]
+    fn par_map_keeps_the_order() {
+        let items: Vec<usize> = (0..1000).collect();
+        let got = par_map(&items, |i| {
+            if i % 7 == 0 {
+                std::thread::sleep(std::time::Duration::from_micros(50));
+            }
+            i * 2
+        });
+        assert_eq!(got, items.iter().map(|i| i * 2).collect::<Vec<_>>());
+        assert_eq!(par_map(&[3usize], |i| i + 1), [4]);
+        assert!(par_map(&Vec::<usize>::new(), |i| *i).is_empty());
+    }
     use crate::cabinet::CabinetFile;
 
     struct Cab {

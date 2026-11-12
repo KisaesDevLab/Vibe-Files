@@ -396,6 +396,13 @@ pub struct Prefs {
     /// one Remote Desktop server); absent = all partners.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub partner_by_user: std::collections::BTreeMap<String, String>,
+    /// Browse's columns hidden (keys, e.g. `hash`): the Windows user's choice while Vibe Files
+    /// runs (owner 2026-11-12); never saved PC-wide.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hidden_columns: Vec<String>,
+    /// Each Windows user's hidden columns.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub hidden_columns_by_user: std::collections::BTreeMap<String, Vec<String>>,
 }
 
 pub const RECENT_MAX: usize = 50;
@@ -433,7 +440,14 @@ mod partner_tests {
         ann.partner = None;
         ann.store_user("ann");
         assert_eq!(ann.clone().for_user("ann").partner, None);
-        assert_eq!(ann.for_user("bob").partner.as_deref(), Some(""));
+        assert_eq!(ann.clone().for_user("bob").partner.as_deref(), Some(""));
+        // Hidden columns too (owner 2026-11-12).
+        let mut a = ann.clone().for_user("ann");
+        a.hidden_columns = vec!["hash".into()];
+        a.store_user("ann");
+        assert!(a.hidden_columns.is_empty(), "not saved PC-wide");
+        assert_eq!(a.clone().for_user("ann").hidden_columns, ["hash"]);
+        assert!(a.for_user("bob").hidden_columns.is_empty());
     }
 }
 
@@ -463,11 +477,22 @@ impl Prefs {
     /// The prefs as `user` sees them: their own partner choice (none: all partners).
     pub fn for_user(mut self, user: &str) -> Self {
         self.partner = self.partner_by_user.get(user).cloned();
+        self.hidden_columns = self
+            .hidden_columns_by_user
+            .get(user)
+            .cloned()
+            .unwrap_or_default();
         self
     }
 
     /// Keeps the partner choice as `user`'s, for saving.
     pub fn store_user(&mut self, user: &str) {
+        let hidden = std::mem::take(&mut self.hidden_columns);
+        if hidden.is_empty() {
+            self.hidden_columns_by_user.remove(user);
+        } else {
+            self.hidden_columns_by_user.insert(user.to_string(), hidden);
+        }
         match self.partner.take() {
             Some(p) => {
                 self.partner_by_user.insert(user.to_string(), p);
@@ -572,9 +597,36 @@ pub fn load(data: &Path) -> Result<Config> {
 
 /// Writes `config.toml` through a temp file so a crash never leaves it half-written.
 pub fn save(data: &Path, c: &Config) -> Result<()> {
+    // Several people on one server share this file: the other users' own choices are taken
+    // as the file has them now, this user's from `c` (QA 2026-11-12: any save, not only
+    // Browse's, wrote back what this process last read).
+    let mut c = c.clone();
+    // Read as it is, never through `load` (which saves a first file itself).
+    let on_disk = std::fs::read_to_string(data.join(CONFIG_FILE))
+        .ok()
+        .and_then(|t| toml::from_str::<Config>(&t).ok());
+    if let Some(on_disk) = on_disk {
+        let me = windows_user();
+        let keep = |mine: &mut std::collections::BTreeMap<String, String>,
+                    theirs: std::collections::BTreeMap<String, String>| {
+            let own = mine.remove(&me);
+            *mine = theirs;
+            mine.remove(&me);
+            if let Some(v) = own {
+                mine.insert(me.clone(), v);
+            }
+        };
+        keep(&mut c.prefs.partner_by_user, on_disk.prefs.partner_by_user);
+        let own = c.prefs.hidden_columns_by_user.remove(&me);
+        c.prefs.hidden_columns_by_user = on_disk.prefs.hidden_columns_by_user;
+        c.prefs.hidden_columns_by_user.remove(&me);
+        if let Some(v) = own {
+            c.prefs.hidden_columns_by_user.insert(me.clone(), v);
+        }
+    }
     vf_fs::cabinet::write_replace(
         &data.join(CONFIG_FILE),
-        toml::to_string(c).expect("serializes").as_bytes(),
+        toml::to_string(&c).expect("serializes").as_bytes(),
     )
     .map_err(anyhow::Error::msg)
 }
@@ -613,6 +665,48 @@ mod tests {
         assert_eq!(firm_cabinet(t.path()), None);
         std::fs::write(&f, "cabinet = S:\\Documents\n").unwrap();
         assert_eq!(firm_cabinet(t.path()), None, "not TOML");
+    }
+
+    /// Any save keeps the other Windows users' partner and column choices as the file has
+    /// them (QA 2026-11-12: a shared server's config.toml); this user's come from memory.
+    #[test]
+    fn a_save_keeps_the_other_users_choices() {
+        let t = tempfile::tempdir().unwrap();
+        let me = windows_user();
+        let mut first = load(t.path()).unwrap();
+        first
+            .prefs
+            .partner_by_user
+            .insert("bob-other".into(), "KW".into());
+        first
+            .prefs
+            .hidden_columns_by_user
+            .insert("bob-other".into(), vec!["hash".into()]);
+        // Written by bob's own Vibe Files (a save here keeps only this user's entry).
+        std::fs::write(t.path().join(CONFIG_FILE), toml::to_string(&first).unwrap()).unwrap();
+        // This process read the file before bob chose: its config has no bob, and its own.
+        let mut mine = load(t.path()).unwrap();
+        mine.prefs.partner_by_user.clear();
+        mine.prefs.hidden_columns_by_user.clear();
+        mine.prefs.partner_by_user.insert(me.clone(), "AB".into());
+        mine.prefs
+            .hidden_columns_by_user
+            .insert(me.clone(), vec!["size".into()]);
+        save(t.path(), &mine).unwrap();
+        let back = load(t.path()).unwrap();
+        assert_eq!(
+            back.prefs
+                .partner_by_user
+                .get("bob-other")
+                .map(String::as_str),
+            Some("KW")
+        );
+        assert_eq!(
+            back.prefs.partner_by_user.get(&me).map(String::as_str),
+            Some("AB")
+        );
+        assert_eq!(back.prefs.hidden_columns_by_user["bob-other"], ["hash"]);
+        assert_eq!(back.prefs.hidden_columns_by_user[&me], ["size"]);
     }
 
     /// QA A2: a config.toml that cannot be read is never saved over; the device id stays.

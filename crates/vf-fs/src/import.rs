@@ -1127,7 +1127,7 @@ pub fn load_last(root: &Path) -> Option<Applied> {
 }
 
 /// Folders per batch of an import (PA-34).
-pub const BATCH: usize = 500;
+pub const BATCH: usize = 250;
 
 /// Applies `plan`: binds the included folders, catalogs, sets doc types and years, queues OCR.
 pub fn apply(
@@ -1264,6 +1264,14 @@ pub fn apply_with(
     progress_total.store(work.len(), std::sync::atomic::Ordering::Relaxed);
     let mut taken: HashSet<String> = plan.folders.iter().map(|r| r.rel.to_lowercase()).collect();
     for batch in work.chunks(BATCH) {
+        // The batch's file counts start again (the page shows them, owner 2026-11-12).
+        for c in [
+            &rebuild::PROGRESS.folders,
+            &rebuild::PROGRESS.found,
+            &rebuild::PROGRESS.read,
+        ] {
+            c.store(0, std::sync::atomic::Ordering::Relaxed);
+        }
         // Bind the batch's chosen folders (and rename them, when asked).
         let mut new_rel: HashMap<usize, String> = HashMap::new();
         let mut tx = Transaction::new(LABEL);

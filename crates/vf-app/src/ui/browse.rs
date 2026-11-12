@@ -62,6 +62,76 @@ impl SortCol {
         (SortCol::FiledBy, "Filed by"),
         (SortCol::Hash, "Hash"),
     ];
+
+    /// The column's key in the prefs (hidden columns, owner 2026-11-12).
+    fn key(self) -> &'static str {
+        match self {
+            SortCol::Name => "name",
+            SortCol::Client => "client",
+            SortCol::DocType => "doc_type",
+            SortCol::Year => "year",
+            SortCol::Status => "status",
+            SortCol::Size => "size",
+            SortCol::Modified => "modified",
+            SortCol::FiledBy => "filed_by",
+            SortCol::Hash => "hash",
+        }
+    }
+
+    /// Its width (the last column shown takes what is left).
+    fn column(self) -> Column {
+        match self {
+            SortCol::Name => Column::initial(260.0)
+                .at_least(160.0)
+                .clip(true)
+                .resizable(true),
+            SortCol::Client => Column::initial(140.0).clip(true).resizable(true),
+            SortCol::DocType => Column::initial(120.0).clip(true).resizable(true),
+            SortCol::Year => Column::exact(80.0),
+            SortCol::Status => Column::exact(90.0),
+            SortCol::Size => Column::exact(72.0),
+            SortCol::Modified => Column::exact(120.0),
+            SortCol::FiledBy => Column::initial(90.0).clip(true),
+            SortCol::Hash => Column::remainder().at_least(80.0),
+        }
+    }
+}
+
+/// The columns shown: every one but those hidden (Name always).
+fn shown_columns(b: &Browse) -> Vec<(SortCol, &'static str)> {
+    SortCol::ALL
+        .into_iter()
+        .filter(|(c, _)| {
+            *c == SortCol::Name || !b.prefs.hidden_columns.iter().any(|k| k == c.key())
+        })
+        .collect()
+}
+
+/// Ticks for the columns (all but Name): right-click a heading, or the Columns menu.
+fn columns_menu(ui: &mut egui::Ui, b: &mut Browse) {
+    ui.label(widgets::caption("Columns shown"));
+    for (c, name) in SortCol::ALL {
+        if c == SortCol::Name {
+            continue;
+        }
+        let mut on = !b.prefs.hidden_columns.iter().any(|k| k == c.key());
+        if ui.checkbox(&mut on, name).changed() {
+            if on {
+                b.prefs.hidden_columns.retain(|k| k != c.key());
+            } else {
+                b.prefs.hidden_columns.push(c.key().to_string());
+                // Sorted by it: by Name instead (an unseen order with no arrow, QA).
+                if b.sort.0 == c {
+                    b.sort_by(SortCol::Name);
+                }
+            }
+            b.prefs_dirty = true;
+        }
+    }
+    if !b.prefs.hidden_columns.is_empty() && ui.button("Show all").clicked() {
+        b.prefs.hidden_columns.clear();
+        b.prefs_dirty = true;
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -3065,6 +3135,15 @@ fn grid(ui: &mut egui::Ui, b: &mut Browse, conn: &Connection) {
             b.scan_request = true;
         }
         sync_menu(ui, b);
+        // Open until a click outside: several columns ticked at once.
+        egui::containers::menu::MenuButton::new("Columns…")
+            .config(
+                egui::containers::menu::MenuConfig::new()
+                    .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside),
+            )
+            .ui(ui, |ui| columns_menu(ui, b))
+            .0
+            .on_hover_text("Choose the columns shown (also: right-click a column heading)");
         ui.separator();
         if ui
             .add_enabled(
@@ -3251,39 +3330,38 @@ fn grid(ui: &mut egui::Ui, b: &mut Browse, conn: &Connection) {
         // Shown, not only on hover: columns past the edge are not missed.
         .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded)
         .show(ui, |ui| {
+            // The columns the person chose (owner 2026-11-12); the last one takes what is left.
+            let cols = shown_columns(b);
             let mut table = TableBuilder::new(ui)
                 .striped(false)
                 .sense(Sense::click_and_drag())
                 .cell_layout(Layout::left_to_right(Align::Center))
-                .column(Column::exact(24.0))
-                .column(
-                    Column::initial(260.0)
-                        .at_least(160.0)
-                        .clip(true)
-                        .resizable(true),
-                )
-                .column(Column::initial(140.0).clip(true).resizable(true))
-                .column(Column::initial(120.0).clip(true).resizable(true))
-                .column(Column::exact(80.0))
-                .column(Column::exact(90.0))
-                .column(Column::exact(72.0))
-                .column(Column::exact(120.0))
-                .column(Column::initial(90.0).clip(true))
-                .column(Column::remainder().at_least(80.0));
+                .column(Column::exact(24.0));
+            for (i, (c, _)) in cols.iter().enumerate() {
+                table = table.column(if i + 1 == cols.len() && *c != SortCol::Name {
+                    Column::remainder().at_least(80.0).clip(true)
+                } else {
+                    c.column()
+                });
+            }
             if let Some(r) = b.scroll_to.take() {
                 table = table.scroll_to_row(r, None);
             }
             table
                 .header(28.0, |mut h| {
                     h.col(|_| {});
-                    for (col, name) in SortCol::ALL {
+                    for (col, name) in cols.iter().copied() {
                         h.col(|ui| {
                             let t = RichText::new(name.to_uppercase())
                                 .small()
                                 .color(theme::ink_muted());
-                            if ui.add(egui::Button::new(t).frame(false)).clicked() {
+                            let r = ui.add(egui::Button::new(t).frame(false));
+                            if r.clicked() {
                                 sort = Some(col);
                             }
+                            egui::Popup::context_menu(&r)
+                                .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+                                .show(|ui| columns_menu(ui, b));
                             if b.sort.0 == col {
                                 sort_arrow(ui, b.sort.1);
                             }
@@ -3312,59 +3390,63 @@ fn grid(ui: &mut egui::Ui, b: &mut Browse, conn: &Connection) {
                                 toggled = Some(pos);
                             }
                         });
-                        row.col(|ui| {
-                            // The name in the normal text color (black / white), semibold; only the
-                            // pill is colored (owner 2026-11-04).
-                            ui.label(
-                                RichText::new(d.name())
-                                    .family(theme::mono_semibold(ui))
-                                    .color(theme::ink()),
-                            );
-                            if let Some(u) = &d.locked_by {
-                                widgets::lock_pill(ui, u);
-                            }
-                            if d.doc_type.is_none() {
-                                widgets::pill(
-                                    ui,
-                                    "Needs doc type",
-                                    widgets::rgb(0xFBEFD5),
-                                    widgets::rgb(0x7A4F07),
-                                );
-                            }
-                        });
-                        row.col(|ui| {
-                            let name = d
-                                .client_id
-                                .as_deref()
-                                .and_then(|id| client_names.get(id))
-                                .map_or("—", |n| n.as_str());
-                            ui.label(name);
-                        });
-                        row.col(|ui| {
-                            ui.label(d.doc_type.as_deref().unwrap_or("—"));
-                        });
-                        row.col(|ui| {
-                            ui.label(year_label(d.tax_year));
-                        });
-                        row.col(|ui| {
-                            widgets::status_pill(ui, &d.status);
-                        });
-                        row.col(|ui| {
-                            ui.label(RichText::new(widgets::size(d.size)).monospace());
-                        });
-                        row.col(|ui| {
-                            ui.label(widgets::local_time(&d.updated_at));
-                        });
-                        row.col(|ui| {
-                            ui.label(d.filed_by.as_deref().unwrap_or("—"));
-                        });
-                        row.col(|ui| {
-                            ui.label(
-                                RichText::new(&d.hash[..d.hash.len().min(8)])
-                                    .monospace()
-                                    .color(theme::ink_muted()),
-                            );
-                        });
+                        for (col, _) in cols.iter().copied() {
+                            row.col(|ui| match col {
+                                SortCol::Name => {
+                                    // The name in the normal text color (black / white),
+                                    // semibold; only the pill is colored (owner 2026-11-04).
+                                    ui.label(
+                                        RichText::new(d.name())
+                                            .family(theme::mono_semibold(ui))
+                                            .color(theme::ink()),
+                                    );
+                                    if let Some(u) = &d.locked_by {
+                                        widgets::lock_pill(ui, u);
+                                    }
+                                    if d.doc_type.is_none() {
+                                        widgets::pill(
+                                            ui,
+                                            "Needs doc type",
+                                            widgets::rgb(0xFBEFD5),
+                                            widgets::rgb(0x7A4F07),
+                                        );
+                                    }
+                                }
+                                SortCol::Client => {
+                                    let name = d
+                                        .client_id
+                                        .as_deref()
+                                        .and_then(|id| client_names.get(id))
+                                        .map_or("—", |n| n.as_str());
+                                    ui.label(name);
+                                }
+                                SortCol::DocType => {
+                                    ui.label(d.doc_type.as_deref().unwrap_or("—"));
+                                }
+                                SortCol::Year => {
+                                    ui.label(year_label(d.tax_year));
+                                }
+                                SortCol::Status => {
+                                    widgets::status_pill(ui, &d.status);
+                                }
+                                SortCol::Size => {
+                                    ui.label(RichText::new(widgets::size(d.size)).monospace());
+                                }
+                                SortCol::Modified => {
+                                    ui.label(widgets::local_time(&d.updated_at));
+                                }
+                                SortCol::FiledBy => {
+                                    ui.label(d.filed_by.as_deref().unwrap_or("—"));
+                                }
+                                SortCol::Hash => {
+                                    ui.label(
+                                        RichText::new(&d.hash[..d.hash.len().min(8)])
+                                            .monospace()
+                                            .color(theme::ink_muted()),
+                                    );
+                                }
+                            });
+                        }
                         let resp = row.response();
                         // Drag rows onto a folder in the tree to move them (PA-23): the selection when
                         // this row is in it, otherwise this row.
@@ -5328,6 +5410,37 @@ Petty cash,1234.50
         h.run();
         assert_eq!(h.state().b.prefs.partner, None);
         assert!(h.query_by_label("3 clients").is_some());
+    }
+
+    /// Columns can be hidden (owner 2026-11-12): the Columns menu (or a heading's right-click)
+    /// ticks them off; Name always stays; Show all brings them back.
+    #[test]
+    fn browse_columns_can_be_hidden() {
+        let mut h = harness(1, 1);
+        h.run();
+        assert!(h.query_by_label("HASH").is_some());
+        h.get_by_label("Columns…").click();
+        h.run();
+        h.get_by_role_and_label(Role::CheckBox, "Hash").click();
+        h.run();
+        if h.query_by_label("Columns shown").is_none() {
+            h.get_by_label("Columns…").click();
+            h.run();
+        }
+        h.get_by_role_and_label(Role::CheckBox, "Size").click();
+        h.run();
+        let b = &h.state().b;
+        assert_eq!(b.prefs.hidden_columns, ["hash", "size"]);
+        assert!(b.prefs_dirty);
+        assert!(h.query_by_label("HASH").is_none() && h.query_by_label("SIZE").is_none());
+        assert!(h.query_by_label("NAME").is_some(), "Name always shown");
+        if h.query_by_label("Columns shown").is_none() {
+            h.get_by_label("Columns…").click();
+            h.run();
+        }
+        h.get_by_label("Show all").click();
+        h.run();
+        assert!(h.state().b.prefs.hidden_columns.is_empty());
     }
 
     /// Files in folders bound to no client are a View of their own (owner 2026-11-12), in a

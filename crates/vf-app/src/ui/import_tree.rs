@@ -665,13 +665,24 @@ pub fn show(ui: &mut egui::Ui, p: &mut ImportPage, env: &mut Env, catalog: &Path
             ui.spinner();
             use std::sync::atomic::Ordering::Relaxed;
             let (done, total) = (p.progress.0.load(Relaxed), p.progress.1.load(Relaxed));
-            ui.label(if total > 0 {
+            // Inside the batch (owner 2026-11-12: "0 of 3323" for an hour looked stuck): the
+            // files found and read so far.
+            let rb = &vf_fs::rebuild::PROGRESS;
+            let (found, read) = (rb.found.load(Relaxed), rb.read.load(Relaxed));
+            let batches = total.div_ceil(import::BATCH).max(1);
+            let batch = (done / import::BATCH + 1).min(batches);
+            ui.label(if total == 0 {
+                "Importing: binding folders, cataloging and reading files…".into()
+            } else if found == 0 {
                 format!(
-                    "Importing: {done} of {total} folders done (in batches of {}; each batch is saved as it finishes)…",
-                    import::BATCH
+                    "Importing batch {batch} of {batches} ({done} of {total} folders done): tying folders to clients, listing their files…"
                 )
             } else {
-                "Importing: binding folders, cataloging and hashing files…".into()
+                format!(
+                    "Importing batch {batch} of {batches} ({done} of {total} folders done): {} of {} files read…",
+                    read.min(found),
+                    found
+                )
             });
             ui.ctx().request_repaint_after(std::time::Duration::from_millis(500));
         }

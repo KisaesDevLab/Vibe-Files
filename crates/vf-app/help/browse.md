@@ -32,7 +32,7 @@ To add a client, year or folder to **FAVORITES**, right-click it and choose **Ad
 
 Above the documents is the path of what you are looking at, for example `Cabinet / Baker Farms (1004) / Income Tax / 2025`, and the count of documents shown and selected.
 
-The columns are **Name**, **Client**, **Doc type**, **Year**, **Status**, **Size**, **Modified**, **Filed by** and **Hash**. **Client** matters in views that mix clients, such as **Received this week**. A document without a doc type shows a **Needs doc type** pill next to its name.
+The columns are **Name**, **Client**, **Doc type**, **Year**, **Status**, **Size**, **Modified**, **Filed by** and **Hash**. **Columns…** (or right-click a heading) hides or shows any but Name, for your Windows login. A document without a doc type shows a **Needs doc type** pill.
 
 - Click a column heading to sort by it; click it again to reverse the order. A small arrow shows the sorted column.
 - Type in **Filter this folder** to show only names containing that text.

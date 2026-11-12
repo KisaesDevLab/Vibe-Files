@@ -54,7 +54,7 @@ When some files have no doc type found, the line **N files with no doc type foun
 
 ## Large cabinets: batches, stopping and continuing
 
-One press of **Import** imports every ticked folder, 500 at a time, going on by itself. Each batch ties its folders to their clients, catalogs their files and sets their doc types and years. The page shows how many folders are done.
+One press of **Import** imports every ticked folder, 250 at a time, going on by itself. Each batch ties its folders to clients, catalogs their files and sets doc types and years. The page shows the folders done and the batch's files read.
 
 Each batch is saved when it finishes. If the import is cut off (Vibe Files closed, the PC restarted), nothing finished is lost:
 
