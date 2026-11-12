@@ -82,6 +82,9 @@ fn pc_a(t: &Path, store: Arc<dyn ObjectStore>) -> Pc {
     );
     vf_fs::rebuild::rebuild(&mut conn, &root, "dev-a").unwrap();
     set_type(&mut conn, &root, "W-2 Northwind.pdf", "W-2", Some(2025));
+    // Every year goes to B2 here (PA-53's rule has its own test): these tests do not depend
+    // on today's date.
+    vf_fs::clients::set_b2_years_back(&root, Some(0)).unwrap();
     let remote = Remote::new(store, &cabinet_id);
     let keys = vf_sync::setup::init(&root, &remote, PASS, FAST).unwrap();
     Pc {
@@ -194,7 +197,11 @@ fn round_trip_restore_and_bound_folders() {
     let r = vf_sync::push::push(&mut a.conn, &a.root, &a.sync, None).unwrap();
     assert_eq!(r.head_rev, 1);
     assert!(r.objects >= 3);
-    assert!(vf_sync::catalog::pending(&a.conn).unwrap().is_empty());
+    assert!(
+        vf_sync::catalog::pending(&a.conn, &vf_sync::rules::Rules::load(&a.root).unwrap())
+            .unwrap()
+            .is_empty()
+    );
     // Nothing readable in the bucket's names or bodies.
     let keys = Remote::new(store.clone(), &a.sync.cabinet_id)
         .list("")
@@ -255,7 +262,12 @@ fn round_trip_restore_and_bound_folders() {
         "1099-INT",
         Some(2025),
     );
-    assert_eq!(vf_sync::catalog::pending(&a.conn).unwrap().len(), 1);
+    assert_eq!(
+        vf_sync::catalog::pending(&a.conn, &vf_sync::rules::Rules::load(&a.root).unwrap())
+            .unwrap()
+            .len(),
+        1
+    );
     vf_sync::push::push(&mut a.conn, &a.root, &a.sync, None).unwrap();
     let p = vf_sync::pull::pull(&mut b.conn, &b.root, &b.sync).unwrap();
     assert_eq!(p.new, 1);
@@ -263,7 +275,11 @@ fn round_trip_restore_and_bound_folders() {
     assert_eq!(meta(&b.conn, &id), meta(&a.conn, &id));
     assert_eq!(meta(&b.conn, &id).2.as_deref(), Some("1099-INT"));
     // B pulled, so it has nothing to push; and a second pull changes nothing.
-    assert!(vf_sync::catalog::pending(&b.conn).unwrap().is_empty());
+    assert!(
+        vf_sync::catalog::pending(&b.conn, &vf_sync::rules::Rules::load(&b.root).unwrap())
+            .unwrap()
+            .is_empty()
+    );
     assert_eq!(
         vf_sync::pull::pull(&mut b.conn, &b.root, &b.sync)
             .unwrap()
@@ -398,12 +414,14 @@ fn pushing_one_client_sends_only_its_documents() {
             r.get(0)
         })
         .unwrap();
-    let p = vf_sync::catalog::pending(&a.conn).unwrap();
+    let p =
+        vf_sync::catalog::pending(&a.conn, &vf_sync::rules::Rules::load(&a.root).unwrap()).unwrap();
     assert_eq!(p.get(&anderson), Some(&4));
     assert_eq!(p.get(&bell), Some(&1));
     let r = vf_sync::push::push(&mut a.conn, &a.root, &a.sync, Some(&anderson)).unwrap();
     assert_eq!(r.objects, 4);
-    let p = vf_sync::catalog::pending(&a.conn).unwrap();
+    let p =
+        vf_sync::catalog::pending(&a.conn, &vf_sync::rules::Rules::load(&a.root).unwrap()).unwrap();
     assert_eq!(p.get(&anderson), None);
     assert_eq!(p.get(&bell), Some(&1));
 }
@@ -745,7 +763,9 @@ fn an_edit_during_a_push_is_sent_next_time() {
     );
     vf_sync::push::push(&mut a.conn, &a.root, &a.sync, None).unwrap();
     assert!(
-        !vf_sync::catalog::pending(&a.conn).unwrap().is_empty(),
+        !vf_sync::catalog::pending(&a.conn, &vf_sync::rules::Rules::load(&a.root).unwrap())
+            .unwrap()
+            .is_empty(),
         "the edit made during the push is still pending"
     );
     vf_sync::push::push(&mut a.conn, &a.root, &a.sync, None).unwrap();
@@ -868,7 +888,11 @@ fn a_local_metadata_edit_survives_remote_content() {
         .unwrap(),
         "ein v2 invented"
     );
-    assert!(!vf_sync::catalog::pending(&a.conn).unwrap().is_empty());
+    assert!(
+        !vf_sync::catalog::pending(&a.conn, &vf_sync::rules::Rules::load(&a.root).unwrap())
+            .unwrap()
+            .is_empty()
+    );
 }
 
 /// PA-34: many changed clients go up in rounds, each its own HEAD; another PC gets them all.
@@ -881,7 +905,11 @@ fn a_push_in_rounds_commits_each_and_delivers_everything() {
     assert!(r.head_rev >= 2, "one HEAD per round: {r:?}");
     assert!(r.segments >= 3, "both clients and the cabinet: {r:?}");
     assert!(r.objects >= 3, "{r:?}");
-    assert!(vf_sync::catalog::pending(&a.conn).unwrap().is_empty());
+    assert!(
+        vf_sync::catalog::pending(&a.conn, &vf_sync::rules::Rules::load(&a.root).unwrap())
+            .unwrap()
+            .is_empty()
+    );
     // Nothing left: a second push sends nothing.
     let again = vf_sync::push::push_in_rounds(&mut a.conn, &a.root, &a.sync, None, 1).unwrap();
     assert_eq!((again.objects, again.segments), (0, 0), "{again:?}");
@@ -928,7 +956,7 @@ fn a_client_pushed_alone_sends_only_that_client() {
     assert!(err.contains("OFFICE-PC"), "{err}");
     assert_eq!(snapshot(&b.root), before, "nothing written");
     assert!(
-        vf_sync::catalog::pending(&b.conn)
+        vf_sync::catalog::pending(&b.conn, &vf_sync::rules::Rules::load(&b.root).unwrap())
             .unwrap()
             .contains_key(&anderson)
     );
@@ -954,7 +982,7 @@ fn a_client_pushed_alone_sends_only_that_client() {
     );
     assert_eq!(vf_sync::catalog::last_rev(&b.conn, "dev-b").unwrap(), seen);
     assert!(
-        !vf_sync::catalog::pending(&b.conn)
+        !vf_sync::catalog::pending(&b.conn, &vf_sync::rules::Rules::load(&b.root).unwrap())
             .unwrap()
             .contains_key(&anderson)
     );
@@ -1138,7 +1166,7 @@ fn second_server_push(seeded: bool) {
     );
     assert_eq!(snapshot(&a.root), before, "the folder is as it was");
     assert!(
-        !vf_sync::catalog::pending(&b_conn)
+        !vf_sync::catalog::pending(&b_conn, &vf_sync::rules::Rules::load(&a.root).unwrap())
             .unwrap()
             .contains_key(&anderson)
     );
@@ -1181,4 +1209,148 @@ fn a_client_pushed_from_a_seeded_second_server_leaves_the_shared_folder_alone() 
 #[test]
 fn a_client_pushed_from_a_second_server_indexed_alone_leaves_the_shared_folder_alone() {
     second_server_push(false);
+}
+
+/// What goes to B2 (owner 2026-11-12, PA-53): a document never sent outside the rule (an old
+/// tax year; no year outside a Permanent folder; a Never send client) is held back, not
+/// pending; widening the rule sends it; once in B2 it keeps syncing; a held document whose
+/// exchange base was lost stays in the bucket's segment.
+#[test]
+fn the_b2_rule_holds_back_old_years() {
+    use vf_sync::rules::Rules;
+    let t = tempfile::tempdir().unwrap();
+    let store = Remote::memory();
+    let mut a = pc_a(t.path(), store);
+    // Tax years 2023 and later, whatever today's date.
+    let this_year = chrono::Datelike::year(&chrono::Local::now());
+    let back = u16::try_from(this_year - 2023).unwrap();
+    vf_fs::clients::set_b2_years_back(&a.root, Some(back)).unwrap();
+    put(
+        &a.root,
+        "Anderson Farms LLC (1042)/Income Tax/2015/Old 1040.pdf",
+        "old return invented",
+    );
+    put(
+        &a.root,
+        "Anderson Farms LLC (1042)/Other/notes.pdf",
+        "no year invented",
+    );
+    vf_fs::rebuild::rebuild(&mut a.conn, &a.root, "dev-a").unwrap();
+    set_type(&mut a.conn, &a.root, "Old 1040.pdf", "W-2", Some(2015));
+    set_type(&mut a.conn, &a.root, "notes.pdf", "W-2", None);
+    let anderson: String = a
+        .conn
+        .query_row("SELECT id FROM client WHERE ext_id = '1042'", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    let rules = Rules::load(&a.root).unwrap();
+    let (held, bytes) = vf_sync::catalog::held(&a.conn, &rules).unwrap();
+    assert_eq!(
+        held, 2,
+        "the 2015 return and the file with no year outside Permanent"
+    );
+    assert!(bytes > 0);
+
+    vf_sync::push::push(&mut a.conn, &a.root, &a.sync, None).unwrap();
+    assert!(
+        vf_sync::catalog::pending(&a.conn, &rules)
+            .unwrap()
+            .is_empty()
+    );
+    let old = doc_id(&a.conn, "Old 1040.pdf");
+    let sent = vf_sync::catalog::sent_ids(&a.conn).unwrap();
+    assert!(!sent.contains(&old), "held back");
+    assert!(
+        sent.contains(&doc_id(&a.conn, "EIN letter.pdf")),
+        "Permanent goes"
+    );
+    let out = t.path().join("export1");
+    let n = vf_sync::restore::export_client(&a.sync, &anderson, &out).unwrap();
+    assert_eq!(n, 2, "the 2025 W-2 and the EIN letter only");
+
+    // Every year: both go up.
+    vf_fs::clients::set_b2_years_back(&a.root, Some(0)).unwrap();
+    let all = Rules::load(&a.root).unwrap();
+    assert_eq!(
+        vf_sync::catalog::pending(&a.conn, &all)
+            .unwrap()
+            .get(&anderson),
+        Some(&2)
+    );
+    vf_sync::push::push(&mut a.conn, &a.root, &a.sync, None).unwrap();
+    assert!(vf_sync::catalog::sent_ids(&a.conn).unwrap().contains(&old));
+
+    // Back to 2023 and later: the 2015 return is in B2 now, so an edit still goes up.
+    vf_fs::clients::set_b2_years_back(&a.root, Some(back)).unwrap();
+    let rules = Rules::load(&a.root).unwrap();
+    set_type(&mut a.conn, &a.root, "Old 1040.pdf", "W-2", Some(2014));
+    assert_eq!(
+        vf_sync::catalog::pending(&a.conn, &rules)
+            .unwrap()
+            .get(&anderson),
+        Some(&1)
+    );
+    vf_sync::push::push(&mut a.conn, &a.root, &a.sync, None).unwrap();
+    assert!(
+        vf_sync::catalog::pending(&a.conn, &rules)
+            .unwrap()
+            .is_empty()
+    );
+
+    // Its exchange base lost (a catalog rebuilt): the next push keeps it in the segment.
+    a.conn
+        .execute("DELETE FROM sync_base WHERE doc_id = ?1", [&old])
+        .unwrap();
+    put(
+        &a.root,
+        "Anderson Farms LLC (1042)/Income Tax/2025/1099 new.pdf",
+        "new invented",
+    );
+    vf_fs::rebuild::rebuild(&mut a.conn, &a.root, "dev-a").unwrap();
+    vf_sync::push::push(&mut a.conn, &a.root, &a.sync, None).unwrap();
+    let out = t.path().join("export2");
+    let n = vf_sync::restore::export_client(&a.sync, &anderson, &out).unwrap();
+    assert_eq!(
+        n, 5,
+        "nothing taken out of B2: W-2, EIN, the 2015 return, notes, the new 1099"
+    );
+
+    // Never send: a new recent file of that client is held back.
+    vf_fs::clients::set_b2_choice(&a.root, &anderson, Some("never")).unwrap();
+    let rules = Rules::load(&a.root).unwrap();
+    put(
+        &a.root,
+        "Anderson Farms LLC (1042)/Income Tax/2026/K-1.pdf",
+        "k1 invented",
+    );
+    vf_fs::rebuild::rebuild(&mut a.conn, &a.root, "dev-a").unwrap();
+    assert!(
+        !vf_sync::catalog::pending(&a.conn, &rules)
+            .unwrap()
+            .contains_key(&anderson)
+    );
+    assert_eq!(vf_sync::catalog::held(&a.conn, &rules).unwrap().0, 1);
+
+    // A conflict copy (this PC's edit of a document in B2) goes up whatever the rule says.
+    let k1 = doc_id(&a.conn, "K-1.pdf");
+    a.conn
+        .execute(
+            "INSERT INTO sync_conflict (id, doc_id, copy_doc_id, kind, from_device, at)
+             VALUES ('x1', ?1, ?2, 'both_changed', 'dev-b', '2026-11-12T00:00:00Z')",
+            [&old, &k1],
+        )
+        .unwrap();
+    assert_eq!(vf_sync::catalog::held(&a.conn, &rules).unwrap().0, 0);
+    assert!(
+        vf_sync::catalog::pending(&a.conn, &rules)
+            .unwrap()
+            .contains_key(&anderson)
+    );
+    assert!(vf_sync::catalog::sent_ids(&a.conn).unwrap().contains(&k1));
+
+    // The rule cannot be read: the push stops, never "send everything".
+    std::fs::write(a.root.join("_Vibe").join("clients.vf.json"), "{ not json").unwrap();
+    assert!(Rules::load(&a.root).is_err());
+    assert!(vf_sync::push::push(&mut a.conn, &a.root, &a.sync, None).is_err());
 }

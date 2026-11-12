@@ -530,7 +530,8 @@ mod scale {
         //    entries.
         let keys = vf_sync::Keys::derive("scale", &[7u8; 32]);
         let t0 = Instant::now();
-        let pending = vf_sync::catalog::pending(&opened.conn).unwrap();
+        let pending =
+            vf_sync::catalog::pending(&opened.conn, &vf_sync::rules::Rules::all()).unwrap();
         for c in pending.keys().take(100) {
             let folder = vf_sync::catalog::client_folder(&opened.conn, c)
                 .unwrap()

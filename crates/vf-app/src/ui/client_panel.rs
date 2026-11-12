@@ -223,6 +223,56 @@ pub fn show(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env, ci: usize) {
             Err(e) => b.error = Some(e),
         }
     }
+    ui.add_space(10.0);
+
+    // B2 sync (owner 2026-11-12, PA-53): the firm's rule, or this client's own choice. Read
+    // once per client shown (the file is on the share).
+    // Again every 10 s: another PC may change it (QA 2026-11-12).
+    if b.b2_choice
+        .as_ref()
+        .is_none_or(|(id, _, at)| *id != c.id || at.elapsed() > std::time::Duration::from_secs(10))
+    {
+        let now = clients::load_b2(env.root)
+            .ok()
+            .and_then(|b2| b2.clients.get(&c.id).cloned());
+        b.b2_choice = Some((c.id.clone(), now, std::time::Instant::now()));
+    }
+    let current = b.b2_choice.as_ref().and_then(|(_, v, _)| v.clone());
+    let l = ui.label(RichText::new("B2 SYNC").small().color(theme::ink_muted()));
+    let label = |v: Option<&str>| match v {
+        Some("always") => "Always send",
+        Some("never") => "Never send",
+        _ => "The firm's rule",
+    };
+    let mut pick = current.clone();
+    egui::ComboBox::from_id_salt("client-b2")
+        .selected_text(label(pick.as_deref()))
+        .show_ui(ui, |ui| {
+            ui.selectable_value(&mut pick, None, "The firm's rule");
+            ui.selectable_value(&mut pick, Some("always".to_string()), "Always send");
+            ui.selectable_value(&mut pick, Some("never".to_string()), "Never send");
+        })
+        .response
+        .labelled_by(l.id)
+        .on_hover_text(
+            "Which of this client's documents not yet in B2 go there: the firm's rule (Sync › What goes to B2), all of them, or none. Documents already in B2 keep syncing.",
+        );
+    if pick != current {
+        match clients::set_b2_choice(env.root, &c.id, pick.as_deref()) {
+            Ok(()) => {
+                b.b2_choice = Some((c.id.clone(), pick.clone(), std::time::Instant::now()));
+                b.notice = Some(match pick.as_deref() {
+                    Some("never") => format!(
+                        "{}: documents not yet in B2 are not sent to it (what is there keeps syncing).",
+                        c.name
+                    ),
+                    Some(_) => format!("{}: every document goes to B2.", c.name),
+                    None => format!("{}: the firm's rule decides what goes to B2.", c.name),
+                });
+            }
+            Err(e) => b.error = Some(e),
+        }
+    }
     ui.add_space(12.0);
 
     ui.label(

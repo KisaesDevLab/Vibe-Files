@@ -86,6 +86,13 @@ pub struct SyncTab {
     pub running_for: Option<String>,
     /// Pending documents per client id (`""` = the cabinet), refreshed every few seconds.
     pub pending: BTreeMap<String, usize>,
+    /// Documents the B2 rule holds back now (count, bytes), counted with `pending` (PA-53).
+    pub held: Option<(usize, u64)>,
+    /// The years box of "What goes to B2" while typing.
+    years_draft: Option<String>,
+    /// The cabinet's years setting as last read, and when (the file is on the share: read
+    /// every 10 s, not every frame).
+    b2_back: Option<(Instant, u16)>,
     pub conflicts: Vec<Conflict>,
     pub last_push: Option<String>,
     pub last_pull: Option<String>,
@@ -125,6 +132,7 @@ type Counted = (
     BTreeMap<String, usize>,
     Vec<Conflict>,
     Option<(i64, Option<String>, Option<String>)>,
+    Option<(usize, u64)>,
 );
 
 const SHARE_LABEL: &str = "Let everyone who opens this cabinet sync without the passphrase";
@@ -315,9 +323,12 @@ impl SyncTab {
         self.recall(env.root, &key_dir(catalog), cfg, env.device_id);
         if let Some(rx) = &self.counting {
             match rx.try_recv() {
-                Ok((pending, conflicts, st)) => {
+                Ok((pending, conflicts, st, held)) => {
                     self.counting = None;
                     self.pending = pending;
+                    if held.is_some() {
+                        self.held = held;
+                    }
                     self.conflicts = conflicts;
                     if let Some((rev, p, l)) = st {
                         self.head_rev = rev as u64;
@@ -389,13 +400,20 @@ impl SyncTab {
             env.device_id.to_string(),
             ctx.clone(),
         );
+        // The held count only when something changed it (a push, the rule): QA 2026-11-12.
+        let (root, want_held) = (env.root.to_path_buf(), self.held.is_none());
         let spawned = std::thread::Builder::new()
             .name("sync-counts".into())
             .spawn(move || {
                 let Ok(conn) = vf_core::db::open(&catalog, Storage::Local) else {
                     return;
                 };
-                let pending = vf_sync::catalog::pending(&conn).unwrap_or_default();
+                // Read here, not on the window's thread (the file is on the share).
+                let rules = vf_sync::rules::Rules::load_or_default(&root);
+                let pending = vf_sync::catalog::pending(&conn, &rules).unwrap_or_default();
+                let held = want_held
+                    .then(|| vf_sync::catalog::held(&conn, &rules).ok())
+                    .flatten();
                 let conflicts = vf_sync::restore::conflicts(&conn).unwrap_or_default();
                 let st = conn
                     .query_row(
@@ -404,7 +422,7 @@ impl SyncTab {
                         |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
                     )
                     .ok();
-                let _ = tx.send((pending, conflicts, st));
+                let _ = tx.send((pending, conflicts, st, held));
                 ctx.request_repaint();
             });
         if spawned.is_ok() {
@@ -450,6 +468,8 @@ impl SyncTab {
                 }
             }
             Done::Push(r) => {
+                // What is held back may have changed (sent, or new files): counted again.
+                self.held = None;
                 if r.pulled.as_ref().is_some_and(|p| p.changed() > 0) {
                     self.changed = true;
                 }
@@ -1242,11 +1262,99 @@ fn unlocked(ui: &mut egui::Ui, t: &mut SyncTab, env: &mut Env, v: &View<'_>) {
     }
 
     ui.add_space(10.0);
+    b2_rule_section(ui, t, env, v.admin);
+
+    ui.add_space(10.0);
     ui.label(RichText::new("Settings").strong());
     if !v.admin {
         ui.label(widgets::caption(ADMIN_NEEDED));
     }
     ui.add_enabled_ui(v.admin, |ui| settings_section(ui, t, v));
+}
+
+/// What goes to B2 (owner 2026-11-12, PA-53): documents never sent go up only for recent tax
+/// years (and Permanent folders); anything already in B2 keeps syncing. Shared by every PC
+/// (`clients.vf.json`); changed with the admin password, like the other settings.
+fn b2_rule_section(ui: &mut egui::Ui, t: &mut SyncTab, env: &mut Env, admin: bool) {
+    ui.label(RichText::new("What goes to B2").strong());
+    if t.b2_back
+        .is_none_or(|(at, _)| at.elapsed() > std::time::Duration::from_secs(10))
+    {
+        let back = vf_fs::clients::load(env.root)
+            .ok()
+            .and_then(|m| m.meta.b2_years_back)
+            .unwrap_or(vf_sync::rules::DEFAULT_YEARS_BACK);
+        t.b2_back = Some((Instant::now(), back));
+    }
+    let back = t
+        .b2_back
+        .map_or(vf_sync::rules::DEFAULT_YEARS_BACK, |(_, b)| b);
+    let this_year = chrono::Datelike::year(&chrono::Local::now());
+    ui.label(widgets::caption(if back == 0 {
+        "Every document goes to B2.".to_string()
+    } else {
+        format!(
+            "Documents not yet in B2 go there when their tax year is {} or later, or they have no tax year and are in a client's Permanent folder; the others are not sent. Anything already in B2 keeps syncing (edits, moves, deletions). A client's own Always send / Never send (Browse, client panel) wins.",
+            this_year - i32::from(back)
+        )
+    }));
+    ui.add_enabled_ui(admin, |ui| {
+        ui.horizontal(|ui| {
+            let l = ui.label("Tax years before this one to send (0 = every year)");
+            let draft = t.years_draft.get_or_insert_with(|| back.to_string());
+            let r = ui
+                .add(egui::TextEdit::singleline(draft).desired_width(40.0))
+                .labelled_by(l.id);
+            let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            if (ui.button("Save").clicked() || enter)
+                && let Some(text) = t.years_draft.clone()
+            {
+                match text.trim().parse::<u16>() {
+                    Ok(n) if n <= 100 => {
+                        match vf_fs::clients::set_b2_years_back(env.root, Some(n)) {
+                            Ok(()) => {
+                                t.notice = Some(if n == 0 {
+                                    "Every document goes to B2 now.".into()
+                                } else {
+                                    format!(
+                                        "Documents not yet in B2 go there for tax years {} and later.",
+                                        this_year - i32::from(n)
+                                    )
+                                });
+                                t.held = None;
+                                t.refreshed = None;
+                                t.b2_back = None;
+                            }
+                            Err(e) => t.error = Some(format!("Not saved: {e}")),
+                        }
+                        t.years_draft = None;
+                    }
+                    _ => t.error = Some("Type a number of years from 0 to 100.".into()),
+                }
+            }
+        });
+    });
+    if !admin {
+        ui.label(widgets::caption(ADMIN_NEEDED));
+    }
+    match t.held {
+        Some((0, _)) => {
+            ui.label(widgets::caption("Nothing is held back."));
+        }
+        Some((n, bytes)) => {
+            ui.label(
+                RichText::new(format!(
+                    "Held back from B2 now: {} documents ({}). They are not in B2: make sure the share is backed up another way.",
+                    n,
+                    widgets::size(bytes as i64)
+                ))
+                .color(theme::warn()),
+            );
+        }
+        None => {
+            ui.label(widgets::caption("Counting what is held back…"));
+        }
+    }
 }
 
 /// Timers, window and Object Lock (admin only, PA-24).
@@ -1416,7 +1524,9 @@ mod tests {
         };
         assert_eq!(r.documents, 2, "{r:?}");
         let conn = vf_core::db::open(&catalog, Storage::Local).unwrap();
-        let pending = vf_sync::catalog::pending(&conn).unwrap();
+        let pending =
+            vf_sync::catalog::pending(&conn, &vf_sync::rules::Rules::load_or_default(&root))
+                .unwrap();
         assert!(!pending.contains_key(&anderson));
         assert_eq!(pending.len(), 1, "Bell Ranch still waits: {pending:?}");
         // One client is not the whole cabinet: no B2 backup time recorded.

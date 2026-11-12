@@ -393,7 +393,8 @@ fn sync(
         }
         let conn = db::open(&catalog, Storage::Local)?;
         same_cabinet(&conn, cabinet)?;
-        let pending = vf_sync::catalog::pending(&conn)?;
+        let pending =
+            vf_sync::catalog::pending(&conn, &vf_sync::rules::Rules::load_or_default(cabinet))?;
         let conflicts = vf_sync::restore::conflicts(&conn)?;
         let (rev, push, pull): (i64, Option<String>, Option<String>) = conn
             .query_row(

@@ -111,17 +111,24 @@ pub fn set_base_values(
 
 const DIRTY: &str = "
     FROM document d LEFT JOIN sync_base b ON b.doc_id = d.id
-    WHERE (b.doc_id IS NULL AND d.deleted_at IS NULL)
+    WHERE ((b.doc_id IS NULL AND d.deleted_at IS NULL)
        OR (b.doc_id IS NOT NULL AND (b.rev != d.rev OR b.hash != d.hash
            OR b.rel_path != d.rel_path OR b.deleted != (d.deleted_at IS NOT NULL)
-           OR coalesce(b.client_id, '') != coalesce(d.client_id, '')))";
+           OR coalesce(b.client_id, '') != coalesce(d.client_id, ''))))";
+
+/// A conflict copy (this PC's edit of a document in B2, kept beside the other PC's): it goes
+/// up whatever the B2 rule says, like the document it came from (QA 2026-11-12).
+const COPY: &str = "d.id IN (SELECT copy_doc_id FROM sync_conflict WHERE copy_doc_id IS NOT NULL)";
 
 /// Segments (client ids; [`CABINET`] for the cabinet) with documents changed since the last
-/// exchange, with how many each. A document that moved between clients counts for both.
-pub fn pending(conn: &Connection) -> Result<BTreeMap<String, usize>> {
+/// exchange, with how many each. A document that moved between clients counts for both. A
+/// document `rules` holds back (never sent, outside the rule) is not counted (PA-53).
+pub fn pending(conn: &Connection, rules: &crate::rules::Rules) -> Result<BTreeMap<String, usize>> {
     let mut out: BTreeMap<String, usize> = BTreeMap::new();
     let mut st = conn.prepare(&format!(
-        "SELECT coalesce(d.client_id, ''), coalesce(b.client_id, d.client_id, '') {DIRTY}"
+        "SELECT coalesce(d.client_id, ''), coalesce(b.client_id, d.client_id, '') {DIRTY}
+           AND (b.doc_id IS NOT NULL OR {COPY} OR {})",
+        rules.sendable_sql()
     ))?;
     let rows = st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
     for r in rows {
@@ -142,6 +149,36 @@ pub fn pending(conn: &Connection) -> Result<BTreeMap<String, usize>> {
         out.entry(id?).or_insert(0);
     }
     Ok(out)
+}
+
+/// What the rule holds back now: documents never sent that it leaves out (count, bytes).
+pub fn held(conn: &Connection, rules: &crate::rules::Rules) -> Result<(usize, u64)> {
+    let (n, bytes): (i64, i64) = conn.query_row(
+        &format!(
+            "SELECT count(*), coalesce(sum(d.size), 0)
+             FROM document d LEFT JOIN sync_base b ON b.doc_id = d.id
+             WHERE b.doc_id IS NULL AND d.deleted_at IS NULL AND NOT {COPY}
+               AND NOT {}",
+            rules.sendable_sql()
+        ),
+        [],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    Ok((n.max(0) as usize, bytes.max(0) as u64))
+}
+
+/// The documents sent before (they have an exchange base): they keep syncing whatever the
+/// rule says (PA-53).
+pub fn sent_ids(conn: &Connection) -> Result<std::collections::HashSet<String>> {
+    // Conflict copies too: they go up like the document they came from.
+    let mut st = conn.prepare(
+        "SELECT doc_id FROM sync_base
+         UNION SELECT copy_doc_id FROM sync_conflict WHERE copy_doc_id IS NOT NULL",
+    )?;
+    let ids = st
+        .query_map([], |r| r.get::<_, String>(0))?
+        .collect::<std::result::Result<_, _>>()?;
+    Ok(ids)
 }
 
 /// A client's folder (cabinet-relative) and sentinel path.

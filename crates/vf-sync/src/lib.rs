@@ -18,6 +18,7 @@ pub mod pull;
 pub mod push;
 pub mod remote;
 pub mod restore;
+pub mod rules;
 pub mod setup;
 pub mod update;
 

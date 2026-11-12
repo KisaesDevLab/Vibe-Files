@@ -6,7 +6,7 @@ How the Sync tab keeps an encrypted copy of the cabinet in your firm's Backblaze
 
 Sync is two-way. A push sends what changed on this PC to the bucket; a pull brings down what other PCs sent. A push always pulls first, so it never hides another PC's work.
 
-Everything is encrypted on this PC before it leaves, with the firm's sync key. The names in the bucket reveal no client, file or hash. What goes up: every document and its earlier versions, each client folder with its `_Vibe\client.json`, the doc types, the folder template, the client list, retention classes, legal holds, Intake's rules and settings, and the audit trail's monthly files. Taxpayer-ID columns are stripped from the client list before it is sent.
+Everything is encrypted on this PC before it leaves, with the firm's sync key. The names in the bucket reveal no client, file or hash. What goes up (see [what goes to B2](help:sync-rules) for which documents): each document and its earlier versions, each client folder with its `_Vibe\client.json`, the doc types, the folder template, the client list, retention classes, legal holds, Intake's rules and settings, and the audit trail's monthly files. Taxpayer-ID columns are stripped from the client list before it is sent.
 
 ## Setting it up
 

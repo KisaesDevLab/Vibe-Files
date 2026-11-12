@@ -212,6 +212,45 @@ pub fn push_client(
     }
 }
 
+/// A segment's entries without the documents the rule holds back (PA-53). A held document the
+/// bucket's segment lists already (its exchange base lost, a catalog rebuilt) keeps the
+/// bucket's entry: the rule never takes anything out of B2.
+fn hold_back(
+    s: &Sync,
+    head: &Head,
+    segment: &str,
+    docs: Vec<crate::layout::DocEntry>,
+    sends: impl Fn(&crate::layout::DocEntry) -> bool,
+) -> Result<Vec<crate::layout::DocEntry>> {
+    let (mut keep, held): (Vec<_>, Vec<_>) = docs
+        .into_iter()
+        .partition(|e| e.deleted_at.is_some() || sends(e));
+    if held.is_empty() {
+        return Ok(keep);
+    }
+    let before: Vec<crate::layout::DocEntry> = if segment == CABINET {
+        if head.cabinet_segment_rev == 0 {
+            vec![]
+        } else {
+            s.get_json::<CabinetSegment>(&head.cabinet_key())?
+                .ok_or_else(|| SyncError::Format("the cabinet segment is missing".into()))?
+                .documents
+        }
+    } else {
+        match head.segments.get(segment) {
+            Some(&rev) => {
+                s.get_json::<ClientSegment>(&head.client_key(segment, rev))?
+                    .ok_or_else(|| SyncError::Format("a client segment is missing".into()))?
+                    .documents
+            }
+            None => vec![],
+        }
+    };
+    let held: HashSet<String> = held.into_iter().map(|e| e.doc_id).collect();
+    keep.extend(before.into_iter().filter(|e| held.contains(&e.doc_id)));
+    Ok(keep)
+}
+
 /// One round. `Ok(true)`: clients are left for another round. `carry`: [`push_client`]'s
 /// entries to send unchanged (and then only that one client is pushed).
 #[allow(clippy::too_many_arguments)]
@@ -230,8 +269,11 @@ fn push_once(
     let head = s.head()?.unwrap_or_default();
     let seen_before = catalog::last_rev(conn, &s.device_id)?;
     let writer = vf_core::new_id();
-    let pending = catalog::pending(conn)?;
+    // What goes to B2 (PA-53): documents never sent outside the rule are held back.
+    let rules = crate::rules::Rules::load(root).map_err(SyncError::Local)?;
+    let pending = catalog::pending(conn, &rules)?;
     let uploaded = catalog::uploaded(conn)?;
+    let sent_before = catalog::sent_ids(conn)?;
     // The admin password file deleted here after it was exchanged (the forgotten-password
     // reset): sent as removed, so the other places drop it too (owner 2026-11-04).
     let pin = vf_fs::trash::pin_file(root);
@@ -303,6 +345,15 @@ fn push_once(
             continue;
         };
         let docs = catalog::entries(conn, &s.keys, client, &folder)?;
+        let docs = hold_back(s, &head, client, docs, |e| {
+            let rel = format!("{folder}/{}", e.rel_path);
+            rules.sends(
+                Some(client),
+                &rel,
+                e.tax_year,
+                sent_before.contains(&e.doc_id),
+            )
+        })?;
         for e in &docs {
             if e.deleted_at.is_none() && !uploaded.contains(&e.hash) {
                 jobs.entry(e.hash.clone())
@@ -324,6 +375,14 @@ fn push_once(
     }
     let cabinet_docs = if cabinet_too {
         let docs = catalog::entries(conn, &s.keys, CABINET, "")?;
+        let docs = hold_back(s, &head, CABINET, docs, |e| {
+            rules.sends(
+                None,
+                &e.rel_path,
+                e.tax_year,
+                sent_before.contains(&e.doc_id),
+            )
+        })?;
         for e in &docs {
             if e.deleted_at.is_none() && !uploaded.contains(&e.hash) {
                 jobs.entry(e.hash.clone())

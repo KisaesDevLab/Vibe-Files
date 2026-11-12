@@ -1688,7 +1688,11 @@ mod tests {
         let Screen::Open(o) = &h.state().screen else {
             panic!("open")
         };
-        let pending = vf_sync::catalog::pending(&o.opened.conn).unwrap();
+        let pending = vf_sync::catalog::pending(
+            &o.opened.conn,
+            &vf_sync::rules::Rules::load_or_default(&o.opened.root),
+        )
+        .unwrap();
         assert_eq!(pending.get(&anderson), None);
         assert_eq!(
             pending.values().sum::<usize>(),
@@ -1703,8 +1707,10 @@ mod tests {
     fn sync_tab_sets_up_and_pushes() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().join("Clients");
-        std::fs::create_dir_all(root.join("Loose")).unwrap();
-        std::fs::write(root.join("Loose/a.pdf"), "invented").unwrap();
+        // A recent tax year (from its folder): what goes to B2 (PA-53) sends it.
+        let year = chrono::Datelike::year(&chrono::Local::now());
+        std::fs::create_dir_all(root.join(format!("Loose/{year}"))).unwrap();
+        std::fs::write(root.join(format!("Loose/{year}/a.pdf")), "invented").unwrap();
         let req = CreateRequest {
             root: &root,
             name: "Firm",

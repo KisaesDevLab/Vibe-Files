@@ -279,6 +279,8 @@ pub struct Browse {
     reveal: Option<String>,
     /// The client panel's Partner box while typing: (client uuid, text).
     pub partner_draft: Option<(String, String)>,
+    /// The client panel's B2 sync choice, as read for this client: (client uuid, choice).
+    pub b2_choice: Option<(String, Option<String>, std::time::Instant)>,
     /// A client edit's catalog update running (it reads every client folder), and whether
     /// another edit came in meanwhile.
     pub client_sync: Option<crate::ui::job::Job<Result<usize, String>>>,
@@ -464,6 +466,7 @@ impl Browse {
             reveal: None,
             width_drag: (None, None),
             partner_draft: None,
+            b2_choice: None,
             client_sync: None,
             client_sync_again: false,
             saved_job: None,

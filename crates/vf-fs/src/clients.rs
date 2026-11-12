@@ -67,6 +67,89 @@ pub struct ClientMeta {
     /// a client CSV column named Partner.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub partners: BTreeMap<String, String>,
+    /// B2 sync (owner 2026-11-12, PA-53): tax years before this one that documents never sent
+    /// still go up for; absent: `vf_sync::rules::DEFAULT_YEARS_BACK`; 0: every year. Kept
+    /// here because every PC and the bucket carry this file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub b2_years_back: Option<u16>,
+    /// Client uuid → "always" / "never": the client's own B2 choice over the years rule.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub b2_clients: BTreeMap<String, String>,
+    /// Fields a later version wrote: kept as they are when this version saves the file (QA
+    /// 2026-11-12: an older build saving it dropped the B2 settings).
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, serde_json::Value>,
+}
+
+/// `_Vibe/b2-rules.json`: a copy of the B2 settings no build before 0.1.26 writes or knows
+/// (not synced): when an older Vibe Files saved `clients.vf.json` without them, they are put
+/// back from it (QA 2026-11-12).
+pub const B2_BACKUP_FILE: &str = "b2-rules.json";
+
+/// The B2 sync settings (PA-53).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct B2Settings {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub years_back: Option<u16>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub clients: BTreeMap<String, String>,
+}
+
+impl B2Settings {
+    fn of(meta: &ClientMeta) -> Self {
+        B2Settings {
+            years_back: meta.b2_years_back,
+            clients: meta.b2_clients.clone(),
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.years_back.is_none() && self.clients.is_empty()
+    }
+}
+
+/// The sidecar alone (not the client list): missing = empty; unreadable = an error.
+fn read_meta(root: &Path) -> Result<ClientMeta, String> {
+    match std::fs::read_to_string(master_dir(root).join(SIDECAR_FILE)) {
+        Ok(t) => {
+            serde_json::from_str(&t).map_err(|e| format!("{SIDECAR_FILE} could not be read: {e}"))
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(ClientMeta::default()),
+        Err(e) => Err(format!("{SIDECAR_FILE} could not be read: {e}")),
+    }
+}
+
+fn save_b2_backup(root: &Path, b2: &B2Settings) -> Result<(), String> {
+    crate::cabinet::write_replace(
+        &master_dir(root).join(B2_BACKUP_FILE),
+        &serde_json::to_vec_pretty(b2).expect("serializes"),
+    )
+    .map_err(|e| format!("saving {B2_BACKUP_FILE}: {e}"))
+}
+
+/// The cabinet's B2 sync settings, from `clients.vf.json` only (never a reason to read the
+/// whole client list). Settings an older build dropped are put back from the backup. An
+/// unreadable file is an error: a push must not take it for "send everything".
+pub fn load_b2(root: &Path) -> Result<B2Settings, String> {
+    let meta = read_meta(root)?;
+    let now = B2Settings::of(&meta);
+    if !now.is_empty() {
+        return Ok(now);
+    }
+    let backup: Option<B2Settings> = std::fs::read_to_string(master_dir(root).join(B2_BACKUP_FILE))
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok());
+    match backup {
+        Some(b) if !b.is_empty() => {
+            let mut meta = meta;
+            meta.b2_years_back = b.years_back;
+            meta.b2_clients = b.clients.clone();
+            // Put back for everyone (best effort: the settings are used either way).
+            let _ = save_meta(root, &meta);
+            Ok(b)
+        }
+        _ => Ok(now),
+    }
 }
 
 impl ClientMeta {
@@ -448,6 +531,36 @@ pub fn partner_of(meta: &ClientMeta, client: &str, listed: Option<&Client>) -> O
             .map(|(_, v)| v.trim().to_string())
             .filter(|v| !v.is_empty())
     })
+}
+
+/// B2 sync (PA-53): the tax years before this one that documents never sent still go up for
+/// (`None`: the default; 0: every year).
+pub fn set_b2_years_back(root: &Path, years: Option<u16>) -> Result<(), String> {
+    let mut meta = read_meta(root)?;
+    let b2 = load_b2(root)?;
+    meta.b2_clients = b2.clients;
+    meta.b2_years_back = years;
+    save_meta(root, &meta)?;
+    save_b2_backup(root, &B2Settings::of(&meta))
+}
+
+/// B2 sync (PA-53): a client's own choice, "always" or "never"; `None`: the firm's rule.
+pub fn set_b2_choice(root: &Path, client_id: &str, choice: Option<&str>) -> Result<(), String> {
+    let mut meta = read_meta(root)?;
+    let b2 = load_b2(root)?;
+    meta.b2_years_back = b2.years_back;
+    meta.b2_clients = b2.clients;
+    match choice {
+        Some(c @ ("always" | "never")) => {
+            meta.b2_clients.insert(client_id.into(), c.into());
+        }
+        Some(other) => return Err(format!("not a B2 choice: {other}")),
+        None => {
+            meta.b2_clients.remove(client_id);
+        }
+    }
+    save_meta(root, &meta)?;
+    save_b2_backup(root, &B2Settings::of(&meta))
 }
 
 /// Sets (or clears) a client's entity type in the sidecar. Run `rebuild::sync_clients` after.
@@ -943,6 +1056,55 @@ mod tests {
         s.save(&dir).unwrap();
         let e = append_to_csv(cab.path(), "5005", "Lee", None).unwrap_err();
         assert!(e.contains("cannot be reached"), "{e}");
+    }
+
+    /// B2 settings (PA-53, QA): fields a later version wrote are kept; settings an older build
+    /// dropped (it rewrote clients.vf.json without them) come back from the backup; an
+    /// unreadable file is an error, never "no rule".
+    #[test]
+    fn b2_settings_survive_an_older_build() {
+        let cab = tempfile::tempdir().unwrap();
+        let dir = master_dir(cab.path());
+        std::fs::create_dir_all(&dir).unwrap();
+        // A later version's field is kept through a save.
+        std::fs::write(
+            dir.join(SIDECAR_FILE),
+            r#"{"entity_types":{},"shares":[],"future":7}"#,
+        )
+        .unwrap();
+        set_b2_years_back(cab.path(), Some(5)).unwrap();
+        set_b2_choice(cab.path(), "c1", Some("never")).unwrap();
+        let raw = std::fs::read_to_string(dir.join(SIDECAR_FILE)).unwrap();
+        assert!(raw.contains("\"future\": 7"), "{raw}");
+        let b2 = load_b2(cab.path()).unwrap();
+        assert_eq!(b2.years_back, Some(5));
+        assert_eq!(b2.clients["c1"], "never");
+
+        // An older build saves the file without them: they come back from the backup.
+        std::fs::write(
+            dir.join(SIDECAR_FILE),
+            r#"{"entity_types":{"c1":"s_corp"},"shares":[]}"#,
+        )
+        .unwrap();
+        let b2 = load_b2(cab.path()).unwrap();
+        assert_eq!(
+            (b2.years_back, b2.clients.get("c1").map(String::as_str)),
+            (Some(5), Some("never"))
+        );
+        let raw = std::fs::read_to_string(dir.join(SIDECAR_FILE)).unwrap();
+        assert!(
+            raw.contains("b2_years_back") && raw.contains("s_corp"),
+            "put back, the rest kept: {raw}"
+        );
+
+        // Cleared on purpose in this version: not put back.
+        set_b2_years_back(cab.path(), None).unwrap();
+        set_b2_choice(cab.path(), "c1", None).unwrap();
+        assert_eq!(load_b2(cab.path()).unwrap(), B2Settings::default());
+
+        // Unreadable: an error.
+        std::fs::write(dir.join(SIDECAR_FILE), "{ not json").unwrap();
+        assert!(load_b2(cab.path()).is_err());
     }
 
     /// A Partner column holding SSNs is refused, whatever its header.
