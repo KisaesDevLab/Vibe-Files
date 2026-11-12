@@ -294,7 +294,7 @@ pub fn check_paths(root: Option<&Path>, inboxes: &[PathBuf]) -> Vec<Issue> {
             continue;
         }
         if let Some(root) = &root_canon {
-            if canon.starts_with(root) {
+            if canon.starts_with(root) && !in_skipped_folder(&canon, root) {
                 out.push(Issue::error(format!(
                     "Inbox {} is inside the client root. Pick a folder outside it.",
                     inbox.display()
@@ -314,6 +314,16 @@ pub fn check_paths(root: Option<&Path>, inboxes: &[PathBuf]) -> Vec<Issue> {
         seen.push(canon);
     }
     out
+}
+
+/// `inbox` is inside `root` in a folder the root scan leaves out (`_x`, `.x`, `~x`, X28), so its
+/// files are never read as a client's folders (a program that embeds Filer keeps one there).
+fn in_skipped_folder(inbox: &Path, root: &Path) -> bool {
+    inbox
+        .strip_prefix(root)
+        .ok()
+        .and_then(|rel| rel.components().next())
+        .is_some_and(|c| c.as_os_str().to_string_lossy().starts_with(['_', '.', '~']))
 }
 
 /// Exists, is a folder, and accepts a new file. Returns the canonical path.
@@ -535,6 +545,20 @@ mod tests {
         assert!(errors(&issues).is_empty() && issues.len() == 1);
 
         let e = check_paths(Some(&root), std::slice::from_ref(&nested));
+        assert!(errors(&e)[0].contains("inside the client root"), "{e:?}");
+        // Inside the root in a folder the scan leaves out is allowed, at any depth below it.
+        for name in ["_Portal inbox", ".in", "~in"] {
+            let skipped = root.join(name).join("sub");
+            std::fs::create_dir_all(&skipped).unwrap();
+            for p in [root.join(name), skipped] {
+                let e = check_paths(Some(&root), std::slice::from_ref(&p));
+                assert!(errors(&e).is_empty(), "{e:?}");
+            }
+        }
+        // A skipped name deeper down (inside a client folder) is still inside the root.
+        let deep = nested.join("_x");
+        std::fs::create_dir_all(&deep).unwrap();
+        let e = check_paths(Some(&root), std::slice::from_ref(&deep));
         assert!(errors(&e)[0].contains("inside the client root"), "{e:?}");
 
         let e = check_paths(Some(&nested), std::slice::from_ref(&root));

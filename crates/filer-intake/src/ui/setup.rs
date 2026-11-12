@@ -386,7 +386,7 @@ impl SetupScreen {
                 self.draft.inboxes.push(p);
             }
             ui.label(
-                RichText::new("An inbox cannot be inside the client root.")
+                RichText::new("An inbox cannot be inside the client root (except in a top-level _ . or ~ folder).")
                     .size(11.0)
                     .color(pal(ui).muted),
             );

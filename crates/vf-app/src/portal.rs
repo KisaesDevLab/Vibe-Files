@@ -184,6 +184,15 @@ mod tests {
         let (fs, _) =
             filer_intake::config::Settings::load_or_default(&vf_fs::clients::master_dir(root));
         assert_eq!(fs.inboxes, vec![portable(&inbox(root))]);
+        // Intake › Setup accepts it inside the root (V34: a `_` folder the root scan leaves out),
+        // so Setup can still be saved.
+        let issues = filer_intake::config::check_paths(Some(root), &fs.inboxes);
+        assert!(
+            issues
+                .iter()
+                .all(|i| i.level != filer_intake::config::Level::Error),
+            "{issues:?}"
+        );
         // The same folder reached another way is not added again.
         let other = root.join(".").join(INBOX);
         let (mut fs2, _) =
