@@ -29,7 +29,7 @@ use vf_core::tx::{FileOp, Transaction};
 
 use crate::clients::{self, master_dir};
 use crate::docmeta::MetaEdit;
-use crate::rebuild::{self, files_under, rel};
+use crate::rebuild::{self, rel};
 
 /// Label of the bind (and rename) Transaction.
 pub const LABEL: &str = "folder_import";
@@ -39,7 +39,7 @@ pub const META_LABEL: &str = "folder_import_meta";
 pub const AUTO: f32 = 0.85;
 
 /// A client a folder is proposed for.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ClientPick {
     pub ext_id: String,
     pub uuid: Uuid,
@@ -48,7 +48,7 @@ pub struct ClientPick {
     pub new: bool,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct FolderRow {
     /// Folder name (cabinet-relative; top level).
     pub rel: String,
@@ -65,14 +65,14 @@ pub struct FolderRow {
     pub include: bool,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct FileRow {
     pub rel: String,
     /// Index into [`Plan::folders`]; `None` for files directly in the cabinet root.
     pub folder: Option<usize>,
     pub tax_year: Option<i32>,
     /// `folder`, `file name`, `permanent`, or empty when not found.
-    pub year_from: &'static str,
+    pub year_from: String,
     /// (doc type id, name).
     pub doc_type: Option<(String, String)>,
     pub type_confidence: f32,
@@ -80,7 +80,7 @@ pub struct FileRow {
     pub type_how: String,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct Plan {
     pub folders: Vec<FolderRow>,
     pub files: Vec<FileRow>,
@@ -88,7 +88,22 @@ pub struct Plan {
     pub clients: Vec<ClientPick>,
     /// Top-level folders left out (names starting `_`, `.` or `~`): listed, not imported.
     pub skipped: Vec<String>,
+    /// The files have been read ([`read_files`]); until then `files` is empty and the folders'
+    /// counts are 0 (owner 2026-11-12: the folders show first).
+    #[serde(default)]
+    pub files_read: bool,
 }
+
+/// How far a scan's phase has got: folders done of all.
+#[derive(Debug, Default)]
+pub struct ScanProgress {
+    pub done: std::sync::atomic::AtomicUsize,
+    pub total: std::sync::atomic::AtomicUsize,
+}
+
+/// Folders read at once by [`read_files`] (a network share answers each listing slowly; several
+/// at a time are much faster than one after another).
+pub const READERS: usize = 12;
 
 /// Why a file is in the remainder.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -780,7 +795,50 @@ fn client_list(root: &Path) -> Result<ClientList, String> {
 /// Scans the cabinet's top-level folders and their files, and proposes what each is. Writes
 /// nothing.
 pub fn plan(conn: &Connection, root: &Path) -> Result<Plan, String> {
-    use filer_intake::sentinel::{Progress, ScanInput, Status, scan_root};
+    let mut p = plan_folders(conn, root, &filer_intake::sentinel::Progress::default())?;
+    let files = read_files(
+        conn,
+        root,
+        &p,
+        &ScanProgress::default(),
+        &std::sync::atomic::AtomicBool::new(false),
+    )?;
+    files.apply(&mut p);
+    Ok(p)
+}
+
+/// What [`read_files`] found: every file's row, each folder's count, and the folders (or
+/// sub-folders) that could not be read (skipped, not the end of the scan).
+#[derive(Debug, Clone, Default)]
+pub struct Files {
+    pub files: Vec<FileRow>,
+    pub counts: Vec<usize>,
+    pub unreadable: Vec<String>,
+}
+
+/// Each top-level entry's files once read (its paths, and what could not be read).
+type Slot = std::sync::Mutex<Option<(Vec<PathBuf>, Vec<String>)>>;
+
+impl Files {
+    /// Into the plan (the person's choices on the folders kept).
+    pub fn apply(self, p: &mut Plan) {
+        for (r, n) in p.folders.iter_mut().zip(&self.counts) {
+            r.files = *n;
+        }
+        p.files = self.files;
+        p.files_read = true;
+    }
+}
+
+/// The scan's first part: the top-level folders and the clients they are for, without their
+/// files (owner 2026-11-12: about 7,000 folders show first, the files fill in after).
+/// `progress`: Filer's folder count as it reads each folder's sentinel.
+pub fn plan_folders(
+    conn: &Connection,
+    root: &Path,
+    progress: &filer_intake::sentinel::Progress,
+) -> Result<Plan, String> {
+    use filer_intake::sentinel::{ScanInput, Status, scan_root};
     let list = client_list(root)?;
     let (settings, _) = filer_core::config::Settings::load_or_default(&master_dir(root));
     let input = ScanInput {
@@ -790,7 +848,7 @@ pub fn plan(conn: &Connection, root: &Path) -> Result<Plan, String> {
         threshold: settings.fuzzy_suggest,
         ignored: vec![],
     };
-    let bindings = scan_root(&input, &Progress::default())?;
+    let bindings = scan_root(&input, progress)?;
     let (tree, _, err) = template::load_or_seed(&master_dir(root));
     if let Some(e) = err {
         return Err(e);
@@ -800,8 +858,6 @@ pub fn plan(conn: &Connection, root: &Path) -> Result<Plan, String> {
         .prepare("SELECT ext_id FROM client WHERE folder_rel IS NOT NULL AND deleted_at IS NULL")
         .and_then(|mut st| st.query_map([], |r| r.get(0))?.collect())
         .map_err(|e| e.to_string())?;
-    let matcher = Matcher::load(conn)?;
-
     let mut p = Plan {
         clients: list.clients.iter().map(|c| pick(c, false)).collect(),
         ..Plan::default()
@@ -889,15 +945,6 @@ pub fn plan(conn: &Connection, root: &Path) -> Result<Plan, String> {
             }
         }
     }
-    let folder_index: HashMap<String, usize> = p
-        .folders
-        .iter()
-        .enumerate()
-        .map(|(i, r)| (r.rel.clone(), i))
-        .collect();
-
-    let mut paths: Vec<PathBuf> = vec![];
-    collect_files(root, &mut paths)?;
     for e in std::fs::read_dir(root).into_iter().flatten().flatten() {
         let n = e.file_name().to_string_lossy().into_owned();
         if e.file_type().is_ok_and(|t| t.is_dir())
@@ -908,60 +955,124 @@ pub fn plan(conn: &Connection, root: &Path) -> Result<Plan, String> {
         }
     }
     p.skipped.sort();
-    for path in paths {
-        let r = rel(root, &path);
-        let segs: Vec<&str> = r.split('/').collect();
-        let (dirs, file) = segs.split_at(segs.len() - 1);
-        let folder = dirs.first().and_then(|d| folder_index.get(*d).copied());
-        if let Some(i) = folder {
-            p.folders[i].files += 1;
-        }
-        let stem = file[0].rsplit_once('.').map_or(file[0], |(s, _)| s);
-        // The client folder's own name says nothing about the doc type or year.
-        let inner: &[&str] = if dirs.is_empty() { &[] } else { &dirs[1..] };
-        let (t, type_conf, type_how) = matcher.decide(stem, inner);
-        let permanent = t.is_some_and(|i| matcher.types[i].2) && type_conf >= AUTO;
-        let (tax_year, year_from) = if permanent {
-            (None, "permanent")
-        } else if let Some(y) = inner.iter().rev().find_map(|d| year_in(d)) {
-            (Some(y), "folder")
-        } else if let Some(y) = year_in(stem) {
-            (Some(y), "file name")
-        } else {
-            (None, "")
-        };
-        p.files.push(FileRow {
-            rel: r,
-            folder,
-            tax_year,
-            year_from,
-            doc_type: t.map(|i| (matcher.types[i].0.clone(), matcher.types[i].1.clone())),
-            type_confidence: type_conf,
-            type_how,
-        });
-    }
     Ok(p)
 }
 
-/// Every file of the cabinet outside `_x`/`.x`/`~x` top-level folders (Filer's X28 rule) and
-/// `_Vibe`.
-fn collect_files(root: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {
-    let entries = std::fs::read_dir(root).map_err(|e| format!("cannot read the cabinet: {e}"))?;
-    let mut entries: Vec<_> = entries.filter_map(|e| e.ok()).collect();
-    entries.sort_by_key(|e| e.file_name());
-    for e in entries {
+/// The scan's second part: every file of the cabinet outside `_x`/`.x`/`~x` top-level folders,
+/// with the doc type and year its name and folders say, and each folder's count. Folders are
+/// read [`READERS`] at a time (owner 2026-11-12); `stop` ends it ("stopped").
+pub fn read_files(
+    conn: &Connection,
+    root: &Path,
+    p: &Plan,
+    progress: &ScanProgress,
+    stop: &std::sync::atomic::AtomicBool,
+) -> Result<Files, String> {
+    use std::sync::atomic::Ordering::Relaxed;
+    let matcher = Matcher::load(conn)?;
+    let folder_index: HashMap<String, usize> = p
+        .folders
+        .iter()
+        .enumerate()
+        .map(|(i, r)| (r.rel.clone(), i))
+        .collect();
+    // The folders the scan listed (not hidden or system ones), and loose files at the top, in
+    // name order as before.
+    enum Top {
+        Dir(PathBuf),
+        File(PathBuf),
+    }
+    let mut tops: Vec<(String, Top)> = p
+        .folders
+        .iter()
+        .map(|r| (r.rel.clone(), Top::Dir(root.join(&r.rel))))
+        .collect();
+    for e in std::fs::read_dir(root)
+        .map_err(|e| format!("cannot read the cabinet: {e}"))?
+        .flatten()
+    {
         let name = e.file_name().to_string_lossy().into_owned();
-        let Ok(ft) = e.file_type() else { continue };
-        if crate::cabinet::is_skipped_name(&name) || ft.is_symlink() {
-            continue;
-        }
-        if ft.is_dir() {
-            files_under(&e.path(), out).map_err(|e| e.to_string())?;
-        } else {
-            out.push(e.path());
+        if !crate::cabinet::is_skipped_name(&name) && e.file_type().is_ok_and(|t| t.is_file()) {
+            tops.push((name, Top::File(e.path())));
         }
     }
-    Ok(())
+    tops.sort_by(|a, b| a.0.cmp(&b.0));
+    let dirs = tops.iter().filter(|t| matches!(t.1, Top::Dir(_))).count();
+    progress.total.store(dirs, Relaxed);
+    progress.done.store(0, Relaxed);
+    // Each entry's files, read by several threads; kept in the cabinet's order. A folder that
+    // cannot be read is noted and skipped (QA 2026-11-12: one access-denied sub-folder threw
+    // away hours of reading).
+    let slots: Vec<Slot> = tops.iter().map(|_| std::sync::Mutex::new(None)).collect();
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    std::thread::scope(|sc| {
+        for _ in 0..READERS.min(tops.len().max(1)) {
+            sc.spawn(|| {
+                loop {
+                    if stop.load(Relaxed) {
+                        return;
+                    }
+                    let i = next.fetch_add(1, Relaxed);
+                    let Some((_, t)) = tops.get(i) else { return };
+                    let got = match t {
+                        Top::Dir(d) => {
+                            let (mut out, mut bad) = (vec![], vec![]);
+                            rebuild::files_under_lenient(d, &mut out, &mut bad);
+                            progress.done.fetch_add(1, Relaxed);
+                            (out, bad.into_iter().map(|(_, why)| why).collect())
+                        }
+                        Top::File(f) => (vec![f.clone()], vec![]),
+                    };
+                    *slots[i].lock().expect("slot") = Some(got);
+                }
+            });
+        }
+    });
+    if stop.load(Relaxed) {
+        return Err("stopped".into());
+    }
+    let mut out = Files {
+        files: vec![],
+        counts: vec![0; p.folders.len()],
+        unreadable: vec![],
+    };
+    for slot in slots {
+        let (paths, bad) = slot.into_inner().expect("slot").unwrap_or_default();
+        out.unreadable.extend(bad);
+        for path in paths {
+            let r = rel(root, &path);
+            let segs: Vec<&str> = r.split('/').collect();
+            let (dirs, file) = segs.split_at(segs.len() - 1);
+            let folder = dirs.first().and_then(|d| folder_index.get(*d).copied());
+            if let Some(i) = folder {
+                out.counts[i] += 1;
+            }
+            let stem = file[0].rsplit_once('.').map_or(file[0], |(s, _)| s);
+            // The client folder's own name says nothing about the doc type or year.
+            let inner: &[&str] = if dirs.is_empty() { &[] } else { &dirs[1..] };
+            let (t, type_conf, type_how) = matcher.decide(stem, inner);
+            let permanent = t.is_some_and(|i| matcher.types[i].2) && type_conf >= AUTO;
+            let (tax_year, year_from) = if permanent {
+                (None, "permanent")
+            } else if let Some(y) = inner.iter().rev().find_map(|d| year_in(d)) {
+                (Some(y), "folder")
+            } else if let Some(y) = year_in(stem) {
+                (Some(y), "file name")
+            } else {
+                (None, "")
+            };
+            out.files.push(FileRow {
+                rel: r,
+                folder,
+                tax_year,
+                year_from: year_from.to_string(),
+                doc_type: t.map(|i| (matcher.types[i].0.clone(), matcher.types[i].1.clone())),
+                type_confidence: type_conf,
+                type_how,
+            });
+        }
+    }
+    Ok(out)
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1248,7 +1359,7 @@ pub fn apply_with(
                         e.source = Some(Some(s.clone()));
                     }
                 }
-                match f.year_from {
+                match f.year_from.as_str() {
                     "permanent" => e.tax_year = Some(None),
                     "" => {}
                     _ => e.tax_year = Some(f.tax_year),

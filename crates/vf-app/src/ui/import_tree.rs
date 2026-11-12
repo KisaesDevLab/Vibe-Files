@@ -22,8 +22,48 @@ const READ_UP_TO: usize = 50_000;
 
 /// What Scan and Undo give back from their thread (owner 2026-11-12: no frozen window).
 enum Side {
+    /// The folders and their clients (the files come next).
     Scanned(Result<(Plan, Vec<(String, String)>), String>),
+    /// Every file, for the folders scanned.
+    Files(Result<import::Files, String>),
+    /// The kept scan's files, read from the PC (`None`: not there, or not this scan's).
+    KeptFiles(Option<Vec<import::FileRow>>),
     Undone(Result<(), String>),
+    /// The work could not start (the catalog would not open).
+    Failed(String),
+}
+
+/// The scan kept on this PC (owner 2026-11-12): the folders with the person's choices (small,
+/// saved as they change) and the files (large, saved once when read).
+const SAVED_FOLDERS: &str = "folder-import-folders";
+const SAVED_FILES: &str = "folder-import-files";
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct SavedFolders {
+    /// This scan's id: its files part is used only when it carries the same (QA 2026-11-12).
+    scan_id: String,
+    root: std::path::PathBuf,
+    at: String,
+    folders: Vec<import::FolderRow>,
+    clients: Vec<import::ClientPick>,
+    skipped: Vec<String>,
+    files_read: bool,
+    rename: bool,
+    default_type: Option<String>,
+    default_source: Option<String>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct SavedFiles {
+    scan_id: String,
+    files: Vec<import::FileRow>,
+}
+
+/// What a running scan has read: Filer's folder count (sentinels), then files by folder.
+#[derive(Default)]
+struct ScanCounts {
+    folders: filer_intake::sentinel::Progress,
+    files: import::ScanProgress,
 }
 
 #[derive(Default)]
@@ -49,6 +89,20 @@ pub struct ImportPage {
     job: Option<Receiver<Result<Applied, String>>>,
     /// A scan or an undo running on its thread, and what it says while it runs.
     side: Option<(&'static str, Receiver<Side>)>,
+    /// The running scan's counts, and its Stop.
+    counts: std::sync::Arc<ScanCounts>,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// The kept scan: looked for once; when it was made; what was saved last (not saved again
+    /// unchanged), checked every few seconds.
+    saved_looked: bool,
+    pub scanned_at: Option<String>,
+    /// The scan on screen, and whether its files part is saved on the PC yet.
+    scan_id: Option<String>,
+    files_saved: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// The import is done: the kept scan is removed (where the catalog is known).
+    forget_on_poll: bool,
+    saved_folders: Option<String>,
+    saved_checked: Option<std::time::Instant>,
     /// Read the text of the imported PDFs (OCR); unset = yes up to [`READ_UP_TO`] files.
     read_text: Option<bool>,
     /// Folders done of the running import, and how many it has (PA-34).
@@ -86,7 +140,7 @@ impl ImportPage {
         let job = move || {
             let r = match vf_core::db::open(&catalog, Storage::Local) {
                 Ok(mut conn) => work(&mut conn),
-                Err(e) => Side::Undone(Err(e.to_string())),
+                Err(e) => Side::Failed(e.to_string()),
             };
             let _ = tx.send(r);
             ctx2.request_repaint();
@@ -104,25 +158,37 @@ impl ImportPage {
     }
 
     fn scan(&mut self, ctx: &egui::Context, env: &Env, catalog: &Path) {
+        // The kept scan is replaced only once the new one has its folders (QA 2026-11-12: a
+        // failed scan would have lost hours of ticks).
         let root = env.root.to_path_buf();
-        self.run_side(
-            ctx,
-            "Scanning the cabinet's folders…",
-            catalog,
-            move |conn| {
-                Side::Scanned(import::plan(conn, &root).map(|p| {
-                    let types = vf_fs::doctypes::load(&root)
-                        .ok()
-                        .flatten()
-                        .unwrap_or_default()
-                        .into_iter()
-                        .filter(|t| !t.archived)
-                        .map(|t| (t.id, t.name))
-                        .collect();
-                    (p, types)
-                }))
-            },
-        );
+        self.counts = Default::default();
+        self.stop = Default::default();
+        let counts = self.counts.clone();
+        self.run_side(ctx, "Reading the client folders", catalog, move |conn| {
+            Side::Scanned(import::plan_folders(conn, &root, &counts.folders).map(|p| {
+                let types = vf_fs::doctypes::load(&root)
+                    .ok()
+                    .flatten()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|t| !t.archived)
+                    .map(|t| (t.id, t.name))
+                    .collect();
+                (p, types)
+            }))
+        });
+    }
+
+    /// The scan's second part: the files, several folders at a time, with Stop.
+    fn read_files(&mut self, ctx: &egui::Context, env: &Env, catalog: &Path) {
+        let Some(plan) = self.plan.clone() else {
+            return;
+        };
+        let root = env.root.to_path_buf();
+        let (counts, stop) = (self.counts.clone(), self.stop.clone());
+        self.run_side(ctx, "Reading the files", catalog, move |conn| {
+            Side::Files(import::read_files(conn, &root, &plan, &counts.files, &stop))
+        });
     }
 
     fn undo(&mut self, ctx: &egui::Context, env: &Env, catalog: &Path, a: Applied) {
@@ -132,7 +198,7 @@ impl ImportPage {
         });
     }
 
-    fn poll_side(&mut self) {
+    fn poll_side(&mut self, ctx: &egui::Context, env: &Env, catalog: &Path) {
         let Some((_, rx)) = &self.side else { return };
         let r = match rx.try_recv() {
             Ok(r) => r,
@@ -142,16 +208,84 @@ impl ImportPage {
         self.side = None;
         match r {
             Side::Scanned(Ok((p, types))) => {
+                forget_saved(catalog);
                 self.plan = Some(p);
                 self.last_tick = None;
                 self.id_drafts.clear();
                 self.types = types;
+                self.scanned_at = Some(vf_core::now_rfc3339());
+                self.scan_id = Some(vf_core::new_id());
+                self.files_saved = Default::default();
+                self.saved_folders = None;
+                // The folders are on screen: the files are read behind them.
+                self.read_files(ctx, env, catalog);
             }
             Side::Scanned(Err(e)) => self.error = Some(format!("Scan failed: {e}")),
+            Side::Files(Ok(files)) => {
+                if !files.unreadable.is_empty() {
+                    self.notice = Some(format!(
+                        "{} folders could not be read and were skipped (their files are not in the scan): {}",
+                        files.unreadable.len(),
+                        files
+                            .unreadable
+                            .iter()
+                            .take(3)
+                            .cloned()
+                            .collect::<Vec<_>>()
+                            .join("; ")
+                    ));
+                }
+                if let (Some(plan), Some(id)) = (self.plan.as_mut(), self.scan_id.clone()) {
+                    files.apply(plan);
+                    save_files(catalog, &id, plan, self.files_saved.clone());
+                    self.saved_folders = None;
+                }
+            }
+            Side::KeptFiles(Some(files)) => {
+                if let Some(plan) = self.plan.as_mut() {
+                    let n = plan.folders.len();
+                    let mut counts = vec![0; n];
+                    // Rows of folders that are not in this scan are dropped (never applied to
+                    // the wrong folder).
+                    let files: Vec<import::FileRow> = files
+                        .into_iter()
+                        .filter(|f| f.folder.is_none_or(|i| i < n))
+                        .collect();
+                    for f in &files {
+                        if let Some(i) = f.folder {
+                            counts[i] += 1;
+                        }
+                    }
+                    import::Files {
+                        files,
+                        counts,
+                        unreadable: vec![],
+                    }
+                    .apply(plan);
+                    self.files_saved
+                        .store(true, std::sync::atomic::Ordering::Relaxed);
+                    self.saved_folders = None;
+                }
+            }
+            Side::KeptFiles(None) => {
+                self.notice = Some(
+                    "The kept scan's files are not on this PC: Read the files again to import."
+                        .into(),
+                );
+            }
+            Side::Failed(e) => self.error = Some(format!("Could not start: {e}")),
+            Side::Files(Err(e)) if e == "stopped" => {
+                self.notice = Some(
+                    "Stopped: the folders are listed, their files were not read. Read the files to import.".into(),
+                );
+            }
+            Side::Files(Err(e)) => self.error = Some(format!("The files could not be read: {e}")),
             Side::Undone(Ok(())) => {
                 self.notice = Some("The import was undone.".into());
                 self.last = None;
                 self.plan = None;
+                self.scanned_at = None;
+                forget_saved(catalog);
                 self.changed = true;
             }
             Side::Undone(Err(e)) => self.error = Some(format!("Undo failed: {e}")),
@@ -265,12 +399,168 @@ impl ImportPage {
                 ));
                 self.last = Some(a);
                 self.plan = None;
+                self.scanned_at = None;
+                self.forget_on_poll = true;
             }
             Err(e) => {
                 tracing::warn!(kind = crate::logging::kind(&e), "folder import failed");
-                self.error = Some(format!("Import failed: {e}"));
+                // The cabinet may have changed since the scan (a folder bound or renamed
+                // elsewhere): the kept scan goes, so Import is never tried on it again.
+                self.error = Some(format!(
+                    "Import failed: {e}. Scan the cabinet again before importing (folders done are kept)."
+                ));
+                self.plan = None;
+                self.scanned_at = None;
+                self.forget_on_poll = true;
             }
         }
+    }
+}
+
+impl ImportPage {
+    /// The kept scan: loaded once when there is none on screen (for this cabinet), and the
+    /// folders part saved again when the person's choices changed (every few seconds).
+    fn keep_saved(&mut self, ctx: &egui::Context, env: &Env, catalog: &Path) {
+        if std::mem::take(&mut self.forget_on_poll) {
+            forget_saved(catalog);
+            self.saved_folders = None;
+        }
+        if !std::mem::replace(&mut self.saved_looked, true)
+            && self.plan.is_none()
+            && let Some(saved) = load_saved(catalog, env.root)
+        {
+            let mut plan = import::Plan {
+                folders: saved.folders,
+                clients: saved.clients,
+                skipped: saved.skipped,
+                ..Default::default()
+            };
+            for r in &mut plan.folders {
+                r.files = 0;
+            }
+            self.plan = Some(plan);
+            self.scan_id = Some(saved.scan_id.clone());
+            self.files_saved = Default::default();
+            // The files (large) are read on a thread, the folders already on screen.
+            if saved.files_read
+                && let Some((_, files_path)) = saved_paths(catalog)
+            {
+                let id = saved.scan_id.clone();
+                self.run_side(ctx, "Loading the kept scan", catalog, move |_| {
+                    let files = std::fs::read(&files_path)
+                        .ok()
+                        .and_then(|b| serde_json::from_slice::<SavedFiles>(&b).ok())
+                        .filter(|f| f.scan_id == id)
+                        .map(|f| f.files);
+                    Side::KeptFiles(files)
+                });
+            }
+            self.rename = saved.rename;
+            self.default_type = saved.default_type;
+            self.default_source = saved.default_source;
+            self.scanned_at = Some(saved.at);
+            self.types = vf_fs::doctypes::load(env.root)
+                .ok()
+                .flatten()
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|t| !t.archived)
+                .map(|t| (t.id, t.name))
+                .collect();
+        }
+        if self
+            .saved_checked
+            .is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(3))
+        {
+            return;
+        }
+        self.saved_checked = Some(std::time::Instant::now());
+        let (Some(plan), Some(at), Some(id)) = (&self.plan, &self.scanned_at, &self.scan_id) else {
+            return;
+        };
+        let saved = SavedFolders {
+            scan_id: id.clone(),
+            root: env.root.to_path_buf(),
+            at: at.clone(),
+            folders: plan.folders.clone(),
+            clients: plan.clients.clone(),
+            skipped: plan.skipped.clone(),
+            // Only once the files part is on disk (QA 2026-11-12).
+            files_read: plan.files_read
+                && self.files_saved.load(std::sync::atomic::Ordering::Relaxed),
+            rename: self.rename,
+            default_type: self.default_type.clone(),
+            default_source: self.default_source.clone(),
+        };
+        let Ok(text) = serde_json::to_string(&saved) else {
+            return;
+        };
+        if self.saved_folders.as_deref() != Some(text.as_str()) {
+            if let Some((folders, _)) = saved_paths(catalog) {
+                let _ = vf_fs::cabinet::write_replace(&folders, text.as_bytes());
+            }
+            self.saved_folders = Some(text);
+        }
+    }
+}
+
+/// Where this Windows user's kept scan is (beside the catalog; one per user, as several people
+/// share one catalog on a server: QA 2026-11-12): the folders part, the files part.
+fn saved_paths(catalog: &Path) -> Option<(std::path::PathBuf, std::path::PathBuf)> {
+    let dir = catalog.parent()?;
+    let user: String = crate::config::windows_user()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect();
+    Some((
+        dir.join(format!("{SAVED_FOLDERS}-{user}.json")),
+        dir.join(format!("{SAVED_FILES}-{user}.json")),
+    ))
+}
+
+/// The kept scan's folders part for `root`, when there is one.
+fn load_saved(catalog: &Path, root: &Path) -> Option<SavedFolders> {
+    let (folders, _) = saved_paths(catalog)?;
+    let saved: SavedFolders = serde_json::from_slice(&std::fs::read(folders).ok()?).ok()?;
+    (saved.root == root).then_some(saved)
+}
+
+/// The files part, saved once when read (on its thread: it can be large); `saved` says when
+/// it is on disk, and only then does the folders part say the files are read.
+fn save_files(
+    catalog: &Path,
+    scan_id: &str,
+    plan: &Plan,
+    saved: std::sync::Arc<std::sync::atomic::AtomicBool>,
+) {
+    let Some((_, path)) = saved_paths(catalog) else {
+        return;
+    };
+    let body = SavedFiles {
+        scan_id: scan_id.to_string(),
+        files: plan.files.clone(),
+    };
+    let write = move || {
+        if let Ok(bytes) = serde_json::to_vec(&body)
+            && vf_fs::cabinet::write_replace(&path, &bytes).is_ok()
+        {
+            saved.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+    };
+    if cfg!(test) {
+        write();
+    } else {
+        let _ = std::thread::Builder::new()
+            .name("folder-import-save".into())
+            .spawn(write);
+    }
+}
+
+/// The kept scan removed (a new scan, an import done or failed, an undo).
+fn forget_saved(catalog: &Path) {
+    if let Some((folders, files)) = saved_paths(catalog) {
+        let _ = std::fs::remove_file(folders);
+        let _ = std::fs::remove_file(files);
     }
 }
 
@@ -292,7 +582,8 @@ pub fn show(ui: &mut egui::Ui, p: &mut ImportPage, env: &mut Env, catalog: &Path
         p.loaded_last = true;
     }
     p.poll();
-    p.poll_side();
+    p.poll_side(ui.ctx(), env, catalog);
+    p.keep_saved(ui.ctx(), env, catalog);
     ui.heading("Folder import");
     ui.label(widgets::caption(
         "Adopts the folders already in this cabinet (a FileCenter cabinet's drawers, an old firm \
@@ -318,10 +609,57 @@ pub fn show(ui: &mut egui::Ui, p: &mut ImportPage, env: &mut Env, catalog: &Path
             p.undo(ui.ctx(), env, catalog, a);
         }
         if let Some((what, _)) = &p.side {
+            use std::sync::atomic::Ordering::Relaxed;
             ui.spinner();
-            ui.label(*what);
+            // How far it has got (owner 2026-11-12: about 7,000 folders).
+            let (done, total) = match *what {
+                "Reading the client folders" => (
+                    p.counts.folders.done.load(Relaxed),
+                    p.counts.folders.total.load(Relaxed),
+                ),
+                "Reading the files" => (
+                    p.counts.files.done.load(Relaxed),
+                    p.counts.files.total.load(Relaxed),
+                ),
+                _ => (0, 0),
+            };
+            ui.label(if total > 0 {
+                format!("{what}: {done} of {total} folders…")
+            } else {
+                format!("{what}…")
+            });
+            if *what == "Reading the files" {
+                let stopping = p.stop.load(Relaxed);
+                if ui
+                    .add_enabled(!stopping, egui::Button::new("Stop"))
+                    .on_hover_text("The folders stay listed; their files are not read")
+                    .clicked()
+                {
+                    p.stop.store(true, Relaxed);
+                }
+            }
             ui.ctx()
                 .request_repaint_after(std::time::Duration::from_millis(250));
+        }
+        // Folders listed, files not read (stopped, or a kept scan): read them now.
+        if !p.running()
+            && p.plan.as_ref().is_some_and(|pl| !pl.files_read)
+            && ui
+                .button("Read the files")
+                .on_hover_text("Each folder's files, for their doc types and years; needed to import")
+                .clicked()
+        {
+            p.counts = Default::default();
+            p.stop = Default::default();
+            p.read_files(ui.ctx(), env, catalog);
+        }
+        if let Some(at) = &p.scanned_at
+            && !p.running()
+        {
+            ui.label(widgets::caption(format!(
+                "Scan of {} (Scan the cabinet for a fresh one)",
+                widgets::local_time(at)
+            )));
         }
         if p.job.is_some() {
             ui.spinner();
@@ -720,10 +1058,17 @@ pub fn show(ui: &mut egui::Ui, p: &mut ImportPage, env: &mut Env, catalog: &Path
         } else {
             format!("Set doc types and years ({to_type} files)")
         };
-        let go = ui.add_enabled(
-            (to_bind > 0 || to_type > 0) && !p.running(),
-            widgets::primary_button(label),
-        );
+        let files_read = p.plan.as_ref().is_some_and(|pl| pl.files_read);
+        let go = ui
+            .add_enabled(
+                (to_bind > 0 || to_type > 0) && !p.running() && files_read,
+                widgets::primary_button(label),
+            )
+            .on_disabled_hover_text(if files_read {
+                "Nothing to import, or the scan is running"
+            } else {
+                "The files are being read (or were not): Read the files first"
+            });
         if go.clicked() {
             p.start(ui.ctx(), catalog, env.root, env.device_id);
         }

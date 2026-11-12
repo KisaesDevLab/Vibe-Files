@@ -1650,6 +1650,28 @@ ANDE1042,Anderson Farms LLC
         h.run();
         let acme = ids(&h)[1].clone();
         assert!(acme != "ACME1001" && acme.contains('9'), "{acme}");
+        // The scan is kept on this PC with the edit (owner 2026-11-12): Vibe Files started
+        // again shows it without scanning, files read.
+        std::thread::sleep(std::time::Duration::from_millis(3100));
+        h.run();
+        let dir = h.state()._tmp.path().to_path_buf();
+        let kept = |prefix: &str| {
+            std::fs::read_dir(&dir)
+                .unwrap()
+                .flatten()
+                .any(|e| e.file_name().to_string_lossy().starts_with(prefix))
+        };
+        assert!(kept("folder-import-folders-") && kept("folder-import-files-"));
+        h.state_mut().a.import = Default::default();
+        h.run();
+        let page = &h.state().a.import;
+        assert!(page.scanned_at.is_some());
+        assert!(
+            page.plan
+                .as_ref()
+                .is_some_and(|p| p.files_read && p.files.len() == 1)
+        );
+        assert_eq!(ids(&h)[1], acme, "the edit kept");
         h.get_by_role_and_label(Role::Button, "Import 2 folders")
             .click();
         h.step();
@@ -1680,6 +1702,8 @@ ANDE1042,Anderson Farms LLC
             ]
         );
         assert!(s.root.join("Acme Ranch/_Vibe/client.json").is_file());
+        // Imported: the kept scan is gone.
+        assert!(!kept("folder-import-folders-") && !kept("folder-import-files-"));
     }
 
     /// PA-28: the folder list filtered by match %, ticked in bulk and by Shift-click.

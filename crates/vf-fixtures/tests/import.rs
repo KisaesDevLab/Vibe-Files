@@ -286,6 +286,40 @@ fn snapshot(dir: &Path) -> BTreeMap<String, String> {
     out
 }
 
+/// The scan in two parts (owner 2026-11-12: about 7,000 folders): the folders first, then
+/// the files read several folders at a time, give what one scan gave, in the same order; Stop
+/// ends the files part; nothing is read before the folders are there.
+#[test]
+fn the_scan_in_two_parts_is_the_same_and_stops() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let f = tree(600);
+    let whole = import::plan(&f.conn, &f.root).unwrap();
+    let folders = filer_intake::sentinel::Progress::default();
+    let mut p = import::plan_folders(&f.conn, &f.root, &folders).unwrap();
+    assert!(!p.files_read && p.files.is_empty());
+    assert!(p.folders.iter().all(|r| r.files == 0));
+    assert_eq!(p.folders.len(), whole.folders.len());
+    let progress = import::ScanProgress::default();
+    let files =
+        import::read_files(&f.conn, &f.root, &p, &progress, &AtomicBool::new(false)).unwrap();
+    assert_eq!(
+        progress.done.load(Ordering::Relaxed),
+        progress.total.load(Ordering::Relaxed)
+    );
+    files.apply(&mut p);
+    assert!(p.files_read);
+    assert_eq!(p.files, whole.files, "same rows, same order");
+    assert_eq!(p.folders, whole.folders, "same counts");
+    let stopped = import::read_files(
+        &f.conn,
+        &f.root,
+        &p,
+        &import::ScanProgress::default(),
+        &AtomicBool::new(true),
+    );
+    assert_eq!(stopped.unwrap_err(), "stopped");
+}
+
 #[test]
 fn a_filecenter_tree_of_2000_files_imports_mostly_mapped() {
     let mut f = tree(2000);

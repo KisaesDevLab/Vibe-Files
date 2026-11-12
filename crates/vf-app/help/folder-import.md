@@ -13,13 +13,13 @@ A very large old tree? **vibe-move.exe**, in the same folder as Vibe Files, can 
 - each client's **Permanent** folder;
 - files modified on or after a date;
 - files with a recent year in their name or folders;
-- **Year folders**: folders whose name has a year in a range you type (`2026`, `2023-2025`), such as `Income Tax6` or `2026 Returns`, moved whole with their sub-folders.
+- **Year folders**: folders whose name has a year in a range you type (`2026`, `2023-2025`), such as `Income Tax\2026` or `2026 Returns`, moved whole with their sub-folders.
 
 Each step shows a preview first, and every move is logged in a CSV file beside the new folder. A file whose new path would be too long (over 240 characters) gets a shorter name, cut in the middle and marked `~`, unless you untick that. **Undo this move**, or **Undo a move from its log…** later, puts a step's files back; a file changed since the move is left. Then import the new folder.
 
 ## Scan the cabinet
 
-Open **Admin** › **Folder import** and press **Scan the cabinet**. Nothing is changed by the scan. Each top-level folder is matched to a client by its ID or its name, and each file gets:
+Open **Admin** › **Folder import** and press **Scan the cabinet**. Nothing is changed by the scan. The folders show first, each matched to a client by its ID or name, while the files are read behind (the page counts them; **Stop** ends it, **Read the files** starts again). Import waits for the files. The scan, with your ticks, is kept on this PC until you import or scan again. Each file gets:
 
 - a **tax year** from a year folder it is in (`Income Tax/2022`), or else from a year in its file name (`…_2022_…`). A year from the file name is flagged to check;
 - a **doc type** from its name or folder, where they say so.
@@ -54,9 +54,9 @@ When some files have no doc type found, the line **N files with no doc type foun
 
 ## Large cabinets: batches, stopping and continuing
 
-One press of **Import** imports every ticked folder: it works through them 500 at a time and goes on to the next batch by itself, with nothing to press in between. Each batch ties its folders to their clients, catalogs only those folders' files, and sets their doc types and years. While it runs, the page shows how many folders are done, for example **Importing: 1500 of 7628 folders done**.
+One press of **Import** imports every ticked folder, 500 at a time, going on by itself. Each batch ties its folders to their clients, catalogs their files and sets their doc types and years. The page shows how many folders are done.
 
-Each batch is saved when it finishes. Only if the import is cut off (Vibe Files is closed or the PC restarts partway through) is there anything to do, and nothing finished is lost:
+Each batch is saved when it finishes. If the import is cut off (Vibe Files closed, the PC restarted), nothing finished is lost:
 
 - Open **Folder import** again and press **Scan the cabinet**. Folders from finished batches show as already bound.
 - Tick the rest and press **Import** to carry on from there.
