@@ -69,6 +69,9 @@ pub struct MoveApp {
     pub year: String,
     /// Step 4's years: `2026` or `2023-2025`.
     pub years: String,
+    /// Shorten a file name whose new path would be too long (owner 2026-11-12); on unless
+    /// turned off.
+    pub shorten: bool,
     /// Clients per run (owner 2026-11-05: a few at a time to try it); blank = all.
     pub per_run: String,
     /// Clients whose files could not all be moved this session: with a per-run limit they are
@@ -109,6 +112,7 @@ impl MoveApp {
     pub fn new() -> MoveApp {
         MoveApp {
             permanent: vf_move::PERMANENT.into(),
+            shorten: true,
             ..Default::default()
         }
     }
@@ -236,6 +240,7 @@ impl MoveApp {
         let (progress, stop) = (self.progress.clone(), self.stop.clone());
         let opts = Options {
             force_copy: self.force_copy,
+            shorten: self.shorten,
             ..Default::default()
         };
         self.running = Some(Job::spawn(ctx, move || {
@@ -566,6 +571,19 @@ impl MoveApp {
                 self.preview = None;
             }
         });
+        ui.add_enabled(
+            !busy,
+            egui::Checkbox::new(
+                &mut self.shorten,
+                format!(
+                    "Shorten a file name whose new path would be over {} characters",
+                    vf_move::MAX_PATH
+                ),
+            ),
+        )
+        .on_hover_text(
+            "Cut in the middle (marked ~), the extension kept; the log keeps the old name. Off: such a file is left where it is.",
+        );
         ui.horizontal(|ui| {
             let can = !busy && self.clients.iter().any(|c| c.1);
             if ui.add_enabled(can, egui::Button::new("Preview")).clicked() {
@@ -736,6 +754,13 @@ fn report(ui: &mut Ui, rep: &Report, undo: bool) {
                 format!(
                     ", {} empty folders made in the new folder",
                     rep.folders_made
+                )
+            } else {
+                String::new()
+            } + &if rep.shortened > 0 {
+                format!(
+                    ", {} with a shortened name (the full path was too long)",
+                    rep.shortened
                 )
             } else {
                 String::new()

@@ -222,6 +222,22 @@ pub fn import_csv(
     import_csv_tin(root, csv, map, known, None)
 }
 
+/// Makes `csv` and `map` Intake Setup's client CSV (Filer's shared `config.json`), so Browse's
+/// import and Intake's re-import read the same file (owner 2026-11-12).
+pub fn use_csv_in_intake(root: &Path, csv: &Path, map: &ColumnMap) -> Result<(), String> {
+    let dir = master_dir(root);
+    let (mut settings, savable) = filer_core::config::Settings::load_or_default(&dir);
+    if !savable {
+        return Err("Intake's config.json could not be read".into());
+    }
+    if settings.csv_path.as_deref() == Some(csv) && settings.column_map == *map {
+        return Ok(());
+    }
+    settings.csv_path = Some(csv.to_path_buf());
+    settings.column_map = map.clone();
+    settings.save(&dir).map_err(|e| e.to_string())
+}
+
 /// A Windows-1252 byte for `c`, when the code page has one.
 fn to_1252(c: char) -> Option<u8> {
     const HIGH: [char; 32] = [
@@ -257,14 +273,18 @@ pub fn append_to_csv(
     name: &str,
     partner: Option<&str>,
 ) -> Result<Option<PathBuf>, String> {
-    let Some(list) = load(root)?.list else {
+    // The CSV Intake › Setup names (and re-imports): none after "Stop using the CSV".
+    let (settings, _) = filer_core::config::Settings::load_or_default(&master_dir(root));
+    let Some(csv) = settings.csv_path.clone() else {
         return Ok(None);
     };
-    let csv = list.source.clone();
-    if csv.as_os_str().is_empty() || !csv.is_file() {
+    if csv.as_os_str().is_empty() {
         return Ok(None);
     }
-    let map = &list.column_map;
+    if !csv.is_file() {
+        return Err(format!("{} cannot be reached from this PC", csv.display()));
+    }
+    let map = &settings.column_map;
     let table = clients::read_csv(&csv).map_err(|e| format!("{}: {e}", csv.display()))?;
     let (Some(id_h), Some(name_h)) = (map.id.as_deref(), map.name.as_deref()) else {
         return Err("the client list has no ID and name columns mapped".into());
@@ -859,6 +879,9 @@ mod tests {
             partner: Some("Preparer".into()),
         };
         import_csv(cab.path(), &csv, &m, &Default::default()).unwrap();
+        // Not Intake's CSV yet: nothing written.
+        assert_eq!(append_to_csv(cab.path(), "2002", "x", None).unwrap(), None);
+        use_csv_in_intake(cab.path(), &csv, &m).unwrap();
 
         let got = append_to_csv(cab.path(), "2002", "Smith, José", Some("AB")).unwrap();
         assert_eq!(got.as_deref(), Some(csv.as_path()));
@@ -896,6 +919,7 @@ mod tests {
         .unwrap();
         let m = ColumnMap { partner: None, ..m };
         import_csv(cab.path(), &csv, &m, &Default::default()).unwrap();
+        use_csv_in_intake(cab.path(), &csv, &m).unwrap();
         append_to_csv(cab.path(), "4004", "Zhang 张", Some("AB")).unwrap();
         assert_eq!(
             std::fs::read_to_string(&csv).unwrap(),
@@ -904,6 +928,21 @@ mod tests {
 4004,Zhang 张
 "
         );
+        // After "Stop using the CSV" (Intake names none): the CSV is left alone.
+        let dir = master_dir(cab.path());
+        let (mut s, _) = filer_core::config::Settings::load_or_default(&dir);
+        s.csv_path = None;
+        s.save(&dir).unwrap();
+        assert_eq!(
+            append_to_csv(cab.path(), "5005", "Lee", None).unwrap(),
+            None
+        );
+        assert!(!std::fs::read_to_string(&csv).unwrap().contains("5005"));
+        // A CSV named but out of reach (a drive this PC lacks): an error, so the dialog warns.
+        s.csv_path = Some(cab.path().join("gone.csv"));
+        s.save(&dir).unwrap();
+        let e = append_to_csv(cab.path(), "5005", "Lee", None).unwrap_err();
+        assert!(e.contains("cannot be reached"), "{e}");
     }
 
     /// A Partner column holding SSNs is refused, whatever its header.

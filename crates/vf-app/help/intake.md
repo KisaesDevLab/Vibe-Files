@@ -22,9 +22,9 @@ The **Intake** tab opens on **Preview**. Every PDF in an inbox folder (set in **
 - **Destination**: the folder and file name it will get.
 - **Status**: **Ready**, **Needs client**, **Needs year**, **Collision**, **Skipped**, **Paused · duplicate folder** or **Error**. Extra pills say **Will create** (a new client folder) or **Cross-drive**.
 
-Click a column heading to sort the rows by it; click it again to reverse. **Date** sorts newest first. Rows with nothing in that column (no client yet, no year) go last.
+Click a column heading to sort by it; again to reverse. **Date** sorts newest first; empty values go last.
 
-The toolbar has **Batch year** (used for any row without a year), **On collision** (**Keep both**, **Overwrite** or **Skip**) and **Keep all original names**.
+The toolbar has **Partner** (only that partner's clients' rows are listed and committed; the same choice as Browse's), **Batch year** (for rows without a year), **On collision** and **Keep all original names**.
 
 **Tick ready** ticks every row whose status is **Ready**; the other rows stay unticked.
 

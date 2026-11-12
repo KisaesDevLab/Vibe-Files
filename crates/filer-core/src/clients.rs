@@ -647,6 +647,21 @@ pub fn load_on_launch(data_dir: &Path, csv: Option<&Path>, map: &ColumnMap) -> L
             note: None,
         };
     };
+    // The CSV moved or deleted, with a list imported before: that list, and one plain note
+    // saying what to do (V37).
+    if let Some(c) = &cached
+        && !csv.exists()
+    {
+        let note = format!(
+            "The client CSV {} is not there: the list imported {} is used. In Setup, Choose CSV… to use another, or Stop using the CSV.",
+            csv.display(),
+            c.imported_text()
+        );
+        return Loaded {
+            list: cached,
+            note: Some((Level::Info, note)),
+        };
+    }
     let stale = match (&cached, file_modified(csv)) {
         (Some(c), Ok(m)) => c.source != csv || c.source_modified != m || c.column_map != *map,
         _ => true,
@@ -743,6 +758,11 @@ impl ClientsManager {
 
     pub fn note(&self) -> Option<&(Level, String)> {
         self.note.as_ref()
+    }
+
+    /// The note no longer applies (the CSV it was about is no longer used).
+    pub fn clear_note(&mut self) {
+        self.note = None;
     }
 
     pub fn busy(&self) -> bool {
@@ -1375,6 +1395,30 @@ mod tests {
         let list = loaded.list.unwrap();
         assert_eq!(list.column_map, with_partner);
         assert_eq!(list.match_by_id("1001").unwrap().extra["Partner"], "KW");
+    }
+
+    /// V37: the CSV gone (moved or deleted): the list imported before, with one plain note;
+    /// no CSV at all: the list as it is, no note.
+    #[test]
+    fn launch_without_the_csv_keeps_the_list() {
+        let dir = tempfile::tempdir().unwrap();
+        let csv = write_csv(dir.path(), "id,name\n1001,A\n");
+        let data = dir.path().join("data");
+        std::fs::create_dir(&data).unwrap();
+        let m = map("id", "name", &[]);
+        load_on_launch(&data, Some(&csv), &m);
+        std::fs::remove_file(&csv).unwrap();
+        let gone = load_on_launch(&data, Some(&csv), &m);
+        assert_eq!(gone.list.unwrap().len(), 1);
+        let (level, note) = gone.note.unwrap();
+        assert_eq!(level, Level::Info);
+        assert!(
+            note.contains("is not there") && note.contains("Stop using the CSV"),
+            "{note}"
+        );
+        let none = load_on_launch(&data, None, &m);
+        assert_eq!(none.list.unwrap().len(), 1);
+        assert!(none.note.is_none());
     }
 
     /// Registers a job whose result the test sends by hand, so finishing order is controlled.

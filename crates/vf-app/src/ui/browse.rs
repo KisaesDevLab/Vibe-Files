@@ -287,6 +287,9 @@ pub struct Browse {
     saved_job: Option<crate::ui::job::Job<SavedRun>>,
     /// A move, copy or undo running.
     file_job: Option<crate::ui::job::Job<FileDone>>,
+    /// Admin is unlocked in this window (the app sets it each frame): Import clients CSV…
+    /// then asks no admin password.
+    pub admin_unlocked: bool,
     /// A pane width being dragged, saved when the drag ends (tree, details).
     width_drag: (Option<u16>, Option<u16>),
     pub name_filter: String,
@@ -465,6 +468,7 @@ impl Browse {
             client_sync_again: false,
             saved_job: None,
             file_job: None,
+            admin_unlocked: false,
             name_filter: String::new(),
             large: false,
             loaded: None,
@@ -1263,6 +1267,15 @@ impl Browse {
                 label,
             },
         );
+    }
+
+    /// The Partner choice (also made in Intake's review): the tree, the Views and their counts
+    /// follow, and it is saved for this Windows user.
+    pub fn set_partner(&mut self, partner: Option<String>) {
+        if self.prefs.partner != partner {
+            self.prefs.partner = partner;
+            self.prefs_changed();
+        }
     }
 
     /// The window's context, once Browse has been shown.
@@ -3022,6 +3035,8 @@ fn grid(ui: &mut egui::Ui, b: &mut Browse, conn: &Connection) {
                 .collect();
             let mut d = ImportDialog::new(known);
             d.catalog = b.catalog.clone();
+            // It also sets Intake › Setup's client CSV, which the admin password locks.
+            d.admin_unlocked = b.admin_unlocked;
             b.import = Some(d);
         }
         if ui
@@ -5689,6 +5704,55 @@ Petty cash,1234.50
         };
         assert_eq!(partner("1001").as_deref(), Some("KW"));
         assert_eq!(partner("1002"), None);
+        // Intake › Setup now names the same CSV and columns (owner 2026-11-12).
+        let n = b.notice.clone().unwrap_or_default();
+        assert!(n.contains("Intake › Setup uses this CSV too"), "{n}");
+        let (fs, _) = filer_core::config::Settings::load_or_default(&vf_fs::clients::master_dir(
+            &h.state().root,
+        ));
+        // Saved as every PC reaches it (absolute; a mapped drive as \server\share).
+        assert_eq!(
+            fs.csv_path,
+            Some(crate::portal::portable(std::path::Path::new(&csv)))
+        );
+        assert_eq!(fs.column_map.partner.as_deref(), Some("Preparer"));
+    }
+
+    /// With an admin password set and Admin locked, Import clients CSV… asks for it (it also
+    /// sets Intake › Setup's client CSV, which the password locks; owner 2026-11-12).
+    #[test]
+    fn importing_clients_asks_the_admin_password() {
+        let mut h = cabinet_harness();
+        {
+            let s = h.state_mut();
+            let root = s.root.clone();
+            vf_fs::trash::set_pin(&mut s.conn, &root, "dev-test", None, "482193").unwrap();
+        }
+        let csv = write_csv(&h, "ClientID,Name\n1001,Acme LLC\n");
+        click(&mut h, "Import clients CSV…");
+        type_into(&mut h, "CSV file", &csv);
+        click(&mut h, "Read");
+        type_into(&mut h, "Admin password", "000000");
+        click(&mut h, "Import 1 rows (one transaction)");
+        let d = h.state().b.import.as_ref().expect("still open");
+        assert_eq!(
+            d.error.as_deref(),
+            Some("That admin password is not right.")
+        );
+        assert!(h.state().b.snap.clients.is_empty(), "nothing imported");
+        type_into(&mut h, "Admin password", "482193");
+        click(&mut h, "Import 1 rows (one transaction)");
+        h.run();
+        assert!(h.state().b.import.is_none(), "{:?}", h.state().b.error);
+        assert_eq!(h.state().b.snap.clients.len(), 1);
+        // Admin unlocked: not asked.
+        h.state_mut().b.admin_unlocked = true;
+        click(&mut h, "Import clients CSV…");
+        h.run();
+        assert_eq!(
+            h.state().b.import.as_ref().unwrap().needs_password,
+            Some(false)
+        );
     }
 
     /// + New client adds the client to the client CSV too (owner 2026-11-12), and says so.

@@ -62,6 +62,13 @@ pub struct IntakeTab {
     /// The client list or relationships changed (Browse, another PC, a re-import): read again
     /// in place, the review kept (Filer V36; owner 2026-11-12).
     refresh_clients: bool,
+    /// Browse's Partner choice (this Windows user's), which the review's filter follows (Filer
+    /// V38; owner 2026-11-12); set by the app each frame.
+    pub partner: Option<String>,
+    /// A partner chosen in the review, for the app to make Browse's choice too.
+    pub partner_change: Option<Option<String>>,
+    /// The client partners last given to Filer (CSV ID → partner).
+    partners_sent: Option<std::collections::HashMap<String, String>>,
     /// "New client…" pressed on a row Filer found no client for: Vibe's New client dialog, for
     /// that file (owner 2026-11-04).
     new_client: Option<(crate::ui::new_client::NewClientDialog, PathBuf)>,
@@ -156,15 +163,9 @@ pub fn settings_with_theme(
     // which renames each print for Filer: Filer's own UltraTax reading (0.2.5+) stays off so
     // there is one place to set it up (owner 2026-11-04, no duplicate processing).
     s.ultratax.enabled = false;
-    // Filer re-imports the client CSV on launch when it changed; point it at the one the master
-    // list came from.
-    if let Ok(Some(list)) = filer_core::clients::load_cache(&dir)
-        && !list.source.as_os_str().is_empty()
-        && list.source.is_file()
-    {
-        s.csv_path = Some(list.source.clone());
-        s.column_map = list.column_map.clone();
-    }
+    // The client CSV is config.json's own: chosen in Intake › Setup or by Browse's import
+    // (`vf_fs::clients::use_csv_in_intake`), none after "Stop using the CSV" (QA 2026-11-12:
+    // pointing it back at clients.json's source here undid Stop on the next load).
     if savable && serde_json::to_value(&s).ok() != before {
         s.save(&dir)
             .map_err(|e| format!("saving Filer's config.json: {e}"))?;
@@ -393,7 +394,13 @@ impl IntakeTab {
                     }
                     // Changed elsewhere: rules and clients are noticed below; relationships are
                     // read again in place; the others offer the reload here.
-                    if ch.from_cabinet.contains(&"relationships.json") {
+                    // config.json too: its client CSV and columns are read again with the list
+                    // (a Browse import elsewhere), so Filer never re-imports the old CSV.
+                    if ch
+                        .from_cabinet
+                        .iter()
+                        .any(|f| matches!(*f, "relationships.json" | "config.json"))
+                    {
                         self.refresh_clients = true;
                     }
                     if ch.from_cabinet.iter().any(|f| {
@@ -766,6 +773,18 @@ impl IntakeTab {
                     .to_string()
             }));
             f.offer_new_client(true);
+            // One Partner choice with Browse; each client's partner as Vibe Files keeps it
+            // (the client panel's own included), not only the CSV's (Filer V38).
+            f.set_partner_filter(self.partner.clone());
+            let partners: std::collections::HashMap<String, String> = snap
+                .clients
+                .iter()
+                .filter_map(|c| Some((c.ext_id.clone(), c.partner.clone()?)))
+                .collect();
+            if self.partners_sent.as_ref() != Some(&partners) {
+                f.set_client_partners(partners.clone());
+                self.partners_sent = Some(partners);
+            }
             if let Some(req) = f.take_new_client_request() {
                 let mut d = crate::ui::new_client::NewClientDialog::new(req.id.clone());
                 d.req.name = req.name.trim().to_string();
@@ -870,6 +889,10 @@ impl IntakeTab {
         match (&mut self.filer, &self.error) {
             (Some(f), _) => {
                 eframe::App::ui(f, ui, frame);
+                if let Some(p) = f.take_partner_change() {
+                    self.partner = p.clone();
+                    self.partner_change = Some(p);
+                }
                 // Taken in the frame the double-click happened (the app opens it below).
                 if let Some(p) = f.take_open_request() {
                     self.ingest.open_request = Some(p);

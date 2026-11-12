@@ -29,6 +29,12 @@ pub struct ImportDialog {
     pub catalog: Option<PathBuf>,
     /// The import running (owner 2026-11-12: a spinner, not a frozen window).
     job: Option<crate::ui::job::Job<Result<String, String>>>,
+    /// An admin password is set and Admin is locked: asked before importing (it also sets
+    /// Intake › Setup's client CSV, which the password locks; owner 2026-11-12).
+    pub needs_password: Option<bool>,
+    pub password: String,
+    /// Admin is unlocked in this window: no password asked.
+    pub admin_unlocked: bool,
 }
 
 impl ImportDialog {
@@ -42,6 +48,9 @@ impl ImportDialog {
             tin: None,
             catalog: None,
             job: None,
+            needs_password: None,
+            password: String::new(),
+            admin_unlocked: false,
         }
     }
 }
@@ -89,6 +98,9 @@ fn column_combo(
 
 pub fn show(ctx: &egui::Context, d: &mut ImportDialog, env: &mut Env) -> DialogOutcome<String> {
     let mut out = DialogOutcome::Open;
+    let needs_password = *d
+        .needs_password
+        .get_or_insert_with(|| !d.admin_unlocked && vf_fs::trash::has_pin(env.root));
     if let Some(r) = crate::ui::job::take(&mut d.job) {
         match r.and_then(|r| r) {
             Ok(msg) => return DialogOutcome::Done(msg),
@@ -202,6 +214,18 @@ pub fn show(ctx: &egui::Context, d: &mut ImportDialog, env: &mut Env) -> DialogO
                 && d.map.partner.as_ref().is_none_or(|p| Some(p) != d.map.id.as_ref() && Some(p) != d.map.name.as_ref());
         });
         ui.add_space(6.0);
+        if needs_password {
+            ui.horizontal(|ui| {
+                let l = ui.label("Admin password");
+                ui.add(
+                    TextEdit::singleline(&mut d.password)
+                        .password(true)
+                        .desired_width(160.0),
+                )
+                .labelled_by(l.id)
+                .on_hover_text("The import also sets Intake › Setup's client CSV, which the admin password locks");
+            });
+        }
         widgets::message_line(ui, d.error.as_deref());
         if let Some(j) = &d.job {
             j.show(ui);
@@ -213,9 +237,35 @@ pub fn show(ctx: &egui::Context, d: &mut ImportDialog, env: &mut Env) -> DialogO
                 ready,
                 widgets::primary_button(format!("Import {n} rows (one transaction)")),
             );
-            if go.clicked() {
+            // The admin password, checked (and wrong ones counted and slowed) as Admin's lock
+            // screen does.
+            let refused = go.clicked()
+                && needs_password
+                && match vf_fs::trash::unlock_admin(env.conn, env.root, env.device_id, &d.password) {
+                    Ok(true) => {
+                        d.needs_password = Some(false);
+                        false
+                    }
+                    Ok(false) => {
+                        d.error = Some("That admin password is not right.".into());
+                        true
+                    }
+                    Err(w) => {
+                        d.error = Some(format!("Too many wrong passwords: try again in {w} s."));
+                        true
+                    }
+                };
+            if refused {
+                d.password.clear();
+            } else if go.clicked() {
+                // A path every PC reaches (a mapped drive as \\server\share, made absolute):
+                // it is saved in Intake's shared settings.
+                let path = crate::portal::portable(
+                    &std::path::absolute(d.path.trim())
+                        .unwrap_or_else(|_| PathBuf::from(d.path.trim())),
+                );
                 let input = Input {
-                    path: PathBuf::from(d.path.trim()),
+                    path,
                     map: d.map.clone(),
                     known: d.known.clone(),
                     tin: d.tin.clone(),
@@ -266,6 +316,8 @@ fn run(
     device_id: &str,
 ) -> Result<String, String> {
     let list = clients::import_csv_tin(root, &d.path, &d.map, &d.known, d.tin.as_deref())?;
+    // The same CSV for Intake: its re-imports read this file with these columns.
+    let intake = clients::use_csv_in_intake(root, &d.path, &d.map).err();
     let rep = vf_fs::rebuild::sync_clients(conn, root, device_id, "clients_import")
         .map_err(|e| format!("The client list was saved but the catalog was not updated: {e}"))?;
     let mut msg = format!(
@@ -284,6 +336,12 @@ fn run(
             " IDs whose folder belongs to a different client record (folder kept): {}.",
             rep.uuid_mismatches.join(", ")
         ));
+    }
+    match intake {
+        None => msg.push_str(" Intake › Setup uses this CSV too (each open Intake picks it up within a few seconds)."),
+        Some(e) => msg.push_str(&format!(
+            " Intake › Setup still names its own CSV ({e}): choose this one there too."
+        )),
     }
     match clients::unbound_matches(root, &list) {
         Ok(m) if !m.is_empty() => {

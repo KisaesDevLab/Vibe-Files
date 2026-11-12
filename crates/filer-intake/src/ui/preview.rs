@@ -127,6 +127,14 @@ pub struct PreviewScreen {
     /// Turned on or off with "Preview pane"; until then it is open when the window has room.
     pane_choice: Option<bool>,
     pane: Option<PagePane>,
+    /// Only rows whose client has this partner (any case); `""`: no partner, and rows with no
+    /// client; `None`: all (V38).
+    partner_filter: Option<String>,
+    /// Each client's partner by client ID, from the host (its own edits included); `None`:
+    /// the client list's `{Partner}` column.
+    host_partners: Option<HashMap<String, String>>,
+    /// The person chose another partner here, for the host to take.
+    partner_changed: Option<Option<String>>,
 }
 
 /// A combined PDF and the queued files it was made from.
@@ -237,11 +245,96 @@ impl Default for PreviewScreen {
             pane_open: false,
             pane_choice: None,
             pane: None,
+            partner_filter: None,
+            host_partners: None,
+            partner_changed: None,
         }
     }
 }
 
 impl PreviewScreen {
+    /// The partner filter (see [`PreviewScreen::partner_filter`]).
+    // Used through a host's hooks (Vibe Files), not by this program.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn set_partner_filter(&mut self, filter: Option<String>) {
+        self.partner_filter = filter;
+    }
+
+    // Used through a host's hooks (Vibe Files), not by this program.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn partner_filter(&self) -> Option<&str> {
+        self.partner_filter.as_deref()
+    }
+
+    /// Each client's partner by client ID, from the host.
+    // Used through a host's hooks (Vibe Files), not by this program.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn set_client_partners(&mut self, partners: HashMap<String, String>) {
+        self.host_partners = Some(partners);
+    }
+
+    /// A partner chosen on this screen since the last call.
+    // Used through a host's hooks (Vibe Files), not by this program.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn take_partner_change(&mut self) -> Option<Option<String>> {
+        self.partner_changed.take()
+    }
+
+    /// The partner of the client a row is for.
+    fn row_partner(&self, p: &Proposal) -> Option<String> {
+        let c = p.client.as_ref()?;
+        let found = match &self.host_partners {
+            Some(m) => m.get(&c.id).cloned(),
+            None => c
+                .extra
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case(crate::clients::PARTNER_TOKEN))
+                .map(|(_, v)| v.clone()),
+        };
+        found
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+    }
+
+    /// The row is shown under the partner filter.
+    fn shown(&self, p: &Proposal) -> bool {
+        match self.partner_filter.as_deref() {
+            None => true,
+            Some("") => self.row_partner(p).is_none(),
+            Some(f) => self
+                .row_partner(p)
+                .is_some_and(|x| x.eq_ignore_ascii_case(f)),
+        }
+    }
+
+    /// The partners there are: the host's, else the client list's, each once (any case),
+    /// sorted.
+    fn partner_names(&self, state: &AppState) -> Vec<String> {
+        let mut seen = std::collections::BTreeMap::new();
+        let mut add = |p: &str| {
+            let p = p.trim();
+            if !p.is_empty() {
+                seen.entry(p.to_lowercase())
+                    .or_insert_with(|| p.to_string());
+            }
+        };
+        match &self.host_partners {
+            Some(m) => m.values().for_each(|p| add(p)),
+            None => {
+                if let Some(list) = state.clients.list() {
+                    for c in &list.clients {
+                        for (k, v) in &c.extra {
+                            if k.eq_ignore_ascii_case(crate::clients::PARTNER_TOKEN) {
+                                add(v);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        seen.into_values().collect()
+    }
+
     #[cfg(test)]
     pub fn proposals(&self) -> &[Proposal] {
         &self.proposals
@@ -842,20 +935,24 @@ impl PreviewScreen {
             && self.commit_rows().any(|p| p.status == RowStatus::Ready)
     }
 
-    /// Some rows are ticked: Commit files only those, and only they can block it (V3).
+    /// Some rows shown are ticked: Commit files only those, and only they can block it (V3).
     fn ticked_only(&self) -> bool {
         self.proposals
             .iter()
-            .any(|p| self.selected.contains(&p.file.path))
+            .any(|p| self.shown(p) && self.selected.contains(&p.file.path))
     }
 
-    /// The rows Commit works on: the ticked ones, or all of them when none is ticked (V3).
+    /// The rows Commit works on: of the rows the partner filter shows (V38), the ticked ones,
+    /// or all of them when none is ticked (V3).
     fn commit_rows(&self) -> impl Iterator<Item = &Proposal> {
         let ticked: std::collections::HashSet<&PathBuf> = self.selected.iter().collect();
-        let only = self.proposals.iter().any(|p| ticked.contains(&p.file.path));
+        let only = self
+            .proposals
+            .iter()
+            .any(|p| self.shown(p) && ticked.contains(&p.file.path));
         self.proposals
             .iter()
-            .filter(move |p| !only || ticked.contains(&p.file.path))
+            .filter(move |p| self.shown(p) && (!only || ticked.contains(&p.file.path)))
     }
 
     fn edit(&mut self, path: &Path) -> &mut RowEdits {
@@ -1127,9 +1224,14 @@ impl PreviewScreen {
             ui.label(strong("Queue"));
             let inboxes = state.intake.watching().len();
             let zips = state.routed.len();
+            let shown = self.proposals.iter().filter(|p| self.shown(p)).count();
+            let pending = if shown == self.proposals.len() {
+                format!("{shown}")
+            } else {
+                format!("{shown} of {}", self.proposals.len())
+            };
             let mut text = format!(
-                " · {} pending · {inboxes} inbox{}",
-                self.proposals.len(),
+                " · {pending} pending · {inboxes} inbox{}",
                 if inboxes == 1 { "" } else { "es" }
             );
             if zips > 0 {
@@ -1178,7 +1280,7 @@ impl PreviewScreen {
                 let ready: Vec<PathBuf> = self
                     .proposals
                     .iter()
-                    .filter(|p| p.status == RowStatus::Ready)
+                    .filter(|p| p.status == RowStatus::Ready && self.shown(p))
                     .map(|p| p.file.path.clone())
                     .collect();
                 let tick = ui
@@ -1208,8 +1310,9 @@ impl PreviewScreen {
                     }
                 });
                 ui.separator();
-                let all_on = !self.proposals.is_empty()
-                    && self.proposals.iter().all(|pr| {
+                // The rows shown (V38: not another partner's).
+                let all_on = self.proposals.iter().any(|pr| self.shown(pr))
+                    && self.proposals.iter().filter(|pr| self.shown(pr)).all(|pr| {
                         self.edits
                             .get(&pr.file.path)
                             .is_some_and(|e| e.keep_original_name)
@@ -1220,6 +1323,7 @@ impl PreviewScreen {
                     let paths: Vec<PathBuf> = self
                         .proposals
                         .iter()
+                        .filter(|pr| self.shown(pr))
                         .map(|pr| pr.file.path.clone())
                         .collect();
                     for path in paths {
@@ -1248,6 +1352,36 @@ impl PreviewScreen {
                 }
                 let l = ui.label(RichText::new("Batch year").color(p.muted));
                 combo.labelled_by(l.id);
+                // Only one partner's clients (V38), when clients have partners.
+                let partners = self.partner_names(state);
+                if !partners.is_empty() || self.partner_filter.is_some() {
+                    ui.add_space(8.0);
+                    let mut pick = self.partner_filter.clone();
+                    let shown = match pick.as_deref() {
+                        None => "All partners".to_string(),
+                        Some("") => "No partner".to_string(),
+                        Some(x) => x.to_string(),
+                    };
+                    let combo = egui::ComboBox::from_id_salt("partner_filter")
+                        .width(110.0)
+                        .selected_text(shown)
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut pick, None, "All partners");
+                            ui.selectable_value(&mut pick, Some(String::new()), "No partner");
+                            for x in &partners {
+                                ui.selectable_value(&mut pick, Some(x.clone()), x);
+                            }
+                        });
+                    let l = ui.label(RichText::new("Partner").color(p.muted));
+                    combo
+                        .response
+                        .labelled_by(l.id)
+                        .on_hover_text("Show and file only one partner's clients' rows");
+                    if pick != self.partner_filter {
+                        self.partner_filter = pick.clone();
+                        self.partner_changed = Some(pick);
+                    }
+                }
             });
         });
     }
@@ -1737,7 +1871,9 @@ impl PreviewScreen {
     /// The rows in the order shown: sorted by the chosen column (ties by file name), else as
     /// the files came in.
     fn display_order(&self) -> Vec<usize> {
-        let mut order: Vec<usize> = (0..self.proposals.len()).collect();
+        let mut order: Vec<usize> = (0..self.proposals.len())
+            .filter(|&i| self.shown(&self.proposals[i]))
+            .collect();
         let Some((by, ascending)) = self.sort else {
             return order;
         };

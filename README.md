@@ -110,6 +110,9 @@ before step 2. It works on plain folders, and Vibe Files doesn't need to be open
 3. Files keep their paths under the new folder. Moves between drives are copied, checked and
    only then removed from the old folder. A name already taken keeps both files (` (2)`).
    A file open in another program is tried again for about 10 seconds, then left and listed.
+   A file whose new path would be over 240 characters gets a shorter name (cut in the middle,
+   marked `~`, extension kept; the log keeps the old one) unless **Shorten a file name…** is
+   unticked, when it is left and listed.
    Folders a move empties are removed. Every move is written to a CSV log beside the new folder.
    **Undo this move** (or **Undo a move from its log…** later) puts a step's files back,
    except any changed since the move.

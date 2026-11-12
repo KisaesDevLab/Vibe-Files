@@ -15,7 +15,7 @@ The tree lists, from the top:
 - **SAVED SEARCHES** — searches saved on the Search tab. See [Search](help:search).
 - **CABINET** — **All documents**, then every client.
 
-Type in **Find client by name or ID** to shorten the client list, for example `smith` or `1004`. When clients have partners, **Partner** at the top of the pane, above **VIEWS**, shows only one partner's clients, or **No partner**. It also keeps the Views (Recent, Pinned, Needs doc type, Needs tax year, Received this week) to those clients' documents, counts included. Each Windows user's choice comes back the next time they open Vibe Files.
+Type in **Find client by name or ID** to shorten the client list, for example `smith` or `1004`. When clients have partners, **Partner** at the top of the pane, above **VIEWS**, shows only one partner's clients, or **No partner**. It also keeps the Views (Recent, Pinned, Needs doc type, Needs tax year, Received this week) to those clients' documents, counts included. Intake's review filters by the same choice. Each Windows user's choice comes back next time.
 
 ### Folders or By year
 

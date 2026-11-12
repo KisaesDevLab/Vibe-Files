@@ -588,12 +588,21 @@ impl FilerApp {
         }
     }
 
-    /// The host changed the client list or the relationships on disk (`clients.json`,
-    /// `relationships.json` in the data folder): both are read again, and the review keeps
-    /// what was chosen and plans again with them (V36).
+    /// The host changed the client list, the relationships or the client CSV setting on disk
+    /// (`clients.json`, `relationships.json`, `config.json` in the data folder): they are read
+    /// again, and the review keeps what was chosen and plans again with them (V36, V37).
     // Used by a host that embeds Filer (Vibe Files), not by this program.
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn reload_clients(&mut self, ctx: &egui::Context) {
+        // The client CSV and columns as config.json has them now (another program or PC may
+        // have changed them): the list is never re-imported from the old CSV (V37 QA), and
+        // Setup's draft follows so a later Save does not write the old one back.
+        let (disk, readable) = crate::config::Settings::load_or_default(&self.shared.data_dir);
+        if readable {
+            self.shared.settings.csv_path = disk.csv_path;
+            self.shared.settings.column_map = disk.column_map;
+            self.setup.sync_csv(&self.shared.settings);
+        }
         let s = &self.shared;
         self.shared.clients.load(
             ctx,
@@ -612,6 +621,31 @@ impl FilerApp {
             .ok()
             .map(chrono::DateTime::from);
         s.relationships_generation += 1;
+    }
+
+    /// Shows and files only rows of clients with `partner` (any case; `""`: no partner and no
+    /// client; `None`: all), as the host's own partner choice says (V38).
+    // Used by a host that embeds Filer (Vibe Files), not by this program.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn set_partner_filter(&mut self, partner: Option<String>) {
+        if self.preview.partner_filter() != partner.as_deref() {
+            self.preview.set_partner_filter(partner);
+        }
+    }
+
+    /// Each client's partner by client ID, as the host keeps them (its own edits included);
+    /// without it, the client list's `{Partner}` column (V38).
+    // Used by a host that embeds Filer (Vibe Files), not by this program.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn set_client_partners(&mut self, partners: std::collections::HashMap<String, String>) {
+        self.preview.set_client_partners(partners);
+    }
+
+    /// A partner the person chose in the review since the last call, for the host to keep.
+    // Used by a host that embeds Filer (Vibe Files), not by this program.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn take_partner_change(&mut self) -> Option<Option<String>> {
+        self.preview.take_partner_change()
     }
 
     /// The row whose "New client…" was pressed, once.
@@ -1513,6 +1547,39 @@ mod import_tests {
         h.step();
         h.step();
         assert!(h.query_by_label("Partner → Preparer").is_some());
+    }
+
+    /// V37: "Stop using the CSV" keeps the client list and saves no CSV in config.json.
+    #[test]
+    fn setup_stops_using_the_csv() {
+        let (data, root, src) = (
+            tempfile::tempdir().unwrap(),
+            tempfile::tempdir().unwrap(),
+            tempfile::tempdir().unwrap(),
+        );
+        let csv = src.path().join("clients.csv");
+        std::fs::write(&csv, "Client ID,Client Name\n1001,Acme LLC\n").unwrap();
+        let mut h = harness(data.path(), root.path());
+        open_wizard(&mut h, &csv);
+        h.get_by_label("Import 1 client").click();
+        settle(&mut h, |h| h.state().shared.settings.csv_path.is_some());
+        h.state_mut().tab = Tab::Setup;
+        h.step();
+        h.step();
+        h.get_by_label("Stop using the CSV").click();
+        h.step();
+        h.step();
+        let app = h.state();
+        assert_eq!(app.shared.settings.csv_path, None);
+        assert_eq!(
+            app.shared.clients.list().unwrap().len(),
+            1,
+            "the list stays"
+        );
+        assert!(!app.setup.is_dirty(&app.shared));
+        let (saved, _) = Settings::load_or_default(data.path());
+        assert_eq!(saved.csv_path, None);
+        assert!(h.query_by_label("(no CSV chosen)").is_some());
     }
 
     #[test]
@@ -2863,6 +2930,98 @@ mod combine_ui_tests {
     /// V3: with rows ticked, Commit files only those; an unticked row that needs a client
     /// doesn't block it and stays queued, like the unticked Ready row.
     #[test]
+    fn partner_filter_shows_and_files_one_partner() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data = tmp.path().join("data");
+        let root = tmp.path().join("root");
+        let inbox = tmp.path().join("inbox");
+        for d in [&data, &root, &inbox] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let csv = tmp.path().join("clients.csv");
+        std::fs::write(
+            &csv,
+            "id,name,Preparer\n1001,\"Smith, John\",KW\n1004,Baker Farms,AB\n",
+        )
+        .unwrap();
+        let names = [
+            "Smith, John_1001_2025 1040.pdf",
+            "Baker Farms_1004_2025 1065.pdf",
+            "Nobody_9999_2025 W-2.pdf",
+        ];
+        for n in names {
+            crate::pdf::write_test_pdf(&inbox.join(n), &[n]);
+        }
+        let settings = Settings {
+            root: Some(root.clone()),
+            inboxes: vec![inbox.clone()],
+            csv_path: Some(csv),
+            column_map: ColumnMap {
+                partner: Some("Preparer".into()),
+                id: Some("id".into()),
+                name: Some("name".into()),
+                extras: vec![],
+            },
+            ..Settings::default()
+        };
+        let d = data.clone();
+        let mut h = HarnessBuilder::default()
+            .with_theme(egui::Theme::Light)
+            .with_size([1800.0, 1200.0])
+            .build_eframe(move |cc| {
+                crate::rules::seed_tax(&d);
+                FilerApp::new(&cc.egui_ctx, AppState::load(d, settings, true, None))
+            });
+        settle(&mut h, "queue", |a| {
+            a.shared.intake.queue().len() == 3 && a.shared.clients.list().is_some()
+        });
+        h.get_by_label("Preview").click();
+        settle(&mut h, "plan", |a| plan_ready(a, 3));
+        assert!(!h.state().preview.can_commit_for_test(), "W-2 blocks");
+
+        // Partner KW: only Smith's row, and the client-less W-2 no longer blocks.
+        h.get_by_role_and_label(egui::accesskit::Role::ComboBox, "Partner")
+            .click();
+        h.step();
+        h.step();
+        h.get_by_label("KW").click();
+        h.step();
+        h.step();
+        assert_eq!(h.state_mut().take_partner_change(), Some(Some("KW".into())));
+        assert_eq!(h.state().preview.shown_order(), [inbox.join(names[0])]);
+        assert!(h.state().preview.can_commit_for_test());
+        // "No partner": the row with no client.
+        h.state_mut().set_partner_filter(Some(String::new()));
+        h.step();
+        assert_eq!(h.state().preview.shown_order(), [inbox.join(names[2])]);
+        // The host's own partners win over the list's.
+        let mut host = std::collections::HashMap::new();
+        host.insert("1004".to_string(), "KW".to_string());
+        h.state_mut().set_client_partners(host);
+        h.state_mut().set_partner_filter(Some("kw".into()));
+        h.step();
+        assert_eq!(h.state().preview.shown_order(), [inbox.join(names[1])]);
+        assert_eq!(
+            h.state_mut().take_partner_change(),
+            None,
+            "the host's own change"
+        );
+
+        // Commit files only the rows shown.
+        h.get_by_label("Commit 1 file").click();
+        settle(&mut h, "summary", |a| a.preview.summary_is_open());
+        for _ in 0..3 {
+            h.step();
+        }
+        h.get_by_label("Confirm commit").click();
+        settle(&mut h, "filed", |a| {
+            a.shared.ops_generation > 0 && !a.preview.committing()
+        });
+        assert!(!inbox.join(names[1]).exists(), "Baker filed");
+        assert!(inbox.join(names[0]).exists() && inbox.join(names[2]).exists());
+    }
+
+    #[test]
     fn ticked_rows_commit_alone() {
         let tmp = tempfile::tempdir().unwrap();
         let data = tmp.path().join("data");
@@ -3049,6 +3208,37 @@ mod combine_ui_tests {
         assert_eq!(
             h.state().shared.relationships.records[0].role,
             "Shareholder"
+        );
+
+        // V37 QA: the host pointed config.json at another CSV: read with the list, so the
+        // list comes from the new CSV, not re-imported from the old one.
+        let csv2 = tmp.path().join("clients2.csv");
+        std::fs::write(
+            &csv2,
+            "id,name
+1001,\"Smith, John\"
+2002,Newco LLC
+3003,Third Co
+",
+        )
+        .unwrap();
+        let (mut on_disk, _) = Settings::load_or_default(&data);
+        on_disk.csv_path = Some(csv2.clone());
+        on_disk.save(&data).unwrap();
+        h.state_mut().reload_clients(&ctx);
+        settle(&mut h, "new CSV read", |a| {
+            a.shared
+                .clients
+                .list()
+                .is_some_and(|l| l.match_by_id("3003").is_some())
+        });
+        assert_eq!(
+            h.state().shared.settings.csv_path.as_deref(),
+            Some(csv2.as_path())
+        );
+        assert!(
+            !h.state().setup.is_dirty(&h.state().shared),
+            "Setup's draft follows"
         );
     }
 

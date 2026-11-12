@@ -722,6 +722,7 @@ impl eframe::App for VibeFilesApp {
             Screen::Open(o) if self.tab == Tab::Intake => {
                 let o = &mut **o;
                 let setup_locked = !o.admin_unlocked && vf_fs::trash::has_pin(&o.opened.root);
+                o.intake.partner = o.browse.prefs.partner.clone();
                 o.intake.show(
                     ui,
                     frame,
@@ -734,6 +735,10 @@ impl eframe::App for VibeFilesApp {
                     &self.config.device_id,
                     setup_locked,
                 );
+                // A partner chosen in Intake's review is Browse's choice too (kept per user).
+                if let Some(p) = o.intake.partner_change.take() {
+                    o.browse.set_partner(p);
+                }
                 o.intake.reconcile(
                     &mut o.opened.conn,
                     &o.opened.catalog,
@@ -946,6 +951,7 @@ impl eframe::App for VibeFilesApp {
                         conflicts: o_sync.conflicts.len(),
                         running_for: o_sync.running_for.clone(),
                     });
+                    tab_browse.admin_unlocked = *admin_unlocked;
                     browse::show(ui, tab_browse, &mut env);
                     // Browse's Scan: Intake's scanner, profile and Scans folder (owner
                     // 2026-11-04); the outcome lands in Intake's log and on Browse.
@@ -3635,6 +3641,38 @@ mod tests {
         let pc = vf_fs::intake::pc_dir(&root, &h.state().config.device_id);
         let (rels, _, _) = filer_core::relationships::load(&pc);
         assert_eq!(rels.records.len(), 1, "Intake's copy is the new one");
+    }
+
+    /// One Partner choice for Browse and Intake's review (owner 2026-11-12, Filer V38): set in
+    /// Browse it filters the review; changed in the review it is Browse's again.
+    #[test]
+    fn intakes_partner_filter_is_browses_choice() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("Clients");
+        let req = CreateRequest {
+            root: &root,
+            name: "Firm",
+        };
+        drop(session::create(&tmp.path().join("pc1"), "dev-1", &req).unwrap());
+        let mut h = harness(&tmp.path().join("pc1"));
+        click(&mut h, "Open existing");
+        type_into(&mut h, "Cabinet folder", &root.display().to_string());
+        click(&mut h, "Open cabinet");
+        settle(&mut h);
+        if let Screen::Open(o) = &mut h.state_mut().screen {
+            o.browse.set_partner(Some("KW".into()));
+        }
+        click(&mut h, "Intake");
+        h.run_steps(8);
+        // The review's Partner box shows Browse's choice.
+        h.get_by_role_and_label(Role::ComboBox, "Partner").click();
+        h.run_steps(3);
+        h.get_by_label("All partners").click();
+        h.run_steps(4);
+        let Screen::Open(o) = &h.state().screen else {
+            unreachable!()
+        };
+        assert_eq!(o.browse.prefs.partner, None, "Browse follows the review");
     }
 
     /// Filer's screen loads once on the Intake tab, not on every frame (regression found

@@ -10,7 +10,7 @@ The client list comes from your tax software's client export. In Browse, press *
 - under **Other columns to keep (folder-name tokens)**, tick any extra columns you want to use in folder names;
 - for a taxpayer-ID column, tick its **keep the last 4 digits only** box. Full SSNs and EINs are never copied into the client list; the last four digits help match W-2s, 1099s and K-1s to clients.
 
-Press **Import N rows (one transaction)**. Re-importing an updated export keeps every client's identity. The message says how many clients have no folder yet, and names any existing folders that match a client but are not yet tied to it.
+Press **Import N rows (one transaction)**. Re-importing an updated export keeps every client's identity. The file and its columns also become Intake › Setup's client CSV, so both read the same file. The message says how many clients have no folder yet, and names any existing folders that match a client but are not yet tied to it.
 
 ## Adding a client
 

@@ -514,6 +514,8 @@ pub fn plan_some(old: &Path, clients: &[String], rule: &Rule, max: Option<usize>
 pub struct Report {
     pub moved: usize,
     pub kept_both: usize,
+    /// Moved under a shorter name: the full path would have been too long (owner 2026-11-12).
+    pub shortened: usize,
     pub failed: Vec<(PathBuf, String)>,
     pub bytes: u64,
     /// Folders removed because the move emptied them.
@@ -538,6 +540,9 @@ pub struct Options {
     pub retries: u32,
     /// …this long apart.
     pub retry_wait: std::time::Duration,
+    /// A file whose new path would be over [`MAX_PATH`] gets a shorter name (cut in the
+    /// middle, its extension kept) instead of being left (owner 2026-11-12).
+    pub shorten: bool,
 }
 
 impl Default for Options {
@@ -547,6 +552,7 @@ impl Default for Options {
             log_dir: None,
             retries: 3,
             retry_wait: std::time::Duration::from_secs(3),
+            shorten: false,
         }
     }
 }
@@ -613,6 +619,54 @@ fn secs(t: SystemTime) -> i64 {
 fn path_len(p: &Path) -> usize {
     use std::os::windows::ffi::OsStrExt;
     p.as_os_str().encode_wide().count()
+}
+
+/// What a shortened name puts where the middle of the name was.
+pub const CUT: &str = "~";
+
+/// `want` with its file name shortened so the whole path is at most [`MAX_PATH`] less `room`
+/// (for a " (2)" a taken name may need): the name cut in the middle, `~` in its place, the
+/// extension kept. `None` when it fits already, or when even a short name would not fit (the
+/// folders alone are too long).
+pub fn shortened(want: &Path, room: usize) -> Option<PathBuf> {
+    let limit = MAX_PATH.saturating_sub(room);
+    let len = path_len(want);
+    if len <= limit {
+        return None;
+    }
+    let name = want.file_name()?.to_string_lossy().into_owned();
+    let p = Path::new(&name);
+    let ext = p
+        .extension()
+        .map(|e| format!(".{}", e.to_string_lossy()))
+        .unwrap_or_default();
+    let stem: Vec<char> = p
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default()
+        .chars()
+        .collect();
+    // UTF-16 units to drop, plus the marker's; at least 12 characters of the name stay.
+    let drop = len - limit + CUT.encode_utf16().count();
+    let units = |cs: &[char]| cs.iter().map(|c| c.len_utf16()).sum::<usize>();
+    if units(&stem) < drop + 12 {
+        return None;
+    }
+    let mut keep = stem.len();
+    while units(&stem[..keep]) > units(&stem) - drop {
+        keep -= 1;
+    }
+    let head = keep.div_ceil(2);
+    let tail = keep - head;
+    let head_s: String = stem[..head].iter().collect();
+    let tail_s: String = stem[stem.len() - tail..].iter().collect();
+    // No space or dot next to the cut or at the end (Windows trims a trailing dot or space).
+    let new_name = format!(
+        "{}{CUT}{}{ext}",
+        head_s.trim_end_matches([' ', '.']),
+        tail_s.trim_start()
+    );
+    Some(want.with_file_name(new_name))
 }
 
 /// A file as moved: where it went, and its size and Date modified there (what the undo
@@ -781,7 +835,14 @@ pub fn apply(
             break;
         }
         let src = old.join(&item.rel);
-        let want = new.join(&item.rel);
+        let full = new.join(&item.rel);
+        // Too long for Windows programs: a shorter name, when asked (the log keeps both).
+        let short = if opts.shorten {
+            shortened(&full, 4)
+        } else {
+            None
+        };
+        let want = short.clone().unwrap_or(full);
         // Logged before it moves ("moving", to the name it will have): a log that cannot be
         // written stops the run before the file moves, so no move is ever off the record.
         let planned = filer_intake::commit::free_path(&want);
@@ -812,16 +873,18 @@ pub fn apply(
                 if kept_both {
                     rep.kept_both += 1;
                 }
-                (
-                    done.dst,
-                    done.size,
-                    done.modified,
-                    if kept_both {
-                        "moved; kept both (the name was taken)".to_string()
-                    } else {
-                        "moved".to_string()
-                    },
-                )
+                if short.is_some() {
+                    rep.shortened += 1;
+                }
+                let mut result = if kept_both {
+                    "moved; kept both (the name was taken)".to_string()
+                } else {
+                    "moved".to_string()
+                };
+                if short.is_some() {
+                    result.push_str("; name shortened (the full path was too long)");
+                }
+                (done.dst, done.size, done.modified, result)
             }
             Err(e) => {
                 rep.failed.push((item.rel.clone(), e.clone()));
@@ -1372,6 +1435,88 @@ mod tests {
         assert!(!a.join("2026 Returns").exists());
         assert!(old.join("Client 2026/Other/e.pdf").is_file());
         assert!(old.join("loose 2026.pdf").is_file());
+    }
+
+    /// A new path over the limit (owner 2026-11-12): with `shorten` the file moves under a name
+    /// cut in the middle (extension kept, the path within the limit), logged and put back by
+    /// Undo; without it, it is left as before.
+    #[test]
+    fn too_long_names_are_shortened_when_asked() {
+        // shortened(): fits already; cut in the middle; folders alone too long.
+        let short = Path::new(r"C:\a\b.pdf");
+        assert_eq!(shortened(short, 4), None);
+        let name = format!("{}.doc", "Single Audit Water and Waste ".repeat(12));
+        let long = Path::new(r"C:\Clients").join(&name);
+        let got = shortened(&long, 4).unwrap();
+        assert!(path_len(&got) <= MAX_PATH - 4, "{}", path_len(&got));
+        let gname = got.file_name().unwrap().to_string_lossy().into_owned();
+        assert!(
+            gname.starts_with("Single Audit") && gname.ends_with(".doc"),
+            "{gname}"
+        );
+        assert!(
+            gname.contains(CUT) && !gname.contains(" ~") && !gname.contains("~ "),
+            "{gname}"
+        );
+        let deep = Path::new(r"C:\")
+            .join("x".repeat(250))
+            .join("file name.pdf");
+        assert_eq!(shortened(&deep, 4), None);
+
+        let t = tempfile::tempdir().unwrap();
+        let (old, new) = (t.path().join("Old"), t.path().join("New"));
+        // Long enough that the new path is over the limit: the old one, with its \\?\ prefix
+        // handled by Filer's engine, is where it is.
+        let room = MAX_PATH + 10 - path_len(&new.join("Client/2026/"));
+        let stem: String = "Determination Worksheet "
+            .repeat(20)
+            .chars()
+            .take(room - 4)
+            .collect();
+        let rel = format!("Client/2026/{}.doc", stem.trim_end());
+        put(&old.join(&rel), "w");
+        assert!(path_len(&new.join(&rel)) > MAX_PATH);
+        let rule = Rule::YearFolders(2026, 2026);
+        let p = plan(&old, &["Client".to_string()], &rule);
+        assert_eq!(p.items.len(), 1);
+        let run = |shorten| {
+            apply(
+                &old,
+                &new,
+                &p,
+                &rule,
+                &Options {
+                    shorten,
+                    ..Default::default()
+                },
+                &AtomicUsize::new(0),
+                &AtomicBool::new(false),
+            )
+            .unwrap()
+        };
+        let off = run(false);
+        assert_eq!((off.moved, off.failed.len()), (0, 1), "{off:?}");
+        let on = run(true);
+        assert_eq!((on.moved, on.shortened), (1, 1), "{on:?}");
+        let moved: Vec<_> = std::fs::read_dir(new.join("Client/2026"))
+            .unwrap()
+            .flatten()
+            .map(|e| e.path())
+            .collect();
+        assert_eq!(moved.len(), 1);
+        assert!(path_len(&moved[0]) <= MAX_PATH);
+        assert!(moved[0].to_string_lossy().ends_with(".doc"));
+        // Undo puts it back under its own name.
+        let log = on.log.clone().unwrap();
+        let back = undo(
+            &log,
+            &Options::default(),
+            &AtomicUsize::new(0),
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        assert_eq!(back.moved, 1, "{back:?}");
+        assert!(old.join(&rel).is_file());
     }
 
     #[test]

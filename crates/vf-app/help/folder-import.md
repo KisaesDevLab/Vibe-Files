@@ -15,7 +15,7 @@ A very large old tree? **vibe-move.exe**, in the same folder as Vibe Files, can 
 - files with a recent year in their name or folders;
 - **Year folders**: folders whose name has a year in a range you type (`2026`, `2023-2025`), such as `Income Tax6` or `2026 Returns`, moved whole with their sub-folders.
 
-Each step shows a preview first, and every move is logged in a CSV file beside the new folder. **Undo this move**, or **Undo a move from its log…** later, puts a step's files back; a file changed since the move is left. Then import the new folder.
+Each step shows a preview first, and every move is logged in a CSV file beside the new folder. A file whose new path would be too long (over 240 characters) gets a shorter name, cut in the middle and marked `~`, unless you untick that. **Undo this move**, or **Undo a move from its log…** later, puts a step's files back; a file changed since the move is left. Then import the new folder.
 
 ## Scan the cabinet
 

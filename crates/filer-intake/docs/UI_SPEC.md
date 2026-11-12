@@ -43,7 +43,7 @@ card with 8px radius and a drop shadow.
 
 ## 3. Preview (Main) — P05, P06, P07a, P07b, P08, P09
 
-Toolbar: `Queue · N pending · N inboxes + N zip` · right side: **Batch year** field · **On collision**
+Toolbar: `Queue · N pending · N inboxes + N zip` · right side: **Partner** (V38, when clients have partners: only that partner's rows are listed and filed) · **Batch year** field · **On collision**
 dropdown (Ask per file / Keep both / Overwrite / Skip) · **Keep all original names** switch · divider · `Browse…` · `Combine` (tooltip
 "Select 2+ rows with the same client"; disabled unless the selection shares one resolved client) · `Rescan root`.
 
@@ -89,7 +89,7 @@ Two-column card grid. A full-width amber banner at top when any inbox is on a di
 
 - **Client root**: path (mono) with `writable` ok pill · `Change…` · line "1,131 folders bound · 4 need attention in Conflicts · last scan today 9:12 AM" · `Rescan root` · `Open data folder`.
 - **Inboxes** ("watched while the app is open · zips go to Import"): one row per inbox, cross-drive ones get an amber border and `cross-drive` pill, `Remove` per row · `Add inbox…` · note "An inbox cannot be inside the client root (except in a top-level _ . or ~ folder)."
-- **Client master list**: CSV path · `Choose CSV…` · stats "1,284 clients · imported <date> · 3 rows skipped (blank ID) · 1 relationship now dangling" · Columns pills `ID → ClientID`, `Name → ClientName`, info pill `+ Entity, Partner, Email as tokens` · `Refresh clients` · `Re-map columns…`.
+- **Client master list**: CSV path · `Choose CSV…` · stats "1,284 clients · imported <date> · 3 rows skipped (blank ID) · 1 relationship now dangling" · Columns pills `ID → ClientID`, `Name → ClientName`, info pill `+ Entity, Partner, Email as tokens` · `Refresh clients` · `Re-map columns…` · `Stop using the CSV` (V37: the list stays, no CSV read again).
 - **Filename parsing**: ID pattern (mono field + `valid regex` / `invalid` pill) · Convention line `ClientName_ID_rest.pdf` with ID highlighted · Fuzzy thresholds: *Suggest at* (default 0.85) and *Auto-resolve at* (default 0.97), two fields with validation auto ≥ suggest · note "Between the two a name match is suggested and needs a click; at or above auto-resolve it files with a `fuzzy` pill."
 - **Folder template** (full width): header note "created on confirm, year folders only when a route needs them" · `Add child` `Rename` `Delete` `Reset to default` · left: tree with folder icons, tokens highlighted; right: "Tokens available" pills (core tokens neutral, CSV tokens info), copy-token note, sanitizer note.
 

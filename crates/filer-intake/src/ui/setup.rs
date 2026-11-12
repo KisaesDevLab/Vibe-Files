@@ -479,6 +479,16 @@ impl SetupScreen {
                 {
                     self.open_wizard(ui.ctx(), csv, &state.settings);
                 }
+                // V37: the list stays as imported, and no CSV is read again.
+                if ui
+                    .add_enabled(idle, egui::Button::new("Stop using the CSV"))
+                    .on_hover_text(
+                        "Keep the client list as it is now; no CSV is read again. Choose CSV… uses one again.",
+                    )
+                    .clicked()
+                {
+                    self.stop_csv(state);
+                }
             }
             if !idle {
                 ui.spinner();
@@ -808,6 +818,32 @@ impl SetupScreen {
     pub fn sync_csv(&mut self, settings: &Settings) {
         self.draft.csv_path = settings.csv_path.clone();
         self.draft.column_map = settings.column_map.clone();
+    }
+
+    /// "Stop using the CSV": the list in clients.json stays; config.json keeps no CSV (V37).
+    fn stop_csv(&mut self, state: &mut AppState) {
+        let mut next = state.settings.clone();
+        next.csv_path = None;
+        let saved = if state.settings_savable {
+            next.save(&state.data_dir).map_err(|e| e.to_string())
+        } else {
+            Err("config.json could not be read at startup".to_string())
+        };
+        match saved {
+            Ok(()) => {
+                state.settings = next;
+                self.sync_csv(&state.settings);
+                state.clients.clear_note();
+                self.message = Some((
+                    Level::Info,
+                    "No CSV is used now: the client list stays as it is, and is changed only by new clients added in this program or its host. Choose CSV… to use one again."
+                        .into(),
+                ));
+            }
+            Err(e) => {
+                self.message = Some((Level::Error, format!("Not changed: {e}")));
+            }
+        }
     }
 
     /// The client list was imported but the CSV path and column map could not be written to
