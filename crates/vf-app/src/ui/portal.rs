@@ -20,6 +20,7 @@ use vf_portal::{PortalSettings, settings};
 
 use crate::portal as core;
 use crate::ui::browse::Env;
+use crate::ui::widgets::UiExt as _;
 use crate::ui::{theme, widgets};
 
 /// Runs `f` on a thread; the window repaints when it is done.
@@ -131,6 +132,8 @@ pub struct PortalState {
     pub notice: Option<String>,
     /// The last problem shown: the same one is not shown again until it changes.
     last_problem: Option<String>,
+    /// The last word about uploads fetched and not filed (PA-43), said once until it changes.
+    last_waiting: Option<String>,
     audit_tx: Sender<AuditEntry>,
     audit_rx: Receiver<AuditEntry>,
 }
@@ -153,6 +156,7 @@ impl Default for PortalState {
             refresh_marks: false,
             notice: None,
             last_problem: None,
+            last_waiting: None,
             audit_tx,
             audit_rx,
         }
@@ -245,6 +249,25 @@ impl PortalState {
                 }
                 Some(_) => {}
                 None => self.last_problem = None,
+            }
+            if let Some(f) = &report.filing {
+                for name in &f.reported {
+                    audit.push(AuditEntry::new(
+                        "portal_upload_filed",
+                        None,
+                        serde_json::json!({ "name": name }),
+                    ));
+                }
+                // An older portal's "update it" is for Admin › Portal, not every fetch.
+                if f.problems.iter().all(|p| p != vf_portal::api::NEEDS_P74) {
+                    let note = core::waiting_note(f, chrono::Utc::now());
+                    if note != self.last_waiting {
+                        self.last_waiting.clone_from(&note);
+                        if let Some(n) = note {
+                            self.notice = Some(n);
+                        }
+                    }
+                }
             }
             if n > 0 {
                 self.notice = Some(format!(
@@ -1233,6 +1256,20 @@ pub struct AdminPortal {
     pub changed: bool,
     /// "Fetch now" was pressed.
     pub fetch_now: bool,
+    /// Uploads fetched and not filed (PA-43), as of the last check.
+    filing: Option<core::FiledReport>,
+    filing_job: Option<Receiver<FilingDone>>,
+    filing_at: Option<Instant>,
+    /// The upload whose Dismiss is being confirmed.
+    confirm_dismiss: Option<String>,
+}
+
+/// A check of what was filed, after Fetch again or Dismiss when one was asked for.
+struct FilingDone {
+    report: core::FiledReport,
+    /// What the action did (`Err` when it was refused); empty for a plain check.
+    said: Result<String, String>,
+    audit: Option<AuditEntry>,
 }
 
 impl AdminPortal {
@@ -1247,6 +1284,13 @@ impl AdminPortal {
     #[cfg(test)]
     pub fn error(&self) -> Option<&str> {
         self.err.as_deref()
+    }
+
+    /// Shows `report` as the last check of what was filed, without asking the portal.
+    #[cfg(test)]
+    pub fn show_filing(&mut self, report: core::FiledReport) {
+        self.filing = Some(report);
+        self.filing_at = Some(Instant::now());
     }
 
     /// Reads the requests (and the client list) again when the page is next shown.
@@ -1398,6 +1442,8 @@ pub fn admin_settings(ui: &mut egui::Ui, a: &mut AdminPortal, env: &mut Env) {
     }
     widgets::message_line(ui, a.err.as_deref());
     ui.separator();
+    unfiled(ui, a, env);
+    ui.separator();
     ui.label(RichText::new("Received from clients lately").strong());
     if a.received.is_empty() {
         ui.label(widgets::caption("Nothing yet."));
@@ -1416,6 +1462,205 @@ pub fn admin_settings(ui: &mut egui::Ui, a: &mut AdminPortal, env: &mut Env) {
                 });
             }
         });
+}
+
+/// How often Admin › Portal reads the list of uploads not filed while it is shown.
+const FILING_EVERY: Duration = Duration::from_secs(60);
+
+/// Starts a check of what was filed, after `act` (Fetch again, Dismiss) when given.
+fn start_filing(
+    ui: &egui::Ui,
+    a: &mut AdminPortal,
+    root: &Path,
+    s: PortalSettings,
+    act: Option<(core::Pending, bool)>,
+) {
+    a.filing_at = Some(Instant::now());
+    let root = root.to_path_buf();
+    a.filing_job = Some(spawn(ui.ctx(), move || {
+        let (said, audit) = match act {
+            None => (Ok(String::new()), None),
+            Some((p, again)) => {
+                let portal = core::client(&s);
+                let u = &p.upload.upload;
+                if again {
+                    let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+                    match vf_portal::filed::fetch_again(&root, &portal, &p.upload, &now) {
+                        Ok(r) => (
+                            Ok(format!("{} is back in {}.", u.name, core::INBOX)),
+                            Some(AuditEntry::new(
+                                "portal_receive_again",
+                                None,
+                                serde_json::json!({
+                                    "upload_id": u.upload_id, "client_id": u.client_id,
+                                    "name": r.name, "saved_as": r.saved_as, "size": r.size,
+                                }),
+                            )),
+                        ),
+                        Err(e) => (Err(format!("{}: {e}", u.name)), None),
+                    }
+                } else {
+                    match portal.mark_dismissed(&u.upload_id) {
+                        Ok(()) => (
+                            Ok(format!("{} was dismissed.", u.name)),
+                            Some(AuditEntry::new(
+                                "portal_upload_dismissed",
+                                None,
+                                serde_json::json!({
+                                    "upload_id": u.upload_id, "client_id": u.client_id,
+                                    "name": u.name, "where": format!("{:?}", p.at),
+                                }),
+                            )),
+                        ),
+                        Err(e) => (Err(format!("{}: {}", u.name, e.message())), None),
+                    }
+                }
+            }
+        };
+        FilingDone {
+            report: core::check_filed(&root, &s),
+            said,
+            audit,
+        }
+    }));
+}
+
+/// Admin › Portal: what Vibe Files fetched and has not filed; Fetch again and Dismiss (PA-43).
+fn unfiled(ui: &mut egui::Ui, a: &mut AdminPortal, env: &mut Env) {
+    let Some(s) = a.cached_settings.clone() else {
+        return;
+    };
+    if let Some(rx) = &a.filing_job
+        && let Ok(done) = rx.try_recv()
+    {
+        a.filing_job = None;
+        let mut rows: Vec<AuditEntry> = done
+            .report
+            .reported
+            .iter()
+            .map(|name| {
+                AuditEntry::new(
+                    "portal_upload_filed",
+                    None,
+                    serde_json::json!({ "name": name }),
+                )
+            })
+            .collect();
+        rows.extend(done.audit);
+        a.filing = Some(done.report);
+        let unrecorded = record(env, "portal_inbox", rows).unwrap_or_default();
+        match done.said {
+            Ok(m) if m.is_empty() => {}
+            Ok(m) => {
+                a.msg = Some(format!("{m}{unrecorded}"));
+                a.err = None;
+            }
+            Err(e) => a.err = Some(e),
+        }
+    }
+    let busy = a.filing_job.is_some();
+    // Tests show a report of their own (`show_filing`) rather than calling a portal.
+    if !busy && !cfg!(test) && a.filing_at.is_none_or(|t| t.elapsed() >= FILING_EVERY) {
+        start_filing(ui, a, env.root, s.clone(), None);
+    }
+    ui.horizontal(|ui| {
+        ui.label(RichText::new("Fetched, not filed yet").strong());
+        if busy {
+            ui.spinner();
+        } else if ui.small_btn("Check again").clicked() {
+            a.filing_at = None;
+        }
+    });
+    let Some(f) = a.filing.clone() else {
+        ui.label(widgets::caption("Reading the portal…"));
+        return;
+    };
+    if let Some(p) = f.problems.first()
+        && f.pending.is_empty()
+    {
+        ui.label(widgets::caption(p.as_str()));
+        return;
+    }
+    ui.label(widgets::caption(format!(
+        "The portal keeps each upload until Intake files it (or you dismiss it here), then {} days;          one never filed is cleared {} days after it was fetched. If the Portal inbox lost a file,          Fetch again puts it back.",
+        f.keep_days, f.cap_days
+    )));
+    if f.pending.is_empty() {
+        ui.label(widgets::caption(
+            "Nothing: Intake has filed everything fetched.",
+        ));
+        return;
+    }
+    let mut act: Option<(core::Pending, bool)> = None;
+    egui::ScrollArea::vertical()
+        .id_salt("portal-unfiled")
+        .max_height(220.0)
+        .show(ui, |ui| {
+            for p in &f.pending {
+                let u = &p.upload.upload;
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(widgets::local_time(&p.upload.fetched_at));
+                    ui.label(RichText::new(&u.name).strong());
+                    ui.label(widgets::caption(format!(
+                        "{} · fetched by {}",
+                        u.client_name,
+                        p.upload.fetched_by.as_deref().unwrap_or("?")
+                    )));
+                    let (words, warn) = match p.at {
+                        core::Where::InInbox => ("in the Portal inbox", false),
+                        core::Where::Missing => {
+                            ("not in the Portal inbox, and Intake has not filed it", true)
+                        }
+                        core::Where::NotReceived => ("this cabinet has no record of it", true),
+                    };
+                    ui.label(if warn {
+                        RichText::new(words).color(theme::warn())
+                    } else {
+                        widgets::caption(words)
+                    });
+                    if p.at != core::Where::InInbox
+                        && ui
+                            .add_enabled(!busy, egui::Button::new("Fetch again"))
+                            .on_hover_text(format!("Put it in {} again for Intake.", core::INBOX))
+                            .clicked()
+                    {
+                        act = Some((p.clone(), true));
+                    }
+                    if a.confirm_dismiss.as_deref() == Some(u.upload_id.as_str()) {
+                        ui.label(
+                            RichText::new(format!(
+                                "Dismiss it? The portal deletes its copy {} days later.",
+                                f.keep_days
+                            ))
+                            .color(theme::warn()),
+                        );
+                        if ui
+                            .add_enabled(!busy, egui::Button::new("Dismiss"))
+                            .clicked()
+                        {
+                            a.confirm_dismiss = None;
+                            act = Some((p.clone(), false));
+                        }
+                        if ui.button("Keep it").clicked() {
+                            a.confirm_dismiss = None;
+                        }
+                    } else if ui
+                        .add_enabled(!busy, egui::Button::new("Dismiss…"))
+                        .on_hover_text(
+                            "Not to be filed (junk, a duplicate): the portal stops keeping it.",
+                        )
+                        .clicked()
+                    {
+                        a.confirm_dismiss = Some(u.upload_id.clone());
+                    }
+                });
+            }
+        });
+    if let Some(act) = act {
+        a.msg = None;
+        a.err = None;
+        start_filing(ui, a, env.root, s, Some(act));
+    }
 }
 
 fn stop(a: &mut AdminPortal, env: &mut Env) {

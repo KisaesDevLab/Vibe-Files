@@ -107,7 +107,7 @@ pub fn mark_from_internet(path: &Path) {
 }
 
 /// Moves `src` into `dir` as `name`, or `name (2)`… — never replacing a file.
-fn move_into(src: &Path, dir: &Path, name: &str) -> std::io::Result<PathBuf> {
+pub(crate) fn move_into(src: &Path, dir: &Path, name: &str) -> std::io::Result<PathBuf> {
     let (stem, ext) = match name.rsplit_once('.') {
         Some((s, e)) => (s.to_string(), format!(".{e}")),
         None => (name.to_string(), String::new()),
@@ -154,10 +154,12 @@ pub struct FetchReport {
     pub on_portal: Option<HashSet<String>>,
     /// Another PC was fetching: nothing was fetched here this time.
     pub busy: bool,
+    /// What was filed since, and what was fetched and is not filed yet (PA-43).
+    pub filing: Option<crate::filed::FiledReport>,
 }
 
 /// The fetch lock; removed when dropped.
-struct Lock(PathBuf);
+pub(crate) struct Lock(PathBuf);
 
 impl Drop for Lock {
     fn drop(&mut self) {
@@ -165,7 +167,7 @@ impl Drop for Lock {
     }
 }
 
-fn take_lock(tmp: &Path, who: &str) -> Option<Lock> {
+pub(crate) fn take_lock(tmp: &Path, who: &str) -> Option<Lock> {
     let p = tmp.join(LOCK);
     for _ in 0..2 {
         match std::fs::OpenOptions::new()
@@ -195,7 +197,7 @@ fn take_lock(tmp: &Path, who: &str) -> Option<Lock> {
     None
 }
 
-fn random_tag() -> String {
+pub(crate) fn random_tag() -> String {
     let mut b = [0u8; 4];
     let _ = getrandom::fill(&mut b);
     b.iter().map(|x| format!("{x:02x}")).collect()
@@ -213,28 +215,33 @@ fn from_label(u: &Upload) -> String {
     }
 }
 
+/// The received-list row of `u`, saved in the inbox at `dest`.
+pub(crate) fn received_row(root: &Path, dest: &Path, u: &Upload, now: &str) -> Received {
+    let rel = dest
+        .strip_prefix(root)
+        .unwrap_or(dest)
+        .to_string_lossy()
+        .replace('\\', "/");
+    Received {
+        at: now.to_string(),
+        upload_id: u.upload_id.clone(),
+        client_id: u.client_id.clone(),
+        client: u.client_name.clone(),
+        name: u.original_name.clone().unwrap_or_else(|| u.name.clone()),
+        saved_as: rel,
+        note: u.note.clone(),
+        from: from_label(u),
+        size: u.size,
+    }
+}
+
 /// Moves a claimed download into the inbox and logs it.
 fn finish(root: &Path, part: &Path, meta: &Path, u: &Upload, now: &str, report: &mut FetchReport) {
     let dir = inbox(root);
     match move_into(part, &dir, &inbox_name(&u.client_name, &u.client_code, &u.name)) {
         Ok(dest) => {
             let _ = std::fs::remove_file(meta);
-            let rel = dest
-                .strip_prefix(root)
-                .unwrap_or(&dest)
-                .to_string_lossy()
-                .replace('\\', "/");
-            let row = Received {
-                at: now.to_string(),
-                upload_id: u.upload_id.clone(),
-                client_id: u.client_id.clone(),
-                client: u.client_name.clone(),
-                name: u.original_name.clone().unwrap_or_else(|| u.name.clone()),
-                saved_as: rel,
-                note: u.note.clone(),
-                from: from_label(u),
-                size: u.size,
-            };
+            let row = received_row(root, &dest, u, now);
             if let Err(e) = append_received(root, std::slice::from_ref(&row)) {
                 report.problems.push(format!("The received list could not be written: {e}"));
             }
@@ -370,6 +377,8 @@ pub fn fetch(root: &Path, portal: &Portal, now: &str) -> FetchReport {
             finish(root, &part, &meta, &u, now, &mut report);
         }
     }
+    // PA-43: tell the portal what Intake filed; the rest it keeps.
+    report.filing = Some(crate::filed::check(root, portal));
     report
 }
 
@@ -393,6 +402,17 @@ pub fn append_received(root: &Path, rows: &[Received]) -> std::io::Result<()> {
         .append(true)
         .open(&p)?
         .write_all(text.as_bytes())
+}
+
+/// Every received upload, oldest first.
+pub fn all_received(root: &Path) -> Vec<Received> {
+    std::fs::read_to_string(received_log(root))
+        .map(|text| {
+            text.lines()
+                .filter_map(|l| serde_json::from_str(l).ok())
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// The newest `n` received uploads, newest first.

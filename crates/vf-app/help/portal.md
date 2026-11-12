@@ -53,7 +53,7 @@ A document on the portal shows **Share… (on portal)** in the pane. To send one
 
 What clients upload is collected into the **`_Portal inbox`** folder of the cabinet, named `<Client name>_<Client ID>_<their file name>`, so Intake files it like a scan: the client is read from the name. Only one PC collects each upload. iPhone photos arrive as JPG.
 
-**Admin › Portal** lists what was received lately, with the client, who sent it, and their note.
+**Admin › Portal** lists what was received lately, who sent it and their note, and [what is not filed yet](help:portal-inbox).
 
 ## In the audit trail
 

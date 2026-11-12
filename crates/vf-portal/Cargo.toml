@@ -10,6 +10,7 @@ publish.workspace = true
 [dependencies]
 vf-fs = { path = "../vf-fs" }
 filer-intake = { path = "../filer-intake" }
+chrono.workspace = true
 getrandom.workspace = true
 serde.workspace = true
 serde_json.workspace = true

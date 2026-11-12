@@ -55,6 +55,7 @@ impl PortalError {
                 "Someone chosen no longer has access to this client.".into()
             }
             Some("already_fetched") => "Another PC already fetched it.".into(),
+            Some("not_fetched") => "The portal says it was never fetched.".into(),
             // Secure links (Vibe-Portal P49, P68).
             Some("file_not_found") => "The document is not on the portal any more.".into(),
             Some("cannot_watermark") => {
@@ -272,6 +273,32 @@ pub struct Upload {
     pub uploaded_at: String,
     pub from: UploadFrom,
 }
+
+/// An upload Vibe Files fetched but has not filed or dismissed (Vibe-Portal P74).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct Unfiled {
+    #[serde(flatten)]
+    pub upload: Upload,
+    pub fetched_at: String,
+    pub fetched_by: Option<String>,
+}
+
+/// The portal's list of uploads fetched and not filed, and how long it keeps them.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct UnfiledList {
+    /// "unfiled": an answer to this question, not an older portal's list of waiting uploads.
+    pub state: String,
+    /// Days the portal keeps an upload after it was filed or dismissed.
+    pub keep_days: u32,
+    /// Days after the fetch the portal clears an upload never filed.
+    pub cap_days: u32,
+    pub uploads: Vec<Unfiled>,
+}
+
+/// What an older portal (before Vibe-Portal P74) is told.
+pub const NEEDS_P74: &str = "The portal does not keep uploads until they are filed yet: update it (sudo vibe upgrade portal).";
 
 /// A portal history row, for Vibe Files' audit trail.
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -810,14 +837,16 @@ impl Portal {
     }
 
     /// Claims an upload. The portal says who has it when it was claimed already, so a claim
-    /// whose answer was lost is still known as this PC's.
+    /// whose answer was lost is still known as this PC's. Vibe Files reports filing
+    /// (`tracksFiling`, Vibe-Portal P74): the portal keeps the upload until then. An older portal
+    /// ignores it.
     pub fn mark_fetched(&self, upload_id: &str) -> Result<Claim> {
         let res = self
             .auth(
                 self.quick
                     .post(&self.url(&format!("/uploads/{upload_id}/fetched"))),
             )
-            .send_empty();
+            .send_json(serde_json::json!({ "tracksFiling": true }));
         let mut res = res.map_err(|e| PortalError::Network(e.to_string()))?;
         let status = res.status().as_u16();
         let text = res.body_mut().read_to_string().unwrap_or_default();
@@ -841,6 +870,35 @@ impl Portal {
                 Err(PortalError::Http { status, code })
             }
         }
+    }
+
+    /// Uploads fetched and not filed or dismissed (Vibe-Portal P74). An older portal answers
+    /// 404: [`NEEDS_P74`].
+    pub fn unfiled(&self) -> Result<UnfiledList> {
+        let l: UnfiledList = self.get("/uploads/unfiled", &[]).map_err(|e| {
+            if e.status() == Some(404) {
+                PortalError::Local(NEEDS_P74.into())
+            } else {
+                e
+            }
+        })?;
+        if l.state != "unfiled" {
+            return Err(PortalError::Local(NEEDS_P74.into()));
+        }
+        Ok(l)
+    }
+
+    /// Intake filed it: the portal's keep period starts (Vibe-Portal P74). Saying it again is
+    /// fine.
+    pub fn mark_filed(&self, upload_id: &str) -> Result<()> {
+        self.post_empty::<serde_json::Value>(&format!("/uploads/{upload_id}/filed"))
+            .map(|_| ())
+    }
+
+    /// Someone said it is not to be filed (junk, a duplicate): the portal's keep period starts.
+    pub fn mark_dismissed(&self, upload_id: &str) -> Result<()> {
+        self.post_empty::<serde_json::Value>(&format!("/uploads/{upload_id}/dismissed"))
+            .map(|_| ())
     }
 
     /// Portal history after `since` (an event id), oldest first, at most `limit`.
@@ -1037,6 +1095,67 @@ mod tests {
                 .unwrap_err()
                 .message()
                 .contains("5 working")
+        );
+    }
+
+    /// Vibe-Portal P74: the claim says Vibe Files reports filing.
+    #[test]
+    fn a_claim_says_filing_is_reported() {
+        let (p, seen) = one_answer("200 OK", r#"{"ok":true}"#);
+        assert_eq!(p.mark_fetched("u1").unwrap(), Claim::Ours);
+        let seen = seen.join().unwrap();
+        assert!(
+            seen.starts_with("POST /api/firm/v1/uploads/u1/fetched HTTP/1.1 | "),
+            "{seen}"
+        );
+        let body: serde_json::Value =
+            serde_json::from_str(seen.rsplit(" | ").next().unwrap()).unwrap();
+        assert_eq!(body, serde_json::json!({ "tracksFiling": true }));
+    }
+
+    /// Vibe-Portal P74: the list of uploads not filed; an older portal is told to update.
+    #[test]
+    fn uploads_not_filed_are_listed() {
+        let (p, seen) = one_answer(
+            "200 OK",
+            r#"{"state":"unfiled","keepDays":30,"capDays":180,"uploads":[{"uploadId":"u1",
+                "clientId":"c1","clientCode":"1001","clientName":"Smith, John","name":"a.pdf",
+                "originalName":null,"size":3,"sha256":"ab","note":"","batchId":null,
+                "uploadedAt":"2026-11-10T10:00:00.000Z","fetchedAt":"2026-11-10T10:05:00.000Z",
+                "fetchedBy":"PC1\\kurt","from":{"identityId":"i1","name":"Mary","email":null,
+                "phone":null}}]}"#,
+        );
+        let l = p.unfiled().unwrap();
+        assert!(
+            seen.join()
+                .unwrap()
+                .starts_with("GET /api/firm/v1/uploads/unfiled ")
+        );
+        assert_eq!((l.keep_days, l.cap_days), (30, 180));
+        assert_eq!(l.uploads[0].upload.upload_id, "u1");
+        assert_eq!(l.uploads[0].fetched_by.as_deref(), Some("PC1\\kurt"));
+        // A portal from before P74.
+        let (p, _) = one_answer("404 Not Found", r#"{"error":"not_found"}"#);
+        assert_eq!(p.unfiled().unwrap_err().message(), NEEDS_P74);
+        // One that ignored the path's meaning and sent something else.
+        let (p, _) = one_answer(
+            "200 OK",
+            r#"{"state":"x","keepDays":1,"capDays":1,"uploads":[]}"#,
+        );
+        assert_eq!(p.unfiled().unwrap_err().message(), NEEDS_P74);
+        let (p, seen) = one_answer("200 OK", r#"{"ok":true}"#);
+        p.mark_filed("u1").unwrap();
+        assert!(
+            seen.join()
+                .unwrap()
+                .starts_with("POST /api/firm/v1/uploads/u1/filed ")
+        );
+        let (p, seen) = one_answer("200 OK", r#"{"ok":true,"already":"filed"}"#);
+        p.mark_dismissed("u1").unwrap();
+        assert!(
+            seen.join()
+                .unwrap()
+                .starts_with("POST /api/firm/v1/uploads/u1/dismissed ")
         );
     }
 

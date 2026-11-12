@@ -1209,6 +1209,207 @@ mod tests {
         );
     }
 
+    /// PA-43: what Vibe Files reads to tell the portal an upload was filed. A file filed from
+    /// the Portal inbox leaves an `intake_move` row in the audit trail's shared mirror, with
+    /// `ok` and the inbox file as `src`.
+    #[test]
+    fn filing_from_the_portal_inbox_is_in_the_shared_trail() {
+        let mut f = fx();
+        f.inbox = f.root.join("_Portal inbox");
+        std::fs::create_dir_all(&f.inbox).unwrap();
+        let acme = client("1001", "Acme LLC");
+        file(&f, &acme, &["Acme LLC_1001_w2.pdf"], false);
+        reconcile(&mut f.conn, &f.root, "dev").unwrap();
+        let dir = f.root.join("_Vibe").join("audit");
+        vf_core::audit::mirror_pending(&f.conn, &dir).unwrap();
+        let rows: Vec<serde_json::Value> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flat_map(|e| {
+                std::fs::read_to_string(e.unwrap().path())
+                    .unwrap()
+                    .lines()
+                    .map(|l| serde_json::from_str(l).unwrap())
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        let moved = rows
+            .iter()
+            .find(|r| r["action"] == "intake_move")
+            .expect("an intake_move row");
+        assert_eq!(moved["detail"]["ok"], true);
+        let src = moved["detail"]["src"].as_str().unwrap();
+        assert!(
+            src.ends_with(&format!(
+                "_Portal inbox{}Acme LLC_1001_w2.pdf",
+                std::path::MAIN_SEPARATOR
+            )),
+            "{src}"
+        );
+        assert!(chrono_like(moved["ts"].as_str().unwrap()), "{moved}");
+    }
+
+    /// Intake rows in the trail's shared mirror, after recording and mirroring.
+    fn mirrored_rows(f: &mut Fx) -> Vec<serde_json::Value> {
+        reconcile(&mut f.conn, &f.root, "dev").unwrap();
+        let dir = f.root.join("_Vibe").join("audit");
+        vf_core::audit::mirror_pending(&f.conn, &dir).unwrap();
+        std::fs::read_dir(&dir)
+            .unwrap()
+            .flat_map(|e| {
+                std::fs::read_to_string(e.unwrap().path())
+                    .unwrap()
+                    .lines()
+                    .map(|l| serde_json::from_str(l).unwrap())
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    }
+
+    /// The `src` of each successful `action` row.
+    fn sources(rows: &[serde_json::Value], action: &str) -> Vec<String> {
+        let mut v: Vec<String> = rows
+            .iter()
+            .filter(|r| r["action"] == action && r["detail"]["ok"] == true)
+            .map(|r| r["detail"]["src"].as_str().unwrap().to_string())
+            .collect();
+        v.sort();
+        v
+    }
+
+    /// One commit item from the Portal inbox, filed for `c`.
+    fn portal_item(f: &Fx, c: &Client, src: PathBuf, name: &str) -> CommitItem {
+        let folder = f.root.join(format!("{} ({})", c.name, c.id));
+        CommitItem {
+            src,
+            dest: folder.join("Income Tax/2025").join(name),
+            folder: if folder.exists() {
+                FolderAction::Exists(folder.clone())
+            } else {
+                FolderAction::WillCreate(folder.clone())
+            },
+            client: c.clone(),
+            overwrite: false,
+            source: Source::Inbox(f.inbox.clone()),
+            merged_from: vec![],
+            split_of: None,
+            copies: vec![],
+            kept_both: false,
+            also_dirs: vec![],
+        }
+    }
+
+    fn commit_items(
+        f: &Fx,
+        items: Vec<CommitItem>,
+        splits: Vec<filer_intake::commit::SplitCommit>,
+    ) {
+        let input = CommitInput {
+            batch: uuid::Uuid::new_v4(),
+            items,
+            skipped: vec![],
+            root: f.root.clone(),
+            first_inbox: Some(f.inbox.clone()),
+            data_dir: crate::clients::master_dir(&f.root),
+            firm_id: f.firm,
+            template: filer_core::template::default_tree(),
+            splits,
+            force_copy: false,
+        };
+        let rep = run_commit(&input, &AtomicUsize::new(0));
+        assert!(rep.warnings.is_empty(), "{:?}", rep.warnings);
+        assert!(
+            rep.outcomes.iter().all(|o| o.result.is_ok()),
+            "{:?}",
+            rep.outcomes
+        );
+    }
+
+    /// PA-43: combining files from the Portal inbox leaves an `intake_merge` row per original,
+    /// and splitting one an `intake_split` row, each with the inbox file as `src`.
+    #[test]
+    fn combining_and_splitting_from_the_portal_inbox_are_in_the_shared_trail() {
+        let mut f = fx();
+        f.inbox = f.root.join("_Portal inbox");
+        std::fs::create_dir_all(&f.inbox).unwrap();
+        let acme = client("1001", "Acme LLC");
+        let sep = std::path::MAIN_SEPARATOR;
+        let tmp = f.root.join("_Vibe").join("tmp").join("t1");
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        // Combined: two uploads into one PDF made beside them.
+        let (a, b) = (
+            f.inbox.join("Acme LLC_1001_a.pdf"),
+            f.inbox.join("Acme LLC_1001_b.pdf"),
+        );
+        std::fs::write(&a, b"a").unwrap();
+        std::fs::write(&b, b"b").unwrap();
+        let merged = tmp.join("combined.pdf");
+        std::fs::write(&merged, b"ab").unwrap();
+        let mut item = portal_item(&f, &acme, merged, "combined.pdf");
+        item.merged_from = [&a, &b]
+            .iter()
+            .map(|p| {
+                filer_intake::commit::CombinedOriginal::stamp(p, Source::Inbox(f.inbox.clone()))
+                    .unwrap()
+            })
+            .collect();
+        commit_items(&f, vec![item], vec![]);
+        assert!(!a.exists() && !b.exists(), "the originals left the inbox");
+        // Recorded batch by batch, as the app does after each commit.
+        reconcile(&mut f.conn, &f.root, "dev").unwrap();
+
+        // Split: one upload into two pieces, both filed.
+        let c = f.inbox.join("Acme LLC_1001_c.pdf");
+        std::fs::write(&c, b"cc").unwrap();
+        let pieces: Vec<PathBuf> = (1..=2)
+            .map(|k| {
+                let d = tmp.join(format!("s{k}"));
+                std::fs::create_dir_all(&d).unwrap();
+                let p = d.join(format!("c{k}.pdf"));
+                std::fs::write(&p, b"c").unwrap();
+                p
+            })
+            .collect();
+        let items = pieces
+            .iter()
+            .enumerate()
+            .map(|(k, p)| {
+                let mut it = portal_item(&f, &acme, p.clone(), &format!("c{}.pdf", k + 1));
+                it.split_of = Some(c.clone());
+                it
+            })
+            .collect();
+        let split = filer_intake::commit::SplitCommit {
+            original: filer_intake::commit::CombinedOriginal::stamp(
+                &c,
+                Source::Inbox(f.inbox.clone()),
+            )
+            .unwrap(),
+            pieces: pieces.clone(),
+            total: 2,
+        };
+        commit_items(&f, items, vec![split]);
+        assert!(!c.exists(), "the original left the inbox");
+
+        let rows = mirrored_rows(&mut f);
+        let ends = |v: Vec<String>, names: &[&str]| {
+            assert_eq!(v.len(), names.len(), "{v:?}");
+            for (s, n) in v.iter().zip(names) {
+                assert!(s.ends_with(&format!("_Portal inbox{sep}{n}")), "{s}");
+            }
+        };
+        ends(
+            sources(&rows, "intake_merge"),
+            &["Acme LLC_1001_a.pdf", "Acme LLC_1001_b.pdf"],
+        );
+        ends(sources(&rows, "intake_split"), &["Acme LLC_1001_c.pdf"]);
+    }
+
+    /// An RFC 3339 time in UTC, as the trail's readers parse it.
+    fn chrono_like(ts: &str) -> bool {
+        time::OffsetDateTime::parse(ts, &time::format_description::well_known::Rfc3339).is_ok()
+    }
+
     /// PHASES P03 done-when: exact duplicates are caught on intake. A second Filer batch filing
     /// content the cabinet already holds is found right after it is recorded.
     #[test]

@@ -1121,6 +1121,75 @@ ANDE1042,Anderson Farms LLC
         assert!(vf_portal::settings::load(&root, "cab-portal").is_none());
     }
 
+    /// PA-43: Admin › Portal lists what was fetched and not filed; one missing from the inbox can
+    /// be fetched again; Dismiss asks first.
+    #[test]
+    fn portal_page_lists_uploads_not_filed() {
+        let mut h = harness();
+        let root = h.state().root.clone();
+        vf_fs::cabinet::create(
+            &root,
+            &vf_fs::cabinet::CabinetFile {
+                cabinet_id: "cab-portal".into(),
+                firm_id: "firm".into(),
+                schema_version: 1,
+                layout_version: 1,
+                created: "2026-11-09T00:00:00Z".into(),
+                name: None,
+            },
+        )
+        .unwrap();
+        click(&mut h, "Portal");
+        let key = "vpk_abcdefghijklmnopqrstuvwxyz0123456789";
+        h.state_mut().a.portal.fill("files.example.test", key, "0");
+        click(&mut h, "Save");
+        let at = |w: crate::portal::Where, id: &str| {
+            crate::portal::Pending {
+            upload: serde_json::from_value(serde_json::json!({
+                "uploadId": id, "clientId": "c", "clientCode": "1001",
+                "clientName": "Smith, John", "name": format!("{id}.pdf"), "originalName": null,
+                "size": 1, "sha256": "x", "note": "", "batchId": null,
+                "uploadedAt": "2026-11-09T10:00:00.000Z", "fetchedAt": "2026-11-09T10:05:00.000Z",
+                "fetchedBy": "PC1", "from": {"identityId": "i", "name": "M", "email": null, "phone": null}
+            }))
+            .unwrap(),
+            at: w,
+            saved_as: None,
+        }
+        };
+        h.state_mut()
+            .a
+            .portal
+            .show_filing(crate::portal::FiledReport {
+                pending: vec![
+                    at(crate::portal::Where::InInbox, "waiting"),
+                    at(crate::portal::Where::Missing, "lost"),
+                ],
+                keep_days: 30,
+                cap_days: 180,
+                ..Default::default()
+            });
+        h.run_steps(3);
+        assert!(h.query_by_label("Fetched, not filed yet").is_some());
+        assert!(h.query_by_label("lost.pdf").is_some());
+        assert!(
+            h.query_by_label("not in the Portal inbox, and Intake has not filed it")
+                .is_some()
+        );
+        // Only the missing one can be fetched again.
+        assert_eq!(h.query_all_by_label("Fetch again").count(), 1);
+        assert_eq!(h.query_all_by_label("Dismiss…").count(), 2);
+        h.query_all_by_label("Dismiss…").next().unwrap().click();
+        h.run_steps(3);
+        assert!(
+            h.query_by_label("Dismiss it? The portal deletes its copy 30 days later.")
+                .is_some()
+        );
+        click(&mut h, "Keep it");
+        assert!(h.query_by_label("Keep it").is_none());
+        assert_eq!(h.query_all_by_label("Dismiss…").count(), 2);
+    }
+
     /// P05 step 2: the Audit trail page lists the rows, filters them, asks for a verify, and
     /// its PDF export reads back.
     #[test]

@@ -6096,6 +6096,7 @@ dependencies = [
 name = "vf-portal"
 version = "0.1.18"
 dependencies = [
+ "chrono",
  "filer-intake",
  "getrandom 0.3.4",
  "serde",
