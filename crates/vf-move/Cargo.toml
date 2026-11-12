@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
-description = "vibe-move: moves a client tree's Permanent folders, recent files and recent-year files to a new folder (PA-35)"
+description = "vibe-move: moves a client tree's Permanent folders, recent files, recent-year files and year folders to a new folder (PA-35, PA-48)"
 
 [[bin]]
 name = "vibe-move"

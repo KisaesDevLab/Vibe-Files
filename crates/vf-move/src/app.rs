@@ -15,6 +15,7 @@ pub enum Step {
     Permanent,
     Date,
     Year,
+    YearFolders,
 }
 
 impl Step {
@@ -23,6 +24,7 @@ impl Step {
             Step::Permanent => "1  Permanent folders",
             Step::Date => "2  Recently modified",
             Step::Year => "3  Year in the name",
+            Step::YearFolders => "4  Year folders",
         }
     }
 }
@@ -65,6 +67,8 @@ pub struct MoveApp {
     pub permanent: String,
     pub date: String,
     pub year: String,
+    /// Step 4's years: `2026` or `2023-2025`.
+    pub years: String,
     /// Clients per run (owner 2026-11-05: a few at a time to try it); blank = all.
     pub per_run: String,
     /// Clients whose files could not all be moved this session: with a per-run limit they are
@@ -160,6 +164,14 @@ impl MoveApp {
                     vf_move::FIRST_YEAR
                 )),
             },
+            Step::YearFolders => vf_move::parse_years(&self.years)
+                .map(|(a, b)| Rule::YearFolders(a, b))
+                .ok_or_else(|| {
+                    format!(
+                        "Type a year like 2026, or a range like 2023-2025 (from {}).",
+                        vf_move::FIRST_YEAR
+                    )
+                }),
         }
     }
 
@@ -482,7 +494,7 @@ impl MoveApp {
 
     fn step_panel(&mut self, ui: &mut Ui, ctx: &egui::Context, busy: bool) {
         ui.horizontal(|ui| {
-            for s in [Step::Permanent, Step::Date, Step::Year] {
+            for s in [Step::Permanent, Step::Date, Step::Year, Step::YearFolders] {
                 if ui
                     .add_enabled(!busy, egui::Button::selectable(self.step == s, s.title()))
                     .clicked()
@@ -512,6 +524,12 @@ impl MoveApp {
                 &mut self.year,
                 "2023",
                 "Files with a four-digit year at or after this one in the file name or in a folder inside the client folder (Taxes\\2024\\…). With several years, the newest counts. Files with no year stay.",
+            ),
+            Step::YearFolders => (
+                "Years",
+                &mut self.years,
+                "2026 or 2023-2025",
+                "Every folder inside a ticked client's folder whose name has a year in this range (Income Tax\\2026, 2026 Returns, TY2026) moves whole: its files and sub-folders, empty ones too, to the same place under the new folder. A year only in a file's name does not count here (step 3 does that).",
             ),
         };
         ui.horizontal(|ui| {
@@ -615,8 +633,13 @@ impl MoveApp {
         let n = plan.items.len();
         ui.label(
             RichText::new(format!(
-                "{n} files ({}) from {} clients would move: {}",
+                "{n} files ({}){} from {} clients would move: {}",
                 size(plan.bytes()),
+                if plan.dirs.is_empty() {
+                    String::new()
+                } else {
+                    format!(" and {} empty folders", plan.dirs.len())
+                },
                 plan.clients,
                 rule.label()
             ))
@@ -643,7 +666,7 @@ impl MoveApp {
         for u in plan.unreadable.iter().take(5) {
             ui.label(format!("Could not be read: {u}"));
         }
-        if n == 0 {
+        if n == 0 && plan.dirs.is_empty() {
             return;
         }
         if self.confirm {
@@ -692,7 +715,7 @@ impl MoveApp {
 fn report(ui: &mut Ui, rep: &Report, undo: bool) {
     ui.label(
         RichText::new(format!(
-            "{} {} files ({}){}; {} folders left empty were removed.",
+            "{} {} files ({}){}{}; {} folders left empty were removed.",
             match (rep.stopped, undo) {
                 (true, false) => "Stopped after moving",
                 (false, false) => "Moved",
@@ -705,6 +728,14 @@ fn report(ui: &mut Ui, rep: &Report, undo: bool) {
                 format!(
                     ", {} under a new name because the name was taken",
                     rep.kept_both
+                )
+            } else {
+                String::new()
+            },
+            if rep.folders_made > 0 {
+                format!(
+                    ", {} empty folders made in the new folder",
+                    rep.folders_made
                 )
             } else {
                 String::new()
@@ -836,6 +867,21 @@ mod tests {
         assert!(!new.join("Example Co").exists());
         assert_eq!(h.state().report.as_ref().unwrap().moved, 2);
         assert!(h.state().report_undo);
+
+        // 4: Year folders 2024 (owner 2026-11-12): the Taxes4 folder moves whole; a year
+        // only in a file name stays.
+        click(&mut h, "4  Year folders");
+        type_into(&mut h, "Years", "2024");
+        click(&mut h, "Preview");
+        wait(&mut h);
+        assert_eq!(h.state().preview.as_ref().unwrap().1.items.len(), 1);
+        click(&mut h, "Move 1 files");
+        click(&mut h, "Yes, move 1 files");
+        wait(&mut h);
+        assert!(new.join("Sample, Pat/Taxes/2024/W2.pdf").is_file());
+        assert!(!old.join("Sample, Pat/Taxes/2024").exists());
+        assert!(old.join("Example Co/Bank 2025-03.pdf").is_file());
+        assert!(old.join("Sample, Pat/Taxes/2018/W2.pdf").is_file());
 
         // 2: a date in the future moves nothing.
         click(&mut h, "2  Recently modified");

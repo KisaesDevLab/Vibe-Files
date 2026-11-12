@@ -6,6 +6,9 @@
 //! 2. **Date**: files modified on or after a date.
 //! 3. **Year**: files with a four-digit year (1990 to next year) at or after the year given,
 //!    in the file name or in a folder inside the client folder; the newest year counts.
+//! 4. **Year folders** (owner 2026-11-12): every folder inside a client folder whose name has
+//!    a year in the range given (`2026`, `2026 Returns`, `TY2026`) moves whole: its files,
+//!    its sub-folders (empty ones too), the same structure under the new folder.
 //!
 //! Files keep their path under the new folder. Moves go through Vibe Filer Desktop's engine
 //! (`transfer`: a rename on one drive; across drives a copy, SHA-256 check, then the original
@@ -45,6 +48,9 @@ pub enum Rule {
     ModifiedSince(NaiveDate),
     /// Files with this year or a later one in their name or a folder inside the client folder.
     YearFrom(i32),
+    /// Folders inside a client folder whose name has a year from the first to the second (both
+    /// included) move whole, sub-folders and all.
+    YearFolders(i32, i32),
 }
 
 impl Rule {
@@ -53,6 +59,8 @@ impl Rule {
             Rule::Permanent(n) => format!("permanent folder \"{n}\""),
             Rule::ModifiedSince(d) => format!("modified on or after {d}"),
             Rule::YearFrom(y) => format!("year {y} or later"),
+            Rule::YearFolders(a, b) if a == b => format!("folders named with {a}"),
+            Rule::YearFolders(a, b) => format!("folders named with a year from {a} to {b}"),
         }
     }
 }
@@ -80,6 +88,9 @@ pub struct Plan {
     pub clients: usize,
     /// More ticked clients have files for this step than the run's limit took.
     pub more: bool,
+    /// Empty folders inside moved year folders (relative to the old folder): made under the
+    /// new folder, removed from the old (step 4).
+    pub dirs: Vec<PathBuf>,
 }
 
 impl Plan {
@@ -166,6 +177,119 @@ fn walk(dir: &Path, base: &Path, out: &mut Vec<(PathBuf, std::fs::Metadata)>, pl
                 .to_path_buf();
             out.push((rel, m));
         }
+    }
+}
+
+/// Step 4: the files inside folders whose name has a year from `from` to `to` (`inside`: the
+/// year folder this folder is in), and the empty folders in them. The folder `dir` itself is
+/// only a year folder through `inside` (a client folder's own name does not count).
+#[allow(clippy::too_many_arguments)]
+fn walk_year_folders(
+    dir: &Path,
+    base: &Path,
+    inside: bool,
+    (from, to): (i32, i32),
+    next_year: i32,
+    out: &mut Vec<(PathBuf, std::fs::Metadata)>,
+    empties: &mut Vec<PathBuf>,
+    plan: &mut Plan,
+) {
+    let rd = match std::fs::read_dir(dir) {
+        Ok(rd) => rd,
+        Err(e) => {
+            plan.unreadable.push(format!("{}: {e}", dir.display()));
+            return;
+        }
+    };
+    let mut entries: Vec<_> = rd.flatten().collect();
+    entries.sort_by_key(|e| e.file_name());
+    let mut empty = true;
+    for e in entries {
+        let name = e.file_name().to_string_lossy().into_owned();
+        let Ok(ft) = e.file_type() else { continue };
+        if ft.is_symlink() {
+            empty = false;
+            continue;
+        }
+        if ft.is_dir() {
+            empty = false;
+            if is_skipped_dir(&name) {
+                continue;
+            }
+            let year = inside
+                || years_in(&name, next_year)
+                    .into_iter()
+                    .any(|y| (from..=to).contains(&y));
+            walk_year_folders(
+                &e.path(),
+                base,
+                year,
+                (from, to),
+                next_year,
+                out,
+                empties,
+                plan,
+            );
+        } else if is_clutter(&name) {
+            empty = false;
+            if inside {
+                plan.clutter += 1;
+            }
+        } else {
+            empty = false;
+            if inside && let Ok(m) = e.metadata() {
+                let rel = e
+                    .path()
+                    .strip_prefix(base)
+                    .unwrap_or(&e.path())
+                    .to_path_buf();
+                out.push((rel, m));
+            }
+        }
+    }
+    if inside && empty {
+        empties.push(dir.strip_prefix(base).unwrap_or(dir).to_path_buf());
+    }
+}
+
+/// The year folder a file is in: its outermost folder inside the client folder whose name has
+/// a year from `from` to `to`.
+pub fn year_folder(rel: &Path, (from, to): (i32, i32), next_year: i32) -> Option<String> {
+    let parts: Vec<String> = rel
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .collect();
+    let dirs = parts.split_last()?.1;
+    dirs.iter()
+        .skip(1)
+        .find(|d| {
+            years_in(d, next_year)
+                .into_iter()
+                .any(|y| (from..=to).contains(&y))
+        })
+        .cloned()
+}
+
+/// Years typed for step 4: `2026`, `2023-2025`, `2023 to 2025` (either order).
+pub fn parse_years(s: &str) -> Option<(i32, i32)> {
+    let s = s
+        .trim()
+        .to_lowercase()
+        .replace(" to ", "-")
+        .replace(['–', '—'], "-");
+    let year = |t: &str| {
+        let t = t.trim();
+        (t.len() == 4)
+            .then(|| t.parse::<i32>().ok())
+            .flatten()
+            .filter(|y| (FIRST_YEAR..=2100).contains(y))
+    };
+    match s.split_once('-') {
+        Some((a, b)) => {
+            let (a, b) = (year(a)?, year(b)?);
+            Some((a.min(b), a.max(b)))
+        }
+        None => year(&s).map(|y| (y, y)),
     }
 }
 
@@ -281,10 +405,8 @@ pub fn plan_some(old: &Path, clients: &[String], rule: &Rule, max: Option<usize>
     for c in clients {
         if max.is_some_and(|m| p.clients >= m) {
             // Only to say whether there is more: the next client with files.
-            if !plan_some(old, std::slice::from_ref(c), rule, None)
-                .items
-                .is_empty()
-            {
+            let next = plan_some(old, std::slice::from_ref(c), rule, None);
+            if !next.items.is_empty() || !next.dirs.is_empty() {
                 p.more = true;
                 break;
             }
@@ -310,6 +432,28 @@ pub fn plan_some(old: &Path, clients: &[String], rule: &Rule, max: Option<usize>
                     {
                         walk(&e.path(), old, &mut files, &mut p);
                     }
+                }
+            }
+            Rule::YearFolders(from, to) => {
+                // Loose files are in no folder of a client.
+                if c.is_empty() {
+                    continue;
+                }
+                let dirs_before = p.dirs.len();
+                let mut empties = vec![];
+                walk_year_folders(
+                    &old.join(c),
+                    old,
+                    false,
+                    (*from, *to),
+                    next_year,
+                    &mut files,
+                    &mut empties,
+                    &mut p,
+                );
+                p.dirs.extend(empties);
+                if files.is_empty() && p.dirs.len() > dirs_before {
+                    p.clients += 1;
                 }
             }
             _ if c.is_empty() => {
@@ -345,6 +489,9 @@ pub fn plan_some(old: &Path, clients: &[String], rule: &Rule, max: Option<usize>
                     Some((found, wher)) if found >= *y => Some(format!("{found} in the {wher}")),
                     _ => None,
                 },
+                Rule::YearFolders(a, b) => {
+                    year_folder(&rel, (*a, *b), next_year).map(|f| format!("in the folder \"{f}\""))
+                }
             };
             if let Some(why) = why {
                 p.items.push(Item {
@@ -371,6 +518,8 @@ pub struct Report {
     pub bytes: u64,
     /// Folders removed because the move emptied them.
     pub folders_removed: usize,
+    /// Empty folders of moved year folders made under the new folder (step 4).
+    pub folders_made: usize,
     pub log: Option<PathBuf>,
     pub stopped: bool,
     /// The log could not be written: the run stopped there (the moves logged are all there
@@ -709,6 +858,31 @@ pub fn apply(
             rep.log_error = Some(e);
             rep.stopped = true;
             break;
+        }
+    }
+    // Step 4's empty folders: made under the new folder, taken away from the old one.
+    if !rep.stopped {
+        for d in &plan.dirs {
+            let want = new.join(d);
+            if path_len(&want) > MAX_PATH {
+                rep.failed.push((
+                    d.clone(),
+                    format!(
+                        "the new path would be {} characters long (limit {MAX_PATH})",
+                        path_len(&want)
+                    ),
+                ));
+                continue;
+            }
+            match std::fs::create_dir_all(&want) {
+                Ok(()) => {
+                    rep.folders_made += 1;
+                    emptied.push(old.join(d));
+                }
+                Err(e) => rep
+                    .failed
+                    .push((d.clone(), format!("folder not made: {e}"))),
+            }
         }
     }
     rep.folders_removed = remove_emptied(emptied, old);
@@ -1102,6 +1276,102 @@ mod tests {
             &AtomicBool::new(false),
         )
         .unwrap()
+    }
+
+    /// Step 4 (owner 2026-11-12): folders whose name has a year in the range move whole,
+    /// sub-folders and empty folders too, same structure; a year only in a file's name or in
+    /// the client folder's own name does not count.
+    #[test]
+    fn year_folders_move_whole_with_their_structure() {
+        assert_eq!(parse_years("2026"), Some((2026, 2026)));
+        assert_eq!(parse_years(" 2025 - 2023 "), Some((2023, 2025)));
+        assert_eq!(parse_years("2023 to 2025"), Some((2023, 2025)));
+        assert_eq!(parse_years("26"), None);
+        assert_eq!(parse_years("1980"), None);
+        assert_eq!(parse_years("2023-"), None);
+
+        let t = tempfile::tempdir().unwrap();
+        let (old, new) = (t.path().join("Old"), t.path().join("New"));
+        let a = old.join("1st Choice Sample LLC");
+        put(&a.join("Income Tax/2026/Return.pdf"), "r");
+        put(&a.join("Income Tax/2026/Workpapers/WP.xlsx"), "w");
+        std::fs::create_dir_all(a.join("Income Tax/2026/Empty")).unwrap();
+        std::fs::create_dir_all(a.join("Payroll/2026")).unwrap();
+        put(&a.join("2026 Returns/Final.pdf"), "f");
+        put(&a.join("Income Tax/2025/Old.pdf"), "o");
+        put(&a.join("Correspondence/2026 letter.pdf"), "name only");
+        put(&a.join("Income Tax/2026/Thumbs.db"), "clutter");
+        put(&old.join("Client 2026/Other/e.pdf"), "client name only");
+        put(&old.join("loose 2026.pdf"), "loose");
+        let clients: Vec<String> = scan(&old, &AtomicBool::new(false), &AtomicUsize::new(0))
+            .unwrap()
+            .into_iter()
+            .map(|c| c.name)
+            .collect();
+
+        let rule = Rule::YearFolders(2026, 2026);
+        let p = plan(&old, &clients, &rule);
+        assert_eq!(
+            rels(&p),
+            [
+                "1st Choice Sample LLC/2026 Returns/Final.pdf",
+                "1st Choice Sample LLC/Income Tax/2026/Return.pdf",
+                "1st Choice Sample LLC/Income Tax/2026/Workpapers/WP.xlsx",
+            ]
+        );
+        let mut dirs: Vec<String> = p
+            .dirs
+            .iter()
+            .map(|d| d.to_string_lossy().replace('\\', "/"))
+            .collect();
+        dirs.sort();
+        assert_eq!(
+            dirs,
+            [
+                "1st Choice Sample LLC/Income Tax/2026/Empty",
+                "1st Choice Sample LLC/Payroll/2026",
+            ]
+        );
+        assert_eq!(p.clients, 1);
+        let why = &p
+            .items
+            .iter()
+            .find(|i| i.rel.ends_with("WP.xlsx"))
+            .unwrap()
+            .why;
+        assert_eq!(why, "in the folder \"2026\"");
+
+        // A range takes 2025 too.
+        let r = plan(&old, &clients, &Rule::YearFolders(2025, 2026));
+        assert!(rels(&r).iter().any(|x| x.ends_with("2025/Old.pdf")));
+
+        let rep = apply(
+            &old,
+            &new,
+            &p,
+            &rule,
+            &Options::default(),
+            &AtomicUsize::new(0),
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        assert_eq!((rep.moved, rep.folders_made), (3, 2), "{rep:?}");
+        assert!(rep.failed.is_empty(), "{rep:?}");
+        let n = new.join("1st Choice Sample LLC");
+        assert!(n.join("Income Tax/2026/Workpapers/WP.xlsx").is_file());
+        assert!(n.join("Income Tax/2026/Empty").is_dir());
+        assert!(n.join("Payroll/2026").is_dir());
+        assert!(n.join("2026 Returns/Final.pdf").is_file());
+        // Left: the 2025 folder, the letter, the clutter (so Income Tax/2026 stays, holding
+        // only Thumbs.db), the other client.
+        assert!(a.join("Income Tax/2025/Old.pdf").is_file());
+        assert!(a.join("Correspondence/2026 letter.pdf").is_file());
+        assert!(!a.join("Income Tax/2026/Workpapers").exists());
+        assert!(!a.join("Income Tax/2026/Empty").exists());
+        assert!(!a.join("Payroll").exists(), "emptied, removed");
+        assert!(!a.join("2026 Returns").exists());
+        assert!(old.join("Client 2026/Other/e.pdf").is_file());
+        assert!(old.join("loose 2026.pdf").is_file());
     }
 
     #[test]

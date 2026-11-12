@@ -95,13 +95,18 @@ before step 2. It works on plain folders, and Vibe Files doesn't need to be open
    leave out.
    **Clients per run** moves only that many clients' files at a time (blank = all), to try
    the process on a few first; Preview again after a move for the next ones.
-2. Run each of the three steps, in any order. Each shows a **Preview** of what would move
+2. Run each of the four steps, in any order. Each shows a **Preview** of what would move
    before you confirm:
    - **Permanent folders**: each client's top-level folder with the name you type (default
      `Permanent`) moves whole.
    - **Recently modified**: files modified on or after a date.
    - **Year in the name**: files with that year or later in the file name or in a folder
      inside the client folder (`Taxes\2024\…`).
+   - **Year folders**: every folder inside a client folder whose name has a year in the
+     range you type (`2026`, or `2023-2025`), such as `Income Tax\2026`, `2026 Returns` or
+     `TY2026`, moves whole: its files and sub-folders, empty ones too, same structure. A year
+     only in a file's name does not count here. Undo puts the files back; empty folders it
+     made stay in the new folder.
 3. Files keep their paths under the new folder. Moves between drives are copied, checked and
    only then removed from the old folder. A name already taken keeps both files (` (2)`).
    A file open in another program is tried again for about 10 seconds, then left and listed.
