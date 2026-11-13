@@ -1462,3 +1462,84 @@ fn selected_documents_are_pushed_whatever_the_rule_says() {
     let e = vf_sync::push::push_docs(&mut a.conn, &a.root, &a.sync, &[loose], &[]).unwrap_err();
     assert!(e.to_string().contains("loose.pdf"), "{e}");
 }
+
+/// PA-63: the firm's list of rules decides what goes up by itself, in the catalog's counts and
+/// in a push alike; an empty list sends nothing; what is in B2 stays there.
+#[test]
+fn a_list_of_rules_decides_what_goes_up() {
+    use vf_fs::clients::{B2Rule, B2Years};
+    use vf_sync::rules::Rules;
+    let t = tempfile::tempdir().unwrap();
+    let store = Remote::memory();
+    let mut a = pc_a(t.path(), store);
+    let ein = doc_id(&a.conn, "EIN letter.pdf");
+    let w2 = doc_id(&a.conn, "W-2 Northwind.pdf");
+    let q941 = doc_id(&a.conn, "941 Q1.pdf");
+    let w2_type: String = a
+        .conn
+        .query_row(
+            "SELECT doc_type_id FROM document WHERE id = ?1",
+            [&w2],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let sent = |a: &Pc| vf_sync::catalog::sent_ids(&a.conn).unwrap();
+    let held = |a: &Pc| {
+        vf_sync::catalog::held(&a.conn, &Rules::load(&a.root).unwrap())
+            .unwrap()
+            .0
+    };
+
+    // One rule: the Setup folder of the permanent file, documents with no tax year.
+    vf_fs::clients::set_b2_rules(
+        &a.root,
+        &[B2Rule {
+            name: "Setup".into(),
+            folders: vec!["Permanent/Setup".into()],
+            years: B2Years::None,
+            no_year: true,
+            ..B2Rule::default()
+        }],
+    )
+    .unwrap();
+    assert_eq!(held(&a), 2, "the W-2 and the 941 wait");
+    vf_sync::push::push(&mut a.conn, &a.root, &a.sync, None).unwrap();
+    assert!(sent(&a).contains(&ein));
+    assert!(!sent(&a).contains(&w2) && !sent(&a).contains(&q941));
+
+    // A second rule, by doc type: either rule matching sends.
+    let mut rules = vf_fs::clients::load_b2(&a.root).unwrap().rules.unwrap();
+    rules.push(B2Rule {
+        name: "W-2s".into(),
+        doc_types: vec![w2_type],
+        ..B2Rule::default()
+    });
+    vf_fs::clients::set_b2_rules(&a.root, &rules).unwrap();
+    assert_eq!(held(&a), 1, "the 941 only");
+    vf_sync::push::push(&mut a.conn, &a.root, &a.sync, None).unwrap();
+    assert!(sent(&a).contains(&w2));
+    assert!(!sent(&a).contains(&q941));
+
+    // No rules: nothing more goes up by itself, and nothing leaves B2.
+    vf_fs::clients::set_b2_rules(&a.root, &[]).unwrap();
+    put(
+        &a.root,
+        "Anderson Farms LLC (1042)/Permanent/Setup/Articles.pdf",
+        "articles invented",
+    );
+    vf_fs::rebuild::rebuild(&mut a.conn, &a.root, "dev-a").unwrap();
+    assert_eq!(held(&a), 2, "the 941 and the new file");
+    vf_sync::push::push(&mut a.conn, &a.root, &a.sync, None).unwrap();
+    assert!(!sent(&a).contains(&doc_id(&a.conn, "Articles.pdf")));
+    assert!(sent(&a).contains(&ein) && sent(&a).contains(&w2));
+    // The client's own Always send still wins.
+    let bell: String = a
+        .conn
+        .query_row("SELECT id FROM client WHERE ext_id = '2002'", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    vf_fs::clients::set_b2_choices(&a.root, std::slice::from_ref(&bell), Some("always")).unwrap();
+    vf_sync::push::push(&mut a.conn, &a.root, &a.sync, None).unwrap();
+    assert!(sent(&a).contains(&q941));
+}

@@ -75,6 +75,11 @@ pub struct ClientMeta {
     /// Client uuid → "always" / "never": the client's own B2 choice over the years rule.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub b2_clients: BTreeMap<String, String>,
+    /// B2 sync (owner 2026-11-13, PA-63): the firm's list of rules; a document never sent goes
+    /// up when any of them matches. Absent: never saved, and the rule from before applies
+    /// (`b2_years_back` and the Permanent folders). Empty: nothing goes up by itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub b2_rules: Option<Vec<B2Rule>>,
     /// Fields a later version wrote: kept as they are when this version saves the file (QA
     /// 2026-11-12: an older build saving it dropped the B2 settings).
     #[serde(flatten)]
@@ -86,25 +91,69 @@ pub struct ClientMeta {
 /// back from it (QA 2026-11-12).
 pub const B2_BACKUP_FILE: &str = "b2-rules.json";
 
-/// The B2 sync settings (PA-53).
+/// Which documents with a tax year a B2 rule takes.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum B2Years {
+    /// Every tax year.
+    #[default]
+    Any,
+    /// None with a tax year (a rule for the permanent file).
+    None,
+    /// This tax year and so many before it (it moves on each January).
+    Back(u16),
+}
+
+/// One rule of what goes to B2 (PA-63). `vf_sync::rules` applies it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct B2Rule {
+    /// What the firm calls it on the Sync page.
+    #[serde(default)]
+    pub name: String,
+    /// Folder paths as they are under a client folder (`Income Tax`, `Permanent/Setup`); a
+    /// document in one of them, at any depth, matches. None listed: any folder.
+    #[serde(default)]
+    pub folders: Vec<String>,
+    /// Doc type ids. None listed: any doc type, and documents with none.
+    #[serde(default)]
+    pub doc_types: Vec<String>,
+    #[serde(default)]
+    pub years: B2Years,
+    /// Documents with no tax year match too.
+    #[serde(default)]
+    pub no_year: bool,
+}
+
+/// The B2 sync settings (PA-53, PA-63).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct B2Settings {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub years_back: Option<u16>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub clients: BTreeMap<String, String>,
+    /// The list of rules; `None`: never saved (the earlier rule applies).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rules: Option<Vec<B2Rule>>,
 }
 
 impl B2Settings {
-    fn of(meta: &ClientMeta) -> Self {
+    pub fn of(meta: &ClientMeta) -> Self {
         B2Settings {
             years_back: meta.b2_years_back,
             clients: meta.b2_clients.clone(),
+            rules: meta.b2_rules.clone(),
         }
     }
 
     fn is_empty(&self) -> bool {
-        self.years_back.is_none() && self.clients.is_empty()
+        self.years_back.is_none() && self.clients.is_empty() && self.rules.is_none()
+    }
+
+    /// Writes these settings into `meta`.
+    fn put(&self, meta: &mut ClientMeta) {
+        meta.b2_years_back = self.years_back;
+        meta.b2_clients = self.clients.clone();
+        meta.b2_rules = self.rules.clone();
     }
 }
 
@@ -142,8 +191,7 @@ pub fn load_b2(root: &Path) -> Result<B2Settings, String> {
     match backup {
         Some(b) if !b.is_empty() => {
             let mut meta = meta;
-            meta.b2_years_back = b.years_back;
-            meta.b2_clients = b.clients.clone();
+            b.put(&mut meta);
             // Put back for everyone (best effort: the settings are used either way).
             let _ = save_meta(root, &meta);
             Ok(b)
@@ -670,8 +718,45 @@ pub fn partner_of(meta: &ClientMeta, client: &str, listed: Option<&Client>) -> O
 pub fn set_b2_years_back(root: &Path, years: Option<u16>) -> Result<(), String> {
     let mut meta = read_meta(root)?;
     let b2 = load_b2(root)?;
-    meta.b2_clients = b2.clients;
+    b2.put(&mut meta);
     meta.b2_years_back = years;
+    save_meta(root, &meta)?;
+    save_b2_backup(root, &B2Settings::of(&meta))
+}
+
+/// B2 sync (PA-63): the firm's list of rules. Saved as given, an empty list too (nothing goes
+/// up by itself then).
+pub fn set_b2_rules(root: &Path, rules: &[B2Rule]) -> Result<(), String> {
+    let mut meta = read_meta(root)?;
+    let b2 = load_b2(root)?;
+    b2.put(&mut meta);
+    meta.b2_rules = Some(rules.to_vec());
+    save_meta(root, &meta)?;
+    save_b2_backup(root, &B2Settings::of(&meta))
+}
+
+/// B2 sync (PA-63): the same choice for many clients in one save (`None`: the firm's rules).
+pub fn set_b2_choices(
+    root: &Path,
+    client_ids: &[String],
+    choice: Option<&str>,
+) -> Result<(), String> {
+    if let Some(other) = choice.filter(|c| !matches!(*c, "always" | "never")) {
+        return Err(format!("not a B2 choice: {other}"));
+    }
+    let mut meta = read_meta(root)?;
+    let b2 = load_b2(root)?;
+    b2.put(&mut meta);
+    for id in client_ids {
+        match choice {
+            Some(c) => {
+                meta.b2_clients.insert(id.clone(), c.into());
+            }
+            None => {
+                meta.b2_clients.remove(id);
+            }
+        }
+    }
     save_meta(root, &meta)?;
     save_b2_backup(root, &B2Settings::of(&meta))
 }
@@ -680,8 +765,7 @@ pub fn set_b2_years_back(root: &Path, years: Option<u16>) -> Result<(), String> 
 pub fn set_b2_choice(root: &Path, client_id: &str, choice: Option<&str>) -> Result<(), String> {
     let mut meta = read_meta(root)?;
     let b2 = load_b2(root)?;
-    meta.b2_years_back = b2.years_back;
-    meta.b2_clients = b2.clients;
+    b2.put(&mut meta);
     match choice {
         Some(c @ ("always" | "never")) => {
             meta.b2_clients.insert(client_id.into(), c.into());

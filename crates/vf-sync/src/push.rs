@@ -438,6 +438,7 @@ fn push_once(
                 rules.sends(
                     Some(client),
                     &rel,
+                    e.doc_type_id.as_deref(),
                     e.tax_year,
                     sent_before.contains(&e.doc_id),
                 )
@@ -468,6 +469,7 @@ fn push_once(
             rules.sends(
                 None,
                 &e.rel_path,
+                e.doc_type_id.as_deref(),
                 e.tax_year,
                 sent_before.contains(&e.doc_id),
             )
