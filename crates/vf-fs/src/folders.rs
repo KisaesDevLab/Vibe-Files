@@ -482,8 +482,10 @@ pub fn rename_client(
     };
     c.name = plan.new_name.clone();
     clients::save_list(root, &list)?;
-    // Catalog rows following the list: not an undo of its own.
-    crate::rebuild::sync_clients(conn, root, device_id, "clients_edit")
+    // Catalog rows following the list: not an undo of its own. Only this client's folder is
+    // read again (PA-61).
+    let reread: Vec<String> = plan.folder.iter().map(|(_, new)| new.clone()).collect();
+    crate::rebuild::sync_clients_edited(conn, root, device_id, "clients_edit", &reread)
         .map_err(|e| e.to_string())?;
     Ok(())
 }
@@ -752,7 +754,15 @@ pub fn set_client_id(
                     plan.new_id
                 )
             });
-    crate::rebuild::sync_clients(conn, root, device_id, "clients_edit")
+    // Only this client's folder (its sentinel was rewritten) is read again (PA-61).
+    let reread: Vec<String> = plan
+        .folder
+        .as_ref()
+        .map(|(_, new)| new.clone())
+        .or_else(|| plan.folder_now.clone())
+        .into_iter()
+        .collect();
+    crate::rebuild::sync_clients_edited(conn, root, device_id, "clients_edit", &reread)
         .map_err(|e| e.to_string())?;
     Ok(note)
 }

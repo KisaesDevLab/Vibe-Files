@@ -32,16 +32,17 @@ impl RelForm {
     }
 }
 
-/// Writes the catalog after a master-file change and re-reads Browse. It reads every client
-/// folder, so with the catalog file it runs as a job with a spinner (owner 2026-11-12); an
-/// edit made meanwhile is brought in by another run once this one is done.
+/// Writes the catalog after a master-file change and re-reads Browse. It reads the client
+/// master on the share, so with the catalog file it runs as a job with a spinner (owner
+/// 2026-11-12); an edit made meanwhile is brought in by another run once this one is done.
+/// No client folder is read: these edits change none (PA-61).
 fn synced(b: &mut Browse, env: &mut Env, action: &str) {
     if b.client_sync.is_some() {
         b.client_sync_again = true;
         return;
     }
     let (Some(catalog), Some(ctx)) = (b.catalog.clone(), b.ctx()) else {
-        let r = vf_fs::rebuild::sync_clients(env.conn, env.root, env.device_id, action)
+        let r = vf_fs::rebuild::sync_clients_edited(env.conn, env.root, env.device_id, action, &[])
             .map(|rep| rep.dangling_relationships)
             .map_err(|e| e.to_string());
         client_synced(b, env, r);
@@ -55,7 +56,7 @@ fn synced(b: &mut Browse, env: &mut Env, action: &str) {
     match crate::ui::job::Job::start(&ctx, "Saving the client…", move || {
         let mut conn =
             vf_core::db::open(&catalog, vf_core::db::Storage::Local).map_err(|e| e.to_string())?;
-        vf_fs::rebuild::sync_clients(&mut conn, &root, &device, &action)
+        vf_fs::rebuild::sync_clients_edited(&mut conn, &root, &device, &action, &[])
             .map(|rep| rep.dangling_relationships)
             .map_err(|e| e.to_string())
     }) {

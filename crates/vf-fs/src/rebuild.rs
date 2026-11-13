@@ -755,10 +755,79 @@ pub fn sync_clients(
     device_id: &str,
     action: &str,
 ) -> Result<RebuildReport, RebuildError> {
-    let now = vf_core::now_rfc3339();
     let mut rep = RebuildReport::default();
     let (bound, _) = scan_folders(root, &mut rep)?;
-    let stmts = client_stmts(conn, root, &bound, &now, device_id, &mut rep)?;
+    commit_clients(conn, root, &bound, rep, device_id, action)
+}
+
+/// [`sync_clients`] after an edit made here (a client renamed, its ID set, its details or
+/// relationships changed): only the client folders in `reread` (cabinet-relative) are read;
+/// the others are taken as the catalog has them. Reading every folder's sentinel for one
+/// client's change took seconds on a share with thousands of clients (owner 2026-11-13).
+pub fn sync_clients_edited(
+    conn: &mut Connection,
+    root: &Path,
+    device_id: &str,
+    action: &str,
+    reread: &[String],
+) -> Result<RebuildReport, RebuildError> {
+    let mut rep = RebuildReport::default();
+    type Row = (String, String, String, String, Option<String>);
+    let rows: Vec<Row> = {
+        let mut st = conn.prepare(
+            "SELECT id, ext_id, name, folder_rel, sentinel_hash FROM client
+             WHERE deleted_at IS NULL AND folder_rel IS NOT NULL ORDER BY folder_rel",
+        )?;
+        st.query_map([], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+        })?
+        .collect::<Result<_, _>>()?
+    };
+    let mut bound: Vec<Bound> = Vec::with_capacity(rows.len());
+    for (id, ext_id, name, folder_rel, hash) in rows {
+        let again = reread.iter().any(|f| f.eq_ignore_ascii_case(&folder_rel));
+        match hash {
+            Some(sentinel_hash) if !again => bound.push(Bound {
+                id,
+                ext_id,
+                name,
+                folder_rel,
+                sentinel_hash,
+            }),
+            _ => {
+                let folder = root.join(&folder_rel);
+                match sentinel::read_sentinel(&folder) {
+                    Ok(Some(s)) => {
+                        let sentinel_hash = sha256_file(&sentinel::sentinel_path(&folder))
+                            .map_err(|e| RebuildError::Io(e.to_string()))?;
+                        bound.push(Bound {
+                            id: s.client_id.to_string(),
+                            ext_id: s.tax_software_id,
+                            name: s.display_name_at_creation,
+                            folder_rel,
+                            sentinel_hash,
+                        });
+                    }
+                    Ok(None) | Err(_) => rep.unbound_folders.push(folder_rel),
+                }
+            }
+        }
+    }
+    rep.clients = bound.len();
+    commit_clients(conn, root, &bound, rep, device_id, action)
+}
+
+/// The client and relationship rows of `bound` and the client master, in one Transaction.
+fn commit_clients(
+    conn: &mut Connection,
+    root: &Path,
+    bound: &[Bound],
+    mut rep: RebuildReport,
+    device_id: &str,
+    action: &str,
+) -> Result<RebuildReport, RebuildError> {
+    let now = vf_core::now_rfc3339();
+    let stmts = client_stmts(conn, root, bound, &now, device_id, &mut rep)?;
     let mut tx = Transaction::new(action).audit(AuditEntry::new(
         action,
         None,
@@ -2346,6 +2415,34 @@ mod tests {
         );
         let snap = vf_core::browse::load(&conn).unwrap();
         assert_eq!(snap.partners(), ["JD", "KW"]);
+    }
+
+    /// PA-61: an edit made here syncs from the catalog; only the client folders named are read
+    /// again (setting one ID read every sentinel of the cabinet).
+    #[test]
+    fn an_edit_syncs_without_reading_every_client_folder() {
+        let c = cab();
+        let mut conn = open(&c);
+        rebuild(&mut conn, &c.root, "dev-1").unwrap();
+        let before = client_rows(&conn);
+        assert!(before.len() >= 2);
+        // Nothing changed: the same rows as the full sync gives.
+        let rep = sync_clients_edited(&mut conn, &c.root, "dev-1", "clients_edit", &[]).unwrap();
+        assert_eq!(client_rows(&conn), before);
+        let full = sync_clients(&mut conn, &c.root, "dev-1", "clients_edit").unwrap();
+        assert_eq!(rep.clients, full.clients);
+        assert_eq!(client_rows(&conn), before);
+        // A sentinel gone from another folder is not looked at: its client stays as it was...
+        let acme = c.root.join("Acme LLC (1002)");
+        std::fs::remove_file(sentinel::sentinel_path(&acme)).unwrap();
+        let named = ["Smith, John (1001)".to_string()];
+        let rep = sync_clients_edited(&mut conn, &c.root, "dev-1", "clients_edit", &named).unwrap();
+        assert!(rep.unbound_folders.is_empty());
+        assert_eq!(client_rows(&conn), before);
+        // ...until its own folder is named (any case).
+        let named = ["acme llc (1002)".to_string()];
+        let rep = sync_clients_edited(&mut conn, &c.root, "dev-1", "clients_edit", &named).unwrap();
+        assert_eq!(rep.unbound_folders, ["Acme LLC (1002)"]);
     }
 
     #[test]
