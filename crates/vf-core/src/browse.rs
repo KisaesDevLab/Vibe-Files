@@ -46,7 +46,8 @@ pub struct DocRow {
     /// `None` = permanent file.
     pub tax_year: Option<i32>,
     pub rel_path: String,
-    pub hash: String,
+    /// SHA-256 of the content; `None`: not fingerprinted yet (PA-60).
+    pub hash: Option<String>,
     pub size: i64,
     pub status: String,
     pub source: Option<String>,
@@ -822,7 +823,7 @@ mod tests {
             doc_type: None,
             tax_year: year,
             rel_path: rel.into(),
-            hash: "ab".repeat(32),
+            hash: Some("ab".repeat(32)),
             size: 1,
             status: "received".into(),
             source: None,

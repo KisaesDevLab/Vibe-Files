@@ -789,7 +789,7 @@ impl Browse {
             .docs
             .iter()
             .filter(mine)
-            .map(|d| d.hash.clone())
+            .filter_map(|d| d.hash.clone())
             .collect();
         let known_paths: Vec<String> = self
             .snap
@@ -2141,7 +2141,8 @@ pub fn show(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env) {
                     doc_id: d.id.clone(),
                     name: d.name().to_string(),
                     path: env.root.join(&d.rel_path),
-                    hash: d.hash.clone(),
+                    // Not fingerprinted yet (PA-60): no text has been read for it either.
+                    hash: d.hash.clone().unwrap_or_default(),
                 }
             })
             .collect();
@@ -3440,9 +3441,13 @@ fn grid(ui: &mut egui::Ui, b: &mut Browse, conn: &Connection) {
                                 }
                                 SortCol::Hash => {
                                     ui.label(
-                                        RichText::new(&d.hash[..d.hash.len().min(8)])
-                                            .monospace()
-                                            .color(theme::ink_muted()),
+                                        RichText::new(
+                                            d.hash
+                                                .as_deref()
+                                                .map_or("—", |h| &h[..h.len().min(8)]),
+                                        )
+                                        .monospace()
+                                        .color(theme::ink_muted()),
                                     );
                                 }
                             });
@@ -3580,16 +3585,24 @@ fn open_share(ctx: &egui::Context, b: &mut Browse, env: &mut Env) {
         );
         return;
     };
-    let refs = docs
-        .iter()
-        .map(|d| crate::ui::portal::DocRef {
+    // The portal compares fingerprints: a document not read yet is read now (PA-60).
+    let mut refs = Vec::with_capacity(docs.len());
+    for d in &docs {
+        let hash = match shared_hash(env, d) {
+            Ok(h) => h,
+            Err(e) => {
+                b.error = Some(e);
+                return;
+            }
+        };
+        refs.push(crate::ui::portal::DocRef {
             id: d.id.clone(),
             name: widgets::file_name(&d.rel_path).to_string(),
             path: env.root.join(&d.rel_path),
-            hash: d.hash.clone(),
+            hash,
             tax_year: d.tax_year,
-        })
-        .collect();
+        });
+    }
     b.portal.share = Some(crate::ui::portal::ShareWindow::new(
         ctx,
         &s,
@@ -3601,6 +3614,15 @@ fn open_share(ctx: &egui::Context, b: &mut Browse, env: &mut Env) {
         refs,
         b.portal.audit_out(),
     ));
+}
+
+/// A document's fingerprint for the portal, which compares it with what it holds: a document
+/// not read yet (PA-60) is read now, once.
+fn shared_hash(env: &mut Env, d: &vf_core::browse::DocRow) -> Result<String, String> {
+    match &d.hash {
+        Some(h) => Ok(h.clone()),
+        None => vf_fs::fingerprint::ensure(env.conn, env.root, env.device_id, &d.id),
+    }
 }
 
 /// The document pane's Send secure link… (Vibe-Portal P68): one document of a client, to
@@ -3623,6 +3645,13 @@ fn open_send_link(ctx: &egui::Context, b: &mut Browse, env: &mut Env, d: &vf_cor
         b.error = Some("Only a document filed under a client can be sent by a secure link.".into());
         return;
     };
+    let hash = match shared_hash(env, d) {
+        Ok(h) => h,
+        Err(e) => {
+            b.error = Some(e);
+            return;
+        }
+    };
     b.portal.send_link = Some(crate::ui::portal::SendLinkWindow::new(
         ctx,
         &s,
@@ -3635,7 +3664,7 @@ fn open_send_link(ctx: &egui::Context, b: &mut Browse, env: &mut Env, d: &vf_cor
             id: d.id.clone(),
             name: widgets::file_name(&d.rel_path).to_string(),
             path: env.root.join(&d.rel_path),
-            hash: d.hash.clone(),
+            hash,
             tax_year: d.tax_year,
         },
         b.portal.audit_out(),
@@ -3706,8 +3735,13 @@ fn inspector_body(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env) {
     // The focused document's pages (PA-12).
     if let Some(di) = b.target_doc() {
         let d = b.snap.docs[di].clone();
-        b.preview
-            .set(ui.ctx(), env.root, &d.id, &d.rel_path, &d.hash);
+        // The pages' cache key: the content's fingerprint, or for a document not read yet
+        // (PA-60) what tells its content apart without reading it.
+        let key = d
+            .hash
+            .clone()
+            .unwrap_or_else(|| format!("{}-{}-{}", d.id, d.size, d.updated_at));
+        b.preview.set(ui.ctx(), env.root, &d.id, &d.rel_path, &key);
         let pos = b.visible.iter().position(|&i| i == di).unwrap_or(0);
         let portal = (
             b.portal.is_set(env.root),
@@ -3902,7 +3936,13 @@ fn inspector_body(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env) {
                     ui.add(egui::Label::new(v).wrap());
                     ui.end_row();
                 };
-                kv(ui, "SHA-256", RichText::new(&d.hash).monospace().small());
+                kv(
+                    ui,
+                    "SHA-256",
+                    RichText::new(d.hash.as_deref().unwrap_or("not fingerprinted yet"))
+                        .monospace()
+                        .small(),
+                );
                 kv(ui, "Versions", RichText::new(d.versions.to_string()));
                 kv(ui, "Size", RichText::new(widgets::size(d.size)));
                 kv(
@@ -6139,7 +6179,8 @@ Petty cash,1234.50
         );
         let s = h.state();
         let d = &s.b.snap.docs[0];
-        assert!(vf_fs::holds::covers(&s.root, None, &d.rel_path, &d.hash));
+        let hash = d.hash.as_deref().unwrap();
+        assert!(vf_fs::holds::covers(&s.root, None, &d.rel_path, hash));
         click(&mut h, "Release hold");
         // Asked first, naming the hold (QA P8).
         assert!(
