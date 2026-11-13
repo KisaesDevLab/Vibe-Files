@@ -145,7 +145,8 @@ pub fn covers_any(root: &Path, client_id: Option<&str>, rel_path: &str, hashes: 
         (h.client_id.is_some() && h.client_id.as_deref() == client_id)
             || h.docs
                 .iter()
-                .any(|d| hashes.contains(&d.hash) || d.rel_path == rel_path)
+                // A hold placed on a file not read yet has no fingerprint (PA-60): by its path.
+                .any(|d| (!d.hash.is_empty() && hashes.contains(&d.hash)) || d.rel_path == rel_path)
     })
 }
 
@@ -291,13 +292,25 @@ pub fn place(
         }
         Target::Docs(ids) => {
             for d in &ids {
-                let (rel_path, hash): (String, String) = conn
-                    .query_row(
-                        "SELECT rel_path, hash FROM document WHERE id = ?1",
-                        [d],
-                        |r| Ok((r.get(0)?, r.get(1)?)),
-                    )
+                let rel_path: String = conn
+                    .query_row("SELECT rel_path FROM document WHERE id = ?1", [d], |r| {
+                        r.get(0)
+                    })
                     .map_err(|_| "a document is not in the catalog".to_string())?;
+                // The hold follows the content through a rename: a document not read yet is
+                // read now (PA-60). A file that cannot be read is still held, by its path.
+                let hash = match conn
+                    .query_row("SELECT hash FROM document WHERE id = ?1", [d], |r| {
+                        r.get::<_, Option<String>>(0)
+                    })
+                    .ok()
+                    .flatten()
+                {
+                    Some(h) => h,
+                    None => {
+                        crate::fingerprint::ensure(conn, root, device_id, d).unwrap_or_default()
+                    }
+                };
                 hold.docs.push(DocRef { rel_path, hash });
             }
             if hold.docs.is_empty() {
@@ -360,7 +373,7 @@ pub fn active_for(
     let Ok(holds) = load(root) else {
         return vec![];
     };
-    let docs: Vec<(String, String, Option<String>)> = doc_ids
+    let docs: Vec<(String, Option<String>, Option<String>)> = doc_ids
         .iter()
         .filter_map(|d| {
             conn.query_row(
@@ -381,8 +394,9 @@ pub fn active_for(
                         .iter()
                         .any(|(_, _, c)| c.as_deref() == h.client_id.as_deref()));
             let by_doc = h.docs.iter().any(|r| {
-                docs.iter()
-                    .any(|(p, hash, _)| *p == r.rel_path || *hash == r.hash)
+                docs.iter().any(|(p, hash, _)| {
+                    *p == r.rel_path || hash.as_deref() == Some(r.hash.as_str())
+                })
             });
             by_client || by_doc
         })

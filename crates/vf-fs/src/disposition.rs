@@ -107,8 +107,8 @@ struct Doc {
 fn live_docs(conn: &Connection) -> Result<Vec<Doc>, String> {
     let mut st = conn
         .prepare(
-            "SELECT d.id, d.client_id, c.name, d.rel_path, d.hash, t.name, r.id, r.name, r.years,
-                    r.anchor, d.tax_year, d.filed_at, d.size
+            "SELECT d.id, d.client_id, c.name, d.rel_path, coalesce(d.hash, ''), t.name, r.id,
+                    r.name, r.years, r.anchor, d.tax_year, d.filed_at, d.size
              FROM document d
              LEFT JOIN client c ON c.id = d.client_id
              LEFT JOIN doc_type t ON t.id = d.doc_type_id
@@ -150,7 +150,10 @@ fn held(
 ) -> bool {
     // Every content the document has had (its versions) counts: a hold placed on an earlier
     // one holds it still.
-    let mut hashes = vec![hash.to_string()];
+    let mut hashes: Vec<String> = Some(hash.to_string())
+        .filter(|h| !h.is_empty())
+        .into_iter()
+        .collect();
     if let Ok(mut st) = conn.prepare("SELECT DISTINCT hash FROM version WHERE doc_id = ?1")
         && let Ok(rows) = st.query_map([id], |r| r.get::<_, String>(0))
     {
@@ -283,7 +286,8 @@ fn decide(
                     after.clone().into(),
                     until.clone().into(),
                     device_id.into(),
-                    l.hash.clone().into(),
+                    // A deferral of a document not read yet (PA-60) records no content.
+                    Some(l.hash.clone()).filter(|h| !h.is_empty()).into(),
                 ],
             ))
             .audit(AuditEntry::new(
@@ -302,14 +306,22 @@ fn decide(
     Ok(lines.len())
 }
 
-/// Approves the lines: destroyed once [`WAIT_DAYS`] have passed.
+/// Approves the lines: destroyed once [`WAIT_DAYS`] have passed. What is approved is a content:
+/// a document not fingerprinted yet (PA-60) is read now, so a file changed during the wait is
+/// not destroyed on this approval. One that cannot be read is an error, and nothing is approved.
 pub fn approve(
     conn: &mut Connection,
+    root: &Path,
     device_id: &str,
     lines: &[Line],
     today: Date,
 ) -> Result<usize, String> {
-    decide(conn, device_id, lines, true, today)
+    let mut lines = lines.to_vec();
+    for l in lines.iter_mut().filter(|l| l.hash.is_empty()) {
+        l.hash = crate::fingerprint::ensure(conn, root, device_id, &l.doc_id)
+            .map_err(|e| format!("Not approved: {e}"))?;
+    }
+    decide(conn, device_id, &lines, true, today)
 }
 
 /// Defers the lines for [`DEFER_MONTHS`] months.
@@ -515,7 +527,8 @@ pub fn destroy_pulled(
 ) -> Result<bool, String> {
     let (rel, hash, client): (String, String, Option<String>) = conn
         .query_row(
-            "SELECT rel_path, hash, client_id FROM document WHERE id = ?1 AND deleted_at IS NULL",
+            "SELECT rel_path, coalesce(hash, ''), client_id FROM document
+             WHERE id = ?1 AND deleted_at IS NULL",
             [doc_id],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
@@ -523,7 +536,11 @@ pub fn destroy_pulled(
     if held(conn, root, doc_id, client.as_deref(), &rel, &hash) {
         return Ok(false);
     }
-    let mut hashes = vec![hash.clone()];
+    // No fingerprint (PA-60): only its versions' stored contents are looked for.
+    let mut hashes: Vec<String> = Some(hash.clone())
+        .filter(|h| !h.is_empty())
+        .into_iter()
+        .collect();
     {
         let mut st = conn
             .prepare("SELECT DISTINCT hash FROM version WHERE doc_id = ?1")
@@ -606,8 +623,8 @@ pub fn destroy_due(
     let (due, held_now, changed_now): (Vec<Victim>, usize, Vec<String>) = {
         let mut st = conn
             .prepare(
-                "SELECT p.doc_id, d.rel_path, d.hash, d.client_id, c.name, t.name, r.name,
-                        d.tax_year, p.eligible_on, p.decided_by, p.decided_at
+                "SELECT p.doc_id, d.rel_path, coalesce(d.hash, ''), d.client_id, c.name, t.name,
+                        r.name, d.tax_year, p.eligible_on, p.decided_by, p.decided_at
                  FROM disposition p
                  JOIN document d ON d.id = p.doc_id
                  LEFT JOIN client c ON c.id = d.client_id
@@ -652,6 +669,15 @@ pub fn destroy_due(
                 &v.hash,
             ) {
                 rep_held += 1;
+                continue;
+            }
+            // An approval always fingerprints the document (PA-60): one without is not
+            // destroyed on it.
+            if v.hash.is_empty() {
+                changed.push((
+                    v.doc_id.clone(),
+                    format!("{}: it has no fingerprint; approve it again", v.rel_path),
+                ));
                 continue;
             }
             // The document as it is now: still eligible under its current class and year,
@@ -1150,7 +1176,7 @@ mod tests {
         let r = eligible(&f.conn, &f.root, today).unwrap();
         let (ret, rest): (Vec<Line>, Vec<Line>) =
             r.lines.into_iter().partition(|l| l.doc_id == "ret-2018");
-        approve(&mut f.conn, "dev", &ret, today).unwrap();
+        approve(&mut f.conn, &f.root, "dev", &ret, today).unwrap();
         defer(&mut f.conn, "dev", &rest, today).unwrap();
         assert!(eligible(&f.conn, &f.root, today).unwrap().lines.is_empty());
         let p = pending(&f.conn).unwrap();
@@ -1191,7 +1217,7 @@ mod tests {
         let mut f = fx();
         let today = d(2026, 11, 3);
         let r = eligible(&f.conn, &f.root, today).unwrap();
-        approve(&mut f.conn, "dev", &r.lines, today).unwrap();
+        approve(&mut f.conn, &f.root, "dev", &r.lines, today).unwrap();
         // The 2019 W-2 is reclassified (an EIN letter: kept permanently).
         f.conn
             .execute(
@@ -1278,7 +1304,7 @@ mod tests {
             .into_iter()
             .filter(|l| l.doc_id == "ret-2018" || l.doc_id == "w2-2019")
             .collect();
-        approve(&mut f.conn, "dev", &lines, today).unwrap();
+        approve(&mut f.conn, &f.root, "dev", &lines, today).unwrap();
         // A hold placed on the W-2 after approval keeps it.
         crate::holds::place(
             &mut f.conn,

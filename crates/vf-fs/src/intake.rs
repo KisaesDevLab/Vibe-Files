@@ -562,7 +562,7 @@ fn record(
             None => filer_intake::commit::sha256_file(&path)
                 .map_err(|e| format!("cannot hash {}: {e}", path.display()))?,
         };
-        let existing: Option<(String, String, i64)> = conn
+        let existing: Option<(String, Option<String>, i64)> = conn
             .query_row(
                 "SELECT id, hash, size FROM document WHERE rel_path = ?1 AND deleted_at IS NULL",
                 [&f.rel],
@@ -572,22 +572,26 @@ fn record(
         match existing {
             // Already in the catalog with this content (picked up from the folder before the
             // batch was recorded): nothing to change.
-            Some((_, ref old_hash, _)) if *old_hash == hash => {}
+            Some((_, ref old_hash, _)) if old_hash.as_deref() == Some(hash.as_str()) => {}
             // Overwrite: the cataloged document now has new content; the old content is a
             // version (Filer kept the bytes in `_Vibe/overwritten/<batch>/`, Q-17).
             Some((id, old_hash, old_size)) => {
-                tx = tx
-                    .catalog(Stmt::new(
+                // The old content's version row needs its fingerprint: a document overwritten
+                // before it was ever read (PA-60) has none, and no version row from here.
+                if let Some(old) = &old_hash {
+                    tx = tx.catalog(Stmt::new(
                         "INSERT OR IGNORE INTO version (doc_id, hash, size, created, created_by, device_id, reason)
                          VALUES (?1, ?2, ?3, ?4, 'intake', ?5, 'overwritten by intake')",
                         vec![
                             id.clone().into(),
-                            old_hash.clone().into(),
+                            old.clone().into(),
                             old_size.into(),
                             now.clone().into(),
                             device_id.into(),
                         ],
-                    ))
+                    ));
+                }
+                tx = tx
                     .catalog(Stmt::new(
                         "UPDATE document SET hash = ?2, size = ?3, device_id = ?4, updated_at = ?5, rev = rev + 1
                          WHERE id = ?1",

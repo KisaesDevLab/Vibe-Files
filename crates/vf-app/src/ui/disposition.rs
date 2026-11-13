@@ -280,7 +280,7 @@ pub fn show(ui: &mut egui::Ui, p: &mut DispositionPage, env: &mut Env, catalog: 
                     p.confirm_approve = true;
                 }
                 if go {
-                    match disposition::approve(env.conn, env.device_id, &chosen, today) {
+                    match disposition::approve(env.conn, env.root, env.device_id, &chosen, today) {
                         Ok(n) => {
                             p.notice = Some(format!(
                                 "Approved {n}; they are destroyed after {} days.",

@@ -85,7 +85,7 @@ pub fn check(
     root: &Path,
     doc_id: &str,
 ) -> Result<Result<(String, String, i64), Refused>, String> {
-    let (rel, hash, size): (String, String, i64) = conn
+    let (rel, hash, size): (String, Option<String>, i64) = conn
         .query_row(
             "SELECT rel_path, hash, size FROM document WHERE id = ?1 AND deleted_at IS NULL",
             [doc_id],
@@ -104,6 +104,8 @@ pub fn check(
         return Ok(Err(Refused::Locked));
     }
     let on_disk = filer_intake::commit::sha256_file(&root.join(&rel)).map_err(|e| e.to_string())?;
+    // Not fingerprinted yet (PA-60): what the file holds now is the document's content.
+    let hash = hash.unwrap_or_else(|| on_disk.clone());
     if on_disk != hash {
         return Ok(Err(Refused::Changed));
     }

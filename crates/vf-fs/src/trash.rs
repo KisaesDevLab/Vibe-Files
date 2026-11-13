@@ -326,7 +326,7 @@ pub fn held(conn: &Connection, doc_id: &str) -> bool {
 fn held_in_cabinet(conn: &Connection, root: &Path, t: &Trashed) -> bool {
     let (client, hash): (Option<String>, String) = conn
         .query_row(
-            "SELECT client_id, hash FROM document WHERE id = ?1",
+            "SELECT client_id, coalesce(hash, '') FROM document WHERE id = ?1",
             [&t.doc_id],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
@@ -568,7 +568,8 @@ pub fn restore(
                     i.doc_type_name.clone().unwrap_or_default().into(),
                     i.tax_year.map(i64::from).into(),
                     t.rel_path.clone().into(),
-                    i.hash.clone().into(),
+                    // Trashed before it was fingerprinted (PA-60): none here either.
+                    Some(i.hash.clone()).filter(|h| !h.is_empty()).into(),
                     i.size.into(),
                     crate::rebuild::mime(&t.rel_path).into(),
                     i.status.clone().into(),
