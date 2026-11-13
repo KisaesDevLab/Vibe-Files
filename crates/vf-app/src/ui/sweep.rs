@@ -61,6 +61,10 @@ pub struct SweepState {
     pub error: Option<String>,
     /// The catalog changed: Browse re-reads.
     pub changed: bool,
+    /// "Measure the cabinet" running (PA-60): lists the cabinet and reads a sample of files.
+    measure: Option<crate::ui::job::Job<Result<String, String>>>,
+    /// Its last result, as shown and copied.
+    pub measured: Option<String>,
 }
 
 impl SweepState {
@@ -206,6 +210,50 @@ fn first_inbox(root: &Path) -> Option<PathBuf> {
     s.inboxes.first().cloned()
 }
 
+/// Measure the cabinet (PA-60, owner 2026-11-13: no way to run the command in a Citrix
+/// session): how long this PC takes to list every file, and how long reading them all would
+/// take, from a sample. Reads only; the result can be copied.
+fn measure_section(ui: &mut egui::Ui, s: &mut SweepState, env: &mut Env) {
+    if let Some(r) = crate::ui::job::take(&mut s.measure) {
+        match r.and_then(|r| r) {
+            Ok(text) => {
+                tracing::info!(result = %text.replace(char::from(10), " | "), "cabinet measured");
+                s.measured = Some(text);
+            }
+            Err(e) => s.measured = Some(format!("Not measured: {e}")),
+        }
+    }
+    ui.horizontal(|ui| {
+        ui.label(RichText::new("Measure the cabinet").strong());
+        ui.label(widgets::caption(
+            "How long this PC takes to list every file, and to read them, from a sample of 300.              It reads only and changes nothing.",
+        ));
+    });
+    ui.horizontal(|ui| {
+        if let Some(j) = &s.measure {
+            j.show(ui);
+        } else if ui.button("Measure now").clicked() {
+            let root = env.root.to_path_buf();
+            match crate::ui::job::Job::start(
+                ui.ctx(),
+                "Listing the cabinet and reading a sample of files…",
+                move || vf_fs::measure::measure(&root, 300).map(|m| m.to_string()),
+            ) {
+                Ok(j) => s.measure = Some(j),
+                Err(e) => s.measured = Some(format!("Not measured: {e}")),
+            }
+        }
+        if let Some(text) = &s.measured
+            && ui.button("Copy the result").clicked()
+        {
+            ui.ctx().copy_text(text.clone());
+        }
+    });
+    if let Some(text) = &s.measured {
+        ui.label(RichText::new(text.trim_end()).monospace().small());
+    }
+}
+
 pub fn show(ui: &mut egui::Ui, s: &mut SweepState, env: &mut Env, catalog: &Path) {
     poll_act(s);
     let idle = s.act.is_none() && !s.running();
@@ -244,6 +292,8 @@ pub fn show(ui: &mut egui::Ui, s: &mut SweepState, env: &mut Env, catalog: &Path
     if let Some(e) = &s.error {
         ui.label(RichText::new(e).color(crate::ui::theme::error()));
     }
+    ui.separator();
+    measure_section(ui, s, env);
     ui.separator();
     let Some(d) = s.drift.clone() else {
         return;
