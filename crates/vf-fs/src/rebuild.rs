@@ -849,8 +849,17 @@ fn rebuild_scoped(
     for c in [&PROGRESS.folders, &PROGRESS.found, &PROGRESS.read] {
         c.store(0, Ordering::Relaxed);
     }
+    // How long each stage takes, for the log (PA-60: nothing recorded where the time went).
+    let started = std::time::Instant::now();
+    let mut stage = started;
+    let mut lap = move || {
+        let ms = stage.elapsed().as_millis() as u64;
+        stage = std::time::Instant::now();
+        ms
+    };
     let (bound, mut folders) = scan_folders(root, &mut rep)?;
     folders.retain(|(f, _)| in_scope(&rel(root, f)));
+    let scan_ms = lap();
     // What the catalog knows: a file of the same size and time is not read again (PA-34).
     let mut known = known_files_in(conn, only)?;
     // Who files the documents found: a folder import, or a catalog made from nothing (a new
@@ -903,10 +912,13 @@ fn rebuild_scoped(
         todo.extend(paths.into_iter().map(|p| (p, client_id.clone())));
     }
     PROGRESS.found.store(todo.len(), Ordering::Relaxed);
+    let (n_folders, n_files) = (folders.len(), todo.len());
+    let list_ms = lap();
     // Size, time and attributes in one call per file (nothing opened, PA-39), several at once.
     let stats3: Vec<Option<(u64, i64, u32)>> = par_map(&todo, |(p, _)| crate::cloud::stat(p));
     let attrs: Vec<u32> = stats3.iter().map(|s| s.map_or(0, |s| s.2)).collect();
     let stats: Vec<Option<(u64, i64)>> = stats3.iter().map(|s| s.map(|(a, b, _)| (a, b))).collect();
+    let stat_ms = lap();
     // Every path found, to tell a file gone from one only left unread (PA-39).
     let listed: HashSet<String> = todo.iter().map(|(p, _)| rel(root, p)).collect();
     let mut reuse: Vec<Option<String>> = Vec::with_capacity(todo.len());
@@ -930,6 +942,7 @@ fn rebuild_scoped(
         reuse.push(if left { Some(String::new()) } else { same });
     }
     let mut read = read_all(&to_read).into_iter();
+    let (n_read, read_ms) = (to_read.len(), lap());
     let mut found: Vec<Found> = Vec::new();
     // Online-only files not in the catalog: their fingerprint may be in docmeta (below).
     let mut waiting: Vec<Waiting> = Vec::new();
@@ -1519,6 +1532,7 @@ fn rebuild_scoped(
     // Committed in parts: one Transaction for ~900K documents held the write lock for minutes
     // (PA-34); a rebuild is idempotent, so a part cut short is finished by the next one.
     let actor = Actor::device(device_id);
+    let build_ms = lap();
     let mut part_no = 0;
     while stmts.len() > CHUNK {
         let rest = stmts.split_off(CHUNK);
@@ -1584,6 +1598,24 @@ fn rebuild_scoped(
     }
     let after_versions: i64 = conn.query_row("SELECT count(*) FROM version", [], |r| r.get(0))?;
     rep.versions_new = (after_versions - before_versions).max(0) as usize;
+    let commit_ms = lap();
+    // A whole-cabinet index always; a folder re-read only when it was slow (they run often).
+    if only.is_none() || started.elapsed().as_secs() >= 2 {
+        tracing::info!(
+            scope = if only.is_none() { "cabinet" } else { "folders" },
+            folders = n_folders,
+            files = n_files,
+            files_read = n_read,
+            docs_new = rep.docs_new,
+            scan_ms,
+            list_ms,
+            stat_ms,
+            read_ms,
+            build_ms,
+            commit_ms,
+            "index timing"
+        );
+    }
     Ok(rep)
 }
 

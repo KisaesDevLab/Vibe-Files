@@ -19,6 +19,15 @@ pub enum Command {
         /// Cabinet root folder.
         cabinet: PathBuf,
     },
+    /// How long this PC takes to list the cabinet's files, and how long reading them all would
+    /// take (from a sample). Reads only; changes nothing.
+    Measure {
+        /// Cabinet root folder.
+        cabinet: PathBuf,
+        /// Files to read for the estimate.
+        #[arg(long, default_value_t = 300)]
+        sample: usize,
+    },
     /// OCR tools.
     Ocr {
         #[command(subcommand)]
@@ -120,6 +129,7 @@ impl Command {
                     ..
                 }
                 | Command::ExportClient { .. }
+                | Command::Measure { .. }
                 | Command::Soak { .. }
         )
     }
@@ -172,6 +182,11 @@ pub fn run(cmd: &Command, data: &Path, out: &mut dyn Write) -> Result<i32> {
             same_cabinet(&conn, cabinet)?;
             let rep = vf_fs::rebuild::rebuild(&mut conn, cabinet, &device_id(data)?)?;
             writeln!(out, "{rep}")?;
+            Ok(0)
+        }
+        Command::Measure { cabinet, sample } => {
+            let m = vf_fs::measure::measure(cabinet, *sample).map_err(anyhow::Error::msg)?;
+            write!(out, "{m}")?;
             Ok(0)
         }
         Command::Ocr {

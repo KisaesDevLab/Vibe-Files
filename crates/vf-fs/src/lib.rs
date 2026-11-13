@@ -18,6 +18,7 @@ pub mod hints;
 pub mod holds;
 pub mod import;
 pub mod intake;
+pub mod measure;
 pub mod merge;
 pub mod moveto;
 pub mod newclient;

@@ -5994,6 +5994,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "time",
+ "tracing",
  "uuid",
  "vf-core",
  "vf-extract",
