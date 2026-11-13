@@ -145,6 +145,7 @@ pub const NOT_ON_UNDO_STACK: &[&str] = &[
     "seed",
     "duplicate_kept",
     "clients_edit",
+    crate::folders::SET_CLIENT_ID,
     "clients_import",
     "intake_clients",
     "external_modify",

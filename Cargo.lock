@@ -5984,6 +5984,7 @@ dependencies = [
 name = "vf-fs"
 version = "0.1.30"
 dependencies = [
+ "csv",
  "filer-core",
  "filer-intake",
  "lopdf",

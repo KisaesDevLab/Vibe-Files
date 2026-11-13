@@ -5,6 +5,9 @@
 //!   puts the tax software's name back, Q-60) and the client folder is renamed to the template's
 //!   name for it (`{Client} ({ID})` by default). Files inside move with the folder; catalog paths
 //!   follow. The sentinel keeps the name it was created with (SentinelV1 records it as such).
+//! - [`set_client_id`]: a client's ID (owner 2026-11-12: clients made from folder names get a
+//!   made-up ID, entered later). The client list, relationships, catalog and sentinel follow,
+//!   and the folder takes the template's name for it.
 //! - [`new_folder`], [`rename_folder`], [`delete_folder`]: folders under a client folder.
 //!   Delete takes only an empty folder (folders inside it may be empty folders too).
 
@@ -20,6 +23,9 @@ use crate::clients;
 use crate::docmeta;
 
 pub const RENAME_CLIENT: &str = "client_rename";
+/// Set ID (owner 2026-11-12): not on the undo stack (the client list changes with it); set
+/// the ID again to change it back.
+pub const SET_CLIENT_ID: &str = "client_set_id";
 pub const NEW_FOLDER: &str = "folder_create";
 pub const RENAME_FOLDER: &str = "folder_rename";
 pub const DELETE_FOLDER: &str = "folder_delete";
@@ -482,6 +488,275 @@ pub fn rename_client(
     Ok(())
 }
 
+/// What setting a client's ID does, for the dialog's preview.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClientIdChange {
+    /// Client uuid.
+    pub client_id: String,
+    pub old_id: String,
+    pub new_id: String,
+    pub name: String,
+    /// The client folder: (now, after). `None`: no folder, or its name stays.
+    pub folder: Option<(String, String)>,
+    /// The client's folder now, when it has one (its sentinel is rewritten).
+    pub folder_now: Option<String>,
+}
+
+/// Plans giving client `client_id` (uuid) the ID `id`.
+pub fn plan_client_id(
+    conn: &Connection,
+    root: &Path,
+    client_id: &str,
+    id: &str,
+) -> Result<ClientIdChange, String> {
+    let new_id = id.trim().to_owned();
+    if new_id.is_empty() {
+        return Err("Type the client's ID.".into());
+    }
+    if clients::is_tin_value(&new_id) {
+        return Err(
+            "That ID looks like an SSN or EIN. Use the tax software's client ID: the ID goes into folder names, the audit trail and the bucket."
+                .into(),
+        );
+    }
+    if new_id.contains(['/', '\\', ':', '*', '?', '"', '<', '>', '|']) {
+        return Err("An ID cannot hold / \\ : * ? \" < > |.".into());
+    }
+    let (old_id, name, folder_rel): (String, String, Option<String>) = conn
+        .query_row(
+            "SELECT ext_id, name, folder_rel FROM client WHERE id = ?1 AND deleted_at IS NULL",
+            [client_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .map_err(|_| "That client is not in the catalog.".to_string())?;
+    if new_id == old_id {
+        return Err("That is the client's ID already.".into());
+    }
+    clients::intake_csv_reachable(root)?;
+    let master = clients::load(root)?;
+    if let Some(other) = master
+        .clients()
+        .iter()
+        .find(|c| c.id.trim().eq_ignore_ascii_case(&new_id) && c.uuid.to_string() != client_id)
+    {
+        return Err(format!("{new_id} is {}'s ID already.", other.name));
+    }
+    let taken: Option<String> = conn
+        .query_row(
+            "SELECT name FROM client WHERE ext_id = ?1 COLLATE NOCASE AND id <> ?2
+               AND deleted_at IS NULL",
+            [&new_id, client_id],
+            |r| r.get(0),
+        )
+        .ok();
+    if let Some(n) = taken {
+        return Err(format!("{new_id} is {n}'s ID already."));
+    }
+    let folder_now = folder_rel.filter(|f| !f.is_empty());
+    let mut folder = None;
+    if let Some(cur) = &folder_now {
+        let (tree, _, err) = template::load_or_seed(&clients::master_dir(root));
+        if let Some(e) = err {
+            return Err(e);
+        }
+        let listed = master
+            .clients()
+            .iter()
+            .find(|c| c.uuid.to_string() == client_id)
+            .cloned();
+        let c = filer_core::clients::Client {
+            id: new_id.clone(),
+            uuid: uuid::Uuid::parse_str(client_id).map_err(|e| e.to_string())?,
+            name: listed.as_ref().map_or(name.clone(), |c| c.name.clone()),
+            extra: listed.map(|c| c.extra).unwrap_or_default(),
+        };
+        let want = template::client_folder_name(&tree, &c).map_err(|e| e.to_string())?;
+        let (parent, cur_name) = match cur.rsplit_once('/') {
+            Some((p, n)) => (format!("{p}/"), n),
+            None => (String::new(), cur.as_str()),
+        };
+        if want != cur_name {
+            let new = format!("{parent}{want}");
+            if want.eq_ignore_ascii_case(cur_name) {
+                return Err(format!(
+                    "The folder would be {want}: only the capital letters differ, which Windows sees as the same name."
+                ));
+            }
+            if root.join(&new).exists() {
+                return Err(format!("A folder named {want} is already in the cabinet."));
+            }
+            folder = Some((cur.clone(), new));
+        }
+    }
+    Ok(ClientIdChange {
+        client_id: client_id.to_owned(),
+        old_id,
+        new_id,
+        name,
+        folder,
+        folder_now,
+    })
+}
+
+/// Sets the client's ID: the client list, relationships and shares first (put back if what
+/// follows fails), then its folder renamed and its sentinel rewritten in one Transaction (the
+/// old sentinel kept beside it as `client.json.before-<secs>`), then the Intake CSV (the row's
+/// ID changed, or the client added, so a re-import keeps it) and the catalog's client rows.
+/// `Some`: a note for the person (the CSV could not be updated).
+pub fn set_client_id(
+    conn: &mut Connection,
+    root: &Path,
+    plan: &ClientIdChange,
+    device_id: &str,
+) -> Result<Option<String>, String> {
+    clients::ensure_listed(conn, root)?;
+    // The client list, relationships and shares by the new ID.
+    let mut master = clients::load(root)?;
+    let before = master.clone();
+    let mut list = master
+        .list
+        .take()
+        .unwrap_or_else(crate::newclient::empty_list);
+    let Some(c) = list
+        .clients
+        .iter_mut()
+        .find(|c| c.uuid.to_string() == plan.client_id)
+    else {
+        return Err(format!("{} is not on the client list.", plan.old_id));
+    };
+    c.id = plan.new_id.clone();
+    let (uuid, name) = (c.uuid, c.name.clone());
+    list.uuids
+        .retain(|k, v| *v != uuid && !k.eq_ignore_ascii_case(&plan.old_id));
+    list.uuids.insert(plan.new_id.clone(), uuid);
+    clients::save_list(root, &list)?;
+    let is_old = |x: &str| x.eq_ignore_ascii_case(&plan.old_id);
+    let swap = |x: &mut String| {
+        if x.eq_ignore_ascii_case(&plan.old_id) {
+            *x = plan.new_id.clone();
+        }
+    };
+    let mut rels = master.rels.clone();
+    if rels
+        .records
+        .iter()
+        .any(|r| is_old(&r.parent_id) || is_old(&r.child_id))
+    {
+        for r in rels.records.iter_mut() {
+            swap(&mut r.parent_id);
+            swap(&mut r.child_id);
+        }
+        clients::save_rels(root, &rels)?;
+    }
+    if master
+        .meta
+        .shares
+        .iter()
+        .any(|r| is_old(&r.parent_id) || is_old(&r.child_id))
+    {
+        for r in master.meta.shares.iter_mut() {
+            swap(&mut r.parent_id);
+            swap(&mut r.child_id);
+        }
+        clients::save_meta(root, &master.meta)?;
+    }
+    // Put back as it was when the folder and sentinel cannot follow.
+    let restore = |e: String| -> String {
+        if let Some(l) = &before.list {
+            let _ = clients::save_list(root, l);
+        }
+        let _ = clients::save_rels(root, &before.rels);
+        let _ = clients::save_meta(root, &before.meta);
+        e
+    };
+    let now = vf_core::now_rfc3339();
+    let set_ext = |e: &str| {
+        Stmt::new(
+            "UPDATE client SET ext_id = ?2, device_id = ?3, updated_at = ?4, rev = rev + 1
+             WHERE id = ?1",
+            vec![
+                plan.client_id.clone().into(),
+                e.into(),
+                device_id.into(),
+                now.clone().into(),
+            ],
+        )
+    };
+    let mut tx = Transaction::new(SET_CLIENT_ID)
+        .catalog(set_ext(&plan.new_id))
+        .catalog_undo(set_ext(&plan.old_id));
+    let mut docs = 0;
+    if let Some((old, new)) = &plan.folder {
+        let set_folder = |f: &str| {
+            Stmt::new(
+                "UPDATE client SET folder_rel = ?2 WHERE id = ?1",
+                vec![plan.client_id.clone().into(), f.into()],
+            )
+        };
+        tx = tx.catalog(set_folder(new)).catalog_undo(set_folder(old));
+        let (t, n) = move_folder(conn, root, old, new, true, device_id, tx).map_err(restore)?;
+        tx = t;
+        docs = n;
+    }
+    if let Some(now_rel) = &plan.folder_now {
+        let after = plan.folder.as_ref().map_or(now_rel, |(_, n)| n);
+        let dir = root.join(after);
+        // Read where it is now (before the rename).
+        if let Some(s) =
+            filer_intake::sentinel::read_sentinel(&root.join(now_rel)).map_err(restore)?
+        {
+            let sentinel = filer_intake::sentinel::sentinel_path(&dir);
+            let secs = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_secs());
+            // A free name where the sentinel is now (an ID set twice in one second).
+            let here = filer_intake::sentinel::sentinel_path(&root.join(now_rel));
+            let name = (0..)
+                .map(|n| match n {
+                    0 => format!("client.json.before-{secs}"),
+                    n => format!("client.json.before-{secs}-{n}"),
+                })
+                .find(|n| !here.with_file_name(n).exists())
+                .expect("a free name");
+            tx = tx
+                .file(FileOp::Move {
+                    src: sentinel.clone(),
+                    dst: sentinel.with_file_name(name),
+                })
+                .file(FileOp::WriteSentinel {
+                    root: root.to_owned(),
+                    folder: dir,
+                    client_id: s.client_id.to_string(),
+                    ext_id: plan.new_id.clone(),
+                    name: s.display_name_at_creation.clone(),
+                    firm_id: s.firm_id.to_string(),
+                });
+        }
+    }
+    tx = tx.audit(AuditEntry::new(
+        SET_CLIENT_ID,
+        None,
+        json!({ "client": plan.client_id, "from": plan.old_id, "to": plan.new_id,
+                "folder": plan.folder, "documents": docs }),
+    ));
+    crate::fileops::commit(conn, root, tx, device_id).map_err(restore)?;
+
+    // On the CSV Intake re-imports, so it is kept (as a client made with + New client).
+    let partner = master.meta.partners.get(&plan.client_id).cloned();
+    let note =
+        clients::change_id_in_csv(root, &plan.old_id, &plan.new_id, &name, partner.as_deref())
+            .err()
+            .map(|e| {
+                format!(
+                    "The client CSV was not updated ({e}): add {} there.",
+                    plan.new_id
+                )
+            });
+    crate::rebuild::sync_clients(conn, root, device_id, "clients_edit")
+        .map_err(|e| e.to_string())?;
+    Ok(note)
+}
+
 #[cfg(test)]
 mod tests {
     use vf_core::db::Storage;
@@ -630,6 +905,191 @@ mod tests {
         assert!(plan_client_rename(&c.conn, &c.root, &id, "Smith, Pat").is_err());
         std::fs::create_dir(c.root.join("Taken (SMIT1001)")).unwrap();
         assert!(plan_client_rename(&c.conn, &c.root, &id, "Taken").is_err());
+    }
+
+    /// Set ID (owner 2026-11-12): a client made up from a folder name gets its real ID; the
+    /// folder takes the template name, the sentinel, list, relationships and catalog follow.
+    #[test]
+    fn client_id_is_set_everywhere() {
+        let (mut c, id) = cab();
+        let other = newclient::plan(
+            &c.conn,
+            &c.root,
+            &NewClient {
+                ext_id: "SMCO2002".into(),
+                name: "Smith Co".into(),
+                entity_type: None,
+                partner: String::new(),
+            },
+        )
+        .unwrap();
+        newclient::create(&mut c.conn, &c.root, &other, "dev").unwrap();
+        clients::add_relationship(
+            &c.root,
+            filer_core::relationships::Relationship {
+                parent_id: "SMCO2002".into(),
+                child_id: "SMIT1001".into(),
+                role: "Shareholder".into(),
+                note: String::new(),
+            },
+            Some(50.0),
+        )
+        .unwrap();
+
+        // Intake's client CSV lists the client (CRLF lines, a quoted name, a note column).
+        let csv = c.root.parent().unwrap().join("clients.csv");
+        let csv_text = "ID,Name,Note\r\nSMIT1001,\"Smith, Pat\",\"keep \"\"this\"\"\"\r\nSMCO2002,Smith Co,\r\n";
+        std::fs::write(&csv, csv_text).unwrap();
+        let map = filer_core::config::ColumnMap {
+            partner: None,
+            id: Some("ID".into()),
+            name: Some("Name".into()),
+            extras: vec![],
+        };
+        clients::use_csv_in_intake(&c.root, &csv, &map).unwrap();
+
+        assert!(plan_client_id(&c.conn, &c.root, &id, " ").is_err());
+        assert!(plan_client_id(&c.conn, &c.root, &id, "SMIT1001").is_err());
+        assert!(
+            plan_client_id(&c.conn, &c.root, &id, "smco2002").is_err(),
+            "taken"
+        );
+        assert!(plan_client_id(&c.conn, &c.root, &id, "A/B").is_err());
+
+        let p = plan_client_id(&c.conn, &c.root, &id, "4417").unwrap();
+        assert_eq!(
+            p.folder,
+            Some(("Smith, Pat (SMIT1001)".into(), "Smith, Pat (4417)".into()))
+        );
+        assert_eq!(
+            set_client_id(&mut c.conn, &c.root, &p, "dev").unwrap(),
+            None
+        );
+        let dir = c.root.join("Smith, Pat (4417)");
+        assert!(dir.join("Correspondence/letter.pdf").is_file());
+        assert_eq!(doc_path(&c), "Smith, Pat (4417)/Correspondence/letter.pdf");
+        let s = filer_intake::sentinel::read_sentinel(&dir)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (s.tax_software_id.as_str(), s.client_id.to_string()),
+            ("4417", id.clone())
+        );
+        let kept = std::fs::read_dir(dir.join("_Vibe"))
+            .unwrap()
+            .flatten()
+            .any(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .starts_with("client.json.before-")
+            });
+        assert!(kept, "the old sentinel kept");
+        let (ext, folder): (String, String) = c
+            .conn
+            .query_row(
+                "SELECT ext_id, folder_rel FROM client WHERE id = ?1",
+                [&id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            (ext.as_str(), folder.as_str()),
+            ("4417", "Smith, Pat (4417)")
+        );
+        let m = clients::load(&c.root).unwrap();
+        let listed = m.list.as_ref().unwrap();
+        assert_eq!(
+            listed.match_by_id("4417").map(|c| c.uuid.to_string()),
+            Some(id.clone())
+        );
+        assert!(listed.match_by_id("SMIT1001").is_none());
+        assert_eq!(m.rels.records[0].child_id, "4417");
+        assert_eq!(m.meta.shares[0].child_id, "4417");
+        assert_eq!(
+            std::fs::read_to_string(&csv).unwrap(),
+            csv_text.replace("SMIT1001,", "4417,"),
+            "the row's ID changed in place, the rest as it was"
+        );
+        // Not on the undo stack: set again to change it back.
+        let stack = crate::fileops::undo_stack(&c.conn, "dev").unwrap();
+        assert!(!stack.iter().any(|e| e.label == SET_CLIENT_ID));
+        let back = plan_client_id(&c.conn, &c.root, &id, "SMIT1001").unwrap();
+        set_client_id(&mut c.conn, &c.root, &back, "dev").unwrap();
+        assert!(
+            c.root
+                .join("Smith, Pat (SMIT1001)/Correspondence/letter.pdf")
+                .is_file()
+        );
+        assert_eq!(std::fs::read_to_string(&csv).unwrap(), csv_text);
+
+        // The CSV out of reach: refused before anything changes.
+        std::fs::remove_file(&csv).unwrap();
+        let e = plan_client_id(&c.conn, &c.root, &id, "4417").unwrap_err();
+        assert!(e.contains("cannot be reached"), "{e}");
+    }
+
+    /// An ID change killed after the new sentinel is written (no folder rename: it replaces
+    /// the one set aside) is put back by recovery: the old sentinel, nothing left over (QA
+    /// 2026-11-12).
+    #[test]
+    fn an_id_change_cut_short_is_put_back() {
+        use vf_core::tx::{AppliedOp, FileOps};
+        struct Dies {
+            inner: crate::fileops::FilerFileOps,
+            n: usize,
+        }
+        impl FileOps for Dies {
+            fn apply(&mut self, op: &FileOp) -> Result<AppliedOp, String> {
+                self.n += 1;
+                assert!(self.n < 3, "killed");
+                self.inner.apply(op)
+            }
+            fn reverse(&mut self, a: &AppliedOp) -> Result<(), String> {
+                self.inner.reverse(a)
+            }
+        }
+        let (mut c, _) = cab();
+        let folder = c.root.join("Smith, Pat (SMIT1001)");
+        let sentinel = filer_intake::sentinel::sentinel_path(&folder);
+        let before = std::fs::read(&sentinel).unwrap();
+        let s = filer_intake::sentinel::read_sentinel(&folder)
+            .unwrap()
+            .unwrap();
+        let aside = sentinel.with_file_name("client.json.before-1");
+        let tx = Transaction::new(SET_CLIENT_ID)
+            .file(FileOp::Move {
+                src: sentinel.clone(),
+                dst: aside.clone(),
+            })
+            .file(FileOp::WriteSentinel {
+                root: c.root.clone(),
+                folder: folder.clone(),
+                client_id: s.client_id.to_string(),
+                ext_id: "4417".into(),
+                name: s.display_name_at_creation.clone(),
+                firm_id: s.firm_id.to_string(),
+            })
+            .file(FileOp::Mkdir {
+                path: c.root.join("never"),
+            })
+            .audit(AuditEntry::new(SET_CLIENT_ID, None, json!({})));
+        let mut fs = Dies {
+            inner: crate::fileops::FilerFileOps::new(&[&c.root]).unwrap(),
+            n: 0,
+        };
+        let conn = &mut c.conn;
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            tx.commit(conn, &mut fs, &vf_core::tx::Actor::device("dev"))
+        }));
+        assert!(r.is_err(), "killed part way");
+        let rec = crate::fileops::recover(&c.conn, &c.root).unwrap();
+        assert!(rec.problems.is_empty(), "{:?}", rec.problems);
+        assert_eq!(
+            std::fs::read(&sentinel).unwrap(),
+            before,
+            "the old sentinel back"
+        );
+        assert!(!aside.exists());
     }
 
     #[test]

@@ -38,7 +38,7 @@ To change a folder's client, pick another in its **Client** column (type to sear
 
 ## Folders that match no client
 
-**Create a client for each unmatched folder** gives each such folder a new client: the folder name becomes the client name, and an ID is made from it (`1 Farm Poultry LLC` gets `1FAR1001`). Change an ID in the box beside the client on its row, then press Enter. The clients are added to the client list when you import. A later client list with the same IDs keeps them. See also [weak matches and two folders for one client](help:folder-import-matches).
+**Create a client for each unmatched folder** gives each such folder a new client: the folder name becomes the client name, and a stand-in ID is made from it (`1 Farm Poultry LLC` gets `1FAR1001`); the folder keeps its name. Type the real ID on its row, or later with **Set ID…** in Browse. The clients are added to the client list when you import. A later client list with the same IDs keeps them. See also [weak matches and two folders for one client](help:folder-import-matches).
 
 ## Files with no doc type
 

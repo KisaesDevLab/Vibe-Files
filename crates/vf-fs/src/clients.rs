@@ -427,6 +427,138 @@ pub fn append_to_csv(
     Ok(Some(csv))
 }
 
+/// The client CSV Intake › Setup names (re-imported by Intake), with its column map; `None`
+/// when there is none (a list made in Vibe Files only, or after "Stop using the CSV").
+fn intake_csv(root: &Path) -> Option<(PathBuf, ColumnMap)> {
+    let (settings, _) = filer_core::config::Settings::load_or_default(&master_dir(root));
+    let csv = settings.csv_path.filter(|p| !p.as_os_str().is_empty())?;
+    Some((csv, settings.column_map))
+}
+
+/// Refused when the client CSV Intake uses is set but cannot be reached from this PC (an ID
+/// changed without it would come back at the next re-import).
+pub fn intake_csv_reachable(root: &Path) -> Result<(), String> {
+    match intake_csv(root) {
+        Some((csv, _)) if !csv.is_file() => Err(format!(
+            "The client CSV Intake uses ({}) cannot be reached from this PC: it must take the new ID too.",
+            csv.display()
+        )),
+        _ => Ok(()),
+    }
+}
+
+/// Gives client `old` the ID `new` in the client CSV Intake uses (owner 2026-11-12: Set ID),
+/// so a re-import keeps it: that row's ID changed in place (the rest of the file byte for
+/// byte), or a row added when the CSV does not list it. `Ok(None)`: no CSV. Refused when the
+/// CSV is set but cannot be reached (a re-import would bring the old ID back).
+pub fn change_id_in_csv(
+    root: &Path,
+    old: &str,
+    new: &str,
+    name: &str,
+    partner: Option<&str>,
+) -> Result<Option<PathBuf>, String> {
+    let Some((csv, map)) = intake_csv(root) else {
+        return Ok(None);
+    };
+    if !csv.is_file() {
+        return Err(format!(
+            "the client CSV {} cannot be reached from this PC",
+            csv.display()
+        ));
+    }
+    let Some(id_h) = map.id.as_deref() else {
+        return Err("the client list has no ID column mapped".into());
+    };
+    let raw = std::fs::read(&csv).map_err(|e| format!("{}: {e}", csv.display()))?;
+    let (text, enc) =
+        clients::decode(raw.clone()).map_err(|e| format!("{}: {e}", csv.display()))?;
+    let bom = if enc == clients::Encoding::Utf8Bom {
+        3
+    } else {
+        0
+    };
+    // Records with their byte ranges in `text` (a line break inside quotes stays in its record).
+    let mut records: Vec<(usize, usize)> = vec![];
+    let (mut start, mut quoted) = (0, false);
+    for (i, ch) in text.char_indices() {
+        match ch {
+            '"' => quoted = !quoted,
+            '\n' if !quoted => {
+                records.push((start, i + 1));
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    if start < text.len() {
+        records.push((start, text.len()));
+    }
+    let fields_of = |rec: &str| -> Vec<String> {
+        csv::ReaderBuilder::new()
+            .has_headers(false)
+            .flexible(true)
+            .from_reader(rec.as_bytes())
+            .records()
+            .next()
+            .and_then(Result::ok)
+            .map(|r| r.iter().map(str::to_string).collect())
+            .unwrap_or_default()
+    };
+    let Some(&(h0, h1)) = records.first() else {
+        return Err(format!("{} is empty", csv.display()));
+    };
+    let headers = fields_of(&text[h0..h1]);
+    let col = headers
+        .iter()
+        .position(|h| h.trim() == id_h)
+        .ok_or_else(|| format!("no column {id_h} in {}", csv.display()))?;
+    let hit = records.iter().skip(1).find(|&&(a, b)| {
+        fields_of(&text[a..b])
+            .get(col)
+            .is_some_and(|v| v.trim().eq_ignore_ascii_case(old.trim()))
+    });
+    let Some(&(a, b)) = hit else {
+        return append_to_csv(root, new, name, partner).map(|_| Some(csv));
+    };
+    let rec = &text[a..b];
+    let body = rec.trim_end_matches(['\r', '\n']);
+    let eol = &rec[body.len()..];
+    let mut fields = fields_of(rec);
+    fields[col] = new.trim().to_string();
+    let line = format!(
+        "{}{eol}",
+        fields
+            .iter()
+            .map(|f| csv_field(f))
+            .collect::<Vec<_>>()
+            .join(",")
+    );
+    let encode = |s: &str| -> Result<Vec<u8>, String> {
+        match enc {
+            clients::Encoding::Windows1252 => s
+                .chars()
+                .map(|c| {
+                    to_1252(c).ok_or_else(|| {
+                        format!("\"{c}\" cannot be written in this CSV's Windows-1252 text")
+                    })
+                })
+                .collect(),
+            _ => Ok(s.as_bytes().to_vec()),
+        }
+    };
+    // Byte offsets in the file: UTF-8 as in `text` (after a BOM); Windows-1252 one per char.
+    let at = |i: usize| match enc {
+        clients::Encoding::Windows1252 => text[..i].chars().count(),
+        _ => bom + i,
+    };
+    let mut out = raw[..at(a)].to_vec();
+    out.extend(encode(&line)?);
+    out.extend_from_slice(&raw[at(b)..]);
+    crate::cabinet::write_replace(&csv, &out)?;
+    Ok(Some(csv))
+}
+
 /// [`import_csv`], also keeping the last 4 digits of `tin_column` (a taxpayer ID column) per
 /// client in `clients.vf.json`. The full numbers are read from the CSV and dropped at once;
 /// Filer's client list never gets the column.

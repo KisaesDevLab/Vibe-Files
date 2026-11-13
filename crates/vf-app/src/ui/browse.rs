@@ -5653,6 +5653,25 @@ Petty cash,1234.50
         h.key_press(egui::Key::Enter);
         h.run();
         assert_eq!(h.state().b.snap.clients[0].partner.as_deref(), Some("KW"));
+
+        // Set ID (owner 2026-11-12): the folder takes the new ID (typed after the one shown).
+        click(&mut h, "Set ID…");
+        type_into(&mut h, "Client ID", "-7");
+        h.run();
+        assert!(
+            h.query_by_label_contains("Anderson Farms LLC II (1042-7)")
+                .is_some(),
+            "the new folder name is previewed"
+        );
+        click(&mut h, "Set ID");
+        let moved = root.join("Anderson Farms LLC II (1042-7)");
+        assert!(moved.join("Correspondence/note.txt").is_file());
+        assert!(!renamed.exists());
+        let s = filer_intake::sentinel::read_sentinel(&moved)
+            .unwrap()
+            .unwrap();
+        assert_eq!(s.tax_software_id, "1042-7");
+        assert_eq!(h.state().b.snap.clients[0].ext_id, "1042-7");
     }
 
     #[test]

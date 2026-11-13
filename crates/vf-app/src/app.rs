@@ -1775,6 +1775,23 @@ mod tests {
             );
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
+
+        // Thousands of clients pending (owner 2026-11-12): what goes to B2 and the settings
+        // stay above the list, and the list lays out only the rows in view.
+        {
+            let Screen::Open(o) = &mut h.state_mut().screen else {
+                panic!("open")
+            };
+            o.sync.pending = (0..5000).map(|i| (format!("C{i:05}"), 3)).collect();
+        }
+        h.run();
+        assert!(h.query_by_label("What goes to B2").is_some());
+        assert!(
+            h.query_by_label("Tax years before this one to send (0 = every year)")
+                .is_some()
+        );
+        let pushes = h.query_all_by_label("Push").count();
+        assert!(pushes > 0 && pushes < 60, "{pushes} rows laid out");
     }
 
     /// Closing the window with annotations unsaved asks first: the window stays, the Viewer

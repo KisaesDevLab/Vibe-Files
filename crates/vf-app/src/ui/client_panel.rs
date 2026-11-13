@@ -110,6 +110,22 @@ pub fn show(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env, ci: usize) {
                 },
             ));
         }
+        // A client made from a folder name has a made-up ID (owner 2026-11-12).
+        if ui
+            .small_btn("Set ID…")
+            .on_hover_text(format!(
+                "Change the client's ID ({}); its folder is renamed to match",
+                c.ext_id
+            ))
+            .clicked()
+        {
+            b.folder_dialog = Some(crate::ui::folder_dialogs::FolderDialog::new(
+                crate::ui::folder_dialogs::FolderAsk::SetClientId {
+                    client_id: c.id.clone(),
+                    ext_id: c.ext_id.clone(),
+                },
+            ));
+        }
         // The firm's Vibe Portal (PA-37): who can sign in for this client.
         if let Some(s) = b.portal.settings(env.root).cloned()
             && ui

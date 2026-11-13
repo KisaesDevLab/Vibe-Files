@@ -751,7 +751,9 @@ pub fn new_clients_from_folders(root: &Path, plan: &mut Plan) -> Result<usize, S
             name: r.rel.clone(),
             new: true,
         };
-        r.template_name = template_name_for(root, &c, &r.rel);
+        // The folder keeps its name until the real ID is typed (on the row, or later with
+        // Browse's Set ID…): owner 2026-11-12.
+        r.template_name = None;
         r.client = Some(c);
         r.how = "new client from the folder name".into();
         r.confidence = 1.0;
@@ -889,7 +891,9 @@ fn new_clients_where(
             name: r.rel.clone(),
             new: true,
         };
-        r.template_name = template_name_for(root, &c, &r.rel);
+        // The folder keeps its name until the real ID is typed (on the row, or later with
+        // Browse's Set ID…): owner 2026-11-12.
+        r.template_name = None;
         r.client = Some(c);
         r.how = "new client from the folder name".into();
         r.confidence = 1.0;

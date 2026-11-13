@@ -398,13 +398,24 @@ impl Transaction {
         let ts = crate::now_rfc3339();
         let journaled = !self.files.is_empty();
         if journaled {
+            // A target an earlier op moves away (a sentinel set aside, then written anew: QA
+            // 2026-11-12) is not there when this op runs: recovery may remove what it writes.
+            let mut gone: std::collections::HashSet<PathBuf> = Default::default();
             let ops: Vec<JournalOp> = self
                 .files
                 .iter()
-                .map(|op| JournalOp {
-                    existed: op.target().exists(),
-                    op: op.clone(),
-                    undo: false,
+                .map(|op| {
+                    let t = op.target();
+                    let existed = t.exists() && !gone.contains(&t);
+                    if let FileOp::Move { src, dst } = op {
+                        gone.insert(src.clone());
+                        gone.remove(dst);
+                    }
+                    JournalOp {
+                        existed,
+                        op: op.clone(),
+                        undo: false,
+                    }
                 })
                 .collect();
             conn.execute(

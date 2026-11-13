@@ -22,6 +22,8 @@ A client from the list that has no folder yet shows **No folder yet (from the cl
 
 Press **Rename client…** beside the name in the client panel, or right-click the client in the tree. Type the new name: the dialog shows the client folder's new name (`{Client} ({ID})`) and renames the folder with it. Files inside move with the folder. **Undo** puts the folder's old name back; the client keeps its new name until you rename it again. Importing the client list again puts the tax software's name back, so change the name there too.
 
+**Set ID…** beside it changes the client's ID, for a client made from a folder name with a stand-in ID. The dialog shows the folder's new name (`{Client} ({ID})`). The client list, relationships, the folder's sentinel and the client CSV Intake uses take the new ID. (its row there gets the new ID, or is added). It is not on the undo list: set the ID again to change it back. Change the ID in your tax software too, so its next client list matches.
+
 ## How a folder knows its client
 
 Every client folder holds `_Vibe\client.json`. This small file ties the folder to the client, so the folder can be renamed in Explorer and Vibe Files still knows whose it is. Do not delete or edit it.

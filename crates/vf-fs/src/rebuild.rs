@@ -657,11 +657,18 @@ fn client_stmts(
         ));
         ext_to_id.insert(b.ext_id.clone(), b.id.clone());
     }
+    // Clients bound by a folder, by uuid: a list entry with another ID for one of them (an ID
+    // change cut short, QA 2026-11-12) must not write the row again without its folder.
+    let bound_ids: HashSet<String> = ext_to_id.values().cloned().collect();
     for c in m.clients() {
         if ext_to_id.contains_key(&c.id) {
             continue;
         }
         let id = c.uuid.to_string();
+        if bound_ids.contains(&id) {
+            rep.uuid_mismatches.push(c.id.clone());
+            continue;
+        }
         if catalog_ext.get(&c.id).is_some_and(|other| *other != id) {
             rep.uuid_mismatches.push(c.id.clone());
             continue;

@@ -3,7 +3,7 @@
 //! (`vf_fs::folders`, one Transaction each, on the undo stack).
 
 use egui::{RichText, TextEdit};
-use vf_fs::folders::{self, ClientRename};
+use vf_fs::folders::{self, ClientIdChange, ClientRename};
 
 use crate::ui::browse::Env;
 use crate::ui::theme;
@@ -16,6 +16,12 @@ pub enum FolderAsk {
     RenameClient {
         client_id: String,
         name: String,
+    },
+    /// Client uuid and its current ID (owner 2026-11-12: clients made from folder names get
+    /// their real ID here).
+    SetClientId {
+        client_id: String,
+        ext_id: String,
     },
     NewFolder {
         parent: String,
@@ -33,6 +39,8 @@ pub struct FolderDialog {
     pub name: String,
     /// Rename client: the preview, recomputed when the name changes.
     plan: Option<Result<ClientRename, String>>,
+    /// Set ID: the preview, recomputed when the ID changes.
+    id_plan: Option<Result<ClientIdChange, String>>,
     pub error: Option<String>,
     focused: bool,
 }
@@ -41,6 +49,7 @@ impl FolderDialog {
     pub fn new(ask: FolderAsk) -> Self {
         let name = match &ask {
             FolderAsk::RenameClient { name, .. } => name.clone(),
+            FolderAsk::SetClientId { ext_id, .. } => ext_id.clone(),
             FolderAsk::RenameFolder { rel } => vf_core::browse::leaf(rel).to_owned(),
             _ => String::new(),
         };
@@ -48,6 +57,7 @@ impl FolderDialog {
             ask,
             name,
             plan: None,
+            id_plan: None,
             error: None,
             focused: false,
         }
@@ -61,6 +71,7 @@ pub fn show(ctx: &egui::Context, d: &mut FolderDialog, env: &mut Env) -> DialogO
     let mut out = DialogOutcome::Open;
     let title = match &d.ask {
         FolderAsk::RenameClient { .. } => "Rename client",
+        FolderAsk::SetClientId { .. } => "Set client ID",
         FolderAsk::NewFolder { .. } => "New folder",
         FolderAsk::RenameFolder { .. } => "Rename folder",
         FolderAsk::DeleteFolder { .. } => "Delete folder",
@@ -83,6 +94,7 @@ pub fn show(ctx: &egui::Context, d: &mut FolderDialog, env: &mut Env) -> DialogO
                 }
                 let l = ui.label(match ask {
                     FolderAsk::RenameClient { .. } => "Client name",
+                    FolderAsk::SetClientId { .. } => "Client ID",
                     _ => "Folder name",
                 });
                 let r = ui.add(TextEdit::singleline(&mut d.name).desired_width(f32::INFINITY));
@@ -93,6 +105,7 @@ pub fn show(ctx: &egui::Context, d: &mut FolderDialog, env: &mut Env) -> DialogO
                 }
                 if r.changed() {
                     d.plan = None;
+                    d.id_plan = None;
                     d.error = None;
                 }
                 go = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
@@ -123,6 +136,33 @@ pub fn show(ctx: &egui::Context, d: &mut FolderDialog, env: &mut Env) -> DialogO
                         "Importing the client list again puts the tax software's name back.",
                     ));
                 }
+                if let FolderAsk::SetClientId { client_id, .. } = &ask {
+                    if d.id_plan.is_none() {
+                        d.id_plan = Some(folders::plan_client_id(
+                            env.conn, env.root, client_id, &d.name,
+                        ));
+                    }
+                    ui.add_space(6.0);
+                    match d.id_plan.as_ref() {
+                        Some(Ok(p)) => match &p.folder {
+                            Some((old, new)) => {
+                                ui.label(widgets::caption("The client folder is renamed too:"));
+                                ui.label(RichText::new(old).monospace().small());
+                                ui.label(RichText::new(format!("→ {new}")).monospace().small());
+                            }
+                            None => {
+                                ui.label(widgets::caption("The client folder keeps its name."));
+                            }
+                        },
+                        Some(Err(e)) => {
+                            ui.label(RichText::new(e).color(theme::ink_muted()));
+                        }
+                        None => {}
+                    }
+                    ui.label(widgets::caption(
+                        "The client list, relationships, the folder's sentinel and the client CSV Intake uses take the new ID. Not on the undo list: set the ID again to change it back.",
+                    ));
+                }
             }
         }
         ui.add_space(6.0);
@@ -133,6 +173,7 @@ pub fn show(ctx: &egui::Context, d: &mut FolderDialog, env: &mut Env) -> DialogO
                 FolderAsk::RenameClient { .. } => {
                     ("Rename", matches!(d.plan, Some(Ok(_))))
                 }
+                FolderAsk::SetClientId { .. } => ("Set ID", matches!(d.id_plan, Some(Ok(_)))),
                 FolderAsk::NewFolder { .. } => ("Create folder", !d.name.trim().is_empty()),
                 FolderAsk::RenameFolder { .. } => ("Rename", !d.name.trim().is_empty()),
                 FolderAsk::DeleteFolder { .. } => ("Delete folder", true),
@@ -169,6 +210,23 @@ fn run(d: &FolderDialog, env: &mut Env) -> Result<String, String> {
                 ),
                 None => format!("Renamed the client to {}.", p.new_name),
             })
+        }
+        FolderAsk::SetClientId { .. } => {
+            let Some(Ok(p)) = &d.id_plan else {
+                return Err("Nothing to change.".into());
+            };
+            let note = folders::set_client_id(env.conn, env.root, p, env.device_id)?;
+            let mut msg = match &p.folder {
+                Some((_, new)) => {
+                    format!("{} is now {}; its folder is now {new}.", p.name, p.new_id)
+                }
+                None => format!("{} is now {}.", p.name, p.new_id),
+            };
+            if let Some(n) = note {
+                msg.push(' ');
+                msg.push_str(&n);
+            }
+            Ok(msg)
         }
         FolderAsk::NewFolder { parent } => {
             let rel = folders::new_folder(env.conn, env.root, parent, &d.name, env.device_id)?;

@@ -15,7 +15,7 @@ Anything already in B2 keeps syncing whatever the rule says: an edit, a move or 
 
 ## Changing it
 
-Open **Sync** › **What goes to B2**. Type the number of tax years before this one to send in **Tax years before this one to send (0 = every year)** and press **Save** (this needs the admin password when one is set, like the other sync settings). 0 sends every document. Widening the rule makes the held-back documents pending, and the next push sends them.
+Open **Sync** › **What goes to B2** (above the list of pending clients). Type the number of tax years before this one to send in **Tax years before this one to send (0 = every year)** and press **Save** (this needs the admin password when one is set, like the other sync settings). 0 sends every document. Widening the rule makes the held-back documents pending, and the next push sends them.
 
 The setting is the cabinet's, so every PC (and every office that pulls from the bucket) follows it. Update every PC to the same version of Vibe Files: an older one sends everything, and when it saves client details it drops these settings (a newer one puts them back from its own copy, `_Vibe\b2-rules.json`).
 

@@ -906,6 +906,15 @@ const ADMIN_NEEDED: &str = "Needs the admin password (Admin tab).";
 
 pub fn show(ui: &mut egui::Ui, t: &mut SyncTab, env: &mut Env, v: View<'_>) {
     egui::CentralPanel::default().show(ui, |ui| {
+        egui::ScrollArea::vertical()
+            .id_salt("sync-page")
+            .auto_shrink([false, false])
+            .show(ui, |ui| page(ui, t, env, v));
+    });
+}
+
+fn page(ui: &mut egui::Ui, t: &mut SyncTab, env: &mut Env, v: View<'_>) {
+    {
         ui.heading("Sync");
         ui.label(widgets::caption(
             "Two-way sync of this cabinet with your Backblaze B2 bucket. Everything is encrypted on \
@@ -953,8 +962,11 @@ pub fn show(ui: &mut egui::Ui, t: &mut SyncTab, env: &mut Env, v: View<'_>) {
         } else if t.session.is_none() {
             ui.label("Sync is set up for this cabinet. Unlock it for this session:");
             field(ui, "Sync passphrase", &mut t.form.unlock, true, "");
-            ui.checkbox(&mut t.form.remember, "Remember on this PC for my Windows login")
-                .on_hover_text(REMEMBER_HELP);
+            ui.checkbox(
+                &mut t.form.remember,
+                "Remember on this PC for my Windows login",
+            )
+            .on_hover_text(REMEMBER_HELP);
             if v.admin {
                 ui.checkbox(&mut t.form.share, SHARE_LABEL)
                     .on_hover_text(SHARE_HELP);
@@ -963,12 +975,18 @@ pub fn show(ui: &mut egui::Ui, t: &mut SyncTab, env: &mut Env, v: View<'_>) {
                 .add_enabled(!t.running(), widgets::primary_button("Unlock"))
                 .clicked()
             {
-                t.unlock(ui.ctx(), env.root, &key_dir(v.catalog), v.cfg, env.device_id);
+                t.unlock(
+                    ui.ctx(),
+                    env.root,
+                    &key_dir(v.catalog),
+                    v.cfg,
+                    env.device_id,
+                );
             }
         } else {
             unlocked(ui, t, env, &v);
         }
-    });
+    }
 }
 
 fn setup_form(ui: &mut egui::Ui, t: &mut SyncTab, env: &Env, v: &View<'_>) {
@@ -1198,6 +1216,18 @@ fn unlocked(ui: &mut egui::Ui, t: &mut SyncTab, env: &mut Env, v: &View<'_>) {
         ui.add_space(8.0);
     }
 
+    // What goes to B2 and the settings above the client list (owner 2026-11-12: thousands of
+    // clients hid them).
+    b2_rule_section(ui, t, env, v.admin);
+
+    ui.add_space(10.0);
+    ui.label(RichText::new("Settings").strong());
+    if !v.admin {
+        ui.label(widgets::caption(ADMIN_NEEDED));
+    }
+    ui.add_enabled_ui(v.admin, |ui| settings_section(ui, t, v));
+
+    ui.add_space(10.0);
     ui.horizontal(|ui| {
         ui.label(RichText::new("Pending by client").strong());
         if let Some(c) = &t.filter_client {
@@ -1214,43 +1244,57 @@ fn unlocked(ui: &mut egui::Ui, t: &mut SyncTab, env: &mut Env, v: &View<'_>) {
         }
     });
     let mut go: Option<Op> = None;
-    egui::Grid::new("sync-pending")
-        .striped(true)
-        .num_columns(3)
-        .show(ui, |ui| {
-            let names: BTreeMap<&str, &str> = v
-                .clients
-                .iter()
-                .map(|(i, n)| (i.as_str(), n.as_str()))
-                .collect();
-            for (id, n) in &t.pending {
-                if t.filter_client.as_ref().is_some_and(|f| f != id) {
-                    continue;
-                }
-                ui.label(if id.is_empty() {
-                    "Cabinet (not in a client folder, master files)"
-                } else {
-                    names.get(id.as_str()).copied().unwrap_or("(client)")
+    let names: BTreeMap<&str, &str> = v
+        .clients
+        .iter()
+        .map(|(i, n)| (i.as_str(), n.as_str()))
+        .collect();
+    let rows: Vec<(&String, &usize)> = t
+        .pending
+        .iter()
+        .filter(|(id, _)| t.filter_client.as_ref().is_none_or(|f| f == *id))
+        .collect();
+    // Its own scrolling box, laying out only the rows in view (thousands of clients).
+    let row_h =
+        ui.spacing().interact_size.y.max(
+            ui.text_style_height(&egui::TextStyle::Button) + 2.0 * ui.spacing().button_padding.y,
+        ) + ui.spacing().item_spacing.y;
+    egui::ScrollArea::vertical()
+        .id_salt("sync-pending-scroll")
+        .max_height(360.0)
+        .auto_shrink([false, true])
+        .show_rows(ui, row_h, rows.len(), |ui, range| {
+            egui::Grid::new("sync-pending")
+                .striped(true)
+                .num_columns(3)
+                .min_col_width(80.0)
+                .show(ui, |ui| {
+                    for &(id, n) in &rows[range] {
+                        ui.label(if id.is_empty() {
+                            "Cabinet (not in a client folder, master files)"
+                        } else {
+                            names.get(id.as_str()).copied().unwrap_or("(client)")
+                        });
+                        ui.label(format!("{n} pending"));
+                        if !id.is_empty() {
+                            ui.horizontal(|ui| {
+                                if ui.add_enabled(idle, egui::Button::new("Push")).clicked() {
+                                    go = Some(Op::Push(Some(id.clone())));
+                                }
+                                if ui
+                                    .add_enabled(idle, egui::Button::new("Restore to a folder…"))
+                                    .clicked()
+                                    && let Some(p) = rfd::FileDialog::new().pick_folder()
+                                {
+                                    go = Some(Op::Export(id.clone(), p));
+                                }
+                            });
+                        } else {
+                            ui.label("");
+                        }
+                        ui.end_row();
+                    }
                 });
-                ui.label(format!("{n} pending"));
-                if !id.is_empty() {
-                    ui.horizontal(|ui| {
-                        if ui.add_enabled(idle, egui::Button::new("Push")).clicked() {
-                            go = Some(Op::Push(Some(id.clone())));
-                        }
-                        if ui
-                            .add_enabled(idle, egui::Button::new("Restore to a folder…"))
-                            .clicked()
-                            && let Some(p) = rfd::FileDialog::new().pick_folder()
-                        {
-                            go = Some(Op::Export(id.clone(), p));
-                        }
-                    });
-                } else {
-                    ui.label("");
-                }
-                ui.end_row();
-            }
         });
     if t.pending.is_empty() {
         ui.label(widgets::caption(
@@ -1260,16 +1304,6 @@ fn unlocked(ui: &mut egui::Ui, t: &mut SyncTab, env: &mut Env, v: &View<'_>) {
     if let Some(op) = go {
         t.start(ui.ctx(), v.catalog, env.root, op);
     }
-
-    ui.add_space(10.0);
-    b2_rule_section(ui, t, env, v.admin);
-
-    ui.add_space(10.0);
-    ui.label(RichText::new("Settings").strong());
-    if !v.admin {
-        ui.label(widgets::caption(ADMIN_NEEDED));
-    }
-    ui.add_enabled_ui(v.admin, |ui| settings_section(ui, t, v));
 }
 
 /// What goes to B2 (owner 2026-11-12, PA-53): documents never sent go up only for recent tax
