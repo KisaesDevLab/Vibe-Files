@@ -1893,6 +1893,62 @@ ANDE1042,Anderson Farms LLC
         h.run();
         assert_eq!(ticked(&h), ["Lindqvist"]);
         assert!(h.query_by_label("Import 1 folders (1 not shown)").is_some());
+
+        // Under 90 % (owner 2026-11-12): the weak matches and the folders with none; their
+        // matches cleared, then a client made from each folder name.
+        h.state_mut().a.import.under = true;
+        h.run();
+        let weak: Vec<String> = {
+            let plan = h.state().a.import.plan.as_ref().unwrap();
+            plan.folders
+                .iter()
+                .filter(|r| r.client.is_some() && (r.confidence * 100.0).round() < 90.0)
+                .map(|r| r.rel.clone())
+                .collect()
+        };
+        assert!(weak.contains(&"Lindqvist".to_string()), "{weak:?}");
+        assert!(!weak.contains(&"Dana Halvorsen".to_string()));
+        let none = h
+            .state()
+            .a
+            .import
+            .plan
+            .as_ref()
+            .unwrap()
+            .folders
+            .iter()
+            .filter(|r| r.client.is_none())
+            .count();
+        assert!(
+            h.query_by_label(&format!("Showing {} of 5 folders", weak.len() + none))
+                .is_some()
+        );
+        click(
+            &mut h,
+            &format!("Clear the match on {} folders shown", weak.len()),
+        );
+        let plan = h.state().a.import.plan.as_ref().unwrap();
+        let lind = plan.folders.iter().find(|r| r.rel == "Lindqvist").unwrap();
+        assert!(lind.client.is_none() && !lind.include);
+        let unmatched = plan.folders.iter().filter(|r| r.client.is_none()).count();
+        click(
+            &mut h,
+            &format!("Create a client for each unmatched folder ({unmatched})"),
+        );
+        let plan = h.state().a.import.plan.as_ref().unwrap();
+        let lind = plan.folders.iter().find(|r| r.rel == "Lindqvist").unwrap();
+        assert!(
+            lind.client
+                .as_ref()
+                .is_some_and(|c| c.new && c.name == "Lindqvist")
+        );
+        // Sure matches are untouched.
+        let dana = plan
+            .folders
+            .iter()
+            .find(|r| r.rel == "Dana Halvorsen")
+            .unwrap();
+        assert!(dana.client.as_ref().is_some_and(|c| !c.new));
     }
 
     /// P10: Scan proposes the folder's client, Import binds it on its own thread, Undo reverses.

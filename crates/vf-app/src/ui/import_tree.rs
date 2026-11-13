@@ -80,6 +80,9 @@ pub struct ImportPage {
     id_drafts: std::collections::HashMap<usize, String>,
     /// Folders shown: a match of at least this many % (PA-28).
     pub min_pct: u8,
+    /// Folders shown: a match under `min_pct` instead, and folders with no match (owner
+    /// 2026-11-12: to clear weak matches and make new clients of them).
+    pub under: bool,
     /// Folders already bound are not shown.
     pub hide_bound: bool,
     /// Folders with no client are not shown.
@@ -575,8 +578,22 @@ fn forget_saved(catalog: &Path) {
 }
 
 /// Whether the filter shows folder row `r`: matched at least `min_pct` (bound folders always
-/// pass it), and not hidden as bound or as matching no client.
-fn shows(r: &import::FolderRow, min_pct: u8, hide_bound: bool, hide_none: bool) -> bool {
+/// pass it), and not hidden as bound or as matching no client. With `under`: the folders not
+/// bound matched under `min_pct` (a new client made here is not a match), and those with none.
+fn shows(
+    r: &import::FolderRow,
+    min_pct: u8,
+    under: bool,
+    hide_bound: bool,
+    hide_none: bool,
+) -> bool {
+    if under {
+        return match &r.client {
+            _ if r.bound => false,
+            None => !hide_none,
+            Some(c) => !c.new && (r.confidence * 100.0).round() < f32::from(min_pct),
+        };
+    }
     if r.bound {
         return !hide_bound;
     }
@@ -835,8 +852,18 @@ pub fn show(ui: &mut egui::Ui, p: &mut ImportPage, env: &mut Env, catalog: &Path
             if p.only_shared {
                 in_shared(r)
             } else {
-                shows(r, p.min_pct, p.hide_bound, p.hide_none)
+                shows(r, p.min_pct, p.under, p.hide_bound, p.hide_none)
             }
+        })
+        .collect();
+    // The weak matches shown, cleared in one go (owner 2026-11-12): then "Create a client for
+    // each unmatched folder" makes clients of them.
+    let clearable: Vec<usize> = shown
+        .iter()
+        .copied()
+        .filter(|&i| {
+            let r = &plan.folders[i];
+            !r.bound && r.client.as_ref().is_some_and(|c| !c.new)
         })
         .collect();
     // Which folder each merge goes into, for the rows.
@@ -851,15 +878,25 @@ pub fn show(ui: &mut egui::Ui, p: &mut ImportPage, env: &mut Env, catalog: &Path
     let mut new_client_row: Option<usize> = None;
     let can_tick = |r: &import::FolderRow| !r.bound && r.client.is_some();
     ui.horizontal_wrapped(|ui| {
-        ui.label("Show matches from");
+        ui.label("Show matches");
+        ui.selectable_value(&mut p.under, false, "from")
+            .on_hover_text("Folders matched at least this well");
+        ui.selectable_value(&mut p.under, true, "under")
+            .on_hover_text("Folders matched less well than this, and folders with no match");
         ui.add(
             egui::DragValue::new(&mut p.min_pct)
                 .range(0..=100)
                 .speed(1.0)
                 .suffix("%"),
         )
-        .on_hover_text("Only folders matched at least this well");
-        ui.label("up");
+        .on_hover_text(if p.under {
+            "Only folders matched under this, and those with no match"
+        } else {
+            "Only folders matched at least this well"
+        });
+        if !p.under {
+            ui.label("up");
+        }
         ui.checkbox(&mut p.hide_bound, "Hide already bound");
         ui.checkbox(&mut p.hide_none, "Hide folders with no match");
         ui.checkbox(&mut p.only_shared, "Only folders sharing a client")
@@ -872,6 +909,24 @@ pub fn show(ui: &mut egui::Ui, p: &mut ImportPage, env: &mut Env, catalog: &Path
             plan.folders.len()
         )));
     });
+    if p.under
+        && !clearable.is_empty()
+        && ui
+            .button(format!(
+                "Clear the match on {} folders shown",
+                clearable.len()
+            ))
+            .on_hover_text(
+                "These folders lose the client they were matched to (none is changed on disk). Then \"Create a client for each unmatched folder\" makes each a client named after it, or pick a client on the row.",
+            )
+            .clicked()
+    {
+        let n = import::clear_matches(plan, &clearable);
+        p.id_drafts.clear();
+        p.notice = Some(format!(
+            "Match cleared on {n} folders: press \"Create a client for each unmatched folder\" to make clients of them."
+        ));
+    }
     ui.horizontal(|ui| {
         let tickable: Vec<usize> = shown
             .iter()
@@ -1190,7 +1245,7 @@ pub fn show(ui: &mut egui::Ui, p: &mut ImportPage, env: &mut Env, catalog: &Path
                         r.include
                             && !r.bound
                             && r.client.is_some()
-                            && !shows(r, p.min_pct, p.hide_bound, p.hide_none)
+                            && !shows(r, p.min_pct, p.under, p.hide_bound, p.hide_none)
                     })
                     .count()
             });

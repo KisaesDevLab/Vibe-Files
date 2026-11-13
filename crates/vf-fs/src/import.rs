@@ -805,6 +805,29 @@ pub fn merge_targets(plan: &Plan) -> Vec<(usize, Vec<usize>)> {
     out
 }
 
+/// Clears the client match of folder rows `rows` (owner 2026-11-12: weak matches cleared, then
+/// made clients of their own with "Create a client for each unmatched folder"). Bound folders
+/// are left alone. Returns how many were cleared.
+pub fn clear_matches(plan: &mut Plan, rows: &[usize]) -> usize {
+    let mut n = 0;
+    for &i in rows {
+        let Some(r) = plan.folders.get_mut(i) else {
+            continue;
+        };
+        if r.bound || r.client.is_none() {
+            continue;
+        }
+        r.client = None;
+        r.include = false;
+        r.merge = false;
+        r.template_name = None;
+        r.confidence = 0.0;
+        r.how = "match cleared".into();
+        n += 1;
+    }
+    n
+}
+
 /// Gives folder row `i` a new client made from its folder name (owner 2026-11-12: a weak
 /// match, or the second folder of a client, made a client of its own).
 pub fn new_client_for(root: &Path, plan: &mut Plan, i: usize) -> Result<(), String> {

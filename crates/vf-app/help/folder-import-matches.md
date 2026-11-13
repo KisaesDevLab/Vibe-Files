@@ -6,6 +6,8 @@ How to sort out the folder import's uncertain rows: folders matched only weakly 
 
 Set **Show matches from** to a percentage, for example 90. When some folders are matched to a client below it, the page offers **Create a client for each folder matched under 90% (N)**. Each such folder then gets a new client named after the folder, with an ID made from its name, instead of the client it only looks like. Change an ID in the box on its row and press Enter. Folders sharing a client are left out: sort those out first (below).
 
+To look at them first, choose **under** next to **Show matches** (instead of **from**): only folders matched under the % are listed, with those matching nothing. **Clear the match on N folders shown** then removes their client, and **Create a client for each unmatched folder** makes each one a client named after it. A sure match is never shown there, so it is never cleared.
+
 To make one folder a client of its own, use **New client** on its row when it shares a client, or pick **(none)** in its **Client** box and press **Create a client for each unmatched folder**.
 
 ## Two folders for one client
