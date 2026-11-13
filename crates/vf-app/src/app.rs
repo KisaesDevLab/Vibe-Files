@@ -963,6 +963,18 @@ impl eframe::App for VibeFilesApp {
                         conflicts: o_sync.conflicts.len(),
                         running_for: o_sync.running_for.clone(),
                     });
+                    // A portal share goes to B2 first when B2 is set up (Q-103).
+                    tab_browse.b2_first = match &o_sync.session {
+                        Some(s) => crate::ui::portal::B2First::Ready {
+                            sync: Box::new(s.clone()),
+                            catalog: opened.catalog.clone(),
+                            root: opened.root.clone(),
+                        },
+                        None if self.config.sync.configured_for(&opened.cabinet.cabinet_id) => {
+                            crate::ui::portal::B2First::Locked
+                        }
+                        None => crate::ui::portal::B2First::NotSetUp,
+                    };
                     tab_browse.admin_unlocked = *admin_unlocked;
                     browse::show(ui, tab_browse, &mut env);
                     // Browse's Scan: Intake's scanner, profile and Scans folder (owner

@@ -472,6 +472,8 @@ pub struct Browse {
     pub sync: Option<SyncView>,
     /// A sync action chosen here (taken by the app).
     pub sync_request: Option<SyncRequest>,
+    /// Whether a portal share goes to B2 first, and with what (the app sets it each frame).
+    pub b2_first: crate::ui::portal::B2First,
 }
 
 /// What Browse shows of sync.
@@ -599,6 +601,7 @@ impl Browse {
             sheets_dir: std::path::PathBuf::new(),
             sync: None,
             sync_request: None,
+            b2_first: Default::default(),
         };
         b.recount();
         b.refresh();
@@ -3636,6 +3639,7 @@ fn open_share(ctx: &egui::Context, b: &mut Browse, env: &mut Env) {
         },
         refs,
         b.portal.audit_out(),
+        b.b2_first.clone(),
     ));
 }
 
@@ -3691,6 +3695,7 @@ fn open_send_link(ctx: &egui::Context, b: &mut Browse, env: &mut Env, d: &vf_cor
             tax_year: d.tax_year,
         },
         b.portal.audit_out(),
+        b.b2_first.clone(),
     ));
 }
 

@@ -924,6 +924,27 @@ impl SyncTab {
     }
 }
 
+/// Pushes these documents to B2 now, on the calling thread (a portal share runs it first:
+/// owner 2026-11-13, Q-103). The same push as Browse's "Push the selected documents now".
+pub fn push_docs_now(catalog: &Path, root: &Path, s: &Sync, ids: &[String]) -> Result<(), String> {
+    let main_here = crate::server::runs_here(root);
+    let cloud = !crate::server::server_mode() && crate::cloudmode::is_cloud(root);
+    if !main_here && cloud {
+        return Err(format!(
+            "B2 sync runs on {} for this cabinet (Admin › Devices)",
+            crate::server::main_server(root)
+                .map(|m| m.computer)
+                .unwrap_or_else(|| "a main PC not chosen yet".into())
+        ));
+    }
+    match run(catalog, root, s, Op::PushDocs(ids.to_vec()), !main_here)? {
+        Done::PushDocs(r, _) if r.skipped > 0 => {
+            Err("a file could not be read just now; try again".into())
+        }
+        _ => Ok(()),
+    }
+}
+
 /// Held while a push or pull runs on this catalog: on a server whose sessions share one
 /// catalog, one session syncs it at a time (PA-34 review).
 pub(crate) fn sync_lock(catalog: &Path) -> Result<std::fs::File, String> {

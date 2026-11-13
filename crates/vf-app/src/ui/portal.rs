@@ -23,6 +23,45 @@ use crate::ui::browse::Env;
 use crate::ui::widgets::UiExt as _;
 use crate::ui::{theme, widgets};
 
+/// Whether a document goes to B2 before it is shared through the portal (owner 2026-11-13,
+/// Q-103: "everything should run through B2 first, unless B2 is not set up").
+#[derive(Clone, Default)]
+pub enum B2First {
+    /// B2 sync is not set up for this cabinet on this PC: the share goes ahead without it.
+    #[default]
+    NotSetUp,
+    /// Set up, but locked on this PC (the passphrase was not given): the share waits.
+    Locked,
+    /// The session to push with, the catalog and the cabinet.
+    Ready {
+        sync: Box<vf_sync::Sync>,
+        catalog: std::path::PathBuf,
+        root: std::path::PathBuf,
+    },
+}
+
+impl B2First {
+    /// Sends these documents (catalog ids) to B2 before they are shared. An error stops the
+    /// share: nothing reaches the portal that is not in B2.
+    fn push(&self, ids: &[String]) -> Result<(), String> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        match self {
+            B2First::NotSetUp => Ok(()),
+            B2First::Locked => Err(
+                "Not shared: shared documents go to B2 first, and B2 sync is locked on this PC. Unlock it on the Sync tab, then share again.".into(),
+            ),
+            B2First::Ready {
+                sync,
+                catalog,
+                root,
+            } => crate::ui::sync::push_docs_now(catalog, root, sync, ids)
+                .map_err(|e| format!("Not shared: the push to B2 did not finish ({e}).")),
+        }
+    }
+}
+
 /// Runs `f` on a thread; the window repaints when it is done.
 fn spawn<T: Send + 'static>(
     ctx: &egui::Context,
@@ -432,6 +471,8 @@ pub fn visibility_changes(
 }
 
 pub struct ShareWindow {
+    /// Whether the documents go to B2 before they are shared (Q-103).
+    b2: B2First,
     client: ClientRef,
     docs: Vec<DocRef>,
     loaded: Option<Loaded>,
@@ -475,9 +516,11 @@ impl ShareWindow {
         client: ClientRef,
         docs: Vec<DocRef>,
         audit: AuditOut,
+        b2: B2First,
     ) -> Self {
         let job = Some(load_job(ctx, s.clone(), client.clone(), docs.clone()));
         Self {
+            b2,
             client,
             docs,
             loaded: None,
@@ -534,9 +577,20 @@ impl ShareWindow {
             .collect();
         let s = s.clone();
         let audit = self.audit.clone();
+        let b2 = self.b2.clone();
         self.msg = None;
         self.err = None;
         self.job = Some(spawn(ctx, move || {
+            // To B2 first (Q-103): what is on the portal already, and what someone is newly
+            // chosen to see.
+            let to_b2: Vec<String> = work
+                .iter()
+                .filter(|(_, file)| {
+                    file.is_some() || visibility_changes(file, &chosen).values().any(|&v| v)
+                })
+                .map(|(d, _)| d.id.clone())
+                .collect();
+            b2.push(&to_b2)?;
             let p = core::client(&s);
             let mut changed = 0usize;
             let mut sent = 0usize;
@@ -1994,6 +2048,8 @@ enum LinkJob {
 /// to change what they see; then the portal emails the link. Nothing is sent from a copy the
 /// person was not shown.
 pub struct SendLinkWindow {
+    /// Whether the document goes to B2 before the link is sent (Q-103).
+    b2: B2First,
     client: ClientRef,
     doc: DocRef,
     pub email: String,
@@ -2028,8 +2084,10 @@ impl SendLinkWindow {
         client: ClientRef,
         doc: DocRef,
         audit: AuditOut,
+        b2: B2First,
     ) -> Self {
         let mut w = Self {
+            b2,
             client,
             doc,
             email: String::new(),
@@ -2093,6 +2151,7 @@ impl SendLinkWindow {
             self.audit.clone(),
         );
         let update_shared = self.update_shared;
+        let b2 = self.b2.clone();
         let link = vf_portal::api::OutsideLink {
             file_ids: vec![],
             email: self.email.trim().to_string(),
@@ -2115,6 +2174,8 @@ impl SendLinkWindow {
             if now != seen {
                 return Ok(LinkJob::Changed(now));
             }
+            // To B2 first (Q-103), before anything reaches the portal.
+            b2.push(std::slice::from_ref(&d.id))?;
             let (file_id, added, updated) = match now {
                 PortalCopy::Same { file_id, .. } => (file_id, false, false),
                 // The client's people see it: their copy changes only when chosen.
@@ -2636,6 +2697,7 @@ mod tests {
                 tax_year: Some(2025),
             },
             AuditOut(tx),
+            B2First::NotSetUp,
         );
         let h = egui_kittest::Harness::builder()
             .with_size([700.0, 800.0])
@@ -2740,6 +2802,38 @@ mod tests {
         assert_eq!(rows[1].detail["to"], "pat@first-bank.test");
         // Asked again for the next link.
         assert!(!h.state().consent);
+    }
+
+    /// Q-103 (owner 2026-11-13): a shared document goes to B2 first. With B2 set up but
+    /// locked on this PC the link is not sent and nothing reaches the portal; with B2 not set
+    /// up the share goes ahead (the test above).
+    #[test]
+    fn a_secure_link_waits_for_b2_when_it_is_locked() {
+        let (mut h, seen, audit, _t) = link_window(|method, path| match (method, path) {
+            ("GET", p) if p.starts_with("/api/firm/v1/files?clientId=AB-1") => {
+                (200, r#"{"files":[]}"#.into())
+            }
+            _ => (200, r#"{"ok":true}"#.into()),
+        });
+        wait_for(&mut h, "Not on the portal yet");
+        h.state_mut().b2 = B2First::Locked;
+        fill_and_send(&mut h);
+        let start = std::time::Instant::now();
+        while h.state().err.is_none() {
+            h.step();
+            assert!(start.elapsed() < Duration::from_secs(20), "no answer");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let err = h.state().err.clone().unwrap();
+        assert!(err.contains("B2 sync is locked"), "{err}");
+        assert!(
+            requests(&seen, "POST").is_empty(),
+            "nothing reached the portal"
+        );
+        assert_eq!(audit.try_iter().count(), 0);
+        // Nothing to push is nothing to wait for, whatever the state.
+        assert!(B2First::Locked.push(&[]).is_ok());
+        assert!(B2First::NotSetUp.push(&["doc-1".to_string()]).is_ok());
     }
 
     /// QA: an older copy the client's people see is not changed unless chosen; chosen, the

@@ -23,6 +23,8 @@ Then tick **The client has consented to sending this to this person** and press 
 
 If the email cannot be sent, no link is made. When the document was sent to the portal before something failed, it stays there, shown to none of the client's people, and **Send** again does not send it twice. Such a document shows **Share… (on portal)** in Browse, though no client person sees it until it is shared with them. **Remove from portal** in **Share…** also stops every link to it.
 
+> When B2 sync is set up for the cabinet, a document goes to your B2 bucket before it is shared, and keeps syncing afterwards (see [what goes to B2](help:sync-rules)). If B2 sync is locked on this PC, or the push cannot finish, the share is stopped and says why: unlock sync on the Sync tab and share again. Without B2 sync, sharing works as before.
+
 ## Seeing and ending links
 
 The links are listed on the portal's staff page, on the client's page under **Secure links sent outside**: who each went to, when it was opened and how many downloads. **Revoke** stops one at once. The **Portal** button in the header opens the staff page's sign-in. The portal's **History** also records each link, with the Windows user who sent it from Vibe Files.
