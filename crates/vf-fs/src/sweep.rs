@@ -141,15 +141,16 @@ pub fn scan_week(conn: &Connection, root: &Path, week: u64) -> Result<Drift, Str
     for (folder, client_id) in &folders {
         let mut paths = Vec::new();
         let mut bad = Vec::new();
-        rebuild::files_under_lenient(folder, &mut paths, &mut bad);
+        rebuild::listed_under_lenient(folder, &mut paths, &mut bad);
         for (dir, why) in bad {
             unread_dirs.push(rebuild::rel(root, &dir));
             d.unreadable.push(why);
         }
-        for p in paths {
+        for (p, st) in paths {
             let rel = rebuild::rel(root, &p);
-            // Size, time and attributes in one call (nothing opened, PA-39).
-            let st = crate::cloud::stat(&p);
+            // Size, time and attributes from the folder's listing (nothing opened, PA-39;
+            // nothing asked per file, PA-60).
+            let st = st.or_else(|| crate::cloud::stat(&p));
             attrs.push(st.map_or(0, |s| s.2));
             todo.push((
                 p.clone(),
@@ -195,7 +196,7 @@ pub fn scan_week(conn: &Connection, root: &Path, week: u64) -> Result<Drift, Str
             continue;
         }
         let got = if whole {
-            read.next().flatten().map(|(h, _)| h)
+            read.next().flatten()
         } else {
             known.get(&rel).map(|k| k.0.clone())
         };

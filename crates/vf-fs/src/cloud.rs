@@ -98,6 +98,14 @@ pub fn stat(p: &Path) -> Option<(u64, i64, u32)> {
     Some((size, secs, d.dwFileAttributes))
 }
 
+/// What [`stat`] would say of a file, taken from metadata its folder's listing already gave
+/// (`DirEntry::metadata`: no call per file, which on a share is one round trip each; PA-60).
+pub fn listed(m: &std::fs::Metadata) -> (u64, i64, u32) {
+    use std::os::windows::fs::MetadataExt;
+    let secs = (m.last_write_time() as i64 - 116_444_736_000_000_000).div_euclid(10_000_000);
+    (m.file_size(), secs, m.file_attributes())
+}
+
 /// Whether `p`'s contents are only in the cloud: reading it would download it.
 pub fn is_online_only(p: &Path) -> bool {
     attributes(p).is_some_and(online_only_attrs)
@@ -392,5 +400,29 @@ mod tests {
                 "_Vibe/clients-OFFICE-2.json",
             ]
         );
+    }
+
+    /// PA-60: a folder listing gives the same size, time and attributes as asking the file
+    /// itself, so a catalog made by either sees no file as changed.
+    #[test]
+    fn a_listing_gives_what_stat_gives() {
+        let tmp = tempfile::tempdir().unwrap();
+        for (i, secs) in [0u64, 1_700_000_000, 1_700_000_001].iter().enumerate() {
+            let p = tmp.path().join(format!("f{i}.pdf"));
+            std::fs::write(&p, vec![b'x'; 10 + i]).unwrap();
+            if *secs > 0 {
+                let t = std::time::UNIX_EPOCH + std::time::Duration::new(*secs, 999_999_900);
+                let f = std::fs::File::options().write(true).open(&p).unwrap();
+                f.set_modified(t).unwrap();
+            }
+        }
+        let mut n = 0;
+        for e in std::fs::read_dir(tmp.path()).unwrap() {
+            let e = e.unwrap();
+            let got = listed(&e.metadata().unwrap());
+            assert_eq!(Some(got), stat(&e.path()), "{}", e.path().display());
+            n += 1;
+        }
+        assert_eq!(n, 3);
     }
 }

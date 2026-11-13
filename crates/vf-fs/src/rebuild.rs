@@ -56,8 +56,11 @@ pub static PROGRESS: Progress = Progress {
 /// fingerprint when it knows the path.
 type Waiting = (PathBuf, Option<String>, Option<(u64, i64)>, Option<String>);
 
-/// One file read: its place in the list, and its SHA-256 and size (`None`: unreadable).
-type Read = (usize, Option<(String, u64)>);
+/// One file read: its place in the list and its SHA-256 (`None`: unreadable).
+type Read = (usize, Option<String>);
+
+/// A file's size, last-modified time (seconds since 1970) and attributes.
+pub(crate) type Stat = (u64, i64, u32);
 
 /// Network reads at once (folder listings, file details, sentinels, file contents): a share
 /// answers each slowly, so many at a time go much faster (owner 2026-11-12: a folder import of
@@ -96,13 +99,13 @@ pub(crate) fn par_map<T: Sync, R: Send>(items: &[T], f: impl Fn(&T) -> R + Sync)
     all.into_iter().map(|(_, r)| r).collect()
 }
 
-/// Reads (SHA-256 and size) every file of `todo` on up to 8 threads, in order; a file that
+/// Reads (SHA-256) every file of `todo` on up to [`READERS`] threads, in order; a file that
 /// cannot be read is `None`. Counts into [`PROGRESS`].
-pub(crate) fn read_all(todo: &[PathBuf]) -> Vec<Option<(String, u64)>> {
+pub(crate) fn read_all(todo: &[PathBuf]) -> Vec<Option<String>> {
     use std::sync::atomic::Ordering;
     let threads = READERS.min(todo.len().max(1));
     let next = std::sync::atomic::AtomicUsize::new(0);
-    let mut out: Vec<Option<(String, u64)>> = vec![None; todo.len()];
+    let mut out: Vec<Option<String>> = vec![None; todo.len()];
     let parts: Vec<Vec<Read>> = std::thread::scope(|s| {
         let handles: Vec<_> = (0..threads)
             .map(|_| {
@@ -111,9 +114,7 @@ pub(crate) fn read_all(todo: &[PathBuf]) -> Vec<Option<(String, u64)>> {
                     loop {
                         let i = next.fetch_add(1, Ordering::Relaxed);
                         let Some(p) = todo.get(i) else { break };
-                        let r = sha256_file(p)
-                            .ok()
-                            .map(|h| (h, std::fs::metadata(p).map(|m| m.len()).unwrap_or(0)));
+                        let r = sha256_file(p).ok();
                         PROGRESS.read.fetch_add(1, Ordering::Relaxed);
                         got.push((i, r));
                     }
@@ -378,6 +379,19 @@ pub(crate) fn files_under_lenient(
     out: &mut Vec<PathBuf>,
     bad: &mut Vec<(PathBuf, String)>,
 ) {
+    let mut all = Vec::new();
+    listed_under_lenient(dir, &mut all, bad);
+    out.extend(all.into_iter().map(|(p, _)| p));
+}
+
+/// [`files_under_lenient`] with each file's size, time and attributes as its folder's listing
+/// gave them (PA-60: asking again per file was one more round trip each on a share). `None`
+/// for a file whose details the listing could not give.
+pub(crate) fn listed_under_lenient(
+    dir: &Path,
+    out: &mut Vec<(PathBuf, Option<Stat>)>,
+    bad: &mut Vec<(PathBuf, String)>,
+) {
     let mut entries: Vec<_> = match std::fs::read_dir(dir) {
         Ok(rd) => rd.filter_map(|e| e.ok()).collect(),
         Err(e) => {
@@ -394,10 +408,11 @@ pub(crate) fn files_under_lenient(
         }
         if ft.is_dir() {
             if name != cabinet::VIBE_DIR {
-                files_under_lenient(&e.path(), out, bad);
+                listed_under_lenient(&e.path(), out, bad);
             }
         } else if !name.starts_with("~vfd-partial-") {
-            out.push(e.path());
+            let st = e.metadata().ok().map(|m| crate::cloud::listed(&m));
+            out.push((e.path(), st));
         }
     }
 }
@@ -964,11 +979,12 @@ fn rebuild_scoped(
     // folder or a network blip must not tombstone them; review of PA-34).
     let mut unread_dirs: Vec<String> = Vec::new();
     let mut unread_files: HashSet<String> = HashSet::new();
+    let mut stats3: Vec<Option<Stat>> = Vec::new();
     // Each folder listed [`READERS`] at a time; taken in order.
     let listed_dirs = par_map(&folders, |(folder, _)| {
         let mut paths = Vec::new();
         let mut bad = Vec::new();
-        files_under_lenient(folder, &mut paths, &mut bad);
+        listed_under_lenient(folder, &mut paths, &mut bad);
         PROGRESS.folders.fetch_add(1, Ordering::Relaxed);
         PROGRESS.found.fetch_add(paths.len(), Ordering::Relaxed);
         (paths, bad)
@@ -978,16 +994,18 @@ fn rebuild_scoped(
             unread_dirs.push(rel(root, &d));
             rep.unreadable.push(why);
         }
-        todo.extend(paths.into_iter().map(|p| (p, client_id.clone())));
+        for (p, st) in paths {
+            // The listing's own size, time and attributes (nothing opened, PA-39; nothing asked
+            // per file, PA-60); asked only for a file the listing gave nothing for.
+            stats3.push(st.or_else(|| crate::cloud::stat(&p)));
+            todo.push((p, client_id.clone()));
+        }
     }
     PROGRESS.found.store(todo.len(), Ordering::Relaxed);
     let (n_folders, n_files) = (folders.len(), todo.len());
     let list_ms = lap();
-    // Size, time and attributes in one call per file (nothing opened, PA-39), several at once.
-    let stats3: Vec<Option<(u64, i64, u32)>> = par_map(&todo, |(p, _)| crate::cloud::stat(p));
     let attrs: Vec<u32> = stats3.iter().map(|s| s.map_or(0, |s| s.2)).collect();
     let stats: Vec<Option<(u64, i64)>> = stats3.iter().map(|s| s.map(|(a, b, _)| (a, b))).collect();
-    let stat_ms = lap();
     // Every path found, to tell a file gone from one only left unread (PA-39).
     let listed: HashSet<String> = todo.iter().map(|(p, _)| rel(root, p)).collect();
     let mut reuse: Vec<Option<String>> = Vec::with_capacity(todo.len());
@@ -1024,7 +1042,13 @@ fn rebuild_scoped(
         }
         let got = match same {
             Some(h) => Some((h, st.map_or(0, |s| s.0))),
-            None => read.next().flatten(),
+            None => read.next().flatten().map(|h| {
+                let size = st.map_or_else(
+                    || std::fs::metadata(&p).map(|m| m.len()).unwrap_or(0),
+                    |s| s.0,
+                );
+                (h, size)
+            }),
         };
         // One file that cannot be read (open in QuickBooks, a denied ACL) does not stop the
         // rebuild: it is listed and left as the catalog has it.
@@ -1678,7 +1702,6 @@ fn rebuild_scoped(
             docs_new = rep.docs_new,
             scan_ms,
             list_ms,
-            stat_ms,
             read_ms,
             build_ms,
             commit_ms,
