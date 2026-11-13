@@ -21,6 +21,8 @@ pub struct OcrState {
     /// Several servers (PA-36): the server text recognition runs on, when not this one. Here
     /// the queue only indexes pages that carry their own text (the text layers it writes).
     pub elsewhere: Option<String>,
+    /// Text reading is switched off on this PC (PA-65): no queue, nothing in the footer.
+    pub off: bool,
 }
 
 /// Starts the OCR workers for a cabinet with this PC's settings (the app and the CLI).
@@ -51,6 +53,12 @@ impl OcrState {
     /// Starts the workers for `opened`, unless paused on this PC.
     pub fn start(ctx: &egui::Context, opened: &Opened, prefs: &Ocr, device_id: &str) -> OcrState {
         let mut s = OcrState::default();
+        // Text reading switched off (PA-65): no queue, no workers, and Search by name only.
+        vf_index::search::set_text_search(prefs.text_reading());
+        if !prefs.text_reading() {
+            s.off = true;
+            return s;
+        }
         if prefs.paused {
             return s;
         }

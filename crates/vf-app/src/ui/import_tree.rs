@@ -302,7 +302,9 @@ impl ImportPage {
         let Some(plan) = self.plan.clone() else {
             return;
         };
-        let read = self.read_text.unwrap_or(plan.files.len() <= READ_UP_TO);
+        // Never while text reading is switched off (PA-65).
+        let read = vf_index::search::text_search()
+            && self.read_text.unwrap_or(plan.files.len() <= READ_UP_TO);
         let opts = Options {
             rename: self.rename,
             default_doc_type: self.default_type.clone(),
@@ -1165,7 +1167,9 @@ pub fn show(ui: &mut egui::Ui, p: &mut ImportPage, env: &mut Env, catalog: &Path
         "Rename bound folders to the firm template's name (\"{Client} ({ID})\"); files inside are not moved",
     );
     let mut read = p.read_text.unwrap_or(plan.files.len() <= READ_UP_TO);
-    if ui
+    // Offered only while text reading is on (PA-65).
+    if vf_index::search::text_search()
+        && ui
         .checkbox(
             &mut read,
             "Read the text of the imported PDFs (OCR), so the words on their pages can be searched",

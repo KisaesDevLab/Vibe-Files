@@ -126,10 +126,38 @@ fn like(s: &str) -> String {
     format!("%{}%", escape_like(s))
 }
 
+/// Whether [`search`] looks inside documents (the page text). Off: file names and details only
+/// (owner 2026-11-13, PA-65).
+static TEXT_SEARCH: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+/// Sets whether [`search`] looks inside documents (when a cabinet opens).
+pub fn set_text_search(on: bool) {
+    TEXT_SEARCH.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn text_search() -> bool {
+    TEXT_SEARCH.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Runs `q`, best first, at most `limit` documents.
 pub fn search(conn: &Connection, q: &Query, limit: usize) -> vf_core::Result<Vec<Hit>> {
+    search_in(conn, q, limit, text_search())
+}
+
+/// [`search`], saying whether the page text is looked at. Without it every word must be in the
+/// file's path, and "Has SSN" (a text filter) is not applied.
+pub fn search_in(
+    conn: &Connection,
+    q: &Query,
+    limit: usize,
+    text: bool,
+) -> vf_core::Result<Vec<Hit>> {
     use vf_core::db::SqlValue as V;
-    let (long, short) = terms(&q.text);
+    let (mut long, mut short) = terms(&q.text);
+    if !text {
+        // Names only: every word is matched in the path, none in the text index.
+        short.append(&mut long);
+    }
     let mut params: Vec<V> = Vec::new();
     let mut p = |v: V| {
         params.push(v);
@@ -229,7 +257,7 @@ pub fn search(conn: &Connection, q: &Query, limit: usize) -> vf_core::Result<Vec
             p(V::Text(t.clone()))
         ));
     }
-    if q.has_ssn {
+    if q.has_ssn && text {
         docf.push(
             "EXISTS (SELECT 1 FROM page_text x WHERE x.hash = d.hash AND x.text GLOB
               '*[0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9][0-9][0-9]*')"
@@ -385,6 +413,49 @@ mod tests {
             text: text.into(),
             ..Query::default()
         }
+    }
+
+    /// PA-65: with text reading off, a search matches words in the path only (the text inside
+    /// documents is not looked at), and Has SSN is not applied.
+    #[test]
+    fn names_only_search_ignores_the_text() {
+        let (_t, c) = db();
+        let q = |text: &str| Query {
+            text: text.into(),
+            ..Query::default()
+        };
+        let ids = |q: &Query, text: bool| -> Vec<String> {
+            let mut v: Vec<String> = search_in(&c, q, 50, text)
+                .unwrap()
+                .into_iter()
+                .map(|h| h.doc_id)
+                .collect();
+            v.sort();
+            v
+        };
+        // In the name: found either way. Both words must be there, in any order and case.
+        assert_eq!(ids(&q("payroll w-2"), false), ["b"]);
+        assert_eq!(ids(&q("EIN letter"), false), ["c"]);
+        // A folder of the path counts; two letters are enough.
+        assert_eq!(ids(&q("permanent"), false), ["c"]);
+        assert_eq!(ids(&q("ei"), false), ["c"]);
+        // Only in the page text: found with text reading, not without.
+        assert_eq!(ids(&q("wages"), true), ["b"]);
+        assert!(ids(&q("wages"), false).is_empty());
+        // Has SSN is a text filter: not applied without text.
+        let ssn = Query {
+            has_ssn: true,
+            ..Query::default()
+        };
+        assert_eq!(ids(&ssn, true), ["b"]);
+        assert_eq!(ids(&ssn, false), ["a", "b", "c"]);
+        // Details still narrow it.
+        let y = Query {
+            text: "pdf".into(),
+            year: Some(Year::Year(2025)),
+            ..Query::default()
+        };
+        assert_eq!(ids(&y, false), ["a"]);
     }
 
     #[test]

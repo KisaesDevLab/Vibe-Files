@@ -704,7 +704,9 @@ impl eframe::App for VibeFilesApp {
         let mut segments = vec![format!("vibe-files {}", env!("CARGO_PKG_VERSION"))];
         if let Screen::Open(o) = &mut self.screen {
             let o = &mut **o;
-            segments.insert(0, o.ocr.footer(&o.opened.conn));
+            if !o.ocr.off {
+                segments.insert(0, o.ocr.footer(&o.opened.conn));
+            }
             segments.insert(
                 0,
                 format!(

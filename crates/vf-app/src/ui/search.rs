@@ -244,7 +244,11 @@ pub fn show(
                 let label = ui.label("Search for");
                 ui.add(
                     egui::TextEdit::singleline(&mut s.text)
-                        .hint_text("text, names, EINs…")
+                        .hint_text(if vf_index::search::text_search() {
+                            "text, names, EINs…"
+                        } else {
+                            "words in the file name or its folders…"
+                        })
                         .desired_width(420.0),
                 )
                 .labelled_by(label.id);
@@ -263,7 +267,10 @@ pub fn show(
             });
             filters(ui, s, snap);
             save_row(ui, s, root, ctx, device_id);
-            near_row(ui, s, catalog, root);
+            // A report on the documents' text: only while text is read (PA-65).
+            if vf_index::search::text_search() {
+                near_row(ui, s, catalog, root);
+            }
         });
     s.run_if_changed(catalog, ctx, ui.ctx());
     egui::CentralPanel::default().show(ui, |ui| {
@@ -280,7 +287,11 @@ pub fn show(
                 ui,
                 "Search the cabinet",
                 &[
-                    "Type in Search for above: words in the documents (scans too, once OCR has read them), file names and details.",
+                    if vf_index::search::text_search() {
+                        "Type in Search for above: words in the documents (scans too, once OCR has read them), file names and details."
+                    } else {
+                        "Type in Search for above: words in the file's name or its folders. The text inside documents is not searched."
+                    },
                     "The filters narrow it to a client, a year, a doc type or a status.",
                 ],
             );
@@ -579,7 +590,10 @@ fn filters(ui: &mut egui::Ui, s: &mut SearchTab, snap: &Snapshot) {
         text_filter(ui, "to", &mut f.filed_to, "YYYY-MM-DD");
         text_filter(ui, "Filed by", &mut f.filed_by, "anyone");
         text_filter(ui, "Tag", &mut f.tag, "any");
-        ui.checkbox(&mut f.has_ssn, "Has SSN");
+        // A filter on the documents' text: only while text is read (PA-65).
+        if vf_index::search::text_search() {
+            ui.checkbox(&mut f.has_ssn, "Has SSN");
+        }
         if *f != Query::default() && ui.small_btn("Clear filters").clicked() {
             *f = Query::default();
             s.year_text.clear();
