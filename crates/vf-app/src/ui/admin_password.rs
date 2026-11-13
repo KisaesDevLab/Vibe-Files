@@ -24,7 +24,8 @@ fn secret(ui: &mut egui::Ui, label: &str, v: &mut String) {
         .labelled_by(l.id);
 }
 
-pub fn show(ui: &mut egui::Ui, p: &mut PasswordPage, env: &mut Env) {
+/// `open`: the Admin pages left open while Admin is locked (PA-64); a tick saves it.
+pub fn show(ui: &mut egui::Ui, p: &mut PasswordPage, env: &mut Env, open: &mut Vec<String>) {
     let has = trash::has_pin(env.root);
     ui.label(RichText::new("Admin password").strong().size(16.0));
     ui.label(widgets::caption(
@@ -97,6 +98,68 @@ pub fn show(ui: &mut egui::Ui, p: &mut PasswordPage, env: &mut Env) {
     }
     if let Some(e) = &p.error {
         ui.label(RichText::new(e).color(theme::error()));
+    }
+    ui.add_space(16.0);
+    open_while_locked(ui, p, env, open, has);
+}
+
+/// Which Admin pages people without the password may open while Admin is locked (owner
+/// 2026-11-13, PA-64). This page is never one of them.
+fn open_while_locked(
+    ui: &mut egui::Ui,
+    p: &mut PasswordPage,
+    env: &mut Env,
+    open: &mut Vec<String>,
+    has: bool,
+) {
+    ui.label(RichText::new("Open while Admin is locked").strong());
+    ui.label(widgets::caption(
+        "The pages ticked here can be opened and used by anyone while Admin is locked; the others          wait for the admin password. Nothing ticked: all of Admin is locked. Emptying the trash          and releasing a legal hold ask for the password wherever they are.",
+    ));
+    if !has {
+        ui.label(widgets::caption(
+            "No admin password is set, so every page is open now; this applies once one is set.",
+        ));
+    }
+    ui.add_space(4.0);
+    let mut changed = false;
+    let mut group = "";
+    egui::ScrollArea::vertical()
+        .id_salt("admin-open-pages")
+        .auto_shrink([false, true])
+        .show(ui, |ui| {
+            for (g, item) in crate::ui::admin::lockable() {
+                if g != group {
+                    group = g;
+                    ui.add_space(4.0);
+                    ui.label(RichText::new(g).small().color(theme::ink_muted()));
+                }
+                let mut on = open.iter().any(|o| o == item);
+                if ui.checkbox(&mut on, item).changed() {
+                    open.retain(|o| o != item);
+                    if on {
+                        open.push(item.to_string());
+                    }
+                    changed = true;
+                }
+            }
+        });
+    if changed {
+        match trash::set_open_pages(env.conn, env.root, env.device_id, open) {
+            Ok(()) => {
+                p.notice = Some(match open.len() {
+                    0 => "All of Admin is locked.".into(),
+                    1 => "1 page is open while Admin is locked.".into(),
+                    n => format!("{n} pages are open while Admin is locked."),
+                });
+                p.error = None;
+            }
+            Err(e) => {
+                // As the cabinet has it.
+                *open = trash::open_pages(env.root);
+                p.error = Some(format!("Not saved: {e}"));
+            }
+        }
     }
 }
 

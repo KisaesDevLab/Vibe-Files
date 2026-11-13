@@ -866,6 +866,52 @@ pub fn remove_pin(
         .map_err(|e| e.to_string())
 }
 
+/// `_Vibe/admin_open.json`: the Admin pages anyone may open while the admin password locks
+/// Admin (owner 2026-11-13, PA-64), by the names the Admin page lists them under.
+pub fn open_pages_file(root: &Path) -> PathBuf {
+    root.join(cabinet::VIBE_DIR).join("admin_open.json")
+}
+
+/// The Admin pages open while Admin is locked; none when the file is missing or unreadable
+/// (then everything waits for the password, as before).
+pub fn open_pages(root: &Path) -> Vec<String> {
+    std::fs::read_to_string(open_pages_file(root))
+        .ok()
+        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+        .and_then(|v| {
+            v.get("open")?.as_array().map(|a| {
+                a.iter()
+                    .filter_map(|x| x.as_str().map(str::to_owned))
+                    .collect()
+            })
+        })
+        .unwrap_or_default()
+}
+
+/// Sets the Admin pages open while Admin is locked. Audited (`admin_open_set`). The caller is
+/// an unlocked Admin session (the page that offers this is never one of them).
+pub fn set_open_pages(
+    conn: &mut Connection,
+    root: &Path,
+    device_id: &str,
+    pages: &[String],
+) -> Result<(), String> {
+    let body = json!({ "open": pages, "set": vf_core::now_rfc3339() });
+    cabinet::write_replace(
+        &open_pages_file(root),
+        &serde_json::to_vec_pretty(&body).expect("serializes"),
+    )?;
+    Transaction::new(PIN_LABEL)
+        .audit(AuditEntry::new(
+            "admin_open_set",
+            None,
+            json!({ "open": pages }),
+        ))
+        .commit(conn, &mut NoFileOps, &Actor::device(device_id))
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use vf_core::db::Storage;

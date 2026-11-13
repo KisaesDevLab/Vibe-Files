@@ -887,9 +887,18 @@ impl eframe::App for VibeFilesApp {
                     root: &opened.root,
                     device_id: &self.config.device_id,
                 };
-                // The admin password (PA-24): Admin waits behind the lock screen.
-                if self.tab == Tab::Admin && !*admin_unlocked && vf_fs::trash::has_pin(&opened.root)
-                {
+                // The admin password (PA-24): Admin waits behind the lock screen, but for the
+                // pages the admin left open (PA-64), which are listed with "Unlock Admin…".
+                let admin_locked = self.tab == Tab::Admin
+                    && !*admin_unlocked
+                    && vf_fs::trash::has_pin(&opened.root);
+                let some_open = admin_locked && {
+                    let a = tab_admin.get_or_insert_with(|| Admin::load(&env));
+                    !a.open.is_empty() && !a.unlock_requested
+                };
+                if admin_locked && !some_open {
+                    let mut back = false;
+                    let can_go_back = tab_admin.as_ref().is_some_and(|a| !a.open.is_empty());
                     egui::CentralPanel::default().show(ui, |ui| {
                         if let crate::ui::admin_password::Unlock::Unlocked =
                             crate::ui::admin_password::lock_screen(
@@ -900,8 +909,20 @@ impl eframe::App for VibeFilesApp {
                             )
                         {
                             *admin_unlocked = true;
+                            back = true;
+                        }
+                        if can_go_back {
+                            ui.vertical_centered(|ui| {
+                                ui.add_space(8.0);
+                                if ui.button("Back to the open pages").clicked() {
+                                    back = true;
+                                }
+                            });
                         }
                     });
+                    if back && let Some(a) = tab_admin.as_mut() {
+                        a.unlock_requested = false;
+                    }
                 } else if self.tab == Tab::Admin {
                     let a = tab_admin.get_or_insert_with(|| Admin::load(&env));
                     a.capture = self.config.ingest.print_capture.clone();
@@ -914,9 +935,13 @@ impl eframe::App for VibeFilesApp {
                             state: o_sweep,
                             catalog: &opened.catalog,
                         },
+                        admin_locked,
                     );
                     if std::mem::take(&mut a.lock_requested) {
                         *admin_unlocked = false;
+                        // As the cabinet has it now (another PC's admin may have changed it).
+                        a.open = vf_fs::trash::open_pages(&opened.root);
+                        a.unlock_requested = false;
                     }
                     if std::mem::take(&mut a.audit.verify_requested) {
                         o_chain.verify_now();
@@ -3810,6 +3835,57 @@ mod tests {
         click(&mut h, "Lock Admin");
         h.run();
         assert!(h.query_by_label("Admin is locked").is_some());
+        // PA-64: the admin leaves two pages open; locked, only those are listed.
+        type_into(&mut h, "Admin password", "invented-pass-1");
+        click(&mut h, "Unlock");
+        h.run();
+        click(&mut h, "Admin password");
+        h.run();
+        assert!(h.query_by_label("Open while Admin is locked").is_some());
+        // The tick box, not the page of the same name in the list.
+        use egui_kittest::kittest::NodeT;
+        for name in ["Devices", "Audit trail"] {
+            let boxes: Vec<_> = h
+                .query_all_by_label(name)
+                .filter(|n| n.accesskit_node().role() == egui::accesskit::Role::CheckBox)
+                .collect();
+            assert_eq!(boxes.len(), 1, "{name}");
+            boxes[0].click();
+            h.run();
+        }
+        assert_eq!(
+            vf_fs::trash::open_pages(&root),
+            ["Devices".to_string(), "Audit trail".to_string()]
+        );
+        click(&mut h, "Lock Admin");
+        h.run();
+        assert!(h.query_by_label("Admin is locked").is_none());
+        assert!(h.query_by_label("Unlock Admin…").is_some());
+        // Devices is the page shown too (its heading), so more than one.
+        assert!(h.query_all_by_label("Devices").count() >= 1);
+        assert!(h.query_by_label("Audit trail").is_some());
+        for hidden in [
+            "Doc types (0)",
+            "Merge cabinets",
+            "Admin password",
+            "Lock Admin",
+        ] {
+            assert!(h.query_by_label(hidden).is_none(), "{hidden}");
+        }
+        // Unlock Admin… asks for the password; Back returns to the open pages.
+        click(&mut h, "Unlock Admin…");
+        h.run();
+        assert!(h.query_by_label("Admin is locked").is_some());
+        click(&mut h, "Back to the open pages");
+        h.run();
+        assert!(h.query_by_label("Unlock Admin…").is_some());
+        click(&mut h, "Unlock Admin…");
+        h.run();
+        type_into(&mut h, "Admin password", "invented-pass-1");
+        click(&mut h, "Unlock");
+        h.run();
+        assert!(h.query_by_label("Lock Admin").is_some());
+        assert!(h.query_by_label("Merge cabinets").is_some());
     }
 
     /// Text size (owner 2026-11-04): the header's A+ / A- change it and this PC keeps it.

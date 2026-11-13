@@ -65,6 +65,37 @@ const NAV: &[(&str, &[&str])] = &[
     ("SECURITY", &["Admin password", "Integrity sweep", "Trash"]),
 ];
 
+/// The pages of [`NAV`] an admin may leave open while Admin is locked (PA-64): every one but
+/// Admin password, where the password and this choice are set.
+pub fn lockable() -> impl Iterator<Item = (&'static str, &'static str)> {
+    NAV.iter()
+        .flat_map(|(group, items)| items.iter().map(move |i| (*group, *i)))
+        .filter(|(_, i)| *i != "Admin password")
+}
+
+/// The page a [`NAV`] name opens.
+fn page_of(item: &str) -> Option<Page> {
+    Some(match item {
+        "Devices" => Page::Devices,
+        "Doc types" => Page::DocTypes,
+        "Folder templates" => Page::Templates,
+        "Folder import" => Page::Import,
+        "Merge cabinets" => Page::Merge,
+        "Print capture & parsers" => Page::PrintCapture,
+        "Portal" => Page::Portal,
+        "Portal requests" => Page::PortalRequests,
+        "Audit trail" => Page::Audit,
+        "Retention classes" => Page::Retention,
+        "Disposition" => Page::Disposition,
+        "Legal holds" => Page::Holds,
+        "Safeguards appendix" => Page::Safeguards,
+        "Admin password" => Page::Password,
+        "Integrity sweep" => Page::Sweep,
+        "Trash" => Page::Trash,
+        _ => return None,
+    })
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Editing {
     Closed,
@@ -141,6 +172,11 @@ pub struct Admin {
     pub password: crate::ui::admin_password::PasswordPage,
     /// "Lock Admin" pressed (the app ends the unlocked session).
     pub lock_requested: bool,
+    /// The pages anyone may open while Admin is locked (PA-64), as `_Vibe/admin_open.json`
+    /// had them when Admin was opened, locked or changed here.
+    pub open: Vec<String>,
+    /// "Unlock Admin…" pressed on the locked page list: the app shows the lock screen.
+    pub unlock_requested: bool,
     pub devices: crate::ui::devices::DevicesPage,
     pub templates: crate::ui::templates::TemplatesPage,
     /// Admin › Portal and Portal requests (PA-37).
@@ -178,6 +214,8 @@ impl Admin {
             trash: Default::default(),
             password: Default::default(),
             lock_requested: false,
+            open: vf_fs::trash::open_pages(env.root),
+            unlock_requested: false,
             devices: Default::default(),
             templates: Default::default(),
             portal: Default::default(),
@@ -318,13 +356,32 @@ pub struct SweepEnv<'a> {
     pub catalog: &'a std::path::Path,
 }
 
-pub fn show(ui: &mut egui::Ui, a: &mut Admin, env: &mut Env, sweep: SweepEnv) {
+/// `locked`: the admin password is set and this session has not given it. Only the pages the
+/// admin left open are listed and shown (PA-64).
+pub fn show(ui: &mut egui::Ui, a: &mut Admin, env: &mut Env, sweep: SweepEnv, locked: bool) {
     let has_password = vf_fs::trash::has_pin(env.root);
+    if locked {
+        // The page shown is always one left open.
+        let is_open = |a: &Admin, p: Page| a.open.iter().any(|o| page_of(o) == Some(p));
+        if a.page == Page::Password || !is_open(a, a.page) {
+            match a
+                .open
+                .iter()
+                .find_map(|o| page_of(o).filter(|p| *p != Page::Password))
+            {
+                Some(p) => a.page = p,
+                None => {
+                    a.unlock_requested = true;
+                    return;
+                }
+            }
+        }
+    }
     egui::Panel::left("admin-nav")
         .exact_size(248.0)
         .resizable(false)
         .frame(egui::Frame::new().fill(theme::pane()).inner_margin(10))
-        .show(ui, |ui| nav(ui, a, has_password));
+        .show(ui, |ui| nav(ui, a, has_password, locked));
     egui::CentralPanel::default().show(ui, |ui| match a.page {
         Page::DocTypes => doc_types(ui, a, env),
         Page::PrintCapture => {
@@ -370,7 +427,7 @@ pub fn show(ui: &mut egui::Ui, a: &mut Admin, env: &mut Env, sweep: SweepEnv) {
                 a.reload(env);
             }
         }
-        Page::Password => crate::ui::admin_password::show(ui, &mut a.password, env),
+        Page::Password => crate::ui::admin_password::show(ui, &mut a.password, env, &mut a.open),
         Page::Portal => {
             egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
@@ -403,8 +460,16 @@ pub fn show(ui: &mut egui::Ui, a: &mut Admin, env: &mut Env, sweep: SweepEnv) {
     });
 }
 
-fn nav(ui: &mut egui::Ui, a: &mut Admin, has_password: bool) {
-    if has_password {
+fn nav(ui: &mut egui::Ui, a: &mut Admin, has_password: bool, locked: bool) {
+    if locked {
+        if ui
+            .button("Unlock Admin…")
+            .on_hover_text("Enter the admin password to see every Admin page.")
+            .clicked()
+        {
+            a.unlock_requested = true;
+        }
+    } else if has_password {
         if ui
             .button("Lock Admin")
             .on_hover_text("Ask for the admin password again on this PC.")
@@ -422,9 +487,18 @@ fn nav(ui: &mut egui::Ui, a: &mut Admin, has_password: bool) {
         a.page = Page::Password;
     }
     for (group, items) in NAV {
+        // Locked: only the pages left open, and no heading over none.
+        let shown =
+            |item: &str| !locked || (item != "Admin password" && a.open.iter().any(|o| o == item));
+        if !items.iter().any(|i| shown(i)) {
+            continue;
+        }
         ui.add_space(6.0);
         ui.label(RichText::new(*group).small().color(theme::ink_muted()));
         for item in *items {
+            if !shown(item) {
+                continue;
+            }
             if *item == "Doc types" {
                 let label = format!("Doc types ({})", a.types.len());
                 if ui
@@ -947,6 +1021,7 @@ mod tests {
                             state: &mut s.sweep,
                             catalog: &s.catalog,
                         },
+                        false,
                     )
                 },
                 State {
