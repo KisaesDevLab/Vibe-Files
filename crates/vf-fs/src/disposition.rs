@@ -578,7 +578,7 @@ pub fn destroy_pulled(
         let _ = std::fs::remove_file(stored.with_extension("json"));
     }
     let now = vf_core::now_rfc3339();
-    let mut tx = Transaction::new(crate::disposition::RUN_LABEL)
+    let tx = Transaction::new(crate::disposition::RUN_LABEL)
         .catalog(Stmt::new(
             "UPDATE document SET deleted_at = ?2, tombstone_reason = 'disposed', rev = rev + 1,
                updated_at = ?2, device_id = ?3 WHERE id = ?1",
@@ -588,26 +588,11 @@ pub fn destroy_pulled(
             "DELETE FROM version WHERE doc_id = ?1",
             vec![doc_id.into()],
         ))
-        .catalog(Stmt::new(
-            "DELETE FROM doc_fts_doc WHERE doc_id = ?1",
-            vec![doc_id.into()],
-        ))
-        .catalog(Stmt::new(
-            "DELETE FROM ocr_job WHERE doc_id = ?1",
-            vec![doc_id.into()],
-        ))
         .audit(AuditEntry::new(
             "disposed_elsewhere",
             Some(doc_id),
-            json!({ "versions": hashes.len() - 1 }),
+            json!({ "versions": hashes.len().saturating_sub(1) }),
         ));
-    for h in &hashes {
-        tx = tx.catalog(Stmt::new(
-            "DELETE FROM page_text WHERE hash = ?1
-               AND NOT EXISTS (SELECT 1 FROM document WHERE hash = ?1 AND deleted_at IS NULL)",
-            vec![h.clone().into()],
-        ));
-    }
     crate::fileops::commit(conn, root, tx, device_id)?;
     Ok(true)
 }
@@ -932,14 +917,6 @@ pub fn destroy_due(
                 ],
             ))
             .catalog(Stmt::new(
-                "DELETE FROM doc_fts_doc WHERE doc_id = ?1",
-                vec![v.doc_id.clone().into()],
-            ))
-            .catalog(Stmt::new(
-                "DELETE FROM ocr_job WHERE doc_id = ?1",
-                vec![v.doc_id.clone().into()],
-            ))
-            .catalog(Stmt::new(
                 "DELETE FROM version WHERE doc_id = ?1",
                 vec![v.doc_id.clone().into()],
             ))
@@ -954,14 +931,6 @@ pub fn destroy_due(
                 json!({ "rel_path": v.rel_path, "class": v.class, "run": run_id,
                         "certificate": cert_rel }),
             ));
-        for h in &v.hashes {
-            // Page text is kept by content: only when nothing else has that content.
-            tx = tx.catalog(Stmt::new(
-                "DELETE FROM page_text WHERE hash = ?1
-                   AND NOT EXISTS (SELECT 1 FROM document WHERE hash = ?1 AND deleted_at IS NULL)",
-                vec![h.clone().into()],
-            ));
-        }
     }
     tx = tx.audit(AuditEntry::new(
         "disposition_run",
@@ -1288,15 +1257,6 @@ mod tests {
         let pc_left = crate::intake::pc_dir(&root, "pc-a").join("overwritten/b1/return.pdf");
         std::fs::create_dir_all(pc_left.parent().unwrap()).unwrap();
         std::fs::copy(&old, &pc_left).unwrap();
-        f.conn
-            .execute_batch(&format!(
-                "INSERT INTO page_text (hash, page, source, text) VALUES ('{h}', 0, 'pdf', 'Form 1040');
-                 INSERT INTO doc_fts (text, doc_id, page) VALUES ('Form 1040', 'ret-2018', 0);
-                 INSERT INTO doc_fts_doc (fts_row, doc_id) VALUES (last_insert_rowid(), 'ret-2018');",
-                h = rep.new_hash
-            ))
-            .unwrap();
-
         let today = d(2026, 11, 3);
         let lines: Vec<Line> = eligible(&f.conn, &root, today)
             .unwrap()
@@ -1324,11 +1284,6 @@ mod tests {
         assert!(!pc_left.exists(), "none in a PC's Intake folder either");
         assert!(root.join("B/2019/w2.pdf").is_file(), "held: kept");
         let n = |sql: &str| -> i64 { f.conn.query_row(sql, [], |r| r.get(0)).unwrap() };
-        assert_eq!(n("SELECT count(*) FROM page_text"), 0);
-        assert_eq!(
-            n("SELECT count(*) FROM doc_fts WHERE doc_id = 'ret-2018'"),
-            0
-        );
         assert_eq!(
             n("SELECT count(*) FROM version WHERE doc_id = 'ret-2018'"),
             0

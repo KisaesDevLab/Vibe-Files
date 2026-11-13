@@ -35,7 +35,7 @@ Undo is refused, with **Undo failed:** and the reason, when undoing would lose w
 
 - **Intake batches.** Intake has its own undo, see below.
 - **Folder import.** It has its own undo in Admin › **Folder import**.
-- Work done in the background: text reading (OCR), rebuilding the catalog, B2 sync, and files copied in with Explorer that Browse picked up.
+- Work done in the background: rebuilding the catalog, B2 sync, and files copied in with Explorer that Browse picked up.
 - Firm settings: doc types, retention classes, folder templates and the client list.
 - Legal holds and disposition.
 - Emptying the trash: those files are gone for good.

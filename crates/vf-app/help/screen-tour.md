@@ -31,7 +31,6 @@ When files are waiting to be processed or filed, the Intake tab shows a count, f
 The thin bar at the bottom shows, from left to right:
 
 - How many documents and clients the cabinet holds, for example `1204 documents · 86 clients`.
-- The state of text reading (OCR) for Search, such as **Search index up to date**, **OCR: 12 documents to read**, or **OCR paused on this PC**. See [OCR](help:ocr).
 - The program version, such as `vibe-files 0.1.2`.
 
 On the right is the cabinet name with a small dot.

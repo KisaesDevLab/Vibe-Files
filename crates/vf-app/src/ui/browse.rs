@@ -2141,8 +2141,6 @@ pub fn show(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env) {
                     doc_id: d.id.clone(),
                     name: d.name().to_string(),
                     path: env.root.join(&d.rel_path),
-                    // Not fingerprinted yet (PA-60): no text has been read for it either.
-                    hash: d.hash.clone().unwrap_or_default(),
                 }
             })
             .collect();

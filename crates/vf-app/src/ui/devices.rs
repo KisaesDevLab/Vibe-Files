@@ -151,38 +151,6 @@ fn cloud_section(ui: &mut egui::Ui, p: &mut DevicesPage, env: &mut Env) {
     ui.add_space(12.0);
 }
 
-/// What text recognition reads in this catalog (PA-34, Q-66).
-fn reads_section(ui: &mut egui::Ui, p: &mut DevicesPage, env: &mut Env) {
-    use vf_ocr::queue::{self, Reads};
-    ui.label(RichText::new("Text recognition").strong().size(16.0));
-    let Ok(now) = queue::reads(env.conn) else {
-        return;
-    };
-    let mut all = now == Reads::All;
-    ui.horizontal(|ui| {
-        ui.radio_value(&mut all, true, "Read every PDF document");
-        ui.radio_value(&mut all, false, "Read only documents filed from now on");
-    });
-    ui.label(widgets::caption(match &now {
-        Reads::All => "Documents already in the cabinet are read too, a few at a time, Intake filings first.".to_string(),
-        Reads::NewSince(t) => format!(
-            "Documents filed since {} are read, through Vibe Files or put in the client folders outside it. The files a folder import found are searchable by name and details only.",
-            widgets::local_time(t)
-        ),
-    }));
-    if all != (now == Reads::All) {
-        let to = if all {
-            Reads::All
-        } else {
-            Reads::NewSince(vf_core::now_rfc3339())
-        };
-        match queue::set_reads(env.conn, &to) {
-            Ok(()) => p.error = None,
-            Err(e) => p.error = Some(format!("Could not change text recognition: {e}")),
-        }
-    }
-}
-
 /// This PC's shared catalog (Q-67: a Remote Desktop server's logins index the cabinet once).
 fn shared_section(ui: &mut egui::Ui, p: &mut DevicesPage, env: &mut Env) {
     ui.label(RichText::new("This PC's catalog").strong().size(16.0));
@@ -235,7 +203,6 @@ pub struct DevicesPage {
 pub fn show(ui: &mut egui::Ui, p: &mut DevicesPage, env: &mut Env) {
     shared_section(ui, p, env);
     ui.add_space(12.0);
-    reads_section(ui, p, env);
     ui.add_space(12.0);
     servers_section(ui, p, env);
     cloud_section(ui, p, env);

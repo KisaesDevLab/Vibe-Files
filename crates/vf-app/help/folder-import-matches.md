@@ -19,4 +19,4 @@ Tick **Only folders sharing a client** to list just these folders. On each row:
 - **Merge**: tick it on the folders to combine (on one is enough when the other is bound or ticked to import). The folder kept is the client's bound folder, else the one with more files; its row says **kept: the others merge into it**, the others **merges into …**. At **Import**, their files move into the folder kept, into the same sub-folders (a name already there gets ` (2)`), and the emptied folders are removed. A folder still holding something else, such as a `_Vibe` folder, stays.
 - **New client**: the folder becomes a client of its own, named after it.
 
-**Undo the last import** puts merged files back in their own folders. It is refused for a merged file changed since, so OCR does not rewrite those files until the next import.
+**Undo the last import** puts merged files back in their own folders. It is refused for a merged file changed since.

@@ -55,7 +55,6 @@ impl Worker {
 }
 const THUMB_WIDTH: u32 = 96;
 const ROW_HEIGHT: f32 = 132.0;
-const MARK_BG: Color32 = Color32::from_rgb(0xFF, 0xE8, 0x8A);
 
 /// What "This client" and "This folder" mean: the node selected in Browse.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -104,9 +103,6 @@ pub struct SearchTab {
     /// A search was saved: the app reloads Browse's Saved searches.
     pub saved_changed: bool,
     pub notice: Option<String>,
-    near_job: Option<std::sync::mpsc::Receiver<Result<Vec<vf_index::neardup::Pair>, String>>>,
-    /// The last near-duplicate report.
-    pub near: Option<Result<Vec<vf_index::neardup::Pair>, String>>,
 }
 
 impl SearchTab {
@@ -215,10 +211,6 @@ impl SearchTab {
     pub fn refresh(&mut self) {
         self.stale = true;
     }
-
-    fn terms(&self) -> Vec<String> {
-        self.text.split_whitespace().map(str::to_string).collect()
-    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -244,11 +236,7 @@ pub fn show(
                 let label = ui.label("Search for");
                 ui.add(
                     egui::TextEdit::singleline(&mut s.text)
-                        .hint_text(if vf_index::search::text_search() {
-                            "text, names, EINs…"
-                        } else {
-                            "words in the file name or its folders…"
-                        })
+                        .hint_text("words in the file name or its folders…")
                         .desired_width(420.0),
                 )
                 .labelled_by(label.id);
@@ -267,10 +255,6 @@ pub fn show(
             });
             filters(ui, s, snap);
             save_row(ui, s, root, ctx, device_id);
-            // A report on the documents' text: only while text is read (PA-65).
-            if vf_index::search::text_search() {
-                near_row(ui, s, catalog, root);
-            }
         });
     s.run_if_changed(catalog, ctx, ui.ctx());
     egui::CentralPanel::default().show(ui, |ui| {
@@ -287,11 +271,7 @@ pub fn show(
                 ui,
                 "Search the cabinet",
                 &[
-                    if vf_index::search::text_search() {
-                        "Type in Search for above: words in the documents (scans too, once OCR has read them), file names and details."
-                    } else {
-                        "Type in Search for above: words in the file's name or its folders. The text inside documents is not searched."
-                    },
+                    "Type in Search for above: words in the file's name or its folders. The text inside documents is not searched.",
                     "The filters narrow it to a client, a year, a doc type or a status.",
                 ],
             );
@@ -305,7 +285,6 @@ pub fn show(
                 .map(|d| format!(" · {} ms", d.as_millis()))
                 .unwrap_or_default()
         )));
-        let terms = s.terms();
         egui::ScrollArea::vertical().auto_shrink(false).show_rows(
             ui,
             ROW_HEIGHT,
@@ -324,7 +303,7 @@ pub fn show(
                             r.request(Request {
                                 key: key.clone(),
                                 path: root.join(&hit.rel_path),
-                                page: hit.page.unwrap_or(0) as usize,
+                                page: 0,
                                 width: THUMB_WIDTH,
                                 terms: vec![],
                             });
@@ -335,8 +314,9 @@ pub fn show(
                             root,
                             &hit.doc_id,
                             &hit.rel_path,
-                            hit.page.unwrap_or(0) as usize,
-                            terms.clone(),
+                            0,
+                            // The words matched the name, not the pages: nothing to mark there.
+                            vec![],
                         ));
                     }
                 }
@@ -390,79 +370,6 @@ fn save_row(ui: &mut egui::Ui, s: &mut SearchTab, root: &Path, ctx: &Context, de
             ui.label(widgets::caption(n));
         }
     });
-}
-
-/// Similarity at or above which two documents are reported as near duplicates.
-const NEAR: f32 = 0.8;
-
-/// `Near-duplicate report`: documents whose text is almost the same but whose files differ
-/// (a rescan, a printed and a scanned copy). Runs on its own thread and catalog connection.
-fn near_row(ui: &mut egui::Ui, s: &mut SearchTab, catalog: &Path, root: &Path) {
-    if let Some(rx) = &s.near_job
-        && let Ok(r) = rx.try_recv()
-    {
-        s.near = Some(r);
-        s.near_job = None;
-    }
-    ui.horizontal(|ui| {
-        let busy = s.near_job.is_some();
-        if ui
-            .add_enabled(!busy, egui::Button::new("Near-duplicate report"))
-            .on_hover_text("Documents whose text is at least 80 % the same but whose files differ.")
-            .clicked()
-        {
-            let catalog = catalog.to_path_buf();
-            let (tx, rx) = std::sync::mpsc::channel();
-            let ctx = ui.ctx().clone();
-            std::thread::spawn(move || {
-                let r = vf_core::db::open(&catalog, vf_core::db::Storage::Local)
-                    .and_then(|c| vf_index::neardup::report(&c, NEAR))
-                    .map_err(|e| e.to_string());
-                let _ = tx.send(r);
-                ctx.request_repaint();
-            });
-            s.near_job = Some(rx);
-        }
-        if busy {
-            ui.spinner();
-        }
-        match &s.near {
-            Some(Ok(p)) if p.is_empty() => {
-                ui.label(widgets::caption("No near duplicates."));
-            }
-            Some(Ok(p)) => {
-                ui.label(widgets::caption(format!("{} pairs", p.len())));
-            }
-            Some(Err(e)) => {
-                ui.label(widgets::caption(format!("Report failed: {e}")));
-            }
-            None => {}
-        }
-        if s.near.is_some() && ui.small_btn("Close report").clicked() {
-            s.near = None;
-        }
-    });
-    let mut open = None;
-    if let Some(Ok(pairs)) = &s.near {
-        egui::ScrollArea::vertical()
-            .id_salt("near-dups")
-            .max_height(180.0)
-            .show(ui, |ui| {
-                for p in pairs {
-                    ui.horizontal(|ui| {
-                        ui.label(format!("{:.0} %", p.similarity * 100.0));
-                        for (id, path) in [(&p.a, &p.a_path), (&p.b, &p.b_path)] {
-                            if ui.link(path).clicked() {
-                                open = Some(Doc::at(root, id, path, 0, vec![]));
-                            }
-                        }
-                    });
-                }
-            });
-    }
-    if open.is_some() {
-        s.open = open;
-    }
 }
 
 fn filters(ui: &mut egui::Ui, s: &mut SearchTab, snap: &Snapshot) {
@@ -590,10 +497,6 @@ fn filters(ui: &mut egui::Ui, s: &mut SearchTab, snap: &Snapshot) {
         text_filter(ui, "to", &mut f.filed_to, "YYYY-MM-DD");
         text_filter(ui, "Filed by", &mut f.filed_by, "anyone");
         text_filter(ui, "Tag", &mut f.tag, "any");
-        // A filter on the documents' text: only while text is read (PA-65).
-        if vf_index::search::text_search() {
-            ui.checkbox(&mut f.has_ssn, "Has SSN");
-        }
         if *f != Query::default() && ui.small_btn("Clear filters").clicked() {
             *f = Query::default();
             s.year_text.clear();
@@ -643,7 +546,7 @@ fn text_filter(ui: &mut egui::Ui, label: &str, v: &mut Option<String>, hint: &st
 }
 
 fn thumb_key(h: &Hit) -> String {
-    format!("{}#{}", h.doc_id, h.page.unwrap_or(0))
+    h.doc_id.clone()
 }
 
 fn pump_thumbs(ctx: &egui::Context, s: &mut SearchTab) {
@@ -698,39 +601,15 @@ fn row(ui: &mut egui::Ui, h: &Hit, thumb: Option<&egui::TextureHandle>) -> egui:
                 egui::Label::new(RichText::new(widgets::file_name(&h.rel_path)).strong())
                     .selectable(false),
             );
-            let mut meta = vec![
+            let meta = [
                 h.client.clone().unwrap_or_else(|| "No client".into()),
                 widgets::year_label(h.tax_year),
                 h.doc_type
                     .clone()
                     .unwrap_or_else(|| "Needs doc type".into()),
             ];
-            match h.page {
-                Some(p) if h.pages > 1 => {
-                    meta.push(format!("page {} ({} pages match)", p + 1, h.pages))
-                }
-                Some(p) => meta.push(format!("page {}", p + 1)),
-                None => meta.push("name or details match".into()),
-            }
             ui.add(egui::Label::new(widgets::caption(meta.join(" · "))).selectable(false));
             ui.add(egui::Label::new(widgets::caption(&h.rel_path).small()).selectable(false));
-            if !h.snippet.is_empty() {
-                let mut job = egui::text::LayoutJob::default();
-                for (text, on) in search::runs(&h.snippet) {
-                    let mut fmt = egui::TextFormat {
-                        color: theme::ink(),
-                        ..Default::default()
-                    };
-                    if on {
-                        fmt.background = MARK_BG;
-                        // The mark is pale yellow in both themes: dark text on it.
-                        fmt.color = theme::PAGE_INK;
-                    }
-                    job.append(&text, 0.0, fmt);
-                }
-                job.wrap.max_width = ui.available_width();
-                ui.add(egui::Label::new(job).selectable(false));
-            }
         });
     });
     let resp = inner.response.interact(egui::Sense::click());
@@ -743,5 +622,5 @@ fn row(ui: &mut egui::Ui, h: &Hit, thumb: Option<&egui::TextureHandle>) -> egui:
         );
     }
     ui.separator();
-    resp.on_hover_text("Open in the Viewer at this page")
+    resp.on_hover_text("Open in the Viewer")
 }

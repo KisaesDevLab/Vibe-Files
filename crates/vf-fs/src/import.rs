@@ -1375,7 +1375,8 @@ pub struct Applied {
     pub new_clients: usize,
     pub documents: usize,
     pub mapped: usize,
-    /// PDFs queued for OCR (set by the caller: `vf_ocr::queue::enqueue_missing`).
+    /// Always 0: the text of documents is not read any more (PA-65). Kept so a result saved
+    /// by an earlier build still reads.
     pub ocr_queued: usize,
     /// Documents whose doc type or year was guessed (tagged `import:guessed`; QA P12).
     #[serde(default)]

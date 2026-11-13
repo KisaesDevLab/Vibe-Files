@@ -25,15 +25,6 @@ While printing, the toolbar shows **Printing to** and the printer's name. When i
 
 Vibe Files prints PDFs itself, so it does not depend on which PDF program is installed. Other files, such as Word or Excel documents, are handed to their own program to print, the same as choosing Print when you right-click the file in Explorer. That program uses its own settings, usually the Windows default printer, so the printer and copies chosen in the dialog may not apply. If no program on the PC can print a file, the message says so.
 
-## Taxpayer ID warning
-
-Before the print dialog opens, Vibe Files checks the text of the documents for anything that looks like a Social Security number or an EIN. If it finds one, it asks **Print documents with taxpayer IDs?** and says how many of the documents have one. Printed copies leave the cabinet's protections.
-
-- **Print anyway** goes on to the print dialog.
-- **Cancel** prints nothing.
-
-> The check uses the text Vibe Files has read. A scan that text recognition has not read yet is not checked (see [text recognition](help:ocr)).
-
 ## The audit record
 
 Every document sent to the printer gets one entry in the [audit trail](help:audit): which document, how many pages, how many copies and which printer. No page content is stored. A print of several documents from Browse is recorded together, at the same time. If the audit entry could not be written, the message after printing says so.

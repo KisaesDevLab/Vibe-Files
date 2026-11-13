@@ -1,13 +1,9 @@
-//! Search (P03 step 4): words in the page text (FTS5 trigram, so `3456` finds `12-3456789`)
-//! and in file names, narrowed by catalog metadata. One hit per document: its best page, with
-//! a snippet.
+//! Search: words in a document's path (its file name and its folders), narrowed by catalog
+//! metadata. The text inside documents is not read or searched (owner 2026-11-13, PA-65: at
+//! ~487,000 documents on a share, reading every file cost far more than it gave).
 
 use serde::{Deserialize, Serialize};
 use vf_core::db::Connection;
-
-/// Snippet highlight markers (start, end): control characters the UI turns into styling.
-pub const MARK_START: char = '\u{2}';
-pub const MARK_END: char = '\u{3}';
 
 /// Where to look.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -40,10 +36,11 @@ pub enum DocType {
     Needed,
 }
 
-/// A search. Saved searches store this as JSON (step 6).
+/// A search. Saved searches store this as JSON. A search saved before PA-65 may carry
+/// `has_ssn` (a filter on the documents' text): it is read and ignored.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Query {
-    /// Words; every word must appear (in the text or the file name).
+    /// Words; every word must appear in the document's path (any case, any order).
     #[serde(default)]
     pub text: String,
     #[serde(default)]
@@ -69,9 +66,6 @@ pub struct Query {
     pub filed_by: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tag: Option<String>,
-    /// Text that looks like an SSN (`123-45-6789`). P06's PII detector refines this.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub has_ssn: bool,
 }
 
 impl Query {
@@ -88,31 +82,15 @@ pub struct Hit {
     pub client: Option<String>,
     pub tax_year: Option<i32>,
     pub doc_type: Option<String>,
-    /// Best matching page (0-based); `None` when only the name or metadata matched.
-    pub page: Option<u32>,
-    /// Pages that match.
-    pub pages: usize,
-    /// Text around the match, with [`MARK_START`] / [`MARK_END`] around the words.
-    pub snippet: String,
 }
 
-/// Words of `text` as FTS5 phrases. Trigram needs three characters; shorter words are
-/// matched with LIKE instead.
-fn terms(text: &str) -> (Vec<String>, Vec<String>) {
-    let mut long = Vec::new();
-    let mut short = Vec::new();
-    for w in text.split_whitespace() {
-        let w = w.trim_matches(|c: char| c == '"');
-        if w.is_empty() {
-            continue;
-        }
-        if w.chars().count() >= 3 {
-            long.push(w.to_string());
-        } else {
-            short.push(w.to_string());
-        }
-    }
-    (long, short)
+/// The words of `text` (quotes around a word are dropped).
+fn words(text: &str) -> Vec<String> {
+    text.split_whitespace()
+        .map(|w| w.trim_matches(|c: char| c == '"'))
+        .filter(|w| !w.is_empty())
+        .map(str::to_owned)
+        .collect()
 }
 
 /// `s` with LIKE's wildcards and the escape character escaped (for `ESCAPE '\'`).
@@ -126,108 +104,44 @@ fn like(s: &str) -> String {
     format!("%{}%", escape_like(s))
 }
 
-/// Whether [`search`] looks inside documents (the page text). Off: file names and details only
-/// (owner 2026-11-13, PA-65).
-static TEXT_SEARCH: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
-
-/// Sets whether [`search`] looks inside documents (when a cabinet opens).
-pub fn set_text_search(on: bool) {
-    TEXT_SEARCH.store(on, std::sync::atomic::Ordering::Relaxed);
-}
-
-pub fn text_search() -> bool {
-    TEXT_SEARCH.load(std::sync::atomic::Ordering::Relaxed)
-}
-
-/// Runs `q`, best first, at most `limit` documents.
+/// Runs `q`: the documents whose path holds every word and that pass the filters, newest
+/// filing first, at most `limit`.
 pub fn search(conn: &Connection, q: &Query, limit: usize) -> vf_core::Result<Vec<Hit>> {
-    search_in(conn, q, limit, text_search())
-}
-
-/// [`search`], saying whether the page text is looked at. Without it every word must be in the
-/// file's path, and "Has SSN" (a text filter) is not applied.
-pub fn search_in(
-    conn: &Connection,
-    q: &Query,
-    limit: usize,
-    text: bool,
-) -> vf_core::Result<Vec<Hit>> {
     use vf_core::db::SqlValue as V;
-    let (mut long, mut short) = terms(&q.text);
-    if !text {
-        // Names only: every word is matched in the path, none in the text index.
-        short.append(&mut long);
-    }
     let mut params: Vec<V> = Vec::new();
     let mut p = |v: V| {
         params.push(v);
         format!("?{}", params.len())
     };
-
-    // Matching pages: every long word in the page text (FTS), or in the file name.
-    let mut sql = String::new();
-    let text_match = if long.is_empty() {
-        None
-    } else {
-        let phrase = long
-            .iter()
-            .map(|w| format!("\"{}\"", w.replace('"', "\"\"")))
-            .collect::<Vec<_>>()
-            .join(" AND ");
-        Some(p(V::Text(phrase)))
-    };
     let mut wh: Vec<String> = Vec::new();
-    // Long words: a text hit, or every long word in the file name.
-    if !long.is_empty() {
-        let names: Vec<String> = long
-            .iter()
-            .map(|w| format!("d.rel_path LIKE {} ESCAPE '\\'", p(V::Text(like(w)))))
-            .collect();
+    for w in words(&q.text) {
         wh.push(format!(
-            "(b.doc_id IS NOT NULL OR ({}))",
-            names.join(" AND ")
+            "d.rel_path LIKE {} ESCAPE '\\'",
+            p(V::Text(like(&w)))
         ));
     }
-    // Short words (1-2 characters, too short for the trigram index): in the name, or on a page
-    // of a document the long words matched (looked up by that document's index rows only).
-    // Never a scan of every page's text (PA-34: ~900K documents).
-    for w in &short {
-        let l = p(V::Text(like(w)));
-        if long.is_empty() {
-            wh.push(format!("d.rel_path LIKE {l} ESCAPE '\\'"));
-        } else {
-            wh.push(format!(
-                "(d.rel_path LIKE {l} ESCAPE '\\' OR (b.doc_id IS NOT NULL AND EXISTS (
-                   SELECT 1 FROM doc_fts_doc x JOIN doc_fts f ON f.rowid = x.fts_row
-                   WHERE x.doc_id = d.id AND f.text LIKE {l} ESCAPE '\\')))"
-            ));
-        }
-    }
-    // Document filters: also applied inside the text match, so a narrowed search only ranks
-    // its own pages (P13).
-    let mut docf: Vec<String> = Vec::new();
     match &q.scope {
         Scope::Cabinet => {}
-        Scope::Client(id) => docf.push(format!("d.client_id = {}", p(V::Text(id.clone())))),
+        Scope::Client(id) => wh.push(format!("d.client_id = {}", p(V::Text(id.clone())))),
         Scope::Folder(f) => {
             let f = f.trim_end_matches('/');
-            docf.push(format!(
+            wh.push(format!(
                 "d.rel_path LIKE {} ESCAPE '\\'",
                 p(V::Text(format!("{}/%", escape_like(f))))
             ));
         }
     }
     if let Some(c) = &q.client {
-        docf.push(format!("d.client_id = {}", p(V::Text(c.clone()))));
+        wh.push(format!("d.client_id = {}", p(V::Text(c.clone()))));
     }
     match &q.year {
-        Some(Year::Year(y)) => docf.push(format!("d.tax_year = {}", p(V::Integer(i64::from(*y))))),
-        Some(Year::Permanent) => docf.push("d.tax_year IS NULL".into()),
+        Some(Year::Year(y)) => wh.push(format!("d.tax_year = {}", p(V::Integer(i64::from(*y))))),
+        Some(Year::Permanent) => wh.push("d.tax_year IS NULL".into()),
         None => {}
     }
     match &q.doc_type {
-        Some(DocType::Is(t)) => docf.push(format!("d.doc_type_id = {}", p(V::Text(t.clone())))),
-        Some(DocType::Needed) => docf.push("d.doc_type_id IS NULL".into()),
+        Some(DocType::Is(t)) => wh.push(format!("d.doc_type_id = {}", p(V::Text(t.clone())))),
+        Some(DocType::Needed) => wh.push("d.doc_type_id IS NULL".into()),
         None => {}
     }
     for (col, v) in [
@@ -236,61 +150,30 @@ pub fn search_in(
         ("d.filed_by", &q.filed_by),
     ] {
         if let Some(v) = v {
-            docf.push(format!("{col} = {}", p(V::Text(v.clone()))));
+            wh.push(format!("{col} = {}", p(V::Text(v.clone()))));
         }
     }
     if let Some(f) = &q.filed_from {
-        docf.push(format!(
+        wh.push(format!(
             "substr(d.filed_at, 1, 10) >= {}",
             p(V::Text(f.clone()))
         ));
     }
     if let Some(t) = &q.filed_to {
-        docf.push(format!(
+        wh.push(format!(
             "substr(d.filed_at, 1, 10) <= {}",
             p(V::Text(t.clone()))
         ));
     }
     if let Some(t) = &q.tag {
-        docf.push(format!(
+        wh.push(format!(
             "EXISTS (SELECT 1 FROM document_tag g WHERE g.doc_id = d.id AND g.tag = {})",
             p(V::Text(t.clone()))
         ));
     }
-    if q.has_ssn && text {
-        docf.push(
-            "EXISTS (SELECT 1 FROM page_text x WHERE x.hash = d.hash AND x.text GLOB
-              '*[0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9][0-9][0-9]*')"
-                .into(),
-        );
-    }
-    let cand = if docf.is_empty() {
-        String::new()
-    } else {
-        format!(
-            " AND doc_id IN (SELECT d.id FROM document d WHERE d.deleted_at IS NULL AND {})",
-            docf.join(" AND ")
-        )
-    };
-    wh.extend(docf);
-    sql.push_str("WITH m AS (");
-    match &text_match {
-        // Snippets are made afterwards, for the hits returned only (P13: a common word
-        // matches every page of a 50,000-document cabinet).
-        Some(m) => sql.push_str(&format!(
-            "SELECT doc_id, page, rank, rowid AS fts_row FROM doc_fts WHERE doc_fts MATCH {m}{cand}"
-        )),
-        None => sql
-            .push_str("SELECT NULL AS doc_id, NULL AS page, NULL AS rank, NULL AS fts_row WHERE 0"),
-    }
-    // Per document: its best page (SQLite takes `page`, `fts_row` from the min-rank row).
-    sql.push_str(
-        "), best AS (
-            SELECT doc_id, min(rank) AS rank, page, fts_row, count(*) AS n FROM m GROUP BY doc_id)
-         SELECT d.id, d.rel_path, c.name, d.tax_year, t.name, b.page, coalesce(b.n, 0),
-                b.fts_row
+    let mut sql = String::from(
+        "SELECT d.id, d.rel_path, c.name, d.tax_year, t.name
          FROM document d
-         LEFT JOIN best b ON b.doc_id = d.id
          LEFT JOIN client c ON c.id = d.client_id
          LEFT JOIN doc_type t ON t.id = d.doc_type_id
          WHERE d.deleted_at IS NULL",
@@ -299,69 +182,20 @@ pub fn search_in(
         sql.push_str(" AND ");
         sql.push_str(&w);
     }
-    sql.push_str(" ORDER BY b.rank IS NULL, b.rank, d.filed_at DESC, d.rel_path");
+    sql.push_str(" ORDER BY d.filed_at DESC, d.rel_path");
     let lim = p(V::Integer(limit as i64));
     sql.push_str(&format!(" LIMIT {lim}"));
-
-    let phrase = match &text_match {
-        Some(_) => match &params[0] {
-            V::Text(t) => Some(t.clone()),
-            _ => None,
-        },
-        None => None,
-    };
     let mut st = conn.prepare(&sql)?;
     let rows = st.query_map(vf_core::db::params_from_iter(params), |r| {
-        Ok((
-            Hit {
-                doc_id: r.get(0)?,
-                rel_path: r.get(1)?,
-                client: r.get(2)?,
-                tax_year: r.get(3)?,
-                doc_type: r.get(4)?,
-                page: r.get(5)?,
-                pages: r.get::<_, i64>(6)? as usize,
-                snippet: String::new(),
-            },
-            r.get::<_, Option<i64>>(7)?,
-        ))
+        Ok(Hit {
+            doc_id: r.get(0)?,
+            rel_path: r.get(1)?,
+            client: r.get(2)?,
+            tax_year: r.get(3)?,
+            doc_type: r.get(4)?,
+        })
     })?;
-    let mut hits = rows.collect::<Result<Vec<_>, _>>()?;
-    if let Some(phrase) = phrase {
-        let mut snip = conn.prepare_cached(
-            "SELECT snippet(doc_fts, 0, char(2), char(3), '…', 12) FROM doc_fts
-             WHERE doc_fts MATCH ?1 AND rowid = ?2",
-        )?;
-        for (h, row) in &mut hits {
-            if let Some(row) = row {
-                h.snippet = snip
-                    .query_row(vf_core::db::params![phrase, *row], |r| r.get(0))
-                    .unwrap_or_default();
-            }
-        }
-    }
-    Ok(hits.into_iter().map(|(h, _)| h).collect())
-}
-
-/// `snippet` split into (text, highlighted) runs.
-pub fn runs(snippet: &str) -> Vec<(String, bool)> {
-    let mut out = Vec::new();
-    let mut cur = String::new();
-    let mut on = false;
-    for c in snippet.chars() {
-        if c == MARK_START || c == MARK_END {
-            if !cur.is_empty() {
-                out.push((std::mem::take(&mut cur), on));
-            }
-            on = c == MARK_START;
-        } else {
-            cur.push(if c == '\n' { ' ' } else { c });
-        }
-    }
-    if !cur.is_empty() {
-        out.push((cur, on));
-    }
-    out
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }
 
 #[cfg(test)]
@@ -382,215 +216,112 @@ mod tests {
                 'received', 'client', 'intake', '2026-02-01T10:00:00Z', 'd', 't'),
                ('b', 'c2', 'w2', 2024, 'Smith, John (1002)/Income Tax/2024/W-2 Sample Payroll.pdf', 'hb', 1,
                 'final', 'client', 'kurt', '2025-02-01T10:00:00Z', 'd', 't'),
-               ('c', 'c2', NULL, NULL, 'Smith, John (1002)/Permanent/Setup/EIN letter.pdf', 'hc', 1,
-                'received', 'government', 'intake', '2024-05-01T10:00:00Z', 'd', 't');
-             INSERT INTO document_tag (doc_id, tag) VALUES ('b', 'reviewed');
-             INSERT INTO page_text (hash, page, source, text) VALUES
-               ('hb', 0, 'pdf', 'SSN 987-65-4321 wages');",
+               ('c', 'c2', NULL, NULL, 'Smith, John (1002)/Permanent/Setup/EIN letter.pdf', NULL, 1,
+                'received', 'government', 'intake', '2024-05-01T10:00:00Z', 'd', 't'),
+               ('gone', 'c2', NULL, 2024, 'Smith, John (1002)/Income Tax/2024/old payroll.pdf', 'hd', 1,
+                'received', 'client', 'intake', '2024-01-01T10:00:00Z', 'd', 't');
+             UPDATE document SET deleted_at = 't' WHERE id = 'gone';
+             INSERT INTO document_tag (doc_id, tag) VALUES ('b', 'reviewed');",
         )
         .unwrap();
-        crate::fts::replace_doc(
-            &c,
-            "a",
-            &[
-                (0, "Cover page".into()),
-                (1, "Payer EIN 12-3456789 Anderson".into()),
-                (2, "Totals EIN 12-3456789".into()),
-            ],
-        )
-        .unwrap();
-        crate::fts::replace_doc(&c, "b", &[(0, "Wages, tips 52,000 Sample Payroll".into())])
-            .unwrap();
         (t, c)
     }
 
-    fn ids(h: &[Hit]) -> Vec<&str> {
-        h.iter().map(|h| h.doc_id.as_str()).collect()
+    fn ids(c: &Connection, q: &Query) -> Vec<String> {
+        search(c, q, 50)
+            .unwrap()
+            .into_iter()
+            .map(|h| h.doc_id)
+            .collect()
     }
 
-    fn q(text: &str) -> Query {
+    fn text(t: &str) -> Query {
         Query {
-            text: text.into(),
+            text: t.into(),
             ..Query::default()
         }
     }
 
-    /// PA-65: with text reading off, a search matches words in the path only (the text inside
-    /// documents is not looked at), and Has SSN is not applied.
+    /// Every word must be in the path, in any order and case; a folder counts; one or two
+    /// letters are enough; a deleted document is never found.
     #[test]
-    fn names_only_search_ignores_the_text() {
+    fn words_match_the_path() {
         let (_t, c) = db();
-        let q = |text: &str| Query {
-            text: text.into(),
-            ..Query::default()
-        };
-        let ids = |q: &Query, text: bool| -> Vec<String> {
-            let mut v: Vec<String> = search_in(&c, q, 50, text)
-                .unwrap()
-                .into_iter()
-                .map(|h| h.doc_id)
-                .collect();
-            v.sort();
-            v
-        };
-        // In the name: found either way. Both words must be there, in any order and case.
-        assert_eq!(ids(&q("payroll w-2"), false), ["b"]);
-        assert_eq!(ids(&q("EIN letter"), false), ["c"]);
-        // A folder of the path counts; two letters are enough.
-        assert_eq!(ids(&q("permanent"), false), ["c"]);
-        assert_eq!(ids(&q("ei"), false), ["c"]);
-        // Only in the page text: found with text reading, not without.
-        assert_eq!(ids(&q("wages"), true), ["b"]);
-        assert!(ids(&q("wages"), false).is_empty());
-        // Has SSN is a text filter: not applied without text.
-        let ssn = Query {
-            has_ssn: true,
-            ..Query::default()
-        };
-        assert_eq!(ids(&ssn, true), ["b"]);
-        assert_eq!(ids(&ssn, false), ["a", "b", "c"]);
-        // Details still narrow it.
-        let y = Query {
-            text: "pdf".into(),
-            year: Some(Year::Year(2025)),
-            ..Query::default()
-        };
-        assert_eq!(ids(&y, false), ["a"]);
+        assert_eq!(ids(&c, &text("payroll w-2")), ["b"]);
+        assert_eq!(ids(&c, &text("\"EIN\" letter")), ["c"]);
+        assert_eq!(ids(&c, &text("permanent")), ["c"]);
+        assert_eq!(ids(&c, &text("ei")), ["c"]);
+        assert_eq!(ids(&c, &text("smith 2024")), ["b"]);
+        assert!(ids(&c, &text("payroll scan")).is_empty());
+        // LIKE's own wildcards are plain characters here.
+        assert!(ids(&c, &text("100%")).is_empty());
+        assert!(ids(&c, &text("w_2")).is_empty());
     }
 
+    /// No words: the filters alone, newest filing first. A document with no fingerprint yet
+    /// (PA-60) is found like any other.
     #[test]
-    fn partial_words_find_the_best_page_with_a_snippet() {
+    fn filters_narrow_and_order_by_filing() {
         let (_t, c) = db();
-        let h = search(&c, &q("3456789"), 50).unwrap();
-        assert_eq!(ids(&h), ["a"]);
-        assert_eq!(h[0].pages, 2);
-        assert!(matches!(h[0].page, Some(1 | 2)), "{:?}", h[0].page);
-        assert!(
-            h[0].snippet.contains("\u{2}3456789\u{3}"),
-            "{:?}",
-            h[0].snippet
+        assert_eq!(ids(&c, &Query::default()), ["a", "b", "c"]);
+        let q = |f: fn(&mut Query)| {
+            let mut q = Query::default();
+            f(&mut q);
+            q
+        };
+        assert_eq!(
+            ids(&c, &q(|q| q.scope = Scope::Client("c2".into()))),
+            ["b", "c"]
         );
         assert_eq!(
-            runs(&h[0].snippet).iter().filter(|r| r.1).count(),
-            1,
-            "one highlighted run"
+            ids(
+                &c,
+                &q(|q| q.scope = Scope::Folder("Smith, John (1002)/Permanent".into()))
+            ),
+            ["c"]
         );
-        // Every word must appear.
-        assert_eq!(ids(&search(&c, &q("EIN Anderson"), 50).unwrap()), ["a"]);
-        assert!(search(&c, &q("EIN Anderson Smith"), 50).unwrap().is_empty());
-        // Both words in the path: Smith's "EIN letter.pdf".
-        assert_eq!(ids(&search(&c, &q("EIN Smith"), 50).unwrap()), ["c"]);
-    }
-
-    #[test]
-    fn file_names_and_short_words_match_too() {
-        let (_t, c) = db();
-        let h = search(&c, &q("letter"), 50).unwrap();
-        assert_eq!(ids(&h), ["c"]);
-        assert_eq!((h[0].page, h[0].pages), (None, 0));
-        assert_eq!(ids(&search(&c, &q("W-2"), 50).unwrap()), ["b"]);
-        assert_eq!(ids(&search(&c, &q("tips 52"), 50).unwrap()), ["b"]);
-        // A short word alone matches names only, never every page's text (PA-34).
-        assert!(search(&c, &q("52"), 50).unwrap().is_empty());
-        assert_eq!(ids(&search(&c, &q("W"), 50).unwrap()), ["b"]);
-        // With a long word, only the pages of documents it matched are checked for it.
-        assert!(search(&c, &q("tips 99"), 50).unwrap().is_empty());
-        // A long word on the page and a short one in the file name (PA-34 review).
-        assert_eq!(ids(&search(&c, &q("tips Jo"), 50).unwrap()), ["b"]);
-        // Replacing a document's pages drops its old ones.
-        crate::fts::replace_doc(&c, "b", &[(0, "Box 12 code DD".into())]).unwrap();
-        assert!(search(&c, &q("tips"), 50).unwrap().is_empty());
-        assert_eq!(crate::fts::pages_of(&c, "b").unwrap(), [0]);
-    }
-
-    #[test]
-    fn metadata_filters_and_scope() {
-        let (_t, c) = db();
-        let all = |q: Query| ids(&search(&c, &q, 50).unwrap()).join(",");
-        assert_eq!(all(Query::default()), "a,b,c");
+        assert_eq!(ids(&c, &q(|q| q.client = Some("c1".into()))), ["a"]);
+        assert_eq!(ids(&c, &q(|q| q.year = Some(Year::Year(2024)))), ["b"]);
+        assert_eq!(ids(&c, &q(|q| q.year = Some(Year::Permanent))), ["c"]);
         assert_eq!(
-            all(Query {
-                scope: Scope::Client("c2".into()),
-                ..Query::default()
-            }),
-            "b,c"
+            ids(&c, &q(|q| q.doc_type = Some(DocType::Is("w2".into())))),
+            ["b"]
         );
         assert_eq!(
-            all(Query {
-                scope: Scope::Folder("Smith, John (1002)/Permanent".into()),
-                ..Query::default()
-            }),
-            "c"
+            ids(&c, &q(|q| q.doc_type = Some(DocType::Needed))),
+            ["a", "c"]
+        );
+        assert_eq!(ids(&c, &q(|q| q.status = Some("final".into()))), ["b"]);
+        assert_eq!(ids(&c, &q(|q| q.source = Some("government".into()))), ["c"]);
+        assert_eq!(ids(&c, &q(|q| q.filed_by = Some("kurt".into()))), ["b"]);
+        assert_eq!(
+            ids(&c, &q(|q| q.filed_from = Some("2025-01-01".into()))),
+            ["a", "b"]
         );
         assert_eq!(
-            all(Query {
-                year: Some(Year::Permanent),
-                ..Query::default()
-            }),
-            "c"
+            ids(&c, &q(|q| q.filed_to = Some("2024-12-31".into()))),
+            ["c"]
         );
+        assert_eq!(ids(&c, &q(|q| q.tag = Some("reviewed".into()))), ["b"]);
+        // Words and a filter together; the limit.
+        let mut both = text("pdf");
+        both.year = Some(Year::Year(2025));
+        assert_eq!(ids(&c, &both), ["a"]);
+        assert_eq!(search(&c, &Query::default(), 2).unwrap().len(), 2);
+        let hit = &search(&c, &text("w-2"), 5).unwrap()[0];
+        assert_eq!(hit.client.as_deref(), Some("Smith, John"));
         assert_eq!(
-            all(Query {
-                year: Some(Year::Year(2025)),
-                ..Query::default()
-            }),
-            "a"
-        );
-        assert_eq!(
-            all(Query {
-                doc_type: Some(DocType::Needed),
-                ..Query::default()
-            }),
-            "a,c"
-        );
-        assert_eq!(
-            all(Query {
-                status: Some("final".into()),
-                tag: Some("reviewed".into()),
-                filed_by: Some("kurt".into()),
-                ..Query::default()
-            }),
-            "b"
-        );
-        assert_eq!(
-            all(Query {
-                source: Some("government".into()),
-                ..Query::default()
-            }),
-            "c"
-        );
-        assert_eq!(
-            all(Query {
-                filed_from: Some("2025-01-01".into()),
-                filed_to: Some("2025-12-31".into()),
-                ..Query::default()
-            }),
-            "b"
-        );
-        assert_eq!(
-            all(Query {
-                has_ssn: true,
-                ..Query::default()
-            }),
-            "b"
+            (hit.tax_year, hit.doc_type.as_deref()),
+            (Some(2024), Some("W-2"))
         );
     }
 
+    /// A search saved before PA-65 with the text filter `has_ssn` still loads.
     #[test]
-    fn deleted_documents_are_not_found_and_queries_round_trip() {
-        let (_t, c) = db();
-        c.execute("UPDATE document SET deleted_at = 't' WHERE id = 'a'", [])
-            .unwrap();
-        assert!(search(&c, &q("3456789"), 50).unwrap().is_empty());
-        let saved = Query {
-            text: "EIN".into(),
-            year: Some(Year::Permanent),
-            scope: Scope::Client("c1".into()),
-            ..Query::default()
-        };
-        let json = serde_json::to_string(&saved).unwrap();
-        assert_eq!(serde_json::from_str::<Query>(&json).unwrap(), saved);
-        assert!(Query::default().is_empty());
-        assert!(!saved.is_empty());
+    fn an_older_saved_search_still_reads() {
+        let q: Query =
+            serde_json::from_str(r#"{"text":"w-2","scope":{"kind":"cabinet"},"has_ssn":true}"#)
+                .unwrap();
+        assert_eq!(q, text("w-2"));
     }
 }

@@ -8,7 +8,6 @@ OneDrive and Dropbox can keep a file "online only": it shows in the folder, but 
 
 - **Indexing** keeps an online-only file as the catalog has it, never as deleted or changed. A new one that another PC filed takes its details from that PC's notes in the client's `_Vibe\docmeta.jsonl` without being read. One added outside Vibe Files is listed once it is on this PC.
 - **The weekly check** counts online-only files as not checked; they are checked once they are on this PC.
-- **Text recognition** sets them aside and reads them once they are on the PC that runs it.
 - **Search results** show no thumbnail for them, and **Browse's preview** shows **Show preview** instead of the page: pressing it downloads the file.
 
 Opening a document (double-click, the Viewer, Open in program) downloads it, as it would in Explorer. To keep a client's files on a PC, right-click its folder in Explorer and choose **Always keep on this device** (OneDrive) or **Make available offline** (Dropbox).
@@ -19,7 +18,7 @@ The catalog is a database that a sync service would damage while it is open, so 
 
 - Each PC keeps its catalog in `ProgramData\Vibe Files\catalogs`. The first PC indexes the cabinet and leaves a copy in the cabinet's `_Vibe\catalog-seed` folder (refreshed weekly); the others start from that copy, with every document's details and recognized text, so they read nothing again.
 - Each PC notes its changes in its own log in `_Vibe\changes`; the others read them when a client is opened and every 15 minutes.
-- Text recognition and B2 sync run on one main PC, chosen in **Admin** › **Devices** with **Run them on this PC**. In a cloud cabinet a PC takes this on by itself only when it alone has opened the cabinet, for a day at least (a one-PC office keeps working as before); otherwise an admin chooses, since two PCs could both take it before the folder synced, and Browse reminds you until one is chosen. Only the main PC leaves the catalog copy.
+- B2 sync runs on one main PC, chosen in **Admin** › **Devices** with **Run them on this PC**. In a cloud cabinet a PC takes this on by itself only when it alone has opened the cabinet, for a day at least (a one-PC office keeps working as before); otherwise an admin chooses, since two PCs could both take it before the folder synced, and Browse reminds you until one is chosen. Only the main PC leaves the catalog copy.
 - A data folder found inside OneDrive or Dropbox (Vibe Files unzipped on a Desktop that OneDrive syncs, for example) is moved to `%LOCALAPPDATA%\Vibe Files\data` with its catalog and settings, and a `MOVED.txt` note is left behind.
 
 ## The setting
@@ -34,7 +33,6 @@ A change takes effect when Vibe Files next starts on that computer. Remote Deskt
 
 ## Not done (yet)
 
-- **Search text of new scans on other PCs.** Text recognition runs on the main PC and writes the text into the PDF. Another PC finds that text once the file is on it; while it is online only there, the scan is found by its name and details, not its words. Text known when the PC started from the catalog copy is searchable at once.
 - **Thumbnails** are made by each PC from the file itself, so online-only files have none.
 - **Keeping a client on this PC** is done in Explorer (above), not in Vibe Files.
 - **The audit trail and each client's `docmeta.jsonl`** are still one shared file each, so two PCs writing to the same one between syncs leave a conflicted copy (below).

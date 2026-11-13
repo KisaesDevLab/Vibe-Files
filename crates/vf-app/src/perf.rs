@@ -15,22 +15,6 @@ mod tests {
     const CLIENTS: usize = 500;
     const PER: usize = 100;
 
-    /// A made-up word for vocabulary index `k` (letters only, 4–9 long).
-    fn pseudo_word(k: usize) -> String {
-        const SYL: [&str; 16] = [
-            "ka", "lo", "mi", "ne", "ru", "sa", "to", "vi", "be", "da", "fo", "gu", "ha", "je",
-            "po", "ze",
-        ];
-        let mut w = String::new();
-        let mut x = k + 17;
-        for _ in 0..(2 + k % 3) {
-            w.push_str(SYL[x % 16]);
-            x /= 16;
-            x += 3;
-        }
-        w
-    }
-
     fn median(mut v: Vec<Duration>) -> Duration {
         v.sort();
         v[v.len() / 2]
@@ -102,39 +86,6 @@ mod tests {
                         ],
                     )
                     .unwrap();
-                    // Page text like OCR of tax documents: a Zipf-distributed vocabulary of
-                    // 3,000 words, form words in some documents, "tax" on every page.
-                    let mut words: Vec<String> = Vec::with_capacity(200);
-                    let mut m = n;
-                    for _ in 0..200 {
-                        m = m
-                            .wrapping_mul(6364136223846793005)
-                            .wrapping_add(1442695040888963407);
-                        let u = (m >> 11) as f64 / (1u64 << 53) as f64;
-                        let k = (3000.0 * u * u * u) as usize;
-                        words.push(pseudo_word(k));
-                    }
-                    words.push("tax".into());
-                    let r = (n >> 24) % 100;
-                    if r < 3 {
-                        words.push("mortgage interest statement".into());
-                    } else if r < 8 {
-                        words.push("payroll quarterly report".into());
-                    }
-                    let mut text = words.join(" ");
-                    if d == 42 {
-                        text.push_str(&format!(" zephyrine{c}"));
-                    }
-                    tx.execute(
-                        "INSERT INTO doc_fts (text, doc_id, page) VALUES (?1, ?2, 0)",
-                        params![text, id],
-                    )
-                    .unwrap();
-                    tx.execute(
-                        "INSERT INTO doc_fts_doc (fts_row, doc_id) VALUES (last_insert_rowid(), ?1)",
-                        params![id],
-                    )
-                    .unwrap();
                 }
             }
             tx.commit().unwrap();
@@ -190,13 +141,13 @@ mod tests {
         b.set_scope(vf_core::browse::Scope::Cabinet);
         let whole = t0.elapsed();
 
-        // Search: a common word, a rare one, and a common one within one client.
+        // Search by name (PA-65): a name in every client, two words, and one within a client.
         let mut searches = vec![];
         let client = b.snap.clients[10].id.clone();
         for (text, client) in [
-            ("mortgage interest", None),
-            ("zephyrine250", None),
-            ("payroll quarterly", Some(client.clone())),
+            ("doc 42", None),
+            ("income doc 7.pdf", None),
+            ("doc 9", Some(client.clone())),
         ] {
             let q = vf_index::search::Query {
                 text: text.into(),
@@ -212,12 +163,12 @@ mod tests {
             }
             searches.push((text, median(runs)));
         }
-        // Worst case, recorded not asserted: a word on every page of every document.
+        // Worst case, recorded not asserted: a word in every document's name.
         let worst = {
             let mut runs = vec![];
             for client in [None, Some(client)] {
                 let q = vf_index::search::Query {
-                    text: "tax".into(),
+                    text: "doc".into(),
                     client,
                     ..Default::default()
                 };
@@ -239,7 +190,7 @@ mod tests {
             eprintln!("search {q:?} (median of 5): {d:?}  target < 100 ms");
         }
         eprintln!(
-            "worst case \"tax\" (on every page): whole cabinet {:?}, one client {:?}",
+            "worst case \"doc\" (in every name): whole cabinet {:?}, one client {:?}",
             worst[0], worst[1]
         );
         assert!(start < Duration::from_secs(2), "startup {start:?}");
@@ -252,7 +203,7 @@ mod tests {
 
 /// PA-34 step 9: the scale test for a cabinet of ~900K files in ~7,600 client folders. It writes
 /// a real tree of small files (invented names, no client data) with a sentinel in each client
-/// folder, catalogs it, adds page text, undo records and audit rows, and holds the owner's time
+/// folder, catalogs it, adds undo records and audit rows, and holds the owner's time
 /// budgets (Q-68). Opt-in, in release:
 ///
 /// `cargo test -p vf-app --release scale_900k -- --ignored --nocapture`
@@ -365,7 +316,6 @@ mod scale {
             );
             assert_eq!(rep.docs_new, total, "{rep}");
 
-            // Page text (as OCR leaves it), with a rare word in one document per 1,000.
             let t0 = Instant::now();
             let ids: Vec<String> = {
                 let mut st = conn.prepare("SELECT id FROM document").unwrap();
@@ -374,34 +324,6 @@ mod scale {
                     .map(|r| r.unwrap())
                     .collect()
             };
-            let tx = conn.transaction().unwrap();
-            {
-                let mut ins = tx
-                    .prepare("INSERT INTO doc_fts (text, doc_id, page) VALUES (?1, ?2, 0)")
-                    .unwrap();
-                let mut row = tx
-                    .prepare(
-                        "INSERT INTO doc_fts_doc (fts_row, doc_id) VALUES (last_insert_rowid(), ?1)",
-                    )
-                    .unwrap();
-                for (i, id) in ids.iter().enumerate() {
-                    let mut text = format!(
-                        "Form W-2 wage and tax statement employer {} employee {} box {} federal income tax withheld",
-                        i % 977,
-                        i % 4099,
-                        i % 20
-                    );
-                    if i % 1000 == 0 {
-                        text.push_str(&format!(" quillfeather{}", i / 1000));
-                    }
-                    if i % 37 == 0 {
-                        text.push_str(" mortgage interest statement");
-                    }
-                    ins.execute(params![text, id]).unwrap();
-                    row.execute(params![id]).unwrap();
-                }
-            }
-            tx.commit().unwrap();
             // Years of undo records and their audit rows (raw rows: the chain is not checked
             // here).
             let tx = conn.transaction().unwrap();
@@ -427,10 +349,7 @@ mod scale {
                 }
             }
             tx.commit().unwrap();
-            eprintln!(
-                "page text, undo and audit rows: {:.1} s",
-                t0.elapsed().as_secs_f64()
-            );
+            eprintln!("undo and audit rows: {:.1} s", t0.elapsed().as_secs_f64());
         }
 
         // 1. Browse opens the cabinet (catalog open with recovery, the window read).
@@ -479,12 +398,13 @@ mod scale {
 
         // 3. Search.
         let client = b.snap.clients[clients / 3].id.clone();
-        // A word in one document of 1,000, from the middle of the catalog.
-        let rare = format!("quillfeather{}", total / 2000);
+        // By name (PA-65): one client's folder, two words, a word within a client, a name in
+        // every client.
+        let one = format!("SC{:05}", clients / 2);
         for (text, client) in [
-            (rare.as_str(), None),
-            ("mortgage interest", None),
-            ("withheld", Some(client.clone())),
+            (one.as_str(), None),
+            ("income 2019", None),
+            ("doc 3", Some(client.clone())),
             ("doc 7", None),
         ] {
             let q = vf_index::search::Query {

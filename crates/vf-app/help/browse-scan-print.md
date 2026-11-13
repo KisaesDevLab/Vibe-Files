@@ -39,7 +39,7 @@ By default the scanner driver's own window opens, so its settings and profiles (
 
 Each document is printed as its own print job. PDFs are printed by Vibe Files; other files are handed to their own program to print. While printing, the bar shows **Printing to** and the printer name; when done, **Sent 3 documents to** the printer.
 
-If any selected document seems to hold an SSN or EIN, Vibe Files first asks **Print documents with taxpayer IDs?** Click **Print anyway** or **Cancel**. Every print is recorded in the audit trail. See [Audit trail](help:audit).
+Every print is recorded in the audit trail. See [Audit trail](help:audit).
 
 To print some pages only, open the PDF in the Viewer and print from there. See [Printing](help:printing).
 

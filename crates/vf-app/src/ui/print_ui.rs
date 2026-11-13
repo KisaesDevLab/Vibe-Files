@@ -17,7 +17,6 @@ pub struct PrintDoc {
     pub doc_id: String,
     pub name: String,
     pub path: PathBuf,
-    pub hash: String,
 }
 
 /// Per document: (doc id, name, pages printed or why not).
@@ -32,20 +31,10 @@ pub struct PrintState {
     job: Option<(String, u32, Receiver<Outcome>)>,
 }
 
-/// How many of `docs` have text that looks like an SSN or an EIN (P03's page text).
-pub fn flagged(conn: &Connection, docs: &[PrintDoc]) -> usize {
-    docs.iter()
-        .filter(|d| {
-            conn.query_row(
-                "SELECT 1 FROM page_text WHERE hash = ?1 AND (
-                   text GLOB '*[0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9][0-9][0-9]*'
-                   OR text GLOB '*[0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9][0-9]*') LIMIT 1",
-                [&d.hash],
-                |_| Ok(()),
-            )
-            .is_ok()
-        })
-        .count()
+/// How many of `docs` are known to hold an SSN or an EIN. Always none: the check read the
+/// documents' stored text, which is no longer kept (PA-65), so nothing is asked before a print.
+pub fn flagged(_conn: &Connection, _docs: &[PrintDoc]) -> usize {
+    0
 }
 
 impl PrintState {
@@ -223,25 +212,19 @@ pub fn record(
 mod tests {
     use super::*;
 
-    /// A Browse print of several documents writes one audit batch (PA-13 done-when 3), and the
-    /// SSN/EIN check finds a flagged one (done-when 2).
+    /// A Browse print of several documents writes one audit batch (PA-13 done-when 3). No
+    /// document is flagged for an SSN or EIN any more (PA-65: no stored text to look in).
     #[test]
-    fn audit_batch_and_pii_check() {
+    fn audit_batch_and_no_pii_check() {
         let t = tempfile::tempdir().unwrap();
         let mut conn =
             vf_core::db::open(&t.path().join("c.db"), vf_core::db::Storage::Local).unwrap();
-        conn.execute(
-            "INSERT INTO page_text (hash, page, source, text) VALUES ('h1', 0, 'pdf', 'SSN 123-45-6789 invented')",
-            [],
-        )
-        .unwrap();
-        let doc = |id: &str, h: &str| PrintDoc {
+        let doc = |id: &str| PrintDoc {
             doc_id: id.into(),
             name: format!("{id}.pdf"),
             path: PathBuf::from(format!("{id}.pdf")),
-            hash: h.into(),
         };
-        assert_eq!(flagged(&conn, &[doc("a", "h1"), doc("b", "h2")]), 1);
+        assert_eq!(flagged(&conn, &[doc("a"), doc("b")]), 0);
         let out: Vec<(String, String, Result<usize, String>)> = (0..10)
             .map(|i| (format!("d{i}"), format!("d{i}.pdf"), Ok(2)))
             .collect();

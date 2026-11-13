@@ -225,22 +225,6 @@ pub struct Ocr {
     /// `tesseract.exe` or its folder; empty = beside the exe, Program Files, `PATH` (Q-25).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tesseract: Option<PathBuf>,
-    /// Pause OCR on this PC.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub paused: bool,
-    /// Reading the text inside documents: OCR, text layers, the search index (`true` turns it
-    /// on). Off unless set (owner 2026-11-13, PA-65): at 486,760 documents it cost more than it
-    /// gave, and Search looks at file names and details only.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub text_reading: Option<bool>,
-}
-
-impl Ocr {
-    /// Whether this PC reads the text inside documents and searches it. Tests keep it on: the
-    /// code stays built and checked while it is switched off.
-    pub fn text_reading(&self) -> bool {
-        self.text_reading.unwrap_or(cfg!(test))
-    }
 }
 
 /// Folders Vibe Files processes before Filer sees the files (`vf_ingest::pipeline`). Outside

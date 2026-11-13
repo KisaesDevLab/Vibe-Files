@@ -30,7 +30,12 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/015_scale_indexes.sql"),
     include_str!("../migrations/016_journal_owner.sql"),
     include_str!("../migrations/017_hash_optional.sql"),
+    include_str!("../migrations/018_no_page_text.sql"),
 ];
+
+/// The migration that drops the stored page text (PA-65): a catalog that had it is compacted
+/// once afterwards, or the file keeps its size.
+const DROPS_PAGE_TEXT: u32 = 18;
 
 /// Schema version this build writes.
 pub const SCHEMA_VERSION: u32 = MIGRATIONS.len() as u32;
@@ -182,7 +187,14 @@ fn migrate(conn: &Connection, path: &Path) -> Result<()> {
     };
     let done = run();
     conn.pragma_update(None, "foreign_keys", true)?;
-    done
+    done?;
+    // The space the dropped page text took (PA-65): given back once, here. It can take a
+    // minute on a large catalog, and cannot run inside a transaction. A failure (another
+    // session has the catalog open) only leaves the file large.
+    if current > 0 && current < DROPS_PAGE_TEXT {
+        let _ = conn.execute_batch("VACUUM");
+    }
+    Ok(())
 }
 
 /// Rows whose foreign key points at no row (`PRAGMA foreign_key_check`).
@@ -231,13 +243,6 @@ mod tests {
         "device",
         "disposition",
         "disposition_run",
-        "doc_fts",
-        "doc_fts_config",
-        "doc_fts_content",
-        "doc_fts_data",
-        "doc_fts_doc",
-        "doc_fts_docsize",
-        "doc_fts_idx",
         "doc_type",
         "document",
         "document_extract",
@@ -245,8 +250,6 @@ mod tests {
         "legal_hold",
         "local_state",
         "lock",
-        "ocr_job",
-        "page_text",
         "retention_class",
         "saved_search",
         "sync_base",
@@ -434,7 +437,8 @@ mod tests {
         }
         let conn = open(&path, Storage::Local).unwrap();
         assert_eq!(user_version(&conn).unwrap(), SCHEMA_VERSION);
-        assert!(tables(&conn).contains(&"ocr_job".to_string()));
+        // Migration 002's page text tables came and, with PA-65, went again.
+        assert_eq!(tables(&conn), TABLES);
         let baks = std::fs::read_dir(tmp.path())
             .unwrap()
             .filter(|e| e.as_ref().unwrap().path().extension() == Some("bak".as_ref()))

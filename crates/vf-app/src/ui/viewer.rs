@@ -667,15 +667,6 @@ impl Viewer {
     pub fn ready(&self) -> bool {
         self.current_texture().is_some()
     }
-
-    /// Search-term boxes on the current page (tests).
-    #[cfg(test)]
-    pub fn hits(&self) -> &[Rect] {
-        self.doc
-            .as_ref()
-            .and_then(|d| self.hits.get(&d.page))
-            .map_or(&[], Vec::as_slice)
-    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1664,12 +1655,10 @@ fn toolbar(ui: &mut egui::Ui, v: &mut Viewer, env: &mut Env<'_>, doc: &Doc) {
                 {
                     let pages = v.pages() as u32;
                     let current = doc.page as u32 + 1;
-                    let hash = v.seen_hash().unwrap_or_default();
                     let d = crate::ui::print_ui::PrintDoc {
                         doc_id: doc.doc_id.clone(),
                         name: doc.name.clone(),
                         path: doc.path.clone(),
-                        hash,
                     };
                     if let Err(e) = v.print.start(env.conn, vec![d], Some(pages), Some(current)) {
                         v.error = Some(e);

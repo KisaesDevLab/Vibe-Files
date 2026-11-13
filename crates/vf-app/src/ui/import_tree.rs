@@ -17,9 +17,6 @@ use crate::ui::{theme, widgets};
 /// Rows of the remainder shown on the page (the CSV has all of them).
 const SHOWN: usize = 300;
 
-/// Files an import reads the text of by default (PA-34: not ~900K files at once).
-const READ_UP_TO: usize = 50_000;
-
 /// What Scan and Undo give back from their thread (owner 2026-11-12: no frozen window).
 enum Side {
     /// The folders and their clients (the files come next).
@@ -109,8 +106,6 @@ pub struct ImportPage {
     forget_on_poll: bool,
     saved_folders: Option<String>,
     saved_checked: Option<std::time::Instant>,
-    /// Read the text of the imported PDFs (OCR); unset = yes up to [`READ_UP_TO`] files.
-    read_text: Option<bool>,
     /// Folders done of the running import, and how many it has (PA-34).
     progress: std::sync::Arc<(
         std::sync::atomic::AtomicUsize,
@@ -302,9 +297,6 @@ impl ImportPage {
         let Some(plan) = self.plan.clone() else {
             return;
         };
-        // Never while text reading is switched off (PA-65).
-        let read = vf_index::search::text_search()
-            && self.read_text.unwrap_or(plan.files.len() <= READ_UP_TO);
         let opts = Options {
             rename: self.rename,
             default_doc_type: self.default_type.clone(),
@@ -325,20 +317,7 @@ impl ImportPage {
                 let r = vf_core::db::open(&catalog, Storage::Local)
                     .map_err(|e| e.to_string())
                     .and_then(|mut conn| {
-                        let started = vf_core::now_rfc3339();
-                        // Not read: the cabinet's text recognition turns to new filings only
-                        // before the import, so its files are not queued as they come in.
-                        if !read
-                            && vf_ocr::queue::reads(&conn).map_err(|e| e.to_string())?
-                                == vf_ocr::queue::Reads::All
-                        {
-                            vf_ocr::queue::set_reads(
-                                &conn,
-                                &vf_ocr::queue::Reads::NewSince(vf_core::now_rfc3339()),
-                            )
-                            .map_err(|e| e.to_string())?;
-                        }
-                        let mut a = import::apply_with(
+                        let a = import::apply_with(
                             &mut conn,
                             &root,
                             &plan,
@@ -347,12 +326,6 @@ impl ImportPage {
                             &progress.0,
                             &progress.1,
                         )?;
-                        a.ocr_queued = if read {
-                            vf_ocr::queue::enqueue_every(&conn, vf_ocr::queue::BACKLOG, &started)
-                                .unwrap_or(0)
-                        } else {
-                            0
-                        };
                         Ok(a)
                     });
                 let _ = tx.send(r);
@@ -380,7 +353,7 @@ impl ImportPage {
                     "folder import"
                 );
                 self.notice = Some(format!(
-                    "Imported: {}{} folders bound{}{}, {} documents, {} with client, doc type and year; {} PDFs queued for OCR.{}",
+                    "Imported: {}{} folders bound{}{}, {} documents, {} with client, doc type and year.{}",
                     if a.merged > 0 {
                         format!("{} folders merged into their client's folder, ", a.merged)
                     } else {
@@ -399,7 +372,6 @@ impl ImportPage {
                     },
                     a.documents,
                     a.mapped,
-                    a.ocr_queued,
                     if a.guessed > 0 {
                         format!(
                             " {} have a doc type or year guessed from a file or folder name (tag {}): they are not disposed of until someone sets them.",
@@ -1166,23 +1138,6 @@ pub fn show(ui: &mut egui::Ui, p: &mut ImportPage, env: &mut Env, catalog: &Path
         &mut p.rename,
         "Rename bound folders to the firm template's name (\"{Client} ({ID})\"); files inside are not moved",
     );
-    let mut read = p.read_text.unwrap_or(plan.files.len() <= READ_UP_TO);
-    // Offered only while text reading is on (PA-65).
-    if vf_index::search::text_search()
-        && ui
-        .checkbox(
-            &mut read,
-            "Read the text of the imported PDFs (OCR), so the words on their pages can be searched",
-        )
-        .on_hover_text(format!(
-            "Unticked (the default above {READ_UP_TO} files), file names and details are still \
-             searchable, and text recognition reads only documents filed from now on (Admin \
-             \u{203a} Devices)."
-        ))
-        .changed()
-    {
-        p.read_text = Some(read);
-    }
     if untyped > 0 {
         ui.horizontal_wrapped(|ui| {
             ui.label(format!("{untyped} files with no doc type found get:"));

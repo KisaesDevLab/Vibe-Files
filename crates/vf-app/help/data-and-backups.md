@@ -24,7 +24,7 @@ It holds:
 - `catalog.db`: this PC's catalog of the cabinet. It is plain SQLite and holds client names and the text of every document, SSNs included. Protect it like the cabinet share: only firm staff, on an encrypted disk.
 - `config.toml`: this PC's settings and its device id (see [devices](help:devices)).
 - a remembered sync key, if you ticked **Remember on this PC for my Windows login**.
-- caches (thumbnails, OCR) and `logs`, kept 30 days. The logs record actions and counts only: no names, paths or document contents.
+- caches (thumbnails) and `logs`, kept 30 days. The logs record actions and counts only: no names, paths or document contents.
 
 > Never put the data folder on the network share. The catalog is not safe to open over the network.
 
