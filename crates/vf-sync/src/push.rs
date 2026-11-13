@@ -9,7 +9,7 @@ use std::sync::Mutex;
 
 use serde_json::json;
 use vf_core::audit::AuditEntry;
-use vf_core::db::Connection;
+use vf_core::db::{Connection, OptionalExtension};
 use vf_core::tx::{Actor, NoFileOps, Transaction};
 
 use crate::catalog::{self, CABINET};
@@ -134,6 +134,7 @@ pub fn push_in_rounds(
                 &mut done,
                 &mut listed,
                 None,
+                None,
             ) {
                 Err(SyncError::Raced) if attempt + 1 < TRIES => {
                     attempt += 1;
@@ -161,6 +162,77 @@ pub fn push_client(
     s: &Sync,
     client: &str,
     same_folder: &[String],
+) -> Result<PushReport> {
+    push_client_forced(conn, root, s, client, same_folder, None)
+}
+
+/// Pushes these documents now (owner 2026-11-13, PA-62: to share them through the portal),
+/// whatever the B2 rules say: each one's content goes up and its client's segment is written
+/// with it. Nothing else the rules hold back goes with them; what the client already has in
+/// B2 keeps syncing as in any push. Once sent, a document keeps syncing like any other.
+///
+/// A document not fingerprinted yet (PA-60) is read first. Only documents in a client folder
+/// can be pushed this way. Works from any computer, as [`push_client`] does.
+pub fn push_docs(
+    conn: &mut Connection,
+    root: &Path,
+    s: &Sync,
+    doc_ids: &[String],
+    same_folder: &[String],
+) -> Result<PushReport> {
+    // By client, in the order given.
+    let mut by_client: Vec<(String, HashSet<String>)> = vec![];
+    for id in doc_ids {
+        let row: Option<(Option<String>, String)> = conn
+            .query_row(
+                "SELECT client_id, rel_path FROM document WHERE id = ?1 AND deleted_at IS NULL",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        let Some((client, rel)) = row else {
+            return Err(SyncError::Local(
+                "A selected document is no longer in the cabinet.".into(),
+            ));
+        };
+        let Some(client) = client else {
+            return Err(SyncError::Local(format!(
+                "{rel} is not in a client folder: only a client's documents can be pushed one by one."
+            )));
+        };
+        vf_fs::fingerprint::ensure(conn, root, &s.device_id, id).map_err(SyncError::Local)?;
+        match by_client.iter_mut().find(|(c, _)| *c == client) {
+            Some((_, ids)) => {
+                ids.insert(id.clone());
+            }
+            None => by_client.push((client, HashSet::from([id.clone()]))),
+        }
+    }
+    let mut total = PushReport::default();
+    for (client, ids) in &by_client {
+        let r = push_client_forced(conn, root, s, client, same_folder, Some(ids))?;
+        total.objects += r.objects;
+        total.bytes += r.bytes;
+        total.segments += r.segments;
+        total.documents += r.documents;
+        total.skipped += r.skipped;
+        total.head_rev = total.head_rev.max(r.head_rev);
+        if r.pulled.is_some() {
+            total.pulled = r.pulled;
+        }
+    }
+    Ok(total)
+}
+
+/// [`push_client`]; with `force`, only those documents (and what the client already has in
+/// B2) go up, the B2 rules aside.
+fn push_client_forced(
+    conn: &mut Connection,
+    root: &Path,
+    s: &Sync,
+    client: &str,
+    same_folder: &[String],
+    force: Option<&HashSet<String>>,
 ) -> Result<PushReport> {
     let mut rep = PushReport::default();
     let mut done: BTreeSet<String> = BTreeSet::new();
@@ -199,6 +271,7 @@ pub fn push_client(
             &mut done,
             &mut listed,
             Some(&carry),
+            force,
         ) {
             Err(SyncError::Raced) if attempt + 1 < TRIES => {
                 attempt += 1;
@@ -252,7 +325,9 @@ fn hold_back(
 }
 
 /// One round. `Ok(true)`: clients are left for another round. `carry`: [`push_client`]'s
-/// entries to send unchanged (and then only that one client is pushed).
+/// entries to send unchanged (and then only that one client is pushed). `force` (with `only`):
+/// the documents of that client to send whatever the B2 rules say ([`push_docs`]); nothing
+/// else never sent goes with them.
 #[allow(clippy::too_many_arguments)]
 fn push_once(
     conn: &mut Connection,
@@ -264,6 +339,7 @@ fn push_once(
     done: &mut BTreeSet<String>,
     listed: &mut Option<Mutex<HashSet<String>>>,
     carry: Option<&[crate::layout::DocEntry]>,
+    force: Option<&HashSet<String>>,
 ) -> Result<bool> {
     let client_only = carry.is_some();
     let head = s.head()?.unwrap_or_default();
@@ -302,12 +378,21 @@ fn push_once(
         Ok(theirs == catalog::segment_rev(conn, c)? || theirs == 0)
     };
     // This round's clients.
-    let waiting: Vec<String> = pending
+    let mut waiting: Vec<String> = pending
         .keys()
         .filter(|c| c.as_str() != CABINET && !done.contains(*c))
         .filter(|c| only.is_none_or(|o| o == c.as_str()))
         .cloned()
         .collect();
+    // Documents pushed by hand: their client goes even when the rules leave it nothing to send.
+    if let (Some(o), Some(f)) = (only, force)
+        && !f.is_empty()
+        && o != CABINET
+        && !done.contains(o)
+        && !waiting.iter().any(|c| c == o)
+    {
+        waiting.push(o.to_string());
+    }
     let mut round: Vec<String> = vec![];
     let mut docs_in_round = 0;
     for c in &waiting {
@@ -345,14 +430,18 @@ fn push_once(
             continue;
         };
         let docs = catalog::entries(conn, &s.keys, client, &folder)?;
-        let docs = hold_back(s, &head, client, docs, |e| {
-            let rel = format!("{folder}/{}", e.rel_path);
-            rules.sends(
-                Some(client),
-                &rel,
-                e.tax_year,
-                sent_before.contains(&e.doc_id),
-            )
+        let docs = hold_back(s, &head, client, docs, |e| match force {
+            // By hand: these documents, and what is in B2 already. The rules decide nothing.
+            Some(f) => f.contains(&e.doc_id) || sent_before.contains(&e.doc_id),
+            None => {
+                let rel = format!("{folder}/{}", e.rel_path);
+                rules.sends(
+                    Some(client),
+                    &rel,
+                    e.tax_year,
+                    sent_before.contains(&e.doc_id),
+                )
+            }
         })?;
         for e in &docs {
             if e.deleted_at.is_none() && !uploaded.contains(&e.hash) {

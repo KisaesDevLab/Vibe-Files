@@ -1354,3 +1354,111 @@ fn the_b2_rule_holds_back_old_years() {
     assert!(Rules::load(&a.root).is_err());
     assert!(vf_sync::push::push(&mut a.conn, &a.root, &a.sync, None).is_err());
 }
+
+/// PA-62: documents pushed by hand go up whatever the B2 rule says, without the rest of what
+/// the rule would send; they keep syncing afterwards; one outside a client folder is refused.
+#[test]
+fn selected_documents_are_pushed_whatever_the_rule_says() {
+    use vf_sync::rules::Rules;
+    let t = tempfile::tempdir().unwrap();
+    let store = Remote::memory();
+    let mut a = pc_a(t.path(), store);
+    let this_year = chrono::Datelike::year(&chrono::Local::now());
+    let back = u16::try_from(this_year - 2023).unwrap();
+    vf_fs::clients::set_b2_years_back(&a.root, Some(back)).unwrap();
+    put(
+        &a.root,
+        "Anderson Farms LLC (1042)/Income Tax/2015/Old 1040.pdf",
+        "old return invented",
+    );
+    put(
+        &a.root,
+        "Anderson Farms LLC (1042)/Other/notes.pdf",
+        "no year invented",
+    );
+    put(&a.root, "loose.pdf", "outside every client invented");
+    vf_fs::rebuild::rebuild(&mut a.conn, &a.root, "dev-a").unwrap();
+    set_type(&mut a.conn, &a.root, "Old 1040.pdf", "W-2", Some(2015));
+    let anderson: String = a
+        .conn
+        .query_row("SELECT id FROM client WHERE ext_id = '1042'", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    let old = doc_id(&a.conn, "Old 1040.pdf");
+    let notes = doc_id(&a.conn, "notes.pdf");
+    let w2 = doc_id(&a.conn, "W-2 Northwind.pdf");
+
+    // Nothing has ever been pushed. The 2015 return alone, though the rule holds it back.
+    let r = vf_sync::push::push_docs(
+        &mut a.conn,
+        &a.root,
+        &a.sync,
+        std::slice::from_ref(&old),
+        &[],
+    )
+    .unwrap();
+    assert_eq!((r.segments, r.objects), (1, 1), "{r:?}");
+    let sent = vf_sync::catalog::sent_ids(&a.conn).unwrap();
+    assert!(sent.contains(&old));
+    assert!(!sent.contains(&notes), "another held document stays held");
+    assert!(
+        !sent.contains(&w2),
+        "what the rule would send waits for a push"
+    );
+    let out = t.path().join("one");
+    assert_eq!(
+        vf_sync::restore::export_client(&a.sync, &anderson, &out).unwrap(),
+        1
+    );
+
+    // The ordinary push sends the rule's documents and keeps the one pushed by hand.
+    vf_sync::push::push(&mut a.conn, &a.root, &a.sync, None).unwrap();
+    let out = t.path().join("three");
+    assert_eq!(
+        vf_sync::restore::export_client(&a.sync, &anderson, &out).unwrap(),
+        3,
+        "the 2025 W-2, the EIN letter and the 2015 return"
+    );
+    // It keeps syncing: an edit is pending under the rule that held it.
+    let rules = Rules::load(&a.root).unwrap();
+    set_type(&mut a.conn, &a.root, "Old 1040.pdf", "W-2", Some(2014));
+    assert_eq!(
+        vf_sync::catalog::pending(&a.conn, &rules)
+            .unwrap()
+            .get(&anderson),
+        Some(&1)
+    );
+    // Pushed again by hand with a second one: both are in B2, nothing sent twice.
+    let r = vf_sync::push::push_docs(
+        &mut a.conn,
+        &a.root,
+        &a.sync,
+        &[old.clone(), notes.clone()],
+        &[],
+    )
+    .unwrap();
+    assert_eq!(r.objects, 1, "only the notes file is new: {r:?}");
+    assert!(
+        vf_sync::catalog::sent_ids(&a.conn)
+            .unwrap()
+            .contains(&notes)
+    );
+    assert!(
+        vf_sync::catalog::pending(&a.conn, &rules)
+            .unwrap()
+            .is_empty()
+    );
+
+    // A document outside every client folder is refused, with its name.
+    a.conn
+        .execute(
+            "INSERT INTO document (id, rel_path, hash, size, filed_at, device_id, updated_at)
+             VALUES ('loose', 'loose.pdf', ?1, 1, 't', 'dev-a', 't')",
+            ["ab".repeat(32)],
+        )
+        .unwrap();
+    let loose = "loose".to_string();
+    let e = vf_sync::push::push_docs(&mut a.conn, &a.root, &a.sync, &[loose], &[]).unwrap_err();
+    assert!(e.to_string().contains("loose.pdf"), "{e}");
+}

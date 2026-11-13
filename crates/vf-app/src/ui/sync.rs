@@ -30,6 +30,8 @@ pub enum Done {
     /// (firm key, session): unlocked with the passphrase.
     Unlocked(Zeroizing<[u8; 32]>, Sync),
     Push(vf_sync::push::PushReport),
+    /// The documents selected in Browse, pushed by hand (PA-62): the report and how many.
+    PushDocs(vf_sync::push::PushReport, usize),
     Pull(vf_sync::pull::PullReport),
     Verify(usize, usize),
     Restored(vf_sync::restore::RestoreReport, PathBuf),
@@ -40,6 +42,8 @@ pub enum Done {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Op {
     Push(Option<String>),
+    /// These documents (catalog ids), now, whatever the B2 rules say (PA-62).
+    PushDocs(Vec<String>),
     Pull,
     Verify,
     Restore(PathBuf),
@@ -271,7 +275,7 @@ impl SyncTab {
         // A cloud cabinet: each PC has its own copy of the folder, synced late perhaps, so a
         // client is not pushed from one that is not the main PC.
         let cloud = !crate::server::server_mode() && crate::cloudmode::is_cloud(root);
-        if !main_here && cloud && matches!(op, Op::Push(_) | Op::Pull) {
+        if !main_here && cloud && matches!(op, Op::Push(_) | Op::PushDocs(_) | Op::Pull) {
             self.error = Some(format!(
                 "B2 sync runs on {} for this cabinet (Admin › Devices).",
                 crate::server::main_server(root)
@@ -292,11 +296,12 @@ impl SyncTab {
         let alone = !main_here;
         self.running_for = match &op {
             Op::Push(c) => Some(c.clone().unwrap_or_default()),
-            Op::Pull => Some(String::new()),
+            Op::PushDocs(_) | Op::Pull => Some(String::new()),
             _ => None,
         };
         let label = match &op {
             Op::Push(Some(_)) => "Pushing this client…",
+            Op::PushDocs(_) => "Pushing the selected documents…",
             Op::Push(None) => "Pushing…",
             Op::Pull => "Pulling…",
             Op::Verify => "Verifying a sample…",
@@ -486,6 +491,32 @@ impl SyncTab {
                         String::new()
                     }
                 ));
+            }
+            Done::PushDocs(r, n) => {
+                self.held = None;
+                if r.pulled.as_ref().is_some_and(|p| p.changed() > 0) {
+                    self.changed = true;
+                }
+                self.notice = Some(format!(
+                    "Pushed the {} selected to B2 ({} new objects, {}). {} from now on, like anything else in B2.",
+                    if n == 1 {
+                        "document".to_string()
+                    } else {
+                        format!("{n} documents")
+                    },
+                    r.objects,
+                    widgets::size(r.bytes as i64),
+                    if n == 1 {
+                        "It keeps syncing"
+                    } else {
+                        "They keep syncing"
+                    },
+                ));
+                if r.skipped > 0 {
+                    self.error = Some(
+                        "A selected file could not be read just now, so its client was not sent: try again.".into(),
+                    );
+                }
             }
             Done::Pull(r) => {
                 if r.changed() > 0 {
@@ -794,7 +825,7 @@ pub(crate) fn sync_lock(catalog: &Path) -> Result<std::fs::File, String> {
 fn run(catalog: &Path, root: &Path, s: &Sync, op: Op, alone: bool) -> Result<Done, String> {
     let e = |e: vf_sync::SyncError| e.to_string();
     let _one_at_a_time = match op {
-        Op::Push(_) | Op::Pull => Some(sync_lock(catalog)?),
+        Op::Push(_) | Op::PushDocs(_) | Op::Pull => Some(sync_lock(catalog)?),
         _ => None,
     };
     match op {
@@ -824,6 +855,19 @@ fn run(catalog: &Path, root: &Path, s: &Sync, op: Op, alone: bool) -> Result<Don
                 .collect();
             vf_sync::push::push_client(&mut conn, root, s, &client, &same_folder)
                 .map(Done::Push)
+                .map_err(e)
+        }
+        Op::PushDocs(ids) => {
+            let mut conn = caught_up(catalog, root, s, alone)?;
+            // As a client pushed alone (PA-41): the servers working in this same folder.
+            let same_folder: Vec<String> = vf_fs::safeguards::devices(root)
+                .into_iter()
+                .filter(|d| d.server)
+                .map(|d| d.name)
+                .collect();
+            let n = ids.len();
+            vf_sync::push::push_docs(&mut conn, root, s, &ids, &same_folder)
+                .map(|r| Done::PushDocs(r, n))
                 .map_err(e)
         }
         Op::Push(only) => {
@@ -1565,6 +1609,24 @@ mod tests {
         assert_eq!(pending.len(), 1, "Bell Ranch still waits: {pending:?}");
         // One client is not the whole cabinet: no B2 backup time recorded.
         assert!(crate::lastpush::read(&root).is_none());
+        // PA-62: one Bell Ranch document pushed by hand from this same computer goes up; the
+        // sync lock is free again after each run.
+        let doc: String = conn
+            .query_row(
+                "SELECT id FROM document WHERE rel_path LIKE '%941.pdf'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        drop(conn);
+        let Done::PushDocs(r, n) =
+            run(&catalog, &root, &s, Op::PushDocs(vec![doc.clone()]), true).unwrap()
+        else {
+            panic!("a push of documents")
+        };
+        assert_eq!((n, r.objects, r.segments), (1, 1, 1), "{r:?}");
+        let conn = vf_core::db::open(&catalog, Storage::Local).unwrap();
+        assert!(vf_sync::catalog::sent_ids(&conn).unwrap().contains(&doc));
     }
 
     /// QA: login folder names never collide (punctuation, letter case, no ASCII letters).

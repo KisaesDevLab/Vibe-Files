@@ -487,6 +487,8 @@ pub struct SyncView {
 #[derive(Debug, Clone, PartialEq)]
 pub enum SyncRequest {
     Push(String),
+    /// The selected documents (catalog ids), now (PA-62).
+    PushDocs(Vec<String>),
     Pull,
     Verify,
     /// Open the Sync tab, filtered to this client.
@@ -2941,6 +2943,29 @@ fn sync_menu(ui: &mut egui::Ui, b: &mut Browse) {
             .clicked()
         {
             req = client.clone().map(SyncRequest::Push);
+            ui.close();
+        }
+        // The documents ticked in the list (owner 2026-11-13, PA-62: to share them through the
+        // portal): sent at once, whatever the B2 rules hold back.
+        let picked: Vec<String> = b
+            .visible
+            .iter()
+            .filter(|i| b.selected.contains(i))
+            .map(|&i| b.snap.docs[i].id.clone())
+            .collect();
+        let label = match picked.len() {
+            0 | 1 => "Push the selected document now".to_string(),
+            n => format!("Push the {n} selected documents now"),
+        };
+        if ui
+            .add_enabled(idle && !picked.is_empty(), egui::Button::new(label))
+            .on_hover_text(
+                "Sends them to B2 at once, whatever the B2 rules hold back. They keep syncing afterwards.",
+            )
+            .on_disabled_hover_text("Tick documents in the list (or wait for the running sync).")
+            .clicked()
+        {
+            req = Some(SyncRequest::PushDocs(picked));
             ui.close();
         }
         if ui

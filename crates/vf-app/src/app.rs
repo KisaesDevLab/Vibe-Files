@@ -1055,6 +1055,12 @@ impl eframe::App for VibeFilesApp {
                                 &opened.root,
                                 Op::Push(Some(c)),
                             ),
+                            browse::SyncRequest::PushDocs(ids) => o_sync.start(
+                                ui.ctx(),
+                                &opened.catalog,
+                                &opened.root,
+                                Op::PushDocs(ids),
+                            ),
                             browse::SyncRequest::Pull => {
                                 o_sync.start(ui.ctx(), &opened.catalog, &opened.root, Op::Pull)
                             }
