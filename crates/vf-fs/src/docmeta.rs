@@ -429,12 +429,24 @@ impl Index {
     fn read(&mut self, text: &str, folder: &str) {
         for line in text.lines().filter(|l| !l.trim().is_empty()) {
             match serde_json::from_str::<Record>(line) {
-                Ok(r) => {
+                Ok(mut r) => {
                     let rel = if folder.is_empty() {
                         r.path.clone()
                     } else {
                         format!("{folder}/{}", r.path)
                     };
+                    // A record written by a PC that had not read the file (a rename or a doc
+                    // type set there) must not hide the fingerprint another PC recorded for
+                    // this same file: it is carried forward (code review 2026-11-13).
+                    if r.hash.is_empty()
+                        && let Some(old) = self.by_rel.get(&rel)
+                        && !old.hash.is_empty()
+                        && (r.size.is_none() || (r.size == old.size && r.mtime == old.mtime))
+                    {
+                        r.hash = old.hash.clone();
+                        r.size = old.size;
+                        r.mtime = old.mtime;
+                    }
                     self.by_rel.insert(rel.clone(), r.clone());
                     // A record of a file not read yet is found by its path only.
                     if !r.hash.is_empty() {

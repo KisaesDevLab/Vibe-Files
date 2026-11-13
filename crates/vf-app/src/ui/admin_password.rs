@@ -122,7 +122,8 @@ fn open_while_locked(
         ));
     }
     ui.add_space(4.0);
-    let mut changed = false;
+    // What was ticked or unticked (the page, on or off).
+    let mut changed: Option<(&str, bool)> = None;
     let mut group = "";
     egui::ScrollArea::vertical()
         .id_salt("admin-open-pages")
@@ -136,15 +137,18 @@ fn open_while_locked(
                 }
                 let mut on = open.iter().any(|o| o == item);
                 if ui.checkbox(&mut on, item).changed() {
-                    open.retain(|o| o != item);
-                    if on {
-                        open.push(item.to_string());
-                    }
-                    changed = true;
+                    changed = Some((item, on));
                 }
             }
         });
-    if changed {
+    if let Some((item, on)) = changed {
+        // The cabinet's list as it is now: another PC's admin may have changed it since this
+        // one read it, and only this one tick is this PC's to change (code review 2026-11-13).
+        *open = trash::open_pages(env.root);
+        open.retain(|o| o != item);
+        if on {
+            open.push(item.to_string());
+        }
         match trash::set_open_pages(env.conn, env.root, env.device_id, open) {
             Ok(()) => {
                 p.notice = Some(match open.len() {

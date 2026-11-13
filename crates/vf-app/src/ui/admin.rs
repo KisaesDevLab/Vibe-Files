@@ -177,6 +177,9 @@ pub struct Admin {
     pub open: Vec<String>,
     /// "Unlock Admin…" pressed on the locked page list: the app shows the lock screen.
     pub unlock_requested: bool,
+    /// When `open` was last read from the cabinet: a locked session reads it again every 30 s,
+    /// so a page another PC's admin closed stops being offered here (code review 2026-11-13).
+    open_read: Option<std::time::Instant>,
     pub devices: crate::ui::devices::DevicesPage,
     pub templates: crate::ui::templates::TemplatesPage,
     /// Admin › Portal and Portal requests (PA-37).
@@ -216,6 +219,7 @@ impl Admin {
             lock_requested: false,
             open: vf_fs::trash::open_pages(env.root),
             unlock_requested: false,
+            open_read: Some(std::time::Instant::now()),
             devices: Default::default(),
             templates: Default::default(),
             portal: Default::default(),
@@ -361,6 +365,12 @@ pub struct SweepEnv<'a> {
 pub fn show(ui: &mut egui::Ui, a: &mut Admin, env: &mut Env, sweep: SweepEnv, locked: bool) {
     let has_password = vf_fs::trash::has_pin(env.root);
     if locked {
+        if a.open_read
+            .is_none_or(|t| t.elapsed() > std::time::Duration::from_secs(30))
+        {
+            a.open = vf_fs::trash::open_pages(env.root);
+            a.open_read = Some(std::time::Instant::now());
+        }
         // The page shown is always one left open.
         let is_open = |a: &Admin, p: Page| a.open.iter().any(|o| page_of(o) == Some(p));
         if a.page == Page::Password || !is_open(a, a.page) {

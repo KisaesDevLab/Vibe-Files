@@ -573,6 +573,15 @@ fn record(
             // Already in the catalog with this content (picked up from the folder before the
             // batch was recorded): nothing to change.
             Some((_, ref old_hash, _)) if old_hash.as_deref() == Some(hash.as_str()) => {}
+            // Picked up from the folder before the batch was recorded, and not read then
+            // (PA-60): the same file, now with its fingerprint. Not an overwrite: no version,
+            // no new revision (code review 2026-11-13).
+            Some((ref id, None, old_size)) if old_size == f.bytes as i64 => {
+                tx = tx.catalog(Stmt::new(
+                    "UPDATE document SET hash = ?2 WHERE id = ?1 AND hash IS NULL",
+                    vec![id.clone().into(), hash.clone().into()],
+                ));
+            }
             // Overwrite: the cataloged document now has new content; the old content is a
             // version (Filer kept the bytes in `_Vibe/overwritten/<batch>/`, Q-17).
             Some((id, old_hash, old_size)) => {

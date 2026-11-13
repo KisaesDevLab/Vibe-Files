@@ -37,6 +37,12 @@ const MIGRATIONS: &[&str] = &[
 /// once afterwards, or the file keeps its size.
 const DROPS_PAGE_TEXT: u32 = 18;
 
+/// The migration that rebuilds `document` (PA-60): the only one whose references are checked.
+const REBUILDS_DOCUMENT: u32 = 17;
+
+/// `local_state` key present while the catalog still waits to be compacted ([`compact_due`]).
+const COMPACT_KEY: &str = "compact_due";
+
 /// Schema version this build writes.
 pub const SCHEMA_VERSION: u32 = MIGRATIONS.len() as u32;
 
@@ -102,6 +108,7 @@ pub fn open(path: &Path, storage: Storage) -> Result<Connection> {
     conn.pragma_update(None, "cache_size", -32_768)?;
     conn.pragma_update(None, "temp_store", "MEMORY")?;
     migrate(&conn, path)?;
+    compact_due(&conn);
     // Statistics for the query planner, kept up to date cheaply (SQLite's advice for a
     // connection that opens: analyse only what needs it, with a limit).
     let _ = conn.execute_batch("PRAGMA optimize=0x10002;");
@@ -169,16 +176,26 @@ fn migrate(conn: &Connection, path: &Path) -> Result<()> {
         for (i, sql) in MIGRATIONS.iter().enumerate().skip(current as usize) {
             let to = i as u32 + 1;
             let tx = begin_write(conn)?;
-            let before = broken_references(&tx)?;
+            // Only the migration that rebuilds a referenced table is checked (each check reads
+            // every child table: code review 2026-11-13).
+            let checked = to == REBUILDS_DOCUMENT;
+            let before = if checked { broken_references(&tx)? } else { 0 };
             tx.execute_batch(sql)?;
             // Only what the migration broke stops it: a catalog with an old stray row still
             // opens.
-            let after = broken_references(&tx)?;
+            let after = if checked { broken_references(&tx)? } else { 0 };
             if after > before {
                 return Err(Error::Tx(format!(
                     "catalog migration {to} left {} rows pointing at missing rows; the catalog was not changed",
                     after - before
                 )));
+            }
+            if to == DROPS_PAGE_TEXT && current > 0 {
+                // The space is given back after the migrations ([`compact_due`]).
+                tx.execute(
+                    "INSERT OR REPLACE INTO local_state (k, v) VALUES (?1, '1')",
+                    [COMPACT_KEY],
+                )?;
             }
             tx.pragma_update(None, "user_version", to)?;
             tx.commit()?;
@@ -187,14 +204,31 @@ fn migrate(conn: &Connection, path: &Path) -> Result<()> {
     };
     let done = run();
     conn.pragma_update(None, "foreign_keys", true)?;
-    done?;
-    // The space the dropped page text took (PA-65): given back once, here. It can take a
-    // minute on a large catalog, and cannot run inside a transaction. A failure (another
-    // session has the catalog open) only leaves the file large.
-    if current > 0 && current < DROPS_PAGE_TEXT {
-        let _ = conn.execute_batch("VACUUM");
+    done
+}
+
+/// Gives back the space the dropped page text took (PA-65), once: `VACUUM` cannot run inside a
+/// transaction, and it can take a minute or more on a large catalog. Its working copy goes to
+/// a file, not to memory (the catalog can be gigabytes: code review 2026-11-13). When it
+/// cannot run now (another session has the catalog open), the note stays and the next open
+/// tries again.
+fn compact_due(conn: &Connection) {
+    let due = conn
+        .query_row(
+            "SELECT 1 FROM local_state WHERE k = ?1",
+            [COMPACT_KEY],
+            |_| Ok(()),
+        )
+        .is_ok();
+    if !due {
+        return;
     }
-    Ok(())
+    let _ = conn.pragma_update(None, "temp_store", "FILE");
+    let done = conn.execute_batch("VACUUM").is_ok();
+    let _ = conn.pragma_update(None, "temp_store", "MEMORY");
+    if done {
+        let _ = conn.execute("DELETE FROM local_state WHERE k = ?1", [COMPACT_KEY]);
+    }
 }
 
 /// Rows whose foreign key points at no row (`PRAGMA foreign_key_check`).
@@ -393,6 +427,20 @@ mod tests {
         );
         assert_eq!(broken_references(&conn).unwrap(), 0);
         assert!(tables(&conn).iter().all(|t| t != "document_new"));
+        // PA-65: the page text tables are gone and the catalog was compacted (nothing waits).
+        assert!(
+            tables(&conn)
+                .iter()
+                .all(|t| t != "page_text" && t != "ocr_job")
+        );
+        let waits: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM local_state WHERE k = 'compact_due'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(waits, 0);
         // A document with no fingerprint yet; the live-path index still refuses a second one.
         conn.execute(
             "INSERT INTO document (id, rel_path, hash, size, filed_at, device_id, updated_at)

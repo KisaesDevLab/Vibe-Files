@@ -222,6 +222,23 @@ mod tests {
         assert_eq!((h.as_str(), how), (want.as_str(), Source::Record));
         assert_eq!(records(&fx).len(), 1);
         assert_eq!(pending(&fx.conn).unwrap(), 0);
+        // A PC that had not read the file writes a later record for it (a doc type set
+        // there), with no fingerprint: the one recorded before is still found, not read again.
+        let mut later = records(&fx)[0].clone();
+        later.hash = String::new();
+        later.device = "pc-3".into();
+        later.status = "final".into();
+        let file = fx.root.join("Smith, Pat (1001)/_Vibe/docmeta.jsonl");
+        let mut text = std::fs::read_to_string(&file).unwrap();
+        text.push_str(&serde_json::to_string(&later).unwrap());
+        text.push(char::from(10));
+        std::fs::write(&file, text).unwrap();
+        fx.conn
+            .execute("UPDATE document SET hash = NULL WHERE id = 'd1'", [])
+            .unwrap();
+        let (h, how) = ensure_how(&mut fx.conn, &fx.root, "pc-4", "d1").unwrap();
+        assert_eq!((h.as_str(), how), (want.as_str(), Source::Record));
+        assert_eq!(records(&fx).len(), 2);
     }
 
     /// A record written for the file as it was (another size) is not trusted: the file is read.

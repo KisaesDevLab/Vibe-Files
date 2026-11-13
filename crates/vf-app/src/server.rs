@@ -150,7 +150,6 @@ const NOT_COPIED: &[&str] = &[
     "rebuild_unfinished",
     "catalog_writer_id",
     "health_check_month",
-    "ocr_reads_owner",
 ];
 
 /// A consistent copy of the catalog at `from` (read only) into `to`, for another server: its
