@@ -29,6 +29,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/014_fts_doc_index.sql"),
     include_str!("../migrations/015_scale_indexes.sql"),
     include_str!("../migrations/016_journal_owner.sql"),
+    include_str!("../migrations/017_hash_optional.sql"),
 ];
 
 /// Schema version this build writes.
@@ -154,14 +155,45 @@ fn migrate(conn: &Connection, path: &Path) -> Result<()> {
     if current > 0 {
         backup(conn, path, current)?;
     }
-    for (i, sql) in MIGRATIONS.iter().enumerate().skip(current as usize) {
-        let to = i as u32 + 1;
-        let tx = begin_write(conn)?;
-        tx.execute_batch(sql)?;
-        tx.pragma_update(None, "user_version", to)?;
-        tx.commit()?;
+    // A migration that rebuilds a table other tables reference (017) cannot run with foreign
+    // keys enforced: dropping the old table fails on its child rows. As SQLite's procedure for
+    // it: enforcement off (it cannot change inside a transaction), the references checked
+    // before each commit, enforcement on again whatever happened.
+    conn.pragma_update(None, "foreign_keys", false)?;
+    let run = || -> Result<()> {
+        for (i, sql) in MIGRATIONS.iter().enumerate().skip(current as usize) {
+            let to = i as u32 + 1;
+            let tx = begin_write(conn)?;
+            let before = broken_references(&tx)?;
+            tx.execute_batch(sql)?;
+            // Only what the migration broke stops it: a catalog with an old stray row still
+            // opens.
+            let after = broken_references(&tx)?;
+            if after > before {
+                return Err(Error::Tx(format!(
+                    "catalog migration {to} left {} rows pointing at missing rows; the catalog was not changed",
+                    after - before
+                )));
+            }
+            tx.pragma_update(None, "user_version", to)?;
+            tx.commit()?;
+        }
+        Ok(())
+    };
+    let done = run();
+    conn.pragma_update(None, "foreign_keys", true)?;
+    done
+}
+
+/// Rows whose foreign key points at no row (`PRAGMA foreign_key_check`).
+fn broken_references(conn: &Connection) -> Result<usize> {
+    let mut st = conn.prepare("PRAGMA foreign_key_check")?;
+    let mut rows = st.query([])?;
+    let mut n = 0;
+    while rows.next()?.is_some() {
+        n += 1;
     }
-    Ok(())
+    Ok(n)
 }
 
 /// `catalog.db.v<from>-<unix secs>.bak`.
@@ -279,6 +311,115 @@ mod tests {
             .filter(|e| e.as_ref().unwrap().path().extension() == Some("bak".as_ref()))
             .count();
         assert_eq!(baks, 0);
+    }
+
+    /// PA-60: migration 017 lets a document have no fingerprint yet. A version 16 catalog keeps
+    /// every document, its child rows and its indexes; foreign keys are enforced again after.
+    #[test]
+    fn migration_017_keeps_documents_and_lets_the_hash_be_unknown() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("catalog.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            for sql in &MIGRATIONS[..16] {
+                conn.execute_batch(sql).unwrap();
+            }
+            conn.pragma_update(None, "user_version", 16).unwrap();
+            conn.execute_batch(
+                "INSERT INTO document (id, rel_path, hash, size, filed_at, device_id, updated_at, file_mtime, tombstone_reason)
+                 VALUES ('d1', 'A (1)/a.pdf', 'h1', 10, 't', 'dev', 't', 1700000000, NULL),
+                        ('d2', 'A (1)/b.pdf', 'h2', 20, 't', 'dev', 't', NULL, 'why');
+                 UPDATE document SET deleted_at = 't' WHERE id = 'd2';
+                 INSERT INTO document_tag (doc_id, tag) VALUES ('d1', 'x');
+                 INSERT INTO version (doc_id, hash, size, created, device_id)
+                 VALUES ('d1', 'h0', 5, 't', 'dev');",
+            )
+            .unwrap();
+        }
+        let indexes = |conn: &Connection| -> Vec<String> {
+            let mut st = conn
+                .prepare(
+                    "SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'document'
+                     AND name NOT LIKE 'sqlite_%' ORDER BY name",
+                )
+                .unwrap();
+            st.query_map([], |r| r.get(0))
+                .unwrap()
+                .map(|r| r.unwrap())
+                .collect()
+        };
+        let conn = open(&path, Storage::Local).unwrap();
+        assert_eq!(user_version(&conn).unwrap(), SCHEMA_VERSION);
+        type Row = (String, Option<String>, i64, Option<i64>, Option<String>);
+        let rows: Vec<Row> = conn
+            .prepare(
+                "SELECT id, hash, size, file_mtime, tombstone_reason FROM document ORDER BY id",
+            )
+            .unwrap()
+            .query_map([], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+            })
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                (
+                    "d1".into(),
+                    Some("h1".into()),
+                    10,
+                    Some(1_700_000_000),
+                    None
+                ),
+                ("d2".into(), Some("h2".into()), 20, None, Some("why".into())),
+            ]
+        );
+        assert_eq!(
+            indexes(&conn),
+            [
+                "document_client",
+                "document_deleted",
+                "document_filed_at",
+                "document_filed_by",
+                "document_hash",
+                "document_rel_path",
+                "document_unhashed_size",
+                "document_updated_at",
+            ]
+        );
+        assert_eq!(broken_references(&conn).unwrap(), 0);
+        assert!(tables(&conn).iter().all(|t| t != "document_new"));
+        // A document with no fingerprint yet; the live-path index still refuses a second one.
+        conn.execute(
+            "INSERT INTO document (id, rel_path, hash, size, filed_at, device_id, updated_at)
+             VALUES ('d3', 'A (1)/c.pdf', NULL, 30, 't', 'dev', 't')",
+            [],
+        )
+        .unwrap();
+        assert!(
+            conn.execute(
+                "INSERT INTO document (id, rel_path, hash, size, filed_at, device_id, updated_at)
+                 VALUES ('d4', 'A (1)/c.pdf', NULL, 30, 't', 'dev', 't')",
+                [],
+            )
+            .is_err()
+        );
+        // Foreign keys are enforced again: a tag of no document is refused.
+        let on: i64 = conn
+            .query_row("PRAGMA foreign_keys", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(on, 1);
+        assert!(
+            conn.execute(
+                "INSERT INTO document_tag (doc_id, tag) VALUES ('nope', 'x')",
+                []
+            )
+            .is_err()
+        );
+        // A catalog made new has the same document table.
+        let fresh = open(&tmp.path().join("fresh.db"), Storage::Local).unwrap();
+        assert_eq!(indexes(&fresh), indexes(&conn));
     }
 
     /// P03: a P00–P02 catalog (version 1) gains the OCR and search tables, after a backup.
