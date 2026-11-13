@@ -84,6 +84,9 @@ pub struct ImportPage {
     pub hide_bound: bool,
     /// Folders with no client are not shown.
     pub hide_none: bool,
+    /// Only folders whose client has another folder (owner 2026-11-12: "3 Way" and "3-Way"),
+    /// to set Merge or New client on them.
+    pub only_shared: bool,
     /// The row whose Bind box was clicked last, for Shift-click ranges.
     last_tick: Option<usize>,
     job: Option<Receiver<Result<Applied, String>>>,
@@ -372,7 +375,12 @@ impl ImportPage {
                     "folder import"
                 );
                 self.notice = Some(format!(
-                    "Imported: {} folders bound{}{}, {} documents, {} with client, doc type and year; {} PDFs queued for OCR.{}",
+                    "Imported: {}{} folders bound{}{}, {} documents, {} with client, doc type and year; {} PDFs queued for OCR.{}",
+                    if a.merged > 0 {
+                        format!("{} folders merged into their client's folder, ", a.merged)
+                    } else {
+                        String::new()
+                    },
                     a.bound,
                     if a.renamed > 0 {
                         format!(" ({} renamed)", a.renamed)
@@ -412,6 +420,8 @@ impl ImportPage {
                 self.plan = None;
                 self.scanned_at = None;
                 self.forget_on_poll = true;
+                // What it did before failing (a merge, a batch) can be undone at once.
+                self.loaded_last = false;
             }
         }
     }
@@ -601,8 +611,13 @@ pub fn show(ui: &mut egui::Ui, p: &mut ImportPage, env: &mut Env, catalog: &Path
             && ui
                 .button("Undo the last import")
                 .on_hover_text(format!(
-                    "Removes the {} sentinels it wrote (and renames back), and the doc types and years it set. Files stay where they are.",
-                    a.bound
+                    "Removes the {} sentinels it wrote (and renames back), and the doc types and years it set.{}",
+                    a.bound,
+                    if a.merged > 0 {
+                        " Merged files go back to their folders (refused if one was changed since)."
+                    } else {
+                        " Files stay where they are."
+                    }
                 ))
                 .clicked()
         {
@@ -699,10 +714,19 @@ pub fn show(ui: &mut egui::Ui, p: &mut ImportPage, env: &mut Env, catalog: &Path
     ui.add_space(8.0);
     let mapped = plan.auto_mapped();
     let total = plan.files.len();
+    // Folders bound, and folders merged into another (a Merge with no other folder of its
+    // client does nothing, so is not counted).
+    let in_merge: std::collections::HashSet<usize> = import::merge_targets(plan)
+        .into_iter()
+        .flat_map(|(t, s)| std::iter::once(t).chain(s))
+        .collect();
     let to_bind = plan
         .folders
         .iter()
-        .filter(|r| r.include && !r.bound && r.client.is_some())
+        .enumerate()
+        .filter(|(i, r)| {
+            !r.bound && r.client.is_some() && (r.include || (r.merge && in_merge.contains(i)))
+        })
         .count();
     // Files in bound (or to-be-bound) folders with a doc type or year to set.
     let to_type = plan
@@ -765,10 +789,66 @@ pub fn show(ui: &mut egui::Ui, p: &mut ImportPage, env: &mut Env, catalog: &Path
             }
         }
     }
+    // Weak matches made clients of their own, in bulk (owner 2026-11-12): under the "Show
+    // matches from" %. Folders sharing a client are left to the filter below.
+    let shared = import::shared_clients(plan);
+    let weak = plan
+        .folders
+        .iter()
+        .filter(|r| {
+            !r.bound
+                && !r.merge
+                && r.client
+                    .as_ref()
+                    .is_some_and(|c| !c.new && !shared.contains(&c.ext_id.to_uppercase()))
+                && (r.confidence * 100.0).round() < f32::from(p.min_pct)
+        })
+        .count();
+    if p.min_pct > 0
+        && weak > 0
+        && ui
+            .button(format!(
+                "Create a client for each folder matched under {}% ({weak})",
+                p.min_pct
+            ))
+            .on_hover_text(
+                "Each such folder gets a new client named after it, with an ID made from its name (change it on the row), instead of the client it looks like. Set the % in \"Show matches from\".",
+            )
+            .clicked()
+    {
+        p.id_drafts.clear();
+        match import::new_clients_under(env.root, plan, p.min_pct) {
+            Ok(n) => p.notice = Some(format!("{n} new clients proposed; check their IDs.")),
+            Err(e) => p.error = Some(e),
+        }
+    }
     // Filter by match % and kind (PA-28); ticking acts on the folders shown.
+    let shared = import::shared_clients(plan);
+    let in_shared = |r: &import::FolderRow| {
+        r.client
+            .as_ref()
+            .is_some_and(|c| shared.contains(&c.ext_id.to_uppercase()))
+    };
     let shown: Vec<usize> = (0..plan.folders.len())
-        .filter(|&i| shows(&plan.folders[i], p.min_pct, p.hide_bound, p.hide_none))
+        .filter(|&i| {
+            let r = &plan.folders[i];
+            if p.only_shared {
+                in_shared(r)
+            } else {
+                shows(r, p.min_pct, p.hide_bound, p.hide_none)
+            }
+        })
         .collect();
+    // Which folder each merge goes into, for the rows.
+    let mut merge_into: std::collections::HashMap<usize, String> = Default::default();
+    let mut kept: std::collections::HashSet<usize> = Default::default();
+    for (t, sources) in import::merge_targets(plan) {
+        kept.insert(t);
+        for sidx in sources {
+            merge_into.insert(sidx, plan.folders[t].rel.clone());
+        }
+    }
+    let mut new_client_row: Option<usize> = None;
     let can_tick = |r: &import::FolderRow| !r.bound && r.client.is_some();
     ui.horizontal_wrapped(|ui| {
         ui.label("Show matches from");
@@ -782,6 +862,10 @@ pub fn show(ui: &mut egui::Ui, p: &mut ImportPage, env: &mut Env, catalog: &Path
         ui.label("up");
         ui.checkbox(&mut p.hide_bound, "Hide already bound");
         ui.checkbox(&mut p.hide_none, "Hide folders with no match");
+        ui.checkbox(&mut p.only_shared, "Only folders sharing a client")
+            .on_hover_text(
+                "Folders matched to a client that another folder is matched to (\"3 Way\" and \"3-Way\"): choose Merge (its files go into the client's folder: the bound one, else the one with more files) or New client on each",
+            );
         ui.label(widgets::caption(format!(
             "Showing {} of {} folders",
             shown.len(),
@@ -937,7 +1021,50 @@ pub fn show(ui: &mut egui::Ui, p: &mut ImportPage, env: &mut Env, catalog: &Path
                                 p.id_drafts.remove(&i);
                             }
                         }
-                        ui.label(widgets::caption(&r.how));
+                        // A folder sharing its client: Merge into the folder kept, or a new
+                        // client of its own (owner 2026-11-12).
+                        let sharing = !r.bound && in_shared(r);
+                        ui.horizontal(|ui| {
+                            if let Some(t) = merge_into.get(&i) {
+                                ui.label(widgets::caption(format!("merges into {t}")));
+                            } else if kept.contains(&i) {
+                                ui.label(widgets::caption("kept: the others merge into it"));
+                            } else if r.merge {
+                                ui.label(widgets::caption(
+                                    "tick Merge on the client's other folder too",
+                                ));
+                            } else {
+                                ui.label(widgets::caption(&r.how));
+                            }
+                            if sharing {
+                                let m = ui
+                                    .checkbox(&mut r.merge, "Merge")
+                                    .on_hover_text(
+                                        "Tick Merge on each of the client's folders to combine: the bound one, else the one with more files, is kept; the others' files go into it and they are removed. Undo the last import puts them back.",
+                                    );
+                                m.widget_info(|| {
+                                    egui::WidgetInfo::selected(
+                                        egui::accesskit::Role::CheckBox,
+                                        true,
+                                        r.merge,
+                                        format!("Merge {}", r.rel),
+                                    )
+                                });
+                                let nc = ui
+                                    .small_button("New client")
+                                    .on_hover_text("A client of its own, named after this folder");
+                                nc.widget_info(|| {
+                                    egui::WidgetInfo::labeled(
+                                        egui::accesskit::Role::Button,
+                                        true,
+                                        format!("New client for {}", r.rel),
+                                    )
+                                });
+                                if nc.clicked() {
+                                    new_client_row = Some(i);
+                                }
+                            }
+                        });
                         ui.label(if r.bound {
                             String::new()
                         } else {
@@ -965,6 +1092,12 @@ pub fn show(ui: &mut egui::Ui, p: &mut ImportPage, env: &mut Env, catalog: &Path
                     }
                 });
         });
+    if let Some(i) = new_client_row {
+        if let Err(e) = import::new_client_for(env.root, plan, i) {
+            p.error = Some(e);
+        }
+        p.id_drafts.remove(&i);
+    }
     if let Some((i, id)) = id_edit {
         if let Err(e) = import::set_new_id(env.root, plan, i, &id) {
             p.error = Some(e);

@@ -255,11 +255,15 @@ pub fn undoable_paths(root: &Path) -> std::collections::HashSet<String> {
     // The cabinet-level `_Vibe/last_batch.json` predates the per-PC folders (Q-53): no Filer
     // loads it, so it can never be undone and its files are not held (QA 2026-11-04).
     let master = crate::clients::master_dir(root);
-    batch_dirs(root)
+    let mut out: std::collections::HashSet<String> = batch_dirs(root)
         .iter()
         .filter(|d| **d != master)
         .flat_map(|d| undoable_in(root, d))
-        .collect()
+        .collect();
+    // Files the last folder import merged into another folder: its Undo checks them the same
+    // way (QA 2026-11-12).
+    out.extend(crate::import::held_paths(root));
+    out
 }
 
 /// [`undoable_paths`] of one Intake folder's last batch.

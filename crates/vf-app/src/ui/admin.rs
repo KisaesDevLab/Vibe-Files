@@ -1706,6 +1706,89 @@ ANDE1042,Anderson Farms LLC
         assert!(!kept("folder-import-folders-") && !kept("folder-import-files-"));
     }
 
+    /// Two folders for one client (owner 2026-11-12): "Only folders sharing a client" lists
+    /// them; Merge on one sends its files into the other at Import.
+    #[test]
+    fn folder_import_merges_two_folders_of_one_client() {
+        use egui::accesskit::Role;
+        let mut h = harness();
+        {
+            let s = h.state_mut();
+            vf_fs::cabinet::create(
+                &s.root,
+                &vf_fs::cabinet::CabinetFile {
+                    cabinet_id: vf_core::new_id(),
+                    firm_id: uuid::Uuid::new_v4().to_string(),
+                    schema_version: vf_core::db::SCHEMA_VERSION,
+                    layout_version: 1,
+                    created: vf_core::now_rfc3339(),
+                    name: None,
+                },
+            )
+            .unwrap();
+            let csv = s._tmp.path().join("c.csv");
+            std::fs::write(
+                &csv,
+                "ID,Name
+3WAY2833,3 Way Construction LLC
+",
+            )
+            .unwrap();
+            let map = filer_core::config::ColumnMap {
+                partner: None,
+                id: Some("ID".into()),
+                name: Some("Name".into()),
+                extras: vec![],
+            };
+            vf_fs::clients::import_csv(&s.root, &csv, &map, &Default::default()).unwrap();
+            for (f, body) in [
+                ("3 Way Construction LLC/2023/a.pdf", "a"),
+                ("3 Way Construction LLC/2023/b.pdf", "b"),
+                ("3-Way Construction, LLC/2023/c.pdf", "c"),
+            ] {
+                let p = s.root.join(f);
+                std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+                std::fs::write(p, body).unwrap();
+            }
+        }
+        click(&mut h, "Folder import");
+        click(&mut h, "Scan the cabinet");
+        h.run();
+        h.get_by_label("Only folders sharing a client").click();
+        h.run();
+        h.get_by_role_and_label(Role::CheckBox, "Merge 3-Way Construction, LLC")
+            .click();
+        h.run();
+        assert!(
+            h.query_by_label("tick Merge on the client's other folder too")
+                .is_some()
+        );
+        h.get_by_role_and_label(Role::CheckBox, "Merge 3 Way Construction LLC")
+            .click();
+        h.run();
+        assert!(
+            h.query_by_label("merges into 3 Way Construction LLC")
+                .is_some()
+        );
+        h.get_by_role_and_label(Role::Button, "Import 2 folders")
+            .click();
+        h.step();
+        let start = std::time::Instant::now();
+        while h.state().a.import.last.is_none() {
+            h.step();
+            assert!(
+                start.elapsed() < std::time::Duration::from_secs(20),
+                "{:?}",
+                h.state().a.import.error
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let root = h.state().root.clone();
+        assert!(!root.join("3-Way Construction, LLC").exists());
+        assert!(root.join("3 Way Construction LLC/2023/c.pdf").is_file());
+        assert_eq!(h.state().a.import.last.as_ref().unwrap().merged, 1);
+    }
+
     /// PA-28: the folder list filtered by match %, ticked in bulk and by Shift-click.
     #[test]
     fn folder_import_filters_by_match_and_ticks_in_bulk() {

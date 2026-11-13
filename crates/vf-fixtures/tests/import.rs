@@ -769,3 +769,142 @@ fn a_continued_import_is_undone_whole() {
         );
     }
 }
+
+/// Two folders for one client (owner 2026-11-12: "3 Way" and "3-Way"): Merge moves the files of
+/// one into the one with more files (same sub-folders, a name taken gets " (2)"), removes the
+/// emptied folder, binds the one kept with every file cataloged and typed; Undo puts it all
+/// back. A weak match can become a new client from its folder name, in bulk under a %.
+#[test]
+fn two_folders_of_one_client_merge_and_weak_matches_become_new_clients() {
+    let t = tempfile::tempdir().unwrap();
+    let root = t.path().join("Clients");
+    std::fs::create_dir_all(&root).unwrap();
+    vf_fs::cabinet::create(
+        &root,
+        &CabinetFile {
+            cabinet_id: vf_core::new_id(),
+            firm_id: uuid::Uuid::new_v4().to_string(),
+            schema_version: vf_core::db::SCHEMA_VERSION,
+            layout_version: 1,
+            created: vf_core::now_rfc3339(),
+            name: None,
+        },
+    )
+    .unwrap();
+    let mut conn = vf_core::db::open(&t.path().join("c.db"), Storage::Local).unwrap();
+    vf_fs::doctypes::seed_if_missing(&root).unwrap();
+    vf_fs::doctypes::sync(&mut conn, &root, "dev", "seed").unwrap();
+    let csv = t.path().join("clients.csv");
+    std::fs::write(
+        &csv,
+        "ID,Name\n3WAY2833,3 Way Construction LLC\nRTHO8446,R & T Holdings LLC\n",
+    )
+    .unwrap();
+    let map = filer_core::config::ColumnMap {
+        partner: None,
+        id: Some("ID".into()),
+        name: Some("Name".into()),
+        extras: vec![],
+    };
+    vf_fs::clients::import_csv(&root, &csv, &map, &Default::default()).unwrap();
+    let put = |rel: &str, body: &str| {
+        let p = root.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, body).unwrap();
+    };
+    put("3 Way Construction LLC/2023/W2.pdf", "w2 main");
+    put("3 Way Construction LLC/2023/1099.pdf", "1099 main");
+    put("3-Way Construction, LLC/2023/W2.pdf", "w2 other");
+    put("3-Way Construction, LLC/Permanent/EIN.pdf", "ein");
+    put("1st Choice Equity Holdings LLC/2023/K1.pdf", "k1");
+    // Left by an import undone earlier: not moved, so its folder stays (QA 2026-11-12).
+    put("3-Way Construction, LLC/_Vibe/docmeta.jsonl", "");
+    // Cataloged already (no client): the rows follow the files, none left behind.
+    vf_fs::rebuild::rebuild(&mut conn, &root, "dev").unwrap();
+    let before = snapshot(&root);
+    let mut plan = import::plan(&conn, &root).unwrap();
+    let idx = |plan: &import::Plan, n: &str| plan.folders.iter().position(|r| r.rel == n).unwrap();
+    let (a, b) = (
+        idx(&plan, "3 Way Construction LLC"),
+        idx(&plan, "3-Way Construction, LLC"),
+    );
+    assert!(
+        !plan.folders[a].include && !plan.folders[b].include,
+        "held back"
+    );
+    // Merge both: the one with more files (3 Way, 2 files... the other has 2 too: the first
+    // wins a tie) is kept.
+    plan.folders[a].merge = true;
+    plan.folders[b].merge = true;
+    let m = import::merge_targets(&plan);
+    assert_eq!(m.len(), 1);
+    let (kept, from) = (&m[0].0, &m[0].1);
+    assert_eq!(*kept, a);
+    assert_eq!(from, &vec![b]);
+    // The weak match under 90 % becomes a client of its own.
+    let weak = idx(&plan, "1st Choice Equity Holdings LLC");
+    let n = import::new_clients_under(&root, &mut plan, 90).unwrap();
+    assert!(n >= 1, "{:?}", plan.folders[weak]);
+    assert!(plan.folders[weak].client.as_ref().is_some_and(|c| c.new));
+
+    // A check failing moves nothing (QA 2026-11-12): a new client given a taken ID.
+    let mut bad = plan.clone();
+    bad.folders[weak].client.as_mut().unwrap().ext_id = "RTHO8446".into();
+    let e = import::apply(&mut conn, &root, &bad, &Options::default(), "dev").unwrap_err();
+    assert!(e.contains("ID already"), "{e}");
+    assert_eq!(snapshot(&root), before, "nothing moved");
+
+    // Bind ticked on one and Merge on the other: still one folder kept.
+    plan.folders[a].merge = false;
+    plan.folders[a].include = true;
+    assert_eq!(import::merge_targets(&plan), vec![(a, vec![b])]);
+
+    let applied = import::apply(&mut conn, &root, &plan, &Options::default(), "dev").unwrap();
+    assert_eq!((applied.merged, applied.merge_txs.len()), (1, 1));
+    let kept_dir = root.join("3 Way Construction LLC");
+    let src = root.join("3-Way Construction, LLC");
+    assert!(
+        !src.join("2023").exists() && !src.join("Permanent").exists(),
+        "emptied, removed"
+    );
+    assert!(
+        src.join("_Vibe/docmeta.jsonl").is_file(),
+        "what was not moved stays"
+    );
+    assert!(
+        vf_fs::import::held_paths(&root).contains("3 way construction llc/2023/w2 (2).pdf"),
+        "{:?}",
+        vf_fs::import::held_paths(&root)
+    );
+    assert_eq!(
+        std::fs::read_to_string(kept_dir.join("2023/W2.pdf")).unwrap(),
+        "w2 main"
+    );
+    assert_eq!(
+        std::fs::read_to_string(kept_dir.join("2023/W2 (2).pdf")).unwrap(),
+        "w2 other"
+    );
+    assert!(kept_dir.join("Permanent/EIN.pdf").is_file());
+    assert!(filer_intake::sentinel::sentinel_path(&kept_dir).is_file());
+    let docs: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM document WHERE deleted_at IS NULL
+               AND rel_path LIKE '3 Way Construction LLC/%'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(docs, 4, "every file cataloged under the folder kept");
+    let stale: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM document WHERE deleted_at IS NULL
+               AND rel_path LIKE '3-Way Construction, LLC/%'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(stale, 0, "no row left at the old paths");
+
+    import::undo(&mut conn, &root, &applied, "dev").unwrap();
+    assert_eq!(snapshot(&root), before, "all back as it was");
+}

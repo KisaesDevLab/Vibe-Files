@@ -91,7 +91,7 @@ articles! {
     Search: "search", "ocr";
     Viewer: "viewer", "annotations", "forms", "ten-key", "page-tools", "printing";
     Sync: "sync", "sync-rules", "sync-key", "sync-conflicts", "portal", "portal-inbox", "portal-secure-links";
-    Admin: "admin", "admin-password", "doc-types", "folder-templates", "clients", "folder-import", "merge-cabinets", "retention",
+    Admin: "admin", "admin-password", "doc-types", "folder-templates", "clients", "folder-import", "folder-import-matches", "merge-cabinets", "retention",
         "trash", "audit", "devices", "maintenance";
     Trouble: "troubleshooting", "data-and-backups";
 }

@@ -63,6 +63,11 @@ pub struct FolderRow {
     pub template_name: Option<String>,
     /// Bound when applied (defaults to confidence ≥ [`AUTO`]; the person can change it).
     pub include: bool,
+    /// Another folder of the same client (`3 Way` and `3-Way`, owner 2026-11-12): its files go
+    /// into the client's folder (the bound one, else the one with more files), then it is
+    /// removed. See [`merge_targets`].
+    #[serde(default)]
+    pub merge: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -756,6 +761,238 @@ pub fn new_clients_from_folders(root: &Path, plan: &mut Plan) -> Result<usize, S
     Ok(n)
 }
 
+/// The merges the plan asks for (owner 2026-11-12): for each client with a folder set to
+/// Merge, the folder that stays (its bound folder, else the one with the most files among those
+/// chosen for it) and the folders whose files go into it.
+pub fn merge_targets(plan: &Plan) -> Vec<(usize, Vec<usize>)> {
+    let mut groups: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+    for (i, r) in plan.folders.iter().enumerate() {
+        if let Some(c) = &r.client
+            && (r.bound || r.include || r.merge)
+        {
+            groups.entry(c.ext_id.to_uppercase()).or_default().push(i);
+        }
+    }
+    let mut out = vec![];
+    for rows in groups.into_values() {
+        if !rows
+            .iter()
+            .any(|&i| plan.folders[i].merge && !plan.folders[i].bound)
+        {
+            continue;
+        }
+        let target = rows
+            .iter()
+            .copied()
+            .find(|&i| plan.folders[i].bound)
+            .or_else(|| {
+                rows.iter()
+                    .copied()
+                    .filter(|&i| plan.folders[i].include || plan.folders[i].merge)
+                    .max_by_key(|&i| (plan.folders[i].files, std::cmp::Reverse(i)))
+            });
+        let Some(t) = target else { continue };
+        // Every other folder chosen for the client goes in too (a Bind tick beside a Merge
+        // would otherwise leave two folders for one client; QA 2026-11-12).
+        let sources: Vec<usize> = rows
+            .into_iter()
+            .filter(|&i| i != t && !plan.folders[i].bound)
+            .collect();
+        if !sources.is_empty() {
+            out.push((t, sources));
+        }
+    }
+    out
+}
+
+/// Gives folder row `i` a new client made from its folder name (owner 2026-11-12: a weak
+/// match, or the second folder of a client, made a client of its own).
+pub fn new_client_for(root: &Path, plan: &mut Plan, i: usize) -> Result<(), String> {
+    new_clients_where(root, plan, |j, _| j == i).map(|_| ())
+}
+
+/// New clients from the folder names of the unbound folders matched under `pct` % (owner
+/// 2026-11-12: "create a folder for those under a % match"); a sure match is left alone.
+/// Folders set to Merge, and folders whose client has another folder, are left for the person
+/// (the shared-client filter).
+pub fn new_clients_under(root: &Path, plan: &mut Plan, pct: u8) -> Result<usize, String> {
+    let shared = shared_clients(plan);
+    new_clients_where(root, plan, |_, r| {
+        r.client
+            .as_ref()
+            .is_some_and(|c| !shared.contains(&c.ext_id.to_uppercase()))
+            && !r.merge
+            && (r.confidence * 100.0).round() < f32::from(pct)
+    })
+}
+
+/// Client IDs (upper case) that more than one folder of the plan is matched to (a bound folder
+/// counting): the "folders sharing a client" filter (owner 2026-11-12).
+pub fn shared_clients(plan: &Plan) -> HashSet<String> {
+    let mut n: HashMap<String, usize> = HashMap::new();
+    for r in &plan.folders {
+        if let Some(c) = &r.client {
+            *n.entry(c.ext_id.to_uppercase()).or_default() += 1;
+        }
+    }
+    n.into_iter()
+        .filter(|(_, k)| *k > 1)
+        .map(|(id, _)| id)
+        .collect()
+}
+
+fn new_clients_where(
+    root: &Path,
+    plan: &mut Plan,
+    which: impl Fn(usize, &FolderRow) -> bool,
+) -> Result<usize, String> {
+    let list = client_list(root)?;
+    let mut taken: HashSet<String> = list.clients.iter().map(|c| c.id.to_uppercase()).collect();
+    taken.extend(
+        plan.folders
+            .iter()
+            .filter_map(|r| r.client.as_ref().map(|c| c.ext_id.to_uppercase())),
+    );
+    let mut n = 0;
+    for (i, r) in plan.folders.iter_mut().enumerate() {
+        if r.bound || !which(i, r) {
+            continue;
+        }
+        let id = id_from_name(&r.rel, &taken);
+        taken.insert(id.clone());
+        let c = ClientPick {
+            ext_id: id,
+            uuid: Uuid::new_v4(),
+            name: r.rel.clone(),
+            new: true,
+        };
+        r.template_name = template_name_for(root, &c, &r.rel);
+        r.client = Some(c);
+        r.how = "new client from the folder name".into();
+        r.confidence = 1.0;
+        r.include = true;
+        r.merge = false;
+        n += 1;
+    }
+    Ok(n)
+}
+
+/// Moves the files of the `sources` folders into folder `target` (the same paths below it; a
+/// name already there or already planned gets " (2)", " (3)"…), then removes the emptied
+/// folders, in one Transaction (undone by [`undo`]). Returns its id and each file's old and new
+/// cabinet-relative path.
+fn merge_folders(
+    conn: &mut Connection,
+    root: &Path,
+    target: &str,
+    sources: &[String],
+    device_id: &str,
+) -> Result<(String, Vec<(String, String)>), String> {
+    let mut tx = Transaction::new(MERGE_LABEL);
+    let mut planned: HashSet<PathBuf> = HashSet::new();
+    let mut moved: Vec<(String, String)> = vec![];
+    let mut rmdirs: Vec<PathBuf> = vec![];
+    let mut left: Vec<String> = vec![];
+    let lower = |p: &Path| PathBuf::from(p.to_string_lossy().to_lowercase());
+    for src_rel in sources {
+        let src_dir = root.join(src_rel);
+        let (mut files, mut bad) = (vec![], vec![]);
+        rebuild::files_under_lenient(&src_dir, &mut files, &mut bad);
+        let mut moved_here: HashSet<PathBuf> = HashSet::new();
+        if !bad.is_empty() {
+            return Err(format!(
+                "{src_rel} cannot be read whole ({}): not merged",
+                bad[0].1
+            ));
+        }
+        for f in files {
+            let rest = f.strip_prefix(&src_dir).map_err(|e| e.to_string())?;
+            let want = root.join(target).join(rest);
+            let mut dst = want.clone();
+            let mut n = 2;
+            while dst.exists() || planned.contains(&lower(&dst)) {
+                let stem = want
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                let name = match want.extension() {
+                    Some(e) => format!("{stem} ({n}).{}", e.to_string_lossy()),
+                    None => format!("{stem} ({n})"),
+                };
+                dst = want.with_file_name(name);
+                n += 1;
+            }
+            planned.insert(lower(&dst));
+            moved_here.insert(f.clone());
+            moved.push((rel(root, &f), rel(root, &dst)));
+            tx = tx.file(FileOp::Move { src: f, dst });
+        }
+        // The emptied folders, deepest first; the folder itself last. A folder still holding
+        // something not moved (a `_Vibe` left by an undone import, a link, a partial copy) is
+        // left in place with its parents (QA 2026-11-12).
+        emptied_dirs(&src_dir, &moved_here, &mut rmdirs, &mut left);
+    }
+    for d in rmdirs {
+        tx = tx.file(FileOp::Rmdir { path: d });
+    }
+    tx = tx.audit(AuditEntry::new(
+        MERGE_LABEL,
+        None,
+        json!({ "into": target, "folders": sources, "files": moved.len(), "left": left.len() }),
+    ));
+    let id = crate::fileops::commit(conn, root, tx, device_id)?.tx_id;
+    Ok((id, moved))
+}
+
+/// Pushes `d`'s folders that hold nothing but files in `moved` (and such folders), deepest
+/// first, then `d` itself when it empties too; returns whether it does. Anything else found
+/// (a `_Vibe` folder, a link, a file not moved) keeps its folder, noted in `left`.
+fn emptied_dirs(
+    d: &Path,
+    moved: &HashSet<PathBuf>,
+    out: &mut Vec<PathBuf>,
+    left: &mut Vec<String>,
+) -> bool {
+    let Ok(rd) = std::fs::read_dir(d) else {
+        left.push(d.to_string_lossy().into_owned());
+        return false;
+    };
+    let mut empties = true;
+    for e in rd.flatten() {
+        let p = e.path();
+        let is_dir = e.file_type().is_ok_and(|t| t.is_dir());
+        let gone = if is_dir && !is_vibe_dir(&p) {
+            emptied_dirs(&p, moved, out, left)
+        } else {
+            moved.contains(&p)
+        };
+        if !gone {
+            if !is_dir || is_vibe_dir(&p) {
+                left.push(p.to_string_lossy().into_owned());
+            }
+            empties = false;
+        }
+    }
+    if empties {
+        out.push(d.to_owned());
+    }
+    empties
+}
+
+fn is_vibe_dir(p: &Path) -> bool {
+    p.file_name()
+        .is_some_and(|n| n.eq_ignore_ascii_case(crate::cabinet::VIBE_DIR))
+}
+
+/// Cabinet-relative paths (lower case) of the files the last import merged into another
+/// folder, while it can be undone: their bytes must not change (OCR's searchable PDF waits),
+/// or the merge's undo is refused (QA 2026-11-12).
+pub fn held_paths(root: &Path) -> HashSet<String> {
+    load_last(root)
+        .map(|l| l.merged_files.into_iter().collect())
+        .unwrap_or_default()
+}
+
 /// Changes the ID of folder row `i`'s new client (typed on the row). Refused when it is empty or
 /// another client (in the list or this plan) has it.
 pub fn set_new_id(root: &Path, plan: &mut Plan, i: usize, id: &str) -> Result<(), String> {
@@ -923,6 +1160,7 @@ pub fn plan_folders(
             how,
             confidence: conf,
             template_name,
+            merge: false,
         });
     }
     // Two folders confidently proposed for the same client (or one and a folder already
@@ -1115,6 +1353,15 @@ pub struct Applied {
     /// Documents whose doc type or year was guessed (tagged `import:guessed`; QA P12).
     #[serde(default)]
     pub guessed: usize,
+    /// One per client whose folders were merged (owner 2026-11-12): the files moved into the
+    /// folder kept; undone last.
+    #[serde(default)]
+    pub merge_txs: Vec<String>,
+    #[serde(default)]
+    pub merged: usize,
+    /// The merged files where they are now (cabinet-relative, lower case): see [`held_paths`].
+    #[serde(default)]
+    pub merged_files: Vec<String>,
 }
 
 /// `_Vibe/import_last.json`: the last import on this cabinet, for Undo after a restart.
@@ -1127,6 +1374,9 @@ pub fn load_last(root: &Path) -> Option<Applied> {
 }
 
 /// Folders per batch of an import (PA-34).
+/// Transaction / audit label of a folder merge (owner 2026-11-12).
+pub const MERGE_LABEL: &str = "import_merge";
+
 pub const BATCH: usize = 250;
 
 /// Applies `plan`: binds the included folders, catalogs, sets doc types and years, queues OCR.
@@ -1161,7 +1411,7 @@ pub fn apply_with(
             if !l.finished
                 && l.bind_tx.is_none()
                 && l.meta_tx.is_none()
-                && !(l.bind_txs.is_empty() && l.meta_txs.is_empty()) =>
+                && !(l.bind_txs.is_empty() && l.meta_txs.is_empty() && l.merge_txs.is_empty()) =>
         {
             // Counted again below over every bound folder.
             Applied {
@@ -1179,6 +1429,37 @@ pub fn apply_with(
             &last_path(root),
             &serde_json::to_vec_pretty(out).expect("serializes"),
         );
+    };
+    // Folders set to Merge (owner 2026-11-12): the plan is checked as if their files were in
+    // the folder kept; they are moved only once every check below has passed (QA 2026-11-12).
+    let merges = merge_targets(plan);
+    let orig_files = &plan.files;
+    let merged_plan;
+    let plan = if merges.is_empty() {
+        plan
+    } else {
+        let mut folders = plan.folders.clone();
+        for (t, sources) in &merges {
+            let target = folders[*t].rel.clone();
+            for &i in sources {
+                let r = &mut folders[i];
+                r.include = false;
+                r.merge = false;
+                r.client = None;
+                r.how = format!("merged into {target}");
+            }
+            if !folders[*t].bound {
+                folders[*t].include = true;
+            }
+        }
+        merged_plan = Plan {
+            folders,
+            files: vec![],
+            clients: vec![],
+            skipped: vec![],
+            files_read: plan.files_read,
+        };
+        &merged_plan
     };
     // Chosen by hand too: two folders for one client, or a client that has a folder already,
     // would leave duplicate sentinels.
@@ -1246,6 +1527,44 @@ pub fn apply_with(
         clients::save_list(root, &list)?;
     }
 
+    // The merges, one Transaction per client: the moved files are planned under the folder kept
+    // (`moved_rows`), and its batch catalogs the source folders too, so rows a rebuild had kept
+    // for them follow their files (QA 2026-11-12).
+    let mut moved_rows: Vec<FileRow> = vec![];
+    let mut merged_src: HashMap<usize, Vec<String>> = HashMap::new();
+    let mut merged_rest: HashMap<usize, Vec<String>> = HashMap::new();
+    for (t, sources) in &merges {
+        let target = plan.folders[*t].rel.clone();
+        let src_rels: Vec<String> = sources
+            .iter()
+            .map(|&i| plan.folders[i].rel.clone())
+            .collect();
+        let (tx_id, moved) = merge_folders(conn, root, &target, &src_rels, device_id)?;
+        out.merge_txs.push(tx_id);
+        out.merged += sources.len();
+        save(&out);
+        let new_rel: HashMap<&str, &str> = moved
+            .iter()
+            .map(|(a, b)| (a.as_str(), b.as_str()))
+            .collect();
+        for f in orig_files {
+            if f.folder.is_some_and(|i| sources.contains(&i))
+                && let Some(n) = new_rel.get(f.rel.as_str())
+            {
+                let mut m = f.clone();
+                m.rel = (*n).to_string();
+                m.folder = Some(*t);
+                moved_rows.push(m);
+            }
+        }
+        merged_rest.entry(*t).or_default().extend(
+            moved
+                .iter()
+                .filter_map(|(_, n)| n.split_once('/').map(|(_, r)| r.to_string())),
+        );
+        merged_src.entry(*t).or_default().extend(src_rels);
+    }
+
     // In batches of folders (PA-34: ~7,600 client folders, ~900K files): each batch binds its
     // folders, catalogs only their files and sets their doc types and years, each step its own
     // Transaction, and the record is saved after it. A stop leaves whole batches done: scanned
@@ -1253,7 +1572,7 @@ pub fn apply_with(
     let chosen_at: HashMap<usize, (&FolderRow, &ClientPick)> =
         chosen.iter().map(|(i, r, c)| (*i, (*r, *c))).collect();
     let mut files_of: HashMap<usize, Vec<&FileRow>> = HashMap::new();
-    for f in &plan.files {
+    for f in orig_files.iter().chain(&moved_rows) {
         if let Some(i) = f.folder {
             files_of.entry(i).or_default().push(f);
         }
@@ -1327,6 +1646,19 @@ pub fn apply_with(
             if let Some(d) = new_rel.get(&i) {
                 scope.push(d.clone());
             }
+            scope.extend(merged_src.get(&i).cloned().unwrap_or_default());
+        }
+        // Merged files where they are now, held until the import is undone or replaced.
+        let mut held = false;
+        for &i in batch {
+            let dest = new_rel.get(&i).unwrap_or(&plan.folders[i].rel);
+            for r in merged_rest.get(&i).map(Vec::as_slice).unwrap_or_default() {
+                out.merged_files.push(format!("{dest}/{r}").to_lowercase());
+                held = true;
+            }
+        }
+        if held {
+            save(&out);
         }
         rebuild::rebuild_folders(conn, root, device_id, &scope).map_err(|e| e.to_string())?;
 
@@ -1453,6 +1785,12 @@ pub fn undo(
         .cloned()
         .collect();
     for t in binds.iter().rev() {
+        if !undone(conn, t) {
+            crate::fileops::undo(conn, root, t, device_id)?;
+        }
+    }
+    // The merges last (done first): the files go back to their folders.
+    for t in applied.merge_txs.iter().rev() {
         if !undone(conn, t) {
             crate::fileops::undo(conn, root, t, device_id)?;
         }
