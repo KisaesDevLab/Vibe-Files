@@ -1,28 +1,48 @@
 # What goes to B2
 
-How Vibe Files decides which documents are sent to your Backblaze B2 bucket, to keep the bucket (and its cost) to the files you still work with, and what happens to the rest.
+How Vibe Files decides which documents are sent to your Backblaze B2 bucket, how to send one by hand, and what happens to the rest.
 
-## The rule
+B2 is mainly for sharing documents with clients through the portal, so little goes up by itself. The share that holds the cabinet needs its own backup.
 
-A document that has never been sent goes to B2 when:
+## The rules
 
-- its tax year is this year or one of the last few (3 unless changed: in 2026, tax years 2023 and later); or
-- it has no tax year and is in a client's **Permanent** folder (formation papers, EIN letters, elections).
+A document that has never been sent goes to B2 when **any** rule in the firm's list matches it. A rule says:
 
-Other documents that were never sent, such as old tax years, or files with no tax year outside a Permanent folder, are not sent. They are **held back**.
+- **Folders**: the folders of a client folder it covers, such as `Income Tax` or `Permanent/Setup`. A document anywhere below one of them matches. None ticked means any folder.
+- **Doc types**: the doc types it covers. None ticked means any doc type, and documents with none.
+- **Tax years**: any tax year, this year and a number of years before it, or none with a tax year.
+- **Include documents with no tax year**: whether a document with no tax year matches too.
 
-Anything already in B2 keeps syncing whatever the rule says: an edit, a move or a deletion still goes up, so the bucket never shows an old version as current. Nothing is ever taken out of the bucket by the rule.
+Documents no rule matches are not sent. They are **held back**.
 
-## Changing it
+Anything already in B2 keeps syncing whatever the rules say: an edit, a move or a deletion still goes up, so the bucket never shows an old version as current. Nothing is ever taken out of the bucket by a rule.
 
-Open **Sync** › **What goes to B2** (above the list of pending clients). Type the number of tax years before this one to send in **Tax years before this one to send (0 = every year)** and press **Save** (this needs the admin password when one is set, like the other sync settings). 0 sends every document. Widening the rule makes the held-back documents pending, and the next push sends them.
+A cabinet that has never changed its rules shows two: **Recent tax years** (this year and the three before, any folder and doc type) and **Permanent files** (documents with no tax year in a Permanent folder). They are what was sent before there was a list.
 
-The setting is the cabinet's, so every PC (and every office that pulls from the bucket) follows it. Update every PC to the same version of Vibe Files: an older one sends everything, and when it saves client details it drops these settings (a newer one puts them back from its own copy, `_Vibe\b2-rules.json`).
+## Changing them
+
+Open **Sync** › **What goes to B2**. This needs the admin password when one is set, like the other sync settings.
+
+1. Click **Add rule**, or **Edit** beside a rule.
+2. Type a **Rule name**, tick the folders and doc types, choose the tax years.
+3. Click **Save rule**.
+
+**Delete** takes a rule off the list; what it sent stays in B2. With no rules, nothing goes up by itself.
+
+The line below the list counts what is held back now. A new or wider rule makes the documents it matches pending, and the next push sends them.
+
+The list is the cabinet's, so every PC follows it. Update every PC to the same version of Vibe Files: an older one does not know the list.
+
+## Sending documents by hand
+
+Tick documents in Browse and choose **Sync to B2** › **Push the selected documents now**. They go to B2 at once, whatever the rules hold back, and keep syncing afterwards like anything else in B2. Nothing else goes with them.
+
+Only documents in a client folder can be sent this way.
 
 ## One client's own choice
 
-In Browse, select a client: **B2 SYNC** in its panel is **The firm's rule** unless changed. **Always send** sends every document of that client, whatever its year. **Never send** holds back every document of that client not yet in B2 (what is already there keeps syncing). Anyone can change it.
+In Browse, select a client: **B2 SYNC** in its panel is **The firm's rule** unless changed. **Always send** sends every document of that client. **Never send** holds back every document of that client not yet in B2 (what is already there keeps syncing, and a document pushed by hand still goes). Anyone can change it.
 
 ## What is held back
 
-**What goes to B2** shows how many documents are held back now, and their size. They are not in B2: make sure the share itself is backed up another way. A document with no tax year that should go up can be given its year (Browse › **Needs tax year**), or moved to the client's Permanent folder.
+**What goes to B2** shows how many documents are held back now, and their size. They are not in B2: make sure the share itself is backed up another way.

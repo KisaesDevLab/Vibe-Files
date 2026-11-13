@@ -1838,6 +1838,52 @@ mod tests {
         assert_eq!(rules[2].years, vf_fs::clients::B2Years::Any);
         assert!(h.query_by_label("Tax returns").is_some());
         assert!(h.query_by_label("New rule").is_none(), "the editor closed");
+        // PA-63: the Sync page's client table. Every client listed, one found by part of its
+        // name, ticked, and set to Never send in one save.
+        {
+            let Screen::Open(o) = &mut h.state_mut().screen else {
+                panic!("open")
+            };
+            for (id, name) in [("1042", "Anderson Farms LLC"), ("2002", "Bell Ranch Inc")] {
+                let p = vf_fs::newclient::plan(
+                    &o.opened.conn,
+                    &root,
+                    &vf_fs::newclient::NewClient {
+                        partner: String::new(),
+                        ext_id: id.into(),
+                        name: name.into(),
+                        entity_type: None,
+                    },
+                )
+                .unwrap();
+                vf_fs::newclient::create(&mut o.opened.conn, &root, &p, "dev-1").unwrap();
+            }
+            o.browse.reload(&o.opened.conn);
+        }
+        h.run();
+        h.get_by_label("Tick all listed").scroll_to_me();
+        h.run();
+        h.get_by_label("All clients").click();
+        h.run();
+        assert!(h.query_by_label("Anderson Farms LLC").is_some());
+        assert!(h.query_by_label("Bell Ranch Inc").is_some());
+        type_into(&mut h, "Find a client", "bell");
+        h.run();
+        assert!(h.query_by_label("Anderson Farms LLC").is_none());
+        assert!(h.query_by_label("Bell Ranch Inc").is_some());
+        click(&mut h, "Tick all listed");
+        h.run();
+        assert!(h.query_by_label("1 listed · 1 ticked").is_some());
+        // The button, not the Show choice of the same name.
+        click(&mut h, "Never send");
+        h.run();
+        let choices = vf_fs::clients::load_b2(&root).unwrap().clients;
+        assert_eq!(choices.len(), 1, "{choices:?}");
+        assert_eq!(choices.values().next().map(String::as_str), Some("never"));
+        // Back to the firm's rules.
+        click(&mut h, "Use the rules");
+        h.run();
+        assert!(vf_fs::clients::load_b2(&root).unwrap().clients.is_empty());
     }
 
     /// Closing the window with annotations unsaved asks first: the window stays, the Viewer

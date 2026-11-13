@@ -45,6 +45,8 @@ pub enum Op {
     Push(Option<String>),
     /// These documents (catalog ids), now, whatever the B2 rules say (PA-62).
     PushDocs(Vec<String>),
+    /// These clients (catalog ids), one after the other (PA-63: the ticked clients).
+    PushClients(Vec<String>),
     Pull,
     Verify,
     Restore(PathBuf),
@@ -81,6 +83,17 @@ impl Default for Form {
             share: true,
         }
     }
+}
+
+/// Which clients the Sync page's table lists (PA-63).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum ClientShow {
+    /// Those with something to send (as the list before the table was).
+    #[default]
+    Pending,
+    All,
+    Always,
+    Never,
 }
 
 /// A B2 rule in the editor (PA-63).
@@ -174,6 +187,28 @@ pub struct SyncTab {
     rule_choices: (Vec<(String, String)>, Vec<String>),
     /// The rule being added or changed.
     rule_edit: Option<RuleEdit>,
+    /// Each client's own Always send / Never send (client id → "always" / "never"), read with
+    /// the rules.
+    b2_choices: BTreeMap<String, String>,
+    /// The client table (PA-63): the words typed in Find a client.
+    client_find: String,
+    /// Which clients it lists.
+    client_show: ClientShow,
+    /// Most pending first, instead of by name.
+    client_by_pending: bool,
+    /// Ticked clients (ids), for the buttons above the table.
+    ticked: std::collections::BTreeSet<String>,
+    /// The table's rows (client ids, `""` = the cabinet) in the order shown, made again only
+    /// when what it shows changes: thousands of clients are not sorted on every repaint.
+    table: Vec<String>,
+    /// What `table` was made for: the find words, the choice of clients, the order, how many
+    /// clients there are and how many have something pending, and the client asked for from
+    /// Browse.
+    table_for: Option<(String, ClientShow, bool, usize, usize, Option<String>)>,
+    /// The pending counts or the clients' choices changed since `table` was made.
+    table_stale: bool,
+    /// Client id → name, made with `table`.
+    names: std::collections::HashMap<String, String>,
     pub conflicts: Vec<Conflict>,
     pub last_push: Option<String>,
     pub last_pull: Option<String>,
@@ -352,7 +387,13 @@ impl SyncTab {
         // A cloud cabinet: each PC has its own copy of the folder, synced late perhaps, so a
         // client is not pushed from one that is not the main PC.
         let cloud = !crate::server::server_mode() && crate::cloudmode::is_cloud(root);
-        if !main_here && cloud && matches!(op, Op::Push(_) | Op::PushDocs(_) | Op::Pull) {
+        if !main_here
+            && cloud
+            && matches!(
+                op,
+                Op::Push(_) | Op::PushDocs(_) | Op::PushClients(_) | Op::Pull
+            )
+        {
             self.error = Some(format!(
                 "B2 sync runs on {} for this cabinet (Admin › Devices).",
                 crate::server::main_server(root)
@@ -373,12 +414,13 @@ impl SyncTab {
         let alone = !main_here;
         self.running_for = match &op {
             Op::Push(c) => Some(c.clone().unwrap_or_default()),
-            Op::PushDocs(_) | Op::Pull => Some(String::new()),
+            Op::PushDocs(_) | Op::PushClients(_) | Op::Pull => Some(String::new()),
             _ => None,
         };
         let label = match &op {
             Op::Push(Some(_)) => "Pushing this client…",
             Op::PushDocs(_) => "Pushing the selected documents…",
+            Op::PushClients(_) => "Pushing the ticked clients…",
             Op::Push(None) => "Pushing…",
             Op::Pull => "Pulling…",
             Op::Verify => "Verifying a sample…",
@@ -408,6 +450,7 @@ impl SyncTab {
                 Ok((pending, conflicts, st, held)) => {
                     self.counting = None;
                     self.pending = pending;
+                    self.table_stale = true;
                     if held.is_some() {
                         self.held = held;
                     }
@@ -902,7 +945,7 @@ pub(crate) fn sync_lock(catalog: &Path) -> Result<std::fs::File, String> {
 fn run(catalog: &Path, root: &Path, s: &Sync, op: Op, alone: bool) -> Result<Done, String> {
     let e = |e: vf_sync::SyncError| e.to_string();
     let _one_at_a_time = match op {
-        Op::Push(_) | Op::PushDocs(_) | Op::Pull => Some(sync_lock(catalog)?),
+        Op::Push(_) | Op::PushDocs(_) | Op::PushClients(_) | Op::Pull => Some(sync_lock(catalog)?),
         _ => None,
     };
     match op {
@@ -933,6 +976,35 @@ fn run(catalog: &Path, root: &Path, s: &Sync, op: Op, alone: bool) -> Result<Don
             vf_sync::push::push_client(&mut conn, root, s, &client, &same_folder)
                 .map(Done::Push)
                 .map_err(e)
+        }
+        Op::PushClients(clients) => {
+            let mut conn = caught_up(catalog, root, s, alone)?;
+            let same_folder: Vec<String> = vf_fs::safeguards::devices(root)
+                .into_iter()
+                .filter(|d| d.server)
+                .map(|d| d.name)
+                .collect();
+            // Each client as a client pushed alone; one that fails stops the rest, with what
+            // went before it already in B2.
+            let mut total = vf_sync::push::PushReport::default();
+            for c in &clients {
+                let r = if alone {
+                    vf_sync::push::push_client(&mut conn, root, s, c, &same_folder)
+                } else {
+                    vf_sync::push::push(&mut conn, root, s, Some(c))
+                }
+                .map_err(e)?;
+                total.objects += r.objects;
+                total.bytes += r.bytes;
+                total.segments += r.segments;
+                total.documents += r.documents;
+                total.skipped += r.skipped;
+                total.head_rev = total.head_rev.max(r.head_rev);
+                if r.pulled.is_some() {
+                    total.pulled = r.pulled;
+                }
+            }
+            Ok(Done::Push(total))
         }
         Op::PushDocs(ids) => {
             let mut conn = caught_up(catalog, root, s, alone)?;
@@ -1349,37 +1421,213 @@ fn unlocked(ui: &mut egui::Ui, t: &mut SyncTab, env: &mut Env, v: &View<'_>) {
     ui.add_enabled_ui(v.admin, |ui| settings_section(ui, t, v));
 
     ui.add_space(10.0);
+    client_table(ui, t, env, v, idle);
+}
+
+/// The clients (PA-63, owner 2026-11-13: thousands of clients in one list with no way to find
+/// one, and everything one client at a time): found by name, shown by what they have waiting
+/// or by their own setting, ticked, and acted on together.
+fn client_table(ui: &mut egui::Ui, t: &mut SyncTab, env: &mut Env, v: &View<'_>, idle: bool) {
     ui.horizontal(|ui| {
-        ui.label(RichText::new("Pending by client").strong());
+        ui.label(RichText::new("Clients").strong());
         if let Some(c) = &t.filter_client {
-            let name = v
-                .clients
-                .iter()
-                .find(|(id, _)| id == c)
-                .map(|(_, n)| n.as_str())
-                .unwrap_or("?");
+            let name = t.names.get(c).map_or("?", String::as_str);
             ui.label(widgets::caption(format!("showing {name}")));
             if ui.small_btn("Show all").clicked() {
                 t.filter_client = None;
             }
         }
     });
+    ui.horizontal_wrapped(|ui| {
+        let l = ui.label("Find a client");
+        ui.add(
+            egui::TextEdit::singleline(&mut t.client_find)
+                .hint_text("part of a name")
+                .desired_width(200.0),
+        )
+        .labelled_by(l.id);
+        ui.separator();
+        ui.label("Show");
+        ui.radio_value(
+            &mut t.client_show,
+            ClientShow::Pending,
+            "With something to send",
+        );
+        ui.radio_value(&mut t.client_show, ClientShow::All, "All clients");
+        ui.radio_value(&mut t.client_show, ClientShow::Always, "Always send");
+        ui.radio_value(&mut t.client_show, ClientShow::Never, "Never send");
+        ui.separator();
+        ui.checkbox(&mut t.client_by_pending, "Most pending first");
+    });
+
+    // The rows, made again only when what they show changed.
+    let key = (
+        t.client_find.trim().to_lowercase(),
+        t.client_show,
+        t.client_by_pending,
+        v.clients.len(),
+        t.pending.len(),
+        t.filter_client.clone(),
+    );
+    if t.table_stale || t.table_for.as_ref() != Some(&key) {
+        t.names = v.clients.iter().cloned().collect();
+        let find = &key.0;
+        let mut rows: Vec<(&str, &str)> = v
+            .clients
+            .iter()
+            .map(|(id, name)| (id.as_str(), name.as_str()))
+            .filter(|(id, name)| {
+                t.filter_client.as_ref().is_none_or(|f| f == id)
+                    && (find.is_empty() || name.to_lowercase().contains(find.as_str()))
+                    && match t.client_show {
+                        ClientShow::Pending => t.pending.contains_key(*id),
+                        ClientShow::All => true,
+                        ClientShow::Always => {
+                            t.b2_choices.get(*id).map(String::as_str) == Some("always")
+                        }
+                        ClientShow::Never => {
+                            t.b2_choices.get(*id).map(String::as_str) == Some("never")
+                        }
+                    }
+            })
+            .collect();
+        if t.client_by_pending {
+            rows.sort_by(|a, b| {
+                let n = |id: &str| t.pending.get(id).copied().unwrap_or(0);
+                n(b.0)
+                    .cmp(&n(a.0))
+                    .then_with(|| a.1.to_lowercase().cmp(&b.1.to_lowercase()))
+            });
+        } else {
+            rows.sort_by_cached_key(|(_, name)| name.to_lowercase());
+        }
+        let mut table: Vec<String> = rows.into_iter().map(|(id, _)| id.to_string()).collect();
+        // What is not in a client folder, first, when it has something to send.
+        if t.client_show == ClientShow::Pending
+            && t.pending.contains_key("")
+            && find.is_empty()
+            && t.filter_client.is_none()
+        {
+            table.insert(0, String::new());
+        }
+        // A pending client this catalog has no name for (it was just removed) is still listed.
+        if t.client_show == ClientShow::Pending && find.is_empty() {
+            for id in t.pending.keys() {
+                if !id.is_empty()
+                    && !t.names.contains_key(id)
+                    && t.filter_client.as_ref().is_none_or(|f| f == id)
+                {
+                    table.push(id.clone());
+                }
+            }
+        }
+        t.table = table;
+        t.table_for = Some(key);
+        t.table_stale = false;
+        // A tick on a client no longer listed would be acted on unseen.
+        let shown: std::collections::HashSet<&str> = t.table.iter().map(String::as_str).collect();
+        t.ticked.retain(|id| shown.contains(id.as_str()));
+    }
+
+    // The buttons for the ticked clients.
     let mut go: Option<Op> = None;
-    let names: BTreeMap<&str, &str> = v
-        .clients
-        .iter()
-        .map(|(i, n)| (i.as_str(), n.as_str()))
-        .collect();
-    let rows: Vec<(&String, &usize)> = t
-        .pending
-        .iter()
-        .filter(|(id, _)| t.filter_client.as_ref().is_none_or(|f| f == *id))
-        .collect();
+    let mut choice: Option<Option<&str>> = None;
+    ui.horizontal_wrapped(|ui| {
+        let n = t.ticked.len();
+        ui.label(match n {
+            0 => format!("{} listed · none ticked", t.table.len()),
+            n => format!("{} listed · {n} ticked", t.table.len()),
+        });
+        if ui.small_btn("Tick all listed").clicked() {
+            t.ticked = t
+                .table
+                .iter()
+                .filter(|id| !id.is_empty())
+                .cloned()
+                .collect();
+        }
+        if ui
+            .add_enabled(n > 0, egui::Button::new("Untick all").small())
+            .clicked()
+        {
+            t.ticked.clear();
+        }
+        ui.separator();
+        if ui
+            .add_enabled(n > 0 && idle, egui::Button::new("Push ticked now"))
+            .on_hover_text(
+                "Sends what the rules let through for each ticked client, one after the other.",
+            )
+            .clicked()
+        {
+            go = Some(Op::PushClients(t.ticked.iter().cloned().collect()));
+        }
+        ui.separator();
+        ui.label("Set ticked to");
+        if ui
+            .add_enabled(n > 0, egui::Button::new("Always send"))
+            .on_hover_text("Every document of these clients goes to B2.")
+            .clicked()
+        {
+            choice = Some(Some("always"));
+        }
+        if ui
+            .add_enabled(n > 0, egui::Button::new("Never send"))
+            .on_hover_text(
+                "Nothing more of these clients goes to B2 by itself; what is there keeps syncing.",
+            )
+            .clicked()
+        {
+            choice = Some(Some("never"));
+        }
+        if ui
+            .add_enabled(n > 0, egui::Button::new("Use the rules"))
+            .on_hover_text("These clients follow the firm's rules again.")
+            .clicked()
+        {
+            choice = Some(None);
+        }
+    });
+    if let Some(c) = choice {
+        let ids: Vec<String> = t.ticked.iter().cloned().collect();
+        match vf_fs::clients::set_b2_choices(env.root, &ids, c) {
+            Ok(()) => {
+                t.notice = Some(format!(
+                    "{} {} set to {}.",
+                    ids.len(),
+                    if ids.len() == 1 { "client" } else { "clients" },
+                    match c {
+                        Some("always") => "Always send",
+                        Some(_) => "Never send",
+                        None => "the firm's rules",
+                    }
+                ));
+                t.error = None;
+                for id in &ids {
+                    match c {
+                        Some(c) => {
+                            t.b2_choices.insert(id.clone(), c.to_string());
+                        }
+                        None => {
+                            t.b2_choices.remove(id);
+                        }
+                    }
+                }
+                // Counted again with the new choices.
+                t.held = None;
+                t.refreshed = None;
+                t.table_stale = true;
+            }
+            Err(e) => t.error = Some(format!("Not saved: {e}")),
+        }
+    }
+
     // Its own scrolling box, laying out only the rows in view (thousands of clients).
     let row_h =
         ui.spacing().interact_size.y.max(
             ui.text_style_height(&egui::TextStyle::Button) + 2.0 * ui.spacing().button_padding.y,
         ) + ui.spacing().item_spacing.y;
+    let rows = t.table.clone();
     egui::ScrollArea::vertical()
         .id_salt("sync-pending-scroll")
         .max_height(360.0)
@@ -1387,16 +1635,38 @@ fn unlocked(ui: &mut egui::Ui, t: &mut SyncTab, env: &mut Env, v: &View<'_>) {
         .show_rows(ui, row_h, rows.len(), |ui, range| {
             egui::Grid::new("sync-pending")
                 .striped(true)
-                .num_columns(3)
-                .min_col_width(80.0)
+                .num_columns(5)
+                .min_col_width(60.0)
                 .show(ui, |ui| {
-                    for &(id, n) in &rows[range] {
-                        ui.label(if id.is_empty() {
-                            "Cabinet (not in a client folder, master files)"
+                    for id in &rows[range] {
+                        if id.is_empty() {
+                            ui.label("");
+                            ui.label("Cabinet (not in a client folder, master files)");
                         } else {
-                            names.get(id.as_str()).copied().unwrap_or("(client)")
+                            let name = t.names.get(id).map_or("(client)", String::as_str);
+                            let mut on = t.ticked.contains(id);
+                            if ui
+                                .checkbox(&mut on, "")
+                                .on_hover_text(format!("Tick {name}"))
+                                .changed()
+                            {
+                                if on {
+                                    t.ticked.insert(id.clone());
+                                } else {
+                                    t.ticked.remove(id);
+                                }
+                            }
+                            ui.label(name);
+                        }
+                        match t.pending.get(id) {
+                            Some(n) => ui.label(format!("{n} pending")),
+                            None => ui.label(widgets::caption("nothing to send")),
+                        };
+                        ui.label(match t.b2_choices.get(id).map(String::as_str) {
+                            Some("always") => "Always send",
+                            Some("never") => "Never send",
+                            _ => "",
                         });
-                        ui.label(format!("{n} pending"));
                         if !id.is_empty() {
                             ui.horizontal(|ui| {
                                 if ui.add_enabled(idle, egui::Button::new("Push")).clicked() {
@@ -1417,10 +1687,13 @@ fn unlocked(ui: &mut egui::Ui, t: &mut SyncTab, env: &mut Env, v: &View<'_>) {
                     }
                 });
         });
-    if t.pending.is_empty() {
-        ui.label(widgets::caption(
-            "Nothing waiting: this PC and the bucket agree.",
-        ));
+    if t.table.is_empty() {
+        ui.label(widgets::caption(match t.client_show {
+            ClientShow::Pending if t.client_find.trim().is_empty() => {
+                "Nothing waiting: this PC and the bucket agree."
+            }
+            _ => "No client matches.",
+        }));
     }
     if let Some(op) = go {
         t.start(ui.ctx(), v.catalog, env.root, op);
@@ -1440,6 +1713,10 @@ fn b2_rule_section(ui: &mut egui::Ui, t: &mut SyncTab, env: &mut Env, admin: boo
         let b2 = vf_fs::clients::load_b2(env.root).unwrap_or_default();
         let saved = b2.rules.is_some();
         t.b2_rules = Some((Instant::now(), vf_sync::rules::listed(&b2), saved));
+        if t.b2_choices != b2.clients {
+            t.b2_choices = b2.clients.clone();
+            t.table_stale = true;
+        }
         let types: Vec<(String, String)> = env
             .conn
             .prepare(
