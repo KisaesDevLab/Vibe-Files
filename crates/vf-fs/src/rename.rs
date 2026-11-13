@@ -367,7 +367,7 @@ pub(crate) fn commit_as(
                     now.clone().into(),
                 ],
             ));
-        if ix.get(&r.old_rel, &m.hash).is_some() {
+        if ix.knows(&r.old_rel, m.hash.as_deref()) {
             let moved = docmeta::Meta {
                 rel_path: new_rel.clone(),
                 ..m.clone()

@@ -232,7 +232,7 @@ fn move_folder(
         let mut by_file: std::collections::BTreeMap<PathBuf, (Vec<String>, Vec<String>)> =
             Default::default();
         for m in &metas {
-            if ix.get(&m.rel_path, &m.hash).is_none() {
+            if !ix.knows(&m.rel_path, m.hash.as_deref()) {
                 continue;
             }
             let moved = docmeta::Meta {

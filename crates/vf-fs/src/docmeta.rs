@@ -44,6 +44,9 @@ pub struct Record {
     /// this same id (owner 2026-11-05). Records written before have none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
+    /// SHA-256 of the content; empty when the file has not been read yet (PA-60: a document
+    /// is cataloged from its folder listing and fingerprinted when first needed).
+    #[serde(default)]
     pub hash: String,
     /// Relative to the client folder (or the cabinet, for documents outside client folders),
     /// forward slashes, so renaming the client folder does not break it.
@@ -75,7 +78,8 @@ pub const GUESSED_TAG: &str = "import:guessed";
 pub struct Meta {
     pub id: String,
     pub rel_path: String,
-    pub hash: String,
+    /// `None`: not fingerprinted yet (PA-60).
+    pub hash: Option<String>,
     /// The client folder, when the document is in one.
     pub folder_rel: Option<String>,
     pub doc_type: Option<String>,
@@ -235,7 +239,7 @@ pub fn record_line(root: &Path, m: &Meta, ts: &str, device: &str) -> (PathBuf, S
         ts: ts.into(),
         device: device.into(),
         id: Some(m.id.clone()).filter(|i| !i.is_empty()),
-        hash: m.hash.clone(),
+        hash: m.hash.clone().unwrap_or_default(),
         path,
         doc_type: m.doc_type.clone(),
         doc_type_name: m.doc_type_name.clone(),
@@ -381,9 +385,13 @@ impl Record {
     /// very size and time (the rebuild's own size/time rule), and the hash is a SHA-256. A record
     /// without them (an older one, or new content not yet written) is not trusted.
     pub fn describes(&self, size: u64, mtime: i64) -> bool {
-        self.size == Some(size)
-            && self.mtime == Some(mtime)
-            && crate::cabinet::is_sha256(&self.hash)
+        self.same_file(size, mtime) && crate::cabinet::is_sha256(&self.hash)
+    }
+
+    /// Whether this record was written for a file of this very size and time (PA-60): its id,
+    /// doc type, year, status and tags are that file's, whether or not it was fingerprinted.
+    pub fn same_file(&self, size: u64, mtime: i64) -> bool {
+        self.size == Some(size) && self.mtime == Some(mtime)
     }
 }
 
@@ -402,17 +410,23 @@ impl Index {
     /// `folders`: cabinet-relative client folders (each may hold `_Vibe/docmeta.jsonl`).
     pub fn load(root: &Path, folders: &[String]) -> Index {
         let mut ix = Index::default();
-        ix.read(&root.join(VIBE_DIR).join(FILE), "");
-        for f in folders {
-            ix.read(&root.join(f).join(VIBE_DIR).join(FILE), f);
+        if let Ok(text) = std::fs::read_to_string(root.join(VIBE_DIR).join(FILE)) {
+            ix.read(&text, "");
+        }
+        // Several files at a time (thousands of client folders on a share, PA-60); taken in
+        // the folders' order, as before.
+        let texts = crate::rebuild::par_map(folders, |f| {
+            std::fs::read_to_string(root.join(f).join(VIBE_DIR).join(FILE)).ok()
+        });
+        for (f, text) in folders.iter().zip(texts) {
+            if let Some(text) = text {
+                ix.read(&text, f);
+            }
         }
         ix
     }
 
-    fn read(&mut self, file: &Path, folder: &str) {
-        let Ok(text) = std::fs::read_to_string(file) else {
-            return;
-        };
+    fn read(&mut self, text: &str, folder: &str) {
         for line in text.lines().filter(|l| !l.trim().is_empty()) {
             match serde_json::from_str::<Record>(line) {
                 Ok(r) => {
@@ -421,9 +435,12 @@ impl Index {
                     } else {
                         format!("{folder}/{}", r.path)
                     };
-                    self.by_hash.insert(r.hash.clone(), r.clone());
                     self.by_rel.insert(rel.clone(), r.clone());
-                    self.by_path.insert((rel, r.hash.clone()), r);
+                    // A record of a file not read yet is found by its path only.
+                    if !r.hash.is_empty() {
+                        self.by_hash.insert(r.hash.clone(), r.clone());
+                        self.by_path.insert((rel, r.hash.clone()), r);
+                    }
                 }
                 Err(_) => self.bad_lines += 1,
             }
@@ -436,6 +453,15 @@ impl Index {
         self.by_path
             .get(&(rel.to_owned(), hash.to_owned()))
             .or_else(|| self.by_hash.get(hash))
+    }
+
+    /// Whether the document at `rel` has a record: by its content when it is fingerprinted
+    /// (same path first, else that content anywhere), else by its path (PA-60).
+    pub fn knows(&self, rel: &str, hash: Option<&str>) -> bool {
+        match hash {
+            Some(h) => self.get(rel, h).is_some(),
+            None => self.by_rel.contains_key(rel),
+        }
     }
 
     /// The record for exactly this path and content (no fall-back by content: two files with

@@ -598,7 +598,7 @@ fn meta_of(conn: &Connection, e: &DocEntry, rel: &str, folder: &str) -> Meta {
     Meta {
         id: e.doc_id.clone(),
         rel_path: rel.into(),
-        hash: e.hash.clone(),
+        hash: Some(e.hash.clone()),
         folder_rel: (!folder.is_empty()).then(|| folder.to_string()),
         doc_type: e.doc_type_id.clone(),
         doc_type_name: type_name(conn, &e.doc_type_id),

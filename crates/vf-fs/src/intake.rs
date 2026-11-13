@@ -675,7 +675,7 @@ fn record(
                     let meta = crate::docmeta::Meta {
                         id: id.clone(),
                         rel_path: f.rel.clone(),
-                        hash: hash.clone(),
+                        hash: Some(hash.clone()),
                         folder_rel: f.client.and_then(|c| c.1.clone()),
                         doc_type_name: doc_type.as_ref().and_then(|t| doc_types.get(t).cloned()),
                         doc_type: doc_type.clone(),

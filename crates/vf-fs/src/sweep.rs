@@ -334,7 +334,7 @@ pub fn adopt_modified(
     let mut tx = Transaction::new("external_modify");
     for m in &items {
         let mut meta = crate::docmeta::load(conn, &m.doc_id)?;
-        meta.hash = m.new_hash.clone();
+        meta.hash = Some(m.new_hash.clone());
         let (file, line) = crate::docmeta::record_line(root, &meta, &now, device_id);
         tx = tx
             .file(FileOp::AppendLines {
@@ -668,7 +668,7 @@ pub fn adopt_unknown(
             let rec = crate::docmeta::Meta {
                 id: id.clone(),
                 rel_path: u.rel_path.clone(),
-                hash: u.hash.clone(),
+                hash: Some(u.hash.clone()),
                 folder_rel: folder_rel.filter(|_| u.client_id.is_some()),
                 doc_type: None,
                 doc_type_name: None,

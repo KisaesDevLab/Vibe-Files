@@ -179,7 +179,7 @@ fn replace_inner(
         version.clone()
     };
     let mut meta = docmeta::load(conn, doc_id)?;
-    meta.hash = new_hash.clone();
+    meta.hash = Some(new_hash.clone());
     let now = vf_core::now_rfc3339();
     let (meta_file, meta_line) = docmeta::record_line(root, &meta, &now, device_id);
 
@@ -364,7 +364,7 @@ fn add_inner(
     let meta = Meta {
         id: id.clone(),
         rel_path: rel.clone(),
-        hash: hash.clone(),
+        hash: Some(hash.clone()),
         folder_rel,
         doc_type: d.doc_type_id.clone(),
         doc_type_name,

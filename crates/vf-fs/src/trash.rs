@@ -143,7 +143,8 @@ pub fn delete_as(
             deleted_at: now.clone(),
             reason: Some(reason.to_string()),
             size,
-            hash: m.hash.clone(),
+            // Empty: not fingerprinted yet (PA-60).
+            hash: m.hash.clone().unwrap_or_default(),
             client_folder: m.folder_rel.clone(),
             doc_type: m.doc_type.clone(),
             doc_type_name: m.doc_type_name.clone(),

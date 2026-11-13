@@ -357,7 +357,7 @@ pub fn apply(
                 let m = docmeta::Meta {
                     id: id.clone(),
                     rel_path: rel.clone(),
-                    hash: hash.clone(),
+                    hash: Some(hash.clone()),
                     folder_rel: Some(dest_folder.clone()),
                     doc_type_name: doc_type.as_ref().and_then(|t| id_name.get(t).cloned()),
                     doc_type: doc_type.clone(),
