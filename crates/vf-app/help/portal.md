@@ -49,8 +49,6 @@ Clients are told by email or text when files are shared with them, gathered into
 
 A document on the portal shows **Share… (on portal)** in the pane. To send one to someone outside the client, see [secure links](help:portal-secure-links).
 
-> When B2 sync is set up for the cabinet, a document goes to your B2 bucket before it is shared, and keeps syncing afterwards (see [what goes to B2](help:sync-rules)). If B2 sync is locked on this PC, or the push cannot finish, the share is stopped and says why: unlock sync on the Sync tab and share again. Without B2 sync, sharing works as before.
-
 ## Receiving files from clients
 
 What clients upload is collected into the **`_Portal inbox`** folder of the cabinet, named `<Client name>_<Client ID>_<their file name>`, so Intake files it like a scan: the client is read from the name. Only one PC collects each upload. iPhone photos arrive as JPG.

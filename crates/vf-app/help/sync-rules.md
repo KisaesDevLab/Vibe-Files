@@ -39,6 +39,8 @@ Tick documents in Browse and choose **Sync to B2** › **Push the selected docum
 
 Only documents in a client folder can be sent this way.
 
+Sharing a document through the [portal](help:portal), or sending a [secure link](help:portal-secure-links), sends it to B2 first in the same way. If B2 sync is locked on the PC, or the push cannot finish, the share is stopped and says why. A cabinet with no B2 sync shares as before.
+
 ## One client's own choice
 
 In Browse, select a client: **B2 SYNC** in its panel is **The firm's rule** unless changed. **Always send** sends every document of that client. **Never send** holds back every document of that client not yet in B2 (what is already there keeps syncing, and a document pushed by hand still goes). Anyone can change it.
