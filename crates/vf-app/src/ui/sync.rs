@@ -13,6 +13,7 @@ use zeroize::Zeroizing;
 
 use egui::RichText;
 use vf_core::db::Storage;
+use vf_fs::clients::{B2Rule, B2Years};
 use vf_sync::Sync;
 use vf_sync::restore::{Conflict, Keep};
 
@@ -82,6 +83,79 @@ impl Default for Form {
     }
 }
 
+/// A B2 rule in the editor (PA-63).
+struct RuleEdit {
+    /// Its place in the list; `None`: a new rule.
+    at: Option<usize>,
+    rule: B2Rule,
+    /// Which tax years: 0 any, 1 this year and some before, 2 none.
+    years: u8,
+    /// The number of years before this one, as typed.
+    back: String,
+}
+
+impl RuleEdit {
+    fn of(at: Option<usize>, rule: B2Rule) -> Self {
+        let (years, back) = match rule.years {
+            B2Years::Any => (0, "3".to_string()),
+            B2Years::Back(n) => (1, n.to_string()),
+            B2Years::None => (2, "3".to_string()),
+        };
+        RuleEdit {
+            at,
+            rule,
+            years,
+            back,
+        }
+    }
+}
+
+/// What a rule sends, in words.
+fn rule_summary(r: &B2Rule, types: &[(String, String)], this_year: i32) -> String {
+    let folders = if r.folders.is_empty() {
+        "any folder".to_string()
+    } else {
+        r.folders.join(", ")
+    };
+    let doc_types = if r.doc_types.is_empty() {
+        "any doc type".to_string()
+    } else {
+        r.doc_types
+            .iter()
+            .map(|id| {
+                types
+                    .iter()
+                    .find(|(i, _)| i == id)
+                    .map_or("(a doc type no longer listed)", |(_, n)| n.as_str())
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let years = match (r.years, r.no_year) {
+        (B2Years::Any, true) => "any tax year, or none".to_string(),
+        (B2Years::Any, false) => "any tax year".to_string(),
+        (B2Years::None, true) => "no tax year only".to_string(),
+        (B2Years::None, false) => "nothing (no tax years chosen)".to_string(),
+        (B2Years::Back(n), no) => format!(
+            "tax year {} or later{}",
+            this_year - i32::from(n),
+            if no { ", or none" } else { "" }
+        ),
+    };
+    format!("{folders} · {doc_types} · {years}")
+}
+
+/// Ticks or unticks `item` in `list` (any letter case).
+fn tick(ui: &mut egui::Ui, list: &mut Vec<String>, item: &str, label: &str) {
+    let mut on = list.iter().any(|x| x.eq_ignore_ascii_case(item));
+    if ui.checkbox(&mut on, label).changed() {
+        list.retain(|x| !x.eq_ignore_ascii_case(item));
+        if on {
+            list.push(item.to_string());
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct SyncTab {
     pub session: Option<Sync>,
@@ -92,11 +166,14 @@ pub struct SyncTab {
     pub pending: BTreeMap<String, usize>,
     /// Documents the B2 rule holds back now (count, bytes), counted with `pending` (PA-53).
     pub held: Option<(usize, u64)>,
-    /// The years box of "What goes to B2" while typing.
-    years_draft: Option<String>,
-    /// The cabinet's years setting as last read, and when (the file is on the share: read
-    /// every 10 s, not every frame).
-    b2_back: Option<(Instant, u16)>,
+    /// The cabinet's B2 rules as last read, when, and whether a list was ever saved (PA-63).
+    /// The file is on the share: read every 30 s and after a save, not every frame.
+    b2_rules: Option<(Instant, Vec<B2Rule>, bool)>,
+    /// What a rule can name, read with the rules: doc types (id, name) and the cabinet
+    /// template's folders below a client folder.
+    rule_choices: (Vec<(String, String)>, Vec<String>),
+    /// The rule being added or changed.
+    rule_edit: Option<RuleEdit>,
     pub conflicts: Vec<Conflict>,
     pub last_push: Option<String>,
     pub last_pull: Option<String>,
@@ -1350,68 +1427,226 @@ fn unlocked(ui: &mut egui::Ui, t: &mut SyncTab, env: &mut Env, v: &View<'_>) {
     }
 }
 
-/// What goes to B2 (owner 2026-11-12, PA-53): documents never sent go up only for recent tax
-/// years (and Permanent folders); anything already in B2 keeps syncing. Shared by every PC
+/// What goes to B2 (owner 2026-11-12, PA-53; a list of rules since PA-63): a document never
+/// sent goes up when any rule matches; anything already in B2 keeps syncing. Shared by every PC
 /// (`clients.vf.json`); changed with the admin password, like the other settings.
 fn b2_rule_section(ui: &mut egui::Ui, t: &mut SyncTab, env: &mut Env, admin: bool) {
     ui.label(RichText::new("What goes to B2").strong());
-    if t.b2_back
-        .is_none_or(|(at, _)| at.elapsed() > std::time::Duration::from_secs(10))
+    if t.b2_rules
+        .as_ref()
+        .is_none_or(|(at, ..)| at.elapsed() > Duration::from_secs(30))
     {
-        let back = vf_fs::clients::load(env.root)
-            .ok()
-            .and_then(|m| m.meta.b2_years_back)
-            .unwrap_or(vf_sync::rules::DEFAULT_YEARS_BACK);
-        t.b2_back = Some((Instant::now(), back));
+        // One small file (never the whole client list), and the names a rule can use.
+        let b2 = vf_fs::clients::load_b2(env.root).unwrap_or_default();
+        let saved = b2.rules.is_some();
+        t.b2_rules = Some((Instant::now(), vf_sync::rules::listed(&b2), saved));
+        let types: Vec<(String, String)> = env
+            .conn
+            .prepare(
+                "SELECT id, name FROM doc_type WHERE deleted_at IS NULL
+                 ORDER BY name COLLATE NOCASE",
+            )
+            .and_then(|mut st| st.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect())
+            .unwrap_or_default();
+        let (tree, _, _) =
+            filer_core::template::load_or_seed(&vf_fs::clients::master_dir(env.root));
+        // The year folders of the template are not folders to name: the rule has its own years.
+        let folders = filer_core::template::folder_templates(&tree)
+            .into_iter()
+            .filter(|f| !f.contains('{'))
+            .collect();
+        t.rule_choices = (types, folders);
     }
-    let back = t
-        .b2_back
-        .map_or(vf_sync::rules::DEFAULT_YEARS_BACK, |(_, b)| b);
+    let (rules, saved) = t
+        .b2_rules
+        .as_ref()
+        .map(|(_, r, s)| (r.clone(), *s))
+        .unwrap_or_default();
     let this_year = chrono::Datelike::year(&chrono::Local::now());
-    ui.label(widgets::caption(if back == 0 {
-        "Every document goes to B2.".to_string()
-    } else {
-        format!(
-            "Documents not yet in B2 go there when their tax year is {} or later, or they have no tax year and are in a client's Permanent folder; the others are not sent. Anything already in B2 keeps syncing (edits, moves, deletions). A client's own Always send / Never send (Browse, client panel) wins.",
-            this_year - i32::from(back)
-        )
-    }));
-    ui.add_enabled_ui(admin, |ui| {
-        ui.horizontal(|ui| {
-            let l = ui.label("Tax years before this one to send (0 = every year)");
-            let draft = t.years_draft.get_or_insert_with(|| back.to_string());
-            let r = ui
-                .add(egui::TextEdit::singleline(draft).desired_width(40.0))
-                .labelled_by(l.id);
-            let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-            if (ui.button("Save").clicked() || enter)
-                && let Some(text) = t.years_draft.clone()
-            {
-                match text.trim().parse::<u16>() {
-                    Ok(n) if n <= 100 => {
-                        match vf_fs::clients::set_b2_years_back(env.root, Some(n)) {
-                            Ok(()) => {
-                                t.notice = Some(if n == 0 {
-                                    "Every document goes to B2 now.".into()
-                                } else {
-                                    format!(
-                                        "Documents not yet in B2 go there for tax years {} and later.",
-                                        this_year - i32::from(n)
-                                    )
-                                });
-                                t.held = None;
-                                t.refreshed = None;
-                                t.b2_back = None;
-                            }
-                            Err(e) => t.error = Some(format!("Not saved: {e}")),
-                        }
-                        t.years_draft = None;
+    ui.label(widgets::caption(
+        "A document not yet in B2 goes there when any rule below matches it. Anything already in B2 keeps syncing (edits, moves, deletions). A client's own Always send / Never send wins, and a document pushed or shared by hand goes whatever the rules say.",
+    ));
+    if !saved {
+        ui.label(widgets::caption(
+            "These rules are the one rule used until now, written as a list. The list is saved the first time you change it.",
+        ));
+    }
+    if rules.is_empty() {
+        ui.label(
+            RichText::new("No rules: nothing goes to B2 by itself.").color(theme::ink_secondary()),
+        );
+    }
+    // What a button asked for: a rule to edit (or a new one), or the list to save.
+    let mut edit: Option<RuleEdit> = None;
+    let mut save: Option<(Vec<B2Rule>, String)> = None;
+    let idle = admin && t.rule_edit.is_none();
+    for (i, r) in rules.iter().enumerate() {
+        ui.horizontal_wrapped(|ui| {
+            let name = if r.name.trim().is_empty() {
+                format!("Rule {}", i + 1)
+            } else {
+                r.name.clone()
+            };
+            ui.label(RichText::new(&name).strong());
+            ui.label(rule_summary(r, &t.rule_choices.0, this_year));
+            ui.add_enabled_ui(idle, |ui| {
+                if ui
+                    .small_btn("Edit")
+                    .on_hover_text(format!("Change the rule {name}"))
+                    .clicked()
+                {
+                    edit = Some(RuleEdit::of(Some(i), r.clone()));
+                }
+                if ui
+                    .small_btn("Delete")
+                    .on_hover_text(format!(
+                        "Take the rule {name} off the list. What it sent stays in B2."
+                    ))
+                    .clicked()
+                {
+                    let mut left = rules.clone();
+                    left.remove(i);
+                    save = Some((left, format!("The rule {name} is deleted.")));
+                }
+            });
+        });
+    }
+    if ui
+        .add_enabled(idle, egui::Button::new("Add rule"))
+        .clicked()
+    {
+        edit = Some(RuleEdit::of(
+            None,
+            B2Rule {
+                years: B2Years::Back(vf_sync::rules::DEFAULT_YEARS_BACK),
+                ..B2Rule::default()
+            },
+        ));
+    }
+    if edit.is_some() {
+        t.rule_edit = edit;
+    }
+    if let Some(e) = &mut t.rule_edit {
+        let mut done = false;
+        let mut cancel = false;
+        egui::Frame::group(ui.style()).show(ui, |ui| {
+            ui.label(
+                RichText::new(if e.at.is_some() {
+                    "Change the rule"
+                } else {
+                    "New rule"
+                })
+                .strong(),
+            );
+            ui.horizontal(|ui| {
+                let l = ui.label("Rule name");
+                ui.add(egui::TextEdit::singleline(&mut e.rule.name).desired_width(240.0))
+                    .labelled_by(l.id);
+            });
+            ui.label(widgets::caption(
+                "Folders (in a client folder, at any depth). None ticked: any folder.",
+            ));
+            ui.horizontal_wrapped(|ui| {
+                for f in &t.rule_choices.1 {
+                    tick(ui, &mut e.rule.folders, f, f);
+                }
+                // A folder the rule names that the template no longer has stays listed.
+                for f in e.rule.folders.clone() {
+                    if !t.rule_choices.1.iter().any(|x| x.eq_ignore_ascii_case(&f)) {
+                        tick(
+                            ui,
+                            &mut e.rule.folders,
+                            &f,
+                            &format!("{f} (not in the template)"),
+                        );
                     }
-                    _ => t.error = Some("Type a number of years from 0 to 100.".into()),
+                }
+            });
+            ui.label(widgets::caption("Doc types. None ticked: any doc type."));
+            egui::ScrollArea::vertical()
+                .id_salt("b2-rule-types")
+                .max_height(120.0)
+                .show(ui, |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        for (id, name) in &t.rule_choices.0 {
+                            tick(ui, &mut e.rule.doc_types, id, name);
+                        }
+                    });
+                });
+            ui.horizontal(|ui| {
+                ui.label("Tax years:");
+                ui.radio_value(&mut e.years, 0, "Any tax year");
+                ui.radio_value(&mut e.years, 1, "This year and");
+                let l = ui.label("years before it");
+                ui.add_enabled(
+                    e.years == 1,
+                    egui::TextEdit::singleline(&mut e.back).desired_width(30.0),
+                )
+                .labelled_by(l.id);
+                ui.radio_value(&mut e.years, 2, "None with a tax year");
+            });
+            ui.checkbox(&mut e.rule.no_year, "Include documents with no tax year");
+            ui.horizontal(|ui| {
+                done = ui.add(widgets::primary_button("Save rule")).clicked();
+                cancel = ui.button("Cancel").clicked();
+            });
+        });
+        if cancel {
+            t.rule_edit = None;
+        } else if done {
+            let years = match e.years {
+                0 => Some(B2Years::Any),
+                2 => Some(B2Years::None),
+                _ => e
+                    .back
+                    .trim()
+                    .parse::<u16>()
+                    .ok()
+                    .filter(|n| *n <= 100)
+                    .map(B2Years::Back),
+            };
+            match years {
+                None => t.error = Some("Type a number of years from 0 to 100.".into()),
+                Some(B2Years::None) if !e.rule.no_year => {
+                    t.error = Some(
+                        "This rule would send nothing: choose tax years, or tick Include documents with no tax year.".into(),
+                    );
+                }
+                Some(y) => {
+                    let mut rule = e.rule.clone();
+                    rule.name = rule.name.trim().to_string();
+                    rule.years = y;
+                    let mut list = rules.clone();
+                    let what = match e.at {
+                        Some(i) if i < list.len() => {
+                            list[i] = rule;
+                            "The rule is changed."
+                        }
+                        _ => {
+                            list.push(rule);
+                            "The rule is added."
+                        }
+                    };
+                    save = Some((list, what.to_string()));
                 }
             }
-        });
-    });
+        }
+    }
+    if let Some((list, what)) = save {
+        match vf_fs::clients::set_b2_rules(env.root, &list) {
+            Ok(()) => {
+                t.notice = Some(format!(
+                    "{what} What it holds back or lets through is counted again below."
+                ));
+                t.error = None;
+                t.held = None;
+                t.refreshed = None;
+                t.b2_rules = None;
+                t.rule_edit = None;
+            }
+            Err(e) => t.error = Some(format!("Not saved: {e}")),
+        }
+    }
     if !admin {
         ui.label(widgets::caption(ADMIN_NEEDED));
     }

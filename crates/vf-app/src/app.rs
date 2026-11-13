@@ -1804,12 +1804,40 @@ mod tests {
         }
         h.run();
         assert!(h.query_by_label("What goes to B2").is_some());
-        assert!(
-            h.query_by_label("Tax years before this one to send (0 = every year)")
-                .is_some()
-        );
+        // PA-63: the earlier rule, shown as a list of two rules.
+        assert!(h.query_by_label("Recent tax years").is_some());
+        assert!(h.query_by_label("Permanent files").is_some());
+        assert!(h.query_by_label("Add rule").is_some());
         let pushes = h.query_all_by_label("Push").count();
         assert!(pushes > 0 && pushes < 60, "{pushes} rows laid out");
+        // A third rule: a folder ticked, every tax year. Saving writes the whole list.
+        let root = {
+            let Screen::Open(o) = &h.state().screen else {
+                panic!("open")
+            };
+            o.opened.root.clone()
+        };
+        assert!(vf_fs::clients::load_b2(&root).unwrap().rules.is_none());
+        click(&mut h, "Add rule");
+        h.run();
+        type_into(&mut h, "Rule name", "Tax returns");
+        // A tick box and a radio button, not buttons.
+        h.get_by_label("Income Tax").click();
+        h.run();
+        h.get_by_label("Any tax year").click();
+        h.run();
+        // The editor's buttons are below the fold of the test window.
+        h.get_by_label("Save rule").scroll_to_me();
+        h.run();
+        click(&mut h, "Save rule");
+        h.run();
+        let rules = vf_fs::clients::load_b2(&root).unwrap().rules.unwrap();
+        assert_eq!(rules.len(), 3, "{rules:?}");
+        assert_eq!(rules[2].name, "Tax returns");
+        assert_eq!(rules[2].folders, ["Income Tax"]);
+        assert_eq!(rules[2].years, vf_fs::clients::B2Years::Any);
+        assert!(h.query_by_label("Tax returns").is_some());
+        assert!(h.query_by_label("New rule").is_none(), "the editor closed");
     }
 
     /// Closing the window with annotations unsaved asks first: the window stays, the Viewer
