@@ -1640,6 +1640,56 @@ fn a_stopped_push_goes_on_at_the_next_one() {
     );
 }
 
+/// Q-107 with B2: a client merged into another leaves the bucket's listing; its documents
+/// are listed once, under the kept client, and a restore from B2 has each of them once.
+#[test]
+fn a_merged_client_leaves_the_bucket_listing() {
+    let t = tempfile::tempdir().unwrap();
+    let store = Remote::memory();
+    let mut a = pc_a(t.path(), store.clone());
+    vf_sync::push::push(&mut a.conn, &a.root, &a.sync, None).unwrap();
+    let id = |conn: &Connection, ext: &str| -> String {
+        conn.query_row("SELECT id FROM client WHERE ext_id = ?1", [ext], |r| {
+            r.get(0)
+        })
+        .unwrap()
+    };
+    let (kept, dup) = (id(&a.conn, "1042"), id(&a.conn, "2002"));
+    assert!(a.sync.head().unwrap().unwrap().segments.contains_key(&dup));
+    let plan = vf_fs::clientmerge::plan(&a.conn, &a.root, &dup, &kept).unwrap();
+    vf_fs::clientmerge::apply(&mut a.conn, &a.root, &plan, "dev-a").unwrap();
+    vf_sync::push::push(&mut a.conn, &a.root, &a.sync, None).unwrap();
+    let head = a.sync.head().unwrap().unwrap();
+    assert!(
+        !head.segments.contains_key(&dup),
+        "the merged client is gone"
+    );
+    assert!(head.segments.contains_key(&kept));
+    // Nothing left to send, and a second push changes nothing.
+    let again = vf_sync::push::push(&mut a.conn, &a.root, &a.sync, None).unwrap();
+    assert_eq!(again.segments, 0);
+
+    // A bare PC restores the cabinet: one client folder, each document once.
+    let b = pc_b(t.path(), store, &a);
+    let files = snapshot(&b.root);
+    let docs: Vec<&String> = files.keys().filter(|k| k.ends_with(".pdf")).collect();
+    assert_eq!(docs.len(), 3, "{docs:?}");
+    assert!(
+        files.contains_key("Anderson Farms LLC (1042)/Payroll/2025/941 Q1.pdf"),
+        "{docs:?}"
+    );
+    assert!(!b.root.join("Bell Ranch Inc (2002)").exists());
+    let n: i64 = b
+        .conn
+        .query_row(
+            "SELECT count(*) FROM document WHERE deleted_at IS NULL",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(n, 3);
+}
+
 #[test]
 fn a_list_of_rules_decides_what_goes_up() {
     use vf_fs::clients::{B2Rule, B2Years};

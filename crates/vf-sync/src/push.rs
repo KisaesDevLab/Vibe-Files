@@ -633,6 +633,20 @@ fn push_once(
             waiting.push(c);
         }
     }
+    // A client that is gone from the cabinet (merged into another, `vf_fs::clientmerge`) and
+    // still has a segment: the segment leaves the manifest, or a restore from B2 would bring
+    // the client back with its documents listed twice. In a whole-cabinet push only.
+    let mut gone: Vec<String> = vec![];
+    if !client_only && only.is_none() {
+        let mut st = conn.prepare("SELECT id FROM client WHERE deleted_at IS NOT NULL")?;
+        for id in st.query_map([], |r| r.get::<_, String>(0))? {
+            let id = id?;
+            if head.segments.contains_key(&id) && !done.contains(&id) {
+                gone.push(id);
+            }
+        }
+        waiting.retain(|c| !gone.contains(c));
+    }
     // Documents pushed by hand: their client goes even when the rules leave it nothing to send.
     if let (Some(o), Some(f)) = (only, force)
         && !f.is_empty()
@@ -868,8 +882,14 @@ fn push_once(
         }
     }
     push_audit(conn, root, s)?;
+    for c in &gone {
+        new_head.segments.remove(c);
+        new_head.segment_writers.remove(c);
+        segments += 1;
+    }
     let mark_done = |done: &mut BTreeSet<String>| {
         done.extend(round.iter().cloned());
+        done.extend(gone.iter().cloned());
         if cabinet_too {
             done.insert(CABINET.into());
         }
@@ -923,6 +943,12 @@ fn push_once(
     }
     for d in &sent_docs {
         tx.execute("DELETE FROM sync_pending WHERE doc_id = ?1", [&d.doc_id])?;
+    }
+    // A client gone from the cabinet: nothing of it is exchanged any more (its documents
+    // are another client's now, and took that client's base above when they were sent).
+    for c in &gone {
+        tx.execute("DELETE FROM sync_segment WHERE client_id = ?1", [c])?;
+        tx.execute("DELETE FROM sync_base WHERE client_id = ?1", [c])?;
     }
     // Taken out of B2 and not in the segments just written: no longer exchanged.
     for id in &rules.removed {
