@@ -72,6 +72,23 @@ pub fn login_device(root: &Path, login: &str, mine: &str) -> String {
     .unwrap_or_else(|_| mine.to_string())
 }
 
+/// The ids the cabinet has given to logins: each one's Intake folder is in use, however long
+/// ago its last batch was.
+pub fn ids_in_use(root: &Path) -> Vec<String> {
+    std::fs::read_dir(root.join(cabinet::VIBE_DIR).join(DIR))
+        .map(|d| {
+            d.flatten()
+                .filter(|e| e.path().extension().is_some_and(|x| x == "json"))
+                .filter_map(|e| {
+                    let f: LoginFile =
+                        serde_json::from_str(&std::fs::read_to_string(e.path()).ok()?).ok()?;
+                    Some(f.device_id)
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// [`login_device`] for a session that stays open: the login's id is its own while the
 /// session holds it (the lock returned, kept alive until dropped). A second session of the
 /// same login open at the same time on another host (a disconnected session left running)

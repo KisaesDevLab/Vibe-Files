@@ -47,7 +47,15 @@ pub struct HistoryScreen {
     /// Copies of the last batch changed since they were written (hashed on a worker), by batch.
     modified: Option<(Uuid, Vec<PathBuf>)>,
     modified_job: Option<Receiver<(Uuid, Vec<PathBuf>)>>,
+    /// Why the last batch cannot be undone, as last checked: (batch, undone, why, when). The
+    /// check asks the share about every file of the batch, so it runs on a worker every few
+    /// seconds, never once per frame (V40: History froze after a batch of hundreds).
+    block: Option<(Uuid, bool, Option<String>, std::time::Instant)>,
+    block_job: Option<Receiver<(Uuid, bool, Option<String>)>>,
 }
+
+/// How long a "can it be undone" answer is shown before it is checked again.
+const BLOCK_RECHECK: std::time::Duration = std::time::Duration::from_secs(5);
 
 impl HistoryScreen {
     #[cfg(test)]
@@ -132,7 +140,8 @@ impl HistoryScreen {
         self.check_copies(&ctx, state);
 
         ui.add_space(4.0);
-        self.undo_ui(ui, state);
+        let blocker = self.blocker_shown(&ctx, state);
+        self.undo_ui(ui, state, blocker.clone());
         if let Some((level, msg)) = &self.message {
             banner(ui, *level, msg);
         }
@@ -156,7 +165,43 @@ impl HistoryScreen {
             state.import_show = Some(batch);
             state.goto = Some(crate::app::Tab::Import);
         }
-        self.confirm_ui(&ctx, state);
+        self.confirm_ui(&ctx, state, blocker);
+    }
+
+    /// [`undo_blocker`] for the screen: the answer as last checked on a worker. Tests check at
+    /// once (their steps do not wait for a worker).
+    fn blocker_shown(&mut self, ctx: &egui::Context, state: &AppState) -> Option<String> {
+        if cfg!(test) {
+            return undo_blocker(state);
+        }
+        if state.committing {
+            return Some("Wait for the commit to finish.".into());
+        }
+        let Some(lb) = &state.last_batch else {
+            return undo::blocker(None);
+        };
+        if let Some(rx) = &self.block_job
+            && let Ok((batch, undone, why)) = rx.try_recv()
+        {
+            self.block_job = None;
+            self.block = Some((batch, undone, why, std::time::Instant::now()));
+        }
+        let fresh = self
+            .block
+            .as_ref()
+            .filter(|(b, u, _, _)| *b == lb.batch && *u == lb.undone);
+        let due = fresh.is_none_or(|(_, _, _, at)| at.elapsed() >= BLOCK_RECHECK);
+        let shown = match fresh {
+            Some((_, _, why, _)) => why.clone(),
+            None => Some("Checking the last batch\u{2026}".into()),
+        };
+        if due && self.block_job.is_none() {
+            let lb = lb.clone();
+            self.block_job = Some(worker::background(ctx, move || {
+                (lb.batch, lb.undone, undo::blocker(Some(&lb)))
+            }));
+        }
+        shown
     }
 
     /// Hashes the last batch's copies on a worker when the batch changes (undo preflight).
@@ -199,7 +244,7 @@ impl HistoryScreen {
         self.undo_confirm
     }
 
-    fn undo_ui(&mut self, ui: &mut egui::Ui, state: &AppState) {
+    fn undo_ui(&mut self, ui: &mut egui::Ui, state: &AppState, blocker: Option<String>) {
         let p = pal(ui);
         card(ui, |ui| {
             ui.set_width(ui.available_width());
@@ -217,7 +262,6 @@ impl HistoryScreen {
                     }
                 });
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    let blocker = undo_blocker(state);
                     let busy = self.undo_job.is_some();
                     let text = {
                         let mut job = egui::text::LayoutJob::default();
@@ -284,11 +328,11 @@ impl HistoryScreen {
         });
     }
 
-    fn confirm_ui(&mut self, ctx: &egui::Context, state: &AppState) {
+    fn confirm_ui(&mut self, ctx: &egui::Context, state: &AppState, blocker: Option<String>) {
         if !self.undo_confirm {
             return;
         }
-        if undo_blocker(state).is_some() {
+        if blocker.is_some() {
             self.undo_confirm = false;
             return;
         }

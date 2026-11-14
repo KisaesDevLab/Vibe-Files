@@ -1543,6 +1543,12 @@ fn prepare(opened: &mut Opened, device_id: &str) -> Prepared {
     if let Err(e) = vf_fs::undolist::restore(&mut opened.conn, &root, device_id) {
         tracing::warn!(kind = crate::logging::kind(&e), "undo list not restored");
     }
+    // Intake folders nobody has used for a month (hosts given a new id at every reset left
+    // one each) are set aside, so they are not read at every open and every batch.
+    let idle = vf_fs::intake::archive_idle(&root, device_id);
+    if idle > 0 {
+        tracing::info!(idle, "idle Intake folders set aside");
+    }
     // Trash older than 90 days empties on its own (Q-15; held documents stay).
     let emptied = vf_fs::trash::auto_empty(&mut opened.conn, &root, device_id);
     let chain = crate::ui::audit::ChainCheck::later();

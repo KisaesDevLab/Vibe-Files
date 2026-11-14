@@ -67,6 +67,82 @@ pub fn batch_dirs(root: &Path) -> Vec<std::path::PathBuf> {
     v
 }
 
+/// Days an Intake folder may go unused before [`archive_idle`] sets it aside.
+pub const IDLE_DAYS: u64 = 30;
+/// Where idle Intake folders go (beside `intake`, in the cabinet's `_Vibe`).
+pub const IDLE_DIR: &str = "intake-old";
+
+/// Sets aside the Intake folders nobody has used for [`IDLE_DAYS`] days (QA I11): a session
+/// host given a new id at every reset left a folder behind each time, each one read at every
+/// open and by every recorded batch, and the documents of its last batch refused edits for
+/// good. A folder is kept when it is this session's (`mine`), a login's
+/// ([`crate::identity::ids_in_use`]), or anything in it changed lately. Nothing is deleted:
+/// the folder moves to `_Vibe/intake-old/`. Returns how many were set aside.
+pub fn archive_idle(root: &Path, mine: &str) -> usize {
+    let master = crate::clients::master_dir(root);
+    let Ok(rd) = std::fs::read_dir(master.join(PC_DIR)) else {
+        return 0;
+    };
+    let name_of = |id: &str| -> String {
+        pc_dir(root, id)
+            .file_name()
+            .map(|n| n.to_string_lossy().to_lowercase())
+            .unwrap_or_default()
+    };
+    let mut keep: std::collections::HashSet<String> = crate::identity::ids_in_use(root)
+        .iter()
+        .map(|id| name_of(id))
+        .collect();
+    keep.insert(name_of(mine));
+    let Some(cutoff) = std::time::SystemTime::now()
+        .checked_sub(std::time::Duration::from_secs(IDLE_DAYS * 24 * 3600))
+    else {
+        return 0;
+    };
+    let mut n = 0;
+    for e in rd.flatten() {
+        if !e.file_type().is_ok_and(|t| t.is_dir()) {
+            continue;
+        }
+        let name = e.file_name().to_string_lossy().into_owned();
+        if keep.contains(&name.to_lowercase()) {
+            continue;
+        }
+        let dir = e.path();
+        // Used lately: a file directly in it changed (its last batch, its log, the settings
+        // copied in each time Intake loads). The times come with the listing.
+        let newest = std::fs::read_dir(&dir)
+            .map(|d| {
+                d.flatten()
+                    .filter_map(|f| f.metadata().ok())
+                    .filter(|m| m.is_file())
+                    .filter_map(|m| m.modified().ok())
+                    .max()
+            })
+            .unwrap_or(None)
+            .or_else(|| mtime(&dir));
+        if newest.is_none_or(|t| t >= cutoff) {
+            continue;
+        }
+        let old = master.join(IDLE_DIR);
+        if std::fs::create_dir_all(&old).is_err() {
+            return n;
+        }
+        let mut to = old.join(&name);
+        if to.exists() {
+            let secs = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_secs());
+            to = old.join(format!("{name}-{secs}"));
+        }
+        // Another computer may be setting the same one aside: the one that loses leaves it.
+        if std::fs::rename(&dir, &to).is_ok() {
+            n += 1;
+        }
+    }
+    n
+}
+
 /// Whether any PC's Filer is filing a batch right now (its last batch saved as in progress
 /// within the hour; an older one is a stopped run Filer's recovery deals with). Files appear
 /// in client folders before Filer lists them, so nothing is adopted meanwhile (QA 2026-11-04).
@@ -1099,6 +1175,55 @@ mod tests {
         );
         let dirs = batch_dirs(&root);
         assert_eq!(dirs, [master.clone(), a, b]);
+    }
+
+    /// QA I11: an Intake folder nobody has used for a month is set aside, with everything in
+    /// it; this session's, a login's and one used lately stay.
+    #[test]
+    fn idle_intake_folders_are_set_aside() {
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path().join("cab");
+        let master = crate::clients::master_dir(&root);
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(40 * 24 * 3600);
+        let aged = |p: &Path| {
+            std::fs::File::options()
+                .write(true)
+                .open(p)
+                .unwrap()
+                .set_modified(old)
+                .unwrap();
+        };
+        for id in ["idle-host", "mine", "a-login", "busy-host"] {
+            let d = pc_dir(&root, id);
+            std::fs::create_dir_all(d.join("undo_zips")).unwrap();
+            std::fs::write(d.join("last_batch.json"), "{}").unwrap();
+            std::fs::write(d.join("undo_zips/kept.zip"), "content").unwrap();
+            if id != "busy-host" {
+                aged(&d.join("last_batch.json"));
+            }
+        }
+        std::fs::create_dir_all(master.join("logins")).unwrap();
+        std::fs::write(
+            master.join("logins/firm_pat.json"),
+            r#"{"login":"FIRM\\pat","device_id":"a-login","since":"t"}"#,
+        )
+        .unwrap();
+        assert_eq!(archive_idle(&root, "mine"), 1);
+        assert!(!pc_dir(&root, "idle-host").exists());
+        assert!(
+            master
+                .join("intake-old/idle-host/undo_zips/kept.zip")
+                .is_file()
+        );
+        for id in ["mine", "a-login", "busy-host"] {
+            assert!(pc_dir(&root, id).is_dir(), "{id}");
+        }
+        assert_eq!(archive_idle(&root, "mine"), 0);
+        assert_eq!(
+            batch_dirs(&root).len(),
+            4,
+            "the cabinet's own and three PCs'"
+        );
     }
 
     /// A PC's look (theme, text size) in Filer's config.json stays on that PC: a save that

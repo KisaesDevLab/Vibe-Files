@@ -175,6 +175,11 @@ impl Tracker {
         gone
     }
 
+    /// Whether `path` is being watched or is queued already.
+    pub fn knows(&self, path: &Path) -> bool {
+        self.emitted.contains(path) || self.candidates.contains_key(path)
+    }
+
     /// Queued paths that no longer exist; they are forgotten and returned.
     pub fn prune(&mut self, exists: impl Fn(&Path) -> bool) -> Vec<PathBuf> {
         let gone: Vec<PathBuf> = self
@@ -308,19 +313,28 @@ impl Worker {
         }
     }
 
-    fn offer_tree(&mut self, path: &Path, source: Source, max_depth: usize) {
+    /// Offers the files under `path` that are not known yet, and returns every file found
+    /// (V40: a file already queued is not asked about again; on a share that was two round
+    /// trips per waiting file at every look).
+    fn offer_tree(&mut self, path: &Path, source: Source, max_depth: usize) -> Vec<PathBuf> {
         let mut files = Vec::new();
         walk_files(path, 0, max_depth, &mut files);
-        for f in files {
-            self.offer_file(f, source.clone());
+        for f in &files {
+            if !self.tracker.knows(f) {
+                self.offer_file(f.clone(), source.clone());
+            }
         }
+        files
     }
 
-    fn list_inboxes(&mut self) {
+    /// Offers what is in the inboxes; returns every file found in them.
+    fn list_inboxes(&mut self) -> HashSet<PathBuf> {
+        let mut all = HashSet::new();
         for (inbox, deep) in self.inboxes.clone().into_iter().zip(self.deep.clone()) {
             let depth = if deep { MAX_DEPTH } else { 0 };
-            self.offer_tree(&inbox, Source::Inbox(inbox.clone()), depth);
+            all.extend(self.offer_tree(&inbox, Source::Inbox(inbox.clone()), depth));
         }
+        all
     }
 
     /// Whether `source`'s sub-folders count.
@@ -437,10 +451,12 @@ impl Worker {
     }
 
     fn recheck(&mut self) {
-        for gone in self.tracker.prune(|p| p.exists()) {
+        // The inboxes are listed once; a queued file the listing shows is there, so only the
+        // ones it does not show are asked about one by one (V40).
+        let listed = self.list_inboxes();
+        for gone in self.tracker.prune(|p| listed.contains(p) || p.exists()) {
             self.send(Event::Gone(gone));
         }
-        self.list_inboxes();
     }
 
     fn run(mut self, rx: Receiver<Msg>) {
