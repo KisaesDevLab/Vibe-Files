@@ -33,6 +33,9 @@ pub struct DispositionPage {
     /// "Destroy due now" running on its thread (it re-hashes and wipes every due file and
     /// its copies; owner 2026-11-12: a spinner, not a frozen window).
     destroy: Option<crate::ui::job::Job<Result<disposition::RunReport, String>>>,
+    /// An approval running on its thread: each document not read yet is fingerprinted first
+    /// (PA-60), which reads its file.
+    approve: Option<crate::ui::job::Job<Result<usize, String>>>,
 }
 
 impl DispositionPage {
@@ -63,6 +66,57 @@ impl DispositionPage {
         ) {
             Ok(j) => self.destroy = Some(j),
             Err(e) => self.error = Some(e),
+        }
+    }
+
+    /// Starts the approval of `chosen` on its thread with its own catalog connection.
+    fn start_approve(
+        &mut self,
+        ctx: &egui::Context,
+        catalog: &Path,
+        root: &Path,
+        device: &str,
+        chosen: Vec<Line>,
+    ) {
+        let today = vf_core::retention::today();
+        let (catalog, root, device) = (
+            catalog.to_path_buf(),
+            root.to_path_buf(),
+            device.to_string(),
+        );
+        let what = format!(
+            "Approving {} documents (reading each one's content)…",
+            chosen.len()
+        );
+        match crate::ui::job::Job::start(ctx, what, move || {
+            let mut conn = vf_core::db::open(&catalog, vf_core::db::Storage::Local)
+                .map_err(|e| e.to_string())?;
+            disposition::approve(&mut conn, &root, &device, &chosen, today)
+        }) {
+            Ok(j) => self.approve = Some(j),
+            Err(e) => self.error = Some(e),
+        }
+    }
+
+    /// Takes a finished approval.
+    fn take_approve(&mut self) {
+        let Some(r) = crate::ui::job::take(&mut self.approve) else {
+            return;
+        };
+        match r.and_then(|r| r) {
+            Ok(n) => {
+                self.notice = Some(format!(
+                    "Approved {n}; they are destroyed after {} days.",
+                    disposition::WAIT_DAYS
+                ));
+                self.error = None;
+                self.changed = true;
+                self.refresh();
+            }
+            Err(e) => {
+                self.error = Some(e);
+                self.changed = true;
+            }
         }
     }
 
@@ -109,6 +163,7 @@ impl DispositionPage {
 pub fn show(ui: &mut egui::Ui, p: &mut DispositionPage, env: &mut Env, catalog: &Path) {
     let today = vf_core::retention::today();
     p.take_destroy();
+    p.take_approve();
     if let Some(rx) = &p.job {
         let got = match rx.try_recv() {
             Ok(r) => Some(r),
@@ -268,9 +323,13 @@ pub fn show(ui: &mut egui::Ui, p: &mut DispositionPage, env: &mut Env, catalog: 
                     }
                 });
             }
+            if let Some(j) = &p.approve {
+                j.show(ui);
+            }
+            let idle = p.approve.is_none();
             ui.horizontal(|ui| {
                 if ui
-                    .add_enabled(n > 0, egui::Button::new(format!("Approve {n}")))
+                    .add_enabled(n > 0 && idle, egui::Button::new(format!("Approve {n}")))
                     .on_hover_text(format!(
                         "Destroyed once {} days have passed (a hold placed meanwhile still stops it).",
                         disposition::WAIT_DAYS
@@ -279,21 +338,15 @@ pub fn show(ui: &mut egui::Ui, p: &mut DispositionPage, env: &mut Env, catalog: 
                 {
                     p.confirm_approve = true;
                 }
-                if go {
-                    match disposition::approve(env.conn, env.root, env.device_id, &chosen, today) {
-                        Ok(n) => {
-                            p.notice = Some(format!(
-                                "Approved {n}; they are destroyed after {} days.",
-                                disposition::WAIT_DAYS
-                            ));
-                            p.error = None;
-                            p.refresh();
-                        }
-                        Err(e) => p.error = Some(e),
+                if go && idle {
+                    p.start_approve(ui.ctx(), catalog, env.root, env.device_id, chosen.clone());
+                    // Tests run the work at once: its result is taken here.
+                    if cfg!(test) {
+                        p.take_approve();
                     }
                 }
                 if ui
-                    .add_enabled(n > 0, egui::Button::new(format!("Defer {n}")))
+                    .add_enabled(n > 0 && idle, egui::Button::new(format!("Defer {n}")))
                     .on_hover_text(format!(
                         "Off the report for {} months.",
                         disposition::DEFER_MONTHS

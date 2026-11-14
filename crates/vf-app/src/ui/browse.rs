@@ -430,6 +430,9 @@ pub struct Browse {
     holds_seen: Option<(String, Vec<vf_fs::holds::Hold>)>,
     /// The reason typed for a new hold, while the form is open.
     hold_reason: Option<String>,
+    /// A hold being placed on its thread (documents not read yet are fingerprinted first,
+    /// PA-60), with what it is placed on.
+    hold_job: Option<(String, crate::ui::job::Job<Result<String, String>>)>,
     /// A hold being released (asked first), and the PIN typed.
     hold_releasing: Option<(String, String)>,
     hold_pin: String,
@@ -584,6 +587,7 @@ impl Browse {
             scan_target: None,
             holds_seen: None,
             hold_reason: None,
+            hold_job: None,
             rename: None,
             prefs: Prefs::default(),
             prefs_dirty: false,
@@ -4105,8 +4109,38 @@ fn legal_holds(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env) {
     }
 }
 
+/// What a hold placed on `what` came to.
+fn hold_placed(b: &mut Browse, what: &str, r: Result<String, String>) {
+    match r {
+        Ok(_) => {
+            b.notice = Some(format!("Legal hold placed on {what}."));
+            b.hold_reason = None;
+            b.holds_seen = None;
+        }
+        Err(e) => b.error = Some(e),
+    }
+}
+
+/// Takes a hold placed on its thread, once it is done.
+fn take_hold_job(b: &mut Browse) {
+    let Some(r) = b.hold_job.as_ref().and_then(|(_, j)| j.poll()) else {
+        return;
+    };
+    let Some((what, _)) = b.hold_job.take() else {
+        return;
+    };
+    hold_placed(b, &what, r.and_then(|r| r));
+}
+
 /// Place legal hold on … (P07), at the foot of the details pane.
 fn place_legal_hold(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env) {
+    take_hold_job(b);
+    if let Some((_, j)) = &b.hold_job {
+        ui.add_space(12.0);
+        ui.separator();
+        j.show(ui);
+        return;
+    }
     let client = if b.selected.is_empty() {
         b.scope_client().map(|c| b.snap.clients[c].id.clone())
     } else {
@@ -4158,13 +4192,31 @@ fn place_legal_hold(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env) {
                     ),
                 };
                 let reason = reason.clone();
-                match vf_fs::holds::place(env.conn, env.root, env.device_id, target, &reason) {
-                    Ok(_) => {
-                        b.notice = Some(format!("Legal hold placed on {what}."));
-                        b.hold_reason = None;
-                        b.holds_seen = None;
+                match (b.catalog.clone(), b.ctx()) {
+                    // On its thread, with its own catalog connection: a document not read
+                    // yet is read for its fingerprint.
+                    (Some(catalog), Some(ctx)) => {
+                        let (root, device) = (env.root.to_path_buf(), env.device_id.to_string());
+                        match crate::ui::job::Job::start(&ctx, "Placing the hold…", move || {
+                            let mut conn = vf_core::db::open(&catalog, vf_core::db::Storage::Local)
+                                .map_err(|e| e.to_string())?;
+                            vf_fs::holds::place(&mut conn, &root, &device, target, &reason)
+                        }) {
+                            Ok(j) => {
+                                b.hold_job = Some((what, j));
+                                // Tests run the work at once: its result is taken here.
+                                if cfg!(test) {
+                                    take_hold_job(b);
+                                }
+                            }
+                            Err(e) => b.error = Some(e),
+                        }
                     }
-                    Err(e) => b.error = Some(e),
+                    _ => {
+                        let r =
+                            vf_fs::holds::place(env.conn, env.root, env.device_id, target, &reason);
+                        hold_placed(b, &what, r);
+                    }
                 }
             } else if cancel {
                 b.hold_reason = None;

@@ -61,6 +61,9 @@ pub struct IngestState {
     pub pre_dupes: Vec<PreDup>,
     /// (index into `pre_dupes`, remove it from the inbox).
     pre_action: Option<(usize, bool)>,
+    /// The check of `to_check` running on its thread (it may read a few documents of the
+    /// cabinet to compare, PA-60: never on the window's thread).
+    dupes_job: Option<crate::ui::job::Job<Vec<PreDup>>>,
     /// A scan running on its own thread.
     scan_job: Option<Receiver<Result<(PathBuf, scanner::Assembled), String>>>,
     /// The portal's line in the strip, set by the app each frame; `None` when no portal is set
@@ -294,10 +297,12 @@ impl IngestState {
     }
 
     /// Checks newly delivered files against the catalog (every frame, cheap when nothing
-    /// arrived) and applies a choice made on one.
+    /// arrived) and applies a choice made on one. The check runs on its own thread with its
+    /// own catalog connection.
     pub fn check_dupes(
         &mut self,
-        conn: &mut vf_core::db::Connection,
+        ctx: &egui::Context,
+        catalog: &std::path::Path,
         root: &std::path::Path,
         device_id: &str,
     ) {
@@ -318,21 +323,55 @@ impl IngestState {
                 self.log_line(line);
             }
         }
-        // Hashes come from the pipeline thread: catalog lookups here, and (PA-60) at most a
-        // few never-read documents of exactly the file's size read to compare.
-        for (path, staging, hashes) in std::mem::take(&mut self.to_check) {
-            let size = std::fs::metadata(&path).map(|m| m.len()).ok();
-            let found = hashes.iter().find_map(|h| match size {
-                Some(size) => vf_fs::dupes::existing_sized(conn, root, device_id, h, size),
-                None => vf_fs::dupes::existing(conn, h),
-            });
-            if let Some(existing) = found {
-                self.pre_dupes.push(PreDup {
-                    path,
-                    staging,
-                    existing,
-                });
+        if let Some(r) = crate::ui::job::take(&mut self.dupes_job) {
+            match r {
+                Ok(found) => self.pre_dupes.extend(found),
+                Err(e) => self.log_line(format!("Duplicate check: {e}")),
             }
+        }
+        if self.to_check.is_empty() || self.dupes_job.is_some() {
+            return;
+        }
+        // Hashes come from the pipeline thread: catalog lookups, and (PA-60) at most a few
+        // never-read documents of exactly the file's size read to compare.
+        let batch = std::mem::take(&mut self.to_check);
+        let (catalog, root, device) = (
+            catalog.to_path_buf(),
+            root.to_path_buf(),
+            device_id.to_string(),
+        );
+        let work = move || {
+            let Ok(mut conn) = vf_core::db::open(&catalog, vf_core::db::Storage::Local) else {
+                return Vec::new();
+            };
+            let mut out = Vec::new();
+            for (path, staging, hashes) in batch {
+                let size = std::fs::metadata(&path).map(|m| m.len()).ok();
+                let found = hashes.iter().find_map(|h| match size {
+                    Some(size) => vf_fs::dupes::existing_sized(&mut conn, &root, &device, h, size),
+                    None => vf_fs::dupes::existing(&conn, h),
+                });
+                if let Some(existing) = found {
+                    out.push(PreDup {
+                        path,
+                        staging,
+                        existing,
+                    });
+                }
+            }
+            out
+        };
+        match crate::ui::job::Job::start(ctx, "Checking for duplicates…", work) {
+            Ok(j) => {
+                self.dupes_job = Some(j);
+                // Tests run the work at once: taken on this same call.
+                if cfg!(test)
+                    && let Some(Ok(found)) = crate::ui::job::take(&mut self.dupes_job)
+                {
+                    self.pre_dupes.extend(found);
+                }
+            }
+            Err(e) => self.log_line(format!("Duplicate check: {e}")),
         }
     }
 

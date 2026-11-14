@@ -1143,9 +1143,12 @@ impl eframe::App for VibeFilesApp {
                 &self.config.device_id,
                 &self.config.ingest,
             );
-            o.intake
-                .ingest
-                .check_dupes(&mut o.opened.conn, &o.opened.root, &self.config.device_id);
+            o.intake.ingest.check_dupes(
+                &ctx,
+                &o.opened.catalog,
+                &o.opened.root,
+                &self.config.device_id,
+            );
             if let Some(p) = o.intake.ingest.open_request.take()
                 && let Err(e) = (o.browse.shell)(&crate::shell::ShellAction::Open(p))
             {
