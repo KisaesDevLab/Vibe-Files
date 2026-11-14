@@ -75,6 +75,9 @@ pub enum Where {
 
 #[derive(Default)]
 pub struct SearchTab {
+    /// The cabinet is still being listed behind the window (PA-60): said above the box,
+    /// because results may be incomplete until it is done (owner 2026-11-14, Q-106).
+    pub listing: Option<String>,
     pub text: String,
     pub scope: Where,
     /// Filters (the query's metadata fields; text and scope are filled in when it runs).
@@ -232,6 +235,12 @@ pub fn show(
                 .inner_margin(egui::Margin::symmetric(16, 10)),
         )
         .show(ui, |ui| {
+            if let Some(line) = &s.listing {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label(egui::RichText::new(line).color(theme::ink_secondary()));
+                });
+            }
             ui.horizontal(|ui| {
                 let label = ui.label("Search for");
                 ui.add(

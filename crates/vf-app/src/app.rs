@@ -856,6 +856,12 @@ impl eframe::App for VibeFilesApp {
                     }
                     o.indexed_seen = (generation, Some(std::time::Instant::now()));
                 }
+                o.search.listing = o.indexing.as_ref().map(|(ix, _)| {
+                    let (done, all, _) = ix.shared.progress();
+                    format!(
+                        "Still listing the cabinet's files ({done} of {all} client folders): results may be incomplete until this is done."
+                    )
+                });
                 crate::ui::search::show(
                     ui,
                     &mut o.search,
