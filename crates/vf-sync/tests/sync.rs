@@ -1595,6 +1595,51 @@ fn a_document_taken_out_of_b2_stays_on_every_computer() {
     assert_eq!(objects(&a.sync), before + 1);
 }
 
+/// PA-63: a push asked to stop sends nothing more and says so; the next push goes on from
+/// there, and the progress counts what went up against what was to be sent.
+#[test]
+fn a_stopped_push_goes_on_at_the_next_one() {
+    use vf_sync::rules::Rules;
+    let t = tempfile::tempdir().unwrap();
+    let store = Remote::memory();
+    let mut a = pc_a(t.path(), store);
+    let cabinet = a.sync.cabinet_id.clone();
+    let rules = Rules::load(&a.root).unwrap();
+    let (files, bytes) = vf_sync::catalog::to_send(&a.conn, &rules, None).unwrap();
+    assert_eq!(files, 3);
+    assert!(bytes > 0);
+    let one: String = a
+        .conn
+        .query_row("SELECT id FROM client WHERE ext_id = '2002'", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(
+        vf_sync::catalog::to_send(&a.conn, &rules, Some(std::slice::from_ref(&one)))
+            .unwrap()
+            .0,
+        1
+    );
+
+    vf_sync::push::begin(&cabinet, files, bytes);
+    vf_sync::push::ask_stop(&cabinet);
+    let r = vf_sync::push::push(&mut a.conn, &a.root, &a.sync, None).unwrap();
+    assert!(r.stopped);
+    assert_eq!((r.objects, r.documents), (0, 0));
+    assert_eq!(vf_sync::push::progress(&cabinet).files, 0);
+
+    vf_sync::push::begin(&cabinet, files, bytes);
+    let r = vf_sync::push::push(&mut a.conn, &a.root, &a.sync, None).unwrap();
+    assert!(!r.stopped);
+    assert_eq!((r.objects, r.documents), (3, 3));
+    let p = vf_sync::push::progress(&cabinet);
+    assert_eq!((p.files, p.bytes), (files, bytes));
+    assert_eq!(
+        vf_sync::catalog::to_send(&a.conn, &rules, None).unwrap(),
+        (0, 0)
+    );
+}
+
 #[test]
 fn a_list_of_rules_decides_what_goes_up() {
     use vf_fs::clients::{B2Rule, B2Years};

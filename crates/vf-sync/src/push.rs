@@ -33,6 +33,104 @@ pub struct PushReport {
     pub head_rev: u64,
     /// The pull this push ran first.
     pub pulled: Option<crate::pull::PullReport>,
+    /// Stopped by the person ([`ask_stop`]) before everything was sent: what went up is in
+    /// B2, and the next push goes on from there.
+    pub stopped: bool,
+}
+
+// The push under way in a cabinet, for the page that shows it (owner 2026-11-13, PA-63:
+// documents, GB, time left, and a way to stop). One push runs at a time per cabinet.
+#[derive(Default)]
+struct Under {
+    files: std::sync::atomic::AtomicU64,
+    bytes: std::sync::atomic::AtomicU64,
+    files_total: std::sync::atomic::AtomicU64,
+    bytes_total: std::sync::atomic::AtomicU64,
+    stop: std::sync::atomic::AtomicBool,
+    started: Mutex<Option<std::time::Instant>>,
+}
+
+static UNDER: Mutex<BTreeMap<String, std::sync::Arc<Under>>> = Mutex::new(BTreeMap::new());
+
+fn under(cabinet_id: &str) -> std::sync::Arc<Under> {
+    let mut all = UNDER.lock().unwrap_or_else(|e| e.into_inner());
+    all.entry(cabinet_id.to_string()).or_default().clone()
+}
+
+/// How far the push under way is.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Progress {
+    /// Contents in the bucket so far (sent now, or found there).
+    pub files: u64,
+    pub bytes: u64,
+    /// What the push set out to send ([`begin`]).
+    pub files_total: u64,
+    pub bytes_total: u64,
+    /// Seconds since it began.
+    pub secs: f64,
+}
+
+impl Progress {
+    /// Seconds left at the rate so far; `None` before anything was sent or with no total.
+    pub fn secs_left(&self) -> Option<f64> {
+        if self.bytes == 0 || self.bytes_total <= self.bytes || self.secs < 1.0 {
+            return None;
+        }
+        Some((self.bytes_total - self.bytes) as f64 * self.secs / self.bytes as f64)
+    }
+}
+
+/// A push of cabinet `cabinet_id` begins: what it is expected to send
+/// ([`catalog::to_send`]). Clears a stop asked of the push before it.
+pub fn begin(cabinet_id: &str, files_total: u64, bytes_total: u64) {
+    use std::sync::atomic::Ordering::Relaxed;
+    let u = under(cabinet_id);
+    u.files.store(0, Relaxed);
+    u.bytes.store(0, Relaxed);
+    u.files_total.store(files_total, Relaxed);
+    u.bytes_total.store(bytes_total, Relaxed);
+    u.stop.store(false, Relaxed);
+    if let Ok(mut s) = u.started.lock() {
+        *s = Some(std::time::Instant::now());
+    }
+}
+
+pub fn progress(cabinet_id: &str) -> Progress {
+    use std::sync::atomic::Ordering::Relaxed;
+    let u = under(cabinet_id);
+    Progress {
+        files: u.files.load(Relaxed),
+        bytes: u.bytes.load(Relaxed),
+        files_total: u.files_total.load(Relaxed),
+        bytes_total: u.bytes_total.load(Relaxed),
+        secs: u
+            .started
+            .lock()
+            .ok()
+            .and_then(|s| *s)
+            .map_or(0.0, |t| t.elapsed().as_secs_f64()),
+    }
+}
+
+/// Asks the push under way to stop: uploads in flight finish, the clients whose documents
+/// are all up are committed, and the rest waits for the next push.
+pub fn ask_stop(cabinet_id: &str) {
+    under(cabinet_id)
+        .stop
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The push ended: a stop asked of it does not carry over to the next one.
+pub fn clear_stop(cabinet_id: &str) {
+    under(cabinet_id)
+        .stop
+        .store(false, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn stopping(cabinet_id: &str) -> bool {
+    under(cabinet_id)
+        .stop
+        .load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// The cabinet's master files (`_Vibe`-relative path → text), and parser profiles.
@@ -144,6 +242,10 @@ pub fn push_in_rounds(
                 r => break r?,
             }
         };
+        if stopping(&s.cabinet_id) {
+            rep.stopped = more || rep.skipped > 0;
+            return Ok(rep);
+        }
         if !more {
             return Ok(rep);
         }
@@ -564,6 +666,8 @@ fn push_once(
     }
     let mut parts: Vec<Part> = vec![];
     let mut jobs: BTreeMap<String, PathBuf> = BTreeMap::new();
+    // Each content's size, for the progress shown.
+    let mut sizes: std::collections::HashMap<String, u64> = Default::default();
     for client in &round {
         if !applied(conn, client)? {
             rep.skipped += pending.get(client).copied().unwrap_or(0);
@@ -617,11 +721,13 @@ fn push_once(
             if e.deleted_at.is_none() && !uploaded.contains(&e.hash) {
                 jobs.entry(e.hash.clone())
                     .or_insert_with(|| root.join(&folder).join(&e.rel_path));
+                sizes.insert(e.hash.clone(), e.size.max(0) as u64);
             }
             for v in &e.versions {
                 if !uploaded.contains(&v.hash) {
                     jobs.entry(v.hash.clone())
                         .or_insert_with(|| vf_fs::cabinet::version_path(root, &v.hash));
+                    sizes.insert(v.hash.clone(), v.size.max(0) as u64);
                 }
             }
         }
@@ -679,7 +785,7 @@ fn push_once(
         let keys: HashSet<String> = s.remote.list("objects")?.into_iter().collect();
         *listed = Some(Mutex::new(keys));
     }
-    let up = upload_all(s, jobs, listed.as_ref())?;
+    let up = upload_all(s, jobs, &sizes, listed.as_ref())?;
     rep.objects += up.objects;
     rep.bytes += up.bytes;
     {
@@ -885,6 +991,7 @@ struct Uploaded {
 fn upload_all(
     s: &Sync,
     jobs: BTreeMap<String, PathBuf>,
+    sizes: &std::collections::HashMap<String, u64>,
     listed: Option<&Mutex<HashSet<String>>>,
 ) -> Result<Uploaded> {
     use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -895,6 +1002,7 @@ fn upload_all(
     let big = Mutex::new(());
     let (objects, bytes) = (AtomicUsize::new(0), AtomicU64::new(0));
     let start = std::time::Instant::now();
+    let now = under(&s.cabinet_id);
     let one = |hash: &str, path: &Path| -> Result<bool> {
         let key = layout::object_key(&s.keys.object_name(hash));
         let there = match listed {
@@ -902,6 +1010,9 @@ fn upload_all(
             None => s.remote.exists(&key)?,
         };
         if there {
+            now.files.fetch_add(1, Ordering::Relaxed);
+            now.bytes
+                .fetch_add(sizes.get(hash).copied().unwrap_or(0), Ordering::Relaxed);
             return Ok(true);
         }
         let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
@@ -916,6 +1027,8 @@ fn upload_all(
         s.remote.put(&key, s.keys.seal(&body, &key))?;
         drop(body);
         objects.fetch_add(1, Ordering::Relaxed);
+        now.files.fetch_add(1, Ordering::Relaxed);
+        now.bytes.fetch_add(n, Ordering::Relaxed);
         let total = bytes.fetch_add(n, Ordering::Relaxed) + n;
         if let Some(l) = listed
             && let Ok(mut l) = l.lock()
@@ -935,7 +1048,7 @@ fn upload_all(
     std::thread::scope(|sc| {
         for _ in 0..UPLOADERS {
             sc.spawn(|| {
-                while !stop.load(Ordering::Relaxed) {
+                while !stop.load(Ordering::Relaxed) && !now.stop.load(Ordering::Relaxed) {
                     let Some((hash, path)) = queue.lock().ok().and_then(|mut q| q.pop()) else {
                         break;
                     };

@@ -24,6 +24,8 @@ Once sync is unlocked on a PC, anyone at that PC can press **Push now**, **Pull 
 
 The status grid shows **Status**, **Bucket**, **Last push**, **Last pull**, **Manifest rev** and **Automatic**.
 
+While a push runs, the page shows the documents and GB sent so far, about how long is left, and **Stop**. Stopping keeps what is already in B2; the next push goes on from there.
+
 On several servers the whole cabinet syncs on the main server only. Anyone with sync unlocked on another server can still push one client: **Push this client now** in Browse, or **Push** beside it here. Vibe Files first reads what the other servers changed, then sends that client as it is in the shared folder; other clients wait for the main server. (In a OneDrive or Dropbox cabinet, only the main PC syncs.)
 
 ## Automatic push and pause

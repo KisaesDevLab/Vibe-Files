@@ -154,6 +154,39 @@ pub fn pending(conn: &Connection, rules: &crate::rules::Rules) -> Result<BTreeMa
     Ok(out)
 }
 
+/// What a push would upload now (documents, bytes): changed or never-sent documents the rules
+/// send whose content is not in the bucket yet; `clients`: of these clients only. For the
+/// progress a push shows (PA-63); a document not read yet counts by its listed size.
+pub fn to_send(
+    conn: &Connection,
+    rules: &crate::rules::Rules,
+    clients: Option<&[String]>,
+) -> Result<(u64, u64)> {
+    let only = match clients {
+        None => String::new(),
+        Some(ids) => {
+            let list: Vec<String> = ids
+                .iter()
+                .filter(|id| id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'))
+                .map(|id| format!("'{id}'"))
+                .collect();
+            format!(" AND d.client_id IN ({})", list.join(","))
+        }
+    };
+    let (n, bytes): (i64, i64) = conn.query_row(
+        &format!(
+            "SELECT count(*), coalesce(sum(d.size), 0) {DIRTY}
+               AND d.deleted_at IS NULL
+               AND (b.doc_id IS NOT NULL OR {COPY} OR {})
+               AND (d.hash IS NULL OR d.hash NOT IN (SELECT hash FROM sync_object)){only}",
+            rules.sendable_sql()
+        ),
+        [],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    Ok((n.max(0) as u64, bytes.max(0) as u64))
+}
+
 /// What the rule holds back now: documents never sent that it leaves out (count, bytes).
 pub fn held(conn: &Connection, rules: &crate::rules::Rules) -> Result<(usize, u64)> {
     let (n, bytes): (i64, i64) = conn.query_row(

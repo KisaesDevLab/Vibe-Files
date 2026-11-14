@@ -450,6 +450,7 @@ impl SyncTab {
             .name("b2-sync".into())
             .spawn(move || {
                 let r = run(&catalog, &root, &s, op, alone);
+                vf_sync::push::clear_stop(&s.cabinet_id);
                 let _ = tx.send(r);
                 ctx.request_repaint();
             })
@@ -618,7 +619,12 @@ impl SyncTab {
                 }
                 let conflicts = r.pulled.as_ref().map_or(0, |p| p.conflicts);
                 self.notice = Some(format!(
-                    "Pushed {} documents ({} new objects, {}) · manifest rev {}{}",
+                    "{} {} documents ({} new objects, {}) · manifest rev {}{}",
+                    if r.stopped {
+                        "Stopped. The rest goes up at the next push. Pushed"
+                    } else {
+                        "Pushed"
+                    },
                     r.documents,
                     r.objects,
                     widgets::size(r.bytes as i64),
@@ -1001,6 +1007,36 @@ pub(crate) fn sync_lock(catalog: &Path) -> Result<std::fs::File, String> {
         })
 }
 
+/// A push begins: what it is expected to send, for the progress shown (PA-63).
+fn begin_push(conn: &vf_core::db::Connection, root: &Path, s: &Sync, clients: Option<&[String]>) {
+    let rules = vf_sync::rules::Rules::load_or_default(root);
+    let (files, bytes) = vf_sync::catalog::to_send(conn, &rules, clients).unwrap_or((0, 0));
+    vf_sync::push::begin(&s.cabinet_id, files, bytes);
+}
+
+/// What a push under way has sent, of what it set out to send, and about how long is left.
+fn progress_line(p: &vf_sync::push::Progress) -> String {
+    let gb = |b: u64| format!("{:.2} GB", b as f64 / 1_073_741_824.0);
+    let files_total = p.files_total.max(p.files);
+    let bytes_total = p.bytes_total.max(p.bytes);
+    let mut line = format!(
+        "{} of {} documents · {} of {}",
+        p.files,
+        files_total,
+        gb(p.bytes),
+        gb(bytes_total)
+    );
+    if let Some(left) = p.secs_left() {
+        let mins = (left / 60.0).ceil() as u64;
+        line.push_str(&match mins {
+            0..=1 => " · about a minute left".to_string(),
+            2..=89 => format!(" · about {mins} minutes left"),
+            _ => format!(" · about {:.1} hours left", mins as f64 / 60.0),
+        });
+    }
+    line
+}
+
 /// `alone`: this computer is not the cabinet's main one, so a client push brings in and sends
 /// that client only (PA-41).
 fn run(catalog: &Path, root: &Path, s: &Sync, op: Op, alone: bool) -> Result<Done, String> {
@@ -1036,12 +1072,14 @@ fn run(catalog: &Path, root: &Path, s: &Sync, op: Op, alone: bool) -> Result<Don
                 .filter(|d| d.server)
                 .map(|d| d.name)
                 .collect();
+            begin_push(&conn, root, s, Some(std::slice::from_ref(&client)));
             vf_sync::push::push_client(&mut conn, root, s, &client, &same_folder)
                 .map(Done::Push)
                 .map_err(e)
         }
         Op::PushClients(clients) => {
             let mut conn = caught_up(catalog, root, s, alone)?;
+            begin_push(&conn, root, s, Some(&clients));
             let same_folder: Vec<String> = vf_fs::safeguards::devices(root)
                 .into_iter()
                 .filter(|d| d.server)
@@ -1050,7 +1088,12 @@ fn run(catalog: &Path, root: &Path, s: &Sync, op: Op, alone: bool) -> Result<Don
             // Each client as a client pushed alone; one that fails stops the rest, with what
             // went before it already in B2.
             let mut total = vf_sync::push::PushReport::default();
-            for c in &clients {
+            for (i, c) in clients.iter().enumerate() {
+                // Stopped: the clients before this one are in B2.
+                if vf_sync::push::stopping(&s.cabinet_id) {
+                    total.stopped = i < clients.len();
+                    break;
+                }
                 let r = if alone {
                     vf_sync::push::push_client(&mut conn, root, s, c, &same_folder)
                 } else {
@@ -1063,6 +1106,7 @@ fn run(catalog: &Path, root: &Path, s: &Sync, op: Op, alone: bool) -> Result<Don
                 total.documents += r.documents;
                 total.skipped += r.skipped;
                 total.head_rev = total.head_rev.max(r.head_rev);
+                total.stopped |= r.stopped;
                 if r.pulled.is_some() {
                     total.pulled = r.pulled;
                 }
@@ -1089,16 +1133,27 @@ fn run(catalog: &Path, root: &Path, s: &Sync, op: Op, alone: bool) -> Result<Don
                 .map(|d| d.name)
                 .collect();
             let n = ids.len();
+            let bytes: i64 = ids
+                .iter()
+                .filter_map(|id| {
+                    conn.query_row("SELECT size FROM document WHERE id = ?1", [id], |r| {
+                        r.get::<_, i64>(0)
+                    })
+                    .ok()
+                })
+                .sum();
+            vf_sync::push::begin(&s.cabinet_id, n as u64, bytes.max(0) as u64);
             vf_sync::push::push_docs(&mut conn, root, s, &ids, &same_folder)
                 .map(|r| Done::PushDocs(r, n))
                 .map_err(e)
         }
         Op::Push(only) => {
             let mut conn = caught_up(catalog, root, s, alone)?;
+            begin_push(&conn, root, s, only.as_ref().map(std::slice::from_ref));
             let r = vf_sync::push::push(&mut conn, root, s, only.as_deref()).map_err(e)?;
             // The whole cabinet went up: every computer's startup check sees when (PA-40). Not
             // when files were left (unreadable now): those are not in B2 yet.
-            if only.is_none() && r.skipped == 0 {
+            if only.is_none() && r.skipped == 0 && !r.stopped {
                 crate::lastpush::record(root);
             }
             Ok(Done::Push(r))
@@ -1204,6 +1259,30 @@ fn page(ui: &mut egui::Ui, t: &mut SyncTab, env: &mut Env, v: View<'_>) {
                 ui.spinner();
                 ui.label(what.as_str());
             });
+            // A push: how far it is, and a way to stop it (PA-63).
+            if what.starts_with("Pushing")
+                && let Some(cabinet) = t.session.as_ref().map(|s| s.cabinet_id.clone())
+            {
+                let p = vf_sync::push::progress(&cabinet);
+                ui.horizontal(|ui| {
+                    if p.files_total > 0 || p.files > 0 {
+                        ui.label(widgets::caption(progress_line(&p)));
+                    }
+                    let stopping = vf_sync::push::stopping(&cabinet);
+                    if ui
+                        .add_enabled(!stopping, egui::Button::new("Stop"))
+                        .on_hover_text(
+                            "Uploads under way finish; what is in B2 stays there. Push again to go on.",
+                        )
+                        .on_disabled_hover_text("Stopping: uploads under way are finishing.")
+                        .clicked()
+                    {
+                        vf_sync::push::ask_stop(&cabinet);
+                    }
+                });
+                ui.ctx()
+                    .request_repaint_after(std::time::Duration::from_millis(500));
+            }
         }
         if let Some(n) = &t.notice {
             ui.label(RichText::new(n).color(theme::ink()));
