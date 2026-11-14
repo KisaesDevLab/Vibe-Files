@@ -64,6 +64,8 @@ pub struct IngestState {
     /// The check of `to_check` running on its thread (it may read a few documents of the
     /// cabinet to compare, PA-60: never on the window's thread).
     dupes_job: Option<crate::ui::job::Job<Vec<PreDup>>>,
+    /// The look at the inboxes and staging folders, on its thread.
+    look_job: Option<crate::ui::job::Job<Looked>>,
     /// A scan running on its own thread.
     scan_job: Option<Receiver<Result<(PathBuf, scanner::Assembled), String>>>,
     /// The portal's line in the strip, set by the app each frame; `None` when no portal is set
@@ -162,6 +164,68 @@ pub fn check_my_inbox(
 }
 
 /// Filer's inbox folders for this cabinet (its `config.json`).
+/// What a look at the share found ([`look`]).
+struct Looked {
+    /// Filer's first inbox.
+    inbox: Option<PathBuf>,
+    /// Files waiting in the inboxes.
+    in_inboxes: usize,
+    warnings: Vec<String>,
+    /// The staging folders that can be used.
+    folders: Vec<(PathBuf, Origin)>,
+    /// How long the inbox part took (a share that went away waits out its timeout).
+    took: Duration,
+}
+
+/// Reads Filer's inboxes, counts what waits in them, and checks this PC's Scans and print
+/// capture folders. Every call asks the share: never on the window's thread.
+fn look(root: &Path, scans: Option<PathBuf>, capture: Option<PathBuf>) -> Looked {
+    let started = Instant::now();
+    let inboxes = filer_inboxes(root);
+    let inbox = inboxes.first().cloned();
+    let in_inboxes = count_queued(&inboxes);
+    let took = started.elapsed();
+    let mut warnings = Vec::new();
+    let mut folders = Vec::new();
+    // One folder as both Scans and print capture would read each file both ways.
+    let same = |a: &std::path::Path, b: &std::path::Path| match (
+        std::fs::canonicalize(a),
+        std::fs::canonicalize(b),
+    ) {
+        (Ok(x), Ok(y)) => x == y,
+        _ => a == b,
+    };
+    if let (Some(s), Some(c)) = (&scans, &capture)
+        && same(s, c)
+    {
+        warnings.push(
+            "The Scans folder and the print capture folder are the same folder: give print capture its own (Admin › Print capture & parsers). Files there are read as scans until then."
+                .to_string(),
+        );
+    }
+    for (dir, origin) in [(&scans, Origin::Scans), (&capture, Origin::PrintCapture)] {
+        if let Some(d) = dir {
+            match check_staging(d, root, &inboxes) {
+                Ok(()) => folders.push((d.clone(), origin)),
+                Err(e) => warnings.push(e),
+            }
+        }
+    }
+    if inbox.is_none() && !folders.is_empty() {
+        warnings.push(
+            "Filer has no inbox yet: add one in Setup below. Processed files go to Filer's first inbox."
+                .into(),
+        );
+    }
+    Looked {
+        inbox,
+        in_inboxes,
+        warnings,
+        folders,
+        took,
+    }
+}
+
 fn filer_inboxes(root: &Path) -> Vec<PathBuf> {
     filer_intake::config::Settings::load_or_default(&vf_fs::clients::master_dir(root))
         .0
@@ -225,58 +289,38 @@ impl IngestState {
         }
         // A slow look (a share that went away waits out its timeout) spaces the next one out,
         // up to a minute, so the window is not stalled every few seconds (QA A7).
-        if self
-            .checked
-            .is_some_and(|t| t.elapsed() < RECHECK.max(self.slow_wait))
+        if self.look_job.is_none()
+            && self
+                .checked
+                .is_some_and(|t| t.elapsed() < RECHECK.max(self.slow_wait))
         {
             return;
         }
-        let started = Instant::now();
-        self.checked = Some(started);
-        let inboxes = filer_inboxes(root);
-        self.inbox = inboxes.first().cloned();
-        self.in_inboxes = count_queued(&inboxes);
-        let took = started.elapsed();
-        self.slow_wait = if took > Duration::from_millis(500) {
-            (took * 20).min(Duration::from_secs(60))
+        // The look asks the share (Filer's settings, the inbox folders, the staging folders):
+        // on its own thread, its answer taken when it is there (QA #9: up to 1.5 s of frozen
+        // window every 3 s with a full inbox).
+        if self.look_job.is_none() {
+            self.checked = Some(Instant::now());
+            let (root2, scans, capture) = (
+                root.to_path_buf(),
+                prefs.scans.clone(),
+                prefs.print_capture.clone(),
+            );
+            self.look_job =
+                crate::ui::job::Job::start(ctx, "", move || look(&root2, scans, capture)).ok();
+        }
+        let Some(Ok(looked)) = crate::ui::job::take(&mut self.look_job) else {
+            return;
+        };
+        self.checked = Some(Instant::now());
+        self.slow_wait = if looked.took > Duration::from_millis(500) {
+            (looked.took * 20).min(Duration::from_secs(60))
         } else {
             Duration::ZERO
         };
-        let mut warnings = Vec::new();
-        let mut folders = Vec::new();
-        // One folder as both Scans and print capture would read each file both ways.
-        let same = |a: &std::path::Path, b: &std::path::Path| match (
-            std::fs::canonicalize(a),
-            std::fs::canonicalize(b),
-        ) {
-            (Ok(x), Ok(y)) => x == y,
-            _ => a == b,
-        };
-        if let (Some(s), Some(c)) = (&prefs.scans, &prefs.print_capture)
-            && same(s, c)
-        {
-            warnings.push(
-                "The Scans folder and the print capture folder are the same folder: give print capture its own (Admin › Print capture & parsers). Files there are read as scans until then."
-                    .to_string(),
-            );
-        }
-        for (dir, origin) in [
-            (&prefs.scans, Origin::Scans),
-            (&prefs.print_capture, Origin::PrintCapture),
-        ] {
-            if let Some(d) = dir {
-                match check_staging(d, root, &inboxes) {
-                    Ok(()) => folders.push((d.clone(), origin)),
-                    Err(e) => warnings.push(e),
-                }
-            }
-        }
-        if self.inbox.is_none() && !folders.is_empty() {
-            warnings.push(
-                "Filer has no inbox yet: add one in Setup below. Processed files go to Filer's first inbox."
-                    .into(),
-            );
-        }
+        self.inbox = looked.inbox;
+        self.in_inboxes = looked.in_inboxes;
+        let (warnings, folders) = (looked.warnings, looked.folders);
         self.warning = (!warnings.is_empty()).then(|| warnings.join(" "));
         let cfg = worker::Config {
             root: root.to_path_buf(),
