@@ -1217,6 +1217,12 @@ impl eframe::App for VibeFilesApp {
                                 &opened.root,
                                 Op::PushDocs(ids),
                             ),
+                            browse::SyncRequest::RemoveDocs(ids) => o_sync.start(
+                                ui.ctx(),
+                                &opened.catalog,
+                                &opened.root,
+                                Op::RemoveDocs(ids),
+                            ),
                             browse::SyncRequest::Pull => {
                                 o_sync.start(ui.ctx(), &opened.catalog, &opened.root, Op::Pull)
                             }

@@ -33,6 +33,8 @@ pub enum Done {
     Push(vf_sync::push::PushReport),
     /// The documents selected in Browse, pushed by hand (PA-62): the report and how many.
     PushDocs(vf_sync::push::PushReport, usize),
+    /// Documents taken out of B2 (Q-104).
+    Removed(vf_sync::push::RemoveReport),
     Pull(vf_sync::pull::PullReport),
     Verify(usize, usize),
     Restored(vf_sync::restore::RestoreReport, PathBuf),
@@ -45,6 +47,8 @@ pub enum Op {
     Push(Option<String>),
     /// These documents (catalog ids), now, whatever the B2 rules say (PA-62).
     PushDocs(Vec<String>),
+    /// These documents (catalog ids) out of B2: the bucket only (Q-104).
+    RemoveDocs(Vec<String>),
     /// These clients (catalog ids), one after the other (PA-63: the ticked clients).
     PushClients(Vec<String>),
     Pull,
@@ -401,7 +405,7 @@ impl SyncTab {
             && cloud
             && matches!(
                 op,
-                Op::Push(_) | Op::PushDocs(_) | Op::PushClients(_) | Op::Pull
+                Op::Push(_) | Op::PushDocs(_) | Op::RemoveDocs(_) | Op::PushClients(_) | Op::Pull
             )
         {
             self.error = Some(format!(
@@ -424,12 +428,15 @@ impl SyncTab {
         let alone = !main_here;
         self.running_for = match &op {
             Op::Push(c) => Some(c.clone().unwrap_or_default()),
-            Op::PushDocs(_) | Op::PushClients(_) | Op::Pull => Some(String::new()),
+            Op::PushDocs(_) | Op::RemoveDocs(_) | Op::PushClients(_) | Op::Pull => {
+                Some(String::new())
+            }
             _ => None,
         };
         let label = match &op {
             Op::Push(Some(_)) => "Pushing this client…",
             Op::PushDocs(_) => "Pushing the selected documents…",
+            Op::RemoveDocs(_) => "Taking the selected documents out of B2…",
             Op::PushClients(_) => "Pushing the ticked clients…",
             Op::Push(None) => "Pushing…",
             Op::Pull => "Pulling…",
@@ -622,6 +629,28 @@ impl SyncTab {
                         String::new()
                     }
                 ));
+            }
+            Done::Removed(r) => {
+                self.held = None;
+                self.changed = true;
+                let docs = |n: usize| {
+                    if n == 1 {
+                        "1 document".to_string()
+                    } else {
+                        format!("{n} documents")
+                    }
+                };
+                let mut msg = format!(
+                    "Took {} out of B2. The files are still in the cabinet; they are not sent again until you push or share them.",
+                    docs(r.documents)
+                );
+                if r.waiting > 0 {
+                    msg.push_str(&format!(
+                        " {} could not be taken out yet (another computer's changes to the client are not in): they leave B2 at the next push.",
+                        docs(r.waiting)
+                    ));
+                }
+                self.notice = Some(msg);
             }
             Done::PushDocs(r, n) => {
                 self.held = None;
@@ -977,7 +1006,9 @@ pub(crate) fn sync_lock(catalog: &Path) -> Result<std::fs::File, String> {
 fn run(catalog: &Path, root: &Path, s: &Sync, op: Op, alone: bool) -> Result<Done, String> {
     let e = |e: vf_sync::SyncError| e.to_string();
     let _one_at_a_time = match op {
-        Op::Push(_) | Op::PushDocs(_) | Op::PushClients(_) | Op::Pull => Some(sync_lock(catalog)?),
+        Op::Push(_) | Op::PushDocs(_) | Op::RemoveDocs(_) | Op::PushClients(_) | Op::Pull => {
+            Some(sync_lock(catalog)?)
+        }
         _ => None,
     };
     match op {
@@ -1037,6 +1068,17 @@ fn run(catalog: &Path, root: &Path, s: &Sync, op: Op, alone: bool) -> Result<Don
                 }
             }
             Ok(Done::Push(total))
+        }
+        Op::RemoveDocs(ids) => {
+            let mut conn = caught_up(catalog, root, s, alone)?;
+            let same_folder: Vec<String> = vf_fs::safeguards::devices(root)
+                .into_iter()
+                .filter(|d| d.server)
+                .map(|d| d.name)
+                .collect();
+            vf_sync::push::remove_docs(&mut conn, root, s, &ids, &same_folder)
+                .map(Done::Removed)
+                .map_err(e)
         }
         Op::PushDocs(ids) => {
             let mut conn = caught_up(catalog, root, s, alone)?;

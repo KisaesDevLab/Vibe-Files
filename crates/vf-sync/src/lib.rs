@@ -17,6 +17,7 @@ pub mod layout;
 pub mod pull;
 pub mod push;
 pub mod remote;
+pub mod removed;
 pub mod restore;
 pub mod rules;
 pub mod setup;
@@ -129,7 +130,7 @@ impl Sync {
         })
     }
 
-    pub(crate) fn get_json<T: serde::de::DeserializeOwned>(&self, key: &str) -> Result<Option<T>> {
+    pub fn get_json<T: serde::de::DeserializeOwned>(&self, key: &str) -> Result<Option<T>> {
         let Some(body) = self.remote.get(key)? else {
             return Ok(None);
         };

@@ -1465,6 +1465,136 @@ fn selected_documents_are_pushed_whatever_the_rule_says() {
 
 /// PA-63: the firm's list of rules decides what goes up by itself, in the catalog's counts and
 /// in a push alike; an empty list sends nothing; what is in B2 stays there.
+/// Q-104, Q-106: a document taken out of B2 leaves the bucket only. Its file stays on every
+/// computer; no push sends it again, from this catalog or from one made later; pushing it by
+/// hand puts it back.
+#[test]
+fn a_document_taken_out_of_b2_stays_on_every_computer() {
+    let t = tempfile::tempdir().unwrap();
+    let store = Remote::memory();
+    let mut a = pc_a(t.path(), store.clone());
+    vf_sync::push::push(&mut a.conn, &a.root, &a.sync, None).unwrap();
+    let mut b = pc_b(t.path(), store.clone(), &a);
+    let w2_rel = "Anderson Farms LLC (1042)/Income Tax/2025/W-2 Northwind.pdf";
+    let w2 = doc_id(&a.conn, "W-2 Northwind.pdf");
+    let objects = |s: &Sync| s.remote.list("objects").unwrap().len();
+    let in_segment = |s: &Sync, conn: &Connection| -> Vec<String> {
+        let client: String = conn
+            .query_row("SELECT id FROM client WHERE ext_id = '1042'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        let head = s.head().unwrap().unwrap();
+        let seg: vf_sync::layout::ClientSegment = s
+            .get_json(&head.client_key(&client, head.segments[&client]))
+            .unwrap()
+            .unwrap();
+        let mut names: Vec<String> = seg
+            .documents
+            .into_iter()
+            .filter(|d| d.deleted_at.is_none())
+            .map(|d| d.rel_path)
+            .collect();
+        names.sort();
+        names
+    };
+    let before = objects(&a.sync);
+    assert_eq!(in_segment(&a.sync, &a.conn).len(), 2);
+
+    let r = vf_sync::push::remove_docs(
+        &mut a.conn,
+        &a.root,
+        &a.sync,
+        std::slice::from_ref(&w2),
+        &[],
+    )
+    .unwrap();
+    assert_eq!((r.documents, r.objects, r.waiting), (1, 1, 0));
+    assert_eq!(objects(&a.sync), before - 1);
+    assert_eq!(
+        in_segment(&a.sync, &a.conn),
+        ["Permanent/Setup/EIN letter.pdf"]
+    );
+    // The file and its document stay here.
+    assert!(a.root.join(w2_rel).is_file());
+    let live: bool = a
+        .conn
+        .query_row(
+            "SELECT deleted_at IS NULL FROM document WHERE id = ?1",
+            [&w2],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(live);
+    assert!(vf_sync::removed::ids(&a.root).unwrap().contains(&w2));
+
+    // And on the other computer, which pulls the client without it.
+    vf_sync::pull::pull(&mut b.conn, &b.root, &b.sync).unwrap();
+    assert!(b.root.join(w2_rel).is_file(), "not deleted there");
+    let live: bool = b
+        .conn
+        .query_row(
+            "SELECT deleted_at IS NULL FROM document WHERE id = ?1",
+            [&w2],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(live);
+
+    // Changed afterwards, and everything pushed: it is not sent again.
+    set_type(&mut a.conn, &a.root, "W-2 Northwind.pdf", "W-2", Some(2024));
+    put(
+        &a.root,
+        "Anderson Farms LLC (1042)/Income Tax/2025/1099 new.pdf",
+        "1099 invented",
+    );
+    vf_fs::rebuild::rebuild(&mut a.conn, &a.root, "dev-a").unwrap();
+    vf_sync::push::push(&mut a.conn, &a.root, &a.sync, None).unwrap();
+    assert_eq!(
+        in_segment(&a.sync, &a.conn),
+        [
+            "Income Tax/2025/1099 new.pdf",
+            "Permanent/Setup/EIN letter.pdf"
+        ]
+    );
+    assert_eq!(objects(&a.sync), before);
+
+    // A catalog made later for the same folder (a session host the next morning) pushes
+    // the client: still not sent.
+    let c_dir = t.path().join("server-c");
+    let mut c_conn = catalog(&c_dir);
+    vf_fs::rebuild::rebuild(&mut c_conn, &a.root, "dev-c").unwrap();
+    let c_sync = Sync::unlock(&a.root, store.clone(), PASS, "dev-c", "SERVER-3").unwrap();
+    let anderson: String = c_conn
+        .query_row("SELECT id FROM client WHERE ext_id = '1042'", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    vf_sync::push::push_client(
+        &mut c_conn,
+        &a.root,
+        &c_sync,
+        &anderson,
+        &["OFFICE-PC".to_string()],
+    )
+    .unwrap();
+    assert_eq!(in_segment(&c_sync, &c_conn).len(), 2);
+    assert_eq!(objects(&c_sync), before);
+
+    // Pushed by hand: back in B2, and off the list.
+    vf_sync::push::push_docs(
+        &mut a.conn,
+        &a.root,
+        &a.sync,
+        std::slice::from_ref(&w2),
+        &[],
+    )
+    .unwrap();
+    assert!(vf_sync::removed::ids(&a.root).unwrap().is_empty());
+    assert_eq!(in_segment(&a.sync, &a.conn).len(), 3);
+    assert_eq!(objects(&a.sync), before + 1);
+}
+
 #[test]
 fn a_list_of_rules_decides_what_goes_up() {
     use vf_fs::clients::{B2Rule, B2Years};

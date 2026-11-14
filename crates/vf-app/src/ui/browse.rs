@@ -485,6 +485,8 @@ pub struct Browse {
     pub sync: Option<SyncView>,
     /// A sync action chosen here (taken by the app).
     pub sync_request: Option<SyncRequest>,
+    /// "Remove from B2…" asked for these documents: the confirmation is open.
+    pub b2_remove: Option<Vec<String>>,
     /// Whether a portal share goes to B2 first, and with what (the app sets it each frame).
     pub b2_first: crate::ui::portal::B2First,
 }
@@ -504,6 +506,8 @@ pub enum SyncRequest {
     Push(String),
     /// The selected documents (catalog ids), now (PA-62).
     PushDocs(Vec<String>),
+    /// The selected documents out of B2, the bucket only (Q-104), once confirmed.
+    RemoveDocs(Vec<String>),
     Pull,
     Verify,
     /// Open the Sync tab, filtered to this client.
@@ -579,6 +583,7 @@ impl Browse {
             new_client: None,
             folder_dialog: None,
             client_merge: None,
+            b2_remove: None,
             import: None,
             rel_form: RelForm::new(),
             meta_form: MetaForm::default(),
@@ -2319,6 +2324,42 @@ pub fn show(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env) {
             }
         }
     }
+    if let Some(ids) = b.b2_remove.clone() {
+        let n = ids.len();
+        let mut close = false;
+        egui::Modal::new(egui::Id::unique("b2-remove")).show(ui.ctx(), |ui| {
+            ui.set_width(480.0);
+            ui.heading(if n == 1 {
+                "Remove this document from B2?".to_string()
+            } else {
+                format!("Remove these {n} documents from B2?")
+            });
+            ui.add_space(6.0);
+            ui.label(
+                "They are deleted from the B2 bucket only. The files stay in the cabinet on every computer.",
+            );
+            ui.label(widgets::caption(
+                "A portal link to them stops working. They are not sent to B2 again until you push or share them. The removal is written to the audit trail.",
+            ));
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                if ui
+                    .add(widgets::primary_button("Remove from B2"))
+                    .clicked()
+                {
+                    b.sync_request = Some(SyncRequest::RemoveDocs(ids.clone()));
+                    close = true;
+                }
+                if ui.button("Cancel").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape))
+                {
+                    close = true;
+                }
+            });
+        });
+        if close {
+            b.b2_remove = None;
+        }
+    }
     if let Some(d) = &mut b.client_merge {
         match crate::ui::client_merge::show(ui.ctx(), d, env) {
             DialogOutcome::Open => {}
@@ -3019,7 +3060,22 @@ fn sync_menu(ui: &mut egui::Ui, b: &mut Browse) {
             .on_disabled_hover_text("Tick documents in the list (or wait for the running sync).")
             .clicked()
         {
-            req = Some(SyncRequest::PushDocs(picked));
+            req = Some(SyncRequest::PushDocs(picked.clone()));
+            ui.close();
+        }
+        let label = match picked.len() {
+            0 | 1 => "Remove the selected document from B2…".to_string(),
+            n => format!("Remove the {n} selected documents from B2…"),
+        };
+        if ui
+            .add_enabled(idle && !picked.is_empty(), egui::Button::new(label))
+            .on_hover_text(
+                "Deletes them from the B2 bucket only. The files stay in the cabinet on every computer.",
+            )
+            .on_disabled_hover_text("Tick documents in the list (or wait for the running sync).")
+            .clicked()
+        {
+            b.b2_remove = Some(picked);
             ui.close();
         }
         if ui

@@ -75,6 +75,9 @@ pub struct Rules {
     pub rules: Vec<Rule>,
     /// Client uuid → its own choice.
     pub clients: HashMap<String, ClientChoice>,
+    /// Documents taken out of B2 ([`crate::removed`]): never sent by a rule, and no longer
+    /// kept in step, until they are pushed by hand again.
+    pub removed: std::collections::HashSet<String>,
 }
 
 /// A folder as a rule compares it: forward slashes, no slash at either end, lower case.
@@ -128,6 +131,7 @@ impl Rules {
                 no_year: true,
             }],
             clients: HashMap::new(),
+            removed: Default::default(),
         }
     }
 
@@ -135,7 +139,10 @@ impl Rules {
     /// everything" (QA 2026-11-12: a passing read error would have sent every held document,
     /// for good).
     pub fn load(root: &Path) -> Result<Self, String> {
-        vf_fs::clients::load_b2(root).map(|b| Self::from_settings(&b, chrono::Local::now().year()))
+        let mut rules = vf_fs::clients::load_b2(root)
+            .map(|b| Self::from_settings(&b, chrono::Local::now().year()))?;
+        rules.removed = crate::removed::ids(root)?;
+        Ok(rules)
     }
 
     /// [`Rules::load`], or the default rule when the file cannot be read (counts on screen).
@@ -170,6 +177,7 @@ impl Rules {
                 .iter()
                 .filter_map(|(k, v)| Some((k.clone(), ClientChoice::from_key(v)?)))
                 .collect(),
+            removed: Default::default(),
         }
     }
 
@@ -206,6 +214,17 @@ impl Rules {
         let always = ids(ClientChoice::Always);
         if !always.is_empty() {
             c = format!("(d.client_id IN ({always}) OR {c})");
+        }
+        // Taken out of B2: no rule sends it.
+        let mut out: Vec<String> = self
+            .removed
+            .iter()
+            .filter(|id| id.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '-'))
+            .map(|id| format!("'{id}'"))
+            .collect();
+        if !out.is_empty() {
+            out.sort();
+            c = format!("(d.id NOT IN ({}) AND {c})", out.join(","));
         }
         // Never NULL (a document with no tax year, doc type or client): `NOT` of it must mean
         // held.

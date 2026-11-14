@@ -41,6 +41,16 @@ Only documents in a client folder can be sent this way.
 
 Sharing a document through the [portal](help:portal), or sending a [secure link](help:portal-secure-links), sends it to B2 first in the same way. If B2 sync is locked on the PC, or the push cannot finish, the share is stopped and says why. A cabinet with no B2 sync shares as before.
 
+## Taking documents out of B2
+
+Tick documents in Browse and choose **Sync to B2** › **Remove the selected documents from B2…**, then confirm. They are deleted from the B2 bucket only:
+
+- The files stay in the cabinet on every computer.
+- A portal link to them stops working.
+- No rule sends them again. Pushing or sharing them by hand puts them back.
+
+Anyone can do this; it is written to the audit trail. If another computer's changes to the client are not in yet, the documents leave B2 at the next push instead.
+
 ## One client's own choice
 
 In Browse, select a client: **B2 SYNC** in its panel is **The firm's rule** unless changed. **Always send** sends every document of that client. **Never send** holds back every document of that client not yet in B2 (what is already there keeps syncing, and a document pushed by hand still goes). Anyone can change it.

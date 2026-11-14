@@ -208,6 +208,9 @@ pub fn push_docs(
             None => by_client.push((client, HashSet::from([id.clone()]))),
         }
     }
+    // Pushed by hand: back in B2 for good, whatever was taken out before.
+    let again: HashSet<String> = doc_ids.iter().cloned().collect();
+    crate::removed::clear(root, &again).map_err(SyncError::Local)?;
     let mut total = PushReport::default();
     for (client, ids) in &by_client {
         let r = push_client_forced(conn, root, s, client, same_folder, Some(ids))?;
@@ -222,6 +225,125 @@ pub fn push_docs(
         }
     }
     Ok(total)
+}
+
+/// Audit label of [`remove_docs`].
+pub const REMOVE_LABEL: &str = "sync_remove";
+
+/// What [`remove_docs`] did.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RemoveReport {
+    /// Documents no longer in B2.
+    pub documents: usize,
+    /// Contents deleted from the bucket (one no other document uses).
+    pub objects: usize,
+    /// Documents still listed in B2: their client could not be written now (another
+    /// computer's changes to it are not in yet). They are left out at the next push.
+    pub waiting: usize,
+}
+
+/// Takes these documents out of B2 (owner 2026-11-14, Q-104): the bucket only. Each file
+/// stays in the cabinet on every computer; its client's segment is written without it, and
+/// its content (and its earlier versions') is deleted from the bucket when no other document
+/// has the same content. No rule sends it again ([`crate::removed`]); pushing or sharing it
+/// by hand puts it back. Only documents in a client folder. Works from any computer, as
+/// [`push_client`] does. Audited.
+pub fn remove_docs(
+    conn: &mut Connection,
+    root: &Path,
+    s: &Sync,
+    doc_ids: &[String],
+    same_folder: &[String],
+) -> Result<RemoveReport> {
+    let mut clients: Vec<String> = vec![];
+    let mut marks: Vec<(String, String)> = vec![];
+    let mut contents: Vec<(String, Vec<String>)> = vec![];
+    for id in doc_ids {
+        let row: Option<(Option<String>, String, Option<String>)> = conn
+            .query_row(
+                "SELECT client_id, rel_path, hash FROM document WHERE id = ?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()?;
+        let Some((client, rel, hash)) = row else {
+            return Err(SyncError::Local(
+                "A selected document is no longer in the catalog.".into(),
+            ));
+        };
+        let Some(client) = client else {
+            return Err(SyncError::Local(format!(
+                "{rel} is not in a client folder: only a client's documents can be taken out of B2 one by one."
+            )));
+        };
+        // Its contents in the bucket: as last sent, as it is now, and its earlier versions.
+        let mut hashes: Vec<String> = hash.into_iter().collect();
+        let sent: Option<String> = conn
+            .query_row("SELECT hash FROM sync_base WHERE doc_id = ?1", [id], |r| {
+                r.get(0)
+            })
+            .optional()?;
+        hashes.extend(sent);
+        let mut st = conn.prepare("SELECT hash FROM version WHERE doc_id = ?1")?;
+        for h in st.query_map([id], |r| r.get::<_, String>(0))? {
+            hashes.push(h?);
+        }
+        drop(st);
+        hashes.sort();
+        hashes.dedup();
+        if !clients.contains(&client) {
+            clients.push(client);
+        }
+        marks.push((id.clone(), rel));
+        contents.push((id.clone(), hashes));
+    }
+    crate::removed::add(root, &marks).map_err(SyncError::Local)?;
+    let nothing: HashSet<String> = HashSet::new();
+    for client in &clients {
+        push_client_forced(conn, root, s, client, same_folder, Some(&nothing))?;
+    }
+    let mut rep = RemoveReport::default();
+    for (id, hashes) in &contents {
+        let still: bool = conn.query_row(
+            "SELECT count(*) > 0 FROM sync_base WHERE doc_id = ?1",
+            [id],
+            |r| r.get(0),
+        )?;
+        if still {
+            rep.waiting += 1;
+            continue;
+        }
+        rep.documents += 1;
+        for h in hashes {
+            // Another document with the same content keeps it in the bucket.
+            let used: bool = conn.query_row(
+                "SELECT (SELECT count(*) FROM document WHERE hash = ?1 AND id != ?2)
+                      + (SELECT count(*) FROM version WHERE hash = ?1 AND doc_id != ?2) > 0",
+                [h, id],
+                |r| r.get(0),
+            )?;
+            if used {
+                continue;
+            }
+            let key = layout::object_key(&s.keys.object_name(h));
+            if s.remote.exists(&key)? {
+                s.remote.delete(&key)?;
+                rep.objects += 1;
+            }
+            conn.execute("DELETE FROM sync_object WHERE hash = ?1", [h])?;
+        }
+    }
+    Transaction::new(REMOVE_LABEL)
+        .audit(AuditEntry::new(
+            REMOVE_LABEL,
+            None,
+            json!({
+                "documents": rep.documents, "objects": rep.objects, "waiting": rep.waiting,
+                "ids": doc_ids,
+            }),
+        ))
+        .commit(conn, &mut NoFileOps, &Actor::device(&s.device_id))?;
+    Ok(rep)
 }
 
 /// [`push_client`]; with `force`, only those documents (and what the client already has in
@@ -287,12 +409,14 @@ fn push_client_forced(
 
 /// A segment's entries without the documents the rule holds back (PA-53). A held document the
 /// bucket's segment lists already (its exchange base lost, a catalog rebuilt) keeps the
-/// bucket's entry: the rule never takes anything out of B2.
+/// bucket's entry: the rule never takes anything out of B2. Only a document a person took out
+/// (`removed`, [`crate::removed`]) leaves the segment.
 fn hold_back(
     s: &Sync,
     head: &Head,
     segment: &str,
     docs: Vec<crate::layout::DocEntry>,
+    removed: &HashSet<String>,
     sends: impl Fn(&crate::layout::DocEntry) -> bool,
 ) -> Result<Vec<crate::layout::DocEntry>> {
     let (mut keep, held): (Vec<_>, Vec<_>) = docs
@@ -320,7 +444,11 @@ fn hold_back(
         }
     };
     let held: HashSet<String> = held.into_iter().map(|e| e.doc_id).collect();
-    keep.extend(before.into_iter().filter(|e| held.contains(&e.doc_id)));
+    keep.extend(
+        before
+            .into_iter()
+            .filter(|e| held.contains(&e.doc_id) && !removed.contains(&e.doc_id)),
+    );
     Ok(keep)
 }
 
@@ -384,6 +512,25 @@ fn push_once(
         .filter(|c| only.is_none_or(|o| o == c.as_str()))
         .cloned()
         .collect();
+    // A document taken out of B2 that this catalog still has as sent: its client's segment is
+    // written without it.
+    for id in &rules.removed {
+        let client: Option<String> = conn
+            .query_row(
+                "SELECT client_id FROM sync_base WHERE doc_id = ?1 AND deleted = 0",
+                [id],
+                |r| r.get(0),
+            )
+            .optional()?
+            .flatten();
+        if let Some(c) = client
+            && only.is_none_or(|o| o == c)
+            && !done.contains(&c)
+            && !waiting.contains(&c)
+        {
+            waiting.push(c);
+        }
+    }
     // Documents pushed by hand: their client goes even when the rules leave it nothing to send.
     if let (Some(o), Some(f)) = (only, force)
         && !f.is_empty()
@@ -435,7 +582,10 @@ fn push_once(
             .into_iter()
             .filter(|(id, rel, doc_type, year)| match force {
                 Some(f) => f.contains(id),
-                None => rules.sends(Some(client), rel, doc_type.as_deref(), *year, false),
+                None => {
+                    !rules.removed.contains(id)
+                        && rules.sends(Some(client), rel, doc_type.as_deref(), *year, false)
+                }
             })
             .map(|(id, ..)| id)
             .collect();
@@ -445,18 +595,22 @@ fn push_once(
             .filter(|r| r.is_err())
             .count();
         let docs = catalog::entries(conn, &s.keys, client, &folder)?;
-        let docs = hold_back(s, &head, client, docs, |e| match force {
+        let docs = hold_back(s, &head, client, docs, &rules.removed, |e| match force {
             // By hand: these documents, and what is in B2 already. The rules decide nothing.
-            Some(f) => f.contains(&e.doc_id) || sent_before.contains(&e.doc_id),
+            Some(f) => {
+                f.contains(&e.doc_id)
+                    || (sent_before.contains(&e.doc_id) && !rules.removed.contains(&e.doc_id))
+            }
             None => {
                 let rel = format!("{folder}/{}", e.rel_path);
-                rules.sends(
-                    Some(client),
-                    &rel,
-                    e.doc_type_id.as_deref(),
-                    e.tax_year,
-                    sent_before.contains(&e.doc_id),
-                )
+                !rules.removed.contains(&e.doc_id)
+                    && rules.sends(
+                        Some(client),
+                        &rel,
+                        e.doc_type_id.as_deref(),
+                        e.tax_year,
+                        sent_before.contains(&e.doc_id),
+                    )
             }
         })?;
         for e in &docs {
@@ -481,8 +635,9 @@ fn push_once(
     let cabinet_docs = if cabinet_too {
         let unread: Vec<String> = catalog::unread(conn, CABINET)?
             .into_iter()
-            .filter(|(_, rel, doc_type, year)| {
-                rules.sends(None, rel, doc_type.as_deref(), *year, false)
+            .filter(|(id, rel, doc_type, year)| {
+                !rules.removed.contains(id)
+                    && rules.sends(None, rel, doc_type.as_deref(), *year, false)
             })
             .map(|(id, ..)| id)
             .collect();
@@ -491,14 +646,15 @@ fn push_once(
             .filter(|r| r.is_err())
             .count();
         let docs = catalog::entries(conn, &s.keys, CABINET, "")?;
-        let docs = hold_back(s, &head, CABINET, docs, |e| {
-            rules.sends(
-                None,
-                &e.rel_path,
-                e.doc_type_id.as_deref(),
-                e.tax_year,
-                sent_before.contains(&e.doc_id),
-            )
+        let docs = hold_back(s, &head, CABINET, docs, &rules.removed, |e| {
+            !rules.removed.contains(&e.doc_id)
+                && rules.sends(
+                    None,
+                    &e.rel_path,
+                    e.doc_type_id.as_deref(),
+                    e.tax_year,
+                    sent_before.contains(&e.doc_id),
+                )
         })?;
         for e in &docs {
             if e.deleted_at.is_none() && !uploaded.contains(&e.hash) {
@@ -553,7 +709,7 @@ fn push_once(
         // Entries this catalog does not know go up as the bucket had them (their objects are
         // there already); they are not this catalog's to take as sent.
         for c in carry.unwrap_or_default() {
-            if !p.docs.iter().any(|d| d.doc_id == c.doc_id) {
+            if !p.docs.iter().any(|d| d.doc_id == c.doc_id) && !rules.removed.contains(&c.doc_id) {
                 p.docs.push(c.clone());
             }
         }
@@ -661,6 +817,23 @@ fn push_once(
     }
     for d in &sent_docs {
         tx.execute("DELETE FROM sync_pending WHERE doc_id = ?1", [&d.doc_id])?;
+    }
+    // Taken out of B2 and not in the segments just written: no longer exchanged.
+    for id in &rules.removed {
+        if sent_docs.iter().any(|d| &d.doc_id == id) {
+            continue;
+        }
+        let client: Option<String> = tx
+            .query_row(
+                "SELECT coalesce(client_id, '') FROM sync_base WHERE doc_id = ?1",
+                [id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if client.is_some_and(|c| sent_segments.iter().any(|(s, ..)| *s == c)) {
+            tx.execute("DELETE FROM sync_base WHERE doc_id = ?1", [id])?;
+            tx.execute("DELETE FROM sync_pending WHERE doc_id = ?1", [id])?;
+        }
     }
     // One client pushed: this computer has still seen only what it had (the other segments of
     // the revs between are not applied here).

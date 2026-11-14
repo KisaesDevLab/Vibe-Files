@@ -164,6 +164,7 @@ pub const NOT_ON_UNDO_STACK: &[&str] = &[
     crate::clientmerge::UNDO_LABEL,
     // B2 sync (P11) applies other workstations' work and records exchanges: not this login's.
     "sync_push",
+    "sync_remove",
     "sync_pull",
     "sync_restore",
     // Records only, or done in the background (QA 2026-11-04): Ctrl+Z never lands on them.
