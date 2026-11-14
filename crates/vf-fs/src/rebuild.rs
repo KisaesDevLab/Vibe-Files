@@ -569,6 +569,117 @@ pub(crate) fn scan_folders(
     Ok((bound, folders))
 }
 
+/// [`scan_folders`] for a re-read of the folders `only` (QA #5: reading one client folder
+/// again read and fingerprinted the sentinel of every client folder in the cabinet, some
+/// 16,000 small reads on a share). The clients outside `only` are taken as the catalog has
+/// them; only the folders named are looked at on disk.
+fn scan_scoped(
+    conn: &Connection,
+    root: &Path,
+    only: &[String],
+    rep: &mut RebuildReport,
+) -> Result<Scan, RebuildError> {
+    type Row = (String, String, String, String, Option<String>);
+    let rows: Vec<Row> = {
+        let mut st = conn.prepare(
+            "SELECT id, ext_id, name, folder_rel, sentinel_hash FROM client
+             WHERE deleted_at IS NULL AND folder_rel IS NOT NULL ORDER BY folder_rel",
+        )?;
+        st.query_map([], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+        })?
+        .collect::<Result<_, _>>()?
+    };
+    let named = |f: &str| only.iter().any(|o| o.eq_ignore_ascii_case(f));
+    let read = |folder: &Path| -> Result<Option<(sentinel::Sentinel, String)>, RebuildError> {
+        match sentinel::read_sentinel(folder) {
+            Ok(Some(s)) => {
+                let hash = sha256_file(&sentinel::sentinel_path(folder))
+                    .map_err(|e| RebuildError::Io(e.to_string()))?;
+                Ok(Some((s, hash)))
+            }
+            Ok(None) | Err(_) => Ok(None),
+        }
+    };
+    let mut bound: Vec<Bound> = Vec::with_capacity(rows.len());
+    let mut folders: Vec<(PathBuf, Option<String>)> = Vec::new();
+    let mut looked: HashSet<String> = HashSet::new();
+    for (id, ext_id, name, folder_rel, hash) in rows {
+        let in_scope = named(&folder_rel);
+        if let (Some(sentinel_hash), false) = (hash, in_scope) {
+            bound.push(Bound {
+                id,
+                ext_id,
+                name,
+                folder_rel,
+                sentinel_hash,
+            });
+            continue;
+        }
+        let folder = root.join(&folder_rel);
+        let client_id = match read(&folder)? {
+            Some((s, sentinel_hash)) => {
+                let id = s.client_id.to_string();
+                bound.push(Bound {
+                    id: id.clone(),
+                    ext_id: s.tax_software_id,
+                    name: s.display_name_at_creation,
+                    folder_rel: folder_rel.clone(),
+                    sentinel_hash,
+                });
+                Some(id)
+            }
+            None => {
+                rep.unbound_folders.push(folder_rel.clone());
+                None
+            }
+        };
+        if in_scope {
+            looked.insert(folder_rel.to_lowercase());
+            folders.push((folder, client_id));
+        }
+    }
+    // Folders named that the catalog has no client for: new here, or not a client's.
+    for f in only {
+        if !looked.insert(f.to_lowercase()) {
+            continue;
+        }
+        let folder = root.join(f);
+        if !folder.is_dir() {
+            continue;
+        }
+        let client_id = match read(&folder)? {
+            Some((s, sentinel_hash)) => {
+                let id = s.client_id.to_string();
+                if bound
+                    .iter()
+                    .any(|b| b.id == id || b.ext_id == s.tax_software_id)
+                {
+                    rep.duplicate_folders.push(f.clone());
+                    None
+                } else {
+                    bound.push(Bound {
+                        id: id.clone(),
+                        ext_id: s.tax_software_id,
+                        name: s.display_name_at_creation,
+                        folder_rel: f.clone(),
+                        sentinel_hash,
+                    });
+                    Some(id)
+                }
+            }
+            None => {
+                rep.unbound_folders.push(f.clone());
+                None
+            }
+        };
+        folders.push((folder, client_id));
+    }
+    bound.sort_by(|a, b| a.folder_rel.cmp(&b.folder_rel));
+    rep.clients = bound.len();
+    Ok((bound, folders))
+}
+
 /// Client and relationship rows from the bound folders merged with the client master
 /// (`crate::clients`). The folder decides a client's uuid and `folder_rel`; the master list
 /// decides its name and CSV extras; the sidecar gives entity type and shares. Master-list clients
@@ -1308,7 +1419,10 @@ fn rebuild_scoped(
     let (bound, mut folders): (&[Bound], Vec<(PathBuf, Option<String>)>) = match pre {
         Some((st, _)) => (&st.scan.0, st.scan.1.clone()),
         None => {
-            scanned = scan_folders(root, &mut rep)?;
+            scanned = match only {
+                Some(o) => scan_scoped(conn, root, o, &mut rep)?,
+                None => scan_folders(root, &mut rep)?,
+            };
             (&scanned.0, scanned.1.clone())
         }
     };
