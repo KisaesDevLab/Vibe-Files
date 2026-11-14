@@ -368,8 +368,10 @@ pub fn commit(
     Ok((c.tx_id, go.len()))
 }
 
-/// The client folders of the cabinet at `root` (bound by a sentinel), by folder name: for
-/// picking a destination in another cabinet.
+/// The folders of the cabinet at `root`, by name: for picking a destination in another
+/// cabinet. From one listing: whether a folder is a client's is checked when it is picked
+/// ([`plan`]); asking the share about every folder's sentinel first took most of a minute for
+/// thousands of clients (QA #15).
 pub fn client_folders(root: &Path) -> Vec<String> {
     let Ok(rd) = std::fs::read_dir(root) else {
         return vec![];
@@ -379,7 +381,6 @@ pub fn client_folders(root: &Path) -> Vec<String> {
         .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
         .map(|e| e.file_name().to_string_lossy().into_owned())
         .filter(|n| !n.eq_ignore_ascii_case(crate::cabinet::VIBE_DIR))
-        .filter(|n| filer_intake::sentinel::sentinel_path(&root.join(n)).is_file())
         .collect();
     out.sort_by_key(|n| n.to_lowercase());
     out

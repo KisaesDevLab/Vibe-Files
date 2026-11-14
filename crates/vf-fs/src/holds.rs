@@ -141,6 +141,17 @@ pub fn covers_any(root: &Path, client_id: Option<&str>, rel_path: &str, hashes: 
     let Ok(holds) = load(root) else {
         return true;
     };
+    covers_in(&holds, client_id, rel_path, hashes)
+}
+
+/// [`covers_any`] against holds already read ([`load`]): for many documents at once, the
+/// file is read once, not once per document.
+pub fn covers_in(
+    holds: &[Hold],
+    client_id: Option<&str>,
+    rel_path: &str,
+    hashes: &[String],
+) -> bool {
     holds.iter().filter(|h| h.active()).any(|h| {
         (h.client_id.is_some() && h.client_id.as_deref() == client_id)
             || h.docs
@@ -183,16 +194,44 @@ fn rows(conn: &Connection, holds: &[Hold]) -> Vec<Row> {
             }
         }
         for (i, d) in h.docs.iter().enumerate() {
-            let doc: Option<String> = conn
-                .query_row(
-                    "SELECT id FROM document WHERE hash = ?1 OR rel_path = ?2
-                     ORDER BY (hash = ?1) DESC, deleted_at IS NULL DESC LIMIT 1",
-                    [&d.hash, &d.rel_path],
+            let id = format!("{}/{i}", h.id);
+            // A released hold this catalog already has as released: nothing to look up (QA
+            // #13: every held document, released ones too, cost a scan of the documents at
+            // every open).
+            if h.released.is_some()
+                && conn
+                    .query_row(
+                        "SELECT released FROM legal_hold WHERE id = ?1",
+                        [&id],
+                        |r| r.get::<_, Option<String>>(0),
+                    )
+                    .is_ok_and(|r| r == h.released)
+            {
+                continue;
+            }
+            // By content first, then by path: two look-ups an index answers (one statement
+            // with OR read every document).
+            let by_hash: Option<String> = (!d.hash.is_empty())
+                .then(|| {
+                    conn.query_row(
+                        "SELECT id FROM document WHERE hash = ?1
+                         ORDER BY deleted_at IS NULL DESC LIMIT 1",
+                        [&d.hash],
+                        |r| r.get(0),
+                    )
+                    .ok()
+                })
+                .flatten();
+            let doc: Option<String> = by_hash.or_else(|| {
+                conn.query_row(
+                    "SELECT id FROM document WHERE rel_path = ?1 AND deleted_at IS NULL LIMIT 1",
+                    [&d.rel_path],
                     |r| r.get(0),
                 )
-                .ok();
+                .ok()
+            });
             if let Some(doc) = doc {
-                out.push(row(format!("{}/{i}", h.id), None, Some(doc)));
+                out.push(row(id, None, Some(doc)));
             }
         }
     }

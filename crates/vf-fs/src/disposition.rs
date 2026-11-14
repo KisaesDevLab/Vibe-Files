@@ -165,6 +165,38 @@ fn held(
     crate::trash::held(conn, id) || crate::holds::covers_any(root, client, rel, &hashes)
 }
 
+/// [`held`] against the cabinet's holds already read: for the review, which looks at every
+/// eligible document (QA #13: the holds file was read from the share once per document).
+/// Holds that could not be read hold everything.
+fn held_in(
+    conn: &Connection,
+    holds: &Result<Vec<crate::holds::Hold>, String>,
+    id: &str,
+    client: Option<&str>,
+    rel: &str,
+    hash: &str,
+) -> bool {
+    if crate::trash::held(conn, id) {
+        return true;
+    }
+    let Ok(holds) = holds else {
+        return true;
+    };
+    if !holds.iter().any(|h| h.active()) {
+        return false;
+    }
+    let mut hashes: Vec<String> = Some(hash.to_string())
+        .filter(|h| !h.is_empty())
+        .into_iter()
+        .collect();
+    if let Ok(mut st) = conn.prepare_cached("SELECT DISTINCT hash FROM version WHERE doc_id = ?1")
+        && let Ok(rows) = st.query_map([id], |r| r.get::<_, String>(0))
+    {
+        hashes.extend(rows.flatten());
+    }
+    crate::holds::covers_in(holds, client, rel, &hashes)
+}
+
 /// Documents whose retention ended on or before `today`.
 pub fn eligible(conn: &Connection, root: &Path, today: Date) -> Result<Report, String> {
     let decided: BTreeMap<String, (String, Option<String>)> = {
@@ -188,6 +220,8 @@ pub fn eligible(conn: &Connection, root: &Path, today: Date) -> Result<Report, S
         rows.collect::<Result<_, _>>().map_err(|e| e.to_string())?
     };
     let today_s = ymd(today);
+    // The cabinet's holds, read once for every document looked at.
+    let holds = crate::holds::load(root);
     let mut rep = Report::default();
     for d in live_docs(conn)? {
         let Some((class_id, class, years, anchor)) = d.class.clone() else {
@@ -200,9 +234,9 @@ pub fn eligible(conn: &Connection, root: &Path, today: Date) -> Result<Report, S
         else {
             continue;
         };
-        if held(
+        if held_in(
             conn,
-            root,
+            &holds,
             &d.id,
             d.client_id.as_deref(),
             &d.rel_path,

@@ -52,6 +52,8 @@ impl PullReport {
 
 /// Applies what the bucket has that this workstation has not applied.
 pub fn pull(conn: &mut Connection, root: &Path, s: &Sync) -> Result<PullReport> {
+    // A pull looks at the admin password file as it is now (deleted by hand, perhaps).
+    vf_fs::trash::pin_changed();
     let mut rep = PullReport::default();
     let Some(head) = s.head()? else {
         return Ok(rep);
@@ -288,6 +290,8 @@ fn apply_files(
 ) -> Result<std::collections::BTreeMap<String, String>> {
     let base = catalog::files_base(conn)?;
     let vibe = root.join(cabinet::VIBE_DIR);
+    // The admin password file may be among them.
+    vf_fs::trash::pin_changed();
     let mut merged = base.clone();
     let mut wrote = 0;
     let mut files_conflicts: Vec<String> = vec![];

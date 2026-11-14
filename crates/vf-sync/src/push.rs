@@ -586,6 +586,7 @@ fn push_once(
     if !pin.exists() && catalog::files_base(conn)?.contains_key("trash_pin.json") {
         vf_fs::cabinet::write_replace(&pin, vf_fs::trash::REMOVED_MARKER.as_bytes())
             .map_err(|e| SyncError::Local(e.to_string()))?;
+        vf_fs::trash::pin_changed();
     }
     let files = master_files(root);
     let hashes = files_hashes(&files);

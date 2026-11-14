@@ -360,9 +360,23 @@ pub fn list(conn: &Connection, root: &Path) -> Result<Vec<Trashed>, String> {
             ))
         })
         .map_err(|e| e.to_string())?;
+    // What is in the trash folder, from one listing (each document's file is in a folder
+    // named by its id). The share is asked about a file only when its folder is there: a
+    // cabinet keeps a row for every document ever deleted, emptied long ago or not, and
+    // asking about each took minutes at every open (QA #7).
+    let present: std::collections::HashSet<String> = std::fs::read_dir(cabinet::trash_dir(root))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
     let mut out = Vec::new();
     for r in rows {
         let (doc_id, rel_path, deleted_at, reason, size) = r.map_err(|e| e.to_string())?;
+        if !present.contains(&doc_id) {
+            continue;
+        }
         let file = trash_file(root, &doc_id, &rel_path);
         if file.is_file() {
             let held = held(conn, &doc_id);
@@ -381,13 +395,10 @@ pub fn list(conn: &Connection, root: &Path) -> Result<Vec<Trashed>, String> {
     // What other servers trashed: the records in the cabinet's trash folder (owner
     // 2026-11-05: one trash for every server).
     let known: std::collections::HashSet<String> = out.iter().map(|t| t.doc_id.clone()).collect();
-    for e in std::fs::read_dir(cabinet::trash_dir(root))
-        .into_iter()
-        .flatten()
-        .flatten()
-    {
-        let id = e.file_name().to_string_lossy().into_owned();
-        if known.contains(&id) || !e.file_type().is_ok_and(|t| t.is_dir()) {
+    // The holds file read once for all of them.
+    let holds = crate::holds::load(root);
+    for id in present {
+        if known.contains(&id) {
             continue;
         }
         let Some(i) = last_item(root, &id).filter(|i| i.event == "trashed" && i.doc_id == id)
@@ -399,7 +410,16 @@ pub fn list(conn: &Connection, root: &Path) -> Result<Vec<Trashed>, String> {
             continue;
         }
         let client = client_of_folder(conn, i.client_folder.as_deref());
-        let held = crate::holds::covers(root, client.as_deref(), &i.rel_path, &i.hash);
+        let held = match &holds {
+            Ok(h) => crate::holds::covers_in(
+                h,
+                client.as_deref(),
+                &i.rel_path,
+                std::slice::from_ref(&i.hash),
+            ),
+            // Unreadable: when in doubt, held.
+            Err(_) => true,
+        };
         out.push(Trashed {
             doc_id: id,
             rel_path: i.rel_path.clone(),
@@ -746,11 +766,42 @@ fn stored_pin(root: &Path) -> Option<String> {
 /// Whether a password is set. Fails closed (QA 2026-11-04): a password file that is there but
 /// cannot be read right now (a share hiccup, a write in progress, a damaged file) counts as set,
 /// so Admin stays locked rather than opening. Only a file that is not there means "no password".
+///
+/// Several screens ask on every repaint, and the file is on the share: the answer is kept for
+/// [`PIN_KEPT`] (QA #8), and forgotten at once when this program sets or removes the password.
 pub fn has_pin(root: &Path) -> bool {
-    match std::fs::read_to_string(pin_file(root)) {
+    let file = pin_file(root);
+    // (This crate's own tests change the file by hand and ask at once.)
+    if !cfg!(test)
+        && let Ok(seen) = PIN_SEEN.lock()
+        && let Some((f, set, at)) = seen.as_ref()
+        && *f == file
+        && at.elapsed() < PIN_KEPT
+    {
+        return *set;
+    }
+    let set = match std::fs::read_to_string(&file) {
         // Removed: the file says so, so sync carries the removal (owner 2026-11-04).
         Ok(t) => !is_removed_marker(&t),
         Err(e) => e.kind() != std::io::ErrorKind::NotFound,
+    };
+    if let Ok(mut seen) = PIN_SEEN.lock() {
+        *seen = Some((file, set, std::time::Instant::now()));
+    }
+    set
+}
+
+/// How long [`has_pin`]'s answer is kept.
+const PIN_KEPT: std::time::Duration = std::time::Duration::from_secs(2);
+
+static PIN_SEEN: std::sync::Mutex<Option<(PathBuf, bool, std::time::Instant)>> =
+    std::sync::Mutex::new(None);
+
+/// Forgets [`has_pin`]'s kept answer: the password file was just written (set or removed
+/// here, or brought in by B2 sync).
+pub fn pin_changed() {
+    if let Ok(mut seen) = PIN_SEEN.lock() {
+        *seen = None;
     }
 }
 
@@ -807,6 +858,7 @@ pub fn set_pin(
             &pin_file(root),
             &serde_json::to_vec_pretty(&body).expect("serializes"),
         )?;
+        pin_changed();
         let how = if had {
             "changed"
         } else if set_before {
@@ -864,6 +916,7 @@ pub fn remove_pin(
         }
         cabinet::write_replace(&pin_file(root), REMOVED_MARKER.as_bytes())
             .map_err(|e| e.to_string())?;
+        pin_changed();
         Transaction::new(PIN_LABEL)
             .audit(AuditEntry::new("firm_pin_removed", None, json!({})))
             .commit(conn, &mut NoFileOps, &Actor::device(device_id))
