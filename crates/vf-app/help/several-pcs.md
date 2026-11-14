@@ -36,7 +36,7 @@ A new client added in Browse also shows this banner: Intake offers the new clien
 
 ## Things to watch for
 
-- Two people change the same setting or rule at the same moment: the last save wins; the other person's change is lost. Agree who edits the rules, or check them after a reload.
+- Two people change the same shared list at the same moment (clients, legal holds, doc types, rules): the second waits a few seconds. If it cannot go on it says who is making changes and changes nothing; try again. In Intake the first save is kept, and the second person is told to reload and make the change again.
 - Two people file the same inbox file: if two PCs watch the same inbox, both see the same files. The first to commit files it; the second gets a "file not found" error for that row. Nothing is lost or filed twice. Separate inbox folders for each person avoid this.
 
 > See [Filing documents with Intake](help:intake) for the queue and commit, and [rules and Setup](help:intake-rules) for the shared settings.
