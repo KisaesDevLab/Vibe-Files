@@ -31,7 +31,7 @@ pub const RENAME_FOLDER: &str = "folder_rename";
 pub const DELETE_FOLDER: &str = "folder_delete";
 
 /// Filer's limit for a path (X104).
-const MAX_PATH: usize = 240;
+pub(crate) const MAX_PATH: usize = 240;
 
 /// A folder name typed by a person: refused (not quietly changed) when Windows can't use it.
 pub fn check_folder_name(name: &str) -> Result<String, String> {

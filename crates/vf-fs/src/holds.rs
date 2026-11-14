@@ -204,7 +204,8 @@ fn stmt(r: &Row, device_id: &str, now: &str) -> Stmt {
         "INSERT INTO legal_hold (id, client_id, doc_id, reason, since, released, device_id,
            updated_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
-         ON CONFLICT(id) DO UPDATE SET reason = excluded.reason,
+         ON CONFLICT(id) DO UPDATE SET client_id = excluded.client_id, doc_id = excluded.doc_id,
+           reason = excluded.reason,
            released = excluded.released, device_id = excluded.device_id,
            updated_at = excluded.updated_at, rev = legal_hold.rev + 1",
         vec![
@@ -223,11 +224,21 @@ fn stmt(r: &Row, device_id: &str, now: &str) -> Stmt {
 /// Whether the catalog already has `r` as it is.
 fn current(conn: &Connection, r: &Row) -> bool {
     conn.query_row(
-        "SELECT reason, released FROM legal_hold WHERE id = ?1",
+        "SELECT reason, released, client_id, doc_id FROM legal_hold WHERE id = ?1",
         [&r.id],
-        |q| Ok((q.get::<_, String>(0)?, q.get::<_, Option<String>>(1)?)),
+        |q| {
+            Ok((
+                q.get::<_, String>(0)?,
+                q.get::<_, Option<String>>(1)?,
+                q.get::<_, Option<String>>(2)?,
+                q.get::<_, Option<String>>(3)?,
+            ))
+        },
     )
-    .is_ok_and(|(reason, released)| reason == r.reason && released == r.released)
+    // Its client too: a client merged into another passes its holds on (`clientmerge`).
+    .is_ok_and(|(reason, released, client, doc)| {
+        reason == r.reason && released == r.released && client == r.client && doc == r.doc
+    })
 }
 
 /// Mirrors the cabinet's holds into this catalog (one audited Transaction when anything
@@ -410,6 +421,76 @@ pub fn active_for(
             by_client || by_doc
         })
         .collect()
+}
+
+/// A client merged into another ([`crate::clientmerge`]): the holds on client `from` become
+/// holds on `into`, and held documents are known by where they are now (`paths`: the old
+/// path in lower case, the new one). Returns the ids of the client holds changed.
+pub fn move_client(
+    conn: &mut Connection,
+    root: &Path,
+    device_id: &str,
+    from: &str,
+    into: &str,
+    paths: &std::collections::HashMap<String, String>,
+) -> Result<Vec<String>, String> {
+    let ids = crate::lock::with(root, "holds", "the legal holds", || {
+        let mut all = load(root)?;
+        let (mut ids, mut changed) = (vec![], false);
+        for h in all.iter_mut() {
+            if h.client_id.as_deref() == Some(from) {
+                h.client_id = Some(into.to_string());
+                ids.push(h.id.clone());
+                changed = true;
+            }
+            for d in h.docs.iter_mut() {
+                if let Some(new) = paths.get(&d.rel_path.to_lowercase()) {
+                    d.rel_path = new.clone();
+                    changed = true;
+                }
+            }
+        }
+        if changed {
+            save(root, &all)?;
+        }
+        Ok(ids)
+    })?;
+    sync(conn, root, device_id)?;
+    Ok(ids)
+}
+
+/// [`move_client`] undone: the holds `ids` are on client `from` again, the documents known by
+/// the paths they went back to.
+pub fn move_back(
+    conn: &mut Connection,
+    root: &Path,
+    device_id: &str,
+    ids: &[String],
+    from: &str,
+    paths: &std::collections::HashMap<String, String>,
+) -> Result<(), String> {
+    crate::lock::with(root, "holds", "the legal holds", || {
+        let mut all = load(root)?;
+        let mut changed = false;
+        for h in all.iter_mut() {
+            if ids.contains(&h.id) && h.client_id.is_some() {
+                h.client_id = Some(from.to_string());
+                changed = true;
+            }
+            for d in h.docs.iter_mut() {
+                if let Some(old) = paths.get(&d.rel_path.to_lowercase()) {
+                    d.rel_path = old.clone();
+                    changed = true;
+                }
+            }
+        }
+        if changed {
+            save(root, &all)?;
+        }
+        Ok(())
+    })?;
+    sync(conn, root, device_id)?;
+    Ok(())
 }
 
 #[cfg(test)]

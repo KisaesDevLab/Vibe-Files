@@ -401,6 +401,8 @@ pub struct Browse {
     pub new_client: Option<NewClientDialog>,
     /// Rename client, new / rename / delete folder (PA-29).
     pub folder_dialog: Option<FolderDialog>,
+    /// Merge the client shown into another (Q-107).
+    pub client_merge: Option<crate::ui::client_merge::MergeDialog>,
     /// The "Import clients CSV…" dialog, while open.
     pub import: Option<ImportDialog>,
     /// The client inspector's add-relationship form.
@@ -576,6 +578,7 @@ impl Browse {
             notice: None,
             new_client: None,
             folder_dialog: None,
+            client_merge: None,
             import: None,
             rel_form: RelForm::new(),
             meta_form: MetaForm::default(),
@@ -2313,6 +2316,25 @@ pub fn show(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env) {
                     b.go_to_client(client);
                 }
                 b.notice = Some(msg);
+            }
+        }
+    }
+    if let Some(d) = &mut b.client_merge {
+        match crate::ui::client_merge::show(ui.ctx(), d, env) {
+            DialogOutcome::Open => {}
+            DialogOutcome::Cancelled => b.client_merge = None,
+            DialogOutcome::Done(done) => {
+                b.client_merge = None;
+                b.reload(env.conn);
+                // The client the documents are with now.
+                b.set_scope(Scope::Cabinet);
+                if let Some(ci) = done
+                    .show
+                    .and_then(|id| b.snap.clients.iter().position(|c| c.id == id))
+                {
+                    b.go_to_client(ci);
+                }
+                b.notice = Some(done.message);
             }
         }
     }
@@ -5800,6 +5822,86 @@ Petty cash,1234.50
             }
             assert_eq!(count(&h, "Needs doc type"), 6);
         }
+    }
+
+    /// Q-107 (owner 2026-11-14): "Merge into…" in the client panel moves a client made twice
+    /// into the other one's folder and removes it; "Undo last merge" puts it back.
+    #[test]
+    fn a_client_is_merged_into_another_from_its_panel() {
+        let mut h = harness(0, 0);
+        let root = h.state().root.clone();
+        vf_fs::cabinet::create(
+            &root,
+            &vf_fs::cabinet::CabinetFile {
+                cabinet_id: vf_core::new_id(),
+                firm_id: vf_core::new_id(),
+                schema_version: vf_core::db::SCHEMA_VERSION,
+                layout_version: 1,
+                created: vf_core::now_rfc3339(),
+                name: None,
+            },
+        )
+        .unwrap();
+        h.state_mut().b.set_root(&root);
+        for (id, name) in [("1042", "Anderson Farms LLC"), ("1043", "Anderson Farm")] {
+            click(&mut h, "+ New client");
+            type_into(&mut h, "Client ID", id);
+            type_into(&mut h, "Client name", name);
+            h.run();
+            click(&mut h, "Create client (one transaction)");
+        }
+        let kept = root.join("Anderson Farms LLC (1042)");
+        let dup = root.join("Anderson Farm (1043)");
+        std::fs::write(dup.join("Correspondence/letter.pdf"), b"invented").unwrap();
+        {
+            let s = h.state_mut();
+            vf_fs::rebuild::rebuild(&mut s.conn, &root, "dev-test").unwrap();
+            s.b.reload(&s.conn);
+        }
+        h.run();
+
+        h.get_by_role_and_label(Role::Button, "Anderson Farm  1043")
+            .click();
+        h.run();
+        click(&mut h, "Merge into…");
+        type_into(&mut h, "Merge into", "1042");
+        h.run();
+        // The match offered under the field (the tree has a row of the same name).
+        h.get_all_by_label("Anderson Farms LLC  1042")
+            .last()
+            .expect("offered")
+            .click();
+        h.run();
+        assert!(
+            h.query_by_label_contains("1 document moves").is_some(),
+            "the preview: {:?}",
+            h.state().b.error
+        );
+        click(&mut h, "Merge");
+        h.run();
+        assert!(h.state().b.client_merge.is_none());
+        assert!(!dup.exists(), "{:?}", h.state().b.notice);
+        assert!(kept.join("Correspondence/letter.pdf").is_file());
+        assert!(
+            h.state()
+                .b
+                .notice
+                .as_deref()
+                .is_some_and(|n| n.starts_with("Merged Anderson Farm into Anderson Farms LLC"))
+        );
+        assert!(
+            h.query_by_role_and_label(Role::Button, "Anderson Farm  1043")
+                .is_none(),
+            "gone from the tree"
+        );
+
+        // Put back, from the kept client.
+        click(&mut h, "Merge into…");
+        click(&mut h, "Undo last merge");
+        h.run();
+        assert!(dup.join("Correspondence/letter.pdf").is_file());
+        assert!(!kept.join("Correspondence/letter.pdf").exists());
+        h.get_by_role_and_label(Role::Button, "Anderson Farm  1043");
     }
 
     /// PA-29 (owner 2026-11-05): right-click a client or folder in the tree to add, rename

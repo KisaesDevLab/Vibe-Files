@@ -1003,6 +1003,146 @@ pub fn tin_extras(map: &ColumnMap) -> Vec<String> {
         .collect()
 }
 
+/// The client CSV Intake uses, read: (file, its bytes, its text, encoding, the byte ranges of
+/// its records in the text, the ID column). `None`: no CSV, or no ID column mapped.
+#[allow(clippy::type_complexity)]
+fn csv_read(
+    root: &Path,
+) -> Result<
+    Option<(
+        PathBuf,
+        Vec<u8>,
+        String,
+        clients::Encoding,
+        Vec<(usize, usize)>,
+        usize,
+    )>,
+    String,
+> {
+    let Some((csv, map)) = intake_csv(root) else {
+        return Ok(None);
+    };
+    if !csv.is_file() {
+        return Err(format!(
+            "the client CSV {} cannot be reached from this PC",
+            csv.display()
+        ));
+    }
+    let Some(id_h) = map.id.as_deref() else {
+        return Ok(None);
+    };
+    let raw = std::fs::read(&csv).map_err(|e| format!("{}: {e}", csv.display()))?;
+    let (text, enc) =
+        clients::decode(raw.clone()).map_err(|e| format!("{}: {e}", csv.display()))?;
+    // A line break inside quotes stays in its record.
+    let mut records: Vec<(usize, usize)> = vec![];
+    let (mut start, mut quoted) = (0, false);
+    for (i, ch) in text.char_indices() {
+        match ch {
+            '"' => quoted = !quoted,
+            '\n' if !quoted => {
+                records.push((start, i + 1));
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    if start < text.len() {
+        records.push((start, text.len()));
+    }
+    let Some(&(h0, h1)) = records.first() else {
+        return Ok(None);
+    };
+    let Some(col) = csv_fields(&text[h0..h1])
+        .iter()
+        .position(|h| h.trim() == id_h)
+    else {
+        return Ok(None);
+    };
+    Ok(Some((csv, raw, text, enc, records, col)))
+}
+
+fn csv_fields(rec: &str) -> Vec<String> {
+    csv::ReaderBuilder::new()
+        .has_headers(false)
+        .flexible(true)
+        .from_reader(rec.as_bytes())
+        .records()
+        .next()
+        .and_then(Result::ok)
+        .map(|r| r.iter().map(str::to_string).collect())
+        .unwrap_or_default()
+}
+
+/// Takes client `id`'s row out of the client CSV Intake uses (a client merged into another,
+/// owner 2026-11-14), the rest of the file byte for byte, so a re-import does not bring the
+/// client back. Returns the row as it was; `None`: no CSV, or the client is not in it.
+pub fn remove_from_csv(root: &Path, id: &str) -> Result<Option<String>, String> {
+    // Under the cabinet lock (PA-68): read, changed and written back as one.
+    crate::lock::with(root, "clients", "the client list", || {
+        let Some((csv, raw, text, enc, records, col)) = csv_read(root)? else {
+            return Ok(None);
+        };
+        let hit = records.iter().skip(1).find(|&&(a, b)| {
+            csv_fields(&text[a..b])
+                .get(col)
+                .is_some_and(|v| v.trim().eq_ignore_ascii_case(id.trim()))
+        });
+        let Some(&(a, b)) = hit else {
+            return Ok(None);
+        };
+        // Byte offsets in the file: UTF-8 as in `text` (after a BOM); Windows-1252 one per char.
+        let at = |i: usize| match enc {
+            clients::Encoding::Windows1252 => text[..i].chars().count(),
+            clients::Encoding::Utf8Bom => 3 + i,
+            _ => i,
+        };
+        let mut out = raw[..at(a)].to_vec();
+        out.extend_from_slice(&raw[at(b)..]);
+        crate::cabinet::write_replace(&csv, &out)?;
+        Ok(Some(text[a..b].to_string()))
+    })
+}
+
+/// Puts a row [`remove_from_csv`] took out back at the end of the client CSV, unless the CSV
+/// lists `id` again. Whether it was added.
+pub fn restore_csv_row(root: &Path, id: &str, row: &str) -> Result<bool, String> {
+    crate::lock::with(root, "clients", "the client list", || {
+        let Some((csv, raw, text, enc, records, col)) = csv_read(root)? else {
+            return Ok(false);
+        };
+        if records.iter().skip(1).any(|&(a, b)| {
+            csv_fields(&text[a..b])
+                .get(col)
+                .is_some_and(|v| v.trim().eq_ignore_ascii_case(id.trim()))
+        }) {
+            return Ok(false);
+        }
+        let eol = if text.contains("\r\n") { "\r\n" } else { "\n" };
+        let mut add = String::new();
+        if !text.ends_with('\n') {
+            add.push_str(eol);
+        }
+        add.push_str(row.trim_end_matches(['\r', '\n']));
+        add.push_str(eol);
+        let bytes: Vec<u8> = match enc {
+            clients::Encoding::Windows1252 => add
+                .chars()
+                .map(|c| {
+                    to_1252(c).ok_or_else(|| {
+                        format!("\"{c}\" cannot be written in this CSV's Windows-1252 text")
+                    })
+                })
+                .collect::<Result<_, _>>()?,
+            _ => add.into_bytes(),
+        };
+        let mut out = raw;
+        out.extend(bytes);
+        crate::cabinet::write_replace(&csv, &out)?;
+        Ok(true)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

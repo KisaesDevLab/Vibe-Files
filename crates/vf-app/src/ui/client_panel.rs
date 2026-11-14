@@ -127,6 +127,29 @@ pub fn show(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env, ci: usize) {
                 },
             ));
         }
+        // The same client made twice (owner 2026-11-14): this one into the other.
+        let listing = b.indexing.is_some();
+        let merge = ui
+            .add_enabled(!listing, egui::Button::new("Merge into…").small().min_size(crate::ui::widgets::MIN_TARGET))
+            .on_hover_text(
+                "Move this client’s documents into another client’s folder and remove this client (a client made twice)",
+            )
+            .on_disabled_hover_text("Wait until the cabinet’s folders are listed.");
+        if merge.clicked() {
+            let label = |c: &vf_core::browse::ClientRow| format!("{}  {}", c.name, c.ext_id);
+            let others = b
+                .snap
+                .clients
+                .iter()
+                .filter(|o| o.id != c.id && o.folder_rel.is_some())
+                .map(|o| (o.id.clone(), label(o)))
+                .collect();
+            b.client_merge = Some(crate::ui::client_merge::MergeDialog::new(
+                env.root,
+                (c.id.clone(), label(&c)),
+                others,
+            ));
+        }
         // The firm's Vibe Portal (PA-37): who can sign in for this client.
         if let Some(s) = b.portal.settings(env.root).cloned()
             && ui

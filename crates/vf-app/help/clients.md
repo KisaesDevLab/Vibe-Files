@@ -24,6 +24,19 @@ Press **Rename client…** beside the name in the client panel, or right-click t
 
 **Set ID…** beside it changes the client's ID, for a client made from a folder name with a stand-in ID. The dialog shows the folder's new name (`{Client} ({ID})`). The client list, relationships, the folder's sentinel and the client CSV Intake uses take the new ID. (its row there gets the new ID, or is added). It is not on the undo list: set the ID again to change it back. Change the ID in your tax software too, so its next client list matches.
 
+## Merging a client made twice
+
+When a client was made twice, open the one to remove in Browse and press **Merge into…** in its panel. Type the name or ID of the client to keep and pick it. The window shows what happens:
+
+- Every document moves to the same folder under the kept client, with its doc type, tax year and tags.
+- A file whose name is already used there is kept too, with "(2)" in its name.
+- Legal holds and relationships become the kept client's.
+- The merged client's folder, list entry and client CSV row are removed.
+
+A file later named with the merged client's ID matches no client. The merge is refused while a file in the folder is not in the catalog (press **Refresh** first) or a document is checked out.
+
+To put the client back, open **Merge into…** on any client and press **Undo last merge** (the most recent merge only, from any PC). Documents moved or renamed since stay with the kept client.
+
 ## How a folder knows its client
 
 Every client folder holds `_Vibe\client.json`. This small file ties the folder to the client, so the folder can be renamed in Explorer and Vibe Files still knows whose it is. Do not delete or edit it.

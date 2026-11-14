@@ -159,6 +159,9 @@ pub const NOT_ON_UNDO_STACK: &[&str] = &[
     // So has the cabinet merge (every client's Transaction together).
     crate::merge::LABEL,
     crate::merge::HISTORY_LABEL,
+    // And a client merged into another (its own Undo, from its record in the cabinet).
+    crate::clientmerge::LABEL,
+    crate::clientmerge::UNDO_LABEL,
     // B2 sync (P11) applies other workstations' work and records exchanges: not this login's.
     "sync_push",
     "sync_pull",
