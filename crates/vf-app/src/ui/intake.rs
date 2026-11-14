@@ -411,6 +411,19 @@ impl IntakeTab {
                     }) {
                         self.clients_stale = true;
                     }
+                    // Changed here and by someone else at once (PA-68): theirs was kept.
+                    if !ch.conflicts.is_empty() {
+                        let what: Vec<&str> = ch
+                            .conflicts
+                            .iter()
+                            .map(|f| vf_fs::intake::shared_lock(f).1)
+                            .collect();
+                        self.ingest.warning = Some(format!(
+                            "Someone else changed {} at the same time as you. Their change was kept and yours was not saved: reload Intake, then make your change again.",
+                            what.join(" and ")
+                        ));
+                        self.clients_stale = true;
+                    }
                 }
                 Err(e) => tracing::warn!(
                     kind = crate::logging::kind(&e),

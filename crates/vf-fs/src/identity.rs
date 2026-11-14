@@ -72,6 +72,26 @@ pub fn login_device(root: &Path, login: &str, mine: &str) -> String {
     .unwrap_or_else(|_| mine.to_string())
 }
 
+/// [`login_device`] for a session that stays open: the login's id is its own while the
+/// session holds it (the lock returned, kept alive until dropped). A second session of the
+/// same login open at the same time on another host (a disconnected session left running)
+/// works under `mine`, its host's own id, so the two never share one Intake folder.
+pub fn login_session(root: &Path, login: &str, mine: &str) -> (String, Option<crate::lock::Held>) {
+    if login.trim().is_empty() || cabinet::read(root).is_err() {
+        return (mine.to_string(), None);
+    }
+    let lock = path(root, login).with_extension("lock");
+    match crate::lock::take_at(
+        &lock,
+        Some(std::time::Duration::ZERO),
+        crate::lock::BEAT,
+        crate::lock::STALE,
+    ) {
+        Ok(held) => (login_device(root, login, mine), Some(held)),
+        Err(_) => (mine.to_string(), None),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -101,6 +121,19 @@ mod tests {
         // Another login has its own.
         assert_eq!(login_device(&root, "FIRM\\lee", "id-lee"), "id-lee");
         assert!(root.join("_Vibe/logins/firm_pat.json").is_file());
+        // A session holds the login's id; a second one open at the same time gets its host's
+        // own; once the first is closed the id is free again.
+        let (id, held) = login_session(&root, "FIRM\\pat", "id-host-5");
+        assert_eq!(id, "id-monday");
+        assert!(held.is_some());
+        let (second, none) = login_session(&root, "FIRM\\pat", "id-host-7");
+        assert_eq!(second, "id-host-7");
+        assert!(none.is_none());
+        drop(held);
+        let (again, held) = login_session(&root, "FIRM\\pat", "id-host-7");
+        assert_eq!(again, "id-monday");
+        drop(held);
+        assert!(!root.join("_Vibe/logins/firm_pat.lock").exists());
         // Not a cabinet, or no login: the PC's own id.
         assert_eq!(login_device(tmp.path(), "FIRM\\pat", "id-own"), "id-own");
         assert_eq!(login_device(&root, " ", "id-own"), "id-own");

@@ -113,6 +113,23 @@ pub struct SharedChanges {
     /// Changed elsewhere (another PC, Vibe's own screens), copied in: Filer, loaded earlier,
     /// should reload to use them.
     pub from_cabinet: Vec<&'static str>,
+    /// Changed here and elsewhere since they were last in step (PA-68): the cabinet's copy was
+    /// kept and copied in (also in `from_cabinet`); this PC's save was set aside beside it as
+    /// `<file>.not-saved`, and the person is told.
+    pub conflicts: Vec<&'static str>,
+}
+
+/// The cabinet lock ([`crate::lock`]) a shared Intake file is written under, and what it is
+/// called in a message.
+pub fn shared_lock(file: &str) -> (&'static str, &'static str) {
+    match file {
+        "clients.json" => ("clients", "the client list"),
+        "relationships.json" => ("clients", "the relationships"),
+        "template.json" => ("template", "the folder template"),
+        "rules.json" => ("intake-settings", "the filing rules"),
+        "folders.json" => ("intake-settings", "the folder index"),
+        _ => ("intake-settings", "Intake's settings"),
+    }
 }
 
 fn copy_over(from: &Path, to: &Path) -> Result<(), String> {
@@ -194,8 +211,10 @@ impl Shared {
         Ok(())
     }
 
-    /// Brings the copies in step: a file this PC's Filer saved goes to the cabinet; one changed
-    /// in the cabinet comes in. When both changed, this PC's save wins (the last save does).
+    /// Brings the copies in step: a file this PC's Filer saved goes to the cabinet (under the
+    /// cabinet's lock for it); one changed in the cabinet comes in. When both changed since
+    /// they were last in step, nothing in the cabinet is overwritten (PA-68): the cabinet's
+    /// copy comes in, this PC's save is set aside, and [`SharedChanges::conflicts`] says so.
     pub fn poll(&mut self, root: &Path, pc: &Path) -> Result<SharedChanges, String> {
         let master = crate::clients::master_dir(root);
         let mut out = SharedChanges::default();
@@ -204,7 +223,26 @@ impl Shared {
             let (mt, pt) = (mtime(&m), mtime(&p));
             let (sm, sp) = self.seen.get(f).copied().unwrap_or((None, None));
             if pt.is_some() && pt != sp {
-                if bring(f, &p, &m)? {
+                let (lock, what) = shared_lock(f);
+                // Someone else is writing it right now: looked at again at the next poll.
+                let Ok(_held) = crate::lock::take(root, lock) else {
+                    let _ = what;
+                    continue;
+                };
+                // Under the lock: the cabinet's copy as it is now.
+                let mt = mtime(&m);
+                if mt.is_some() && mt != sm {
+                    let same =
+                        matches!((std::fs::read(&p), std::fs::read(&m)), (Ok(a), Ok(b)) if a == b);
+                    if !same {
+                        let mut aside = p.as_os_str().to_os_string();
+                        aside.push(".not-saved");
+                        let _ = std::fs::copy(&p, std::path::PathBuf::from(aside));
+                        copy_over(&m, &p)?;
+                        out.conflicts.push(f);
+                        out.from_cabinet.push(f);
+                    }
+                } else if bring(f, &p, &m)? {
                     out.to_cabinet.push(f);
                 }
             } else if mt.is_some() && mt != sm {
@@ -966,6 +1004,31 @@ mod tests {
             SharedChanges::default(),
             "A is in step"
         );
+        // Both change it before either poll runs (PA-68): the first save is in the cabinet;
+        // the second is not written over it, it is set aside and its PC takes the cabinet's.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(a.join("rules.json"), "A again").unwrap();
+        std::fs::write(b.join("rules.json"), "B at the same time").unwrap();
+        assert_eq!(sa.poll(&root, &a).unwrap().to_cabinet, ["rules.json"]);
+        let got = sb.poll(&root, &b).unwrap();
+        assert_eq!(got.conflicts, ["rules.json"]);
+        assert_eq!(got.from_cabinet, ["rules.json"]);
+        assert!(got.to_cabinet.is_empty());
+        assert_eq!(
+            std::fs::read_to_string(master.join("rules.json")).unwrap(),
+            "A again",
+            "not overwritten"
+        );
+        assert_eq!(
+            std::fs::read_to_string(b.join("rules.json")).unwrap(),
+            "A again"
+        );
+        assert_eq!(
+            std::fs::read_to_string(b.join("rules.json.not-saved")).unwrap(),
+            "B at the same time"
+        );
+        assert_eq!(sb.poll(&root, &b).unwrap(), SharedChanges::default());
+        assert_eq!(sa.poll(&root, &a).unwrap(), SharedChanges::default());
         // A's save right before a reload (the poll had not run): prepare sends it, not loses it.
         std::thread::sleep(std::time::Duration::from_millis(20));
         std::fs::write(a.join("rules.json"), "rules saved just before reload").unwrap();

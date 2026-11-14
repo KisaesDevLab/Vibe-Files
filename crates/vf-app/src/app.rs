@@ -110,6 +110,8 @@ pub struct OpenCabinet {
     indexing: Option<(crate::indexer::Indexer, std::time::Instant)>,
     /// The client folder shown that the index has been asked to take next.
     index_wait: Option<String>,
+    /// This login's id in the cabinet, held while the cabinet is open (PA-69).
+    _login: Option<vf_fs::lock::Held>,
 }
 
 impl OpenCabinet {
@@ -298,14 +300,14 @@ impl VibeFilesApp {
             // A session host is wiped overnight and its settings with it (PA-69): the login
             // works under the id the cabinet remembers for it, so its Intake folder and what
             // it did yesterday are still its own.
-            let device = if mode == Mode::Open && crate::server::server_mode() {
-                vf_fs::identity::login_device(
+            let (device, login) = if mode == Mode::Open && crate::server::server_mode() {
+                vf_fs::identity::login_session(
                     &root,
                     &vf_core::windows_login().unwrap_or_default(),
                     &device,
                 )
             } else {
-                device
+                (device, None)
             };
             let r = match mode {
                 Mode::Create => session::create(
@@ -321,7 +323,8 @@ impl VibeFilesApp {
             // The rest of opening (it reads and writes the share) here too, not on the UI
             // thread once the cabinet shows (QA A6).
             let r = r.map(|mut o| {
-                let p = prepare(&mut o, &device);
+                let mut p = prepare(&mut o, &device);
+                p.login = login;
                 (o, p)
             });
             let _ = tx.send(r.map_err(|e| format!("{e:#}")));
@@ -357,6 +360,7 @@ impl VibeFilesApp {
                     emptied,
                     chain,
                     device,
+                    login,
                 },
             )) => {
                 // Saved with the settings below.
@@ -499,6 +503,7 @@ impl VibeFilesApp {
                     admin_msg: None,
                     indexing,
                     index_wait: None,
+                    _login: login,
                 }));
             }
             Err(e) => {
@@ -1423,6 +1428,9 @@ pub struct Prepared {
     /// The id this login works under: on a session host, the one the cabinet remembers for
     /// the login (PA-69), which may not be the one in this host's settings.
     device: String,
+    /// That id held for this session (another session of the login open elsewhere at the same
+    /// time works under its host's own).
+    login: Option<vf_fs::lock::Held>,
 }
 
 /// The work of opening a cabinet that reads and writes the share or the whole catalog: print
@@ -1493,6 +1501,7 @@ fn prepare(opened: &mut Opened, device_id: &str) -> Prepared {
         emptied,
         chain,
         device: device_id.to_string(),
+        login: None,
     }
 }
 
