@@ -35,6 +35,9 @@ pub struct Opened {
     pub sync_device: String,
     /// Server mode (PA-36): this catalog's id in the cabinet's change logs.
     pub writer: Option<String>,
+    /// [`open_staged`]: the catalog has the clients and no documents yet; the index goes on
+    /// behind the window (`crate::indexer`, PA-60).
+    pub staged: Option<vf_fs::rebuild::Staged>,
 }
 
 /// The device id sync uses for `conn`'s catalog: kept in the catalog, set by the first login
@@ -112,6 +115,7 @@ pub fn create(data: &Path, device_id: &str, r: &CreateRequest) -> Result<Opened>
         _live: live,
         sync_device: device_id.to_string(),
         writer: None,
+        staged: None,
     })
 }
 
@@ -147,6 +151,17 @@ pub fn set_aside_encrypted(catalog: &Path) -> Result<Option<PathBuf>> {
 /// Opens the cabinet at `root`. Rebuilds when this data folder's catalog has never indexed
 /// the cabinet (first open on a workstation, or a catalog set aside by PA-18).
 pub fn open(data: &Path, device_id: &str, root: &Path) -> Result<Opened> {
+    open_how(data, device_id, root, false)
+}
+
+/// [`open`] for the window (PA-60): when the catalog does not know the cabinet's documents yet,
+/// only the clients are written here and [`Opened::staged`] is what the index behind the window
+/// goes on with, so nobody waits for the folder listing.
+pub fn open_staged(data: &Path, device_id: &str, root: &Path) -> Result<Opened> {
+    open_how(data, device_id, root, true)
+}
+
+fn open_how(data: &Path, device_id: &str, root: &Path, behind: bool) -> Result<Opened> {
     let cab = cabinet::read(root).map_err(anyhow::Error::msg)?;
     std::fs::create_dir_all(data).with_context(|| format!("creating {}", data.display()))?;
     // This PC's shared catalog for the cabinet, when an admin shared one (Q-67).
@@ -232,7 +247,16 @@ pub fn open(data: &Path, device_id: &str, root: &Path) -> Result<Opened> {
     }
     // From the folder listing (PA-60): no file is read. Ids, details and known fingerprints
     // come from each client folder's records, so every PC has the same catalog.
-    let rebuild = if known == 0 || vf_fs::rebuild::unfinished(&conn) {
+    // Behind the window: a catalog new to the cabinet, or an index in parts cut short. (A
+    // rebuild of another kind cut short runs again here, as it was.)
+    let label = vf_fs::rebuild::unfinished_label(&conn);
+    let in_parts =
+        behind && (known == 0 || label.as_deref() == Some(vf_fs::rebuild::FILED_BY_IMPORT));
+    let mut staged = None;
+    let rebuild = if in_parts {
+        staged = Some(vf_fs::rebuild::index_start(&mut conn, root, device_id)?);
+        None
+    } else if known == 0 || label.is_some() {
         Some(vf_fs::rebuild::index(&mut conn, root, device_id)?)
     } else {
         None
@@ -269,6 +293,7 @@ pub fn open(data: &Path, device_id: &str, root: &Path) -> Result<Opened> {
         _live: live,
         sync_device,
         writer,
+        staged,
     })
 }
 

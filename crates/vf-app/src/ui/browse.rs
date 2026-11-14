@@ -329,6 +329,11 @@ pub struct Browse {
     missing_job: Option<std::sync::mpsc::Receiver<Result<vf_fs::rebuild::RebuildReport, String>>>,
     /// The catalog file, for work on Browse's own threads (set by the app).
     pub catalog: Option<PathBuf>,
+    /// The cabinet's index still running behind the window (PA-60): a client folder it has
+    /// not cataloged yet is its to catalog, not Browse's look for new files.
+    pub indexing: Option<std::sync::Arc<crate::indexer::Shared>>,
+    /// What the index behind the window is doing, shown above the documents.
+    pub index_line: Option<String>,
     /// A drop on a folder waiting for "Move" (PA-23).
     move_ask: Option<MoveAsk>,
     /// Right-click › Move to… / Copy to…: picking where (Q-74).
@@ -531,6 +536,8 @@ impl Browse {
             missing_seen: None,
             missing_job: None,
             catalog: None,
+            indexing: None,
+            index_line: None,
             move_ask: None,
             move_to: None,
             disk_job: None,
@@ -788,6 +795,12 @@ impl Browse {
             })
             .into_iter()
             .collect();
+        // A folder the index behind the window has not cataloged yet (PA-60): every file in
+        // it would look new. Left to the index, which takes this folder next.
+        let shown: Vec<(String, String)> = match &self.indexing {
+            Some(ix) => shown.into_iter().filter(|(f, _)| ix.listed(f)).collect(),
+            None => shown,
+        };
         let shown_id = shown.first().map(|(_, id)| id.clone());
         let mine = |d: &&DocRow| d.client_id.is_some() && d.client_id == shown_id;
         let known: HashSet<String> = self
@@ -1188,6 +1201,14 @@ impl Browse {
         self.scope_client()
             .and_then(|c| self.snap.clients.get(c))
             .map(|c| c.id.clone())
+    }
+
+    /// The folder (cabinet-relative) of the client shown, if one is.
+    pub fn shown_folder(&self) -> Option<String> {
+        self.scope_client()
+            .and_then(|c| self.snap.clients.get(c))
+            .and_then(|c| c.folder_rel.clone())
+            .filter(|r| !r.is_empty())
     }
 
     fn scope_client(&self) -> Option<usize> {
@@ -3102,6 +3123,12 @@ fn grid(ui: &mut egui::Ui, b: &mut Browse, conn: &Connection) {
     }
     if let Some(e) = &b.error {
         ui.label(RichText::new(e).color(crate::ui::theme::error()));
+    }
+    if let Some(line) = &b.index_line {
+        ui.horizontal(|ui| {
+            ui.spinner();
+            ui.label(RichText::new(line).color(theme::ink_secondary()));
+        });
     }
     let mut dismiss = false;
     if let Some(n) = &b.notice {

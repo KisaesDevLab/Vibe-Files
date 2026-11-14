@@ -15,7 +15,9 @@ When no cabinet is open, Vibe Files shows the **Cabinet** screen. At the top you
 2. In **Cabinet folder**, type the folder path, for example `C:\Clients` or `\\server\share\Clients`, or click **Browse…** to pick it.
 3. Click **Open cabinet**.
 
-While it opens you see **Opening the cabinet…**. The first time a PC opens a cabinet, Vibe Files indexes the whole tree: it reads every file once to fingerprint it, several at a time. On a large cabinet this takes a while, and the screen shows how far it is (**Indexing: N of M files read**). Later opens are quick.
+While it opens you see **Opening the cabinet…**. The first time a PC opens a cabinet it reads the client list, then shows the window. The documents are listed behind it, from the folders' own listings: no document is opened. A line above the documents shows how far it is (**Listing the cabinet's files: N of M client folders**).
+
+Meanwhile you can work. Open a client and its documents are listed next (**Listing this client's files…**). Search and the counts cover the whole cabinet once the line is gone. Later opens skip all of this.
 
 If the folder is not a cabinet, the screen shows a message saying it is not a Vibe Files cabinet. Check the path, or use **Create new**.
 

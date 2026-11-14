@@ -318,6 +318,58 @@ mod scale {
             );
             assert_eq!(rep.docs_new, total, "{rep}");
 
+            // A second PC (a host wiped overnight), as the window does it (PA-60): the clients,
+            // then the index behind the window in parts, a client asked for first.
+            {
+                let d2 = tmp.path().join("pc2");
+                std::fs::create_dir_all(&d2).unwrap();
+                let mut c2 =
+                    vf_core::db::open(&d2.join(crate::session::CATALOG_FILE), Storage::Local)
+                        .unwrap();
+                let t0 = Instant::now();
+                let staged = vf_fs::rebuild::index_start(&mut c2, &root, "dev2").unwrap();
+                eprintln!(
+                    "second PC: window can open after {:.1} s (clients only)",
+                    t0.elapsed().as_secs_f64()
+                );
+                let shared = crate::indexer::Shared::new(&staged);
+                let asked = staged.folders[staged.folders.len() / 2].clone();
+                shared.ask(&asked);
+                let t1 = Instant::now();
+                let first = std::cell::Cell::new(None);
+                crate::indexer::run(&mut c2, &root, "dev2", &staged, &shared, &|| {
+                    if first.get().is_none() {
+                        first.set(Some(t1.elapsed()));
+                    }
+                });
+                eprintln!(
+                    "second PC: the client asked for is listed after {:.2} s; the whole cabinet behind the window after {:.1} s",
+                    first.get().unwrap_or_default().as_secs_f64(),
+                    t1.elapsed().as_secs_f64()
+                );
+                let n: i64 = c2
+                    .query_row(
+                        "SELECT count(*) FROM document WHERE deleted_at IS NULL",
+                        [],
+                        |r| r.get(0),
+                    )
+                    .unwrap();
+                assert_eq!(n as usize, total);
+                let same: i64 = c2
+                    .query_row(
+                        "SELECT count(*) FROM document WHERE id = ?1",
+                        [&{
+                            let id: String = conn
+                                .query_row("SELECT id FROM document LIMIT 1", [], |r| r.get(0))
+                                .unwrap();
+                            id
+                        }],
+                        |r| r.get(0),
+                    )
+                    .unwrap();
+                assert_eq!(same, 1, "the same ids as the first PC");
+            }
+
             let t0 = Instant::now();
             let ids: Vec<String> = {
                 let mut st = conn.prepare("SELECT id FROM document").unwrap();

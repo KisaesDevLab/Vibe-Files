@@ -105,6 +105,11 @@ pub struct OpenCabinet {
     admin_msg: Option<String>,
     /// Startup self-checks (P13 step 4), while they run.
     checks: Option<mpsc::Receiver<Vec<crate::selfcheck::Check>>>,
+    /// The cabinet's first index on this PC, running behind the window (PA-60), and when
+    /// Browse last read the catalog for it.
+    indexing: Option<(crate::indexer::Indexer, std::time::Instant)>,
+    /// The client folder shown that the index has been asked to take next.
+    index_wait: Option<String>,
 }
 
 impl OpenCabinet {
@@ -299,7 +304,7 @@ impl VibeFilesApp {
                         name: &name,
                     },
                 ),
-                Mode::Open => session::open(&data, &device, &root),
+                Mode::Open => session::open_staged(&data, &device, &root),
             };
             // The rest of opening (it reads and writes the share) here too, not on the UI
             // thread once the cabinet shows (QA A6).
@@ -341,6 +346,34 @@ impl VibeFilesApp {
                     chain,
                 },
             )) => {
+                // The catalog has the clients only (PA-60): the documents are cataloged
+                // behind the window, the client being looked at first.
+                let indexing = opened.staged.take().and_then(|staged| {
+                    if cfg!(test) {
+                        // Tests: here and now, so the cabinet is whole on the first frame.
+                        let shared = crate::indexer::Shared::new(&staged);
+                        crate::indexer::run(
+                            &mut opened.conn,
+                            &opened.root.clone(),
+                            &self.config.device_id,
+                            &staged,
+                            &shared,
+                            &|| {},
+                        );
+                        None
+                    } else {
+                        Some((
+                            crate::indexer::Indexer::start(
+                                ctx,
+                                &opened.catalog,
+                                &opened.root,
+                                &self.config.device_id,
+                                staged,
+                            ),
+                            std::time::Instant::now(),
+                        ))
+                    }
+                });
                 // A crash between Filer's commit and the catalog write is caught up here.
                 let mut intake = IntakeTab::default();
                 let root = opened.root.clone();
@@ -352,6 +385,7 @@ impl VibeFilesApp {
                 let mut browse = Browse::load(&opened.conn);
                 browse.set_root(&opened.root);
                 browse.catalog = Some(opened.catalog.clone());
+                browse.indexing = indexing.as_ref().map(|(ix, _)| ix.shared.clone());
                 browse.sheets_dir = self.data.join("sheets");
                 browse.set_prefs(self.config.prefs.clone().for_user(&config::windows_user()));
                 browse.saved = vf_index::saved::load(&opened.root);
@@ -420,7 +454,9 @@ impl VibeFilesApp {
                 // The weekly sweep reads files: on the main computer only (PA-60), and by the
                 // cabinet's own note of the last one, so a host reset each night does not
                 // start it every morning.
-                if vf_fs::sweep::due_for(&opened.conn, &opened.root)
+                // Not while the index runs behind the window: started when it is done.
+                if indexing.is_none()
+                    && vf_fs::sweep::due_for(&opened.conn, &opened.root)
                     && crate::server::runs_here(&opened.root)
                 {
                     sweep.start(ctx, &opened.catalog, &opened.root);
@@ -444,6 +480,8 @@ impl VibeFilesApp {
                     admin_unlocked: false,
                     admin_typed: String::new(),
                     admin_msg: None,
+                    indexing,
+                    index_wait: None,
                 }));
             }
             Err(e) => {
@@ -598,6 +636,60 @@ impl eframe::App for VibeFilesApp {
             if std::mem::take(&mut o.sweep.changed) {
                 o.browse.reload(&o.opened.conn);
             }
+            // The index behind the window (PA-60): the client being looked at goes next, and
+            // Browse reads the catalog when that client is there, now and then meanwhile, and
+            // when the index is done.
+            if let Some((ix, read_at)) = &mut o.indexing {
+                let sh = ix.shared.clone();
+                let shown = o.browse.shown_folder();
+                let mut reload = false;
+                if let Some(f) = &o.index_wait
+                    && sh.listed(f)
+                {
+                    o.index_wait = None;
+                    reload = true;
+                }
+                if let Some(f) = shown.filter(|f| !sh.listed(f)) {
+                    sh.ask(&f);
+                    o.index_wait = Some(f);
+                }
+                if let Some(e) = sh.take_error() {
+                    add_error(&mut o.browse.error, format!("Listing the cabinet: {e}"));
+                }
+                let (done, all, docs) = sh.progress();
+                if sh.finished() {
+                    o.browse.index_line = None;
+                    o.browse.indexing = None;
+                    o.index_wait = None;
+                    o.indexing = None;
+                    o.browse.reload(&o.opened.conn);
+                    if o.browse.notice.is_none() {
+                        o.browse.notice = Some(format!(
+                            "The cabinet's files are listed: {docs} documents in {all} folders."
+                        ));
+                    }
+                    if vf_fs::sweep::due_for(&o.opened.conn, &o.opened.root)
+                        && crate::server::runs_here(&o.opened.root)
+                    {
+                        o.sweep.start(ui.ctx(), &o.opened.catalog, &o.opened.root);
+                    }
+                } else {
+                    o.browse.index_line = Some(match &o.index_wait {
+                        Some(_) => format!(
+                            "Listing this client's files… ({done} of {all} client folders listed so far)"
+                        ),
+                        None => format!(
+                            "Listing the cabinet's files: {done} of {all} client folders, {docs} documents so far. Clients open as usual; search and counts are complete when this is done."
+                        ),
+                    });
+                    if reload || read_at.elapsed() >= std::time::Duration::from_secs(20) {
+                        *read_at = std::time::Instant::now();
+                        o.browse.reload(&o.opened.conn);
+                    }
+                    ui.ctx()
+                        .request_repaint_after(std::time::Duration::from_millis(300));
+                }
+            }
             // Another session on this PC changed the shared catalog: read it again (at most
             // every 3 s).
             if o.opened.shared
@@ -611,7 +703,8 @@ impl eframe::App for VibeFilesApp {
                     .conn
                     .query_row("PRAGMA data_version", [], |r| r.get::<_, i64>(0))
                 {
-                    if o.data_version.0 != 0 && v != o.data_version.0 {
+                    // (The index behind the window changes it all the time: read above.)
+                    if o.data_version.0 != 0 && v != o.data_version.0 && o.indexing.is_none() {
                         o.browse.reload(&o.opened.conn);
                     }
                     o.data_version.0 = v;
@@ -1188,7 +1281,11 @@ impl eframe::App for VibeFilesApp {
         }
         if let Screen::Open(o) = &mut self.screen {
             let o = &mut **o;
-            if let Some(w) = o.opened.writer.clone()
+            // The other servers' changes and B2 sync wait for the index behind the window:
+            // both catalog files they find.
+            let indexed = o.indexing.is_none();
+            if indexed
+                && let Some(w) = o.opened.writer.clone()
                 && o.servers.tick(
                     &ctx,
                     &o.opened.catalog,
@@ -1200,16 +1297,18 @@ impl eframe::App for VibeFilesApp {
             {
                 o.browse.reload(&o.opened.conn);
             }
-            o.sync.tick(
-                &ctx,
-                &browse::Env {
-                    conn: &mut o.opened.conn,
-                    root: &o.opened.root,
-                    device_id: &o.opened.sync_device,
-                },
-                &o.opened.catalog,
-                &self.config.sync,
-            );
+            if indexed {
+                o.sync.tick(
+                    &ctx,
+                    &browse::Env {
+                        conn: &mut o.opened.conn,
+                        root: &o.opened.root,
+                        device_id: &o.opened.sync_device,
+                    },
+                    &o.opened.catalog,
+                    &self.config.sync,
+                );
+            }
             if std::mem::take(&mut o.sync.changed) {
                 o.browse.reload(&o.opened.conn);
             }
