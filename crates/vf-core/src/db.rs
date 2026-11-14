@@ -103,6 +103,12 @@ pub fn open(path: &Path, storage: Storage) -> Result<Connection> {
         Storage::Network => "DELETE",
     };
     conn.pragma_update(None, "journal_mode", mode)?;
+    // Owner 2026-11-13 (Q-102): with a write-ahead log the catalog is flushed to disk at each
+    // checkpoint, not at each commit. A power cut can lose the last commits, never corrupt
+    // the catalog, and the catalog is rebuilt from the cabinet anyway.
+    if storage == Storage::Local {
+        conn.pragma_update(None, "synchronous", "NORMAL")?;
+    }
     // A large catalog (PA-34): 32 MB of page cache per connection (the default is 2 MB),
     // sorts and temporary indexes in memory.
     conn.pragma_update(None, "cache_size", -32_768)?;

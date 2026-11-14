@@ -45,6 +45,9 @@ type ActDone = (Result<usize, String>, &'static str, Act);
 
 #[derive(Default)]
 pub struct SweepState {
+    /// The cabinet is still being listed behind the window (PA-60): a sweep waits for it
+    /// (it would take files not listed yet for unknown ones).
+    pub hold: bool,
     job: Option<Receiver<Result<Drift, String>>>,
     /// Follow moves / Mark deleted / Adopt / Send to Intake running on its thread (they hash
     /// or move every file listed; owner 2026-11-12: a spinner, not a frozen window).
@@ -278,7 +281,12 @@ pub fn show(ui: &mut egui::Ui, s: &mut SweepState, env: &mut Env, catalog: &Path
             ui.spinner();
             ui.label("Sweeping…");
         } else if ui
-            .add_enabled(s.act.is_none(), egui::Button::new("Sweep now"))
+            .add_enabled(s.act.is_none() && !s.hold, egui::Button::new("Sweep now"))
+            .on_disabled_hover_text(if s.hold {
+                "Wait until the cabinet’s folders are listed."
+            } else {
+                "Wait for the work under way."
+            })
             .clicked()
         {
             s.start(ui.ctx(), catalog, env.root);

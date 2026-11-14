@@ -658,6 +658,7 @@ impl eframe::App for VibeFilesApp {
             if std::mem::take(&mut o.sweep.changed) {
                 o.browse.reload(&o.opened.conn);
             }
+            o.sweep.hold = o.indexing.is_some();
             // The index behind the window (PA-60): the client being looked at goes next, and
             // Browse reads the catalog when that client is there, now and then meanwhile, and
             // when the index is done.

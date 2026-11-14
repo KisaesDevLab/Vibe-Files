@@ -103,6 +103,23 @@ fn mtime(p: &Path) -> Option<std::time::SystemTime> {
 pub struct Shared {
     /// Per file: (cabinet copy's time, PC copy's time) as last brought in step.
     seen: HashMap<&'static str, (Option<std::time::SystemTime>, Option<std::time::SystemTime>)>,
+    /// Files that came in from the cabinet since Filer last loaded ([`Shared::prepare`]):
+    /// Filer still works from the copy it loaded before, so a save of one of them would put
+    /// that old copy over the other person's change. It is treated as a save at the same
+    /// time (set aside, the cabinet's kept) until Intake is reloaded.
+    stale: std::collections::HashSet<&'static str>,
+}
+
+/// The shared files Filer holds whole in memory and saves whole: a change from elsewhere
+/// needs a reload before a save here. (The client list and relationships are read again in
+/// place; the folder index is written whole from a scan of the disk.)
+const NEEDS_RELOAD: [&str; 3] = ["config.json", "rules.json", "template.json"];
+
+/// `p` (this PC's save that cannot go to the cabinet) kept beside itself as `.not-saved`.
+fn set_aside(p: &Path) {
+    let mut aside = p.as_os_str().to_os_string();
+    aside.push(".not-saved");
+    let _ = std::fs::copy(p, std::path::PathBuf::from(aside));
 }
 
 /// What [`Shared::poll`] copied.
@@ -192,6 +209,7 @@ impl Shared {
         std::fs::create_dir_all(pc).map_err(|e| format!("{}: {e}", pc.display()))?;
         let master = crate::clients::master_dir(root);
         self.seen.clear();
+        let stale = std::mem::take(&mut self.stale);
         for f in SHARED {
             let (m, p) = (master.join(f), pc.join(f));
             // A save on this PC the 2 s poll had not sent yet (a reload or exit right after
@@ -201,7 +219,11 @@ impl Shared {
                 (Some(_), None) => true,
                 _ => false,
             };
-            if pc_newer {
+            if pc_newer && stale.contains(f) && m.is_file() {
+                // Saved from a copy loaded before someone else's change: not over theirs.
+                set_aside(&p);
+                copy_over(&m, &p)?;
+            } else if pc_newer {
                 bring(f, &p, &m)?;
             } else if m.is_file() {
                 bring(f, &m, &p)?;
@@ -231,16 +253,17 @@ impl Shared {
                 };
                 // Under the lock: the cabinet's copy as it is now.
                 let mt = mtime(&m);
-                if mt.is_some() && mt != sm {
+                if mt.is_some() && (mt != sm || self.stale.contains(f)) {
                     let same =
                         matches!((std::fs::read(&p), std::fs::read(&m)), (Ok(a), Ok(b)) if a == b);
                     if !same {
-                        let mut aside = p.as_os_str().to_os_string();
-                        aside.push(".not-saved");
-                        let _ = std::fs::copy(&p, std::path::PathBuf::from(aside));
+                        set_aside(&p);
                         copy_over(&m, &p)?;
                         out.conflicts.push(f);
                         out.from_cabinet.push(f);
+                        if NEEDS_RELOAD.contains(&f) {
+                            self.stale.insert(f);
+                        }
                     }
                 } else if bring(f, &p, &m)? {
                     out.to_cabinet.push(f);
@@ -248,6 +271,9 @@ impl Shared {
             } else if mt.is_some() && mt != sm {
                 if bring(f, &m, &p)? {
                     out.from_cabinet.push(f);
+                    if NEEDS_RELOAD.contains(&f) {
+                        self.stale.insert(f);
+                    }
                 }
             } else {
                 continue;
@@ -1029,6 +1055,40 @@ mod tests {
         );
         assert_eq!(sb.poll(&root, &b).unwrap(), SharedChanges::default());
         assert_eq!(sa.poll(&root, &a).unwrap(), SharedChanges::default());
+        // B changed the rules; A's Filer, still on the copy it loaded, saves without the
+        // reload it was offered: A's old copy does not replace B's change.
+        sb.prepare(&root, &b).unwrap(); // B reloaded Intake after the warning
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(b.join("rules.json"), "B's new rule").unwrap();
+        assert_eq!(sb.poll(&root, &b).unwrap().to_cabinet, ["rules.json"]);
+        assert_eq!(sa.poll(&root, &a).unwrap().from_cabinet, ["rules.json"]);
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(a.join("rules.json"), "A's old copy, one line changed").unwrap();
+        let got = sa.poll(&root, &a).unwrap();
+        assert_eq!(got.conflicts, ["rules.json"]);
+        assert!(got.to_cabinet.is_empty());
+        assert_eq!(
+            std::fs::read_to_string(master.join("rules.json")).unwrap(),
+            "B's new rule"
+        );
+        assert_eq!(
+            std::fs::read_to_string(a.join("rules.json.not-saved")).unwrap(),
+            "A's old copy, one line changed"
+        );
+        // The same right before the reload: still not over B's.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(a.join("rules.json"), "A's old copy again").unwrap();
+        sa.prepare(&root, &a).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(master.join("rules.json")).unwrap(),
+            "B's new rule"
+        );
+        assert_eq!(
+            std::fs::read_to_string(a.join("rules.json")).unwrap(),
+            "B's new rule"
+        );
+        // Reloaded: A's saves go to the cabinet again.
+        assert_eq!(sb.poll(&root, &b).unwrap(), SharedChanges::default());
         // A's save right before a reload (the poll had not run): prepare sends it, not loses it.
         std::thread::sleep(std::time::Duration::from_millis(20));
         std::fs::write(a.join("rules.json"), "rules saved just before reload").unwrap();
