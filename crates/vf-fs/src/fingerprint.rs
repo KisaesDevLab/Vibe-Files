@@ -108,17 +108,129 @@ pub fn ensure_how(
     Ok((hash, how))
 }
 
+/// Documents recorded per Transaction by [`ensure_many`].
+const BATCH: usize = 200;
+
 /// [`ensure`] for each of `doc_ids`, in order; a document whose file cannot be read is `Err`
-/// and does not stop the others.
+/// and does not stop the others. For many documents at once (a client pushed to B2): each
+/// client folder's `docmeta.jsonl` is read once, not once per document; the files that must
+/// be read are read several at a time; and the results are recorded [`BATCH`] documents per
+/// Transaction (one audit row, one append per record file).
 pub fn ensure_many(
     conn: &mut Connection,
     root: &Path,
     device_id: &str,
     doc_ids: &[String],
 ) -> Vec<Result<String, String>> {
-    doc_ids
-        .iter()
-        .map(|id| ensure(conn, root, device_id, id))
+    let mut out: Vec<Option<Result<String, String>>> = vec![None; doc_ids.len()];
+    // (place in `out`, the document) for the ones the catalog has no fingerprint for.
+    let mut todo: Vec<(usize, docmeta::Meta)> = vec![];
+    for (i, id) in doc_ids.iter().enumerate() {
+        match docmeta::load(conn, id) {
+            Err(e) => out[i] = Some(Err(e)),
+            Ok(m) => match &m.hash {
+                Some(h) => out[i] = Some(Ok(h.clone())),
+                None => todo.push((i, m)),
+            },
+        }
+    }
+    for chunk in todo.chunks(BATCH) {
+        let folders: Vec<String> = chunk
+            .iter()
+            .filter_map(|(_, m)| m.folder_rel.clone())
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        let ix = docmeta::Index::load(root, &folders);
+        // What another PC noted for the very file (same size and time), else the file read.
+        let got = crate::rebuild::par_map(chunk, |(_, m)| {
+            let path = root.join(&m.rel_path);
+            let Some((size, mtime, _)) = crate::cloud::stat(&path) else {
+                return Err(format!("{} cannot be reached.", m.rel_path));
+            };
+            if let Some(r) = ix
+                .latest_at(&m.rel_path)
+                .filter(|r| r.describes(size, mtime))
+            {
+                return Ok((r.hash.clone(), size, mtime, Source::Record));
+            }
+            let h = sha256_file(&path).map_err(|e| format!("{}: {e}", m.rel_path))?;
+            if crate::cloud::stat(&path).map(|s| (s.0, s.1)) != Some((size, mtime)) {
+                return Err(format!(
+                    "{} changed while it was read; try again.",
+                    m.rel_path
+                ));
+            }
+            Ok((h, size, mtime, Source::Read))
+        });
+        let now = vf_core::now_rfc3339();
+        let mut tx = Transaction::new(LABEL);
+        let mut lines: std::collections::BTreeMap<std::path::PathBuf, Vec<String>> =
+            Default::default();
+        let (mut read, mut noted) = (0usize, 0usize);
+        let mut done: Vec<(usize, String)> = vec![];
+        for ((i, m), r) in chunk.iter().zip(got) {
+            let (hash, size, mtime, how) = match r {
+                Ok(x) => x,
+                Err(e) => {
+                    out[*i] = Some(Err(e));
+                    continue;
+                }
+            };
+            tx = tx.catalog(Stmt::new(
+                "UPDATE document SET hash = ?2, size = ?3, file_mtime = ?4
+                 WHERE id = ?1 AND hash IS NULL AND deleted_at IS NULL",
+                vec![
+                    m.id.clone().into(),
+                    hash.clone().into(),
+                    (size as i64).into(),
+                    mtime.into(),
+                ],
+            ));
+            if how == Source::Read {
+                read += 1;
+                let m = docmeta::Meta {
+                    hash: Some(hash.clone()),
+                    stamp: Some((size, mtime)),
+                    ..m.clone()
+                };
+                let (file, line) = docmeta::record_line(root, &m, &now, device_id);
+                lines.entry(file).or_default().push(line);
+            } else {
+                noted += 1;
+            }
+            done.push((*i, hash));
+        }
+        if done.is_empty() {
+            continue;
+        }
+        for (path, lines) in lines {
+            tx = tx.file(FileOp::AppendLines {
+                path,
+                lines,
+                undo_lines: vec![],
+            });
+        }
+        tx = tx.audit(AuditEntry::new(
+            LABEL,
+            None,
+            json!({ "documents": done.len(), "from_file": read, "from_record": noted }),
+        ));
+        match crate::fileops::commit(conn, root, tx, device_id) {
+            Ok(_) => {
+                for (i, h) in done {
+                    out[i] = Some(Ok(h));
+                }
+            }
+            Err(e) => {
+                for (i, _) in done {
+                    out[i] = Some(Err(e.clone()));
+                }
+            }
+        }
+    }
+    out.into_iter()
+        .map(|r| r.expect("every document answered"))
         .collect()
 }
 
@@ -239,6 +351,64 @@ mod tests {
         let (h, how) = ensure_how(&mut fx.conn, &fx.root, "pc-4", "d1").unwrap();
         assert_eq!((h.as_str(), how), (want.as_str(), Source::Record));
         assert_eq!(records(&fx).len(), 2);
+    }
+
+    /// Many at once (a client pushed to B2): one Transaction and one audit row for them all,
+    /// one line each in the record file; a file that is gone does not stop the others; another
+    /// PC's catalog then takes them all from the records.
+    #[test]
+    fn many_are_fingerprinted_together() {
+        let mut fx = fx();
+        let folder = fx.root.join("Smith, Pat (1001)/Income Tax/2025");
+        let mut ids = vec!["d1".to_string()];
+        for i in 2..=5 {
+            let name = format!("doc{i}.pdf");
+            std::fs::write(folder.join(&name), format!("invented {i}")).unwrap();
+            let (size, mtime, _) = crate::cloud::stat(&folder.join(&name)).unwrap();
+            fx.conn
+                .execute(
+                    "INSERT INTO document (id, client_id, rel_path, hash, size, filed_at, device_id, updated_at, file_mtime)
+                     VALUES (?1, 'c1', ?2, NULL, ?3, 't', 'dev', 't', ?4)",
+                    (
+                        format!("d{i}"),
+                        format!("Smith, Pat (1001)/Income Tax/2025/{name}"),
+                        size as i64,
+                        mtime,
+                    ),
+                )
+                .unwrap();
+            ids.push(format!("d{i}"));
+        }
+        std::fs::remove_file(folder.join("doc5.pdf")).unwrap();
+        let audits = |conn: &Connection| -> i64 {
+            conn.query_row(
+                "SELECT count(*) FROM audit WHERE action = 'fingerprint'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        let got = ensure_many(&mut fx.conn, &fx.root, "dev", &ids);
+        assert_eq!(got.iter().filter(|r| r.is_ok()).count(), 4);
+        assert!(got[4].as_ref().unwrap_err().contains("doc5.pdf"));
+        assert_eq!(
+            got[1].as_deref().unwrap(),
+            sha256_file(&folder.join("doc2.pdf")).unwrap()
+        );
+        assert_eq!(pending(&fx.conn).unwrap(), 1);
+        assert_eq!(records(&fx).len(), 4);
+        assert_eq!(audits(&fx.conn), 1);
+        // Again: all from the catalog, nothing written.
+        let again = ensure_many(&mut fx.conn, &fx.root, "dev", &ids[..4]);
+        assert_eq!(again, got[..4]);
+        assert_eq!((records(&fx).len(), audits(&fx.conn)), (4, 1));
+        // Another PC's catalog: from the records, no new lines.
+        fx.conn
+            .execute("UPDATE document SET hash = NULL", [])
+            .unwrap();
+        let other = ensure_many(&mut fx.conn, &fx.root, "pc-2", &ids[..4]);
+        assert_eq!(other, got[..4]);
+        assert_eq!(records(&fx).len(), 4);
     }
 
     /// A record written for the file as it was (another size) is not trusted: the file is read.

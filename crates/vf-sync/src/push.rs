@@ -431,15 +431,19 @@ fn push_once(
         };
         // Documents not fingerprinted yet (PA-60) that this push sends are read first; one
         // that cannot be read now waits for the next push.
-        for (id, rel, doc_type, year) in catalog::unread(conn, client)? {
-            let goes = match force {
-                Some(f) => f.contains(&id),
-                None => rules.sends(Some(client), &rel, doc_type.as_deref(), year, false),
-            };
-            if goes && vf_fs::fingerprint::ensure(conn, root, &s.device_id, &id).is_err() {
-                rep.skipped += 1;
-            }
-        }
+        let unread: Vec<String> = catalog::unread(conn, client)?
+            .into_iter()
+            .filter(|(id, rel, doc_type, year)| match force {
+                Some(f) => f.contains(id),
+                None => rules.sends(Some(client), rel, doc_type.as_deref(), *year, false),
+            })
+            .map(|(id, ..)| id)
+            .collect();
+        // Together: the client's records are read once, the files several at a time.
+        rep.skipped += vf_fs::fingerprint::ensure_many(conn, root, &s.device_id, &unread)
+            .iter()
+            .filter(|r| r.is_err())
+            .count();
         let docs = catalog::entries(conn, &s.keys, client, &folder)?;
         let docs = hold_back(s, &head, client, docs, |e| match force {
             // By hand: these documents, and what is in B2 already. The rules decide nothing.
@@ -475,13 +479,17 @@ fn push_once(
         });
     }
     let cabinet_docs = if cabinet_too {
-        for (id, rel, doc_type, year) in catalog::unread(conn, CABINET)? {
-            if rules.sends(None, &rel, doc_type.as_deref(), year, false)
-                && vf_fs::fingerprint::ensure(conn, root, &s.device_id, &id).is_err()
-            {
-                rep.skipped += 1;
-            }
-        }
+        let unread: Vec<String> = catalog::unread(conn, CABINET)?
+            .into_iter()
+            .filter(|(_, rel, doc_type, year)| {
+                rules.sends(None, rel, doc_type.as_deref(), *year, false)
+            })
+            .map(|(id, ..)| id)
+            .collect();
+        rep.skipped += vf_fs::fingerprint::ensure_many(conn, root, &s.device_id, &unread)
+            .iter()
+            .filter(|r| r.is_err())
+            .count();
         let docs = catalog::entries(conn, &s.keys, CABINET, "")?;
         let docs = hold_back(s, &head, CABINET, docs, |e| {
             rules.sends(
