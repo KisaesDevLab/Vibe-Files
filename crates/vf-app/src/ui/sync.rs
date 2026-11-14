@@ -1942,7 +1942,22 @@ fn b2_rule_section(ui: &mut egui::Ui, t: &mut SyncTab, env: &mut Env, admin: boo
         }
     }
     if let Some((list, what)) = save {
-        match vf_fs::clients::set_b2_rules(env.root, &list) {
+        // Saved only when the list in the cabinet is still the one shown here (PA-68): a
+        // change someone else made meanwhile is not written over.
+        let saved = vf_fs::lock::with(env.root, "clients", "the B2 rules", || {
+            let now = vf_sync::rules::listed(&vf_fs::clients::load_b2(env.root)?);
+            if now != rules {
+                return Err(
+                    "someone else changed the rules while this page was open. They are shown again now: make your change again."
+                        .to_string(),
+                );
+            }
+            vf_fs::clients::set_b2_rules(env.root, &list)
+        });
+        if saved.is_err() {
+            t.b2_rules = None;
+        }
+        match saved {
             Ok(()) => {
                 t.notice = Some(format!(
                     "{what} What it holds back or lets through is counted again below."
