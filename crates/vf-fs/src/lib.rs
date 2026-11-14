@@ -17,6 +17,7 @@ pub mod fingerprint;
 pub mod folders;
 pub mod hints;
 pub mod holds;
+pub mod identity;
 pub mod import;
 pub mod intake;
 pub mod lock;

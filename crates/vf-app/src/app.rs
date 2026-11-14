@@ -295,6 +295,18 @@ impl VibeFilesApp {
         let name = w.name.clone();
         let ctx = ctx.clone();
         std::thread::spawn(move || {
+            // A session host is wiped overnight and its settings with it (PA-69): the login
+            // works under the id the cabinet remembers for it, so its Intake folder and what
+            // it did yesterday are still its own.
+            let device = if mode == Mode::Open && crate::server::server_mode() {
+                vf_fs::identity::login_device(
+                    &root,
+                    &vf_core::windows_login().unwrap_or_default(),
+                    &device,
+                )
+            } else {
+                device
+            };
             let r = match mode {
                 Mode::Create => session::create(
                     &data,
@@ -344,8 +356,11 @@ impl VibeFilesApp {
                     rules_problem,
                     emptied,
                     chain,
+                    device,
                 },
             )) => {
+                // Saved with the settings below.
+                self.config.device_id = device;
                 // The catalog has the clients only (PA-60): the documents are cataloged
                 // behind the window, the client being looked at first.
                 let indexing = opened.staged.take().and_then(|staged| {
@@ -1387,6 +1402,9 @@ pub struct Prepared {
     /// Documents the 90-day trash rule emptied.
     emptied: Result<usize, String>,
     chain: crate::ui::audit::ChainCheck,
+    /// The id this login works under: on a session host, the one the cabinet remembers for
+    /// the login (PA-69), which may not be the one in this host's settings.
+    device: String,
 }
 
 /// The work of opening a cabinet that reads and writes the share or the whole catalog: print
@@ -1456,6 +1474,7 @@ fn prepare(opened: &mut Opened, device_id: &str) -> Prepared {
         rules_problem,
         emptied,
         chain,
+        device: device_id.to_string(),
     }
 }
 
