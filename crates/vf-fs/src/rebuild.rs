@@ -882,7 +882,7 @@ pub fn rebuild(
     root: &Path,
     device_id: &str,
 ) -> Result<RebuildReport, RebuildError> {
-    rebuild_scoped(conn, root, device_id, None, None, false)
+    rebuild_scoped(conn, root, device_id, None, None, false, None)
 }
 
 /// The index a cabinet gets when it is opened with a catalog that does not know it yet (owner
@@ -899,7 +899,116 @@ pub fn index(
     device_id: &str,
 ) -> Result<RebuildReport, RebuildError> {
     let _one_at_a_time = IndexLock::take(root);
-    rebuild_scoped(conn, root, device_id, None, None, true)
+    rebuild_scoped(conn, root, device_id, None, None, true, None)
+}
+
+/// The folders of a cabinet as [`scan_folders`] found them.
+type Scan = (Vec<Bound>, Vec<(PathBuf, Option<String>)>);
+
+/// An index from the listing made in parts (PA-60: the window opens once the clients are
+/// there; the documents of each client folder follow, the one being looked at first).
+pub struct Staged {
+    scan: Scan,
+    /// The cabinet's top-level folders (cabinet-relative), in name order: what
+    /// [`index_part`] is given, a few at a time.
+    pub folders: Vec<String>,
+}
+
+/// The label under which an index cut short left its mark ([`unfinished`]), if any.
+pub fn unfinished_label(conn: &Connection) -> Option<String> {
+    conn.query_row(
+        "SELECT v FROM local_state WHERE k = ?1",
+        [UNFINISHED],
+        |r| r.get(0),
+    )
+    .ok()
+}
+
+/// Starts an index made in parts: the cabinet, its clients, doc types and retention classes
+/// are written (every client folder's sentinel is read, no document), and the index is marked
+/// unfinished until [`index_finish`]. Then [`index_part`] for all of [`Staged::folders`].
+pub fn index_start(
+    conn: &mut Connection,
+    root: &Path,
+    device_id: &str,
+) -> Result<Staged, RebuildError> {
+    let mut rep = RebuildReport::default();
+    let scan = scan_folders(root, &mut rep)?;
+    conn.execute(
+        "INSERT INTO local_state (k, v) VALUES (?1, ?2) ON CONFLICT(k) DO UPDATE SET v = excluded.v",
+        [UNFINISHED, FILED_BY_IMPORT],
+    )?;
+    rebuild_scoped(
+        conn,
+        root,
+        device_id,
+        Some(&[]),
+        None,
+        true,
+        Some((&scan, true)),
+    )?;
+    let folders = scan.1.iter().map(|(f, _)| rel(root, f)).collect();
+    Ok(Staged { scan, folders })
+}
+
+/// The documents of `folders` (some of [`Staged::folders`]) cataloged from their listing, as
+/// [`index`] does for the whole cabinet. Each part takes the index lock for itself, so two PCs
+/// indexing at once take turns and give a file one id.
+pub fn index_part(
+    conn: &mut Connection,
+    root: &Path,
+    device_id: &str,
+    staged: &Staged,
+    folders: &[String],
+) -> Result<RebuildReport, RebuildError> {
+    let _one_at_a_time = IndexLock::take(root);
+    rebuild_scoped(
+        conn,
+        root,
+        device_id,
+        Some(folders),
+        None,
+        true,
+        Some((&staged.scan, false)),
+    )
+}
+
+/// Ends an index made in parts, once every folder had its [`index_part`]: the versions the
+/// cabinet keeps of the documents, and the index is no longer unfinished.
+pub fn index_finish(
+    conn: &mut Connection,
+    root: &Path,
+    device_id: &str,
+) -> Result<RebuildReport, RebuildError> {
+    let mut rep = RebuildReport::default();
+    let docs: Vec<(String, String, Option<String>)> = {
+        let mut st =
+            conn.prepare("SELECT rel_path, id, hash FROM document WHERE deleted_at IS NULL")?;
+        st.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+            .collect::<Result<_, _>>()?
+    };
+    let mut stmts: Vec<Stmt> = Vec::new();
+    version_stmts(root, &docs, &mut rep, &mut stmts)?;
+    let actor = Actor::device(device_id);
+    let mut parts: Vec<Vec<Stmt>> = Vec::new();
+    while stmts.len() > CHUNK {
+        let rest = stmts.split_off(CHUNK);
+        parts.push(std::mem::replace(&mut stmts, rest));
+    }
+    parts.push(stmts);
+    for part in parts {
+        let mut tx = Transaction::new("rebuild").audit(AuditEntry::new(
+            "rebuild",
+            None,
+            json!({ "versions": rep.versions_new, "statements": part.len() }),
+        ));
+        for s in part {
+            tx = tx.catalog(s);
+        }
+        tx.commit(conn, &mut NoFileOps, &actor)?;
+    }
+    conn.execute("DELETE FROM local_state WHERE k = ?1", [UNFINISHED])?;
+    Ok(rep)
 }
 
 /// `_Vibe/index.lock`, held while an index from the listing writes the records of documents
@@ -958,15 +1067,17 @@ impl IndexLock {
                         .name("index-lock".into())
                         .spawn(move || {
                             let mut n = 0u64;
-                            let mut slept = std::time::Duration::ZERO;
-                            let step = std::time::Duration::from_millis(50).min(beat);
+                            let mut last = std::time::Instant::now();
                             while !stop2.load(Ordering::Relaxed) {
-                                std::thread::sleep(step);
-                                slept += step;
-                                if slept < beat {
+                                // Woken at once when the lock is given back.
+                                std::thread::park_timeout(beat.saturating_sub(last.elapsed()));
+                                if stop2.load(Ordering::Relaxed) {
+                                    return;
+                                }
+                                if last.elapsed() < beat {
                                     continue;
                                 }
-                                slept = std::time::Duration::ZERO;
+                                last = std::time::Instant::now();
                                 // Only while it is still this PC's (taken over: left alone).
                                 let mine = std::fs::read_to_string(&path2)
                                     .is_ok_and(|t| t.starts_with(token2.as_str()));
@@ -1003,7 +1114,7 @@ impl IndexLock {
                         }
                         _ => seen = Some((now, std::time::Instant::now())),
                     }
-                    std::thread::sleep(std::time::Duration::from_millis(500).min(beat));
+                    std::thread::sleep(std::time::Duration::from_millis(100).min(beat));
                 }
                 // A cabinet that cannot be written (read-only share): nothing to guard.
                 Err(_) => return Self::none(),
@@ -1016,6 +1127,7 @@ impl Drop for IndexLock {
     fn drop(&mut self) {
         self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
         if let Some(t) = self.beat.take() {
+            t.thread().unpark();
             let _ = t.join();
         }
         // Given back only if it is still this PC's.
@@ -1036,7 +1148,7 @@ pub fn rebuild_folders(
     device_id: &str,
     folders: &[String],
 ) -> Result<RebuildReport, RebuildError> {
-    rebuild_scoped(conn, root, device_id, Some(folders), None, false)
+    rebuild_scoped(conn, root, device_id, Some(folders), None, false, None)
 }
 
 /// [`rebuild_folders`] of folders already in the cabinet (Browse re-reading a client folder
@@ -1048,10 +1160,126 @@ pub fn reread_folders(
     device_id: &str,
     folders: &[String],
 ) -> Result<RebuildReport, RebuildError> {
-    rebuild_scoped(conn, root, device_id, Some(folders), Some("rebuild"), false)
+    rebuild_scoped(
+        conn,
+        root,
+        device_id,
+        Some(folders),
+        Some("rebuild"),
+        false,
+        None,
+    )
 }
 
-/// `listing`: [`index`], a file new to the catalog is not read.
+/// The version rows the sidecars in `_Vibe/versions` give the live documents `docs`
+/// (path, id, fingerprint when known).
+fn version_stmts(
+    root: &Path,
+    docs: &[(String, String, Option<String>)],
+    rep: &mut RebuildReport,
+    stmts: &mut Vec<Stmt>,
+) -> Result<(), RebuildError> {
+    // Versions from sidecars. An entry that says what replaced it is followed from each
+    // document's current content back through the versions (path-independent, QA C7); older
+    // entries go by the path the document had.
+    let vdir = root.join(cabinet::VIBE_DIR).join(cabinet::VERSIONS_DIR);
+    let doc_id_by_rel: HashMap<String, String> = docs
+        .iter()
+        .map(|(rel, id, _)| (rel.clone(), id.clone()))
+        .collect();
+    if vdir.is_dir() {
+        let mut sidecars = Vec::new();
+        files_under(&vdir, &mut sidecars)?;
+        let mut all: Vec<(String, u64, VersionSidecar)> = Vec::new();
+        for sc in sidecars
+            .iter()
+            .filter(|p| p.extension().is_some_and(|e| e == "json"))
+        {
+            let hash = sc
+                .file_stem()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned();
+            if !cabinet::is_sha256(&hash) {
+                rep.bad_sidecars += 1;
+                continue;
+            }
+            let content = sc.with_extension("");
+            let Ok(size) = std::fs::metadata(&content).map(|m| m.len()) else {
+                continue; // sidecar without its content: nothing to restore
+            };
+            let Some(entries) = std::fs::read_to_string(sc)
+                .ok()
+                .and_then(|t| serde_json::from_str::<Vec<VersionSidecar>>(&t).ok())
+            else {
+                rep.bad_sidecars += 1;
+                continue;
+            };
+            all.extend(entries.into_iter().map(|e| (hash.clone(), size, e)));
+        }
+        // Documents by their current content: (path, id).
+        let mut by_hash: HashMap<&str, Vec<(&str, &String)>> = HashMap::new();
+        for (rel, id, hash) in docs {
+            if let Some(h) = hash {
+                by_hash.entry(h).or_default().push((rel, id));
+            }
+        }
+        let mut by_version: HashMap<&str, Vec<usize>> = HashMap::new();
+        for (i, (h, _, _)) in all.iter().enumerate() {
+            by_version.entry(h.as_str()).or_default().push(i);
+        }
+        fn owner(
+            i: usize,
+            depth: usize,
+            all: &[(String, u64, VersionSidecar)],
+            by_hash: &HashMap<&str, Vec<(&str, &String)>>,
+            by_version: &HashMap<&str, Vec<usize>>,
+            by_rel: &HashMap<String, String>,
+        ) -> Option<String> {
+            let e = &all[i].2;
+            let Some(next) = &e.next else {
+                return by_rel.get(&e.rel_path).cloned();
+            };
+            if let Some(docs) = by_hash.get(next.as_str()) {
+                // Two documents with that content: the one at the entry's path first.
+                return docs
+                    .iter()
+                    .find(|(rel, _)| *rel == e.rel_path)
+                    .or_else(|| docs.first())
+                    .map(|(_, id)| (*id).clone());
+            }
+            if depth >= 32 {
+                return None;
+            }
+            // Replaced by content that is itself a version now: whose version it is.
+            let mut cands = by_version.get(next.as_str()).cloned().unwrap_or_default();
+            cands.sort_by_key(|j| all[*j].2.rel_path != e.rel_path);
+            cands
+                .into_iter()
+                .find_map(|j| owner(j, depth + 1, all, by_hash, by_version, by_rel))
+        }
+        for i in 0..all.len() {
+            let Some(doc_id) = owner(i, 0, &all, &by_hash, &by_version, &doc_id_by_rel) else {
+                continue;
+            };
+            let (hash, size, v) = all[i].clone();
+            stmts.push(Stmt::new(
+                "INSERT OR IGNORE INTO version (doc_id, hash, size, created, created_by, device_id, reason)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                vec![
+                    doc_id.into(), hash.into(), size.into(), v.created.into(),
+                    v.created_by.into(), v.device_id.into(), v.reason.into(),
+                ],
+            ));
+            rep.versions_new += 1;
+        }
+    }
+    Ok(())
+}
+
+/// `listing`: [`index`], a file new to the catalog is not read. `pre`: the cabinet's folders
+/// as already scanned (an index made in parts, [`index_part`]: the scan reads every client
+/// folder's sentinel), and whether this call still writes the client rows.
 fn rebuild_scoped(
     conn: &mut Connection,
     root: &Path,
@@ -1059,6 +1287,7 @@ fn rebuild_scoped(
     only: Option<&[String]>,
     filed_as: Option<&'static str>,
     listing: bool,
+    pre: Option<(&Scan, bool)>,
 ) -> Result<RebuildReport, RebuildError> {
     let in_scope = |rel: &str| {
         only.is_none_or(|o| {
@@ -1102,7 +1331,14 @@ fn rebuild_scoped(
         stage = std::time::Instant::now();
         ms
     };
-    let (bound, mut folders) = scan_folders(root, &mut rep)?;
+    let scanned;
+    let (bound, mut folders): (&[Bound], Vec<(PathBuf, Option<String>)>) = match pre {
+        Some((scan, _)) => (&scan.0, scan.1.clone()),
+        None => {
+            scanned = scan_folders(root, &mut rep)?;
+            (&scanned.0, scanned.1.clone())
+        }
+    };
     folders.retain(|(f, _)| in_scope(&rel(root, f)));
     let scan_ms = lap();
     // What the catalog knows: a file of the same size and time is not read again (PA-34).
@@ -1232,7 +1468,10 @@ fn rebuild_scoped(
         });
     }
 
-    stmts.extend(client_stmts(conn, root, &bound, &now, device_id, &mut rep)?);
+    // An index made in parts wrote the clients when it started.
+    if pre.is_none_or(|(_, clients)| clients) {
+        stmts.extend(client_stmts(conn, root, bound, &now, device_id, &mut rep)?);
+    }
     // Doc types the restored metadata may point at: id -> id, lower-case name -> id.
     let mut type_ids: HashMap<String, String> = HashMap::new();
     let mut type_names: HashMap<String, String> = HashMap::new();
@@ -1807,97 +2046,18 @@ fn rebuild_scoped(
         gone_ids.push(id.clone());
     }
 
-    // Versions from sidecars. An entry that says what replaced it is followed from each
-    // document's current content back through the versions (path-independent, QA C7); older
-    // entries go by the path the document had.
-    let vdir = root.join(cabinet::VIBE_DIR).join(cabinet::VERSIONS_DIR);
-    // A scoped re-read leaves the versions store alone (it is the whole cabinet's).
-    if vdir.is_dir() && only.is_none() {
-        let mut sidecars = Vec::new();
-        files_under(&vdir, &mut sidecars)?;
-        let mut all: Vec<(String, u64, VersionSidecar)> = Vec::new();
-        for sc in sidecars
+    // Versions from sidecars. A scoped re-read leaves the versions store alone (it is the whole
+    // cabinet's).
+    if only.is_none() {
+        let docs: Vec<(String, String, Option<String>)> = found
             .iter()
-            .filter(|p| p.extension().is_some_and(|e| e == "json"))
-        {
-            let hash = sc
-                .file_stem()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .into_owned();
-            if !cabinet::is_sha256(&hash) {
-                rep.bad_sidecars += 1;
-                continue;
-            }
-            let content = sc.with_extension("");
-            let Ok(size) = std::fs::metadata(&content).map(|m| m.len()) else {
-                continue; // sidecar without its content: nothing to restore
-            };
-            let Some(entries) = std::fs::read_to_string(sc)
-                .ok()
-                .and_then(|t| serde_json::from_str::<Vec<VersionSidecar>>(&t).ok())
-            else {
-                rep.bad_sidecars += 1;
-                continue;
-            };
-            all.extend(entries.into_iter().map(|e| (hash.clone(), size, e)));
-        }
-        // Documents by their current content: (path, id).
-        let mut by_hash: HashMap<&str, Vec<(&str, &String)>> = HashMap::new();
-        for f in &found {
-            if let (Some(id), Some(h)) = (doc_id_by_rel.get(&f.rel), &f.hash) {
-                by_hash.entry(h).or_default().push((&f.rel, id));
-            }
-        }
-        let mut by_version: HashMap<&str, Vec<usize>> = HashMap::new();
-        for (i, (h, _, _)) in all.iter().enumerate() {
-            by_version.entry(h.as_str()).or_default().push(i);
-        }
-        fn owner(
-            i: usize,
-            depth: usize,
-            all: &[(String, u64, VersionSidecar)],
-            by_hash: &HashMap<&str, Vec<(&str, &String)>>,
-            by_version: &HashMap<&str, Vec<usize>>,
-            by_rel: &HashMap<String, String>,
-        ) -> Option<String> {
-            let e = &all[i].2;
-            let Some(next) = &e.next else {
-                return by_rel.get(&e.rel_path).cloned();
-            };
-            if let Some(docs) = by_hash.get(next.as_str()) {
-                // Two documents with that content: the one at the entry's path first.
-                return docs
-                    .iter()
-                    .find(|(rel, _)| *rel == e.rel_path)
-                    .or_else(|| docs.first())
-                    .map(|(_, id)| (*id).clone());
-            }
-            if depth >= 32 {
-                return None;
-            }
-            // Replaced by content that is itself a version now: whose version it is.
-            let mut cands = by_version.get(next.as_str()).cloned().unwrap_or_default();
-            cands.sort_by_key(|j| all[*j].2.rel_path != e.rel_path);
-            cands
-                .into_iter()
-                .find_map(|j| owner(j, depth + 1, all, by_hash, by_version, by_rel))
-        }
-        for i in 0..all.len() {
-            let Some(doc_id) = owner(i, 0, &all, &by_hash, &by_version, &doc_id_by_rel) else {
-                continue;
-            };
-            let (hash, size, v) = all[i].clone();
-            stmts.push(Stmt::new(
-                "INSERT OR IGNORE INTO version (doc_id, hash, size, created, created_by, device_id, reason)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                vec![
-                    doc_id.into(), hash.into(), size.into(), v.created.into(),
-                    v.created_by.into(), v.device_id.into(), v.reason.into(),
-                ],
-            ));
-            rep.versions_new += 1;
-        }
+            .filter_map(|f| {
+                doc_id_by_rel
+                    .get(&f.rel)
+                    .map(|id| (f.rel.clone(), id.clone(), f.hash.clone()))
+            })
+            .collect();
+        version_stmts(root, &docs, &mut rep, &mut stmts)?;
     }
     let before_versions: i64 = conn.query_row("SELECT count(*) FROM version", [], |r| r.get(0))?;
 
@@ -2195,6 +2355,62 @@ mod tests {
         std::fs::write(&lock, "other 0 OTHER").unwrap();
         drop(third);
         assert_eq!(std::fs::read_to_string(&lock).unwrap(), "other 0 OTHER");
+    }
+
+    /// PA-60: an index made in parts (the window opens first) gives the same catalog as one
+    /// made in one go, whatever the order of the parts, and a folder indexed twice (asked for,
+    /// then reached by the background pass) gets nothing twice.
+    #[test]
+    fn an_index_in_parts_is_the_same_index() {
+        let c = cab();
+        // The versions store: a sidecar for a document of the cabinet.
+        let mut whole = open(&c);
+        index(&mut whole, &c.root, "pc-1").unwrap();
+        let want = doc_rows(&whole);
+        let smith = "Smith, John (1001)/_Vibe/docmeta.jsonl";
+        let lines = record_lines(&c, smith);
+
+        let d = c.data.join("parts");
+        std::fs::create_dir_all(&d).unwrap();
+        let mut conn = vf_core::db::open(&d.join("catalog.db"), Storage::Local).unwrap();
+        let staged = index_start(&mut conn, &c.root, "pc-2").unwrap();
+        assert!(unfinished(&conn));
+        assert_eq!(unfinished_label(&conn).as_deref(), Some(FILED_BY_IMPORT));
+        assert!(doc_rows(&conn).is_empty(), "clients only so far");
+        let clients: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM client WHERE deleted_at IS NULL",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(clients >= 2);
+        assert!(staged.folders.len() >= 2, "{:?}", staged.folders);
+        // The client being looked at first, then every folder (that one again among them).
+        let asked = ["Smith, John (1001)".to_string()];
+        let first = index_part(&mut conn, &c.root, "pc-2", &staged, &asked).unwrap();
+        assert_eq!(first.docs_new, 3);
+        assert_eq!(doc_rows(&conn).len(), 3);
+        let mut new = 0;
+        for f in staged.folders.iter().rev() {
+            new += index_part(&mut conn, &c.root, "pc-2", &staged, std::slice::from_ref(f))
+                .unwrap()
+                .docs_new;
+        }
+        assert_eq!(new, want.len() - 3);
+        index_finish(&mut conn, &c.root, "pc-2").unwrap();
+        assert!(!unfinished(&conn));
+        assert_eq!(doc_rows(&conn), want, "the same ids as the first PC's");
+        assert_eq!(record_lines(&c, smith), lines, "no record written twice");
+        assert!(!c.root.join("_Vibe/index.lock").exists());
+        let filed: Vec<String> = conn
+            .prepare("SELECT DISTINCT filed_by FROM document")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        assert_eq!(filed, [FILED_BY_IMPORT], "the cabinet's existing files");
     }
 
     /// PA-60: an index from the folder listing reads no file. Every document gets a record in
