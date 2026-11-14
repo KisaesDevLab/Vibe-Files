@@ -845,8 +845,62 @@ pub fn sync_clients_edited(
             }
         }
     }
+    // A folder named in `reread` that this catalog has no client for yet (a client made by
+    // an Intake batch, or on another computer): bound when it has a sentinel.
+    for f in reread {
+        if bound.iter().any(|b| b.folder_rel.eq_ignore_ascii_case(f))
+            || rep
+                .unbound_folders
+                .iter()
+                .any(|u| u.eq_ignore_ascii_case(f))
+        {
+            continue;
+        }
+        let folder = root.join(f);
+        if let Ok(Some(s)) = sentinel::read_sentinel(&folder) {
+            let sentinel_hash = sha256_file(&sentinel::sentinel_path(&folder))
+                .map_err(|e| RebuildError::Io(e.to_string()))?;
+            bound.push(Bound {
+                id: s.client_id.to_string(),
+                ext_id: s.tax_software_id,
+                name: s.display_name_at_creation,
+                folder_rel: f.clone(),
+                sentinel_hash,
+            });
+        }
+    }
+    bound.sort_by(|a, b| a.folder_rel.cmp(&b.folder_rel));
     rep.clients = bound.len();
     commit_clients(conn, root, &bound, rep, device_id, action)
+}
+
+/// [`sync_clients`] after the client list changed somewhere (another computer added a client,
+/// a CSV was imported): the list is applied, and only the folders of clients this catalog
+/// does not know yet are looked for (by the name the cabinet's template gives them). Reading
+/// every client folder's sentinel for one new client took seconds in every session (QA #6).
+pub fn sync_clients_listed(
+    conn: &mut Connection,
+    root: &Path,
+    device_id: &str,
+    action: &str,
+) -> Result<RebuildReport, RebuildError> {
+    let known: std::collections::HashSet<String> = {
+        let mut st = conn.prepare("SELECT upper(ext_id) FROM client WHERE deleted_at IS NULL")?;
+        st.query_map([], |r| r.get::<_, String>(0))?
+            .collect::<Result<_, _>>()?
+    };
+    let mut look: Vec<String> = vec![];
+    if let Ok(master) = crate::clients::load(root) {
+        let (tree, _, _) = filer_core::template::load_or_seed(&crate::clients::master_dir(root));
+        for c in master.clients() {
+            if !known.contains(&c.id.to_uppercase())
+                && let Ok(name) = filer_core::template::client_folder_name(&tree, c)
+            {
+                look.push(name);
+            }
+        }
+    }
+    sync_clients_edited(conn, root, device_id, action, &look)
 }
 
 /// The client and relationship rows of `bound` and the client master, in one Transaction.

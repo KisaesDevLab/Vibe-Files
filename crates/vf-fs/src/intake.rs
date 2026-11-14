@@ -694,8 +694,26 @@ fn record(
     backups: &[(std::path::PathBuf, std::path::PathBuf)],
     device_id: &str,
 ) -> Result<(usize, usize), String> {
-    // A batch can create client folders and sentinels: catalog clients first.
-    crate::rebuild::sync_clients(conn, root, device_id, "intake_clients")
+    // A batch can create client folders and sentinels: catalog clients first. Only the
+    // client folders the batch filed into are read (QA #6: every folder's sentinel was read
+    // for every batch, in every session's catalog).
+    let mut folders: std::collections::BTreeSet<String> = Default::default();
+    let mut looked: std::collections::HashSet<std::path::PathBuf> = Default::default();
+    for f in files {
+        let mut dir = f.dst.parent();
+        while let Some(d) = dir {
+            if d == root || !d.starts_with(root) || !looked.insert(d.to_path_buf()) {
+                break;
+            }
+            if filer_intake::sentinel::sentinel_path(d).is_file() {
+                folders.insert(crate::rebuild::rel(root, d));
+                break;
+            }
+            dir = d.parent();
+        }
+    }
+    let folders: Vec<String> = folders.into_iter().collect();
+    crate::rebuild::sync_clients_edited(conn, root, device_id, "intake_clients", &folders)
         .map_err(|e| e.to_string())?;
     // CSV ID → (client id, client folder).
     let clients: HashMap<String, (String, Option<String>)> = conn

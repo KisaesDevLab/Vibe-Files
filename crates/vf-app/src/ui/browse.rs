@@ -373,6 +373,8 @@ pub struct Browse {
     /// A large cabinet (PA-34): the snapshot holds a window of documents, reloaded when the
     /// scope, the open clients or the lists change.
     pub large: bool,
+    /// Documents above which the catalog is read in windows ([`LARGE`]; tests set it lower).
+    large_above: usize,
     /// The window the snapshot holds.
     loaded: Option<vf_core::browse::Window>,
     /// The name filter a cabinet-wide page was read with, and when the filter last changed
@@ -572,6 +574,7 @@ impl Browse {
             admin_unlocked: false,
             name_filter: String::new(),
             large: false,
+            large_above: LARGE,
             loaded: None,
             page_filter: String::new(),
             filter_typed: None,
@@ -648,17 +651,20 @@ impl Browse {
         if vf_core::browse::document_count(conn).is_ok_and(|n| n > large_above) {
             let mut b = Self::new(Snapshot::default());
             b.large = true;
+            b.large_above = large_above;
             b.reload(conn);
             return b;
         }
-        match vf_core::browse::load(conn) {
+        let mut b = match vf_core::browse::load(conn) {
             Ok(s) => Self::new(s),
             Err(e) => {
                 let mut b = Self::new(Snapshot::default());
                 b.error = Some(format!("The catalog could not be read: {e}"));
                 b
             }
-        }
+        };
+        b.large_above = large_above;
+        b
     }
 
     /// The documents a large cabinet's snapshot should hold now: the client shown and those
@@ -1126,6 +1132,13 @@ impl Browse {
                 )),
             })
             .collect();
+        // A catalog that grew past the limit since it was first read (one listed behind the
+        // window started with its clients only, PA-60): read in windows from now on, never
+        // whole on the window's thread.
+        if !self.large && vf_core::browse::document_count(conn).is_ok_and(|n| n > self.large_above)
+        {
+            self.large = true;
+        }
         let window = self.large.then(|| self.window());
         let reuse = std::mem::take(&mut self.reuse_counts)
             .then(|| self.snap.windowed.clone())
@@ -5224,6 +5237,44 @@ Petty cash,1234.50
                 .join("Client 0000 (1000)/Income Tax/2025/Invented bank statement (2).pdf")
                 .is_file()
         );
+    }
+
+    /// PA-60: a catalog listed behind the window starts with its clients only. Once its
+    /// documents pass the limit, Browse reads it in windows; it is never loaded whole.
+    #[test]
+    fn a_catalog_that_grows_large_is_read_in_windows_from_then_on() {
+        let mut h = harness_from(2, 0, 3);
+        assert!(!h.state().b.large, "only clients yet");
+        {
+            let s = h.state_mut();
+            for n in 0..8 {
+                s.conn
+                    .execute(
+                        "INSERT INTO document (id, client_id, tax_year, rel_path, hash, size,
+                           filed_at, device_id, updated_at)
+                         VALUES (?1, ?2, 2025, ?3, NULL, 10, '2026-11-02T00:00:00Z', 'd',
+                                 '2026-11-02T00:00:00Z')",
+                        (
+                            format!("listed-{n}"),
+                            format!("c{:04}", n % 2),
+                            format!(
+                                "Client {:04} ({})/Income Tax/2025/listed {n}.pdf",
+                                n % 2,
+                                1000 + n % 2
+                            ),
+                        ),
+                    )
+                    .unwrap();
+            }
+            s.b.reload(&s.conn);
+        }
+        h.run();
+        assert!(h.state().b.large);
+        click(&mut h, "Client 0001  1001");
+        h.run();
+        let b = &h.state().b;
+        assert_eq!(b.snap.docs.len(), 4, "only the client opened is held");
+        assert_eq!(b.ix.clients.iter().map(|c| c.count).sum::<usize>(), 8);
     }
 
     /// PA-34: a large cabinet's Browse holds a window: the client opened, a view's page; the

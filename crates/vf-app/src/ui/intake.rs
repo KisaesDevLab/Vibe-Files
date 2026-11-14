@@ -293,9 +293,14 @@ impl IntakeTab {
                 vf_core::db::open(&catalog, vf_core::db::Storage::Local)
                     .map_err(|e| e.to_string())
                     .and_then(|mut c| {
-                        vf_fs::rebuild::sync_clients(&mut c, &root, &device, "intake_clients")
-                            .map(|_| ())
-                            .map_err(|e| e.to_string())
+                        vf_fs::rebuild::sync_clients_listed(
+                            &mut c,
+                            &root,
+                            &device,
+                            "intake_clients",
+                        )
+                        .map(|_| ())
+                        .map_err(|e| e.to_string())
                     })
             }
         };
