@@ -46,7 +46,7 @@ Sharing a document through the [portal](help:portal), or sending a [secure link]
 Tick documents in Browse and choose **Sync to B2** › **Remove the selected documents from B2…**, then confirm. They are deleted from the B2 bucket only:
 
 - The files stay in the cabinet on every computer.
-- A portal link to them stops working.
+- A portal share of them may stop working.
 - No rule sends them again. Pushing or sharing them by hand puts them back.
 
 Anyone can do this; it is written to the audit trail. If another computer's changes to the client are not in yet, the documents leave B2 at the next push instead.

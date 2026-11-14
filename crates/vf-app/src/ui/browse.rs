@@ -2348,7 +2348,7 @@ pub fn show(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env) {
                 "They are deleted from the B2 bucket only. The files stay in the cabinet on every computer.",
             );
             ui.label(widgets::caption(
-                "A portal link to them stops working. They are not sent to B2 again until you push or share them. The removal is written to the audit trail.",
+                "A portal share of them may stop working. They are not sent to B2 again until you push or share them. The removal is written to the audit trail.",
             ));
             ui.add_space(8.0);
             ui.horizontal(|ui| {

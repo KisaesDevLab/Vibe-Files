@@ -247,59 +247,65 @@ const MIRRORED: &str = "audit_mirrored_seq";
 /// Appends to `<dir>/<yyyy-mm>.jsonl` every row not mirrored yet, and remembers how far it got.
 /// Run after changes (the app calls it every few seconds); returns how many rows it wrote.
 pub fn mirror_pending(conn: &Connection, dir: &Path) -> Result<usize> {
-    // Several sessions can share one catalog (Q-67). The rows are claimed first, under the
-    // catalog's write lock and with nothing else done under it; the files are written after
-    // (writing to the share under the lock made every other session's writes wait for it).
-    conn.execute_batch("BEGIN IMMEDIATE")?;
-    let claim = (|| -> Result<(u64, u64)> {
-        let done: u64 = conn
+    // The rows are written first, with no lock held (writing to the share under the catalog's
+    // write lock made every other session's writes wait for it), and the mark is moved on
+    // only after: a process killed in between writes them again next time, never leaves them
+    // out. Several sessions can share one catalog (Q-67): two that copy at the same moment
+    // may both write a row, which a reader can tell by its `seq`.
+    let read_mark = |conn: &Connection| -> Result<u64> {
+        Ok(conn
             .query_row("SELECT v FROM local_state WHERE k = ?1", [MIRRORED], |r| {
                 r.get::<_, String>(0)
             })
             .optional()?
             .and_then(|v| v.parse().ok())
-            .unwrap_or(0);
-        let last: u64 =
-            conn.query_row("SELECT coalesce(max(seq), 0) FROM audit", [], |r| r.get(0))?;
-        if last > done {
-            set_mirrored(conn, last)?;
-        }
-        Ok((done, last))
-    })();
-    conn.execute_batch(if claim.is_ok() { "COMMIT" } else { "ROLLBACK" })?;
-    let (done, last) = claim?;
+            .unwrap_or(0))
+    };
+    let done = read_mark(conn)?;
+    let last: u64 = conn.query_row("SELECT coalesce(max(seq), 0) FROM audit", [], |r| r.get(0))?;
     if last <= done {
         return Ok(0);
     }
-    let written = (|| -> Result<usize> {
+    let rows = {
         let mut st = conn.prepare(
             "SELECT seq, ts, user, device_id, action, doc_id, detail, prev_hash, hash
              FROM audit WHERE seq > ?1 AND seq <= ?2 ORDER BY seq",
         )?;
-        let rows = st
-            .query_map([done, last], |r| {
-                Ok(AuditRow {
-                    seq: r.get(0)?,
-                    ts: r.get(1)?,
-                    user: r.get(2)?,
-                    device: r.get(3)?,
-                    action: r.get(4)?,
-                    doc: r.get(5)?,
-                    detail: r.get(6)?,
-                    prev_hash: r.get(7)?,
-                    hash: r.get(8)?,
-                })
-            })?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        mirror_append(dir, &rows).map_err(|e| crate::Error::Tx(format!("audit mirror: {e}")))?;
-        Ok(rows.len())
-    })();
-    if written.is_err() {
-        // Not written: claimed again next time. (Rows another session wrote meanwhile are
-        // then written twice, which a reader can tell by their `seq`; none is ever left out.)
-        let _ = set_mirrored(conn, done);
+        st.query_map([done, last], |r| {
+            Ok(AuditRow {
+                seq: r.get(0)?,
+                ts: r.get(1)?,
+                user: r.get(2)?,
+                device: r.get(3)?,
+                action: r.get(4)?,
+                doc: r.get(5)?,
+                detail: r.get(6)?,
+                prev_hash: r.get(7)?,
+                hash: r.get(8)?,
+            })
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?
+    };
+    // Another session got there first (the mark moved while the rows were read): nothing to
+    // write for the rows it covered.
+    let now = read_mark(conn)?;
+    let rows: Vec<AuditRow> = rows.into_iter().filter(|r| r.seq > now).collect();
+    if rows.is_empty() {
+        return Ok(0);
     }
-    written
+    mirror_append(dir, &rows).map_err(|e| crate::Error::Tx(format!("audit mirror: {e}")))?;
+    // The mark only ever moves forward.
+    conn.execute_batch("BEGIN IMMEDIATE")?;
+    let moved = read_mark(conn).and_then(|cur| {
+        if last > cur {
+            set_mirrored(conn, last)
+        } else {
+            Ok(())
+        }
+    });
+    conn.execute_batch(if moved.is_ok() { "COMMIT" } else { "ROLLBACK" })?;
+    moved?;
+    Ok(rows.len())
 }
 
 /// Whether there are rows [`mirror_pending`] has not written yet (two small reads of the

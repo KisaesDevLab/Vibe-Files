@@ -296,17 +296,15 @@ pub fn sync_decisions(
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
         Err(e) => return Err(format!("{DECISIONS_FILE}: {e}")),
     };
-    // The last line for a document wins (the file is in the order the decisions were made).
+    // The latest decision for each document wins. Each line is matched to its document first
+    // (by id, else by the path it had then): a document approved, then renamed, then taken
+    // back has lines under two paths, and the later one must still win.
     let mut last: BTreeMap<String, Decision> = BTreeMap::new();
     for line in text.lines().filter(|l| !l.trim().is_empty()) {
         // A line cut short (two PCs writing at once) is left out, not a reason to stop.
-        if let Ok(d) = serde_json::from_str::<Decision>(line) {
-            last.insert(d.rel_path.to_lowercase(), d);
-        }
-    }
-    let mut tx = Transaction::new(DECIDE_LABEL);
-    let mut n = 0;
-    for d in last.values() {
+        let Ok(d) = serde_json::from_str::<Decision>(line) else {
+            continue;
+        };
         let Some(doc): Option<String> = conn
             .query_row(
                 "SELECT id FROM document
@@ -319,6 +317,17 @@ pub fn sync_decisions(
         else {
             continue;
         };
+        if last
+            .get(&doc)
+            .is_none_or(|have| have.at.as_str() <= d.at.as_str())
+        {
+            last.insert(doc, d);
+        }
+    }
+    let mut tx = Transaction::new(DECIDE_LABEL);
+    let mut n = 0;
+    for (doc, d) in &last {
+        let doc = doc.clone();
         let have: Option<(String, Option<String>)> = conn
             .query_row(
                 "SELECT decided_at, destroyed_at FROM disposition WHERE doc_id = ?1",
@@ -1435,6 +1444,44 @@ mod tests {
         assert_eq!(run.destroyed, 0);
         assert!(pending(&conn).unwrap().is_empty());
         assert!(f.root.join("B/2018/return.pdf").is_file());
+    }
+
+    /// Approved, then renamed, then taken back: a catalog made later must not bring the
+    /// approval back (the two lines name the document by different paths).
+    #[test]
+    fn an_approval_taken_back_after_a_rename_stays_taken_back() {
+        let mut f = fx();
+        let today = d(2026, 11, 3);
+        let r = eligible(&f.conn, &f.root, today).unwrap();
+        let ret: Vec<Line> = r
+            .lines
+            .into_iter()
+            .filter(|l| l.doc_id == "ret-2018")
+            .collect();
+        approve(&mut f.conn, &f.root, "dev", &ret, today).unwrap();
+        std::fs::rename(
+            f.root.join("B/2018/return.pdf"),
+            f.root.join("B/2018/return 2018.pdf"),
+        )
+        .unwrap();
+        f.conn
+            .execute(
+                "UPDATE document SET rel_path = 'B/2018/return 2018.pdf' WHERE id = 'ret-2018'",
+                [],
+            )
+            .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        assert_eq!(
+            cancel(&mut f.conn, &f.root, "dev", &["ret-2018".into()]).unwrap(),
+            1
+        );
+        // A catalog made later.
+        f.conn.execute("DELETE FROM disposition", []).unwrap();
+        sync_decisions(&mut f.conn, &f.root, "pc-2").unwrap();
+        assert!(pending(&f.conn).unwrap().is_empty());
+        let run = destroy_due(&mut f.conn, &f.root, "pc-2", d(2026, 12, 4), "Firm").unwrap();
+        assert_eq!(run.destroyed, 0);
+        assert!(f.root.join("B/2018/return 2018.pdf").is_file());
     }
 
     /// QA P3: an approval is checked again at destroy time. Reclassified as permanent, or new

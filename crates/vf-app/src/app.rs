@@ -834,6 +834,8 @@ impl eframe::App for VibeFilesApp {
             }
             if let Some(r) = crate::ui::job::take(&mut o.mirror_job) {
                 let r = r.and_then(|r| r);
+                // The copy's own mark in the catalog is not a change by others (Q-102).
+                o.data_version.0 = 0;
                 o.mirror_wait = match r {
                     Ok(_) => std::time::Duration::from_secs(2),
                     Err(_) => (o.mirror_wait * 2).min(std::time::Duration::from_secs(120)),
