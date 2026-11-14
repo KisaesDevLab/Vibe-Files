@@ -447,19 +447,24 @@ impl Transaction {
                 let _ = clear_journal(conn, &tx_id);
             }
         };
-        let sql_tx =
-            match rusqlite::Transaction::new_unchecked(conn, TransactionBehavior::Immediate) {
-                Ok(t) => t,
-                Err(e) => {
-                    // Nothing was done: no journal row may stay (a later recovery would take it for
-                    // an interrupted change and move files back).
-                    forget(conn);
-                    return Err(e.into());
-                }
-            };
-        let prepared = (|| -> Result<Vec<AuditRow>> {
+        // The catalog's write lock is held only while the catalog is written, never while
+        // files are moved on the share (QA #2: trashing a thousand documents held it for most
+        // of a minute, and the other sessions sharing the catalog waited and then failed).
+        //
+        // 1. The catalog statements are tried and rolled back: one that fails touches no file.
+        let check = match rusqlite::Transaction::new_unchecked(conn, TransactionBehavior::Immediate)
+        {
+            Ok(t) => t,
+            Err(e) => {
+                // Nothing was done: no journal row may stay (a later recovery would take it for
+                // an interrupted change and move files back).
+                forget(conn);
+                return Err(e.into());
+            }
+        };
+        let write = |sql_tx: &rusqlite::Transaction<'_>| -> Result<Vec<AuditRow>> {
             for s in &self.catalog {
-                s.run(&sql_tx)?;
+                s.run(sql_tx)?;
             }
             let mut rows = Vec::with_capacity(self.audit.len());
             for e in &self.audit {
@@ -468,7 +473,7 @@ impl Transaction {
                     m.insert("tx".into(), tx_id.clone().into());
                 }
                 rows.push(audit::append(
-                    &sql_tx,
+                    sql_tx,
                     &ts,
                     actor.user.as_deref(),
                     &actor.device_id,
@@ -476,23 +481,21 @@ impl Transaction {
                 )?);
             }
             Ok(rows)
-        })();
-        let rows = match prepared {
-            Ok(r) => r,
-            Err(e) => {
-                drop(sql_tx);
-                forget(conn);
-                return Err(e);
-            }
         };
+        let tried = write(&check);
+        drop(check); // rolled back: nothing is written yet
+        if let Err(e) = tried {
+            forget(conn);
+            return Err(e);
+        }
 
+        // 2. The file changes, with no lock held. The journal row says what is under way.
         let mut applied: Vec<AppliedOp> = Vec::with_capacity(self.files.len());
         for op in &self.files {
             match fs.apply(op) {
                 Ok(a) => applied.push(a),
                 Err(e) => {
                     let leftovers = reverse_all(fs, &applied);
-                    drop(sql_tx); // rollback
                     forget(conn);
                     return Err(Error::FileOp {
                         error: e,
@@ -502,40 +505,57 @@ impl Transaction {
             }
         }
 
+        // 3. The catalog, in one short transaction. If it cannot be written now (another
+        // session changed the same rows meanwhile), the files go back.
         let record = UndoRecord {
             applied: applied.clone(),
-            catalog_undo: self.catalog_undo,
-            extra: self.extra,
+            catalog_undo: self.catalog_undo.clone(),
+            extra: self.extra.clone(),
         };
-        let stored = sql_tx
-            .execute(
-                "INSERT INTO undo_record (tx_id, user, device_id, ts, label, record)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                rusqlite::params![
-                    tx_id,
-                    actor.user,
-                    actor.device_id,
-                    ts,
-                    self.label,
-                    serde_json::to_string(&record).expect("undo record serializes")
-                ],
-            )
-            .and_then(|_| sql_tx.execute("DELETE FROM tx_journal WHERE tx_id = ?1", [&tx_id]))
-            .map_err(Error::from)
-            .and_then(|_| sql_tx.commit().map_err(Error::from));
-        if let Err(e) = stored {
-            let leftovers = reverse_all(fs, &applied);
-            forget(conn);
-            return Err(Error::FileOp {
-                error: format!("catalog commit failed ({e}); file changes reversed"),
-                not_reversed: leftovers,
-            });
+        let stored =
+            match rusqlite::Transaction::new_unchecked(conn, TransactionBehavior::Immediate) {
+                Err(e) => Err(Error::from(e)),
+                Ok(sql_tx) => {
+                    let written = write(&sql_tx).and_then(|rows| {
+                        sql_tx.execute(
+                            "INSERT INTO undo_record (tx_id, user, device_id, ts, label, record)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                            rusqlite::params![
+                                tx_id,
+                                actor.user,
+                                actor.device_id,
+                                ts,
+                                self.label,
+                                serde_json::to_string(&record).expect("undo record serializes")
+                            ],
+                        )?;
+                        sql_tx.execute("DELETE FROM tx_journal WHERE tx_id = ?1", [&tx_id])?;
+                        Ok(rows)
+                    });
+                    match written {
+                        Ok(rows) => sql_tx.commit().map(|()| rows).map_err(Error::from),
+                        Err(e) => {
+                            drop(sql_tx);
+                            Err(e)
+                        }
+                    }
+                }
+            };
+        match stored {
+            Ok(rows) => Ok(Committed {
+                tx_id,
+                applied,
+                audit: rows,
+            }),
+            Err(e) => {
+                let leftovers = reverse_all(fs, &applied);
+                forget(conn);
+                Err(Error::FileOp {
+                    error: format!("catalog commit failed ({e}); file changes reversed"),
+                    not_reversed: leftovers,
+                })
+            }
         }
-        Ok(Committed {
-            tx_id,
-            applied,
-            audit: rows,
-        })
     }
 }
 
@@ -778,6 +798,66 @@ mod tests {
         assert_eq!(count(&c, "audit"), 2);
         assert!(crate::audit::verify(&c).unwrap().ok());
         assert!(undo(&mut c, &mut fs, &actor, &done.tx_id).is_err());
+    }
+
+    /// QA #2: while a transaction moves its files (on a share, that is the slow part),
+    /// another session sharing the catalog can still write to it; and what that session
+    /// wrote is there after the commit.
+    #[test]
+    fn the_catalog_is_not_locked_while_files_are_moved() {
+        struct Busy {
+            inner: FakeFs,
+            catalog: PathBuf,
+            wrote: usize,
+        }
+        impl FileOps for Busy {
+            fn apply(&mut self, op: &FileOp) -> std::result::Result<AppliedOp, String> {
+                // Another session, mid-move: it must not have to wait for this one.
+                let other = open(&self.catalog, Storage::Local).map_err(|e| e.to_string())?;
+                other
+                    .busy_timeout(std::time::Duration::ZERO)
+                    .map_err(|e| e.to_string())?;
+                other
+                    .execute(
+                        "INSERT INTO local_state (k, v) VALUES (?1, 'x')
+                         ON CONFLICT(k) DO UPDATE SET v = 'x'",
+                        [format!("other-session-{}", self.wrote)],
+                    )
+                    .map_err(|e| format!("the catalog was locked during a file move: {e}"))?;
+                self.wrote += 1;
+                self.inner.apply(op)
+            }
+            fn reverse(&mut self, a: &AppliedOp) -> std::result::Result<(), String> {
+                self.inner.reverse(a)
+            }
+        }
+        let (t, mut c, actor) = setup();
+        let mut fs = Busy {
+            inner: FakeFs::default(),
+            catalog: t.path().join("c.db"),
+            wrote: 0,
+        };
+        fs.inner
+            .files
+            .extend(["/in/a.pdf".into(), "/in/b.pdf".into()]);
+        tx_two_moves().commit(&mut c, &mut fs, &actor).unwrap();
+        assert_eq!(fs.wrote, 2);
+        assert_eq!(count(&c, "device"), 1);
+        assert_eq!(
+            count(&c, "audit"),
+            1,
+            "the trial run left no audit row behind"
+        );
+        assert_eq!(count(&c, "tx_journal"), 0);
+        let others: i64 = c
+            .query_row(
+                "SELECT count(*) FROM local_state WHERE k LIKE 'other-session-%'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(others, 2);
+        assert!(crate::audit::verify(&c).unwrap().ok());
     }
 
     #[test]
