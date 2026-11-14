@@ -19,6 +19,7 @@ pub mod hints;
 pub mod holds;
 pub mod import;
 pub mod intake;
+pub mod lock;
 pub mod measure;
 pub mod merge;
 pub mod moveto;

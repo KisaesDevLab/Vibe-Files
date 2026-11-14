@@ -1013,129 +1013,23 @@ pub fn index_finish(
 
 /// `_Vibe/index.lock`, held while an index from the listing writes the records of documents
 /// that had none: two PCs indexing a cabinet for the first time at once would give one file
-/// two ids. The holder writes the file again every [`IndexLock::BEAT`], so a PC that finds it
-/// waits for as long as it keeps changing, and takes it over only once it has seen it stay the
-/// same for [`IndexLock::STALE`] (left by a PC that stopped). What changes is watched, not the
-/// file's time against this PC's clock: the file server's clock may differ.
-struct IndexLock {
-    held: Option<(PathBuf, String)>,
-    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    beat: Option<std::thread::JoinHandle<()>>,
-}
+/// two ids. A PC that finds it waits for as long as its holder keeps it alive
+/// ([`crate::lock`]), and takes over one left by a PC that stopped.
+struct IndexLock;
 
 impl IndexLock {
-    const BEAT: std::time::Duration = std::time::Duration::from_secs(20);
-    const STALE: std::time::Duration = std::time::Duration::from_secs(120);
-
-    fn take(root: &Path) -> Self {
-        Self::take_with(root, Self::BEAT, Self::STALE)
+    fn take(root: &Path) -> crate::lock::Held {
+        Self::take_with(root, crate::lock::BEAT, crate::lock::STALE)
     }
 
-    fn none() -> Self {
-        IndexLock {
-            held: None,
-            stop: Default::default(),
-            beat: None,
-        }
-    }
-
-    fn take_with(root: &Path, beat: std::time::Duration, stale: std::time::Duration) -> Self {
-        use std::sync::atomic::Ordering;
+    fn take_with(
+        root: &Path,
+        beat: std::time::Duration,
+        stale: std::time::Duration,
+    ) -> crate::lock::Held {
         let path = root.join(cabinet::VIBE_DIR).join("index.lock");
-        let token = vf_core::new_id();
-        let body = |n: u64| {
-            format!(
-                "{token} {n} {}",
-                std::env::var("COMPUTERNAME").unwrap_or_default()
-            )
-        };
-        // What the lock held by another PC looked like, and since when it has not changed.
-        let mut seen: Option<(String, std::time::Instant)> = None;
-        loop {
-            let made = std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&path);
-            match made {
-                Ok(mut f) => {
-                    use std::io::Write;
-                    let _ = f.write_all(body(0).as_bytes());
-                    drop(f);
-                    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-                    let (stop2, path2, token2) = (stop.clone(), path.clone(), token.clone());
-                    let thread = std::thread::Builder::new()
-                        .name("index-lock".into())
-                        .spawn(move || {
-                            let mut n = 0u64;
-                            let mut last = std::time::Instant::now();
-                            while !stop2.load(Ordering::Relaxed) {
-                                // Woken at once when the lock is given back.
-                                std::thread::park_timeout(beat.saturating_sub(last.elapsed()));
-                                if stop2.load(Ordering::Relaxed) {
-                                    return;
-                                }
-                                if last.elapsed() < beat {
-                                    continue;
-                                }
-                                last = std::time::Instant::now();
-                                // Only while it is still this PC's (taken over: left alone).
-                                let mine = std::fs::read_to_string(&path2)
-                                    .is_ok_and(|t| t.starts_with(token2.as_str()));
-                                if !mine {
-                                    return;
-                                }
-                                n += 1;
-                                let _ = std::fs::write(
-                                    &path2,
-                                    format!(
-                                        "{token2} {n} {}",
-                                        std::env::var("COMPUTERNAME").unwrap_or_default()
-                                    ),
-                                );
-                            }
-                        })
-                        .ok();
-                    return IndexLock {
-                        held: Some((path, token)),
-                        stop,
-                        beat: thread,
-                    };
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                    let now = std::fs::read_to_string(&path).unwrap_or_default();
-                    match &seen {
-                        Some((was, since)) if *was == now => {
-                            if since.elapsed() > stale {
-                                // Not written again for that long: its PC stopped.
-                                let _ = std::fs::remove_file(&path);
-                                seen = None;
-                                continue;
-                            }
-                        }
-                        _ => seen = Some((now, std::time::Instant::now())),
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(100).min(beat));
-                }
-                // A cabinet that cannot be written (read-only share): nothing to guard.
-                Err(_) => return Self::none(),
-            }
-        }
-    }
-}
-
-impl Drop for IndexLock {
-    fn drop(&mut self) {
-        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
-        if let Some(t) = self.beat.take() {
-            t.thread().unpark();
-            let _ = t.join();
-        }
-        // Given back only if it is still this PC's.
-        if let Some((p, token)) = self.held.take()
-            && std::fs::read_to_string(&p).is_ok_and(|t| t.starts_with(token.as_str()))
-        {
-            let _ = std::fs::remove_file(p);
-        }
+        // No limit to the wait: it cannot be refused.
+        crate::lock::take_at(&path, None, beat, stale).unwrap_or_else(|_| unreachable!())
     }
 }
 

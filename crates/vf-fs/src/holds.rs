@@ -319,10 +319,14 @@ pub fn place(
             json!({ "hold": id, "documents": hold.docs.len(), "reason": hold.reason })
         }
     };
-    let mut holds = load(root)?;
-    holds.push(hold);
-    save(root, &holds)?;
-    write(conn, device_id, &holds, "legal_hold_place", detail)?;
+    // Read, added to and written back under the cabinet's lock (PA-68): a hold placed on
+    // another PC at the same moment is not lost.
+    crate::lock::with(root, LOCK, "the legal holds", || {
+        let mut holds = load(root)?;
+        holds.push(hold);
+        save(root, &holds)?;
+        write(conn, device_id, &holds, "legal_hold_place", detail)
+    })?;
     Ok(id)
 }
 
@@ -333,17 +337,22 @@ pub fn release(
     device_id: &str,
     id: &str,
 ) -> Result<(), String> {
-    let mut holds = load(root)?;
-    let h = holds
-        .iter_mut()
-        .find(|h| h.id == id && h.active())
-        .ok_or("That hold is not active any more.")?;
-    h.released = Some(vf_core::now_rfc3339());
-    h.released_by = vf_core::windows_login();
-    let detail = json!({ "hold": id, "reason": h.reason });
-    save(root, &holds)?;
-    write(conn, device_id, &holds, "legal_hold_release", detail)
+    crate::lock::with(root, LOCK, "the legal holds", || {
+        let mut holds = load(root)?;
+        let h = holds
+            .iter_mut()
+            .find(|h| h.id == id && h.active())
+            .ok_or("That hold is not active any more.")?;
+        h.released = Some(vf_core::now_rfc3339());
+        h.released_by = vf_core::windows_login();
+        let detail = json!({ "hold": id, "reason": h.reason });
+        save(root, &holds)?;
+        write(conn, device_id, &holds, "legal_hold_release", detail)
+    })
 }
+
+/// The cabinet lock ([`crate::lock`]) a change to the holds file is made under.
+const LOCK: &str = "holds";
 
 fn write(
     conn: &mut Connection,
