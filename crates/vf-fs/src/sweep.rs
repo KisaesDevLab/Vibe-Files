@@ -1033,6 +1033,32 @@ pub fn due(conn: &Connection) -> bool {
     last_sweep(conn).is_none_or(|t| t < vf_core::rfc3339_days_ago(EVERY_DAYS))
 }
 
+/// `_Vibe/last-sweep.txt`: when a sweep of the cabinet last finished, on whichever computer
+/// (PA-60). A catalog knows only its own sweeps, and one made anew each morning (a session
+/// host reset to a clean image) knows none: it would sweep every day, or never.
+fn cabinet_sweep_file(root: &Path) -> PathBuf {
+    root.join(crate::cabinet::VIBE_DIR).join("last-sweep.txt")
+}
+
+/// When a sweep of the cabinet last finished (RFC 3339), by any computer.
+pub fn cabinet_last_sweep(root: &Path) -> Option<String> {
+    std::fs::read_to_string(cabinet_sweep_file(root))
+        .ok()
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty())
+}
+
+/// Notes in the cabinet that a sweep finished at `ts` (best effort).
+pub fn record_cabinet_sweep(root: &Path, ts: &str) {
+    let _ = crate::cabinet::write_replace(&cabinet_sweep_file(root), ts.as_bytes());
+}
+
+/// [`due`], counting the sweeps other computers (or this one before it was reset) finished.
+pub fn due_for(conn: &Connection, root: &Path) -> bool {
+    let last = last_sweep(conn).max(cabinet_last_sweep(root));
+    last.is_none_or(|t| t < vf_core::rfc3339_days_ago(EVERY_DAYS))
+}
+
 #[cfg(test)]
 mod tests {
     use vf_core::db::Storage;

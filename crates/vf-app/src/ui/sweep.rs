@@ -121,6 +121,7 @@ impl SweepState {
         };
         let now = vf_core::now_rfc3339();
         let _ = sweep::set_last_sweep(conn, &now);
+        sweep::record_cabinet_sweep(root, &now);
         self.when = Some(now);
         self.adopted.clear();
         if !d.modified.is_empty() {

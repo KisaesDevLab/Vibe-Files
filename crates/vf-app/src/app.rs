@@ -417,7 +417,12 @@ impl VibeFilesApp {
                 };
                 crate::cloudmode::check_conflicts(ctx, &opened.root);
                 let mut sweep = crate::ui::sweep::SweepState::default();
-                if vf_fs::sweep::due(&opened.conn) {
+                // The weekly sweep reads files: on the main computer only (PA-60), and by the
+                // cabinet's own note of the last one, so a host reset each night does not
+                // start it every morning.
+                if vf_fs::sweep::due_for(&opened.conn, &opened.root)
+                    && crate::server::runs_here(&opened.root)
+                {
                     sweep.start(ctx, &opened.catalog, &opened.root);
                 }
                 self.screen = Screen::Open(Box::new(OpenCabinet {
