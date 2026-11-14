@@ -127,6 +127,43 @@ pub fn existing(conn: &Connection, hash: &str) -> Option<String> {
     holders(conn, hash).ok()?.into_iter().next().map(|h| h.1)
 }
 
+/// Older documents one check of a file not yet filed reads, at most (it runs as the file
+/// arrives).
+const READ_BEFORE_FILING: usize = 5;
+
+/// [`existing`] for a file of `size` bytes that is about to be filed (a scan in Filer's
+/// inbox): when no fingerprinted document has its content, the documents of exactly its size
+/// that were never read (PA-60) are read, at most [`READ_BEFORE_FILING`], and looked at again.
+pub fn existing_sized(
+    conn: &mut Connection,
+    root: &Path,
+    device_id: &str,
+    hash: &str,
+    size: u64,
+) -> Option<String> {
+    if let Some(found) = existing(conn, hash) {
+        return Some(found);
+    }
+    let ids: Vec<String> = conn
+        .prepare_cached(
+            "SELECT id FROM document
+             WHERE hash IS NULL AND size = ?1 AND deleted_at IS NULL
+             ORDER BY filed_at LIMIT ?2",
+        )
+        .and_then(|mut st| {
+            st.query_map((size as i64, READ_BEFORE_FILING as i64), |r| r.get(0))?
+                .collect()
+        })
+        .ok()?;
+    if ids.is_empty() {
+        return None;
+    }
+    for id in ids {
+        let _ = crate::fingerprint::ensure(conn, root, device_id, &id);
+    }
+    existing(conn, hash)
+}
+
 /// Moves document `doc_id`'s file to `_Vibe/trash/<id>/<name>` and tombstones it, as one
 /// Transaction. Returns the transaction id (undo puts it back).
 pub fn trash(

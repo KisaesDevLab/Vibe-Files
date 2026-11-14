@@ -1095,7 +1095,8 @@ impl eframe::App for VibeFilesApp {
                             ui.spinner();
                             ui.label(*what);
                         });
-                        // A first index reads every file: say how far it is (owner 2026-11-05).
+                        // A first index lists every client folder (PA-60: it reads no file):
+                        // say how far it is (owner 2026-11-05).
                         use std::sync::atomic::Ordering;
                         let p = &vf_fs::rebuild::PROGRESS;
                         let (dirs, found, read) = (
@@ -1105,7 +1106,7 @@ impl eframe::App for VibeFilesApp {
                         );
                         if found > 0 {
                             ui.label(crate::ui::widgets::caption(format!(
-                                "Indexing: {read} of {found} files read ({dirs} client folders). The first open on a PC reads every file once; later opens are quick."
+                                "Indexing: {read} of {found} files listed ({dirs} client folders). Files are listed, not read; later opens skip this."
                             )));
                         } else if dirs > 0 {
                             ui.label(crate::ui::widgets::caption(format!(
@@ -1137,7 +1138,9 @@ impl eframe::App for VibeFilesApp {
                 &self.config.device_id,
                 &self.config.ingest,
             );
-            o.intake.ingest.check_dupes(&o.opened.conn);
+            o.intake
+                .ingest
+                .check_dupes(&mut o.opened.conn, &o.opened.root, &self.config.device_id);
             if let Some(p) = o.intake.ingest.open_request.take()
                 && let Err(e) = (o.browse.shell)(&crate::shell::ShellAction::Open(p))
             {
@@ -2663,14 +2666,19 @@ mod tests {
             let Screen::Open(o) = &h.state().screen else {
                 unreachable!()
             };
-            let id = o.viewer.doc.as_ref().unwrap().doc_id.clone();
-            let hash: String = o
+            let doc = o.viewer.doc.as_ref().unwrap();
+            let id = doc.doc_id.clone();
+            // Cataloged from the folder listing (PA-60): not fingerprinted until needed, so
+            // the content the old version must have is what the file holds now.
+            let hash: Option<String> = o
                 .opened
                 .conn
                 .query_row("SELECT hash FROM document WHERE id = ?1", [&id], |r| {
                     r.get(0)
                 })
                 .unwrap();
+            let hash =
+                hash.unwrap_or_else(|| filer_intake::commit::sha256_file(&doc.path).unwrap());
             (id, hash)
         };
         // Letter tickmarks A-Z, and the tickmark color and initials kept in this PC's

@@ -99,7 +99,8 @@ pub fn create(data: &Path, device_id: &str, r: &CreateRequest) -> Result<Opened>
     std::fs::create_dir_all(data).with_context(|| format!("creating {}", data.display()))?;
     let mut conn = db::open(&catalog, Storage::Local)?;
     let live = vf_fs::fileops::hold_live(data);
-    let rep = vf_fs::rebuild::rebuild(&mut conn, r.root, device_id)?;
+    // From the folder listing (PA-60): the files already in the folder are not read.
+    let rep = vf_fs::rebuild::index(&mut conn, r.root, device_id)?;
     Ok(Opened {
         root: r.root.to_owned(),
         cabinet: cab,
@@ -229,8 +230,10 @@ pub fn open(data: &Path, device_id: &str, root: &Path) -> Result<Opened> {
             tracing::warn!(kind = crate::logging::kind(&e), "change logs not marked");
         }
     }
+    // From the folder listing (PA-60): no file is read. Ids, details and known fingerprints
+    // come from each client folder's records, so every PC has the same catalog.
     let rebuild = if known == 0 || vf_fs::rebuild::unfinished(&conn) {
-        Some(vf_fs::rebuild::rebuild(&mut conn, root, device_id)?)
+        Some(vf_fs::rebuild::index(&mut conn, root, device_id)?)
     } else {
         None
     };

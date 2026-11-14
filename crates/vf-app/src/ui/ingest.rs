@@ -295,7 +295,12 @@ impl IngestState {
 
     /// Checks newly delivered files against the catalog (every frame, cheap when nothing
     /// arrived) and applies a choice made on one.
-    pub fn check_dupes(&mut self, conn: &vf_core::db::Connection) {
+    pub fn check_dupes(
+        &mut self,
+        conn: &mut vf_core::db::Connection,
+        root: &std::path::Path,
+        device_id: &str,
+    ) {
         if let Some((i, remove)) = self.pre_action.take()
             && i < self.pre_dupes.len()
         {
@@ -313,9 +318,14 @@ impl IngestState {
                 self.log_line(line);
             }
         }
-        // Hashes come from the pipeline thread: only catalog lookups here.
+        // Hashes come from the pipeline thread: catalog lookups here, and (PA-60) at most a
+        // few never-read documents of exactly the file's size read to compare.
         for (path, staging, hashes) in std::mem::take(&mut self.to_check) {
-            let found = hashes.iter().find_map(|h| vf_fs::dupes::existing(conn, h));
+            let size = std::fs::metadata(&path).map(|m| m.len()).ok();
+            let found = hashes.iter().find_map(|h| match size {
+                Some(size) => vf_fs::dupes::existing_sized(conn, root, device_id, h, size),
+                None => vf_fs::dupes::existing(conn, h),
+            });
             if let Some(existing) = found {
                 self.pre_dupes.push(PreDup {
                     path,
