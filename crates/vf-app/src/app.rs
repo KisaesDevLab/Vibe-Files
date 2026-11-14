@@ -547,6 +547,17 @@ impl VibeFilesApp {
     }
 }
 
+/// The cabinet closes (another is opened, or Vibe Files exits): the audit rows of the last
+/// seconds go to the cabinet's copy now. On a session host the catalog is gone by morning.
+impl Drop for OpenCabinet {
+    fn drop(&mut self) {
+        let dir = self.opened.root.join("_Vibe").join("audit");
+        if vf_core::audit::mirror_due(&self.opened.conn) {
+            let _ = vf_core::audit::mirror_pending(&self.opened.conn, &dir);
+        }
+    }
+}
+
 impl eframe::App for VibeFilesApp {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         self.poll(ui.ctx());
