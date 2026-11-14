@@ -393,7 +393,9 @@ impl VibeFilesApp {
                 let mut intake = IntakeTab::default();
                 let root = opened.root.clone();
                 let catalog = opened.catalog.clone();
-                intake.reconcile(&mut opened.conn, &catalog, &root, &self.config.device_id);
+                if indexing.is_none() {
+                    intake.reconcile(&mut opened.conn, &catalog, &root, &self.config.device_id);
+                }
                 self.config.last_cabinet = Some(opened.root.clone());
                 // The cabinet is open either way; a settings write failure only loses "last".
                 let _ = config::save(&self.data, &self.config);
@@ -669,7 +671,7 @@ impl eframe::App for VibeFilesApp {
                     o.index_wait = Some(f);
                 }
                 if let Some(e) = sh.take_error() {
-                    add_error(&mut o.browse.error, format!("Listing the cabinet: {e}"));
+                    tracing::warn!(kind = crate::logging::kind(&e), "listing the cabinet");
                 }
                 let (done, all, docs) = sh.progress();
                 if sh.finished() {
@@ -688,6 +690,19 @@ impl eframe::App for VibeFilesApp {
                     {
                         o.sweep.start(ui.ctx(), &o.opened.catalog, &o.opened.root);
                     }
+                    // What Intake filed meanwhile is recorded now.
+                    o.intake.reconcile(
+                        &mut o.opened.conn,
+                        &o.opened.catalog,
+                        &o.opened.root,
+                        &self.config.device_id,
+                    );
+                } else if sh.waiting() {
+                    o.browse.index_line = Some(format!(
+                        "The cabinet cannot be read just now: listing its files waits and tries again ({done} of {all} client folders listed)."
+                    ));
+                    ui.ctx()
+                        .request_repaint_after(std::time::Duration::from_secs(1));
                 } else {
                     o.browse.index_line = Some(match &o.index_wait {
                         Some(_) => format!(
@@ -843,12 +858,16 @@ impl eframe::App for VibeFilesApp {
                 if let Some(p) = o.intake.partner_change.take() {
                     o.browse.set_partner(p);
                 }
-                o.intake.reconcile(
-                    &mut o.opened.conn,
-                    &o.opened.catalog,
-                    &o.opened.root,
-                    &self.config.device_id,
-                );
+                // Not while the index runs behind the window (PA-60): a batch is recorded
+                // against the whole catalog.
+                if o.indexing.is_none() {
+                    o.intake.reconcile(
+                        &mut o.opened.conn,
+                        &o.opened.catalog,
+                        &o.opened.root,
+                        &self.config.device_id,
+                    );
+                }
             }
             Screen::Open(o) if self.tab == Tab::Search => {
                 let o = &mut **o;
@@ -1302,8 +1321,8 @@ impl eframe::App for VibeFilesApp {
         }
         if let Screen::Open(o) = &mut self.screen {
             let o = &mut **o;
-            // The other servers' changes and B2 sync wait for the index behind the window:
-            // both catalog files they find.
+            // The other servers' changes wait for the index behind the window (they catalog
+            // the files they find); so does B2 sync, but for the documents chosen.
             let indexed = o.indexing.is_none();
             if indexed
                 && let Some(w) = o.opened.writer.clone()
@@ -1318,18 +1337,17 @@ impl eframe::App for VibeFilesApp {
             {
                 o.browse.reload(&o.opened.conn);
             }
-            if indexed {
-                o.sync.tick(
-                    &ctx,
-                    &browse::Env {
-                        conn: &mut o.opened.conn,
-                        root: &o.opened.root,
-                        device_id: &o.opened.sync_device,
-                    },
-                    &o.opened.catalog,
-                    &self.config.sync,
-                );
-            }
+            o.sync.hold = !indexed;
+            o.sync.tick(
+                &ctx,
+                &browse::Env {
+                    conn: &mut o.opened.conn,
+                    root: &o.opened.root,
+                    device_id: &o.opened.sync_device,
+                },
+                &o.opened.catalog,
+                &self.config.sync,
+            );
             if std::mem::take(&mut o.sync.changed) {
                 o.browse.reload(&o.opened.conn);
             }

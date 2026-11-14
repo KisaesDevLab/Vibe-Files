@@ -171,6 +171,8 @@ fn tick(ui: &mut egui::Ui, list: &mut Vec<String>, item: &str, label: &str) {
 
 #[derive(Default)]
 pub struct SyncTab {
+    /// The cabinet is still being listed behind the window (set by the app, PA-60).
+    pub hold: bool,
     pub session: Option<Sync>,
     job: Option<(String, Receiver<Result<Done, String>>)>,
     /// The client a running push or pull is for (`Some("")` = all).
@@ -377,6 +379,14 @@ impl SyncTab {
             self.error = Some("Unlock sync first (Sync tab).".into());
             return;
         };
+        // The cabinet is still being listed behind the window (PA-60): only the documents
+        // chosen go up (a share pushes them first); the rest waits for the whole catalog.
+        if self.hold && !matches!(op, Op::PushDocs(_)) {
+            self.error = Some(
+                "The cabinet's files are still being listed. Try again when that is done.".into(),
+            );
+            return;
+        }
         if self.running() {
             return;
         }
@@ -498,6 +508,7 @@ impl SyncTab {
         if self.session.is_some()
             && !cfg.paused
             && cfg.auto_minutes > 0
+            && !self.hold
             && !self.running()
             && self
                 .last_auto

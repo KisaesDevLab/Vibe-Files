@@ -20,6 +20,13 @@ use vf_fs::rebuild::Staged;
 /// about a second, large enough that the parts' fixed cost does not add up.
 const PART: usize = 40;
 
+/// The first pause before a failed part is tried again; it grows with each failure.
+const RETRY: std::time::Duration = if cfg!(test) {
+    std::time::Duration::from_millis(20)
+} else {
+    std::time::Duration::from_secs(2)
+};
+
 /// What the window knows of the index running behind it.
 #[derive(Default)]
 pub struct Shared {
@@ -32,6 +39,8 @@ pub struct Shared {
     /// Documents cataloged so far.
     docs: AtomicUsize,
     finished: AtomicBool,
+    /// A part failed and is being tried again (the share cannot be read).
+    waiting: AtomicBool,
     stop: AtomicBool,
     /// What went wrong in a part (the index goes on with the next).
     error: Mutex<Option<String>>,
@@ -79,6 +88,16 @@ impl Shared {
         self.finished.load(Ordering::Relaxed)
     }
 
+    /// The cabinet cannot be read just now; the index is waiting to try again.
+    pub fn waiting(&self) -> bool {
+        self.waiting.load(Ordering::Relaxed)
+    }
+
+    /// Stops the index after the part it is on (the cabinet is being closed).
+    pub fn stop(&self) {
+        self.stop.store(true, Ordering::Relaxed);
+    }
+
     pub fn take_error(&self) -> Option<String> {
         self.error.lock().ok().and_then(|mut e| e.take())
     }
@@ -92,7 +111,7 @@ pub struct Indexer {
 
 impl Drop for Indexer {
     fn drop(&mut self) {
-        self.shared.stop.store(true, Ordering::Relaxed);
+        self.shared.stop();
     }
 }
 
@@ -168,31 +187,52 @@ pub fn run(
         if part.is_empty() {
             break;
         }
-        match vf_fs::rebuild::index_part(conn, root, device_id, staged, &part) {
-            Ok(rep) => {
-                shared.docs.fetch_add(rep.docs_new, Ordering::Relaxed);
-            }
-            Err(e) => {
-                tracing::warn!(
-                    kind = crate::logging::kind(&e.to_string()),
-                    "a part of the index failed"
-                );
-                if let Ok(mut err) = shared.error.lock() {
-                    *err = Some(e.to_string());
+        // A part that fails (the share went away for a moment) is tried again, after a pause
+        // that grows to half a minute, for as long as the cabinet is open. It is never taken
+        // for done: the index would end with most clients empty and not be run again.
+        let mut tries = 0u32;
+        loop {
+            match vf_fs::rebuild::index_part(conn, root, device_id, staged, &part) {
+                Ok(rep) => {
+                    shared.docs.fetch_add(rep.docs_new, Ordering::Relaxed);
+                    shared.waiting.store(false, Ordering::Relaxed);
+                    break;
+                }
+                Err(e) => {
+                    tries += 1;
+                    tracing::warn!(
+                        kind = crate::logging::kind(&e.to_string()),
+                        tries,
+                        "a part of the index failed"
+                    );
+                    if let Ok(mut err) = shared.error.lock() {
+                        *err = Some(e.to_string());
+                    }
+                    shared.waiting.store(true, Ordering::Relaxed);
+                    tick();
+                    let pause = RETRY * tries.min(15);
+                    let since = std::time::Instant::now();
+                    while since.elapsed() < pause {
+                        if shared.stop.load(Ordering::Relaxed) {
+                            return;
+                        }
+                        std::thread::sleep(RETRY.min(std::time::Duration::from_millis(200)));
+                    }
                 }
             }
         }
-        // Done either way: a folder that cannot be cataloged now is not tried in a loop (the
-        // client's folder is read again when it is opened in Browse).
         if let Ok(mut d) = shared.done.lock() {
             d.extend(part);
         }
         tick();
     }
-    if let Err(e) = vf_fs::rebuild::index_finish(conn, root, device_id)
-        && let Ok(mut err) = shared.error.lock()
-    {
-        *err = Some(e.to_string());
+    // Not finished: the unfinished mark stays, and the next open goes on.
+    if let Err(e) = vf_fs::rebuild::index_finish(conn, root, device_id) {
+        if let Ok(mut err) = shared.error.lock() {
+            *err = Some(e.to_string());
+        }
+        shared.waiting.store(true, Ordering::Relaxed);
+        return;
     }
     let (_, folders, docs) = shared.progress();
     tracing::info!(
@@ -208,9 +248,9 @@ pub fn run(
 mod tests {
     use super::*;
 
-    /// The folder asked for is cataloged first; the rest follow; nothing twice.
-    #[test]
-    fn the_folder_asked_for_goes_first() {
+    /// A cabinet of three clients (2, 3 and 1 documents) and a second PC's catalog, new to it,
+    /// with the clients written: (the folder kept, cabinet, catalog file, connection, staged).
+    fn second_pc() -> (tempfile::TempDir, PathBuf, PathBuf, Connection, Staged) {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().join("cab");
         let req = crate::session::CreateRequest {
@@ -227,27 +267,33 @@ mod tests {
         }
         let data = tmp.path().join("pc2");
         std::fs::create_dir_all(&data).unwrap();
-        let mut conn =
-            vf_core::db::open(&data.join("catalog.db"), vf_core::db::Storage::Local).unwrap();
+        let catalog = data.join("catalog.db");
+        let mut conn = vf_core::db::open(&catalog, vf_core::db::Storage::Local).unwrap();
         let staged = vf_fs::rebuild::index_start(&mut conn, &root, "dev-2").unwrap();
+        (tmp, root, catalog, conn, staged)
+    }
+
+    fn count(conn: &Connection) -> i64 {
+        conn.query_row(
+            "SELECT count(*) FROM document WHERE deleted_at IS NULL",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap()
+    }
+
+    /// The folder asked for is cataloged first; the rest follow; nothing twice.
+    #[test]
+    fn the_folder_asked_for_goes_first() {
+        let (_tmp, root, catalog, mut conn, staged) = second_pc();
         let shared = Shared::new(&staged);
         assert!(!shared.listed("Beta"));
         assert!(shared.listed("Made later"), "not this index's to catalog");
         shared.ask("Beta");
         shared.ask("Gamma");
         shared.ask("Beta"); // the latest asked for is first
-        // After the first part only Beta is there.
         let seen = std::cell::RefCell::new(Vec::new());
-        let count = |conn: &Connection| -> i64 {
-            conn.query_row(
-                "SELECT count(*) FROM document WHERE deleted_at IS NULL",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap()
-        };
-        let check =
-            vf_core::db::open(&data.join("catalog.db"), vf_core::db::Storage::Local).unwrap();
+        let check = vf_core::db::open(&catalog, vf_core::db::Storage::Local).unwrap();
         run(&mut conn, &root, "dev-2", &staged, &shared, &|| {
             seen.borrow_mut().push(count(&check));
         });
@@ -261,6 +307,102 @@ mod tests {
         assert!(!vf_fs::rebuild::unfinished(&conn));
         let (done, all, docs) = shared.progress();
         assert_eq!((done, all, docs), (3, 3, 6));
-        assert!(shared.take_error().is_none());
+    }
+
+    /// The share goes away while the index runs: the part is tried again until it is back.
+    /// It is never taken for done, and the index does not end as finished with clients empty.
+    #[test]
+    fn a_part_that_fails_is_tried_again() {
+        let (_tmp, root, _catalog, mut conn, staged) = second_pc();
+        let shared = Arc::new(Shared::new(&staged));
+        // The cabinet cannot be read (its own file is away).
+        let cab = root.join("_Vibe/cabinet.json");
+        let away = root.join("_Vibe/cabinet.away");
+        std::fs::rename(&cab, &away).unwrap();
+        let (sh, root2) = (shared.clone(), root.clone());
+        let t = std::thread::spawn(move || {
+            run(&mut conn, &root2, "dev-2", &staged, &sh, &|| {});
+            conn
+        });
+        let t0 = std::time::Instant::now();
+        while !shared.waiting() {
+            assert!(
+                t0.elapsed() < std::time::Duration::from_secs(20),
+                "never waited"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        assert!(!shared.finished());
+        assert_eq!(shared.progress().0, 0, "nothing taken for done");
+        // Back again: it goes on by itself.
+        std::fs::rename(&away, &cab).unwrap();
+        let conn = t.join().unwrap();
+        assert!(shared.finished());
+        assert!(!shared.waiting());
+        assert_eq!(count(&conn), 6);
+        assert!(!vf_fs::rebuild::unfinished(&conn));
+
+        // Stopped while it waits (the cabinet closed): left unfinished, for the next open.
+        let (_tmp, root, _catalog, mut conn, staged) = second_pc();
+        let shared = Arc::new(Shared::new(&staged));
+        std::fs::rename(
+            root.join("_Vibe/cabinet.json"),
+            root.join("_Vibe/cabinet.away"),
+        )
+        .unwrap();
+        let (sh, root2) = (shared.clone(), root.clone());
+        let t = std::thread::spawn(move || {
+            run(&mut conn, &root2, "dev-2", &staged, &sh, &|| {});
+            conn
+        });
+        while !shared.waiting() {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        shared.stop();
+        let conn = t.join().unwrap();
+        assert!(!shared.finished());
+        assert!(vf_fs::rebuild::unfinished(&conn));
+    }
+
+    /// As in the app: the index on its own thread and connection while the window's
+    /// connection writes to the same catalog.
+    #[test]
+    fn the_index_runs_on_its_thread_beside_the_windows_connection() {
+        let (_tmp, root, catalog, mut conn, staged) = second_pc();
+        let ix = Indexer::start(&egui::Context::default(), &catalog, &root, "dev-2", staged);
+        ix.shared.ask("Gamma");
+        let t0 = std::time::Instant::now();
+        let mut wrote = 0;
+        while !ix.shared.finished() {
+            assert!(
+                t0.elapsed() < std::time::Duration::from_secs(60),
+                "never finished"
+            );
+            // The window's own work meanwhile: a fingerprint for a document already listed.
+            let listed: Option<String> = conn
+                .query_row(
+                    "SELECT id FROM document WHERE hash IS NULL AND deleted_at IS NULL LIMIT 1",
+                    [],
+                    |r| r.get(0),
+                )
+                .ok();
+            if let Some(id) = listed
+                && vf_fs::fingerprint::ensure(&mut conn, &root, "dev-2", &id).is_ok()
+            {
+                wrote += 1;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        assert!(ix.shared.take_error().is_none());
+        assert_eq!(count(&conn), 6);
+        assert!(!vf_fs::rebuild::unfinished(&conn));
+        let ids: i64 = conn
+            .query_row("SELECT count(DISTINCT rel_path) FROM document", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(ids, 6, "no file cataloged twice");
+        let _ = wrote;
     }
 }
