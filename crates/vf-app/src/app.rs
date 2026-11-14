@@ -92,6 +92,10 @@ pub struct OpenCabinet {
     data_version: (i64, Option<std::time::Instant>),
     /// Browse's count of reloads when `data_version` was last taken as seen.
     seen_reloads: u64,
+    /// Until when a change to the catalog is taken for this session's own: its background
+    /// work (B2 sync, the sweep, a batch being recorded, the audit copy) writes on
+    /// connections of its own, which `data_version` cannot tell from another session's.
+    own_writes_until: Option<std::time::Instant>,
     /// Wait before the next mirror write: 2 s, doubling to 2 min after failures, so a share
     /// that went away is not waited on every 2 s (QA A7).
     mirror_wait: std::time::Duration,
@@ -492,6 +496,7 @@ impl VibeFilesApp {
                     mirror_job: None,
                     data_version: (0, None),
                     seen_reloads: 0,
+                    own_writes_until: None,
                     mirror_wait: std::time::Duration::from_secs(2),
                     sweep,
                     sync: Default::default(),
@@ -743,8 +748,16 @@ impl eframe::App for VibeFilesApp {
                         .request_repaint_after(std::time::Duration::from_millis(300));
                 }
             }
-            // Another session on this PC changed the shared catalog: read it again (at most
-            // every 3 s).
+            if o.sync.running()
+                || o.sweep.running()
+                || o.mirror_job.is_some()
+                || o.intake.recording()
+            {
+                o.own_writes_until =
+                    Some(std::time::Instant::now() + std::time::Duration::from_secs(5));
+            }
+            // Another session on this PC changed the shared catalog: said in Browse (looked
+            // at every 3 s at most).
             if o.opened.shared
                 && o.data_version
                     .1
@@ -762,7 +775,11 @@ impl eframe::App for VibeFilesApp {
                     // person's hands (owner 2026-11-13, Q-102).
                     if o.browse.reloads != o.seen_reloads {
                         o.seen_reloads = o.browse.reloads;
-                    } else if o.data_version.0 != 0 && v != o.data_version.0 && o.indexing.is_none()
+                    } else if o.data_version.0 != 0
+                        && v != o.data_version.0
+                        && o.indexing.is_none()
+                        && o.own_writes_until
+                            .is_none_or(|t| std::time::Instant::now() > t)
                     {
                         o.browse.others_changed = true;
                     }

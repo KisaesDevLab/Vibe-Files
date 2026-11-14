@@ -550,6 +550,12 @@ impl IntakeTab {
 
     /// Takes a finished reconcile's result (every frame, whatever tab shows). Returns whether
     /// one is still running.
+    /// Whether this session is writing to the catalog on a thread of its own right now (a
+    /// batch being recorded, the client list being brought in).
+    pub fn recording(&self) -> bool {
+        self.reconciling.is_some() || self.clients_syncing.is_some()
+    }
+
     pub fn poll_reconcile(&mut self) -> bool {
         let Some((_, rx)) = &self.reconciling else {
             return false;
