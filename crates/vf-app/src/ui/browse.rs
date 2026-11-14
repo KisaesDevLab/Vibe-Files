@@ -485,6 +485,11 @@ pub struct Browse {
     pub sync: Option<SyncView>,
     /// A sync action chosen here (taken by the app).
     pub sync_request: Option<SyncRequest>,
+    /// Another session changed the shared catalog since this list was read (Q-102): a notice
+    /// with Refresh is shown; the list does not reload by itself under the person's hands.
+    pub others_changed: bool,
+    /// Times the list was read from the catalog ([`Browse::reload`]).
+    pub reloads: u64,
     /// "Remove from B2…" asked for these documents: the confirmation is open.
     pub b2_remove: Option<Vec<String>>,
     /// Whether a portal share goes to B2 first, and with what (the app sets it each frame).
@@ -584,6 +589,8 @@ impl Browse {
             folder_dialog: None,
             client_merge: None,
             b2_remove: None,
+            others_changed: false,
+            reloads: 0,
             import: None,
             rel_form: RelForm::new(),
             meta_form: MetaForm::default(),
@@ -1094,6 +1101,8 @@ impl Browse {
 
     /// Re-reads the catalog, keeping scope (when it still exists) and selection by document id.
     pub fn reload(&mut self, conn: &Connection) {
+        self.reloads += 1;
+        self.others_changed = false;
         let keep: HashSet<String> = self
             .selected
             .iter()
@@ -3063,6 +3072,29 @@ fn sync_menu(ui: &mut egui::Ui, b: &mut Browse) {
             req = Some(SyncRequest::PushDocs(picked.clone()));
             ui.close();
         }
+        // A folder, a year or a search result (PA-63: push a folder): everything listed.
+        if !matches!(b.scope, Scope::Cabinet | Scope::Client(_)) && !b.visible.is_empty() {
+            let shown: Vec<String> = b
+                .visible
+                .iter()
+                .map(|&i| b.snap.docs[i].id.clone())
+                .collect();
+            let label = match shown.len() {
+                1 => "Push the document shown now".to_string(),
+                n => format!("Push the {n} documents shown now"),
+            };
+            if ui
+                .add_enabled(idle, egui::Button::new(label))
+                .on_hover_text(
+                    "Sends every document listed here (this folder and the folders in it) to B2 at once, whatever the B2 rules hold back.",
+                )
+                .on_disabled_hover_text("Wait for the running sync.")
+                .clicked()
+            {
+                req = Some(SyncRequest::PushDocs(shown));
+                ui.close();
+            }
+        }
         let label = match picked.len() {
             0 | 1 => "Remove the selected document from B2…".to_string(),
             n => format!("Remove the {n} selected documents from B2…"),
@@ -3231,6 +3263,18 @@ fn grid(ui: &mut egui::Ui, b: &mut Browse, conn: &Connection) {
         ui.horizontal(|ui| {
             ui.spinner();
             ui.label(RichText::new(line).color(theme::ink_secondary()));
+        });
+    }
+    if b.others_changed {
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Changes by others.").color(theme::ink_secondary()));
+            if ui
+                .small_btn("Refresh")
+                .on_hover_text("Read the list again with what other people changed")
+                .clicked()
+            {
+                b.reload(conn);
+            }
         });
     }
     let mut dismiss = false;

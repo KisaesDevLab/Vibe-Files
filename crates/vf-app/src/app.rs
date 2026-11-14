@@ -86,8 +86,10 @@ pub struct OpenCabinet {
     /// When new audit rows were last copied to `_Vibe/audit/<month>.jsonl`.
     mirrored_at: Option<std::time::Instant>,
     /// A shared catalog (Q-67): its `data_version` when last seen, and when it was looked at;
-    /// another session's change makes Browse read the catalog again.
+    /// another session's change shows "Changes by others: Refresh" in Browse (Q-102).
     data_version: (i64, Option<std::time::Instant>),
+    /// Browse's count of reloads when `data_version` was last taken as seen.
+    seen_reloads: u64,
     /// Wait before the next mirror write: 2 s, doubling to 2 min after failures, so a share
     /// that went away is not waited on every 2 s (QA A7).
     mirror_wait: std::time::Duration,
@@ -486,6 +488,7 @@ impl VibeFilesApp {
                     chain,
                     mirrored_at: None,
                     data_version: (0, None),
+                    seen_reloads: 0,
                     mirror_wait: std::time::Duration::from_secs(2),
                     sweep,
                     sync: Default::default(),
@@ -740,8 +743,14 @@ impl eframe::App for VibeFilesApp {
                     .query_row("PRAGMA data_version", [], |r| r.get::<_, i64>(0))
                 {
                     // (The index behind the window changes it all the time: read above.)
-                    if o.data_version.0 != 0 && v != o.data_version.0 && o.indexing.is_none() {
-                        o.browse.reload(&o.opened.conn);
+                    // A change since Browse last read the catalog is someone else's (this
+                    // session's own work ends with a reload): said, not reloaded under the
+                    // person's hands (owner 2026-11-13, Q-102).
+                    if o.browse.reloads != o.seen_reloads {
+                        o.seen_reloads = o.browse.reloads;
+                    } else if o.data_version.0 != 0 && v != o.data_version.0 && o.indexing.is_none()
+                    {
+                        o.browse.others_changed = true;
                     }
                     o.data_version.0 = v;
                 }
