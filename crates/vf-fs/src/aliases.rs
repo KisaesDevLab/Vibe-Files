@@ -49,25 +49,28 @@ pub fn load(root: &Path) -> Vec<Alias> {
 
 /// Records that `payer`'s forms belong to `client_id` (replacing what was learned for it).
 pub fn learn(root: &Path, payer: &str, client_id: &str) -> Result<(), String> {
-    let payer = payer.trim();
-    if payer.is_empty() {
-        return Ok(());
-    }
-    let mut all = load(root);
-    all.retain(|a| key(&a.payer) != key(payer));
-    all.push(Alias {
-        payer: payer.into(),
-        client_id: client_id.into(),
-        learned: vf_core::now_rfc3339(),
-    });
-    let f = FileV1 {
-        version: 1,
-        aliases: all,
-    };
-    crate::cabinet::write_replace(
-        &path(root),
-        &serde_json::to_vec_pretty(&f).expect("serializes"),
-    )
+    // Under the cabinet lock (PA-68): read, changed and written back as one.
+    crate::lock::with(root, "aliases", "the payer names", || {
+        let payer = payer.trim();
+        if payer.is_empty() {
+            return Ok(());
+        }
+        let mut all = load(root);
+        all.retain(|a| key(&a.payer) != key(payer));
+        all.push(Alias {
+            payer: payer.into(),
+            client_id: client_id.into(),
+            learned: vf_core::now_rfc3339(),
+        });
+        let f = FileV1 {
+            version: 1,
+            aliases: all,
+        };
+        crate::cabinet::write_replace(
+            &path(root),
+            &serde_json::to_vec_pretty(&f).expect("serializes"),
+        )
+    })
 }
 
 #[cfg(test)]

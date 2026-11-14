@@ -40,32 +40,38 @@ fn write(root: &Path, all: &[SavedSearch]) -> Result<(), String> {
 
 /// Saves `query` as `name` (a search with that name is replaced). Returns its id.
 pub fn add(root: &Path, name: &str, query: &Query, device: &str) -> Result<String, String> {
-    let name = name.trim();
-    if name.is_empty() {
-        return Err("Give the search a name.".into());
-    }
-    let mut all = load(root);
-    let id = all
-        .iter()
-        .find(|s| s.name.eq_ignore_ascii_case(name))
-        .map(|s| s.id.clone())
-        .unwrap_or_else(vf_core::new_id);
-    all.retain(|s| s.id != id);
-    all.push(SavedSearch {
-        id: id.clone(),
-        name: name.to_string(),
-        query: query.clone(),
-        created: vf_core::now_rfc3339(),
-        device: device.into(),
-    });
-    write(root, &all)?;
-    Ok(id)
+    // Under the cabinet lock (PA-68): read, changed and written back as one.
+    vf_fs::lock::with(root, "saved-searches", "the saved searches", || {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err("Give the search a name.".into());
+        }
+        let mut all = load(root);
+        let id = all
+            .iter()
+            .find(|s| s.name.eq_ignore_ascii_case(name))
+            .map(|s| s.id.clone())
+            .unwrap_or_else(vf_core::new_id);
+        all.retain(|s| s.id != id);
+        all.push(SavedSearch {
+            id: id.clone(),
+            name: name.to_string(),
+            query: query.clone(),
+            created: vf_core::now_rfc3339(),
+            device: device.into(),
+        });
+        write(root, &all)?;
+        Ok(id)
+    })
 }
 
 pub fn remove(root: &Path, id: &str) -> Result<(), String> {
-    let mut all = load(root);
-    all.retain(|s| s.id != id);
-    write(root, &all)
+    // Under the cabinet lock (PA-68): read, changed and written back as one.
+    vf_fs::lock::with(root, "saved-searches", "the saved searches", || {
+        let mut all = load(root);
+        all.retain(|s| s.id != id);
+        write(root, &all)
+    })
 }
 
 #[cfg(test)]

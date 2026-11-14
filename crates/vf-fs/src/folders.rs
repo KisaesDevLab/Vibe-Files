@@ -440,12 +440,14 @@ pub fn rename_client(
     plan: &ClientRename,
     device_id: &str,
 ) -> Result<(), String> {
-    // A client bound by its folder only (no list yet) is put on the list first.
-    clients::ensure_listed(conn, root)?;
-    if let Some((old, new)) = &plan.folder {
-        let now = vf_core::now_rfc3339();
-        let set_folder = |f: &str| {
-            Stmt::new(
+    // Under the cabinet lock (PA-68): read, changed and written back as one.
+    crate::lock::with(root, "clients", "the client list", || {
+        // A client bound by its folder only (no list yet) is put on the list first.
+        clients::ensure_listed(conn, root)?;
+        if let Some((old, new)) = &plan.folder {
+            let now = vf_core::now_rfc3339();
+            let set_folder = |f: &str| {
+                Stmt::new(
                 "UPDATE client SET folder_rel = ?2, device_id = ?3, updated_at = ?4, rev = rev + 1
                  WHERE id = ?1",
                 vec![
@@ -455,39 +457,40 @@ pub fn rename_client(
                     now.clone().into(),
                 ],
             )
+            };
+            let tx = Transaction::new(RENAME_CLIENT)
+                .catalog(set_folder(new))
+                .catalog_undo(set_folder(old));
+            let (tx, docs) = move_folder(conn, root, old, new, true, device_id, tx)?;
+            let tx = tx.audit(AuditEntry::new(
+                RENAME_CLIENT,
+                None,
+                json!({ "client": plan.ext_id, "folder": old, "to": new, "documents": docs }),
+            ));
+            crate::fileops::commit(conn, root, tx, device_id)?;
+        }
+        let mut list = clients::load(root)?
+            .list
+            .unwrap_or_else(crate::newclient::empty_list);
+        let Some(c) = list
+            .clients
+            .iter_mut()
+            .find(|c| c.uuid.to_string() == plan.client_id)
+        else {
+            return Err(format!(
+                "{} is not on the client list; the folder was renamed, the name was not.",
+                plan.ext_id
+            ));
         };
-        let tx = Transaction::new(RENAME_CLIENT)
-            .catalog(set_folder(new))
-            .catalog_undo(set_folder(old));
-        let (tx, docs) = move_folder(conn, root, old, new, true, device_id, tx)?;
-        let tx = tx.audit(AuditEntry::new(
-            RENAME_CLIENT,
-            None,
-            json!({ "client": plan.ext_id, "folder": old, "to": new, "documents": docs }),
-        ));
-        crate::fileops::commit(conn, root, tx, device_id)?;
-    }
-    let mut list = clients::load(root)?
-        .list
-        .unwrap_or_else(crate::newclient::empty_list);
-    let Some(c) = list
-        .clients
-        .iter_mut()
-        .find(|c| c.uuid.to_string() == plan.client_id)
-    else {
-        return Err(format!(
-            "{} is not on the client list; the folder was renamed, the name was not.",
-            plan.ext_id
-        ));
-    };
-    c.name = plan.new_name.clone();
-    clients::save_list(root, &list)?;
-    // Catalog rows following the list: not an undo of its own. Only this client's folder is
-    // read again (PA-61).
-    let reread: Vec<String> = plan.folder.iter().map(|(_, new)| new.clone()).collect();
-    crate::rebuild::sync_clients_edited(conn, root, device_id, "clients_edit", &reread)
-        .map_err(|e| e.to_string())?;
-    Ok(())
+        c.name = plan.new_name.clone();
+        clients::save_list(root, &list)?;
+        // Catalog rows following the list: not an undo of its own. Only this client's folder is
+        // read again (PA-61).
+        let reread: Vec<String> = plan.folder.iter().map(|(_, new)| new.clone()).collect();
+        crate::rebuild::sync_clients_edited(conn, root, device_id, "clients_edit", &reread)
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    })
 }
 
 /// What setting a client's ID does, for the dialog's preview.
@@ -611,160 +614,163 @@ pub fn set_client_id(
     plan: &ClientIdChange,
     device_id: &str,
 ) -> Result<Option<String>, String> {
-    clients::ensure_listed(conn, root)?;
-    // The client list, relationships and shares by the new ID.
-    let mut master = clients::load(root)?;
-    let before = master.clone();
-    let mut list = master
-        .list
-        .take()
-        .unwrap_or_else(crate::newclient::empty_list);
-    let Some(c) = list
-        .clients
-        .iter_mut()
-        .find(|c| c.uuid.to_string() == plan.client_id)
-    else {
-        return Err(format!("{} is not on the client list.", plan.old_id));
-    };
-    c.id = plan.new_id.clone();
-    let (uuid, name) = (c.uuid, c.name.clone());
-    list.uuids
-        .retain(|k, v| *v != uuid && !k.eq_ignore_ascii_case(&plan.old_id));
-    list.uuids.insert(plan.new_id.clone(), uuid);
-    clients::save_list(root, &list)?;
-    let is_old = |x: &str| x.eq_ignore_ascii_case(&plan.old_id);
-    let swap = |x: &mut String| {
-        if x.eq_ignore_ascii_case(&plan.old_id) {
-            *x = plan.new_id.clone();
+    // Under the cabinet lock (PA-68): read, changed and written back as one.
+    crate::lock::with(root, "clients", "the client list", || {
+        clients::ensure_listed(conn, root)?;
+        // The client list, relationships and shares by the new ID.
+        let mut master = clients::load(root)?;
+        let before = master.clone();
+        let mut list = master
+            .list
+            .take()
+            .unwrap_or_else(crate::newclient::empty_list);
+        let Some(c) = list
+            .clients
+            .iter_mut()
+            .find(|c| c.uuid.to_string() == plan.client_id)
+        else {
+            return Err(format!("{} is not on the client list.", plan.old_id));
+        };
+        c.id = plan.new_id.clone();
+        let (uuid, name) = (c.uuid, c.name.clone());
+        list.uuids
+            .retain(|k, v| *v != uuid && !k.eq_ignore_ascii_case(&plan.old_id));
+        list.uuids.insert(plan.new_id.clone(), uuid);
+        clients::save_list(root, &list)?;
+        let is_old = |x: &str| x.eq_ignore_ascii_case(&plan.old_id);
+        let swap = |x: &mut String| {
+            if x.eq_ignore_ascii_case(&plan.old_id) {
+                *x = plan.new_id.clone();
+            }
+        };
+        let mut rels = master.rels.clone();
+        if rels
+            .records
+            .iter()
+            .any(|r| is_old(&r.parent_id) || is_old(&r.child_id))
+        {
+            for r in rels.records.iter_mut() {
+                swap(&mut r.parent_id);
+                swap(&mut r.child_id);
+            }
+            clients::save_rels(root, &rels)?;
         }
-    };
-    let mut rels = master.rels.clone();
-    if rels
-        .records
-        .iter()
-        .any(|r| is_old(&r.parent_id) || is_old(&r.child_id))
-    {
-        for r in rels.records.iter_mut() {
-            swap(&mut r.parent_id);
-            swap(&mut r.child_id);
+        if master
+            .meta
+            .shares
+            .iter()
+            .any(|r| is_old(&r.parent_id) || is_old(&r.child_id))
+        {
+            for r in master.meta.shares.iter_mut() {
+                swap(&mut r.parent_id);
+                swap(&mut r.child_id);
+            }
+            clients::save_meta(root, &master.meta)?;
         }
-        clients::save_rels(root, &rels)?;
-    }
-    if master
-        .meta
-        .shares
-        .iter()
-        .any(|r| is_old(&r.parent_id) || is_old(&r.child_id))
-    {
-        for r in master.meta.shares.iter_mut() {
-            swap(&mut r.parent_id);
-            swap(&mut r.child_id);
-        }
-        clients::save_meta(root, &master.meta)?;
-    }
-    // Put back as it was when the folder and sentinel cannot follow.
-    let restore = |e: String| -> String {
-        if let Some(l) = &before.list {
-            let _ = clients::save_list(root, l);
-        }
-        let _ = clients::save_rels(root, &before.rels);
-        let _ = clients::save_meta(root, &before.meta);
-        e
-    };
-    let now = vf_core::now_rfc3339();
-    let set_ext = |e: &str| {
-        Stmt::new(
-            "UPDATE client SET ext_id = ?2, device_id = ?3, updated_at = ?4, rev = rev + 1
-             WHERE id = ?1",
-            vec![
-                plan.client_id.clone().into(),
-                e.into(),
-                device_id.into(),
-                now.clone().into(),
-            ],
-        )
-    };
-    let mut tx = Transaction::new(SET_CLIENT_ID)
-        .catalog(set_ext(&plan.new_id))
-        .catalog_undo(set_ext(&plan.old_id));
-    let mut docs = 0;
-    if let Some((old, new)) = &plan.folder {
-        let set_folder = |f: &str| {
+        // Put back as it was when the folder and sentinel cannot follow.
+        let restore = |e: String| -> String {
+            if let Some(l) = &before.list {
+                let _ = clients::save_list(root, l);
+            }
+            let _ = clients::save_rels(root, &before.rels);
+            let _ = clients::save_meta(root, &before.meta);
+            e
+        };
+        let now = vf_core::now_rfc3339();
+        let set_ext = |e: &str| {
             Stmt::new(
-                "UPDATE client SET folder_rel = ?2 WHERE id = ?1",
-                vec![plan.client_id.clone().into(), f.into()],
+                "UPDATE client SET ext_id = ?2, device_id = ?3, updated_at = ?4, rev = rev + 1
+             WHERE id = ?1",
+                vec![
+                    plan.client_id.clone().into(),
+                    e.into(),
+                    device_id.into(),
+                    now.clone().into(),
+                ],
             )
         };
-        tx = tx.catalog(set_folder(new)).catalog_undo(set_folder(old));
-        let (t, n) = move_folder(conn, root, old, new, true, device_id, tx).map_err(restore)?;
-        tx = t;
-        docs = n;
-    }
-    if let Some(now_rel) = &plan.folder_now {
-        let after = plan.folder.as_ref().map_or(now_rel, |(_, n)| n);
-        let dir = root.join(after);
-        // Read where it is now (before the rename).
-        if let Some(s) =
-            filer_intake::sentinel::read_sentinel(&root.join(now_rel)).map_err(restore)?
-        {
-            let sentinel = filer_intake::sentinel::sentinel_path(&dir);
-            let secs = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_or(0, |d| d.as_secs());
-            // A free name where the sentinel is now (an ID set twice in one second).
-            let here = filer_intake::sentinel::sentinel_path(&root.join(now_rel));
-            let name = (0..)
-                .map(|n| match n {
-                    0 => format!("client.json.before-{secs}"),
-                    n => format!("client.json.before-{secs}-{n}"),
-                })
-                .find(|n| !here.with_file_name(n).exists())
-                .expect("a free name");
-            tx = tx
-                .file(FileOp::Move {
-                    src: sentinel.clone(),
-                    dst: sentinel.with_file_name(name),
-                })
-                .file(FileOp::WriteSentinel {
-                    root: root.to_owned(),
-                    folder: dir,
-                    client_id: s.client_id.to_string(),
-                    ext_id: plan.new_id.clone(),
-                    name: s.display_name_at_creation.clone(),
-                    firm_id: s.firm_id.to_string(),
-                });
-        }
-    }
-    tx = tx.audit(AuditEntry::new(
-        SET_CLIENT_ID,
-        None,
-        json!({ "client": plan.client_id, "from": plan.old_id, "to": plan.new_id,
-                "folder": plan.folder, "documents": docs }),
-    ));
-    crate::fileops::commit(conn, root, tx, device_id).map_err(restore)?;
-
-    // On the CSV Intake re-imports, so it is kept (as a client made with + New client).
-    let partner = master.meta.partners.get(&plan.client_id).cloned();
-    let note =
-        clients::change_id_in_csv(root, &plan.old_id, &plan.new_id, &name, partner.as_deref())
-            .err()
-            .map(|e| {
-                format!(
-                    "The client CSV was not updated ({e}): add {} there.",
-                    plan.new_id
+        let mut tx = Transaction::new(SET_CLIENT_ID)
+            .catalog(set_ext(&plan.new_id))
+            .catalog_undo(set_ext(&plan.old_id));
+        let mut docs = 0;
+        if let Some((old, new)) = &plan.folder {
+            let set_folder = |f: &str| {
+                Stmt::new(
+                    "UPDATE client SET folder_rel = ?2 WHERE id = ?1",
+                    vec![plan.client_id.clone().into(), f.into()],
                 )
-            });
-    // Only this client's folder (its sentinel was rewritten) is read again (PA-61).
-    let reread: Vec<String> = plan
-        .folder
-        .as_ref()
-        .map(|(_, new)| new.clone())
-        .or_else(|| plan.folder_now.clone())
-        .into_iter()
-        .collect();
-    crate::rebuild::sync_clients_edited(conn, root, device_id, "clients_edit", &reread)
-        .map_err(|e| e.to_string())?;
-    Ok(note)
+            };
+            tx = tx.catalog(set_folder(new)).catalog_undo(set_folder(old));
+            let (t, n) = move_folder(conn, root, old, new, true, device_id, tx).map_err(restore)?;
+            tx = t;
+            docs = n;
+        }
+        if let Some(now_rel) = &plan.folder_now {
+            let after = plan.folder.as_ref().map_or(now_rel, |(_, n)| n);
+            let dir = root.join(after);
+            // Read where it is now (before the rename).
+            if let Some(s) =
+                filer_intake::sentinel::read_sentinel(&root.join(now_rel)).map_err(restore)?
+            {
+                let sentinel = filer_intake::sentinel::sentinel_path(&dir);
+                let secs = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |d| d.as_secs());
+                // A free name where the sentinel is now (an ID set twice in one second).
+                let here = filer_intake::sentinel::sentinel_path(&root.join(now_rel));
+                let name = (0..)
+                    .map(|n| match n {
+                        0 => format!("client.json.before-{secs}"),
+                        n => format!("client.json.before-{secs}-{n}"),
+                    })
+                    .find(|n| !here.with_file_name(n).exists())
+                    .expect("a free name");
+                tx = tx
+                    .file(FileOp::Move {
+                        src: sentinel.clone(),
+                        dst: sentinel.with_file_name(name),
+                    })
+                    .file(FileOp::WriteSentinel {
+                        root: root.to_owned(),
+                        folder: dir,
+                        client_id: s.client_id.to_string(),
+                        ext_id: plan.new_id.clone(),
+                        name: s.display_name_at_creation.clone(),
+                        firm_id: s.firm_id.to_string(),
+                    });
+            }
+        }
+        tx = tx.audit(AuditEntry::new(
+            SET_CLIENT_ID,
+            None,
+            json!({ "client": plan.client_id, "from": plan.old_id, "to": plan.new_id,
+                "folder": plan.folder, "documents": docs }),
+        ));
+        crate::fileops::commit(conn, root, tx, device_id).map_err(restore)?;
+
+        // On the CSV Intake re-imports, so it is kept (as a client made with + New client).
+        let partner = master.meta.partners.get(&plan.client_id).cloned();
+        let note =
+            clients::change_id_in_csv(root, &plan.old_id, &plan.new_id, &name, partner.as_deref())
+                .err()
+                .map(|e| {
+                    format!(
+                        "The client CSV was not updated ({e}): add {} there.",
+                        plan.new_id
+                    )
+                });
+        // Only this client's folder (its sentinel was rewritten) is read again (PA-61).
+        let reread: Vec<String> = plan
+            .folder
+            .as_ref()
+            .map(|(_, new)| new.clone())
+            .or_else(|| plan.folder_now.clone())
+            .into_iter()
+            .collect();
+        crate::rebuild::sync_clients_edited(conn, root, device_id, "clients_edit", &reread)
+            .map_err(|e| e.to_string())?;
+        Ok(note)
+    })
 }
 
 #[cfg(test)]

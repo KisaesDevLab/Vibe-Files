@@ -789,35 +789,37 @@ pub fn set_pin(
     current: Option<&str>,
     new: &str,
 ) -> Result<(), String> {
-    let had = has_pin(root);
-    if had && !current.is_some_and(|c| check_pin(root, c)) {
-        return Err("the current admin password is not right".into());
-    }
-    let set_before = conn
-        .query_row(
-            "SELECT 1 FROM audit WHERE action = 'firm_pin_set' LIMIT 1",
-            [],
-            |_| Ok(()),
-        )
-        .is_ok();
-    let hash = vf_security::pin::hash(new)?;
-    let body = json!({ "hash": hash, "set": vf_core::now_rfc3339() });
-    cabinet::write_replace(
-        &pin_file(root),
-        &serde_json::to_vec_pretty(&body).expect("serializes"),
-    )?;
-    let how = if had {
-        "changed"
-    } else if set_before {
-        "reset (the PIN file had been removed)"
-    } else {
-        "first set"
-    };
-    Transaction::new(PIN_LABEL)
-        .audit(AuditEntry::new("firm_pin_set", None, json!({ "how": how })))
-        .commit(conn, &mut NoFileOps, &Actor::device(device_id))
-        .map(|_| ())
-        .map_err(|e| e.to_string())
+    crate::lock::with(root, "admin", "the admin settings", || {
+        let had = has_pin(root);
+        if had && !current.is_some_and(|c| check_pin(root, c)) {
+            return Err("the current admin password is not right".into());
+        }
+        let set_before = conn
+            .query_row(
+                "SELECT 1 FROM audit WHERE action = 'firm_pin_set' LIMIT 1",
+                [],
+                |_| Ok(()),
+            )
+            .is_ok();
+        let hash = vf_security::pin::hash(new)?;
+        let body = json!({ "hash": hash, "set": vf_core::now_rfc3339() });
+        cabinet::write_replace(
+            &pin_file(root),
+            &serde_json::to_vec_pretty(&body).expect("serializes"),
+        )?;
+        let how = if had {
+            "changed"
+        } else if set_before {
+            "reset (the PIN file had been removed)"
+        } else {
+            "first set"
+        };
+        Transaction::new(PIN_LABEL)
+            .audit(AuditEntry::new("firm_pin_set", None, json!({ "how": how })))
+            .commit(conn, &mut NoFileOps, &Actor::device(device_id))
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    })
 }
 
 /// Unlocks Admin and the Sync settings with the admin password (Q-49). Both outcomes are
@@ -855,16 +857,19 @@ pub fn remove_pin(
     device_id: &str,
     current: &str,
 ) -> Result<(), String> {
-    if !check_pin(root, current) {
-        return Err("the current admin password is not right".into());
-    }
-    cabinet::write_replace(&pin_file(root), REMOVED_MARKER.as_bytes())
-        .map_err(|e| e.to_string())?;
-    Transaction::new(PIN_LABEL)
-        .audit(AuditEntry::new("firm_pin_removed", None, json!({})))
-        .commit(conn, &mut NoFileOps, &Actor::device(device_id))
-        .map(|_| ())
-        .map_err(|e| e.to_string())
+    // Under the cabinet lock (PA-68): read, changed and written back as one.
+    crate::lock::with(root, "admin", "the admin settings", || {
+        if !check_pin(root, current) {
+            return Err("the current admin password is not right".into());
+        }
+        cabinet::write_replace(&pin_file(root), REMOVED_MARKER.as_bytes())
+            .map_err(|e| e.to_string())?;
+        Transaction::new(PIN_LABEL)
+            .audit(AuditEntry::new("firm_pin_removed", None, json!({})))
+            .commit(conn, &mut NoFileOps, &Actor::device(device_id))
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    })
 }
 
 /// `_Vibe/admin_open.json`: the Admin pages anyone may open while the admin password locks
@@ -897,20 +902,23 @@ pub fn set_open_pages(
     device_id: &str,
     pages: &[String],
 ) -> Result<(), String> {
-    let body = json!({ "open": pages, "set": vf_core::now_rfc3339() });
-    cabinet::write_replace(
-        &open_pages_file(root),
-        &serde_json::to_vec_pretty(&body).expect("serializes"),
-    )?;
-    Transaction::new(PIN_LABEL)
-        .audit(AuditEntry::new(
-            "admin_open_set",
-            None,
-            json!({ "open": pages }),
-        ))
-        .commit(conn, &mut NoFileOps, &Actor::device(device_id))
-        .map(|_| ())
-        .map_err(|e| e.to_string())
+    // Under the cabinet lock (PA-68): read, changed and written back as one.
+    crate::lock::with(root, "admin", "the admin settings", || {
+        let body = json!({ "open": pages, "set": vf_core::now_rfc3339() });
+        cabinet::write_replace(
+            &open_pages_file(root),
+            &serde_json::to_vec_pretty(&body).expect("serializes"),
+        )?;
+        Transaction::new(PIN_LABEL)
+            .audit(AuditEntry::new(
+                "admin_open_set",
+                None,
+                json!({ "open": pages }),
+            ))
+            .commit(conn, &mut NoFileOps, &Actor::device(device_id))
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    })
 }
 
 #[cfg(test)]

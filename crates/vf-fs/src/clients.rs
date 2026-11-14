@@ -278,47 +278,50 @@ pub fn save_list(root: &Path, list: &ClientList) -> Result<(), String> {
 /// cabinet made before the list) otherwise gives Intake no clients to pick (owner 2026-11-04).
 /// Returns how many were added.
 pub fn ensure_listed(conn: &vf_core::db::Connection, root: &Path) -> Result<usize, String> {
-    let mut st = conn
-        .prepare(
-            "SELECT id, ext_id, name FROM client
+    // Under the cabinet lock (PA-68): read, changed and written back as one.
+    crate::lock::with(root, "clients", "the client list", || {
+        let mut st = conn
+            .prepare(
+                "SELECT id, ext_id, name FROM client
              WHERE deleted_at IS NULL AND folder_rel IS NOT NULL AND ext_id <> ''
              ORDER BY name",
-        )
-        .map_err(|e| e.to_string())?;
-    let rows: Vec<(String, String, String)> = st
-        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
-        .map_err(|e| e.to_string())?
-        .collect::<Result<_, _>>()
-        .map_err(|e| e.to_string())?;
-    if rows.is_empty() {
-        return Ok(0);
-    }
-    let mut list = load(root)?
-        .list
-        .unwrap_or_else(crate::newclient::empty_list);
-    let have: std::collections::HashSet<String> =
-        list.clients.iter().map(|c| c.id.to_uppercase()).collect();
-    let mut added = 0;
-    for (id, ext, name) in rows {
-        if have.contains(&ext.to_uppercase()) {
-            continue;
+            )
+            .map_err(|e| e.to_string())?;
+        let rows: Vec<(String, String, String)> = st
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .map_err(|e| e.to_string())?
+            .collect::<Result<_, _>>()
+            .map_err(|e| e.to_string())?;
+        if rows.is_empty() {
+            return Ok(0);
         }
-        let Ok(uuid) = Uuid::parse_str(&id) else {
-            continue;
-        };
-        list.uuids.insert(ext.clone(), uuid);
-        list.clients.push(Client {
-            id: ext,
-            uuid,
-            name,
-            extra: BTreeMap::new(),
-        });
-        added += 1;
-    }
-    if added > 0 {
-        save_list(root, &list)?;
-    }
-    Ok(added)
+        let mut list = load(root)?
+            .list
+            .unwrap_or_else(crate::newclient::empty_list);
+        let have: std::collections::HashSet<String> =
+            list.clients.iter().map(|c| c.id.to_uppercase()).collect();
+        let mut added = 0;
+        for (id, ext, name) in rows {
+            if have.contains(&ext.to_uppercase()) {
+                continue;
+            }
+            let Ok(uuid) = Uuid::parse_str(&id) else {
+                continue;
+            };
+            list.uuids.insert(ext.clone(), uuid);
+            list.clients.push(Client {
+                id: ext,
+                uuid,
+                name,
+                extra: BTreeMap::new(),
+            });
+            added += 1;
+        }
+        if added > 0 {
+            save_list(root, &list)?;
+        }
+        Ok(added)
+    })
 }
 
 pub fn save_rels(root: &Path, rels: &Relationships) -> Result<(), String> {
@@ -404,75 +407,78 @@ pub fn append_to_csv(
     name: &str,
     partner: Option<&str>,
 ) -> Result<Option<PathBuf>, String> {
-    // The CSV Intake › Setup names (and re-imports): none after "Stop using the CSV".
-    let (settings, _) = filer_core::config::Settings::load_or_default(&master_dir(root));
-    let Some(csv) = settings.csv_path.clone() else {
-        return Ok(None);
-    };
-    if csv.as_os_str().is_empty() {
-        return Ok(None);
-    }
-    if !csv.is_file() {
-        return Err(format!("{} cannot be reached from this PC", csv.display()));
-    }
-    let map = &settings.column_map;
-    let table = clients::read_csv(&csv).map_err(|e| format!("{}: {e}", csv.display()))?;
-    let (Some(id_h), Some(name_h)) = (map.id.as_deref(), map.name.as_deref()) else {
-        return Err("the client list has no ID and name columns mapped".into());
-    };
-    let col = |h: &str| table.headers.iter().position(|x| x == h);
-    let id_col = col(id_h).ok_or_else(|| format!("no column {id_h} in {}", csv.display()))?;
-    if table.rows.iter().any(|r| {
-        r.get(id_col)
-            .is_some_and(|v| v.trim().eq_ignore_ascii_case(id.trim()))
-    }) {
-        return Ok(None);
-    }
-    let fields: Vec<String> = table
-        .headers
-        .iter()
-        .map(|h| {
-            if h == id_h {
-                id.trim().to_string()
-            } else if h == name_h {
-                name.trim().to_string()
-            } else if map.partner.as_deref() == Some(h.as_str()) {
-                partner.unwrap_or("").trim().to_string()
-            } else {
-                String::new()
-            }
-        })
-        .collect();
-    let line: String = fields
-        .iter()
-        .map(|f| csv_field(f))
-        .collect::<Vec<_>>()
-        .join(",");
-    let raw = std::fs::read(&csv).map_err(|e| format!("{}: {e}", csv.display()))?;
-    let crlf = raw.windows(2).any(|w| w == b"\r\n") || !raw.contains(&b'\n');
-    let eol: &[u8] = if crlf { b"\r\n" } else { b"\n" };
-    let mut bytes: Vec<u8> = vec![];
-    if !raw.is_empty() && !raw.ends_with(b"\n") {
-        bytes.extend_from_slice(eol);
-    }
-    match table.encoding {
-        clients::Encoding::Windows1252 => {
-            for c in line.chars() {
-                bytes.push(to_1252(c).ok_or_else(|| {
-                    format!("\"{c}\" cannot be written in this CSV's Windows-1252 text")
-                })?);
-            }
+    // Under the cabinet lock (PA-68): read, changed and written back as one.
+    crate::lock::with(root, "clients", "the client list", || {
+        // The CSV Intake › Setup names (and re-imports): none after "Stop using the CSV".
+        let (settings, _) = filer_core::config::Settings::load_or_default(&master_dir(root));
+        let Some(csv) = settings.csv_path.clone() else {
+            return Ok(None);
+        };
+        if csv.as_os_str().is_empty() {
+            return Ok(None);
         }
-        _ => bytes.extend_from_slice(line.as_bytes()),
-    }
-    bytes.extend_from_slice(eol);
-    use std::io::Write;
-    std::fs::OpenOptions::new()
-        .append(true)
-        .open(&csv)
-        .and_then(|mut f| f.write_all(&bytes).and_then(|()| f.sync_all()))
-        .map_err(|e| format!("{}: {e}", csv.display()))?;
-    Ok(Some(csv))
+        if !csv.is_file() {
+            return Err(format!("{} cannot be reached from this PC", csv.display()));
+        }
+        let map = &settings.column_map;
+        let table = clients::read_csv(&csv).map_err(|e| format!("{}: {e}", csv.display()))?;
+        let (Some(id_h), Some(name_h)) = (map.id.as_deref(), map.name.as_deref()) else {
+            return Err("the client list has no ID and name columns mapped".into());
+        };
+        let col = |h: &str| table.headers.iter().position(|x| x == h);
+        let id_col = col(id_h).ok_or_else(|| format!("no column {id_h} in {}", csv.display()))?;
+        if table.rows.iter().any(|r| {
+            r.get(id_col)
+                .is_some_and(|v| v.trim().eq_ignore_ascii_case(id.trim()))
+        }) {
+            return Ok(None);
+        }
+        let fields: Vec<String> = table
+            .headers
+            .iter()
+            .map(|h| {
+                if h == id_h {
+                    id.trim().to_string()
+                } else if h == name_h {
+                    name.trim().to_string()
+                } else if map.partner.as_deref() == Some(h.as_str()) {
+                    partner.unwrap_or("").trim().to_string()
+                } else {
+                    String::new()
+                }
+            })
+            .collect();
+        let line: String = fields
+            .iter()
+            .map(|f| csv_field(f))
+            .collect::<Vec<_>>()
+            .join(",");
+        let raw = std::fs::read(&csv).map_err(|e| format!("{}: {e}", csv.display()))?;
+        let crlf = raw.windows(2).any(|w| w == b"\r\n") || !raw.contains(&b'\n');
+        let eol: &[u8] = if crlf { b"\r\n" } else { b"\n" };
+        let mut bytes: Vec<u8> = vec![];
+        if !raw.is_empty() && !raw.ends_with(b"\n") {
+            bytes.extend_from_slice(eol);
+        }
+        match table.encoding {
+            clients::Encoding::Windows1252 => {
+                for c in line.chars() {
+                    bytes.push(to_1252(c).ok_or_else(|| {
+                        format!("\"{c}\" cannot be written in this CSV's Windows-1252 text")
+                    })?);
+                }
+            }
+            _ => bytes.extend_from_slice(line.as_bytes()),
+        }
+        bytes.extend_from_slice(eol);
+        use std::io::Write;
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&csv)
+            .and_then(|mut f| f.write_all(&bytes).and_then(|()| f.sync_all()))
+            .map_err(|e| format!("{}: {e}", csv.display()))?;
+        Ok(Some(csv))
+    })
 }
 
 /// The client CSV Intake › Setup names (re-imported by Intake), with its column map; `None`
@@ -506,105 +512,108 @@ pub fn change_id_in_csv(
     name: &str,
     partner: Option<&str>,
 ) -> Result<Option<PathBuf>, String> {
-    let Some((csv, map)) = intake_csv(root) else {
-        return Ok(None);
-    };
-    if !csv.is_file() {
-        return Err(format!(
-            "the client CSV {} cannot be reached from this PC",
-            csv.display()
-        ));
-    }
-    let Some(id_h) = map.id.as_deref() else {
-        return Err("the client list has no ID column mapped".into());
-    };
-    let raw = std::fs::read(&csv).map_err(|e| format!("{}: {e}", csv.display()))?;
-    let (text, enc) =
-        clients::decode(raw.clone()).map_err(|e| format!("{}: {e}", csv.display()))?;
-    let bom = if enc == clients::Encoding::Utf8Bom {
-        3
-    } else {
-        0
-    };
-    // Records with their byte ranges in `text` (a line break inside quotes stays in its record).
-    let mut records: Vec<(usize, usize)> = vec![];
-    let (mut start, mut quoted) = (0, false);
-    for (i, ch) in text.char_indices() {
-        match ch {
-            '"' => quoted = !quoted,
-            '\n' if !quoted => {
-                records.push((start, i + 1));
-                start = i + 1;
+    // Under the cabinet lock (PA-68): read, changed and written back as one.
+    crate::lock::with(root, "clients", "the client list", || {
+        let Some((csv, map)) = intake_csv(root) else {
+            return Ok(None);
+        };
+        if !csv.is_file() {
+            return Err(format!(
+                "the client CSV {} cannot be reached from this PC",
+                csv.display()
+            ));
+        }
+        let Some(id_h) = map.id.as_deref() else {
+            return Err("the client list has no ID column mapped".into());
+        };
+        let raw = std::fs::read(&csv).map_err(|e| format!("{}: {e}", csv.display()))?;
+        let (text, enc) =
+            clients::decode(raw.clone()).map_err(|e| format!("{}: {e}", csv.display()))?;
+        let bom = if enc == clients::Encoding::Utf8Bom {
+            3
+        } else {
+            0
+        };
+        // Records with their byte ranges in `text` (a line break inside quotes stays in its record).
+        let mut records: Vec<(usize, usize)> = vec![];
+        let (mut start, mut quoted) = (0, false);
+        for (i, ch) in text.char_indices() {
+            match ch {
+                '"' => quoted = !quoted,
+                '\n' if !quoted => {
+                    records.push((start, i + 1));
+                    start = i + 1;
+                }
+                _ => {}
             }
-            _ => {}
         }
-    }
-    if start < text.len() {
-        records.push((start, text.len()));
-    }
-    let fields_of = |rec: &str| -> Vec<String> {
-        csv::ReaderBuilder::new()
-            .has_headers(false)
-            .flexible(true)
-            .from_reader(rec.as_bytes())
-            .records()
-            .next()
-            .and_then(Result::ok)
-            .map(|r| r.iter().map(str::to_string).collect())
-            .unwrap_or_default()
-    };
-    let Some(&(h0, h1)) = records.first() else {
-        return Err(format!("{} is empty", csv.display()));
-    };
-    let headers = fields_of(&text[h0..h1]);
-    let col = headers
-        .iter()
-        .position(|h| h.trim() == id_h)
-        .ok_or_else(|| format!("no column {id_h} in {}", csv.display()))?;
-    let hit = records.iter().skip(1).find(|&&(a, b)| {
-        fields_of(&text[a..b])
-            .get(col)
-            .is_some_and(|v| v.trim().eq_ignore_ascii_case(old.trim()))
-    });
-    let Some(&(a, b)) = hit else {
-        return append_to_csv(root, new, name, partner).map(|_| Some(csv));
-    };
-    let rec = &text[a..b];
-    let body = rec.trim_end_matches(['\r', '\n']);
-    let eol = &rec[body.len()..];
-    let mut fields = fields_of(rec);
-    fields[col] = new.trim().to_string();
-    let line = format!(
-        "{}{eol}",
-        fields
+        if start < text.len() {
+            records.push((start, text.len()));
+        }
+        let fields_of = |rec: &str| -> Vec<String> {
+            csv::ReaderBuilder::new()
+                .has_headers(false)
+                .flexible(true)
+                .from_reader(rec.as_bytes())
+                .records()
+                .next()
+                .and_then(Result::ok)
+                .map(|r| r.iter().map(str::to_string).collect())
+                .unwrap_or_default()
+        };
+        let Some(&(h0, h1)) = records.first() else {
+            return Err(format!("{} is empty", csv.display()));
+        };
+        let headers = fields_of(&text[h0..h1]);
+        let col = headers
             .iter()
-            .map(|f| csv_field(f))
-            .collect::<Vec<_>>()
-            .join(",")
-    );
-    let encode = |s: &str| -> Result<Vec<u8>, String> {
-        match enc {
-            clients::Encoding::Windows1252 => s
-                .chars()
-                .map(|c| {
-                    to_1252(c).ok_or_else(|| {
-                        format!("\"{c}\" cannot be written in this CSV's Windows-1252 text")
+            .position(|h| h.trim() == id_h)
+            .ok_or_else(|| format!("no column {id_h} in {}", csv.display()))?;
+        let hit = records.iter().skip(1).find(|&&(a, b)| {
+            fields_of(&text[a..b])
+                .get(col)
+                .is_some_and(|v| v.trim().eq_ignore_ascii_case(old.trim()))
+        });
+        let Some(&(a, b)) = hit else {
+            return append_to_csv(root, new, name, partner).map(|_| Some(csv));
+        };
+        let rec = &text[a..b];
+        let body = rec.trim_end_matches(['\r', '\n']);
+        let eol = &rec[body.len()..];
+        let mut fields = fields_of(rec);
+        fields[col] = new.trim().to_string();
+        let line = format!(
+            "{}{eol}",
+            fields
+                .iter()
+                .map(|f| csv_field(f))
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        let encode = |s: &str| -> Result<Vec<u8>, String> {
+            match enc {
+                clients::Encoding::Windows1252 => s
+                    .chars()
+                    .map(|c| {
+                        to_1252(c).ok_or_else(|| {
+                            format!("\"{c}\" cannot be written in this CSV's Windows-1252 text")
+                        })
                     })
-                })
-                .collect(),
-            _ => Ok(s.as_bytes().to_vec()),
-        }
-    };
-    // Byte offsets in the file: UTF-8 as in `text` (after a BOM); Windows-1252 one per char.
-    let at = |i: usize| match enc {
-        clients::Encoding::Windows1252 => text[..i].chars().count(),
-        _ => bom + i,
-    };
-    let mut out = raw[..at(a)].to_vec();
-    out.extend(encode(&line)?);
-    out.extend_from_slice(&raw[at(b)..]);
-    crate::cabinet::write_replace(&csv, &out)?;
-    Ok(Some(csv))
+                    .collect(),
+                _ => Ok(s.as_bytes().to_vec()),
+            }
+        };
+        // Byte offsets in the file: UTF-8 as in `text` (after a BOM); Windows-1252 one per char.
+        let at = |i: usize| match enc {
+            clients::Encoding::Windows1252 => text[..i].chars().count(),
+            _ => bom + i,
+        };
+        let mut out = raw[..at(a)].to_vec();
+        out.extend(encode(&line)?);
+        out.extend_from_slice(&raw[at(b)..]);
+        crate::cabinet::write_replace(&csv, &out)?;
+        Ok(Some(csv))
+    })
 }
 
 /// [`import_csv`], also keeping the last 4 digits of `tin_column` (a taxpayer ID column) per
@@ -617,88 +626,94 @@ pub fn import_csv_tin(
     known: &BTreeMap<String, Uuid>,
     tin_column: Option<&str>,
 ) -> Result<ClientList, String> {
-    let tins = tin_extras(map);
-    if !tins.is_empty() {
-        return Err(format!(
-            "Leave out {}: taxpayer ID columns are not copied into the client list (full TINs stay in the documents only).",
-            tins.join(", ")
-        ));
-    }
-    let table = clients::read_csv(csv).map_err(|e| e.to_string())?;
-    // By the values too: an ID, name or kept column holding SSNs / EINs is refused.
-    let col = |h: &str| table.headers.iter().position(|x| x == h);
-    for h in map
-        .id
-        .iter()
-        .chain(map.name.iter())
-        .chain(map.extras.iter())
-        .chain(map.partner.iter())
-    {
-        if let Some(i) = col(h)
-            && values_look_like_tins(
-                table
-                    .rows
-                    .iter()
-                    .filter_map(|r| r.get(i).map(String::as_str)),
-            )
-        {
+    // Under the cabinet lock (PA-68): read, changed and written back as one.
+    crate::lock::with(root, "clients", "the client list", || {
+        let tins = tin_extras(map);
+        if !tins.is_empty() {
             return Err(format!(
-                "The column {h} holds taxpayer IDs (SSNs or EINs): it cannot be the client ID, the name, the partner or a kept column. Full TINs stay in the documents only."
+                "Leave out {}: taxpayer ID columns are not copied into the client list (full TINs stay in the documents only).",
+                tins.join(", ")
             ));
         }
-    }
-    let mut list = clients::apply_mapping(&table, map).map_err(|e| e.to_string())?;
-    let mut all = load(root)?.list.map(|l| l.uuids).unwrap_or_default();
-    all.extend(known.iter().map(|(k, v)| (k.clone(), *v)));
-    list.assign_uuids(&all);
-    save_list(root, &list)?;
-    if let Some(tc) = tin_column {
+        let table = clients::read_csv(csv).map_err(|e| e.to_string())?;
+        // By the values too: an ID, name or kept column holding SSNs / EINs is refused.
         let col = |h: &str| table.headers.iter().position(|x| x == h);
-        let tin_col = col(tc).ok_or_else(|| format!("no column {tc}"))?;
-        let id_col = map
+        for h in map
             .id
-            .as_deref()
-            .and_then(col)
-            .ok_or("no client ID column")?;
-        let mut meta = load(root)?.meta;
-        for row in &table.rows {
-            let (Some(id), Some(tin)) = (row.get(id_col), row.get(tin_col)) else {
-                continue;
-            };
-            let Some(c) = list.match_by_id(id.trim()) else {
-                continue;
-            };
-            let key = c.uuid.to_string();
-            match last4(tin) {
-                Some(l4) => {
-                    meta.tin_last4.insert(key, l4);
-                }
-                None => {
-                    meta.tin_last4.remove(&key);
-                }
+            .iter()
+            .chain(map.name.iter())
+            .chain(map.extras.iter())
+            .chain(map.partner.iter())
+        {
+            if let Some(i) = col(h)
+                && values_look_like_tins(
+                    table
+                        .rows
+                        .iter()
+                        .filter_map(|r| r.get(i).map(String::as_str)),
+                )
+            {
+                return Err(format!(
+                    "The column {h} holds taxpayer IDs (SSNs or EINs): it cannot be the client ID, the name, the partner or a kept column. Full TINs stay in the documents only."
+                ));
             }
         }
-        save_meta(root, &meta)?;
-    }
-    // Re-read so the list's lookup index is built.
-    load(root)?
-        .list
-        .ok_or_else(|| "clients.json vanished after saving".into())
+        let mut list = clients::apply_mapping(&table, map).map_err(|e| e.to_string())?;
+        let mut all = load(root)?.list.map(|l| l.uuids).unwrap_or_default();
+        all.extend(known.iter().map(|(k, v)| (k.clone(), *v)));
+        list.assign_uuids(&all);
+        save_list(root, &list)?;
+        if let Some(tc) = tin_column {
+            let col = |h: &str| table.headers.iter().position(|x| x == h);
+            let tin_col = col(tc).ok_or_else(|| format!("no column {tc}"))?;
+            let id_col = map
+                .id
+                .as_deref()
+                .and_then(col)
+                .ok_or("no client ID column")?;
+            let mut meta = load(root)?.meta;
+            for row in &table.rows {
+                let (Some(id), Some(tin)) = (row.get(id_col), row.get(tin_col)) else {
+                    continue;
+                };
+                let Some(c) = list.match_by_id(id.trim()) else {
+                    continue;
+                };
+                let key = c.uuid.to_string();
+                match last4(tin) {
+                    Some(l4) => {
+                        meta.tin_last4.insert(key, l4);
+                    }
+                    None => {
+                        meta.tin_last4.remove(&key);
+                    }
+                }
+            }
+            save_meta(root, &meta)?;
+        }
+        // Re-read so the list's lookup index is built.
+        load(root)?
+            .list
+            .ok_or_else(|| "clients.json vanished after saving".into())
+    })
 }
 
 /// Sets (or clears, `None` or blank) a client's partner in the sidecar. Run
 /// `rebuild::sync_clients` after.
 pub fn set_partner(root: &Path, client_id: &str, partner: Option<&str>) -> Result<(), String> {
-    let mut m = load(root)?;
-    match partner.map(str::trim).filter(|p| !p.is_empty()) {
-        Some(p) => {
-            m.meta.partners.insert(client_id.into(), p.into());
+    // Under the cabinet lock (PA-68): read, changed and written back as one.
+    crate::lock::with(root, "clients", "the client list", || {
+        let mut m = load(root)?;
+        match partner.map(str::trim).filter(|p| !p.is_empty()) {
+            Some(p) => {
+                m.meta.partners.insert(client_id.into(), p.into());
+            }
+            None => {
+                m.meta.partners.remove(client_id);
+            }
         }
-        None => {
-            m.meta.partners.remove(client_id);
-        }
-    }
-    save_meta(root, &m.meta)
+        save_meta(root, &m.meta)
+    })
 }
 
 /// A client's partner: set in Vibe Files, else the client CSV's Partner column.
@@ -716,23 +731,29 @@ pub fn partner_of(meta: &ClientMeta, client: &str, listed: Option<&Client>) -> O
 /// B2 sync (PA-53): the tax years before this one that documents never sent still go up for
 /// (`None`: the default; 0: every year).
 pub fn set_b2_years_back(root: &Path, years: Option<u16>) -> Result<(), String> {
-    let mut meta = read_meta(root)?;
-    let b2 = load_b2(root)?;
-    b2.put(&mut meta);
-    meta.b2_years_back = years;
-    save_meta(root, &meta)?;
-    save_b2_backup(root, &B2Settings::of(&meta))
+    // Under the cabinet lock (PA-68): read, changed and written back as one.
+    crate::lock::with(root, "clients", "the client list", || {
+        let mut meta = read_meta(root)?;
+        let b2 = load_b2(root)?;
+        b2.put(&mut meta);
+        meta.b2_years_back = years;
+        save_meta(root, &meta)?;
+        save_b2_backup(root, &B2Settings::of(&meta))
+    })
 }
 
 /// B2 sync (PA-63): the firm's list of rules. Saved as given, an empty list too (nothing goes
 /// up by itself then).
 pub fn set_b2_rules(root: &Path, rules: &[B2Rule]) -> Result<(), String> {
-    let mut meta = read_meta(root)?;
-    let b2 = load_b2(root)?;
-    b2.put(&mut meta);
-    meta.b2_rules = Some(rules.to_vec());
-    save_meta(root, &meta)?;
-    save_b2_backup(root, &B2Settings::of(&meta))
+    // Under the cabinet lock (PA-68): read, changed and written back as one.
+    crate::lock::with(root, "clients", "the client list", || {
+        let mut meta = read_meta(root)?;
+        let b2 = load_b2(root)?;
+        b2.put(&mut meta);
+        meta.b2_rules = Some(rules.to_vec());
+        save_meta(root, &meta)?;
+        save_b2_backup(root, &B2Settings::of(&meta))
+    })
 }
 
 /// B2 sync (PA-63): the same choice for many clients in one save (`None`: the firm's rules).
@@ -741,59 +762,68 @@ pub fn set_b2_choices(
     client_ids: &[String],
     choice: Option<&str>,
 ) -> Result<(), String> {
-    if let Some(other) = choice.filter(|c| !matches!(*c, "always" | "never")) {
-        return Err(format!("not a B2 choice: {other}"));
-    }
-    let mut meta = read_meta(root)?;
-    let b2 = load_b2(root)?;
-    b2.put(&mut meta);
-    for id in client_ids {
-        match choice {
-            Some(c) => {
-                meta.b2_clients.insert(id.clone(), c.into());
-            }
-            None => {
-                meta.b2_clients.remove(id);
+    // Under the cabinet lock (PA-68): read, changed and written back as one.
+    crate::lock::with(root, "clients", "the client list", || {
+        if let Some(other) = choice.filter(|c| !matches!(*c, "always" | "never")) {
+            return Err(format!("not a B2 choice: {other}"));
+        }
+        let mut meta = read_meta(root)?;
+        let b2 = load_b2(root)?;
+        b2.put(&mut meta);
+        for id in client_ids {
+            match choice {
+                Some(c) => {
+                    meta.b2_clients.insert(id.clone(), c.into());
+                }
+                None => {
+                    meta.b2_clients.remove(id);
+                }
             }
         }
-    }
-    save_meta(root, &meta)?;
-    save_b2_backup(root, &B2Settings::of(&meta))
+        save_meta(root, &meta)?;
+        save_b2_backup(root, &B2Settings::of(&meta))
+    })
 }
 
 /// B2 sync (PA-53): a client's own choice, "always" or "never"; `None`: the firm's rule.
 pub fn set_b2_choice(root: &Path, client_id: &str, choice: Option<&str>) -> Result<(), String> {
-    let mut meta = read_meta(root)?;
-    let b2 = load_b2(root)?;
-    b2.put(&mut meta);
-    match choice {
-        Some(c @ ("always" | "never")) => {
-            meta.b2_clients.insert(client_id.into(), c.into());
+    // Under the cabinet lock (PA-68): read, changed and written back as one.
+    crate::lock::with(root, "clients", "the client list", || {
+        let mut meta = read_meta(root)?;
+        let b2 = load_b2(root)?;
+        b2.put(&mut meta);
+        match choice {
+            Some(c @ ("always" | "never")) => {
+                meta.b2_clients.insert(client_id.into(), c.into());
+            }
+            Some(other) => return Err(format!("not a B2 choice: {other}")),
+            None => {
+                meta.b2_clients.remove(client_id);
+            }
         }
-        Some(other) => return Err(format!("not a B2 choice: {other}")),
-        None => {
-            meta.b2_clients.remove(client_id);
-        }
-    }
-    save_meta(root, &meta)?;
-    save_b2_backup(root, &B2Settings::of(&meta))
+        save_meta(root, &meta)?;
+        save_b2_backup(root, &B2Settings::of(&meta))
+    })
 }
 
 /// Sets (or clears) a client's entity type in the sidecar. Run `rebuild::sync_clients` after.
 pub fn set_entity_type(root: &Path, client_id: &str, entity: Option<&str>) -> Result<(), String> {
-    let mut m = load(root)?;
-    match entity.filter(|e| !e.is_empty()) {
-        Some(e) => {
-            if !ENTITY_TYPES.iter().any(|(k, _)| *k == e) {
-                return Err(format!("unknown entity type {e}"));
+    // Under the cabinet lock (PA-68): read, changed and written back as one.
+    crate::lock::with(root, "clients", "the client list", || {
+        let mut m = load(root)?;
+        match entity.filter(|e| !e.is_empty()) {
+            Some(e) => {
+                if !ENTITY_TYPES.iter().any(|(k, _)| *k == e) {
+                    return Err(format!("unknown entity type {e}"));
+                }
+                m.meta.entity_types.insert(client_id.into(), e.into());
             }
-            m.meta.entity_types.insert(client_id.into(), e.into());
+            None => {
+                m.meta.entity_types.remove(client_id);
+            }
         }
-        None => {
-            m.meta.entity_types.remove(client_id);
-        }
-    }
-    save_meta(root, &m.meta)
+        save_meta(root, &m.meta)
+    })
 }
 
 /// Adds a relationship (Filer's checks: not to itself, a role, no duplicate) and its share.
@@ -803,21 +833,24 @@ pub fn add_relationship(
     rel: relationships::Relationship,
     share_pct: Option<f64>,
 ) -> Result<(), String> {
-    if let Some(p) = share_pct
-        && !(0.0..=100.0).contains(&p)
-    {
-        return Err("The share must be between 0 and 100 %.".into());
-    }
-    let mut m = load(root)?;
-    let (p, c, role) = (
-        rel.parent_id.trim().to_owned(),
-        rel.child_id.trim().to_owned(),
-        rel.role.trim().to_owned(),
-    );
-    m.rels.add(rel).map_err(|e| e.to_string())?;
-    m.meta.set_share(&p, &c, &role, share_pct);
-    save_rels(root, &m.rels)?;
-    save_meta(root, &m.meta)
+    // Under the cabinet lock (PA-68): read, changed and written back as one.
+    crate::lock::with(root, "clients", "the client list", || {
+        if let Some(p) = share_pct
+            && !(0.0..=100.0).contains(&p)
+        {
+            return Err("The share must be between 0 and 100 %.".into());
+        }
+        let mut m = load(root)?;
+        let (p, c, role) = (
+            rel.parent_id.trim().to_owned(),
+            rel.child_id.trim().to_owned(),
+            rel.role.trim().to_owned(),
+        );
+        m.rels.add(rel).map_err(|e| e.to_string())?;
+        m.meta.set_share(&p, &c, &role, share_pct);
+        save_rels(root, &m.rels)?;
+        save_meta(root, &m.meta)
+    })
 }
 
 /// Removes one relationship and its share. Run `sync_clients` after (it tombstones the row).
@@ -827,17 +860,20 @@ pub fn remove_relationship(
     child: &str,
     role: &str,
 ) -> Result<(), String> {
-    let mut m = load(root)?;
-    let before = m.rels.records.len();
-    m.rels
-        .records
-        .retain(|r| !(r.parent_id == parent && r.child_id == child && same_role(&r.role, role)));
-    if m.rels.records.len() == before {
-        return Err("That relationship is not in the list.".into());
-    }
-    m.meta.set_share(parent, child, role, None);
-    save_rels(root, &m.rels)?;
-    save_meta(root, &m.meta)
+    // Under the cabinet lock (PA-68): read, changed and written back as one.
+    crate::lock::with(root, "clients", "the client list", || {
+        let mut m = load(root)?;
+        let before = m.rels.records.len();
+        m.rels.records.retain(|r| {
+            !(r.parent_id == parent && r.child_id == child && same_role(&r.role, role))
+        });
+        if m.rels.records.len() == before {
+            return Err("That relationship is not in the list.".into());
+        }
+        m.meta.set_share(parent, child, role, None);
+        save_rels(root, &m.rels)?;
+        save_meta(root, &m.meta)
+    })
 }
 
 /// Top-level folders with no sentinel that Filer's scan matches to a master-list client (by the
@@ -943,14 +979,17 @@ pub fn strip_tins(list: &mut ClientList) -> Vec<String> {
 /// [`strip_tins`] on the cabinet's `clients.json`, saving it when anything was removed. Run when
 /// a cabinet opens and before the catalog or the bucket gets the list.
 pub fn strip_tins_on_disk(root: &Path) -> Result<Vec<String>, String> {
-    let Some(mut list) = load(root)?.list else {
-        return Ok(vec![]);
-    };
-    let bad = strip_tins(&mut list);
-    if !bad.is_empty() {
-        save_list(root, &list)?;
-    }
-    Ok(bad)
+    // Under the cabinet lock (PA-68): read, changed and written back as one.
+    crate::lock::with(root, "clients", "the client list", || {
+        let Some(mut list) = load(root)?.list else {
+            return Ok(vec![]);
+        };
+        let bad = strip_tins(&mut list);
+        if !bad.is_empty() {
+            save_list(root, &list)?;
+        }
+        Ok(bad)
+    })
 }
 
 /// Extras in `map` that look like taxpayer IDs.

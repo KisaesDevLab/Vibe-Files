@@ -65,8 +65,7 @@ fn me() -> String {
 pub fn take(root: &Path, name: &str) -> Result<Held, Busy> {
     let path = root
         .join(cabinet::VIBE_DIR)
-        .join("locks")
-        .join(format!("cabinet-{name}.lock"));
+        .join(format!("lock-{name}.lock"));
     take_at(&path, Some(WAIT), BEAT, STALE)
 }
 
@@ -78,8 +77,28 @@ pub fn with<T>(
     what: &str,
     change: impl FnOnce() -> Result<T, String>,
 ) -> Result<T, String> {
+    // Already held by this thread (a change made of several, each under the lock): go on.
+    let key = (root.to_path_buf(), name.to_string());
+    if MINE.with(|m| m.borrow().contains(&key)) {
+        return change();
+    }
     let _held = take(root, name).map_err(|b| b.message(what))?;
+    MINE.with(|m| m.borrow_mut().insert(key.clone()));
+    // Taken off the list however the change ends.
+    struct Off((PathBuf, String));
+    impl Drop for Off {
+        fn drop(&mut self) {
+            MINE.with(|m| m.borrow_mut().remove(&self.0));
+        }
+    }
+    let _off = Off(key);
     change()
+}
+
+thread_local! {
+    /// The locks this thread holds through [`with`].
+    static MINE: std::cell::RefCell<std::collections::HashSet<(PathBuf, String)>> =
+        Default::default();
 }
 
 /// The age of the file at `path` by the file server's clock: against a file written just now
@@ -220,7 +239,7 @@ mod tests {
     #[test]
     fn the_second_waits_then_is_told_who() {
         let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("_Vibe/locks/cabinet-holds.lock");
+        let path = tmp.path().join("_Vibe/lock-holds.lock");
         let (beat, stale) = (Duration::from_millis(60), Duration::from_millis(500));
         let first = take_at(&path, Some(Duration::from_millis(200)), beat, stale).unwrap();
         // Held past the second's wait: told who.
@@ -296,5 +315,13 @@ mod tests {
             t.join().unwrap().unwrap();
         }
         assert_eq!(std::fs::read_to_string(&file).unwrap().lines().count(), 8);
+        // A change made of several, each under the same lock, does not wait for itself.
+        let t0 = Instant::now();
+        with(&root, "shared", "the list", || {
+            with(&root, "shared", "the list", || Ok::<_, String>(()))
+        })
+        .unwrap();
+        assert!(t0.elapsed() < Duration::from_secs(2));
+        assert!(!root.join("_Vibe/lock-shared.lock").exists());
     }
 }

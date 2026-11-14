@@ -154,43 +154,45 @@ pub fn create(
     plan: &Plan,
     device_id: &str,
 ) -> Result<String, String> {
-    let mut master = clients::load(root)?;
-    let c = &plan.client;
-    if !plan.in_master {
-        let mut list = master.list.take().unwrap_or_else(empty_list);
-        list.clients.push(c.clone());
-        list.uuids.insert(c.id.clone(), c.uuid);
-        clients::save_list(root, &list)?;
-    }
-    if let Some(et) = &plan.entity_type {
-        master
-            .meta
-            .entity_types
-            .insert(c.uuid.to_string(), et.clone());
-    }
-    if let Some(p) = &plan.partner_set {
-        master.meta.partners.insert(c.uuid.to_string(), p.clone());
-    }
-    if plan.entity_type.is_some() || plan.partner_set.is_some() {
-        clients::save_meta(root, &master.meta)?;
-    }
+    // Under the cabinet lock (PA-68): read, changed and written back as one.
+    crate::lock::with(root, "clients", "the client list", || {
+        let mut master = clients::load(root)?;
+        let c = &plan.client;
+        if !plan.in_master {
+            let mut list = master.list.take().unwrap_or_else(empty_list);
+            list.clients.push(c.clone());
+            list.uuids.insert(c.id.clone(), c.uuid);
+            clients::save_list(root, &list)?;
+        }
+        if let Some(et) = &plan.entity_type {
+            master
+                .meta
+                .entity_types
+                .insert(c.uuid.to_string(), et.clone());
+        }
+        if let Some(p) = &plan.partner_set {
+            master.meta.partners.insert(c.uuid.to_string(), p.clone());
+        }
+        if plan.entity_type.is_some() || plan.partner_set.is_some() {
+            clients::save_meta(root, &master.meta)?;
+        }
 
-    let id = c.uuid.to_string();
-    let prev: Option<Option<String>> = conn
-        .query_row("SELECT folder_rel FROM client WHERE id = ?1", [&id], |r| {
-            r.get(0)
-        })
-        .ok();
-    let now = vf_core::now_rfc3339();
-    let entity_type = match &plan.entity_type {
-        Some(e) => Some(e.clone()),
-        None => master.meta.entity_types.get(&id).cloned(),
-    };
-    let mut tx = Transaction::new("client_create");
-    for d in &plan.dirs {
-        tx = tx.file(FileOp::Mkdir { path: root.join(d) });
-    }
-    tx = tx
+        let id = c.uuid.to_string();
+        let prev: Option<Option<String>> = conn
+            .query_row("SELECT folder_rel FROM client WHERE id = ?1", [&id], |r| {
+                r.get(0)
+            })
+            .ok();
+        let now = vf_core::now_rfc3339();
+        let entity_type = match &plan.entity_type {
+            Some(e) => Some(e.clone()),
+            None => master.meta.entity_types.get(&id).cloned(),
+        };
+        let mut tx = Transaction::new("client_create");
+        for d in &plan.dirs {
+            tx = tx.file(FileOp::Mkdir { path: root.join(d) });
+        }
+        tx = tx
         .file(FileOp::WriteSentinel {
             root: root.to_owned(),
             folder: plan.folder.clone(),
@@ -234,7 +236,8 @@ pub fn create(
             None,
             json!({ "client": c.id, "folder": plan.folder_rel, "dirs": plan.dirs.len() }),
         ));
-    crate::fileops::commit(conn, root, tx, device_id).map(|c| c.tx_id)
+        crate::fileops::commit(conn, root, tx, device_id).map(|c| c.tx_id)
+    })
 }
 
 #[cfg(test)]

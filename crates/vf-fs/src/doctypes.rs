@@ -317,59 +317,62 @@ pub enum Edit {
 }
 
 pub fn apply(root: &Path, edit: Edit) -> Result<(), String> {
-    let mut types = load(root)?.unwrap_or_default();
-    let pos = |types: &[DocType], id: &str| {
-        types
-            .iter()
-            .position(|t| t.id == id)
-            .ok_or_else(|| "That doc type is not in the list any more.".to_string())
-    };
-    match edit {
-        Edit::Add {
-            name,
-            default_folder,
-            client_visible,
-            retention,
-        } => types.push(DocType {
-            id: vf_core::new_id(),
-            name: name.trim().into(),
-            default_folder: default_folder.trim().into(),
-            client_visible,
-            retention,
-            cover_default: false,
-            archived: false,
-        }),
-        Edit::Update(mut t) => {
-            if t.archived {
-                t.cover_default = false;
-            }
-            let i = pos(&types, &t.id)?;
-            // One cover sheet default: setting it here takes it from the others.
-            if t.cover_default {
-                for x in types.iter_mut() {
-                    x.cover_default = false;
+    // Under the cabinet lock (PA-68): read, changed and written back as one.
+    crate::lock::with(root, "doc-types", "the doc types", || {
+        let mut types = load(root)?.unwrap_or_default();
+        let pos = |types: &[DocType], id: &str| {
+            types
+                .iter()
+                .position(|t| t.id == id)
+                .ok_or_else(|| "That doc type is not in the list any more.".to_string())
+        };
+        match edit {
+            Edit::Add {
+                name,
+                default_folder,
+                client_visible,
+                retention,
+            } => types.push(DocType {
+                id: vf_core::new_id(),
+                name: name.trim().into(),
+                default_folder: default_folder.trim().into(),
+                client_visible,
+                retention,
+                cover_default: false,
+                archived: false,
+            }),
+            Edit::Update(mut t) => {
+                if t.archived {
+                    t.cover_default = false;
                 }
+                let i = pos(&types, &t.id)?;
+                // One cover sheet default: setting it here takes it from the others.
+                if t.cover_default {
+                    for x in types.iter_mut() {
+                        x.cover_default = false;
+                    }
+                }
+                types[i] = DocType {
+                    name: t.name.trim().into(),
+                    default_folder: t.default_folder.trim().into(),
+                    ..t
+                };
             }
-            types[i] = DocType {
-                name: t.name.trim().into(),
-                default_folder: t.default_folder.trim().into(),
-                ..t
-            };
-        }
-        Edit::Remove(id) => {
-            let i = pos(&types, &id)?;
-            types.remove(i);
-        }
-        Edit::Move(id, by) => {
-            let i = pos(&types, &id)?;
-            let j = i as i64 + by as i64;
-            if j < 0 || j >= types.len() as i64 {
-                return Ok(());
+            Edit::Remove(id) => {
+                let i = pos(&types, &id)?;
+                types.remove(i);
             }
-            types.swap(i, j as usize);
+            Edit::Move(id, by) => {
+                let i = pos(&types, &id)?;
+                let j = i as i64 + by as i64;
+                if j < 0 || j >= types.len() as i64 {
+                    return Ok(());
+                }
+                types.swap(i, j as usize);
+            }
         }
-    }
-    save(root, &types)
+        save(root, &types)
+    })
 }
 
 #[cfg(test)]

@@ -298,51 +298,54 @@ pub enum Edit {
 }
 
 pub fn apply(root: &Path, edit: Edit) -> Result<(), String> {
-    let mut classes = load(root)?.unwrap_or_default();
-    let pos = |classes: &[Class], id: &str| {
-        classes
-            .iter()
-            .position(|c| c.id == id)
-            .ok_or_else(|| "That class is not in the schedule any more.".to_string())
-    };
-    match edit {
-        Edit::Add {
-            name,
-            years,
-            anchor,
-        } => classes.push(Class {
-            id: vf_core::new_id(),
-            name: name.trim().into(),
-            years: if anchor == "never" { None } else { years },
-            anchor,
-        }),
-        Edit::Update(c) => {
-            let i = pos(&classes, &c.id)?;
-            classes[i] = Class {
-                name: c.name.trim().into(),
-                years: if c.anchor == "never" { None } else { c.years },
-                ..c
-            };
-        }
-        Edit::Remove(id) => {
-            let i = pos(&classes, &id)?;
-            let users: Vec<String> = crate::doctypes::load(root)?
-                .unwrap_or_default()
-                .into_iter()
-                .filter(|t| t.retention.as_deref() == Some(id.as_str()))
-                .map(|t| t.name)
-                .collect();
-            if !users.is_empty() {
-                return Err(format!(
-                    "{} is used by {}; give those doc types another class first.",
-                    classes[i].name,
-                    users.join(", ")
-                ));
+    // Under the cabinet lock (PA-68): read, changed and written back as one.
+    crate::lock::with(root, "retention", "the retention schedule", || {
+        let mut classes = load(root)?.unwrap_or_default();
+        let pos = |classes: &[Class], id: &str| {
+            classes
+                .iter()
+                .position(|c| c.id == id)
+                .ok_or_else(|| "That class is not in the schedule any more.".to_string())
+        };
+        match edit {
+            Edit::Add {
+                name,
+                years,
+                anchor,
+            } => classes.push(Class {
+                id: vf_core::new_id(),
+                name: name.trim().into(),
+                years: if anchor == "never" { None } else { years },
+                anchor,
+            }),
+            Edit::Update(c) => {
+                let i = pos(&classes, &c.id)?;
+                classes[i] = Class {
+                    name: c.name.trim().into(),
+                    years: if c.anchor == "never" { None } else { c.years },
+                    ..c
+                };
             }
-            classes.remove(i);
+            Edit::Remove(id) => {
+                let i = pos(&classes, &id)?;
+                let users: Vec<String> = crate::doctypes::load(root)?
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|t| t.retention.as_deref() == Some(id.as_str()))
+                    .map(|t| t.name)
+                    .collect();
+                if !users.is_empty() {
+                    return Err(format!(
+                        "{} is used by {}; give those doc types another class first.",
+                        classes[i].name,
+                        users.join(", ")
+                    ));
+                }
+                classes.remove(i);
+            }
         }
-    }
-    save(root, &classes)
+        save(root, &classes)
+    })
 }
 
 #[cfg(test)]
