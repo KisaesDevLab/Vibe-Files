@@ -190,24 +190,30 @@ pub fn show(ui: &mut egui::Ui, p: &mut DispositionPage, env: &mut Env, catalog: 
     if p.report.is_none() && p.job.is_none() && cfg!(test) {
         // Tests: at once (a result arriving between frames would land at a random step).
         let (tx, rx) = std::sync::mpsc::channel();
-        let _ = tx.send(disposition::eligible(env.conn, env.root, today));
+        let _ = tx.send(disposition::review(
+            env.conn,
+            env.root,
+            env.device_id,
+            today,
+        ));
         p.job = Some(rx);
         return show(ui, p, env, catalog);
     }
     if p.report.is_none() {
         if p.job.is_none() {
             let (tx, rx) = std::sync::mpsc::channel();
-            let (catalog, root, ctx) = (
+            let (catalog, root, ctx, device) = (
                 catalog.to_path_buf(),
                 env.root.to_path_buf(),
                 ui.ctx().clone(),
+                env.device_id.to_string(),
             );
             let _ = std::thread::Builder::new()
                 .name("disposition".into())
                 .spawn(move || {
                     let r = vf_core::db::open(&catalog, vf_core::db::Storage::Local)
                         .map_err(|e| e.to_string())
-                        .and_then(|conn| disposition::eligible(&conn, &root, today));
+                        .and_then(|mut conn| disposition::review(&mut conn, &root, &device, today));
                     let _ = tx.send(r);
                     ctx.request_repaint();
                 });
@@ -353,7 +359,7 @@ pub fn show(ui: &mut egui::Ui, p: &mut DispositionPage, env: &mut Env, catalog: 
                     ))
                     .clicked()
                 {
-                    match disposition::defer(env.conn, env.device_id, &chosen, today) {
+                    match disposition::defer(env.conn, env.root, env.device_id, &chosen, today) {
                         Ok(n) => {
                             p.notice = Some(format!("Deferred {n}."));
                             p.error = None;
@@ -398,7 +404,7 @@ pub fn show(ui: &mut egui::Ui, p: &mut DispositionPage, env: &mut Env, catalog: 
             });
         }
         if let Some(id) = cancel {
-            match disposition::cancel(env.conn, env.device_id, &[id]) {
+            match disposition::cancel(env.conn, env.root, env.device_id, &[id]) {
                 Ok(_) => {
                     p.notice = Some("Approval taken back: the document is not destroyed.".into());
                     p.refresh();

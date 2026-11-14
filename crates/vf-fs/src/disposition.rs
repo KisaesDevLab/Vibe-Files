@@ -13,8 +13,11 @@
 //!   certificate of destruction PDF is filed in `_Vibe/disposition/`, and the audit trail
 //!   links to it.
 //!
-//! Decisions live in this workstation's catalog: run disposition from one workstation, as
-//! Intake (STATE). The holds are re-read from the cabinet just before anything is destroyed.
+//! Decisions are kept in the cabinet too (`_Vibe/disposition/decisions.jsonl`, owner
+//! 2026-11-14, Q-105): a session host's catalog is new every morning, and an approval made
+//! on one host must be seen, and can be taken back, on another. [`sync_decisions`] brings a
+//! catalog in line with the file before the review is shown and before anything is destroyed.
+//! The holds are re-read from the cabinet just before anything is destroyed.
 
 use std::collections::{BTreeMap, HashSet};
 use std::io::Write;
@@ -25,7 +28,7 @@ use time::Date;
 use vf_core::audit::AuditEntry;
 use vf_core::db::Connection;
 use vf_core::retention::{self, Anchor, Standing};
-use vf_core::tx::{Actor, NoFileOps, Stmt, Transaction};
+use vf_core::tx::{Actor, FileOp, NoFileOps, Stmt, Transaction};
 
 use crate::cabinet;
 
@@ -247,8 +250,154 @@ pub fn eligible(conn: &Connection, root: &Path, today: Date) -> Result<Report, S
     Ok(rep)
 }
 
+/// The cabinet's record of the decisions: one line per decision, only ever added to.
+pub const DECISIONS_FILE: &str = "decisions.jsonl";
+
+fn decisions_path(root: &Path) -> PathBuf {
+    root.join(cabinet::VIBE_DIR).join(DIR).join(DECISIONS_FILE)
+}
+
+/// One decision as the cabinet keeps it. The document is named by its id (the same on every
+/// PC through its client folder's records) and by its path, for a catalog that knows it by
+/// another id.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+struct Decision {
+    doc_id: String,
+    rel_path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    hash: Option<String>,
+    /// `approved`, `deferred`, or `cancelled` (an approval taken back).
+    decision: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    class_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    eligible_on: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    destroy_after: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    deferred_until: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    by: Option<String>,
+    at: String,
+    device: String,
+}
+
+/// Brings this catalog's decisions in line with the cabinet's record: for each document, the
+/// last decision recorded, when it is later than the one this catalog has. Returns how many
+/// rows changed. A catalog made this morning gets every decision still standing; an approval
+/// taken back on another PC is taken back here.
+pub fn sync_decisions(
+    conn: &mut Connection,
+    root: &Path,
+    device_id: &str,
+) -> Result<usize, String> {
+    let text = match std::fs::read_to_string(decisions_path(root)) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(e) => return Err(format!("{DECISIONS_FILE}: {e}")),
+    };
+    // The last line for a document wins (the file is in the order the decisions were made).
+    let mut last: BTreeMap<String, Decision> = BTreeMap::new();
+    for line in text.lines().filter(|l| !l.trim().is_empty()) {
+        // A line cut short (two PCs writing at once) is left out, not a reason to stop.
+        if let Ok(d) = serde_json::from_str::<Decision>(line) {
+            last.insert(d.rel_path.to_lowercase(), d);
+        }
+    }
+    let mut tx = Transaction::new(DECIDE_LABEL);
+    let mut n = 0;
+    for d in last.values() {
+        let Some(doc): Option<String> = conn
+            .query_row(
+                "SELECT id FROM document
+                 WHERE deleted_at IS NULL AND (id = ?1 OR lower(rel_path) = lower(?2))
+                 ORDER BY (id = ?1) DESC LIMIT 1",
+                [&d.doc_id, &d.rel_path],
+                |r| r.get(0),
+            )
+            .ok()
+        else {
+            continue;
+        };
+        let have: Option<(String, Option<String>)> = conn
+            .query_row(
+                "SELECT decided_at, destroyed_at FROM disposition WHERE doc_id = ?1",
+                [&doc],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .ok();
+        if have
+            .as_ref()
+            .is_some_and(|(at, destroyed)| destroyed.is_some() || at.as_str() >= d.at.as_str())
+        {
+            continue;
+        }
+        if d.decision == "cancelled" {
+            if have.is_none() {
+                continue;
+            }
+            tx = tx.catalog(Stmt::new(
+                "DELETE FROM disposition WHERE doc_id = ?1 AND destroyed_at IS NULL",
+                vec![doc.into()],
+            ));
+        } else if matches!(d.decision.as_str(), "approved" | "deferred") {
+            let Some(eligible_on) = d.eligible_on.clone() else {
+                continue;
+            };
+            tx = tx.catalog(Stmt::new(
+                "INSERT INTO disposition (doc_id, class_id, eligible_on, decision, decided_by,
+                   decided_at, destroy_after, deferred_until, device_id, hash)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+                 ON CONFLICT(doc_id) DO UPDATE SET decision = excluded.decision,
+                   decided_by = excluded.decided_by, decided_at = excluded.decided_at,
+                   destroy_after = excluded.destroy_after, deferred_until = excluded.deferred_until,
+                   device_id = excluded.device_id, hash = excluded.hash",
+                vec![
+                    doc.into(),
+                    d.class_id.clone().into(),
+                    eligible_on.into(),
+                    d.decision.clone().into(),
+                    d.by.clone().into(),
+                    d.at.clone().into(),
+                    d.destroy_after.clone().into(),
+                    d.deferred_until.clone().into(),
+                    d.device.clone().into(),
+                    d.hash.clone().into(),
+                ],
+            ));
+        } else {
+            continue;
+        }
+        n += 1;
+    }
+    if n == 0 {
+        return Ok(0);
+    }
+    tx.audit(AuditEntry::new(
+        "disposition_sync",
+        None,
+        json!({ "decisions": n }),
+    ))
+    .commit(conn, &mut NoFileOps, &Actor::device(device_id))
+    .map_err(|e| e.to_string())?;
+    Ok(n)
+}
+
+/// [`eligible`] for the review page: the cabinet's decisions first ([`sync_decisions`]), so a
+/// document approved or deferred on another PC is not offered again here.
+pub fn review(
+    conn: &mut Connection,
+    root: &Path,
+    device_id: &str,
+    today: Date,
+) -> Result<Report, String> {
+    sync_decisions(conn, root, device_id)?;
+    eligible(conn, root, today)
+}
+
 fn decide(
     conn: &mut Connection,
+    root: &Path,
     device_id: &str,
     lines: &[Line],
     approve: bool,
@@ -266,6 +415,31 @@ fn decide(
     };
     let decision = if approve { "approved" } else { "deferred" };
     let mut tx = Transaction::new(DECIDE_LABEL);
+    // The cabinet's record first (file changes are applied before the catalog's).
+    let record: Vec<String> = lines
+        .iter()
+        .map(|l| {
+            serde_json::to_string(&Decision {
+                doc_id: l.doc_id.clone(),
+                rel_path: l.rel_path.clone(),
+                hash: Some(l.hash.clone()).filter(|h| !h.is_empty()),
+                decision: decision.into(),
+                class_id: Some(l.class_id.clone()),
+                eligible_on: Some(ymd(l.eligible_on)),
+                destroy_after: after.clone(),
+                deferred_until: until.clone(),
+                by: by.clone(),
+                at: now.clone(),
+                device: device_id.into(),
+            })
+            .expect("serializes")
+        })
+        .collect();
+    tx = tx.file(FileOp::AppendLines {
+        path: decisions_path(root),
+        lines: record,
+        undo_lines: vec![],
+    });
     for l in lines {
         tx = tx
             .catalog(Stmt::new(
@@ -301,8 +475,7 @@ fn decide(
                         "destroy_after": after, "deferred_until": until }),
             ));
     }
-    tx.commit(conn, &mut NoFileOps, &Actor::device(device_id))
-        .map_err(|e| e.to_string())?;
+    crate::fileops::commit(conn, root, tx, device_id)?;
     Ok(lines.len())
 }
 
@@ -321,24 +494,32 @@ pub fn approve(
         l.hash = crate::fingerprint::ensure(conn, root, device_id, &l.doc_id)
             .map_err(|e| format!("Not approved: {e}"))?;
     }
-    decide(conn, device_id, &lines, true, today)
+    decide(conn, root, device_id, &lines, true, today)
 }
 
 /// Defers the lines for [`DEFER_MONTHS`] months.
 pub fn defer(
     conn: &mut Connection,
+    root: &Path,
     device_id: &str,
     lines: &[Line],
     today: Date,
 ) -> Result<usize, String> {
-    decide(conn, device_id, lines, false, today)
+    decide(conn, root, device_id, lines, false, today)
 }
 
 /// Takes back the approval of `doc_ids` while they wait for destruction (owner 2026-11-04):
 /// each returns to the eligible list for a new decision. Audited (`disposition_cancel`).
-pub fn cancel(conn: &mut Connection, device_id: &str, doc_ids: &[String]) -> Result<usize, String> {
+pub fn cancel(
+    conn: &mut Connection,
+    root: &Path,
+    device_id: &str,
+    doc_ids: &[String],
+) -> Result<usize, String> {
     let mut tx = Transaction::new(DECIDE_LABEL);
     let mut n = 0;
+    let now = vf_core::now_rfc3339();
+    let mut record: Vec<String> = vec![];
     for id in doc_ids {
         let row: Option<(Option<String>, Option<String>)> = conn
             .query_row(
@@ -349,6 +530,27 @@ pub fn cancel(conn: &mut Connection, device_id: &str, doc_ids: &[String]) -> Res
             )
             .ok();
         let Some((after, by)) = row else { continue };
+        let rel_path: String = conn
+            .query_row("SELECT rel_path FROM document WHERE id = ?1", [id], |r| {
+                r.get(0)
+            })
+            .map_err(|e| e.to_string())?;
+        record.push(
+            serde_json::to_string(&Decision {
+                doc_id: id.clone(),
+                rel_path,
+                hash: None,
+                decision: "cancelled".into(),
+                class_id: None,
+                eligible_on: None,
+                destroy_after: None,
+                deferred_until: None,
+                by: vf_core::windows_login(),
+                at: now.clone(),
+                device: device_id.into(),
+            })
+            .expect("serializes"),
+        );
         tx = tx
             .catalog(Stmt::new(
                 "DELETE FROM disposition
@@ -365,8 +567,12 @@ pub fn cancel(conn: &mut Connection, device_id: &str, doc_ids: &[String]) -> Res
     if n == 0 {
         return Ok(0);
     }
-    tx.commit(conn, &mut NoFileOps, &Actor::device(device_id))
-        .map_err(|e| e.to_string())?;
+    tx = tx.file(FileOp::AppendLines {
+        path: decisions_path(root),
+        lines: record,
+        undo_lines: vec![],
+    });
+    crate::fileops::commit(conn, root, tx, device_id)?;
     Ok(n)
 }
 
@@ -604,6 +810,8 @@ pub fn destroy_due(
     today: Date,
     cabinet_name: &str,
 ) -> Result<RunReport, String> {
+    // What the other PCs decided since: an approval taken back there is not carried out here.
+    sync_decisions(conn, root, device_id)?;
     let today_s = ymd(today);
     let (due, held_now, changed_now): (Vec<Victim>, usize, Vec<String>) = {
         let mut st = conn
@@ -1146,7 +1354,7 @@ mod tests {
         let (ret, rest): (Vec<Line>, Vec<Line>) =
             r.lines.into_iter().partition(|l| l.doc_id == "ret-2018");
         approve(&mut f.conn, &f.root, "dev", &ret, today).unwrap();
-        defer(&mut f.conn, "dev", &rest, today).unwrap();
+        defer(&mut f.conn, &f.root, "dev", &rest, today).unwrap();
         assert!(eligible(&f.conn, &f.root, today).unwrap().lines.is_empty());
         let p = pending(&f.conn).unwrap();
         assert_eq!(p.len(), 1);
@@ -1161,7 +1369,10 @@ mod tests {
             ["engage", "w2-2019"]
         );
         // Cancelled while waiting: back on the eligible list, audited (owner 2026-11-04).
-        assert_eq!(cancel(&mut f.conn, "dev", &["ret-2018".into()]).unwrap(), 1);
+        assert_eq!(
+            cancel(&mut f.conn, &f.root, "dev", &["ret-2018".into()]).unwrap(),
+            1
+        );
         assert!(pending(&f.conn).unwrap().is_empty());
         assert_eq!(
             ids(&eligible(&f.conn, &f.root, today).unwrap()),
@@ -1176,7 +1387,54 @@ mod tests {
             )
             .unwrap();
         assert_eq!(n, 1);
-        assert_eq!(cancel(&mut f.conn, "dev", &["ret-2018".into()]).unwrap(), 0);
+        assert_eq!(
+            cancel(&mut f.conn, &f.root, "dev", &["ret-2018".into()]).unwrap(),
+            0
+        );
+    }
+
+    /// Q-105: the decisions are in the cabinet. A catalog made this morning has them all; an
+    /// approval taken back on one PC is not carried out on another.
+    #[test]
+    fn decisions_are_the_same_on_every_pc() {
+        let mut f = fx();
+        let today = d(2026, 11, 3);
+        let r = eligible(&f.conn, &f.root, today).unwrap();
+        let (ret, rest): (Vec<Line>, Vec<Line>) =
+            r.lines.into_iter().partition(|l| l.doc_id == "ret-2018");
+        approve(&mut f.conn, &f.root, "dev", &ret, today).unwrap();
+        defer(&mut f.conn, &f.root, "dev", &rest, today).unwrap();
+        // The PC the approval was made on, as it is now.
+        let first = f._t.path().join("first.db");
+        f.conn
+            .execute("VACUUM INTO ?1", [first.to_string_lossy().to_string()])
+            .unwrap();
+        // Another PC, its catalog new: nothing decided there yet.
+        f.conn.execute("DELETE FROM disposition", []).unwrap();
+        assert_eq!(eligible(&f.conn, &f.root, today).unwrap().lines.len(), 3);
+        assert!(
+            review(&mut f.conn, &f.root, "pc-2", today)
+                .unwrap()
+                .lines
+                .is_empty(),
+            "decided on the other PC: not offered again"
+        );
+        let p = pending(&f.conn).unwrap();
+        assert_eq!(p.len(), 1);
+        assert_eq!(p[0].destroy_after, "2026-12-03");
+        assert_eq!(sync_decisions(&mut f.conn, &f.root, "pc-2").unwrap(), 0);
+        // The approval is taken back here.
+        assert_eq!(
+            cancel(&mut f.conn, &f.root, "pc-2", &["ret-2018".into()]).unwrap(),
+            1
+        );
+        // The first PC, after the wait: it does not destroy what was taken back.
+        let mut conn = vf_core::db::open(&first, Storage::Local).unwrap();
+        assert_eq!(pending(&conn).unwrap().len(), 1);
+        let run = destroy_due(&mut conn, &f.root, "dev", d(2026, 12, 4), "Firm").unwrap();
+        assert_eq!(run.destroyed, 0);
+        assert!(pending(&conn).unwrap().is_empty());
+        assert!(f.root.join("B/2018/return.pdf").is_file());
     }
 
     /// QA P3: an approval is checked again at destroy time. Reclassified as permanent, or new
