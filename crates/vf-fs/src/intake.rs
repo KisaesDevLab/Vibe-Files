@@ -769,8 +769,22 @@ fn record(
         // A rename on one volume carries no hash; hash what is in the cabinet now.
         let hash = match &f.sha256 {
             Some(h) => h.clone(),
-            None => filer_intake::commit::sha256_file(&path)
-                .map_err(|e| format!("cannot hash {}: {e}", path.display()))?,
+            None => {
+                // Another computer recorded this batch first and noted the fingerprint of
+                // this very file (same size and time): taken from its record, the file is
+                // not read again (QA I4: every session's catalog read every filed file).
+                let noted = crate::cloud::stat(&path).and_then(|(size, mtime, _)| {
+                    recorded
+                        .latest_at(&f.rel)
+                        .filter(|r| r.describes(size, mtime))
+                        .map(|r| r.hash.clone())
+                });
+                match noted {
+                    Some(h) => h,
+                    None => filer_intake::commit::sha256_file(&path)
+                        .map_err(|e| format!("cannot hash {}: {e}", path.display()))?,
+                }
+            }
         };
         let existing: Option<(String, Option<String>, i64)> = conn
             .query_row(
