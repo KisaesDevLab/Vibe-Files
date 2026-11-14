@@ -85,6 +85,8 @@ pub struct OpenCabinet {
     pub chain: crate::ui::audit::ChainCheck,
     /// When new audit rows were last copied to `_Vibe/audit/<month>.jsonl`.
     mirrored_at: Option<std::time::Instant>,
+    /// The copy being written, on its own thread.
+    mirror_job: Option<crate::ui::job::Job<Result<usize, String>>>,
     /// A shared catalog (Q-67): its `data_version` when last seen, and when it was looked at;
     /// another session's change shows "Changes by others: Refresh" in Browse (Q-102).
     data_version: (i64, Option<std::time::Instant>),
@@ -487,6 +489,7 @@ impl VibeFilesApp {
                 self.screen = Screen::Open(Box::new(OpenCabinet {
                     chain,
                     mirrored_at: None,
+                    mirror_job: None,
                     data_version: (0, None),
                     seen_reloads: 0,
                     mirror_wait: std::time::Duration::from_secs(2),
@@ -800,19 +803,32 @@ impl eframe::App for VibeFilesApp {
                 o.browse.notice = Some(n);
             }
             // The audit trail's copy in the cabinet (CLAUDE.md layout: _Vibe/audit/*.jsonl).
-            if o.mirrored_at.is_none_or(|t| t.elapsed() >= o.mirror_wait) {
+            // On its own thread with its own connection: it writes to the share.
+            if o.mirror_job.is_none() && o.mirrored_at.is_none_or(|t| t.elapsed() >= o.mirror_wait)
+            {
                 o.mirrored_at = Some(std::time::Instant::now());
+            }
+            if o.mirror_job.is_none()
+                && o.mirrored_at.is_some_and(|t| t.elapsed().as_millis() < 50)
+                && vf_core::audit::mirror_due(&o.opened.conn)
+            {
                 let dir = o.opened.root.join("_Vibe").join("audit");
-                let r = vf_core::audit::mirror_pending(&o.opened.conn, &dir);
+                let catalog = o.opened.catalog.clone();
+                let work = move || {
+                    vf_core::db::open(&catalog, vf_core::db::Storage::Local)
+                        .and_then(|conn| vf_core::audit::mirror_pending(&conn, &dir))
+                        .map_err(|e| e.to_string())
+                };
+                o.mirror_job = crate::ui::job::Job::start(ui.ctx(), "", work).ok();
+            }
+            if let Some(r) = crate::ui::job::take(&mut o.mirror_job) {
+                let r = r.and_then(|r| r);
                 o.mirror_wait = match r {
                     Ok(_) => std::time::Duration::from_secs(2),
                     Err(_) => (o.mirror_wait * 2).min(std::time::Duration::from_secs(120)),
                 };
                 if let Err(e) = r {
-                    tracing::warn!(
-                        kind = crate::logging::kind(&e.to_string()),
-                        "audit mirror not written"
-                    );
+                    tracing::warn!(kind = crate::logging::kind(&e), "audit mirror not written");
                     o.browse.error = Some(format!(
                         "The audit trail's copy in the cabinet could not be written: {e}"
                     ));

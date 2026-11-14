@@ -212,12 +212,10 @@ fn file_safe(s: &str) -> String {
 
 pub fn mirror_append(dir: &Path, rows: &[AuditRow]) -> std::io::Result<()> {
     std::fs::create_dir_all(dir)?;
+    // Each file opened, written and flushed once for all its rows (the cabinet is on a share:
+    // a round trip per row made a batch of hundreds take seconds).
+    let mut by_file: std::collections::BTreeMap<std::path::PathBuf, String> = Default::default();
     for row in rows {
-        let mut f = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            // One file per month and device: each workstation's catalog has its own chain.
-            .open(dir.join(format!("{}.{}.jsonl", row.month(), file_safe(&row.device))))?;
         let detail: serde_json::Value =
             serde_json::from_str(&row.detail).unwrap_or(serde_json::Value::Null);
         let line = serde_json::json!({
@@ -225,7 +223,19 @@ pub fn mirror_append(dir: &Path, rows: &[AuditRow]) -> std::io::Result<()> {
             "action": row.action, "doc": row.doc, "detail": detail,
             "detail_text": row.detail, "prev_hash": row.prev_hash, "hash": row.hash,
         });
-        writeln!(f, "{line}")?;
+        // One file per month and device: each workstation's catalog has its own chain.
+        let text = by_file
+            .entry(dir.join(format!("{}.{}.jsonl", row.month(), file_safe(&row.device))))
+            .or_default();
+        text.push_str(&line.to_string());
+        text.push(char::from(10));
+    }
+    for (path, text) in by_file {
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)?;
+        f.write_all(text.as_bytes())?;
         f.sync_data()?;
     }
     Ok(())
@@ -237,53 +247,84 @@ const MIRRORED: &str = "audit_mirrored_seq";
 /// Appends to `<dir>/<yyyy-mm>.jsonl` every row not mirrored yet, and remembers how far it got.
 /// Run after changes (the app calls it every few seconds); returns how many rows it wrote.
 pub fn mirror_pending(conn: &Connection, dir: &Path) -> Result<usize> {
-    // Several sessions can share one catalog (Q-67): the catalog's write lock is held while a
-    // session reads how far the mirror got, appends and records it, so rows are never written
-    // twice.
+    // Several sessions can share one catalog (Q-67). The rows are claimed first, under the
+    // catalog's write lock and with nothing else done under it; the files are written after
+    // (writing to the share under the lock made every other session's writes wait for it).
     conn.execute_batch("BEGIN IMMEDIATE")?;
-    let r = mirror_locked(conn, dir);
-    conn.execute_batch(if r.is_ok() { "COMMIT" } else { "ROLLBACK" })?;
-    r
+    let claim = (|| -> Result<(u64, u64)> {
+        let done: u64 = conn
+            .query_row("SELECT v FROM local_state WHERE k = ?1", [MIRRORED], |r| {
+                r.get::<_, String>(0)
+            })
+            .optional()?
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0);
+        let last: u64 =
+            conn.query_row("SELECT coalesce(max(seq), 0) FROM audit", [], |r| r.get(0))?;
+        if last > done {
+            set_mirrored(conn, last)?;
+        }
+        Ok((done, last))
+    })();
+    conn.execute_batch(if claim.is_ok() { "COMMIT" } else { "ROLLBACK" })?;
+    let (done, last) = claim?;
+    if last <= done {
+        return Ok(0);
+    }
+    let written = (|| -> Result<usize> {
+        let mut st = conn.prepare(
+            "SELECT seq, ts, user, device_id, action, doc_id, detail, prev_hash, hash
+             FROM audit WHERE seq > ?1 AND seq <= ?2 ORDER BY seq",
+        )?;
+        let rows = st
+            .query_map([done, last], |r| {
+                Ok(AuditRow {
+                    seq: r.get(0)?,
+                    ts: r.get(1)?,
+                    user: r.get(2)?,
+                    device: r.get(3)?,
+                    action: r.get(4)?,
+                    doc: r.get(5)?,
+                    detail: r.get(6)?,
+                    prev_hash: r.get(7)?,
+                    hash: r.get(8)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        mirror_append(dir, &rows).map_err(|e| crate::Error::Tx(format!("audit mirror: {e}")))?;
+        Ok(rows.len())
+    })();
+    if written.is_err() {
+        // Not written: claimed again next time. (Rows another session wrote meanwhile are
+        // then written twice, which a reader can tell by their `seq`; none is ever left out.)
+        let _ = set_mirrored(conn, done);
+    }
+    written
 }
 
-fn mirror_locked(conn: &Connection, dir: &Path) -> Result<usize> {
+/// Whether there are rows [`mirror_pending`] has not written yet (two small reads of the
+/// catalog; nothing is written).
+pub fn mirror_due(conn: &Connection) -> bool {
     let done: u64 = conn
         .query_row("SELECT v FROM local_state WHERE k = ?1", [MIRRORED], |r| {
             r.get::<_, String>(0)
         })
-        .optional()?
+        .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(0);
-    let last: u64 = conn.query_row("SELECT coalesce(max(seq), 0) FROM audit", [], |r| r.get(0))?;
-    if last <= done {
-        return Ok(0);
-    }
-    let mut st = conn.prepare(
-        "SELECT seq, ts, user, device_id, action, doc_id, detail, prev_hash, hash
-         FROM audit WHERE seq > ?1 ORDER BY seq",
-    )?;
-    let rows = st
-        .query_map([done], |r| {
-            Ok(AuditRow {
-                seq: r.get(0)?,
-                ts: r.get(1)?,
-                user: r.get(2)?,
-                device: r.get(3)?,
-                action: r.get(4)?,
-                doc: r.get(5)?,
-                detail: r.get(6)?,
-                prev_hash: r.get(7)?,
-                hash: r.get(8)?,
-            })
-        })?
-        .collect::<std::result::Result<Vec<_>, _>>()?;
-    mirror_append(dir, &rows).map_err(|e| crate::Error::Tx(format!("audit mirror: {e}")))?;
+    conn.query_row("SELECT coalesce(max(seq), 0) FROM audit", [], |r| {
+        r.get::<_, u64>(0)
+    })
+    .is_ok_and(|last| last > done)
+}
+
+fn set_mirrored(conn: &Connection, seq: u64) -> Result<()> {
     conn.execute(
         "INSERT INTO local_state (k, v) VALUES (?1, ?2)
          ON CONFLICT(k) DO UPDATE SET v = excluded.v",
-        params![MIRRORED, last.to_string()],
+        params![MIRRORED, seq.to_string()],
     )?;
-    Ok(rows.len())
+    Ok(())
 }
 
 /// What the Audit trail page shows (PHASES P05 step 2). Empty fields do not filter.
