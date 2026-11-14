@@ -36,12 +36,18 @@ pub struct DispositionPage {
     /// An approval running on its thread: each document not read yet is fingerprinted first
     /// (PA-60), which reads its file.
     approve: Option<crate::ui::job::Job<Result<usize, String>>>,
+    /// What waits for destruction and the past runs, read once per refresh (they were read
+    /// from the catalog on every repaint).
+    waiting: Option<Vec<disposition::Pending>>,
+    runs: Option<Vec<disposition::Run>>,
 }
 
 impl DispositionPage {
     pub fn refresh(&mut self) {
         self.report = None;
         self.job = None;
+        self.waiting = None;
+        self.runs = None;
     }
 
     /// Starts the destruction of what is due on its thread with its own catalog connection.
@@ -268,15 +274,38 @@ pub fn show(ui: &mut egui::Ui, p: &mut DispositionPage, env: &mut Env, catalog: 
                     p.picked.clear();
                 }
             });
+            // Rows of one height, and only the ones in view laid out: a first review of a
+            // large cabinet lists tens of thousands of documents (QA #10).
+            let row_h = ui.spacing().interact_size.y.max(22.0);
+            let across = egui::Layout::left_to_right(egui::Align::Center);
             let mut client: Option<&str> = None;
             for l in &rep.lines {
                 let c = l.client.as_deref().unwrap_or("No client");
                 if client != Some(c) {
-                    ui.add_space(4.0);
-                    ui.label(RichText::new(c).strong());
                     client = Some(c);
+                    let (rect, _) = ui.allocate_exact_size(
+                        egui::vec2(ui.available_width(), row_h + 4.0),
+                        egui::Sense::hover(),
+                    );
+                    if ui.is_rect_visible(rect) {
+                        ui.scope_builder(
+                            egui::UiBuilder::new().max_rect(rect).layout(
+                                egui::Layout::left_to_right(egui::Align::BOTTOM),
+                            ),
+                            |ui| {
+                                ui.label(RichText::new(c).strong());
+                            },
+                        );
+                    }
                 }
-                ui.horizontal(|ui| {
+                let (rect, _) = ui.allocate_exact_size(
+                    egui::vec2(ui.available_width(), row_h),
+                    egui::Sense::hover(),
+                );
+                if !ui.is_rect_visible(rect) {
+                    continue;
+                }
+                ui.scope_builder(egui::UiBuilder::new().max_rect(rect).layout(across), |ui| {
                     let mut on = p.picked.contains(&l.doc_id);
                     let name = RichText::new(&l.rel_path).monospace().small();
                     if ui.checkbox(&mut on, name).changed() {
@@ -373,7 +402,10 @@ pub fn show(ui: &mut egui::Ui, p: &mut DispositionPage, env: &mut Env, catalog: 
 
         ui.add_space(10.0);
         ui.label(RichText::new("Waiting for destruction").strong());
-        let pending = disposition::pending(env.conn).unwrap_or_default();
+        if p.waiting.is_none() {
+            p.waiting = Some(disposition::pending(env.conn).unwrap_or_default());
+        }
+        let pending = p.waiting.clone().unwrap_or_default();
         let today_s = today.to_string();
         let due = pending.iter().filter(|x| x.destroy_after <= today_s).count();
         if pending.is_empty() {
@@ -447,7 +479,10 @@ pub fn show(ui: &mut egui::Ui, p: &mut DispositionPage, env: &mut Env, catalog: 
 
         ui.add_space(10.0);
         ui.label(RichText::new("Runs").strong());
-        let runs = disposition::runs(env.conn, None).unwrap_or_default();
+        if p.runs.is_none() {
+            p.runs = Some(disposition::runs(env.conn, None).unwrap_or_default());
+        }
+        let runs = p.runs.clone().unwrap_or_default();
         if runs.is_empty() {
             ui.label(RichText::new("None yet.").color(theme::ink_muted()));
         }
