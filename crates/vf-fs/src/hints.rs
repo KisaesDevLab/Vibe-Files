@@ -8,6 +8,7 @@
 //! Same single-writer rule as Filer's other files in `_Vibe/` (QUESTIONS Q-19).
 
 use std::collections::HashMap;
+#[cfg(test)]
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -100,14 +101,8 @@ pub fn path(root: &Path) -> PathBuf {
 pub fn append(root: &Path, hint: &Hint) -> Result<(), String> {
     let p = path(root);
     let line = serde_json::to_string(hint).expect("serializes");
-    let mut f = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&p)
-        .map_err(|e| format!("cannot open {}: {e}", p.display()))?;
-    f.write_all(format!("{line}\n").as_bytes())
-        .and_then(|_| f.sync_all())
-        .map_err(|e| format!("cannot write {}: {e}", p.display()))
+    // Every session appends here: one at a time (`cabinet::append_text`).
+    crate::cabinet::append_text(&p, &line).map_err(|e| format!("cannot write {}: {e}", p.display()))
 }
 
 /// Every hint by hash; a later line for the same hash wins. Unreadable lines are skipped.

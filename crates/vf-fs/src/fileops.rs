@@ -459,23 +459,13 @@ fn remove_empty(created: &[PathBuf]) {
 
 /// Appends one line per item, flushed to disk.
 fn append(path: &Path, lines: &[String]) -> Result<(), String> {
-    use std::io::Write;
-    let mut f = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-        .map_err(|e| format!("cannot open {}: {e}", path.display()))?;
     let mut buf = String::new();
-    // A last line cut short (a crash, a share dropping) would merge with the first new one.
-    if std::fs::metadata(path).is_ok_and(|m| m.len() > 0) && !ends_with_newline(path) {
-        buf.push('\n');
-    }
     for l in lines {
         buf.push_str(l);
         buf.push('\n');
     }
-    f.write_all(buf.as_bytes())
-        .and_then(|()| f.sync_all())
+    // One writer at a time across computers; a last line cut short is ended first.
+    crate::cabinet::append_text(path, &buf)
         .map_err(|e| format!("cannot write {}: {e}", path.display()))
 }
 
@@ -487,15 +477,6 @@ fn in_versions(p: &Path) -> bool {
         crate::cabinet::VIBE_DIR,
         crate::cabinet::VERSIONS_DIR
     ))
-}
-
-fn ends_with_newline(path: &Path) -> bool {
-    use std::io::{Read, Seek, SeekFrom};
-    let Ok(mut f) = std::fs::File::open(path) else {
-        return true;
-    };
-    let mut b = [0u8; 1];
-    f.seek(SeekFrom::End(-1)).is_ok() && f.read_exact(&mut b).is_ok() && b[0] == b'\n'
 }
 
 fn method_name(m: Method) -> &'static str {

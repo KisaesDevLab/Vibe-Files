@@ -3,7 +3,6 @@
 //! rebuild gave it a new one, by its path, so the file on disk is all a rebuild needs
 //! (principle 2). Tapes hold only what the person picked or typed.
 
-use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -35,13 +34,7 @@ pub fn save(root: &Path, t: &Saved) -> Result<(), String> {
         std::fs::create_dir_all(d).map_err(|e| format!("{}: {e}", d.display()))?;
     }
     let line = serde_json::to_string(t).map_err(|e| e.to_string())?;
-    let mut f = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&p)
-        .map_err(|e| format!("{}: {e}", p.display()))?;
-    writeln!(f, "{line}").map_err(|e| format!("{}: {e}", p.display()))?;
-    f.sync_all().map_err(|e| e.to_string())
+    crate::cabinet::append_text(&p, &line).map_err(|e| format!("{}: {e}", p.display()))
 }
 
 /// The tapes saved on a document, newest first.

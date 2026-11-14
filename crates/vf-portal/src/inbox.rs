@@ -395,13 +395,8 @@ pub fn append_received(root: &Path, rows: &[Received]) -> std::io::Result<()> {
         text.push_str(&serde_json::to_string(r).expect("serializes"));
         text.push('\n');
     }
-    use std::io::Write;
-    // One write per call in append mode: rows from several PCs do not interleave.
-    std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&p)?
-        .write_all(text.as_bytes())
+    // One writer at a time across computers (`cabinet::append_text`).
+    vf_fs::cabinet::append_text(&p, &text)
 }
 
 /// Every received upload, oldest first.

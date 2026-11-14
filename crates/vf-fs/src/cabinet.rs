@@ -85,6 +85,58 @@ pub fn write_new(p: &Path, bytes: &[u8]) -> Result<(), String> {
 
 /// Replaces `p` with `bytes` through a temp file beside it, flushed to disk before the rename,
 /// so a crash leaves the old file or the new one, never half of one.
+/// How long [`append_text`] waits for another computer's append to the same file.
+const APPEND_WAIT: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// Appends `text` (whole lines) to a file several computers append to: a record file, a log.
+///
+/// One writer at a time, kept by the file server: the file is opened so that nobody else can
+/// open it for writing meanwhile (others may read), and a second writer waits for the first
+/// to finish. Over a share each computer chooses where its write lands, so two that append
+/// at the same moment without this can write over each other's lines (research review
+/// 2026-11-14). A computer that dies mid-append leaves no lock behind: the server closes its
+/// handle. A last line cut short earlier is ended first, so the new lines never merge with it.
+pub fn append_text(p: &Path, text: &str) -> std::io::Result<()> {
+    use std::io::{Read, Seek, SeekFrom, Write};
+    if text.is_empty() {
+        return Ok(());
+    }
+    if let Some(dir) = p.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let started = std::time::Instant::now();
+    let mut f = loop {
+        let mut o = std::fs::OpenOptions::new();
+        o.create(true).read(true).append(true);
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            // FILE_SHARE_READ: readers yes, another writer no.
+            o.share_mode(1);
+        }
+        match o.open(p) {
+            Ok(f) => break f,
+            // ERROR_SHARING_VIOLATION: someone is appending right now.
+            Err(e) if e.raw_os_error() == Some(32) && started.elapsed() < APPEND_WAIT => {
+                std::thread::sleep(std::time::Duration::from_millis(15));
+            }
+            Err(e) => return Err(e),
+        }
+    };
+    let mut buf = String::with_capacity(text.len() + 2);
+    let mut last = [0u8; 1];
+    if f.seek(SeekFrom::End(-1)).is_ok() && f.read_exact(&mut last).is_ok() && last[0] != b'\n' {
+        buf.push(char::from(10));
+    }
+    buf.push_str(text);
+    if !buf.ends_with(char::from(10)) {
+        buf.push(char::from(10));
+    }
+    // One write, at the end (the handle is in append mode), then on disk before it is let go.
+    f.write_all(buf.as_bytes())?;
+    f.sync_all()
+}
+
 pub fn write_replace(p: &Path, bytes: &[u8]) -> Result<(), String> {
     use std::io::Write;
     if let Some(dir) = p.parent() {
@@ -226,6 +278,50 @@ mod tests {
         bind(tmp.path(), "Ccc (2)", b);
         bind(tmp.path(), "Bbb (1)", a);
         assert_eq!(discover_firm_id(tmp.path()), Some(a.to_string()));
+    }
+
+    /// Several writers appending to one file at the same moment (as several computers do to
+    /// a record file on the share): every line is there, whole, once.
+    #[test]
+    fn appends_from_several_writers_all_land_whole() {
+        let t = tempfile::tempdir().unwrap();
+        let p = t.path().join("sub").join("records.jsonl");
+        // A last line cut short earlier is ended before anything is added.
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(&p, "cut sho").unwrap();
+        let (writers, each) = (8, 250);
+        std::thread::scope(|s| {
+            for w in 0..writers {
+                let p = &p;
+                s.spawn(move || {
+                    for n in 0..each {
+                        // Two lines per append, as a Transaction appends several records.
+                        append_text(
+                            p,
+                            &format!("writer {w} line {n} a\nwriter {w} line {n} b\n"),
+                        )
+                        .unwrap();
+                    }
+                });
+            }
+        });
+        let text = std::fs::read_to_string(&p).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines[0], "cut sho");
+        assert_eq!(lines.len(), 1 + writers * each * 2);
+        assert!(text.ends_with(char::from(10)));
+        let mut seen = std::collections::HashSet::new();
+        for (i, l) in lines[1..].iter().enumerate() {
+            assert!(
+                l.starts_with("writer ") && (l.ends_with(" a") || l.ends_with(" b")),
+                "{l}"
+            );
+            assert!(seen.insert(*l), "twice: {l}");
+            // The two lines of one append stay together.
+            if l.ends_with(" a") {
+                assert_eq!(lines[i + 2], format!("{} b", l.trim_end_matches(" a")));
+            }
+        }
     }
 
     #[test]
