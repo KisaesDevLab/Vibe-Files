@@ -1445,6 +1445,30 @@ mod tests {
         assert_eq!(d.len(), 1, "{d:?}");
         assert!(d[0].new_rel.ends_with("/w2 again.pdf"));
         assert!(d[0].old_rel.ends_with("/w2.pdf"));
+
+        // PA-60: the older document was cataloged from its folder listing and never read.
+        // Nothing to compare until the documents of the new one's size are read; then found.
+        f.conn
+            .execute(
+                "UPDATE document SET hash = NULL WHERE rel_path LIKE '%/w2.pdf'",
+                [],
+            )
+            .unwrap();
+        assert!(
+            crate::dupes::filed_since(&f.conn, &before)
+                .unwrap()
+                .is_empty()
+        );
+        let read = crate::dupes::read_candidates(&mut f.conn, &f.root, "dev", &before).unwrap();
+        assert_eq!(read, 1, "only the document of that size");
+        let d = crate::dupes::filed_since(&f.conn, &before).unwrap();
+        assert_eq!(d.len(), 1, "{d:?}");
+        assert!(d[0].old_rel.ends_with("/w2.pdf"));
+        // Nothing left to read the second time.
+        assert_eq!(
+            crate::dupes::read_candidates(&mut f.conn, &f.root, "dev", &before).unwrap(),
+            0
+        );
     }
 
     /// Filer's own Undo moves the files back; reconcile then undoes the catalog side only.

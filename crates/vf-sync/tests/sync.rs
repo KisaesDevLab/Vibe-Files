@@ -1543,3 +1543,80 @@ fn a_list_of_rules_decides_what_goes_up() {
     vf_sync::push::push(&mut a.conn, &a.root, &a.sync, None).unwrap();
     assert!(sent(&a).contains(&q941));
 }
+
+/// PA-60: documents cataloged from the folder listing have no fingerprint until something
+/// needs it. A push reads the ones it sends, and only those.
+#[test]
+fn a_push_fingerprints_what_it_sends_and_nothing_else() {
+    use vf_fs::clients::{B2Rule, B2Years};
+    let t = tempfile::tempdir().unwrap();
+    let store = Remote::memory();
+    let mut a = pc_a(t.path(), store);
+    // Only the permanent file goes up by itself.
+    vf_fs::clients::set_b2_rules(
+        &a.root,
+        &[B2Rule {
+            name: "Permanent".into(),
+            folders: vec!["Permanent".into()],
+            years: B2Years::None,
+            no_year: true,
+            ..B2Rule::default()
+        }],
+    )
+    .unwrap();
+    let before: Vec<(String, String)> = a
+        .conn
+        .prepare("SELECT rel_path, hash FROM document WHERE deleted_at IS NULL ORDER BY rel_path")
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect();
+    a.conn
+        .execute("UPDATE document SET hash = NULL", [])
+        .unwrap();
+    let hash_of = |a: &Pc, file: &str| -> Option<String> {
+        a.conn
+            .query_row(
+                "SELECT hash FROM document WHERE rel_path LIKE '%' || ?1",
+                [file],
+                |r| r.get(0),
+            )
+            .unwrap()
+    };
+
+    let r = vf_sync::push::push(&mut a.conn, &a.root, &a.sync, None).unwrap();
+    assert_eq!(r.skipped, 0, "{r:?}");
+    let ein = before
+        .iter()
+        .find(|(p, _)| p.ends_with("EIN letter.pdf"))
+        .unwrap();
+    assert_eq!(
+        hash_of(&a, "EIN letter.pdf").as_ref(),
+        Some(&ein.1),
+        "read and sent"
+    );
+    assert!(
+        hash_of(&a, "W-2 Northwind.pdf").is_none(),
+        "held back: not read"
+    );
+    assert!(hash_of(&a, "941 Q1.pdf").is_none(), "held back: not read");
+    assert!(
+        vf_sync::catalog::sent_ids(&a.conn)
+            .unwrap()
+            .contains(&doc_id(&a.conn, "EIN letter.pdf"))
+    );
+
+    // Pushed by hand: read then, and sent.
+    let w2 = doc_id(&a.conn, "W-2 Northwind.pdf");
+    vf_sync::push::push_docs(
+        &mut a.conn,
+        &a.root,
+        &a.sync,
+        std::slice::from_ref(&w2),
+        &[],
+    )
+    .unwrap();
+    assert!(hash_of(&a, "W-2 Northwind.pdf").is_some());
+    assert!(hash_of(&a, "941 Q1.pdf").is_none());
+}

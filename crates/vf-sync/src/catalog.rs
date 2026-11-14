@@ -28,7 +28,9 @@ pub struct Doc {
 pub fn doc(conn: &Connection, id: &str) -> Result<Option<Doc>> {
     Ok(conn
         .query_row(
-            "SELECT id, client_id, rel_path, hash, size, rev, deleted_at IS NOT NULL
+            // A document not fingerprinted yet (PA-60) has an empty hash here: it equals no
+            // entry's, so its file is read before anything is decided about it.
+            "SELECT id, client_id, rel_path, coalesce(hash, ''), size, rev, deleted_at IS NOT NULL
              FROM document WHERE id = ?1",
             [id],
             |r| {
@@ -78,7 +80,8 @@ pub fn base(conn: &Connection, id: &str) -> Result<Option<Base>> {
 pub fn set_base(conn: &Connection, id: &str) -> Result<()> {
     conn.execute(
         "INSERT INTO sync_base (doc_id, client_id, rel_path, hash, rev, deleted)
-         SELECT id, client_id, rel_path, hash, rev, deleted_at IS NOT NULL FROM document WHERE id = ?1
+         SELECT id, client_id, rel_path, hash, rev, deleted_at IS NOT NULL FROM document
+         WHERE id = ?1 AND hash IS NOT NULL
          ON CONFLICT(doc_id) DO UPDATE SET client_id = excluded.client_id,
            rel_path = excluded.rel_path, hash = excluded.hash, rev = excluded.rev,
            deleted = excluded.deleted",
@@ -193,6 +196,27 @@ pub fn client_folder(conn: &Connection, client_id: &str) -> Result<Option<String
         .flatten())
 }
 
+/// A document not fingerprinted yet: (id, cabinet path, doc type, tax year).
+pub type Unread = (String, String, Option<String>, Option<i32>);
+
+/// The live documents of a segment not fingerprinted yet (PA-60). An entry needs its content's fingerprint, so a push reads the ones it is going
+/// to send first ([`entries`] leaves the others out; they were never sent).
+pub fn unread(conn: &Connection, client: &str) -> Result<Vec<Unread>> {
+    let which = if client.is_empty() {
+        "client_id IS NULL AND ?1 = ''"
+    } else {
+        "client_id = ?1"
+    };
+    let mut st = conn.prepare(&format!(
+        "SELECT id, rel_path, doc_type_id, tax_year FROM document
+         WHERE {which} AND deleted_at IS NULL AND hash IS NULL ORDER BY rel_path"
+    ))?;
+    let rows = st.query_map([client], |r| {
+        Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+    })?;
+    Ok(rows.collect::<std::result::Result<_, _>>()?)
+}
+
 /// The documents of a segment as entries (live ones, and tombstones of documents ever sent).
 pub fn entries(
     conn: &Connection,
@@ -212,6 +236,7 @@ pub fn entries(
                 d.tombstone_reason
          FROM document d LEFT JOIN sync_base b ON b.doc_id = d.id
          WHERE {which} AND (d.deleted_at IS NULL OR b.doc_id IS NOT NULL)
+           AND d.hash IS NOT NULL
          ORDER BY d.rel_path, d.id"
     ))?;
     let strip = |rel: &str| -> String {

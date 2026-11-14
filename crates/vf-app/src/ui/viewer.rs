@@ -3001,7 +3001,7 @@ enum Convert {
 /// from: a document renamed or moved meanwhile is never edited from its old path, where another
 /// file may sit now (QA A11).
 fn source_hash(env: &Env<'_>, doc: &Doc, seen: Option<&str>) -> Result<String, String> {
-    let (rel, hash): (String, String) = env
+    let (rel, hash): (String, Option<String>) = env
         .conn
         .query_row(
             "SELECT rel_path, hash FROM document WHERE id = ?1 AND deleted_at IS NULL",
@@ -3015,6 +3015,13 @@ fn source_hash(env: &Env<'_>, doc: &Doc, seen: Option<&str>) -> Result<String, S
             doc.name
         ));
     }
+    // Not fingerprinted yet (PA-60): what the file holds now is its content (the change that
+    // follows reads the file again and checks it against this).
+    let hash = match hash {
+        Some(h) => h,
+        None => filer_intake::commit::sha256_file(&doc.path)
+            .map_err(|e| format!("{} cannot be read: {e}", doc.name))?,
+    };
     if let Some(seen) = seen
         && seen != hash
     {

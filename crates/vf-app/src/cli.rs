@@ -532,7 +532,14 @@ fn export_client(
          LEFT JOIN doc_type t ON t.id = d.doc_type_id
          WHERE d.client_id = ?1 AND d.deleted_at IS NULL ORDER BY d.rel_path",
     )?;
-    type Row = (String, String, i64, Option<String>, Option<i64>, String);
+    type Row = (
+        String,
+        Option<String>,
+        i64,
+        Option<String>,
+        Option<i64>,
+        String,
+    );
     let docs: Vec<Row> = st
         .query_map([&client_id], |r| {
             Ok((
@@ -556,6 +563,8 @@ fn export_client(
     for (rel, hash, size, ty, year, status) in &docs {
         let bytes = std::fs::read(cabinet.join(rel))?;
         let have = vf_sync::crypto::sha256(&bytes);
+        // Not fingerprinted yet (PA-60): the file as it is, with the fingerprint just made.
+        let hash = hash.as_ref().unwrap_or(&have);
         if &have != hash {
             bail!(
                 "{rel} does not match the catalog (changed outside Vibe Files?): run the integrity sweep first"

@@ -219,6 +219,9 @@ fn reconcile_now(conn: &mut Connection, root: &Path, device_id: &str) -> Result<
     let before = vf_core::now_rfc3339();
     let r = vf_fs::intake::reconcile(conn, root, device_id)?;
     let dupes = if r.recorded.is_some() {
+        // Older documents not read yet that are the size of one just filed are read first
+        // (PA-60), or a copy of a never-opened document would not be noticed.
+        let _ = vf_fs::dupes::read_candidates(conn, root, device_id, &before);
         vf_fs::dupes::filed_since(conn, &before)
     } else {
         Ok(vec![])

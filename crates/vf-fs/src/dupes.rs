@@ -42,13 +42,60 @@ fn holders(conn: &Connection, hash: &str) -> Result<Vec<(String, String, String)
     rows.collect::<Result<_, _>>().map_err(|e| e.to_string())
 }
 
+/// Older documents one check reads for each size of new file, at most (a size shared by
+/// very many files, an empty or template file, is not worth reading them all).
+const READ_PER_SIZE: usize = 25;
+
+/// Fingerprints the older documents a just-filed one could be a copy of (PA-60): a document
+/// cataloged from its folder listing has no fingerprint until something needs it, and two
+/// files with the same content have the same size. For each size of the documents filed at or
+/// after `since`, the live documents of that size not read yet are read, oldest first, at
+/// most [`READ_PER_SIZE`] each. Run before [`filed_since`], off the window's thread. Returns
+/// how many were read; one that cannot be read is left as it is.
+pub fn read_candidates(
+    conn: &mut Connection,
+    root: &Path,
+    device_id: &str,
+    since: &str,
+) -> Result<usize, String> {
+    let sizes: Vec<i64> = conn
+        .prepare(
+            "SELECT DISTINCT size FROM document
+             WHERE deleted_at IS NULL AND filed_at >= ?1 AND hash IS NOT NULL",
+        )
+        .and_then(|mut st| st.query_map([since], |r| r.get(0))?.collect())
+        .map_err(|e| e.to_string())?;
+    let mut read = 0;
+    for size in sizes {
+        // The partial index on unread documents by size serves this.
+        let ids: Vec<String> = conn
+            .prepare_cached(
+                "SELECT id FROM document
+                 WHERE hash IS NULL AND size = ?1 AND deleted_at IS NULL
+                 ORDER BY filed_at LIMIT ?2",
+            )
+            .and_then(|mut st| {
+                st.query_map((size, READ_PER_SIZE as i64), |r| r.get(0))?
+                    .collect()
+            })
+            .map_err(|e| e.to_string())?;
+        for id in ids {
+            if crate::fingerprint::ensure(conn, root, device_id, &id).is_ok() {
+                read += 1;
+            }
+        }
+    }
+    Ok(read)
+}
+
 /// Live documents filed at or after `since` (RFC 3339) whose content an older live document
-/// already has (the oldest such document is named).
+/// already has (the oldest such document is named). Only fingerprinted documents are compared:
+/// see [`read_candidates`].
 pub fn filed_since(conn: &Connection, since: &str) -> Result<Vec<Dup>, String> {
     let mut st = conn
         .prepare(
             "SELECT id, rel_path, hash, filed_at FROM document
-             WHERE deleted_at IS NULL AND filed_at >= ?1 ORDER BY rel_path",
+             WHERE deleted_at IS NULL AND filed_at >= ?1 AND hash IS NOT NULL ORDER BY rel_path",
         )
         .map_err(|e| e.to_string())?;
     let new: Vec<(String, String, String, String)> = st

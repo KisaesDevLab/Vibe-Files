@@ -926,13 +926,28 @@ fn apply_one(
             return Ok(One::Done);
         }
         // Already here under another id (a shared cabinet folder, or a restore)?
-        let other: Option<(String, String)> = conn
+        let other: Option<(String, Option<String>)> = conn
             .query_row(
                 "SELECT id, hash FROM document WHERE rel_path = ?1 AND deleted_at IS NULL",
                 [&want],
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .optional()?;
+        // Not fingerprinted yet (PA-60): the file is read now, and its row told.
+        let other = match other {
+            Some((id, None)) => {
+                let read = filer_intake::commit::sha256_file(&root.join(&want)).ok();
+                if let Some(h) = &read {
+                    conn.execute(
+                        "UPDATE document SET hash = ?2 WHERE id = ?1 AND hash IS NULL",
+                        [&id, h],
+                    )?;
+                }
+                Some((id, read.unwrap_or_default()))
+            }
+            Some((id, Some(h))) => Some((id, h)),
+            None => None,
+        };
         match other {
             Some((id, h)) if h == e.hash && catalog::base(conn, &id)?.is_none() => {
                 catalog::rekey(conn, &id, &e.doc_id)?;

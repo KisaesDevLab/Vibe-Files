@@ -369,7 +369,7 @@ fn push_once(
 
     // A segment this PC has not applied (a pull left documents for later) is never sent: it
     // would put back what the other workstation changed.
-    let applied = |c: &str| -> Result<bool> {
+    let applied = |conn: &Connection, c: &str| -> Result<bool> {
         let theirs = if c == CABINET {
             head.cabinet_segment_rev
         } else {
@@ -406,7 +406,7 @@ fn push_once(
     let cabinet_too = !client_only
         && !done.contains(CABINET)
         && (files_dirty || (pending.contains_key(CABINET) && only.is_none_or(|o| o == CABINET)))
-        && applied(CABINET)?;
+        && applied(conn, CABINET)?;
 
     // Each client's entries, and the contents they need up.
     struct Part {
@@ -418,7 +418,7 @@ fn push_once(
     let mut parts: Vec<Part> = vec![];
     let mut jobs: BTreeMap<String, PathBuf> = BTreeMap::new();
     for client in &round {
-        if !applied(client)? {
+        if !applied(conn, client)? {
             rep.skipped += pending.get(client).copied().unwrap_or(0);
             continue;
         }
@@ -429,6 +429,17 @@ fn push_once(
         let Ok(sentinel) = std::fs::read_to_string(&sentinel_path) else {
             continue;
         };
+        // Documents not fingerprinted yet (PA-60) that this push sends are read first; one
+        // that cannot be read now waits for the next push.
+        for (id, rel, doc_type, year) in catalog::unread(conn, client)? {
+            let goes = match force {
+                Some(f) => f.contains(&id),
+                None => rules.sends(Some(client), &rel, doc_type.as_deref(), year, false),
+            };
+            if goes && vf_fs::fingerprint::ensure(conn, root, &s.device_id, &id).is_err() {
+                rep.skipped += 1;
+            }
+        }
         let docs = catalog::entries(conn, &s.keys, client, &folder)?;
         let docs = hold_back(s, &head, client, docs, |e| match force {
             // By hand: these documents, and what is in B2 already. The rules decide nothing.
@@ -464,6 +475,13 @@ fn push_once(
         });
     }
     let cabinet_docs = if cabinet_too {
+        for (id, rel, doc_type, year) in catalog::unread(conn, CABINET)? {
+            if rules.sends(None, &rel, doc_type.as_deref(), year, false)
+                && vf_fs::fingerprint::ensure(conn, root, &s.device_id, &id).is_err()
+            {
+                rep.skipped += 1;
+            }
+        }
         let docs = catalog::entries(conn, &s.keys, CABINET, "")?;
         let docs = hold_back(s, &head, CABINET, docs, |e| {
             rules.sends(
