@@ -150,8 +150,17 @@ pub fn write_replace(p: &Path, bytes: &[u8]) -> Result<(), String> {
     let tmp = p.with_file_name(name);
     std::fs::File::create(&tmp)
         .and_then(|mut f| f.write_all(bytes).and_then(|()| f.sync_all()))
-        .and_then(|()| std::fs::rename(&tmp, p))
-        .map_err(|e| format!("cannot write {}: {e}", p.display()))
+        .map_err(|e| format!("cannot write {}: {e}", p.display()))?;
+    // The cabinet locks this change is made under are still this computer's, asked at the
+    // last moment before the file is replaced.
+    if let Err(e) = crate::lock::still_mine() {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    std::fs::rename(&tmp, p).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        format!("cannot write {}: {e}", p.display())
+    })
 }
 
 /// Same rule as Filer's root scan (X28): `_x`, `.x`, `~x` are not client folders.

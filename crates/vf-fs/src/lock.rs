@@ -84,21 +84,65 @@ pub fn with<T>(
     }
     let _held = take(root, name).map_err(|b| b.message(what))?;
     MINE.with(|m| m.borrow_mut().insert(key.clone()));
-    // Taken off the list however the change ends.
-    struct Off((PathBuf, String));
+    let file = _held.held.clone();
+    if let Some(f) = &file {
+        FILES.with(|m| {
+            m.borrow_mut()
+                .push((f.0.clone(), f.1.clone(), what.to_string()))
+        });
+    }
+    // Taken off the lists however the change ends.
+    struct Off((PathBuf, String), Option<(PathBuf, String)>);
     impl Drop for Off {
         fn drop(&mut self) {
             MINE.with(|m| m.borrow_mut().remove(&self.0));
+            if let Some(f) = &self.1 {
+                FILES.with(|m| m.borrow_mut().retain(|x| x.0 != f.0 || x.1 != f.1));
+            }
         }
     }
-    let _off = Off(key);
+    let _off = Off(key, file);
     change()
+}
+
+/// Whether every lock this thread holds through [`with`] is still its own, asked just before
+/// a shared file is written ([`cabinet::write_replace`]). A computer that stalled for longer
+/// than [`STALE`] in the middle of a change (asleep, a share that hung) had its lock taken
+/// over, and someone else may have changed the file since: writing now would put this
+/// computer's old copy over theirs (research review 2026-11-14). `Err`: what to tell the
+/// person; nothing is written.
+pub fn still_mine() -> Result<(), String> {
+    let held: Vec<(PathBuf, String, String)> = FILES.with(|m| m.borrow().clone());
+    for (path, token, what) in held {
+        // The holder's own heartbeat rewrites the file: an empty read is looked at again.
+        let mut ours = false;
+        for _ in 0..5 {
+            match std::fs::read_to_string(&path) {
+                Ok(t) if t.starts_with(token.as_str()) => {
+                    ours = true;
+                    break;
+                }
+                Ok(t) if t.trim().is_empty() => {
+                    std::thread::sleep(Duration::from_millis(30));
+                }
+                _ => break,
+            }
+        }
+        if !ours {
+            return Err(format!(
+                "This computer stopped for a while in the middle of changing {what}, and someone else went ahead meanwhile. Nothing was saved: make the change again."
+            ));
+        }
+    }
+    Ok(())
 }
 
 thread_local! {
     /// The locks this thread holds through [`with`].
     static MINE: std::cell::RefCell<std::collections::HashSet<(PathBuf, String)>> =
         Default::default();
+    /// Their lock files: (file, this holder's token, what it guards).
+    static FILES: std::cell::RefCell<Vec<(PathBuf, String, String)>> = Default::default();
 }
 
 /// The age of the file at `path` by the file server's clock: against a file written just now
@@ -237,6 +281,47 @@ impl Drop for Held {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A computer that stalled past the takeover time in the middle of a change does not
+    /// write its old copy over what the computer that took the lock over wrote.
+    #[test]
+    fn a_change_whose_lock_was_taken_over_is_not_written() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+        let file = root.join("_Vibe/holds.json");
+        // Held all the way: written.
+        with(&root, "holds", "the legal holds", || {
+            cabinet::write_replace(&file, b"first")
+        })
+        .unwrap();
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "first");
+        // Taken over while this change was under way: not written, and said.
+        let lock = root.join("_Vibe/lock-holds.lock");
+        let e = with(&root, "holds", "the legal holds", || {
+            std::fs::write(&lock, "another-token 1 Pat on HOST7").unwrap();
+            cabinet::write_replace(&file, b"stale copy")
+        })
+        .unwrap_err();
+        assert!(e.contains("Nothing was saved"), "{e}");
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "first");
+        // The other holder's lock is left alone, and no temp file is left behind.
+        assert!(
+            std::fs::read_to_string(&lock)
+                .unwrap()
+                .starts_with("another-token")
+        );
+        let left: Vec<String> = std::fs::read_dir(root.join("_Vibe"))
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.ends_with(".tmp"))
+            .collect();
+        assert!(left.is_empty(), "{left:?}");
+        // Outside any lock, a write is not asked about locks.
+        std::fs::remove_file(&lock).unwrap();
+        cabinet::write_replace(&file, b"second").unwrap();
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "second");
+    }
 
     /// The second change waits for the first; one that cannot have the lock in time is told
     /// who holds it; a lock left by a PC that stopped is taken over.

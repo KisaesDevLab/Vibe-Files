@@ -270,6 +270,8 @@ pub fn load(root: &Path) -> Result<Master, String> {
 }
 
 pub fn save_list(root: &Path, list: &ClientList) -> Result<(), String> {
+    // Filer's own writer does not ask: the lock this change is made under is still ours.
+    crate::lock::still_mine()?;
     clients::save_cache(&master_dir(root), list).map_err(|e| format!("saving clients.json: {e}"))
 }
 
@@ -325,6 +327,7 @@ pub fn ensure_listed(conn: &vf_core::db::Connection, root: &Path) -> Result<usiz
 }
 
 pub fn save_rels(root: &Path, rels: &Relationships) -> Result<(), String> {
+    crate::lock::still_mine()?;
     relationships::save(&master_dir(root), rels)
         .map_err(|e| format!("saving relationships.json: {e}"))
 }
