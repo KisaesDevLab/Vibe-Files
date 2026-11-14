@@ -119,7 +119,8 @@ pub fn scan_week(conn: &Connection, root: &Path, week: u64) -> Result<Drift, Str
     let mut rep = RebuildReport::default();
     let (_, folders) = rebuild::scan_folders(root, &mut rep).map_err(|e| e.to_string())?;
     let known = rebuild::known_files(conn).map_err(|e| e.to_string())?;
-    let mut live: HashMap<String, (String, String, i64)> = HashMap::new(); // rel -> id, hash, size
+    // rel -> id, hash (`None`: not fingerprinted yet, PA-60), size
+    let mut live: HashMap<String, (String, Option<String>, i64)> = HashMap::new();
     {
         let mut st = conn
             .prepare("SELECT rel_path, id, hash, size FROM document WHERE deleted_at IS NULL")
@@ -128,7 +129,8 @@ pub fn scan_week(conn: &Connection, root: &Path, week: u64) -> Result<Drift, Str
             .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
             .map_err(|e| e.to_string())?;
         for r in rows {
-            let (p, id, h, s): (String, String, String, i64) = r.map_err(|e| e.to_string())?;
+            let (p, id, h, s): (String, String, Option<String>, i64) =
+                r.map_err(|e| e.to_string())?;
             live.insert(p, (id, h, s));
         }
     }
@@ -189,6 +191,9 @@ pub fn scan_week(conn: &Connection, root: &Path, week: u64) -> Result<Drift, Str
         .collect();
     let mut read = rebuild::read_all(&to_read).into_iter();
     let mut times: Vec<(String, i64)> = Vec::new();
+    // Documents never fingerprinted that this sweep read (its weekly slice, or a changed size
+    // or time): (id, fingerprint, size). Filled in: over the 13 weeks every document gets one.
+    let mut fills: Vec<(String, String, u64)> = Vec::new();
     for (((p, rel, client_id, st), whole), left) in todo.into_iter().zip(read_whole).zip(left) {
         if left {
             d.online_only += 1;
@@ -198,7 +203,16 @@ pub fn scan_week(conn: &Connection, root: &Path, week: u64) -> Result<Drift, Str
         let got = if whole {
             read.next().flatten()
         } else {
-            known.get(&rel).map(|k| k.0.clone())
+            match known.get(&rel).map(|k| k.0.clone()) {
+                Some(Some(h)) => Some(h),
+                // Not fingerprinted yet and not in this week's slice: nothing to check it
+                // against. It is there, and waits for its week.
+                Some(None) => {
+                    seen.push(rel);
+                    continue;
+                }
+                None => None,
+            }
         };
         let hash = match got {
             Some(h) => h,
@@ -216,14 +230,16 @@ pub fn scan_week(conn: &Connection, root: &Path, week: u64) -> Result<Drift, Str
         if let Some((_, t)) = st
             && known
                 .get(&rel)
-                .is_some_and(|k| k.0 == hash && k.2 != Some(t))
+                .is_some_and(|k| k.0.as_deref().is_none_or(|h| h == hash) && k.2 != Some(t))
         {
             times.push((rel.clone(), t));
         }
         {
             match live.get(&rel) {
-                Some((_, h, _)) if *h == hash => {}
-                Some((id, h, s)) => d.modified.push(Modified {
+                Some((_, Some(h), _)) if *h == hash => {}
+                // Read for the first time: its fingerprint, not a change.
+                Some((id, None, _)) => fills.push((id.clone(), hash, size)),
+                Some((id, Some(h), s)) => d.modified.push(Modified {
                     doc_id: id.clone(),
                     rel_path: rel.clone(),
                     old_hash: h.clone(),
@@ -240,6 +256,23 @@ pub fn scan_week(conn: &Connection, root: &Path, week: u64) -> Result<Drift, Str
             }
             seen.push(rel);
         }
+    }
+    // Fingerprints made for documents that had none.
+    if !fills.is_empty() {
+        let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
+        {
+            let mut st = tx
+                .prepare(
+                    "UPDATE document SET hash = ?2, size = ?3
+                     WHERE id = ?1 AND hash IS NULL AND deleted_at IS NULL",
+                )
+                .map_err(|e| e.to_string())?;
+            for (id, hash, size) in &fills {
+                st.execute((id, hash, *size as i64))
+                    .map_err(|e| e.to_string())?;
+            }
+        }
+        tx.commit().map_err(|e| e.to_string())?;
     }
     // Times of files read and found unchanged: the next sweep checks them by size and time.
     if !times.is_empty() {
@@ -268,7 +301,8 @@ pub fn scan_week(conn: &Connection, root: &Path, week: u64) -> Result<Drift, Str
         .map(|(rel, (id, hash, _))| Missing {
             doc_id: id,
             rel_path: rel,
-            hash,
+            // Never fingerprinted: empty, which no file's content matches.
+            hash: hash.unwrap_or_default(),
         })
         .collect();
     missing.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));

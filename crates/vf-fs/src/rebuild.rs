@@ -162,6 +162,9 @@ pub struct RebuildReport {
     pub doc_types_error: Option<String>,
     /// New document rows whose metadata came from a `docmeta.jsonl` record.
     pub docmeta_restored: usize,
+    /// Files not read whose fingerprint was taken from a record another PC wrote for the very
+    /// same file (PA-60).
+    pub docmeta_trusted: usize,
     /// Documents already cataloged whose metadata was brought in line with `docmeta.jsonl`
     /// (a scoped rebuild: another server's edit, PA-36).
     pub docs_meta_updated: usize,
@@ -302,14 +305,28 @@ impl From<vf_core::db::SqlError> for RebuildError {
 struct Found {
     rel: String,
     client_id: Option<String>,
-    hash: String,
+    /// `None`: not read (PA-60: cataloged from its folder's listing).
+    hash: Option<String>,
     size: u64,
     /// Last-modified time (seconds since 1970).
     mtime: Option<i64>,
 }
 
-/// path → (hash, size, file_mtime) of the catalog's live documents.
-pub(crate) type Known = HashMap<String, (String, i64, Option<i64>)>;
+/// path → (hash, size, file_mtime) of the catalog's live documents. A hash of `None`: the
+/// document has not been fingerprinted yet (PA-60).
+pub(crate) type Known = HashMap<String, (Option<String>, i64, Option<i64>)>;
+
+/// What the index does with one listed file.
+enum Take {
+    /// The catalog has it at this path with this size and time: its fingerprint as known.
+    Same(Option<String>),
+    /// Online only (PA-39): not read.
+    Left,
+    /// Read whole.
+    Read,
+    /// New to the catalog, in an index made from the folder listing (PA-60): not read.
+    Listed,
+}
 
 /// The catalog's live documents: path → (hash, size, file_mtime), for the size/time check.
 pub(crate) fn known_files(conn: &Connection) -> Result<Known, RebuildError> {
@@ -365,7 +382,7 @@ fn known_files_in(conn: &Connection, only: Option<&[String]>) -> Result<Known, R
         for r in st.query_map(vf_core::db::params_from_iter(params.iter()), |r| {
             Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
         })? {
-            let (p, h, s, t): (String, String, i64, Option<i64>) = r?;
+            let (p, h, s, t): (String, Option<String>, i64, Option<i64>) = r?;
             out.insert(p, (h, s, t));
         }
     }
@@ -865,7 +882,77 @@ pub fn rebuild(
     root: &Path,
     device_id: &str,
 ) -> Result<RebuildReport, RebuildError> {
-    rebuild_scoped(conn, root, device_id, None, None)
+    rebuild_scoped(conn, root, device_id, None, None, false)
+}
+
+/// The index a cabinet gets when it is opened with a catalog that does not know it yet (owner
+/// 2026-11-13, PA-60: reading every file of a 307,876-file cabinet over the share took hours,
+/// on every Citrix host, every morning). Made from the folder listing: a file new to the
+/// catalog is cataloged by its path, size and time and not read. Its id, doc type, year, status
+/// and tags come from its client folder's `docmeta.jsonl` when a record there was written for
+/// this very file (same path, size and time), and its fingerprint too when the record has one.
+/// A document with no record gets one, so every PC catalogs it under the same id. A file the
+/// catalog knows with another size or time is read, as in any rebuild.
+pub fn index(
+    conn: &mut Connection,
+    root: &Path,
+    device_id: &str,
+) -> Result<RebuildReport, RebuildError> {
+    let _one_at_a_time = IndexLock::take(root);
+    rebuild_scoped(conn, root, device_id, None, None, true)
+}
+
+/// `_Vibe/index.lock`, held while an index from the listing writes the records of documents
+/// that had none: two PCs indexing a cabinet for the first time at once would give one file
+/// two ids. A PC that finds it waits (up to [`IndexLock::WAIT`]); the records are there when it
+/// goes on. A lock older than that was left by a PC that stopped.
+struct IndexLock(Option<PathBuf>);
+
+impl IndexLock {
+    const WAIT: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+
+    fn take(root: &Path) -> Self {
+        let path = root.join(cabinet::VIBE_DIR).join("index.lock");
+        let started = std::time::Instant::now();
+        loop {
+            let made = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path);
+            match made {
+                Ok(mut f) => {
+                    use std::io::Write;
+                    let _ = writeln!(f, "{}", std::env::var("COMPUTERNAME").unwrap_or_default());
+                    return IndexLock(Some(path));
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    let stale = std::fs::metadata(&path)
+                        .and_then(|m| m.modified())
+                        .ok()
+                        .and_then(|t| t.elapsed().ok())
+                        .is_none_or(|age| age > Self::WAIT);
+                    if stale {
+                        let _ = std::fs::remove_file(&path);
+                    } else if started.elapsed() > Self::WAIT {
+                        // Never stopped by it for good: goes on without it.
+                        return IndexLock(None);
+                    } else {
+                        std::thread::sleep(std::time::Duration::from_secs(2));
+                    }
+                }
+                // A cabinet that cannot be written (read-only share): nothing to guard.
+                Err(_) => return IndexLock(None),
+            }
+        }
+    }
+}
+
+impl Drop for IndexLock {
+    fn drop(&mut self) {
+        if let Some(p) = self.0.take() {
+            let _ = std::fs::remove_file(p);
+        }
+    }
 }
 
 /// [`rebuild`] of only these top-level folders (cabinet-relative): their files are cataloged,
@@ -877,7 +964,7 @@ pub fn rebuild_folders(
     device_id: &str,
     folders: &[String],
 ) -> Result<RebuildReport, RebuildError> {
-    rebuild_scoped(conn, root, device_id, Some(folders), None)
+    rebuild_scoped(conn, root, device_id, Some(folders), None, false)
 }
 
 /// [`rebuild_folders`] of folders already in the cabinet (Browse re-reading a client folder
@@ -889,15 +976,17 @@ pub fn reread_folders(
     device_id: &str,
     folders: &[String],
 ) -> Result<RebuildReport, RebuildError> {
-    rebuild_scoped(conn, root, device_id, Some(folders), Some("rebuild"))
+    rebuild_scoped(conn, root, device_id, Some(folders), Some("rebuild"), false)
 }
 
+/// `listing`: [`index`], a file new to the catalog is not read.
 fn rebuild_scoped(
     conn: &mut Connection,
     root: &Path,
     device_id: &str,
     only: Option<&[String]>,
     filed_as: Option<&'static str>,
+    listing: bool,
 ) -> Result<RebuildReport, RebuildError> {
     let in_scope = |rel: &str| {
         only.is_none_or(|o| {
@@ -1008,46 +1097,51 @@ fn rebuild_scoped(
     let stats: Vec<Option<(u64, i64)>> = stats3.iter().map(|s| s.map(|(a, b, _)| (a, b))).collect();
     // Every path found, to tell a file gone from one only left unread (PA-39).
     let listed: HashSet<String> = todo.iter().map(|(p, _)| rel(root, p)).collect();
-    let mut reuse: Vec<Option<String>> = Vec::with_capacity(todo.len());
+    let mut reuse: Vec<Take> = Vec::with_capacity(todo.len());
     let mut to_read: Vec<PathBuf> = Vec::new();
     for (((p, _), st), a) in todo.iter().zip(&stats).zip(&attrs) {
         let r = rel(root, p);
-        let same = match (known.get(&r), st) {
+        let take = match (known.get(&r), st) {
             (Some((h, size, Some(t))), Some((s, mt))) if *size as u64 == *s && t == mt => {
-                Some(h.clone())
+                Take::Same(h.clone())
             }
-            _ => None,
+            // Online only (a OneDrive or Dropbox cabinet, PA-39): reading it would download
+            // it. Left unread, never taken for deleted or changed.
+            _ if crate::cloud::leave_attrs(*a) => Take::Left,
+            // From the listing (PA-60): a file the catalog has no row for is not read. One it
+            // knows with another size or time is.
+            (None, Some(_)) if listing => Take::Listed,
+            _ => Take::Read,
         };
-        // Online only (a OneDrive or Dropbox cabinet, PA-39): reading it would download it.
-        // Left unread, never taken for deleted or changed.
-        let left = same.is_none() && crate::cloud::leave_attrs(*a);
-        if same.is_none() && !left {
+        if matches!(take, Take::Read) {
             to_read.push(p.clone());
         } else {
             PROGRESS.read.fetch_add(1, Ordering::Relaxed);
         }
-        reuse.push(if left { Some(String::new()) } else { same });
+        reuse.push(take);
     }
     let mut read = read_all(&to_read).into_iter();
     let (n_read, read_ms) = (to_read.len(), lap());
     let mut found: Vec<Found> = Vec::new();
     // Online-only files not in the catalog: their fingerprint may be in docmeta (below).
     let mut waiting: Vec<Waiting> = Vec::new();
-    for (((p, client_id), st), same) in todo.into_iter().zip(stats).zip(reuse) {
-        if same.as_deref() == Some("") {
-            let r = rel(root, &p);
-            let had = known.get(&r).map(|k| k.0.clone());
-            waiting.push((p, client_id, st, had));
-            continue;
-        }
-        let got = match same {
-            Some(h) => Some((h, st.map_or(0, |s| s.0))),
-            None => read.next().flatten().map(|h| {
+    for (((p, client_id), st), take) in todo.into_iter().zip(stats).zip(reuse) {
+        let got: Option<(Option<String>, u64)> = match take {
+            Take::Left => {
+                let r = rel(root, &p);
+                // Whether the catalog knows the path, and the fingerprint it has for it.
+                let had = known.get(&r).map(|k| k.0.clone().unwrap_or_default());
+                waiting.push((p, client_id, st, had));
+                continue;
+            }
+            Take::Same(h) => Some((h, st.map_or(0, |s| s.0))),
+            Take::Listed => Some((None, st.map_or(0, |s| s.0))),
+            Take::Read => read.next().flatten().map(|h| {
                 let size = st.map_or_else(
                     || std::fs::metadata(&p).map(|m| m.len()).unwrap_or(0),
                     |s| s.0,
                 );
-                (h, size)
+                (Some(h), size)
             }),
         };
         // One file that cannot be read (open in QuickBooks, a denied ACL) does not stop the
@@ -1123,7 +1217,7 @@ fn rebuild_scoped(
                 found.push(Found {
                     rel: r,
                     client_id,
-                    hash: m.hash.clone(),
+                    hash: Some(m.hash.clone()),
                     size,
                     mtime: Some(mt),
                 });
@@ -1162,9 +1256,22 @@ fn rebuild_scoped(
         }
     }
 
+    // A file not read here (PA-60) takes the fingerprint another PC recorded for it, when the
+    // record was written for this very file: same path, size and time (`Record::describes`).
+    // This is how a fingerprint made once reaches every catalog.
+    for f in found.iter_mut().filter(|f| f.hash.is_none()) {
+        if let Some(t) = f.mtime
+            && let Some(m) = meta.latest_at(&f.rel)
+            && m.describes(f.size, t)
+        {
+            f.hash = Some(m.hash.clone());
+            rep.docmeta_trusted += 1;
+        }
+    }
+
     // Documents: compare with live catalog rows by path; re-link moves by hash.
     // rel -> (id, hash, client)
-    let mut live: HashMap<String, (String, String, Option<String>)> = HashMap::new();
+    let mut live: HashMap<String, (String, Option<String>, Option<String>)> = HashMap::new();
     // Each row's updated_at as read: a change made by someone else while this runs (a move, a
     // restore, an edit) wins; this rebuild's update of that row then does nothing (QA).
     let mut stamp: HashMap<String, String> = HashMap::new();
@@ -1177,7 +1284,7 @@ fn rebuild_scoped(
         for r in st.query_map(vf_core::db::params_from_iter(params.iter()), |r| {
             Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
         })? {
-            let (p, id, h, c, u): (String, String, String, Option<String>, String) = r?;
+            let (p, id, h, c, u): (String, String, Option<String>, Option<String>, String) = r?;
             // Scoped: documents of other folders are neither missing nor moved here.
             if in_scope(&p) {
                 stamp.insert(id.clone(), u);
@@ -1235,17 +1342,42 @@ fn rebuild_scoped(
                     .is_some_and(|r| r.starts_with('/'))
             })
     };
+    // Missing rows never fingerprinted (PA-60), by the size and time of the file they were
+    // listed with: a file listed now with both, and no other candidate, is that document moved
+    // or renamed (its name is not compared: an Explorer rename changes only that).
+    let mut missing_by_stat: HashMap<(i64, i64), Vec<String>> = HashMap::new();
+    // Sizes of the fingerprinted missing rows: an unread new file of one of them may be that
+    // document, and is read to find out (that one file).
+    let mut missing_sizes: HashSet<i64> = HashSet::new();
     for (p, (id, h, _)) in live_paths {
         if !on_disk.contains(p.as_str()) && !unread(p) {
-            missing_by_hash
-                .entry(h.clone())
-                .or_default()
-                .push(id.clone());
+            let stat = known.get(p.as_str()).map(|k| (k.1, k.2));
+            match h {
+                Some(h) => {
+                    missing_by_hash
+                        .entry(h.clone())
+                        .or_default()
+                        .push(id.clone());
+                    if let Some((size, _)) = stat {
+                        missing_sizes.insert(size);
+                    }
+                }
+                None => {
+                    if let Some((size, Some(t))) = stat {
+                        missing_by_stat
+                            .entry((size, t))
+                            .or_default()
+                            .push(id.clone());
+                    }
+                }
+            }
             missing_ids.push(id.clone());
         }
     }
     let mut moved: HashSet<String> = HashSet::new();
     let mut doc_id_by_rel: HashMap<String, String> = HashMap::new();
+    // Records to write for documents that had none (an index from the listing): file → lines.
+    let mut new_records: BTreeMap<PathBuf, Vec<String>> = BTreeMap::new();
     for f in &found {
         let year = year_from_path(&f.rel)
             .map(serde_json::Value::from)
@@ -1267,12 +1399,25 @@ fn rebuild_scoped(
                 }
                 doc_id_by_rel.insert(f.rel.clone(), id.clone());
             }
+            // Never fingerprinted here (PA-60), and now it is known (another PC's record, or
+            // the file was read because its size or time changed): filled in. Not a change of
+            // content this catalog can speak of: no version row, no new revision.
+            Some((id, None, c)) => {
+                rebind(id, c, &mut stmts);
+                stmts.push(Stmt::new(
+                    "UPDATE document SET hash = ?2, size = ?3 WHERE id = ?1 AND hash IS NULL",
+                    vec![id.clone().into(), f.hash.clone().into(), f.size.into()],
+                ));
+                rep.docs_unchanged += 1;
+                doc_id_by_rel.insert(f.rel.clone(), id.clone());
+            }
             Some((id, _, c)) => {
                 rebind(id, c, &mut stmts);
                 // Changed outside the app: keep the old content's identity as a version row.
                 stmts.push(Stmt::new(
                     "INSERT OR IGNORE INTO version (doc_id, hash, size, created, created_by, device_id, reason)
-                     SELECT id, hash, size, ?2, 'rebuild', ?3, 'changed on disk' FROM document WHERE id = ?1",
+                     SELECT id, hash, size, ?2, 'rebuild', ?3, 'changed on disk' FROM document
+                     WHERE id = ?1 AND hash IS NOT NULL",
                     vec![id.clone().into(), now.clone().into(), device_id.into()],
                 ));
                 stmts.push(Stmt::new(
@@ -1286,9 +1431,26 @@ fn rebuild_scoped(
                 // A document gone from where it was (deleted, or moved to another client
                 // folder in Explorer) whose content turns up here: the same document again,
                 // with its id, metadata, holds and history (QA).
+                // Not read (PA-60), and a fingerprinted document of this size has gone missing:
+                // this may be it, moved or renamed. Read to find out (this one file).
+                let hash: Option<String> = match &f.hash {
+                    Some(h) => Some(h.clone()),
+                    None if missing_sizes.contains(&(f.size as i64)) => {
+                        sha256_file(&root.join(&f.rel)).ok()
+                    }
+                    None => None,
+                };
+                // Its record: for this path and content, else (a file not read) the one written
+                // for a file of this very size and time at this path.
+                let rec = hash
+                    .as_deref()
+                    .and_then(|h| meta.get_at(&f.rel, h))
+                    .or_else(|| {
+                        meta.latest_at(&f.rel)
+                            .filter(|m| f.mtime.is_some_and(|t| m.same_file(f.size, t)))
+                    });
                 // The id its folder's docmeta.jsonl gives this file (shared between servers).
-                let recorded: Option<String> = meta
-                    .get_at(&f.rel, &f.hash)
+                let recorded: Option<String> = rec
                     .and_then(|m| m.id.clone())
                     .filter(|id| !revived.contains(id) && !used_ids.contains(id));
                 let recorded_state: Option<i64> = match &recorded {
@@ -1303,11 +1465,13 @@ fn rebuild_scoped(
                 let back: Option<String> = match (&recorded, recorded_state) {
                     (Some(rid), Some(1)) => Some(rid.clone()),
                     (Some(_), _) => None,
-                    (None, _) => vf_core::db::OptionalExtension::optional(
-                        revive
-                            .query_row((&f.hash, &name, &revive_since), |r| r.get::<_, String>(0)),
-                    )?
-                    .filter(|id| !revived.contains(id)),
+                    (None, _) => match &hash {
+                        Some(h) => vf_core::db::OptionalExtension::optional(
+                            revive.query_row((h, &name, &revive_since), |r| r.get::<_, String>(0)),
+                        )?
+                        .filter(|id| !revived.contains(id)),
+                        None => None,
+                    },
                 };
                 // The recorded document is live here at another path whose file is gone: it
                 // was moved (by another server, or in Explorer) and this folder was read first.
@@ -1321,11 +1485,31 @@ fn rebuild_scoped(
                     }
                     _ => None,
                 };
-                if let Some(id) = missing_by_hash.get_mut(&f.hash).and_then(|v| v.pop()) {
+                // A missing document this file is: by its content; else the only missing one
+                // never read that was listed with this size and time (a document cataloged
+                // from the listing and then renamed or moved in Explorer keeps its identity).
+                let by_content: Option<String> = hash
+                    .as_ref()
+                    .and_then(|h| missing_by_hash.get_mut(h))
+                    .and_then(|v| v.pop());
+                let same_document: Option<String> = by_content.or_else(|| {
+                    f.mtime
+                        .and_then(|t| missing_by_stat.get_mut(&(f.size as i64, t)))
+                        .filter(|v| v.len() == 1)
+                        .and_then(|v| v.pop())
+                });
+                if let Some(id) = same_document {
                     stmts.push(Stmt::new(
                         "UPDATE document SET rel_path = ?2, client_id = ?3, device_id = ?4, updated_at = ?5, rev = rev + 1 WHERE id = ?1 AND updated_at = ?6",
                         vec![id.clone().into(), f.rel.clone().into(), f.client_id.clone().into(), device_id.into(), now.clone().into(), stamp.get(&id).cloned().unwrap_or_default().into()],
                     ));
+                    // Its fingerprint, when this file was read and the document never was.
+                    if let Some(h) = &hash {
+                        stmts.push(Stmt::new(
+                            "UPDATE document SET hash = ?2 WHERE id = ?1 AND hash IS NULL",
+                            vec![id.clone().into(), h.clone().into()],
+                        ));
+                    }
                     moved.insert(id.clone());
                     rep.docs_moved += 1;
                     doc_id_by_rel.insert(f.rel.clone(), id);
@@ -1363,7 +1547,34 @@ fn rebuild_scoped(
                     };
                     used_ids.insert(id.clone());
                     // Q-22: metadata kept on disk wins over what the path suggests.
-                    let m = meta.get(&f.rel, &f.hash);
+                    let m = match &hash {
+                        Some(h) => meta.get(&f.rel, h).or(rec),
+                        None => rec,
+                    };
+                    // A document with no record gets one (PA-60), so every PC that indexes the
+                    // cabinet from its listing catalogs this file under this id.
+                    if listing && m.is_none() {
+                        let top = f.rel.split('/').next().unwrap_or_default();
+                        let line = crate::docmeta::record_line(
+                            root,
+                            &crate::docmeta::Meta {
+                                id: id.clone(),
+                                rel_path: f.rel.clone(),
+                                hash: hash.clone(),
+                                folder_rel: f.client_id.as_ref().map(|_| top.to_string()),
+                                doc_type: None,
+                                doc_type_name: None,
+                                tax_year: year_from_path(&f.rel).map(|y| y as i32),
+                                status: "received".into(),
+                                source: None,
+                                tags: vec![],
+                                stamp: f.mtime.map(|t| (f.size, t)),
+                            },
+                            &now,
+                            device_id,
+                        );
+                        new_records.entry(line.0).or_default().push(line.1);
+                    }
                     let (year, status, source, doc_type, tags) = match m {
                         Some(m) => {
                             rep.docmeta_restored += 1;
@@ -1387,14 +1598,16 @@ fn rebuild_scoped(
                         }
                         None => (year, "received".to_string(), None, None, vec![]),
                     };
+                    // The file's time goes in with the row (PA-60): a later index then sees the
+                    // file as unchanged without reading it, even if this one is cut short.
                     stmts.push(Stmt::new(
-                        "INSERT INTO document (id, client_id, doc_type_id, tax_year, rel_path, hash, size, mime, status, source, filed_by, filed_at, device_id, updated_at)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?13, ?11, ?12, ?11)",
+                        "INSERT INTO document (id, client_id, doc_type_id, tax_year, rel_path, hash, size, mime, status, source, filed_by, filed_at, device_id, updated_at, file_mtime)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?13, ?11, ?12, ?11, ?14)",
                         vec![
                             id.clone().into(), f.client_id.clone().into(), doc_type.into(), year,
-                            f.rel.clone().into(), f.hash.clone().into(), f.size.into(),
+                            f.rel.clone().into(), hash.clone().into(), f.size.into(),
                             mime(&f.rel).into(), status.into(), source.into(), now.clone().into(),
-                            device_id.into(), filed_by.into(),
+                            device_id.into(), filed_by.into(), f.mtime.into(),
                         ],
                     ));
                     for t in tags {
@@ -1423,7 +1636,13 @@ fn rebuild_scoped(
                 continue;
             };
             // By path only: a copy with the same bytes elsewhere keeps its own (code review).
-            let Some(m) = meta.get_at(&f.rel, &f.hash) else {
+            let m = match &f.hash {
+                Some(h) => meta.get_at(&f.rel, h),
+                None => meta
+                    .latest_at(&f.rel)
+                    .filter(|m| f.mtime.is_some_and(|t| m.same_file(f.size, t))),
+            };
+            let Some(m) = m else {
                 continue;
             };
             // New rows are not in the catalog yet (they were made from docmeta already).
@@ -1554,8 +1773,8 @@ fn rebuild_scoped(
         // Documents by their current content: (path, id).
         let mut by_hash: HashMap<&str, Vec<(&str, &String)>> = HashMap::new();
         for f in &found {
-            if let Some(id) = doc_id_by_rel.get(&f.rel) {
-                by_hash.entry(&f.hash).or_default().push((&f.rel, id));
+            if let (Some(id), Some(h)) = (doc_id_by_rel.get(&f.rel), &f.hash) {
+                by_hash.entry(h).or_default().push((&f.rel, id));
             }
         }
         let mut by_version: HashMap<&str, Vec<usize>> = HashMap::new();
@@ -1618,6 +1837,37 @@ fn rebuild_scoped(
                 "UPDATE document SET file_mtime = ?2 WHERE rel_path = ?1 AND deleted_at IS NULL",
                 vec![f.rel.clone().into(), f.mtime.into()],
             ));
+        }
+    }
+    // The records of documents that had none, before their catalog rows (PA-60): a PC that
+    // finds a record takes its id. One append per client folder. A folder that cannot be
+    // written keeps this catalog's ids to itself; the index goes on.
+    for (file, lines) in new_records {
+        use std::io::Write;
+        if let Some(dir) = file.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let Ok(mut out) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&file)
+        else {
+            rep.unreadable
+                .push(format!("{}: cannot be written", file.display()));
+            continue;
+        };
+        // A line of its own, whatever the file ended with (blank lines are skipped by readers).
+        let mut text = String::new();
+        if out.metadata().is_ok_and(|m| m.len() > 0) {
+            text.push(char::from(10));
+        }
+        for l in lines {
+            text.push_str(&l);
+            text.push(char::from(10));
+        }
+        if out.write_all(text.as_bytes()).is_err() {
+            rep.unreadable
+                .push(format!("{}: cannot be written", file.display()));
         }
     }
     let changed =
@@ -1816,6 +2066,194 @@ mod tests {
 
     fn open(c: &Cab) -> Connection {
         vf_core::db::open(&c.data.join("catalog.db"), Storage::Local).unwrap()
+    }
+
+    /// Live documents: (path, id, fingerprint), by path.
+    fn doc_rows(conn: &Connection) -> Vec<(String, String, Option<String>)> {
+        conn.prepare(
+            "SELECT rel_path, id, hash FROM document WHERE deleted_at IS NULL ORDER BY rel_path",
+        )
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect()
+    }
+
+    /// Lines of a `docmeta.jsonl` (cabinet-relative path of the file).
+    fn record_lines(c: &Cab, file: &str) -> usize {
+        std::fs::read_to_string(c.root.join(file))
+            .unwrap_or_default()
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .count()
+    }
+
+    /// PA-60: an index from the folder listing reads no file. Every document gets a record in
+    /// its client folder, so a second PC catalogs the cabinet under the same ids, and a
+    /// fingerprint one PC makes reaches the others without the file being read again.
+    #[test]
+    fn an_index_from_the_listing_reads_nothing_and_is_shared() {
+        let c = cab();
+        let mut conn = open(&c);
+        let rep = index(&mut conn, &c.root, "pc-1").unwrap();
+        let first = doc_rows(&conn);
+        assert_eq!(first.len(), 5, "{first:?}");
+        assert_eq!(rep.docs_new, 5);
+        assert!(first.iter().all(|r| r.2.is_none()), "nothing was read");
+        assert!(!unfinished(&conn));
+        assert!(
+            !c.root.join("_Vibe/index.lock").exists(),
+            "the lock is given back"
+        );
+        let timed: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM document WHERE file_mtime IS NOT NULL",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(timed, 5, "each row has its file's time");
+        let smith = "Smith, John (1001)/_Vibe/docmeta.jsonl";
+        assert_eq!(record_lines(&c, smith), 3);
+        assert_eq!(record_lines(&c, "Acme LLC (1002)/_Vibe/docmeta.jsonl"), 1);
+        assert_eq!(record_lines(&c, "_Vibe/docmeta.jsonl"), 1, "the loose file");
+
+        // The same PC again: nothing new, nothing written.
+        let again = index(&mut conn, &c.root, "pc-1").unwrap();
+        assert_eq!((again.docs_new, again.docs_unchanged), (0, 5));
+        assert_eq!(record_lines(&c, smith), 3);
+
+        // A second PC, with its own empty catalog: the same ids, and no more records.
+        let open_at = |name: &str| {
+            let d = c.data.join(name);
+            std::fs::create_dir_all(&d).unwrap();
+            vf_core::db::open(&d.join("catalog.db"), Storage::Local).unwrap()
+        };
+        let mut conn2 = open_at("pc2");
+        index(&mut conn2, &c.root, "pc-2").unwrap();
+        assert_eq!(doc_rows(&conn2), first);
+        assert_eq!(record_lines(&c, smith), 3);
+
+        // PC 1 fingerprints one document (something needed it).
+        let w2 = first
+            .iter()
+            .find(|r| r.0.ends_with("2025/w2.pdf"))
+            .unwrap()
+            .1
+            .clone();
+        let h = crate::fingerprint::ensure(&mut conn, &c.root, "pc-1", &w2).unwrap();
+        assert_eq!(record_lines(&c, smith), 4);
+        // A third PC indexing now takes it from the record: not read, and only that one.
+        let mut conn3 = open_at("pc3");
+        let rep3 = index(&mut conn3, &c.root, "pc-3").unwrap();
+        assert_eq!(rep3.docmeta_trusted, 1);
+        let third = doc_rows(&conn3);
+        assert_eq!(
+            third.iter().filter(|r| r.2.is_some()).count(),
+            1,
+            "{third:?}"
+        );
+        assert_eq!(
+            third.iter().find(|r| r.1 == w2).unwrap().2.as_deref(),
+            Some(h.as_str())
+        );
+        // PC 2, which indexed before: it takes it when it next reads that client folder, as a
+        // fingerprint filled in, not as a change (no new revision, no version).
+        let smith_folder = ["Smith, John (1001)".to_string()];
+        let r2 = reread_folders(&mut conn2, &c.root, "pc-2", &smith_folder).unwrap();
+        assert_eq!((r2.docs_changed, r2.docs_new), (0, 0), "{r2}");
+        let (hash2, rev2): (Option<String>, i64) = conn2
+            .query_row("SELECT hash, rev FROM document WHERE id = ?1", [&w2], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+        assert_eq!((hash2.as_deref(), rev2), (Some(h.as_str()), 1));
+        let versions: i64 = conn2
+            .query_row("SELECT count(*) FROM version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(versions, 0);
+    }
+
+    /// PA-60: a document cataloged from the listing and never read keeps its id and details
+    /// when its file is renamed or moved in Explorer, and when its content changes.
+    #[test]
+    fn a_document_never_read_keeps_its_identity() {
+        let c = cab();
+        let mut conn = open(&c);
+        index(&mut conn, &c.root, "pc-1").unwrap();
+        let before = doc_rows(&conn);
+        let id = |like: &str| {
+            before
+                .iter()
+                .find(|r| r.0.ends_with(like))
+                .unwrap()
+                .1
+                .clone()
+        };
+        let (w2, ein, old) = (id("2025/w2.pdf"), id("ein letter.pdf"), id("2024/w2.pdf"));
+        conn.execute("UPDATE document SET status = 'final' WHERE id = ?1", [&w2])
+            .unwrap();
+        let smith = c.root.join("Smith, John (1001)");
+        let folder = ["Smith, John (1001)".to_string()];
+        let now = |conn: &Connection, id: &str| -> (String, Option<String>, String, i64) {
+            conn.query_row(
+                "SELECT rel_path, hash, status, (SELECT count(*) FROM version v WHERE v.doc_id = d.id)
+                 FROM document d WHERE id = ?1 AND deleted_at IS NULL",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap()
+        };
+
+        // Renamed in Explorer: the same document at its new name.
+        std::fs::rename(
+            smith.join("Income Tax/2025/w2.pdf"),
+            smith.join("Income Tax/2025/W-2 Northwind 2025.pdf"),
+        )
+        .unwrap();
+        // Moved to another folder of the client.
+        std::fs::rename(
+            smith.join("Permanent/Setup/ein letter.pdf"),
+            smith.join("Income Tax/2025/ein letter.pdf"),
+        )
+        .unwrap();
+        // Changed: other content, another size.
+        put(
+            &smith.join("Income Tax/2024/w2.pdf"),
+            "w2 2024, corrected and longer",
+        );
+        let rep = reread_folders(&mut conn, &c.root, "pc-1", &folder).unwrap();
+        assert_eq!(
+            (rep.docs_moved, rep.docs_new, rep.docs_tombstoned),
+            (2, 0, 0),
+            "{rep}"
+        );
+        let (rel, hash, status, _) = now(&conn, &w2);
+        assert!(rel.ends_with("/W-2 Northwind 2025.pdf"), "{rel}");
+        assert_eq!(status, "final", "its details stay");
+        assert!(hash.is_some(), "read when it was found again");
+        assert!(
+            now(&conn, &ein)
+                .0
+                .ends_with("Income Tax/2025/ein letter.pdf")
+        );
+        // The changed file: read, its fingerprint filled in; no version of content never known.
+        let (_, hash, _, versions) = now(&conn, &old);
+        assert_eq!(
+            hash.as_deref(),
+            Some(
+                sha256_file(&smith.join("Income Tax/2024/w2.pdf"))
+                    .unwrap()
+                    .as_str()
+            )
+        );
+        assert_eq!(versions, 0);
+        assert_eq!(
+            doc_rows(&conn).len(),
+            before.len(),
+            "no document made or lost"
+        );
     }
 
     /// PA-34 review: a first index cut short is marked unfinished, run again, and keeps
