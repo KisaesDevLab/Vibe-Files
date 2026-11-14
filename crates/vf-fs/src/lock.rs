@@ -197,7 +197,11 @@ pub(crate) fn take_at(
                     age_by_server(path).is_some_and(|age| age > stale)
                 });
                 if dead {
-                    let _ = std::fs::remove_file(path);
+                    // Only the lock that was judged: another waiter may have taken it over
+                    // (and made its own) in the meantime.
+                    if std::fs::read_to_string(path).is_ok_and(|t| t == now) {
+                        let _ = std::fs::remove_file(path);
+                    }
                     seen = None;
                     continue;
                 }

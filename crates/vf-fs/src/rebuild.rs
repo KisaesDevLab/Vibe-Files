@@ -899,7 +899,20 @@ pub fn index(
     device_id: &str,
 ) -> Result<RebuildReport, RebuildError> {
     let _one_at_a_time = IndexLock::take(root);
+    mark_fresh(conn)?;
     rebuild_scoped(conn, root, device_id, None, None, true, None)
+}
+
+/// A catalog with no documents, about to be made from the listing: what Intake filed before
+/// now is cataloged by it, not recorded batch by batch (`intake::mark_cataloged`).
+fn mark_fresh(conn: &Connection) -> Result<(), RebuildError> {
+    let empty: bool = conn.query_row("SELECT NOT EXISTS (SELECT 1 FROM document)", [], |r| {
+        r.get(0)
+    })?;
+    if empty {
+        crate::intake::mark_cataloged(conn)?;
+    }
+    Ok(())
 }
 
 /// The folders of a cabinet as [`scan_folders`] found them.
@@ -909,6 +922,9 @@ type Scan = (Vec<Bound>, Vec<(PathBuf, Option<String>)>);
 /// there; the documents of each client folder follow, the one being looked at first).
 pub struct Staged {
     scan: Scan,
+    /// Files of batches Intake has filed and not recorded yet, when the index started: left to
+    /// Intake's own recording.
+    pending: HashSet<String>,
     /// The cabinet's top-level folders (cabinet-relative), in name order: what
     /// [`index_part`] is given, a few at a time.
     pub folders: Vec<String>,
@@ -934,10 +950,20 @@ pub fn index_start(
 ) -> Result<Staged, RebuildError> {
     let mut rep = RebuildReport::default();
     let scan = scan_folders(root, &mut rep)?;
+    mark_fresh(conn)?;
     conn.execute(
         "INSERT INTO local_state (k, v) VALUES (?1, ?2) ON CONFLICT(k) DO UPDATE SET v = excluded.v",
         [UNFINISHED, FILED_BY_IMPORT],
     )?;
+    let folders = scan.1.iter().map(|(f, _)| rel(root, f)).collect();
+    let pending = crate::intake::unrecorded_paths(conn, root)
+        .into_iter()
+        .collect();
+    let staged = Staged {
+        scan,
+        pending,
+        folders,
+    };
     rebuild_scoped(
         conn,
         root,
@@ -945,10 +971,9 @@ pub fn index_start(
         Some(&[]),
         None,
         true,
-        Some((&scan, true)),
+        Some((&staged, true)),
     )?;
-    let folders = scan.1.iter().map(|(f, _)| rel(root, f)).collect();
-    Ok(Staged { scan, folders })
+    Ok(staged)
 }
 
 /// The documents of `folders` (some of [`Staged::folders`]) cataloged from their listing, as
@@ -969,7 +994,7 @@ pub fn index_part(
         Some(folders),
         None,
         true,
-        Some((&staged.scan, false)),
+        Some((staged, false)),
     )
 }
 
@@ -1181,7 +1206,7 @@ fn rebuild_scoped(
     only: Option<&[String]>,
     filed_as: Option<&'static str>,
     listing: bool,
-    pre: Option<(&Scan, bool)>,
+    pre: Option<(&Staged, bool)>,
 ) -> Result<RebuildReport, RebuildError> {
     let in_scope = |rel: &str| {
         only.is_none_or(|o| {
@@ -1227,7 +1252,7 @@ fn rebuild_scoped(
     };
     let scanned;
     let (bound, mut folders): (&[Bound], Vec<(PathBuf, Option<String>)>) = match pre {
-        Some((scan, _)) => (&scan.0, scan.1.clone()),
+        Some((st, _)) => (&st.scan.0, st.scan.1.clone()),
         None => {
             scanned = scan_folders(root, &mut rep)?;
             (&scanned.0, scanned.1.clone())
@@ -1499,12 +1524,13 @@ fn rebuild_scoped(
     }
     // A scoped re-read leaves files Intake has just filed and not recorded yet to Intake (and
     // the rows at those paths: an Overwrite is Intake's to record, QA).
-    let pending: HashSet<String> = if only.is_some() {
-        crate::intake::unrecorded_paths(conn, root)
+    let pending: HashSet<String> = match pre {
+        // An index in parts read them once (every PC's Intake folder is looked at).
+        Some((st, _)) => st.pending.clone(),
+        None if only.is_some() => crate::intake::unrecorded_paths(conn, root)
             .into_iter()
-            .collect()
-    } else {
-        HashSet::new()
+            .collect(),
+        None => HashSet::new(),
     };
     if !pending.is_empty() {
         found.retain(|f| !pending.contains(&f.rel.to_lowercase()));

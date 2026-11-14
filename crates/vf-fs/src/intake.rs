@@ -292,6 +292,7 @@ fn undoable_in(root: &Path, dir: &Path) -> std::collections::HashSet<String> {
 /// found in client folders at these paths are Intake's to record, not new files (PA-23).
 pub fn unrecorded_paths(conn: &Connection, root: &Path) -> std::collections::HashSet<String> {
     let mut out = std::collections::HashSet::new();
+    let before = cataloged_before(conn);
     for d in batch_dirs(root) {
         let Some(lb) = load_last_batch(&d) else {
             continue;
@@ -299,9 +300,43 @@ pub fn unrecorded_paths(conn: &Connection, root: &Path) -> std::collections::Has
         if lb.undone || (!lb.in_progress && recorded(conn, &lb.batch.to_string()).is_some()) {
             continue;
         }
+        // Filed before this catalog was made from the listing: cataloged then, never recorded.
+        if !lb.in_progress && before.is_some_and(|t| lb.committed_at.timestamp_micros() < t) {
+            continue;
+        }
         out.extend(undoable_in(root, &d));
     }
     out
+}
+
+/// `local_state` key: the time (microseconds since 1970) this catalog was made from the
+/// cabinet's folder listing. Batches filed before it are in the catalog from that listing,
+/// with the details their filing PC wrote in the client folders' records.
+const BEFORE: &str = "intake_cataloged_before";
+
+/// Notes that this catalog is being made from the folder listing now (PA-60): the batches
+/// every PC filed before are not recorded again. A catalog new to a cabinet used to replay
+/// every batch in every PC's op log and read each filed file for its fingerprint, on every
+/// session host, every morning. Kept as first set (an index cut short goes on from it).
+pub(crate) fn mark_cataloged(conn: &Connection) -> Result<(), crate::rebuild::RebuildError> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_micros() as i64);
+    conn.execute(
+        "INSERT INTO local_state (k, v) VALUES (?1, ?2) ON CONFLICT(k) DO NOTHING",
+        (BEFORE, now.to_string()),
+    )?;
+    Ok(())
+}
+
+/// See [`mark_cataloged`].
+fn cataloged_before(conn: &Connection) -> Option<i64> {
+    conn.query_row("SELECT v FROM local_state WHERE k = ?1", [BEFORE], |r| {
+        r.get::<_, String>(0)
+    })
+    .ok()?
+    .parse()
+    .ok()
 }
 
 pub fn reconcile(
@@ -353,6 +388,12 @@ fn reconcile_dir(
         return Ok(out); // still filing (or crashed mid-batch: Filer recovers)
     }
     let batch = lb.batch.to_string();
+    // Filed before this catalog was made from the listing: its files are in it already.
+    if recorded(conn, &batch).is_none()
+        && cataloged_before(conn).is_some_and(|t| lb.committed_at.timestamp_micros() < t)
+    {
+        return Ok(out);
+    }
     match (recorded(conn, &batch), lb.undone) {
         (None, false) => {
             let backups: Vec<(std::path::PathBuf, std::path::PathBuf)> = lb
@@ -445,17 +486,28 @@ fn missed_batches(conn: &Connection, dir: &Path, last: Option<uuid::Uuid>) -> Ve
         .unwrap_or_default();
     let mut order: Vec<uuid::Uuid> = Vec::new();
     let mut undone = std::collections::HashSet::new();
+    // Each batch's last line: one wholly before this catalog was made from the listing is in
+    // it already.
+    let before = cataloged_before(conn);
+    let mut ended: std::collections::HashMap<uuid::Uuid, i64> = Default::default();
+    let mut seen = std::collections::HashSet::new();
     for r in &log.records {
         if r.op == Op::Undo {
             undone.insert(r.batch);
         }
-        if !order.contains(&r.batch) {
+        if seen.insert(r.batch) {
             order.push(r.batch);
         }
+        let t = r.ts.timestamp_micros();
+        ended
+            .entry(r.batch)
+            .and_modify(|e| *e = (*e).max(t))
+            .or_insert(t);
     }
     order
         .into_iter()
         .filter(|b| Some(*b) != last && !undone.contains(b) && !known.contains(&b.to_string()))
+        .filter(|b| !before.is_some_and(|t| ended.get(b).is_some_and(|e| *e < t)))
         .map(|b| {
             let files: Vec<FiledFile> = log
                 .records
@@ -1118,6 +1170,70 @@ mod tests {
             f.root
                 .join("Acme LLC (1001)/Income Tax/2025/1099-int.pdf")
                 .is_file()
+        );
+    }
+
+    /// PA-60: a catalog made from the folder listing has what Intake filed before it (a host
+    /// wiped overnight used to record every batch of every PC again, reading each filed file).
+    /// What is filed after it is recorded as ever.
+    #[test]
+    fn batches_filed_before_a_catalog_was_listed_are_not_recorded_again() {
+        let f = fx();
+        let acme = client("1001", "Acme LLC");
+        let a = pc_dir(&f.root, "pc-a");
+        std::fs::create_dir_all(&a).unwrap();
+        file_from(&f, &acme, &["w2.pdf"], false, &a);
+        file_from(&f, &acme, &["1099-int.pdf"], false, &a);
+        // Another PC's new catalog, made from the listing after those two batches.
+        let d = f.root.parent().unwrap().join("pc-new");
+        std::fs::create_dir_all(&d).unwrap();
+        let mut conn =
+            vf_core::db::open(&d.join("catalog.db"), vf_core::db::Storage::Local).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        crate::rebuild::index(&mut conn, &f.root, "pc-new").unwrap();
+        let docs = n(
+            &conn,
+            "SELECT count(*) FROM document WHERE deleted_at IS NULL",
+        );
+        assert!(docs >= 2, "{docs}");
+        assert!(unrecorded_paths(&conn, &f.root).is_empty());
+        let r = reconcile(&mut conn, &f.root, "pc-new").unwrap();
+        assert!(r.recorded.is_none(), "nothing recorded again");
+        assert_eq!(
+            n(
+                &conn,
+                "SELECT count(*) FROM document WHERE deleted_at IS NULL"
+            ),
+            docs
+        );
+        assert_eq!(
+            n(
+                &conn,
+                "SELECT count(*) FROM document WHERE hash IS NOT NULL AND filed_by = 'import'"
+            ),
+            0,
+            "no file read for it"
+        );
+        assert_eq!(
+            n(
+                &conn,
+                "SELECT count(*) FROM undo_record WHERE label = 'intake_batch'"
+            ),
+            0
+        );
+        // A batch filed after: recorded.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let r3 = file_from(&f, &acme, &["1099-div.pdf"], false, &a);
+        assert_eq!(unrecorded_paths(&conn, &f.root).len(), 1);
+        let r = reconcile(&mut conn, &f.root, "pc-new").unwrap();
+        assert!(r.recorded.is_some());
+        assert!(recorded(&conn, &r3.last_batch.batch.to_string()).is_some());
+        assert_eq!(
+            n(
+                &conn,
+                "SELECT count(*) FROM document WHERE filed_by = 'intake' AND deleted_at IS NULL"
+            ),
+            1
         );
     }
 
