@@ -5085,3 +5085,133 @@ mod r2_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod conflicts_scale_tests {
+    use super::*;
+    use crate::config::ColumnMap;
+    use crate::sentinel::{FolderBinding, FoldersFile, FoldersManager, Status};
+    use egui_kittest::{Harness, HarnessBuilder};
+    use std::time::Instant;
+
+    const LAST: [&str; 20] = [
+        "Alder", "Birch", "Cedar", "Dogwood", "Elm", "Fir", "Ginkgo", "Hazel", "Ironwood",
+        "Juniper", "Katsura", "Larch", "Maple", "Nutmeg", "Oak", "Pine", "Quince", "Rowan",
+        "Spruce", "Tupelo",
+    ];
+    const FIRST: [&str; 20] = [
+        "Avery", "Blake", "Casey", "Devon", "Emery", "Finley", "Gray", "Harper", "Indigo", "Jules",
+        "Kai", "Logan", "Morgan", "Noel", "Oakley", "Parker", "Quinn", "Reese", "Sage", "Tatum",
+    ];
+
+    fn name(i: usize) -> (String, String) {
+        let (l, f) = (LAST[i % 20], FIRST[(i / 20) % 20]);
+        let n = i / 400;
+        (format!("{l}{n}, {f}"), format!("{f} {l}{n}"))
+    }
+
+    /// (first frame, steady frame) of the Conflicts tab with `clients` clients and `folders`
+    /// folders, each given its status by `status(i)`.
+    fn frames(clients: usize, folders: usize, status: impl Fn(usize) -> Status) -> (f64, f64) {
+        let tmp = tempfile::tempdir().unwrap();
+        let (data, root) = (tmp.path().join("data"), tmp.path().join("root"));
+        for d in [&data, &root] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let csv = tmp.path().join("clients.csv");
+        let mut text = String::from("id,name\n");
+        for i in 0..clients {
+            text.push_str(&format!("{},\"{}\"\n", 1000 + i, name(i).0));
+        }
+        std::fs::write(&csv, text).unwrap();
+        let settings = Settings {
+            root: Some(root.clone()),
+            csv_path: Some(csv),
+            column_map: ColumnMap {
+                partner: None,
+                id: Some("id".into()),
+                name: Some("name".into()),
+                extras: vec![],
+            },
+            ..Settings::default()
+        };
+        let d = data.clone();
+        let mut h: Harness<'static, FilerApp> = HarnessBuilder::default()
+            .with_theme(egui::Theme::Light)
+            .with_size([1400.0, 900.0])
+            .build_eframe(move |cc| {
+                FilerApp::new(&cc.egui_ctx, AppState::load(d, settings, true, None))
+            });
+        for _ in 0..500 {
+            h.step();
+            if h.state().shared.clients.list().is_some() && !h.state().shared.clients.busy() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let file = FoldersFile {
+            root: root.clone(),
+            scanned_at: chrono::Utc::now(),
+            folders: (0..folders)
+                .map(|i| {
+                    let st = status(i);
+                    let (listed, spoken) = name(i);
+                    let folder = match st {
+                        Status::UnboundFuzzy | Status::Unmatched => spoken,
+                        Status::Bound if i % 2 == 0 => listed.clone(),
+                        _ => format!("{listed} ({})", 1000 + i),
+                    };
+                    FolderBinding {
+                        path: root.join(folder),
+                        client_id: (st != Status::Unmatched).then(|| (1000 + i).to_string()),
+                        status: st,
+                        score: (st == Status::UnboundFuzzy).then_some(0.93),
+                        note: None,
+                    }
+                })
+                .collect(),
+            ignored: vec![],
+        };
+        std::fs::write(
+            data.join(crate::sentinel::FOLDERS_FILE),
+            serde_json::to_vec(&file).unwrap(),
+        )
+        .unwrap();
+        h.state_mut().shared.folders = FoldersManager::load(&data);
+        h.state_mut().tab = Tab::Conflicts;
+        let t = Instant::now();
+        h.step();
+        let first = t.elapsed().as_secs_f64();
+        h.step();
+        let t = Instant::now();
+        for _ in 0..3 {
+            h.step();
+        }
+        (first, t.elapsed().as_secs_f64() / 3.0)
+    }
+
+    #[test]
+    #[ignore = "timing; run with --release -- --ignored --nocapture"]
+    fn conflicts_at_scale() {
+        for (what, f) in [
+            (
+                "all bound, half misnamed",
+                (|_| Status::Bound) as fn(usize) -> Status,
+            ),
+            ("3 in 4 bound, rest fuzzy", |i| {
+                if i % 4 == 0 {
+                    Status::UnboundFuzzy
+                } else {
+                    Status::Bound
+                }
+            }),
+            ("all fuzzy", |_| Status::UnboundFuzzy),
+            ("all named", |_| Status::UnboundNamed),
+            ("all unmatched", |_| Status::Unmatched),
+        ] {
+            let (first, steady) = frames(8100, 7600, f);
+            println!("{what}: first frame {first:.2} s, each later frame {steady:.3} s");
+            assert!(first < 2.0 && steady < 0.1, "{what}: the tab is slow");
+        }
+    }
+}

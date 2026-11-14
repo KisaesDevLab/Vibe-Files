@@ -30,7 +30,13 @@ pub struct ConflictsScreen {
     /// Setup's ID pattern and its folder-name regex (the scan's), to search from a folder's
     /// name without its ID.
     id_re: Option<(String, regex::Regex)>,
+    /// Height of each table row as last drawn, for one list of rows: only the rows in view are
+    /// drawn (a cabinet can have thousands), the others take their height as empty space.
+    heights: (Option<HeightsKey>, Vec<f32>),
 }
+
+/// What a list of rows is of: the scan, the client list, "Show ignored", how many rows.
+type HeightsKey = (chrono::DateTime<chrono::Utc>, usize, bool, usize);
 
 type FuzzyOptions = std::collections::HashMap<PathBuf, Vec<(f64, Client)>>;
 
@@ -120,19 +126,48 @@ impl ConflictsScreen {
         }
         let rows = rows(&scan.folders, self.show_ignored);
         let mut action = None;
-        table_ui(ui, |ui| {
+        let hkey = key.map(|(at, list)| (at, list, self.show_ignored, rows.len()));
+        if self.heights.0 != hkey {
+            self.heights = (hkey, Vec::new());
+        }
+        let mut heights = std::mem::take(&mut self.heights.1);
+        heights.resize(rows.len(), 0.0);
+        table_ui(ui, |ui, view| {
             if rows.is_empty() {
                 ui.add_space(8.0);
                 ui.label("Every folder is bound to a client.");
                 ui.add_space(8.0);
             }
+            // Only the rows in view are drawn; the rest are skipped as space of their height
+            // (as last drawn, else a guess that is put right when the row is first drawn).
+            let (mut y, mut skipped) = (0.0_f32, 0.0_f32);
             for (i, row) in rows.iter().enumerate() {
-                if i > 0 {
-                    ui.separator();
+                let h = if heights[i] > 0.0 {
+                    heights[i]
+                } else {
+                    row_height_guess(row)
+                };
+                if y + h < view.min.y || y > view.max.y {
+                    skipped += h;
+                } else {
+                    if skipped > 0.0 {
+                        ui.add_space(skipped);
+                        skipped = 0.0;
+                    }
+                    let top = ui.cursor().min.y;
+                    if i > 0 {
+                        ui.separator();
+                    }
+                    self.row_ui(ui, row, clients.as_deref(), &rel_counts, busy, &mut action);
+                    heights[i] = ui.cursor().min.y - top;
                 }
-                self.row_ui(ui, row, clients.as_deref(), &rel_counts, busy, &mut action);
+                y += h;
+            }
+            if skipped > 0.0 {
+                ui.add_space(skipped);
             }
         });
+        self.heights.1 = heights;
 
         let data_dir = state.data_dir.clone();
         match action {
@@ -212,6 +247,17 @@ impl ConflictsScreen {
         else {
             return Vec::new();
         };
+        // The names in the root, from one listing (not a look per folder: the root may be a
+        // network share with thousands of them).
+        let on_disk: Option<std::collections::HashSet<String>> = check_disk.then(|| {
+            std::fs::read_dir(root)
+                .map(|d| {
+                    d.flatten()
+                        .map(|e| e.file_name().to_string_lossy().to_lowercase())
+                        .collect()
+                })
+                .unwrap_or_default()
+        });
         let mut rows: Vec<RenameRow> = scan
             .folders
             .iter()
@@ -224,7 +270,9 @@ impl ConflictsScreen {
                     return None;
                 }
                 let to = root.join(&name);
-                let taken = check_disk && to.exists();
+                let taken = on_disk
+                    .as_ref()
+                    .is_some_and(|names| names.contains(&name.to_lowercase()));
                 Some(RenameRow {
                     client_id: client.id.clone(),
                     from: b.path.clone(),
@@ -234,7 +282,7 @@ impl ConflictsScreen {
                 })
             })
             .collect();
-        rows.sort_by_key(|r| r.from.to_string_lossy().to_lowercase());
+        rows.sort_by_cached_key(|r| r.from.to_string_lossy().to_lowercase());
         rows
     }
 
@@ -812,6 +860,14 @@ fn rows(folders: &[FolderBinding], show_ignored: bool) -> Vec<Row<'_>> {
     out
 }
 
+/// A row's height before it has been drawn once.
+fn row_height_guess(row: &Row<'_>) -> f32 {
+    match row {
+        Row::Single(_) => 50.0,
+        Row::Duplicate(group) => 50.0 + 18.0 * group.len() as f32,
+    }
+}
+
 /// Four stat tiles (UI_SPEC §12).
 fn tiles_ui(ui: &mut egui::Ui, folders: &[FolderBinding]) {
     let p = pal(ui);
@@ -868,7 +924,7 @@ fn tiles_ui(ui: &mut egui::Ui, folders: &[FolderBinding]) {
 }
 
 /// The white table card with its header row and footnote.
-fn table_ui(ui: &mut egui::Ui, body: impl FnOnce(&mut egui::Ui)) {
+fn table_ui(ui: &mut egui::Ui, body: impl FnOnce(&mut egui::Ui, egui::Rect)) {
     let p = pal(ui);
     Frame::new()
         .fill(p.card)
@@ -897,12 +953,12 @@ fn table_ui(ui: &mut egui::Ui, body: impl FnOnce(&mut egui::Ui)) {
             egui::ScrollArea::vertical()
                 .id_salt("conflicts_rows")
                 .max_height((ui.available_height() - 50.0).max(120.0))
-                .show(ui, |ui| {
+                .show_viewport(ui, |ui, view| {
                     Frame::new()
                         .inner_margin(Margin::symmetric(10, 4))
                         .show(ui, |ui| {
                             ui.set_width(ui.available_width());
-                            body(ui);
+                            body(ui, view);
                         });
                 });
             Frame::new()
