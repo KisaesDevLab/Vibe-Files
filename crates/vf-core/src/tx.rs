@@ -287,11 +287,24 @@ pub fn undo_stack(conn: &Connection, actor: &Actor, except: &[&str]) -> Result<V
     let mut docs = conn.prepare_cached(
         "SELECT count(DISTINCT doc_id) FROM audit WHERE json_extract(detail, '$.tx') = ?1",
     )?;
+    // A record brought in from the cabinet (a catalog made after the change) has no audit
+    // rows here: the line it was shown with travels in the record.
+    let mut carried = conn.prepare_cached(
+        "SELECT json_extract(record, '$.summary') FROM undo_record WHERE tx_id = ?1",
+    )?;
     let mut rows = Vec::with_capacity(picked.len());
     for (tx_id, ts, label) in picked {
         let action: Option<String> =
             rusqlite::OptionalExtension::optional(first.query_row([&tx_id], |r| r.get(0)))?;
         let n: i64 = docs.query_row([&tx_id], |r| r.get(0))?;
+        let carried: Option<String> = if action.is_none() {
+            carried
+                .query_row([&tx_id], |r| r.get::<_, Option<String>>(0))
+                .ok()
+                .flatten()
+        } else {
+            None
+        };
         rows.push(Ok::<_, rusqlite::Error>(Undoable {
             tx_id,
             ts,
@@ -300,7 +313,7 @@ pub fn undo_stack(conn: &Connection, actor: &Actor, except: &[&str]) -> Result<V
                 (Some(a), 0) => a,
                 (Some(a), 1) => format!("{a} · 1 document"),
                 (Some(a), n) => format!("{a} · {n} documents"),
-                (None, _) => String::new(),
+                (None, _) => carried.unwrap_or_default(),
             },
         }));
     }

@@ -3097,6 +3097,31 @@ fn sync_pill(ui: &mut egui::Ui, b: &mut Browse) {
     }
 }
 
+/// The undo list changed: its copy in the cabinet follows (Q-105: a session host's catalog is
+/// new every morning). On its own thread with its own connection: it writes to the share.
+fn save_undo_list(env: &Env) {
+    let (root, device) = (env.root.to_path_buf(), env.device_id.to_string());
+    let Some(catalog) = env
+        .conn
+        .path()
+        .filter(|p| !p.is_empty())
+        .map(std::path::PathBuf::from)
+    else {
+        let _ = vf_fs::undolist::save(env.conn, &root, &device);
+        return;
+    };
+    let _ = std::thread::Builder::new()
+        .name("undo-list".into())
+        .spawn(move || {
+            let saved = vf_core::db::open(&catalog, vf_core::db::Storage::Local)
+                .map_err(|e| e.to_string())
+                .and_then(|conn| vf_fs::undolist::save(&conn, &root, &device));
+            if let Err(e) = saved {
+                tracing::warn!(kind = crate::logging::kind(&e), "undo list not saved");
+            }
+        });
+}
+
 /// Undoes this login's newest change (Ctrl+Z with the client panel showing).
 fn undo_newest(b: &mut Browse, env: &mut Env) {
     let top = vf_fs::fileops::undo_stack(env.conn, env.device_id)
@@ -3914,6 +3939,7 @@ fn inspector_body(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env) {
     if b.undo_stack.is_none() {
         b.undo_stack =
             Some(vf_fs::fileops::undo_stack(env.conn, env.device_id).unwrap_or_default());
+        save_undo_list(env);
     }
     let top = b.undo_stack.as_ref().and_then(|s| s.first()).cloned();
     let mut undo = std::mem::take(&mut b.undo_requested);

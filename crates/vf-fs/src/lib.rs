@@ -33,6 +33,7 @@ pub mod safeguards;
 pub mod sweep;
 pub mod tapes;
 pub mod trash;
+pub mod undolist;
 pub mod versions;
 
 #[cfg(test)]

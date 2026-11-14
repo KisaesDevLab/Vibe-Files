@@ -1494,6 +1494,11 @@ fn prepare(opened: &mut Opened, device_id: &str) -> Prepared {
     if let Err(e) = vf_fs::holds::sync(&mut opened.conn, &root, device_id) {
         tracing::warn!(kind = crate::logging::kind(&e), "legal holds not synced");
     }
+    // This login's undo list as the cabinet has it (Q-105): a catalog made this morning
+    // still offers yesterday's changes to undo.
+    if let Err(e) = vf_fs::undolist::restore(&mut opened.conn, &root, device_id) {
+        tracing::warn!(kind = crate::logging::kind(&e), "undo list not restored");
+    }
     // Trash older than 90 days empties on its own (Q-15; held documents stay).
     let emptied = vf_fs::trash::auto_empty(&mut opened.conn, &root, device_id);
     let chain = crate::ui::audit::ChainCheck::later();
