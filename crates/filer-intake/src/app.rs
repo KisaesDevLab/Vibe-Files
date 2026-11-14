@@ -2552,13 +2552,31 @@ mod combine_ui_tests {
     /// Ticks the "Select" box of the row for `name`, then waits for the re-plan ticks cause
     /// (ticked rows are numbered first).
     fn tick(h: &mut Harness<'static, FilerApp>, name: &str) {
-        h.get_by_role_and_label(Role::CheckBox, &format!("Select {name}"))
-            .click();
-        // The click is applied on the next frame; give it two.
-        h.step();
-        h.step();
-        settle(h, "plan after tick", |a| a.preview.plan_idle());
-        h.step();
+        let ticked = |h: &Harness<'static, FilerApp>| {
+            h.state()
+                .preview
+                .ticked()
+                .iter()
+                .any(|p| p.file_name().is_some_and(|n| n.to_string_lossy() == name))
+        };
+        let was = ticked(h);
+        // A click can miss: it lands where the box was on the last frame, and the rows move
+        // when a plan arrives in between (on a busy machine the first tick was lost about
+        // one run in two, and the test failed later for a reason that looked unrelated).
+        // Clicked again until the tick has changed.
+        for _ in 0..5 {
+            h.get_by_role_and_label(Role::CheckBox, &format!("Select {name}"))
+                .click();
+            // The click is applied on the next frame; give it two.
+            h.step();
+            h.step();
+            settle(h, "plan after tick", |a| a.preview.plan_idle());
+            h.step();
+            if ticked(h) != was {
+                return;
+            }
+        }
+        panic!("the tick of {name} never changed");
     }
 
     #[test]
