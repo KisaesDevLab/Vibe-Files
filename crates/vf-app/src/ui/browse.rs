@@ -433,6 +433,9 @@ pub struct Browse {
     /// A hold being placed on its thread (documents not read yet are fingerprinted first,
     /// PA-60), with what it is placed on.
     hold_job: Option<(String, crate::ui::job::Job<Result<String, String>>)>,
+    /// Share… or Send secure link… waiting for the fingerprints of documents not read yet
+    /// (PA-60), made on a thread; its window opens when they are there.
+    portal_open: Option<PortalOpen>,
     /// A hold being released (asked first), and the PIN typed.
     hold_releasing: Option<(String, String)>,
     hold_pin: String,
@@ -588,6 +591,7 @@ impl Browse {
             holds_seen: None,
             hold_reason: None,
             hold_job: None,
+            portal_open: None,
             rename: None,
             prefs: Prefs::default(),
             prefs_dirty: false,
@@ -3598,7 +3602,7 @@ fn sort_arrow(ui: &mut egui::Ui, asc: bool) {
 
 /// Browse › Share…: the selected documents (all of one client) on the firm's Vibe Portal.
 fn open_share(ctx: &egui::Context, b: &mut Browse, env: &mut Env) {
-    let Some(s) = b.portal.settings(env.root).cloned() else {
+    if b.portal.settings(env.root).is_none() {
         return;
     };
     let docs = b.selected_docs();
@@ -3615,36 +3619,152 @@ fn open_share(ctx: &egui::Context, b: &mut Browse, env: &mut Env) {
         );
         return;
     };
-    // The portal compares fingerprints: a document not read yet is read now (PA-60).
-    let mut refs = Vec::with_capacity(docs.len());
-    for d in &docs {
-        let hash = match shared_hash(env, d) {
-            Ok(h) => h,
-            Err(e) => {
-                b.error = Some(e);
-                return;
+    let docs: Vec<vf_core::browse::DocRow> = docs.into_iter().cloned().collect();
+    start_portal_open(ctx, b, env, c, docs, false);
+}
+
+/// A portal window waiting for fingerprints: the client, the documents, whether it is the
+/// secure link's (one document), and the work.
+struct PortalOpen {
+    client: vf_core::browse::ClientRow,
+    docs: Vec<vf_core::browse::DocRow>,
+    link: bool,
+    job: crate::ui::job::Job<Result<Vec<String>, String>>,
+}
+
+/// Opens Share… (or Send secure link…) for `docs` of `client`. The portal compares
+/// fingerprints: documents not read yet (PA-60) are read first, on a thread with its own
+/// catalog connection, and the window opens when that is done.
+fn start_portal_open(
+    ctx: &egui::Context,
+    b: &mut Browse,
+    env: &mut Env,
+    client: vf_core::browse::ClientRow,
+    docs: Vec<vf_core::browse::DocRow>,
+    link: bool,
+) {
+    if docs.iter().all(|d| d.hash.is_some()) {
+        let hashes = docs
+            .iter()
+            .map(|d| d.hash.clone().unwrap_or_default())
+            .collect();
+        return portal_window(ctx, b, env.root, client, docs, link, hashes);
+    }
+    let Some(catalog) = b.catalog.clone() else {
+        // No catalog file to open again (tests of the page alone): here.
+        let mut hashes = Vec::with_capacity(docs.len());
+        for d in &docs {
+            match shared_hash(env, d) {
+                Ok(h) => hashes.push(h),
+                Err(e) => {
+                    b.error = Some(e);
+                    return;
+                }
             }
-        };
-        refs.push(crate::ui::portal::DocRef {
+        }
+        return portal_window(ctx, b, env.root, client, docs, link, hashes);
+    };
+    let (root, device) = (env.root.to_path_buf(), env.device_id.to_string());
+    let ids: Vec<(String, Option<String>)> = docs
+        .iter()
+        .map(|d| (d.id.clone(), d.hash.clone()))
+        .collect();
+    let what = if docs.len() == 1 {
+        "Reading the document before it is shared…".to_string()
+    } else {
+        format!("Reading {} documents before they are shared…", docs.len())
+    };
+    match crate::ui::job::Job::start(ctx, what, move || {
+        let mut conn =
+            vf_core::db::open(&catalog, vf_core::db::Storage::Local).map_err(|e| e.to_string())?;
+        ids.into_iter()
+            .map(|(id, hash)| match hash {
+                Some(h) => Ok(h),
+                None => vf_fs::fingerprint::ensure(&mut conn, &root, &device, &id),
+            })
+            .collect()
+    }) {
+        Ok(job) => {
+            b.portal_open = Some(PortalOpen {
+                client,
+                docs,
+                link,
+                job,
+            });
+            // Tests run the work at once: its window opens here.
+            if cfg!(test) {
+                take_portal_open(ctx, b, env.root);
+            }
+        }
+        Err(e) => b.error = Some(e),
+    }
+}
+
+/// Opens the window a finished [`start_portal_open`] was for.
+fn take_portal_open(ctx: &egui::Context, b: &mut Browse, root: &Path) {
+    let Some(r) = b.portal_open.as_ref().and_then(|p| p.job.poll()) else {
+        return;
+    };
+    let Some(p) = b.portal_open.take() else {
+        return;
+    };
+    match r.and_then(|r| r) {
+        Ok(hashes) => portal_window(ctx, b, root, p.client, p.docs, p.link, hashes),
+        Err(e) => b.error = Some(e),
+    }
+}
+
+/// The Share… window (or Send secure link…'s) for `docs`, whose fingerprints are `hashes`.
+fn portal_window(
+    ctx: &egui::Context,
+    b: &mut Browse,
+    root: &Path,
+    c: vf_core::browse::ClientRow,
+    docs: Vec<vf_core::browse::DocRow>,
+    link: bool,
+    hashes: Vec<String>,
+) {
+    let Some(s) = b.portal.settings(root).cloned() else {
+        return;
+    };
+    let client = crate::ui::portal::ClientRef {
+        id: c.id.clone(),
+        code: c.ext_id.clone(),
+        name: c.name.clone(),
+    };
+    let mut refs: Vec<crate::ui::portal::DocRef> = docs
+        .iter()
+        .zip(hashes)
+        .map(|(d, hash)| crate::ui::portal::DocRef {
             id: d.id.clone(),
             name: widgets::file_name(&d.rel_path).to_string(),
-            path: env.root.join(&d.rel_path),
+            path: root.join(&d.rel_path),
             hash,
             tax_year: d.tax_year,
-        });
+        })
+        .collect();
+    if link {
+        let Some(doc) = refs.pop() else {
+            return;
+        };
+        b.portal.send_link = Some(crate::ui::portal::SendLinkWindow::new(
+            ctx,
+            &s,
+            client,
+            doc,
+            b.portal.audit_out(),
+            b.b2_first.clone(),
+        ));
+    } else {
+        b.portal.share = Some(crate::ui::portal::ShareWindow::new(
+            ctx,
+            &s,
+            client,
+            refs,
+            b.portal.audit_out(),
+            b.b2_first.clone(),
+        ));
     }
-    b.portal.share = Some(crate::ui::portal::ShareWindow::new(
-        ctx,
-        &s,
-        crate::ui::portal::ClientRef {
-            id: c.id.clone(),
-            code: c.ext_id.clone(),
-            name: c.name.clone(),
-        },
-        refs,
-        b.portal.audit_out(),
-        b.b2_first.clone(),
-    ));
 }
 
 /// A document's fingerprint for the portal, which compares it with what it holds: a document
@@ -3659,7 +3779,7 @@ fn shared_hash(env: &mut Env, d: &vf_core::browse::DocRow) -> Result<String, Str
 /// The document pane's Send secure link… (Vibe-Portal P68): one document of a client, to
 /// someone outside the client.
 fn open_send_link(ctx: &egui::Context, b: &mut Browse, env: &mut Env, d: &vf_core::browse::DocRow) {
-    let Some(s) = b.portal.settings(env.root).cloned() else {
+    if b.portal.settings(env.root).is_none() {
         return;
     };
     // A link being sent keeps its window: its result is shown there.
@@ -3676,35 +3796,19 @@ fn open_send_link(ctx: &egui::Context, b: &mut Browse, env: &mut Env, d: &vf_cor
         b.error = Some("Only a document filed under a client can be sent by a secure link.".into());
         return;
     };
-    let hash = match shared_hash(env, d) {
-        Ok(h) => h,
-        Err(e) => {
-            b.error = Some(e);
-            return;
-        }
-    };
-    b.portal.send_link = Some(crate::ui::portal::SendLinkWindow::new(
-        ctx,
-        &s,
-        crate::ui::portal::ClientRef {
-            id: c.id.clone(),
-            code: c.ext_id.clone(),
-            name: c.name.clone(),
-        },
-        crate::ui::portal::DocRef {
-            id: d.id.clone(),
-            name: widgets::file_name(&d.rel_path).to_string(),
-            path: env.root.join(&d.rel_path),
-            hash,
-            tax_year: d.tax_year,
-        },
-        b.portal.audit_out(),
-        b.b2_first.clone(),
-    ));
+    start_portal_open(ctx, b, env, c, vec![d.clone()], true);
 }
 
 /// The portal windows (Share…, Portal users…, Send secure link…), drawn over Browse while open.
 fn portal_windows(ctx: &egui::Context, b: &mut Browse, env: &mut Env) {
+    take_portal_open(ctx, b, env.root);
+    if let Some(p) = &b.portal_open {
+        egui::Window::new("Share")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| p.job.show(ui));
+    }
     let Some(s) = b.portal.settings(env.root).cloned() else {
         b.portal.share = None;
         b.portal.people = None;
