@@ -309,9 +309,11 @@ mod scale {
             vf_fs::doctypes::seed_if_missing(&root).unwrap();
             vf_fs::doctypes::sync(&mut conn, &root, "dev", "seed").unwrap();
             let t0 = Instant::now();
-            let rep = vf_fs::rebuild::rebuild(&mut conn, &root, "dev").unwrap();
+            // As the app does when a catalog meets the cabinet (PA-60): from the folder
+            // listing, no file read.
+            let rep = vf_fs::rebuild::index(&mut conn, &root, "dev").unwrap();
             eprintln!(
-                "first index (every file read): {:.1} s",
+                "first index (from the listing, no file read): {:.1} s",
                 t0.elapsed().as_secs_f64()
             );
             assert_eq!(rep.docs_new, total, "{rep}");
