@@ -85,6 +85,10 @@ pub struct IntakeTab {
     /// print capture rules put back (QA2 U5).
     rules_seen: Option<std::time::SystemTime>,
     rules_looked: Option<std::time::Instant>,
+    /// When the share was last asked whether the client list or a PC's last batch changed:
+    /// once a second, not on every repaint (QA #9). Tests ask every time.
+    list_looked: Option<std::time::Instant>,
+    batch_looked: Option<std::time::Instant>,
     /// rules.json's modified time when Filer was loaded (the rules it holds).
     filer_rules_at: Option<std::time::SystemTime>,
     /// Whether Filer is filing a batch, and when that was last read (once a second).
@@ -269,6 +273,14 @@ impl IntakeTab {
             }
             return;
         }
+        if !cfg!(test)
+            && self
+                .list_looked
+                .is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(1))
+        {
+            return;
+        }
+        self.list_looked = Some(std::time::Instant::now());
         let p = filer_core::clients::cache_path(&vf_fs::clients::master_dir(root));
         let now = std::fs::metadata(p).and_then(|m| m.modified()).ok();
         if now.is_none() || now == self.clients_synced {
@@ -343,7 +355,15 @@ impl IntakeTab {
         if self.poll_reconcile() || self.clients_syncing.is_some() {
             return;
         }
-        // Every PC's last batch (Q-53): any of them changing is looked at.
+        // Every PC's last batch (Q-53): any of them changing is looked at, once a second.
+        if !cfg!(test)
+            && self
+                .batch_looked
+                .is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(1))
+        {
+            return;
+        }
+        self.batch_looked = Some(std::time::Instant::now());
         let modified = vf_fs::intake::latest_change(root);
         if modified.is_none() || modified == self.seen {
             return;

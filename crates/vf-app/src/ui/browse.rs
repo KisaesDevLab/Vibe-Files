@@ -492,6 +492,8 @@ pub struct Browse {
     pub others_changed: bool,
     /// Times the list was read from the catalog ([`Browse::reload`]).
     pub reloads: u64,
+    /// The height of one client row of the tree, as last laid out (0 until then).
+    tree_row_h: f32,
     /// "Remove from B2…" asked for these documents: the confirmation is open.
     pub b2_remove: Option<Vec<String>>,
     /// Whether a portal share goes to B2 first, and with what (the app sets it each frame).
@@ -594,6 +596,7 @@ impl Browse {
             b2_remove: None,
             others_changed: false,
             reloads: 0,
+            tree_row_h: 0.0,
             import: None,
             rel_form: RelForm::new(),
             meta_form: MetaForm::default(),
@@ -2773,9 +2776,15 @@ fn tree(ui: &mut egui::Ui, b: &mut Browse) {
     let mut fav_scope: Option<Scope> = None;
     // A drop of dragged documents on a client or folder row: (ids, cabinet-relative folder).
     let mut dropped: Option<(Vec<String>, String)> = None;
+    // Only the clients in view are laid out (thousands of clients cost 15-40 ms a repaint,
+    // QA #10): a closed client out of view takes its row's height as empty space.
+    let row_h = b.tree_row_h;
+    let mut measured: Option<f32> = None;
     egui::ScrollArea::vertical()
         .auto_shrink(false)
-        .show(ui, |ui| {
+        .show_viewport(ui, |ui, view| {
+            let origin = ui.cursor().min.y;
+            let mut skipped = 0.0_f32;
             if tree_row(
                 ui,
                 0,
@@ -2794,6 +2803,20 @@ fn tree(ui: &mut egui::Ui, b: &mut Browse) {
                 let c = &b.snap.clients[ci];
                 let node = &b.ix.clients[ci];
                 let open = b.expanded.contains(&Node::Client(ci));
+                let y = ui.cursor().min.y - origin + skipped;
+                if row_h > 0.0
+                    && !open
+                    && b.reveal.as_deref() != Some(c.id.as_str())
+                    && (y + row_h < view.min.y - 100.0 || y > view.max.y + 100.0)
+                {
+                    skipped += row_h;
+                    continue;
+                }
+                if skipped > 0.0 {
+                    ui.add_space(skipped);
+                    skipped = 0.0;
+                }
+                let row_top = ui.cursor().min.y;
                 let label = format!("{}  {}", c.name, c.ext_id);
                 let (chev, resp) = tree_row(
                     ui,
@@ -2804,6 +2827,9 @@ fn tree(ui: &mut egui::Ui, b: &mut Browse) {
                     node.count,
                     b.scope == Scope::Client(ci),
                 );
+                if measured.is_none() {
+                    measured = Some(ui.cursor().min.y - row_top);
+                }
                 if let Some(cf) = &c.folder_rel {
                     drop_target(&resp, cf, &mut dropped);
                 }
@@ -2963,7 +2989,13 @@ fn tree(ui: &mut egui::Ui, b: &mut Browse) {
                     }
                 }
             }
+            if skipped > 0.0 {
+                ui.add_space(skipped);
+            }
         });
+    if let Some(h) = measured.filter(|h| *h > 0.0) {
+        b.tree_row_h = h;
+    }
     if let Some(n) = toggle
         && !b.expanded.remove(&n)
     {
@@ -7070,6 +7102,9 @@ Petty cash,1234.50
             let mut best = Duration::MAX;
             for c in group {
                 let label = format!("Client {c:04}  {}", 1000 + c);
+                // Scrolled into view first: only the clients in view are laid out.
+                h.state_mut().b.reveal = Some(format!("c{c:04}"));
+                h.run();
                 h.get_by_role_and_label(Role::Button, &label).click();
                 // The frame that handles the click and draws the expanded node and its grid.
                 let t = Instant::now();
