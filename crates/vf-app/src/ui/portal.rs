@@ -1327,9 +1327,11 @@ pub struct AdminPortal {
     columns: RecordColumns,
     /// The client list's extra columns (token names), and each client's row by its ID.
     extras: Vec<String>,
-    rows: BTreeMap<String, BTreeMap<String, String>>,
+    rows: record::Rows,
     /// The client list was read for `extras` and `rows`.
     record_read: bool,
+    /// Why the client list could not be read (no request can then be compared with it).
+    record_err: Option<String>,
     /// The request whose "How did you check?" is open, the choice made and the note typed.
     asking: Option<String>,
     how: (Option<usize>, String),
@@ -1397,6 +1399,11 @@ impl AdminPortal {
         }
         self.clients.clear();
         self.record_read = false;
+        // The clients are read again: what was picked by its place in the list, and a question
+        // open for it, no longer stand.
+        self.pick.clear();
+        self.asking = None;
+        self.how = (None, String::new());
         self.err = None;
         self.read_at = None;
     }
@@ -1424,14 +1431,24 @@ impl AdminPortal {
     }
 
     /// Reads the client record requests are checked against: the client list's extra columns
-    /// and each client's row. Once per visit, and again when `again` (Refresh, Save): the list
-    /// can be large and the cabinet is often on a share, so not on the 10-second timer.
+    /// and each client's row. Once per visit, and again when `again` (Refresh, Save, Read the
+    /// client list again): the list can be large and the cabinet is often on a share, so not
+    /// on the 10-second timer.
     fn load_record(&mut self, root: &Path, again: bool) {
         if self.record_read && !again {
             return;
         }
         self.record_read = true;
-        let master = vf_fs::clients::load(root).unwrap_or_default();
+        let master = match vf_fs::clients::load(root) {
+            Ok(m) => {
+                self.record_err = None;
+                m
+            }
+            Err(e) => {
+                self.record_err = Some(format!("The client list could not be read: {e}"));
+                Default::default()
+            }
+        };
         let mut extras: Vec<String> = Vec::new();
         self.rows.clear();
         for c in master.clients() {
@@ -1440,17 +1457,11 @@ impl AdminPortal {
                     extras.push(k.clone());
                 }
             }
-            self.rows.insert(row_key(&c.id), c.extra.clone());
+            self.rows.insert(&c.id, c.extra.clone());
         }
         extras.sort_by_key(|k| k.to_lowercase());
         self.extras = extras;
     }
-}
-
-/// A client's ID as rows are kept and looked up by: trimmed, without case, as the client list
-/// compares IDs.
-fn row_key(id: &str) -> String {
-    id.trim().to_lowercase()
 }
 
 /// One of the three column choices of Admin › Portal: "(none)" or a client-list column.
@@ -1549,6 +1560,14 @@ pub fn admin_settings(ui: &mut egui::Ui, a: &mut AdminPortal, env: &mut Env) {
             );
             column_choice(ui, "Client's date of birth", &a.extras, &mut a.columns.dob);
         });
+    if ui
+        .button("Read the client list again")
+        .on_hover_text("After ticking a column as a token in Admin › Clients.")
+        .clicked()
+    {
+        a.load_record(env.root, true);
+    }
+    widgets::message_line(ui, a.record_err.as_deref());
     let busy = a.status.is_some();
     ui.horizontal(|ui| {
         if ui
@@ -1890,6 +1909,7 @@ fn save(a: &mut AdminPortal, env: &mut Env) {
         a.err = Some(format!("Not saved: {e}"));
         return;
     }
+    a.load_record(env.root, true);
     let inbox = match core::register_inbox(env.root) {
         Ok(true) => format!(
             " {} was added to Intake's inboxes (Reload Intake to see it).",
@@ -1989,6 +2009,14 @@ pub fn admin_requests(ui: &mut egui::Ui, a: &mut AdminPortal, env: &mut Env) {
         }
         if let Some(l) = list {
             a.check_required = l.check_required;
+            // A question stays open (with its note) until its request is decided: a refusal
+            // by the portal leaves it to be tried again.
+            if let Some(id) = &a.asking
+                && !l.requests.iter().any(|r| &r.id == id)
+            {
+                a.asking = None;
+                a.how = (None, String::new());
+            }
             a.requests = Some(l.requests);
         }
     }
@@ -2006,6 +2034,7 @@ pub fn admin_requests(ui: &mut egui::Ui, a: &mut AdminPortal, env: &mut Env) {
         "People who asked for portal access and confirmed their email or phone. Link each to the \
          client whose files they should see, or deny it. Only the confirmed contact is used.",
     ));
+    widgets::message_line(ui, a.record_err.as_deref());
     if a.check_required {
         ui.label(widgets::caption(
             "Your portal asks for a check before approving: a request that matches the client \
@@ -2020,7 +2049,10 @@ pub fn admin_requests(ui: &mut egui::Ui, a: &mut AdminPortal, env: &mut Env) {
         a.err = None;
         a.requests = None;
         a.asking = None;
-        // The client list may have changed too.
+        a.how = (None, String::new());
+        // The clients and the client list may have changed too.
+        a.clients = load_clients(env);
+        a.pick.clear();
         a.load_record(env.root, true);
     }
     let mut decision: Option<Decision> = None;
@@ -2082,11 +2114,7 @@ pub fn admin_requests(ui: &mut egui::Ui, a: &mut AdminPortal, env: &mut Env) {
                     // The request beside the chosen client's row of the client list.
                     let cmp = chosen_client.filter(|_| s.record.any()).map(|c| {
                         let empty = BTreeMap::new();
-                        record::compare(
-                            r,
-                            a.rows.get(&row_key(&c.code)).unwrap_or(&empty),
-                            &s.record,
-                        )
+                        record::compare(r, a.rows.get(&c.code).unwrap_or(&empty), &s.record)
                     });
                     if let (Some(c), Some(cmp)) = (chosen_client, &cmp) {
                         ui.label(format!(
@@ -2180,7 +2208,8 @@ pub fn admin_requests(ui: &mut egui::Ui, a: &mut AdminPortal, env: &mut Env) {
                         ));
                         let (how, note) = &mut a.how;
                         for (i, (_, label, _)) in CHECKS.iter().enumerate() {
-                            if ui.radio(*how == Some(i), *label).clicked() {
+                            // (Clicking the one already chosen keeps its note.)
+                            if ui.radio(*how == Some(i), *label).clicked() && *how != Some(i) {
                                 *how = Some(i);
                                 note.clear();
                             }
@@ -2226,7 +2255,6 @@ pub fn admin_requests(ui: &mut egui::Ui, a: &mut AdminPortal, env: &mut Env) {
         a.how = (None, String::new());
     }
     if let Some((req, to)) = decision {
-        a.asking = None;
         let out = a.audit.clone();
         // Without the app's channel (tests), the row comes back here to be recorded.
         let (tx, rx) = mpsc::channel::<AuditEntry>();
@@ -2773,8 +2801,6 @@ mod tests {
         // The words of the portal's flags; one it adds later is shown as it is.
         assert_eq!(flag_words("expired"), "The ID has expired");
         assert_eq!(flag_words("something_new"), "something new");
-        // A client's row is found whatever the case or spacing of its ID.
-        assert_eq!(row_key(" Ab-1 "), row_key("AB-1"));
     }
 
     /// PA-38: Intake's portal line says what the last fetch here did and how often it runs.

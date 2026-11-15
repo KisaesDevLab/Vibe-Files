@@ -93,40 +93,168 @@ fn email_key(s: &str) -> String {
 }
 
 /// A phone number as compared: its last ten digits (the country code and punctuation aside), or
-/// `None` when it has fewer than seven.
+/// `None` when it has fewer than seven. An extension ("x12", "ext. 12", "#12") is left off.
 fn phone_key(s: &str) -> Option<String> {
-    let digits: String = s.chars().filter(char::is_ascii_digit).collect();
+    let lower = s.to_lowercase();
+    let mut digits = String::new();
+    let mut rest = lower.as_str();
+    while let Some(c) = rest.chars().next() {
+        if digits.len() >= 7 && (c == 'x' || c == '#' || rest.starts_with("ext")) {
+            break;
+        }
+        if c.is_ascii_digit() {
+            digits.push(c);
+        }
+        rest = &rest[c.len_utf8()..];
+    }
     if digits.len() < 7 {
         return None;
     }
     Some(digits[digits.len().saturating_sub(10)..].to_string())
 }
 
-/// A date as written in a client list, as (year, month, day): `1990-01-06`, `1990/01/06`,
-/// `19900106`, `1/6/1990`, `01-06-1990`, `1.6.1990` (month first, as US lists write it). A
-/// two-digit year is not guessed at.
+/// The phone numbers of a cell: one, or several set apart by `;`, `,`, `/`, `|` or "or".
+fn phones(cell: &str) -> impl Iterator<Item = String> + '_ {
+    cell.split([';', ',', '/', '|'])
+        .flat_map(|part| part.split(" or "))
+        .filter_map(phone_key)
+}
+
+/// The email addresses of a cell: one, or several, written plainly, as `Name <a@b>` or as
+/// `mailto:a@b`.
+fn emails(cell: &str) -> impl Iterator<Item = String> + '_ {
+    cell.split([';', ',', ' ', '<', '>', '(', ')'])
+        .map(|t| {
+            let t = t.trim();
+            let lower = t.to_lowercase();
+            lower.strip_prefix("mailto:").unwrap_or(&lower).to_string()
+        })
+        .filter(|t| t.contains('@'))
+}
+
+const MONTHS: [&str; 12] = [
+    "jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec",
+];
+
+/// The month a word names ("Jan", "January", "Sept."), 1 to 12.
+fn month_named(word: &str) -> Option<u32> {
+    let w = word.trim_end_matches('.').to_lowercase();
+    if w.len() < 3 || !w.chars().all(|c| c.is_ascii_alphabetic()) {
+        return None;
+    }
+    MONTHS
+        .iter()
+        .position(|m| w.starts_with(m))
+        .map(|i| i as u32 + 1)
+}
+
+/// A date as written in a client list, as (year, month, day):
+/// - `1990-01-06`, `1990/01/06`, `19900106`;
+/// - `1/6/1990`, `01-06-1990`, `1.6.1990`: month first, as US lists write it, unless the first
+///   number is over 12 (`13/1/1990` is 13 January);
+/// - `Jan 6 1990`, `January 6, 1990`, `6 Jan 1990`, `6-Jan-1990`;
+/// - a spreadsheet's day number (`32879` is 1990-01-06).
+///
+/// A two-digit year is not guessed at. A day-first list whose days are 12 or less reads month
+/// first: such a row shows as "differs", never as a match it is not.
 pub fn parse_date(s: &str) -> Option<(u32, u32, u32)> {
-    let t = s.trim();
+    let ok = |y: u32, m: u32, d: u32| {
+        ((1900..=2199).contains(&y) && (1..=12).contains(&m) && (1..=31).contains(&d))
+            .then_some((y, m, d))
+    };
+    let whole = s.trim();
+    // A month by name.
+    let words: Vec<&str> = whole
+        .split([' ', ',', '-', '/', '.'])
+        .filter(|w| !w.is_empty())
+        .collect();
+    if let Some(at) = words.iter().position(|w| month_named(w).is_some()) {
+        let m = month_named(words[at])?;
+        let nums: Vec<u32> = words
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| *i != at)
+            .filter_map(|(_, w)| w.parse().ok())
+            .collect();
+        return match nums.as_slice() {
+            [a, b, ..] if *a > 31 => ok(*a, m, *b),
+            [a, b, ..] => ok(*b, m, *a),
+            _ => None,
+        };
+    }
     // A time after the date (a spreadsheet's "1/6/1990 0:00") is dropped.
-    let t = t.split([' ', 'T']).next().unwrap_or("");
+    let t = whole.split([' ', 'T']).next().unwrap_or("");
     let parts: Vec<&str> = t.split(['-', '/', '.']).collect();
     let num = |p: &str| -> Option<u32> {
         (!p.is_empty() && p.len() <= 4 && p.chars().all(|c| c.is_ascii_digit()))
             .then(|| p.parse().ok())
             .flatten()
     };
-    let (y, m, d) = match parts.as_slice() {
-        [one] if one.len() == 8 && one.chars().all(|c| c.is_ascii_digit()) => (
+    match parts.as_slice() {
+        [one] if one.len() == 8 && one.chars().all(|c| c.is_ascii_digit()) => ok(
             one[0..4].parse().ok()?,
             one[4..6].parse().ok()?,
             one[6..8].parse().ok()?,
         ),
-        [a, b, c] if a.len() == 4 => (num(a)?, num(b)?, num(c)?),
-        [a, b, c] if c.len() == 4 => (num(c)?, num(a)?, num(b)?),
-        _ => return None,
-    };
-    ((1900..=2199).contains(&y) && (1..=12).contains(&m) && (1..=31).contains(&d))
-        .then_some((y, m, d))
+        // A spreadsheet's day number: days since 30 December 1899.
+        [one] if (4..=6).contains(&one.len()) && one.chars().all(|c| c.is_ascii_digit()) => {
+            use chrono::Datelike;
+            let day = chrono::NaiveDate::from_ymd_opt(1899, 12, 30)?
+                .checked_add_days(chrono::Days::new(one.parse().ok()?))?;
+            ok(u32::try_from(day.year()).ok()?, day.month(), day.day())
+        }
+        [a, b, c] if a.len() == 4 => ok(num(a)?, num(b)?, num(c)?),
+        [a, b, c] if c.len() == 4 => {
+            let (first, second) = (num(a)?, num(b)?);
+            // Over 12 cannot be a month: the list writes the day first.
+            if first > 12 {
+                ok(num(c)?, second, first)
+            } else {
+                ok(num(c)?, first, second)
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Each client's row of the client list, by its ID. An ID is looked up as written; when no
+/// client has it so, without regard to case, but only if one client alone answers to it (two
+/// IDs that differ only by case are two clients: neither stands in for the other).
+#[derive(Debug, Clone, Default)]
+pub struct Rows {
+    exact: BTreeMap<String, BTreeMap<String, String>>,
+    /// Lower-case ID to the one ID written so, or `None` when several are.
+    folded: BTreeMap<String, Option<String>>,
+}
+
+impl Rows {
+    pub fn clear(&mut self) {
+        self.exact.clear();
+        self.folded.clear();
+    }
+
+    pub fn insert(&mut self, id: &str, extra: BTreeMap<String, String>) {
+        let id = id.trim().to_string();
+        self.folded
+            .entry(id.to_lowercase())
+            .and_modify(|e| {
+                if e.as_deref() != Some(id.as_str()) {
+                    *e = None;
+                }
+            })
+            .or_insert_with(|| Some(id.clone()));
+        self.exact.insert(id, extra);
+    }
+
+    pub fn get(&self, id: &str) -> Option<&BTreeMap<String, String>> {
+        let id = id.trim();
+        self.exact.get(id).or_else(|| {
+            self.folded
+                .get(&id.to_lowercase())
+                .and_then(|one| one.as_deref())
+                .and_then(|k| self.exact.get(k))
+        })
+    }
 }
 
 /// The row's value in a chosen column, when the column was chosen and the row has something.
@@ -152,9 +280,7 @@ pub fn compare(
             None => Line::NotInRecord,
             // A cell may hold more than one address.
             Some(v) => {
-                if v.split([';', ',', ' '])
-                    .any(|a| !a.trim().is_empty() && email_key(a) == email_key(confirmed))
-                {
+                if emails(v).any(|a| a == email_key(confirmed)) {
                     Line::Matches
                 } else {
                     Line::Differs
@@ -167,10 +293,7 @@ pub fn compare(
         (false, Some(asked)) => match cell(extra, &columns.mobile) {
             None => Line::NotInRecord,
             Some(v) => {
-                if v.split([';', ',', '/'])
-                    .filter_map(phone_key)
-                    .any(|n| n == asked)
-                {
+                if phones(v).any(|n| n == asked) {
                     Line::Matches
                 } else {
                     Line::Differs
@@ -255,12 +378,27 @@ mod tests {
             assert_eq!(parse_date(s), Some((1990, 1, 6)), "{s}");
         }
         for s in [
+            "Jan 6 1990",
+            "January 6, 1990",
+            "6 Jan 1990",
+            "6-Jan-1990",
+            "Jan. 6, 1990",
+            "1990 January 6",
+            "32879",
+        ] {
+            assert_eq!(parse_date(s), Some((1990, 1, 6)), "{s}");
+        }
+        // Over 12 cannot be a month: day first.
+        assert_eq!(parse_date("13/1/1990"), Some((1990, 1, 13)));
+        assert_eq!(parse_date("31.12.1990"), Some((1990, 12, 31)));
+        for s in [
             "",
             "1/6/90",
-            "Jan 6 1990",
+            "Janus 6",
             "13/40/1990",
             "1990-13-01",
             "0000-01-01",
+            "12",
         ] {
             assert_eq!(parse_date(s), None, "{s}");
         }
@@ -334,6 +472,60 @@ mod tests {
             &columns(),
         );
         assert_eq!(odd.dob, Line::Differs);
+    }
+
+    #[test]
+    fn extensions_names_and_several_in_a_cell_are_read() {
+        let cols = columns();
+        for cell in [
+            "555-010-1234 x12",
+            "(555) 010-1234 ext. 7",
+            "555.010.9999 or 555.010.1234",
+            "1 555 010 1234 #3 | 555 010 0000",
+        ] {
+            let c = compare(
+                &request("+15550101234", None, &[]),
+                &row(&[("Cell", cell)]),
+                &cols,
+            );
+            assert_eq!(c.mobile, Line::Matches, "{cell}");
+        }
+        for cell in [
+            "Alex Sample <ALEX@example.test>",
+            "mailto:alex@example.test",
+            "old@example.test, Alex (alex@example.test)",
+        ] {
+            let c = compare(
+                &request("alex@example.test", None, &[]),
+                &row(&[("Email", cell)]),
+                &cols,
+            );
+            assert_eq!(c.email, Line::Matches, "{cell}");
+        }
+        let c = compare(
+            &request("alex@example.test", None, &[]),
+            &row(&[("Email", "Alex Sample")]),
+            &cols,
+        );
+        assert_eq!(c.email, Line::Differs);
+    }
+
+    #[test]
+    fn a_row_is_found_by_its_id_and_never_by_another_clients() {
+        let mut rows = Rows::default();
+        rows.insert(" AB-1 ", row(&[("Email", "one@example.test")]));
+        rows.insert("cd-2", row(&[("Email", "two@example.test")]));
+        // As written, trimmed; and whatever the case, when one client alone answers to it.
+        assert_eq!(rows.get("AB-1").unwrap()["Email"], "one@example.test");
+        assert_eq!(rows.get("ab-1 ").unwrap()["Email"], "one@example.test");
+        assert!(rows.get("zz-9").is_none());
+        // Two IDs that differ only by case are two clients.
+        rows.insert("CD-2", row(&[("Email", "three@example.test")]));
+        assert_eq!(rows.get("cd-2").unwrap()["Email"], "two@example.test");
+        assert_eq!(rows.get("CD-2").unwrap()["Email"], "three@example.test");
+        assert!(rows.get("Cd-2").is_none());
+        rows.clear();
+        assert!(rows.get("AB-1").is_none());
     }
 
     #[test]
