@@ -9,6 +9,7 @@
 pub mod api;
 pub mod filed;
 pub mod inbox;
+pub mod record;
 pub mod settings;
 
 pub use api::{Portal, PortalError};

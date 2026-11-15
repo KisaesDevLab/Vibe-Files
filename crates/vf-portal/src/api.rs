@@ -76,6 +76,16 @@ impl PortalError {
             Some("email_failed") => {
                 "The portal could not send the email, so no link was made. Try again.".into()
             }
+            // Checking who asks for access (Vibe Portal Addendum 01, layer B).
+            Some("check_required") => {
+                "The portal asks how you checked who this is before approving.".into()
+            }
+            Some("check_note_required") => {
+                "Say who you spoke to, or how you know this person.".into()
+            }
+            Some("check_invalid") => {
+                "The portal did not accept that way of checking: update Vibe Portal, or approve on the portal's staff page.".into()
+            }
             _ => self.to_string(),
         }
     }
@@ -219,6 +229,96 @@ pub struct AccessRequest {
     pub client_as: String,
     pub note: String,
     pub created_at: String,
+    /// What the barcode on the back of their ID said (Vibe Portal Addendum 01, layer A); absent
+    /// when the firm asks for no scan, the barcode could not be read, or the portal is older.
+    #[serde(default)]
+    pub id_scan: Option<IdScan>,
+    /// The portal's flags on the ID: `expired`, `name_differs`, `unreadable`, `no_barcode`.
+    #[serde(default)]
+    pub id_flags: Vec<String>,
+}
+
+/// The fields of an ID's barcode as the portal read them. Dates are `YYYY-MM-DD`. The licence
+/// number is never among them.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct IdScan {
+    pub family_name: String,
+    pub first_name: String,
+    pub middle_name: String,
+    pub dob: Option<String>,
+    pub expires: Option<String>,
+    pub issued: Option<String>,
+    pub address: IdAddress,
+    pub issuer: String,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct IdAddress {
+    pub street: String,
+    pub city: String,
+    pub state: String,
+    pub zip: String,
+}
+
+impl IdScan {
+    /// "ALEXANDER JAMES SAMPLE".
+    pub fn full_name(&self) -> String {
+        [&self.first_name, &self.middle_name, &self.family_name]
+            .into_iter()
+            .filter(|p| !p.is_empty())
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    /// "2570 24TH STREET, SACRAMENTO, CA, 95818".
+    pub fn address_line(&self) -> String {
+        let a = &self.address;
+        let town = [&a.city, &a.state]
+            .into_iter()
+            .filter(|p| !p.is_empty())
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", ");
+        [a.street.clone(), town, a.zip.clone()]
+            .into_iter()
+            .filter(|p| !p.is_empty())
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+}
+
+/// The requests waiting, and whether the firm asks for a check before approving.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AccessRequests {
+    pub requests: Vec<AccessRequest>,
+    /// The portal's "Check before approving" is on: Approve needs a [`Check`]. `false` from a
+    /// portal that does not say (one from before the setting).
+    pub check_required: bool,
+}
+
+/// How staff checked who is asking, sent with an approval (Vibe Portal Addendum 01, layer B).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Check {
+    /// `record_match`, `callback`, `in_person` or `other`.
+    pub method: String,
+    /// For `record_match`: what matched the client record (`email`, `mobile`, `dob`). Nothing
+    /// of the record itself is sent.
+    pub matched: Vec<String>,
+    /// For `callback`, who they spoke to; for `other`, how they know the person.
+    pub note: String,
+}
+
+impl Check {
+    pub fn record_match(matched: &[&str]) -> Self {
+        Self {
+            method: "record_match".into(),
+            matched: matched.iter().map(|m| (*m).to_string()).collect(),
+            note: String::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -619,19 +719,38 @@ impl Portal {
         .map(|_| ())
     }
 
-    pub fn access_requests(&self) -> Result<Vec<AccessRequest>> {
+    pub fn access_requests(&self) -> Result<AccessRequests> {
         #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
         struct R {
             requests: Vec<AccessRequest>,
+            #[serde(default)]
+            request_check: Option<String>,
         }
-        self.get::<R>("/access-requests", &[]).map(|r| r.requests)
+        self.get::<R>("/access-requests", &[])
+            .map(|r| AccessRequests {
+                requests: r.requests,
+                check_required: r.request_check.as_deref() == Some("required"),
+            })
     }
 
-    pub fn approve(&self, request_id: &str, client_id: &str, role: &str) -> Result<()> {
+    /// Approves a request for a client. `check`: how staff checked who is asking; left out, the
+    /// portal refuses the approval when the firm requires one.
+    pub fn approve(
+        &self,
+        request_id: &str,
+        client_id: &str,
+        role: &str,
+        check: Option<&Check>,
+    ) -> Result<()> {
+        let mut body = serde_json::json!({ "clientId": client_id, "roleLabel": role });
+        if let Some(c) = check {
+            body["check"] = serde_json::json!(c);
+        }
         self.send_json::<serde_json::Value>(
             "POST",
             &format!("/access-requests/{request_id}/approve"),
-            &serde_json::json!({ "clientId": client_id, "roleLabel": role }),
+            &body,
         )
         .map(|_| ())
     }
@@ -1019,6 +1138,7 @@ mod tests {
             url: format!("http://127.0.0.1:{port}"),
             key: "vpk_test".into(),
             fetch_minutes: 0,
+            record: Default::default(),
         };
         (Portal::new(&s, "PC1", "kurt"), seen)
     }
@@ -1043,6 +1163,85 @@ mod tests {
         // A portal from before P63.
         let (p, _) = one_answer("404 Not Found", r#"{"error":"not_found"}"#);
         assert_eq!(p.people("john").unwrap_err().status(), Some(404));
+    }
+
+    /// Vibe Portal Addendum 01: the requests carry what the ID's barcode said and the flags,
+    /// and say whether the firm asks for a check; an approval says how it was checked.
+    #[test]
+    fn requests_carry_the_id_scan_and_approvals_the_check() {
+        let (p, _) = one_answer(
+            "200 OK",
+            r#"{"requestCheck":"required","requests":[{"id":"r1","name":"Alexander Sample",
+                "email":"alex@example.test","phone":null,"confirmedContact":"alex@example.test",
+                "clientAs":"Sample","note":"","createdAt":"2026-11-14T10:00:00Z",
+                "idPhoto":{"contentType":"image/jpeg","size":10},"idBack":null,
+                "idScan":{"familyName":"SAMPLE","firstName":"ALEXANDER","middleName":"JAMES",
+                  "dob":"1990-01-06","expires":"2027-01-06","issued":"2022-08-24",
+                  "address":{"street":"2570 24TH STREET","city":"SACRAMENTO","state":"CA",
+                    "zip":"95818"},"issuer":"CA, USA"},
+                "idFlags":["expired"]}]}"#,
+        );
+        let list = p.access_requests().unwrap();
+        assert!(list.check_required);
+        let r = &list.requests[0];
+        let scan = r.id_scan.as_ref().unwrap();
+        assert_eq!(scan.full_name(), "ALEXANDER JAMES SAMPLE");
+        assert_eq!(
+            scan.address_line(),
+            "2570 24TH STREET, SACRAMENTO, CA, 95818"
+        );
+        assert_eq!(scan.dob.as_deref(), Some("1990-01-06"));
+        assert_eq!(r.id_flags, vec!["expired".to_string()]);
+
+        // A portal from before the addendum: no check asked, no scan, no flags.
+        let (p, _) = one_answer(
+            "200 OK",
+            r#"{"requests":[{"id":"r1","name":"A","email":null,"phone":null,
+                "confirmedContact":null,"clientAs":"","note":"","createdAt":"x"}]}"#,
+        );
+        let old = p.access_requests().unwrap();
+        assert!(!old.check_required);
+        assert_eq!(old.requests[0].id_scan, None);
+        assert!(old.requests[0].id_flags.is_empty());
+
+        let (p, seen) = one_answer("200 OK", r#"{"ok":true}"#);
+        p.approve(
+            "r1",
+            "AB-1",
+            "Spouse",
+            Some(&Check::record_match(&["email", "dob"])),
+        )
+        .unwrap();
+        let seen = seen.join().unwrap();
+        assert!(
+            seen.starts_with("POST /api/firm/v1/access-requests/r1/approve HTTP/1.1 | "),
+            "{seen}"
+        );
+        let body: serde_json::Value =
+            serde_json::from_str(seen.rsplit(" | ").next().unwrap()).unwrap();
+        assert_eq!(
+            body,
+            serde_json::json!({
+                "clientId": "AB-1", "roleLabel": "Spouse",
+                "check": { "method": "record_match", "matched": ["email", "dob"], "note": "" }
+            })
+        );
+        // With no check, the body is what an older Vibe Files sent.
+        let (p, seen) = one_answer("200 OK", r#"{"ok":true}"#);
+        p.approve("r1", "AB-1", "", None).unwrap();
+        let seen = seen.join().unwrap();
+        let body: serde_json::Value =
+            serde_json::from_str(seen.rsplit(" | ").next().unwrap()).unwrap();
+        assert_eq!(
+            body,
+            serde_json::json!({ "clientId": "AB-1", "roleLabel": "" })
+        );
+        // The portal's refusal, in words.
+        let (p, _) = one_answer("400 Bad Request", r#"{"error":"check_required"}"#);
+        assert_eq!(
+            p.approve("r1", "AB-1", "", None).unwrap_err().message(),
+            "The portal asks how you checked who this is before approving."
+        );
     }
 
     /// Vibe-Portal P68: a secure link to someone outside, for files already on the portal.
