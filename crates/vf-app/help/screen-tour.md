@@ -15,13 +15,13 @@ The text size and theme are kept on this PC, so each person's PC can be set the 
 
 ## The tab bar
 
-Under the header are the six tabs, always in this order: **Browse**, **Intake**, **Search**, **Viewer**, **Sync**, **Admin**. The tab you are on is underlined.
+Under the header are the five tabs, always in this order: **Browse**, **Intake**, **Viewer**, **Sync**, **Admin**. The tab you are on is underlined.
 
 When files are waiting to be processed or filed, the Intake tab shows a count, for example **Intake (4)**. Nothing pops up; the count is the only signal.
 
 - [Browse](help:browse) — the client tree and documents
 - [Intake](help:intake) — filing incoming files
-- [Search](help:search) — finding documents by their words
+- [Finding documents](help:search) — from Browse, by file name, folder and details
 - [Viewer](help:viewer) — reading and working on PDF pages
 - [Sync](help:sync) — the B2 cloud copy
 - [Admin](help:admin) — firm settings

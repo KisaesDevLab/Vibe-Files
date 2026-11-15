@@ -89,10 +89,7 @@ mod tests {
             }
         }
         shot(&mut h, "03-browse-year-selected");
-        for (i, tab) in ["Intake", "Search", "Viewer", "Sync", "Admin"]
-            .iter()
-            .enumerate()
-        {
+        for (i, tab) in ["Intake", "Viewer", "Sync", "Admin"].iter().enumerate() {
             h.get_by_role_and_label(Role::Button, tab).click();
             h.run_steps(8);
             shot(&mut h, &format!("{:02}-{}", 10 + i, tab.to_lowercase()));
@@ -328,16 +325,19 @@ mod tests {
         }
         shot(&mut h, "04-intake");
 
-        // 5. Search, typed in two goes.
-        h.get_by_role_and_label(Role::Button, "Search").click();
+        // 5. Find documents in Browse, typed in two goes, then found.
+        h.get_by_role_and_label(Role::Button, "Browse").click();
         h.run_steps(8);
-        h.get_by_label("Search for").click();
+        h.get_by_label("Find documents…").click();
+        h.run_steps(4);
+        h.get_by_label("Words").click();
         h.step();
         for (i, part) in ["1099", "-INT 2025"].iter().enumerate() {
-            h.get_by_label("Search for").type_text(part);
+            h.get_by_label("Words").type_text(part);
             h.run_steps(4);
             shot(&mut h, &format!("05-search-{i}"));
         }
+        h.get_by_label("Find").click();
         for _ in 0..3 {
             std::thread::sleep(std::time::Duration::from_millis(400));
             h.run_steps(10);

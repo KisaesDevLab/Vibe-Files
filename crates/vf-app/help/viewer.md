@@ -6,7 +6,7 @@ How to open a PDF in the Viewer, move through its pages, zoom, find words, and w
 
 - In [Browse](help:browse), double-click a PDF, or right-click it and choose **Open**.
 - In the Browse preview, click **Open in Viewer** to open at the page shown.
-- On the [Search](help:search) tab, click a result: it opens at the page that matched, with your words marked.
+- After [finding documents](help:search) in Browse, open one from the list the same way.
 
 Only PDFs open in the Viewer. Other files (Word, Excel, pictures) open in their own program. **Open in PDF app** in the Viewer's toolbar opens the same file in the PDF program set in Windows.
 

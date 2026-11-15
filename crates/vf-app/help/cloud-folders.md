@@ -8,7 +8,7 @@ OneDrive and Dropbox can keep a file "online only": it shows in the folder, but 
 
 - **Indexing** keeps an online-only file as the catalog has it, never as deleted or changed. A new one that another PC filed takes its details from that PC's notes in the client's `_Vibe\docmeta.jsonl` without being read. One added outside Vibe Files is listed once it is on this PC.
 - **The weekly check** counts online-only files as not checked; they are checked once they are on this PC.
-- **Search results** show no thumbnail for them, and **Browse's preview** shows **Show preview** instead of the page: pressing it downloads the file.
+- **Browse's preview** shows **Show preview** instead of the page: pressing it downloads the file.
 
 Opening a document (double-click, the Viewer, Open in program) downloads it, as it would in Explorer. To keep a client's files on a PC, right-click its folder in Explorer and choose **Always keep on this device** (OneDrive) or **Make available offline** (Dropbox).
 

@@ -1,8 +1,5 @@
-//! Page images for the Search results and the Viewer, rendered by pdfium on one worker
-//! thread, with the places where the search words are on the page.
-
-use std::path::PathBuf;
-use std::sync::mpsc::{Receiver, Sender, channel};
+//! Page images for the Viewer and the preview, rendered by pdfium, with the places where
+//! words looked for are on the page.
 
 use pdfium_render::prelude::{
     PdfDocument, PdfPageRenderRotation, PdfPoints, PdfRenderConfig, PdfSearchOptions,
@@ -13,86 +10,6 @@ pub struct Rendered {
     pub image: egui::ColorImage,
     /// Where the search words are, as fractions of the image (0–1), top left origin.
     pub hits: Vec<egui::Rect>,
-}
-
-/// One page to render. `key` comes back with the result.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Request {
-    pub key: String,
-    pub path: PathBuf,
-    pub page: usize,
-    pub width: u32,
-    /// Words to find on the page.
-    pub terms: Vec<String>,
-}
-
-pub struct Renderer {
-    tx: Sender<Request>,
-    rx: Receiver<(String, Result<Rendered, String>)>,
-}
-
-impl Renderer {
-    /// `latest_only`: when requests pile up, render only the newest (the Viewer stepping
-    /// through pages); otherwise every request (Search thumbnails).
-    pub fn new(ctx: &egui::Context, pdfium_dir: Option<PathBuf>, latest_only: bool) -> Renderer {
-        let (tx, jobs) = channel::<Request>();
-        let (out, rx) = channel();
-        let ctx = ctx.clone();
-        std::thread::Builder::new()
-            .name("vf-pages".into())
-            .spawn(move || {
-                let pdfium = pdfium_dir
-                    .ok_or_else(|| "pdfium.dll not found".to_string())
-                    .and_then(|d| filer_pdf::pdf::pdfium(&d));
-                // The document stays open while requests keep coming (stepping pages, a
-                // results list), and is closed when the queue runs dry: an open PDF would stop
-                // Windows from moving or renaming the file (Browse rename, OCR write-back).
-                let mut open: Option<(PathBuf, PdfDocument<'static>)> = None;
-                let mut next: Option<Request> = None;
-                while let Some(mut req) = next.take().or_else(|| jobs.recv().ok()) {
-                    if latest_only {
-                        while let Ok(newer) = jobs.try_recv() {
-                            req = newer;
-                        }
-                    }
-                    let r = match &pdfium {
-                        Ok(p) => {
-                            if open.as_ref().is_none_or(|(path, _)| *path != req.path) {
-                                open = p
-                                    .load_pdf_from_file(&req.path, None)
-                                    .ok()
-                                    .map(|d| (req.path.clone(), d));
-                            }
-                            match &open {
-                                Some((_, doc)) => {
-                                    render_doc(doc, req.page, req.width, 0, &req.terms)
-                                }
-                                None => Err(format!("cannot open {}", req.path.display())),
-                            }
-                        }
-                        Err(e) => Err(e.clone()),
-                    };
-                    if out.send((req.key, r)).is_err() {
-                        break;
-                    }
-                    ctx.request_repaint();
-                    next = jobs.try_recv().ok();
-                    if next.is_none() {
-                        open = None;
-                    }
-                }
-            })
-            .expect("spawn page renderer");
-        Renderer { tx, rx }
-    }
-
-    pub fn request(&self, req: Request) {
-        let _ = self.tx.send(req);
-    }
-
-    pub fn finished(&self) -> Vec<(String, Result<Rendered, String>)> {
-        self.rx.try_iter().collect()
-    }
 }
 
 /// Renders page `page` (0-based) of `doc`, `width` pixels wide, turned `rotate` degrees

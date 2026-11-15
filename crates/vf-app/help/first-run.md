@@ -17,7 +17,7 @@ When no cabinet is open, Vibe Files shows the **Cabinet** screen. At the top you
 
 While it opens you see **Opening the cabinet…**. The first time a PC opens a cabinet it reads the client list, then shows the window. The documents are listed behind it, from the folders' own listings: no document is opened. A line above the documents shows how far it is (**Listing the cabinet's files: N of M client folders**).
 
-Meanwhile you can work. Open a client and its documents are listed next (**Listing this client's files…**). Search and the counts cover the whole cabinet once the line is gone. Later opens skip all of this.
+Meanwhile you can work. Open a client and its documents are listed next (**Listing this client's files…**). Find documents and the counts cover the whole cabinet once the line is gone. Later opens skip all of this.
 
 If the folder is not a cabinet, the screen shows a message saying it is not a Vibe Files cabinet. Check the path, or use **Create new**.
 

@@ -45,4 +45,4 @@ To place one, click **Place legal hold on this document…** (or on this client,
 
 - [Browsing the cabinet](help:browse)
 - [Doc types](help:doc-types)
-- [Search](help:search)
+- [Finding documents](help:search)

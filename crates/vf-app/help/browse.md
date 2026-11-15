@@ -12,7 +12,7 @@ The tree lists, from the top:
 
 - **VIEWS** — ready-made lists across all clients: **Recent** (documents you opened or changed lately), **Pinned**, **Needs doc type**, **Needs tax year**, **Received this week** and **Folders with no client ID** (files in cabinet folders bound to no client; bind them with Admin › Folder import). Each shows a count.
 - **FAVORITES** — clients, years or folders you added. Right-click one and choose **Remove from favorites** to drop it.
-- **SAVED SEARCHES** — searches saved on the Search tab. See [Search](help:search).
+- **SAVED SEARCHES** — searches saved from **Find documents…**. See [Finding documents](help:search).
 - **CABINET** — **All documents**, then every client.
 
 Type in **Find client by name or ID** to shorten the client list, for example `smith` or `1004`. When clients have partners, **Partner** at the top of the pane, above **VIEWS**, shows only one partner's clients, or **No partner**. It also keeps the Views (Recent, Pinned, Needs doc type, Needs tax year, Received this week) to those clients' documents, counts included. Intake's review filters by the same choice. Each Windows user's choice comes back next time.

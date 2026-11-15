@@ -1,22 +1,30 @@
-# Searching documents
+# Finding documents
 
-How to find a document by its file name, its folder or its details, narrow the results with filters, open a result in the Viewer and keep a search for later.
+How to find a document from Browse by its file name, its folder or its details, narrow what is found with filters, and keep a search for later.
 
-Search looks at names and details only. The words on the pages of a document are not searched.
+Finding looks at names and details only. The words on the pages of a document are not searched. There is no Search tab: finding is part of **Browse**.
 
-## Search the cabinet
+## Find in the cabinet
 
-1. Open the **Search** tab.
-2. Type in **Search for**: words from the file name or from the folders it is in, such as a client's name, a form, a year. Every word you type must appear, in any order; capitals do not matter.
-3. Results appear when you pause typing. Each row shows a small picture of the first page, the file name, the client, the year, the doc type and where the file is.
+1. On the **Browse** tab, press **Find documents…** above the list. A panel opens above the list.
+2. Type in **Words**: words from the file name or from the folders it is in, such as a client's name, a form, a year. Every word you type must appear, in any order; capitals do not matter.
+3. Press **Find**, or Enter.
 
-Part of a word is enough: `1099` finds `1099-MISC`, and `smi` finds `Smith`. The newest filings come first.
+The documents found become the Browse list, so everything Browse does works on them: open, preview, rename, move, share, print. The line above the list reads **Found /** and your words. The **Client** column says whose each document is.
 
-The line above the results says how many documents were found. Only the first 200 are listed; add a word or a filter if the count says "(first 200)".
+Part of a word is enough: `1099` finds `1099-MISC`, and `smi` finds `Smith`.
+
+At most 10,000 documents are listed. If more match, a line says so: add a word or a filter.
+
+To go back, click a client, a folder or a view on the left. **Close** in the panel hides it; what you typed is kept.
+
+The list shows what was found when you pressed **Find**. After filing or renaming documents, press **Find** again to bring it up to date.
 
 ## Where to look
 
-Beside the box, choose **Cabinet**, **This client** or **This folder**. The last two use the client or folder selected in [Browse](help:browse); they are greyed out until you select one there. **This folder** also looks in the folders below it.
+Beside the box, choose **Cabinet**, **This client** or **This folder**. The last two use the client or folder selected in the tree on the left; they are greyed out until you select one. **This folder** also looks in the folders below it.
+
+To find within the folder you are looking at without leaving it, use **Filter this folder** at the right above the list instead.
 
 ## Filters
 
@@ -31,15 +39,15 @@ The filters work with or without words in the box:
 
 **Clear filters** puts them all back.
 
-## Open a result
-
-Click a result row. The document opens in the [Viewer](help:viewer).
-
 ## Saved searches
 
-1. Set up the words, scope and filters.
+1. Set up the words, where to look and the filters.
 2. Click **Save search…**, type a **Name** (for example `1099s received 2025`) and click **Save**.
 
-The search is listed in Browse under **Saved searches**, for everyone in the firm. Clicking it there runs it again and shows the documents found in the Browse list. To remove one, right-click it and choose **Delete saved search**.
+The search is listed on the left under **Saved searches**, for everyone in the firm. Clicking it runs it again and shows the documents found in the list. To remove one, right-click it and choose **Delete saved search**.
+
+## While the cabinet is still being listed
+
+Just after a cabinet is opened on a PC for the first time, its files are still being listed behind the window. The panel says so: what is found may be incomplete until the footer's spinner is gone.
 
 > A document is easiest to find when its name says what it is. Intake names files from your rules, and the doc type and year filters find a document whatever it is called (see [Intake rules](help:intake-rules)).

@@ -1,62 +1,20 @@
-//! The Search tab (P03 step 5): one box, filters, results with a thumbnail of the matching
-//! page and a snippet; a result opens in the Viewer at that page.
+//! Finding documents from Browse (owner 2026-11-15, Q-113: the Search tab is gone). One box
+//! for words in the file name or its folders, the details filters, and "Save search…". What is
+//! found shows in Browse's own list (`Scope::Found`), like a saved search; Browse runs the
+//! query on a thread.
 
-use std::collections::{HashMap, HashSet};
-use std::path::Path;
-use std::time::{Duration, Instant};
-
-use egui::{Color32, RichText};
+use egui::RichText;
 use vf_core::browse::Snapshot;
-use vf_index::search::{self, DocType, Hit, Query, Scope, Year};
+use vf_index::search::{DocType, Query, Scope, Year};
 
-use crate::ui::pages::{Renderer, Request};
-use crate::ui::viewer::Doc;
 use crate::ui::widgets::UiExt as _;
 use crate::ui::{theme, widgets};
 
-const LIMIT: usize = 200;
-/// Typing pause before a search runs.
-const DEBOUNCE: Duration = Duration::from_millis(300);
-/// Least time between searches re-run because the catalog changed.
-const REFRESH: Duration = Duration::from_secs(5);
+/// The most documents a find lists. More than that is not a list anyone reads: the line above
+/// the list says to add a word or a filter.
+pub const LIMIT: usize = 10_000;
 
-type Answer = (Query, Result<Vec<Hit>, String>, Duration);
-
-/// The search thread, with its own catalog connection (PA-34: a search of a large cabinet
-/// no longer holds up the window). It ends when the tab is dropped.
-struct Worker {
-    tx: std::sync::mpsc::Sender<Query>,
-    rx: std::sync::mpsc::Receiver<Answer>,
-}
-
-impl Worker {
-    fn spawn(catalog: std::path::PathBuf, ui: egui::Context) -> Worker {
-        let (tx, qrx) = std::sync::mpsc::channel::<Query>();
-        let (rtx, rx) = std::sync::mpsc::channel::<Answer>();
-        let _ = std::thread::Builder::new()
-            .name("search".into())
-            .spawn(move || {
-                let conn = vf_core::db::open(&catalog, vf_core::db::Storage::Local)
-                    .map_err(|e| e.to_string());
-                while let Ok(q) = qrx.recv() {
-                    let t = Instant::now();
-                    let r = match &conn {
-                        Ok(c) => search::search(c, &q, LIMIT).map_err(|e| e.to_string()),
-                        Err(e) => Err(e.clone()),
-                    };
-                    if rtx.send((q, r, t.elapsed())).is_err() {
-                        break;
-                    }
-                    ui.request_repaint();
-                }
-            });
-        Worker { tx, rx }
-    }
-}
-const THUMB_WIDTH: u32 = 96;
-const ROW_HEIGHT: f32 = 132.0;
-
-/// What "This client" and "This folder" mean: the node selected in Browse.
+/// What "This client" and "This folder" mean: the node selected in Browse's tree.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Context {
     /// (client id, label).
@@ -73,42 +31,31 @@ pub enum Where {
     Folder,
 }
 
+/// The Find documents panel of Browse: what is typed and chosen in it.
 #[derive(Default)]
-pub struct SearchTab {
-    /// The cabinet is still being listed behind the window (PA-60): said above the box,
-    /// because results may be incomplete until it is done (owner 2026-11-14, Q-106).
-    pub listing: Option<String>,
+pub struct Find {
     pub text: String,
     pub scope: Where,
     /// Filters (the query's metadata fields; text and scope are filled in when it runs).
     pub filters: Query,
     year_text: String,
-    pub results: Vec<Hit>,
-    pub elapsed: Option<Duration>,
-    pub error: Option<String>,
-    /// The query the results are for.
-    ran: Option<Query>,
-    worker: Option<Worker>,
-    /// The query on the search thread now.
-    asked: Option<Query>,
-    /// A query typed and when, waiting for the typing to pause.
-    typed: Option<(Query, Instant)>,
-    /// The catalog changed since the results.
-    stale: bool,
-    last_run: Option<Instant>,
-    renderer: Option<Renderer>,
-    thumbs: HashMap<String, egui::TextureHandle>,
-    requested: HashSet<String>,
-    /// A result to open in the Viewer (taken by the app).
-    pub open: Option<Doc>,
     /// The "Save search" name being typed.
     save_name: Option<String>,
-    /// A search was saved: the app reloads Browse's Saved searches.
-    pub saved_changed: bool,
     pub notice: Option<String>,
 }
 
-impl SearchTab {
+/// What the panel asks Browse to do.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Ask {
+    /// Find the documents of this query.
+    Run(Query),
+    /// Keep this query under this name, for the whole firm.
+    Save(String, Query),
+    /// Close the panel.
+    Close,
+}
+
+impl Find {
     /// The query as the box, scope and filters say.
     pub fn query(&self, ctx: &Context) -> Query {
         let mut q = self.filters.clone();
@@ -133,217 +80,95 @@ impl SearchTab {
         q
     }
 
-    /// Runs the query on the search thread when it changed: after typing stops for
-    /// [`DEBOUNCE`], one search at a time (PA-34: a cabinet of ~900K documents). Results
-    /// arrive on a later frame.
-    pub fn run_if_changed(&mut self, catalog: &Path, ctx: &Context, ui: &egui::Context) {
-        if let Some(w) = &self.worker {
-            while let Ok((q, r, took)) = w.rx.try_recv() {
-                self.asked = None;
-                match r {
-                    Ok(r) => {
-                        self.results = r;
-                        self.error = None;
-                    }
-                    Err(e) => {
-                        self.results.clear();
-                        self.error = Some(format!("Search failed: {e}"));
-                    }
-                }
-                self.elapsed = Some(took);
-                self.ran = Some(q);
-            }
-        }
-        let q = self.query(ctx);
-        // The catalog changed: searched again, at most every REFRESH.
-        let stale = self.stale && self.last_run.is_none_or(|t| t.elapsed() >= REFRESH);
-        if self.ran.as_ref() == Some(&q) && !stale {
-            self.typed = None;
-            if self.stale {
-                ui.request_repaint_after(REFRESH);
-            }
-            return;
-        }
-        if q.is_empty() {
-            self.results.clear();
-            self.elapsed = None;
-            self.ran = Some(q);
-            self.typed = None;
-            self.stale = false;
-            return;
-        }
-        if self.asked.is_some() {
-            // One at a time: the newest query runs when this one is back.
-            return;
-        }
-        if self.ran.as_ref() != Some(&q) {
-            let at = match &self.typed {
-                Some((t, at)) if *t == q => *at,
-                _ => {
-                    self.typed = Some((q.clone(), Instant::now()));
-                    Instant::now()
-                }
-            };
-            let waited = at.elapsed();
-            if waited < DEBOUNCE {
-                ui.request_repaint_after(DEBOUNCE - waited);
-                return;
-            }
-        }
-        let w = self
-            .worker
-            .get_or_insert_with(|| Worker::spawn(catalog.to_path_buf(), ui.clone()));
-        if w.tx.send(q.clone()).is_err() {
-            self.error = Some("Search stopped; open the cabinet again.".into());
-            self.ran = Some(q);
-            return;
-        }
-        self.asked = Some(q);
-        self.typed = None;
-        self.stale = false;
-        self.last_run = Some(Instant::now());
-    }
-
-    /// Whether a search is running.
-    pub fn searching(&self) -> bool {
-        self.asked.is_some()
-    }
-
-    /// The catalog changed: the results are searched again (not more often than every
-    /// [`REFRESH`], so OCR indexing pages does not re-run a search every second).
-    pub fn refresh(&mut self) {
-        self.stale = true;
+    /// A search was saved under `name`: said in the panel, and the name box closes.
+    pub fn saved(&mut self, name: &str) {
+        self.notice = Some(format!(
+            "Saved \"{}\". It is under Saved searches on the left.",
+            name.trim()
+        ));
+        self.save_name = None;
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-pub fn show(
+/// The panel, above Browse's list. `listing`: the cabinet is still being listed behind the
+/// window (PA-60), so what is found may be incomplete (owner 2026-11-14, Q-106). `busy`: a find
+/// is running.
+pub fn panel(
     ui: &mut egui::Ui,
-    s: &mut SearchTab,
-    catalog: &Path,
-    root: &Path,
+    s: &mut Find,
     snap: &Snapshot,
     ctx: &Context,
-    device_id: &str,
-) {
-    pump_thumbs(ui.ctx(), s);
-    egui::Panel::top("vf-search-box")
-        .resizable(false)
-        .frame(
-            egui::Frame::new()
-                .fill(theme::pane())
-                .inner_margin(egui::Margin::symmetric(16, 10)),
-        )
+    listing: Option<&str>,
+    busy: bool,
+) -> Option<Ask> {
+    let mut ask = None;
+    egui::Frame::new()
+        .fill(theme::pane())
+        .inner_margin(egui::Margin::symmetric(10, 8))
         .show(ui, |ui| {
-            if let Some(line) = &s.listing {
-                ui.horizontal(|ui| {
-                    ui.spinner();
-                    ui.label(egui::RichText::new(line).color(theme::ink_secondary()));
-                });
+            if let Some(line) = listing {
+                ui.label(RichText::new(line).color(theme::ink_secondary()));
             }
-            ui.horizontal(|ui| {
-                let label = ui.label("Search for");
-                ui.add(
-                    egui::TextEdit::singleline(&mut s.text)
-                        .hint_text("words in the file name or its folders…")
-                        .desired_width(420.0),
-                )
-                .labelled_by(label.id);
+            ui.horizontal_wrapped(|ui| {
+                let label = ui.label("Words");
+                let r = ui
+                    .add(
+                        egui::TextEdit::singleline(&mut s.text)
+                            .hint_text("in the file name or its folders…")
+                            .desired_width(300.0),
+                    )
+                    .labelled_by(label.id);
+                let entered = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
                 ui.separator();
                 ui.radio_value(&mut s.scope, Where::Cabinet, "Cabinet");
                 let client = ctx.client.as_ref().map(|c| c.1.as_str());
                 ui.add_enabled_ui(client.is_some(), |ui| {
                     ui.radio_value(&mut s.scope, Where::Client, "This client")
-                        .on_hover_text(client.unwrap_or("Select a client in Browse"));
+                        .on_hover_text(client.unwrap_or("Select a client in the tree"));
                 });
                 let folder = ctx.folder.as_ref().map(|f| f.2.as_str());
                 ui.add_enabled_ui(folder.is_some(), |ui| {
                     ui.radio_value(&mut s.scope, Where::Folder, "This folder")
-                        .on_hover_text(folder.unwrap_or("Select a folder in Browse"));
+                        .on_hover_text(folder.unwrap_or("Select a folder in the tree"));
                 });
+                let q = s.query(ctx);
+                let can = !q.is_empty() && !busy;
+                let find = ui
+                    .add_enabled(can, widgets::primary_button("Find"))
+                    .on_disabled_hover_text("Type a word or choose a filter first.");
+                if can && (find.clicked() || entered) {
+                    s.notice = None;
+                    ask = Some(Ask::Run(q));
+                }
+                if ui
+                    .button("Close")
+                    .on_hover_text("Close Find documents")
+                    .clicked()
+                {
+                    ask = Some(Ask::Close);
+                }
             });
             filters(ui, s, snap);
-            save_row(ui, s, root, ctx, device_id);
+            if let Some(a) = save_row(ui, s, ctx) {
+                ask = Some(a);
+            }
         });
-    s.run_if_changed(catalog, ctx, ui.ctx());
-    egui::CentralPanel::default().show(ui, |ui| {
-        widgets::message_line(ui, s.error.as_deref());
-        if s.ran.as_ref().is_none_or(Query::is_empty) && s.searching() {
-            ui.horizontal(|ui| {
-                ui.spinner();
-                ui.label(widgets::caption("Searching…"));
-            });
-            return;
-        }
-        if s.ran.as_ref().is_none_or(Query::is_empty) {
-            widgets::empty_state(
-                ui,
-                "Search the cabinet",
-                &[
-                    "Type in Search for above: words in the file's name or its folders. The text inside documents is not searched.",
-                    "The filters narrow it to a client, a year, a doc type or a status.",
-                ],
-            );
-            return;
-        }
-        ui.label(widgets::caption(format!(
-            "{} documents{}{}",
-            s.results.len(),
-            if s.results.len() == LIMIT { " (first 200)" } else { "" },
-            s.elapsed
-                .map(|d| format!(" · {} ms", d.as_millis()))
-                .unwrap_or_default()
-        )));
-        egui::ScrollArea::vertical().auto_shrink(false).show_rows(
-            ui,
-            ROW_HEIGHT,
-            s.results.len(),
-            |ui, range| {
-                for i in range {
-                    let hit = s.results[i].clone();
-                    let key = thumb_key(&hit);
-                    if !s.requested.contains(&key)
-                        && let Some(r) = &s.renderer
-                    {
-                        s.requested.insert(key.clone());
-                        // Online only (PA-39): a results list must not download its files;
-                        // the row shows without a thumbnail.
-                        if !vf_fs::cloud::leave(&root.join(&hit.rel_path)) {
-                            r.request(Request {
-                                key: key.clone(),
-                                path: root.join(&hit.rel_path),
-                                page: 0,
-                                width: THUMB_WIDTH,
-                                terms: vec![],
-                            });
-                        }
-                    }
-                    if row(ui, &hit, s.thumbs.get(&key)).clicked() {
-                        s.open = Some(Doc::at(
-                            root,
-                            &hit.doc_id,
-                            &hit.rel_path,
-                            0,
-                            // The words matched the name, not the pages: nothing to mark there.
-                            vec![],
-                        ));
-                    }
-                }
-            },
-        );
-    });
+    ask
 }
 
 /// `Save search…`: names the current query; Browse lists it under Saved searches for the
 /// whole firm.
-fn save_row(ui: &mut egui::Ui, s: &mut SearchTab, root: &Path, ctx: &Context, device_id: &str) {
+fn save_row(ui: &mut egui::Ui, s: &mut Find, ctx: &Context) -> Option<Ask> {
     let q = s.query(ctx);
+    let mut ask = None;
     ui.horizontal(|ui| {
         match &mut s.save_name {
             None => {
                 if ui
                     .add_enabled(!q.is_empty(), egui::Button::new("Save search…"))
-                    .on_hover_text("Saved searches appear in Browse for everyone in the firm.")
+                    .on_hover_text(
+                        "Saved searches are listed on the left for everyone in the firm.",
+                    )
                     .clicked()
                 {
                     s.save_name = Some(String::new());
@@ -359,17 +184,7 @@ fn save_row(ui: &mut egui::Ui, s: &mut SearchTab, root: &Path, ctx: &Context, de
                 )
                 .labelled_by(l.id);
                 if ui.add(widgets::primary_button("Save")).clicked() {
-                    match vf_index::saved::add(root, name, &q, device_id) {
-                        Ok(_) => {
-                            s.notice = Some(format!(
-                                "Saved \"{}\". It is in Browse under Saved searches.",
-                                name.trim()
-                            ));
-                            s.saved_changed = true;
-                            s.save_name = None;
-                        }
-                        Err(e) => s.notice = Some(e),
-                    }
+                    ask = Some(Ask::Save(name.clone(), q.clone()));
                 } else if ui.button("Cancel").clicked() {
                     s.save_name = None;
                 }
@@ -379,9 +194,10 @@ fn save_row(ui: &mut egui::Ui, s: &mut SearchTab, root: &Path, ctx: &Context, de
             ui.label(widgets::caption(n));
         }
     });
+    ask
 }
 
-fn filters(ui: &mut egui::Ui, s: &mut SearchTab, snap: &Snapshot) {
+fn filters(ui: &mut egui::Ui, s: &mut Find, snap: &Snapshot) {
     let f = &mut s.filters;
     ui.horizontal_wrapped(|ui| {
         let client_name = f
@@ -552,84 +368,4 @@ fn text_filter(ui: &mut egui::Ui, label: &str, v: &mut Option<String>, hint: &st
             *v = (!t.trim().is_empty()).then(|| t.trim().to_string());
         }
     });
-}
-
-fn thumb_key(h: &Hit) -> String {
-    h.doc_id.clone()
-}
-
-fn pump_thumbs(ctx: &egui::Context, s: &mut SearchTab) {
-    let r = s
-        .renderer
-        .get_or_insert_with(|| Renderer::new(ctx, crate::ui::intake::pdfium_dir(), false));
-    for (key, res) in r.finished() {
-        if let Ok(p) = res {
-            let tex = ctx.load_texture(
-                format!("search-{key}"),
-                p.image,
-                egui::TextureOptions::LINEAR,
-            );
-            s.thumbs.insert(key, tex);
-        }
-    }
-    if s.thumbs.len() > 400 {
-        s.thumbs.clear();
-        s.requested.clear();
-    }
-}
-
-/// One result: thumbnail, name, metadata, snippet. The whole row clicks.
-fn row(ui: &mut egui::Ui, h: &Hit, thumb: Option<&egui::TextureHandle>) -> egui::Response {
-    let inner = ui.horizontal(|ui| {
-        ui.set_min_height(ROW_HEIGHT - 8.0);
-        let (rect, _) =
-            ui.allocate_exact_size(egui::vec2(THUMB_WIDTH as f32, 124.0), egui::Sense::hover());
-        match thumb {
-            Some(t) => {
-                let size = t.size_vec2() * (THUMB_WIDTH as f32 / t.size_vec2().x);
-                let r = egui::Rect::from_min_size(rect.min, size.min(rect.size()));
-                ui.painter().image(
-                    t.id(),
-                    r,
-                    egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-                    Color32::WHITE,
-                );
-                ui.painter().rect_stroke(
-                    r,
-                    0.0,
-                    (1.0, theme::border_pane()),
-                    egui::StrokeKind::Outside,
-                );
-            }
-            None => {
-                ui.painter().rect_filled(rect, 2.0, theme::app_bg());
-            }
-        }
-        ui.vertical(|ui| {
-            ui.add(
-                egui::Label::new(RichText::new(widgets::file_name(&h.rel_path)).strong())
-                    .selectable(false),
-            );
-            let meta = [
-                h.client.clone().unwrap_or_else(|| "No client".into()),
-                widgets::year_label(h.tax_year),
-                h.doc_type
-                    .clone()
-                    .unwrap_or_else(|| "Needs doc type".into()),
-            ];
-            ui.add(egui::Label::new(widgets::caption(meta.join(" · "))).selectable(false));
-            ui.add(egui::Label::new(widgets::caption(&h.rel_path).small()).selectable(false));
-        });
-    });
-    let resp = inner.response.interact(egui::Sense::click());
-    if resp.hovered() {
-        ui.painter().rect_stroke(
-            resp.rect,
-            4.0,
-            (1.0, theme::accent()),
-            egui::StrokeKind::Inside,
-        );
-    }
-    ui.separator();
-    resp.on_hover_text("Open in the Viewer")
 }

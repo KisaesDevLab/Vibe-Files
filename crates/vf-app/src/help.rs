@@ -10,7 +10,6 @@ pub enum Section {
     Start,
     Browse,
     Intake,
-    Search,
     Viewer,
     Sync,
     Admin,
@@ -18,11 +17,10 @@ pub enum Section {
 }
 
 impl Section {
-    pub const ALL: [Section; 8] = [
+    pub const ALL: [Section; 7] = [
         Section::Start,
         Section::Browse,
         Section::Intake,
-        Section::Search,
         Section::Viewer,
         Section::Sync,
         Section::Admin,
@@ -34,7 +32,7 @@ impl Section {
             Section::Start => "Getting started",
             Section::Browse => "Browse",
             Section::Intake => "Intake and scanning",
-            Section::Search => "Search",
+
             Section::Viewer => "Viewer",
             Section::Sync => "Sync",
             Section::Admin => "Admin",
@@ -85,10 +83,9 @@ macro_rules! articles {
 
 articles! {
     Start: "welcome", "first-run", "screen-tour", "shortcuts";
-    Browse: "browse", "documents", "moving-renaming", "new-files", "browse-scan-print", "undo";
+    Browse: "browse", "search", "documents", "moving-renaming", "new-files", "browse-scan-print", "undo";
     Intake: "intake", "intake-rules", "just-filed", "scanning", "cover-sheets", "print-capture",
-        "several-pcs", "cloud-folders";
-    Search: "search", "ocr";
+        "several-pcs", "cloud-folders", "ocr";
     Viewer: "viewer", "annotations", "forms", "ten-key", "page-tools", "printing";
     Sync: "sync", "sync-rules", "sync-key", "sync-conflicts", "portal", "portal-requests", "portal-inbox", "portal-secure-links";
     Admin: "admin", "admin-password", "doc-types", "folder-templates", "clients", "folder-import", "folder-import-matches", "merge-cabinets", "retention",
@@ -107,7 +104,7 @@ pub fn for_tab(tab: Option<Tab>) -> &'static str {
         None => "first-run",
         Some(Tab::Browse) => "browse",
         Some(Tab::Intake) => "intake",
-        Some(Tab::Search) => "search",
+
         Some(Tab::Viewer) => "viewer",
         Some(Tab::Sync) => "sync",
         Some(Tab::Admin) => "admin",

@@ -473,6 +473,16 @@ pub struct Browse {
     saved_open: Option<usize>,
     /// A saved search to delete (needs the cabinet root).
     saved_delete: Option<String>,
+    /// Find documents (Q-113: the Search tab's place): the panel above the list, whether it
+    /// is open, what "This client" / "This folder" mean (the tree node last selected), what
+    /// it asked for this frame, the find running on its thread, and the query the list shows
+    /// with whether it was cut at [`crate::ui::search::LIMIT`].
+    pub find: crate::ui::search::Find,
+    pub find_open: bool,
+    find_ctx: crate::ui::search::Context,
+    find_ask: Option<crate::ui::search::Ask>,
+    find_job: Option<crate::ui::job::Job<FindRun>>,
+    pub found: Option<(vf_index::search::Query, bool)>,
     week_start: String,
     /// Hands files to Windows; tests replace it to record instead of launching apps.
     pub shell: ShellFn,
@@ -572,6 +582,12 @@ impl Browse {
             client_sync: None,
             client_sync_again: false,
             saved_job: None,
+            find: Default::default(),
+            find_open: false,
+            find_ctx: Default::default(),
+            find_ask: None,
+            find_job: None,
+            found: None,
             file_job: None,
             admin_unlocked: false,
             name_filter: String::new(),
@@ -709,7 +725,9 @@ impl Browse {
         }
         w.ids.extend(self.prefs.recent.iter().cloned());
         w.ids.extend(self.prefs.pinned.iter().cloned());
-        if let Scope::Ids { ids, .. } | Scope::Saved { ids, .. } = &self.scope {
+        if let Scope::Ids { ids, .. } | Scope::Saved { ids, .. } | Scope::Found { ids } =
+            &self.scope
+        {
             w.ids.extend(ids.iter().cloned());
         }
         w
@@ -1193,7 +1211,8 @@ impl Browse {
                 | Scope::NeedsTaxYear
                 | Scope::ReceivedSince(_)
                 | Scope::Ids { .. }
-                | Scope::Saved { .. }),
+                | Scope::Saved { .. }
+                | Scope::Found { .. }),
                 _,
             ) => s.clone(),
             _ => Scope::Cabinet,
@@ -1783,6 +1802,106 @@ impl Browse {
                 Ok(()) => self.saved = vf_index::saved::load(env.root),
                 Err(e) => self.error = Some(format!("Could not delete the saved search: {e}")),
             }
+        }
+        self.find_requests(env);
+    }
+
+    /// What "This client" and "This folder" mean in Find documents: the tree node selected.
+    /// While the list shows what a find or a saved search found, the node selected before.
+    fn find_context(&mut self) -> crate::ui::search::Context {
+        let snap = &self.snap;
+        let label = |ci: usize| {
+            let c = &snap.clients[ci];
+            (c.id.clone(), format!("{} ({})", c.name, c.ext_id))
+        };
+        let mut cx = crate::ui::search::Context::default();
+        match &self.scope {
+            Scope::Found { .. } | Scope::Saved { .. } => return self.find_ctx.clone(),
+            Scope::Client(ci)
+            | Scope::Year { client: ci, .. }
+            | Scope::YearFolder { client: ci, .. }
+                if *ci < snap.clients.len() =>
+            {
+                cx.client = Some(label(*ci));
+            }
+            Scope::Folder { client, folder } if *client < snap.clients.len() => {
+                cx.client = Some(label(*client));
+                let base = snap.clients[*client].folder_rel.clone().unwrap_or_default();
+                cx.folder = Some((
+                    if base.is_empty() {
+                        folder.clone()
+                    } else {
+                        format!("{base}/{folder}")
+                    },
+                    None,
+                    folder.replace('/', " › "),
+                ));
+            }
+            _ => {}
+        }
+        self.find_ctx = cx.clone();
+        cx
+    }
+
+    /// Runs what Find documents asked for: a find (on its thread with a spinner; here when
+    /// there is no catalog file, as in tests), a search to save, the panel closed.
+    fn find_requests(&mut self, env: &Env) {
+        use crate::ui::search::{Ask, LIMIT};
+        // One more than the limit, to know there are more.
+        let ids = |conn: &Connection, q: &vf_index::search::Query| {
+            vf_index::search::search(conn, q, LIMIT + 1)
+                .map(|hits| hits.into_iter().map(|h| h.doc_id).collect::<Vec<_>>())
+                .map_err(|e| e.to_string())
+        };
+        match self.find_ask.take() {
+            Some(Ask::Run(q)) => match (self.catalog.clone(), self.ctx()) {
+                (Some(catalog), Some(ctx)) => {
+                    let query = q.clone();
+                    match crate::ui::job::Job::start(&ctx, "Finding documents…", move || {
+                        let r = vf_core::db::open(&catalog, vf_core::db::Storage::Local)
+                            .map_err(|e| e.to_string())
+                            .and_then(|conn| ids(&conn, &query));
+                        (query, r)
+                    }) {
+                        Ok(j) => self.find_job = Some(j),
+                        Err(e) => self.error = Some(format!("The find did not run: {e}")),
+                    }
+                }
+                _ => {
+                    let r = ids(env.conn, &q);
+                    self.found_ids(q, r);
+                }
+            },
+            Some(Ask::Save(name, q)) => {
+                match vf_index::saved::add(env.root, &name, &q, env.device_id) {
+                    Ok(_) => {
+                        self.saved = vf_index::saved::load(env.root);
+                        self.find.saved(&name);
+                    }
+                    Err(e) => self.find.notice = Some(e),
+                }
+            }
+            Some(Ask::Close) => self.find_open = false,
+            None => {}
+        }
+        if let Some(r) = crate::ui::job::take(&mut self.find_job) {
+            match r {
+                Ok((q, r)) => self.found_ids(q, r),
+                Err(e) => self.error = Some(format!("The find did not run: {e}")),
+            }
+        }
+    }
+
+    /// A find came back: its documents become the list.
+    fn found_ids(&mut self, q: vf_index::search::Query, r: Result<Vec<String>, String>) {
+        match r {
+            Ok(mut ids) => {
+                let more = ids.len() > crate::ui::search::LIMIT;
+                ids.truncate(crate::ui::search::LIMIT);
+                self.found = Some((q, more));
+                self.set_scope(Scope::Found { ids });
+            }
+            Err(e) => self.error = Some(format!("The find did not run: {e}")),
         }
     }
 
@@ -2624,6 +2743,8 @@ fn partner_pick(ui: &mut egui::Ui, b: &mut Browse) {
 
 /// A saved search's run: its name and the documents it found.
 type SavedRun = (String, Result<Vec<String>, String>);
+/// A find's query and the ids it found (one more than the limit when there are more).
+type FindRun = (vf_index::search::Query, Result<Vec<String>, String>);
 
 /// The View of files in folders bound to no client (no client ID).
 const NO_CLIENT_ID: &str = "Folders with no client ID";
@@ -3277,6 +3398,10 @@ fn breadcrumb(b: &Browse) -> String {
         Scope::ReceivedSince(_) => "Views / Received this week".into(),
         Scope::Ids { list, .. } => format!("Views / {}", list.label()),
         Scope::Saved { name, .. } => format!("Saved searches / {name}"),
+        Scope::Found { .. } => match b.found.as_ref().map(|(q, _)| q.text.as_str()) {
+            Some(t) if !t.is_empty() => format!("Found / {t}"),
+            _ => "Found".into(),
+        },
         Scope::Client(c) => format!("Cabinet / {}", client(*c)),
         Scope::Folder { client: c, folder } => {
             format!("Cabinet / {} / {}", client(*c), folder.replace('/', " / "))
@@ -3481,6 +3606,16 @@ fn grid(ui: &mut egui::Ui, b: &mut Browse, conn: &Connection) {
             b.prefs.hide_tree = !b.prefs.hide_tree;
             b.prefs_changed();
         }
+        // Find documents in the whole cabinet, a client or a folder (Q-113).
+        if ui
+            .add(egui::Button::new("Find documents…").small().selected(b.find_open))
+            .on_hover_text(
+                "Find documents by words in the file name or its folders, a client, a year, a doc type…",
+            )
+            .clicked()
+        {
+            b.find_open = !b.find_open;
+        }
         // The folder path on its own row (it ran under the filter when long, owner
         // 2026-11-04); cut short with … only when wider than the list, whole on hover.
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -3511,6 +3646,32 @@ fn grid(ui: &mut egui::Ui, b: &mut Browse, conn: &Connection) {
             });
         });
     });
+    if b.find_open {
+        let cx = b.find_context();
+        let listing = b.indexing.as_ref().map(|sh| {
+            let (done, all, _) = sh.progress();
+            format!(
+                "Still listing the cabinet's files ({done} of {all} client folders): what is found may be incomplete until this is done."
+            )
+        });
+        let busy = b.find_job.is_some();
+        if let Some(ask) =
+            crate::ui::search::panel(ui, &mut b.find, &b.snap, &cx, listing.as_deref(), busy)
+        {
+            b.find_ask = Some(ask);
+        }
+        if let Some(j) = &b.find_job {
+            j.show(ui);
+        }
+        ui.add_space(4.0);
+    }
+    if matches!(b.scope, Scope::Found { .. }) && b.found.as_ref().is_some_and(|(_, more)| *more) {
+        ui.label(widgets::caption(format!(
+            "More than {} documents match: the first {} are listed. Add a word or a filter.",
+            crate::ui::search::LIMIT,
+            crate::ui::search::LIMIT
+        )));
+    }
     ui.horizontal(|ui| {
         ui.label(
             RichText::new(match b.page_note() {
@@ -4935,6 +5096,77 @@ mod tests {
         crate::ui::theme::install(&h.ctx);
         h.run();
         h
+    }
+
+    /// Q-113 (owner 2026-11-15): documents are found from Browse, not from a Search tab. Find
+    /// documents takes words from the file name or its folders; what it finds is the list; a
+    /// find can be kept to one client and saved for the firm.
+    #[test]
+    fn find_documents_lists_what_it_finds_in_browse() {
+        use crate::ui::search::{Ask, Where};
+        let mut h = harness(3, 8);
+        let root = h.state().root.clone();
+        std::fs::create_dir_all(&root).unwrap();
+        assert!(
+            h.query_by_label("Words").is_none(),
+            "closed until asked for"
+        );
+        click(&mut h, "Find documents…");
+        h.run();
+        h.get_by_label("Words").click();
+        h.run();
+        h.get_by_label("Words").type_text("2025");
+        h.run();
+        click(&mut h, "Find");
+        h.run();
+        {
+            let b = &h.state().b;
+            assert!(matches!(&b.scope, Scope::Found { .. }));
+            assert_eq!(b.visible.len(), 12, "half of 3 × 8 are 2025");
+            assert!(
+                b.visible
+                    .iter()
+                    .all(|&i| b.snap.docs[i].rel_path.contains("2025"))
+            );
+            assert_eq!(breadcrumb(b), "Found / 2025");
+        }
+        // This client: the client selected in the tree before the find.
+        {
+            let b = &mut h.state_mut().b;
+            b.set_scope(Scope::Client(0));
+            b.find.scope = Where::Client;
+        }
+        h.run();
+        click(&mut h, "Find");
+        h.run();
+        {
+            let b = &h.state().b;
+            assert!(matches!(&b.scope, Scope::Found { .. }));
+            assert_eq!(b.visible.len(), 4, "one client's 2025 documents");
+            let client = b.snap.clients[0].id.clone();
+            assert!(
+                b.visible
+                    .iter()
+                    .all(|&i| b.snap.docs[i].client_id.as_deref() == Some(client.as_str()))
+            );
+        }
+        // Still "this client" while the list shows what was found; and saved for the firm.
+        let q = {
+            let b = &mut h.state_mut().b;
+            let cx = b.find_context();
+            assert!(cx.client.is_some());
+            b.find.query(&cx)
+        };
+        h.state_mut().b.find_ask = Some(Ask::Save("2025 of one client".into(), q));
+        h.run();
+        let b = &h.state().b;
+        assert_eq!(b.saved.len(), 1);
+        assert_eq!(b.saved[0].name, "2025 of one client");
+        assert_eq!(vf_index::saved::load(&root).len(), 1);
+        // Closed again from the panel.
+        click(&mut h, "Close");
+        h.run();
+        assert!(h.query_by_label("Words").is_none());
     }
 
     /// P03 step 6: a saved search is a virtual folder in the tree, shared through the cabinet.

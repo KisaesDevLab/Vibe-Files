@@ -10,7 +10,7 @@ That is the only reading it does. See [Intake](help:intake) and [scanning](help:
 
 ## What it does not do
 
-Vibe Files does not read the documents already in the cabinet, does not keep the words of any page, and does not write a text layer into a PDF. [Search](help:search) finds documents by file name, folder and details.
+Vibe Files does not read the documents already in the cabinet, does not keep the words of any page, and does not write a text layer into a PDF. [Find documents](help:search) in Browse finds documents by file name, folder and details.
 
 Earlier versions read every PDF so the words on its pages could be searched. On a large cabinet that kept the PCs and the network busy for weeks, so it was taken out. A PDF that got a text layer then keeps it.
 

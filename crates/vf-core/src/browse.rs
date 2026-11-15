@@ -474,6 +474,11 @@ pub enum Scope {
         name: String,
         ids: Vec<String>,
     },
+    /// What "Find documents" in Browse found (owner 2026-11-15, Q-113: the Search tab's
+    /// place): the documents it found when it ran.
+    Found {
+        ids: Vec<String>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -722,7 +727,7 @@ impl Index {
                 .collect();
         }
         let ids: std::collections::HashSet<&str> = match scope {
-            Scope::Ids { ids, .. } | Scope::Saved { ids, .. } => {
+            Scope::Ids { ids, .. } | Scope::Saved { ids, .. } | Scope::Found { ids } => {
                 ids.iter().map(String::as_str).collect()
             }
             _ => Default::default(),
@@ -761,7 +766,9 @@ impl Index {
                         d.tax_year.is_none() && !permanent(folder) && !permanent(&d.rel_path)
                     }
                     Scope::ReceivedSince(t) => d.filed_at.as_str() >= t.as_str(),
-                    Scope::Ids { .. } | Scope::Saved { .. } => ids.contains(d.id.as_str()),
+                    Scope::Ids { .. } | Scope::Saved { .. } | Scope::Found { .. } => {
+                        ids.contains(d.id.as_str())
+                    }
                 }
             })
             .collect()

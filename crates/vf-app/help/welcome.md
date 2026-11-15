@@ -16,7 +16,7 @@ The tab bar is always in this order:
 
 - **Browse** — the client tree, the documents in the folder you pick, and their details. This is where most work happens. See [Browsing the cabinet](help:browse).
 - **Intake** — files arriving from scanners, inbox folders and print capture are matched to clients and filed after you preview them. The tab shows a count, such as **Intake (3)**, when files are waiting. See [Intake](help:intake).
-- **Search** — find documents by the words in them. See [Search](help:search).
+- **Find documents…** on Browse — find documents by file name, folder and details. See [Finding documents](help:search).
 - **Viewer** — pages of a PDF, with find, annotations, page tools and the ten-key tape. See [the Viewer](help:viewer).
 - **Sync** — two-way sync of the cabinet with your firm's own B2 bucket. See [Sync](help:sync).
 - **Admin** — doc types, folder templates, retention, trash, audit trail and other firm settings. See [Admin](help:admin).

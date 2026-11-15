@@ -15,28 +15,21 @@ use crate::ui::{chrome, theme};
 pub enum Tab {
     Browse,
     Intake,
-    Search,
     Viewer,
     Sync,
     Admin,
 }
 
 impl Tab {
-    /// CLAUDE.md conventions: tabs in exactly this order.
-    pub const ALL: [Tab; 6] = [
-        Tab::Browse,
-        Tab::Intake,
-        Tab::Search,
-        Tab::Viewer,
-        Tab::Sync,
-        Tab::Admin,
-    ];
+    /// CLAUDE.md conventions: tabs in exactly this order. (No Search tab since Q-113, owner
+    /// 2026-11-15: documents are found from Browse.)
+    pub const ALL: [Tab; 5] = [Tab::Browse, Tab::Intake, Tab::Viewer, Tab::Sync, Tab::Admin];
 
     pub fn name(self) -> &'static str {
         match self {
             Tab::Browse => "Browse",
             Tab::Intake => "Intake",
-            Tab::Search => "Search",
+
             Tab::Viewer => "Viewer",
             Tab::Sync => "Sync",
             Tab::Admin => "Admin",
@@ -47,8 +40,7 @@ impl Tab {
         match self {
             Tab::Browse => "Browse shows the client tree once a cabinet is open.",
             Tab::Intake => "Intake files documents into the open cabinet.",
-            Tab::Search => "Search the text of every document.",
-            Tab::Viewer => "Open a document from Search.",
+            Tab::Viewer => "Open a document from Browse.",
             Tab::Sync => "Two-way sync with B2.",
             Tab::Admin => "Users, doc types, audit and compliance settings.",
         }
@@ -75,12 +67,7 @@ pub struct OpenCabinet {
     pub admin: Option<Admin>,
     /// The mounted Filer Desktop app, built the first time Intake is shown.
     pub intake: IntakeTab,
-    /// OCR workers (P03).
-    pub search: crate::ui::search::SearchTab,
     pub viewer: crate::ui::viewer::Viewer,
-    /// OCR's indexed count when Search last re-ran, and when: while OCR works through a
-    /// backlog, Search runs again at most every 3 s, not on every document.
-    indexed_seen: (usize, Option<std::time::Instant>),
     /// The audit chain check: on open, then weekly (P05 step 2).
     pub chain: crate::ui::audit::ChainCheck,
     /// When new audit rows were last copied to `_Vibe/audit/<month>.jsonl`.
@@ -120,41 +107,6 @@ pub struct OpenCabinet {
     index_wait: Option<String>,
     /// This login's id in the cabinet, held while the cabinet is open (PA-69).
     _login: Option<vf_fs::lock::Held>,
-}
-
-impl OpenCabinet {
-    /// What Search's "This client" / "This folder" mean: Browse's selected node.
-    pub fn search_context(&self) -> crate::ui::search::Context {
-        use vf_core::browse::Scope as B;
-        let snap = &self.browse.snap;
-        let label = |ci: usize| {
-            let c = &snap.clients[ci];
-            (c.id.clone(), format!("{} ({})", c.name, c.ext_id))
-        };
-        let mut cx = crate::ui::search::Context::default();
-        match &self.browse.scope {
-            B::Client(ci) | B::Year { client: ci, .. } | B::YearFolder { client: ci, .. }
-                if *ci < snap.clients.len() =>
-            {
-                cx.client = Some(label(*ci));
-            }
-            B::Folder { client, folder } if *client < snap.clients.len() => {
-                cx.client = Some(label(*client));
-                let base = snap.clients[*client].folder_rel.clone().unwrap_or_default();
-                cx.folder = Some((
-                    if base.is_empty() {
-                        folder.clone()
-                    } else {
-                        format!("{base}/{folder}")
-                    },
-                    None,
-                    folder.replace('/', " › "),
-                ));
-            }
-            _ => {}
-        }
-        cx
-    }
 }
 
 pub struct VibeFilesApp {
@@ -592,9 +544,9 @@ impl VibeFilesApp {
                     browse,
                     admin: None,
                     intake,
-                    search: Default::default(),
+
                     viewer: Default::default(),
-                    indexed_seen: (0, None),
+
                     admin_unlocked: false,
                     admin_typed: String::new(),
                     admin_msg: None,
@@ -1028,50 +980,6 @@ impl eframe::App for VibeFilesApp {
                         &o.opened.root,
                         &self.config.device_id,
                     );
-                }
-            }
-            Screen::Open(o) if self.tab == Tab::Search => {
-                let o = &mut **o;
-                let cx = o.search_context();
-                // Any change to the catalog (every change writes an audit row): the results
-                // are run again, so a renamed or trashed document is never shown at its old
-                // place (QA A11). Looked at once a second.
-                let (seen, at) = o.indexed_seen;
-                if at.is_none_or(|t| t.elapsed() >= std::time::Duration::from_secs(1)) {
-                    let changes: usize = o
-                        .opened
-                        .conn
-                        .query_row("SELECT coalesce(max(seq), 0) FROM audit", [], |r| {
-                            r.get::<_, i64>(0)
-                        })
-                        .map_or(0, |n| n as usize);
-                    let generation = changes;
-                    if generation != seen && at.is_some() {
-                        o.search.refresh();
-                    }
-                    o.indexed_seen = (generation, Some(std::time::Instant::now()));
-                }
-                o.search.listing = o.indexing.as_ref().map(|(ix, _)| {
-                    let (done, all, _) = ix.shared.progress();
-                    format!(
-                        "Still listing the cabinet's files ({done} of {all} client folders): results may be incomplete until this is done."
-                    )
-                });
-                crate::ui::search::show(
-                    ui,
-                    &mut o.search,
-                    &o.opened.catalog,
-                    &o.opened.root,
-                    &o.browse.snap,
-                    &cx,
-                    &self.config.device_id,
-                );
-                if std::mem::take(&mut o.search.saved_changed) {
-                    o.browse.saved = vf_index::saved::load(&o.opened.root);
-                }
-                if let Some(doc) = o.search.open.take() {
-                    o.viewer.open(doc);
-                    self.tab = Tab::Viewer;
                 }
             }
             Screen::Open(o) if self.tab == Tab::Viewer => {
@@ -1794,12 +1702,9 @@ mod tests {
     }
 
     #[test]
-    fn six_tabs_in_spec_order() {
+    fn five_tabs_in_spec_order() {
         let names: Vec<_> = Tab::ALL.iter().map(|t| t.name()).collect();
-        assert_eq!(
-            names,
-            ["Browse", "Intake", "Search", "Viewer", "Sync", "Admin"]
-        );
+        assert_eq!(names, ["Browse", "Intake", "Viewer", "Sync", "Admin"]);
     }
 
     #[test]
