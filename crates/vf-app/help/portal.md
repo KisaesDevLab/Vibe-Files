@@ -31,7 +31,7 @@ A client can have several people (a spouse, a bookkeeper), and one person can ha
 
 For someone already on the portal, use **Someone who already uses the portal…**: search part of their name, email or mobile, then press **Invite** beside them to fill in the invitation. They accept it and keep one login.
 
-People can also ask for access on the portal's sign-in page. Their requests appear in **Admin › Portal requests** once they have confirmed their email or phone: choose the client their files belong to and press **Approve**, or **Deny**.
+People can also ask for access on the portal's sign-in page. Their requests appear in **Admin › Portal requests** once they have confirmed their email or phone: see [checking who asks for access](help:portal-requests).
 
 ## Sharing documents
 

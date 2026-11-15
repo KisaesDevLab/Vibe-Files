@@ -73,6 +73,10 @@ pub enum Line {
     /// The request has nothing to compare: confirmed by the other contact, or no date of birth
     /// was read from an ID.
     NotOnRequest,
+    /// The row has a date of birth that could not be read (a two-digit year, words, or a date
+    /// that could be either way round in a column that does not say): not compared, and never
+    /// said to differ (review 2026-11-15).
+    Unreadable,
 }
 
 impl Line {
@@ -82,6 +86,7 @@ impl Line {
             Self::Differs => "differs from the record",
             Self::NotInRecord => "not in the record",
             Self::NotOnRequest => "not on the request",
+            Self::Unreadable => "the record's date could not be read",
         }
     }
 }
@@ -186,6 +191,17 @@ fn phones(cell: &str) -> Vec<String> {
         let mut prev = ' ';
         let mut rest = lower.as_str();
         while let Some(c) = rest.chars().next() {
+            // A number of another country ("+44 20 7946 0958"): the portal confirms none, and
+            // its digits are not read as a US one. What follows it in this part is not read.
+            if c == '+'
+                && rest[1..]
+                    .trim_start()
+                    .chars()
+                    .next()
+                    .is_some_and(|d| d.is_ascii_digit() && d != '1')
+            {
+                break;
+            }
             if c.is_ascii_digit() {
                 if !in_run {
                     in_run = true;
@@ -215,21 +231,25 @@ fn phones(cell: &str) -> Vec<String> {
         while i < runs.len() {
             if runs[i].len() >= 10 {
                 // Written without a break: one number after another, a 1 in front (never the
-                // start of an area code), then ten.
+                // start of an area code), then ten. The whole group must be such numbers and
+                // nothing else: a number is not looked for inside a longer one (an account
+                // number, a number with a digit too many; review 2026-11-15).
+                let mut found = Vec::new();
                 let mut d = runs[i].as_str();
-                while d.len() >= 10 {
-                    if d.len() >= 11 && d.starts_with('1') {
-                        d = &d[1..];
-                    }
-                    let (ten, after) = d.split_at(10);
-                    if is_nanp(ten) {
-                        out.push(ten.to_string());
-                        d = after;
-                    } else {
-                        // Not a number here: look one digit on, in case it starts later.
-                        d = &d[1..];
+                while !d.is_empty() {
+                    let d10 = d.strip_prefix('1').unwrap_or(d);
+                    match d10.split_at_checked(10) {
+                        Some((ten, after)) if is_nanp(ten) => {
+                            found.push(ten.to_string());
+                            d = after;
+                        }
+                        _ => {
+                            found.clear();
+                            break;
+                        }
                     }
                 }
+                out.append(&mut found);
                 i += 1;
                 continue;
             }
@@ -263,15 +283,17 @@ fn phones(cell: &str) -> Vec<String> {
 }
 
 /// The email addresses of a cell: one, or several, written plainly, as `Name <a@b>` or as
-/// `mailto:a@b`.
+/// `mailto:a@b`, told apart by `;`, `,`, `/`, `|`, a space or a new line in the cell.
 fn emails(cell: &str) -> impl Iterator<Item = String> + '_ {
-    cell.split([';', ',', ' ', '<', '>', '(', ')'])
-        .map(|t| {
-            let t = t.trim();
-            let lower = t.to_lowercase();
-            lower.strip_prefix("mailto:").unwrap_or(&lower).to_string()
-        })
-        .filter(|t| t.contains('@'))
+    cell.split(|c: char| {
+        c.is_whitespace() || matches!(c, ';' | ',' | '<' | '>' | '(' | ')' | '/' | '|')
+    })
+    .map(|t| {
+        let t = t.trim();
+        let lower = t.to_lowercase();
+        lower.strip_prefix("mailto:").unwrap_or(&lower).to_string()
+    })
+    .filter(|t| t.contains('@'))
 }
 
 const MONTHS: [&str; 12] = [
@@ -520,8 +542,9 @@ pub fn compare_in(
             None => Line::NotInRecord,
             Some(v) => match parse_date_in(v, written) {
                 Some(d) if d == on_id => Line::Matches,
-                // A date that cannot be read is not the ID's date.
-                _ => Line::Differs,
+                Some(_) => Line::Differs,
+                // A date that cannot be read is not a match, and not a difference either.
+                None => Line::Unreadable,
             },
         },
     };
@@ -691,7 +714,15 @@ mod tests {
             &row(&[("DOB", "sometime in 1990")]),
             &columns(),
         );
-        assert_eq!(odd.dob, Line::Differs);
+        assert_eq!(odd.dob, Line::Unreadable);
+        assert!(odd.matched().is_empty());
+        let short = compare(
+            &request("alex@example.test", Some("1990-01-06"), &[]),
+            &row(&[("DOB", "1/6/90"), ("Email", "alex@example.test")]),
+            &columns(),
+        );
+        assert_eq!(short.dob, Line::Unreadable);
+        assert_eq!(short.matched(), vec!["email"]);
     }
 
     #[test]
@@ -714,6 +745,10 @@ mod tests {
             "Alex Sample <ALEX@example.test>",
             "mailto:alex@example.test",
             "old@example.test, Alex (alex@example.test)",
+            "old@example.test/alex@example.test",
+            "old@example.test | alex@example.test",
+            "old@example.test\nalex@example.test",
+            "old@example.test\talex@example.test",
         ] {
             let c = compare(
                 &request("alex@example.test", None, &[]),
@@ -759,6 +794,19 @@ mod tests {
             vec!["2125550123", "6465550100"]
         );
         assert_eq!(phones("1 2125550123"), vec!["2125550123"]);
+        assert_eq!(phones("12125550123"), vec!["2125550123"]);
+        assert_eq!(
+            phones("212555012316465550100"),
+            vec!["2125550123", "6465550100"]
+        );
+        // A number is not looked for inside a longer run of digits.
+        assert!(phones("acct 4111222233334444").is_empty());
+        assert!(phones("21255501239").is_empty());
+        // A number of another country is not read as a US one; one before it still is.
+        assert!(phones("+44 20 7946 0958").is_empty());
+        assert_eq!(phones("+1 212 555 0123"), vec!["2125550123"]);
+        assert_eq!(phones("212-555-0123 +44 20 7946 0958"), vec!["2125550123"]);
+        assert_eq!(phones("+44 20 7946 0958; 212-555-0123"), vec!["2125550123"]);
         // Not numbers the plan allows: an area code or exchange starting with 0 or 1, too few
         // digits, an account number.
         for cell in [
@@ -850,7 +898,7 @@ mod tests {
         let swapped = compare_in(&r, &row(&[("DOB", "1/6/1990")]), &cols, Written::DayFirst);
         assert_eq!(swapped.dob, Line::Differs);
         let unsure = compare_in(&r, &row(&[("DOB", "6/1/1990")]), &cols, Written::Mixed);
-        assert_eq!(unsure.dob, Line::Differs);
+        assert_eq!(unsure.dob, Line::Unreadable);
     }
 
     #[test]
