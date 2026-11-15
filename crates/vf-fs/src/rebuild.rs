@@ -2163,29 +2163,15 @@ fn rebuild_scoped(
     // finds a record takes its id. One append per client folder. A folder that cannot be
     // written keeps this catalog's ids to itself; the index goes on.
     for (file, lines) in new_records {
-        use std::io::Write;
-        if let Some(dir) = file.parent() {
-            let _ = std::fs::create_dir_all(dir);
-        }
-        let Ok(mut out) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&file)
-        else {
-            rep.unreadable
-                .push(format!("{}: cannot be written", file.display()));
-            continue;
-        };
-        // A line of its own, whatever the file ended with (blank lines are skipped by readers).
         let mut text = String::new();
-        if out.metadata().is_ok_and(|m| m.len() > 0) {
-            text.push(char::from(10));
-        }
         for l in lines {
             text.push_str(&l);
             text.push(char::from(10));
         }
-        if out.write_all(text.as_bytes()).is_err() {
+        // One writer at a time across computers (`cabinet::append_text` waits for another
+        // computer's append to the same file; code review 2026-11-14: a plain append here
+        // could fail against it, or write over its lines).
+        if crate::cabinet::append_text(&file, &text).is_err() {
             rep.unreadable
                 .push(format!("{}: cannot be written", file.display()));
         }

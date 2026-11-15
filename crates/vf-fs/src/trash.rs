@@ -338,6 +338,26 @@ fn held_in_cabinet(conn: &Connection, root: &Path, t: &Trashed) -> bool {
                 i.map(|i| i.hash.clone()).unwrap_or_default(),
             )
         });
+    // A hold placed on a content must still find it here when this catalog never read the
+    // file (PA-60: a catalog made from the listing; the file renamed since, so not found by
+    // its path either): the file about to be deleted is read first. One that cannot be read
+    // counts as held (code review 2026-11-14).
+    let hash = if hash.is_empty() {
+        let by_content = crate::holds::load(root).map_or(true, |hs| {
+            hs.iter()
+                .any(|h| h.active() && h.docs.iter().any(|d| !d.hash.is_empty()))
+        });
+        if by_content {
+            match filer_intake::commit::sha256_file(&t.file) {
+                Ok(h) => h,
+                Err(_) => return true,
+            }
+        } else {
+            hash
+        }
+    } else {
+        hash
+    };
     crate::holds::covers(root, client.as_deref(), &t.rel_path, &hash)
 }
 

@@ -158,6 +158,16 @@ fn age_by_server(path: &Path) -> Option<Duration> {
     Some(now.ok()?.duration_since(was).unwrap_or_default())
 }
 
+/// Whether a file can be made beside the lock file `path` (the cabinet can be written).
+fn writable(path: &Path) -> bool {
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(format!(".{}.probe", uuid::Uuid::now_v7().simple()));
+    let probe = path.with_file_name(name);
+    let ok = std::fs::write(&probe, b"").is_ok();
+    let _ = std::fs::remove_file(&probe);
+    ok
+}
+
 /// The lock file `path`. `wait`: how long to wait for another holder (`None`: for as long as
 /// it keeps its lock alive). A cabinet that cannot be written gives a lock that guards nothing.
 pub(crate) fn take_at(
@@ -180,6 +190,8 @@ pub(crate) fn take_at(
     // What the lock held by another looked like, and since when it has not changed.
     let mut seen: Option<(String, Instant)> = None;
     let mut checked_age = false;
+    // Since when the lock file could be neither made nor found there.
+    let mut trouble: Option<Instant> = None;
     loop {
         let made = std::fs::OpenOptions::new()
             .write(true)
@@ -241,10 +253,23 @@ pub(crate) fn take_at(
                     age_by_server(path).is_some_and(|age| age > stale)
                 });
                 if dead {
-                    // Only the lock that was judged: another waiter may have taken it over
-                    // (and made its own) in the meantime.
-                    if std::fs::read_to_string(path).is_ok_and(|t| t == now) {
-                        let _ = std::fs::remove_file(path);
+                    // Taken away under a name of its own first: of several waiters that
+                    // judged the same lock dead, only one's rename finds it (code review
+                    // 2026-11-14: read-then-remove let a second waiter remove the first
+                    // one's new lock, and both held it).
+                    let mut aside = path.as_os_str().to_os_string();
+                    aside.push(format!(".{}.old", uuid::Uuid::now_v7().simple()));
+                    let aside = PathBuf::from(aside);
+                    if std::fs::rename(path, &aside).is_ok() {
+                        // The lock that was judged; or not it, but another has been made
+                        // since (the one taken away lost its place either way).
+                        if std::fs::read_to_string(&aside).is_ok_and(|t| t == now) || path.exists()
+                        {
+                            let _ = std::fs::remove_file(&aside);
+                        } else {
+                            // Not the lock that was judged (someone's new one): put back.
+                            let _ = std::fs::rename(&aside, path);
+                        }
                     }
                     seen = None;
                     continue;
@@ -256,8 +281,23 @@ pub(crate) fn take_at(
                 }
                 std::thread::sleep(Duration::from_millis(100).min(beat));
             }
-            // A cabinet that cannot be written (read-only share): nothing to guard.
-            Err(_) => return Ok(none()),
+            // Not "already there": a share error for a moment, or the lock file being
+            // deleted by its last holder while a waiter still has it open. Tried again; only
+            // a cabinet that really cannot be written (a read-only share) has nothing to
+            // guard. Taking any error for that let a change run with no lock beside the
+            // real holder (code review 2026-11-14).
+            Err(_) => {
+                let since = *trouble.get_or_insert_with(Instant::now);
+                if since.elapsed() >= Duration::from_secs(3) {
+                    if !writable(path) {
+                        return Ok(none());
+                    }
+                    if wait.is_some_and(|w| started.elapsed() >= w) {
+                        return Err(Busy { who: String::new() });
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(100).min(beat));
+            }
         }
     }
 }

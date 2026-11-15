@@ -131,16 +131,35 @@ impl Indexer {
         let started = std::thread::Builder::new()
             .name("background-index".into())
             .spawn(move || {
-                match vf_core::db::open(&catalog, vf_core::db::Storage::Local) {
-                    Ok(mut conn) => run(&mut conn, &root, &device, &staged, &sh, &|| {
-                        ctx.request_repaint()
-                    }),
-                    Err(e) => {
-                        if let Ok(mut err) = sh.error.lock() {
-                            *err = Some(e.to_string());
+                // A catalog that cannot be opened just now is tried again until it can, or
+                // the cabinet is closed.
+                let mut tries = 0u32;
+                let mut conn = loop {
+                    match vf_core::db::open(&catalog, vf_core::db::Storage::Local) {
+                        Ok(conn) => break conn,
+                        Err(e) => {
+                            tries += 1;
+                            if let Ok(mut err) = sh.error.lock() {
+                                *err = Some(e.to_string());
+                            }
+                            sh.waiting.store(true, Ordering::Relaxed);
+                            ctx.request_repaint();
+                            let pause = RETRY * tries.min(15);
+                            let since = std::time::Instant::now();
+                            while since.elapsed() < pause {
+                                if sh.stop.load(Ordering::Relaxed) {
+                                    return;
+                                }
+                                std::thread::sleep(
+                                    RETRY.min(std::time::Duration::from_millis(200)),
+                                );
+                            }
                         }
                     }
-                }
+                };
+                run(&mut conn, &root, &device, &staged, &sh, &|| {
+                    ctx.request_repaint()
+                });
                 ctx.request_repaint();
             });
         if let Err(e) = started
@@ -226,14 +245,32 @@ pub fn run(
         }
         tick();
     }
-    // Not finished: the unfinished mark stays, and the next open goes on.
-    if let Err(e) = vf_fs::rebuild::index_finish(conn, root, device_id) {
+    // The end is tried again like a part (a catalog another session is busy in), for as
+    // long as the cabinet is open: a session that gave up here waited on the index for good.
+    let mut tries = 0u32;
+    while let Err(e) = vf_fs::rebuild::index_finish(conn, root, device_id) {
+        tries += 1;
+        tracing::warn!(
+            kind = crate::logging::kind(&e.to_string()),
+            tries,
+            "the index could not be finished"
+        );
         if let Ok(mut err) = shared.error.lock() {
             *err = Some(e.to_string());
         }
         shared.waiting.store(true, Ordering::Relaxed);
-        return;
+        tick();
+        let pause = RETRY * tries.min(15);
+        let since = std::time::Instant::now();
+        while since.elapsed() < pause {
+            // Stopped: the unfinished mark stays, and the next open goes on.
+            if shared.stop.load(Ordering::Relaxed) {
+                return;
+            }
+            std::thread::sleep(RETRY.min(std::time::Duration::from_millis(200)));
+        }
     }
+    shared.waiting.store(false, Ordering::Relaxed);
     let (_, folders, docs) = shared.progress();
     tracing::info!(
         folders,

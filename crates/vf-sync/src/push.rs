@@ -404,6 +404,29 @@ pub fn remove_docs(
     for client in &clients {
         push_client_forced(conn, root, s, client, same_folder, Some(&nothing))?;
     }
+    // Another document may have the same content and not have been read in this catalog
+    // (one made from the folder listing): those of the same size are fingerprinted first, so
+    // "nobody else uses this content" is known, not assumed. If any cannot be read, no
+    // content is deleted from the bucket (code review 2026-11-14: a K-1 filed to the entity
+    // and the shareholder lost its object for both).
+    let mut unread: Vec<String> = vec![];
+    for (id, _) in &contents {
+        let mut st = conn.prepare(
+            "SELECT d.id FROM document d
+             WHERE d.hash IS NULL AND d.deleted_at IS NULL AND d.id != ?1
+               AND d.size IN (SELECT size FROM document WHERE id = ?1
+                              UNION SELECT size FROM version WHERE doc_id = ?1)",
+        )?;
+        for other in st.query_map([id], |r| r.get::<_, String>(0))? {
+            let other = other?;
+            if !unread.contains(&other) {
+                unread.push(other);
+            }
+        }
+    }
+    let sure = vf_fs::fingerprint::ensure_many(conn, root, &s.device_id, &unread)
+        .iter()
+        .all(|r| r.is_ok());
     let mut rep = RemoveReport::default();
     for (id, hashes) in &contents {
         let still: bool = conn.query_row(
@@ -424,7 +447,7 @@ pub fn remove_docs(
                 [h, id],
                 |r| r.get(0),
             )?;
-            if used {
+            if used || !sure {
                 continue;
             }
             let key = layout::object_key(&s.keys.object_name(h));

@@ -139,11 +139,20 @@ pub fn load_last(root: &Path) -> Option<Merged> {
     all.pop().filter(|m| m.undone.is_none())
 }
 
+/// Writes the merge's record. Not through [`cabinet::write_replace`]: the record is this
+/// merge's own file, and it must be written whatever became of the cabinet lock meanwhile
+/// (without it a merge that has moved the documents could not be undone).
 fn save(root: &Path, m: &Merged) -> Result<(), String> {
-    cabinet::write_replace(
-        &dir(root).join(format!("{}.json", m.tx_id)),
-        &serde_json::to_vec_pretty(m).expect("serializes"),
-    )
+    let file = dir(root).join(format!("{}.json", m.tx_id));
+    let bytes = serde_json::to_vec_pretty(m).expect("serializes");
+    std::fs::create_dir_all(dir(root))
+        .and_then(|()| {
+            let tmp = file.with_extension("json.tmp");
+            std::fs::write(&tmp, &bytes).and_then(|()| std::fs::rename(&tmp, &file))
+        })
+        // A share that will not rename: written in place.
+        .or_else(|_| std::fs::write(&file, &bytes))
+        .map_err(|e| format!("cannot write {}: {e}", file.display()))
 }
 
 fn who(conn: &Connection, id: &str) -> Result<Who, String> {
@@ -521,7 +530,14 @@ pub fn apply(
             note: None,
             undone: None,
         };
+        // The record first, as it stands: whatever fails from here on, the merge can be
+        // undone (code review 2026-11-14).
         let mut notes: Vec<String> = vec![];
+        if let Err(e) = save(root, &m) {
+            notes.push(format!(
+                "The merge's record could not be written ({e}): it cannot be undone from this window."
+            ));
+        }
         if let Err(e) = lists(root, &mut m) {
             notes.push(format!("The client list was not changed: {e}"));
         }
@@ -543,12 +559,21 @@ pub fn apply(
                 )),
             }
         }
+        // The documents have moved: what follows is said, never an error for the merge.
+        if let Err(e) = rebuild::sync_clients_edited(conn, root, device_id, "clients_edit", &[]) {
+            notes.push(format!(
+                "The client list in this catalog was not brought up to date ({e}); it is at the next open."
+            ));
+        }
         if !notes.is_empty() {
             m.note = Some(notes.join(" "));
         }
-        save(root, &m)?;
-        rebuild::sync_clients_edited(conn, root, device_id, "clients_edit", &[])
-            .map_err(|e| e.to_string())?;
+        if let Err(e) = save(root, &m) {
+            m.note = Some(format!(
+                "{} The merge's record could not be completed ({e}).",
+                m.note.clone().unwrap_or_default()
+            ));
+        }
         Ok(m)
     })
 }
@@ -742,7 +767,7 @@ pub fn undo(
             tx = tx.catalog(Stmt::new(
                 "UPDATE document SET rel_path = ?2, client_id = ?3, device_id = ?4,
                    updated_at = ?5, rev = rev + 1
-                 WHERE deleted_at IS NULL AND lower(rel_path) = lower(?1)",
+                 WHERE deleted_at IS NULL AND rel_path = ?1",
                 vec![
                     x.to.clone().into(),
                     x.from.clone().into(),

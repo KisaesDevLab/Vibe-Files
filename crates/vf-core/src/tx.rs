@@ -482,7 +482,13 @@ impl Transaction {
             }
             Ok(rows)
         };
-        let tried = write(&check);
+        // (With no file to change there is nothing to protect: the statements run once,
+        // below. A first index writes hundreds of thousands of rows this way.)
+        let tried = if self.files.is_empty() {
+            Ok(vec![])
+        } else {
+            write(&check)
+        };
         drop(check); // rolled back: nothing is written yet
         if let Err(e) = tried {
             forget(conn);
@@ -512,35 +518,52 @@ impl Transaction {
             catalog_undo: self.catalog_undo.clone(),
             extra: self.extra.clone(),
         };
-        let stored =
-            match rusqlite::Transaction::new_unchecked(conn, TransactionBehavior::Immediate) {
-                Err(e) => Err(Error::from(e)),
-                Ok(sql_tx) => {
-                    let written = write(&sql_tx).and_then(|rows| {
-                        sql_tx.execute(
-                            "INSERT INTO undo_record (tx_id, user, device_id, ts, label, record)
+        // The files have moved: a catalog another session is busy in is waited for (minutes
+        // if need be), not a reason to move a thousand files back.
+        let begun = {
+            let patience = if self.files.is_empty() {
+                std::time::Duration::ZERO
+            } else {
+                FINISH_WAIT
+            };
+            let since = std::time::Instant::now();
+            loop {
+                match rusqlite::Transaction::new_unchecked(conn, TransactionBehavior::Immediate) {
+                    Err(e) if is_busy(&e) && since.elapsed() < patience => {
+                        std::thread::sleep(std::time::Duration::from_millis(250));
+                    }
+                    r => break r,
+                }
+            }
+        };
+        let stored = match begun {
+            Err(e) => Err(Error::from(e)),
+            Ok(sql_tx) => {
+                let written = write(&sql_tx).and_then(|rows| {
+                    sql_tx.execute(
+                        "INSERT INTO undo_record (tx_id, user, device_id, ts, label, record)
                          VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                            rusqlite::params![
-                                tx_id,
-                                actor.user,
-                                actor.device_id,
-                                ts,
-                                self.label,
-                                serde_json::to_string(&record).expect("undo record serializes")
-                            ],
-                        )?;
-                        sql_tx.execute("DELETE FROM tx_journal WHERE tx_id = ?1", [&tx_id])?;
-                        Ok(rows)
-                    });
-                    match written {
-                        Ok(rows) => sql_tx.commit().map(|()| rows).map_err(Error::from),
-                        Err(e) => {
-                            drop(sql_tx);
-                            Err(e)
-                        }
+                        rusqlite::params![
+                            tx_id,
+                            actor.user,
+                            actor.device_id,
+                            ts,
+                            self.label,
+                            serde_json::to_string(&record).expect("undo record serializes")
+                        ],
+                    )?;
+                    sql_tx.execute("DELETE FROM tx_journal WHERE tx_id = ?1", [&tx_id])?;
+                    Ok(rows)
+                });
+                match written {
+                    Ok(rows) => sql_tx.commit().map(|()| rows).map_err(Error::from),
+                    Err(e) => {
+                        drop(sql_tx);
+                        Err(e)
                     }
                 }
-            };
+            }
+        };
         match stored {
             Ok(rows) => Ok(Committed {
                 tx_id,
@@ -557,6 +580,18 @@ impl Transaction {
             }
         }
     }
+}
+
+/// How long a transaction whose files have already moved waits for a catalog another session
+/// is writing to, before it gives up and moves them back.
+const FINISH_WAIT: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// The catalog is locked by another connection right now.
+fn is_busy(e: &rusqlite::Error) -> bool {
+    matches!(
+        e.sqlite_error_code(),
+        Some(rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked)
+    )
 }
 
 /// Reverses newest first; returns descriptions of anything that could not be reversed.

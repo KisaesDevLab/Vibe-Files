@@ -1690,6 +1690,53 @@ fn a_merged_client_leaves_the_bucket_listing() {
     assert_eq!(n, 3);
 }
 
+/// Code review 2026-11-14: the same content filed to two clients (a K-1 to the entity and
+/// the shareholder). Taking one out of B2 keeps the content in the bucket for the other,
+/// also when this catalog has not read the other one's file.
+#[test]
+fn removing_one_of_two_same_documents_keeps_the_content_in_the_bucket() {
+    let t = tempfile::tempdir().unwrap();
+    let store = Remote::memory();
+    let mut a = pc_a(t.path(), store);
+    // The W-2's bytes again, in the other client's folder.
+    put(
+        &a.root,
+        "Bell Ranch Inc (2002)/Income Tax/2025/W-2 copy.pdf",
+        "w2 2025 invented",
+    );
+    vf_fs::rebuild::rebuild(&mut a.conn, &a.root, "dev-a").unwrap();
+    vf_sync::push::push(&mut a.conn, &a.root, &a.sync, None).unwrap();
+    let objects = a.sync.remote.list("objects").unwrap().len();
+    let w2 = doc_id(&a.conn, "W-2 Northwind.pdf");
+    // A catalog made from the folder listing has not read the copy.
+    a.conn
+        .execute(
+            "UPDATE document SET hash = NULL WHERE rel_path LIKE '%W-2 copy.pdf'",
+            [],
+        )
+        .unwrap();
+    let r = vf_sync::push::remove_docs(
+        &mut a.conn,
+        &a.root,
+        &a.sync,
+        std::slice::from_ref(&w2),
+        &[],
+    )
+    .unwrap();
+    assert_eq!((r.documents, r.objects), (1, 0), "the copy still uses it");
+    assert_eq!(a.sync.remote.list("objects").unwrap().len(), objects);
+    // The copy was read to find that out.
+    let read: bool = a
+        .conn
+        .query_row(
+            "SELECT hash IS NOT NULL FROM document WHERE rel_path LIKE '%W-2 copy.pdf'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(read);
+}
+
 #[test]
 fn a_list_of_rules_decides_what_goes_up() {
     use vf_fs::clients::{B2Rule, B2Years};
