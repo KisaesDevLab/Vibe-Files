@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 use egui::RichText;
 use vf_core::audit::AuditEntry;
 use vf_portal::api::{AccessRequest, AccessRequests, Check, Person, PortalFile, Users};
-use vf_portal::record::{self, RecordColumns};
+use vf_portal::record::{self, DateOrder, RecordColumns, Written};
 use vf_portal::{PortalSettings, settings};
 
 use crate::portal as core;
@@ -1332,6 +1332,9 @@ pub struct AdminPortal {
     record_read: bool,
     /// Why the client list could not be read (no request can then be compared with it).
     record_err: Option<String>,
+    /// How the date-of-birth column writes its dates, worked out once for the column and the
+    /// firm's choice it was worked out for (the whole list is looked at).
+    written: Option<(Option<String>, DateOrder, Written)>,
     /// The request whose "How did you check?" is open, the choice made and the note typed.
     asking: Option<String>,
     how: (Option<usize>, String),
@@ -1430,6 +1433,19 @@ impl AdminPortal {
         self.columns = s.map(|s| s.record.clone()).unwrap_or_default();
     }
 
+    /// How `column` writes its dates, for the firm's choice `order`: worked out from the whole
+    /// list the first time, then kept until the list or the choice changes.
+    fn written_for(&mut self, column: Option<String>, order: DateOrder) -> Written {
+        if let Some((c, o, w)) = &self.written
+            && (c, o) == (&column, &order)
+        {
+            return *w;
+        }
+        let w = self.rows.written(column.as_deref(), order);
+        self.written = Some((column, order, w));
+        w
+    }
+
     /// Reads the client record requests are checked against: the client list's extra columns
     /// and each client's row. Once per visit, and again when `again` (Refresh, Save, Read the
     /// client list again): the list can be large and the cabinet is often on a share, so not
@@ -1439,6 +1455,7 @@ impl AdminPortal {
             return;
         }
         self.record_read = true;
+        self.written = None;
         let master = match vf_fs::clients::load(root) {
             Ok(m) => {
                 self.record_err = None;
@@ -1559,7 +1576,43 @@ pub fn admin_settings(ui: &mut egui::Ui, a: &mut AdminPortal, env: &mut Env) {
                 &mut a.columns.mobile,
             );
             column_choice(ui, "Client's date of birth", &a.extras, &mut a.columns.dob);
+            let l = ui.label("Dates are written");
+            let words = |o: DateOrder| match o {
+                DateOrder::Auto => "Work it out from the list",
+                DateOrder::MonthFirst => "Month first (1/6/1990 is 6 January)",
+                DateOrder::DayFirst => "Day first (6/1/1990 is 6 January)",
+            };
+            egui::ComboBox::from_id_salt("portal-date-order")
+                .width(220.0)
+                .selected_text(words(a.columns.dates))
+                .show_ui(ui, |ui| {
+                    for o in [DateOrder::Auto, DateOrder::MonthFirst, DateOrder::DayFirst] {
+                        ui.selectable_value(&mut a.columns.dates, o, words(o));
+                    }
+                })
+                .response
+                .labelled_by(l.id);
+            ui.end_row();
         });
+    // What "Work it out" finds in the chosen column, so the firm can see it is right.
+    if a.columns.dates == DateOrder::Auto && a.columns.dob.is_some() {
+        ui.label(widgets::caption(
+            match a.written_for(a.columns.dob.clone(), DateOrder::Auto) {
+                Written::DayFirst => {
+                    "The date of birth column writes the day first (it has a date like 25/12/1985)."
+                }
+                Written::MonthFirst => {
+                    "The date of birth column is read month first. If your list writes the day \
+                     first and no day in it is over 12, choose Day first."
+                }
+                Written::Mixed => {
+                    "The date of birth column has dates written both ways. A date that could be \
+                     either (6/1/1990) is not compared: choose how they are written, or tidy the \
+                     list."
+                }
+            },
+        ));
+    }
     if ui
         .button("Read the client list again")
         .on_hover_text("After ticking a column as a token in Admin › Clients.")
@@ -1931,6 +1984,7 @@ fn save(a: &mut AdminPortal, env: &mut Env) {
                     "email": s.record.email,
                     "mobile": s.record.mobile,
                     "dob": s.record.dob,
+                    "dates": s.record.dates,
                 },
             }),
         )],
@@ -2055,6 +2109,8 @@ pub fn admin_requests(ui: &mut egui::Ui, a: &mut AdminPortal, env: &mut Env) {
         a.pick.clear();
         a.load_record(env.root, true);
     }
+    // How the list writes its dates of birth: looked up once, not for every request drawn.
+    let written = a.written_for(s.record.dob.clone(), s.record.dates);
     let mut decision: Option<Decision> = None;
     let mut ask: Option<Option<String>> = None;
     match &a.requests {
@@ -2114,7 +2170,12 @@ pub fn admin_requests(ui: &mut egui::Ui, a: &mut AdminPortal, env: &mut Env) {
                     // The request beside the chosen client's row of the client list.
                     let cmp = chosen_client.filter(|_| s.record.any()).map(|c| {
                         let empty = BTreeMap::new();
-                        record::compare(r, a.rows.get(&c.code).unwrap_or(&empty), &s.record)
+                        record::compare_in(
+                            r,
+                            a.rows.get(&c.code).unwrap_or(&empty),
+                            &s.record,
+                            written,
+                        )
                     });
                     if let (Some(c), Some(cmp)) = (chosen_client, &cmp) {
                         ui.label(format!(

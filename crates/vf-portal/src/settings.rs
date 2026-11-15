@@ -196,6 +196,7 @@ mod tests {
                 email: Some("Email".into()),
                 mobile: None,
                 dob: Some("Date_of_Birth".into()),
+                dates: crate::record::DateOrder::DayFirst,
             });
         save(t.path(), &s).unwrap();
         assert_eq!(load(t.path(), "cab-1"), Some(s));
