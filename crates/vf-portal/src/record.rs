@@ -245,7 +245,10 @@ fn phones(cell: &str) -> Vec<String> {
                     11 if c.starts_with('1') => Some(&c[1..]),
                     _ => None,
                 };
+                // A number ends on its last four digits or more ("0123", "5550123"), never
+                // on an area code or exchange: "555-2123 212-555-0199" is not 555-212-3212.
                 if let Some(t) = ten
+                    && runs[j - 1].len() >= 4
                     && is_nanp(t)
                 {
                     out.push(t.to_string());
@@ -743,6 +746,9 @@ mod tests {
         );
         // A number is not made of the end of one and the start of the next.
         assert_eq!(phones("555-0123 212-555-0199"), vec!["2125550199"]);
+        assert_eq!(phones("555-2123 212-555-0199"), vec!["2125550199"]);
+        assert!(phones("555-2123 555-0199").is_empty());
+        assert_eq!(phones("212 5550123"), vec!["2125550123"]);
         // One after an extension, or after "fax", is still read.
         assert_eq!(
             phones("212-555-0123 x12 646-555-0100"),
