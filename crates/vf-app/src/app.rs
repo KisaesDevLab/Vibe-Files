@@ -181,6 +181,16 @@ pub struct VibeFilesApp {
     firm_inbox: Option<PathBuf>,
 }
 
+/// The line under the opening screen's spinner: the step, and how long it has taken once
+/// that is worth saying.
+pub(crate) fn opening_line(step: &str, since: std::time::Duration) -> String {
+    match since.as_secs() {
+        0..=2 => format!("{step}…"),
+        s @ 3..=119 => format!("{step}… ({s} s)"),
+        s => format!("{step}… ({} min)", s / 60),
+    }
+}
+
 /// What the footer says is going on behind the window: the index of the cabinet's files
 /// (`listing`: client folders done, of how many, documents so far), else the other servers'
 /// changes being read.
@@ -360,6 +370,7 @@ impl VibeFilesApp {
             // A session host is wiped overnight and its settings with it (PA-69): the login
             // works under the id the cabinet remembers for it, so its Intake folder and what
             // it did yesterday are still its own.
+            session::step("Signing this login in to the cabinet");
             let (device, login) = if mode == Mode::Open && crate::server::server_mode() {
                 vf_fs::identity::login_session(
                     &root,
@@ -383,11 +394,15 @@ impl VibeFilesApp {
             // The rest of opening (it reads and writes the share) here too, not on the UI
             // thread once the cabinet shows (QA A6).
             let r = r.map(|mut o| {
+                session::step(
+                    "Getting the cabinet ready: print capture rules, the client list, legal holds, the trash",
+                );
                 let mut p = prepare(&mut o, &device);
                 p.login = login;
                 p.inbox_problem = inbox_problem;
                 (o, p)
             });
+            session::steps_done();
             let _ = tx.send(r.map_err(|e| format!("{e:#}")));
             ctx.request_repaint();
         });
@@ -1385,6 +1400,11 @@ impl eframe::App for VibeFilesApp {
                             ui.spinner();
                             ui.label(*what);
                         });
+                        // What is being waited for, and for how long (owner 2026-11-15: a
+                        // session host's log cannot always be reached).
+                        if let Some((step, since)) = session::current_step() {
+                            ui.label(crate::ui::widgets::caption(opening_line(step, since)));
+                        }
                         // A first index lists every client folder (PA-60: it reads no file):
                         // say how far it is (owner 2026-11-05).
                         use std::sync::atomic::Ordering;

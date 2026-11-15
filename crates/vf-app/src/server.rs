@@ -733,6 +733,18 @@ mod tests {
         assert!(Watch::default().last.is_some());
         assert!(!Watch::due_now().busy());
         assert!(Watch::due_now().first_pending() && !Watch::default().first_pending());
+        // The opening screen says the step being waited for, and for how long.
+        let line = crate::app::opening_line;
+        let secs = std::time::Duration::from_secs;
+        assert_eq!(line("Opening the catalog", secs(1)), "Opening the catalog…");
+        assert_eq!(
+            line("Opening the catalog", secs(45)),
+            "Opening the catalog… (45 s)"
+        );
+        assert_eq!(
+            line("Opening the catalog", secs(600)),
+            "Opening the catalog… (10 min)"
+        );
     }
 
     /// Q-112: the computer's own choice first, then the firm's line, then Windows.

@@ -43,6 +43,44 @@ pub struct Opened {
     pub caught_up: bool,
 }
 
+/// What opening a cabinet is doing now and since when, said under the spinner of the opening
+/// screen (owner 2026-11-15: on a session host the log cannot always be reached, and
+/// "Opening the cabinet…" alone does not say what is being waited for).
+static STEP: std::sync::Mutex<Option<(&'static str, std::time::Instant)>> =
+    std::sync::Mutex::new(None);
+
+/// Opening has reached `what` (also logged, with how long the step before it took).
+pub fn step(what: &'static str) {
+    let mut s = STEP.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((before, at)) = *s {
+        tracing::info!(
+            step = before,
+            ms = at.elapsed().as_millis() as u64,
+            "opening: step done"
+        );
+    }
+    *s = Some((what, std::time::Instant::now()));
+}
+
+/// Opening is over (the cabinet shows, or the opening screen says why not).
+pub fn steps_done() {
+    let mut s = STEP.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((before, at)) = s.take() {
+        tracing::info!(
+            step = before,
+            ms = at.elapsed().as_millis() as u64,
+            "opening: step done"
+        );
+    }
+}
+
+/// The step opening is in, and for how long.
+pub fn current_step() -> Option<(&'static str, std::time::Duration)> {
+    STEP.lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .map(|(what, at)| (what, at.elapsed()))
+}
+
 /// The device id sync uses for `conn`'s catalog: kept in the catalog, set by the first login
 /// that opens it.
 fn catalog_sync_device(conn: &Connection, device_id: &str) -> String {
@@ -166,6 +204,7 @@ pub fn open_staged(data: &Path, device_id: &str, root: &Path) -> Result<Opened> 
 }
 
 fn open_how(data: &Path, device_id: &str, root: &Path, behind: bool) -> Result<Opened> {
+    step("Reading the cabinet's own file on the share");
     let cab = cabinet::read(root).map_err(anyhow::Error::msg)?;
     std::fs::create_dir_all(data).with_context(|| format!("creating {}", data.display()))?;
     // This PC's shared catalog for the cabinet, when an admin shared one (Q-67).
@@ -186,6 +225,9 @@ fn open_how(data: &Path, device_id: &str, root: &Path, behind: bool) -> Result<O
             } else {
                 vf_core::exe_dir().map(|d| d.join("data").join(CATALOG_FILE))
             };
+            step(
+                "Making this computer's catalog from the copy in the cabinet (another login may be making it: this one waits)",
+            );
             Some(crate::server::provision(
                 &cab.cabinet_id,
                 root,
@@ -196,8 +238,10 @@ fn open_how(data: &Path, device_id: &str, root: &Path, behind: bool) -> Result<O
     };
     let shared = shared_at.is_some();
     let catalog = shared_at.unwrap_or_else(|| data.join(CATALOG_FILE));
+    step("Opening the catalog (after an update it is tidied once, which can take minutes)");
     let set_aside = set_aside_encrypted(&catalog)?;
     let mut conn = db::open(&catalog, Storage::Local)?;
+    step("Reading the client list");
     // Taxpayer-ID columns a client list may carry (Filer's own wizard) are removed first.
     if let Ok(bad) = vf_fs::clients::strip_tins_on_disk(root)
         && !bad.is_empty()
@@ -210,6 +254,7 @@ fn open_how(data: &Path, device_id: &str, root: &Path, behind: bool) -> Result<O
     // This copy marked as running first: its own rows from now on are not another's to
     // recover. Then a change cut short by a crash is put back before anything else reads the
     // cabinet (on a shared catalog, only those of copies no longer running).
+    step("Putting back changes that were cut short");
     let live = vf_fs::fileops::hold_live(catalog.parent().unwrap_or(data));
     let rec = vf_fs::fileops::recover(&conn, root).map_err(anyhow::Error::msg)?;
     if rec.transactions > 0 {
@@ -232,6 +277,7 @@ fn open_how(data: &Path, device_id: &str, root: &Path, behind: bool) -> Result<O
             data.display()
         );
     }
+    step("Reading the cabinet's doc types and retention schedule");
     // Cabinets made before doc types existed get the seeded list now.
     let seeded = vf_fs::doctypes::seed_if_missing(root).map_err(anyhow::Error::msg)?;
     // P07: the seeded retention schedule, and the doc types' default classes (once).
@@ -254,6 +300,7 @@ fn open_how(data: &Path, device_id: &str, root: &Path, behind: bool) -> Result<O
     // Behind the window: a catalog new to the cabinet, or any index cut short (owner
     // 2026-11-15, Q-112: nobody waits at "Opening the cabinet…" while files are listed; a
     // rebuild of another kind cut short used to run again here, in front of the window).
+    step("Listing the client folders");
     let label = vf_fs::rebuild::unfinished_label(&conn);
     let in_parts = behind && (known == 0 || label.is_some());
     let mut staged = None;
@@ -275,6 +322,7 @@ fn open_how(data: &Path, device_id: &str, root: &Path, behind: bool) -> Result<O
         vf_fs::changes::set_writer(root, w);
     }
     if let Some(w) = writer.as_ref().filter(|_| caught_up) {
+        step("Reading the changes made on other servers");
         match vf_fs::changes::catch_up(&mut conn, root, w, device_id) {
             Ok(f) if !f.is_empty() => {
                 tracing::info!(folders = f.len(), "other servers' changes read")
