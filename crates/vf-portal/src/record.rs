@@ -5,9 +5,12 @@
 //! which column holds the client's email, mobile number and date of birth; a request is compared
 //! with the chosen client's row on this PC, and only what matched is sent to the portal.
 //!
-//! A request matches (Vibe Portal P84) when the contact the person confirmed with a code is the
-//! record's email or mobile, or the date of birth in their ID's barcode is the record's and the
-//! portal did not flag the ID's name as different from the request's.
+//! A request matches when the contact the person confirmed with a code is the record's email
+//! or mobile. The date of birth in their ID's barcode is compared and shown, and said with a
+//! match when it is the record's and the portal did not flag the ID's name, but never counts
+//! alone (owner 2026-11-14, Q-110; narrower than Vibe Portal P84): a barcode can be made by
+//! anyone, and the portal compares the ID's name with the name the person typed, not with the
+//! client's.
 
 use std::collections::BTreeMap;
 
@@ -95,7 +98,8 @@ pub struct Comparison {
 
 impl Comparison {
     /// What matched, in the portal's words (`email`, `mobile`, `dob`): empty when the request
-    /// does not match the record. A date of birth counts only with the name flag clear.
+    /// does not match the record. The confirmed email or mobile must be the record's; a date
+    /// of birth is added to that (with the name flag clear) and never counts alone.
     pub fn matched(&self) -> Vec<&'static str> {
         let mut out = Vec::new();
         if self.email == Line::Matches {
@@ -104,10 +108,20 @@ impl Comparison {
         if self.mobile == Line::Matches {
             out.push("mobile");
         }
-        if self.dob == Line::Matches && !self.name_differs {
+        if !out.is_empty() && self.dob_alone_would() {
             out.push("dob");
         }
         out
+    }
+
+    /// The date of birth is the record's and the ID's name was not flagged.
+    fn dob_alone_would(&self) -> bool {
+        self.dob == Line::Matches && !self.name_differs
+    }
+
+    /// The date of birth is the record's, and nothing else is: said on the page, not a match.
+    pub fn only_dob(&self) -> bool {
+        self.dob_alone_would() && self.matched().is_empty()
     }
 }
 
@@ -154,39 +168,92 @@ fn is_nanp(ten: &str) -> bool {
 /// digits, with or without a 1 in front. Several in a cell are told apart by `;`, `,`, `/`,
 /// `|` or "or", or by their length alone ("212 555 0123 212 555 0199" is two). An extension
 /// is left off; digits that are not such a number are not compared.
+///
+/// A number is made of whole groups of digits as they are written ("212", "555", "0123"),
+/// never of the end of one number and the start of the next: "555-0123 212-555-0199" has one
+/// number, the second.
 fn phones(cell: &str) -> Vec<String> {
     let mut out = Vec::new();
     for part in cell
         .split([';', ',', '/', '|'])
         .flat_map(|p| p.split(" or "))
     {
-        // The digits up to an extension ("x12", "ext. 12", "#12").
+        // The groups of digits, without the one after an extension's mark ("x12", "ext. 12",
+        // "#12"; the x of "fax" is not one).
         let lower = part.to_lowercase();
-        let mut digits = String::new();
+        let mut runs: Vec<String> = Vec::new();
+        let (mut total, mut in_run, mut skip) = (0usize, false, false);
+        let mut prev = ' ';
         let mut rest = lower.as_str();
         while let Some(c) = rest.chars().next() {
-            if digits.len() >= 10 && (c == 'x' || c == '#' || rest.starts_with("ext")) {
-                break;
-            }
             if c.is_ascii_digit() {
-                digits.push(c);
+                if !in_run {
+                    in_run = true;
+                    if !skip {
+                        runs.push(String::new());
+                    }
+                }
+                if !skip && let Some(run) = runs.last_mut() {
+                    run.push(c);
+                    total += 1;
+                }
+            } else {
+                if in_run {
+                    in_run = false;
+                    skip = false;
+                }
+                if total >= 10
+                    && (c == '#' || rest.starts_with("ext") || (c == 'x' && !prev.is_alphabetic()))
+                {
+                    skip = true;
+                }
             }
+            prev = c;
             rest = &rest[c.len_utf8()..];
         }
-        // One number after another: a 1 in front (never the start of an area code), then ten.
-        let mut d = digits.as_str();
-        while d.len() >= 10 {
-            if d.len() >= 11 && d.starts_with('1') {
-                d = &d[1..];
+        let mut i = 0;
+        while i < runs.len() {
+            if runs[i].len() >= 10 {
+                // Written without a break: one number after another, a 1 in front (never the
+                // start of an area code), then ten.
+                let mut d = runs[i].as_str();
+                while d.len() >= 10 {
+                    if d.len() >= 11 && d.starts_with('1') {
+                        d = &d[1..];
+                    }
+                    let (ten, after) = d.split_at(10);
+                    if is_nanp(ten) {
+                        out.push(ten.to_string());
+                        d = after;
+                    } else {
+                        // Not a number here: look one digit on, in case it starts later.
+                        d = &d[1..];
+                    }
+                }
+                i += 1;
+                continue;
             }
-            let (ten, after) = d.split_at(10);
-            if is_nanp(ten) {
-                out.push(ten.to_string());
-                d = after;
-            } else {
-                // Not a number here: look one digit on, in case it starts later.
-                d = &d[1..];
+            // Groups from this one on, until they make ten digits (or a 1 and ten).
+            let mut c = String::new();
+            let mut j = i;
+            let mut found = false;
+            while j < runs.len() && runs[j].len() < 10 && c.len() < 11 {
+                c.push_str(&runs[j]);
+                j += 1;
+                let ten = match c.len() {
+                    10 => Some(&c[..]),
+                    11 if c.starts_with('1') => Some(&c[1..]),
+                    _ => None,
+                };
+                if let Some(t) = ten
+                    && is_nanp(t)
+                {
+                    out.push(t.to_string());
+                    found = true;
+                    break;
+                }
             }
+            i = if found { j } else { i + 1 };
         }
     }
     out
@@ -313,6 +380,9 @@ pub fn parse_date_in(s: &str, written: Written) -> Option<(u32, u32, u32)> {
     }
 }
 
+/// How many dates that can only be day first make a column day first ([`Rows::written`]).
+pub const SEVERAL: usize = 3;
+
 /// Each client's row of the client list, by its ID. An ID is looked up as written; when no
 /// client has it so, without regard to case, but only if one client alone answers to it (two
 /// IDs that differ only by case are two clients: neither stands in for the other).
@@ -342,10 +412,12 @@ impl Rows {
         self.exact.insert(id, extra);
     }
 
-    /// How `column`'s dates are written, from every client's row: day first when some date
-    /// can only be so (`13/1/1990`), month first when some can only be so (`1/13/1990`) or
-    /// none says, and mixed when the column has both kinds. `order`: what the firm chose in
-    /// Admin › Portal, which settles it without looking.
+    /// How `column`'s dates are written, from every client's row: day first when several
+    /// dates ([`SEVERAL`]) can only be so (`13/1/1990`) and none can only be month first;
+    /// month first when none can only be day first; and mixed otherwise (both kinds, or only
+    /// one or two that say day first: one mistyped row does not turn a whole list round,
+    /// owner 2026-11-14, Q-110). `order`: what the firm chose in Admin › Portal, which settles
+    /// it without looking.
     pub fn written(&self, column: Option<&str>, order: DateOrder) -> Written {
         match order {
             DateOrder::MonthFirst => return Written::MonthFirst,
@@ -355,17 +427,17 @@ impl Rows {
         let Some(column) = column else {
             return Written::MonthFirst;
         };
-        let (mut day_first, mut month_first) = (false, false);
+        let (mut day_first, mut month_first) = (0usize, 0usize);
         for row in self.exact.values() {
             if let Some((a, b)) = row.get(column).and_then(|v| before_year(v)) {
-                day_first |= a > 12 && b <= 12;
-                month_first |= b > 12 && a <= 12;
+                day_first += usize::from(a > 12 && b <= 12);
+                month_first += usize::from(b > 12 && a <= 12);
             }
         }
         match (day_first, month_first) {
-            (true, true) => Written::Mixed,
-            (true, false) => Written::DayFirst,
-            _ => Written::MonthFirst,
+            (0, _) => Written::MonthFirst,
+            (d, 0) if d >= SEVERAL => Written::DayFirst,
+            _ => Written::Mixed,
         }
     }
 
@@ -574,14 +646,25 @@ mod tests {
 
     #[test]
     fn a_date_of_birth_counts_only_with_the_name_clear() {
-        let extra = row(&[("DOB", "1/6/1990"), ("Email", "someone@else.test")]);
+        // Alone it is not a match (Q-110): a barcode can be made by anyone.
+        let other = row(&[("DOB", "1/6/1990"), ("Email", "someone@else.test")]);
+        let alone = compare(
+            &request("alex@example.test", Some("1990-01-06"), &[]),
+            &other,
+            &columns(),
+        );
+        assert_eq!((alone.email, alone.dob), (Line::Differs, Line::Matches));
+        assert!(alone.matched().is_empty());
+        assert!(alone.only_dob());
+        // With the confirmed email it is said too, unless the ID's name was flagged.
+        let extra = row(&[("DOB", "1/6/1990"), ("Email", "alex@example.test")]);
         let c = compare(
             &request("alex@example.test", Some("1990-01-06"), &[]),
             &extra,
             &columns(),
         );
-        assert_eq!((c.email, c.dob), (Line::Differs, Line::Matches));
-        assert_eq!(c.matched(), vec!["dob"]);
+        assert_eq!(c.matched(), vec!["email", "dob"]);
+        assert!(!c.only_dob());
         let flagged = compare(
             &request(
                 "alex@example.test",
@@ -592,7 +675,7 @@ mod tests {
             &columns(),
         );
         assert_eq!(flagged.dob, Line::Matches);
-        assert!(flagged.matched().is_empty());
+        assert_eq!(flagged.matched(), vec!["email"]);
         let wrong = compare(
             &request("alex@example.test", Some("1990-01-07"), &[]),
             &extra,
@@ -658,6 +741,18 @@ mod tests {
             phones("home 2125550123, cell 6465550100"),
             vec!["2125550123", "6465550100"]
         );
+        // A number is not made of the end of one and the start of the next.
+        assert_eq!(phones("555-0123 212-555-0199"), vec!["2125550199"]);
+        // One after an extension, or after "fax", is still read.
+        assert_eq!(
+            phones("212-555-0123 x12 646-555-0100"),
+            vec!["2125550123", "6465550100"]
+        );
+        assert_eq!(
+            phones("212-555-0123 fax 646-555-0100"),
+            vec!["2125550123", "6465550100"]
+        );
+        assert_eq!(phones("1 2125550123"), vec!["2125550123"]);
         // Not numbers the plan allows: an area code or exchange starting with 0 or 1, too few
         // digits, an account number.
         for cell in [
@@ -695,9 +790,14 @@ mod tests {
             rows
         };
         let auto = DateOrder::Auto;
-        // One date that can only be day first settles the column.
-        let uk = list(&["6/1/1990", "25/12/1985", "3/4/1970"]);
+        // Several dates that can only be day first settle the column.
+        let uk = list(&["6/1/1990", "25/12/1985", "13/4/1970", "31/1/1960"]);
         assert_eq!(uk.written(Some("DOB"), auto), Written::DayFirst);
+        // One or two do not (a mistyped row): a date that could be either is then not read.
+        assert_eq!(
+            list(&["6/1/1990", "25/12/1985", "3/4/1970"]).written(Some("DOB"), auto),
+            Written::Mixed
+        );
         assert_eq!(
             parse_date_in("6/1/1990", Written::DayFirst),
             Some((1990, 1, 6))
