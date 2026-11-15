@@ -478,6 +478,8 @@ pub struct Browse {
     /// it asked for this frame, the find running on its thread, and the query the list shows
     /// with whether it was cut at [`crate::ui::search::LIMIT`].
     pub find: crate::ui::search::Find,
+    /// Explorer view (Q-114): the folder shown as it is on disk.
+    ex: Explorer,
     pub find_open: bool,
     find_ctx: crate::ui::search::Context,
     find_ask: Option<crate::ui::search::Ask>,
@@ -583,6 +585,7 @@ impl Browse {
             client_sync_again: false,
             saved_job: None,
             find: Default::default(),
+            ex: Default::default(),
             find_open: false,
             find_ctx: Default::default(),
             find_ask: None,
@@ -729,6 +732,12 @@ impl Browse {
             &self.scope
         {
             w.ids.extend(ids.iter().cloned());
+        }
+        // Explorer view: the documents of the folder shown, whoever's they are.
+        if self.explorer_on()
+            && let Some(l) = &self.ex.listed
+        {
+            w.ids.extend(l.ids.iter().cloned());
         }
         w
     }
@@ -1543,7 +1552,18 @@ impl Browse {
             self.scope = self.ids_scope(*list);
         }
         let needle = self.name_filter.trim().to_lowercase();
-        let mut v = self.view_docs(&self.scope);
+        let mut v = if self.explorer_on() {
+            // Explorer view: the documents directly in the folder shown, not those below it.
+            let dir = self.ex.dir.as_str();
+            (0..self.snap.docs.len())
+                .filter(|&i| {
+                    crate::ui::explorer::dir_of(&self.snap.docs[i].rel_path)
+                        .eq_ignore_ascii_case(dir)
+                })
+                .collect()
+        } else {
+            self.view_docs(&self.scope)
+        };
         if !needle.is_empty() {
             v.retain(|&i| self.snap.docs[i].name().to_lowercase().contains(&needle));
         }
@@ -1804,6 +1824,151 @@ impl Browse {
             }
         }
         self.find_requests(env);
+        if let Some(ctx) = self.ctx() {
+            self.explorer_sync(&ctx, env);
+        }
+    }
+
+    /// The folder on disk a tree node stands for: the cabinet, a client's folder, a folder in
+    /// it. Views, saved searches, what was found and the by-year tree have none.
+    fn scope_dir(&self, scope: &Scope) -> Option<String> {
+        let of = |c: usize| self.snap.clients.get(c)?.folder_rel.clone();
+        match scope {
+            Scope::Cabinet => Some(String::new()),
+            Scope::Client(c) => of(*c).filter(|f| !f.is_empty()),
+            Scope::Folder { client, folder } => {
+                Some(crate::ui::explorer::join(&of(*client)?, folder))
+            }
+            _ => None,
+        }
+    }
+
+    /// The tree node of a folder on disk, when it is the cabinet, a client's folder or inside
+    /// one.
+    fn dir_scope(&self, dir: &str) -> Option<Scope> {
+        if dir.is_empty() {
+            return Some(Scope::Cabinet);
+        }
+        let d = dir.to_lowercase();
+        self.snap.clients.iter().enumerate().find_map(|(i, c)| {
+            let f = c
+                .folder_rel
+                .as_deref()
+                .filter(|f| !f.is_empty())?
+                .to_lowercase();
+            if d == f {
+                Some(Scope::Client(i))
+            } else {
+                d.strip_prefix(&f)
+                    .filter(|rest| rest.starts_with('/'))
+                    .map(|_| Scope::Folder {
+                        client: i,
+                        folder: dir[f.len() + 1..].to_string(),
+                    })
+            }
+        })
+    }
+
+    /// Explorer view is chosen and the tree node shown is a folder on disk.
+    pub fn explorer_on(&self) -> bool {
+        self.prefs.explorer && self.scope_dir(&self.scope).is_some()
+    }
+
+    /// Explorer view goes to `dir`: by the tree when the folder is the cabinet, a client's or
+    /// inside one (the tree, the "this client first" index and the other servers' read follow),
+    /// else on its own (`_Vibe`, a folder bound to no client).
+    fn explorer_go(&mut self, dir: String) {
+        if !crate::ui::explorer::inside(&dir) {
+            return;
+        }
+        self.ex.picked = None;
+        match self.dir_scope(&dir) {
+            Some(s) => {
+                self.set_scope(s);
+                // (The same node, reached from a folder that was not one: `dir` still moves.)
+                self.ex.for_scope = None;
+            }
+            None => {
+                self.ex.dir = dir;
+                self.selected.clear();
+                self.cursor = None;
+                self.anchor = None;
+                self.refresh();
+            }
+        }
+    }
+
+    /// Keeps explorer view in step, every frame: the folder follows the tree node, the folder
+    /// is listed when it changed or the catalog was read again (on its thread with a spinner:
+    /// it asks the share; here without the catalog file, as in tests), and what the row
+    /// actions asked for is done.
+    fn explorer_sync(&mut self, ctx: &egui::Context, env: &Env) {
+        if let Some(dir) = self.ex.go.take() {
+            self.explorer_go(dir);
+        }
+        if let Some(a) = self.ex.shell.take()
+            && let Err(e) = (self.shell)(&a)
+        {
+            self.error = Some(e);
+        }
+        if let Some(p) = self.ex.copy.take() {
+            ctx.copy_text(p.display().to_string());
+            self.notice = Some(format!("Copied {}", p.display()));
+        }
+        if !self.explorer_on() {
+            self.ex.for_scope = None;
+            return;
+        }
+        if self.ex.for_scope.as_ref() != Some(&self.scope) {
+            if let Some(d) = self.scope_dir(&self.scope) {
+                self.ex.dir = d;
+            }
+            self.ex.for_scope = Some(self.scope.clone());
+            self.ex.picked = None;
+            self.refresh();
+        }
+        if self.ex.reloads != self.reloads {
+            self.ex.reloads = self.reloads;
+            self.ex.stale = true;
+        }
+        let have = self
+            .ex
+            .listed
+            .as_ref()
+            .is_some_and(|l| l.dir == self.ex.dir);
+        if (!have || self.ex.stale) && self.ex.job.is_none() {
+            self.ex.stale = false;
+            let (root, dir) = (env.root.to_path_buf(), self.ex.dir.clone());
+            match self.catalog.clone() {
+                Some(catalog) => {
+                    match crate::ui::job::Job::start(ctx, "Reading the folder…", move || {
+                        let conn = vf_core::db::open(&catalog, vf_core::db::Storage::Local).ok();
+                        crate::ui::explorer::list(&root, &dir, conn.as_ref())
+                    }) {
+                        Ok(j) => self.ex.job = Some(j),
+                        Err(e) => self.error = Some(format!("The folder was not read: {e}")),
+                    }
+                }
+                None => {
+                    let l = crate::ui::explorer::list(&root, &dir, Some(&*env.conn));
+                    self.explorer_listed(l);
+                }
+            }
+        }
+        if let Some(r) = crate::ui::job::take(&mut self.ex.job) {
+            match r {
+                Ok(l) => self.explorer_listed(l),
+                Err(e) => self.error = Some(format!("The folder was not read: {e}")),
+            }
+        }
+    }
+
+    /// A folder's listing came back (dropped when the view has moved on meanwhile).
+    fn explorer_listed(&mut self, l: crate::ui::explorer::Listed) {
+        if l.dir == self.ex.dir {
+            self.ex.listed = Some(l);
+            self.refresh();
+        }
     }
 
     /// What "This client" and "This folder" mean in Find documents: the tree node selected.
@@ -2743,6 +2908,29 @@ fn partner_pick(ui: &mut egui::Ui, b: &mut Browse) {
 
 /// A saved search's run: its name and the documents it found.
 type SavedRun = (String, Result<Vec<String>, String>);
+
+/// Explorer view's state (Q-114): the folder shown, its listing, and the row picked when it is
+/// not a document (a folder, or a file the catalog does not have).
+#[derive(Default)]
+struct Explorer {
+    /// Cabinet-relative, `/`-separated; `""` is the cabinet folder.
+    dir: String,
+    /// The tree node `dir` was last taken from: a change of node moves the view there.
+    for_scope: Option<Scope>,
+    listed: Option<crate::ui::explorer::Listed>,
+    job: Option<crate::ui::job::Job<crate::ui::explorer::Listed>>,
+    /// The catalog was read again: the folder is listed again too.
+    reloads: u64,
+    stale: bool,
+    /// The column sorted by, and whether from the last to the first.
+    sort: (crate::ui::explorer::Col, bool),
+    picked: Option<String>,
+    /// Asked for this frame (they need the cabinet root): a folder to go into, a file the
+    /// catalog does not have to hand to Windows, a path to copy.
+    go: Option<String>,
+    shell: Option<ShellAction>,
+    copy: Option<PathBuf>,
+}
 /// A find's query and the ids it found (one more than the limit when there are more).
 type FindRun = (vf_index::search::Query, Result<Vec<String>, String>);
 
@@ -3616,6 +3804,39 @@ fn grid(ui: &mut egui::Ui, b: &mut Browse, conn: &Connection) {
         {
             b.find_open = !b.find_open;
         }
+        // Documents (the catalog's list, with what is below the folder) or Explorer (the
+        // folder as it is on disk, Q-114); each Windows login keeps its own choice.
+        ui.separator();
+        let on_disk = b.scope_dir(&b.scope).is_some();
+        for (explorer, label, tip) in [
+            (
+                false,
+                "Documents",
+                "The documents of what is selected on the left, with those in the folders below it",
+            ),
+            (
+                true,
+                "Explorer",
+                "The folder as it is on disk: its folders, then every file in it",
+            ),
+        ] {
+            let r = ui
+                .add_enabled(
+                    on_disk || !explorer,
+                    egui::Button::new(label)
+                        .small()
+                        .selected(b.prefs.explorer == explorer),
+                )
+                .on_hover_text(tip)
+                .on_disabled_hover_text(
+                    "Explorer view shows a folder: choose the cabinet, a client or a folder on the left (with the tree set to Folders).",
+                );
+            if r.clicked() && b.prefs.explorer != explorer {
+                b.prefs.explorer = explorer;
+                b.ex.for_scope = None;
+                b.prefs_changed();
+            }
+        }
         // The folder path on its own row (it ran under the filter when long, owner
         // 2026-11-04); cut short with … only when wider than the list, whole on hover.
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -3712,6 +3933,10 @@ fn grid(ui: &mut egui::Ui, b: &mut Browse, conn: &Connection) {
         });
     });
     ui.add_space(6.0);
+    if b.explorer_on() {
+        explorer_list(ui, b);
+        return;
+    }
     if b.snap.docs.is_empty() {
         ui.label("Create your first client or run the import wizard.");
         return;
@@ -3965,6 +4190,256 @@ fn grid(ui: &mut egui::Ui, b: &mut Browse, conn: &Connection) {
 }
 
 /// A painted ▲/▼ (the bundled fonts have no such glyph).
+/// Explorer view (Q-114): the folder shown as it is on disk. Its folders first, then every
+/// file in it. A file the catalog has is the document (select it, and the toolbar and the
+/// details pane work on it as in the Documents view); a folder is gone into by a
+/// double-click; a file the catalog does not have can only be opened, shown in Windows
+/// Explorer or have its path copied (nothing here moves or renames outside a Transaction).
+fn explorer_list(ui: &mut egui::Ui, b: &mut Browse) {
+    use crate::ui::explorer::{self as ex, Col};
+    let Some(root) = b.root.clone() else {
+        ui.label(widgets::caption("The cabinet's folder is not known here."));
+        return;
+    };
+    // Up, and where this is.
+    ui.horizontal(|ui| {
+        let up = ex::parent(&b.ex.dir);
+        if ui
+            .add_enabled(up.is_some(), egui::Button::new("Up").small())
+            .on_hover_text("The folder this one is in")
+            .on_disabled_hover_text("This is the cabinet's own folder.")
+            .clicked()
+        {
+            b.ex.go = up;
+        }
+        let path = if b.ex.dir.is_empty() {
+            "Cabinet".to_string()
+        } else {
+            format!("Cabinet / {}", b.ex.dir.replace('/', " / "))
+        };
+        ui.add(egui::Label::new(RichText::new(&path).monospace()).truncate())
+            .on_hover_text(root.join(&b.ex.dir).display().to_string());
+    });
+    if let Some(j) = &b.ex.job {
+        j.show(ui);
+    }
+    let listed = b.ex.listed.as_ref().filter(|l| l.dir == b.ex.dir);
+    let mut rows = match listed.map(|l| &l.entries) {
+        None => {
+            ui.label(widgets::caption("Reading the folder…"));
+            return;
+        }
+        Some(Err(e)) => {
+            ui.label(RichText::new(e).color(crate::ui::theme::error()));
+            return;
+        }
+        Some(Ok(v)) => v.clone(),
+    };
+    let needle = b.name_filter.trim().to_lowercase();
+    if !needle.is_empty() {
+        rows.retain(|e| e.name.to_lowercase().contains(&needle));
+    }
+    let (col, desc) = b.ex.sort;
+    let asc = !desc;
+    ex::sort(&mut rows, col, asc);
+    // The catalog's documents of this folder by file name, and the list's own order made
+    // theirs (the keys move through the documents in the order shown).
+    let by_name: HashMap<String, usize> = b
+        .visible
+        .iter()
+        .map(|&di| (b.snap.docs[di].name().to_lowercase(), di))
+        .collect();
+    let order: Vec<usize> = rows
+        .iter()
+        .filter(|e| !e.dir)
+        .filter_map(|e| by_name.get(&e.name.to_lowercase()).copied())
+        .collect();
+    if order.len() == b.visible.len() && order != b.visible {
+        b.visible = order;
+        b.cursor = None;
+        b.anchor = None;
+    }
+    let pos_of: HashMap<usize, usize> = b
+        .visible
+        .iter()
+        .enumerate()
+        .map(|(p, &di)| (di, p))
+        .collect();
+    let (folders, files) = (
+        rows.iter().filter(|e| e.dir).count(),
+        rows.iter().filter(|e| !e.dir).count(),
+    );
+    ui.label(widgets::caption(format!(
+        "{folders} folders · {files} files, {} of them documents in the catalog",
+        b.visible.len()
+    )));
+    if rows.is_empty() {
+        ui.label(widgets::caption(if needle.is_empty() {
+            "This folder is empty."
+        } else {
+            "Nothing in this folder has that in its name."
+        }));
+        return;
+    }
+    let listing = b.indexing.is_some();
+    let mods = ui.input(|i| i.modifiers);
+    let mut sort: Option<Col> = None;
+    let mut click: Option<(usize, egui::Modifiers)> = None;
+    let mut pick: Option<String> = None;
+    let mut file_req: Option<(usize, FileAct)> = None;
+    let selectable = ui.style().interaction.selectable_labels;
+    ui.style_mut().interaction.selectable_labels = false;
+    let selection_text = ui.visuals().selection.stroke.color;
+    ui.visuals_mut().selection.stroke.color = theme::ink();
+    b.scroll_to = None;
+    egui::ScrollArea::horizontal()
+        .id_salt("browse-explorer-x")
+        .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded)
+        .show(ui, |ui| {
+            TableBuilder::new(ui)
+                .striped(false)
+                .sense(Sense::click())
+                .cell_layout(Layout::left_to_right(Align::Center))
+                .column(Column::initial(420.0).at_least(200.0).clip(true).resizable(true))
+                .column(Column::exact(150.0))
+                .column(Column::exact(120.0))
+                .column(Column::remainder().at_least(90.0))
+                .header(28.0, |mut h| {
+                    for (c, name) in Col::ALL {
+                        h.col(|ui| {
+                            let t = RichText::new(name.to_uppercase())
+                                .small()
+                                .color(theme::ink_muted());
+                            if ui.add(egui::Button::new(t).frame(false)).clicked() {
+                                sort = Some(c);
+                            }
+                            if col == c {
+                                sort_arrow(ui, asc);
+                            }
+                        });
+                    }
+                })
+                .body(|body| {
+                    body.rows(ROW_H, rows.len(), |mut row| {
+                        let e = &rows[row.index()];
+                        let doc = (!e.dir)
+                            .then(|| by_name.get(&e.name.to_lowercase()).copied())
+                            .flatten();
+                        let sel = match doc {
+                            Some(di) => b.selected.contains(&di),
+                            None => b.ex.picked.as_deref() == Some(e.name.as_str()),
+                        };
+                        row.set_selected(sel);
+                        row.col(|ui| {
+                            if e.dir {
+                                // A folder's mark, drawn (no font has to carry a glyph).
+                                let (r, _) = ui.allocate_exact_size(egui::vec2(16.0, 12.0), Sense::hover());
+                                ui.painter().rect_filled(r, 2.0, theme::accent());
+                            } else {
+                                ui.add_space(16.0 + ui.spacing().item_spacing.x);
+                            }
+                            let name = RichText::new(&e.name).family(theme::mono_semibold(ui));
+                            // A file the catalog does not have is shown fainter.
+                            ui.label(if e.dir || doc.is_some() {
+                                name.color(theme::ink())
+                            } else {
+                                name.color(theme::ink_muted())
+                            });
+                        });
+                        row.col(|ui| {
+                            ui.label(ex::modified_text(e.modified));
+                        });
+                        row.col(|ui| {
+                            ui.label(ex::type_of(e));
+                        });
+                        row.col(|ui| {
+                            if !e.dir {
+                                ui.label(RichText::new(widgets::size(e.size as i64)).monospace());
+                            }
+                        });
+                        let mut resp = row.response();
+                        let full = root.join(ex::join(&b.ex.dir, &e.name));
+                        if !e.dir && doc.is_none() {
+                            resp = resp.on_hover_text(if listing {
+                                "Not listed yet: the cabinet's files are still being listed."
+                            } else {
+                                "Not in the catalog: Vibe Files has no details for this file. Double-click opens it in its Windows program."
+                            });
+                        }
+                        if resp.double_clicked() {
+                            match (e.dir, doc) {
+                                (true, _) => b.ex.go = Some(ex::join(&b.ex.dir, &e.name)),
+                                (false, Some(di)) => file_req = Some((di, FileAct::Open)),
+                                (false, None) => b.ex.shell = Some(ShellAction::Open(full.clone())),
+                            }
+                        } else if resp.clicked() {
+                            match doc.and_then(|di| pos_of.get(&di).copied()) {
+                                Some(pos) => click = Some((pos, mods)),
+                                None => pick = Some(e.name.clone()),
+                            }
+                        }
+                        resp.context_menu(|ui| {
+                            if e.dir {
+                                if ui.button("Open").clicked() {
+                                    b.ex.go = Some(ex::join(&b.ex.dir, &e.name));
+                                    ui.close();
+                                }
+                            } else if let Some(di) = doc {
+                                for (label, act) in [
+                                    ("Open", FileAct::Open),
+                                    ("Open in Windows program", FileAct::OpenExternal),
+                                ] {
+                                    if ui.button(label).clicked() {
+                                        file_req = Some((di, act));
+                                        ui.close();
+                                    }
+                                }
+                            } else if ui.button("Open in Windows program").clicked() {
+                                b.ex.shell = Some(ShellAction::Open(full.clone()));
+                                ui.close();
+                            }
+                            if ui.button("Open in Explorer").clicked() {
+                                b.ex.shell = Some(if e.dir {
+                                    ShellAction::Open(full.clone())
+                                } else {
+                                    ShellAction::Reveal(full.clone())
+                                });
+                                ui.close();
+                            }
+                            if ui.button("Copy path").clicked() {
+                                b.ex.copy = Some(full.clone());
+                                ui.close();
+                            }
+                        });
+                    });
+                });
+        });
+    ui.style_mut().interaction.selectable_labels = selectable;
+    ui.visuals_mut().selection.stroke.color = selection_text;
+    if let Some(c) = sort {
+        b.ex.sort = if b.ex.sort.0 == c {
+            (c, !b.ex.sort.1)
+        } else {
+            (c, false)
+        };
+    }
+    if let Some((pos, m)) = click {
+        b.ex.picked = None;
+        b.click_row(pos, m);
+    }
+    // A folder or a file the catalog does not have: no document stays selected, so the
+    // toolbar never acts on one chosen before.
+    if let Some(name) = pick {
+        b.ex.picked = Some(name);
+        b.selected.clear();
+        b.cursor = None;
+        b.anchor = None;
+    }
+    if file_req.is_some() {
+        b.file_request = file_req;
+    }
+}
+
 fn sort_arrow(ui: &mut egui::Ui, asc: bool) {
     let (rect, _) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), Sense::hover());
     let c = rect.center();
@@ -5096,6 +5571,155 @@ mod tests {
         crate::ui::theme::install(&h.ctx);
         h.run();
         h
+    }
+
+    /// Q-114 (owner 2026-11-15): the list flips to explorer view and back. Explorer view shows
+    /// one folder as it is on disk: its folders, then every file in it, a file the catalog has
+    /// being the document; the tree follows; each login keeps its choice.
+    #[test]
+    fn explorer_view_shows_the_folder_as_it_is_on_disk() {
+        let mut h = harness(3, 8);
+        let root = h.state().root.clone();
+        let client = "Client 0000 (1000)";
+        let dir = root.join(client).join("Income Tax").join("2025");
+        std::fs::create_dir_all(dir.join("Workpapers")).unwrap();
+        for f in ["doc 001.pdf", "doc 005.pdf", "~vfd-partial-ab-notes.pdf"] {
+            std::fs::write(dir.join(f), "x").unwrap();
+        }
+        std::fs::create_dir_all(root.join("Loose")).unwrap();
+        std::fs::write(root.join("Loose").join("scan.tif"), "x").unwrap();
+        h.state_mut().b.set_root(&root);
+        h.run();
+        let names = |h: &Harness<'static, State>| -> Vec<String> {
+            let l = h.state().b.ex.listed.as_ref().expect("listed");
+            let mut v: Vec<String> = l
+                .entries
+                .as_ref()
+                .expect("read")
+                .iter()
+                .map(|e| e.name.clone())
+                .collect();
+            v.sort();
+            v
+        };
+        assert!(!h.state().b.explorer_on());
+        click(&mut h, "Explorer");
+        h.run();
+        // The cabinet's own folder: what is on disk, a folder of no client among it.
+        assert!(h.state().b.explorer_on());
+        assert!(h.state().b.prefs_dirty, "kept for this login");
+        assert_eq!(names(&h), ["Client 0000 (1000)", "Loose"]);
+        assert!(
+            h.state().b.visible.is_empty(),
+            "no document is in the cabinet folder itself"
+        );
+        // Into a client's folder: the tree follows.
+        h.state_mut().b.ex.go = Some(format!("{client}/Income Tax/2025"));
+        h.run();
+        h.run();
+        {
+            let b = &h.state().b;
+            assert!(matches!(
+                &b.scope,
+                Scope::Folder { client: 0, folder } if folder == "Income Tax/2025"
+            ));
+            assert_eq!(b.visible.len(), 2, "the two documents in this folder");
+        }
+        assert_eq!(
+            names(&h),
+            [
+                "Workpapers",
+                "doc 001.pdf",
+                "doc 005.pdf",
+                "~vfd-partial-ab-notes.pdf"
+            ]
+        );
+        // A file the catalog does not have (here one of its own half-written copies, which it
+        // never takes in) is listed, and picking it selects no document.
+        h.state_mut().b.selected.insert(0);
+        h.get_by_label("~vfd-partial-ab-notes.pdf").click();
+        h.run();
+        {
+            let b = &h.state().b;
+            assert_eq!(b.ex.picked.as_deref(), Some("~vfd-partial-ab-notes.pdf"));
+            assert!(
+                b.selected.is_empty(),
+                "the toolbar has no document to act on"
+            );
+        }
+        // A file the catalog has is the document.
+        h.get_by_label("doc 001.pdf").click();
+        h.run();
+        {
+            let b = &h.state().b;
+            assert_eq!(b.selected.len(), 1);
+            let di = *b.selected.iter().next().unwrap();
+            assert!(
+                b.snap.docs[di]
+                    .rel_path
+                    .ends_with("Income Tax/2025/doc 001.pdf")
+            );
+            assert_eq!(b.ex.picked, None);
+        }
+        // Up: the folder above, which has no document of its own.
+        click(&mut h, "Up");
+        h.run();
+        h.run();
+        {
+            let b = &h.state().b;
+            assert!(matches!(
+                &b.scope,
+                Scope::Folder { client: 0, folder } if folder == "Income Tax"
+            ));
+            assert!(b.visible.is_empty());
+        }
+        assert_eq!(names(&h), ["2025"]);
+        // A folder that is no client's: shown too; the tree stays where it was.
+        h.state_mut().b.ex.go = Some("Loose".into());
+        h.run();
+        h.run();
+        assert_eq!(h.state().b.ex.dir, "Loose");
+        assert_eq!(names(&h), ["scan.tif"]);
+        // Never outside the cabinet.
+        h.state_mut().b.ex.go = Some("../elsewhere".into());
+        h.run();
+        assert_eq!(h.state().b.ex.dir, "Loose");
+        // And back: the documents of the node, with those below it.
+        click(&mut h, "Documents");
+        h.run();
+        let b = &h.state().b;
+        assert!(!b.explorer_on());
+        assert_eq!(b.visible.len(), 4, "Income Tax and the folders below it");
+    }
+
+    /// Q-114 on a large cabinet (its snapshot holds a window of the documents, PA-34): the
+    /// documents of the folder shown are there.
+    #[test]
+    fn explorer_view_has_the_folders_documents_on_a_large_cabinet() {
+        let mut h = harness_from(3, 8, 4);
+        let root = h.state().root.clone();
+        let dir = root.join("Client 0001 (1001)").join("Payroll").join("2025");
+        std::fs::create_dir_all(&dir).unwrap();
+        for f in ["doc 002.pdf", "doc 006.pdf"] {
+            std::fs::write(dir.join(f), "x").unwrap();
+        }
+        h.state_mut().b.set_root(&root);
+        h.run();
+        assert!(h.state().b.large);
+        click(&mut h, "Explorer");
+        h.run();
+        h.state_mut().b.ex.go = Some("Client 0001 (1001)/Payroll/2025".into());
+        for _ in 0..4 {
+            h.run();
+        }
+        let b = &h.state().b;
+        assert!(matches!(&b.scope, Scope::Folder { client: 1, .. }));
+        assert_eq!(b.visible.len(), 2);
+        assert!(
+            b.visible
+                .iter()
+                .all(|&i| b.snap.docs[i].rel_path.contains("Payroll/2025/"))
+        );
     }
 
     /// Q-113 (owner 2026-11-15): documents are found from Browse, not from a Search tab. Find

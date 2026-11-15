@@ -1466,8 +1466,10 @@ impl eframe::App for VibeFilesApp {
             if let Ok(on_disk) = config::load(&self.data) {
                 prefs.partner_by_user = on_disk.prefs.partner_by_user;
                 prefs.hidden_columns_by_user = on_disk.prefs.hidden_columns_by_user;
+                prefs.explorer_by_user = on_disk.prefs.explorer_by_user;
             }
             prefs.store_user(&config::windows_user());
+            o.browse.prefs.explorer_by_user = prefs.explorer_by_user.clone();
             o.browse.prefs.partner_by_user = prefs.partner_by_user.clone();
             o.browse.prefs.hidden_columns_by_user = prefs.hidden_columns_by_user.clone();
             self.config.prefs = prefs;

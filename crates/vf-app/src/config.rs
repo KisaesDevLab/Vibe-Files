@@ -497,6 +497,13 @@ pub struct Prefs {
     /// Each Windows user's hidden columns.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub hidden_columns_by_user: std::collections::BTreeMap<String, Vec<String>>,
+    /// Browse's list is in explorer view (the folder as it is on disk; owner 2026-11-15,
+    /// Q-114): the Windows user's choice while Vibe Files runs; never saved PC-wide.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub explorer: bool,
+    /// The Windows users who chose explorer view.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub explorer_by_user: std::collections::BTreeMap<String, String>,
 }
 
 pub const RECENT_MAX: usize = 50;
@@ -535,6 +542,16 @@ mod partner_tests {
         ann.store_user("ann");
         assert_eq!(ann.clone().for_user("ann").partner, None);
         assert_eq!(ann.clone().for_user("bob").partner.as_deref(), Some(""));
+        // Explorer view too (owner 2026-11-15, Q-114).
+        let mut e = ann.clone().for_user("ann");
+        assert!(!e.explorer);
+        e.explorer = true;
+        e.store_user("ann");
+        assert!(!e.explorer, "not saved PC-wide");
+        assert!(e.clone().for_user("ann").explorer);
+        assert!(!e.clone().for_user("bob").explorer);
+        let back: Prefs = toml::from_str(&toml::to_string(&e).unwrap()).unwrap();
+        assert!(back.for_user("ann").explorer);
         // Hidden columns too (owner 2026-11-12).
         let mut a = ann.clone().for_user("ann");
         a.hidden_columns = vec!["hash".into()];
@@ -576,6 +593,7 @@ impl Prefs {
             .get(user)
             .cloned()
             .unwrap_or_default();
+        self.explorer = self.explorer_by_user.contains_key(user);
         self
     }
 
@@ -586,6 +604,11 @@ impl Prefs {
             self.hidden_columns_by_user.remove(user);
         } else {
             self.hidden_columns_by_user.insert(user.to_string(), hidden);
+        }
+        if std::mem::take(&mut self.explorer) {
+            self.explorer_by_user.insert(user.to_string(), "on".into());
+        } else {
+            self.explorer_by_user.remove(user);
         }
         match self.partner.take() {
             Some(p) => {
@@ -711,6 +734,10 @@ pub fn save(data: &Path, c: &Config) -> Result<()> {
             }
         };
         keep(&mut c.prefs.partner_by_user, on_disk.prefs.partner_by_user);
+        keep(
+            &mut c.prefs.explorer_by_user,
+            on_disk.prefs.explorer_by_user,
+        );
         let own = c.prefs.hidden_columns_by_user.remove(&me);
         c.prefs.hidden_columns_by_user = on_disk.prefs.hidden_columns_by_user;
         c.prefs.hidden_columns_by_user.remove(&me);

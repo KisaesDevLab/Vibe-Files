@@ -10,6 +10,7 @@ pub mod cover_sheet;
 pub mod devices;
 pub mod disposition;
 pub mod doc_render;
+pub mod explorer;
 pub mod filed_details;
 pub mod folder_dialogs;
 pub mod help;
