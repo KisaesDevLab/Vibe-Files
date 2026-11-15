@@ -2222,6 +2222,7 @@ mod tests {
                 url: "https://files.example-cpa.test".into(),
                 key: "vpk_test".into(),
                 fetch_minutes: 0,
+                record: Default::default(),
             },
         )
         .unwrap();

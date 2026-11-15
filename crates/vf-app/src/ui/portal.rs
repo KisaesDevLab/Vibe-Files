@@ -15,7 +15,8 @@ use std::time::{Duration, Instant};
 
 use egui::RichText;
 use vf_core::audit::AuditEntry;
-use vf_portal::api::{AccessRequest, Person, PortalFile, Users};
+use vf_portal::api::{AccessRequest, AccessRequests, Check, Person, PortalFile, Users};
+use vf_portal::record::{self, RecordColumns};
 use vf_portal::{PortalSettings, settings};
 
 use crate::portal as core;
@@ -1279,7 +1280,36 @@ impl PeopleWindow {
 // ======================================================================================
 
 /// Requests read again (None after a failed read), and what the action did.
-type RequestsDone = (Option<Vec<AccessRequest>>, Result<(), String>);
+type RequestsDone = (Option<AccessRequests>, Result<(), String>);
+
+/// How staff checked who is asking, when the request does not match the client record (Vibe
+/// Portal Addendum 01, layer B): the portal's word, what Approve shows, and what the note is
+/// (`None`: no note asked). A text or email to the contact on the request is not a choice:
+/// that contact is what is being checked.
+const CHECKS: [(&str, &str, Option<&str>); 3] = [
+    (
+        "callback",
+        "Called the number in our records",
+        Some("Who you spoke to"),
+    ),
+    ("in_person", "Met in person", None),
+    (
+        "other",
+        "Known to me, other",
+        Some("How you know this person"),
+    ),
+];
+
+/// The portal's flags on an ID, in words (as its staff page and approval PDF say them).
+fn flag_words(flag: &str) -> String {
+    match flag {
+        "expired" => "The ID has expired".into(),
+        "name_differs" => "The name on the ID differs from the name on the request".into(),
+        "unreadable" => "The barcode on the back could not be read".into(),
+        "no_barcode" => "The person said the ID has no barcode".into(),
+        other => other.replace('_', " "),
+    }
+}
 
 #[derive(Default)]
 pub struct AdminPortal {
@@ -1289,7 +1319,20 @@ pub struct AdminPortal {
     minutes: String,
     status: Option<Receiver<Result<String, String>>>,
     requests: Option<Vec<AccessRequest>>,
+    /// The portal's "Check before approving" is on (as of the last read of the requests).
+    check_required: bool,
     req_job: Option<Receiver<RequestsDone>>,
+    /// The client-list columns chosen for the client's email, mobile and date of birth
+    /// (Admin › Portal), as typed until Save.
+    columns: RecordColumns,
+    /// The client list's extra columns (token names), and each client's row by its ID.
+    extras: Vec<String>,
+    rows: BTreeMap<String, BTreeMap<String, String>>,
+    /// The client list was read for `extras` and `rows`.
+    record_read: bool,
+    /// The request whose "How did you check?" is open, the choice made and the note typed.
+    asking: Option<String>,
+    how: (Option<usize>, String),
     /// Per request: the client chosen and the role typed.
     pick: BTreeMap<String, (Option<usize>, String)>,
     clients: Vec<ClientRef>,
@@ -1353,6 +1396,7 @@ impl AdminPortal {
             self.requests = None;
         }
         self.clients.clear();
+        self.record_read = false;
         self.err = None;
         self.read_at = None;
     }
@@ -1376,12 +1420,70 @@ impl AdminPortal {
         self.minutes = s
             .map_or(settings::DEFAULT_FETCH_MINUTES, |s| s.fetch_minutes)
             .to_string();
+        self.columns = s.map(|s| s.record.clone()).unwrap_or_default();
     }
+
+    /// Reads the client record requests are checked against: the client list's extra columns
+    /// and each client's row. Once per visit, and again when `again` (Refresh, Save): the list
+    /// can be large and the cabinet is often on a share, so not on the 10-second timer.
+    fn load_record(&mut self, root: &Path, again: bool) {
+        if self.record_read && !again {
+            return;
+        }
+        self.record_read = true;
+        let master = vf_fs::clients::load(root).unwrap_or_default();
+        let mut extras: Vec<String> = Vec::new();
+        self.rows.clear();
+        for c in master.clients() {
+            for k in c.extra.keys() {
+                if !extras.contains(k) {
+                    extras.push(k.clone());
+                }
+            }
+            self.rows.insert(row_key(&c.id), c.extra.clone());
+        }
+        extras.sort_by_key(|k| k.to_lowercase());
+        self.extras = extras;
+    }
+}
+
+/// A client's ID as rows are kept and looked up by: trimmed, without case, as the client list
+/// compares IDs.
+fn row_key(id: &str) -> String {
+    id.trim().to_lowercase()
+}
+
+/// One of the three column choices of Admin › Portal: "(none)" or a client-list column.
+fn column_choice(ui: &mut egui::Ui, label: &str, extras: &[String], chosen: &mut Option<String>) {
+    let l = ui.label(label);
+    egui::ComboBox::from_id_salt(("portal-column", label))
+        .width(220.0)
+        .selected_text(chosen.clone().unwrap_or_else(|| "(none)".into()))
+        .show_ui(ui, |ui| {
+            ui.selectable_value(chosen, None, "(none)");
+            for e in extras {
+                ui.selectable_value(chosen, Some(e.clone()), e.as_str());
+            }
+            // A column chosen earlier that the client list no longer has stays shown.
+            if let Some(c) = chosen.clone()
+                && !extras.contains(&c)
+            {
+                ui.selectable_value(
+                    chosen,
+                    Some(c.clone()),
+                    format!("{c} (not in the client list)"),
+                );
+            }
+        })
+        .response
+        .labelled_by(l.id);
+    ui.end_row();
 }
 
 /// Admin › Portal: the address, the key, Test, and what clients sent lately.
 pub fn admin_settings(ui: &mut egui::Ui, a: &mut AdminPortal, env: &mut Env) {
     a.load(env.root);
+    a.load_record(env.root, false);
     if let Some(rx) = &a.status
         && let Ok(r) = rx.try_recv()
     {
@@ -1425,6 +1527,27 @@ pub fn admin_settings(ui: &mut egui::Ui, a: &mut AdminPortal, env: &mut Env) {
             ui.add(egui::TextEdit::singleline(&mut a.minutes).desired_width(60.0))
                 .labelled_by(l.id);
             ui.end_row();
+        });
+    ui.add_space(6.0);
+    ui.label(RichText::new("Checking access requests").strong());
+    ui.label(widgets::caption(
+        "Which columns of your client list hold the client's email, mobile number and date of \
+         birth. Portal requests then shows whether a request matches the client you pick: a \
+         match approves in one step. Nothing from the client list is sent to the portal, only \
+         what matched. With none chosen, no request can match. A column must be ticked as a \
+         token in Admin › Clients to be listed here.",
+    ));
+    egui::Grid::new("portal-record-columns")
+        .num_columns(2)
+        .show(ui, |ui| {
+            column_choice(ui, "Client's email", &a.extras, &mut a.columns.email);
+            column_choice(
+                ui,
+                "Client's mobile number",
+                &a.extras,
+                &mut a.columns.mobile,
+            );
+            column_choice(ui, "Client's date of birth", &a.extras, &mut a.columns.dob);
         });
     let busy = a.status.is_some();
     ui.horizontal(|ui| {
@@ -1757,7 +1880,7 @@ fn save(a: &mut AdminPortal, env: &mut Env) {
         }
     };
     let s = match PortalSettings::new(&id, &a.url, &a.key, minutes) {
-        Ok(s) => s,
+        Ok(s) => s.with_record(a.columns.clone()),
         Err(e) => {
             a.err = Some(e);
             return;
@@ -1781,7 +1904,15 @@ fn save(a: &mut AdminPortal, env: &mut Env) {
         vec![AuditEntry::new(
             "portal_settings",
             None,
-            serde_json::json!({ "url": s.url, "fetch_minutes": s.fetch_minutes }),
+            serde_json::json!({
+                "url": s.url,
+                "fetch_minutes": s.fetch_minutes,
+                "record_columns": {
+                    "email": s.record.email,
+                    "mobile": s.record.mobile,
+                    "dob": s.record.dob,
+                },
+            }),
         )],
     )
     .unwrap_or_default();
@@ -1810,9 +1941,37 @@ fn load_clients(env: &mut Env) -> Vec<ClientRef> {
     .unwrap_or_default()
 }
 
+/// What Approve does for a request, given the client picked.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ApproveStep {
+    /// The request matches the client record: one step, saying what matched.
+    Matched(Check),
+    /// No match, and the portal requires a check: ask how staff checked.
+    Ask,
+    /// No match, and the portal asks for nothing.
+    Plain,
+}
+
+fn approve_step(cmp: Option<&record::Comparison>, check_required: bool) -> ApproveStep {
+    let matched = cmp.map(record::Comparison::matched).unwrap_or_default();
+    if !matched.is_empty() {
+        ApproveStep::Matched(Check::record_match(&matched))
+    } else if check_required {
+        ApproveStep::Ask
+    } else {
+        ApproveStep::Plain
+    }
+}
+
+/// A decision on a request: approve for a client (with the role and how it was checked), or deny.
+type Decision = (String, Option<(ClientRef, String, Option<Check>)>);
+
 /// Admin › Portal requests: confirmed "Request access" forms; link each to a client, or deny.
+/// What the barcode on the person's ID said and the portal's flags are shown, and, once a
+/// client is picked, how the request compares with that client's row of the client list.
 pub fn admin_requests(ui: &mut egui::Ui, a: &mut AdminPortal, env: &mut Env) {
     a.load(env.root);
+    a.load_record(env.root, false);
     let Some(s) = a.cached_settings.clone() else {
         ui.heading("Portal requests");
         ui.label("Set up the portal in Admin › Portal first.");
@@ -1829,7 +1988,8 @@ pub fn admin_requests(ui: &mut egui::Ui, a: &mut AdminPortal, env: &mut Env) {
             a.err = Some(e);
         }
         if let Some(l) = list {
-            a.requests = Some(l);
+            a.check_required = l.check_required;
+            a.requests = Some(l.requests);
         }
     }
     if a.requests.is_none() && a.req_job.is_none() && a.err.is_none() {
@@ -1846,6 +2006,12 @@ pub fn admin_requests(ui: &mut egui::Ui, a: &mut AdminPortal, env: &mut Env) {
         "People who asked for portal access and confirmed their email or phone. Link each to the \
          client whose files they should see, or deny it. Only the confirmed contact is used.",
     ));
+    if a.check_required {
+        ui.label(widgets::caption(
+            "Your portal asks for a check before approving: a request that matches the client \
+             record approves in one step; for any other, say how you checked.",
+        ));
+    }
     let busy = a.req_job.is_some();
     if ui
         .add_enabled(!busy, egui::Button::new("Refresh"))
@@ -1853,8 +2019,12 @@ pub fn admin_requests(ui: &mut egui::Ui, a: &mut AdminPortal, env: &mut Env) {
     {
         a.err = None;
         a.requests = None;
+        a.asking = None;
+        // The client list may have changed too.
+        a.load_record(env.root, true);
     }
-    let mut decision: Option<(String, Option<(ClientRef, String)>)> = None;
+    let mut decision: Option<Decision> = None;
+    let mut ask: Option<Option<String>> = None;
     match &a.requests {
         None => {
             ui.label(widgets::caption("Reading the portal…"));
@@ -1885,7 +2055,71 @@ pub fn admin_requests(ui: &mut egui::Ui, a: &mut AdminPortal, env: &mut Env) {
                     if !r.note.is_empty() {
                         ui.label(widgets::caption(format!("“{}”", r.note)));
                     }
+                    // What the barcode on the back of the ID said, and the portal's flags. The
+                    // pictures are on the portal's staff page and in the approval PDF.
+                    for f in &r.id_flags {
+                        ui.label(RichText::new(flag_words(f)).color(theme::warn()).strong());
+                    }
+                    if let Some(scan) = &r.id_scan {
+                        ui.label(widgets::caption(
+                            "Read from the barcode on the back of their ID. A barcode can be \
+                             made by anyone: compare it with the pictures on the portal's staff \
+                             page.",
+                        ));
+                        ui.label(format!(
+                            "Name on the ID: {}    Date of birth: {}    Expires: {}",
+                            scan.full_name(),
+                            scan.dob.as_deref().unwrap_or("-"),
+                            scan.expires.as_deref().unwrap_or("-"),
+                        ));
+                        let address = scan.address_line();
+                        if !address.is_empty() || !scan.issuer.is_empty() {
+                            ui.label(format!("Address: {address}    Issued by: {}", scan.issuer));
+                        }
+                    }
                     let (pick, role) = a.pick.entry(r.id.clone()).or_insert((None, String::new()));
+                    let chosen_client = pick.and_then(|i| a.clients.get(i));
+                    // The request beside the chosen client's row of the client list.
+                    let cmp = chosen_client.filter(|_| s.record.any()).map(|c| {
+                        let empty = BTreeMap::new();
+                        record::compare(
+                            r,
+                            a.rows.get(&row_key(&c.code)).unwrap_or(&empty),
+                            &s.record,
+                        )
+                    });
+                    if let (Some(c), Some(cmp)) = (chosen_client, &cmp) {
+                        ui.label(format!(
+                            "Email: {}    Mobile: {}    Date of birth: {}",
+                            cmp.email.words(),
+                            cmp.mobile.words(),
+                            cmp.dob.words(),
+                        ));
+                        if let Some(scan) = &r.id_scan {
+                            ui.label(format!(
+                                "Name on the ID: {}    Client: {}",
+                                scan.full_name(),
+                                c.name
+                            ));
+                        }
+                        let matched = cmp.matched();
+                        if matched.is_empty() {
+                            ui.label(
+                                RichText::new("This request does not match the client record.")
+                                    .color(theme::warn()),
+                            );
+                        } else {
+                            ui.label(
+                                RichText::new("This request matches the client record.")
+                                    .color(theme::health_ok()),
+                            );
+                        }
+                    } else if chosen_client.is_some() {
+                        ui.label(widgets::caption(
+                            "No client-list columns are chosen in Admin › Portal, so the request \
+                             cannot be compared with the client record.",
+                        ));
+                    }
                     ui.horizontal_wrapped(|ui| {
                         let shown = pick
                             .and_then(|i| labels.get(i).cloned())
@@ -1902,26 +2136,97 @@ pub fn admin_requests(ui: &mut egui::Ui, a: &mut AdminPortal, env: &mut Env) {
                         );
                         if let Some(c) = chosen {
                             *pick = c;
+                            // Another client: the question, if open, starts over.
+                            if a.asking.as_deref() == Some(r.id.as_str()) {
+                                ask = Some(None);
+                            }
                         }
                         let l = ui.label("Role");
                         ui.add(egui::TextEdit::singleline(role).desired_width(100.0))
                             .labelled_by(l.id);
-                        let ok = pick.is_some() && !busy;
+                        let asking_this = a.asking.as_deref() == Some(r.id.as_str());
+                        let ok = pick.is_some() && !busy && !asking_this;
                         if ui.add_enabled(ok, egui::Button::new("Approve")).clicked()
                             && let Some(c) = pick.and_then(|i| a.clients.get(i))
                         {
-                            decision =
-                                Some((r.id.clone(), Some((c.clone(), role.trim().to_string()))));
+                            match approve_step(cmp.as_ref(), a.check_required) {
+                                ApproveStep::Matched(check) => {
+                                    decision = Some((
+                                        r.id.clone(),
+                                        Some((c.clone(), role.trim().to_string(), Some(check))),
+                                    ));
+                                }
+                                ApproveStep::Ask => ask = Some(Some(r.id.clone())),
+                                ApproveStep::Plain => {
+                                    decision = Some((
+                                        r.id.clone(),
+                                        Some((c.clone(), role.trim().to_string(), None)),
+                                    ));
+                                }
+                            }
                         }
                         if ui.add_enabled(!busy, egui::Button::new("Deny")).clicked() {
                             decision = Some((r.id.clone(), None));
                         }
                     });
+                    // How did you check? One choice, and its note where one is asked.
+                    if a.asking.as_deref() == Some(r.id.as_str()) {
+                        ui.separator();
+                        ui.label(RichText::new(format!("How did you check {}?", r.name)).strong());
+                        ui.label(widgets::caption(
+                            "It is kept with the approval on the portal and printed in its PDF. \
+                             A text or email to the contact on the request does not count: that \
+                             contact is what is being checked.",
+                        ));
+                        let (how, note) = &mut a.how;
+                        for (i, (_, label, _)) in CHECKS.iter().enumerate() {
+                            if ui.radio(*how == Some(i), *label).clicked() {
+                                *how = Some(i);
+                                note.clear();
+                            }
+                        }
+                        let wanted = how.and_then(|i| CHECKS[i].2);
+                        if let Some(label) = wanted {
+                            let l = ui.label(label);
+                            ui.add(egui::TextEdit::singleline(note).desired_width(320.0))
+                                .labelled_by(l.id);
+                        }
+                        let ready = how.is_some() && (wanted.is_none() || !note.trim().is_empty());
+                        ui.horizontal(|ui| {
+                            if ui
+                                .add_enabled(
+                                    ready && !busy,
+                                    widgets::primary_button("Approve with this check"),
+                                )
+                                .clicked()
+                                && let (Some(i), Some(c)) =
+                                    (*how, pick.and_then(|i| a.clients.get(i)))
+                            {
+                                let check = Check {
+                                    method: CHECKS[i].0.into(),
+                                    matched: Vec::new(),
+                                    note: note.trim().chars().take(300).collect(),
+                                };
+                                decision = Some((
+                                    r.id.clone(),
+                                    Some((c.clone(), role.trim().to_string(), Some(check))),
+                                ));
+                            }
+                            if ui.button("Cancel").clicked() {
+                                ask = Some(None);
+                            }
+                        });
+                    }
                 });
             }
         }
     }
+    if let Some(to) = ask {
+        a.asking = to;
+        a.how = (None, String::new());
+    }
     if let Some((req, to)) = decision {
+        a.asking = None;
         let out = a.audit.clone();
         // Without the app's channel (tests), the row comes back here to be recorded.
         let (tx, rx) = mpsc::channel::<AuditEntry>();
@@ -1931,14 +2236,24 @@ pub fn admin_requests(ui: &mut egui::Ui, a: &mut AdminPortal, env: &mut Env) {
         a.req_job = Some(spawn(ui.ctx(), move || {
             let p = core::client(&s);
             let done = match &to {
-                Some((c, role)) => p
+                Some((c, role, check)) => p
                     .put_client(&c.id, &c.code, &c.name, None)
-                    .and_then(|()| p.approve(&req, &c.id, role))
+                    .and_then(|()| p.approve(&req, &c.id, role, check.as_ref()))
                     .map(|()| {
                         audit.send(AuditEntry::new(
                             "portal_approve",
                             None,
-                            serde_json::json!({ "request": req, "client_id": c.id, "role": role }),
+                            serde_json::json!({
+                                "request": req,
+                                "client_id": c.id,
+                                "role": role,
+                                // How it was checked; never the record's own values.
+                                "check": check.as_ref().map(|k| serde_json::json!({
+                                    "method": k.method,
+                                    "matched": k.matched,
+                                    "note": k.note,
+                                })),
+                            }),
                         ));
                     }),
                 None => p.deny(&req).map(|()| {
@@ -2426,6 +2741,42 @@ mod tests {
     use egui_kittest::kittest::Queryable;
     use vf_portal::api::FileUser;
 
+    /// Vibe Portal Addendum 01, layer B: a request that matches the client record approves in
+    /// one step and says what matched; one that does not is asked about only when the portal
+    /// requires a check.
+    #[test]
+    fn approve_sends_the_match_or_asks_how_it_was_checked() {
+        use vf_portal::record::{Comparison, Line};
+        let cmp = |email, dob, name_differs| Comparison {
+            email,
+            mobile: Line::NotOnRequest,
+            dob,
+            name_differs,
+        };
+        let matched = cmp(Line::Matches, Line::Matches, false);
+        assert_eq!(
+            approve_step(Some(&matched), true),
+            ApproveStep::Matched(Check::record_match(&["email", "dob"]))
+        );
+        // Said even when the portal asks for nothing: it is kept with the approval.
+        assert!(matches!(
+            approve_step(Some(&matched), false),
+            ApproveStep::Matched(_)
+        ));
+        // The date of birth alone does not count when the ID's name was flagged.
+        let flagged = cmp(Line::Differs, Line::Matches, true);
+        assert_eq!(approve_step(Some(&flagged), true), ApproveStep::Ask);
+        assert_eq!(approve_step(Some(&flagged), false), ApproveStep::Plain);
+        // No columns chosen in Admin › Portal: nothing to compare.
+        assert_eq!(approve_step(None, true), ApproveStep::Ask);
+        assert_eq!(approve_step(None, false), ApproveStep::Plain);
+        // The words of the portal's flags; one it adds later is shown as it is.
+        assert_eq!(flag_words("expired"), "The ID has expired");
+        assert_eq!(flag_words("something_new"), "something new");
+        // A client's row is found whatever the case or spacing of its ID.
+        assert_eq!(row_key(" Ab-1 "), row_key("AB-1"));
+    }
+
     /// PA-38: Intake's portal line says what the last fetch here did and how often it runs.
     #[test]
     fn intake_line_reads_in_plain_words() {
@@ -2581,6 +2932,7 @@ mod tests {
             url,
             key: "vpk_test".into(),
             fetch_minutes: 0,
+            record: Default::default(),
         };
         let (tx, audit) = mpsc::channel();
         let w = PeopleWindow::new(
@@ -2675,6 +3027,7 @@ mod tests {
             url,
             key: "vpk_test".into(),
             fetch_minutes: 0,
+            record: Default::default(),
         };
         let t = tempfile::tempdir().unwrap();
         let path = t.path().join("Return 2025.pdf");

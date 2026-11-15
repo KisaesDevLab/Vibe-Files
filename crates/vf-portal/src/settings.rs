@@ -8,6 +8,8 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroize;
 
+use crate::record::RecordColumns;
+
 pub const FILE: &str = "portal.json";
 /// The firm key's prefix (Vibe Portal's `vpk_`).
 pub const KEY_PREFIX: &str = "vpk_";
@@ -26,6 +28,11 @@ pub struct PortalSettings {
     /// Fetch client uploads every this many minutes (0: only by hand).
     #[serde(default = "default_fetch")]
     pub fetch_minutes: u32,
+    /// Which client-list columns hold the client's email, mobile and date of birth, for
+    /// checking access requests (Vibe Portal Addendum 01, layer B). None chosen: no request
+    /// can match the record.
+    #[serde(default)]
+    pub record: RecordColumns,
 }
 
 fn default_fetch() -> u32 {
@@ -106,7 +113,14 @@ impl PortalSettings {
             url,
             key: key.into(),
             fetch_minutes: fetch_minutes.min(24 * 60),
+            record: RecordColumns::default(),
         })
+    }
+
+    /// The same settings with the client-record columns chosen in Admin › Portal.
+    pub fn with_record(mut self, record: RecordColumns) -> Self {
+        self.record = record;
+        self
     }
 }
 
@@ -171,6 +185,30 @@ mod tests {
         assert!(PortalSettings::new("c", "files.example.test", "secret", 5).is_err());
         let s = PortalSettings::new("c", "files.example.test", &format!(" {KEY} "), 5).unwrap();
         assert_eq!(s.key, KEY);
+    }
+
+    #[test]
+    fn the_record_columns_are_kept_and_older_files_have_none() {
+        let t = tempfile::tempdir().unwrap();
+        let s = PortalSettings::new("cab-1", "https://files.example.test", KEY, 5)
+            .unwrap()
+            .with_record(RecordColumns {
+                email: Some("Email".into()),
+                mobile: None,
+                dob: Some("Date_of_Birth".into()),
+            });
+        save(t.path(), &s).unwrap();
+        assert_eq!(load(t.path(), "cab-1"), Some(s));
+        // A file written before the columns existed.
+        std::fs::write(
+            file(t.path()),
+            format!(
+                r#"{{"version":1,"cabinet_id":"cab-1","url":"https://files.example.test","key":"{KEY}","fetch_minutes":5}}"#
+            ),
+        )
+        .unwrap();
+        let old = load(t.path(), "cab-1").unwrap();
+        assert!(!old.record.any());
     }
 
     #[test]
