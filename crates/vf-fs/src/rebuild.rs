@@ -1120,7 +1120,23 @@ pub fn index_start(
         "INSERT INTO local_state (k, v) VALUES (?1, ?2) ON CONFLICT(k) DO UPDATE SET v = excluded.v",
         [UNFINISHED, FILED_BY_IMPORT],
     )?;
-    let folders = scan.1.iter().map(|(f, _)| rel(root, f)).collect();
+    let mut folders: Vec<String> = scan.1.iter().map(|(f, _)| rel(root, f)).collect();
+    // A catalog that already has documents (an index cut short, Q-112): the top folders it
+    // knows and the cabinet no longer has get a part too, so their documents are no longer
+    // documents, as after an index made in one go.
+    let gone: Vec<String> = {
+        let mut st = conn.prepare(
+            "SELECT DISTINCT substr(rel_path, 1, instr(rel_path, '/') - 1) FROM document
+             WHERE deleted_at IS NULL AND instr(rel_path, '/') > 0",
+        )?;
+        st.query_map([], |r| r.get::<_, String>(0))?
+            .collect::<Result<_, _>>()?
+    };
+    for g in gone {
+        if !folders.iter().any(|f| f.eq_ignore_ascii_case(&g)) {
+            folders.push(g);
+        }
+    }
     let pending = crate::intake::unrecorded_paths(conn, root)
         .into_iter()
         .collect();
@@ -2485,6 +2501,59 @@ mod tests {
             .map(|r| r.unwrap())
             .collect();
         assert_eq!(filed, [FILED_BY_IMPORT], "the cabinet's existing files");
+    }
+
+    /// Q-112 (owner 2026-11-15): an index cut short goes on behind the window whatever its
+    /// kind, so an index in parts over a catalog that already has the cabinet's documents must
+    /// leave what one made in one go leaves: a file gone is no longer a document (in a folder
+    /// still there, and in one removed whole), a new file is one.
+    #[test]
+    fn an_index_in_parts_over_a_known_cabinet_is_the_same_index() {
+        let c = cab();
+        let live = |conn: &Connection| -> Vec<String> {
+            conn.prepare("SELECT rel_path FROM document WHERE deleted_at IS NULL ORDER BY 1")
+                .unwrap()
+                .query_map([], |r| r.get(0))
+                .unwrap()
+                .map(|r| r.unwrap())
+                .collect()
+        };
+        let mut whole = open(&c);
+        index(&mut whole, &c.root, "pc-1").unwrap();
+        let d = c.data.join("parts");
+        std::fs::create_dir_all(&d).unwrap();
+        let mut parts = vf_core::db::open(&d.join("catalog.db"), Storage::Local).unwrap();
+        index(&mut parts, &c.root, "pc-2").unwrap();
+        assert_eq!(live(&parts), live(&whole));
+
+        // Outside Vibe Files: a file deleted, one added, a top folder removed whole.
+        std::fs::remove_file(c.root.join("Smith, John (1001)/Income Tax/2024/w2.pdf")).unwrap();
+        put(
+            &c.root.join("Acme LLC (1002)/Payroll/2025/941 Q2.pdf"),
+            "941 q2",
+        );
+        std::fs::remove_dir_all(c.root.join("Loose Folder")).unwrap();
+
+        index(&mut whole, &c.root, "pc-1").unwrap();
+        let want = live(&whole);
+        assert!(want.iter().any(|p| p.ends_with("941 Q2.pdf")), "{want:?}");
+        assert!(!want.iter().any(|p| p.contains("2024")), "{want:?}");
+        assert!(!want.iter().any(|p| p.contains("Loose Folder")), "{want:?}");
+
+        let staged = index_start(&mut parts, &c.root, "pc-2").unwrap();
+        for f in &staged.folders {
+            index_part(
+                &mut parts,
+                &c.root,
+                "pc-2",
+                &staged,
+                std::slice::from_ref(f),
+            )
+            .unwrap();
+        }
+        index_finish(&mut parts, &c.root, "pc-2").unwrap();
+        assert!(!unfinished(&parts));
+        assert_eq!(live(&parts), want);
     }
 
     /// PA-60: an index from the folder listing reads no file. Every document gets a record in

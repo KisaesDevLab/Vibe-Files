@@ -38,6 +38,9 @@ pub struct Opened {
     /// [`open_staged`]: the catalog has the clients and no documents yet; the index goes on
     /// behind the window (`crate::indexer`, PA-60).
     pub staged: Option<vf_fs::rebuild::Staged>,
+    /// The other servers' changes were read while opening. `false` after [`open_staged`] on a
+    /// server: they are read behind the window, at once (owner 2026-11-15, Q-112).
+    pub caught_up: bool,
 }
 
 /// The device id sync uses for `conn`'s catalog: kept in the catalog, set by the first login
@@ -116,6 +119,7 @@ pub fn create(data: &Path, device_id: &str, r: &CreateRequest) -> Result<Opened>
         sync_device: device_id.to_string(),
         writer: None,
         staged: None,
+        caught_up: true,
     })
 }
 
@@ -247,11 +251,11 @@ fn open_how(data: &Path, device_id: &str, root: &Path, behind: bool) -> Result<O
     }
     // From the folder listing (PA-60): no file is read. Ids, details and known fingerprints
     // come from each client folder's records, so every PC has the same catalog.
-    // Behind the window: a catalog new to the cabinet, or an index in parts cut short. (A
-    // rebuild of another kind cut short runs again here, as it was.)
+    // Behind the window: a catalog new to the cabinet, or any index cut short (owner
+    // 2026-11-15, Q-112: nobody waits at "Opening the cabinet…" while files are listed; a
+    // rebuild of another kind cut short used to run again here, in front of the window).
     let label = vf_fs::rebuild::unfinished_label(&conn);
-    let in_parts =
-        behind && (known == 0 || label.as_deref() == Some(vf_fs::rebuild::FILED_BY_IMPORT));
+    let in_parts = behind && (known == 0 || label.is_some());
     let mut staged = None;
     let rebuild = if in_parts {
         staged = Some(vf_fs::rebuild::index_start(&mut conn, root, device_id)?);
@@ -264,8 +268,13 @@ fn open_how(data: &Path, device_id: &str, root: &Path, behind: bool) -> Result<O
     // Several servers (PA-36): this catalog notes its changes for the others, and takes
     // theirs since it last looked.
     let writer = server.then(|| crate::server::writer_id(&conn));
+    // For the window, theirs are read behind it (`server::Watch`, at once): a server started
+    // from a copy up to a week old re-reads every folder changed since, thousands of files.
+    let caught_up = !(behind && server);
     if let Some(w) = &writer {
         vf_fs::changes::set_writer(root, w);
+    }
+    if let Some(w) = writer.as_ref().filter(|_| caught_up) {
         match vf_fs::changes::catch_up(&mut conn, root, w, device_id) {
             Ok(f) if !f.is_empty() => {
                 tracing::info!(folders = f.len(), "other servers' changes read")
@@ -294,6 +303,7 @@ fn open_how(data: &Path, device_id: &str, root: &Path, behind: bool) -> Result<O
         sync_device,
         writer,
         staged,
+        caught_up,
     })
 }
 
@@ -306,6 +316,38 @@ pub(crate) mod tests {
             root,
             name: "Kisaes Clients",
         }
+    }
+
+    /// Q-112 (owner 2026-11-15): an index of any kind that was cut short goes on behind the
+    /// window at the next open; nobody waits at "Opening the cabinet…" for it.
+    #[test]
+    fn an_index_cut_short_goes_on_behind_the_window() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (data, root) = (tmp.path().join("pc1"), tmp.path().join("cab"));
+        drop(create(&data, "dev-1", &req(&root)).unwrap());
+        // A whole-cabinet rebuild (not a first index) that did not finish.
+        {
+            let c = db::open(&data.join(CATALOG_FILE), Storage::Local).unwrap();
+            c.execute(
+                "INSERT INTO local_state (k, v) VALUES ('rebuild_unfinished', 'rebuild')",
+                [],
+            )
+            .unwrap();
+        }
+        let mut o = open_staged(&data, "dev-1", &root).unwrap();
+        assert!(o.rebuild.is_none(), "not in front of the window");
+        assert!(o.caught_up, "not a server: nothing of others to read");
+        let staged = o
+            .staged
+            .take()
+            .expect("left for the index behind the window");
+        let shared = crate::indexer::Shared::new(&staged);
+        crate::indexer::run(&mut o.conn, &root, "dev-1", &staged, &shared, &|| {});
+        assert!(shared.finished());
+        assert_eq!(vf_fs::rebuild::unfinished_label(&o.conn), None);
+        drop(o);
+        let again = open_staged(&data, "dev-1", &root).unwrap();
+        assert!(again.staged.is_none() && again.rebuild.is_none());
     }
 
     /// PA-18 done-when: created and reopened with no passphrase anywhere; a plain SQLite file.

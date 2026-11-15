@@ -281,29 +281,126 @@ impl Default for Ingest {
 /// 2026-11-12): written once by the admin, read only.
 pub const FIRM_FILE: &str = "firm.toml";
 
-#[derive(Debug, Default, Deserialize)]
-struct Firm {
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+pub struct Firm {
     /// The cabinet a login with none yet opens, e.g. `cabinet = '\\server\share\Documents'`.
     #[serde(default)]
     cabinet: Option<PathBuf>,
+    /// Each login's own Intake inbox when it has none (owner 2026-11-15, Q-112): a folder per
+    /// login, `{user}` standing for the Windows user name, e.g. `my_inbox = 'U:\Scans\{user}'`.
+    #[serde(default)]
+    my_inbox: Option<String>,
+    /// The Scans folder of a login that has none.
+    #[serde(default)]
+    scans: Option<PathBuf>,
+    /// The print capture folder of a login that has none.
+    #[serde(default)]
+    print_capture: Option<PathBuf>,
+    /// `false`: no login asks GitHub for a newer release.
+    #[serde(default)]
+    update_check: Option<bool>,
+    /// Server mode for computers that have not chosen in Admin › Devices › Servers: `'on'`,
+    /// `'off'`, or `'auto'` (as with no line).
+    #[serde(default)]
+    server: Option<String>,
 }
 
-/// The firm's cabinet named in `dir`'s `firm.toml`, when there is one. A file that cannot be
-/// read is left out (logged); the opening screen shows as before.
+/// A path as typed in `firm.toml`: trimmed, none when blank.
+fn tidy(p: &Option<PathBuf>) -> Option<PathBuf> {
+    p.as_ref()
+        .map(|c| PathBuf::from(c.to_string_lossy().trim()))
+        .filter(|c| !c.as_os_str().is_empty())
+}
+
+/// What `dir`'s `firm.toml` says. A file that is missing or cannot be read says nothing
+/// (logged): every login then starts as it did before.
+pub fn firm(dir: &Path) -> Firm {
+    let Ok(text) = std::fs::read_to_string(dir.join(FIRM_FILE)) else {
+        return Firm::default();
+    };
+    toml::from_str::<Firm>(&text).unwrap_or_else(|e| {
+        tracing::warn!(
+            kind = crate::logging::kind(&e.to_string()),
+            "firm.toml not read"
+        );
+        Firm::default()
+    })
+}
+
+/// The firm's cabinet named in `dir`'s `firm.toml`, when there is one.
+#[cfg(test)]
 pub fn firm_cabinet(dir: &Path) -> Option<PathBuf> {
-    let p = dir.join(FIRM_FILE);
-    let text = std::fs::read_to_string(&p).ok()?;
-    match toml::from_str::<Firm>(&text) {
-        Ok(f) => f
-            .cabinet
-            .map(|c| PathBuf::from(c.to_string_lossy().trim()))
-            .filter(|c| !c.as_os_str().is_empty()),
-        Err(e) => {
-            tracing::warn!(
-                kind = crate::logging::kind(&e.to_string()),
-                "firm.toml not read"
-            );
-            None
+    firm(dir).cabinet()
+}
+
+impl Firm {
+    pub fn cabinet(&self) -> Option<PathBuf> {
+        tidy(&self.cabinet)
+    }
+
+    /// `user`'s own inbox folder by the firm's pattern. None without a pattern, or when the
+    /// pattern names the user and the user is not known.
+    pub fn my_inbox_for(&self, user: &str) -> Option<PathBuf> {
+        let pattern = self.my_inbox.as_deref()?.trim();
+        // (A Windows user name holds no `\ / :`; anything else odd is left out of the name.)
+        let user: String = user
+            .trim()
+            .chars()
+            .filter(|c| !matches!(c, '\\' | '/' | ':' | '*' | '?' | '"' | '<' | '>' | '|'))
+            .collect();
+        if pattern.is_empty() || (pattern.contains("{user}") && user.is_empty()) {
+            return None;
+        }
+        Some(PathBuf::from(pattern.replace("{user}", &user)))
+    }
+
+    /// Whether logins may ask for a newer release (`false` only when the firm says so).
+    pub fn update_check(&self) -> bool {
+        self.update_check != Some(false)
+    }
+
+    /// The firm's server-mode choice, when it made one.
+    pub fn server(&self) -> Option<bool> {
+        match self.server.as_deref().map(str::trim) {
+            Some("on") => Some(true),
+            Some("off") => Some(false),
+            _ => None,
+        }
+    }
+
+    /// Fills what this login has not set with the firm's defaults: the Scans folder, the print
+    /// capture folder, and its own inbox (`login`: the key its inboxes are kept under; `user`:
+    /// the Windows user name the folder is named for). A login's own choice is never changed.
+    /// An inbox inside the firm's or the login's cabinet is left out (Intake's own inboxes are
+    /// outside the cabinet, Q-64). Nothing is asked of the disk here.
+    pub fn apply(&self, c: &mut Config, login: &str, user: &str) {
+        if c.ingest.scans.is_none() {
+            c.ingest.scans = tidy(&self.scans);
+        }
+        if c.ingest.print_capture.is_none() {
+            c.ingest.print_capture = tidy(&self.print_capture);
+        }
+        if c.ingest.my_inboxes(login).is_empty()
+            && let Some(dir) = self.my_inbox_for(user)
+        {
+            let inside = |cab: &Option<PathBuf>| {
+                cab.as_ref().is_some_and(|cab| {
+                    let (d, cab) = (
+                        dir.to_string_lossy().to_lowercase(),
+                        cab.to_string_lossy().to_lowercase(),
+                    );
+                    Path::new(&d).starts_with(Path::new(&cab))
+                })
+            };
+            let staging = [&c.ingest.scans, &c.ingest.print_capture]
+                .into_iter()
+                .flatten()
+                .any(|s| s == &dir);
+            if inside(&self.cabinet()) || inside(&c.last_cabinet) || staging {
+                tracing::warn!("firm.toml: my_inbox is inside the cabinet or a staging folder");
+            } else {
+                c.ingest.set_my_inboxes(login, vec![dir]);
+            }
         }
     }
 }
@@ -662,6 +759,67 @@ mod tests {
         assert_eq!(firm_cabinet(t.path()), None);
         std::fs::write(&f, "cabinet = S:\\Documents\n").unwrap();
         assert_eq!(firm_cabinet(t.path()), None, "not TOML");
+    }
+
+    /// Q-112 (owner 2026-11-15): firm.toml also gives each login its own inbox folder, the
+    /// Scans and print capture folders, the update check and server mode. A login's own choice
+    /// is kept.
+    #[test]
+    fn the_firm_gives_defaults_a_login_has_not_set() {
+        let t = tempfile::tempdir().unwrap();
+        std::fs::write(
+            t.path().join(FIRM_FILE),
+            "cabinet = 'S:\\Client Documents'\nmy_inbox = 'U:\\Inbox\\{user}'\n\
+             scans = ' S:\\Scans '\nprint_capture = 'S:\\Print capture'\n\
+             update_check = false\nserver = 'on'\n",
+        )
+        .unwrap();
+        let f = firm(t.path());
+        assert!(!f.update_check());
+        assert_eq!(f.server(), Some(true));
+        let mut c: Config = toml::from_str("device_id = 'd'").unwrap();
+        f.apply(&mut c, r"FIRM\pat", "pat");
+        assert_eq!(c.ingest.scans, Some(PathBuf::from(r"S:\Scans")));
+        assert_eq!(
+            c.ingest.print_capture,
+            Some(PathBuf::from(r"S:\Print capture"))
+        );
+        assert_eq!(
+            c.ingest.my_inboxes(r"FIRM\pat"),
+            [PathBuf::from(r"U:\Inbox\pat")]
+        );
+        assert!(c.ingest.my_inboxes(r"FIRM\lee").is_empty());
+        // What the login chose stays.
+        let mut own: Config = toml::from_str("device_id = 'd'").unwrap();
+        own.ingest.scans = Some(PathBuf::from(r"C:\My scans"));
+        own.ingest
+            .set_my_inboxes(r"FIRM\pat", vec![PathBuf::from(r"C:\Mine")]);
+        f.apply(&mut own, r"FIRM\pat", "pat");
+        assert_eq!(own.ingest.scans, Some(PathBuf::from(r"C:\My scans")));
+        assert_eq!(
+            own.ingest.my_inboxes(r"FIRM\pat"),
+            [PathBuf::from(r"C:\Mine")]
+        );
+        // No user name, or an inbox inside the cabinet: none is given.
+        assert_eq!(f.my_inbox_for(" "), None);
+        std::fs::write(
+            t.path().join(FIRM_FILE),
+            "cabinet = 'S:\\Client Documents'\nmy_inbox = 's:\\client documents\\Inbox\\{user}'\n",
+        )
+        .unwrap();
+        let inside = firm(t.path());
+        let mut c: Config = toml::from_str("device_id = 'd'").unwrap();
+        inside.apply(&mut c, r"FIRM\pat", "pat");
+        assert!(c.ingest.my_inboxes(r"FIRM\pat").is_empty());
+        // No file, or lines it does not have: as before.
+        let none = Firm::default();
+        assert!(none.update_check());
+        assert_eq!(none.server(), None);
+        let mut c: Config = toml::from_str("device_id = 'd'").unwrap();
+        none.apply(&mut c, r"FIRM\pat", "pat");
+        assert_eq!(c.ingest, Ingest::default());
+        std::fs::write(t.path().join(FIRM_FILE), "server = 'auto'\n").unwrap();
+        assert_eq!(firm(t.path()).server(), None);
     }
 
     /// Any save keeps the other Windows users' partner and column choices as the file has

@@ -159,7 +159,9 @@ pub fn tab_bar(ui: &mut egui::Ui, current: &mut Tab, intake_badge: usize) {
         });
 }
 
-pub fn footer(ui: &mut egui::Ui, segments: &[String], health: &str) {
+/// The footer: `segments` on the left, then `working` with a spinner when something goes on
+/// behind the window (the index of the cabinet's files), and the cabinet on the right.
+pub fn footer(ui: &mut egui::Ui, segments: &[String], working: Option<&str>, health: &str) {
     egui::Panel::bottom("vf-footer")
         .exact_size(28.0)
         .resizable(false)
@@ -172,6 +174,11 @@ pub fn footer(ui: &mut egui::Ui, segments: &[String], health: &str) {
             ui.horizontal_centered(|ui| {
                 for s in segments {
                     ui.label(RichText::new(s).small().color(theme::ink_muted()));
+                }
+                if let Some(w) = working {
+                    ui.add_space(8.0);
+                    ui.add(egui::Spinner::new().size(12.0));
+                    ui.label(RichText::new(w).small().color(theme::ink_muted()));
                 }
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     ui.label(RichText::new(health).small().color(theme::ink_muted()));

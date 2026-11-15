@@ -50,6 +50,20 @@ So that nobody has to pick the cabinet the first time, an admin can name it once
 
 Keep the single quotes. A login that has not opened a cabinet yet then opens that one straight away; after that, its own last cabinet. **Open a different cabinet** still works. A winget install replaces its program folder on each update, so there put the file back after updating.
 
+## Other firm defaults
+
+The same file can hold more lines, one each. They fill in what a login has not set itself, which matters on a server whose logins start fresh each day. A login's own choice always stays.
+
+- `my_inbox = 'U:\Inbox\{user}'`: each login gets its own Intake inbox, a folder named for its Windows user name, made when the cabinet opens. It must be outside the cabinet and outside the shared inboxes and the Scans folder; if it is not, Browse says so and it is not used. A login that removes it gets it back at the next start; change the line instead.
+- `scans = 'S:\Scans'`: the Scans folder.
+- `print_capture = 'S:\Print capture'`: the folder the PDF printer saves to.
+- `update_check = false`: no login asks GitHub for a newer release.
+- `server = 'on'`: server mode on every computer that runs this copy and has not chosen for itself in **Admin › Devices › Servers** (`'off'` turns it off; no line leaves it to Windows). See [several PCs](help:several-pcs).
+
+A login keeps what it was given: on a PC that keeps its settings from day to day, a later change to these lines reaches only logins that have nothing set.
+
+The cabinet's shared inboxes are kept in the cabinet and need no line here. A line that is misspelled is ignored; a file that is not valid is ignored whole and noted in the log.
+
 ## Next
 
 - [Finding your way around](help:screen-tour)

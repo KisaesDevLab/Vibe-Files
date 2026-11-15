@@ -163,6 +163,27 @@ pub fn check_my_inbox(
     Ok(())
 }
 
+/// [`check_my_inbox`] for the inbox `firm.toml` names for a login (Q-112), against the cabinet's
+/// own shared inboxes; and not a folder inside one of them (a shared inbox reads its
+/// sub-folders: each file would wait twice). Asks the share: on the opening thread.
+pub(crate) fn check_firm_inbox(dir: &Path, root: &Path, staging: &[PathBuf]) -> Result<(), String> {
+    let shared = filer_inboxes(root);
+    check_my_inbox(dir, root, &shared, staging)?;
+    let canon = |p: &Path| std::fs::canonicalize(p).ok();
+    if let Some(d) = canon(dir)
+        && shared
+            .iter()
+            .filter_map(|s| canon(s))
+            .any(|s| d.starts_with(&s))
+    {
+        return Err(format!(
+            "{} is inside one of Intake's shared inboxes. Name a folder outside them.",
+            dir.display()
+        ));
+    }
+    Ok(())
+}
+
 /// Filer's inbox folders for this cabinet (its `config.json`).
 /// What a look at the share found ([`look`]).
 struct Looked {

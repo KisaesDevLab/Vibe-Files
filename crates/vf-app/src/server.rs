@@ -46,12 +46,22 @@ pub fn server_mode() -> bool {
     *ON.get_or_init(|| match std::env::var("VIBE_FILES_SERVER").as_deref() {
         Ok("1") => true,
         Ok("0") => false,
-        _ => match mode_setting() {
-            Setting::On => true,
-            Setting::Off => false,
-            Setting::Auto => auto_detected(),
-        },
+        _ => decide(
+            mode_setting(),
+            vf_core::exe_dir().and_then(|d| crate::config::firm(&d).server()),
+            auto_detected,
+        ),
     })
+}
+
+/// Server mode from this computer's choice, else the firm's (`server = 'on'` in `firm.toml`
+/// beside the exe, owner 2026-11-15, Q-112), else what Windows says.
+fn decide(computer: Setting, firm: Option<bool>, auto: impl FnOnce() -> bool) -> bool {
+    match computer {
+        Setting::On => true,
+        Setting::Off => false,
+        Setting::Auto => firm.unwrap_or_else(auto),
+    }
 }
 
 /// What Windows says: a Windows Server running Vibe Files from a network folder.
@@ -431,6 +441,8 @@ pub struct Watch {
     job: Option<std::sync::mpsc::Receiver<Vec<String>>>,
     last: Option<std::time::Instant>,
     client: Option<String>,
+    /// The first read, left by opening the cabinet for the window, has not finished.
+    first: bool,
 }
 
 const EVERY: std::time::Duration = std::time::Duration::from_secs(15 * 60);
@@ -443,11 +455,35 @@ impl Default for Watch {
             job: None,
             last: Some(std::time::Instant::now()),
             client: None,
+            first: false,
         }
     }
 }
 
 impl Watch {
+    /// Due at the first frame: opening the cabinet left the other servers' changes to be read
+    /// behind the window (`Opened::caught_up`).
+    pub fn due_now() -> Self {
+        Watch {
+            job: None,
+            last: None,
+            client: None,
+            first: true,
+        }
+    }
+
+    /// The other servers' changes are being read now (said in the footer).
+    pub fn busy(&self) -> bool {
+        self.job.is_some()
+    }
+
+    /// The read opening left for behind the window is still to come or running: until it is
+    /// done the catalog is as old as the copy it started from, and what catalogs files it
+    /// finds (the sweep, B2 sync, Intake's recording) waits, as it does for the index.
+    pub fn first_pending(&self) -> bool {
+        self.first
+    }
+
     /// Every frame. True when a catch-up re-read folders (Browse should read the catalog).
     pub fn tick(
         &mut self,
@@ -462,10 +498,12 @@ impl Watch {
             return match rx.try_recv() {
                 Ok(folders) => {
                     self.job = None;
+                    self.first = false;
                     !folders.is_empty()
                 }
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                     self.job = None;
+                    self.first = false;
                     false
                 }
                 Err(std::sync::mpsc::TryRecvError::Empty) => false,
@@ -521,6 +559,9 @@ impl Watch {
             });
         if started.is_ok() {
             self.job = Some(rx);
+        } else {
+            // No thread: nothing more is waited for (the next read is in 15 minutes).
+            self.first = false;
         }
         false
     }
@@ -672,6 +713,36 @@ mod tests {
         std::fs::write(main_path(root), "{half").unwrap();
         assert!(main_server(root).is_none());
         assert!(main_path(root).exists());
+    }
+
+    /// Q-112: what goes on behind the window is said in the footer; a cabinet opened for the
+    /// window reads the other servers' changes at its first frame, not before it shows.
+    #[test]
+    fn the_footer_says_what_goes_on_behind_the_window() {
+        let words = crate::app::behind_the_window;
+        assert_eq!(
+            words(Some((3, 40, 1200)), true).as_deref(),
+            Some("Indexing: 3 of 40 client folders, 1200 documents")
+        );
+        assert_eq!(
+            words(None, true).as_deref(),
+            Some("Reading changes made on other servers")
+        );
+        assert_eq!(words(None, false), None);
+        assert!(Watch::due_now().last.is_none());
+        assert!(Watch::default().last.is_some());
+        assert!(!Watch::due_now().busy());
+        assert!(Watch::due_now().first_pending() && !Watch::default().first_pending());
+    }
+
+    /// Q-112: the computer's own choice first, then the firm's line, then Windows.
+    #[test]
+    fn the_firms_server_line_stands_where_the_computer_has_not_chosen() {
+        assert!(decide(Setting::Auto, Some(true), || false));
+        assert!(!decide(Setting::Auto, Some(false), || true));
+        assert!(decide(Setting::Auto, None, || true));
+        assert!(!decide(Setting::Off, Some(true), || true));
+        assert!(decide(Setting::On, Some(false), || false));
     }
 
     #[test]

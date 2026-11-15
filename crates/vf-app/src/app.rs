@@ -176,6 +176,25 @@ pub struct VibeFilesApp {
     tip_clicked: bool,
     /// The portal staff page the header's Portal button opened (tests).
     portal_opened: Option<String>,
+    /// This login's own inbox as the firm's `firm.toml` gave it at this start (Q-112): the
+    /// folder is made when a cabinet opens, on the opening thread.
+    firm_inbox: Option<PathBuf>,
+}
+
+/// What the footer says is going on behind the window: the index of the cabinet's files
+/// (`listing`: client folders done, of how many, documents so far), else the other servers'
+/// changes being read.
+pub(crate) fn behind_the_window(
+    listing: Option<(usize, usize, usize)>,
+    others: bool,
+) -> Option<String> {
+    match listing {
+        Some((done, all, docs)) => Some(format!(
+            "Indexing: {done} of {all} client folders, {docs} documents"
+        )),
+        None if others => Some("Reading changes made on other servers".into()),
+        None => None,
+    }
 }
 
 /// Asks GitHub for the latest release, once per start, on a thread (never in tests: no network).
@@ -242,13 +261,23 @@ impl VibeFilesApp {
         theme::install(ctx);
         // A login's first start: the firm's cabinet (firm.toml beside the exe, owner
         // 2026-11-12), when the admin named one; its own last cabinet after that.
-        let start = config
-            .last_cabinet
-            .clone()
-            .or_else(|| firm_dir.and_then(config::firm_cabinet));
+        let firm = firm_dir.map(config::firm).unwrap_or_default();
+        let start = config.last_cabinet.clone().or_else(|| firm.cabinet());
+        // What this login has not set comes from the firm (Q-112): its own inbox folder, the
+        // Scans and print capture folders. The inbox folder is made when the cabinet opens.
+        let mut config = config;
+        let before = config.ingest.clone();
+        firm.apply(
+            &mut config,
+            &vf_core::windows_login().unwrap_or_default(),
+            &config::windows_user(),
+        );
+        let firm_inbox = (config.ingest.inboxes_by_user != before.inboxes_by_user)
+            .then(|| firm.my_inbox_for(&config::windows_user()))
+            .flatten();
         let mut w = Wizard::new(start.as_deref());
         w.error = error;
-        let update = check_for_update(config.update_check);
+        let update = check_for_update(config.update_check && firm.update_check());
         let mut app = Self {
             tab: Tab::Browse,
             data,
@@ -261,6 +290,7 @@ impl VibeFilesApp {
             closing: false,
             tip_clicked: false,
             portal_opened: None,
+            firm_inbox,
         };
         // Tests drive the wizard themselves; `open_last` has its own test.
         if !cfg!(test) {
@@ -304,7 +334,29 @@ impl VibeFilesApp {
         let (data, device) = (self.data.clone(), self.config.device_id.clone());
         let name = w.name.clone();
         let ctx = ctx.clone();
+        let firm_inbox = self.firm_inbox.clone();
+        let staging: Vec<PathBuf> = [
+            self.config.ingest.scans.clone(),
+            self.config.ingest.print_capture.clone(),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
         std::thread::spawn(move || {
+            // The login's own inbox the firm named (Q-112): made and checked here, off the
+            // window's thread (it is usually on a share), by the rules of one added by hand.
+            let inbox_problem =
+                firm_inbox
+                    .as_ref()
+                    .filter(|_| mode == Mode::Open)
+                    .and_then(|dir| {
+                        std::fs::create_dir_all(dir)
+                            .map_err(|e| format!("{} could not be made: {e}", dir.display()))
+                            .and_then(|()| {
+                                crate::ui::ingest::check_firm_inbox(dir, &root, &staging)
+                            })
+                            .err()
+                    });
             // A session host is wiped overnight and its settings with it (PA-69): the login
             // works under the id the cabinet remembers for it, so its Intake folder and what
             // it did yesterday are still its own.
@@ -333,6 +385,7 @@ impl VibeFilesApp {
             let r = r.map(|mut o| {
                 let mut p = prepare(&mut o, &device);
                 p.login = login;
+                p.inbox_problem = inbox_problem;
                 (o, p)
             });
             let _ = tx.send(r.map_err(|e| format!("{e:#}")));
@@ -369,10 +422,19 @@ impl VibeFilesApp {
                     chain,
                     device,
                     login,
+                    inbox_problem,
                 },
             )) => {
                 // Saved with the settings below.
                 self.config.device_id = device;
+                // The firm's inbox for this login cannot be used: not kept, and said below.
+                if inbox_problem.is_some() {
+                    self.config
+                        .ingest
+                        .set_my_inboxes(&vf_core::windows_login().unwrap_or_default(), vec![]);
+                    self.firm_inbox = None;
+                }
+                let caught_up = opened.caught_up;
                 // The catalog has the clients only (PA-60): the documents are cataloged
                 // behind the window, the client being looked at first.
                 let indexing = opened.staged.take().and_then(|staged| {
@@ -421,6 +483,11 @@ impl VibeFilesApp {
                 if let Some(e) = rules_problem {
                     browse.error = Some(format!(
                         "Print capture (Admin › Print capture & parsers): {e}"
+                    ));
+                }
+                if let Some(e) = inbox_problem {
+                    browse.error = Some(format!(
+                        "Your own inbox from firm.toml (my_inbox) is not used: {e}"
                     ));
                 }
                 browse.notice = opened.rebuild.as_ref().map(|r| match &opened.set_aside {
@@ -500,7 +567,11 @@ impl VibeFilesApp {
                     mirror_wait: std::time::Duration::from_secs(2),
                     sweep,
                     sync: Default::default(),
-                    servers: Default::default(),
+                    servers: if caught_up {
+                        Default::default()
+                    } else {
+                        crate::server::Watch::due_now()
+                    },
                     checks,
                     opened,
                     browse,
@@ -680,7 +751,8 @@ impl eframe::App for VibeFilesApp {
             if std::mem::take(&mut o.sweep.changed) {
                 o.browse.reload(&o.opened.conn);
             }
-            o.sweep.hold = o.indexing.is_some();
+            // (And for the other servers' changes left for behind the window, Q-112.)
+            o.sweep.hold = o.indexing.is_some() || o.servers.first_pending();
             // The index behind the window (PA-60): the client being looked at goes next, and
             // Browse reads the catalog when that client is there, now and then meanwhile, and
             // when the index is done.
@@ -752,6 +824,7 @@ impl eframe::App for VibeFilesApp {
                 || o.sweep.running()
                 || o.mirror_job.is_some()
                 || o.intake.recording()
+                || o.servers.busy()
             {
                 o.own_writes_until =
                     Some(std::time::Instant::now() + std::time::Duration::from_secs(5));
@@ -883,6 +956,9 @@ impl eframe::App for VibeFilesApp {
             }
         }
         let mut segments = vec![format!("vibe-files {}", env!("CARGO_PKG_VERSION"))];
+        // Work going on behind the window, said in the footer with a spinner on every tab
+        // (owner 2026-11-15, Q-112).
+        let mut working = None;
         if let Screen::Open(o) = &mut self.screen {
             let o = &mut **o;
             segments.insert(
@@ -893,8 +969,17 @@ impl eframe::App for VibeFilesApp {
                     o.browse.snap.clients.len()
                 ),
             );
+            working = behind_the_window(
+                o.indexing.as_ref().map(|(ix, _)| ix.shared.progress()),
+                o.servers.busy(),
+            );
         }
-        chrome::footer(ui, &segments, name.as_deref().unwrap_or("No cabinet open"));
+        chrome::footer(
+            ui,
+            &segments,
+            working.as_deref(),
+            name.as_deref().unwrap_or("No cabinet open"),
+        );
         let ctx = ui.ctx().clone();
         let mut submit = None;
         let mut to_wizard = false;
@@ -921,7 +1006,7 @@ impl eframe::App for VibeFilesApp {
                 }
                 // Not while the index runs behind the window (PA-60): a batch is recorded
                 // against the whole catalog.
-                if o.indexing.is_none() {
+                if o.indexing.is_none() && !o.servers.first_pending() {
                     o.intake.reconcile(
                         &mut o.opened.conn,
                         &o.opened.catalog,
@@ -1404,7 +1489,7 @@ impl eframe::App for VibeFilesApp {
             {
                 o.browse.reload(&o.opened.conn);
             }
-            o.sync.hold = !indexed;
+            o.sync.hold = !indexed || o.servers.first_pending();
             o.sync.tick(
                 &ctx,
                 &browse::Env {
@@ -1493,6 +1578,8 @@ pub struct Prepared {
     /// That id held for this session (another session of the login open elsewhere at the same
     /// time works under its host's own).
     login: Option<vf_fs::lock::Held>,
+    /// Why the login's own inbox named in `firm.toml` cannot be used (Q-112).
+    inbox_problem: Option<String>,
 }
 
 /// The work of opening a cabinet that reads and writes the share or the whole catalog: print
@@ -1575,6 +1662,7 @@ fn prepare(opened: &mut Opened, device_id: &str) -> Prepared {
         chain,
         device: device_id.to_string(),
         login: None,
+        inbox_problem: None,
     }
 }
 
