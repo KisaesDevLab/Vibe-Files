@@ -89,6 +89,25 @@ mod tests {
             }
         }
         shot(&mut h, "03-browse-year-selected");
+        // A client's notes (PA-76): FileCenter's file in the client's folder, invented text.
+        {
+            let crate::app::Screen::Open(o) = &mut h.state_mut().screen else {
+                panic!()
+            };
+            let folder = o.browse.snap.clients[0].folder_rel.clone().unwrap();
+            std::fs::write(
+                root.join(folder).join("!fcinfo.ini"),
+                "[Fields]\r\n\r\n\r\n[Memo]\r\nPrefers a call before 10.\r\nOrganizer goes by mail, not the portal.\r\nExtension filed every year.\r\n\r\n[System]\r\n",
+            )
+            .unwrap();
+            o.browse.selected.clear();
+            o.browse.set_scope(vf_core::browse::Scope::Client(0));
+        }
+        for _ in 0..5 {
+            std::thread::sleep(std::time::Duration::from_millis(150));
+            h.run_steps(4);
+        }
+        shot(&mut h, "05-browse-client-notes");
         for (i, tab) in ["Intake", "Viewer", "Sync", "Admin"].iter().enumerate() {
             h.get_by_role_and_label(Role::Button, tab).click();
             h.run_steps(8);
@@ -114,6 +133,22 @@ mod tests {
                 shot(&mut h, &format!("{:02}-admin-{}", 20 + i, i));
             }
         }
+        // Admin > Bulk changes (PA-78): found by file name, all ticked.
+        h.get_by_role_and_label(Role::Button, "Bulk changes")
+            .click();
+        h.run_steps(4);
+        h.get_by_label("File name contains").click();
+        h.step();
+        h.get_by_label("File name contains").type_text("1099");
+        h.step();
+        h.get_by_role_and_label(Role::Button, "Find").click();
+        for _ in 0..5 {
+            std::thread::sleep(std::time::Duration::from_millis(150));
+            h.run_steps(4);
+        }
+        h.get_by_role_and_label(Role::Button, "Select all").click();
+        h.run_steps(4);
+        shot(&mut h, "32-admin-bulk-changes");
         h.get_by_role_and_label(Role::Button, "Folder import")
             .click();
         h.run_steps(8);

@@ -28,6 +28,8 @@ pub struct NotesState {
     pub error: Option<String>,
     /// Text typed for a client and not saved, kept while another client is looked at.
     drafts: BTreeMap<String, String>,
+    /// The frame the notes were last drawn in: coming back to them reads the file again.
+    drawn: u64,
 }
 
 impl NotesState {
@@ -86,9 +88,16 @@ pub fn show(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env, ci: usize) {
     let client_id = c.id.clone();
     let ctx = ui.ctx().clone();
     let n = &mut b.notes;
+    let frame = ctx.cumulative_frame_nr();
+    let back = frame > n.drawn + 1;
+    n.drawn = frame;
     if n.folder.as_deref() != Some(folder.as_str()) {
         n.turn_to(&folder);
         n.load = None;
+        n.start_load(&ctx, env.root, &folder);
+    } else if back && n.load.is_none() && n.save.is_none() && !n.unsaved() {
+        // Looked away (another folder, a document, another tab) and back: FileCenter or
+        // another PC may have changed the notes meanwhile.
         n.start_load(&ctx, env.root, &folder);
     }
     if let Some(r) = job::take(&mut n.load) {

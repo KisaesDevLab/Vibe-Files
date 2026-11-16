@@ -380,9 +380,9 @@ fn actions(ui: &mut egui::Ui, p: &mut BulkPage, env: &mut Env, catalog: &Path, i
                 format!("For the {} selected:", docs(n))
             }));
             ui.add_enabled_ui(can, |ui| {
-                ui.horizontal_wrapped(|ui| {
-                    meta_editor::fields(ui, &mut p.form, &p.doc_types);
-                });
+                // As wide as Browse's details pane draws it.
+                ui.set_max_width(420.0);
+                meta_editor::fields(ui, &mut p.form, &p.doc_types);
             });
             let edit = p.form.to_edit();
             let touched = edit != vf_fs::docmeta::MetaEdit::default();
@@ -625,6 +625,8 @@ fn grid(ui: &mut egui::Ui, p: &mut BulkPage) {
     let mut toggled: Option<(String, bool)> = None;
     let mut all: Option<bool> = None;
     let every = !p.rows.is_empty() && p.picked.len() == p.rows.len();
+    // A ticked row keeps the normal text color; its fill shows the tick (as in Browse).
+    ui.visuals_mut().selection.stroke.color = theme::ink();
     egui::ScrollArea::horizontal()
         .id_salt("bulk-table-x")
         .show(ui, |ui| {
@@ -634,7 +636,7 @@ fn grid(ui: &mut egui::Ui, p: &mut BulkPage) {
                 .column(Column::exact(24.0));
             for (c, _) in COLS {
                 table = table.column(match c {
-                    Col::Name => Column::initial(320.0)
+                    Col::Name => Column::initial(300.0)
                         .at_least(120.0)
                         .clip(true)
                         .resizable(true),
@@ -642,11 +644,11 @@ fn grid(ui: &mut egui::Ui, p: &mut BulkPage) {
                         .at_least(80.0)
                         .clip(true)
                         .resizable(true),
-                    Col::DocType => Column::initial(130.0)
+                    Col::DocType => Column::initial(120.0)
                         .at_least(60.0)
                         .clip(true)
                         .resizable(true),
-                    _ => Column::initial(84.0)
+                    _ => Column::initial(76.0)
                         .at_least(50.0)
                         .clip(true)
                         .resizable(true),
