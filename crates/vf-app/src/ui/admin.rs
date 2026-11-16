@@ -1703,7 +1703,7 @@ ANDE1042,Anderson Farms LLC
                 break;
             }
             assert!(
-                start.elapsed() < std::time::Duration::from_secs(20),
+                start.elapsed() < crate::ui::test_util::PATIENCE,
                 "{:?}",
                 s.sweep.error
             );
@@ -1838,7 +1838,7 @@ ANDE1042,Anderson Farms LLC
         while h.state().a.merge.last.is_none() {
             h.step();
             assert!(
-                start.elapsed() < std::time::Duration::from_secs(20),
+                start.elapsed() < crate::ui::test_util::PATIENCE,
                 "{:?}",
                 h.state().a.merge.error
             );
@@ -1947,7 +1947,7 @@ ANDE1042,Anderson Farms LLC
         while h.state().a.import.last.is_none() {
             h.step();
             assert!(
-                start.elapsed() < std::time::Duration::from_secs(20),
+                start.elapsed() < crate::ui::test_util::PATIENCE,
                 "{:?}",
                 h.state().a.import.error
             );
@@ -2045,7 +2045,7 @@ ANDE1042,Anderson Farms LLC
         while h.state().a.import.last.is_none() {
             h.step();
             assert!(
-                start.elapsed() < std::time::Duration::from_secs(20),
+                start.elapsed() < crate::ui::test_util::PATIENCE,
                 "{:?}",
                 h.state().a.import.error
             );
@@ -2267,7 +2267,7 @@ HALV1001,\"Halvorsen, Dana\"
         while h.state().a.import.last.is_none() {
             h.step();
             assert!(
-                start.elapsed() < std::time::Duration::from_secs(20),
+                start.elapsed() < crate::ui::test_util::PATIENCE,
                 "{:?}",
                 h.state().a.import.error
             );

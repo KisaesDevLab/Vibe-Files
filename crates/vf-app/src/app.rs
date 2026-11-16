@@ -2072,7 +2072,7 @@ mod tests {
         while h.query_by_label("4 pending").is_none() {
             h.step();
             assert!(
-                start.elapsed() < std::time::Duration::from_secs(20),
+                start.elapsed() < crate::ui::test_util::PATIENCE,
                 "the pill counts the client's documents"
             );
             std::thread::sleep(std::time::Duration::from_millis(20));
@@ -2087,7 +2087,7 @@ mod tests {
         while h.query_by_label("in sync").is_none() {
             h.step();
             assert!(
-                start.elapsed() < std::time::Duration::from_secs(30),
+                start.elapsed() < crate::ui::test_util::PATIENCE,
                 "push did not finish"
             );
             std::thread::sleep(std::time::Duration::from_millis(20));
@@ -2166,7 +2166,7 @@ mod tests {
         let start = std::time::Instant::now();
         while h.query_by_label_contains("Pushed 1 documents").is_none() {
             h.step();
-            assert!(start.elapsed() < std::time::Duration::from_secs(30));
+            assert!(start.elapsed() < crate::ui::test_util::PATIENCE);
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
         // The counts are made on their own thread (PA-34): wait for them.
@@ -2479,19 +2479,27 @@ mod tests {
         h.state_mut().tab = Tab::Intake;
         h.run_steps(10);
         h.get_by_label("Setup").click();
-        h.run_steps(4);
-        assert!(
-            h.query_by_label_contains("locked by the admin password")
-                .is_some(),
-            "Setup locked"
-        );
+        // (Waited for, not counted in frames: Filer's screen loads on its own threads, and
+        // a busy machine took more than four frames now and then.)
+        let start = std::time::Instant::now();
+        while h
+            .query_by_label_contains("locked by the admin password")
+            .is_none()
+        {
+            assert!(
+                start.elapsed() < crate::ui::test_util::PATIENCE,
+                "Setup locked"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(30));
+            h.step();
+        }
         // The row with no client: New client… opens Vibe's dialog, filled from the name.
         h.get_by_label("Preview").click();
         let label = "New client for Newco LLC_NEWC2002_2025 W-2.pdf";
         let start = std::time::Instant::now();
         while h.query_by_label(label).is_none() {
             assert!(
-                start.elapsed() < std::time::Duration::from_secs(20),
+                start.elapsed() < crate::ui::test_util::PATIENCE,
                 "row planned"
             );
             std::thread::sleep(std::time::Duration::from_millis(30));
@@ -2523,7 +2531,7 @@ mod tests {
                 break;
             }
             assert!(
-                start.elapsed() < std::time::Duration::from_secs(20),
+                start.elapsed() < crate::ui::test_util::PATIENCE,
                 "the row got its new client"
             );
             std::thread::sleep(std::time::Duration::from_millis(30));
@@ -2566,10 +2574,7 @@ mod tests {
              ok: &dyn Fn(&egui_kittest::Harness<'static, VibeFilesApp>) -> bool| {
                 let start = std::time::Instant::now();
                 while !ok(h) {
-                    assert!(
-                        start.elapsed() < std::time::Duration::from_secs(30),
-                        "{what}"
-                    );
+                    assert!(start.elapsed() < crate::ui::test_util::PATIENCE, "{what}");
                     std::thread::sleep(std::time::Duration::from_millis(30));
                     h.step();
                 }
@@ -2643,10 +2648,7 @@ mod tests {
              ok: &dyn Fn(&egui_kittest::Harness<'static, VibeFilesApp>) -> bool| {
                 let start = std::time::Instant::now();
                 while !ok(h) {
-                    assert!(
-                        start.elapsed() < std::time::Duration::from_secs(30),
-                        "{what}"
-                    );
+                    assert!(start.elapsed() < crate::ui::test_util::PATIENCE, "{what}");
                     std::thread::sleep(std::time::Duration::from_millis(30));
                     h.step();
                 }
@@ -2767,7 +2769,7 @@ mod tests {
             && h.query_by_label("Intake (1)").is_some())
         {
             assert!(
-                start.elapsed() < std::time::Duration::from_secs(30),
+                start.elapsed() < crate::ui::test_util::PATIENCE,
                 "the badge never showed the delivered file"
             );
             std::thread::sleep(std::time::Duration::from_millis(100));
@@ -2820,7 +2822,7 @@ mod tests {
             .query_by_label_contains("is already in the cabinet as Old/receipt.pdf")
             .is_none()
         {
-            if start.elapsed() > std::time::Duration::from_secs(30) {
+            if start.elapsed() > crate::ui::test_util::PATIENCE {
                 let Screen::Open(o) = &h.state().screen else {
                     unreachable!()
                 };
@@ -2936,10 +2938,7 @@ mod tests {
                 if ok(viewer(h)) {
                     break;
                 }
-                assert!(
-                    start.elapsed() < std::time::Duration::from_secs(20),
-                    "{what}"
-                );
+                assert!(start.elapsed() < crate::ui::test_util::PATIENCE, "{what}");
                 std::thread::sleep(std::time::Duration::from_millis(20));
             }
         };
@@ -3032,7 +3031,7 @@ mod tests {
                 break;
             }
             assert!(
-                start.elapsed() < std::time::Duration::from_secs(20),
+                start.elapsed() < crate::ui::test_util::PATIENCE,
                 "never rendered"
             );
             std::thread::sleep(std::time::Duration::from_millis(20));
@@ -3054,10 +3053,7 @@ mod tests {
             if o.viewer.pick_amounts_for_test(0) >= 2 {
                 break o.viewer.tape.tape.lines().len();
             }
-            assert!(
-                start.elapsed() < std::time::Duration::from_secs(20),
-                "no words"
-            );
+            assert!(start.elapsed() < crate::ui::test_util::PATIENCE, "no words");
             std::thread::sleep(std::time::Duration::from_millis(20));
         };
         assert_eq!(picked, 2);
@@ -3120,10 +3116,7 @@ mod tests {
             if o.viewer.ready() && o.viewer.tape_on_file_for_test() == 1 {
                 break;
             }
-            assert!(
-                start.elapsed() < std::time::Duration::from_secs(20),
-                "reloaded"
-            );
+            assert!(start.elapsed() < crate::ui::test_util::PATIENCE, "reloaded");
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
         if let Screen::Open(o) = &mut h.state_mut().screen {
@@ -3183,7 +3176,7 @@ mod tests {
                 break;
             }
             assert!(
-                start.elapsed() < std::time::Duration::from_secs(20),
+                start.elapsed() < crate::ui::test_util::PATIENCE,
                 "never rendered"
             );
             std::thread::sleep(std::time::Duration::from_millis(20));
@@ -3519,7 +3512,7 @@ mod tests {
                     return;
                 }
                 assert!(
-                    start.elapsed() < std::time::Duration::from_secs(20),
+                    start.elapsed() < crate::ui::test_util::PATIENCE,
                     "never: {what}"
                 );
                 std::thread::sleep(std::time::Duration::from_millis(20));
@@ -3616,7 +3609,7 @@ mod tests {
                 {
                     break;
                 }
-                assert!(start.elapsed() < std::time::Duration::from_secs(20));
+                assert!(start.elapsed() < crate::ui::test_util::PATIENCE);
                 std::thread::sleep(std::time::Duration::from_millis(20));
             }
         };
@@ -3681,7 +3674,7 @@ mod tests {
             {
                 break;
             }
-            assert!(start.elapsed() < std::time::Duration::from_secs(20));
+            assert!(start.elapsed() < crate::ui::test_util::PATIENCE);
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
         if let Screen::Open(o) = &mut h.state_mut().screen {
@@ -3739,7 +3732,7 @@ mod tests {
         let start = std::time::Instant::now();
         while h.query_by_label("Page 2 thumbnail").is_none() {
             h.step();
-            assert!(start.elapsed() < std::time::Duration::from_secs(20));
+            assert!(start.elapsed() < crate::ui::test_util::PATIENCE);
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
         h.get_by_label("Page 2 thumbnail").click_secondary();
@@ -3819,7 +3812,7 @@ mod tests {
             {
                 break;
             }
-            assert!(start.elapsed() < std::time::Duration::from_secs(20));
+            assert!(start.elapsed() < crate::ui::test_util::PATIENCE);
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
         let open_pages = |h: &mut egui_kittest::Harness<'static, VibeFilesApp>, pages: &str| {
@@ -3828,7 +3821,7 @@ mod tests {
             let start = std::time::Instant::now();
             while !matches!(&h.state().screen, Screen::Open(o) if o.viewer.ready()) {
                 assert!(
-                    start.elapsed() < std::time::Duration::from_secs(30),
+                    start.elapsed() < crate::ui::test_util::PATIENCE,
                     "viewer ready"
                 );
                 std::thread::sleep(std::time::Duration::from_millis(20));

@@ -3366,7 +3366,10 @@ mod tests {
     ) -> serde_json::Value {
         let start = Instant::now();
         while requests(seen, APPROVE).is_empty() {
-            assert!(start.elapsed() < Duration::from_secs(10), "never approved");
+            assert!(
+                start.elapsed() < crate::ui::test_util::PATIENCE,
+                "never approved"
+            );
             std::thread::sleep(Duration::from_millis(20));
             h.step();
         }
@@ -3404,7 +3407,10 @@ mod tests {
             if let Ok(e) = audit.try_recv() {
                 break e;
             }
-            assert!(start.elapsed() < Duration::from_secs(10), "no audit row");
+            assert!(
+                start.elapsed() < crate::ui::test_util::PATIENCE,
+                "no audit row"
+            );
             std::thread::sleep(Duration::from_millis(20));
         };
         assert_eq!(row.action, "portal_approve");
@@ -3670,7 +3676,7 @@ mod tests {
         let start = Instant::now();
         while h.query_by_label_contains(label).is_none() {
             assert!(
-                start.elapsed() < Duration::from_secs(10),
+                start.elapsed() < crate::ui::test_util::PATIENCE,
                 "never showed {label}"
             );
             std::thread::sleep(Duration::from_millis(20));
@@ -4614,7 +4620,10 @@ mod tests {
         let start = std::time::Instant::now();
         while h.state().err.is_none() {
             h.step();
-            assert!(start.elapsed() < Duration::from_secs(20), "no answer");
+            assert!(
+                start.elapsed() < crate::ui::test_util::PATIENCE,
+                "no answer"
+            );
             std::thread::sleep(Duration::from_millis(20));
         }
         let err = h.state().err.clone().unwrap();

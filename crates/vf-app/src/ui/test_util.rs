@@ -9,6 +9,11 @@ use egui_kittest::kittest::Queryable;
 /// moment of its own, and under a full run that pushed a `run` to 5 or 6 frames now and then:
 /// the test then failed with "exceeded max_steps" though nothing was wrong.
 pub const MAX_STEPS: u64 = 40;
+/// How long a test waits for work done on another thread (Filer's loading, a push, a count)
+/// before it fails. Such a wait ends as soon as the work is done; the limit is only for work
+/// that never comes. 30 seconds was not always enough on a machine busy with something else.
+pub const PATIENCE: std::time::Duration = std::time::Duration::from_secs(180);
+
 /// The processor time this thread has used so far (kernel and user). A speed test measures
 /// the code with this, not with a clock: another program building on the same machine made
 /// the clock say 110 and 159 ms for work that takes about 40, and the test failed for it.

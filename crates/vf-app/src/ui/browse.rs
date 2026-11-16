@@ -6285,7 +6285,7 @@ mod tests {
         let start = std::time::Instant::now();
         while h.query_by_label("Page 1 / 2").is_none() {
             assert!(
-                start.elapsed() < std::time::Duration::from_secs(20),
+                start.elapsed() < crate::ui::test_util::PATIENCE,
                 "never opened"
             );
             std::thread::sleep(std::time::Duration::from_millis(20));
@@ -6296,7 +6296,7 @@ mod tests {
         assert!(h.query_by_label("2 of 2").is_some());
         let start = std::time::Instant::now();
         while h.query_by_label("Open in Viewer").is_none() {
-            assert!(start.elapsed() < std::time::Duration::from_secs(20));
+            assert!(start.elapsed() < crate::ui::test_util::PATIENCE);
             std::thread::sleep(std::time::Duration::from_millis(20));
             h.step();
         }
@@ -6347,7 +6347,7 @@ Petty cash,1234.50
         let start = std::time::Instant::now();
         while h.query_by_label("Petty cash").is_none() {
             assert!(
-                start.elapsed() < std::time::Duration::from_secs(20),
+                start.elapsed() < crate::ui::test_util::PATIENCE,
                 "never read"
             );
             std::thread::sleep(std::time::Duration::from_millis(20));
