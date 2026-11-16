@@ -13,6 +13,8 @@ Your choice is kept for your Windows login on this PC. On a server that is reset
 
 **Explorer** is available when what is selected on the left is a folder on disk: the cabinet, a client or a folder, with the tree set to **Folders**. For a view, a saved search, what **Find documents…** found, or the tree set to **By year**, the list stays as **Documents**.
 
+Explorer view reads the disk itself, so it works while the footer still says the cabinet is being indexed. For a client the catalog has no folder for yet, Vibe Files looks in the cabinet for the folder named as the folder template names that client's, and shows it. If there is no such folder, the list says which name it looked for.
+
 ## Moving around
 
 - Double-click a folder to go into it. **Up** goes to the folder it is in, and stops at the cabinet's own folder.

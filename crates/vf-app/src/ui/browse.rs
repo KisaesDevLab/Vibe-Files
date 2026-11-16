@@ -1555,7 +1555,10 @@ impl Browse {
             self.scope = self.ids_scope(*list);
         }
         let needle = self.name_filter.trim().to_lowercase();
-        let mut v = if self.explorer_on() {
+        let mut v = if self.explorer_on() && self.folderless().is_some() {
+            // Explorer view of a client whose folder is not found (yet): no folder is shown.
+            Vec::new()
+        } else if self.explorer_on() {
             // Explorer view: the documents directly in the folder shown, not those below it.
             let dir = self.ex.dir.as_str();
             (0..self.snap.docs.len())
@@ -1838,7 +1841,11 @@ impl Browse {
         let of = |c: usize| self.snap.clients.get(c)?.folder_rel.clone();
         match scope {
             Scope::Cabinet => Some(String::new()),
-            Scope::Client(c) => of(*c).filter(|f| !f.is_empty()),
+            // A client the catalog has no folder for: the one found on disk for it (PA-81).
+            Scope::Client(c) => of(*c).filter(|f| !f.is_empty()).or_else(|| {
+                let id = &self.snap.clients.get(*c)?.id;
+                self.ex.found.get(id)?.as_ref().ok().cloned()
+            }),
             Scope::Folder { client, folder } => {
                 Some(crate::ui::explorer::join(&of(*client)?, folder))
             }
@@ -1874,7 +1881,22 @@ impl Browse {
 
     /// Explorer view is chosen and the tree node shown is a folder on disk.
     pub fn explorer_on(&self) -> bool {
-        self.prefs.explorer && self.scope_dir(&self.scope).is_some()
+        self.prefs.explorer && self.on_disk()
+    }
+
+    /// The tree node shown is a folder on disk, or a client whose folder is looked for there.
+    fn on_disk(&self) -> bool {
+        self.scope_dir(&self.scope).is_some() || self.folderless().is_some()
+    }
+
+    /// The client shown, when neither the catalog nor a look at the disk gave it a folder
+    /// (PA-81: explorer view looks for it on the disk itself, so it does not wait for the
+    /// index).
+    fn folderless(&self) -> Option<&vf_core::browse::ClientRow> {
+        match self.scope {
+            Scope::Client(c) if self.scope_dir(&self.scope).is_none() => self.snap.clients.get(c),
+            _ => None,
+        }
     }
 
     /// Explorer view goes to `dir`: by the tree when the folder is the cabinet, a client's or
@@ -1922,6 +1944,48 @@ impl Browse {
             self.ex.for_scope = None;
             return;
         }
+        // The catalog was read again (Refresh, the index got further): a folder not found
+        // before is looked for again.
+        if self.ex.reloads != self.reloads {
+            self.ex.reloads = self.reloads;
+            self.ex.stale = true;
+            self.ex.found.retain(|_, r| r.is_ok());
+        }
+        if let Some(r) = crate::ui::job::take(&mut self.ex.find) {
+            match r {
+                Ok((id, found)) => {
+                    self.ex.found.insert(id, found);
+                }
+                Err(e) => self.error = Some(format!("The client's folder was not looked for: {e}")),
+            }
+        }
+        // A client the catalog has no folder for: looked for on disk, on a thread.
+        let folderless = self
+            .folderless()
+            .map(|c| (c.id.clone(), c.ext_id.clone(), c.name.clone()));
+        if let Some((id, ext, name)) = folderless {
+            self.ex.for_scope = None;
+            if !self.ex.found.contains_key(&id) && self.ex.find.is_none() {
+                let root = env.root.to_path_buf();
+                match crate::ui::job::Job::start(
+                    ctx,
+                    "Looking for the client's folder…",
+                    move || {
+                        let found = crate::ui::explorer::client_folder(&root, &ext, &name);
+                        (id, found)
+                    },
+                ) {
+                    Ok(j) => self.ex.find = Some(j),
+                    Err(e) => {
+                        self.error = Some(format!("The client's folder was not looked for: {e}"))
+                    }
+                }
+            }
+            if !self.visible.is_empty() {
+                self.refresh();
+            }
+            return;
+        }
         if self.ex.for_scope.as_ref() != Some(&self.scope) {
             if let Some(d) = self.scope_dir(&self.scope) {
                 self.ex.dir = d;
@@ -1929,10 +1993,6 @@ impl Browse {
             self.ex.for_scope = Some(self.scope.clone());
             self.ex.picked = None;
             self.refresh();
-        }
-        if self.ex.reloads != self.reloads {
-            self.ex.reloads = self.reloads;
-            self.ex.stale = true;
         }
         let have = self
             .ex
@@ -2923,6 +2983,11 @@ struct Explorer {
     for_scope: Option<Scope>,
     listed: Option<crate::ui::explorer::Listed>,
     job: Option<crate::ui::job::Job<crate::ui::explorer::Listed>>,
+    /// By client id, for clients the catalog has no folder for (PA-81): the folder found on
+    /// disk for the client, or why there is none. Kept while Vibe Files is open; what was not
+    /// found is looked for again when the catalog is read again.
+    found: HashMap<String, Result<String, String>>,
+    find: Option<crate::ui::job::Job<(String, Result<String, String>)>>,
     /// The catalog was read again: the folder is listed again too.
     reloads: u64,
     stale: bool,
@@ -3811,7 +3876,7 @@ fn grid(ui: &mut egui::Ui, b: &mut Browse, conn: &Connection) {
         // Documents (the catalog's list, with what is below the folder) or Explorer (the
         // folder as it is on disk, Q-114); each Windows login keeps its own choice.
         ui.separator();
-        let on_disk = b.scope_dir(&b.scope).is_some();
+        let on_disk = b.on_disk();
         for (explorer, label, tip) in [
             (
                 false,
@@ -4205,6 +4270,21 @@ fn explorer_list(ui: &mut egui::Ui, b: &mut Browse) {
         ui.label(widgets::caption("The cabinet's folder is not known here."));
         return;
     };
+    // A client the catalog has no folder for: looked for on disk, or not there.
+    if let Some(c) = b.folderless() {
+        match b.ex.found.get(&c.id) {
+            Some(Err(why)) => {
+                ui.label(widgets::caption(why));
+            }
+            _ => match &b.ex.find {
+                Some(j) => j.show(ui),
+                None => {
+                    ui.label(widgets::caption("Looking for the client's folder…"));
+                }
+            },
+        }
+        return;
+    }
     // Up, and where this is.
     ui.horizontal(|ui| {
         let up = ex::parent(&b.ex.dir);
@@ -5700,6 +5780,67 @@ mod tests {
         let b = &h.state().b;
         assert!(!b.explorer_on());
         assert_eq!(b.visible.len(), 4, "Income Tax and the folders below it");
+    }
+
+    /// PA-81 (owner 2026-11-16): explorer view does not wait for the catalog to know a
+    /// client's folder. For a client with none there, the folder the template names is looked
+    /// for on disk and shown; with no such folder the list says what was looked for.
+    #[test]
+    fn explorer_view_finds_a_clients_folder_the_catalog_does_not_have() {
+        let mut h = harness(3, 2);
+        let root = h.state().root.clone();
+        std::fs::create_dir_all(root.join("Client 0001 (1001)").join("Income Tax")).unwrap();
+        std::fs::write(root.join("Client 0001 (1001)").join("letter.pdf"), "x").unwrap();
+        {
+            let b = &mut h.state_mut().b;
+            b.set_root(&root);
+            // As the catalog has a client whose folder is not bound, or not indexed yet.
+            b.snap.clients[1].folder_rel = None;
+            b.snap.clients[2].folder_rel = None;
+            b.set_scope(Scope::Client(1));
+        }
+        h.run();
+        click(&mut h, "Explorer");
+        h.run();
+        h.run();
+        {
+            let b = &h.state().b;
+            assert!(b.explorer_on());
+            assert_eq!(b.ex.dir, "Client 0001 (1001)");
+            let l = b.ex.listed.as_ref().expect("listed");
+            let mut names: Vec<&str> = l
+                .entries
+                .as_ref()
+                .expect("read")
+                .iter()
+                .map(|e| e.name.as_str())
+                .collect();
+            names.sort();
+            assert_eq!(names, ["Income Tax", "letter.pdf"]);
+        }
+        // Into its sub-folder and back up: the view stays in the client's folder.
+        h.state_mut().b.ex.go = Some("Client 0001 (1001)/Income Tax".into());
+        h.run();
+        h.run();
+        assert_eq!(h.state().b.ex.dir, "Client 0001 (1001)/Income Tax");
+        assert_eq!(h.state().b.scope, Scope::Client(1));
+        click(&mut h, "Up");
+        h.run();
+        h.run();
+        assert_eq!(h.state().b.ex.dir, "Client 0001 (1001)");
+        // A client with no folder on disk: said, and no other folder shown.
+        h.state_mut().b.set_scope(Scope::Client(2));
+        h.run();
+        h.run();
+        let b = &h.state().b;
+        assert!(b.explorer_on());
+        assert!(b.visible.is_empty());
+        let why = b.ex.found[&b.snap.clients[2].id].as_ref().unwrap_err();
+        assert!(why.contains("Client 0002 (1002)"), "{why}");
+        assert!(
+            h.query_by_label_contains("has no folder in the cabinet yet")
+                .is_some()
+        );
     }
 
     /// Q-114 on a large cabinet (its snapshot holds a window of the documents, PA-34): the

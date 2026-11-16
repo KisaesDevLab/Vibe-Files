@@ -100,6 +100,30 @@ pub fn list(root: &Path, dir: &str, conn: Option<&Connection>) -> Listed {
     }
 }
 
+/// The folder of a client the catalog has no folder for (PA-81: its folder has no client
+/// file yet, or the index has not bound it): the top folder named as the cabinet's template
+/// names this client's, when the disk has it. Only that name is looked for, so another
+/// client's folder is never shown in its place. Reads the client list and the template from
+/// the share: never on the window's thread. No client is bound and no catalog row written.
+pub fn client_folder(root: &Path, ext_id: &str, name: &str) -> Result<String, String> {
+    let dir = vf_fs::clients::master_dir(root);
+    let (tree, _, _) = filer_core::template::load_or_seed(&dir);
+    let listed = vf_fs::clients::load(root).ok().and_then(|m| {
+        m.clients()
+            .iter()
+            .find(|c| c.id.eq_ignore_ascii_case(ext_id))
+            .and_then(|c| filer_core::template::client_folder_name(&tree, c).ok())
+    });
+    let folder = listed.unwrap_or_else(|| format!("{name} ({ext_id})"));
+    if inside(&folder) && !folder.contains('/') && root.join(&folder).is_dir() {
+        Ok(folder)
+    } else {
+        Err(format!(
+            "This client has no folder in the cabinet yet. Looked for \"{folder}\". + New client makes its folders; a folder under another name is reached from the cabinet's own folder (All documents on the left)."
+        ))
+    }
+}
+
 fn read(path: &Path) -> Result<Vec<DiskEntry>, String> {
     let rd =
         std::fs::read_dir(path).map_err(|e| format!("{} cannot be read: {e}", path.display()))?;
