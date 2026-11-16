@@ -33,6 +33,11 @@ pub enum FolderAsk {
     DeleteFolder {
         rel: String,
     },
+    /// The cabinet's folder template applied to a client's folder (owner 2026-11-16, PA-88):
+    /// the folders it does not have yet are made.
+    ApplyTemplate {
+        folder: String,
+    },
 }
 
 pub struct FolderDialog {
@@ -47,6 +52,10 @@ pub struct FolderDialog {
     /// The change being made (owner 2026-11-13: setting an ID took seconds with no sign of
     /// life): on its own thread, the dialog showing a spinner meanwhile.
     job: Option<Job<Result<Done, String>>>,
+    /// Apply folder template: the folders that would be made, read on its own thread (the
+    /// template, the client list and the client's folder are on the share).
+    tpl: Option<Result<Vec<String>, String>>,
+    tpl_job: Option<Job<Result<Vec<String>, String>>>,
 }
 
 /// What the buttons' work needs, taken from the dialog so it can run on its own thread.
@@ -55,6 +64,7 @@ struct Work {
     name: String,
     plan: Option<ClientRename>,
     id_plan: Option<ClientIdChange>,
+    dirs: Vec<String>,
 }
 
 impl FolderDialog {
@@ -73,6 +83,8 @@ impl FolderDialog {
             error: None,
             focused: false,
             job: None,
+            tpl: None,
+            tpl_job: None,
         }
     }
 }
@@ -95,7 +107,35 @@ pub fn show(ctx: &egui::Context, d: &mut FolderDialog, env: &mut Env) -> DialogO
         FolderAsk::NewFolder { .. } => "New folder",
         FolderAsk::RenameFolder { .. } => "Rename folder",
         FolderAsk::DeleteFolder { .. } => "Delete folder",
+        FolderAsk::ApplyTemplate { .. } => "Apply folder template",
     };
+    // The folders the template would add, read once on a thread.
+    if let FolderAsk::ApplyTemplate { folder } = &d.ask {
+        if let Some(r) = job::take(&mut d.tpl_job) {
+            d.tpl = Some(r.and_then(|r| r));
+        }
+        if d.tpl.is_none() && d.tpl_job.is_none() {
+            let (root, folder) = (env.root.to_path_buf(), folder.clone());
+            match env
+                .conn
+                .path()
+                .filter(|p| !p.is_empty())
+                .map(std::path::PathBuf::from)
+            {
+                Some(catalog) => {
+                    match Job::start(ctx, "Reading the folder template…", move || {
+                        let conn = vf_core::db::open(&catalog, vf_core::db::Storage::Local)
+                            .map_err(|e| e.to_string())?;
+                        folders::plan_template(&conn, &root, &folder)
+                    }) {
+                        Ok(j) => d.tpl_job = Some(j),
+                        Err(e) => d.tpl = Some(Err(e)),
+                    }
+                }
+                None => d.tpl = Some(folders::plan_template(env.conn, &root, &folder)),
+            }
+        }
+    }
     egui::Modal::new(egui::Id::unique("folder-dialog")).show(ctx, |ui| {
         ui.set_width(520.0);
         ui.heading(title);
@@ -106,6 +146,43 @@ pub fn show(ctx: &egui::Context, d: &mut FolderDialog, env: &mut Env) -> DialogO
                 ui.label(format!("Delete the empty folder {rel}?"));
                 ui.label(widgets::caption(
                     "Only a folder with no files in it is deleted (empty folders inside it go too). Undo brings it back.",
+                ));
+            }
+            FolderAsk::ApplyTemplate { folder } => {
+                ui.label(widgets::caption(format!("In {folder}")));
+                match &d.tpl {
+                    None => {
+                        if let Some(j) = &d.tpl_job {
+                            j.show(ui);
+                        }
+                    }
+                    Some(Err(e)) => {
+                        ui.label(RichText::new(e).color(theme::error()));
+                    }
+                    Some(Ok(dirs)) if dirs.is_empty() => {
+                        ui.label("This client has every folder of the folder template.");
+                    }
+                    Some(Ok(dirs)) => {
+                        ui.label(format!(
+                            "{} folder{} of the folder template {} missing and will be made:",
+                            dirs.len(),
+                            if dirs.len() == 1 { "" } else { "s" },
+                            if dirs.len() == 1 { "is" } else { "are" },
+                        ));
+                        egui::ScrollArea::vertical().max_height(260.0).show(ui, |ui| {
+                            let cut = folder.len() + 1;
+                            for dir in dirs {
+                                ui.label(
+                                    RichText::new(dir.get(cut..).unwrap_or(dir))
+                                        .monospace()
+                                        .small(),
+                                );
+                            }
+                        });
+                    }
+                }
+                ui.label(widgets::caption(
+                    "The folders and files that are there are not touched. Year folders are made when a document is filed into them. The template is set in Admin › Folder templates. Undo takes the new folders away again.",
                 ));
             }
             ask => {
@@ -203,6 +280,10 @@ pub fn show(ctx: &egui::Context, d: &mut FolderDialog, env: &mut Env) -> DialogO
                 FolderAsk::NewFolder { .. } => ("Create folder", !d.name.trim().is_empty()),
                 FolderAsk::RenameFolder { .. } => ("Rename", !d.name.trim().is_empty()),
                 FolderAsk::DeleteFolder { .. } => ("Delete folder", true),
+                FolderAsk::ApplyTemplate { .. } => (
+                    "Create folders",
+                    matches!(&d.tpl, Some(Ok(dirs)) if !dirs.is_empty()),
+                ),
             };
             let pressed = ui
                 .add_enabled(ready && !busy, widgets::primary_button(label))
@@ -231,6 +312,7 @@ fn start(ctx: &egui::Context, d: &mut FolderDialog, env: &mut Env) -> Option<Don
         name: d.name.clone(),
         plan: d.plan.clone().and_then(Result::ok),
         id_plan: d.id_plan.clone().and_then(Result::ok),
+        dirs: d.tpl.clone().and_then(Result::ok).unwrap_or_default(),
     };
     d.error = None;
     let catalog = env.conn.path().filter(|p| !p.is_empty());
@@ -249,6 +331,7 @@ fn start(ctx: &egui::Context, d: &mut FolderDialog, env: &mut Env) -> Option<Don
         FolderAsk::NewFolder { .. } => "Creating the folder…",
         FolderAsk::RenameFolder { .. } => "Renaming the folder…",
         FolderAsk::DeleteFolder { .. } => "Deleting the folder…",
+        FolderAsk::ApplyTemplate { .. } => "Creating the folders…",
     };
     let (root, device) = (env.root.to_path_buf(), env.device_id.to_string());
     match Job::start(ctx, what, move || {
@@ -310,6 +393,14 @@ fn run(
         FolderAsk::DeleteFolder { rel } => {
             folders::delete_folder(conn, root, rel, device_id)?;
             Ok(format!("Deleted {rel}."))
+        }
+        FolderAsk::ApplyTemplate { folder } => {
+            let n = folders::apply_template(conn, root, folder, &d.dirs, device_id)?;
+            Ok(match n {
+                0 => format!("{folder} has every folder of the folder template."),
+                1 => format!("Created 1 folder in {folder}."),
+                n => format!("Created {n} folders in {folder}."),
+            })
         }
     }
 }

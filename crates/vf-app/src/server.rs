@@ -385,16 +385,26 @@ pub fn writer_id(conn: &Connection) -> String {
 }
 
 /// Leaves a copy of this server's catalog for the others to start from, when there is none or
-/// it is a week old. The copy has read the change logs as far as this catalog had, its own
-/// included. Run on a thread (the copy is 1-3 GB for ~900K documents).
-pub fn publish_seed(catalog: &Path, root: &Path, writer: &str) -> Result<bool> {
+/// it is a week old, or `now` (this server has just finished indexing the cabinet, PA-88: the
+/// copy the others start from each morning must not be one made before that index, or each of
+/// them indexes again, for up to a week). Never from a catalog whose index is not finished:
+/// a copy carries no sign of that, and whoever started from it would take it for whole. The
+/// copy has read the change logs as far as this catalog had, its own included. Run on a
+/// thread (the copy is 1-3 GB for ~900K documents).
+pub fn publish_seed(catalog: &Path, root: &Path, writer: &str, now: bool) -> Result<bool> {
     let seed = seed_path(root);
     let fresh = std::fs::metadata(&seed)
         .and_then(|m| m.modified())
         .ok()
         .and_then(|t| t.elapsed().ok())
         .is_some_and(|age| age < std::time::Duration::from_secs(7 * 86_400));
-    if fresh {
+    if fresh && !now {
+        return Ok(false);
+    }
+    let unfinished = Connection::open_with_flags(catalog, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .map(|c| vf_fs::rebuild::unfinished_label(&c).is_some())
+        .unwrap_or(true);
+    if unfinished {
         return Ok(false);
     }
     let dir = seed.parent().context("no seed folder")?;
@@ -538,6 +548,8 @@ pub struct Watch {
     client: Option<String>,
     /// The first read, left by opening the cabinet for the window, has not finished.
     first: bool,
+    /// Make the copy the other servers start from again at the next read, whatever its age.
+    seed_now: bool,
 }
 
 const EVERY: std::time::Duration = std::time::Duration::from_secs(15 * 60);
@@ -551,6 +563,7 @@ impl Default for Watch {
             last: Some(std::time::Instant::now()),
             client: None,
             first: false,
+            seed_now: false,
         }
     }
 }
@@ -564,7 +577,15 @@ impl Watch {
             last: None,
             client: None,
             first: true,
+            seed_now: false,
         }
+    }
+
+    /// This server has just finished indexing the cabinet: the copy the other servers start
+    /// from is made again at the next read, which is due now.
+    pub fn seed_after_index(&mut self) {
+        self.seed_now = true;
+        self.last = None;
     }
 
     /// The other servers' changes are being read now (said in the footer).
@@ -616,6 +637,7 @@ impl Watch {
         }
         self.last = Some(std::time::Instant::now());
         self.client = client;
+        let seed_now = std::mem::take(&mut self.seed_now);
         let (catalog, root, writer, device) = (
             catalog.to_path_buf(),
             root.to_path_buf(),
@@ -641,7 +663,7 @@ impl Watch {
                 // send one at once (the second would be a conflicted copy of a large file).
                 let leaves = !crate::cloudmode::is_cloud(&root) || runs_here(&root);
                 if let Err(e) = leaves
-                    .then(|| publish_seed(&catalog, &root, &writer))
+                    .then(|| publish_seed(&catalog, &root, &writer, seed_now))
                     .transpose()
                 {
                     tracing::warn!(
@@ -754,11 +776,23 @@ mod tests {
             path: root.join("Client One/x"),
         }]);
         vf_fs::changes::clear_writer();
-        assert!(publish_seed(&a, &root, "server-a").unwrap());
+        assert!(publish_seed(&a, &root, "server-a", false).unwrap());
         assert!(
-            !publish_seed(&a, &root, "server-a").unwrap(),
+            !publish_seed(&a, &root, "server-a", false).unwrap(),
             "fresh: not again"
         );
+        // PA-88: made again at once when this server has just finished an index; never from
+        // a catalog whose index is not finished (the copy would pass for whole).
+        assert!(publish_seed(&a, &root, "server-a", true).unwrap());
+        {
+            let c = vf_core::db::open(&a, Storage::Local).unwrap();
+            vf_fs::rebuild::ask_for_index(&c).unwrap();
+            drop(c);
+            assert!(!publish_seed(&a, &root, "server-a", true).unwrap());
+            let c = vf_core::db::open(&a, Storage::Local).unwrap();
+            c.execute("DELETE FROM local_state WHERE k = 'rebuild_unfinished'", [])
+                .unwrap();
+        }
         // PA-84: the place for this computer's catalogs was changed. The catalog in the place
         // used before starts the new one, as it is (taken before the seed).
         {

@@ -38,3 +38,7 @@ Other PCs pick up a saved template too: their Intake offers **Reload Intake**.
 
 - [Doc types](help:doc-types) name a default folder from this template, for example `Income Tax/{Year}`.
 - [Clients and relationships](help:clients) covers creating a client, which makes its folder from the template.
+
+## Applying the template to a client
+
+A client whose folder came from elsewhere (an import, or a folder bound in Intake's Setup) may not have the folders of the template. In **Browse**, right-click the client in the tree and choose **Apply folder template…**. The folders the client does not have are listed; **Create folders** makes them. Folders and files that are there are not touched, and year folders are made later, when a document is filed into them. **Undo last** takes the new folders away again.

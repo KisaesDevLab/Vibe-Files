@@ -29,6 +29,7 @@ pub const SET_CLIENT_ID: &str = "client_set_id";
 pub const NEW_FOLDER: &str = "folder_create";
 pub const RENAME_FOLDER: &str = "folder_rename";
 pub const DELETE_FOLDER: &str = "folder_delete";
+pub const APPLY_TEMPLATE: &str = "folder_template";
 
 /// Filer's limit for a path (X104).
 pub(crate) const MAX_PATH: usize = 240;
@@ -130,6 +131,97 @@ pub fn new_folder(
         .audit(AuditEntry::new(NEW_FOLDER, None, json!({ "folder": rel })));
     crate::fileops::commit(conn, root, tx, device_id)?;
     Ok(rel)
+}
+
+/// The folders of the cabinet's folder template that client folder `client_folder` does not
+/// have (owner 2026-11-16, PA-88: a client whose folder came from elsewhere gets the firm's
+/// folders): cabinet-relative, parents first. The year folders are left out, as for a new
+/// client: they are made when a document needs them. Nothing that is there is touched.
+pub fn plan_template(
+    conn: &Connection,
+    root: &Path,
+    client_folder: &str,
+) -> Result<Vec<String>, String> {
+    let cf = client_folder.trim_matches('/');
+    if inside_client(conn, root, cf)? != cf {
+        return Err("The folder template is applied to a client's own folder.".into());
+    }
+    let (ext, name): (String, String) = conn
+        .query_row(
+            "SELECT ext_id, name FROM client
+             WHERE folder_rel = ?1 COLLATE NOCASE AND deleted_at IS NULL",
+            [cf],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .map_err(|_| "That folder is not a client's.".to_string())?;
+    // The client as the client list has it (its columns can be in a folder's name).
+    let master = crate::clients::load(root)?;
+    let client = master
+        .list
+        .as_ref()
+        .and_then(|l| l.match_by_id(&ext))
+        .cloned()
+        .unwrap_or(filer_core::clients::Client {
+            id: ext,
+            uuid: uuid::Uuid::nil(),
+            name,
+            extra: Default::default(),
+        });
+    let (tree, _, err) = template::load_or_seed(&crate::clients::master_dir(root));
+    if let Some(e) = err {
+        return Err(e);
+    }
+    let dirs = template::initial_dirs(&tree, &client).map_err(|e| e.to_string())?;
+    let mut out = Vec::new();
+    // The first is the client folder as the template names it: this client's folder is what
+    // it is on disk, whatever its name.
+    for d in dirs.iter().skip(1) {
+        let inner: Vec<String> = d
+            .components()
+            .skip(1)
+            .map(|c| c.as_os_str().to_string_lossy().into_owned())
+            .collect();
+        if inner.is_empty() {
+            continue;
+        }
+        let rel = format!("{cf}/{}", inner.join("/"));
+        if root.join(&rel).exists() {
+            continue;
+        }
+        if let Some(e) = too_long(root, &rel) {
+            return Err(format!("{rel}: {e}"));
+        }
+        out.push(rel);
+    }
+    Ok(out)
+}
+
+/// Makes the folders [`plan_template`] listed (`dirs`) that are still missing, as one
+/// Transaction (Undo takes the empty ones away again). Returns how many were made.
+pub fn apply_template(
+    conn: &mut Connection,
+    root: &Path,
+    client_folder: &str,
+    dirs: &[String],
+    device_id: &str,
+) -> Result<usize, String> {
+    // Planned again: only what the template still asks for, and is not there by now.
+    let now = plan_template(conn, root, client_folder)?;
+    let make: Vec<&String> = now.iter().filter(|d| dirs.contains(d)).collect();
+    if make.is_empty() {
+        return Ok(0);
+    }
+    let mut tx = Transaction::new(APPLY_TEMPLATE);
+    for d in &make {
+        tx = tx.file(FileOp::Mkdir { path: root.join(d) });
+    }
+    let tx = tx.audit(AuditEntry::new(
+        APPLY_TEMPLATE,
+        None,
+        json!({ "client_folder": client_folder.trim_matches('/'), "folders": make.len() }),
+    ));
+    crate::fileops::commit(conn, root, tx, device_id)?;
+    Ok(make.len())
 }
 
 /// Every file under `dir` (relative to it, `/`-separated), and every folder, deepest first.
@@ -1106,6 +1198,72 @@ mod tests {
             "the old sentinel back"
         );
         assert!(!aside.exists());
+    }
+
+    /// PA-88 (owner 2026-11-16): the cabinet's folder template applied to a client's folder
+    /// makes the folders it does not have, under the folder's own name, and nothing else;
+    /// applied again it has nothing to do; Undo takes the new folders away.
+    #[test]
+    fn the_folder_template_is_applied_to_a_clients_folder() {
+        let (mut c, _) = cab();
+        let cf = "Smith, Pat (SMIT1001)";
+        // A client made here has every folder of the template: nothing to do.
+        assert!(plan_template(&c.conn, &c.root, cf).unwrap().is_empty());
+        // One whose folder came from elsewhere lacks some (here: a folder and those in it).
+        std::fs::remove_dir_all(c.root.join(cf).join("Permanent")).unwrap();
+        let all = plan_template(&c.conn, &c.root, cf).unwrap();
+        assert!(
+            all.contains(&format!("{cf}/Permanent"))
+                && all.contains(&format!("{cf}/Permanent/Setup")),
+            "{all:?}"
+        );
+        let kept = c.root.join(cf).join("Correspondence");
+        assert!(kept.is_dir());
+        assert!(
+            !all.iter().any(|d| d == &format!("{cf}/Correspondence")),
+            "{all:?}"
+        );
+        assert!(!all.is_empty(), "the fixture has only some of the template");
+        assert!(all.iter().all(|d| d.starts_with(&format!("{cf}/"))));
+        assert!(
+            !all.iter()
+                .any(|d| d.contains("{Year}") || d.contains("/20")),
+            "no year folders: {all:?}"
+        );
+        let before: Vec<String> = std::fs::read_dir(&kept)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        let made = apply_template(&mut c.conn, &c.root, cf, &all, "dev").unwrap();
+        assert_eq!(made, all.len());
+        for d in &all {
+            assert!(c.root.join(d).is_dir(), "{d}");
+        }
+        let after: Vec<String> = std::fs::read_dir(&kept)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(before, after, "what was there is not touched");
+        // Again: nothing to do.
+        assert!(plan_template(&c.conn, &c.root, cf).unwrap().is_empty());
+        assert_eq!(
+            apply_template(&mut c.conn, &c.root, cf, &all, "dev").unwrap(),
+            0
+        );
+        // Not a client's folder, or a folder inside one.
+        assert!(plan_template(&c.conn, &c.root, "").is_err());
+        assert!(plan_template(&c.conn, &c.root, &format!("{cf}/Correspondence")).is_err());
+        // Undo: the new folders go.
+        let stack = crate::fileops::undo_stack(&c.conn, "dev").unwrap();
+        assert_eq!(stack[0].label, APPLY_TEMPLATE);
+        let tx = stack[0].tx_id.clone();
+        crate::fileops::undo(&mut c.conn, &c.root, &tx, "dev").unwrap();
+        for d in &all {
+            assert!(!c.root.join(d).exists(), "{d}");
+        }
+        assert!(kept.is_dir());
     }
 
     #[test]

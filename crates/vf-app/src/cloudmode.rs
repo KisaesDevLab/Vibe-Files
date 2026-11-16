@@ -369,7 +369,7 @@ mod tests {
         let a = crate::session::open(&t.path().join("pc-a"), "pc-a", &root).unwrap();
         assert!(a.catalog.starts_with(t.path().join("pc-a-programdata")));
         let w = a.writer.clone().expect("a cloud cabinet notes its changes");
-        assert!(crate::server::publish_seed(&a.catalog, &root, &w).unwrap());
+        assert!(crate::server::publish_seed(&a.catalog, &root, &w, false).unwrap());
         drop(a);
         vf_fs::changes::clear_writer();
 

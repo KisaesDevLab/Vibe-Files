@@ -3218,6 +3218,10 @@ fn tree(ui: &mut egui::Ui, b: &mut Browse) {
                 )];
                 if let Some(cf) = &c.folder_rel {
                     asks.push(("New folder…", FolderAsk::NewFolder { parent: cf.clone() }));
+                    asks.push((
+                        "Apply folder template…",
+                        FolderAsk::ApplyTemplate { folder: cf.clone() },
+                    ));
                 }
                 fav_menu(&resp, Scope::Client(ci), &mut fav_scope, asks, &mut ask);
                 if b.reveal.as_deref() == Some(c.id.as_str()) {
@@ -7297,6 +7301,42 @@ Petty cash,1234.50
         click(&mut h, "Create client (one transaction)");
         let cf = root.join("Anderson Farms LLC (1042)");
         assert!(cf.is_dir());
+
+        // PA-88 (owner 2026-11-16): Apply folder template… on a client makes the template's
+        // folders its folder does not have, after showing them.
+        std::fs::remove_dir_all(cf.join("Permanent")).unwrap();
+        h.get_by_role_and_label(Role::Button, "Anderson Farms LLC  1042")
+            .click_secondary();
+        h.run();
+        click(&mut h, "Apply folder template…");
+        h.run();
+        assert!(
+            h.query_by_label("Permanent/Setup").is_some(),
+            "listed first"
+        );
+        assert!(
+            !cf.join("Permanent").exists(),
+            "nothing made before the button"
+        );
+        click(&mut h, "Create folders");
+        h.run();
+        assert!(
+            cf.join("Permanent").join("Setup").is_dir(),
+            "{:?}",
+            h.state().b.notice
+        );
+        assert!(h.state().b.folder_dialog.is_none());
+        // With nothing missing there is nothing to create.
+        h.get_by_role_and_label(Role::Button, "Anderson Farms LLC  1042")
+            .click_secondary();
+        h.run();
+        click(&mut h, "Apply folder template…");
+        h.run();
+        assert!(
+            h.query_by_label("This client has every folder of the folder template.")
+                .is_some()
+        );
+        click(&mut h, "Cancel");
 
         // New folder in the client folder.
         h.get_by_role_and_label(Role::Button, "Anderson Farms LLC  1042")

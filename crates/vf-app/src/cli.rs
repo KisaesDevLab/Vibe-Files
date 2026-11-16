@@ -788,7 +788,7 @@ mod tests {
         crate::server::set_main(&root).unwrap();
         let a = crate::session::open(&data_a, &device_id(&data_a).unwrap(), &root).unwrap();
         let w = a.writer.clone().unwrap();
-        assert!(crate::server::publish_seed(&a.catalog, &root, &w).unwrap());
+        assert!(crate::server::publish_seed(&a.catalog, &root, &w, false).unwrap());
         drop(a);
         vf_fs::changes::clear_writer();
 

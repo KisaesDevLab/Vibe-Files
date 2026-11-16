@@ -799,6 +799,8 @@ impl eframe::App for VibeFilesApp {
                     o.browse.indexing = None;
                     o.index_wait = None;
                     o.indexing = None;
+                    // The other servers start from this catalog's copy: made again now.
+                    o.servers.seed_after_index();
                     o.browse.reload(&o.opened.conn);
                     if o.browse.notice.is_none() {
                         o.browse.notice = Some(format!(
