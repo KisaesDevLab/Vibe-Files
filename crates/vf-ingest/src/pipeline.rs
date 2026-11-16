@@ -414,29 +414,43 @@ fn read_printed(
 /// Intake filed with no hint, a print saved straight into an inbox and filed under its printed
 /// name. Its doc type, tax year and source, when the name is a program's and its client is in
 /// the client list. Loads the profiles, doc types and client list once.
-pub fn name_reader(root: &Path) -> vf_fs::intake::NameReader {
+/// An error when the client list or the doc types cannot be read: no name of the batch can be
+/// read then, and the caller says so.
+pub fn name_reader(root: &Path) -> Result<vf_fs::intake::NameReader, String> {
     let (profiles, _) = crate::parsers::load(root);
-    let lookup = Lookup::load(root).unwrap_or(Lookup {
-        clients: Default::default(),
-        doc_types: Default::default(),
-    });
-    Box::new(move |name| {
-        let p = read_printed(&profiles, &lookup, name)?;
+    let lookup = Lookup::load(root)?;
+    Ok(Box::new(move |name| {
+        // A second file of the same name: Windows, or Intake's Keep both, put ` (2)` after it.
+        let plain = without_copy_number(name);
+        let p = read_printed(&profiles, &lookup, &plain)?;
         if !lookup.clients.contains_key(&p.client_id) {
             return None;
         }
-        let mut h = Hint::new("", name, &format!("print_name:{}", p.profile), "");
-        h.tax_year = p.year;
-        h.source = Some(p.source.clone());
-        h.doc_type = p.doc_type.as_ref().and_then(|t| {
-            lookup
-                .doc_types
-                .iter()
-                .find(|(_, n)| *n == t)
-                .map(|(id, _)| id.clone())
-        });
-        Some(h)
-    })
+        Some(hint_of(&lookup, &p, name, "print_name"))
+    }))
+}
+
+/// `name` without the ` (2)` before its extension that a second file of the same name gets.
+fn without_copy_number(name: &str) -> String {
+    static COPY: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    COPY.get_or_init(|| regex::Regex::new(r"[ _]*\(\d+\)(\.[A-Za-z0-9]+)$").expect("valid"))
+        .replace(name, "$1")
+        .into_owned()
+}
+
+/// The hint a profile's reading of a name gives a file: its doc type, tax year and source.
+fn hint_of(lookup: &Lookup, p: &crate::parsers::Parsed, name: &str, origin: &str) -> Hint {
+    let mut h = Hint::new("", name, &format!("{origin}:{}", p.profile), "");
+    h.tax_year = p.year;
+    h.source = Some(p.source.clone());
+    h.doc_type = p.doc_type.as_ref().and_then(|t| {
+        lookup
+            .doc_types
+            .iter()
+            .find(|(_, n)| *n == t)
+            .map(|(id, _)| id.clone())
+    });
+    h
 }
 
 /// Print capture (step 5): the name a parser profile reads, as Filer's `Name_ID_rest.pdf`, and
@@ -451,11 +465,18 @@ pub fn capture_name(root: &Path, lookup: &Lookup, name: &str) -> (String, Hint, 
     let (profiles, _) = crate::parsers::load(root);
     // The client ID must read back as Filer's ID, or Filer would take another part of the name
     // for it (wrong client); such a name goes through unprofiled (QA2 E11).
-    // (An ID of the client list is read by Intake through the list, whatever the pattern.)
+    // An ID with an underscore in it is the one kind Intake reads through the client list at
+    // the end of a name (`Name_rest_ID` below), and only when no part of it is a client's ID
+    // of its own: Filer would take that part for the client (clients `2614` and `2614_FOUR`).
+    // Any other ID must still read as Filer's pattern does.
     let id_ok = |id: &str| {
-        lookup.clients.contains_key(id)
-            || regex::Regex::new(&format!("^(?:{})$", filer_id_pattern(root)))
+        if id.contains('_') {
+            lookup.clients.contains_key(id)
+                && !id.split('_').any(|part| lookup.clients.contains_key(part))
+        } else {
+            regex::Regex::new(&format!("^(?:{})$", filer_id_pattern(root)))
                 .is_ok_and(|r| r.is_match(id))
+        }
     };
     let parsed = read_printed(&profiles, lookup, name).filter(|p| id_ok(&p.client_id));
     let Some(p) = parsed else {
@@ -557,16 +578,7 @@ pub fn capture_name(root: &Path, lookup: &Lookup, name: &str) -> (String, Hint, 
             rest
         )
     };
-    let mut h = Hint::new("", &file, &format!("print_capture:{}", p.profile), "");
-    h.tax_year = p.year;
-    h.source = Some(p.source.clone());
-    h.doc_type = p.doc_type.as_ref().and_then(|t| {
-        lookup
-            .doc_types
-            .iter()
-            .find(|(_, n)| *n == t)
-            .map(|(id, _)| id.clone())
-    });
+    let h = hint_of(lookup, &p, &file, "print_capture");
     let note = format!(
         "{} filename profile{}{}",
         p.profile,

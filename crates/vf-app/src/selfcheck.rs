@@ -89,39 +89,61 @@ pub fn run_with(
         }),
     ));
     let one_main = crate::server::server_mode() || crate::cloudmode::is_cloud(root);
+    // The computer B2 sync runs on, when it is another one, and what the cabinet says of its
+    // last whole push (each read once). `one_main`: the cabinet syncs on one main computer
+    // (several servers, a cloud cabinet); on a plain office share every PC syncs, and a
+    // main-server file left from before means nothing.
+    let (main, last_push) = match main_elsewhere(root, one_main) {
+        Some((m, p)) => (Some(m), p),
+        None => (None, None),
+    };
     if sync_configured {
-        // On a computer that is not the one B2 sync runs on, a catalog that never pushed or
-        // pulled is as it should be (owner 2026-11-16: a session host said so in red every
-        // morning; another computer pushes).
         out.push(check(
             "Sync",
-            sync_state(conn, main_is_another(root, one_main)),
+            match &main {
+                // Named, and it has never sent the cabinet: nothing is going to B2, whatever
+                // this catalog's own state.
+                Some(m) if last_push.is_none() => Err(format!(
+                    "set to run on {}, which has not sent the cabinet to B2 yet (Admin › Devices › Servers)",
+                    m.computer
+                )),
+                // On a computer B2 sync does not run on, a catalog that never pushed or
+                // pulled is as it should be (owner 2026-11-16: a session host said so in red
+                // every morning). Only on the word of a push that did happen: "B2 backup"
+                // below says how old it is.
+                Some(m) => sync_state(conn, Some(&m.computer)),
+                None => sync_state(conn, None),
+            },
         ));
     }
     // On the computers that are not the main one (sync set up there or not): the main
     // computer, or its scheduled push, stopped sending the cabinet to B2 (PA-40). The main one
     // itself is not told: it opens before its first push of the day (a Monday after a weekend
     // closed); its own Sync check covers it.
-    out.extend(backup_check(root, one_main));
+    out.extend(last_push.map(|r| check("B2 backup", r)));
     out
 }
 
-/// Whether the cabinet's B2 sync runs on a computer that is not this one.
-fn main_is_another(root: &Path, one_main: bool) -> bool {
-    one_main
-        && crate::server::main_server(root)
-            .is_some_and(|m| !m.computer.eq_ignore_ascii_case(&crate::server::computer()))
+/// The other computer the cabinet's B2 sync runs on, and what the cabinet says of its last
+/// whole push (`None`: it never sent one). `None` when sync runs here, or on every PC.
+fn main_elsewhere(
+    root: &Path,
+    one_main: bool,
+) -> Option<(crate::server::MainServer, Option<Result<String, String>>)> {
+    let main = one_main
+        .then(|| crate::server::main_server(root))
+        .flatten()
+        .filter(|m| !m.computer.eq_ignore_ascii_case(&crate::server::computer()))?;
+    Some((main, crate::lastpush::check(root)))
 }
 
 /// "B2 backup", when another computer runs the cabinet's B2 sync and it sent the whole cabinet
-/// once at least. `one_main`: the cabinet syncs on one main computer (several servers, a cloud
-/// cabinet); on a plain office share every PC syncs, and a main-server file left from before
-/// means nothing.
+/// once at least.
+#[cfg(test)]
 fn backup_check(root: &Path, one_main: bool) -> Option<Check> {
-    if !main_is_another(root, one_main) {
-        return None;
-    }
-    crate::lastpush::check(root).map(|r| check("B2 backup", r))
+    main_elsewhere(root, one_main)?
+        .1
+        .map(|r| check("B2 backup", r))
 }
 
 /// The cabinet file reads and the cabinet takes a write (a share gone read-only fails here).
@@ -135,7 +157,9 @@ fn reachable(root: &Path) -> Result<String, String> {
     Ok("readable and writable".into())
 }
 
-fn sync_state(conn: &Connection, runs_elsewhere: bool) -> Result<String, String> {
+/// This catalog's own sync state. `runs_on`: the other computer B2 sync runs on (and has
+/// pushed from): never having exchanged, or not lately, is then no failure here.
+fn sync_state(conn: &Connection, runs_on: Option<&str>) -> Result<String, String> {
     let conflicts: i64 = conn
         .query_row(
             "SELECT count(*) FROM sync_conflict WHERE resolved IS NULL",
@@ -155,8 +179,8 @@ fn sync_state(conn: &Connection, runs_elsewhere: bool) -> Result<String, String>
         return Err(format!("{conflicts} conflicts to resolve (Sync tab)"));
     }
     let Some(last) = last else {
-        if runs_elsewhere {
-            return Ok("runs on another computer; nothing pushed or pulled from this one".into());
+        if let Some(c) = runs_on {
+            return Ok(format!("runs on {c}"));
         }
         // (Not "unlock it": this is said when sync is unlocked too, owner 2026-11-16.)
         return Err(
@@ -167,7 +191,7 @@ fn sync_state(conn: &Connection, runs_elsewhere: bool) -> Result<String, String>
     let age = chrono::DateTime::parse_from_rfc3339(&last)
         .map(|t| (chrono::Utc::now() - t.with_timezone(&chrono::Utc)).num_days())
         .unwrap_or(0);
-    if age > 7 && !runs_elsewhere {
+    if age > 7 && runs_on.is_none() {
         Err(format!("last exchange {age} days ago"))
     } else {
         Ok(format!(
@@ -204,8 +228,8 @@ mod tests {
         let sync = r.iter().find(|c| c.name == "Sync").unwrap();
         assert!(!sync.ok, "set up but never run");
         // On a computer B2 sync does not run on, that is as it should be.
-        assert!(sync_state(&conn, true).is_ok());
-        assert!(sync_state(&conn, false).is_err());
+        assert!(sync_state(&conn, Some("HOST-2")).is_ok());
+        assert!(sync_state(&conn, None).is_err());
         std::fs::remove_dir_all(&root).unwrap();
         let r = run(&conn, &root, false);
         assert!(!r.iter().find(|c| c.name == "Cabinet reachable").unwrap().ok);

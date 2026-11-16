@@ -585,11 +585,21 @@ fn ultratax_prints_dropped_in_an_inbox_follow_their_rows() {
             rule, "UltraTax CS · ArchiveK1Package",
             "{delivered} -> {dest}"
         );
+        // And it is this client's: Intake reads the ID whole.
+        let read = filer_core::parse::read_name(
+            &delivered,
+            Some(&re),
+            &off,
+            2026,
+            |id| list.match_by_id(id).is_some(),
+            |_| false,
+        );
+        assert_eq!(read.id.as_deref(), Some("2614_FOUR"), "{delivered}");
     }
     // PA-86: recorded by Intake with no hint, such a print gets its doc type, year and
     // source from its own name; a name that is no program's says nothing.
     {
-        let read = vf_ingest::pipeline::name_reader(&root);
+        let read = vf_ingest::pipeline::name_reader(&root).unwrap();
         let h = read("Four State Barns LLC_2025_1065_K1_Package_Chet A Hammen_2614_FOUR.pdf")
             .expect("read");
         assert!(h.doc_type.is_some());
@@ -598,6 +608,9 @@ fn ultratax_prints_dropped_in_an_inbox_follow_their_rows() {
             (Some(2025), Some("firm"))
         );
         let h = read("Anderson Farms LLC_2025_1120S_Form_8879_ANDE1042.pdf").expect("read");
+        assert!(h.doc_type.is_some());
+        // A second file of the same name is read as the first is.
+        let h = read("Anderson Farms LLC_2025_1120S_Form_8879_ANDE1042 (2).pdf").expect("read");
         assert!(h.doc_type.is_some());
         assert!(read("Anderson Farms LLC_2024_W2_client copy_NOBODY99.pdf").is_none());
         assert!(read("scan0001.pdf").is_none());
@@ -634,4 +647,56 @@ fn ultratax_prints_dropped_in_an_inbox_follow_their_rows() {
             .id
             .starts_with(vf_ingest::parsers::MANAGED_PREFIX)
     );
+}
+
+/// Code review of PA-86: a two-part ID one part of which is another client's ID (`2614` and
+/// `2614_FOUR`) cannot be handed to Intake in a name: Filer would take the part for the
+/// client. Such a print goes through with no ID in its name, so Intake asks which client.
+#[test]
+fn a_two_part_id_holding_another_clients_id_is_left_for_intake_to_ask() {
+    let t = tempfile::tempdir().unwrap();
+    let root = t.path().join("cabinet");
+    vf_fs::cabinet::create(
+        &root,
+        &vf_fs::cabinet::CabinetFile {
+            cabinet_id: vf_core::new_id(),
+            firm_id: uuid::Uuid::new_v4().to_string(),
+            schema_version: vf_core::db::SCHEMA_VERSION,
+            layout_version: 1,
+            created: vf_core::now_rfc3339(),
+            name: None,
+        },
+    )
+    .unwrap();
+    vf_fs::doctypes::seed_if_missing(&root).unwrap();
+    let csv = t.path().join("clients.csv");
+    std::fs::write(
+        &csv,
+        "ID,Name\n2614,Other Client LLC\n2614_FOUR,Four State Barns LLC\n8054_1FAR,One Farm LLC\n",
+    )
+    .unwrap();
+    let map = filer_core::config::ColumnMap {
+        partner: None,
+        id: Some("ID".into()),
+        name: Some("Name".into()),
+        extras: vec![],
+    };
+    vf_fs::clients::import_csv(&root, &csv, &map, &Default::default()).unwrap();
+    vf_ingest::parsers::seed_if_missing(&root).unwrap();
+    let lookup = vf_ingest::pipeline::Lookup::load(&root).unwrap();
+    let (delivered, hint, _, _) = vf_ingest::pipeline::capture_name(
+        &root,
+        &lookup,
+        "Four State Barns LLC_2025_1065_Tax_Return_2614_FOUR.pdf",
+    );
+    assert!(!delivered.contains('_'), "{delivered}");
+    assert!(hint.doc_type.is_none());
+    // One with no such part goes through with its row.
+    let (delivered, hint, _, _) = vf_ingest::pipeline::capture_name(
+        &root,
+        &lookup,
+        "One Farm LLC_2025_1065_Tax_Return_8054_1FAR.pdf",
+    );
+    assert!(delivered.ends_with("_8054_1FAR.pdf"), "{delivered}");
+    assert!(hint.doc_type.is_some());
 }

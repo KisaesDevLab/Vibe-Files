@@ -870,7 +870,20 @@ pub fn trial(root: &Path, file_name: &str) -> Trial {
         Ok(r) => r,
         Err(e) => return fail(String::new(), format!("Filer's ID pattern: {e}")),
     };
-    let fp = filer_core::parse::parse_filename(&delivered, &re, year);
+    // Read as Intake reads a file in an inbox: Filer's UltraTax layout off, and the client's
+    // ID found through the client list (one with an underscore in it stands at the end).
+    let off = filer_core::parse::UltraTaxLayout {
+        enabled: false,
+        ..Default::default()
+    };
+    let fp = filer_core::parse::read_name(
+        &delivered,
+        Some(&re),
+        &off,
+        year,
+        |id| lookup.clients.contains_key(id),
+        |_| false,
+    );
     let compiled = match filer_core::rules::CompiledRules::new(rules.active_rules()) {
         Ok(c) => c,
         Err(e) => return fail(String::new(), format!("Filer's rules: {e}")),

@@ -43,7 +43,16 @@ struct Args {
 
 fn main() -> anyhow::Result<std::process::ExitCode> {
     // Intake's recording asks print capture's profiles what a printed name says (PA-86).
-    vf_fs::intake::set_name_reader(vf_ingest::pipeline::name_reader);
+    vf_fs::intake::set_name_reader(|root| {
+        vf_ingest::pipeline::name_reader(root).unwrap_or_else(|e| {
+            // Said, not passed over: no file of this batch gets a doc type from its name.
+            tracing::warn!(
+                kind = logging::kind(&e),
+                "printed names not read: the client list or doc types could not be loaded"
+            );
+            Box::new(|_| None)
+        })
+    });
     let args = Args::parse();
     let chosen = args.data.is_some();
     let personal = std::env::var_os("LOCALAPPDATA")

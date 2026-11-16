@@ -695,19 +695,11 @@ pub type MakeNameReader = fn(&Path) -> NameReader;
 
 static NAME_READER: std::sync::RwLock<Option<MakeNameReader>> = std::sync::RwLock::new(None);
 
-/// Sets the reader of file names ([`NameReader`]).
+/// Sets the reader of file names ([`NameReader`]). The program sets it once, first thing in
+/// `main`, before any command or window opens a cabinet; with none set, a file with no hint
+/// is recorded with no doc type, as before PA-86.
 pub fn set_name_reader(make: MakeNameReader) {
     *NAME_READER.write().unwrap_or_else(|e| e.into_inner()) = Some(make);
-}
-
-/// Whether `name` could be a program's printed name worth asking the reader about: a PDF
-/// with a year and several `_` parts. (The reader loads the profiles and the client list.)
-fn worth_reading(name: &str) -> bool {
-    name.to_ascii_lowercase().ends_with(".pdf")
-        && name.matches('_').count() >= 3
-        && name
-            .split('_')
-            .any(|p| p.len() == 4 && (p.starts_with("19") || p.starts_with("20")))
 }
 
 /// Records one finished, not-undone batch. Returns (documents added, documents updated).
@@ -754,7 +746,7 @@ fn record(
         .and_then(|mut st| st.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect())
         .map_err(|e| e.to_string())?;
     let hints = crate::hints::load(root);
-    // Made when the first file with no hint and a name worth reading comes.
+    // Made when the first file with no hint comes.
     let mut name_reader: Option<Option<NameReader>> = None;
     // Payer → client corrections to learn once the batch is recorded (P08 step 4).
     let mut learned: Vec<(String, String)> = Vec::new();
@@ -893,25 +885,21 @@ fn record(
                 // rebuild restores it (Q-22).
                 // With no hint, what its own name says (a print saved straight into an
                 // inbox, filed under its printed name).
-                let by_name = match hints.get(&hash) {
+                // (Which names are a program's is the reader's to say: every name is asked.)
+                let by_hash = hints.get(&hash);
+                let by_name = match by_hash {
                     Some(_) => None,
-                    None => f
-                        .rel
-                        .rsplit('/')
-                        .next()
-                        .filter(|n| worth_reading(n))
-                        .and_then(|n| {
-                            name_reader
-                                .get_or_insert_with(|| {
-                                    let make =
-                                        *NAME_READER.read().unwrap_or_else(|e| e.into_inner());
-                                    make.map(|m| m(root))
-                                })
-                                .as_ref()
-                                .and_then(|r| r(n))
-                        }),
+                    None => f.rel.rsplit('/').next().and_then(|n| {
+                        name_reader
+                            .get_or_insert_with(|| {
+                                let make = *NAME_READER.read().unwrap_or_else(|e| e.into_inner());
+                                make.map(|m| m(root))
+                            })
+                            .as_ref()
+                            .and_then(|r| r(n))
+                    }),
                 };
-                let hint = hints.get(&hash).or(by_name.as_ref());
+                let hint = by_hash.or(by_name.as_ref());
                 let doc_type = hint
                     .and_then(|h| h.doc_type.clone())
                     .filter(|t| doc_types.contains_key(t));

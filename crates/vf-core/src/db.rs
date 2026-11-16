@@ -101,10 +101,27 @@ pub fn is_on_network(path: &Path) -> bool {
     storage_of(path, Storage::Local) == Storage::Network
 }
 
+/// A path as text for comparing: lower case, `/` as `\`, and without the `\\?\` (or
+/// `\\?\UNC\`) Windows and SQLite put before a long or a canonical path. The same catalog is
+/// named in several ways (as the program built its path, as SQLite reports it).
+fn spelled(p: &Path) -> String {
+    let s = p.to_string_lossy().replace('/', "\\").to_lowercase();
+    match s.strip_prefix(r"\\?\unc\") {
+        Some(rest) => format!(r"\\{rest}"),
+        None => s.strip_prefix(r"\\?\").unwrap_or(&s).to_string(),
+    }
+}
+
 /// How the catalog at `path` is opened when `asked` for.
 fn storage_of(path: &Path, asked: Storage) -> Storage {
     let n = NETWORK.read().unwrap_or_else(|e| e.into_inner());
-    if n.iter().any(|d| path.starts_with(d)) {
+    let p = spelled(path);
+    let under = |d: &std::path::PathBuf| {
+        let d = spelled(d);
+        let d = d.trim_end_matches('\\');
+        p.strip_prefix(d).is_some_and(|rest| rest.starts_with('\\'))
+    };
+    if n.iter().any(under) {
         Storage::Network
     } else {
         asked
@@ -321,6 +338,19 @@ mod tests {
         };
         assert_eq!(mode(&share.join("HOST").join("catalog.db")), "delete");
         assert_eq!(mode(&local.join("catalog.db")), "wal");
+        // However the path is spelled (another case, `/`, the `\\?\` of a canonical path).
+        let again = share.join("HOST").join("catalog.db");
+        let upper = Path::new(&again.to_string_lossy().to_uppercase()).to_path_buf();
+        assert!(is_on_network(&upper));
+        assert!(is_on_network(Path::new(&format!(
+            r"\\?\{}",
+            again.display()
+        ))));
+        assert!(is_on_network(Path::new(
+            &again.to_string_lossy().replace('\\', "/")
+        )));
+        // A folder whose name only starts the same is another folder.
+        assert!(!is_on_network(&t.path().join("share2").join("catalog.db")));
     }
     const TABLES: &[&str] = &[
         "audit",

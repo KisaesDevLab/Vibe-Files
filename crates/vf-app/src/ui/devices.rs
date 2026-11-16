@@ -208,22 +208,40 @@ pub struct Facts {
 
 /// [`Facts`] of the catalog at `file`, through a connection of its own.
 pub fn facts(file: &std::path::Path) -> Result<Facts, String> {
-    let conn = vf_core::db::open(file, vf_core::db::Storage::Local).map_err(|e| e.to_string())?;
-    let n = |sql: &str| -> i64 { conn.query_row(sql, [], |r| r.get(0)).unwrap_or(0) };
-    let meta = std::fs::metadata(file).ok();
+    // Read only, with no setting changed: this is a look at the catalog in use, wherever
+    // and however it is kept.
+    let conn = vf_core::db::Connection::open_with_flags(
+        file,
+        vf_core::db::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .map_err(|e| e.to_string())?;
+    let _ = conn.busy_timeout(std::time::Duration::from_secs(10));
+    // A count that cannot be read is an error, never a 0 (a healthy catalog must not read
+    // as empty while the index writes).
+    let n = |sql: &str| -> Result<i64, String> {
+        conn.query_row(sql, [], |r| r.get(0))
+            .map_err(|e| format!("the catalog is busy or cannot be read ({e})"))
+    };
+    // The catalog's file and its write-ahead log beside it (what was written since the log
+    // was last folded into the file is there): the size of both, the later of their times.
+    let wal = std::path::PathBuf::from(format!("{}-wal", file.display()));
+    let metas: Vec<std::fs::Metadata> = [file, wal.as_path()]
+        .iter()
+        .filter_map(|f| std::fs::metadata(f).ok())
+        .collect();
     Ok(Facts {
         file: file.to_path_buf(),
-        bytes: meta.as_ref().map(|m| m.len()),
-        written: meta.and_then(|m| m.modified().ok()).map(|t| {
-            chrono::DateTime::<chrono::Local>::from(t)
-                .format("%Y-%m-%d %H:%M")
-                .to_string()
-        }),
-        documents: n("SELECT count(*) FROM document WHERE deleted_at IS NULL"),
-        clients: n("SELECT count(*) FROM client WHERE deleted_at IS NULL"),
+        bytes: (!metas.is_empty()).then(|| metas.iter().map(|m| m.len()).sum()),
+        written: metas
+            .iter()
+            .filter_map(|m| m.modified().ok())
+            .max()
+            .map(|t| crate::ui::explorer::modified_text(Some(t))),
+        documents: n("SELECT count(*) FROM document WHERE deleted_at IS NULL")?,
+        clients: n("SELECT count(*) FROM client WHERE deleted_at IS NULL")?,
         clients_with_folder: n(
             "SELECT count(*) FROM client WHERE deleted_at IS NULL AND coalesce(folder_rel, '') <> ''",
-        ),
+        )?,
         index_due: vf_fs::rebuild::unfinished_label(&conn).is_some(),
     })
 }
@@ -286,26 +304,42 @@ fn catalog_facts(ui: &mut egui::Ui, p: &mut DevicesPage, env: &mut Env) {
                     ui.label(widgets::caption(
                         "The cabinet is being indexed, or will be when Vibe Files next opens it on this computer.",
                     ));
-                } else if ui
-                    .button("Index the cabinet again")
-                    .on_hover_text(
-                        "For a catalog that is missing clients' folders or documents. The cabinet's folders are listed again (no file is read) the next time Vibe Files opens it here, behind the window. Nothing is removed now.",
-                    )
-                    .clicked()
+                } else if !p.ask_index
+                    && ui
+                        .button("Index the cabinet again…")
+                        .on_hover_text(
+                            "For a catalog that is missing clients' folders or documents.",
+                        )
+                        .clicked()
                 {
-                    match vf_fs::rebuild::ask_for_index(env.conn) {
-                        Ok(()) => {
-                            p.notice = Some(
-                                "Close Vibe Files and open it again on this computer: the cabinet is indexed again behind the window."
-                                    .into(),
-                            );
-                            p.error = None;
-                            p.facts = None;
-                        }
-                        Err(e) => p.error = Some(format!("Not asked for: {e}")),
-                    }
+                    p.ask_index = true;
                 }
             });
+            // Asked first (it changes the catalog for every login of this computer).
+            if p.ask_index && !f.index_due {
+                ui.label(
+                    "The next time this cabinet is opened on this computer, by anyone, its folders are listed again and the catalog brought in line: files it does not have are added, clients get the folders bound to them, and documents whose files are gone are taken out. No file is read or changed. In the Vibe Files window it runs behind the window; a command-line run waits for it.",
+                );
+                ui.horizontal(|ui| {
+                    if ui.button("Index at the next open").clicked() {
+                        p.ask_index = false;
+                        match vf_fs::rebuild::ask_for_index(env.conn) {
+                            Ok(()) => {
+                                p.notice = Some(
+                                    "Close Vibe Files and open it again on this computer: the cabinet is indexed again."
+                                        .into(),
+                                );
+                                p.error = None;
+                                p.facts = None;
+                            }
+                            Err(e) => p.error = Some(format!("Not asked for: {e}")),
+                        }
+                    }
+                    if ui.button("Cancel").clicked() {
+                        p.ask_index = false;
+                    }
+                });
+            }
         }
         Some(Err(e)) => {
             ui.label(RichText::new(format!("The catalog was not read: {e}")).color(theme::error()));
@@ -325,6 +359,8 @@ pub struct DevicesPage {
     /// The catalog's facts (PA-86), and their reading.
     facts: Option<Result<Facts, String>>,
     facts_job: Option<crate::ui::job::Job<Result<Facts, String>>>,
+    /// "Index the cabinet again…" was pressed: what it does is shown, to be confirmed.
+    ask_index: bool,
     /// This computer's server-mode choice and what Windows says, read once (not every frame).
     server: Option<(crate::server::Setting, bool)>,
     /// This computer's cloud folder choice, read once (PA-39).
