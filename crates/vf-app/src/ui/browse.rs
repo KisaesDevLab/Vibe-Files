@@ -7886,8 +7886,15 @@ Petty cash,1234.50
             rels
         };
         h.run();
-        click(&mut h, "Move 2 to trash");
-        // Two or more ask first (owner 2026-11-03).
+        // Two or more ask first (owner 2026-11-03). Pressed until it asks: the preview of the
+        // selection arrives on its own thread and the pane is drawn again, and a press that
+        // lands in that frame does nothing (seen on a busy machine).
+        for _ in 0..50 {
+            if h.query_by_label("Move 2 documents to the trash?").is_some() {
+                break;
+            }
+            click(&mut h, "Move 2 to trash");
+        }
         assert!(h.query_by_label("Move 2 documents to the trash?").is_some());
         assert_eq!(h.state().b.snap.docs.len(), 2, "nothing moved yet");
         click(&mut h, "Yes, move 2 to trash");

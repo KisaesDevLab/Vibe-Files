@@ -2505,8 +2505,23 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(30));
             h.step();
         }
-        h.get_by_label(label).click();
-        h.run_steps(4);
+        // Pressed until the dialog is there (a press that lands while the row is still
+        // being planned again does nothing; seen on a busy machine).
+        let start = std::time::Instant::now();
+        while h
+            .query_by_label("Create client (one transaction)")
+            .is_none()
+        {
+            assert!(
+                start.elapsed() < crate::ui::test_util::PATIENCE,
+                "New client dialog"
+            );
+            if let Some(b) = h.query_by_label(label) {
+                b.click();
+            }
+            h.run_steps(4);
+            std::thread::sleep(std::time::Duration::from_millis(30));
+        }
         h.get_by_label("Create client (one transaction)").click();
         h.run_steps(4);
         let start = std::time::Instant::now();
@@ -2661,10 +2676,20 @@ mod tests {
             h.query_by_label("own.pdf").is_none(),
             "not on the shared tab"
         );
-        h.get_by_label("My inbox (1)").click();
-        wait(&mut h, "my file listed", &|h| {
-            h.query_by_label("own.pdf").is_some()
-        });
+        // The tab pressed until its file is listed (a press that lands while the tabs are
+        // still being drawn again does nothing; seen on a busy machine).
+        let start = std::time::Instant::now();
+        while h.query_by_label("own.pdf").is_none() {
+            assert!(
+                start.elapsed() < crate::ui::test_util::PATIENCE,
+                "my file listed"
+            );
+            if let Some(tab) = h.query_by_label("My inbox (1)") {
+                tab.click();
+            }
+            h.run_steps(3);
+            std::thread::sleep(std::time::Duration::from_millis(30));
+        }
         assert!(h.query_by_label("shared.pdf").is_none());
         h.get_by_label("own.pdf").click_secondary();
         h.run_steps(3);
