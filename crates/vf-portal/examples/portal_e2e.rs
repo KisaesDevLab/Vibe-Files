@@ -10,6 +10,11 @@
 //!   vis <file-id> <identity-id> <true|false>
 //!   viewed <doc-id> <identity-id>                       -> "opened" or "not opened"
 //!   fetch <cabinet-root>                                -> one saved path per line
+//!   list-send <client-id> <code> <name> <rev> <head> [<path>...]
+//!                                                       -> "sent N cleared M kept K" (PA-80): this PC
+//!                                                          has only that client, with those
+//!                                                          documents in B2
+//!   list-clear-all                                      -> how many clients had a list
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -91,6 +96,40 @@ fn main() {
             if !r.problems.is_empty() {
                 std::process::exit(1);
             }
+        }
+        "list-send" => {
+            let files = a
+                .iter()
+                .skip(6)
+                .enumerate()
+                .map(|(i, path)| vf_portal::listing::ListFile {
+                    doc_id: format!("{}-doc-{i}", arg(1)),
+                    path: path.clone(),
+                    size: 100 + i as u64,
+                    tax_year: (i % 2 == 0).then_some(2025),
+                })
+                .collect();
+            let local = vf_portal::listing::Local {
+                head_rev: arg(5).parse().expect("head"),
+                live: [arg(1).to_string()].into(),
+                me: p.actor_name(),
+                clients: vec![vf_portal::listing::ClientList {
+                    id: arg(1).into(),
+                    code: arg(2).into(),
+                    name: arg(3).into(),
+                    rev: arg(4).parse().expect("rev"),
+                    files,
+                }],
+            };
+            let r = vf_portal::listing::send(&p, &local);
+            if let Some(e) = &r.problem {
+                eprintln!("problem: {e}");
+                std::process::exit(1);
+            }
+            println!("sent {} cleared {} kept {}", r.sent, r.cleared, r.kept);
+        }
+        "list-clear-all" => {
+            println!("{}", p.clear_cabinet_lists().unwrap_or_else(|e| fail(e)));
         }
         other => {
             eprintln!("unknown step: {other}");

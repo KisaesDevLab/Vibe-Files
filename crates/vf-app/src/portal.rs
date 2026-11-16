@@ -12,6 +12,7 @@ use vf_portal::{Portal, PortalSettings};
 
 pub use vf_portal::filed::{FiledReport, Pending, Where};
 pub use vf_portal::inbox::{FetchReport, INBOX, inbox, recent_received};
+pub use vf_portal::listing::ListReport;
 
 /// This PC and Windows user, as the portal's history shows them (Vibe Portal P15).
 pub fn who() -> (String, String) {
@@ -69,6 +70,147 @@ pub fn fetch(root: &Path, s: &PortalSettings, now: &str) -> FetchReport {
 /// Tells the portal what Intake filed and lists what it keeps unfiled (PA-43; on a thread).
 pub fn check_filed(root: &Path, s: &PortalSettings) -> FiledReport {
     vf_portal::filed::check(root, &client(s))
+}
+
+/// Minutes between sends of the lists of documents in B2 (PA-80).
+pub const LIST_MINUTES: u64 = 10;
+
+/// What this PC's catalog knows to be in B2, by client, as the portal lists it (PA-80). Its own
+/// read-only connection: the window's is not waited on.
+pub fn read_lists(catalog: &Path, device: &str) -> Result<vf_portal::listing::Local, String> {
+    use vf_core::db::{Connection, OpenFlags};
+    let conn = Connection::open_with_flags(catalog, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .map_err(|e| e.to_string())?;
+    conn.busy_timeout(std::time::Duration::from_secs(10))
+        .map_err(|e| e.to_string())?;
+    let l = vf_sync::listed::listed(&conn, device).map_err(|e| e.to_string())?;
+    Ok(vf_portal::listing::Local {
+        head_rev: l.head_rev,
+        live: l.live,
+        me: String::new(),
+        clients: l
+            .clients
+            .into_iter()
+            .map(|c| vf_portal::listing::ClientList {
+                id: c.id,
+                // Within what the portal takes, so one odd client does not stop its list.
+                code: c.code.trim().chars().take(64).collect(),
+                name: match c.name.trim() {
+                    "" => "(no name)".into(),
+                    n => n.chars().take(200).collect(),
+                },
+                rev: c.rev,
+                files: c
+                    .docs
+                    .into_iter()
+                    .map(|d| vf_portal::listing::ListFile {
+                        doc_id: d.doc_id,
+                        path: d.path,
+                        size: d.size.max(0) as u64,
+                        tax_year: d.tax_year.filter(|y| (1900..=2200).contains(y)),
+                    })
+                    .collect(),
+            })
+            .collect(),
+    })
+}
+
+/// The cabinet's portal settings as they are now, when the lists of documents in B2 are to
+/// be sent. Read from the cabinet each time, not from what a window read a while ago: another
+/// PC may just have unticked the setting, or stopped using the portal, and removed the lists.
+fn listing_settings(root: &Path) -> Option<PortalSettings> {
+    let id = vf_fs::cabinet::read(root).ok()?.cabinet_id;
+    vf_portal::settings::load(root, &id).filter(|s| s.b2_list)
+}
+
+/// Sends the portal the lists of documents in B2 that differ from what it holds (PA-80; on a
+/// thread). Only while the firm has it ticked, only where B2 sync runs (the main computer of a
+/// server or cloud cabinet), and only once this PC has exchanged something with the bucket.
+pub fn send_lists(root: &Path, catalog: &Path, device: &str) -> ListReport {
+    let Some(s) = listing_settings(root) else {
+        return ListReport::default();
+    };
+    // B2 sync was set up on a new bucket since: the portal's lists are of the old one and
+    // outrank every new list. They go first, from whichever PC gets there; until they have,
+    // nothing is sent (it would not be taken) and the reason is said.
+    if old_bucket_mark(root).exists() {
+        match client(&s).clear_cabinet_lists() {
+            Ok(_) => {}
+            Err(e) if e.status() == Some(404) => {}
+            Err(e) => {
+                return ListReport {
+                    problem: Some(format!("{OLD_BUCKET} ({})", e.message())),
+                    ..Default::default()
+                };
+            }
+        }
+        let _ = std::fs::remove_file(old_bucket_mark(root));
+    }
+    if !crate::server::runs_here(root) {
+        return ListReport::default();
+    }
+    let mut local = match read_lists(catalog, device) {
+        Ok(l) => l,
+        Err(e) => {
+            return ListReport {
+                problem: Some(format!("the catalog could not be read ({e})")),
+                ..Default::default()
+            };
+        }
+    };
+    if local.head_rev == 0 && local.clients.is_empty() {
+        return ListReport::default();
+    }
+    // Taken out of B2 on a PC of this cabinet (Sync to B2 › Remove…): this PC's catalog may
+    // still have it as exchanged until its next push; the cabinet's own list of them says so.
+    if let Ok(out) = vf_sync::removed::ids(root)
+        && !out.is_empty()
+    {
+        for c in &mut local.clients {
+            c.files.retain(|f| !out.contains(&f.doc_id));
+        }
+    }
+    let p = client(&s);
+    local.me = p.actor_name();
+    // Still wanted, by this portal (a new key for it changes nothing): asked before each list (the cabinet's file is read at most
+    // every two seconds).
+    let mut asked: Option<(std::time::Instant, bool)> = None;
+    vf_portal::listing::send_while(&p, &local, &mut || {
+        if let Some((at, yes)) = asked
+            && at.elapsed() < std::time::Duration::from_secs(2)
+        {
+            return yes;
+        }
+        let yes = listing_settings(root).is_some_and(|now| now.url == s.url);
+        asked = Some((std::time::Instant::now(), yes));
+        yes
+    })
+}
+
+/// Said while the portal still holds the lists of a bucket this cabinet no longer uses.
+pub const OLD_BUCKET: &str = "The portal still has the lists of documents of the B2 bucket used before, and they could not be removed, so the new bucket's lists are not sent yet. It is tried again every 10 minutes";
+
+/// Marks that B2 sync was set up on a new bucket (in `_Vibe/keys`, never sent to B2).
+fn old_bucket_mark(root: &Path) -> std::path::PathBuf {
+    root.join(vf_fs::cabinet::VIBE_DIR)
+        .join(vf_fs::cabinet::KEYS_DIR)
+        .join("portal-lists-old-bucket")
+}
+
+/// B2 sync was set up for this cabinet on a new bucket (its segments counted from 1 again):
+/// the lists the portal holds were made from the old bucket and would outrank every new one.
+/// Marked in the cabinet; the next send (on any PC) removes them before sending, and says so
+/// while it cannot. Nothing when the lists are not being sent.
+pub fn forget_lists(root: &Path) {
+    if listing_settings(root).is_some() {
+        let p = old_bucket_mark(root);
+        if let Some(d) = p.parent() {
+            let _ = std::fs::create_dir_all(d);
+        }
+        if std::fs::write(&p, b"").is_err() {
+            tracing::warn!("portal: a new bucket could not be marked for the lists");
+        }
+    }
 }
 
 /// Days an upload waits in the Portal inbox before Vibe Files says so.

@@ -174,6 +174,13 @@ pub struct PortalState {
     last_problem: Option<String>,
     /// The last word about uploads fetched and not filed (PA-43), said once until it changes.
     last_waiting: Option<String>,
+    /// The catalog file and the device id B2 sync uses for it: where the lists of documents in
+    /// B2 are read from (PA-80). Set by the app once a cabinet is open.
+    pub lists_from: Option<(std::path::PathBuf, String)>,
+    /// The lists being sent to the portal, when they were last sent, and the last problem said.
+    lists: Option<Receiver<core::ListReport>>,
+    lists_at: Option<Instant>,
+    last_list_problem: Option<String>,
     audit_tx: Sender<AuditEntry>,
     audit_rx: Receiver<AuditEntry>,
 }
@@ -197,6 +204,10 @@ impl Default for PortalState {
             notice: None,
             last_problem: None,
             last_waiting: None,
+            lists_from: None,
+            lists: None,
+            lists_at: None,
+            last_list_problem: None,
             audit_tx,
             audit_rx,
         }
@@ -224,6 +235,7 @@ impl PortalState {
     pub fn reread(&mut self) {
         self.read_at = None;
         self.fetched_at = None;
+        self.lists_at = None;
     }
 
     pub fn is_set(&mut self, root: &Path) -> bool {
@@ -317,6 +329,7 @@ impl PortalState {
                 ));
             }
         }
+        self.take_lists(&mut audit);
         let Some(s) = self.settings(root).cloned() else {
             return audit;
         };
@@ -338,11 +351,149 @@ impl PortalState {
                     .map(|f| f.into_iter().map(|f| f.vf_document_id).collect())
             }));
         }
-        if s.fetch_minutes > 0 {
+        if s.fetch_minutes > 0 || s.b2_list {
             ctx.request_repaint_after(Duration::from_secs(30));
         }
+        self.tick_lists(ctx, root, &s);
         audit
     }
+
+    /// What a send of the lists of documents in B2 did, when one has ended (PA-80): the audit
+    /// row, and a word in Browse when something went wrong. Taken whether or not the portal is
+    /// still set up: a send may end after Stop using the portal.
+    fn take_lists(&mut self, audit: &mut Vec<AuditEntry>) {
+        let Some(rx) = &self.lists else { return };
+        let Ok(rep) = rx.try_recv() else { return };
+        self.lists = None;
+        if rep.sent + rep.cleared > 0 {
+            audit.push(AuditEntry::new(
+                "portal_b2_list",
+                None,
+                serde_json::json!({ "clients_sent": rep.sent, "clients_cleared": rep.cleared }),
+            ));
+        }
+        match list_problem(&rep) {
+            // Said once, until it changes or a send works again.
+            Some(p) if self.last_list_problem.as_deref() != Some(p.as_str()) => {
+                self.last_list_problem = Some(p.clone());
+                self.notice = Some(format!("Portal: {p}"));
+            }
+            Some(_) => {}
+            None => self.last_list_problem = None,
+        }
+    }
+
+    /// The lists of documents in B2, sent to the portal every 10 minutes when the firm ticked
+    /// it in Admin › Portal (PA-80): only the clients whose list changed go.
+    fn tick_lists(&mut self, ctx: &egui::Context, root: &Path, s: &PortalSettings) {
+        if !s.b2_list {
+            if self.lists.is_none() {
+                self.last_list_problem = None;
+            }
+            return;
+        }
+        let every = Duration::from_secs(core::LIST_MINUTES * 60);
+        if self.lists.is_some() || self.lists_at.is_some_and(|t| t.elapsed() < every) {
+            return;
+        }
+        let Some((catalog, device)) = self.lists_from.clone() else {
+            return;
+        };
+        self.lists_at = Some(Instant::now());
+        let root = root.to_path_buf();
+        self.lists = Some(spawn(ctx, move || {
+            core::send_lists(&root, &catalog, &device)
+        }));
+    }
+}
+
+/// "Acme LLC" or "3 clients".
+fn who(names: &[String]) -> String {
+    match names {
+        [one] => one.clone(),
+        many => format!("{} clients", many.len()),
+    }
+}
+
+/// What went wrong with a send of the lists of documents in B2, in words for Browse's notice:
+/// everything that applies, each with what to do about it.
+fn list_problem(r: &core::ListReport) -> Option<String> {
+    if r.old_portal {
+        return Some(
+            "the portal cannot show the documents in B2 yet. Update the portal (on the appliance: \
+             sudo vibe upgrade portal)."
+                .into(),
+        );
+    }
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(e) = &r.unremoved {
+        parts.push(format!(
+            "the setting was unticked while lists of documents in B2 were being sent, and they \
+             could not be removed from the portal ({e}). In Admin › Portal tick Show the \
+             documents in B2 on the portal's staff page, save, then untick it and save."
+        ));
+    }
+    if let Some(p) = &r.problem {
+        parts.push(format!(
+            "the lists of documents in B2 were not all sent: {}{}",
+            p.trim_end_matches('.'),
+            "."
+        ));
+    }
+    let own = |names: &[String]| {
+        if names.len() == 1 {
+            "its list was"
+        } else {
+            "their lists were"
+        }
+    };
+    let has = |names: &[String]| if names.len() == 1 { "has" } else { "have" };
+    if !r.too_many.is_empty() {
+        parts.push(format!(
+            "{} {} more than {} documents in B2, the most the portal lists for one client; {} \
+             not sent, and the portal shows the last list sent, if any.",
+            who(&r.too_many),
+            has(&r.too_many),
+            r.max_docs,
+            own(&r.too_many)
+        ));
+    }
+    if !r.too_long.is_empty() {
+        parts.push(format!(
+            "{} {} a document in B2 whose folder and name together are longer than {} \
+             characters; {} not sent until that document is renamed or moved.",
+            who(&r.too_long),
+            has(&r.too_long),
+            r.max_path.unwrap_or(0),
+            own(&r.too_long)
+        ));
+    }
+    if !r.refused.is_empty() {
+        parts.push(format!(
+            "the portal did not take the list of documents in B2 of {}{}",
+            who(&r.refused),
+            if r.sent > 0 {
+                "; the other clients' lists were sent."
+            } else {
+                "."
+            }
+        ));
+    }
+    if parts.is_empty() {
+        return None;
+    }
+    // The notice starts "Portal: ": the first part follows it in small letters, the rest are
+    // sentences of their own.
+    let mut out = parts.remove(0);
+    for p in parts {
+        let mut c = p.chars();
+        if let Some(f) = c.next() {
+            out.push(' ');
+            out.extend(f.to_uppercase());
+            out.push_str(c.as_str());
+        }
+    }
+    Some(out)
 }
 
 // ======================================================================================
@@ -1368,6 +1519,8 @@ pub struct AdminPortal {
     received: Vec<vf_portal::inbox::Received>,
     read_at: Option<Instant>,
     confirm_stop: bool,
+    /// "Show the documents in B2 on the portal's staff page", as ticked until Save (PA-80).
+    b2_list: bool,
     /// Audit rows of request decisions when there is no app channel (tests).
     local_audit: Option<Receiver<AuditEntry>>,
     msg: Option<String>,
@@ -1453,6 +1606,7 @@ impl AdminPortal {
             .map_or(settings::DEFAULT_FETCH_MINUTES, |s| s.fetch_minutes)
             .to_string();
         self.columns = s.map(|s| s.record.clone()).unwrap_or_default();
+        self.b2_list = s.is_some_and(|s| s.b2_list);
     }
 
     /// How `column` writes its dates, for the firm's choice `order`: worked out from the whole
@@ -1606,6 +1760,20 @@ pub fn admin_settings(ui: &mut egui::Ui, a: &mut AdminPortal, env: &mut Env) {
             ui.end_row();
         });
     ui.add_space(6.0);
+    ui.checkbox(
+        &mut a.b2_list,
+        "Show the documents in B2 on the portal's staff page",
+    );
+    ui.label(widgets::caption(
+        "Sends the portal a list of the documents this cabinet has in B2, by client: where each \
+         is in the client's folder, its size and tax year. Staff then see every client with \
+         documents in B2, and those documents' names, on the staff page. Only names are sent, \
+         never a document; clients see nothing of it. The list follows B2 sync, up to 10 minutes \
+         behind, while Vibe Files is open on the computer B2 sync runs on. Unticking it removes \
+         the lists from the portal. Needs Vibe Portal 0.3.15 or later, and this version of Vibe \
+         Files on every PC.",
+    ));
+    ui.add_space(6.0);
     ui.label(RichText::new("Checking access requests").strong());
     ui.label(widgets::caption(
         "Which columns of your client list hold the client's email, mobile number and date of \
@@ -1684,7 +1852,7 @@ pub fn admin_settings(ui: &mut egui::Ui, a: &mut AdminPortal, env: &mut Env) {
             .add_enabled(!busy, widgets::primary_button("Save"))
             .clicked()
         {
-            save(a, env);
+            save(a, ui.ctx(), env);
         }
         if ui.add_enabled(!busy, egui::Button::new("Test")).clicked() {
             match cabinet_id(env.root)
@@ -1736,7 +1904,7 @@ pub fn admin_settings(ui: &mut egui::Ui, a: &mut AdminPortal, env: &mut Env) {
             ui.label(RichText::new("Stop using the portal on every PC?").color(theme::warn()));
             if ui.button("Stop").clicked() {
                 a.confirm_stop = false;
-                stop(a, env);
+                stop(a, ui.ctx(), env);
             }
             if ui.button("Keep using it").clicked() {
                 a.confirm_stop = false;
@@ -1969,9 +2137,12 @@ fn unfiled(ui: &mut egui::Ui, a: &mut AdminPortal, env: &mut Env) {
     }
 }
 
-fn stop(a: &mut AdminPortal, env: &mut Env) {
+fn stop(a: &mut AdminPortal, ctx: &egui::Context, env: &mut Env) {
     a.msg = None;
     a.err = None;
+    // The lists of documents in B2 leave the portal with it (PA-80): read before the key goes.
+    // Whether or not the setting is ticked now: an untick whose removal failed left them there.
+    let listing = cabinet_id(env.root).and_then(|id| settings::load(env.root, &id));
     // Said when it fails (a read-only share): every PC would otherwise keep using it.
     if let Err(e) = settings::clear(env.root) {
         a.err = Some(format!("Not stopped: {e}"));
@@ -1992,14 +2163,21 @@ fn stop(a: &mut AdminPortal, env: &mut Env) {
     a.shown = None;
     a.changed = true;
     a.read_at = None;
-    a.msg = Some(format!("The portal is no longer used.{unrecorded}"));
+    let said = format!("The portal is no longer used.{unrecorded}");
+    match listing {
+        Some(s) if s.b2_list => clear_lists(a, ctx, s, said, AfterFailure::SetUpAgain),
+        // Not ticked: there are lists only if an earlier untick could not remove them (it said
+        // so then). Tried once more, without a word when the portal still cannot be reached.
+        Some(s) => clear_lists(a, ctx, s, said, AfterFailure::Quiet),
+        None => a.msg = Some(said),
+    }
 }
 
 /// What Save says when another PC changed the portal settings while this page was open.
 const STALE: &str = "Someone else changed the portal settings while this page was open. They are \
                      shown again now: make your change again.";
 
-fn save(a: &mut AdminPortal, env: &mut Env) {
+fn save(a: &mut AdminPortal, ctx: &egui::Context, env: &mut Env) {
     a.msg = None;
     a.err = None;
     let Some(id) = cabinet_id(env.root) else {
@@ -2014,12 +2192,15 @@ fn save(a: &mut AdminPortal, env: &mut Env) {
         }
     };
     let s = match PortalSettings::new(&id, &a.url, &a.key, minutes) {
-        Ok(s) => s.with_record(a.columns.clone()),
+        Ok(s) => s.with_record(a.columns.clone()).with_b2_list(a.b2_list),
         Err(e) => {
             a.err = Some(e);
             return;
         }
     };
+    // The portal the lists were being sent to, when they were: they leave it when the setting
+    // is unticked, and when the address or key changes (the new portal gets its own).
+    let old_listing = a.shown.clone().filter(|s| s.b2_list);
     // Saved only when the cabinet's settings are still the ones this form was filled from: a
     // change made on another PC meanwhile is not written over (as the B2 rules, PA-68).
     let saved = vf_fs::lock::with(env.root, "portal", "the portal settings", || {
@@ -2058,6 +2239,7 @@ fn save(a: &mut AdminPortal, env: &mut Env) {
             serde_json::json!({
                 "url": s.url,
                 "fetch_minutes": s.fetch_minutes,
+                "b2_list": s.b2_list,
                 "record_columns": {
                     "email": s.record.email,
                     "mobile": s.record.mobile,
@@ -2071,7 +2253,103 @@ fn save(a: &mut AdminPortal, env: &mut Env) {
     a.url = s.url.clone();
     a.changed = true;
     a.read_at = None;
-    a.msg = Some(format!("Saved for every PC.{inbox}{unrecorded}"));
+    let said = format!("Saved for every PC.{inbox}{unrecorded}");
+    match old_listing {
+        // Unticked, or another portal now: the lists leave the portal they were sent to, now,
+        // not when someone remembers them. (A new key for the same portal: they stay.)
+        Some(old) if !s.b2_list || old.url != s.url => {
+            let after = if old.url != s.url {
+                AfterFailure::OldPortal
+            } else {
+                AfterFailure::TickAndUntick
+            };
+            let said = if s.b2_list {
+                format!("{said} {LISTED_SOON}")
+            } else {
+                said
+            };
+            clear_lists(a, ctx, old, said, after);
+        }
+        // Ticked now: whether this portal can take the lists is said here, where it was ticked.
+        None if s.b2_list => {
+            a.msg = Some(said.clone());
+            a.status = Some(spawn(ctx, move || {
+                match core::client(&s).cabinet_state() {
+                    Err(e) if e.message() == vf_portal::listing::NEEDS_P90 => Err(
+                        "The portal cannot show the documents in B2 yet: update the portal (on \
+                         the appliance: sudo vibe upgrade portal). The setting is saved, and the \
+                         lists are sent once it is updated."
+                            .to_string(),
+                    ),
+                    // Reached or not, the send itself says what goes wrong.
+                    _ => Ok(format!("{said} {LISTED_SOON}")),
+                }
+            }));
+        }
+        _ => a.msg = Some(said),
+    }
+}
+
+/// Said when the setting is saved ticked.
+const LISTED_SOON: &str = "The computer B2 sync runs on sends the lists of documents in B2 within about 10 minutes, while Vibe Files is open there.";
+
+/// What to say when the lists could not be removed from the portal.
+#[derive(Clone, Copy)]
+enum AfterFailure {
+    /// The portal is still set up: the setting can be ticked and unticked again.
+    TickAndUntick,
+    /// The address was changed: they are on the portal used before.
+    OldPortal,
+    /// Stop using the portal: the address and key are gone from the cabinet.
+    SetUpAgain,
+    /// Stop using the portal with the setting not ticked: most likely there are none.
+    Quiet,
+}
+
+/// Removes the lists of documents in B2 from the portal `s` (the setting was unticked, the
+/// address changed, or the portal is no longer used), on a thread. `said` is shown at once and
+/// with what came of it; a removal that failed is shown as a problem, with what to do.
+fn clear_lists(
+    a: &mut AdminPortal,
+    ctx: &egui::Context,
+    s: PortalSettings,
+    said: String,
+    after: AfterFailure,
+) {
+    a.msg = Some(said.clone());
+    a.status = Some(spawn(ctx, move || {
+        match core::client(&s).clear_cabinet_lists() {
+            Ok(0) => Ok(said),
+            Ok(n) => Ok(format!(
+                "{said} The lists of documents in B2 were removed from the portal ({n} client{}).",
+                if n == 1 { "" } else { "s" }
+            )),
+            // An older portal has none to remove.
+            Err(e) if e.status() == Some(404) => Ok(said),
+            Err(_) if matches!(after, AfterFailure::Quiet) => Ok(format!(
+                "{said} If lists of documents in B2 were ever sent to this portal, they may \
+                 still be there."
+            )),
+            Err(e) => Err(format!(
+                "The lists of documents in B2 could NOT be removed from the portal ({}). {}",
+                e.message(),
+                match after {
+                    AfterFailure::TickAndUntick =>
+                        "Tick the setting, save, then untick it and save again.".to_string(),
+                    AfterFailure::OldPortal => format!(
+                        "They are still on the portal used before ({}). To remove them, enter \
+                         that address and its key again, tick the setting, save, untick it, and \
+                         save.",
+                        s.url
+                    ),
+                    AfterFailure::SetUpAgain | AfterFailure::Quiet =>
+                        "To remove them, enter the portal address and key again, tick the \
+                         setting, save, untick it, save, and then stop using the portal."
+                            .to_string(),
+                }
+            )),
+        }
+    }));
 }
 
 fn load_clients(env: &mut Env) -> Vec<ClientRef> {
@@ -3040,6 +3318,7 @@ mod tests {
                     dob: Some("DOB".into()),
                     dates: DateOrder::Auto,
                 },
+                b2_list: false,
             }),
             clients: vec![ClientRef {
                 id: "0199aaaa-0000-7000-8000-000000000001".into(),
@@ -3215,11 +3494,11 @@ mod tests {
         };
         let (mut one, mut two) = (page(), page());
         one.columns.email = Some("Email".into());
-        save(&mut one, &mut env);
+        save(&mut one, &egui::Context::default(), &mut env);
         assert_eq!(one.err, None);
         // The second PC's Save is refused, and its page is filled again from the cabinet.
         two.columns.mobile = Some("Cell".into());
-        save(&mut two, &mut env);
+        save(&mut two, &egui::Context::default(), &mut env);
         assert_eq!(two.err.as_deref(), Some(STALE));
         let kept = settings::load(root.path(), "cab-1").unwrap();
         assert_eq!(kept.record.email.as_deref(), Some("Email"));
@@ -3227,10 +3506,10 @@ mod tests {
         two.load(root.path());
         assert_eq!(two.columns.email.as_deref(), Some("Email"));
         two.columns.mobile = Some("Cell".into());
-        save(&mut two, &mut env);
+        save(&mut two, &egui::Context::default(), &mut env);
         assert_eq!(two.err, None);
         // The first PC saves again without reloading: its own last save is no longer there.
-        save(&mut one, &mut env);
+        save(&mut one, &egui::Context::default(), &mut env);
         assert_eq!(one.err.as_deref(), Some(STALE));
         let kept = settings::load(root.path(), "cab-1").unwrap();
         assert_eq!(kept.record.mobile.as_deref(), Some("Cell"));
@@ -3427,6 +3706,7 @@ mod tests {
             key: "vpk_test".into(),
             fetch_minutes: 0,
             record: Default::default(),
+            b2_list: false,
         };
         let (tx, audit) = mpsc::channel();
         let w = PeopleWindow::new(
@@ -3522,6 +3802,7 @@ mod tests {
             key: "vpk_test".into(),
             fetch_minutes: 0,
             record: Default::default(),
+            b2_list: false,
         };
         let t = tempfile::tempdir().unwrap();
         let path = t.path().join("Return 2025.pdf");
@@ -3558,6 +3839,667 @@ mod tests {
             .click();
         h.run();
         h.get_by_label("Send").click();
+    }
+
+    /// PA-80: with the setting ticked, the documents this PC knows to be in B2 go to the portal
+    /// by client (their place in the client's folder, size and year; no content), and a client
+    /// with nothing in B2 is not sent.
+    #[test]
+    fn the_documents_in_b2_are_sent_to_the_portal_by_client() {
+        const ACME: &str = "0199aaaa-0000-7000-8000-000000000001";
+        const EMPTY: &str = "0199aaaa-0000-7000-8000-000000000002";
+        let t = tempfile::tempdir().unwrap();
+        let catalog = t.path().join("catalog.db");
+        let conn = vf_core::db::open(&catalog, vf_core::db::Storage::Local).unwrap();
+        for (id, ext, name) in [
+            (ACME, "1001", "Acme Farms LLC"),
+            (EMPTY, "1002", "Birch, Lee"),
+        ] {
+            conn.execute(
+                "INSERT INTO client (id, ext_id, name, folder_rel, device_id, updated_at)
+                 VALUES (?1, ?2, ?3, ?3 || ' (' || ?2 || ')', 'dev-1', '2026-11-15T00:00:00Z')",
+                [id, ext, name],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO sync_segment (client_id, rev) VALUES (?1, 3)",
+                [id],
+            )
+            .unwrap();
+        }
+        for (id, path, year, sent) in [
+            ("d1", "Income Tax/2025/1040.pdf", Some(2025), true),
+            ("d2", "Permanent/Setup/EIN letter.pdf", None, true),
+            // Held back by the firm's rule: never sent, so not listed.
+            (
+                "d3",
+                "Workpapers & Support/2025/notes.pdf",
+                Some(2025),
+                false,
+            ),
+        ] {
+            let rel = format!("Acme Farms LLC (1001)/{path}");
+            conn.execute(
+                "INSERT INTO document (id, client_id, rel_path, hash, size, tax_year, filed_at,
+                                       device_id, updated_at)
+                 VALUES (?1, ?2, ?3, 'h', 120, ?4, '2026-11-15T00:00:00Z', 'dev-1',
+                         '2026-11-15T00:00:00Z')",
+                vf_core::db::params![id, ACME, rel, year],
+            )
+            .unwrap();
+            if sent {
+                conn.execute(
+                    "INSERT INTO sync_base (doc_id, client_id, rel_path, hash, rev, deleted)
+                     VALUES (?1, ?2, ?3, 'h', 1, 0)",
+                    vf_core::db::params![id, ACME, rel],
+                )
+                .unwrap();
+            }
+        }
+        conn.execute(
+            "INSERT INTO sync_state (device_id, last_manifest_rev) VALUES ('dev-1', 7)",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let (url, seen) = fake_portal(|method, path| match (method, path) {
+            ("GET", "/api/firm/v1/cabinet") => (200, r#"{"max":20000,"clients":[]}"#.into()),
+            _ => (200, r#"{"ok":true}"#.into()),
+        });
+        // The cabinet's own settings say whether the lists go, and where.
+        let root = t.path().join("cabinet");
+        vf_fs::cabinet::create(
+            &root,
+            &vf_fs::cabinet::CabinetFile {
+                cabinet_id: "cab-1".into(),
+                firm_id: "firm-1".into(),
+                schema_version: 1,
+                layout_version: 1,
+                created: "2026-11-15T00:00:00Z".into(),
+                name: None,
+            },
+        )
+        .unwrap();
+        let set = |url: String, on: bool| {
+            settings::save(
+                &root,
+                &PortalSettings {
+                    version: 1,
+                    cabinet_id: "cab-1".into(),
+                    url,
+                    key: "vpk_test".into(),
+                    fetch_minutes: 0,
+                    record: Default::default(),
+                    b2_list: on,
+                },
+            )
+            .unwrap();
+        };
+        set(url.clone(), true);
+        let rep = core::send_lists(&root, &catalog, "dev-1");
+        assert_eq!(
+            rep,
+            core::ListReport {
+                sent: 1,
+                max_docs: 20000,
+                ..Default::default()
+            }
+        );
+        let puts = requests(&seen, "PUT /api/firm/v1/cabinet/");
+        assert_eq!(puts.len(), 1, "{puts:?}");
+        assert!(puts[0].starts_with(&format!("PUT /api/firm/v1/cabinet/{ACME} ")));
+        let body: serde_json::Value =
+            serde_json::from_str(puts[0].splitn(3, ' ').nth(2).unwrap()).unwrap();
+        assert_eq!(body["clientCode"], "1001");
+        assert_eq!(body["displayName"], "Acme Farms LLC");
+        assert_eq!(body["rev"], 3);
+        assert_eq!(body["headRev"], 7);
+        assert_eq!(body["hash"].as_str().unwrap().len(), 64);
+        assert_eq!(
+            body["files"],
+            serde_json::json!([
+                { "docId": "d1", "path": "Income Tax/2025/1040.pdf", "size": 120, "taxYear": 2025 },
+                { "docId": "d2", "path": "Permanent/Setup/EIN letter.pdf", "size": 120, "taxYear": null },
+            ])
+        );
+
+        // Taken out of B2 on a PC of this cabinet (the cabinet's own list says so) while this
+        // PC's catalog still has it as exchanged: not listed.
+        vf_sync::removed::add(&root, &[("d2".to_string(), "x".to_string())]).unwrap();
+        let (url2, seen2) = fake_portal(|method, path| match (method, path) {
+            ("GET", "/api/firm/v1/cabinet") => (200, r#"{"max":20000,"clients":[]}"#.into()),
+            _ => (200, r#"{"ok":true}"#.into()),
+        });
+        set(url2, true);
+        assert_eq!(core::send_lists(&root, &catalog, "dev-1").sent, 1);
+        let put = requests(&seen2, "PUT /api/firm/v1/cabinet/");
+        let body: serde_json::Value =
+            serde_json::from_str(put[0].splitn(3, ' ').nth(2).unwrap()).unwrap();
+        assert_eq!(body["files"].as_array().unwrap().len(), 1);
+        assert_eq!(body["files"][0]["docId"], "d1");
+        let none: std::collections::HashSet<String> = ["d2".to_string()].into();
+        vf_sync::removed::clear(&root, &none).unwrap();
+
+        // Unticked (on this PC or another: the cabinet's settings are read at each send), or
+        // the portal no longer used: the portal is not called.
+        let calls = seen.lock().unwrap().len();
+        set(url.clone(), false);
+        assert_eq!(
+            core::send_lists(&root, &catalog, "dev-1"),
+            core::ListReport::default()
+        );
+        settings::clear(&root).unwrap();
+        assert_eq!(
+            core::send_lists(&root, &catalog, "dev-1"),
+            core::ListReport::default()
+        );
+        assert_eq!(seen.lock().unwrap().len(), calls);
+
+        // A portal from before Vibe-Portal P90: said in words, nothing sent.
+        let (url, seen) = fake_portal(|_, _| (404, r#"{"error":"not_found"}"#.into()));
+        set(url, true);
+        let rep = core::send_lists(&root, &catalog, "dev-1");
+        assert_eq!(rep.problem.as_deref(), Some(vf_portal::listing::NEEDS_P90));
+        assert!(requests(&seen, "PUT ").is_empty());
+        assert_eq!(
+            list_problem(&rep).unwrap(),
+            "the portal cannot show the documents in B2 yet. Update the portal (on the appliance: \
+             sudo vibe upgrade portal)."
+        );
+
+        // A PC that has never exchanged anything with the bucket does not call the portal.
+        let bare = t.path().join("bare.db");
+        drop(vf_core::db::open(&bare, vf_core::db::Storage::Local).unwrap());
+        let (url, seen) = fake_portal(|_, _| (200, r#"{"max":20000,"clients":[]}"#.into()));
+        set(url, true);
+        assert_eq!(
+            core::send_lists(&root, &bare, "dev-1"),
+            core::ListReport::default()
+        );
+        assert!(seen.lock().unwrap().is_empty());
+
+        // The portal refuses one client's list: it is named, and the next client's still goes.
+        let conn = vf_core::db::open(&catalog, vf_core::db::Storage::Local).unwrap();
+        conn.execute(
+            "INSERT INTO document (id, client_id, rel_path, hash, size, tax_year, filed_at,
+                                   device_id, updated_at)
+             VALUES ('e1', ?1, 'Birch, Lee (1002)/Income Tax/2025/W-2.pdf', 'h', 9, 2025,
+                     '2026-11-15T00:00:00Z', 'dev-1', '2026-11-15T00:00:00Z')",
+            [EMPTY],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sync_base (doc_id, client_id, rel_path, hash, rev, deleted)
+             VALUES ('e1', ?1, 'Birch, Lee (1002)/Income Tax/2025/W-2.pdf', 'h', 1, 0)",
+            [EMPTY],
+        )
+        .unwrap();
+        drop(conn);
+        let (url, seen) = fake_portal(|method, path| match (method, path) {
+            ("GET", "/api/firm/v1/cabinet") => (200, r#"{"max":20000,"clients":[]}"#.into()),
+            ("PUT", p) if p.ends_with("0001") => (400, r#"{"error":"invalid"}"#.into()),
+            _ => (200, r#"{"ok":true}"#.into()),
+        });
+        set(url, true);
+        let rep = core::send_lists(&root, &catalog, "dev-1");
+        assert_eq!(
+            rep,
+            core::ListReport {
+                sent: 1,
+                refused: vec!["Acme Farms LLC".into()],
+                max_docs: 20000,
+                ..Default::default()
+            }
+        );
+        assert_eq!(requests(&seen, "PUT /api/firm/v1/cabinet/").len(), 2);
+        assert_eq!(
+            list_problem(&rep).unwrap(),
+            "the portal did not take the list of documents in B2 of Acme Farms LLC; the other \
+             clients' lists were sent."
+        );
+    }
+
+    /// Code review of PA-80: a send that is running when the firm unticks the setting (on any
+    /// PC) stops before its next list and takes the lists off the portal again, so none it
+    /// sent after the firm's own removal stays; a list the portal keeps another PC's for is
+    /// not counted as sent.
+    #[test]
+    fn a_send_under_way_when_the_setting_is_unticked_leaves_nothing_on_the_portal() {
+        use vf_portal::listing::{ClientList, ListFile, Local, send_while};
+        let list = |id: &str| ClientList {
+            id: id.into(),
+            code: "1".into(),
+            name: format!("Client {id}"),
+            rev: 1,
+            files: vec![ListFile {
+                doc_id: format!("{id}-d"),
+                path: "a.pdf".into(),
+                size: 1,
+                tax_year: None,
+            }],
+        };
+        let local = Local {
+            head_rev: 1,
+            live: ["a".to_string(), "b".to_string(), "c".to_string()].into(),
+            clients: vec![list("a"), list("b"), list("c")],
+            me: "PC1\\kurt".into(),
+        };
+        let portal = |url: String| {
+            core::client(&PortalSettings {
+                version: 1,
+                cabinet_id: "c".into(),
+                url,
+                key: "vpk_test".into(),
+                fetch_minutes: 0,
+                record: Default::default(),
+                b2_list: true,
+            })
+        };
+        let (url, seen) = fake_portal(|method, path| match (method, path) {
+            ("GET", "/api/firm/v1/cabinet") => (200, r#"{"max":20000,"clients":[]}"#.into()),
+            ("DELETE", "/api/firm/v1/cabinet") => (200, r#"{"ok":true,"clients":1}"#.into()),
+            _ => (200, r#"{"ok":true}"#.into()),
+        });
+        // Wanted for the first list, not for the second.
+        let mut asked = 0;
+        let rep = send_while(&portal(url), &local, &mut || {
+            asked += 1;
+            asked == 1
+        });
+        assert!(rep.stopped);
+        assert_eq!(rep.sent, 1);
+        assert_eq!(rep.problem, None);
+        let calls: Vec<String> = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|r| r.split(' ').take(2).collect::<Vec<_>>().join(" "))
+            .collect();
+        assert_eq!(
+            calls,
+            [
+                "GET /api/firm/v1/cabinet",
+                "PUT /api/firm/v1/cabinet/a",
+                "DELETE /api/firm/v1/cabinet",
+            ]
+        );
+
+        // Unticked just as the last list went: found at the end, and removed.
+        let (url, seen) = fake_portal(|method, path| match (method, path) {
+            ("GET", "/api/firm/v1/cabinet") => (200, r#"{"max":20000,"clients":[]}"#.into()),
+            _ => (200, r#"{"ok":true}"#.into()),
+        });
+        let mut asked = 0;
+        let rep = send_while(&portal(url), &local, &mut || {
+            asked += 1;
+            asked <= 3
+        });
+        assert!(rep.stopped);
+        assert_eq!(rep.sent, 3);
+        assert_eq!(requests(&seen, "DELETE /api/firm/v1/cabinet ").len(), 1);
+
+        // Still wanted to the end: nothing is removed. A list the portal keeps another PC's
+        // for is not sent, and not counted as sent.
+        let (url, seen) = fake_portal(|method, path| match (method, path) {
+            ("GET", "/api/firm/v1/cabinet") => (200, r#"{"max":20000,"clients":[]}"#.into()),
+            ("PUT", p) if p.ends_with("/b") => (200, r#"{"ok":true,"kept":true}"#.into()),
+            _ => (200, r#"{"ok":true}"#.into()),
+        });
+        let rep = send_while(&portal(url), &local, &mut || true);
+        assert_eq!((rep.sent, rep.kept, rep.stopped), (2, 1, false));
+        assert!(requests(&seen, "DELETE ").is_empty());
+    }
+
+    /// Code review of PA-80: the lists leave the portal they were sent to when the address
+    /// changes, and Stop removes them whether or not the setting is still ticked.
+    #[test]
+    fn the_lists_leave_the_portal_they_were_sent_to() {
+        const KEY: &str = "vpk_abcdefghijklmnopqrstuvwxyz0123456789";
+        let answer: fn(&str, &str) -> (u16, String) = |method, path| match (method, path) {
+            ("DELETE", "/api/firm/v1/cabinet") => (200, r#"{"ok":true,"clients":3}"#.into()),
+            _ => (200, r#"{"ok":true}"#.into()),
+        };
+        let (old_url, old_seen) = fake_portal(answer);
+        let (new_url, new_seen) = fake_portal(answer);
+        let root = tempfile::tempdir().unwrap();
+        vf_fs::cabinet::create(
+            root.path(),
+            &vf_fs::cabinet::CabinetFile {
+                cabinet_id: "cab-1".into(),
+                firm_id: "firm-1".into(),
+                schema_version: 1,
+                layout_version: 1,
+                created: "2026-11-15T00:00:00Z".into(),
+                name: None,
+            },
+        )
+        .unwrap();
+        let mut conn = vf_core::db::Connection::open_in_memory().unwrap();
+        let mut env = Env {
+            conn: &mut conn,
+            root: root.path(),
+            device_id: "dev-1",
+        };
+        let ctx = egui::Context::default();
+        let done = |a: &mut AdminPortal| -> String {
+            a.status
+                .take()
+                .expect("the lists are being removed")
+                .recv_timeout(Duration::from_secs(10))
+                .unwrap()
+                .unwrap()
+        };
+        let mut a = AdminPortal::default();
+        a.load(root.path());
+        a.url = old_url;
+        a.key = KEY.into();
+        a.b2_list = true;
+        save(&mut a, &ctx, &mut env);
+        assert_eq!(a.err, None);
+
+        // Another portal, the setting still ticked: the old portal's lists go, the new one is
+        // not asked to remove any.
+        a.url = new_url;
+        save(&mut a, &ctx, &mut env);
+        assert_eq!(a.err, None);
+        let said = done(&mut a);
+        assert!(
+            said.contains("removed from the portal (3 clients)"),
+            "{said}"
+        );
+        assert!(said.contains("within about 10 minutes"), "{said}");
+        assert_eq!(requests(&old_seen, "DELETE /api/firm/v1/cabinet").len(), 1);
+        assert!(requests(&new_seen, "DELETE ").is_empty());
+
+        // Unticked on disk already (an untick whose removal had failed): Stop removes them.
+        let kept = settings::load(root.path(), "cab-1")
+            .unwrap()
+            .with_b2_list(false);
+        settings::save(root.path(), &kept).unwrap();
+        stop(&mut a, &ctx, &mut env);
+        assert_eq!(a.err, None);
+        let said = done(&mut a);
+        assert!(said.starts_with("The portal is no longer used."), "{said}");
+        assert_eq!(requests(&new_seen, "DELETE /api/firm/v1/cabinet").len(), 1);
+        assert_eq!(settings::load(root.path(), "cab-1"), None);
+    }
+
+    /// QA of PA-80: a new key for the same portal keeps the lists; a removal that fails is a
+    /// problem with what to do, naming the old portal when the address changed; Stop with the
+    /// setting not ticked raises no alarm; ticking it against an older portal says so on Save.
+    #[test]
+    fn what_admin_portal_says_about_the_lists() {
+        const KEY: &str = "vpk_abcdefghijklmnopqrstuvwxyz0123456789";
+        const KEY2: &str = "vpk_zyxwvutsrqponmlkjihgfedcba9876543210";
+        let (url, seen) = fake_portal(|method, path| match (method, path) {
+            ("GET", "/api/firm/v1/cabinet") => (200, r#"{"max":20000,"clients":[]}"#.into()),
+            _ => (200, r#"{"ok":true}"#.into()),
+        });
+        // A portal that fails every call, and one from before Vibe-Portal P90.
+        let (down, _) = fake_portal(|_, _| (500, r#"{"error":"internal"}"#.into()));
+        let (old, _) = fake_portal(|_, _| (404, r#"{"error":"not_found"}"#.into()));
+        let root = tempfile::tempdir().unwrap();
+        vf_fs::cabinet::create(
+            root.path(),
+            &vf_fs::cabinet::CabinetFile {
+                cabinet_id: "cab-1".into(),
+                firm_id: "firm-1".into(),
+                schema_version: 1,
+                layout_version: 1,
+                created: "2026-11-15T00:00:00Z".into(),
+                name: None,
+            },
+        )
+        .unwrap();
+        let mut conn = vf_core::db::Connection::open_in_memory().unwrap();
+        let mut env = Env {
+            conn: &mut conn,
+            root: root.path(),
+            device_id: "dev-1",
+        };
+        let ctx = egui::Context::default();
+        let done = |a: &mut AdminPortal| -> Result<String, String> {
+            a.status
+                .take()
+                .expect("the portal is being asked")
+                .recv_timeout(Duration::from_secs(10))
+                .unwrap()
+        };
+        let mut a = AdminPortal::default();
+        a.load(root.path());
+        a.url = url.clone();
+        a.key = KEY.into();
+        a.b2_list = true;
+        save(&mut a, &ctx, &mut env);
+        assert!(done(&mut a).unwrap().contains("within about 10 minutes"));
+
+        // A new key, the same portal: nothing is removed, nothing asked.
+        a.key = KEY2.into();
+        save(&mut a, &ctx, &mut env);
+        assert_eq!(a.err, None);
+        assert!(a.status.is_none());
+        assert!(requests(&seen, "DELETE ").is_empty());
+
+        // The address changed to a portal from before the lists: it is said here, as a problem,
+        // and the old portal's lists were removed all the same.
+        a.url = old.clone();
+        save(&mut a, &ctx, &mut env);
+        assert!(done(&mut a).is_ok());
+        assert_eq!(requests(&seen, "DELETE /api/firm/v1/cabinet").len(), 1);
+        a.b2_list = false;
+        save(&mut a, &ctx, &mut env);
+        // An older portal has none to remove: no alarm.
+        assert!(done(&mut a).unwrap().starts_with("Saved for every PC."));
+        a.b2_list = true;
+        save(&mut a, &ctx, &mut env);
+        let e = done(&mut a).unwrap_err();
+        assert!(
+            e.contains("update the portal") && e.contains("The setting is saved"),
+            "{e}"
+        );
+
+        // Ticked on a portal that then cannot be reached, and the address changed: the removal
+        // fails, as a problem that names the portal the lists are on.
+        a.url = down.clone();
+        save(&mut a, &ctx, &mut env);
+        let _ = done(&mut a);
+        a.url = url.clone();
+        save(&mut a, &ctx, &mut env);
+        let e = done(&mut a).unwrap_err();
+        assert!(e.contains("could NOT be removed"), "{e}");
+        assert!(
+            e.contains(&format!("still on the portal used before ({down})")),
+            "{e}"
+        );
+        // What was saved is still said.
+        assert!(a.msg.as_deref().unwrap().starts_with("Saved for every PC."));
+
+        // Unticked while it cannot be reached: tick and untick again.
+        a.url = down.clone();
+        save(&mut a, &ctx, &mut env);
+        let _ = done(&mut a);
+        a.b2_list = false;
+        save(&mut a, &ctx, &mut env);
+        let e = done(&mut a).unwrap_err();
+        assert!(
+            e.ends_with("Tick the setting, save, then untick it and save again."),
+            "{e}"
+        );
+        // Stop, with the setting not ticked and the portal still not reached: no alarm, one
+        // quiet sentence.
+        stop(&mut a, &ctx, &mut env);
+        let said = done(&mut a).unwrap();
+        assert!(
+            said.ends_with("If lists of documents in B2 were ever sent to this portal, they may still be there."),
+            "{said}"
+        );
+    }
+
+    /// QA of PA-80: everything that kept a list from going is said, with the limit and what to
+    /// do; a new bucket's lists wait until the old bucket's are off the portal.
+    #[test]
+    fn what_browse_is_told_about_the_lists() {
+        let mut r = core::ListReport {
+            max_docs: 20000,
+            max_path: Some(500),
+            ..Default::default()
+        };
+        assert_eq!(list_problem(&r), None);
+        r.too_many = vec!["Acme Farms LLC".into()];
+        r.too_long = vec!["Birch, Lee".into(), "Cole Inc".into()];
+        r.refused = vec!["Dane LLC".into()];
+        assert_eq!(
+            list_problem(&r).unwrap(),
+            "Acme Farms LLC has more than 20000 documents in B2, the most the portal lists for \
+             one client; its list was not sent, and the portal shows the last list sent, if any. \
+             2 clients have a document in B2 whose folder and name together are longer than 500 \
+             characters; their lists were not sent until that document is renamed or moved. The \
+             portal did not take the list of documents in B2 of Dane LLC."
+        );
+        let failed = core::ListReport {
+            problem: Some("The portal cannot be reached: timeout".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            list_problem(&failed).unwrap(),
+            "the lists of documents in B2 were not all sent: The portal cannot be reached: timeout."
+        );
+        let unremoved = core::ListReport {
+            stopped: true,
+            unremoved: Some("The portal cannot be reached: timeout".into()),
+            ..Default::default()
+        };
+        assert!(
+            list_problem(&unremoved)
+                .unwrap()
+                .ends_with("save, then untick it and save.")
+        );
+
+        // A new bucket: marked only while the lists are being sent; the next send removes the
+        // old bucket's lists first, and says so while it cannot.
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path().join("cabinet");
+        vf_fs::cabinet::create(
+            &root,
+            &vf_fs::cabinet::CabinetFile {
+                cabinet_id: "cab-1".into(),
+                firm_id: "firm-1".into(),
+                schema_version: 1,
+                layout_version: 1,
+                created: "2026-11-15T00:00:00Z".into(),
+                name: None,
+            },
+        )
+        .unwrap();
+        let catalog = t.path().join("catalog.db");
+        drop(vf_core::db::open(&catalog, vf_core::db::Storage::Local).unwrap());
+        let set = |url: String, on: bool| {
+            settings::save(
+                &root,
+                &PortalSettings {
+                    version: 1,
+                    cabinet_id: "cab-1".into(),
+                    url,
+                    key: "vpk_test".into(),
+                    fetch_minutes: 0,
+                    record: Default::default(),
+                    b2_list: on,
+                },
+            )
+            .unwrap();
+        };
+        let mark = root
+            .join("_Vibe")
+            .join("keys")
+            .join("portal-lists-old-bucket");
+        let (down, _) = fake_portal(|_, _| (500, r#"{"error":"internal"}"#.into()));
+        set(down, false);
+        core::forget_lists(&root);
+        assert!(!mark.exists(), "not sending lists: nothing to forget");
+        let (down, _) = fake_portal(|_, _| (500, r#"{"error":"internal"}"#.into()));
+        set(down, true);
+        core::forget_lists(&root);
+        assert!(mark.exists());
+        let rep = core::send_lists(&root, &catalog, "dev-1");
+        assert!(
+            rep.problem
+                .as_deref()
+                .unwrap()
+                .starts_with(core::OLD_BUCKET)
+        );
+        assert!(mark.exists(), "tried again at the next send");
+        let (up, seen) = fake_portal(|_, _| (200, r#"{"ok":true,"clients":4}"#.into()));
+        set(up, true);
+        assert_eq!(core::send_lists(&root, &catalog, "dev-1").problem, None);
+        assert_eq!(requests(&seen, "DELETE /api/firm/v1/cabinet").len(), 1);
+        assert!(!mark.exists());
+    }
+
+    /// PA-80: the setting is kept with the portal settings, and unticking it takes the lists
+    /// off the portal at once.
+    #[test]
+    fn unticking_the_b2_list_removes_the_lists_from_the_portal() {
+        const KEY: &str = "vpk_abcdefghijklmnopqrstuvwxyz0123456789";
+        let (url, seen) = fake_portal(|method, path| match (method, path) {
+            ("DELETE", "/api/firm/v1/cabinet") => (200, r#"{"ok":true,"clients":2}"#.into()),
+            _ => (200, r#"{"ok":true}"#.into()),
+        });
+        let root = tempfile::tempdir().unwrap();
+        vf_fs::cabinet::create(
+            root.path(),
+            &vf_fs::cabinet::CabinetFile {
+                cabinet_id: "cab-1".into(),
+                firm_id: "firm-1".into(),
+                schema_version: 1,
+                layout_version: 1,
+                created: "2026-11-15T00:00:00Z".into(),
+                name: None,
+            },
+        )
+        .unwrap();
+        let mut conn = vf_core::db::Connection::open_in_memory().unwrap();
+        let mut env = Env {
+            conn: &mut conn,
+            root: root.path(),
+            device_id: "dev-1",
+        };
+        let ctx = egui::Context::default();
+        let mut a = AdminPortal::default();
+        a.load(root.path());
+        a.url = url;
+        a.key = KEY.into();
+        a.b2_list = true;
+        save(&mut a, &ctx, &mut env);
+        assert_eq!(a.err, None);
+        assert!(settings::load(root.path(), "cab-1").unwrap().b2_list);
+        // Ticked and saved: when the lists go is said, and nothing is removed.
+        let said = a
+            .status
+            .take()
+            .expect("the portal is asked whether it can take the lists")
+            .recv_timeout(Duration::from_secs(10))
+            .unwrap()
+            .unwrap();
+        assert!(said.contains("within about 10 minutes"), "{said}");
+        assert!(requests(&seen, "DELETE ").is_empty());
+
+        a.b2_list = false;
+        save(&mut a, &ctx, &mut env);
+        assert_eq!(a.err, None);
+        assert!(!settings::load(root.path(), "cab-1").unwrap().b2_list);
+        let said = a
+            .status
+            .take()
+            .expect("the lists are being removed")
+            .recv_timeout(Duration::from_secs(10))
+            .unwrap()
+            .unwrap();
+        assert!(
+            said.contains("removed from the portal (2 clients)"),
+            "{said}"
+        );
+        assert_eq!(requests(&seen, "DELETE /api/firm/v1/cabinet").len(), 1);
     }
 
     fn requests(seen: &std::sync::Arc<std::sync::Mutex<Vec<String>>>, start: &str) -> Vec<String> {

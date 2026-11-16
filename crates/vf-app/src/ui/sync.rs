@@ -941,6 +941,8 @@ impl SyncTab {
                     let store =
                         vf_sync::Remote::s3(&cfg.s3(), &app_key).map_err(|e| e.to_string())?;
                     let remote = vf_sync::Remote::new(store, &cab);
+                    // A bucket not set up yet is a new one; one that is, this PC only joins.
+                    let new_bucket = matches!(vf_sync::setup::bucket_cabinet(&remote), Ok(None));
                     let (firm, keys) = vf_sync::setup::init_with_firm(
                         &root,
                         &remote,
@@ -948,6 +950,10 @@ impl SyncTab {
                         vf_sync::setup::DEFAULT_KDF,
                     )
                     .map_err(|e| e.to_string())?;
+                    // PA-80: the portal's lists of documents in B2 were of the bucket before.
+                    if new_bucket {
+                        crate::portal::forget_lists(&root);
+                    }
                     let sealed = vf_sync::setup::seal_secret(&keys, &app_key);
                     let firm = Zeroizing::new(firm);
                     Ok(Done::Setup(

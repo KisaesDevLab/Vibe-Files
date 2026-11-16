@@ -14,6 +14,7 @@
 pub mod catalog;
 pub mod crypto;
 pub mod layout;
+pub mod listed;
 pub mod pull;
 pub mod push;
 pub mod remote;

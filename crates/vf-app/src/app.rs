@@ -870,6 +870,10 @@ impl eframe::App for VibeFilesApp {
             if std::mem::take(&mut o.intake.ingest.fetch_portal) {
                 o.browse.portal.fetch_now = true;
             }
+            if o.browse.portal.lists_from.is_none() {
+                o.browse.portal.lists_from =
+                    Some((o.opened.catalog.clone(), o.opened.sync_device.clone()));
+            }
             let received = o.browse.portal.tick(ui.ctx(), &o.opened.root);
             o.intake.ingest.portal = o.browse.portal.intake_line(&o.opened.root);
             if !received.is_empty() {
@@ -2260,6 +2264,7 @@ mod tests {
                 key: "vpk_test".into(),
                 fetch_minutes: 0,
                 record: Default::default(),
+                b2_list: false,
             },
         )
         .unwrap();

@@ -2046,3 +2046,77 @@ fn a_push_fingerprints_what_it_sends_and_nothing_else() {
     assert!(hash_of(&a, "W-2 Northwind.pdf").is_some());
     assert!(hash_of(&a, "941 Q1.pdf").is_none());
 }
+
+/// PA-80: what the portal's staff page is told is in B2, by client, from the catalog alone.
+#[test]
+fn the_documents_in_b2_are_listed_by_client() {
+    let t = tempfile::tempdir().unwrap();
+    let store = Remote::memory();
+    let mut a = pc_a(t.path(), store.clone());
+    // Nothing exchanged yet: no client has anything in the bucket.
+    let none = vf_sync::listed::listed(&a.conn, "dev-a").unwrap();
+    assert!(none.clients.is_empty());
+    assert_eq!(none.live.len(), 2);
+    assert_eq!(none.head_rev, 0);
+
+    vf_sync::push::push(&mut a.conn, &a.root, &a.sync, None).unwrap();
+    let l = vf_sync::listed::listed(&a.conn, "dev-a").unwrap();
+    assert!(l.head_rev > 0);
+    let names = |l: &vf_sync::listed::Listed, code: &str| -> Vec<String> {
+        l.clients
+            .iter()
+            .find(|c| c.code == code)
+            .map(|c| c.docs.iter().map(|d| d.path.clone()).collect())
+            .unwrap_or_default()
+    };
+    // Below the client's folder, by path.
+    assert_eq!(
+        names(&l, "1042"),
+        [
+            "Income Tax/2025/W-2 Northwind.pdf",
+            "Permanent/Setup/EIN letter.pdf"
+        ]
+    );
+    assert_eq!(names(&l, "2002"), ["Payroll/2025/941 Q1.pdf"]);
+    let anderson = l.clients.iter().find(|c| c.code == "1042").unwrap();
+    assert_eq!(anderson.name, "Anderson Farms LLC");
+    assert!(anderson.rev > 0);
+    let w2 = &anderson.docs[0];
+    assert_eq!(w2.doc_id, doc_id(&a.conn, "W-2 Northwind.pdf"));
+    assert_eq!(w2.tax_year, Some(2025));
+    assert_eq!(w2.size, "w2 2025 invented".len() as i64);
+
+    // Another PC that pulled lists the same.
+    let b = pc_b(t.path(), store.clone(), &a);
+    let lb = vf_sync::listed::listed(&b.conn, &b.sync.device_id).unwrap();
+    assert_eq!(names(&lb, "1042"), names(&l, "1042"));
+    assert_eq!(
+        lb.clients.iter().map(|c| c.rev).collect::<Vec<_>>(),
+        l.clients.iter().map(|c| c.rev).collect::<Vec<_>>()
+    );
+
+    // A document not sent (filed since the push) is not listed; one taken out of B2 leaves.
+    put(
+        &a.root,
+        "Anderson Farms LLC (1042)/Income Tax/2025/1099 new.pdf",
+        "not sent yet",
+    );
+    vf_fs::rebuild::rebuild(&mut a.conn, &a.root, "dev-a").unwrap();
+    assert_eq!(
+        names(&vf_sync::listed::listed(&a.conn, "dev-a").unwrap(), "1042").len(),
+        2
+    );
+    let w2_id = w2.doc_id.clone();
+    vf_sync::push::remove_docs(
+        &mut a.conn,
+        &a.root,
+        &a.sync,
+        std::slice::from_ref(&w2_id),
+        &[],
+    )
+    .unwrap();
+    let after = vf_sync::listed::listed(&a.conn, "dev-a").unwrap();
+    assert!(!names(&after, "1042").contains(&"Income Tax/2025/W-2 Northwind.pdf".to_string()));
+    let rev_after = after.clients.iter().find(|c| c.code == "1042").unwrap().rev;
+    assert!(rev_after > anderson.rev, "the segment moved on");
+}

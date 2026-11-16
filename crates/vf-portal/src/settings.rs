@@ -33,6 +33,10 @@ pub struct PortalSettings {
     /// can match the record.
     #[serde(default)]
     pub record: RecordColumns,
+    /// Send the portal the list of documents in B2, by client, for its staff page (PA-80):
+    /// names, sizes and tax years, never content. Off unless the firm ticks it.
+    #[serde(default)]
+    pub b2_list: bool,
 }
 
 fn default_fetch() -> u32 {
@@ -114,7 +118,14 @@ impl PortalSettings {
             key: key.into(),
             fetch_minutes: fetch_minutes.min(24 * 60),
             record: RecordColumns::default(),
+            b2_list: false,
         })
+    }
+
+    /// The same settings with the list of documents in B2 sent to the portal, or not.
+    pub fn with_b2_list(mut self, on: bool) -> Self {
+        self.b2_list = on;
+        self
     }
 
     /// The same settings with the client-record columns chosen in Admin › Portal.
@@ -210,6 +221,11 @@ mod tests {
         .unwrap();
         let old = load(t.path(), "cab-1").unwrap();
         assert!(!old.record.any());
+        // Nor the list of documents in B2: off until ticked.
+        assert!(!old.b2_list);
+        let on = old.with_b2_list(true);
+        save(t.path(), &on).unwrap();
+        assert!(load(t.path(), "cab-1").unwrap().b2_list);
     }
 
     #[test]

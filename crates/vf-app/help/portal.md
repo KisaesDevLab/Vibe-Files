@@ -61,4 +61,4 @@ Vibe Files records each portal action it takes: settings changes (never the key)
 
 ## The portal's staff page
 
-Staff can also work at `https://<portal address>/staff`, signing in with their email, password and an authenticator app code: from home or a PC without Vibe Files. There they can invite and turn off people, approve access requests, hide or remove shared files, download what clients sent (it still arrives in `_Portal inbox`), and change the firm's name, logo and upload limits, the portal keys and the staff accounts. Sharing new documents is done only from Vibe Files.
+Staff can also work at `https://<portal address>/staff`, signing in with their email, password and an authenticator app code: from home or a PC without Vibe Files. There they can invite and turn off people, approve access requests, hide or remove shared files, download what clients sent (it still arrives in `_Portal inbox`), and change the firm's name, logo and upload limits, the portal keys and the staff accounts. Sharing new documents is done only from Vibe Files. More: [documents in B2](help:portal-b2-list).

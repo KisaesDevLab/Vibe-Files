@@ -1233,7 +1233,11 @@ ANDE1042,Anderson Farms LLC
         click(&mut h, "Stop using the portal");
         // It asks first: nothing stopped yet.
         assert!(vf_portal::settings::load(&root, "cab-portal").is_some());
-        click(&mut h, "Stop");
+        // Stop also asks the portal, on a thread, to drop any lists of documents in B2
+        // (PA-80): the page shows a spinner meanwhile, so one step, not "until it settles".
+        h.get_by_role_and_label(egui::accesskit::Role::Button, "Stop")
+            .click();
+        h.step();
         assert!(vf_portal::settings::load(&root, "cab-portal").is_none());
     }
 

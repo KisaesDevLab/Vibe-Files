@@ -591,7 +591,7 @@ impl Portal {
         serde_json::from_str(&text).map_err(|e| PortalError::Format(e.to_string()))
     }
 
-    fn get<T: DeserializeOwned>(&self, path: &str, query: &[(&str, &str)]) -> Result<T> {
+    pub(crate) fn get<T: DeserializeOwned>(&self, path: &str, query: &[(&str, &str)]) -> Result<T> {
         let mut r = self.auth(self.quick.get(&self.url(path)));
         for (k, v) in query {
             r = r.query(k, v);
@@ -615,11 +615,21 @@ impl Portal {
         Self::read(r)
     }
 
+    /// A JSON body that can be large (a client's list of documents, PA-80): no overall time
+    /// limit, only the limits on each wait.
+    pub(crate) fn put_json_large<T: DeserializeOwned>(
+        &self,
+        path: &str,
+        body: &serde_json::Value,
+    ) -> Result<T> {
+        Self::read(self.auth(self.bulk.put(&self.url(path))).send_json(body))
+    }
+
     fn post_empty<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
         Self::read(self.auth(self.quick.post(&self.url(path))).send_empty())
     }
 
-    fn delete<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
+    pub(crate) fn delete<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
         Self::read(self.auth(self.quick.delete(&self.url(path))).call())
     }
 
@@ -1139,6 +1149,7 @@ mod tests {
             key: "vpk_test".into(),
             fetch_minutes: 0,
             record: Default::default(),
+            b2_list: false,
         };
         (Portal::new(&s, "PC1", "kurt"), seen)
     }
