@@ -392,7 +392,7 @@ pub fn show(ui: &mut egui::Ui, p: &mut BulkPage, env: &mut Env, catalog: &Path) 
         let l = ui.label("File name contains");
         let r = ui
             .add(
-                egui::TextEdit::singleline(&mut p.phrase)
+                egui::TextEdit::singleline(&mut p.phrase).margin(crate::ui::widgets::SEARCH_MARGIN)
                     .hint_text("e.g. GovtK1")
                     .desired_width(260.0),
             )

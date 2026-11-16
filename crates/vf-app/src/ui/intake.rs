@@ -85,6 +85,9 @@ pub struct IntakeTab {
     /// print capture rules put back (QA2 U5).
     rules_seen: Option<std::time::SystemTime>,
     rules_looked: Option<std::time::Instant>,
+    /// The client list's modified time when the rules were last brought in line (PA-87: the
+    /// row rules carry the client list's kinds of ID).
+    rules_clients_seen: Option<std::time::SystemTime>,
     /// When the share was last asked whether the client list or a PC's last batch changed:
     /// once a second, not on every repaint (QA #9). Tests ask every time.
     list_looked: Option<std::time::Instant>,
@@ -459,7 +462,14 @@ impl IntakeTab {
         let path = filer_core::rules::path(&vf_fs::clients::master_dir(root));
         let modified = |p: &Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
         let now = modified(&path);
-        if now.is_none() || now == self.rules_seen {
+        // The row rules carry the client list's kinds of ID (PA-87): a client list changed
+        // since they were last written (a new client, an ID set, an import, another PC) has
+        // them written again, so a print for the new client follows its row at once.
+        let clients_now = modified(&filer_core::clients::cache_path(
+            &vf_fs::clients::master_dir(root),
+        ));
+        let clients_changed = clients_now.is_some() && clients_now != self.rules_clients_seen;
+        if now.is_none() || (now == self.rules_seen && !clients_changed) {
             self.look_at_clients(root);
             return;
         }
@@ -469,6 +479,7 @@ impl IntakeTab {
             return;
         }
         self.rules_seen = modified(&path);
+        self.rules_clients_seen = clients_now;
         self.look_at_clients(root);
         // Filer loaded other rules than the file has now (written here, by Filer's own Rules
         // screen, or by another PC): offer the reload (QA3 #4).

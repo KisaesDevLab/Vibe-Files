@@ -306,13 +306,13 @@ impl Layout {
             let mut p = match v {
                 Var::ClientName => g("client", ".+?"),
                 // Reading a name, a two-part ID is found through the client list
-                // (`pipeline::capture_name`). A rule's pattern has no list: it takes a part
-                // before the ID when that part is all digits (`2614_FOUR`, PA-86). This is
-                // matched only against a name the profile already read as this row's (the
-                // capture folder hands Intake a printed-shape name for no other), so the
-                // digits cannot be the end of another document's name. A two-part ID whose
-                // first part has letters (`AB_1234`) is not taken here: such a print keeps
-                // its doc type and client, and is filed by its doc type's rule.
+                // (`pipeline::capture_name`). A rule's pattern has no list of its own: it
+                // takes a part before the ID when that part is all digits (`2614_FOUR`,
+                // PA-86) or one of `id_parts`, the client list's own first parts with
+                // letters (`AB` of `AB_1234`, PA-87). It is matched only against a name the
+                // profile already read as this row's (the capture folder hands Intake a
+                // printed-shape name for no other), so such a part cannot be the end of
+                // another document's name.
                 Var::ClientId if named => g("id", "[^_ ]+"),
                 Var::ClientId => {
                     // The client list's own first parts beside the number part (PA-87):

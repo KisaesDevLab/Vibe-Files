@@ -114,6 +114,7 @@ pub fn panel(
                 let r = ui
                     .add(
                         egui::TextEdit::singleline(&mut s.text)
+                            .margin(crate::ui::widgets::SEARCH_MARGIN)
                             .hint_text("in the file name or its folders…")
                             .desired_width(300.0),
                     )

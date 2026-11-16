@@ -550,6 +550,11 @@ pub struct Watch {
     first: bool,
     /// Make the copy the other servers start from again at the next read, whatever its age.
     seed_now: bool,
+    /// That copy was asked for and not made (the share refused it, another server had it
+    /// open, the index was not finished): asked for again at the next read.
+    seed_owed: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// A copy is being made (minutes for a large catalog): no second one beside it.
+    seed_busy: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 const EVERY: std::time::Duration = std::time::Duration::from_secs(15 * 60);
@@ -564,6 +569,8 @@ impl Default for Watch {
             client: None,
             first: false,
             seed_now: false,
+            seed_owed: Default::default(),
+            seed_busy: Default::default(),
         }
     }
 }
@@ -578,6 +585,8 @@ impl Watch {
             client: None,
             first: true,
             seed_now: false,
+            seed_owed: Default::default(),
+            seed_busy: Default::default(),
         }
     }
 
@@ -637,7 +646,10 @@ impl Watch {
         }
         self.last = Some(std::time::Instant::now());
         self.client = client;
-        let seed_now = std::mem::take(&mut self.seed_now);
+        use std::sync::atomic::Ordering;
+        let seed_now =
+            std::mem::take(&mut self.seed_now) | self.seed_owed.swap(false, Ordering::SeqCst);
+        let (seed_owed, seed_busy) = (self.seed_owed.clone(), self.seed_busy.clone());
         let (catalog, root, writer, device) = (
             catalog.to_path_buf(),
             root.to_path_buf(),
@@ -659,20 +671,37 @@ impl Watch {
                         ),
                     }
                 }
+                // The read is done: said before the copy below, which takes minutes for a
+                // large catalog and is no part of it (the footer, the sweep, B2 sync and
+                // Intake's recording do not wait for a copy).
+                let _ = tx.send(folders);
+                ctx.request_repaint();
                 // A cloud cabinet (PA-39): only the main PC leaves the copy, so two PCs never
                 // send one at once (the second would be a conflicted copy of a large file).
                 let leaves = !crate::cloudmode::is_cloud(&root) || runs_here(&root);
-                if let Err(e) = leaves
-                    .then(|| publish_seed(&catalog, &root, &writer, seed_now))
-                    .transpose()
-                {
+                if !leaves {
+                    return;
+                }
+                if seed_busy.swap(true, Ordering::SeqCst) {
+                    // One is being made: this request waits for the next read.
+                    if seed_now {
+                        seed_owed.store(true, Ordering::SeqCst);
+                    }
+                    return;
+                }
+                let made = publish_seed(&catalog, &root, &writer, seed_now);
+                seed_busy.store(false, Ordering::SeqCst);
+                if let Err(e) = &made {
                     tracing::warn!(
                         kind = crate::logging::kind(&e.to_string()),
                         "catalog copy for other servers not left"
                     );
                 }
-                let _ = tx.send(folders);
-                ctx.request_repaint();
+                // Asked for after an index and not made: asked for again, not dropped.
+                if seed_now && !matches!(made, Ok(true)) {
+                    tracing::info!("catalog copy after the index not made yet: tried again");
+                    seed_owed.store(true, Ordering::SeqCst);
+                }
             });
         if started.is_ok() {
             self.job = Some(rx);

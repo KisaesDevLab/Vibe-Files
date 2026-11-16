@@ -28,6 +28,19 @@ pub enum Error {
     },
 }
 
+impl Error {
+    /// The catalog was busy or locked (another connection was writing): worth trying again,
+    /// not a failure to show. By SQLite's own code, not by the words of the message.
+    pub fn is_busy(&self) -> bool {
+        matches!(
+            self,
+            Error::Sql(e) if matches!(
+                e.sqlite_error_code(),
+                Some(rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked)
+            )
+        )
+    }
+}
 pub type Result<T> = std::result::Result<T, Error>;
 
 /// Current UTC time, RFC 3339 with microseconds (storage format for every timestamp).

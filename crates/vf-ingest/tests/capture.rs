@@ -702,7 +702,10 @@ fn a_two_part_id_holding_another_clients_id_is_left_for_intake_to_ask() {
 
     // PA-87: an ID whose first part has letters follows its row too. The rules know the
     // client list's first parts, so no word of a document's name is taken for one.
-    assert_eq!(vf_ingest::parsers::id_first_parts(&root), ["AB"]);
+    assert_eq!(
+        vf_ingest::parsers::id_first_parts(&root).unwrap(),
+        (vec!["AB".to_string()], 0)
+    );
     vf_ingest::parsers::sync_filer_rules(&root).unwrap();
     let master = vf_fs::clients::master_dir(&root);
     let (rules, _, _) = filer_core::rules::load_or_seed(&master);

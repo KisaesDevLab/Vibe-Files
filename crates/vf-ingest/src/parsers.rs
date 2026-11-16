@@ -534,29 +534,39 @@ pub fn table_rules(
     (out, problems)
 }
 
+/// The most first parts the row rules carry ([`id_first_parts`]).
+pub const MOST_ID_PARTS: usize = 300;
+
 /// What stands before the last part of the client list's IDs that have an underscore in them
 /// and do not start with a number part (`AB` of `AB_1234`; PA-87, owner 2026-11-16): the row
 /// rules take such an ID whole by these, as they take a number part. Each once, in order, so
-/// an unchanged client list rewrites nothing. A list with very many of them is cut short
-/// (the rules would grow without end); the IDs left out are filed by their doc type's rule.
-pub fn id_first_parts(root: &Path) -> Vec<String> {
-    const MOST: usize = 300;
-    let Ok(master) = vf_fs::clients::load(root) else {
-        return vec![];
-    };
-    let mut parts: std::collections::BTreeSet<String> = master
-        .clients()
+/// an unchanged client list rewrites nothing. With how many were left out: a list with more
+/// than [`MOST_ID_PARTS`] is cut short (the rules would grow without end), and the caller
+/// says so. An error when the client list cannot be read: the rules must not be written
+/// without the parts they had.
+pub fn id_first_parts(root: &Path) -> Result<(Vec<String>, usize), String> {
+    // The list alone (the relationships and the rest of the master are not needed here).
+    let dir = vf_fs::clients::master_dir(root);
+    let list = filer_core::clients::load_cache(&dir).map_err(|e| {
+        format!(
+            "{} could not be read: {e}",
+            filer_core::clients::cache_path(&dir).display()
+        )
+    })?;
+    let mut parts: std::collections::BTreeSet<String> = list
         .iter()
+        .flat_map(|l| l.clients.iter())
         .filter_map(|c| c.id.rsplit_once('_').map(|(first, _)| first.to_string()))
         .filter(|f| !f.is_empty() && !f.chars().all(|ch| ch.is_ascii_digit()))
         .filter(|f| !f.contains(' '))
         .collect();
-    while parts.len() > MOST {
+    let mut left_out = 0;
+    while parts.len() > MOST_ID_PARTS {
         parts.pop_last();
+        left_out += 1;
     }
-    parts.into_iter().collect()
+    Ok((parts.into_iter().collect(), left_out))
 }
-
 /// A stable id from the profile and doc type (so an unchanged mapping rewrites nothing).
 fn stable_id(profile: &str, doc_type: &str) -> String {
     use sha2::{Digest, Sha256};
@@ -652,13 +662,19 @@ fn plan_rules(
     }
     // The document tables go first, ahead of Filer's K-1 rules (they carry the partner copy).
     let k1 = active.iter().find(|r| r.name == "K-1").cloned();
-    let (table, mut problems) = table_rules(
-        &profiles,
-        &types,
-        k1.as_ref(),
-        &extra,
-        &id_first_parts(root),
-    );
+    // (A client list that cannot be read changes nothing, as a profile that cannot.)
+    let (id_parts, left_out) = id_first_parts(root).map_err(|e| {
+        format!("the client list cannot be read, so Intake's rules were left as they are: {e}")
+    })?;
+    let (table, mut problems) = table_rules(&profiles, &types, k1.as_ref(), &extra, &id_parts);
+    if left_out > 0 {
+        problems.push((
+            String::new(),
+            format!(
+                "{left_out} kinds of client ID (the part before the last underscore) are more than the row rules can carry ({MOST_ID_PARTS}): prints for those clients are filed by their doc type's rule, not their row's"
+            ),
+        ));
+    }
     problems.extend(dup);
     for (k, r) in table.into_iter().enumerate() {
         active.insert(k, r);

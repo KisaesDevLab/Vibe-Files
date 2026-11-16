@@ -406,6 +406,7 @@ fn several_list(ui: &mut egui::Ui, d: &mut CoverSheetDialog) {
     ui.horizontal(|ui| {
         let r = ui.add(
             egui::TextEdit::singleline(&mut d.find)
+                .margin(crate::ui::widgets::SEARCH_MARGIN)
                 .hint_text("Find client by name or ID")
                 .desired_width(260.0),
         );

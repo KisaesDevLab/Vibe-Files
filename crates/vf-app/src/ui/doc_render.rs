@@ -345,7 +345,11 @@ mod tests {
         // The best of three goes: the code's time, not a busy machine's (the whole suite
         // runs beside this test, and one slow go failed it now and then).
         let (mut ms, mut per_page) = (u128::MAX, u128::MAX);
+        // By the clock too, with room for a busy machine: work that waits uses no processor
+        // time and must still fail.
+        let mut clock_ms = u128::MAX;
         for _ in 0..3 {
+            let clock = std::time::Instant::now();
             // (Processor time, which a busy machine does not change: `test_util::thread_cpu`.)
             let start = crate::ui::test_util::thread_cpu();
             let bytes = std::fs::read(&pdf).unwrap();
@@ -357,6 +361,7 @@ mod tests {
                     .saturating_sub(start)
                     .as_millis(),
             );
+            clock_ms = clock_ms.min(clock.elapsed().as_millis());
             assert_eq!(geoms.len(), 300);
             assert_eq!(doc.pages().len(), 300);
             assert_eq!(first.image.size[0], 640);
@@ -373,6 +378,10 @@ mod tests {
             );
         }
         assert!(ms < 200, "first page took {ms} ms");
+        assert!(
+            clock_ms < 3000,
+            "first page took {clock_ms} ms by the clock"
+        );
         assert!(per_page < 100, "{per_page} ms per page while scrolling");
     }
 }

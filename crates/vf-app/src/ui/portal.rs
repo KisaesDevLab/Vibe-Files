@@ -1281,7 +1281,7 @@ impl PeopleWindow {
                             let l = ui.label("Find");
                             let r = ui
                                 .add(
-                                    egui::TextEdit::singleline(&mut self.find)
+                                    egui::TextEdit::singleline(&mut self.find).margin(crate::ui::widgets::SEARCH_MARGIN)
                                         .hint_text("name, email or mobile")
                                         .desired_width(220.0),
                                 )

@@ -1611,6 +1611,7 @@ fn client_table(ui: &mut egui::Ui, t: &mut SyncTab, env: &mut Env, v: &View<'_>,
         let r = ui
             .add(
                 egui::TextEdit::singleline(&mut t.client_find)
+                    .margin(crate::ui::widgets::SEARCH_MARGIN)
                     .hint_text("part of a name")
                     .desired_width(200.0),
             )

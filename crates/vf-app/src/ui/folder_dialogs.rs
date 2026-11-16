@@ -54,8 +54,8 @@ pub struct FolderDialog {
     job: Option<Job<Result<Done, String>>>,
     /// Apply folder template: the folders that would be made, read on its own thread (the
     /// template, the client list and the client's folder are on the share).
-    tpl: Option<Result<Vec<String>, String>>,
-    tpl_job: Option<Job<Result<Vec<String>, String>>>,
+    tpl: Option<Result<folders::TemplatePlan, String>>,
+    tpl_job: Option<Job<Result<folders::TemplatePlan, String>>>,
 }
 
 /// What the buttons' work needs, taken from the dialog so it can run on its own thread.
@@ -159,26 +159,48 @@ pub fn show(ctx: &egui::Context, d: &mut FolderDialog, env: &mut Env) -> DialogO
                     Some(Err(e)) => {
                         ui.label(RichText::new(e).color(theme::error()));
                     }
-                    Some(Ok(dirs)) if dirs.is_empty() => {
-                        ui.label("This client has every folder of the folder template.");
-                    }
-                    Some(Ok(dirs)) => {
-                        ui.label(format!(
-                            "{} folder{} of the folder template {} missing and will be made:",
-                            dirs.len(),
-                            if dirs.len() == 1 { "" } else { "s" },
-                            if dirs.len() == 1 { "is" } else { "are" },
-                        ));
-                        egui::ScrollArea::vertical().max_height(260.0).show(ui, |ui| {
-                            let cut = folder.len() + 1;
-                            for dir in dirs {
+                    Some(Ok(p)) => {
+                        let cut = folder.len() + 1;
+                        let dirs = &p.dirs;
+                        if dirs.is_empty() && p.left_out.is_empty() {
+                            ui.label("This client has every folder of the folder template.");
+                        } else if dirs.is_empty() {
+                            ui.label("No folder of the folder template can be made here.");
+                        } else {
+                            ui.label(format!(
+                                "{} folder{} of the folder template {} missing and will be made:",
+                                dirs.len(),
+                                if dirs.len() == 1 { "" } else { "s" },
+                                if dirs.len() == 1 { "is" } else { "are" },
+                            ));
+                            egui::ScrollArea::vertical()
+                                .id_salt("tpl-dirs")
+                                .max_height(220.0)
+                                .show(ui, |ui| {
+                                    for dir in dirs {
+                                        ui.label(
+                                            RichText::new(dir.get(cut..).unwrap_or(dir))
+                                                .monospace()
+                                                .small(),
+                                        );
+                                    }
+                                });
+                        }
+                        // What cannot be made, with why: the rest is not held up by it.
+                        if !p.left_out.is_empty() {
+                            ui.add_space(4.0);
+                            ui.label(
+                                RichText::new("Not made (and the folders in them):")
+                                    .color(theme::error()),
+                            );
+                            for why in &p.left_out {
                                 ui.label(
-                                    RichText::new(dir.get(cut..).unwrap_or(dir))
-                                        .monospace()
-                                        .small(),
+                                    RichText::new(why.get(cut..).unwrap_or(why))
+                                        .small()
+                                        .color(theme::error()),
                                 );
                             }
-                        });
+                        }
                     }
                 }
                 ui.label(widgets::caption(
@@ -282,7 +304,7 @@ pub fn show(ctx: &egui::Context, d: &mut FolderDialog, env: &mut Env) -> DialogO
                 FolderAsk::DeleteFolder { .. } => ("Delete folder", true),
                 FolderAsk::ApplyTemplate { .. } => (
                     "Create folders",
-                    matches!(&d.tpl, Some(Ok(dirs)) if !dirs.is_empty()),
+                    matches!(&d.tpl, Some(Ok(p)) if !p.dirs.is_empty()),
                 ),
             };
             let pressed = ui
@@ -312,7 +334,12 @@ fn start(ctx: &egui::Context, d: &mut FolderDialog, env: &mut Env) -> Option<Don
         name: d.name.clone(),
         plan: d.plan.clone().and_then(Result::ok),
         id_plan: d.id_plan.clone().and_then(Result::ok),
-        dirs: d.tpl.clone().and_then(Result::ok).unwrap_or_default(),
+        dirs: d
+            .tpl
+            .clone()
+            .and_then(Result::ok)
+            .map(|p| p.dirs)
+            .unwrap_or_default(),
     };
     d.error = None;
     let catalog = env.conn.path().filter(|p| !p.is_empty());

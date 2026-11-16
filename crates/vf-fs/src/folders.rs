@@ -141,7 +141,7 @@ pub fn plan_template(
     conn: &Connection,
     root: &Path,
     client_folder: &str,
-) -> Result<Vec<String>, String> {
+) -> Result<TemplatePlan, String> {
     let cf = client_folder.trim_matches('/');
     if inside_client(conn, root, cf)? != cf {
         return Err("The folder template is applied to a client's own folder.".into());
@@ -167,14 +167,19 @@ pub fn plan_template(
             name,
             extra: Default::default(),
         });
-    let (tree, _, err) = template::load_or_seed(&crate::clients::master_dir(root));
+    let (mut tree, _, err) = template::load_or_seed(&crate::clients::master_dir(root));
     if let Some(e) = err {
         return Err(e);
     }
-    let dirs = template::initial_dirs(&tree, &client).map_err(|e| e.to_string())?;
-    let mut out = Vec::new();
-    // The first is the client folder as the template names it: this client's folder is what
-    // it is on disk, whatever its name.
+    // The client folder is what it is on disk, whatever its name: the template's own name
+    // for it is not used, so it is not made from this client (a client that is not in the
+    // client list has none of the list's columns such a name may ask for).
+    tree.name = "client".into();
+    let dirs = template::initial_dirs(&tree, &client)
+        .map_err(|e| format!("A folder of the template cannot be named for this client: {e}"))?;
+    let mut plan = TemplatePlan::default();
+    // Folders left out, with everything below them.
+    let mut closed: Vec<String> = Vec::new();
     for d in dirs.iter().skip(1) {
         let inner: Vec<String> = d
             .components()
@@ -185,15 +190,38 @@ pub fn plan_template(
             continue;
         }
         let rel = format!("{cf}/{}", inner.join("/"));
-        if root.join(&rel).exists() {
+        if closed.iter().any(|c| rel.starts_with(&format!("{c}/"))) {
+            continue;
+        }
+        let at = root.join(&rel);
+        if at.is_dir() {
+            continue;
+        }
+        // One folder that cannot be made does not stop the others.
+        if at.exists() {
+            plan.left_out
+                .push(format!("{rel}: a file of that name is in the way"));
+            closed.push(rel);
             continue;
         }
         if let Some(e) = too_long(root, &rel) {
-            return Err(format!("{rel}: {e}"));
+            plan.left_out.push(format!("{rel}: {e}"));
+            closed.push(rel);
+            continue;
         }
-        out.push(rel);
+        plan.dirs.push(rel);
     }
-    Ok(out)
+    Ok(plan)
+}
+
+/// What [`plan_template`] found for a client's folder.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TemplatePlan {
+    /// The folders to make: cabinet-relative, parents first.
+    pub dirs: Vec<String>,
+    /// Folders of the template that cannot be made here, each with why (and the folders
+    /// below them go unmade with them).
+    pub left_out: Vec<String>,
 }
 
 /// Makes the folders [`plan_template`] listed (`dirs`) that are still missing, as one
@@ -207,7 +235,7 @@ pub fn apply_template(
 ) -> Result<usize, String> {
     // Planned again: only what the template still asks for, and is not there by now.
     let now = plan_template(conn, root, client_folder)?;
-    let make: Vec<&String> = now.iter().filter(|d| dirs.contains(d)).collect();
+    let make: Vec<&String> = now.dirs.iter().filter(|d| dirs.contains(d)).collect();
     if make.is_empty() {
         return Ok(0);
     }
@@ -1208,10 +1236,10 @@ mod tests {
         let (mut c, _) = cab();
         let cf = "Smith, Pat (SMIT1001)";
         // A client made here has every folder of the template: nothing to do.
-        assert!(plan_template(&c.conn, &c.root, cf).unwrap().is_empty());
+        assert!(plan_template(&c.conn, &c.root, cf).unwrap().dirs.is_empty());
         // One whose folder came from elsewhere lacks some (here: a folder and those in it).
         std::fs::remove_dir_all(c.root.join(cf).join("Permanent")).unwrap();
-        let all = plan_template(&c.conn, &c.root, cf).unwrap();
+        let all = plan_template(&c.conn, &c.root, cf).unwrap().dirs;
         assert!(
             all.contains(&format!("{cf}/Permanent"))
                 && all.contains(&format!("{cf}/Permanent/Setup")),
@@ -1247,11 +1275,27 @@ mod tests {
             .collect();
         assert_eq!(before, after, "what was there is not touched");
         // Again: nothing to do.
-        assert!(plan_template(&c.conn, &c.root, cf).unwrap().is_empty());
+        assert!(plan_template(&c.conn, &c.root, cf).unwrap().dirs.is_empty());
         assert_eq!(
             apply_template(&mut c.conn, &c.root, cf, &all, "dev").unwrap(),
             0
         );
+        // A file in the way of one folder: that folder and those below it are left out and
+        // said; the others are still made.
+        std::fs::remove_dir_all(c.root.join(cf).join("Permanent")).unwrap();
+        std::fs::write(c.root.join(cf).join("Permanent"), "a file").unwrap();
+        std::fs::remove_dir_all(c.root.join(cf).join("Correspondence")).unwrap();
+        let p = plan_template(&c.conn, &c.root, cf).unwrap();
+        assert_eq!(p.dirs, [format!("{cf}/Correspondence")]);
+        assert_eq!(p.left_out.len(), 1, "{:?}", p.left_out);
+        assert!(p.left_out[0].starts_with(&format!("{cf}/Permanent:")));
+        assert_eq!(
+            apply_template(&mut c.conn, &c.root, cf, &p.dirs, "dev").unwrap(),
+            1
+        );
+        std::fs::remove_file(c.root.join(cf).join("Permanent")).unwrap();
+        let rest = plan_template(&c.conn, &c.root, cf).unwrap().dirs;
+        apply_template(&mut c.conn, &c.root, cf, &rest, "dev").unwrap();
         // Not a client's folder, or a folder inside one.
         assert!(plan_template(&c.conn, &c.root, "").is_err());
         assert!(plan_template(&c.conn, &c.root, &format!("{cf}/Correspondence")).is_err());

@@ -3105,6 +3105,7 @@ fn tree(ui: &mut egui::Ui, b: &mut Browse) {
     });
     let r = ui.add(
         egui::TextEdit::singleline(&mut b.client_filter)
+            .margin(crate::ui::widgets::SEARCH_MARGIN)
             .hint_text("Find client by name or ID")
             .desired_width(f32::INFINITY),
     );
@@ -3983,7 +3984,7 @@ fn grid(ui: &mut egui::Ui, b: &mut Browse, conn: &Connection) {
         );
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             let r = ui.add(
-                egui::TextEdit::singleline(&mut b.name_filter)
+                egui::TextEdit::singleline(&mut b.name_filter).margin(crate::ui::widgets::SEARCH_MARGIN)
                     .hint_text("Filter this folder")
                     .desired_width(200.0),
             );
@@ -8330,7 +8331,7 @@ Petty cash,1234.50
     fn tree_expands_fast_at_5000_documents() {
         let mut h = harness(50, 100);
         assert_eq!(h.state().b.snap.docs.len(), 5000);
-        let mut worst = Duration::ZERO;
+        let (mut worst, mut slowest) = (Duration::ZERO, Duration::ZERO);
         // Best of three neighbouring clients per spot: the code's time, not a busy machine's
         // (the test suite runs OCR and image work in parallel).
         for group in [[0, 1, 2], [17, 18, 19], [42, 43, 44]] {
@@ -8343,15 +8344,24 @@ Petty cash,1234.50
                 h.get_by_role_and_label(Role::Button, &label).click();
                 // The frame that handles the click and draws the expanded node and its grid:
                 // the processor time it takes, which a busy machine does not change.
-                let t = crate::ui::test_util::thread_cpu();
+                let (t, clock) = (
+                    crate::ui::test_util::thread_cpu(),
+                    std::time::Instant::now(),
+                );
                 h.step();
                 best = best.min(crate::ui::test_util::thread_cpu().saturating_sub(t));
+                // And by the clock, with room for a busy machine: a frame that waits (on the
+                // disk, a lock, another thread) uses no processor time and must still fail.
+                slowest = slowest.max(clock.elapsed());
                 h.run();
                 assert_eq!(h.state().b.visible.len(), 100);
             }
             worst = worst.max(best);
         }
-        eprintln!("worst tree expansion at 5,000 documents: {worst:?}");
+        eprintln!(
+            "worst tree expansion at 5,000 documents: {worst:?} of processor time; slowest frame by the clock {slowest:?}"
+        );
         assert!(worst < Duration::from_millis(100), "{worst:?}");
+        assert!(slowest < Duration::from_secs(2), "{slowest:?} by the clock");
     }
 }

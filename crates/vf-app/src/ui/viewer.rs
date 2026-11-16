@@ -1609,7 +1609,7 @@ fn toolbar(ui: &mut egui::Ui, v: &mut Viewer, env: &mut Env<'_>, doc: &Doc) {
                 ui.separator();
                 let l = ui.label("Find");
                 let r = ui
-                    .add(egui::TextEdit::singleline(&mut v.find).desired_width(160.0))
+                    .add(egui::TextEdit::singleline(&mut v.find).margin(crate::ui::widgets::SEARCH_MARGIN).desired_width(160.0))
                     .labelled_by(l.id);
                 if crate::ui::widgets::clear_x(ui, &r, &mut v.find) {
                     // The words found before are no longer marked.

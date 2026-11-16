@@ -124,7 +124,7 @@ pub fn show(ctx: &egui::Context, d: &mut MergeDialog, env: &mut Env) -> DialogOu
         let r = ui
             .add_enabled(
                 !busy,
-                TextEdit::singleline(&mut d.query)
+                TextEdit::singleline(&mut d.query).margin(crate::ui::widgets::SEARCH_MARGIN)
                     .hint_text("Type a client's name or ID")
                     .desired_width(f32::INFINITY),
             )

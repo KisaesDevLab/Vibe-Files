@@ -60,6 +60,7 @@ pub fn show(ctx: &egui::Context, h: &mut HelpState) {
                     let r = ui
                         .add(
                             egui::TextEdit::singleline(&mut h.query)
+                                .margin(crate::ui::widgets::SEARCH_MARGIN)
                                 .hint_text("e.g. cover sheet, tape, password")
                                 .desired_width(f32::INFINITY),
                         )

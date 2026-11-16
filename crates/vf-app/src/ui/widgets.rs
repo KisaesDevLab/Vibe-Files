@@ -281,7 +281,15 @@ pub fn size(bytes: i64) -> String {
     }
 }
 
-/// Storage time (RFC 3339 UTC) shown in local time, `2026-11-02 14:05`.
+/// The inner margin of a search box that has [`clear_x`]: room at its right end for the ×,
+/// so the caret and the last letters of a long text are never under it.
+pub const SEARCH_MARGIN: egui::Margin = egui::Margin {
+    left: 4,
+    right: 22,
+    top: 2,
+    bottom: 2,
+};
+
 /// A small × at the right end of the search box `r` that empties `text` (owner 2026-11-16:
 /// "on the search boxes add an x to clear the search box"). Drawn over the box only while it
 /// holds something, takes no room of its own, and leaves the caret in the box. True when it
@@ -324,6 +332,7 @@ pub fn clear_x(ui: &mut egui::Ui, r: &egui::Response, text: &mut String) -> bool
     false
 }
 
+/// Storage time (RFC 3339 UTC) shown in local time, `2026-11-02 14:05`.
 pub fn local_time(rfc3339: &str) -> String {
     chrono::DateTime::parse_from_rfc3339(rfc3339)
         .map(|t| {
