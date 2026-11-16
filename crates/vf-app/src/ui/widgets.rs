@@ -282,6 +282,48 @@ pub fn size(bytes: i64) -> String {
 }
 
 /// Storage time (RFC 3339 UTC) shown in local time, `2026-11-02 14:05`.
+/// A small × at the right end of the search box `r` that empties `text` (owner 2026-11-16:
+/// "on the search boxes add an x to clear the search box"). Drawn over the box only while it
+/// holds something, takes no room of its own, and leaves the caret in the box. True when it
+/// was pressed: the caller treats that as the text having changed.
+pub fn clear_x(ui: &mut egui::Ui, r: &egui::Response, text: &mut String) -> bool {
+    if text.is_empty() {
+        return false;
+    }
+    let side = r.rect.height().min(20.0);
+    let rect = egui::Rect::from_center_size(
+        egui::pos2(r.rect.right() - side / 2.0 - 2.0, r.rect.center().y),
+        egui::vec2(side, side),
+    );
+    let x = ui
+        .interact(rect, r.id.with("clear-x"), egui::Sense::click())
+        .on_hover_text("Clear")
+        .on_hover_cursor(egui::CursorIcon::PointingHand);
+    x.widget_info(|| {
+        egui::WidgetInfo::labeled(egui::accesskit::Role::Button, true, "Clear search")
+    });
+    // The box's own fill behind it, so text that runs to the end does not show through.
+    ui.painter()
+        .rect_filled(rect.shrink(1.0), 2.0, ui.visuals().extreme_bg_color);
+    ui.painter().text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        "×",
+        egui::FontId::proportional(15.0),
+        if x.hovered() {
+            crate::ui::theme::ink()
+        } else {
+            crate::ui::theme::ink_muted()
+        },
+    );
+    if x.clicked() {
+        text.clear();
+        r.request_focus();
+        return true;
+    }
+    false
+}
+
 pub fn local_time(rfc3339: &str) -> String {
     chrono::DateTime::parse_from_rfc3339(rfc3339)
         .map(|t| {

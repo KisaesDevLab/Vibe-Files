@@ -118,6 +118,7 @@ pub fn panel(
                             .desired_width(300.0),
                     )
                     .labelled_by(label.id);
+                crate::ui::widgets::clear_x(ui, &r, &mut s.text);
                 let entered = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
                 ui.separator();
                 ui.radio_value(&mut s.scope, Where::Cabinet, "Cabinet");

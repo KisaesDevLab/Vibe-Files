@@ -404,12 +404,13 @@ fn several_list(ui: &mut egui::Ui, d: &mut CoverSheetDialog) {
     ui.add_space(6.0);
     let shown = d.shown();
     ui.horizontal(|ui| {
-        ui.add(
+        let r = ui.add(
             egui::TextEdit::singleline(&mut d.find)
                 .hint_text("Find client by name or ID")
                 .desired_width(260.0),
-        )
-        .widget_info(|| {
+        );
+        crate::ui::widgets::clear_x(ui, &r, &mut d.find);
+        r.widget_info(|| {
             egui::WidgetInfo::labeled(
                 egui::accesskit::Role::TextInput,
                 true,

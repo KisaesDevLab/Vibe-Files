@@ -1611,6 +1611,10 @@ fn toolbar(ui: &mut egui::Ui, v: &mut Viewer, env: &mut Env<'_>, doc: &Doc) {
                 let r = ui
                     .add(egui::TextEdit::singleline(&mut v.find).desired_width(160.0))
                     .labelled_by(l.id);
+                if crate::ui::widgets::clear_x(ui, &r, &mut v.find) {
+                    // The words found before are no longer marked.
+                    run_find(v);
+                }
                 if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                     run_find(v);
                 }

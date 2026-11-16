@@ -129,6 +129,9 @@ pub fn show(ctx: &egui::Context, d: &mut MergeDialog, env: &mut Env) -> DialogOu
                     .desired_width(f32::INFINITY),
             )
             .labelled_by(l.id);
+        if !busy {
+            widgets::clear_x(ui, &r, &mut d.query);
+        }
         if !d.focused {
             r.request_focus();
             d.focused = true;

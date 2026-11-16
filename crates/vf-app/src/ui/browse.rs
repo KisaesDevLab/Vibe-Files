@@ -3103,11 +3103,12 @@ fn tree(ui: &mut egui::Ui, b: &mut Browse) {
             }
         });
     });
-    ui.add(
+    let r = ui.add(
         egui::TextEdit::singleline(&mut b.client_filter)
             .hint_text("Find client by name or ID")
             .desired_width(f32::INFINITY),
     );
+    widgets::clear_x(ui, &r, &mut b.client_filter);
     let needle = b.client_filter.trim().to_lowercase();
     let shown: Vec<usize> = (0..b.snap.clients.len())
         .filter(|&i| {
@@ -3986,7 +3987,8 @@ fn grid(ui: &mut egui::Ui, b: &mut Browse, conn: &Connection) {
                     .hint_text("Filter this folder")
                     .desired_width(200.0),
             );
-            if r.changed() {
+            let cleared = widgets::clear_x(ui, &r, &mut b.name_filter);
+            if r.changed() || cleared {
                 b.refresh();
                 if b.large {
                     b.filter_typed = Some(std::time::Instant::now());
@@ -5783,6 +5785,41 @@ mod tests {
         let b = &h.state().b;
         assert!(!b.explorer_on());
         assert_eq!(b.visible.len(), 4, "Income Tax and the folders below it");
+    }
+
+    /// Owner 2026-11-16: a search box has an × that empties it. It shows only while the box
+    /// holds something; pressing it empties the box and the list is as it was.
+    #[test]
+    fn a_search_box_is_cleared_by_its_x() {
+        let mut h = harness(3, 4);
+        assert!(
+            h.query_by_label("Clear search").is_none(),
+            "nothing to clear"
+        );
+        // The client box above the tree.
+        h.state_mut().b.client_filter = "0001".into();
+        h.run();
+        assert!(h.query_by_label("Client 0000  1000").is_none());
+        h.get_by_role_and_label(Role::Button, "Clear search")
+            .click();
+        h.run();
+        assert_eq!(h.state().b.client_filter, "");
+        assert!(h.query_by_label("Client 0000  1000").is_some());
+        assert!(h.query_by_label("Clear search").is_none());
+        // The filter above the list: the documents come back.
+        let all = h.state().b.visible.len();
+        {
+            let b = &mut h.state_mut().b;
+            b.name_filter = "no such name".into();
+            b.refresh();
+        }
+        h.run();
+        assert_eq!(h.state().b.visible.len(), 0);
+        h.get_by_role_and_label(Role::Button, "Clear search")
+            .click();
+        h.run();
+        assert_eq!(h.state().b.name_filter, "");
+        assert_eq!(h.state().b.visible.len(), all);
     }
 
     /// PA-81, PA-83 (owner 2026-11-16): explorer view does not wait for the catalog to know

@@ -397,6 +397,7 @@ pub fn show(ui: &mut egui::Ui, p: &mut BulkPage, env: &mut Env, catalog: &Path) 
                     .desired_width(260.0),
             )
             .labelled_by(l.id);
+        widgets::clear_x(ui, &r, &mut p.phrase);
         let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
         let go = ui
             .add_enabled(idle, egui::Button::new("Find"))

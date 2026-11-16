@@ -1286,6 +1286,7 @@ impl PeopleWindow {
                                         .desired_width(220.0),
                                 )
                                 .labelled_by(l.id);
+                            crate::ui::widgets::clear_x(ui, &r, &mut self.find);
                             let ok = self.find.trim().chars().count() >= 2 && !finding;
                             let enter =
                                 r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));

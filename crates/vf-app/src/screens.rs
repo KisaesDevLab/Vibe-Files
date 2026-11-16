@@ -109,6 +109,26 @@ mod tests {
             h.run_steps(4);
         }
         shot(&mut h, "05-browse-client-notes");
+        // The search boxes with something in them: each has its × (owner 2026-11-16).
+        {
+            let crate::app::Screen::Open(o) = &mut h.state_mut().screen else {
+                panic!("open")
+            };
+            o.browse.client_filter = "farm".into();
+            o.browse.name_filter = "return".into();
+            o.browse.refresh();
+        }
+        h.run_steps(6);
+        shot(&mut h, "06-browse-search-boxes");
+        {
+            let crate::app::Screen::Open(o) = &mut h.state_mut().screen else {
+                panic!("open")
+            };
+            o.browse.client_filter.clear();
+            o.browse.name_filter.clear();
+            o.browse.refresh();
+        }
+        h.run_steps(4);
         for (i, tab) in ["Intake", "Viewer", "Sync", "Admin"].iter().enumerate() {
             h.get_by_role_and_label(Role::Button, tab).click();
             h.run_steps(8);

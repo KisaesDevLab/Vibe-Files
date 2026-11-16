@@ -57,12 +57,14 @@ pub fn show(ctx: &egui::Context, h: &mut HelpState) {
                 .default_size(250.0)
                 .show(ui, |ui| {
                     let l = ui.label("Search help");
-                    ui.add(
-                        egui::TextEdit::singleline(&mut h.query)
-                            .hint_text("e.g. cover sheet, tape, password")
-                            .desired_width(f32::INFINITY),
-                    )
-                    .labelled_by(l.id);
+                    let r = ui
+                        .add(
+                            egui::TextEdit::singleline(&mut h.query)
+                                .hint_text("e.g. cover sheet, tape, password")
+                                .desired_width(f32::INFINITY),
+                        )
+                        .labelled_by(l.id);
+                    crate::ui::widgets::clear_x(ui, &r, &mut h.query);
                     ui.add_space(6.0);
                     egui::ScrollArea::vertical()
                         .id_salt("help-list-scroll")

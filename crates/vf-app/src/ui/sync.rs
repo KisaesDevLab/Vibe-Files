@@ -1608,12 +1608,14 @@ fn client_table(ui: &mut egui::Ui, t: &mut SyncTab, env: &mut Env, v: &View<'_>,
     });
     ui.horizontal_wrapped(|ui| {
         let l = ui.label("Find a client");
-        ui.add(
-            egui::TextEdit::singleline(&mut t.client_find)
-                .hint_text("part of a name")
-                .desired_width(200.0),
-        )
-        .labelled_by(l.id);
+        let r = ui
+            .add(
+                egui::TextEdit::singleline(&mut t.client_find)
+                    .hint_text("part of a name")
+                    .desired_width(200.0),
+            )
+            .labelled_by(l.id);
+        crate::ui::widgets::clear_x(ui, &r, &mut t.client_find);
         ui.separator();
         ui.label("Show");
         ui.radio_value(
