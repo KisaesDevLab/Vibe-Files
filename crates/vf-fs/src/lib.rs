@@ -13,6 +13,7 @@ pub mod disposition;
 pub mod docmeta;
 pub mod doctypes;
 pub mod dupes;
+pub mod fcinfo;
 pub mod fileops;
 pub mod fingerprint;
 pub mod folders;

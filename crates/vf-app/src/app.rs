@@ -107,6 +107,9 @@ pub struct OpenCabinet {
     index_wait: Option<String>,
     /// This login's id in the cabinet, held while the cabinet is open (PA-69).
     _login: Option<vf_fs::lock::Held>,
+    /// Rows an earlier build made for clients' notes files being taken out of the catalog
+    /// (PA-76), behind the window: it reads every document's path.
+    note_rows: Option<crate::ui::job::Job<Result<usize, String>>>,
 }
 
 pub struct VibeFilesApp {
@@ -524,7 +527,17 @@ impl VibeFilesApp {
                 {
                     sweep.start(ctx, &opened.catalog, &opened.root);
                 }
+                let note_rows = {
+                    let (catalog, device) = (opened.catalog.clone(), self.config.device_id.clone());
+                    crate::ui::job::Job::start(ctx, "Tidying the catalog…", move || {
+                        let mut conn = vf_core::db::open(&catalog, vf_core::db::Storage::Local)
+                            .map_err(|e| e.to_string())?;
+                        vf_fs::fcinfo::forget_rows(&mut conn, &device)
+                    })
+                    .ok()
+                };
                 self.screen = Screen::Open(Box::new(OpenCabinet {
+                    note_rows,
                     chain,
                     mirrored_at: None,
                     mirror_job: None,
@@ -717,6 +730,13 @@ impl eframe::App for VibeFilesApp {
             }
             if std::mem::take(&mut o.sweep.changed) {
                 o.browse.reload(&o.opened.conn);
+            }
+            match crate::ui::job::take(&mut o.note_rows) {
+                Some(Ok(Ok(n))) if n > 0 => o.browse.reload(&o.opened.conn),
+                Some(Ok(Err(e))) | Some(Err(e)) => {
+                    tracing::warn!(kind = crate::logging::kind(&e), "notes files' rows");
+                }
+                _ => {}
             }
             // (And for the other servers' changes left for behind the window, Q-112.)
             o.sweep.hold = o.indexing.is_some() || o.servers.first_pending();

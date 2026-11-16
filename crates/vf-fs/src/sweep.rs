@@ -868,6 +868,7 @@ pub fn find_new_counted(
                 || name.starts_with('.')
                 || name == "desktop.ini"
                 || name == "thumbs.db"
+                || crate::fcinfo::is_note_file(&name)
             {
                 continue;
             }

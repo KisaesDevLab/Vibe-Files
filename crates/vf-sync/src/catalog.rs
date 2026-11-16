@@ -117,7 +117,8 @@ const DIRTY: &str = "
     WHERE ((b.doc_id IS NULL AND d.deleted_at IS NULL)
        OR (b.doc_id IS NOT NULL AND (b.rev != d.rev OR b.hash != d.hash
            OR b.rel_path != d.rel_path OR b.deleted != (d.deleted_at IS NOT NULL)
-           OR coalesce(b.client_id, '') != coalesce(d.client_id, ''))))";
+           OR coalesce(b.client_id, '') != coalesce(d.client_id, ''))))
+      AND lower(d.rel_path) != '!fcinfo.ini' AND lower(d.rel_path) NOT LIKE '%/!fcinfo.ini'";
 
 /// A conflict copy (this PC's edit of a document in B2, kept beside the other PC's): it goes
 /// up whatever the B2 rule says, like the document it came from (QA 2026-11-12).
@@ -306,6 +307,9 @@ pub fn entries(
             })
         })?
         .collect::<std::result::Result<_, _>>()?;
+    // A client's notes file (PA-76) is not a document: a row an earlier build made for one is
+    // never sent, least of all as a deletion (another PC would move the file to its trash).
+    out.retain(|e| !vf_fs::fcinfo::is_note_path(&e.rel_path));
     let mut tags = conn.prepare("SELECT tag FROM document_tag WHERE doc_id = ?1 ORDER BY tag")?;
     let mut vers = conn.prepare(
         "SELECT hash, size, created, created_by, device_id, reason FROM version

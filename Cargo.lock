@@ -5985,6 +5985,7 @@ name = "vf-fs"
 version = "0.1.35"
 dependencies = [
  "csv",
+ "encoding_rs",
  "filer-core",
  "filer-intake",
  "lopdf",

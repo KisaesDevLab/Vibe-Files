@@ -11,6 +11,7 @@ filer-intake = { path = "../filer-intake" }
 vf-core = { path = "../vf-core" }
 vf-security = { path = "../vf-security" }
 csv = { workspace = true }
+encoding_rs = "0.8"
 vf-pdf = { path = "../vf-pdf" }
 vf-extract = { path = "../vf-extract" }
 regex.workspace = true

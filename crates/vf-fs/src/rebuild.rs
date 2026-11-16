@@ -427,7 +427,7 @@ pub(crate) fn listed_under_lenient(
             if name != cabinet::VIBE_DIR {
                 listed_under_lenient(&e.path(), out, bad);
             }
-        } else if !name.starts_with("~vfd-partial-") {
+        } else if !name.starts_with("~vfd-partial-") && !crate::fcinfo::is_note_file(&name) {
             let st = e.metadata().ok().map(|m| crate::cloud::listed(&m));
             out.push((e.path(), st));
         }
@@ -459,7 +459,7 @@ pub(crate) fn files_under(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), Rebu
             if name != cabinet::VIBE_DIR {
                 files_under(&e.path(), out)?;
             }
-        } else if !name.starts_with("~vfd-partial-") {
+        } else if !name.starts_with("~vfd-partial-") && !crate::fcinfo::is_note_file(&name) {
             out.push(e.path());
         }
     }
@@ -2507,6 +2507,88 @@ mod tests {
     /// kind, so an index in parts over a catalog that already has the cabinet's documents must
     /// leave what one made in one go leaves: a file gone is no longer a document (in a folder
     /// still there, and in one removed whole), a new file is one.
+    /// A client's notes file (FileCenter's `!fcinfo.ini`, PA-76) is not a document: the index
+    /// leaves it out, and a row an earlier build made for one is taken out of the catalog
+    /// without the file being touched or a deletion being left to send.
+    #[test]
+    fn a_notes_file_is_not_a_document() {
+        let c = cab();
+        let notes = c.root.join("Smith, John (1001)/!fcinfo.ini");
+        put(&notes, "[Memo]\r\ncall in March\r\n");
+        put(
+            &c.root
+                .join("Smith, John (1001)/Income Tax/2024/!FCINFO.INI"),
+            "[Memo]\r\n",
+        );
+        let mut conn = open(&c);
+        index(&mut conn, &c.root, "pc-1").unwrap();
+        let rows = |conn: &Connection| -> i64 {
+            conn.query_row(
+                "SELECT count(*) FROM document WHERE lower(rel_path) LIKE '%!fcinfo.ini'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(rows(&conn), 0);
+        assert_eq!(crate::fcinfo::forget_rows(&mut conn, "pc-1").unwrap(), 0);
+
+        // As an earlier build left it: a live row, with a tag and an exchange base.
+        let (client, id): (String, String) = conn
+            .query_row(
+                "SELECT client_id, id FROM document WHERE deleted_at IS NULL
+                   AND rel_path LIKE 'Smith, John (1001)/%' LIMIT 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        conn.execute(
+            "INSERT INTO document (id, client_id, rel_path, hash, size, mime, status, filed_by,
+                                   filed_at, device_id, rev, updated_at)
+             SELECT 'note-row', ?1, 'Smith, John (1001)/!fcinfo.ini', 'abc', 1, mime, status,
+                    filed_by, filed_at, device_id, 1, updated_at FROM document WHERE id = ?2",
+            [&client, &id],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO document_tag (doc_id, tag) VALUES ('note-row', 'x')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sync_base (doc_id, client_id, rel_path, hash, rev, deleted)
+             VALUES ('note-row', ?1, 'Smith, John (1001)/!fcinfo.ini', 'abc', 1, 0)",
+            [&client],
+        )
+        .unwrap();
+        let before: i64 = conn
+            .query_row("SELECT count(*) FROM document", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(crate::fcinfo::forget_rows(&mut conn, "pc-1").unwrap(), 1);
+        assert_eq!(rows(&conn), 0);
+        let after: i64 = conn
+            .query_row("SELECT count(*) FROM document", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(after, before - 1, "removed, not marked deleted");
+        for t in ["document_tag", "sync_base"] {
+            let n: i64 = conn
+                .query_row(
+                    &format!("SELECT count(*) FROM {t} WHERE doc_id = 'note-row'"),
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(n, 0, "{t}");
+        }
+        assert_eq!(
+            std::fs::read_to_string(&notes).unwrap(),
+            "[Memo]\r\ncall in March\r\n"
+        );
+        // And it is not found as a new file either.
+        index(&mut conn, &c.root, "pc-1").unwrap();
+        assert_eq!(rows(&conn), 0);
+    }
+
     #[test]
     fn an_index_in_parts_over_a_known_cabinet_is_the_same_index() {
         let c = cab();

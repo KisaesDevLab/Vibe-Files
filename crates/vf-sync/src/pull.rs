@@ -915,6 +915,11 @@ fn apply_one(
     e: &DocEntry,
     rep: &mut PullReport,
 ) -> Result<One> {
+    // A client's notes file (PA-76) is not a document: an entry an earlier build sent for one,
+    // live or deleted, changes neither the file nor the catalog here.
+    if vf_fs::fcinfo::is_note_path(&e.rel_path) {
+        return Ok(One::Done);
+    }
     let want = join(folder, &e.rel_path);
     let local = catalog::doc(conn, &e.doc_id)?;
     let base = catalog::base(conn, &e.doc_id)?;

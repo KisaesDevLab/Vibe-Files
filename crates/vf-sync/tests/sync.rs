@@ -301,6 +301,79 @@ fn round_trip_restore_and_bound_folders() {
     assert_eq!(snapshot(&b.root), snapshot(&a.root));
 }
 
+/// A client's notes file (FileCenter's `!fcinfo.ini`, PA-76) is not a document. A row an
+/// earlier build made for one is never sent: not as a document, and above all not as a
+/// deletion, which would move the file to the trash on every other PC.
+#[test]
+fn a_notes_file_is_never_sent_or_deleted_by_sync() {
+    let t = tempfile::tempdir().unwrap();
+    let store = Remote::memory();
+    let mut a = pc_a(t.path(), store.clone());
+    let rel = "Anderson Farms LLC (1042)/!fcinfo.ini";
+    put(&a.root, rel, "[Memo]\r\ninvented note\r\n");
+    // As an earlier build left it: a live row for the file.
+    let like = doc_id(&a.conn, "EIN letter.pdf");
+    let hash = filer_intake::commit::sha256_file(&a.root.join(rel)).unwrap();
+    a.conn
+        .execute(
+            "INSERT INTO document (id, client_id, rel_path, hash, size, mime, status, filed_by,
+                                   filed_at, device_id, rev, updated_at)
+             SELECT 'note-row', client_id, ?2, ?3, 24, mime, status, filed_by, filed_at,
+                    device_id, 1, updated_at FROM document WHERE id = ?1",
+            [&like, rel, &hash],
+        )
+        .unwrap();
+    let rules = vf_sync::rules::Rules::load(&a.root).unwrap();
+    vf_sync::push::push(&mut a.conn, &a.root, &a.sync, None).unwrap();
+    assert!(
+        vf_sync::catalog::pending(&a.conn, &rules)
+            .unwrap()
+            .is_empty()
+    );
+    let mut b = pc_b(t.path(), store.clone(), &a);
+    assert!(!b.root.join(rel).exists(), "not sent as a document");
+    let n: i64 = b
+        .conn
+        .query_row(
+            "SELECT count(*) FROM document WHERE id = 'note-row'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(n, 0);
+
+    // PC-B has its own notes for the client. On PC-A the row is marked deleted (an index that
+    // no longer lists the file does that), and something else changes so the client is sent.
+    put(&b.root, rel, "[Memo]\r\nnotes kept on b\r\n");
+    a.conn
+        .execute(
+            "INSERT INTO sync_base (doc_id, client_id, rel_path, hash, rev, deleted)
+             SELECT id, client_id, rel_path, hash, rev, 0 FROM document WHERE id = 'note-row'",
+            [],
+        )
+        .unwrap();
+    a.conn
+        .execute(
+            "UPDATE document SET deleted_at = updated_at, tombstone_reason = 'missing on rebuild',
+                                 rev = rev + 1 WHERE id = 'note-row'",
+            [],
+        )
+        .unwrap();
+    assert!(
+        vf_sync::catalog::pending(&a.conn, &rules)
+            .unwrap()
+            .is_empty(),
+        "the deletion is not something to send"
+    );
+    set_type(&mut a.conn, &a.root, "EIN letter.pdf", "W-2", Some(2024));
+    vf_sync::push::push(&mut a.conn, &a.root, &a.sync, None).unwrap();
+    vf_sync::pull::pull(&mut b.conn, &b.root, &b.sync).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(b.root.join(rel)).unwrap(),
+        "[Memo]\r\nnotes kept on b\r\n"
+    );
+}
+
 #[test]
 fn a_forced_collision_keeps_both_and_raises_a_conflict() {
     let t = tempfile::tempdir().unwrap();
