@@ -4443,7 +4443,7 @@ fn explorer_list(ui: &mut egui::Ui, b: &mut Browse) {
     }
 }
 
-fn sort_arrow(ui: &mut egui::Ui, asc: bool) {
+pub(crate) fn sort_arrow(ui: &mut egui::Ui, asc: bool) {
     let (rect, _) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), Sense::hover());
     let c = rect.center();
     let (tip, base) = if asc { (-3.0, 3.0) } else { (3.0, -3.0) };

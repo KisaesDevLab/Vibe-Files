@@ -16,6 +16,8 @@ pub enum Page {
     PrintCapture,
     Audit,
     Trash,
+    /// Find by file name, change or trash many (PA-78).
+    Bulk,
     Sweep,
     Retention,
     Disposition,
@@ -48,6 +50,7 @@ const NAV: &[(&str, &[&str])] = &[
             "Folder templates",
             "Folder import",
             "Merge cabinets",
+            "Bulk changes",
         ],
     ),
     ("INTAKE", &["Print capture & parsers"]),
@@ -81,6 +84,7 @@ fn page_of(item: &str) -> Option<Page> {
         "Folder templates" => Page::Templates,
         "Folder import" => Page::Import,
         "Merge cabinets" => Page::Merge,
+        "Bulk changes" => Page::Bulk,
         "Print capture & parsers" => Page::PrintCapture,
         "Portal" => Page::Portal,
         "Portal requests" => Page::PortalRequests,
@@ -168,6 +172,8 @@ pub struct Admin {
     pub chain: Option<crate::ui::audit::ChainCheck>,
     /// Trash page (P05 step 3).
     pub trash: crate::ui::trash::TrashPage,
+    /// Bulk changes page (PA-78).
+    pub bulk: crate::ui::bulk::BulkPage,
     /// Admin password page (PA-24).
     pub password: crate::ui::admin_password::PasswordPage,
     /// "Lock Admin" pressed (the app ends the unlocked session).
@@ -215,6 +221,7 @@ impl Admin {
             audit: Default::default(),
             chain: None,
             trash: Default::default(),
+            bulk: Default::default(),
             password: Default::default(),
             lock_requested: false,
             open: vf_fs::trash::open_pages(env.root),
@@ -467,6 +474,12 @@ pub fn show(ui: &mut egui::Ui, a: &mut Admin, env: &mut Env, sweep: SweepEnv, lo
                 a.changed = true;
             }
         }
+        Page::Bulk => {
+            crate::ui::bulk::show(ui, &mut a.bulk, env, sweep.catalog);
+            if std::mem::take(&mut a.bulk.changed) {
+                a.changed = true;
+            }
+        }
     });
 }
 
@@ -594,6 +607,10 @@ fn nav(ui: &mut egui::Ui, a: &mut Admin, has_password: bool, locked: bool) {
                     .clicked()
                 {
                     a.page = Page::Password;
+                }
+            } else if *item == "Bulk changes" {
+                if ui.selectable_label(a.page == Page::Bulk, *item).clicked() {
+                    a.page = Page::Bulk;
                 }
             } else if *item == "Trash" {
                 if ui.selectable_label(a.page == Page::Trash, *item).clicked() {
@@ -1405,6 +1422,145 @@ ANDE1042,Anderson Farms LLC
             )
             .unwrap();
         assert_eq!(n, 1);
+    }
+
+    /// Q-117 (owner 2026-11-15): Admin › Bulk changes finds documents by part of their file
+    /// name (not their folders'), ticks all or none, and changes the ticked ones together:
+    /// details, a find-and-replace in their names, the trash (asked first, with the count).
+    #[test]
+    fn bulk_changes_finds_by_name_and_changes_many() {
+        let mut h = harness();
+        {
+            let s = h.state_mut();
+            // A folder named like the phrase: its other file is not a match.
+            for rel in [
+                "A (1)/2025/GovtK1 one.pdf",
+                "A (1)/2025/govtk1 two.pdf",
+                "A (1)/2024/GovtK1 three.pdf",
+                "A (1)/GovtK1/letter.pdf",
+                "A (1)/2025/w2.pdf",
+            ]
+            .iter()
+            .enumerate()
+            {
+                let (i, rel) = rel;
+                let p = s.root.join(rel);
+                std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+                std::fs::write(p, rel.as_bytes()).unwrap();
+                s.conn
+                    .execute(
+                        "INSERT INTO document (id, tax_year, rel_path, hash, size, filed_at, device_id, updated_at)
+                         VALUES (?1, 2025, ?2, ?1, 2, 't', 'dev', 't')",
+                        [format!("b{i}"), rel.to_string()],
+                    )
+                    .unwrap();
+            }
+        }
+        click(&mut h, "Bulk changes");
+        assert_eq!(h.state().a.page, Page::Bulk);
+        type_into(&mut h, "File name contains", "govtk1");
+        click(&mut h, "Find");
+        h.run();
+        let names = |h: &Harness<'static, State>| -> Vec<String> {
+            let mut v: Vec<String> = h
+                .state()
+                .a
+                .bulk
+                .rows()
+                .iter()
+                .map(|d| d.name().to_string())
+                .collect();
+            v.sort();
+            v
+        };
+        assert_eq!(
+            names(&h),
+            ["GovtK1 one.pdf", "GovtK1 three.pdf", "govtk1 two.pdf"]
+        );
+        assert!(h.query_by_label("3 documents · 0 selected").is_some());
+
+        click(&mut h, "Select all");
+        assert_eq!(h.state().a.bulk.picked.len(), 3);
+        click(&mut h, "Select none");
+        assert!(h.state().a.bulk.picked.is_empty());
+        h.get_by_label("Select every row").click();
+        h.run();
+        assert_eq!(h.state().a.bulk.picked.len(), 3);
+
+        // Details: the tax year of all three, in one transaction.
+        h.run();
+        h.state_mut().a.bulk.set_year_for_test(Some(2023));
+        h.run();
+        click(&mut h, "Apply to 3");
+        h.run();
+        h.run();
+        let years: Vec<Option<i32>> = h.state().a.bulk.rows().iter().map(|d| d.tax_year).collect();
+        assert_eq!(years, [Some(2023); 3], "{:?}", h.state().a.bulk.error);
+        let other: i64 = h
+            .state()
+            .conn
+            .query_row(
+                "SELECT count(*) FROM document WHERE tax_year = 2025",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(other, 2, "the documents not ticked keep theirs");
+        click(&mut h, "Select all");
+        // Rename: the text replaced in each name, previewed first.
+        click(&mut h, "Rename…");
+        type_into(&mut h, "with", "K-1");
+        click(&mut h, "Preview");
+        h.run();
+        assert!(
+            h.query_by_label("3 documents will be renamed, 0 left as they are.")
+                .is_some()
+        );
+        click(&mut h, "Rename 3");
+        h.run();
+        h.run();
+        assert!(h.state().root.join("A (1)/2025/K-1 one.pdf").is_file());
+        assert!(h.state().root.join("A (1)/2025/K-1 two.pdf").is_file());
+        assert!(!h.state().root.join("A (1)/2025/GovtK1 one.pdf").exists());
+        assert!(h.state().a.changed, "Browse reads the catalog again");
+        // The grid was found again: the names no longer have the text.
+        assert!(names(&h).is_empty(), "{:?}", names(&h));
+
+        // Trash: asked first, with the count.
+        type_into(
+            &mut h,
+            "File name contains",
+            "\u{8}\u{8}\u{8}\u{8}\u{8}\u{8}",
+        );
+        h.state_mut().a.bulk.phrase = "K-1".into();
+        click(&mut h, "Find");
+        h.run();
+        assert_eq!(names(&h).len(), 3);
+        click(&mut h, "Select all");
+        h.get_by_label("Select K-1 three.pdf").click();
+        h.run();
+        click(&mut h, "Move 2 to trash");
+        assert!(h.query_by_label("Move 2 documents to the trash?").is_some());
+        assert!(
+            h.state().root.join("A (1)/2025/K-1 one.pdf").is_file(),
+            "not yet"
+        );
+        click(&mut h, "Yes, move 2 to trash");
+        h.run();
+        h.run();
+        assert!(!h.state().root.join("A (1)/2025/K-1 one.pdf").exists());
+        assert!(h.state().root.join("A (1)/2024/K-1 three.pdf").is_file());
+        assert_eq!(names(&h), ["K-1 three.pdf"]);
+        let live: i64 = h
+            .state()
+            .conn
+            .query_row(
+                "SELECT count(*) FROM document WHERE deleted_at IS NULL",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(live, 3, "the two others and the one kept");
     }
 
     /// P05 step 3: set the admin password, restore from the trash, empty it with the password.

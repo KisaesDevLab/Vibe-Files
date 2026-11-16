@@ -212,6 +212,41 @@ fn docs_where(
     Ok(rows)
 }
 
+/// The documents whose file name (not its folders) contains `phrase`, without regard to case,
+/// in path order, at most `limit` (Admin › Bulk changes, PA-78). Reads every document's path:
+/// not for the window's thread.
+pub fn docs_named(conn: &Connection, phrase: &str, limit: usize) -> Result<Vec<DocRow>> {
+    let want = phrase.trim().to_lowercase();
+    if want.is_empty() {
+        return Ok(vec![]);
+    }
+    // `%` and `_` typed are themselves, not wildcards.
+    let like = format!(
+        "%{}%",
+        want.replace('\\', "\\\\")
+            .replace('%', "\\%")
+            .replace('_', "\\_")
+    );
+    let sql = format!(
+        "{DOC_SELECT} WHERE d.deleted_at IS NULL AND lower(d.rel_path) LIKE ?1 ESCAPE '\\'
+         ORDER BY d.rel_path"
+    );
+    let mut st = conn.prepare_cached(&sql)?;
+    let mut rows = st.query([&like])?;
+    let mut out = Vec::new();
+    while let Some(r) = rows.next()? {
+        let d = doc_row(r)?;
+        // The path matched: the phrase may be in a folder's name only.
+        if d.name().to_lowercase().contains(&want) {
+            out.push(d);
+            if out.len() >= limit {
+                break;
+            }
+        }
+    }
+    Ok(out)
+}
+
 /// The condition and parameters of a cabinet-wide view's page (`?1` = the name filter).
 fn page_cond(kind: &PageKind) -> (&'static str, Option<String>) {
     match kind {

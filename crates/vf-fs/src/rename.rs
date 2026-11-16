@@ -209,12 +209,50 @@ impl Planner {
     /// The preview: what each document would be called with `tpl`.
     pub fn plan(&self, root: &Path, tpl: &str) -> Result<Vec<Row>, String> {
         check_template(tpl, &self.extras)?;
+        Ok(self.plan_with(root, |d| {
+            template::render_segment(tpl, &d.tokens).map_err(|e| e.to_string())
+        }))
+    }
+
+    /// The preview of a find-and-replace in the file names (Admin › Bulk changes, PA-78):
+    /// every `find` in a name's part before its extension becomes `replace`, without regard
+    /// to case. The extension is kept.
+    pub fn plan_replace(&self, root: &Path, find: &str, replace: &str) -> Result<Vec<Row>, String> {
+        if find.is_empty() {
+            return Err("Enter the text to find in the file names.".into());
+        }
+        if let Some(c) = replace.chars().find(|c| r#"\/:*?"<>|"#.contains(*c)) {
+            return Err(format!("A file name cannot contain {c}."));
+        }
+        Ok(self.plan_with(root, |d| {
+            let old = d.rel.rsplit('/').next().unwrap_or(&d.rel);
+            let (stem, ext) = match old.rsplit_once('.') {
+                Some((s, e)) if !s.is_empty() => (s, Some(e)),
+                _ => (old, None),
+            };
+            let stem = replace_no_case(stem, find, replace);
+            let stem = stem.trim();
+            if stem.is_empty() {
+                return Err("the name would be empty".into());
+            }
+            Ok(match ext {
+                Some(e) => format!("{stem}.{e}"),
+                None => stem.to_string(),
+            })
+        }))
+    }
+
+    fn plan_with(
+        &self,
+        root: &Path,
+        name_of: impl Fn(&DocInfo) -> Result<String, String>,
+    ) -> Vec<Row> {
         // Names taken in this batch (lower-case cabinet paths): renamed-to paths, and the paths
         // of documents that keep their name.
         let mut claimed: HashSet<String> = HashSet::new();
         let mut rows = Vec::with_capacity(self.docs.len());
         for d in &self.docs {
-            let outcome = self.plan_one(root, d, tpl, &claimed);
+            let outcome = self.plan_one(root, d, name_of(d), &claimed);
             let keeps = match &outcome {
                 Outcome::Rename(p) | Outcome::KeepBoth(p) => p,
                 Outcome::Same | Outcome::Skip(_) => &d.rel,
@@ -226,17 +264,23 @@ impl Planner {
                 outcome,
             });
         }
-        Ok(rows)
+        rows
     }
 
-    fn plan_one(&self, root: &Path, d: &DocInfo, tpl: &str, claimed: &HashSet<String>) -> Outcome {
+    fn plan_one(
+        &self,
+        root: &Path,
+        d: &DocInfo,
+        name: Result<String, String>,
+        claimed: &HashSet<String>,
+    ) -> Outcome {
         let (dir, old_name) = d.rel.rsplit_once('/').unwrap_or(("", &d.rel));
         if let Some(u) = &d.locked_by {
             return Outcome::Skip(format!("checked out by {u}"));
         }
-        let name = match template::render_segment(tpl, &d.tokens) {
+        let name = match name {
             Ok(n) => n,
-            Err(e) => return Outcome::Skip(e.to_string()),
+            Err(e) => return Outcome::Skip(e),
         };
         if name == old_name {
             return Outcome::Same;
@@ -260,6 +304,24 @@ impl Planner {
             Outcome::KeepBoth(new_rel)
         }
     }
+}
+
+/// `text` with every `find` (compared without regard to case) replaced by `with`.
+fn replace_no_case(text: &str, find: &str, with: &str) -> String {
+    let (lt, lf) = (text.to_lowercase(), find.to_lowercase());
+    // Lower-casing changed a length (rare letters): compare as written instead.
+    if lt.len() != text.len() || lf.len() != find.len() {
+        return text.replace(find, with);
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut at = 0;
+    while let Some(i) = lt[at..].find(&lf) {
+        out.push_str(&text[at..at + i]);
+        out.push_str(with);
+        at += i + lf.len();
+    }
+    out.push_str(&text[at..]);
+    out
 }
 
 /// `name`, or Filer's ` (2)`, ` (3)`… form (as `commit::free_path`) when `taken`.
@@ -451,6 +513,52 @@ mod tests {
             .collect();
         v.sort();
         v
+    }
+
+    /// Admin › Bulk changes (PA-78): text replaced in the names, capitals or not, the
+    /// extension kept; a name without the text stays, a name that would be empty or is taken
+    /// is not written over.
+    #[test]
+    fn find_and_replace_in_the_names() {
+        let mut f = fx(&[
+            "GovtK1 Smith.pdf",
+            "2024 govtk1.PDF",
+            "letter.pdf",
+            "GovtK1.pdf",
+            "K-1 Smith.pdf",
+        ]);
+        let p = Planner::load(&f.conn, &f.root, &ids(5), 2026).unwrap();
+        assert!(p.plan_replace(&f.root, "", "x").is_err());
+        assert!(p.plan_replace(&f.root, "GovtK1", "a/b").is_err());
+        let rows = p.plan_replace(&f.root, "GovtK1", "K-1").unwrap();
+        let name = |r: &Row| {
+            r.new_rel()
+                .map(|p| p.rsplit('/').next().unwrap().to_string())
+        };
+        // Taken by a document that keeps its name: Filer's Keep both.
+        assert_eq!(name(&rows[0]).as_deref(), Some("K-1 Smith (2).pdf"));
+        assert!(matches!(rows[0].outcome, Outcome::KeepBoth(_)));
+        assert_eq!(name(&rows[1]).as_deref(), Some("2024 K-1.PDF"));
+        assert_eq!(rows[2].outcome, Outcome::Same);
+        assert_eq!(name(&rows[3]).as_deref(), Some("K-1.pdf"));
+        assert_eq!(rows[4].outcome, Outcome::Same);
+        // Taken out altogether: a name that would be nothing is left.
+        let gone = p.plan_replace(&f.root, "govtk1", "").unwrap();
+        assert_eq!(name(&gone[0]).as_deref(), Some("Smith.pdf"));
+        assert!(matches!(&gone[3].outcome, Outcome::Skip(w) if w.contains("empty")));
+
+        let (_, n) = commit(&mut f.conn, &f.root, &rows, "dev").unwrap();
+        assert_eq!(n, 3);
+        assert_eq!(
+            names(&f),
+            [
+                "2024 K-1.PDF",
+                "K-1 Smith (2).pdf",
+                "K-1 Smith.pdf",
+                "K-1.pdf",
+                "letter.pdf"
+            ]
+        );
     }
 
     #[test]

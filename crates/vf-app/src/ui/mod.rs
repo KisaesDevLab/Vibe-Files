@@ -2,6 +2,7 @@ pub mod admin;
 pub mod admin_password;
 pub mod audit;
 pub mod browse;
+pub mod bulk;
 pub mod capture;
 pub mod chrome;
 pub mod client_merge;
