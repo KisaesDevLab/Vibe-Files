@@ -49,6 +49,90 @@ const COLS: [(Col, &str); 8] = [
     (Col::Size, "Size"),
 ];
 
+/// The documents one transaction of a change takes. A larger change is made in parts of this
+/// many, so its count can be shown and it can be stopped between two parts.
+const PART: usize = 500;
+
+/// How far a change has come, and whether it was asked to stop.
+#[derive(Default)]
+struct Progress {
+    done: std::sync::atomic::AtomicUsize,
+    of: std::sync::atomic::AtomicUsize,
+    stop: std::sync::atomic::AtomicBool,
+}
+
+/// How a change in parts ended.
+struct Parts {
+    /// Documents changed.
+    changed: usize,
+    /// Transactions made.
+    parts: usize,
+    /// Asked to stop before the end.
+    stopped: bool,
+}
+
+/// `each` over `items` in parts of [`PART`], counting in `pr` and stopping between two parts
+/// when asked. A part that fails stops it, saying how many were done before.
+fn in_parts<T>(
+    items: &[T],
+    pr: &Progress,
+    mut each: impl FnMut(&[T]) -> Result<usize, String>,
+) -> Result<Parts, String> {
+    use std::sync::atomic::Ordering::Relaxed;
+    pr.of.store(items.len(), Relaxed);
+    let mut out = Parts {
+        changed: 0,
+        parts: 0,
+        stopped: false,
+    };
+    for (i, part) in items.chunks(PART).enumerate() {
+        if pr.stop.load(Relaxed) {
+            out.stopped = true;
+            break;
+        }
+        match each(part) {
+            Ok(0) => {}
+            Ok(n) => {
+                out.changed += n;
+                out.parts += 1;
+            }
+            Err(e) if out.changed > 0 => {
+                return Err(format!(
+                    "{e} ({} were changed before this; Undo last in Browse takes them back a part at a time.)",
+                    docs(out.changed)
+                ));
+            }
+            Err(e) => return Err(e),
+        }
+        pr.done
+            .store((i * PART + part.len()).min(items.len()), Relaxed);
+    }
+    Ok(out)
+}
+
+/// The note after a change: what was done to how many, and how Undo takes it back.
+fn said(done: &str, p: &Parts, of: usize, back: &str) -> String {
+    let what = if p.stopped {
+        format!("Stopped: {done} {} of {}.", count(p.changed), docs(of))
+    } else {
+        format!("{} {}.", capital(done), docs(p.changed))
+    };
+    match p.parts {
+        0 => what,
+        1 => format!("{what} {back}"),
+        n => format!(
+            "{what} Done in {n} transactions of up to {PART}: Undo last in Browse takes them back one at a time."
+        ),
+    }
+}
+
+fn capital(s: &str) -> String {
+    let mut c = s.chars();
+    c.next().map_or(String::new(), |f| {
+        f.to_uppercase().collect::<String>() + c.as_str()
+    })
+}
+
 /// What a find gives back.
 struct Found {
     phrase: String,
@@ -88,6 +172,7 @@ pub struct BulkPage {
     finding: Option<Job<Result<Found, String>>>,
     /// A change running; its result is the note to show.
     work: Option<Job<Result<String, String>>>,
+    progress: std::sync::Arc<Progress>,
     confirm_trash: bool,
     renaming: Option<Renaming>,
     pub notice: Option<String>,
@@ -192,17 +277,21 @@ impl BulkPage {
         env: &Env,
         catalog: &Path,
         what: &str,
-        work: impl FnOnce(&mut Connection, &Path, &str) -> Result<String, String> + Send + 'static,
+        work: impl FnOnce(&mut Connection, &Path, &str, &Progress) -> Result<String, String>
+        + Send
+        + 'static,
     ) {
         let (catalog, root, device) = (
             catalog.to_path_buf(),
             env.root.to_path_buf(),
             env.device_id.to_string(),
         );
+        self.progress = Default::default();
+        let pr = self.progress.clone();
         match Job::start(ctx, what, move || {
             let mut conn = vf_core::db::open(&catalog, vf_core::db::Storage::Local)
                 .map_err(|e| e.to_string())?;
-            work(&mut conn, &root, &device)
+            work(&mut conn, &root, &device, &pr)
         }) {
             Ok(j) => {
                 self.work = Some(j);
@@ -323,7 +412,27 @@ pub fn show(ui: &mut egui::Ui, p: &mut BulkPage, env: &mut Env, catalog: &Path) 
         }
     });
     if let Some(j) = &p.work {
-        j.show(ui);
+        use std::sync::atomic::Ordering::Relaxed;
+        ui.horizontal(|ui| {
+            j.show(ui);
+            let (done, of) = (p.progress.done.load(Relaxed), p.progress.of.load(Relaxed));
+            if of > PART {
+                ui.label(format!("{} of {}", count(done), count(of)));
+                let stopping = p.progress.stop.load(Relaxed);
+                if ui
+                    .add_enabled(!stopping, egui::Button::new("Cancel"))
+                    .on_hover_text(format!(
+                        "Stops after the {PART} documents being changed now. What is already changed stays changed."
+                    ))
+                    .clicked()
+                {
+                    p.progress.stop.store(true, Relaxed);
+                }
+                if stopping {
+                    ui.label(widgets::caption("Stopping…"));
+                }
+            }
+        });
     }
     if let Some(e) = &p.error {
         ui.colored_label(theme::error(), e);
@@ -422,11 +531,23 @@ fn actions(ui: &mut egui::Ui, p: &mut BulkPage, env: &mut Env, catalog: &Path, i
             });
             if apply {
                 let ids = p.picked_ids();
-                p.run(&ctx, env, catalog, "Changing the documents…", move |conn, root, dev| {
-                    let (_, changed) = vf_fs::docmeta::edit(conn, root, &ids, &edit, dev)?;
-                    Ok(format!(
-                        "Changed {} (one transaction; Undo last in Browse takes it back).",
-                        docs(changed)
+                p.run(&ctx, env, catalog, "Changing the documents…", move |conn, root, dev, pr| {
+                    let r = in_parts(&ids, pr, |part| {
+                        match vf_fs::docmeta::edit(conn, root, part, &edit, dev) {
+                            Ok((_, changed)) => Ok(changed),
+                            // None of this part's documents differ: nothing to do for it.
+                            Err(e) if e.contains("already have these values") => Ok(0),
+                            Err(e) => Err(e),
+                        }
+                    })?;
+                    if r.changed == 0 && !r.stopped {
+                        return Err("The selected documents already have these values.".into());
+                    }
+                    Ok(said(
+                        "changed",
+                        &r,
+                        ids.len(),
+                        "One transaction: Undo last in Browse takes it back.",
                     ))
                 });
             }
@@ -484,11 +605,15 @@ fn confirm_trash(ui: &mut egui::Ui, p: &mut BulkPage, env: &mut Env, catalog: &P
                 env,
                 catalog,
                 "Moving to the trash…",
-                move |conn, root, dev| {
-                    vf_fs::trash::delete(conn, root, dev, &ids, "deleted")?;
-                    Ok(format!(
-                        "Moved {} to the trash (Admin › Trash restores them).",
-                        docs(ids.len())
+                move |conn, root, dev, pr| {
+                    let r = in_parts(&ids, pr, |part| {
+                        vf_fs::trash::delete(conn, root, dev, part, "deleted").map(|_| part.len())
+                    })?;
+                    Ok(said(
+                        "moved to the trash",
+                        &r,
+                        ids.len(),
+                        "Admin › Trash restores them.",
                     ))
                 },
             );
@@ -647,13 +772,25 @@ fn renaming(ui: &mut egui::Ui, p: &mut BulkPage, env: &mut Env, catalog: &Path, 
         && same_ticks
         && let Some(rows) = r.plan.clone()
     {
-        p.run(&ctx, env, catalog, "Renaming…", move |conn, root, dev| {
-            let (_, n) = vf_fs::rename::commit(conn, root, &rows, dev)?;
-            Ok(format!(
-                "Renamed {} (one transaction; Undo last in Browse takes it back).",
-                docs(n)
-            ))
-        });
+        p.run(
+            &ctx,
+            env,
+            catalog,
+            "Renaming…",
+            move |conn, root, dev, pr| {
+                // Only the rows that rename: a part of rows that all stay is not a transaction.
+                let rows: Vec<Row> = rows.into_iter().filter(Row::renames).collect();
+                let r = in_parts(&rows, pr, |part| {
+                    vf_fs::rename::commit(conn, root, part, dev).map(|(_, n)| n)
+                })?;
+                Ok(said(
+                    "renamed",
+                    &r,
+                    rows.len(),
+                    "One transaction: Undo last in Browse takes it back.",
+                ))
+            },
+        );
     }
 }
 
@@ -792,5 +929,70 @@ fn grid(ui: &mut egui::Ui, p: &mut BulkPage) {
             (col, false)
         };
         p.sort_rows();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::Ordering::Relaxed;
+
+    use super::*;
+
+    #[test]
+    fn a_large_change_is_made_in_parts_and_can_be_stopped() {
+        let items: Vec<usize> = (0..PART * 2 + 7).collect();
+        let pr = Progress::default();
+        let r = in_parts(&items, &pr, |part| Ok(part.len())).unwrap();
+        assert_eq!((r.changed, r.parts, r.stopped), (PART * 2 + 7, 3, false));
+        assert_eq!(pr.done.load(Relaxed), items.len());
+        assert_eq!(pr.of.load(Relaxed), items.len());
+        assert!(
+            said("renamed", &r, items.len(), "x")
+                .starts_with("Renamed 1,007 documents. Done in 3 transactions")
+        );
+
+        // Asked to stop during the first part: that part is finished, no other is begun.
+        let pr = Progress::default();
+        let r = in_parts(&items, &pr, |part| {
+            pr.stop.store(true, Relaxed);
+            Ok(part.len())
+        })
+        .unwrap();
+        assert_eq!((r.changed, r.parts, r.stopped), (PART, 1, true));
+        assert_eq!(
+            said(
+                "moved to the trash",
+                &r,
+                items.len(),
+                "Admin › Trash restores them."
+            ),
+            "Stopped: moved to the trash 500 of 1,007 documents. Admin › Trash restores them."
+        );
+
+        // A part that fails after others were done says how many were.
+        let pr = Progress::default();
+        let mut n = 0;
+        let e = in_parts(&items, &pr, |part| {
+            n += 1;
+            if n == 2 {
+                Err("the share went away".to_string())
+            } else {
+                Ok(part.len())
+            }
+        })
+        .err()
+        .unwrap();
+        assert!(
+            e.starts_with("the share went away (500 documents were changed before this"),
+            "{e}"
+        );
+
+        // A small change is one transaction, said as before.
+        let pr = Progress::default();
+        let r = in_parts(&items[..3], &pr, |part| Ok(part.len())).unwrap();
+        assert_eq!(
+            said("changed", &r, 3, "One transaction."),
+            "Changed 3 documents. One transaction."
+        );
     }
 }

@@ -20,7 +20,7 @@ Tick the box at the start of a row. **Select all** ticks every row listed, **Sel
 
 With rows ticked, choose a **DOC TYPE**, **TAX YEAR**, **STATUS** or **SOURCE**, or type **TAGS**. A field left at its current value is not changed. Click **Apply to N**.
 
-All the selected documents are changed in one transaction. See [Document details](help:documents) for what each field means.
+See [Document details](help:documents) for what each field means.
 
 ## Renaming
 
@@ -35,8 +35,14 @@ The extension is kept. A document whose name does not have the text is left as i
 
 Click **Move N to trash**. A box names the count and the first few documents, and asks before anything is moved. The files leave their folders and can be restored from **Admin** › **Trash** for 90 days. See [Trash](help:trash).
 
+## Large changes
+
+A change to up to 500 documents is one transaction. A larger one is made 500 documents at a time. While it runs, a line shows how far it is, for example **1,500 of 4,200**, with **Cancel**. Cancel stops after the 500 being changed at that moment. What was already changed stays changed, and the note says how many that was.
+
+On a network share each file is renamed or moved one at a time, so thousands take a while. The rest of Vibe Files can be used meanwhile.
+
 ## Undo
 
-Each change here is one transaction, recorded in the audit trail. Right after it, **Undo last** in Browse takes it back. See [Undoing changes](help:undo).
+Each transaction is recorded in the audit trail. Right after a change, **Undo last** in Browse takes it back. A change made 500 at a time is taken back 500 at a time, the last ones first. See [Undoing changes](help:undo).
 
-> A change to thousands of documents takes a while on a network share: each file is renamed or moved one at a time. A spinner shows while it runs, and the rest of Vibe Files can be used meanwhile.
+> Browse keeps the last 20 transactions for **Undo last**. A change to more than 10,000 documents cannot be taken back whole that way; documents moved to the trash can always be restored from **Admin** › **Trash**.
