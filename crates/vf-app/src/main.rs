@@ -3,6 +3,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
+mod catalog_place;
 mod cli;
 mod cloudmode;
 mod config;

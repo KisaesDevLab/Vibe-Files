@@ -83,6 +83,29 @@ pub fn is_plain_or_missing(path: &Path) -> bool {
     }
 }
 
+/// Folders whose catalogs are on a network share ([`on_network`]).
+static NETWORK: std::sync::RwLock<Vec<std::path::PathBuf>> = std::sync::RwLock::new(Vec::new());
+
+/// Says that catalogs under `dir` are on a network share: [`open`] then opens them as
+/// [`Storage::Network`] whatever it is asked (the program opens its catalog in many places,
+/// each as local; where the catalog is kept is decided once, by the app's catalog place).
+pub fn on_network(dir: &Path) {
+    let mut n = NETWORK.write().unwrap_or_else(|e| e.into_inner());
+    if !n.iter().any(|d| d == dir) {
+        n.push(dir.to_path_buf());
+    }
+}
+
+/// How the catalog at `path` is opened when `asked` for.
+fn storage_of(path: &Path, asked: Storage) -> Storage {
+    let n = NETWORK.read().unwrap_or_else(|e| e.into_inner());
+    if n.iter().any(|d| path.starts_with(d)) {
+        Storage::Network
+    } else {
+        asked
+    }
+}
+
 /// Opens (creating if needed) the catalog at `path` and migrates it to [`SCHEMA_VERSION`].
 /// Before migrating a non-empty catalog, a backup is written beside it.
 pub fn open(path: &Path, storage: Storage) -> Result<Connection> {
@@ -98,6 +121,7 @@ pub fn open(path: &Path, storage: Storage) -> Result<Connection> {
     // OCR workers hold their own connections (P03); wait for a writer rather than fail.
     conn.busy_timeout(std::time::Duration::from_secs(10))?;
     conn.pragma_update(None, "foreign_keys", true)?;
+    let storage = storage_of(path, storage);
     let mode = match storage {
         Storage::Local => "WAL",
         Storage::Network => "DELETE",
@@ -274,6 +298,24 @@ fn backup(conn: &Connection, path: &Path, from: u32) -> Result<PathBuf> {
 mod tests {
     use super::*;
 
+    /// PA-84: a catalog under a folder said to be on a network share is opened without the
+    /// write-ahead log, whatever the caller asks; one elsewhere is not affected.
+    #[test]
+    fn a_catalog_on_a_network_share_is_opened_without_wal() {
+        let t = tempfile::tempdir().unwrap();
+        let (share, local) = (t.path().join("share"), t.path().join("local"));
+        std::fs::create_dir_all(share.join("HOST")).unwrap();
+        std::fs::create_dir_all(&local).unwrap();
+        on_network(&share);
+        let mode = |p: &Path| -> String {
+            open(p, Storage::Local)
+                .unwrap()
+                .query_row("PRAGMA journal_mode", [], |r| r.get(0))
+                .unwrap()
+        };
+        assert_eq!(mode(&share.join("HOST").join("catalog.db")), "delete");
+        assert_eq!(mode(&local.join("catalog.db")), "wal");
+    }
     const TABLES: &[&str] = &[
         "audit",
         "cabinet",

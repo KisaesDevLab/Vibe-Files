@@ -185,15 +185,20 @@ fn copy_catalog(from: &Path, to: &Path) -> Result<()> {
 /// belongs to this cabinet (else empty: the open indexes the cabinet). `legacy` is that old
 /// catalog.
 pub fn provision(cabinet_id: &str, root: &Path, legacy: Option<&Path>) -> Result<PathBuf> {
-    let base = crate::shared::shared_root().context("this server has no ProgramData folder")?;
-    provision_in(&base, cabinet_id, root, legacy)
+    let base = crate::shared::shared_root()
+        .context("the folder for this computer's catalogs is not known (firm.toml: catalogs)")?;
+    let earlier = crate::catalog_place::earlier_catalogs(cabinet_id);
+    provision_in(&base, cabinet_id, root, legacy, &earlier)
 }
 
+/// `earlier`: this computer's catalog in a place used before (PA-84): the most up to date
+/// there is, taken first and as it is.
 fn provision_in(
     base: &Path,
     cabinet_id: &str,
     root: &Path,
     legacy: Option<&Path>,
+    earlier: &[PathBuf],
 ) -> Result<PathBuf> {
     let dir = crate::shared::prepare_dir(base, cabinet_id)?;
     let target = dir.join(CATALOG_FILE);
@@ -207,7 +212,11 @@ fn provision_in(
     }
     let part = dir.join(format!("{CATALOG_FILE}.part"));
     let seed = seed_path(root);
-    for (from, is_seed) in [(Some(seed.as_path()), true), (legacy, false)] {
+    let sources = earlier
+        .iter()
+        .map(|e| (Some(e.as_path()), true))
+        .chain([(Some(seed.as_path()), true), (legacy, false)]);
+    for (from, is_seed) in sources {
         let Some(from) = from.filter(|f| f.is_file()) else {
             continue;
         };
@@ -665,9 +674,43 @@ mod tests {
             !publish_seed(&a, &root, "server-a").unwrap(),
             "fresh: not again"
         );
+        // PA-84: the place for this computer's catalogs was changed. The catalog in the place
+        // used before starts the new one, as it is (taken before the seed).
+        {
+            let c = vf_core::db::open(&a, Storage::Local).unwrap();
+            c.execute(
+                "INSERT INTO local_state (k, v) VALUES ('probe', 'from the earlier place')",
+                [],
+            )
+            .unwrap();
+        }
+        let moved = provision_in(
+            &t.path().join("new-place"),
+            "cab-1",
+            &root,
+            None,
+            std::slice::from_ref(&a),
+        )
+        .unwrap();
+        let v: String = vf_core::db::open(&moved, Storage::Local)
+            .unwrap()
+            .query_row("SELECT v FROM local_state WHERE k = 'probe'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(v, "from the earlier place");
+        let again: i64 = vf_core::db::open(&moved, Storage::Local)
+            .unwrap()
+            .query_row(
+                "SELECT count(*) FROM local_state WHERE k = 'rebuild_unfinished'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(again, 0, "not indexed again");
         // Server B: from the seed.
         let base = t.path().join("B-ProgramData");
-        let b = provision_in(&base, "cab-1", &root, None).unwrap();
+        let b = provision_in(&base, "cab-1", &root, None, &[]).unwrap();
         let c = vf_core::db::open(&b, Storage::Local).unwrap();
         let n: i64 = c
             .query_row("SELECT count(*) FROM cabinet WHERE id = 'cab-1'", [], |r| {
@@ -687,7 +730,7 @@ mod tests {
         let mut seen = vf_fs::changes::load_seen(&c).unwrap();
         assert!(vf_fs::changes::changed_since(&root, "server-b", &mut seen, true).is_empty());
         // Another cabinet's catalog is not used.
-        let other = provision_in(&t.path().join("C"), "cab-2", &root, None).unwrap();
+        let other = provision_in(&t.path().join("C"), "cab-2", &root, None, &[]).unwrap();
         assert!(
             !other.exists(),
             "nothing to start from: empty, indexed at open"

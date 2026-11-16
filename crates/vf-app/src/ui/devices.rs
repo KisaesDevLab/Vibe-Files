@@ -157,6 +157,7 @@ fn shared_section(ui: &mut egui::Ui, p: &mut DevicesPage, env: &mut Env) {
     let Ok(cab) = vf_fs::cabinet::read(env.root) else {
         return;
     };
+    ui.label(widgets::caption(crate::catalog_place::describe()));
     match crate::shared::shared_catalog(&cab.cabinet_id) {
         Some(at) => {
             ui.label(format!(
@@ -169,7 +170,7 @@ fn shared_section(ui: &mut egui::Ui, p: &mut DevicesPage, env: &mut Env) {
         }
         None => {
             ui.label(widgets::caption(
-                "On a Remote Desktop server where several people use this cabinet, share this login's catalog: the others then use it instead of each reading the whole cabinet. It is kept on this PC's own disk (ProgramData).",
+                "On a Remote Desktop server where several people use this cabinet, share this login's catalog: the others then use it instead of each reading the whole cabinet. It is kept where the line above says.",
             ));
             if ui
                 .button("Share this catalog with everyone on this PC")

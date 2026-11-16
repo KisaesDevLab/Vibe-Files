@@ -303,6 +303,10 @@ pub struct Firm {
     /// `'off'`, or `'auto'` (as with no line).
     #[serde(default)]
     server: Option<String>,
+    /// Where each computer's catalog is kept (`crate::catalog_place`, PA-84): `'programdata'`
+    /// (as with no line), `'exe'` (beside the program, a folder per computer), or a folder.
+    #[serde(default)]
+    catalogs: Option<String>,
 }
 
 /// A path as typed in `firm.toml`: trimmed, none when blank.
@@ -357,6 +361,15 @@ impl Firm {
     /// Whether logins may ask for a newer release (`false` only when the firm says so).
     pub fn update_check(&self) -> bool {
         self.update_check != Some(false)
+    }
+
+    /// The firm's `catalogs` line, when it has one (`crate::catalog_place`).
+    pub fn catalogs(&self) -> Option<String> {
+        self.catalogs
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
     }
 
     /// The firm's server-mode choice, when it made one.

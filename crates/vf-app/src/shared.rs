@@ -15,9 +15,8 @@ pub const CATALOG_FILE: &str = "catalog.db";
 
 /// Where shared catalogs live on this PC.
 pub fn shared_root() -> Option<PathBuf> {
-    std::env::var_os("PROGRAMDATA")
-        .map(PathBuf::from)
-        .map(|p| p.join("Vibe Files").join("catalogs"))
+    // The one place that decides it (PA-84).
+    crate::catalog_place::root()
 }
 
 /// This cabinet's shared catalog on this PC, when it has one.
@@ -44,7 +43,10 @@ pub fn prepare_dir(base: &Path, cabinet_id: &str) -> Result<PathBuf> {
     let safe = vf_fs::changes::safe_id(cabinet_id);
     let dir = base.join(&safe);
     std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
-    grant_users(&dir)?;
+    // On a network share the share's own rights apply (a login cannot change them).
+    if !crate::server::is_network(&dir) {
+        grant_users(&dir)?;
+    }
     Ok(dir)
 }
 

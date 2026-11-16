@@ -89,7 +89,7 @@ articles! {
     Viewer: "viewer", "annotations", "forms", "ten-key", "page-tools", "printing";
     Sync: "sync", "sync-rules", "sync-key", "sync-conflicts", "portal", "portal-requests", "portal-inbox", "portal-secure-links", "portal-b2-list";
     Admin: "admin", "admin-password", "doc-types", "folder-templates", "clients", "folder-import", "folder-import-matches", "merge-cabinets", "bulk-changes", "retention",
-        "trash", "audit", "devices", "maintenance";
+        "trash", "audit", "devices", "catalog-place", "maintenance";
     Trouble: "troubleshooting", "data-and-backups";
 }
 

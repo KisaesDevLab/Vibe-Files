@@ -16,7 +16,7 @@ Opening a document (double-click, the Viewer, Open in program) downloads it, as 
 
 The catalog is a database that a sync service would damage while it is open, so it never lives in the cloud folder:
 
-- Each PC keeps its catalog in `ProgramData\Vibe Files\catalogs`. The first PC indexes the cabinet and leaves a copy in the cabinet's `_Vibe\catalog-seed` folder (refreshed weekly); the others start from that copy, with every document's details and recognized text, so they read nothing again.
+- Each PC keeps its catalog in `ProgramData\Vibe Files\catalogs` (or where `firm.toml` says, see [Where the catalog is kept](help:catalog-place)). The first PC indexes the cabinet and leaves a copy in the cabinet's `_Vibe\catalog-seed` folder (refreshed weekly); the others start from that copy, with every document's details and recognized text, so they read nothing again.
 - Each PC notes its changes in its own log in `_Vibe\changes`; the others read them when a client is opened and every 15 minutes.
 - B2 sync runs on one main PC, chosen in **Admin** › **Devices** with **Run them on this PC**. In a cloud cabinet a PC takes this on by itself only when it alone has opened the cabinet, for a day at least (a one-PC office keeps working as before); otherwise an admin chooses, since two PCs could both take it before the folder synced, and Browse reminds you until one is chosen. Only the main PC leaves the catalog copy.
 - A data folder found inside OneDrive or Dropbox (Vibe Files unzipped on a Desktop that OneDrive syncs, for example) is moved to `%LOCALAPPDATA%\Vibe Files\data` with its catalog and settings, and a `MOVED.txt` note is left behind.
