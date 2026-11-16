@@ -106,6 +106,17 @@ pub fn save(
         } else {
             (NEW.to_string(), Enc::Ansi)
         };
+        // A file that is not the INI file expected (no section in it, or text in a form not
+        // known here, which reads as letters with empty characters between them) is never
+        // written into: FileCenter's file is left as it is.
+        if now.exists
+            && !text.trim().is_empty()
+            && (text.contains('\0') || !text.lines().any(is_header))
+        {
+            return Err(format!(
+                "{NAME} in this folder is not in a form Vibe Files can change, so it was left as it is. Edit these notes in FileCenter."
+            ));
+        }
         let text = with_memo(&text, &memo);
         let bytes = encode(&text, enc);
         let p = path(folder);
@@ -145,23 +156,36 @@ pub fn forget_rows(conn: &mut vf_core::db::Connection, device_id: &str) -> Resul
     if ids.is_empty() {
         return Ok(0);
     }
+    // By groups of ids: a cabinet can have one of these files in thousands of folders.
     let mut tx = Transaction::new("note_files_not_documents");
-    for id in &ids {
-        let p = || vec![serde_json::Value::String(id.clone())];
-        for sql in [
-            "DELETE FROM document_tag WHERE doc_id = ?1",
-            "DELETE FROM version WHERE doc_id = ?1",
-            "DELETE FROM lock WHERE doc_id = ?1",
-            "DELETE FROM legal_hold WHERE doc_id = ?1",
-            "UPDATE consent_7216 SET doc_id = NULL WHERE doc_id = ?1",
-            "DELETE FROM disposition WHERE doc_id = ?1",
-            "DELETE FROM document_extract WHERE doc_id = ?1",
-            "DELETE FROM sync_base WHERE doc_id = ?1",
-            "DELETE FROM sync_pending WHERE doc_id = ?1",
-            "DELETE FROM sync_conflict WHERE doc_id = ?1 OR copy_doc_id = ?1",
-            "DELETE FROM document WHERE id = ?1",
+    for chunk in ids.chunks(400) {
+        let marks = vec!["?"; chunk.len()].join(",");
+        let p = || -> Vec<serde_json::Value> {
+            chunk
+                .iter()
+                .map(|id| serde_json::Value::String(id.clone()))
+                .collect()
+        };
+        for (table, col, set_null) in [
+            ("document_tag", "doc_id", false),
+            ("version", "doc_id", false),
+            ("lock", "doc_id", false),
+            ("legal_hold", "doc_id", false),
+            ("consent_7216", "doc_id", true),
+            ("disposition", "doc_id", false),
+            ("document_extract", "doc_id", false),
+            ("sync_base", "doc_id", false),
+            ("sync_pending", "doc_id", false),
+            ("sync_conflict", "doc_id", false),
+            ("sync_conflict", "copy_doc_id", false),
+            ("document", "id", false),
         ] {
-            tx = tx.catalog(Stmt::new(sql, p()));
+            let sql = if set_null {
+                format!("UPDATE {table} SET {col} = NULL WHERE {col} IN ({marks})")
+            } else {
+                format!("DELETE FROM {table} WHERE {col} IN ({marks})")
+            };
+            tx = tx.catalog(Stmt::new(&sql, p()));
         }
     }
     tx.audit(vf_core::audit::AuditEntry::new(
@@ -505,6 +529,32 @@ mod tests {
         assert_eq!(read(&folder).unwrap().memo, "plain");
         let (text, _) = decode(&raw);
         assert!(text.contains("Name=Café"));
+    }
+
+    #[test]
+    fn a_file_that_cannot_be_understood_is_left_alone() {
+        let (t, folder) = cabinet();
+        // UTF-16 without its mark: read as letters with empty characters between them.
+        let odd: Vec<u8> = "[Memo]\r\nkept\r\n"
+            .encode_utf16()
+            .flat_map(|u| u.to_le_bytes())
+            .collect();
+        for raw in [
+            odd.as_slice(),
+            b"just some text\r\nno sections\r\n".as_slice(),
+        ] {
+            std::fs::write(path(&folder), raw).unwrap();
+            let shown = read(&folder).unwrap();
+            assert_eq!(shown.memo, "");
+            let e = save(t.path(), &folder, &shown, "mine", false).unwrap_err();
+            assert!(e.contains("left as it is"), "{e}");
+            assert_eq!(std::fs::read(path(&folder)).unwrap(), raw);
+        }
+        // An empty file is only empty: the notes go in.
+        std::fs::write(path(&folder), "").unwrap();
+        let shown = read(&folder).unwrap();
+        done(save(t.path(), &folder, &shown, "mine", false).unwrap());
+        assert_eq!(read(&folder).unwrap().memo, "mine");
     }
 
     #[test]

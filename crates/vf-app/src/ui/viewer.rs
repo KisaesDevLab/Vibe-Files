@@ -3312,13 +3312,15 @@ fn finish_convert(v: &mut Viewer, env: &mut Env<'_>) {
                 let _ = std::fs::remove_file(&c.tmp);
                 return Ok(None);
             }
+            // OCR stopped (whatever was read before the stop: nothing was written), or
+            // nothing was read: the document is not changed.
+            let stopped = detail["cancelled"].as_bool() == Some(true);
             if let Convert::Ocr(pages) = what
-                && detail["pages"].as_u64() == Some(0)
+                && (stopped || detail["pages"].as_u64() == Some(0))
             {
-                // Nothing was read: the document is not changed.
                 let _ = std::fs::remove_file(&c.tmp);
                 let one = matches!(pages, vf_ocr::document::Pages::One { .. });
-                return Ok(Some(if detail["cancelled"].as_bool() == Some(true) {
+                return Ok(Some(if stopped {
                     "OCR stopped: the document is not changed.".to_string()
                 } else if detail["with_text"].as_u64().unwrap_or(0) > 0
                     && detail["empty"].as_u64() == Some(0)

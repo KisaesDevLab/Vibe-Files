@@ -144,6 +144,8 @@ pub fn scan_week(conn: &Connection, root: &Path, week: u64) -> Result<Drift, Str
         let mut paths = Vec::new();
         let mut bad = Vec::new();
         rebuild::listed_under_lenient(folder, &mut paths, &mut bad);
+        // A client's notes file (PA-76) is not a document.
+        paths.retain(|(p, _)| !rebuild::is_notes(p));
         for (dir, why) in bad {
             unread_dirs.push(rebuild::rel(root, &dir));
             d.unreadable.push(why);

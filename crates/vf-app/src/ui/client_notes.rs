@@ -155,7 +155,9 @@ pub fn show(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env, ci: usize) {
     };
     // As tall as the notes: egui grows the box with its lines; three when there are few.
     let rows = n.text.lines().count().max(3);
-    ui.add(
+    // Not typed into while the file is being read again (the read would replace the text).
+    ui.add_enabled(
+        n.load.is_none(),
         egui::TextEdit::multiline(&mut n.text)
             .desired_width(f32::INFINITY)
             .desired_rows(rows)

@@ -228,3 +228,66 @@ fn a_document_asked_for_is_read_once() {
     assert!(rep.cancelled);
     assert!(!again.exists());
 }
+
+/// Cancel during a long document (PA-77): pages read before the stop are not written, so the
+/// document is either read as asked or left as it was. No Tesseract needed.
+#[test]
+fn a_stop_part_way_writes_nothing() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use vf_ocr::document::{Pages, add_text};
+    struct OneWord;
+    impl OcrEngine for OneWord {
+        fn name(&self) -> &str {
+            "test"
+        }
+        fn recognize(
+            &self,
+            page: &image::GrayImage,
+            _dpi: u32,
+        ) -> Result<vf_ocr::OcrPage, vf_ocr::OcrError> {
+            Ok(vf_ocr::OcrPage {
+                width: page.width(),
+                height: page.height(),
+                words: vec![vf_ocr::Word {
+                    bbox: [10, 10, 80, 20],
+                    text: "word".into(),
+                    conf: 90.0,
+                    line: 0,
+                }],
+            })
+        }
+    }
+    let t = tempfile::tempdir().unwrap();
+    let scan = t.path().join("three.pdf");
+    let blank = || vf_ingest::images::Frame {
+        rgb: image::RgbImage::from_pixel(425, 550, image::Rgb([255, 255, 255])),
+        dpi: Some(50.0),
+        orientation: 1,
+    };
+    vf_ingest::images::frames_to_pdf(vec![blank(), blank(), blank()], false, &scan).unwrap();
+    let out = t.path().join("out.pdf");
+    let stop = AtomicBool::new(false);
+    let rep = add_text(
+        pdfium(),
+        &OneWord,
+        &scan,
+        &out,
+        Pages::All,
+        // Asked to stop while the second page is read.
+        &|done, _| stop.store(done >= 1, Ordering::Relaxed),
+        &stop,
+    )
+    .unwrap();
+    assert!(rep.cancelled);
+    assert_eq!(rep.read, 2, "two pages were read before the stop was seen");
+    assert!(!out.exists(), "and none of it was written");
+
+    // Not stopped: all three, in one file.
+    let go = AtomicBool::new(false);
+    let rep = add_text(pdfium(), &OneWord, &scan, &out, Pages::All, &|_, _| {}, &go).unwrap();
+    assert_eq!((rep.read, rep.cancelled), (3, false));
+    let doc = pdfium().load_pdf_from_file(&out, None).unwrap();
+    for page in doc.pages().iter() {
+        assert!(vf_pdf::text::page_text(&page).contains("word"));
+    }
+}

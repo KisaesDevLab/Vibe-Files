@@ -427,11 +427,17 @@ pub(crate) fn listed_under_lenient(
             if name != cabinet::VIBE_DIR {
                 listed_under_lenient(&e.path(), out, bad);
             }
-        } else if !name.starts_with("~vfd-partial-") && !crate::fcinfo::is_note_file(&name) {
+        } else if !name.starts_with("~vfd-partial-") {
             let st = e.metadata().ok().map(|m| crate::cloud::listed(&m));
             out.push((e.path(), st));
         }
     }
+}
+
+/// Whether `p` is a client's notes file ([`crate::fcinfo`]).
+pub(crate) fn is_notes(p: &Path) -> bool {
+    p.file_name()
+        .is_some_and(|n| crate::fcinfo::is_note_file(&n.to_string_lossy()))
 }
 
 /// Cabinet-relative path with forward slashes (stable across Windows/UNC roots).
@@ -459,7 +465,7 @@ pub(crate) fn files_under(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), Rebu
             if name != cabinet::VIBE_DIR {
                 files_under(&e.path(), out)?;
             }
-        } else if !name.starts_with("~vfd-partial-") && !crate::fcinfo::is_note_file(&name) {
+        } else if !name.starts_with("~vfd-partial-") {
             out.push(e.path());
         }
     }
@@ -1485,6 +1491,9 @@ fn rebuild_scoped(
         let mut paths = Vec::new();
         let mut bad = Vec::new();
         listed_under_lenient(folder, &mut paths, &mut bad);
+        // A client's notes file (PA-76) is not a document. Left out here, not in the walker:
+        // import and merge list a folder's files to move them, the notes with them.
+        paths.retain(|(p, _)| !is_notes(p));
         PROGRESS.folders.fetch_add(1, Ordering::Relaxed);
         PROGRESS.found.fetch_add(paths.len(), Ordering::Relaxed);
         (paths, bad)
@@ -2584,7 +2593,9 @@ mod tests {
             std::fs::read_to_string(&notes).unwrap(),
             "[Memo]\r\ncall in March\r\n"
         );
-        // And it is not found as a new file either.
+        // A folder's files listed to be moved (import, merge) still have it: the notes go
+        // with their folder.
+        assert!(cabinet_files(&c.root).iter().any(|p| is_notes(p))); // And it is not found as a new file either.
         index(&mut conn, &c.root, "pc-1").unwrap();
         assert_eq!(rows(&conn), 0);
     }
