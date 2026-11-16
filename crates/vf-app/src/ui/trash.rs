@@ -25,6 +25,8 @@ pub struct TrashPage {
     /// Restore or Empty running on its thread (each file is moved or deleted on the share;
     /// owner 2026-11-12: a spinner, not a frozen window).
     job: Option<crate::ui::job::Job<Done>>,
+    /// The trash being read on its thread (it asks the share about every trashed file).
+    load: Option<crate::ui::job::Job<Result<Vec<Trashed>, String>>>,
 }
 
 /// What Restore and Empty give back from their thread.
@@ -66,6 +68,24 @@ impl TrashPage {
         }
     }
 
+    /// The trash was read.
+    fn listed(&mut self, l: Result<Vec<Trashed>, String>) {
+        match l {
+            Ok(v) => self.items = Some(v),
+            Err(e) => {
+                self.error = Some(e);
+                self.items = Some(vec![]);
+            }
+        }
+        let live: BTreeSet<String> = self
+            .items
+            .iter()
+            .flatten()
+            .map(|t| t.doc_id.clone())
+            .collect();
+        self.picked.retain(|id| live.contains(id));
+    }
+
     fn finished(&mut self, d: Done) {
         match d {
             Done::Restored(Ok(placed)) => {
@@ -104,16 +124,32 @@ pub fn show(
     if let Some(r) = crate::ui::job::take(&mut p.job) {
         p.finished(r.unwrap_or_else(|e| Done::Restored(Err(e))));
     }
-    if p.items.is_none() {
-        match trash::list(env.conn, env.root) {
-            Ok(v) => p.items = Some(v),
-            Err(e) => {
-                p.error = Some(e);
-                p.items = Some(vec![]);
+    if p.items.is_none() && p.load.is_none() {
+        // On a thread with its own connection (never the window's: the share is asked);
+        // here when no catalog file is known.
+        let listed = match catalog {
+            Some(catalog) => {
+                let (catalog, root) = (catalog.to_path_buf(), env.root.to_path_buf());
+                match crate::ui::job::Job::start(ui.ctx(), "Reading the trash…", move || {
+                    let conn = vf_core::db::open(&catalog, vf_core::db::Storage::Local)
+                        .map_err(|e| e.to_string())?;
+                    trash::list(&conn, &root)
+                }) {
+                    Ok(j) => {
+                        p.load = Some(j);
+                        None
+                    }
+                    Err(e) => Some(Err(e)),
+                }
             }
+            None => Some(trash::list(env.conn, env.root)),
+        };
+        if let Some(l) = listed {
+            p.listed(l);
         }
-        let live: BTreeSet<String> = p.items.iter().flatten().map(|t| t.doc_id.clone()).collect();
-        p.picked.retain(|id| live.contains(id));
+    }
+    if let Some(r) = crate::ui::job::take(&mut p.load) {
+        p.listed(r.and_then(|l| l));
     }
     let items = p.items.clone().unwrap_or_default();
     ui.horizontal(|ui| {
@@ -124,6 +160,10 @@ pub fn show(
         )));
     });
     ui.add_space(6.0);
+    if let Some(j) = &p.load {
+        j.show(ui);
+        return;
+    }
     let has_pin = trash::has_pin(env.root);
     let idle = p.job.is_none();
     ui.horizontal(|ui| {

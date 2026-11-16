@@ -302,7 +302,14 @@ fn open_how(data: &Path, device_id: &str, root: &Path, behind: bool) -> Result<O
     // rebuild of another kind cut short used to run again here, in front of the window).
     step("Listing the client folders");
     let label = vf_fs::rebuild::unfinished_label(&conn);
-    let in_parts = behind && (known == 0 || label.is_some());
+    // Or a catalog that is behind Intake's folder index (PA-83): folders bound to clients
+    // after it was made. Indexed the same way, behind the window.
+    let stale =
+        behind && known > 0 && label.is_none() && vf_fs::rebuild::behind_folder_index(&conn, root);
+    if stale {
+        tracing::info!("the catalog is behind Intake's folder index: indexing");
+    }
+    let in_parts = behind && (known == 0 || label.is_some() || stale);
     let mut staged = None;
     let rebuild = if in_parts {
         staged = Some(vf_fs::rebuild::index_start(&mut conn, root, device_id)?);
@@ -398,6 +405,72 @@ pub(crate) mod tests {
         assert!(again.staged.is_none() && again.rebuild.is_none());
     }
 
+    /// PA-83 (owner 2026-11-16): a catalog made before a folder was bound to its client
+    /// (Intake's Setup binds folders without the catalog) showed the client with no folder
+    /// and no documents for good. When Intake's folder index has a bound folder the catalog
+    /// has not, the cabinet is indexed behind the window, once for that scan.
+    #[test]
+    fn a_catalog_behind_intakes_folder_index_is_indexed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (pc1, pc2, root) = (
+            tmp.path().join("pc1"),
+            tmp.path().join("pc2"),
+            tmp.path().join("cab"),
+        );
+        let mut a = create(&pc1, "dev-1", &req(&root)).unwrap();
+        // The second PC's catalog is made now: it knows the cabinet, and no client.
+        drop(open(&pc2, "dev-2", &root).unwrap());
+        // A client's folder, bound, with a file; under a name of its own.
+        let plan = vf_fs::newclient::plan(
+            &a.conn,
+            &root,
+            &vf_fs::newclient::NewClient {
+                ext_id: "1042".into(),
+                name: "Anderson Farms LLC".into(),
+                entity_type: None,
+                partner: String::new(),
+            },
+        )
+        .unwrap();
+        vf_fs::newclient::create(&mut a.conn, &root, &plan, "dev-1").unwrap();
+        drop(a);
+        let folder = root.join("01 Anderson");
+        std::fs::rename(root.join(&plan.folder_rel), &folder).unwrap();
+        std::fs::write(folder.join("letter.pdf"), "invented").unwrap();
+        let index = |at: &str| {
+            let f = serde_json::json!({
+                "root": root, "scanned_at": at,
+                "folders": [{ "path": folder, "client_id": "1042", "status": "bound" }],
+            });
+            std::fs::write(root.join("_Vibe/folders.json"), f.to_string()).unwrap();
+        };
+        index("2026-11-12T22:57:00Z");
+        assert_eq!(
+            vf_fs::rebuild::bound_folder_of(&root, "1042").as_deref(),
+            Some("01 Anderson")
+        );
+
+        let mut o = open_staged(&pc2, "dev-2", &root).unwrap();
+        let staged = o.staged.take().expect("indexed behind the window");
+        let shared = crate::indexer::Shared::new(&staged);
+        crate::indexer::run(&mut o.conn, &root, "dev-2", &staged, &shared, &|| {});
+        let (folder_rel, docs): (String, i64) = o
+            .conn
+            .query_row(
+                "SELECT c.folder_rel, (SELECT count(*) FROM document d WHERE d.client_id = c.id
+                                        AND d.deleted_at IS NULL)
+                 FROM client c WHERE c.ext_id = '1042'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((folder_rel.as_str(), docs), ("01 Anderson", 1));
+        drop(o);
+        // In line now: no index at the next open, nor after another scan of the root.
+        assert!(open_staged(&pc2, "dev-2", &root).unwrap().staged.is_none());
+        index("2026-11-16T11:07:00Z");
+        assert!(open_staged(&pc2, "dev-2", &root).unwrap().staged.is_none());
+    }
     /// PA-18 done-when: created and reopened with no passphrase anywhere; a plain SQLite file.
     #[test]
     fn create_then_open_on_a_fresh_workstation() {

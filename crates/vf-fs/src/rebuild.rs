@@ -1086,6 +1086,81 @@ fn mark_fresh(conn: &Connection) -> Result<(), RebuildError> {
     Ok(())
 }
 
+/// Intake's folder index (`_Vibe/folders.json`, written by its Setup's scan of the root): when
+/// it was made, and the top folders it found bound to a client, as (client ID, folder name).
+/// `None` when there is none, or it is of another root.
+fn folder_index(root: &Path) -> Option<(String, Vec<(String, String)>)> {
+    use filer_intake::sentinel::{FOLDERS_FILE, FoldersFile, Status, same_path};
+    let text = std::fs::read(crate::clients::master_dir(root).join(FOLDERS_FILE)).ok()?;
+    let file: FoldersFile = serde_json::from_slice(&text).ok()?;
+    if !same_path(&file.root, root) {
+        return None;
+    }
+    let bound = file
+        .folders
+        .iter()
+        .filter(|b| b.status == Status::Bound)
+        .filter(|b| b.path.parent().is_some_and(|p| same_path(p, root)))
+        .filter_map(|b| Some((b.client_id.clone()?, b.name())))
+        .collect();
+    Some((file.scanned_at.to_rfc3339(), bound))
+}
+
+/// The top folder bound to the client with this ID, by Intake's folder index and the folder's
+/// own client file (PA-83: the catalog may not have it yet, and the folder need not be named
+/// as the template names it). Reads the share.
+pub fn bound_folder_of(root: &Path, ext_id: &str) -> Option<String> {
+    let (_, bound) = folder_index(root)?;
+    bound
+        .into_iter()
+        .filter(|(id, _)| id.eq_ignore_ascii_case(ext_id))
+        .map(|(_, name)| name)
+        .find(|name| {
+            sentinel::read_sentinel(&root.join(name))
+                .ok()
+                .flatten()
+                .is_some_and(|s| s.tax_software_id.eq_ignore_ascii_case(ext_id))
+        })
+}
+
+/// Whether the catalog is behind Intake's folder index (PA-83, owner 2026-11-16: folders
+/// bound to clients in Intake's Setup after the catalog was made stayed unknown to it for
+/// good, every client at 0 documents): a folder the index has bound to a client the catalog
+/// has no folder for. Asked once for each scan of the root, so an index that cannot bring
+/// the two in line does not run at every open.
+pub fn behind_folder_index(conn: &Connection, root: &Path) -> bool {
+    const KEY: &str = "indexed_for_scan";
+    let Some((scanned_at, bound)) = folder_index(root) else {
+        return false;
+    };
+    let seen: Option<String> = conn
+        .query_row("SELECT v FROM local_state WHERE k = ?1", [KEY], |r| {
+            r.get(0)
+        })
+        .ok();
+    if seen.as_deref() == Some(scanned_at.as_str()) {
+        return false;
+    }
+    let have: HashSet<String> = conn
+        .prepare(
+            "SELECT upper(ext_id) FROM client
+             WHERE deleted_at IS NULL AND coalesce(folder_rel, '') <> ''",
+        )
+        .and_then(|mut st| {
+            st.query_map([], |r| r.get::<_, String>(0))?
+                .collect::<Result<_, _>>()
+        })
+        .unwrap_or_default();
+    let behind = bound
+        .iter()
+        .any(|(id, _)| !have.contains(&id.to_uppercase()));
+    let _ = conn.execute(
+        "INSERT INTO local_state (k, v) VALUES (?1, ?2) ON CONFLICT(k) DO UPDATE SET v = excluded.v",
+        [KEY, scanned_at.as_str()],
+    );
+    behind
+}
+
 /// The folders of a cabinet as [`scan_folders`] found them.
 type Scan = (Vec<Bound>, Vec<(PathBuf, Option<String>)>);
 

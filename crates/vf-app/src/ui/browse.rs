@@ -1960,10 +1960,8 @@ impl Browse {
             }
         }
         // A client the catalog has no folder for: looked for on disk, on a thread.
-        let folderless = self
-            .folderless()
-            .map(|c| (c.id.clone(), c.ext_id.clone(), c.name.clone()));
-        if let Some((id, ext, name)) = folderless {
+        let folderless = self.folderless().map(|c| (c.id.clone(), c.ext_id.clone()));
+        if let Some((id, ext)) = folderless {
             self.ex.for_scope = None;
             if !self.ex.found.contains_key(&id) && self.ex.find.is_none() {
                 let root = env.root.to_path_buf();
@@ -1971,7 +1969,7 @@ impl Browse {
                     ctx,
                     "Looking for the client's folder…",
                     move || {
-                        let found = crate::ui::explorer::client_folder(&root, &ext, &name);
+                        let found = crate::ui::explorer::client_folder(&root, &ext);
                         (id, found)
                     },
                 ) {
@@ -5782,15 +5780,40 @@ mod tests {
         assert_eq!(b.visible.len(), 4, "Income Tax and the folders below it");
     }
 
-    /// PA-81 (owner 2026-11-16): explorer view does not wait for the catalog to know a
-    /// client's folder. For a client with none there, the folder the template names is looked
-    /// for on disk and shown; with no such folder the list says what was looked for.
+    /// PA-81, PA-83 (owner 2026-11-16): explorer view does not wait for the catalog to know
+    /// a client's folder. For a client with none there, the folder whose own client file
+    /// names the client is found and shown, whatever its name; a folder that only has the
+    /// client's name is not taken for it.
     #[test]
     fn explorer_view_finds_a_clients_folder_the_catalog_does_not_have() {
         let mut h = harness(3, 2);
         let root = h.state().root.clone();
-        std::fs::create_dir_all(root.join("Client 0001 (1001)").join("Income Tax")).unwrap();
-        std::fs::write(root.join("Client 0001 (1001)").join("letter.pdf"), "x").unwrap();
+        // Bound under a name of its own; client 2's folder has the name and no client file.
+        let bound = root.join("01 Client One");
+        std::fs::create_dir_all(bound.join("Income Tax")).unwrap();
+        std::fs::write(bound.join("letter.pdf"), "x").unwrap();
+        std::fs::create_dir_all(bound.join("_Vibe")).unwrap();
+        std::fs::write(
+            bound.join("_Vibe/client.json"),
+            serde_json::json!({
+                "version": 1, "client_id": uuid::Uuid::new_v4(), "firm_id": uuid::Uuid::new_v4(),
+                "tax_software_id": "1001", "display_name_at_creation": "Client 0001",
+                "created_at": "2026-11-12T22:57:00Z", "created_by": null,
+            })
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::create_dir_all(root.join("Client 0002 (1002)")).unwrap();
+        std::fs::create_dir_all(root.join("_Vibe")).unwrap();
+        std::fs::write(
+            root.join("_Vibe/folders.json"),
+            serde_json::json!({
+                "root": root, "scanned_at": "2026-11-16T11:07:00Z",
+                "folders": [{ "path": bound, "client_id": "1001", "status": "bound" }],
+            })
+            .to_string(),
+        )
+        .unwrap();
         {
             let b = &mut h.state_mut().b;
             b.set_root(&root);
@@ -5806,7 +5829,7 @@ mod tests {
         {
             let b = &h.state().b;
             assert!(b.explorer_on());
-            assert_eq!(b.ex.dir, "Client 0001 (1001)");
+            assert_eq!(b.ex.dir, "01 Client One");
             let l = b.ex.listed.as_ref().expect("listed");
             let mut names: Vec<&str> = l
                 .entries
@@ -5816,18 +5839,18 @@ mod tests {
                 .map(|e| e.name.as_str())
                 .collect();
             names.sort();
-            assert_eq!(names, ["Income Tax", "letter.pdf"]);
+            assert_eq!(names, ["Income Tax", "_Vibe", "letter.pdf"]);
         }
         // Into its sub-folder and back up: the view stays in the client's folder.
-        h.state_mut().b.ex.go = Some("Client 0001 (1001)/Income Tax".into());
+        h.state_mut().b.ex.go = Some("01 Client One/Income Tax".into());
         h.run();
         h.run();
-        assert_eq!(h.state().b.ex.dir, "Client 0001 (1001)/Income Tax");
+        assert_eq!(h.state().b.ex.dir, "01 Client One/Income Tax");
         assert_eq!(h.state().b.scope, Scope::Client(1));
         click(&mut h, "Up");
         h.run();
         h.run();
-        assert_eq!(h.state().b.ex.dir, "Client 0001 (1001)");
+        assert_eq!(h.state().b.ex.dir, "01 Client One");
         // A client with no folder on disk: said, and no other folder shown.
         h.state_mut().b.set_scope(Scope::Client(2));
         h.run();
@@ -5835,10 +5858,9 @@ mod tests {
         let b = &h.state().b;
         assert!(b.explorer_on());
         assert!(b.visible.is_empty());
-        let why = b.ex.found[&b.snap.clients[2].id].as_ref().unwrap_err();
-        assert!(why.contains("Client 0002 (1002)"), "{why}");
+        assert!(b.ex.found[&b.snap.clients[2].id].is_err());
         assert!(
-            h.query_by_label_contains("has no folder in the cabinet yet")
+            h.query_by_label_contains("No folder in the cabinet is bound to this client")
                 .is_some()
         );
     }

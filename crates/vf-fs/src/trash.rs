@@ -417,18 +417,22 @@ pub fn list(conn: &Connection, root: &Path) -> Result<Vec<Trashed>, String> {
     let known: std::collections::HashSet<String> = out.iter().map(|t| t.doc_id.clone()).collect();
     // The holds file read once for all of them.
     let holds = crate::holds::load(root);
-    for id in present {
-        if known.contains(&id) {
-            continue;
-        }
-        let Some(i) = last_item(root, &id).filter(|i| i.event == "trashed" && i.doc_id == id)
-        else {
+    // Each one's record is a small file on the share: read several at a time (owner
+    // 2026-11-16: with thousands in the trash and a catalog that knew none of them, the
+    // Trash page stood still).
+    let others: Vec<String> = present
+        .into_iter()
+        .filter(|id| !known.contains(id))
+        .collect();
+    let read = crate::rebuild::par_map(&others, |id| {
+        let i = last_item(root, id).filter(|i| i.event == "trashed" && i.doc_id == *id)?;
+        let file = trash_file(root, id, &i.rel_path);
+        file.is_file().then_some((i, file))
+    });
+    for (id, got) in others.into_iter().zip(read) {
+        let Some((i, file)) = got else {
             continue;
         };
-        let file = trash_file(root, &id, &i.rel_path);
-        if !file.is_file() {
-            continue;
-        }
         let client = client_of_folder(conn, i.client_folder.as_deref());
         let held = match &holds {
             Ok(h) => crate::holds::covers_in(
