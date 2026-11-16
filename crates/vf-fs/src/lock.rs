@@ -190,6 +190,8 @@ pub(crate) fn take_at(
     // What the lock held by another looked like, and since when it has not changed.
     let mut seen: Option<(String, Instant)> = None;
     let mut checked_age = false;
+    // The holder's name, as last read from the lock file.
+    let mut holder = String::new();
     // Since when the lock file could be neither made nor found there.
     let mut trouble: Option<Instant> = None;
     loop {
@@ -239,6 +241,12 @@ pub(crate) fn take_at(
             }
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
                 let now = std::fs::read_to_string(path).unwrap_or_default();
+                // "token n who": the holder's name is the rest. Kept from the last look that
+                // read one: the holder writes the file again at every beat, and a look in
+                // that instant reads it empty (the person was then told "Someone else").
+                if let Some(w) = now.splitn(3, ' ').nth(2).filter(|w| !w.trim().is_empty()) {
+                    holder = w.to_string();
+                }
                 // Left by a PC that stopped: by the server's clock (looked at once, and again
                 // whenever the lock is seen to change hands), or seen unchanged for that long.
                 let dead = match &seen {
@@ -275,9 +283,7 @@ pub(crate) fn take_at(
                     continue;
                 }
                 if wait.is_some_and(|w| started.elapsed() >= w) {
-                    // "token n who": the holder's name is the rest.
-                    let who = now.splitn(3, ' ').nth(2).unwrap_or_default().to_string();
-                    return Err(Busy { who });
+                    return Err(Busy { who: holder });
                 }
                 std::thread::sleep(Duration::from_millis(100).min(beat));
             }
@@ -293,7 +299,7 @@ pub(crate) fn take_at(
                         return Ok(none());
                     }
                     if wait.is_some_and(|w| started.elapsed() >= w) {
-                        return Err(Busy { who: String::new() });
+                        return Err(Busy { who: holder });
                     }
                 }
                 std::thread::sleep(Duration::from_millis(100).min(beat));

@@ -26,8 +26,17 @@ of its `src/` (QUESTIONS Q-16). Upstream `main.rs` is not vendored; `vf-app` is 
    `CARGO_MANIFEST_DIR` paths are unchanged.
 4. Package versions kept at upstream's (`0.2.6`) so `CARGO_PKG_VERSION` text is unchanged.
 
+5. **Tests only** (owner 2026-11-16, PA-87: "make any necessary changes to the Filer necessary to
+   ensure stability in the Files app"): the eight `settle` helpers in `filer-intake/src/app.rs`
+   wait by the clock (180 s at most) instead of a fixed 300 to 600 frames. The work they wait
+   for runs on other threads, and a few seconds was not always enough on a machine busy with
+   something else (`twenty_file_batch_resolves_to_ready`, `combine_commit_and_undo_through_the_ui`
+   failed now and then with nothing wrong). To go upstream with the next re-vendor, or be
+   applied again after it.
+
 No logic edits. Check with:
-`diff -r <upstream>/src crates/filer-*/src` (only the four attribute lines differ).
+`diff -r <upstream>/src crates/filer-*/src` (only the four attribute lines and the `settle`
+helpers of item 5 differ).
 
 ## File → crate
 

@@ -7973,8 +7973,15 @@ Petty cash,1234.50
             s.b.selected = s.b.visible.iter().copied().collect();
         }
         h.run();
-        h.get_by_role_and_label(Role::ComboBox, "STATUS").click();
-        h.run();
+        // The list opened (pressed again while it has not: a press that lands on a frame
+        // where the pane is drawn again does nothing; seen on a busy machine).
+        for _ in 0..50 {
+            if h.query_by_role_and_label(Role::Button, "Final").is_some() {
+                break;
+            }
+            h.get_by_role_and_label(Role::ComboBox, "STATUS").click();
+            h.run();
+        }
         click(&mut h, "Final");
         click(&mut h, "Apply to 6 (one transaction)");
         let finals = |h: &Harness<'static, State>| {

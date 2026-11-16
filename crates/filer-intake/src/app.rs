@@ -1443,14 +1443,22 @@ mod import_tests {
         h: &mut Harness<'static, FilerApp>,
         done: impl Fn(&Harness<'static, FilerApp>) -> bool,
     ) {
-        for _ in 0..300 {
+        // Vibe Files (PA-87): by the clock, not by a count of frames. The work waited for runs
+        // on other threads; 300 to 600 frames (a few seconds) was not always enough on a
+        // machine busy with something else, and the test failed with nothing wrong. A wait
+        // still ends on the frame the condition holds.
+        let start = std::time::Instant::now();
+        loop {
             h.step();
             if done(h) {
                 return;
             }
+            assert!(
+                start.elapsed() < std::time::Duration::from_secs(180),
+                "condition never reached"
+            );
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
-        panic!("condition never reached");
     }
 
     fn open_wizard(h: &mut Harness<'static, FilerApp>, csv: &std::path::Path) {
@@ -1657,14 +1665,22 @@ mod conflict_tests {
         h: &mut Harness<'static, FilerApp>,
         done: impl Fn(&Harness<'static, FilerApp>) -> bool,
     ) {
-        for _ in 0..300 {
+        // Vibe Files (PA-87): by the clock, not by a count of frames. The work waited for runs
+        // on other threads; 300 to 600 frames (a few seconds) was not always enough on a
+        // machine busy with something else, and the test failed with nothing wrong. A wait
+        // still ends on the frame the condition holds.
+        let start = std::time::Instant::now();
+        loop {
             h.step();
             if done(h) {
                 return;
             }
+            assert!(
+                start.elapsed() < std::time::Duration::from_secs(180),
+                "condition never reached"
+            );
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
-        panic!("condition never reached");
     }
 
     #[test]
@@ -2170,14 +2186,22 @@ mod plan_ui_tests {
     ];
 
     fn settle(h: &mut Harness<'static, FilerApp>, what: &str, done: impl Fn(&FilerApp) -> bool) {
-        for _ in 0..500 {
+        // Vibe Files (PA-87): by the clock, not by a count of frames. The work waited for runs
+        // on other threads; 300 to 600 frames (a few seconds) was not always enough on a
+        // machine busy with something else, and the test failed with nothing wrong. A wait
+        // still ends on the frame the condition holds.
+        let start = std::time::Instant::now();
+        loop {
             h.step();
             if done(h.state()) {
                 return;
             }
+            assert!(
+                start.elapsed() < std::time::Duration::from_secs(180),
+                "never reached: {what}"
+            );
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
-        panic!("never reached: {what}");
     }
 
     fn proposal(app: &FilerApp, name: &str) -> Proposal {
@@ -2529,14 +2553,22 @@ mod combine_ui_tests {
     use egui_kittest::{Harness, HarnessBuilder};
 
     fn settle(h: &mut Harness<'static, FilerApp>, what: &str, done: impl Fn(&FilerApp) -> bool) {
-        for _ in 0..500 {
+        // Vibe Files (PA-87): by the clock, not by a count of frames. The work waited for runs
+        // on other threads; 300 to 600 frames (a few seconds) was not always enough on a
+        // machine busy with something else, and the test failed with nothing wrong. A wait
+        // still ends on the frame the condition holds.
+        let start = std::time::Instant::now();
+        loop {
             h.step();
             if done(h.state()) {
                 return;
             }
+            assert!(
+                start.elapsed() < std::time::Duration::from_secs(180),
+                "never reached: {what}"
+            );
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
-        panic!("never reached: {what}");
     }
 
     fn plan_ready(a: &FilerApp, rows: usize) -> bool {
@@ -4071,14 +4103,22 @@ mod split_ui_tests {
     use std::path::Path;
 
     fn settle(h: &mut Harness<'static, FilerApp>, what: &str, done: impl Fn(&FilerApp) -> bool) {
-        for _ in 0..600 {
+        // Vibe Files (PA-87): by the clock, not by a count of frames. The work waited for runs
+        // on other threads; 300 to 600 frames (a few seconds) was not always enough on a
+        // machine busy with something else, and the test failed with nothing wrong. A wait
+        // still ends on the frame the condition holds.
+        let start = std::time::Instant::now();
+        loop {
             h.step();
             if done(h.state()) {
                 return;
             }
+            assert!(
+                start.elapsed() < std::time::Duration::from_secs(180),
+                "never reached: {what}"
+            );
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
-        panic!("never reached: {what}");
     }
 
     fn plan_ready(a: &FilerApp, rows: usize) -> bool {
@@ -4295,14 +4335,22 @@ mod p10_tests {
     use egui_kittest::{Harness, HarnessBuilder};
 
     fn settle(h: &mut Harness<'static, FilerApp>, what: &str, done: impl Fn(&FilerApp) -> bool) {
-        for _ in 0..500 {
+        // Vibe Files (PA-87): by the clock, not by a count of frames. The work waited for runs
+        // on other threads; 300 to 600 frames (a few seconds) was not always enough on a
+        // machine busy with something else, and the test failed with nothing wrong. A wait
+        // still ends on the frame the condition holds.
+        let start = std::time::Instant::now();
+        loop {
             h.step();
             if done(h.state()) {
                 return;
             }
+            assert!(
+                start.elapsed() < std::time::Duration::from_secs(180),
+                "never reached: {what}"
+            );
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
-        panic!("never reached: {what}");
     }
 
     #[test]
@@ -4460,14 +4508,22 @@ mod r1c_tests {
     use egui_kittest::{Harness, HarnessBuilder};
 
     fn settle(h: &mut Harness<'static, FilerApp>, what: &str, done: impl Fn(&FilerApp) -> bool) {
-        for _ in 0..500 {
+        // Vibe Files (PA-87): by the clock, not by a count of frames. The work waited for runs
+        // on other threads; 300 to 600 frames (a few seconds) was not always enough on a
+        // machine busy with something else, and the test failed with nothing wrong. A wait
+        // still ends on the frame the condition holds.
+        let start = std::time::Instant::now();
+        loop {
             h.step();
             if done(h.state()) {
                 return;
             }
+            assert!(
+                start.elapsed() < std::time::Duration::from_secs(180),
+                "never reached: {what}"
+            );
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
-        panic!("never reached: {what}");
     }
 
     #[test]
@@ -4571,14 +4627,22 @@ mod r2_tests {
     use egui_kittest::{Harness, HarnessBuilder};
 
     fn settle(h: &mut Harness<'static, FilerApp>, what: &str, done: impl Fn(&FilerApp) -> bool) {
-        for _ in 0..500 {
+        // Vibe Files (PA-87): by the clock, not by a count of frames. The work waited for runs
+        // on other threads; 300 to 600 frames (a few seconds) was not always enough on a
+        // machine busy with something else, and the test failed with nothing wrong. A wait
+        // still ends on the frame the condition holds.
+        let start = std::time::Instant::now();
+        loop {
             h.step();
             if done(h.state()) {
                 return;
             }
+            assert!(
+                start.elapsed() < std::time::Duration::from_secs(180),
+                "never reached: {what}"
+            );
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
-        panic!("never reached: {what}");
     }
 
     /// A K-1 for a shareholder who is not related yet: "Add relationship…" opens Relationships on
