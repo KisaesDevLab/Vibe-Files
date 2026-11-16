@@ -958,9 +958,14 @@ impl eframe::App for VibeFilesApp {
                 };
                 if let Err(e) = r {
                     tracing::warn!(kind = crate::logging::kind(&e), "audit mirror not written");
-                    o.browse.error = Some(format!(
-                        "The audit trail's copy in the cabinet could not be written: {e}"
-                    ));
+                    // The catalog busy (the index writes behind the window, another session
+                    // saves): the copy is tried again in a moment, and nothing is lost: not
+                    // a problem to show in red (owner 2026-11-16, while the index ran).
+                    if !(e.contains("locked") || e.contains("busy")) {
+                        o.browse.error = Some(format!(
+                            "The audit trail's copy in the cabinet could not be written: {e}"
+                        ));
+                    }
                 }
             }
             if let Some(problem) = o.chain.problem() {
