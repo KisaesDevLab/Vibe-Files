@@ -42,6 +42,8 @@ struct Args {
 }
 
 fn main() -> anyhow::Result<std::process::ExitCode> {
+    // Intake's recording asks print capture's profiles what a printed name says (PA-86).
+    vf_fs::intake::set_name_reader(vf_ingest::pipeline::name_reader);
     let args = Args::parse();
     let chosen = args.data.is_some();
     let personal = std::env::var_os("LOCALAPPDATA")

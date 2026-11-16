@@ -684,6 +684,32 @@ type MissedBatch = (
     Vec<(std::path::PathBuf, std::path::PathBuf)>,
 );
 
+/// What a file's own name says of it, for a file no Vibe intake processor handed over (PA-86,
+/// owner 2026-11-16: an UltraTax print saved straight into an inbox got its folder from
+/// Intake's rules and no doc type). The app gives the reader (print capture's profiles live
+/// in a crate above this one): made once for a cabinet, then asked name by name.
+pub type NameReader = Box<dyn Fn(&str) -> Option<crate::hints::Hint>>;
+
+/// Makes a cabinet's [`NameReader`].
+pub type MakeNameReader = fn(&Path) -> NameReader;
+
+static NAME_READER: std::sync::RwLock<Option<MakeNameReader>> = std::sync::RwLock::new(None);
+
+/// Sets the reader of file names ([`NameReader`]).
+pub fn set_name_reader(make: MakeNameReader) {
+    *NAME_READER.write().unwrap_or_else(|e| e.into_inner()) = Some(make);
+}
+
+/// Whether `name` could be a program's printed name worth asking the reader about: a PDF
+/// with a year and several `_` parts. (The reader loads the profiles and the client list.)
+fn worth_reading(name: &str) -> bool {
+    name.to_ascii_lowercase().ends_with(".pdf")
+        && name.matches('_').count() >= 3
+        && name
+            .split('_')
+            .any(|p| p.len() == 4 && (p.starts_with("19") || p.starts_with("20")))
+}
+
 /// Records one finished, not-undone batch. Returns (documents added, documents updated).
 fn record(
     conn: &mut Connection,
@@ -728,6 +754,8 @@ fn record(
         .and_then(|mut st| st.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect())
         .map_err(|e| e.to_string())?;
     let hints = crate::hints::load(root);
+    // Made when the first file with no hint and a name worth reading comes.
+    let mut name_reader: Option<Option<NameReader>> = None;
     // Payer → client corrections to learn once the batch is recorded (P08 step 4).
     let mut learned: Vec<(String, String)> = Vec::new();
 
@@ -863,7 +891,27 @@ fn record(
                 // What a Vibe intake processor knew about the file (barcode cover sheet, print
                 // capture parser): doc type, tax year, source. Kept in docmeta.jsonl too, so
                 // rebuild restores it (Q-22).
-                let hint = hints.get(&hash);
+                // With no hint, what its own name says (a print saved straight into an
+                // inbox, filed under its printed name).
+                let by_name = match hints.get(&hash) {
+                    Some(_) => None,
+                    None => f
+                        .rel
+                        .rsplit('/')
+                        .next()
+                        .filter(|n| worth_reading(n))
+                        .and_then(|n| {
+                            name_reader
+                                .get_or_insert_with(|| {
+                                    let make =
+                                        *NAME_READER.read().unwrap_or_else(|e| e.into_inner());
+                                    make.map(|m| m(root))
+                                })
+                                .as_ref()
+                                .and_then(|r| r(n))
+                        }),
+                };
+                let hint = hints.get(&hash).or(by_name.as_ref());
                 let doc_type = hint
                     .and_then(|h| h.doc_type.clone())
                     .filter(|t| doc_types.contains_key(t));
@@ -1943,6 +1991,52 @@ mod tests {
         assert!(meta.lines().all(|l| l.contains("\"id\":")));
     }
 
+    /// PA-86: a file filed with no hint (an UltraTax print saved straight into an inbox) takes
+    /// its doc type, year and source from what its own name says, when the app's reader reads
+    /// it; a hint, when there is one, comes first.
+    #[test]
+    fn a_file_with_no_hint_takes_what_its_name_says() {
+        let mut f = fx();
+        crate::doctypes::seed_if_missing(&f.root).unwrap();
+        crate::doctypes::sync(&mut f.conn, &f.root, "dev", "seed").unwrap();
+        // (One reader for the whole test run: it reads this test's name only.)
+        fn reader(root: &Path) -> NameReader {
+            let first = crate::doctypes::load(root)
+                .ok()
+                .flatten()
+                .and_then(|t| t.first().map(|t| t.id.clone()));
+            Box::new(move |name| {
+                (name == "Acme LLC_2023_1120S_Printed_Thing_1001.pdf").then(|| {
+                    let mut h = crate::hints::Hint::new("", name, "print_name:test", "");
+                    h.doc_type = first.clone();
+                    h.tax_year = Some(2023);
+                    h.source = Some("firm".into());
+                    h
+                })
+            })
+        }
+        set_name_reader(reader);
+        let printed = "Acme LLC_2023_1120S_Printed_Thing_1001.pdf";
+        for n in [printed, "plain.pdf"] {
+            std::fs::write(f.inbox.join(n), format!("content of {n}")).unwrap();
+        }
+        let acme = client("1001", "Acme LLC");
+        file(&f, &acme, &[printed, "plain.pdf"], false);
+        reconcile(&mut f.conn, &f.root, "dev").unwrap();
+        let row = |name: &str| -> (bool, Option<i64>, String) {
+            f.conn
+                .query_row(
+                    "SELECT doc_type_id IS NOT NULL, tax_year, source FROM document
+                     WHERE rel_path LIKE ?1",
+                    [format!("%/{name}")],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .unwrap()
+        };
+        assert_eq!(row(printed), (true, Some(2023), "firm".into()));
+        assert!(!row("plain.pdf").0);
+        assert_eq!(row("plain.pdf").2, "client");
+    }
     /// P08 steps 2 and 4: a recognized form's reading is kept with the document; filed to a
     /// different client than proposed, the payer's client is learned for next time.
     #[test]

@@ -1178,6 +1178,18 @@ pub struct Staged {
     pub folders: Vec<String>,
 }
 
+/// Asks for the cabinet to be indexed again from its listing at the next open (Admin ›
+/// Devices, PA-86): the same mark an index cut short leaves, so the open indexes behind the
+/// window. Nothing is removed from the catalog now; the index adds what it finds, binds the
+/// folders it finds bound, and takes out documents whose files are gone.
+pub fn ask_for_index(conn: &Connection) -> Result<(), RebuildError> {
+    conn.execute(
+        "INSERT INTO local_state (k, v) VALUES (?1, ?2) ON CONFLICT(k) DO UPDATE SET v = excluded.v",
+        [UNFINISHED, FILED_BY_IMPORT],
+    )?;
+    Ok(())
+}
+
 /// The label under which an index cut short left its mark ([`unfinished`]), if any.
 pub fn unfinished_label(conn: &Connection) -> Option<String> {
     conn.query_row(

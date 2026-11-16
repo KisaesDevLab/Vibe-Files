@@ -565,6 +565,43 @@ fn ultratax_prints_dropped_in_an_inbox_follow_their_rows() {
             r.name
         );
     }
+    // PA-86: a client ID with an underscore in it is read whole through the capture folder
+    // too (the profile took its last part for the ID): the print keeps its row, its doc
+    // type and its client.
+    {
+        let lookup = vf_ingest::pipeline::Lookup::load(&root).unwrap();
+        let (delivered, hint, _, skip) = vf_ingest::pipeline::capture_name(
+            &root,
+            &lookup,
+            "Four State Barns LLC_2025_1065_K1_Package_Chet A Hammen_2614_FOUR.pdf",
+        );
+        assert!(!skip);
+        assert!(
+            hint.doc_type.is_some(),
+            "its doc type (K-1 by entity type): {delivered}"
+        );
+        let (rule, dest) = file(&re, &delivered);
+        assert_eq!(
+            rule, "UltraTax CS · ArchiveK1Package",
+            "{delivered} -> {dest}"
+        );
+    }
+    // PA-86: recorded by Intake with no hint, such a print gets its doc type, year and
+    // source from its own name; a name that is no program's says nothing.
+    {
+        let read = vf_ingest::pipeline::name_reader(&root);
+        let h = read("Four State Barns LLC_2025_1065_K1_Package_Chet A Hammen_2614_FOUR.pdf")
+            .expect("read");
+        assert!(h.doc_type.is_some());
+        assert_eq!(
+            (h.tax_year, h.source.as_deref()),
+            (Some(2025), Some("firm"))
+        );
+        let h = read("Anderson Farms LLC_2025_1120S_Form_8879_ANDE1042.pdf").expect("read");
+        assert!(h.doc_type.is_some());
+        assert!(read("Anderson Farms LLC_2024_W2_client copy_NOBODY99.pdf").is_none());
+        assert!(read("scan0001.pdf").is_none());
+    }
     // A row set to "Don't file": left with the unfiled, with no copy to anyone (Filer's
     // "K-1 package" took it before, with copies to every related client).
     {

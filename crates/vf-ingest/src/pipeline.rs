@@ -346,6 +346,99 @@ fn cover_name(cover: &Cover, lookup: &Lookup, stem: &str, part: usize) -> (Strin
     (file, hint)
 }
 
+/// A client ID of the list that has an underscore in it and stands in `name` as a part of its
+/// own (between underscores, or at an end): where it starts, and the ID as the name has it.
+fn two_part_id(lookup: &Lookup, name: &str) -> Option<(usize, String)> {
+    let stem_len = name
+        .len()
+        .checked_sub(4)
+        .filter(|i| name.is_char_boundary(*i) && name[*i..].eq_ignore_ascii_case(".pdf"))
+        .unwrap_or(name.len());
+    let lower = name.to_lowercase();
+    if lower.len() != name.len() {
+        return None;
+    }
+    lookup
+        .clients
+        .keys()
+        .filter(|k| k.contains('_'))
+        .filter_map(|k| {
+            let k = k.to_lowercase();
+            lower.match_indices(&k).find_map(|(at, _)| {
+                let end = at + k.len();
+                let before = at == 0 || lower.as_bytes()[at - 1] == b'_';
+                let after = end == stem_len || lower.as_bytes().get(end) == Some(&b'_');
+                (before && after).then(|| (at, name[at..end].to_string()))
+            })
+        })
+        // The longest, when one such ID ends another.
+        .max_by_key(|(_, id)| id.len())
+}
+
+/// What the profiles read in a printed name, with the client's ID as the client list has it.
+fn read_printed(
+    profiles: &[crate::parsers::Compiled],
+    lookup: &Lookup,
+    name: &str,
+) -> Option<crate::parsers::Parsed> {
+    // A client ID with an underscore in it (`2614_FOUR`, PA-86): a profile reads the parts of
+    // a name between underscores, so it took `FOUR` for the ID and `2614` for the end of the
+    // document name. Such an ID of the client list is read whole: its underscore is put
+    // aside while the profile reads the name.
+    const JOIN: char = '\u{1f}';
+    let whole = two_part_id(lookup, name);
+    let for_profile = match &whole {
+        Some((at, id)) => format!(
+            "{}{}{}",
+            &name[..*at],
+            id.replace('_', &JOIN.to_string()),
+            &name[at + id.len()..]
+        ),
+        None => name.to_string(),
+    };
+    let mut p = crate::parsers::parse(profiles, &for_profile)?;
+    p.client_id = p.client_id.replace(JOIN, "_");
+    p.printed = p.printed.replace(JOIN, "_");
+    // An ID typed in another case is the client list's (QA3 e2e #4).
+    if let Some(k) = lookup
+        .clients
+        .keys()
+        .find(|k| k.eq_ignore_ascii_case(&p.client_id))
+    {
+        p.client_id = k.clone();
+    }
+    Some(p)
+}
+
+/// For `vf_fs::intake::set_name_reader` (PA-86): what the profiles read in the name of a file
+/// Intake filed with no hint, a print saved straight into an inbox and filed under its printed
+/// name. Its doc type, tax year and source, when the name is a program's and its client is in
+/// the client list. Loads the profiles, doc types and client list once.
+pub fn name_reader(root: &Path) -> vf_fs::intake::NameReader {
+    let (profiles, _) = crate::parsers::load(root);
+    let lookup = Lookup::load(root).unwrap_or(Lookup {
+        clients: Default::default(),
+        doc_types: Default::default(),
+    });
+    Box::new(move |name| {
+        let p = read_printed(&profiles, &lookup, name)?;
+        if !lookup.clients.contains_key(&p.client_id) {
+            return None;
+        }
+        let mut h = Hint::new("", name, &format!("print_name:{}", p.profile), "");
+        h.tax_year = p.year;
+        h.source = Some(p.source.clone());
+        h.doc_type = p.doc_type.as_ref().and_then(|t| {
+            lookup
+                .doc_types
+                .iter()
+                .find(|(_, n)| *n == t)
+                .map(|(id, _)| id.clone())
+        });
+        Some(h)
+    })
+}
+
 /// Print capture (step 5): the name a parser profile reads, as Filer's `Name_ID_rest.pdf`, and
 /// a hint with the profile's doc type, year and source (`firm`). A name no profile reads goes
 /// through as it is, still marked as the firm's.
@@ -358,23 +451,13 @@ pub fn capture_name(root: &Path, lookup: &Lookup, name: &str) -> (String, Hint, 
     let (profiles, _) = crate::parsers::load(root);
     // The client ID must read back as Filer's ID, or Filer would take another part of the name
     // for it (wrong client); such a name goes through unprofiled (QA2 E11).
+    // (An ID of the client list is read by Intake through the list, whatever the pattern.)
     let id_ok = |id: &str| {
-        regex::Regex::new(&format!("^(?:{})$", filer_id_pattern(root)))
-            .is_ok_and(|r| r.is_match(id))
+        lookup.clients.contains_key(id)
+            || regex::Regex::new(&format!("^(?:{})$", filer_id_pattern(root)))
+                .is_ok_and(|r| r.is_match(id))
     };
-    // An ID typed in another case is the client list's (QA3 e2e #4).
-    let parsed = crate::parsers::parse(&profiles, name)
-        .map(|mut p| {
-            if let Some(k) = lookup
-                .clients
-                .keys()
-                .find(|k| k.eq_ignore_ascii_case(&p.client_id))
-            {
-                p.client_id = k.clone();
-            }
-            p
-        })
-        .filter(|p| id_ok(&p.client_id));
+    let parsed = read_printed(&profiles, lookup, name).filter(|p| id_ok(&p.client_id));
     let Some(p) = parsed else {
         // A profile read it but the ID is not one Filer reads: Filer would take another part
         // of the name for the ID (a year, another client). Underscores out, so Intake asks
@@ -457,12 +540,23 @@ pub fn capture_name(root: &Path, lookup: &Lookup, name: &str) -> (String, Hint, 
             rest = format!("{y} {rest}");
         }
     }
-    let file = format!(
-        "{}_{}_{}.pdf",
-        clean(&client).replace('_', " "),
-        p.client_id,
-        rest
-    );
+    // `Name_ID_rest`. An ID with an underscore in it is not read there (Intake finds such an
+    // ID at the end of a name, through the client list): `Name_rest_ID` for it (PA-86).
+    let file = if p.client_id.contains('_') {
+        format!(
+            "{}_{}_{}.pdf",
+            clean(&client).replace('_', " "),
+            rest,
+            p.client_id
+        )
+    } else {
+        format!(
+            "{}_{}_{}.pdf",
+            clean(&client).replace('_', " "),
+            p.client_id,
+            rest
+        )
+    };
     let mut h = Hint::new("", &file, &format!("print_capture:{}", p.profile), "");
     h.tax_year = p.year;
     h.source = Some(p.source.clone());

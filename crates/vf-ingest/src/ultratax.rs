@@ -299,7 +299,12 @@ impl Layout {
         for v in self.order() {
             let mut p = match v {
                 Var::ClientName => g("client", ".+?"),
-                Var::ClientId => g("id", "[^_ ]+"),
+                // Reading a name, a two-part ID is found through the client list
+                // (`pipeline::capture_name`). A rule's pattern has no list: it takes a second
+                // part before the ID when that part is a number (`2614_FOUR`, PA-86), which a
+                // document name does not end with.
+                Var::ClientId if named => g("id", "[^_ ]+"),
+                Var::ClientId => r"(?:(?:\d+_)?[^_ ]+)".to_string(),
                 Var::EntityType => g("form", "[A-Za-z0-9-]+"),
                 Var::TaxYear => g("year", "(?:19|20)\\d{2}"),
                 Var::YearEnd => g("ye", "[^_]+"),

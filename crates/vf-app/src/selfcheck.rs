@@ -88,16 +88,29 @@ pub fn run_with(
             }
         }),
     ));
+    let one_main = crate::server::server_mode() || crate::cloudmode::is_cloud(root);
     if sync_configured {
-        out.push(check("Sync", sync_state(conn)));
+        // On a computer that is not the one B2 sync runs on, a catalog that never pushed or
+        // pulled is as it should be (owner 2026-11-16: a session host said so in red every
+        // morning; another computer pushes).
+        out.push(check(
+            "Sync",
+            sync_state(conn, main_is_another(root, one_main)),
+        ));
     }
     // On the computers that are not the main one (sync set up there or not): the main
     // computer, or its scheduled push, stopped sending the cabinet to B2 (PA-40). The main one
     // itself is not told: it opens before its first push of the day (a Monday after a weekend
     // closed); its own Sync check covers it.
-    let one_main = crate::server::server_mode() || crate::cloudmode::is_cloud(root);
     out.extend(backup_check(root, one_main));
     out
+}
+
+/// Whether the cabinet's B2 sync runs on a computer that is not this one.
+fn main_is_another(root: &Path, one_main: bool) -> bool {
+    one_main
+        && crate::server::main_server(root)
+            .is_some_and(|m| !m.computer.eq_ignore_ascii_case(&crate::server::computer()))
 }
 
 /// "B2 backup", when another computer runs the cabinet's B2 sync and it sent the whole cabinet
@@ -105,10 +118,7 @@ pub fn run_with(
 /// cabinet); on a plain office share every PC syncs, and a main-server file left from before
 /// means nothing.
 fn backup_check(root: &Path, one_main: bool) -> Option<Check> {
-    let another = one_main
-        && crate::server::main_server(root)
-            .is_some_and(|m| !m.computer.eq_ignore_ascii_case(&crate::server::computer()));
-    if !another {
+    if !main_is_another(root, one_main) {
         return None;
     }
     crate::lastpush::check(root).map(|r| check("B2 backup", r))
@@ -125,7 +135,7 @@ fn reachable(root: &Path) -> Result<String, String> {
     Ok("readable and writable".into())
 }
 
-fn sync_state(conn: &Connection) -> Result<String, String> {
+fn sync_state(conn: &Connection, runs_elsewhere: bool) -> Result<String, String> {
     let conflicts: i64 = conn
         .query_row(
             "SELECT count(*) FROM sync_conflict WHERE resolved IS NULL",
@@ -145,6 +155,9 @@ fn sync_state(conn: &Connection) -> Result<String, String> {
         return Err(format!("{conflicts} conflicts to resolve (Sync tab)"));
     }
     let Some(last) = last else {
+        if runs_elsewhere {
+            return Ok("runs on another computer; nothing pushed or pulled from this one".into());
+        }
         // (Not "unlock it": this is said when sync is unlocked too, owner 2026-11-16.)
         return Err(
             "set up, but this PC's catalog has not pushed to B2 or pulled from it yet: Push now or Pull now in the Sync tab"
@@ -154,7 +167,7 @@ fn sync_state(conn: &Connection) -> Result<String, String> {
     let age = chrono::DateTime::parse_from_rfc3339(&last)
         .map(|t| (chrono::Utc::now() - t.with_timezone(&chrono::Utc)).num_days())
         .unwrap_or(0);
-    if age > 7 {
+    if age > 7 && !runs_elsewhere {
         Err(format!("last exchange {age} days ago"))
     } else {
         Ok(format!(
@@ -190,6 +203,9 @@ mod tests {
         assert!(r.iter().take(4).all(|c| c.ok), "{r:?}");
         let sync = r.iter().find(|c| c.name == "Sync").unwrap();
         assert!(!sync.ok, "set up but never run");
+        // On a computer B2 sync does not run on, that is as it should be.
+        assert!(sync_state(&conn, true).is_ok());
+        assert!(sync_state(&conn, false).is_err());
         std::fs::remove_dir_all(&root).unwrap();
         let r = run(&conn, &root, false);
         assert!(!r.iter().find(|c| c.name == "Cabinet reachable").unwrap().ok);

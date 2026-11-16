@@ -158,6 +158,7 @@ fn shared_section(ui: &mut egui::Ui, p: &mut DevicesPage, env: &mut Env) {
         return;
     };
     ui.label(widgets::caption(crate::catalog_place::describe()));
+    catalog_facts(ui, p, env);
     match crate::shared::shared_catalog(&cab.cabinet_id) {
         Some(at) => {
             ui.label(format!(
@@ -191,10 +192,139 @@ fn shared_section(ui: &mut egui::Ui, p: &mut DevicesPage, env: &mut Env) {
     }
 }
 
+/// What the catalog in use holds, for Admin (PA-86): read on a thread, shown until Refresh.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Facts {
+    pub file: std::path::PathBuf,
+    /// Size on disk, and when the file was last written (local time), when the file says.
+    pub bytes: Option<u64>,
+    pub written: Option<String>,
+    pub documents: i64,
+    pub clients: i64,
+    pub clients_with_folder: i64,
+    /// An index is asked for or under way.
+    pub index_due: bool,
+}
+
+/// [`Facts`] of the catalog at `file`, through a connection of its own.
+pub fn facts(file: &std::path::Path) -> Result<Facts, String> {
+    let conn = vf_core::db::open(file, vf_core::db::Storage::Local).map_err(|e| e.to_string())?;
+    let n = |sql: &str| -> i64 { conn.query_row(sql, [], |r| r.get(0)).unwrap_or(0) };
+    let meta = std::fs::metadata(file).ok();
+    Ok(Facts {
+        file: file.to_path_buf(),
+        bytes: meta.as_ref().map(|m| m.len()),
+        written: meta.and_then(|m| m.modified().ok()).map(|t| {
+            chrono::DateTime::<chrono::Local>::from(t)
+                .format("%Y-%m-%d %H:%M")
+                .to_string()
+        }),
+        documents: n("SELECT count(*) FROM document WHERE deleted_at IS NULL"),
+        clients: n("SELECT count(*) FROM client WHERE deleted_at IS NULL"),
+        clients_with_folder: n(
+            "SELECT count(*) FROM client WHERE deleted_at IS NULL AND coalesce(folder_rel, '') <> ''",
+        ),
+        index_due: vf_fs::rebuild::unfinished_label(&conn).is_some(),
+    })
+}
+
+/// The catalog's facts and "Index the cabinet again" (PA-86, owner 2026-11-16: the catalog's
+/// folder cannot be opened from their login; what it holds is shown here, and it can be put
+/// right without reaching the file).
+fn catalog_facts(ui: &mut egui::Ui, p: &mut DevicesPage, env: &mut Env) {
+    if let Some(r) = crate::ui::job::take(&mut p.facts_job) {
+        p.facts = Some(r.and_then(|f| f));
+    }
+    if p.facts.is_none() && p.facts_job.is_none() {
+        // The file the open connection is on (the catalog in use, wherever it is kept).
+        let file: Option<String> = env
+            .conn
+            .query_row(
+                "SELECT file FROM pragma_database_list WHERE name = 'main'",
+                [],
+                |r| r.get(0),
+            )
+            .ok()
+            .filter(|f: &String| !f.is_empty());
+        match file {
+            Some(file) => {
+                match crate::ui::job::Job::start(ui.ctx(), "Reading the catalog…", move || {
+                    facts(std::path::Path::new(&file))
+                }) {
+                    Ok(j) => p.facts_job = Some(j),
+                    Err(e) => p.facts = Some(Err(e)),
+                }
+            }
+            None => p.facts = Some(Err("the catalog's file is not known".into())),
+        }
+    }
+    if let Some(j) = &p.facts_job {
+        j.show(ui);
+        return;
+    }
+    match p.facts.clone() {
+        Some(Ok(f)) => {
+            ui.label(format!("In use: {}", f.file.display()));
+            let size = f.bytes.map_or_else(
+                || "size not known".to_string(),
+                |b| format!("{:.1} MB", b as f64 / 1_048_576.0),
+            );
+            ui.label(format!(
+                "{} documents · {} of {} clients have a folder · {size}{}",
+                f.documents,
+                f.clients_with_folder,
+                f.clients,
+                f.written
+                    .as_deref()
+                    .map_or(String::new(), |w| format!(" · last written {w}"))
+            ));
+            ui.horizontal(|ui| {
+                if ui.button("Refresh").clicked() {
+                    p.facts = None;
+                }
+                if f.index_due {
+                    ui.label(widgets::caption(
+                        "The cabinet is being indexed, or will be when Vibe Files next opens it on this computer.",
+                    ));
+                } else if ui
+                    .button("Index the cabinet again")
+                    .on_hover_text(
+                        "For a catalog that is missing clients' folders or documents. The cabinet's folders are listed again (no file is read) the next time Vibe Files opens it here, behind the window. Nothing is removed now.",
+                    )
+                    .clicked()
+                {
+                    match vf_fs::rebuild::ask_for_index(env.conn) {
+                        Ok(()) => {
+                            p.notice = Some(
+                                "Close Vibe Files and open it again on this computer: the cabinet is indexed again behind the window."
+                                    .into(),
+                            );
+                            p.error = None;
+                            p.facts = None;
+                        }
+                        Err(e) => p.error = Some(format!("Not asked for: {e}")),
+                    }
+                }
+            });
+        }
+        Some(Err(e)) => {
+            ui.label(RichText::new(format!("The catalog was not read: {e}")).color(theme::error()));
+            if ui.button("Refresh").clicked() {
+                p.facts = None;
+            }
+        }
+        None => {}
+    }
+    ui.add_space(6.0);
+}
+
 #[derive(Default)]
 pub struct DevicesPage {
     pub notice: Option<String>,
     pub error: Option<String>,
+    /// The catalog's facts (PA-86), and their reading.
+    facts: Option<Result<Facts, String>>,
+    facts_job: Option<crate::ui::job::Job<Result<Facts, String>>>,
     /// This computer's server-mode choice and what Windows says, read once (not every frame).
     server: Option<(crate::server::Setting, bool)>,
     /// This computer's cloud folder choice, read once (PA-39).

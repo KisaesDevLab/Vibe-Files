@@ -471,6 +471,27 @@ pub(crate) mod tests {
         index("2026-11-16T11:07:00Z");
         assert!(open_staged(&pc2, "dev-2", &root).unwrap().staged.is_none());
     }
+    /// PA-86: Admin › Devices says what the catalog in use holds, and "Index the cabinet
+    /// again" has the next open index it behind the window.
+    #[test]
+    fn the_catalogs_facts_and_indexing_it_again() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (data, root) = (tmp.path().join("pc1"), tmp.path().join("cab"));
+        let o = create(&data, "dev-1", &req(&root)).unwrap();
+        let file = data.join(CATALOG_FILE);
+        let f = crate::ui::devices::facts(&file).unwrap();
+        assert_eq!((f.documents, f.clients, f.clients_with_folder), (0, 0, 0));
+        assert!(f.bytes.is_some_and(|b| b > 0) && !f.index_due);
+        vf_fs::rebuild::ask_for_index(&o.conn).unwrap();
+        drop(o);
+        assert!(crate::ui::devices::facts(&file).unwrap().index_due);
+        let mut again = open_staged(&data, "dev-1", &root).unwrap();
+        let staged = again.staged.take().expect("indexed behind the window");
+        let shared = crate::indexer::Shared::new(&staged);
+        crate::indexer::run(&mut again.conn, &root, "dev-1", &staged, &shared, &|| {});
+        drop(again);
+        assert!(!crate::ui::devices::facts(&file).unwrap().index_due);
+    }
     /// PA-18 done-when: created and reopened with no passphrase anywhere; a plain SQLite file.
     #[test]
     fn create_then_open_on_a_fresh_workstation() {
