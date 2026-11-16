@@ -185,12 +185,15 @@ impl Layout {
             doc.push('|');
         }
         doc.push_str(&format!("(?P<doc_o>{}))", other.join("|")));
-        format!("(?i)^{}\\.pdf$", self.join(doc, true))
+        format!("(?i)^{}\\.pdf$", self.join(doc, true, &[]))
     }
 
     /// The printed name of one row, anchored to its place in the layout, with no capture groups
     /// but `who` (the K-1 partner, when `who`): what a managed Filer rule matches for `{Printed}`.
-    pub fn row_body(&self, row: &Row, who: bool) -> String {
+    /// `id_parts`: what stands before the last part of the client list's IDs that have an
+    /// underscore and do not start with a number part (`AB` of `AB_1234`): such an ID is
+    /// taken whole too (a number part always is).
+    pub fn row_body(&self, row: &Row, who: bool, id_parts: &[String]) -> String {
         let mut names: Vec<String> = row.names();
         names.sort_by_key(|d| std::cmp::Reverse(d.len()));
         names.dedup();
@@ -203,7 +206,7 @@ impl Layout {
                 "(?:_[^_]+?)??"
             });
         }
-        self.join(doc, false)
+        self.join(doc, false, id_parts)
     }
 
     /// What Intake's rules read from a printed name of `row` saved straight into an inbox
@@ -257,7 +260,10 @@ impl Layout {
             client_id: 0,
             ..self.clone()
         };
-        Some(format!(r"^{}(?:[ _]*\(\d+\))?$", middle.join(doc, false)))
+        Some(format!(
+            r"^{}(?:[ _]*\(\d+\))?$",
+            middle.join(doc, false, &[])
+        ))
     }
 
     /// [`Self::inbox_pattern`] for a print that is in no row: any document name `doc_re`
@@ -287,7 +293,7 @@ impl Layout {
     }
 
     /// The layout's variables in order, `doc` standing for the document name.
-    fn join(&self, doc: String, named: bool) -> String {
+    fn join(&self, doc: String, named: bool, id_parts: &[String]) -> String {
         let g = |name: &str, re: &str| {
             if named {
                 format!("(?P<{name}>{re})")
@@ -308,7 +314,13 @@ impl Layout {
                 // first part has letters (`AB_1234`) is not taken here: such a print keeps
                 // its doc type and client, and is filed by its doc type's rule.
                 Var::ClientId if named => g("id", "[^_ ]+"),
-                Var::ClientId => r"(?:(?:\d+_)?[^_ ]+)".to_string(),
+                Var::ClientId => {
+                    // The client list's own first parts beside the number part (PA-87):
+                    // exact, so a word of a document's name is never taken for one.
+                    let mut firsts = vec![r"\d+".to_string()];
+                    firsts.extend(id_parts.iter().map(|p| regex::escape(p)));
+                    format!("(?:(?:(?:{})_)?[^_ ]+)", firsts.join("|"))
+                }
                 Var::EntityType => g("form", "[A-Za-z0-9-]+"),
                 Var::TaxYear => g("year", "(?:19|20)\\d{2}"),
                 Var::YearEnd => g("ye", "[^_]+"),
@@ -849,7 +861,7 @@ pub fn folder_problem(folder: &str) -> Option<String> {
 /// the inbox, is never taken by the row. The K-1 partner is captured as `who` (copies).
 /// `layout` gives the shape of `{Printed}`; a leading year may be added by the pipeline when
 /// the name would otherwise give Filer the wrong year (QA2 E2).
-pub fn rule_pattern(row: &Row, layout: &Layout, short: bool) -> String {
+pub fn rule_pattern(row: &Row, layout: &Layout, short: bool, id_parts: &[String]) -> String {
     let t = row.template(short);
     let mut names: Vec<String> = row.names();
     names.sort_by_key(|d| std::cmp::Reverse(d.len()));
@@ -873,7 +885,7 @@ pub fn rule_pattern(row: &Row, layout: &Layout, short: bool) -> String {
             rest = &rest[end + 1..];
             out.push_str(&match tok {
                 "{Printed}" => {
-                    let b = format!("(?:{})", layout.row_body(row, who));
+                    let b = format!("(?:{})", layout.row_body(row, who, id_parts));
                     if row.is_k1() && layout.k1_recipient_after_document {
                         who = false;
                     }
@@ -965,7 +977,7 @@ mod tests {
         let rows = default_rows();
         let get = |d: &str| rows.iter().find(|r| r.default_name == d).unwrap();
         let re = |d: &str, short: bool| {
-            regex::RegexBuilder::new(&rule_pattern(get(d), &l, short))
+            regex::RegexBuilder::new(&rule_pattern(get(d), &l, short, &[]))
                 .case_insensitive(true)
                 .build()
                 .unwrap()
@@ -1004,7 +1016,7 @@ mod tests {
         // A rename with the partner joined by "_" still captures the partner.
         let mut r = get("ArchiveK1Package").clone();
         r.rename = "{Year} {Document}_{Recipient}".into();
-        let p = regex::RegexBuilder::new(&rule_pattern(&r, &l, false))
+        let p = regex::RegexBuilder::new(&rule_pattern(&r, &l, false, &[]))
             .case_insensitive(true)
             .build()
             .unwrap();

@@ -672,7 +672,7 @@ fn a_two_part_id_holding_another_clients_id_is_left_for_intake_to_ask() {
     let csv = t.path().join("clients.csv");
     std::fs::write(
         &csv,
-        "ID,Name\n2614,Other Client LLC\n2614_FOUR,Four State Barns LLC\n8054_1FAR,One Farm LLC\n",
+        "ID,Name\n2614,Other Client LLC\n2614_FOUR,Four State Barns LLC\n8054_1FAR,One Farm LLC\nAB_1234,Abel Barns LLC\n",
     )
     .unwrap();
     let map = filer_core::config::ColumnMap {
@@ -699,4 +699,49 @@ fn a_two_part_id_holding_another_clients_id_is_left_for_intake_to_ask() {
     );
     assert!(delivered.ends_with("_8054_1FAR.pdf"), "{delivered}");
     assert!(hint.doc_type.is_some());
+
+    // PA-87: an ID whose first part has letters follows its row too. The rules know the
+    // client list's first parts, so no word of a document's name is taken for one.
+    assert_eq!(vf_ingest::parsers::id_first_parts(&root), ["AB"]);
+    vf_ingest::parsers::sync_filer_rules(&root).unwrap();
+    let master = vf_fs::clients::master_dir(&root);
+    let (rules, _, _) = filer_core::rules::load_or_seed(&master);
+    let compiled = filer_core::rules::CompiledRules::new(rules.active_rules()).unwrap();
+    let list = vf_fs::clients::load(&root).unwrap().list.unwrap();
+    let re =
+        filer_core::parse::filename_regex(&vf_ingest::pipeline::filer_id_pattern(&root)).unwrap();
+    let off = filer_core::parse::UltraTaxLayout {
+        enabled: false,
+        ..Default::default()
+    };
+    let filed = |printed: &str| {
+        let (delivered, _, _, _) = vf_ingest::pipeline::capture_name(&root, &lookup, printed);
+        let read = filer_core::parse::read_name(
+            &delivered,
+            Some(&re),
+            &off,
+            2026,
+            |id| list.match_by_id(id).is_some(),
+            |_| false,
+        );
+        (
+            read.id.clone().unwrap_or_default(),
+            compiled
+                .first_match(&read.rest, read.ultratax.is_some())
+                .name
+                .clone(),
+        )
+    };
+    assert_eq!(
+        filed("Abel Barns LLC_2025_1065_Tax_Return_AB_1234.pdf"),
+        (
+            "AB_1234".to_string(),
+            "UltraTax CS · ArchivedTaxReturn".to_string()
+        )
+    );
+    // The longer document of the same start keeps its own row for that client.
+    assert_eq!(
+        filed("Abel Barns LLC_2025_1065_Tax_Return_Documents_AB_1234.pdf").1,
+        "UltraTax CS · TaxSourceDocuments"
+    );
 }

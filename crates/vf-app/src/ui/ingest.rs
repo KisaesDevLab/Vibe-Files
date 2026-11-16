@@ -909,6 +909,7 @@ mod tests {
         use egui_kittest::kittest::Queryable;
 
         let mut h = HarnessBuilder::default()
+            .with_max_steps(crate::ui::test_util::MAX_STEPS)
             .with_size([1200.0, 200.0])
             .build_ui_state(
                 |ui, s: &mut IngestState| s.portal_row(ui),

@@ -1043,6 +1043,7 @@ mod tests {
             Admin::load(&env)
         };
         let mut h = HarnessBuilder::default()
+            .with_max_steps(crate::ui::test_util::MAX_STEPS)
             .with_size([1440.0, 900.0])
             .build_ui_state(
                 |ui, s: &mut State| {

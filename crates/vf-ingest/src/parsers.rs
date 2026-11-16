@@ -366,6 +366,7 @@ pub fn table_rules(
     types: &[vf_fs::doctypes::DocType],
     like_k1: Option<&filer_core::rules::Rule>,
     extra_tokens: &[String],
+    id_parts: &[String],
 ) -> (Vec<filer_core::rules::Rule>, Vec<(String, String)>) {
     use crate::ultratax::{Action, K1_BY_FORM, label_of};
     use filer_core::rules::{CopyDest, OnSplit, Resolver, Rule};
@@ -463,7 +464,7 @@ pub fn table_rules(
         }
         let mut rule = Rule::new(
             &format!("{} · {}", p.name, r.default_name),
-            &crate::ultratax::rule_pattern(r, layout, p.short_names),
+            &crate::ultratax::rule_pattern(r, layout, p.short_names, id_parts),
             &format!("{{Client}}/{folder}"),
             "{Rest}.{Ext}",
             // The partner copy's folder has {Year} too.
@@ -531,6 +532,29 @@ pub fn table_rules(
         }
     }
     (out, problems)
+}
+
+/// What stands before the last part of the client list's IDs that have an underscore in them
+/// and do not start with a number part (`AB` of `AB_1234`; PA-87, owner 2026-11-16): the row
+/// rules take such an ID whole by these, as they take a number part. Each once, in order, so
+/// an unchanged client list rewrites nothing. A list with very many of them is cut short
+/// (the rules would grow without end); the IDs left out are filed by their doc type's rule.
+pub fn id_first_parts(root: &Path) -> Vec<String> {
+    const MOST: usize = 300;
+    let Ok(master) = vf_fs::clients::load(root) else {
+        return vec![];
+    };
+    let mut parts: std::collections::BTreeSet<String> = master
+        .clients()
+        .iter()
+        .filter_map(|c| c.id.rsplit_once('_').map(|(first, _)| first.to_string()))
+        .filter(|f| !f.is_empty() && !f.chars().all(|ch| ch.is_ascii_digit()))
+        .filter(|f| !f.contains(' '))
+        .collect();
+    while parts.len() > MOST {
+        parts.pop_last();
+    }
+    parts.into_iter().collect()
 }
 
 /// A stable id from the profile and doc type (so an unchanged mapping rewrites nothing).
@@ -628,7 +652,13 @@ fn plan_rules(
     }
     // The document tables go first, ahead of Filer's K-1 rules (they carry the partner copy).
     let k1 = active.iter().find(|r| r.name == "K-1").cloned();
-    let (table, mut problems) = table_rules(&profiles, &types, k1.as_ref(), &extra);
+    let (table, mut problems) = table_rules(
+        &profiles,
+        &types,
+        k1.as_ref(),
+        &extra,
+        &id_first_parts(root),
+    );
     problems.extend(dup);
     for (k, r) in table.into_iter().enumerate() {
         active.insert(k, r);

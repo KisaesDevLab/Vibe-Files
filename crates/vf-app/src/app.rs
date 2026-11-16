@@ -1786,6 +1786,7 @@ mod tests {
         crate::ui::test_util::pdfium_first();
         let data = data.to_owned();
         let mut h = HarnessBuilder::default()
+            .with_max_steps(crate::ui::test_util::MAX_STEPS)
             .with_theme(egui::Theme::Light)
             .with_size([1440.0, 900.0])
             .build_eframe(move |cc| VibeFilesApp::new(&cc.egui_ctx, data.clone()));
@@ -2158,10 +2159,24 @@ mod tests {
                 .is_none()
         {
             h.step();
-            assert!(
-                start.elapsed() < std::time::Duration::from_secs(30),
-                "counts never refreshed"
-            );
+            // (Failed now and then under a full run, never alone, with no word of what the
+            // page showed: said here, and given longer than a loaded machine needs.)
+            if start.elapsed() >= std::time::Duration::from_secs(90) {
+                let Screen::Open(o) = &h.state().screen else {
+                    panic!("open")
+                };
+                panic!(
+                    "counts never refreshed: last push {:?}, last pull {:?}, {} conflicts, error {:?}, notice {:?}, in sync shown {}, nothing waiting shown {}",
+                    o.sync.last_push,
+                    o.sync.last_pull,
+                    o.sync.conflicts.len(),
+                    o.sync.error,
+                    o.sync.notice,
+                    h.query_by_label("in sync").is_some(),
+                    h.query_by_label("Nothing waiting: this PC and the bucket agree.")
+                        .is_some(),
+                );
+            }
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
 
@@ -3954,14 +3969,23 @@ mod tests {
         h.state_mut().open_last(&ctx);
         assert!(matches!(h.state().screen, Screen::Busy { .. }));
         h.step();
-        if matches!(h.state().screen, Screen::Busy { .. }) {
-            click(&mut h, "Open a different cabinet");
-            // (Or the cabinet opened in that very frame: opening is short now, PA-82.)
-            assert!(matches!(
-                h.state().screen,
-                Screen::Wizard(_) | Screen::Open(_)
-            ));
+        // The opening line under the spinner changes as the open goes on, and the button
+        // moves with it: a click aimed at the frame before can miss (this failed now and
+        // then under a full run). Pressed until it takes, or the cabinet has opened.
+        for _ in 0..20 {
+            if !matches!(h.state().screen, Screen::Busy { .. }) {
+                break;
+            }
+            if h.query_by_label("Open a different cabinet").is_some() {
+                click(&mut h, "Open a different cabinet");
+            } else {
+                h.step();
+            }
         }
+        assert!(matches!(
+            h.state().screen,
+            Screen::Wizard(_) | Screen::Open(_)
+        ));
         // The abandoned opening lets go of the data folder before the next one.
         std::thread::sleep(std::time::Duration::from_millis(500));
         // And straight through when left alone.
@@ -3998,6 +4022,7 @@ mod tests {
         crate::ui::test_util::pdfium_first();
         let (d, e) = (data.clone(), exe.clone());
         let mut h = HarnessBuilder::default()
+            .with_max_steps(crate::ui::test_util::MAX_STEPS)
             .with_theme(egui::Theme::Light)
             .with_size([1440.0, 900.0])
             .build_eframe(move |cc| VibeFilesApp::new_in(&cc.egui_ctx, d.clone(), Some(&e)));

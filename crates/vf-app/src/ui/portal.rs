@@ -3340,6 +3340,7 @@ mod tests {
             root: tempfile::tempdir().unwrap(),
         };
         let h = egui_kittest::Harness::builder()
+            .with_max_steps(crate::ui::test_util::MAX_STEPS)
             .with_size([900.0, 800.0])
             .build_ui_state(
                 |ui, st: &mut RequestsPage| {
@@ -3720,6 +3721,7 @@ mod tests {
             AuditOut(tx),
         );
         let mut h = egui_kittest::Harness::builder()
+            .with_max_steps(crate::ui::test_util::MAX_STEPS)
             .with_size([700.0, 700.0])
             .build_ui_state(move |ui, w: &mut PeopleWindow| w.show(ui.ctx(), &s), w);
         wait_for(&mut h, "Nobody has portal access");
@@ -3828,6 +3830,7 @@ mod tests {
             B2First::NotSetUp,
         );
         let h = egui_kittest::Harness::builder()
+            .with_max_steps(crate::ui::test_util::MAX_STEPS)
             .with_size([700.0, 800.0])
             .build_ui_state(move |ui, w: &mut SendLinkWindow| w.show(ui.ctx(), &s), w);
         (h, seen, audit, t)

@@ -316,6 +316,7 @@ mod tests {
         use egui::accesskit::Role;
         use egui_kittest::kittest::Queryable;
         let mut h = egui_kittest::HarnessBuilder::default()
+            .with_max_steps(crate::ui::test_util::MAX_STEPS)
             .with_size([600.0, 600.0])
             .build_ui_state(
                 |ui, chosen: &mut Option<usize>| {

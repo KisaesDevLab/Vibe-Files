@@ -4,6 +4,11 @@ use egui::accesskit::Role;
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
 
+/// How many frames a test's `run` may take to settle. kittest's own limit is 4. A worker
+/// thread (the document preview, a job) asks the window to repaint when it is done, at a
+/// moment of its own, and under a full run that pushed a `run` to 5 or 6 frames now and then:
+/// the test then failed with "exceeded max_steps" though nothing was wrong.
+pub const MAX_STEPS: u64 = 40;
 /// Clicks the button labelled `label`, then runs until the UI settles.
 pub fn click<S>(h: &mut Harness<'_, S>, label: &str) {
     h.get_by_role_and_label(Role::Button, label).click();

@@ -5635,6 +5635,7 @@ mod tests {
         let (tmp, conn) = seed(clients, per);
         let b = Browse::load_with(&conn, large_above);
         let mut h = HarnessBuilder::default()
+            .with_max_steps(crate::ui::test_util::MAX_STEPS)
             // Wide enough for every grid column beside the 400 px inspector (PA-12).
             .with_size([1600.0, 900.0])
             // Real frame times: double-clicks need two clicks within 0.3 s of simulated time.

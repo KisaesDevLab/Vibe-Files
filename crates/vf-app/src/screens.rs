@@ -31,6 +31,7 @@ mod tests {
         drop(crate::session::open(&data, "dev", &root).unwrap());
         let d = data.clone();
         let mut h = HarnessBuilder::default()
+            .with_max_steps(crate::ui::test_util::MAX_STEPS)
             .with_theme(egui::Theme::Light)
             .with_size([1440.0, 900.0])
             .build_eframe(move |cc| VibeFilesApp::new(&cc.egui_ctx, d.clone()));
@@ -286,6 +287,7 @@ mod tests {
 
         let d = data.clone();
         let mut h = HarnessBuilder::default()
+            .with_max_steps(crate::ui::test_util::MAX_STEPS)
             .with_theme(egui::Theme::Light)
             .with_size([1440.0, 810.0])
             .with_pixels_per_point(1920.0 / 1440.0)
