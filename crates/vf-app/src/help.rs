@@ -83,7 +83,7 @@ macro_rules! articles {
 
 articles! {
     Start: "welcome", "first-run", "screen-tour", "shortcuts";
-    Browse: "browse", "search", "explorer-view", "documents", "moving-renaming", "new-files", "browse-scan-print", "undo";
+    Browse: "browse", "search", "explorer-view", "documents", "client-notes", "moving-renaming", "new-files", "browse-scan-print", "undo";
     Intake: "intake", "intake-rules", "just-filed", "scanning", "cover-sheets", "print-capture",
         "several-pcs", "cloud-folders", "ocr";
     Viewer: "viewer", "annotations", "forms", "ten-key", "page-tools", "printing";

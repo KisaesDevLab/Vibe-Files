@@ -19,6 +19,7 @@ The new documents have no doc type yet, so they show the **Needs doc type** pill
 Left out on purpose:
 
 - Office and Explorer working files, such as `~$letter.docx`, `desktop.ini` and `Thumbs.db`.
+- FileCenter's `!fcinfo.ini`: it holds the client's notes. See [Client notes](help:client-notes).
 - A file with exactly the same content as a document already in the catalog (a copy, or a file moved in Explorer). The **Integrity sweep** in Admin deals with those. See [Maintenance](help:maintenance).
 - Files outside any client folder.
 

@@ -360,6 +360,8 @@ pub struct Browse {
     /// another edit came in meanwhile.
     pub client_sync: Option<crate::ui::job::Job<Result<usize, String>>>,
     pub client_sync_again: bool,
+    /// The selected client's notes (FileCenter's `!fcinfo.ini`, PA-76).
+    pub notes: crate::ui::client_notes::NotesState,
     /// A saved search running on its thread: its name and the documents it found.
     saved_job: Option<crate::ui::job::Job<SavedRun>>,
     /// A move, copy or undo running.
@@ -583,6 +585,7 @@ impl Browse {
             b2_choice: None,
             client_sync: None,
             client_sync_again: false,
+            notes: Default::default(),
             saved_job: None,
             find: Default::default(),
             ex: Default::default(),
@@ -4700,6 +4703,12 @@ fn inspector(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env) {
     legal_holds(ui, b, env);
     inspector_body(ui, b, env);
     place_legal_hold(ui, b, env);
+    // The client's notes (PA-76), when the client itself is what is selected.
+    if b.selected.is_empty()
+        && let Scope::Client(c) = b.scope
+    {
+        crate::ui::client_notes::show(ui, b, env, c);
+    }
 }
 
 fn inspector_body(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env) {
@@ -5694,6 +5703,103 @@ mod tests {
 
     /// Q-114 on a large cabinet (its snapshot holds a window of the documents, PA-34): the
     /// documents of the folder shown are there.
+    /// Q-115 (owner 2026-11-15): a client's notes are the `[Memo]` text of FileCenter's
+    /// `!fcinfo.ini` in the client's folder. They show when the client itself is selected,
+    /// are edited and saved back into that file (the rest of it kept), the file is made on the
+    /// first save, and a change made elsewhere meanwhile is shown, not written over unseen.
+    #[test]
+    fn a_clients_notes_are_read_from_and_saved_to_fcinfo() {
+        let mut h = harness(2, 4);
+        let root = h.state().root.clone();
+        let folder = root.join("Client 0000 (1000)");
+        std::fs::create_dir_all(&folder).unwrap();
+        let file = folder.join("!fcinfo.ini");
+        std::fs::write(
+            &file,
+            "[Fields]\r\nKind=Example\r\n\r\n[Memo]\r\nfirst note\r\nsecond note\r\n\r\n[System]\r\nStamp=1\r\n",
+        )
+        .unwrap();
+        h.state_mut().b.set_root(&root);
+        h.state_mut().b.set_scope(Scope::Client(0));
+        h.run();
+        h.run();
+        assert_eq!(h.state().b.notes.text, "first note\nsecond note");
+        assert!(h.query_by_label("NOTES").is_some());
+        assert!(!h.state().b.notes.unsaved());
+
+        h.state_mut().b.notes.text = "first note\nchanged".into();
+        h.run();
+        click(&mut h, "Save notes");
+        h.run();
+        h.run();
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            "[Fields]\r\nKind=Example\r\n\r\n[Memo]\r\nfirst note\r\nchanged\r\n\r\n[System]\r\nStamp=1\r\n"
+        );
+        assert!(!h.state().b.notes.unsaved());
+        let audited: i64 = h
+            .state()
+            .conn
+            .query_row(
+                "SELECT count(*) FROM audit WHERE action = 'client_notes'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(audited, 1);
+
+        // Changed elsewhere (FileCenter) while it is shown: said, and nothing written.
+        let theirs = std::fs::read_to_string(&file)
+            .unwrap()
+            .replace("changed", "theirs");
+        std::fs::write(&file, &theirs).unwrap();
+        h.state_mut().b.notes.text = "mine".into();
+        h.run();
+        click(&mut h, "Save notes");
+        h.run();
+        h.run();
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), theirs);
+        assert_eq!(
+            h.state().b.notes.newer.as_ref().map(|n| n.memo.as_str()),
+            Some("first note\ntheirs")
+        );
+        click(&mut h, "Save mine anyway");
+        h.run();
+        h.run();
+        assert!(
+            std::fs::read_to_string(&file)
+                .unwrap()
+                .contains("[Memo]\r\nmine\r\n\r\n[System]")
+        );
+        assert!(h.state().b.notes.newer.is_none());
+
+        // A folder of the client: the notes are not offered there.
+        h.state_mut().b.set_scope(Scope::Folder {
+            client: 0,
+            folder: "Income Tax/2025".into(),
+        });
+        h.run();
+        assert!(h.query_by_label("NOTES").is_none());
+
+        // A client with no file yet: one is made on the first save.
+        let other = root.join("Client 0001 (1001)");
+        std::fs::create_dir_all(&other).unwrap();
+        h.state_mut().b.set_scope(Scope::Client(1));
+        h.run();
+        h.run();
+        assert_eq!(h.state().b.notes.text, "");
+        assert!(h.query_by_label("Save notes").is_none());
+        h.state_mut().b.notes.text = "call in March".into();
+        h.run();
+        click(&mut h, "Create notes");
+        h.run();
+        h.run();
+        assert_eq!(
+            std::fs::read_to_string(other.join("!fcinfo.ini")).unwrap(),
+            "[Fields]\r\n\r\n\r\n[Memo]\r\ncall in March\r\n\r\n[System]\r\n"
+        );
+    }
+
     #[test]
     fn explorer_view_has_the_folders_documents_on_a_large_cabinet() {
         let mut h = harness_from(3, 8, 4);
