@@ -607,6 +607,13 @@ fn plan_rules(
     let extra = filer_core::clients::extra_tokens(&settings.column_map);
     for rules in file.profiles.values_mut() {
         rules.retain(|r| !r.id.starts_with(MANAGED_PREFIX));
+        // Filer's rules for names read with its own UltraTax layout ("UltraTax K-1 package",
+        // "UltraTax files"): that reading is off in Vibe Files (print capture reads UltraTax
+        // names), so they can never match here. Switched off, so the list shows one set of
+        // rules for UltraTax prints, not two (owner 2026-11-16, PA-85).
+        for r in rules.iter_mut().filter(|r| r.ultratax_only) {
+            r.enabled = false;
+        }
     }
     let active = file.active_rules_mut();
     let ut = active
@@ -626,6 +633,36 @@ fn plan_rules(
     for (k, r) in table.into_iter().enumerate() {
         active.insert(k, r);
     }
+    // One of Intake's own rules that says exactly what a print capture rule above it says
+    // (same pattern, exception and folder) is a duplicate: said, for its owner to delete.
+    {
+        let key = |r: &filer_core::rules::Rule| {
+            (
+                r.pattern.to_lowercase(),
+                r.exclude.to_lowercase(),
+                r.dest_template.to_lowercase(),
+            )
+        };
+        let active = file.active_rules();
+        let ours: Vec<&filer_core::rules::Rule> = active
+            .iter()
+            .filter(|r| r.id.starts_with(MANAGED_PREFIX))
+            .collect();
+        for r in active
+            .iter()
+            .filter(|r| !r.id.starts_with(MANAGED_PREFIX) && !r.catch_all && r.enabled)
+        {
+            if let Some(o) = ours.iter().find(|o| key(o) == key(r)) {
+                problems.push((
+                    String::new(),
+                    format!(
+                        "Intake's rule \"{}\" is the same as \"{}\", which print capture writes: delete it in Intake › Rules",
+                        r.name, o.name
+                    ),
+                ));
+            }
+        }
+    }
     let errors = filer_core::rules::validate_file(&file, &extra);
     if !errors.is_empty() {
         return Err(format!(
@@ -634,6 +671,49 @@ fn plan_rules(
         ));
     }
     Ok((before, file, problems))
+}
+
+/// Intake's own rules that would also take an UltraTax print of the profiles' tables if the
+/// print capture rules were not above them: (Intake's rule, the document). For Admin to show,
+/// so the firm sees the two sets side by side; nothing is wrong when the list is not empty
+/// (the first rule that matches files the print, and print capture's come first).
+pub fn also_matched(root: &Path) -> Vec<(String, String)> {
+    let master = vf_fs::clients::master_dir(root);
+    let (file, _, _) = filer_core::rules::load_or_seed(&master);
+    let own: Vec<filer_core::rules::Rule> = file
+        .active_rules()
+        .iter()
+        .filter(|r| !r.id.starts_with(MANAGED_PREFIX))
+        .cloned()
+        .collect();
+    let Ok(compiled) = filer_core::rules::CompiledRules::new(&own) else {
+        return vec![];
+    };
+    let (profiles, _) = load_files(root);
+    let mut out: Vec<(String, String)> = Vec::new();
+    for (_, p) in profiles.iter().filter(|(_, p)| p.enabled) {
+        let Some(layout) = &p.layout else { continue };
+        for r in &p.documents {
+            // The part of an example name Intake's rules read (client name and ID taken off).
+            let example = layout.example(r.printed_name()).replace('*', "");
+            let stem = example.trim_end_matches(".pdf");
+            let parts: Vec<&str> = stem.split('_').collect();
+            if parts.len() < 3 || layout.inbox_pattern(r, false).is_none() {
+                continue;
+            }
+            let rest = parts[1..parts.len() - 1].join("_");
+            if let Some(hit) = compiled.first_specific_match(&rest, false) {
+                let pair = (
+                    hit.name.clone(),
+                    crate::ultratax::label_of(&r.default_name).to_string(),
+                );
+                if !out.contains(&pair) {
+                    out.push(pair);
+                }
+            }
+        }
+    }
+    out
 }
 
 /// Brings Filer's `rules.json` in line with the parser profiles and doc types: the managed rules
@@ -1208,7 +1288,16 @@ mod tests {
         let root = t.path();
         std::fs::create_dir_all(dir(root)).unwrap();
         let mut old = ultratax_profile();
-        old.doc = docs_before_pa85();
+        // The lines as the profile was seeded before: the text's own, less the K-1 lines,
+        // and the invoice line.
+        let mut before: Profile = toml::from_str(ULTRATAX).unwrap();
+        before.doc.retain(|d| !d.pattern.starts_with("(?i)^1"));
+        before.doc.push(DocRule {
+            pattern: "(?i)invoice".into(),
+            doc_type: "Invoice".into(),
+        });
+        assert_eq!(before.doc, docs_before_pa85());
+        old.doc = before.doc;
         let path = dir(root).join("ultratax.toml");
         save_profile(&path, &old).unwrap();
         assert!(seed_if_missing(root).unwrap());

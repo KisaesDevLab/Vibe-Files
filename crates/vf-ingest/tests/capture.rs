@@ -486,6 +486,22 @@ fn ultratax_prints_dropped_in_an_inbox_follow_their_rows() {
             );
         }
     }
+    // No two sets of rules for UltraTax prints (owner 2026-11-16): Filer's rules for names
+    // read with its own UltraTax layout, which is off here, are switched off; and what of
+    // Intake's own rules would also take a table print is listed for Admin.
+    assert!(
+        rules
+            .active_rules()
+            .iter()
+            .filter(|r| r.ultratax_only)
+            .all(|r| !r.enabled)
+    );
+    assert!(rules.active_rules().iter().any(|r| r.ultratax_only));
+    let also = vf_ingest::parsers::also_matched(&root);
+    assert!(
+        also.iter().any(|(rule, _)| rule == "K-1 package"),
+        "{also:?}"
+    );
     // PA-85. A second file of the same name (Windows adds " (2)") keeps its row.
     let re = filer_core::parse::filename_regex(&patterns[0]).unwrap();
     let k1 = "Anderson Farms LLC_2025_1120S_K1_Package_Pat Partner_ANDE1042";
@@ -514,6 +530,40 @@ fn ultratax_prints_dropped_in_an_inbox_follow_their_rows() {
             &format!("Anderson Farms LLC_2025_1120S_{doc}_ANDE1042.pdf"),
         );
         assert!(got.starts_with(rule), "{doc}: {got} ({dest})");
+    }
+    // A state return is read as one here too (its line asks for a non-letter before "state").
+    for doc in ["State_Return", "NE_Return"] {
+        let (got, _) = file(
+            &re,
+            &format!("Anderson Farms LLC_2025_1120S_{doc}_ANDE1042.pdf"),
+        );
+        assert!(
+            got.starts_with("Return copy — state · UltraTax CS (inbox"),
+            "{doc}: {got}"
+        );
+    }
+    // Only names in UltraTax's shape: a file somebody named, or one a client uploaded, with
+    // "copy" or "return" in it goes by Filer's own rules as before.
+    for name in [
+        "Anderson Farms LLC_2024_W2_client copy_ANDE1042.pdf",
+        "Anderson Farms LLC_2024_tax_return_ANDE1042.pdf",
+        "Anderson Farms LLC_2024 tax return signed_ANDE1042.pdf",
+        "Anderson Farms LLC_federal return 2024_ANDE1042.pdf",
+    ] {
+        let read = filer_core::parse::read_name(
+            name,
+            Some(&re),
+            &off,
+            2026,
+            |id| list.match_by_id(id).is_some(),
+            |_| false,
+        );
+        let r = compiled.first_match(&read.rest, read.ultratax.is_some());
+        assert!(
+            !r.id.starts_with(vf_ingest::parsers::MANAGED_PREFIX),
+            "{name}: {}",
+            r.name
+        );
     }
     // A row set to "Don't file": left with the unfiled, with no copy to anyone (Filer's
     // "K-1 package" took it before, with copies to every related client).

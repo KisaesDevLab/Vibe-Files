@@ -21,6 +21,9 @@ pub struct CapturePage {
     loaded: bool,
     files: Vec<(PathBuf, Profile)>,
     errors: Vec<String>,
+    /// Intake's own rules that would also take a print of the tables, and which document
+    /// (`parsers::also_matched`): shown, so the two sets of rules are seen side by side.
+    also: Vec<(String, String)>,
     pick: usize,
     /// The profile being edited (a copy of `files[pick]` until saved).
     draft: Option<Profile>,
@@ -45,6 +48,7 @@ impl CapturePage {
         let (files, errors) = parsers::load_files(root);
         self.files = files;
         self.errors = errors;
+        self.also = parsers::also_matched(root);
         let at = self
             .draft_of
             .as_ref()
@@ -167,6 +171,24 @@ pub fn show(
     });
     for e in &p.errors {
         ui.label(RichText::new(e).color(crate::ui::theme::error()));
+    }
+    if !p.also.is_empty() {
+        let names: Vec<&str> = {
+            let mut v: Vec<&str> = p.also.iter().map(|(r, _)| r.as_str()).collect();
+            v.dedup();
+            v
+        };
+        ui.label(widgets::caption(format!(
+            "Intake's own rules that would also take one of these prints: {}. They do not: the rules written here come first in Intake › Rules. Intake's rules for UltraTax's own name layout are switched off, since these profiles read those names.",
+            names.join(", ")
+        )))
+        .on_hover_text(
+            p.also
+                .iter()
+                .map(|(r, d)| format!("{r}: {d}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
     }
     if p.files.is_empty() {
         ui.label("No parser profiles.");

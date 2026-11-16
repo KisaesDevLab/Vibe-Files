@@ -96,6 +96,11 @@ pub fn on_network(dir: &Path) {
     }
 }
 
+/// Whether `path` is under a folder said to be on a network share ([`on_network`]).
+pub fn is_on_network(path: &Path) -> bool {
+    storage_of(path, Storage::Local) == Storage::Network
+}
+
 /// How the catalog at `path` is opened when `asked` for.
 fn storage_of(path: &Path, asked: Storage) -> Storage {
     let n = NETWORK.read().unwrap_or_else(|e| e.into_inner());
@@ -127,6 +132,7 @@ pub fn open(path: &Path, storage: Storage) -> Result<Connection> {
         Storage::Network => "DELETE",
     };
     conn.pragma_update(None, "journal_mode", mode)?;
+
     // Owner 2026-11-13 (Q-102): with a write-ahead log the catalog is flushed to disk at each
     // checkpoint, not at each commit. A power cut can lose the last commits, never corrupt
     // the catalog, and the catalog is rebuilt from the cabinet anyway.

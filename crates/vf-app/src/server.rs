@@ -188,11 +188,72 @@ pub fn provision(cabinet_id: &str, root: &Path, legacy: Option<&Path>) -> Result
     let base = crate::shared::shared_root()
         .context("the folder for this computer's catalogs is not known (firm.toml: catalogs)")?;
     let earlier = crate::catalog_place::earlier_catalogs(cabinet_id);
+    // The place was changed while other sessions of this computer have the catalog open in
+    // the place used before: this one joins them there (two catalogs for one computer would
+    // each miss the other's changes). The move is made by the first session to open when
+    // nobody else is in.
+    if !crate::shared::prepare_dir(&base, cabinet_id)?
+        .join(CATALOG_FILE)
+        .is_file()
+        && let Some(open) = earlier.iter().find(|e| in_use(e))
+    {
+        tracing::info!("the catalog is open in another session: not moved to its new place yet");
+        return Ok(open.clone());
+    }
     provision_in(&base, cabinet_id, root, legacy, &earlier)
 }
 
+/// Whether a session has the catalog at `catalog` open: one of the lock files in the `live`
+/// folder beside it is held (`vf_fs::fileops::hold_live`).
+fn in_use(catalog: &Path) -> bool {
+    use std::os::windows::fs::OpenOptionsExt;
+    let Some(dir) = catalog.parent().map(|d| d.join("live")) else {
+        return false;
+    };
+    std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| e.path().extension().is_some_and(|x| x == "lock"))
+        .any(|e| {
+            std::fs::OpenOptions::new()
+                .read(true)
+                .share_mode(0)
+                .open(e.path())
+                .is_err()
+        })
+}
+
+/// The whole catalog at `from` copied into `to`, as it is (the same computer's catalog going
+/// to another place, PA-84: its writer id and its place in the change logs go with it).
+fn move_copy(from: &Path, to: &Path) -> Result<()> {
+    let src = Connection::open_with_flags(from, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .with_context(|| format!("opening {}", from.display()))?;
+    let _ = std::fs::remove_file(to);
+    src.execute("VACUUM INTO ?1", [to.to_string_lossy().as_ref()])
+        .with_context(|| format!("copying {}", from.display()))?;
+    Ok(())
+}
+
+/// The catalog at `old` and its side files set aside once it has been moved: a later change
+/// of place must not take it for the catalog in use.
+fn set_aside_moved(old: &Path) {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    for side in ["", "-wal", "-shm"] {
+        let f = PathBuf::from(format!("{}{side}", old.display()));
+        if f.is_file() {
+            let to = PathBuf::from(format!("{}.moved-{secs}{side}", old.display()));
+            if std::fs::rename(&f, &to).is_err() {
+                tracing::warn!("the catalog in the place used before could not be set aside");
+            }
+        }
+    }
+}
+
 /// `earlier`: this computer's catalog in a place used before (PA-84): the most up to date
-/// there is, taken first and as it is.
+/// there is, taken first and as it is, and set aside there once moved.
 fn provision_in(
     base: &Path,
     cabinet_id: &str,
@@ -212,17 +273,23 @@ fn provision_in(
     }
     let part = dir.join(format!("{CATALOG_FILE}.part"));
     let seed = seed_path(root);
+    // (from, up to date as it is, this computer's own catalog moved)
     let sources = earlier
         .iter()
-        .map(|e| (Some(e.as_path()), true))
-        .chain([(Some(seed.as_path()), true), (legacy, false)]);
-    for (from, is_seed) in sources {
+        .map(|e| (Some(e.as_path()), true, true))
+        .chain([(Some(seed.as_path()), true, false), (legacy, false, false)]);
+    for (from, is_seed, moved) in sources {
         let Some(from) = from.filter(|f| f.is_file()) else {
             continue;
         };
-        match copy_catalog(from, &part) {
+        let copied = if moved {
+            move_copy(from, &part)
+        } else {
+            copy_catalog(from, &part)
+        };
+        match copied.and_then(|()| without_wal(&part)) {
             Ok(()) if belongs(&part, cabinet_id) => {
-                tracing::info!(seed = is_seed, "server catalog started from a copy");
+                tracing::info!(seed = is_seed, moved, "server catalog started from a copy");
                 if !is_seed {
                     // The old catalog beside the exe was not kept up to date by the change
                     // logs: the first open re-indexes the cabinet by size and date.
@@ -234,6 +301,9 @@ fn provision_in(
                     )?;
                 }
                 std::fs::rename(&part, &target)?;
+                if moved {
+                    set_aside_moved(from);
+                }
                 return Ok(target);
             }
             Ok(()) => {}
@@ -245,6 +315,21 @@ fn provision_in(
         let _ = std::fs::remove_file(&part);
     }
     Ok(target)
+}
+
+/// A catalog made for a place on a network share is put in the journal mode it is opened in
+/// there before anyone opens it (two logins opening a copy still in WAL mode at once would
+/// each keep it there).
+fn without_wal(part: &Path) -> Result<()> {
+    if !vf_core::db::is_on_network(part) {
+        return Ok(());
+    }
+    let c = Connection::open(part)?;
+    let mode: String = c.query_row("PRAGMA journal_mode=DELETE", [], |r| r.get(0))?;
+    if !mode.eq_ignore_ascii_case("delete") {
+        anyhow::bail!("the catalog copy stayed in {mode} mode");
+    }
+    Ok(())
 }
 
 /// Whether the catalog at `p` is this cabinet's.
@@ -684,14 +769,35 @@ mod tests {
             )
             .unwrap();
         }
+        let old = t.path().join("old-place").join("catalog.db");
+        std::fs::create_dir_all(old.parent().unwrap().join("live")).unwrap();
+        std::fs::copy(&a, &old).unwrap();
+        // While another session has it open there, it is not moved.
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            let held = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create_new(true)
+                .share_mode(0)
+                .open(old.parent().unwrap().join("live").join("s1.lock"))
+                .unwrap();
+            assert!(in_use(&old));
+            drop(held);
+            assert!(!in_use(&old));
+        }
         let moved = provision_in(
             &t.path().join("new-place"),
             "cab-1",
             &root,
             None,
-            std::slice::from_ref(&a),
+            std::slice::from_ref(&old),
         )
         .unwrap();
+        assert!(
+            !old.exists(),
+            "set aside: not taken for the one in use later"
+        );
         let v: String = vf_core::db::open(&moved, Storage::Local)
             .unwrap()
             .query_row("SELECT v FROM local_state WHERE k = 'probe'", [], |r| {

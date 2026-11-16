@@ -1093,14 +1093,14 @@ fn folder_index(root: &Path) -> Option<(String, Vec<(String, String)>)> {
     use filer_intake::sentinel::{FOLDERS_FILE, FoldersFile, Status, same_path};
     let text = std::fs::read(crate::clients::master_dir(root).join(FOLDERS_FILE)).ok()?;
     let file: FoldersFile = serde_json::from_slice(&text).ok()?;
-    if !same_path(&file.root, root) {
-        return None;
-    }
+    // By the folder's name directly under the scan's root, not by how the root is spelled
+    // (one login opens `S:\Documents`, another the server's own path): whoever uses a name
+    // checks the folder's own client file under this root.
     let bound = file
         .folders
         .iter()
         .filter(|b| b.status == Status::Bound)
-        .filter(|b| b.path.parent().is_some_and(|p| same_path(p, root)))
+        .filter(|b| b.path.parent().is_some_and(|p| same_path(p, &file.root)))
         .filter_map(|b| Some((b.client_id.clone()?, b.name())))
         .collect();
     Some((file.scanned_at.to_rfc3339(), bound))
@@ -1151,9 +1151,11 @@ pub fn behind_folder_index(conn: &Connection, root: &Path) -> bool {
                 .collect::<Result<_, _>>()
         })
         .unwrap_or_default();
-    let behind = bound
-        .iter()
-        .any(|(id, _)| !have.contains(&id.to_uppercase()));
+    // (The folder's client file is asked for only for a folder the catalog has none for:
+    // none at all once the two are in line.)
+    let behind = bound.iter().any(|(id, name)| {
+        !have.contains(&id.to_uppercase()) && sentinel::sentinel_path(&root.join(name)).is_file()
+    });
     let _ = conn.execute(
         "INSERT INTO local_state (k, v) VALUES (?1, ?2) ON CONFLICT(k) DO UPDATE SET v = excluded.v",
         [KEY, scanned_at.as_str()],

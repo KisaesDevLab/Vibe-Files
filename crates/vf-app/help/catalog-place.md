@@ -14,7 +14,7 @@ Add one line to `firm.toml` beside `vibe-files.exe`:
 - `catalogs = 'D:\VibeFiles'` keeps it in that folder, again one folder per computer.
 - `catalogs = 'programdata'`, or no line, is the default.
 
-The change takes effect the next time Vibe Files starts on each computer. The catalog a computer already has is copied to the new place the first time, so the cabinet is not indexed again. Removing the line moves it back the same way.
+The change takes effect the next time Vibe Files starts on each computer. On a Remote Desktop server or with a cabinet in OneDrive or Dropbox, the catalog the computer already has is copied to the new place the first time, so the cabinet is not indexed again; the old one is set aside beside where it was. This happens when nobody else on that computer has the cabinet open: while someone does, the old place stays in use. Removing the line moves it back the same way. An office PC that shared its catalog by hand shares it again from **Admin** › **Devices** after the change.
 
 Every computer has a folder of its own because a catalog belongs to one computer. Two computers never open the same one.
 

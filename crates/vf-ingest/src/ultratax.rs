@@ -261,9 +261,29 @@ impl Layout {
     }
 
     /// [`Self::inbox_pattern`] for a print that is in no row: any document name `doc_re`
-    /// (a profile's `[[doc]]` regex) finds something in (PA-85).
+    /// (a profile's `[[doc]]` regex) finds something in (PA-85). Only a name in UltraTax's
+    /// own shape is taken: the entity type must be there and start with a digit (`1040`,
+    /// `1120S`), so a file somebody named `2024_W2_client copy` is left to Filer's rules.
+    /// The `_` before the document name is left for `doc_re` to see, so a line that asks for
+    /// the start of the name or a non-letter before a word (`State_Return`) reads here as it
+    /// does in the capture folder. `None` without the entity type in the layout.
     pub fn inbox_any(&self, doc_re: &str) -> Option<String> {
-        self.inbox_shape(format!("(?:[^_].*?)?(?:{doc_re}).*?"))
+        if self.entity_type == 0 {
+            return None;
+        }
+        const DOC: &str = "\u{1}DOC\u{1}";
+        const FORM: &str = "(?:[A-Za-z0-9-]+)";
+        let shape = self.inbox_shape(DOC.to_string())?;
+        if !shape.contains(FORM) {
+            return None;
+        }
+        let shape = shape.replace(FORM, r"(?:\d[A-Za-z0-9-]*)");
+        let found = format!("(?:{doc_re}).*?");
+        Some(if shape.contains(&format!("_{DOC}")) {
+            shape.replace(&format!("_{DOC}"), &format!("(?:_.*?)??{found}"))
+        } else {
+            shape.replace(DOC, &format!("(?:.*?){found}"))
+        })
     }
 
     /// The layout's variables in order, `doc` standing for the document name.
