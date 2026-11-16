@@ -1193,6 +1193,58 @@ impl eframe::App for FilerApp {
     }
 }
 
+/// Vibe Files (PA-87): opens the header tab `label` and comes back once it is the one shown.
+/// A press that lands on a frame where the header is being drawn again (its badges change as
+/// the queue loads) does nothing; the test then waited for work that was never asked for.
+/// Pressed again until the tab is open.
+#[cfg(test)]
+pub fn press_tab(h: &mut egui_kittest::Harness<'static, FilerApp>, label: &str, tab: Tab) {
+    use egui_kittest::kittest::Queryable;
+    let start = std::time::Instant::now();
+    loop {
+        if h.state().tab == tab {
+            return;
+        }
+        if let Some(n) = h.query_by_label(label) {
+            n.click();
+        }
+        h.step();
+        h.step();
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(180),
+            "the {label} tab never opened"
+        );
+    }
+}
+
+/// Vibe Files (PA-87): steps until something labelled `label` (or, with `contains`, with
+/// `label` in its label) is on screen. In place of a fixed five frames, which the work
+/// behind it (a zip's pre-scan, a client match) outlasted on a busy machine.
+#[cfg(test)]
+pub fn wait_for_label(
+    h: &mut egui_kittest::Harness<'static, FilerApp>,
+    label: &str,
+    contains: bool,
+) {
+    use egui_kittest::kittest::Queryable;
+    let start = std::time::Instant::now();
+    loop {
+        let there = if contains {
+            h.query_by_label_contains(label).is_some()
+        } else {
+            h.query_by_label(label).is_some()
+        };
+        if there {
+            return;
+        }
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(180),
+            "never shown: {label}"
+        );
+        h.step();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
 /// Saves a rendered image of the harness to `$VFD_SNAPSHOT_DIR/<name>.png` when that variable is
 /// set (for looking at screens automation can't click to). Does nothing otherwise.
 #[cfg(test)]
@@ -1858,7 +1910,7 @@ mod conflict_tests {
         let lb = h.state().shared.last_batch.clone().unwrap();
         assert_eq!(lb.renamed_dirs.len(), 1);
 
-        h.get_by_label("History").click();
+        crate::app::press_tab(&mut h, "History", Tab::History);
         h.step();
         h.step();
         h.get_by_label("Undo last batch…").click();
@@ -2294,7 +2346,7 @@ mod plan_ui_tests {
             a.shared.intake.queue().len() == 20 && a.shared.clients.list().is_some()
         });
         h.get_by_label("Preview: 20 pending");
-        h.get_by_label("Preview").click();
+        crate::app::press_tab(&mut h, "Preview", Tab::Preview);
         settle(&mut h, "plan after the rescan", |a| {
             a.preview.plan_idle()
                 && a.preview.proposals().len() == 20
@@ -2496,7 +2548,7 @@ mod plan_ui_tests {
         assert_eq!(lb.items.len(), 19);
 
         // History lists the batch; Undo puts everything back.
-        h.get_by_label("History").click();
+        crate::app::press_tab(&mut h, "History", Tab::History);
         settle(&mut h, "history loaded", |a| !a.history.loading());
         h.step();
         assert!(h.get_all_by_label("move").count() >= 19);
@@ -2659,7 +2711,7 @@ mod combine_ui_tests {
             a.shared.intake.queue().len() == 4 && a.shared.clients.list().is_some()
         });
         h.get_by_label("Preview: 4 pending");
-        h.get_by_label("Preview").click();
+        crate::app::press_tab(&mut h, "Preview", Tab::Preview);
         settle(&mut h, "plan", |a| plan_ready(a, 4));
 
         // Ticking a different client's row blocks Combine.
@@ -2716,7 +2768,7 @@ mod combine_ui_tests {
         // Badges change as the queue empties; let the header settle before clicking.
         h.step();
         h.step();
-        h.get_by_label("History").click();
+        crate::app::press_tab(&mut h, "History", Tab::History);
         settle(&mut h, "history", |a| {
             a.tab == Tab::History && !a.history.loading()
         });
@@ -2797,7 +2849,7 @@ mod combine_ui_tests {
                 && a.shared.intake.unsupported().len() == 1
                 && a.shared.clients.list().is_some()
         });
-        h.get_by_label("Preview").click();
+        crate::app::press_tab(&mut h, "Preview", Tab::Preview);
         settle(&mut h, "converted", |a| a.preview.group_count() == 1);
         settle(&mut h, "plan", |a| plan_ready(a, 2));
         h.step();
@@ -2845,7 +2897,7 @@ mod combine_ui_tests {
 
         h.step();
         h.step();
-        h.get_by_label("History").click();
+        crate::app::press_tab(&mut h, "History", Tab::History);
         settle(&mut h, "history", |a| {
             a.tab == Tab::History && !a.history.loading()
         });
@@ -2914,7 +2966,7 @@ mod combine_ui_tests {
         settle(&mut h, "queue", |a| {
             a.shared.intake.queue().len() == 3 && a.shared.clients.list().is_some()
         });
-        h.get_by_label("Preview").click();
+        crate::app::press_tab(&mut h, "Preview", Tab::Preview);
         settle(&mut h, "plan", |a| plan_ready(a, 3));
         let dest_of = |a: &FilerApp, n: &str| {
             a.preview
@@ -3025,7 +3077,7 @@ mod combine_ui_tests {
         settle(&mut h, "queue", |a| {
             a.shared.intake.queue().len() == 3 && a.shared.clients.list().is_some()
         });
-        h.get_by_label("Preview").click();
+        crate::app::press_tab(&mut h, "Preview", Tab::Preview);
         settle(&mut h, "plan", |a| plan_ready(a, 3));
         assert!(!h.state().preview.can_commit_for_test(), "W-2 blocks");
 
@@ -3113,7 +3165,7 @@ mod combine_ui_tests {
         settle(&mut h, "queue", |a| {
             a.shared.intake.queue().len() == 3 && a.shared.clients.list().is_some()
         });
-        h.get_by_label("Preview").click();
+        crate::app::press_tab(&mut h, "Preview", Tab::Preview);
         settle(&mut h, "plan", |a| plan_ready(a, 3));
         assert!(!h.state().preview.can_commit_for_test(), "W-2 blocks");
 
@@ -3200,7 +3252,7 @@ mod combine_ui_tests {
         h.step();
         h.step();
         assert!(h.query_by_label("Locked by the admin password.").is_some());
-        h.get_by_label("Preview").click();
+        crate::app::press_tab(&mut h, "Preview", Tab::Preview);
         settle(&mut h, "plan", |a| plan_ready(a, 1));
         h.step();
         let file = inbox.join("Newco LLC_2002_2025 W-2.pdf");
@@ -3341,7 +3393,7 @@ mod combine_ui_tests {
         settle(&mut h, "queue", |a| {
             a.shared.intake.queue().len() == 2 && a.shared.clients.list().is_some()
         });
-        h.get_by_label("Preview").click();
+        crate::app::press_tab(&mut h, "Preview", Tab::Preview);
         settle(&mut h, "plan", |a| plan_ready(a, 2));
         h.step();
 
@@ -3476,7 +3528,7 @@ mod combine_ui_tests {
         settle(&mut h, "queue", |a| {
             a.shared.intake.queue().len() == 2 && a.shared.clients.list().is_some()
         });
-        h.get_by_label("Preview").click();
+        crate::app::press_tab(&mut h, "Preview", Tab::Preview);
         settle(&mut h, "plan", |a| plan_ready(a, 1));
         h.step();
         assert!(h.query_by_label("Shared inbox (1)").is_some());
@@ -3534,7 +3586,7 @@ mod combine_ui_tests {
                 app
             });
         settle(&mut h, "queue", |a| a.shared.intake.queue().len() == 1);
-        h.get_by_label("Preview").click();
+        crate::app::press_tab(&mut h, "Preview", Tab::Preview);
         settle(&mut h, "plan", |a| plan_ready(a, 1));
         h.step();
         // Both clicks in one frame (kittest's click() takes a frame per event).
@@ -3585,7 +3637,7 @@ mod combine_ui_tests {
                 app
             });
         settle(&mut h, "zips", |a| a.shared.intake.zips().len() == 2);
-        h.get_by_label("Import").click();
+        crate::app::press_tab(&mut h, "Import", Tab::Import);
         for _ in 0..6 {
             h.step();
         }
@@ -3671,7 +3723,7 @@ My miles for 2025.
         settle(&mut h, "queue", |a| {
             a.shared.intake.queue().len() == 2 && a.shared.clients.list().is_some()
         });
-        h.get_by_label("Preview").click();
+        crate::app::press_tab(&mut h, "Preview", Tab::Preview);
         settle(&mut h, "plan", |a| plan_ready(a, 2));
         h.step();
         h.get_by_label("Preview pane").click();
@@ -3739,7 +3791,7 @@ My miles for 2025.
         settle(&mut h, "queue", |a| {
             a.shared.intake.queue().len() == 2 && a.shared.intake.unsupported().len() == 21
         });
-        h.get_by_label("Preview").click();
+        crate::app::press_tab(&mut h, "Preview", Tab::Preview);
         settle(&mut h, "plan", |a| plan_ready(a, 2));
         h.get_by_label("Preview pane").click();
         for _ in 0..4 {
@@ -3805,7 +3857,7 @@ My miles for 2025.
         settle(&mut h, "queue", |a| {
             a.shared.intake.queue().len() == 4 && a.shared.clients.list().is_some()
         });
-        h.get_by_label("Preview").click();
+        crate::app::press_tab(&mut h, "Preview", Tab::Preview);
         settle(&mut h, "plan", |a| plan_ready(a, 4));
         h.step();
         let rule_of = |h: &Harness<'_, FilerApp>, n: &str| {
@@ -3902,7 +3954,7 @@ My miles for 2025.
                 FilerApp::new(&cc.egui_ctx, AppState::load(d, settings, true, None))
             });
         settle(&mut h, "queue", |a| a.shared.intake.queue().len() == 3);
-        h.get_by_label("Preview").click();
+        crate::app::press_tab(&mut h, "Preview", Tab::Preview);
         settle(&mut h, "plan", |a| plan_ready(a, 3));
         settle(&mut h, "dates", |a| a.preview.dates_read());
         h.step();
@@ -4002,7 +4054,7 @@ My miles for 2025.
         settle(&mut h, "queue", |a| {
             a.shared.intake.queue().len() == 3 && a.shared.clients.list().is_some()
         });
-        h.get_by_label("Preview").click();
+        crate::app::press_tab(&mut h, "Preview", Tab::Preview);
         settle(&mut h, "plan", |a| plan_ready(a, 3));
         h.step();
         // Narrower than 1800 points: the pane opens with its switch.
@@ -4210,7 +4262,7 @@ mod split_ui_tests {
             a.shared.intake.queue().len() == 2 && a.shared.clients.list().is_some()
         });
         h.get_by_label("Preview: 2 pending");
-        h.get_by_label("Preview").click();
+        crate::app::press_tab(&mut h, "Preview", Tab::Preview);
         settle(&mut h, "plan", |a| plan_ready(a, 2));
 
         // The print run: three pieces proposed from the client IDs in its text.
@@ -4308,7 +4360,7 @@ mod split_ui_tests {
         // Badges change as the queue empties; let the header settle before clicking.
         h.step();
         h.step();
-        h.get_by_label("History").click();
+        crate::app::press_tab(&mut h, "History", Tab::History);
         settle(&mut h, "history", |a| {
             a.tab == Tab::History && !a.history.loading()
         });
@@ -4444,7 +4496,7 @@ mod p10_tests {
             a.shared.intake.queue().len() == 2 && a.shared.clients.list().is_some()
         });
         h.get_by_label("Preview: 2 pending");
-        h.get_by_label("Preview").click();
+        crate::app::press_tab(&mut h, "Preview", Tab::Preview);
         let ready = |a: &FilerApp| {
             a.preview.plan_idle()
                 && a.preview.proposals().len() == 2
@@ -4760,13 +4812,9 @@ mod r2_tests {
                 FilerApp::new(&cc.egui_ctx, AppState::load(d, settings, true, None))
             });
         settle(&mut h, "draft", |a| a.shared.intake.zips().len() == 1);
-        h.get_by_label("Import").click();
-        for _ in 0..5 {
-            h.step();
-            std::thread::sleep(std::time::Duration::from_millis(20));
-        }
-        h.get_by_label("pre-scan ok");
-        h.get_by_label_contains("No client list yet");
+        crate::app::press_tab(&mut h, "Import", Tab::Import);
+        crate::app::wait_for_label(&mut h, "pre-scan ok", false);
+        crate::app::wait_for_label(&mut h, "No client list yet", true);
     }
 
     /// P07b Unpack through the Import tab: a zip in the inbox becomes a draft; typing the client
@@ -4814,22 +4862,14 @@ mod r2_tests {
             a.shared.clients.list().is_some() && a.shared.intake.zips().len() == 1
         });
         h.get_by_label("Import: 1 drafts");
-        h.get_by_label("Import").click();
-        for _ in 0..5 {
-            h.step();
-            std::thread::sleep(std::time::Duration::from_millis(20));
-        }
-        h.get_by_label("pre-scan ok");
-        h.get_by_label("1 executable");
+        crate::app::press_tab(&mut h, "Import", Tab::Import);
+        crate::app::wait_for_label(&mut h, "pre-scan ok", false);
+        crate::app::wait_for_label(&mut h, "1 executable", false);
         h.get_by_label("Client").click();
         h.step();
         h.get_by_label("Client").type_text("1877");
-        for _ in 0..5 {
-            h.step();
-            std::thread::sleep(std::time::Duration::from_millis(20));
-        }
-        h.get_by_label("1877 · exact");
-        h.get_by_label_contains("None: no file in the zip");
+        crate::app::wait_for_label(&mut h, "1877 · exact", false);
+        crate::app::wait_for_label(&mut h, "None: no file in the zip", true);
         crate::app::snapshot(&mut h, "import_tab");
         h.get_by_label("Unpack 2 files").click();
         settle(&mut h, "unpacked", |a| a.shared.intake.zips().is_empty());
@@ -4900,11 +4940,7 @@ mod r2_tests {
             a.shared.clients.list().is_some() && a.shared.intake.zips().len() == 1
         });
         h.get_by_label("Import: 1 drafts").click();
-        for _ in 0..5 {
-            h.step();
-            std::thread::sleep(std::time::Duration::from_millis(20));
-        }
-        h.get_by_label("pre-scan ok");
+        crate::app::wait_for_label(&mut h, "pre-scan ok", false);
         h.get_by_label("Send contents to the queue").click();
         for _ in 0..3 {
             h.step();

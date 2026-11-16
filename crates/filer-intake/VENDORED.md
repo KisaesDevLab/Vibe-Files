@@ -31,8 +31,10 @@ of its `src/` (QUESTIONS Q-16). Upstream `main.rs` is not vendored; `vf-app` is 
    wait by the clock (180 s at most) instead of a fixed 300 to 600 frames. The work they wait
    for runs on other threads, and a few seconds was not always enough on a machine busy with
    something else (`twenty_file_batch_resolves_to_ready`, `combine_commit_and_undo_through_the_ui`
-   failed now and then with nothing wrong). To go upstream with the next re-vendor, or be
-   applied again after it.
+   failed now and then with nothing wrong). Also in the tests of `app.rs`: a header tab is
+   opened with `press_tab` (pressed again until it is the one shown: a press on a frame where
+   the header is drawn again did nothing) and four fixed five-frame waits are `wait_for_label`.
+   To go upstream with the next re-vendor, or be applied again after it.
 
 No logic edits. Check with:
 `diff -r <upstream>/src crates/filer-*/src` (only the four attribute lines and the `settle`
