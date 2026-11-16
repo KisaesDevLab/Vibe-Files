@@ -24,12 +24,22 @@ pub struct NotesState {
     /// The file changed since it was shown and a save stopped: the file's notes now.
     pub newer: Option<Notes>,
     load: Option<Job<(String, Result<Notes, String>)>>,
-    save: Option<Job<(String, Result<Saved, String>)>>,
+    save: Option<Job<Saving>>,
     pub error: Option<String>,
-    /// Text typed for a client and not saved, kept while another client is looked at.
-    drafts: BTreeMap<String, String>,
+    /// Text typed for a client and not saved, kept while another client is looked at, with
+    /// the notes it was typed over: a change made to the file meanwhile is then seen.
+    drafts: BTreeMap<String, (String, Notes)>,
     /// The frame the notes were last drawn in: coming back to them reads the file again.
     drawn: u64,
+}
+
+/// A save on its thread: whose notes, what was typed over what, and how it went.
+struct Saving {
+    folder: String,
+    client_id: String,
+    text: String,
+    shown: Notes,
+    result: Result<Saved, String>,
 }
 
 impl NotesState {
@@ -49,14 +59,27 @@ impl NotesState {
         }
     }
 
-    fn start_save(&mut self, ctx: &egui::Context, root: &std::path::Path, force: bool) {
+    fn start_save(
+        &mut self,
+        ctx: &egui::Context,
+        root: &std::path::Path,
+        client_id: &str,
+        force: bool,
+    ) {
         let (Some(folder), Some(shown)) = (self.folder.clone(), self.shown.clone()) else {
             return;
         };
         let (root, dir, text) = (root.to_path_buf(), root.join(&folder), self.text.clone());
+        let client_id = client_id.to_string();
         match Job::start(ctx, "Saving the notes…", move || {
-            let r = fcinfo::save(&root, &dir, &shown, &text, force);
-            (folder, r)
+            let result = fcinfo::save(&root, &dir, &shown, &text, force);
+            Saving {
+                folder,
+                client_id,
+                text,
+                shown,
+                result,
+            }
         }) {
             Ok(j) => self.save = Some(j),
             Err(e) => self.error = Some(format!("The notes were not saved: {e}")),
@@ -67,8 +90,10 @@ impl NotesState {
     fn turn_to(&mut self, folder: &str) {
         if let Some(old) = self.folder.take()
             && self.unsaved()
+            && let Some(shown) = self.shown.take()
         {
-            self.drafts.insert(old, std::mem::take(&mut self.text));
+            self.drafts
+                .insert(old, (std::mem::take(&mut self.text), shown));
         }
         self.folder = Some(folder.to_string());
         self.shown = None;
@@ -103,35 +128,27 @@ pub fn show(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env, ci: usize) {
     if let Some(r) = job::take(&mut n.load) {
         match r {
             Ok((f, Ok(notes))) if n.folder.as_deref() == Some(f.as_str()) => {
-                n.text = n.drafts.remove(&f).unwrap_or_else(|| notes.memo.clone());
-                n.shown = Some(notes);
-                n.newer = None;
+                match n.drafts.remove(&f) {
+                    // Typed earlier and not saved: it stays over the notes it was typed over.
+                    // When the file is no longer those, that is said before any save.
+                    Some((text, over)) => {
+                        n.text = text;
+                        n.newer = (over != notes).then_some(notes);
+                        n.shown = Some(over);
+                    }
+                    None => {
+                        n.text = notes.memo.clone();
+                        n.shown = Some(notes);
+                        n.newer = None;
+                    }
+                }
             }
             Ok((f, Err(e))) if n.folder.as_deref() == Some(f.as_str()) => n.error = Some(e),
             Ok(_) => {}
             Err(e) => n.error = Some(format!("The notes were not read: {e}")),
         }
     }
-    if let Some(r) = job::take(&mut n.save) {
-        match r {
-            Ok((f, Ok(saved))) if n.folder.as_deref() == Some(f.as_str()) => match saved {
-                Saved::Done(notes) => {
-                    n.text = notes.memo.clone();
-                    n.shown = Some(notes);
-                    n.newer = None;
-                    n.error = None;
-                    audit(env, &client_id);
-                    b.notice = Some("Notes saved.".into());
-                }
-                Saved::Changed(now) => n.newer = Some(now),
-            },
-            Ok((f, Err(e))) if n.folder.as_deref() == Some(f.as_str()) => {
-                n.error = Some(format!("The notes were not saved: {e}"));
-            }
-            Ok(_) => {}
-            Err(e) => n.error = Some(format!("The notes were not saved: {e}")),
-        }
-    }
+    poll(b, env);
     let n = &mut b.notes;
 
     ui.add_space(12.0);
@@ -226,14 +243,65 @@ pub fn show(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env, ci: usize) {
     }
     if reload {
         if changed {
-            n.drafts.insert(folder.clone(), n.text.clone());
+            n.drafts
+                .insert(folder.clone(), (n.text.clone(), shown.clone()));
         }
         n.error = None;
         n.start_load(&ctx, env.root, &folder);
     }
     if save || force {
         n.error = None;
-        n.start_save(&ctx, env.root, force);
+        n.start_save(&ctx, env.root, &client_id, force);
+    }
+}
+
+/// Each frame, whatever is selected: takes a finished save. The audit row is written and the
+/// outcome said even when another client is looked at by then.
+pub fn poll(b: &mut Browse, env: &mut Env) {
+    let Some(r) = job::take(&mut b.notes.save) else {
+        return;
+    };
+    let n = &mut b.notes;
+    let s = match r {
+        Ok(s) => s,
+        Err(e) => {
+            n.error = Some(format!("The notes were not saved: {e}"));
+            return;
+        }
+    };
+    let here = n.folder.as_deref() == Some(s.folder.as_str());
+    match s.result {
+        Ok(Saved::Done(notes)) => {
+            if here {
+                n.text = notes.memo.clone();
+                n.shown = Some(notes);
+                n.newer = None;
+                n.error = None;
+            }
+            audit(env, &s.client_id);
+            b.notice = Some("Notes saved.".into());
+        }
+        Ok(Saved::Changed(now)) if here => n.newer = Some(now),
+        // Not saved, and that client is no longer shown: what was typed is kept for it, and
+        // the change is said when it is shown again.
+        Ok(Saved::Changed(_)) => {
+            n.drafts.insert(s.folder, (s.text, s.shown));
+            b.error = Some(
+                "The notes were not saved: they were changed somewhere else. Go back to the client to choose."
+                    .into(),
+            );
+        }
+        Err(e) => {
+            if !here {
+                n.drafts.insert(s.folder, (s.text, s.shown));
+            }
+            let msg = format!("The notes were not saved: {e}");
+            if here {
+                n.error = Some(msg);
+            } else {
+                b.error = Some(msg);
+            }
+        }
     }
 }
 

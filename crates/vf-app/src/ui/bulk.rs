@@ -63,9 +63,10 @@ struct Found {
 struct Renaming {
     find: String,
     replace: String,
-    /// The preview, for the texts in `planned_for`.
+    /// The preview, for the texts in `planned_for` and the documents ticked then.
     plan: Option<Vec<Row>>,
     planned_for: (String, String),
+    planned_ids: BTreeSet<String>,
     job: Option<Job<Result<Vec<Row>, String>>>,
     error: Option<String>,
 }
@@ -93,6 +94,8 @@ pub struct BulkPage {
     pub error: Option<String>,
     /// The catalog changed: Browse re-reads.
     pub changed: bool,
+    /// A change finished: the grid is found again when the page is next drawn.
+    refind: bool,
 }
 
 impl BulkPage {
@@ -210,6 +213,25 @@ impl BulkPage {
         }
     }
 
+    /// Takes a finished change, wherever the person is by then (the app calls this each frame):
+    /// Browse must read the catalog again even when this page is not the one shown.
+    pub fn poll(&mut self) {
+        let Some(r) = job::take(&mut self.work) else {
+            return;
+        };
+        match r.and_then(|r| r) {
+            Ok(msg) => {
+                self.notice = Some(msg);
+                self.error = None;
+                self.changed = true;
+                self.picked.clear();
+                self.renaming = None;
+                self.refind = true;
+            }
+            Err(e) => self.error = Some(e),
+        }
+    }
+
     fn picked_ids(&self) -> Vec<String> {
         // In the grid's order, so a preview reads like the grid.
         self.rows
@@ -261,22 +283,13 @@ pub fn show(ui: &mut egui::Ui, p: &mut BulkPage, env: &mut Env, catalog: &Path) 
             Err(e) => p.error = Some(format!("The documents were not found: {e}")),
         }
     }
-    if let Some(r) = job::take(&mut p.work) {
-        match r.and_then(|r| r) {
-            Ok(msg) => {
-                p.notice = Some(msg);
-                p.error = None;
-                p.changed = true;
-                p.picked.clear();
-                p.renaming = None;
-                // The grid as the catalog now has it.
-                if let Some(ph) = p.found_for.clone() {
-                    p.phrase = ph;
-                    p.find(&ctx, catalog);
-                }
-            }
-            Err(e) => p.error = Some(e),
-        }
+    p.poll();
+    // The grid as the catalog now has it.
+    if std::mem::take(&mut p.refind)
+        && let Some(ph) = p.found_for.clone()
+    {
+        p.phrase = ph;
+        p.find(&ctx, catalog);
     }
     ui.horizontal(|ui| {
         ui.label(RichText::new("Bulk changes").strong().size(16.0));
@@ -488,7 +501,15 @@ fn confirm_trash(ui: &mut egui::Ui, p: &mut BulkPage, env: &mut Env, catalog: &P
 /// The find-and-replace in the ticked documents' names: the two texts, a preview, then Rename.
 fn renaming(ui: &mut egui::Ui, p: &mut BulkPage, env: &mut Env, catalog: &Path, idle: bool) {
     let ctx = ui.ctx().clone();
-    let ids = p.picked_ids();
+    if p.renaming.is_none() {
+        return;
+    }
+    let ticked = p.picked.len();
+    // The preview stands only for the documents ticked when it was made.
+    let same_ticks = p
+        .renaming
+        .as_ref()
+        .is_some_and(|r| r.planned_ids == p.picked);
     let Some(r) = p.renaming.as_mut() else {
         return;
     };
@@ -512,7 +533,7 @@ fn renaming(ui: &mut egui::Ui, p: &mut BulkPage, env: &mut Env, catalog: &Path, 
         .inner_margin(8)
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
-            ui.label(RichText::new(format!("Rename {}", docs(ids.len()))).strong());
+            ui.label(RichText::new(format!("Rename {}", docs(ticked))).strong());
             ui.horizontal_wrapped(|ui| {
                 let l = ui.label("Replace");
                 ui.add(egui::TextEdit::singleline(&mut r.find).desired_width(180.0))
@@ -538,7 +559,12 @@ fn renaming(ui: &mut egui::Ui, p: &mut BulkPage, env: &mut Env, catalog: &Path, 
             if let Some(e) = &r.error {
                 ui.colored_label(theme::error(), e);
             }
-            let current = r.planned_for == (r.find.clone(), r.replace.clone());
+            let current = same_ticks && r.planned_for == (r.find.clone(), r.replace.clone());
+            if r.plan.is_some() && !current {
+                ui.label(widgets::caption(
+                    "The text or the ticked documents changed: Preview again.",
+                ));
+            }
             if let Some(plan) = r.plan.as_ref().filter(|_| current) {
                 let will = plan.iter().filter(|x| x.renames()).count();
                 ui.label(widgets::caption(format!(
@@ -597,7 +623,15 @@ fn renaming(ui: &mut egui::Ui, p: &mut BulkPage, env: &mut Env, catalog: &Path, 
     if preview {
         let (find, replace) = (r.find.clone(), r.replace.clone());
         r.planned_for = (find.clone(), replace.clone());
+        r.planned_ids = p.picked.clone();
         r.plan = None;
+        // In the grid's order, so the preview reads like the grid.
+        let ids: Vec<String> = p
+            .rows
+            .iter()
+            .filter(|d| p.picked.contains(&d.id))
+            .map(|d| d.id.clone())
+            .collect();
         let (catalog, root) = (catalog.to_path_buf(), env.root.to_path_buf());
         let year = chrono::Datelike::year(&chrono::Local::now());
         match Job::start(&ctx, "Working out the new names…", move || {
@@ -609,7 +643,10 @@ fn renaming(ui: &mut egui::Ui, p: &mut BulkPage, env: &mut Env, catalog: &Path, 
             Ok(j) => r.job = Some(j),
             Err(e) => r.error = Some(e),
         }
-    } else if go && let Some(rows) = r.plan.clone() {
+    } else if go
+        && same_ticks
+        && let Some(rows) = r.plan.clone()
+    {
         p.run(&ctx, env, catalog, "Renaming…", move |conn, root, dev| {
             let (_, n) = vf_fs::rename::commit(conn, root, &rows, dev)?;
             Ok(format!(

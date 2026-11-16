@@ -282,6 +282,18 @@ pub fn apply(
                 }
             }
             taken.insert(dst.clone());
+            // A client's notes file (PA-76) goes with its folder, as a file: it is not a
+            // document. Where this cabinet's client has notes too, it lands beside them as
+            // `!fcinfo (2).ini` for a person to bring together.
+            if rebuild::is_notes(&src) {
+                tx = tx.file(FileOp::Move {
+                    src: src.clone(),
+                    dst: dst.clone(),
+                });
+                moved += 1;
+                progress.fetch_add(1, Ordering::Relaxed);
+                continue;
+            }
             let rel = rel_of(root, &dst);
             // The source's metadata for this content, mapped onto this cabinet's doc types.
             let rec = src_meta.get(&format!("{}/{inner}", c.src_folder), &hash);

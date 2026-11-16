@@ -360,6 +360,17 @@ impl Admin {
     }
 }
 
+impl Admin {
+    /// Each frame, whichever tab is shown: a bulk change that finished behind the window
+    /// marks the catalog as changed, so Browse reads it again.
+    pub fn poll(&mut self) {
+        self.bulk.poll();
+        if std::mem::take(&mut self.bulk.changed) {
+            self.changed = true;
+        }
+    }
+}
+
 /// The app's integrity sweep (it runs on a schedule, so it lives with the open cabinet) and the
 /// catalog file its thread opens.
 pub struct SweepEnv<'a> {
@@ -1516,6 +1527,17 @@ ANDE1042,Anderson Farms LLC
             h.query_by_label("3 documents will be renamed, 0 left as they are.")
                 .is_some()
         );
+        // The preview stands for the documents ticked when it was made: with one unticked,
+        // nothing can be renamed until it is made again (or the tick put back).
+        h.get_by_label("Select GovtK1 one.pdf").click();
+        h.run();
+        assert!(h.query_by_label("Rename 3").is_none());
+        assert!(
+            h.query_by_label("The text or the ticked documents changed: Preview again.")
+                .is_some()
+        );
+        h.get_by_label("Select GovtK1 one.pdf").click();
+        h.run();
         click(&mut h, "Rename 3");
         h.run();
         h.run();

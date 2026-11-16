@@ -152,7 +152,7 @@ pub struct Viewer {
     /// The engine OCR uses instead of looking for Tesseract (tests).
     pub ocr_engine: Option<std::sync::Arc<dyn vf_ocr::OcrEngine>>,
     /// OCR of one page was asked for and the page has text of its own: read it anyway?
-    ask_ocr: Option<u32>,
+    ask_ocr: Option<(String, u32)>,
     /// Another document asked for while annotations are unsaved: open it and drop them?
     pub ask_open: Option<Doc>,
     /// Close asked for while annotations are unsaved: drop them?
@@ -698,7 +698,14 @@ pub fn show(ui: &mut egui::Ui, v: &mut Viewer, env: &mut Env<'_>) {
         ui.ctx()
             .request_repaint_after(std::time::Duration::from_millis(200));
     }
-    if let Some(page) = v.ask_ocr {
+    // Asked about the document it was asked for only: another one opened meanwhile drops it.
+    if v.ask_ocr
+        .as_ref()
+        .is_some_and(|(id, _)| v.doc.as_ref().is_none_or(|d| &d.doc_id != id))
+    {
+        v.ask_ocr = None;
+    }
+    if let Some((_, page)) = v.ask_ocr.clone() {
         let mut answer = None;
         egui::Modal::new(egui::Id::unique("viewer-ocr-anyway")).show(ui.ctx(), |ui| {
             ui.set_width(380.0);
@@ -3325,8 +3332,22 @@ fn finish_convert(v: &mut Viewer, env: &mut Env<'_>) {
                 } else if detail["with_text"].as_u64().unwrap_or(0) > 0
                     && detail["empty"].as_u64() == Some(0)
                 {
-                    if let vf_ocr::document::Pages::One { page, .. } = pages {
-                        v.ask_ocr = Some(page);
+                    // "Read it anyway?" is for a scan with a stamp or a header as its only
+                    // text. A document read here before has its words already: reading the
+                    // page again would put each of them on it twice, so it is not offered.
+                    let read_before: bool = env
+                        .conn
+                        .query_row(
+                            "SELECT EXISTS(SELECT 1 FROM version WHERE doc_id = ?1
+                               AND created_by = ?2)",
+                            vf_core::db::params![c.doc_id, vf_fs::cabinet::TEXT_LAYER_VERSION_BY],
+                            |r| r.get(0),
+                        )
+                        .unwrap_or(true);
+                    if let vf_ocr::document::Pages::One { page, .. } = pages
+                        && !read_before
+                    {
+                        v.ask_ocr = Some((c.doc_id.clone(), page));
                     }
                     if one {
                         "This page already has text.".to_string()

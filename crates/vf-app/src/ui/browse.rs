@@ -2478,6 +2478,7 @@ pub fn show(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env) {
     b.poll_disk();
     b.poll_file_job(env);
     crate::ui::client_panel::poll_sync(b, env);
+    crate::ui::client_notes::poll(b, env);
     portal_windows(ui.ctx(), b, env);
     // New files first: each is added as Explorer put it there (and read by text recognition as
     // new), before a re-read for files gone from the same folder.
@@ -5797,6 +5798,37 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(other.join("!fcinfo.ini")).unwrap(),
             "[Fields]\r\n\r\n\r\n[Memo]\r\ncall in March\r\n\r\n[System]\r\n"
+        );
+
+        // Typed and not saved, another client looked at, and the file changed meanwhile: the
+        // typed text is kept, and the change is said before any save can write over it.
+        h.state_mut().b.set_scope(Scope::Client(0));
+        h.run();
+        h.run();
+        h.state_mut().b.notes.text = "a draft".into();
+        h.run();
+        h.state_mut().b.set_scope(Scope::Client(1));
+        h.run();
+        h.run();
+        let theirs = std::fs::read_to_string(&file)
+            .unwrap()
+            .replace("mine", "theirs again");
+        std::fs::write(&file, &theirs).unwrap();
+        h.state_mut().b.set_scope(Scope::Client(0));
+        h.run();
+        h.run();
+        assert_eq!(h.state().b.notes.text, "a draft");
+        assert_eq!(
+            h.state().b.notes.newer.as_ref().map(|n| n.memo.as_str()),
+            Some("theirs again")
+        );
+        click(&mut h, "Save notes");
+        h.run();
+        h.run();
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            theirs,
+            "not written over"
         );
     }
 

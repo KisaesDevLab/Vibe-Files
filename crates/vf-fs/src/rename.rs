@@ -308,22 +308,37 @@ impl Planner {
 
 /// `text` with every `find` (compared without regard to case) replaced by `with`.
 fn replace_no_case(text: &str, find: &str, with: &str) -> String {
-    let (lt, lf) = (text.to_lowercase(), find.to_lowercase());
-    // Lower-casing changed a length (rare letters): compare as written instead.
-    if lt.len() != text.len() || lf.len() != find.len() {
-        return text.replace(find, with);
-    }
+    // Letter by letter: lower-casing can change a letter's length, so places found in a
+    // lower-cased copy are not places in the text.
+    let starts = |hay: &str| -> Option<usize> {
+        let mut h = hay.chars();
+        let mut used = 0;
+        for n in find.chars() {
+            let c = h.next()?;
+            if !c.to_lowercase().eq(n.to_lowercase()) {
+                return None;
+            }
+            used += c.len_utf8();
+        }
+        Some(used)
+    };
     let mut out = String::with_capacity(text.len());
     let mut at = 0;
-    while let Some(i) = lt[at..].find(&lf) {
-        out.push_str(&text[at..at + i]);
-        out.push_str(with);
-        at += i + lf.len();
+    while at < text.len() {
+        match starts(&text[at..]).filter(|n| *n > 0) {
+            Some(n) => {
+                out.push_str(with);
+                at += n;
+            }
+            None => {
+                let c = text[at..].chars().next().expect("not at the end");
+                out.push(c);
+                at += c.len_utf8();
+            }
+        }
     }
-    out.push_str(&text[at..]);
     out
 }
-
 /// `name`, or Filer's ` (2)`, ` (3)`… form (as `commit::free_path`) when `taken`.
 pub(crate) fn free_name(name: &str, taken: impl Fn(&str) -> bool) -> String {
     if !taken(name) {
@@ -542,6 +557,9 @@ mod tests {
         assert_eq!(rows[2].outcome, Outcome::Same);
         assert_eq!(name(&rows[3]).as_deref(), Some("K-1.pdf"));
         assert_eq!(rows[4].outcome, Outcome::Same);
+        // Letters whose lower-case form has another length do not shift the place found.
+        assert_eq!(replace_no_case("İK govtk1 İ", "GOVTK1", "x"), "İK x İ");
+        assert_eq!(replace_no_case("RÉSUMÉ résumé", "résumé", "cv"), "cv cv");
         // Taken out altogether: a name that would be nothing is left.
         let gone = p.plan_replace(&f.root, "govtk1", "").unwrap();
         assert_eq!(name(&gone[0]).as_deref(), Some("Smith.pdf"));

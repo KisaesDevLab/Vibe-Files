@@ -220,33 +220,50 @@ pub fn docs_named(conn: &Connection, phrase: &str, limit: usize) -> Result<Vec<D
     if want.is_empty() {
         return Ok(vec![]);
     }
-    // `%` and `_` typed are themselves, not wildcards.
-    let like = format!(
-        "%{}%",
-        want.replace('\\', "\\\\")
-            .replace('%', "\\%")
-            .replace('_', "\\_")
-    );
-    let sql = format!(
-        "{DOC_SELECT} WHERE d.deleted_at IS NULL AND lower(d.rel_path) LIKE ?1 ESCAPE '\\'
-         ORDER BY d.rel_path"
-    );
-    let mut st = conn.prepare_cached(&sql)?;
-    let mut rows = st.query([&like])?;
-    let mut out = Vec::new();
-    while let Some(r) = rows.next()? {
-        let d = doc_row(r)?;
-        // The path matched: the phrase may be in a folder's name only.
-        if d.name().to_lowercase().contains(&want) {
-            out.push(d);
-            if out.len() >= limit {
-                break;
+    // The paths first (one cheap pass), the names compared here: SQLite folds only the
+    // letters a-z, so a name such as "RÉSUMÉ" would not be found by it. For a phrase of plain
+    // letters SQLite narrows the pass; `%` and `_` typed are themselves, not wildcards.
+    let (cond, like) = if want.is_ascii() {
+        (
+            "AND lower(rel_path) LIKE ?1 ESCAPE '\\'",
+            format!(
+                "%{}%",
+                want.replace('\\', "\\\\")
+                    .replace('%', "\\%")
+                    .replace('_', "\\_")
+            ),
+        )
+    } else {
+        ("AND ?1 = ?1", String::new())
+    };
+    let mut ids: Vec<String> = Vec::new();
+    {
+        let mut st = conn.prepare(&format!(
+            "SELECT id, rel_path FROM document WHERE deleted_at IS NULL {cond} ORDER BY rel_path"
+        ))?;
+        let mut rows = st.query([&like])?;
+        while let Some(r) = rows.next()? {
+            let rel: String = r.get(1)?;
+            // The path matched: the phrase may be in a folder's name only.
+            let name = rel.rsplit('/').next().unwrap_or(&rel);
+            if name.to_lowercase().contains(&want) {
+                ids.push(r.get(0)?);
+                if ids.len() >= limit {
+                    break;
+                }
             }
         }
     }
+    let mut out = Vec::with_capacity(ids.len());
+    for chunk in ids.chunks(500) {
+        let marks = vec!["?"; chunk.len()].join(",");
+        let p: Vec<&dyn rusqlite::ToSql> =
+            chunk.iter().map(|c| c as &dyn rusqlite::ToSql).collect();
+        out.extend(docs_where(conn, &format!("d.id IN ({marks})"), &p, "")?);
+    }
+    out.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
     Ok(out)
 }
-
 /// The condition and parameters of a cabinet-wide view's page (`?1` = the name filter).
 fn page_cond(kind: &PageKind) -> (&'static str, Option<String>) {
     match kind {

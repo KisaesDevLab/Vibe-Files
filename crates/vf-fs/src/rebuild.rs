@@ -2573,6 +2573,14 @@ mod tests {
         let before: i64 = conn
             .query_row("SELECT count(*) FROM document", [], |r| r.get(0))
             .unwrap();
+        // Looked for once for each version of the program, not on every open.
+        assert_eq!(crate::fcinfo::forget_rows(&mut conn, "pc-1").unwrap(), 0);
+        assert_eq!(rows(&conn), 1);
+        conn.execute(
+            "DELETE FROM local_state WHERE k = 'note_rows_forgotten'",
+            [],
+        )
+        .unwrap();
         assert_eq!(crate::fcinfo::forget_rows(&mut conn, "pc-1").unwrap(), 1);
         assert_eq!(rows(&conn), 0);
         let after: i64 = conn

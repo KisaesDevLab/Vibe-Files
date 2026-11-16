@@ -15,7 +15,13 @@ pub const NAME: &str = "!fcinfo.ini";
 /// never taken into the catalog, never sent to or changed from the bucket.
 pub fn is_note_file(name: &str) -> bool {
     let n = name.to_ascii_lowercase();
-    n == NAME || (n.starts_with("!fcinfo.ini.") && n.ends_with(".tmp"))
+    if n == NAME || (n.starts_with("!fcinfo.ini.") && n.ends_with(".tmp")) {
+        return true;
+    }
+    // `!fcinfo (2).ini`: a second notes file a merge of two folders put beside the first.
+    n.strip_prefix("!fcinfo (")
+        .and_then(|r| r.strip_suffix(").ini"))
+        .is_some_and(|d| !d.is_empty() && d.bytes().all(|b| b.is_ascii_digit()))
 }
 
 /// [`is_note_file`] for a cabinet-relative path.
@@ -141,6 +147,28 @@ pub fn save(
 /// Reads every document's path: not for the window's thread.
 pub fn forget_rows(conn: &mut vf_core::db::Connection, device_id: &str) -> Result<usize, String> {
     use vf_core::tx::{Actor, NoFileOps, Stmt, Transaction};
+    // Once for each version of the program, not on every open: it reads every document's
+    // path. (Again after an update: a PC still on an earlier version, sharing this catalog,
+    // may have listed the files again meanwhile.)
+    const DONE: &str = "note_rows_forgotten";
+    let version = env!("CARGO_PKG_VERSION");
+    let done: Option<String> = conn
+        .query_row("SELECT v FROM local_state WHERE k = ?1", [DONE], |r| {
+            r.get(0)
+        })
+        .ok();
+    if done.as_deref() == Some(version) {
+        return Ok(0);
+    }
+    let mark = |conn: &vf_core::db::Connection| {
+        conn.execute(
+            "INSERT INTO local_state (k, v) VALUES (?1, ?2)
+             ON CONFLICT(k) DO UPDATE SET v = excluded.v",
+            [DONE, version],
+        )
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+    };
     let ids: Vec<String> = {
         let mut st = conn
             .prepare(
@@ -154,6 +182,7 @@ pub fn forget_rows(conn: &mut vf_core::db::Connection, device_id: &str) -> Resul
             .map_err(|e| e.to_string())?
     };
     if ids.is_empty() {
+        mark(conn)?;
         return Ok(0);
     }
     // By groups of ids: a cabinet can have one of these files in thousands of folders.
@@ -195,6 +224,7 @@ pub fn forget_rows(conn: &mut vf_core::db::Connection, device_id: &str) -> Resul
     ))
     .commit(conn, &mut NoFileOps, &Actor::device(device_id))
     .map_err(|e| e.to_string())?;
+    mark(conn)?;
     Ok(ids.len())
 }
 
@@ -398,6 +428,8 @@ mod tests {
         assert!(is_note_file("!fcinfo.ini"));
         assert!(is_note_file("!FCInfo.INI"));
         assert!(is_note_file("!fcinfo.ini.0192abc.tmp"));
+        assert!(is_note_file("!fcinfo (2).ini"));
+        assert!(!is_note_file("!fcinfo (draft).ini"));
         assert!(!is_note_file("fcinfo.ini"));
         assert!(!is_note_file("!fcinfo.ini.bak"));
         assert!(is_note_path("Example Client (1000)/Payroll/!fcinfo.ini"));

@@ -1177,9 +1177,10 @@ impl eframe::App for VibeFilesApp {
                 } else {
                     let intake_changed = std::mem::take(&mut o_intake.catalog_changed);
                     if intake_changed
-                        || tab_admin
-                            .as_mut()
-                            .is_some_and(|a| std::mem::take(&mut a.changed))
+                        || tab_admin.as_mut().is_some_and(|a| {
+                            a.poll();
+                            std::mem::take(&mut a.changed)
+                        })
                     {
                         tab_browse.reload(env.conn);
                     }
