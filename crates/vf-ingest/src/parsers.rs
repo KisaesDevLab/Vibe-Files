@@ -275,8 +275,85 @@ pub fn filer_rules(
             r.next_year_folder = by_year && like.is_some_and(|l| l.next_year_folder);
             out.push(r);
         }
+        // The same documents printed straight into an inbox (PA-85: they went by Filer's own
+        // rules there, to other folders than through the capture folder). One rule for each
+        // `[[doc]]` line, in the profile's order (the first that finds the name wins, as in
+        // the capture folder), filed in the doc type's folder under the printed name.
+        let Some(layout) = &p.layout else { continue };
+        for (n, d) in p.doc.iter().enumerate() {
+            let folder = folder_for(p, &d.doc_type, types);
+            let Some(pattern) = layout.inbox_any(&d.pattern).filter(|_| !folder.is_empty()) else {
+                continue;
+            };
+            let by_year = folder.contains("{Year}");
+            let mut r = Rule::new(
+                &format!("{} · {} (inbox {})", d.doc_type, p.name, n + 1),
+                &pattern,
+                &format!("{{Client}}/{folder}"),
+                "{Original}.{Ext}",
+                by_year,
+            );
+            r.id = format!(
+                "{MANAGED_PREFIX}{}",
+                stable_id(&p.name, &format!("{}\u{0}inbox\u{0}{n}", d.pattern))
+            );
+            r.next_year_folder = by_year && like.is_some_and(|l| l.next_year_folder);
+            if filer_core::rules::compile_pattern(&r.pattern).is_ok() {
+                out.push(r);
+            }
+        }
     }
     out
+}
+
+/// The `[[doc]]` lines seeded before PA-85, in their order: the state and federal return lines
+/// came first and took an 8879, an extension, estimate vouchers and an invoice whose name had
+/// "federal", "return" or "copy" in it; the state line did not read `State_Return`.
+fn docs_before_pa85() -> Vec<DocRule> {
+    let d = |m: &str, t: &str| DocRule {
+        pattern: m.into(),
+        doc_type: t.into(),
+    };
+    vec![
+        d(r"(?i)\b(state|[A-Z]{2} return)\b", "Return copy — state"),
+        d(
+            "(?i)client.?copy|government.?copy|preparer.?copy|filing.?copy|federal|return",
+            "Return copy — federal",
+        ),
+        d("(?i)8879", "8879 e-file authorization"),
+        d("(?i)organizer", "Organizer"),
+        d("(?i)extension|4868|7004", "Extension"),
+        d("(?i)estimate|voucher|1040-?ES", "Estimate vouchers"),
+        d("(?i)engagement", "Engagement letter"),
+        d("(?i)invoice", "Invoice"),
+    ]
+}
+
+/// The `[[doc]]` lines for documents not in the table (PA-85): what a name says it is first
+/// (8879, organizer, extension, estimates, engagement letter, invoice), then a state return
+/// (`State`, `StateReturn`, or a postal code before `Return`: `NE_Return`), then any other
+/// return or copy as the federal return.
+pub fn fallback_docs() -> Vec<DocRule> {
+    let d = |m: &str, t: &str| DocRule {
+        pattern: m.into(),
+        doc_type: t.into(),
+    };
+    vec![
+        d("(?i)8879", "8879 e-file authorization"),
+        d("(?i)organizer", "Organizer"),
+        d("(?i)extension|4868|7004", "Extension"),
+        d("(?i)estimate|voucher|1040-?ES", "Estimate vouchers"),
+        d("(?i)engagement", "Engagement letter"),
+        d("(?i)invoice", "Invoice"),
+        d(
+            r"(?i:(?:^|[^a-z])state(?:[^a-z]|return|$))|(?:^|[^A-Za-z])[A-Z]{2}[ _]?(?i:return)",
+            "Return copy — state",
+        ),
+        d(
+            "(?i)client.?copy|government.?copy|preparer.?copy|filing.?copy|federal|return",
+            "Return copy — federal",
+        ),
+    ]
 }
 
 /// The Filer rules for the document tables of the enabled profiles (PA-22): one per row that is
@@ -302,12 +379,36 @@ pub fn table_rules(
         .iter()
         .filter(|p| p.enabled && p.layout.is_some())
         .flat_map(|p| p.documents.iter().map(move |r| (p, r)))
-        .filter(|(_, r)| r.action == Action::File)
         .collect();
     rows.sort_by_key(|(_, r)| std::cmp::Reverse(crate::ultratax::phrase_len(r)));
     let (mut out, mut problems) = (Vec::new(), Vec::new());
     for (p, r) in rows {
         let label = label_of(&r.default_name);
+        if r.action != Action::File {
+            // "Don't file" holds in the capture folder only: a print saved straight into an
+            // inbox reaches Intake all the same. It is then left with the unfiled (Not Yet
+            // Filed), under its printed name, with no copy to anyone, for Preview to show:
+            // Filer's own rules took it before (a K-1 package with copies to every related
+            // client, PA-85).
+            let layout = p.layout.as_ref().expect("filtered");
+            if let Some(pattern) = layout.inbox_pattern(r, false) {
+                let mut i = Rule::new(
+                    &format!("{} · {} (inbox, not filed)", p.name, r.default_name),
+                    &pattern,
+                    "{Client}/Not Yet Filed",
+                    "{Original}.{Ext}",
+                    false,
+                );
+                i.id = format!(
+                    "{MANAGED_PREFIX}{}",
+                    stable_id(&p.name, &format!("{}\u{0}inbox-skip", r.default_name))
+                );
+                if filer_core::rules::validate_rule(&i, extra_tokens).is_empty() {
+                    out.push(i);
+                }
+            }
+            continue;
+        }
         if let Some(e) = crate::ultratax::rename_problem(r, p.short_names) {
             problems.push((p.name.clone(), e));
             continue;
@@ -777,6 +878,20 @@ pub fn seed_if_missing(root: &Path) -> Result<bool, String> {
         vf_fs::cabinet::write_replace(&ut, profile_text(&ultratax_profile())?.as_bytes())?;
         return Ok(true);
     }
+    // A profile still holding the `[[doc]]` lines as they were seeded gets them in the order
+    // of PA-85; lines the firm changed are left as they are.
+    let (files, _) = load_files(root);
+    let mut wrote = false;
+    for (path, mut p) in files {
+        if p.doc == docs_before_pa85() {
+            p.doc = fallback_docs();
+            save_profile(&path, &p)?;
+            wrote = true;
+        }
+    }
+    if wrote {
+        return Ok(true);
+    }
     let any = std::fs::read_dir(&d)
         .map(|rd| {
             rd.filter_map(Result::ok)
@@ -800,11 +915,9 @@ pub fn ultratax_profile() -> Profile {
     let mut p: Profile = toml::from_str(ULTRATAX).expect("seeded profile reads");
     // The document name no longer starts with the form: K-1s are in the table instead.
     p.doc.retain(|d| !d.pattern.starts_with("(?i)^1"));
-    // UltraTax invoices (not in its Document Names) are the firm's invoices (QA3 e2e #3).
-    p.doc.push(DocRule {
-        pattern: "(?i)invoice".into(),
-        doc_type: "Invoice".into(),
-    });
+    // UltraTax invoices (not in its Document Names) are the firm's invoices (QA3 e2e #3); and
+    // the lines in the order that reads a name for what it says first (PA-85).
+    p.doc = fallback_docs();
     p.layout = Some(crate::ultratax::Layout::default());
     p.documents = crate::ultratax::default_rows();
     p.pattern = p.layout.as_ref().expect("set above").regex(&p.documents);
@@ -1058,6 +1171,55 @@ mod tests {
         assert!(p.parse("Reyes_25_1040_Tax_Return_REYE5521.pdf").is_none());
     }
 
+    /// PA-85: a document not in the table is read for what its name says first; "federal",
+    /// "return" or "copy" in the name of an 8879, an extension, estimates or an invoice no
+    /// longer makes it the federal return, and a state return is read with `_` in its name.
+    #[test]
+    fn a_name_is_read_for_what_it_says_first() {
+        let p = compile_profile(ultratax_profile()).unwrap();
+        let t = |doc: &str| {
+            p.parse(&format!("Reyes, Dana & Lee_2025_1040_{doc}_REYE5521.pdf"))
+                .unwrap()
+                .doc_type
+                .unwrap_or_default()
+        };
+        for (doc, want) in [
+            ("Form_8879_Filing_Copy", "8879 e-file authorization"),
+            ("Federal_Extension", "Extension"),
+            ("Estimate_Vouchers_Federal", "Estimate vouchers"),
+            ("Client_Copy_Invoice", "Invoice"),
+            ("Engagement_Letter", "Engagement letter"),
+            ("State_Return", "Return copy — state"),
+            ("StateReturn", "Return copy — state"),
+            ("NE_Return", "Return copy — state"),
+            ("Copy of Return", "Return copy — federal"),
+            ("Client_Tax_Return", "Return copy — federal"),
+            ("Estate_Return", "Return copy — federal"),
+        ] {
+            assert_eq!(t(doc), want, "{doc}");
+        }
+    }
+
+    /// PA-85: a profile holding the `[[doc]]` lines as seeded gets the new order once; lines
+    /// the firm changed are left as they are.
+    #[test]
+    fn seeded_doc_lines_get_the_new_order() {
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path();
+        std::fs::create_dir_all(dir(root)).unwrap();
+        let mut old = ultratax_profile();
+        old.doc = docs_before_pa85();
+        let path = dir(root).join("ultratax.toml");
+        save_profile(&path, &old).unwrap();
+        assert!(seed_if_missing(root).unwrap());
+        assert_eq!(load_files(root).0[0].1.doc, fallback_docs());
+        assert!(!seed_if_missing(root).unwrap(), "once");
+        let mut own = old.clone();
+        own.doc.remove(0);
+        save_profile(&path, &own).unwrap();
+        assert!(!seed_if_missing(root).unwrap());
+        assert_eq!(load_files(root).0[0].1.doc, own.doc);
+    }
     /// A cabinet seeded with the first profile and never edited gets the new one; an edited
     /// one is left alone.
     #[test]

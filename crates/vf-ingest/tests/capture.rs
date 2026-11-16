@@ -486,7 +486,61 @@ fn ultratax_prints_dropped_in_an_inbox_follow_their_rows() {
             );
         }
     }
-    // An ordinary file keeps Filer's own rules.
+    // PA-85. A second file of the same name (Windows adds " (2)") keeps its row.
+    let re = filer_core::parse::filename_regex(&patterns[0]).unwrap();
+    let k1 = "Anderson Farms LLC_2025_1120S_K1_Package_Pat Partner_ANDE1042";
+    assert_eq!(
+        file(&re, &format!("{k1} (2).pdf")).0,
+        "UltraTax CS · ArchiveK1Package (inbox)"
+    );
+    // A document not in the table goes to its doc type's folder, as through the capture
+    // folder (Filer's own rules took it before, to other folders).
+    for (doc, rule) in [
+        (
+            "Engagement_Letter",
+            "Engagement letter · UltraTax CS (inbox",
+        ),
+        (
+            "Form_8879",
+            "8879 e-file authorization · UltraTax CS (inbox",
+        ),
+        (
+            "Client_Tax_Return",
+            "Return copy — federal · UltraTax CS (inbox",
+        ),
+    ] {
+        let (got, dest) = file(
+            &re,
+            &format!("Anderson Farms LLC_2025_1120S_{doc}_ANDE1042.pdf"),
+        );
+        assert!(got.starts_with(rule), "{doc}: {got} ({dest})");
+    }
+    // A row set to "Don't file": left with the unfiled, with no copy to anyone (Filer's
+    // "K-1 package" took it before, with copies to every related client).
+    {
+        let (path, mut p) = vf_ingest::parsers::load_files(&root).0.remove(0);
+        for r in &mut p.documents {
+            if r.default_name == "ArchiveK1Package" {
+                r.action = vf_ingest::ultratax::Action::Skip;
+            }
+        }
+        vf_ingest::parsers::save_profile(&path, &p).unwrap();
+        vf_ingest::parsers::sync_filer_rules(&root).unwrap();
+        let (rules, _, _) = filer_core::rules::load_or_seed(&master);
+        let compiled = filer_core::rules::CompiledRules::new(rules.active_rules()).unwrap();
+        let read = filer_core::parse::read_name(
+            &format!("{k1}.pdf"),
+            Some(&re),
+            &off,
+            2026,
+            |id| list.match_by_id(id).is_some(),
+            |_| false,
+        );
+        let r = compiled.first_match(&read.rest, read.ultratax.is_some());
+        assert_eq!(r.name, "UltraTax CS · ArchiveK1Package (inbox, not filed)");
+        assert_eq!(r.dest_template, "{Client}/Not Yet Filed");
+        assert!(r.copies.is_empty());
+    } // An ordinary file keeps Filer's own rules.
     assert!(
         !compiled
             .first_match("2025 Tax Return signed", false)

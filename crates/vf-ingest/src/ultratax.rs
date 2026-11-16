@@ -234,12 +234,36 @@ impl Layout {
                 "(?:_[^_]+?)??"
             });
         }
+        self.inbox_shape(doc)
+    }
+
+    /// The part of a name printed straight into an inbox that Intake's rules read (the client
+    /// name and ID taken off), with `doc` standing for the document name: anchored, and with
+    /// the ` (2)` Windows adds to a second file of the same name (PA-85: such a print missed
+    /// its row). `None` unless the layout starts with the client name and ends with the ID.
+    fn inbox_shape(&self, doc: String) -> Option<String> {
+        let order = self.order();
+        if order.first() != Some(&Var::ClientName)
+            || order.last() != Some(&Var::ClientId)
+            || matches!(
+                self.postal_code_after,
+                Some(Var::ClientName | Var::ClientId)
+            )
+        {
+            return None;
+        }
         let middle = Layout {
             client_name: 0,
             client_id: 0,
             ..self.clone()
         };
-        Some(format!("^{}$", middle.join(doc, false)))
+        Some(format!(r"^{}(?:[ _]*\(\d+\))?$", middle.join(doc, false)))
+    }
+
+    /// [`Self::inbox_pattern`] for a print that is in no row: any document name `doc_re`
+    /// (a profile's `[[doc]]` regex) finds something in (PA-85).
+    pub fn inbox_any(&self, doc_re: &str) -> Option<String> {
+        self.inbox_shape(format!("(?:[^_].*?)?(?:{doc_re}).*?"))
     }
 
     /// The layout's variables in order, `doc` standing for the document name.
