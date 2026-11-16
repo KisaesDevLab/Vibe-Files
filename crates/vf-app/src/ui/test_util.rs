@@ -9,6 +9,34 @@ use egui_kittest::kittest::Queryable;
 /// moment of its own, and under a full run that pushed a `run` to 5 or 6 frames now and then:
 /// the test then failed with "exceeded max_steps" though nothing was wrong.
 pub const MAX_STEPS: u64 = 40;
+/// The processor time this thread has used so far (kernel and user). A speed test measures
+/// the code with this, not with a clock: another program building on the same machine made
+/// the clock say 110 and 159 ms for work that takes about 40, and the test failed for it.
+pub fn thread_cpu() -> std::time::Duration {
+    use windows::Win32::Foundation::FILETIME;
+    use windows::Win32::System::Threading::{GetCurrentThread, GetThreadTimes};
+    let (mut made, mut ended, mut kernel, mut user) = (
+        FILETIME::default(),
+        FILETIME::default(),
+        FILETIME::default(),
+        FILETIME::default(),
+    );
+    // SAFETY: the pseudo-handle of this thread, and four FILETIMEs that outlive the call.
+    let ok = unsafe {
+        GetThreadTimes(
+            GetCurrentThread(),
+            &mut made,
+            &mut ended,
+            &mut kernel,
+            &mut user,
+        )
+    };
+    assert!(ok.is_ok(), "thread times not read");
+    let ticks = |f: FILETIME| (u64::from(f.dwHighDateTime) << 32) | u64::from(f.dwLowDateTime);
+    // In 100-nanosecond units.
+    std::time::Duration::from_nanos((ticks(kernel) + ticks(user)) * 100)
+}
+
 /// Clicks the button labelled `label`, then runs until the UI settles.
 pub fn click<S>(h: &mut Harness<'_, S>, label: &str) {
     h.get_by_role_and_label(Role::Button, label).click();

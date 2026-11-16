@@ -5567,7 +5567,7 @@ fn move_dialog(ctx: &egui::Context, b: &mut Browse, env: &mut Env) {
 #[cfg(test)]
 mod tests {
     use crate::ui::test_util::{click, type_into};
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
 
     use super::*;
     use egui::accesskit::Role;
@@ -8304,10 +8304,11 @@ Petty cash,1234.50
                 h.state_mut().b.reveal = Some(format!("c{c:04}"));
                 h.run();
                 h.get_by_role_and_label(Role::Button, &label).click();
-                // The frame that handles the click and draws the expanded node and its grid.
-                let t = Instant::now();
+                // The frame that handles the click and draws the expanded node and its grid:
+                // the processor time it takes, which a busy machine does not change.
+                let t = crate::ui::test_util::thread_cpu();
                 h.step();
-                best = best.min(t.elapsed());
+                best = best.min(crate::ui::test_util::thread_cpu().saturating_sub(t));
                 h.run();
                 assert_eq!(h.state().b.visible.len(), 100);
             }
