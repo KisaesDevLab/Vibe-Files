@@ -41,4 +41,4 @@ Both buttons are greyed out when nothing is waiting. On a digitally signed PDF, 
 
 > If the file was changed on another PC, by sync, or by restoring a version while you had it open, your unsaved edits are refused rather than put on the wrong pages. Note them, discard, and open the document again.
 
-The toolbar also has **Print…** (see [printing](help:printing)), **Pages…**, **Flatten**, **PDF/A** and **Compress** (see [page tools](help:page-tools)). The ten-key tape is the **10-key** tab in the right-hand panel (see [the ten-key tape](help:ten-key)), and a fillable PDF is filled in on the **Form** tab (see [filling in forms](help:forms)).
+The toolbar also has **Print…** (see [printing](help:printing)), **Pages…**, **Flatten**, **PDF/A** and **Compress** (see [page tools](help:page-tools)), and **OCR**, which reads the text of a scan (see [reading text](help:ocr)). The ten-key tape is the **10-key** tab in the right-hand panel (see [the ten-key tape](help:ten-key)), and a fillable PDF is filled in on the **Form** tab (see [filling in forms](help:forms)).

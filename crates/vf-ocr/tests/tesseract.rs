@@ -167,3 +167,64 @@ fn scanned_page_gets_an_invisible_layer_where_the_words_are() {
 fn rotated_scan_maps_words_back_through_rotate() {
     check(90);
 }
+
+/// The Viewer's OCR (PA-77): a scan's pages are read and the text written into a copy; the
+/// same document read again is left alone (its pages have text now); a stop writes nothing.
+#[test]
+fn a_document_asked_for_is_read_once() {
+    use std::sync::atomic::AtomicBool;
+    use vf_ocr::document::{Outcome, Pages, add_text};
+    let Some(engine) = engine() else { return };
+    let t = tempfile::tempdir().unwrap();
+    let scan = scanned(t.path(), 0);
+    let out = t.path().join("read.pdf");
+    let seen = std::cell::Cell::new((0, 0));
+    let go = AtomicBool::new(false);
+    let rep = add_text(
+        pdfium(),
+        &engine,
+        &scan,
+        &out,
+        Pages::All,
+        &|done, of| seen.set((done, of)),
+        &go,
+    )
+    .unwrap();
+    assert_eq!(
+        rep,
+        Outcome {
+            read: 1,
+            ..Default::default()
+        }
+    );
+    assert_eq!(seen.get(), (0, 1));
+    let doc = pdfium().load_pdf_from_file(&out, None).unwrap();
+    let text = vf_pdf::text::page_text(&doc.pages().first().unwrap());
+    assert!(text.contains("12-3456789"), "{text}");
+    drop(doc);
+
+    let again = t.path().join("again.pdf");
+    let rep = add_text(pdfium(), &engine, &out, &again, Pages::All, &|_, _| {}, &go).unwrap();
+    assert_eq!(
+        rep,
+        Outcome {
+            with_text: 1,
+            ..Default::default()
+        }
+    );
+    assert!(!again.exists(), "nothing read: nothing written");
+
+    let stop = AtomicBool::new(true);
+    let rep = add_text(
+        pdfium(),
+        &engine,
+        &scan,
+        &again,
+        Pages::All,
+        &|_, _| {},
+        &stop,
+    )
+    .unwrap();
+    assert!(rep.cancelled);
+    assert!(!again.exists());
+}

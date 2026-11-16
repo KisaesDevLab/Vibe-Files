@@ -145,8 +145,14 @@ pub struct Viewer {
     /// The catalog content of the document as shown (read when it is opened or read again):
     /// edits are made on it and refused once the document has other content (QA2 U7).
     seen: Option<(u64, String)>,
-    /// A Flatten / PDF/A / Compress running on its thread.
+    /// A Flatten / PDF/A / Compress / OCR running on its thread.
     converting: Option<Converting>,
+    /// Where Tesseract was set to be (`config.toml [ocr] tesseract`), for OCR (PA-77).
+    pub tesseract: Option<PathBuf>,
+    /// The engine OCR uses instead of looking for Tesseract (tests).
+    pub ocr_engine: Option<std::sync::Arc<dyn vf_ocr::OcrEngine>>,
+    /// OCR of one page was asked for and the page has text of its own: read it anyway?
+    ask_ocr: Option<u32>,
     /// Another document asked for while annotations are unsaved: open it and drop them?
     pub ask_open: Option<Doc>,
     /// Close asked for while annotations are unsaved: drop them?
@@ -311,6 +317,9 @@ impl Default for Viewer {
             doc: None,
             seen: None,
             converting: None,
+            tesseract: None,
+            ocr_engine: None,
+            ask_ocr: None,
             ask_open: None,
             ask_close: false,
             quit_asked: false,
@@ -688,6 +697,38 @@ pub fn show(ui: &mut egui::Ui, v: &mut Viewer, env: &mut Env<'_>) {
     if v.converting.is_some() {
         ui.ctx()
             .request_repaint_after(std::time::Duration::from_millis(200));
+    }
+    if let Some(page) = v.ask_ocr {
+        let mut answer = None;
+        egui::Modal::new(egui::Id::unique("viewer-ocr-anyway")).show(ui.ctx(), |ui| {
+            ui.set_width(380.0);
+            ui.heading("This page already has text");
+            ui.label("Reading it again adds the words found in the picture to the text the page has. Do that when the page is a scan with only a stamp or a header as text.");
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                if ui.button("Read it anyway").clicked() {
+                    answer = Some(true);
+                }
+                if ui.button("Cancel").clicked() {
+                    answer = Some(false);
+                }
+            });
+        });
+        match answer {
+            Some(true) => {
+                v.ask_ocr = None;
+                convert(
+                    v,
+                    env,
+                    Convert::Ocr(vf_ocr::document::Pages::One {
+                        page,
+                        even_with_text: true,
+                    }),
+                );
+            }
+            Some(false) => v.ask_ocr = None,
+            None => {}
+        }
     }
     if let Some(doc) = &v.doc
         && v.seen.as_ref().is_none_or(|(g, _)| *g != v.generation)
@@ -1648,6 +1689,38 @@ fn toolbar(ui: &mut egui::Ui, v: &mut Viewer, env: &mut Env<'_>, doc: &Doc) {
                 {
                     convert(v, env, Convert::Compress);
                 }
+                let mut ocr = None;
+                if clean && v.converting.is_none() {
+                    ui.menu_button("OCR", |ui| {
+                        if ui
+                            .button("This page")
+                            .on_hover_text("Read the text of the page shown.")
+                            .clicked()
+                        {
+                            ocr = Some(vf_ocr::document::Pages::One {
+                                page: doc.page as u32,
+                                even_with_text: false,
+                            });
+                            ui.close();
+                        }
+                        if ui
+                            .button("Whole document")
+                            .on_hover_text("Read every page that has no text. A long scan takes a few seconds a page.")
+                            .clicked()
+                        {
+                            ocr = Some(vf_ocr::document::Pages::All);
+                            ui.close();
+                        }
+                    })
+                    .response
+                    .on_hover_text("Read the text of a scanned PDF so it can be found, copied and picked for the 10-key tape (a new version; the current one is kept).");
+                } else {
+                    ui.add_enabled(false, egui::Button::new("OCR"))
+                        .on_disabled_hover_text("Save or discard the unsaved changes first.");
+                }
+                if let Some(pages) = ocr {
+                    convert(v, env, Convert::Ocr(pages));
+                }
                 if ui
                     .add_enabled(!v.print.running(), egui::Button::new("Print…"))
                     .on_hover_text("Print this document or some of its pages (saved annotations print as shown).")
@@ -1696,7 +1769,27 @@ fn toolbar(ui: &mut egui::Ui, v: &mut Viewer, env: &mut Env<'_>, doc: &Doc) {
                     v.close();
                 }
             });
-            if let Some(n) = &v.notice {
+            if let Some(c) = &v.converting
+                && matches!(c.what, Convert::Ocr(_))
+            {
+                use std::sync::atomic::Ordering::Relaxed;
+                let (done, of) = (c.progress[0].load(Relaxed), c.progress[1].load(Relaxed));
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label(widgets::caption(if of > 0 {
+                        format!("Reading page {} of {of}…", (done + 1).min(of))
+                    } else {
+                        "Reading the text…".to_string()
+                    }));
+                    if ui
+                        .small_button("Cancel")
+                        .on_hover_text("Stops after the page being read; the document is not changed.")
+                        .clicked()
+                    {
+                        c.cancel.store(true, Relaxed);
+                    }
+                });
+            } else if let Some(n) = &v.notice {
                 ui.label(widgets::caption(n));
             }
         });
@@ -2995,6 +3088,8 @@ enum Convert {
     Flatten,
     PdfA,
     Compress,
+    /// A text layer on the pages that have no text (owner 2026-11-15, Q-116, PA-77).
+    Ocr(vf_ocr::document::Pages),
 }
 
 /// The catalog hash of the open document, after checking it is still at the path it was opened
@@ -3052,7 +3147,33 @@ fn convert(v: &mut Viewer, env: &mut Env<'_>, what: Convert) {
         return;
     }
     let seen = v.seen_hash();
+    let progress = std::sync::Arc::new([
+        std::sync::atomic::AtomicU32::new(0),
+        std::sync::atomic::AtomicU32::new(0),
+    ]);
+    let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (progress_w, cancel_w) = (progress.clone(), cancel.clone());
     let started = (|| -> Result<Converting, String> {
+        // OCR: the engine is found before anything is started, so a PC without Tesseract is
+        // told at once.
+        let engine: Option<std::sync::Arc<dyn vf_ocr::OcrEngine>> = match what {
+            Convert::Ocr(_) => {
+                if !doc.name.to_lowercase().ends_with(".pdf") {
+                    return Err("Only a PDF can be read for its text.".into());
+                }
+                if v.info.as_ref().is_some_and(|i| i.signed) {
+                    return Err("This PDF is digitally signed: adding text to it would make its signature invalid, so it is left as it is.".into());
+                }
+                Some(match &v.ocr_engine {
+                    Some(e) => e.clone(),
+                    None => std::sync::Arc::new(
+                        vf_ocr::Tesseract::locate(v.tesseract.as_deref())
+                            .map_err(|e| e.to_string())?,
+                    ),
+                })
+            }
+            _ => None,
+        };
         let based_on = source_hash(env, &doc, seen.as_deref())?;
         let tmp = vf_fs::content::tmp_file(env.root, "pdf")?;
         let (tx, rx) = std::sync::mpsc::channel();
@@ -3093,6 +3214,35 @@ fn convert(v: &mut Viewer, env: &mut Env<'_>, what: Convert) {
                         }),
                     )
                 }
+                Convert::Ocr(pages) => {
+                    let pdfium = crate::ui::intake::pdfium_dir()
+                        .ok_or_else(|| "pdfium.dll not found".to_string())
+                        .and_then(|d| filer_pdf::pdf::pdfium(&d))?;
+                    let engine = engine.expect("found above");
+                    let rep = vf_ocr::document::add_text(
+                        pdfium,
+                        engine.as_ref(),
+                        &src,
+                        &out,
+                        pages,
+                        &|done, of| {
+                            use std::sync::atomic::Ordering::Relaxed;
+                            progress_w[0].store(done, Relaxed);
+                            progress_w[1].store(of, Relaxed);
+                        },
+                        &cancel_w,
+                    )?;
+                    (
+                        "ocr_text_layer",
+                        "before OCR text layer",
+                        serde_json::json!({
+                            "pages": rep.read,
+                            "with_text": rep.with_text,
+                            "empty": rep.empty,
+                            "cancelled": rep.cancelled,
+                        }),
+                    )
+                }
             })
         };
         if cfg!(test) {
@@ -3111,6 +3261,8 @@ fn convert(v: &mut Viewer, env: &mut Env<'_>, what: Convert) {
             based_on,
             tmp,
             rx,
+            progress,
+            cancel,
         })
     })();
     match started {
@@ -3133,6 +3285,10 @@ struct Converting {
     based_on: String,
     tmp: PathBuf,
     rx: std::sync::mpsc::Receiver<Result<ConvertDone, String>>,
+    /// OCR: pages done, of how many.
+    progress: std::sync::Arc<[std::sync::atomic::AtomicU32; 2]>,
+    /// OCR: stop after the page being read.
+    cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// Takes a finished conversion (every frame): the new file becomes the document's new version.
@@ -3156,9 +3312,39 @@ fn finish_convert(v: &mut Viewer, env: &mut Env<'_>) {
                 let _ = std::fs::remove_file(&c.tmp);
                 return Ok(None);
             }
+            if let Convert::Ocr(pages) = what
+                && detail["pages"].as_u64() == Some(0)
+            {
+                // Nothing was read: the document is not changed.
+                let _ = std::fs::remove_file(&c.tmp);
+                let one = matches!(pages, vf_ocr::document::Pages::One { .. });
+                return Ok(Some(if detail["cancelled"].as_bool() == Some(true) {
+                    "OCR stopped: the document is not changed.".to_string()
+                } else if detail["with_text"].as_u64().unwrap_or(0) > 0
+                    && detail["empty"].as_u64() == Some(0)
+                {
+                    if let vf_ocr::document::Pages::One { page, .. } = pages {
+                        v.ask_ocr = Some(page);
+                    }
+                    if one {
+                        "This page already has text.".to_string()
+                    } else {
+                        "Every page already has text: nothing to read.".to_string()
+                    }
+                } else if one {
+                    "No text was found on this page.".to_string()
+                } else {
+                    "No text was found on the pages without text.".to_string()
+                }));
+            }
             let change = vf_fs::content::Change {
                 label,
-                created_by: label,
+                // A version made by OCR keeps unsaved edits valid (`source_hash`).
+                created_by: if matches!(what, Convert::Ocr(_)) {
+                    vf_fs::cabinet::TEXT_LAYER_VERSION_BY
+                } else {
+                    label
+                },
                 reason,
                 detail: detail.clone(),
                 extra: vec![],
@@ -3187,11 +3373,25 @@ fn finish_convert(v: &mut Viewer, env: &mut Env<'_>) {
                         widgets::size(detail["before"].as_i64().unwrap_or(0)),
                         widgets::size(detail["after"].as_i64().unwrap_or(0))
                     ),
+                    Convert::Ocr(_) => {
+                        let n = detail["pages"].as_u64().unwrap_or(0);
+                        format!(
+                            "Text added to {n} page{}; the previous version is kept.",
+                            if n == 1 { "" } else { "s" }
+                        )
+                    }
                 })),
                 Err(why) => Err(format!("Not changed: {why}.")),
             }
         });
     match r {
+        Ok(Some(msg))
+            if !c.tmp.exists()
+                && matches!(what, Convert::Ocr(_))
+                && !msg.starts_with("Text added") =>
+        {
+            v.notice = Some(msg);
+        }
         Ok(Some(msg)) => {
             v.catalog_changed = true;
             v.reload();
@@ -4257,6 +4457,35 @@ fn tape_panel(ui: &mut egui::Ui, v: &mut Viewer, env: &mut Env<'_>, doc: &Doc) {
                     ui.label(widgets::caption(st));
                 }
             });
+            // A scan: nothing to pick until its text is read (PA-77).
+            if v.tape.pick && v.words.get(&doc.page).is_some_and(|w| w.is_empty()) {
+                let mut read = false;
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(widgets::caption(
+                        "This page has no text to pick from (a scan).",
+                    ));
+                    read = ui
+                        .add_enabled(
+                            v.converting.is_none() && v.unsaved() == 0,
+                            egui::Button::new("OCR this page"),
+                        )
+                        .on_hover_text(
+                            "Read the page's text (a new version; the current one is kept).",
+                        )
+                        .on_disabled_hover_text("Save or discard the unsaved changes first.")
+                        .clicked();
+                });
+                if read {
+                    convert(
+                        v,
+                        env,
+                        Convert::Ocr(vf_ocr::document::Pages::One {
+                            page: doc.page as u32,
+                            even_with_text: false,
+                        }),
+                    );
+                }
+            }
             ui.add_space(4.0);
             egui::Frame::new()
                 .fill(theme::pane())
@@ -4527,6 +4756,13 @@ fn save_tape(v: &mut Viewer, env: &Env<'_>, doc: &Doc) {
 #[cfg(test)]
 impl Viewer {
     /// Picks every amount on `page` the renderer has sent words for; returns the tape's length.
+    /// Whether `page`'s words have come back from the renderer (asking for them if not).
+    #[cfg(test)]
+    pub fn words_known_for_test(&mut self, page: usize) -> bool {
+        self.request_words(page);
+        self.words.contains_key(&page)
+    }
+
     pub fn pick_amounts_for_test(&mut self, page: usize) -> usize {
         self.request_words(page);
         let words: Vec<WordBox> = self

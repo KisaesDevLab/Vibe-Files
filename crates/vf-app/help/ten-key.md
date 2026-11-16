@@ -31,6 +31,8 @@ You can also use the keyboard when no box has the cursor: digits, `.`, `+`, `-`,
 
 Picked lines get a numbered marker on the page. Click a picked amount on the tape to show where it came from. Esc or **Keypad** goes back to typing. Plain numbers without a point, comma or dollar sign, such as years and box numbers, are not offered.
 
+A scanned page is a picture, so it has no amounts to pick. The tape then says **This page has no text to pick from (a scan).** Click **OCR this page** beside it to read the page's text; the amounts get their underline when it is done. See [Reading text (OCR)](help:ocr).
+
 With **Labels from box captions** on, each picked line is labelled with the words beside or above the amount on the form, plus its page. You can edit any label on the tape.
 
 ## Undo, Redo and History

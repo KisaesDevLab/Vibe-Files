@@ -9,8 +9,9 @@
 //!   first time, from the old catalog beside the exe), then checked by size and date;
 //! - every change is noted in the cabinet's change logs (`vf_fs::changes`) and the other
 //!   servers re-read the folders named there (on open, every 15 minutes, on a client's open);
-//! - text recognition (Tesseract and the text layers it writes) and B2 sync run on one server,
-//!   the main server (`<cabinet>\_Vibe\main-server.json`); the others index the text layers.
+//! - B2 sync runs on one server, the main server (`<cabinet>\_Vibe\main-server.json`). (Text
+//!   recognition ran there too until its queue was removed, PA-65; the Viewer's OCR of one
+//!   document, PA-77, runs wherever it is asked for.)
 
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;

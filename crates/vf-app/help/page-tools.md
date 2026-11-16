@@ -39,6 +39,7 @@ The document you are viewing is not changed. The new ones keep its doc type. Lea
 - **Flatten** burns annotations and form fields into the pages, so they can no longer be moved or deleted.
 - **PDF/A** makes the file PDF/A-2b for long-term archiving. Pages whose fonts are not embedded become images with a searchable text layer.
 - **Compress** brings scanned images down to 200 dpi. If the file would not get smaller, it is left alone.
+- **OCR** reads the text of a scanned page or document. See [reading text](help:ocr).
 
 Each makes a new version and keeps the current one. These buttons, and **Pages…**, are greyed out while annotations or [form entries](help:forms) are unsaved: save or discard them first.
 

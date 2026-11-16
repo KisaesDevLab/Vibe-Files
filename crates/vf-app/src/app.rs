@@ -1011,6 +1011,7 @@ impl eframe::App for VibeFilesApp {
                 let tick_size =
                     crate::ui::viewer::tick_size_index(self.config.viewer.tick_size.as_deref());
                 o.viewer.tick_size = tick_size;
+                o.viewer.tesseract = self.config.ocr.tesseract.clone();
                 crate::ui::viewer::show(
                     ui,
                     &mut o.viewer,
@@ -2735,6 +2736,142 @@ mod tests {
         assert!(
             h.query_by_label_contains("is already in the cabinet")
                 .is_none()
+        );
+    }
+
+    /// Q-116 (owner 2026-11-15): a scan has no text, so the ten-key tape finds nothing to pick.
+    /// OCR › This page reads it, the text is saved into the PDF as a new version (the scan is
+    /// kept), and the amounts can be picked. A page that has text is not read again.
+    #[test]
+    fn ocr_gives_a_scanned_page_text_to_pick() {
+        /// Two amounts, wherever the picture is.
+        struct TwoAmounts;
+        impl vf_ocr::OcrEngine for TwoAmounts {
+            fn name(&self) -> &str {
+                "test"
+            }
+            fn recognize(
+                &self,
+                page: &image::GrayImage,
+                _dpi: u32,
+            ) -> Result<vf_ocr::OcrPage, vf_ocr::OcrError> {
+                let (w, h) = (page.width(), page.height());
+                let word = |text: &str, line: u32| vf_ocr::Word {
+                    bbox: [w / 10, h / 10 * (line + 1), w / 5, h / 40],
+                    text: text.into(),
+                    conf: 95.0,
+                    line,
+                };
+                Ok(vf_ocr::OcrPage {
+                    width: w,
+                    height: h,
+                    words: vec![word("1,284.17", 0), word("45.00", 1)],
+                })
+            }
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("Clients");
+        std::fs::create_dir_all(root.join("Old")).unwrap();
+        // A scan: one page that is a picture and nothing else.
+        vf_ingest::images::frames_to_pdf(
+            vec![vf_ingest::images::Frame {
+                rgb: image::RgbImage::from_pixel(850, 1100, image::Rgb([255, 255, 255])),
+                dpi: Some(100.0),
+                orientation: 1,
+            }],
+            false,
+            &root.join("Old/scan.pdf"),
+        )
+        .unwrap();
+        let req = CreateRequest {
+            root: &root,
+            name: "Firm",
+        };
+        drop(session::create(&tmp.path().join("pc1"), "dev-1", &req).unwrap());
+        let mut h = harness(&tmp.path().join("pc1"));
+        click(&mut h, "Open existing");
+        type_into(&mut h, "Cabinet folder", &root.display().to_string());
+        click(&mut h, "Open cabinet");
+        settle(&mut h);
+        h.get_by_label("scan.pdf").click();
+        h.run_steps(4);
+        h.key_press(egui::Key::Enter);
+        h.step();
+        h.step();
+        fn viewer<'a>(
+            h: &'a mut egui_kittest::Harness<'static, VibeFilesApp>,
+        ) -> &'a mut crate::ui::viewer::Viewer {
+            let Screen::Open(o) = &mut h.state_mut().screen else {
+                unreachable!()
+            };
+            &mut o.viewer
+        }
+        let wait = |h: &mut egui_kittest::Harness<'static, VibeFilesApp>,
+                    what: &str,
+                    ok: &dyn Fn(&mut crate::ui::viewer::Viewer) -> bool| {
+            let start = std::time::Instant::now();
+            loop {
+                h.step();
+                if ok(viewer(h)) {
+                    break;
+                }
+                assert!(
+                    start.elapsed() < std::time::Duration::from_secs(20),
+                    "{what}"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+        };
+        wait(&mut h, "never rendered", &|v| v.ready());
+        viewer(&mut h).ocr_engine = Some(std::sync::Arc::new(TwoAmounts));
+        // Nothing to pick on the scan, and the tape says why.
+        click(&mut h, "10-key");
+        viewer(&mut h).tape.pick = true;
+        wait(&mut h, "the words never came", &|v| {
+            v.words_known_for_test(0)
+        });
+        assert_eq!(viewer(&mut h).pick_amounts_for_test(0), 0);
+        h.run_steps(3);
+        assert!(
+            h.query_by_label_contains("no text to pick from").is_some(),
+            "the tape says the page is a scan"
+        );
+        let versions = |h: &egui_kittest::Harness<'static, VibeFilesApp>| -> i64 {
+            let Screen::Open(o) = &h.state().screen else {
+                unreachable!()
+            };
+            o.opened
+                .conn
+                .query_row("SELECT count(*) FROM version", [], |r| r.get(0))
+                .unwrap()
+        };
+        assert_eq!(versions(&h), 0);
+        click(&mut h, "OCR this page");
+        h.run_steps(4);
+        assert_eq!(versions(&h), 1, "the scan is kept as the previous version");
+        wait(&mut h, "no words after OCR", &|v| {
+            v.pick_amounts_for_test(0) >= 2
+        });
+        assert_eq!(viewer(&mut h).tape.tape.lines().len(), 2);
+        let by: String = {
+            let Screen::Open(o) = &h.state().screen else {
+                unreachable!()
+            };
+            o.opened
+                .conn
+                .query_row("SELECT created_by FROM version", [], |r| r.get(0))
+                .unwrap()
+        };
+        assert_eq!(by, vf_fs::cabinet::TEXT_LAYER_VERSION_BY);
+        // Again, from the toolbar's menu: the page has its text, nothing is written.
+        click(&mut h, "OCR");
+        h.run_steps(2);
+        click(&mut h, "Whole document");
+        h.run_steps(4);
+        assert_eq!(versions(&h), 1);
+        assert!(
+            h.query_by_label_contains("already has text").is_some(),
+            "said, not read twice"
         );
     }
 
