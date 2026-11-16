@@ -35,6 +35,8 @@ pub struct RestoreReport {
     pub clients: usize,
     pub documents: usize,
     pub audit_months: usize,
+    /// Notes files put back.
+    pub notes: usize,
 }
 
 /// Restores cabinet `cabinet_id` into `root` (missing or empty) with a new catalog `conn`.
@@ -125,6 +127,7 @@ pub fn restore_session(conn: &mut Connection, root: &Path, s: &Sync) -> Result<R
         clients: head.segments.len(),
         documents: rep.new,
         audit_months: 0,
+        notes: 0,
     };
     let dir = vibe.join("audit");
     for key in s.remote.list("audit/")? {
@@ -143,6 +146,8 @@ pub fn restore_session(conn: &mut Connection, root: &Path, s: &Sync) -> Result<R
             .map_err(|e| SyncError::Local(e.to_string()))?;
         out.audit_months += 1;
     }
+    // The clients' notes files (PA-79), each only where its folder has none.
+    out.notes = restore_notes(conn, root, s)?;
     // Rows the folders imply (the cabinet row, versions from sidecars).
     vf_fs::rebuild::rebuild(conn, root, device_id).map_err(|e| e.to_string())?;
     crate::push::write_device(s, head.rev)?;
@@ -196,6 +201,37 @@ pub fn conflicts(conn: &Connection) -> Result<Vec<Conflict>> {
         })?
         .collect::<std::result::Result<_, _>>()?;
     Ok(v)
+}
+
+/// Puts back the notes files the bucket has (`notes/<client_id>`) into the folders of the
+/// clients this catalog has. A notes file that is already there is never written over.
+pub fn restore_notes(conn: &Connection, root: &Path, s: &Sync) -> Result<usize> {
+    let mut n = 0;
+    for key in s.remote.list("notes/")? {
+        let Some(client) = key
+            .strip_prefix("notes/")
+            .filter(|c| crate::layout::safe_client_id(c))
+        else {
+            continue;
+        };
+        let Some(folder) = crate::catalog::client_folder(conn, client)? else {
+            continue;
+        };
+        let Some(body) = s.get_json::<crate::layout::ClientNotes>(&key)? else {
+            continue;
+        };
+        let files = body
+            .checked()
+            .map_err(|what| SyncError::Format(format!("a client's notes: refused {what}")))?;
+        for (rel, bytes) in files {
+            if vf_fs::fcinfo::put_back(&root.join(&folder), &rel, &bytes)
+                .map_err(SyncError::Local)?
+            {
+                n += 1;
+            }
+        }
+    }
+    Ok(n)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -130,6 +130,52 @@ pub fn audit_key(month: &str) -> String {
     format!("audit/{month}")
 }
 
+/// `notes/<client_id>`: a client's notes files (FileCenter's `!fcinfo.ini`, PA-79). They are
+/// not documents, so they are not in the manifest; this object is their backup.
+pub fn notes_key(client_id: &str) -> String {
+    format!("notes/{client_id}")
+}
+
+/// A client id as it may stand in a key.
+pub fn safe_client_id(id: &str) -> bool {
+    !id.is_empty() && id.len() <= 64 && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+}
+
+/// The body of `notes/<client_id>` (encrypted like every other object): each notes file under
+/// the client's folder, by its path below it, its bytes as hex (the files are ANSI or UTF-16,
+/// not text a JSON string can carry).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ClientNotes {
+    pub files: BTreeMap<String, String>,
+    #[serde(default)]
+    pub written_by: String,
+}
+
+impl ClientNotes {
+    /// The files as bytes; refuses a path that is not a notes file's below the folder, bytes
+    /// that are not hex, or a file larger than a backup holds.
+    pub fn checked(&self) -> Result<Vec<(String, Vec<u8>)>, String> {
+        let mut out = Vec::with_capacity(self.files.len());
+        for (rel, hex) in &self.files {
+            if !vf_fs::fcinfo::safe_backup_path(rel) {
+                return Err("a notes file's path".into());
+            }
+            if hex.len() % 2 != 0 || hex.len() as u64 / 2 > vf_fs::fcinfo::BACKUP_MAX {
+                return Err("a notes file's size".into());
+            }
+            let bytes: Option<Vec<u8>> = (0..hex.len())
+                .step_by(2)
+                .map(|i| {
+                    hex.get(i..i + 2)
+                        .and_then(|h| u8::from_str_radix(h, 16).ok())
+                })
+                .collect();
+            out.push((rel.clone(), bytes.ok_or("a notes file's bytes")?));
+        }
+        Ok(out)
+    }
+}
+
 /// `cabinet.json` in the bucket: not encrypted, no secrets in the clear. `wrapped` is the firm
 /// sync key wrapped by the sync passphrase (Argon2id + ChaCha20-Poly1305, bound to the cabinet
 /// id), so a bare PC restores from the bucket and the passphrase alone.

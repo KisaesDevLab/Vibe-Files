@@ -29,6 +29,7 @@ Everything below lives under one prefix: `vf/<cabinet_id>/` (`cabinet_id` from `
 | `devices/<device_id>` | yes | `{device_id, name, mode, last_seen, acked_rev}`. Tombstoned objects are removed only when every live device's `acked_rev` ≥ the tombstone's rev (and retention allows). |
 | `catalog/<rev>` | yes | Catalog snapshot for remote mode (PA-17, v2; not written in v1). Without FTS tables in v1. |
 | `audit/<yyyy-mm>` | yes | Copy of `_Vibe/audit/<yyyy-mm>.jsonl` (append → new object version). |
+| `notes/<client_id>` | yes | The client's notes files (FileCenter's `!fcinfo.ini`, PA-79): JSON `{ files: { "<path below the client folder>": "<bytes as hex>" }, written_by }`. Not documents and not in the manifest. Written when the notes changed; never removed. A restore writes each file only where the folder has none. Added without a `layout_ver` bump: builds before 0.1.37 neither read nor write the prefix, and nothing lists it but a restore. |
 
 `client_id` and `doc_id` are UUIDs (not names), and `n` is a keyed hash, so the listing carries no
 client information.

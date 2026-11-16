@@ -1491,14 +1491,19 @@ fn rebuild_scoped(
         let mut paths = Vec::new();
         let mut bad = Vec::new();
         listed_under_lenient(folder, &mut paths, &mut bad);
+        // What the listing says of the client's notes files, for their backup (PA-79).
+        let notes = crate::fcinfo::stamp(&paths);
         // A client's notes file (PA-76) is not a document. Left out here, not in the walker:
         // import and merge list a folder's files to move them, the notes with them.
         paths.retain(|(p, _)| !is_notes(p));
         PROGRESS.folders.fetch_add(1, Ordering::Relaxed);
         PROGRESS.found.fetch_add(paths.len(), Ordering::Relaxed);
-        (paths, bad)
+        (paths, bad, notes)
     });
-    for ((_, client_id), (paths, bad)) in folders.iter().zip(listed_dirs) {
+    for ((_, client_id), (paths, bad, notes)) in folders.iter().zip(listed_dirs) {
+        if let Some(c) = client_id.as_ref() {
+            crate::fcinfo::listed(conn, c, notes);
+        }
         for (d, why) in bad {
             unread_dirs.push(rel(root, &d));
             rep.unreadable.push(why);

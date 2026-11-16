@@ -131,6 +131,9 @@ pub fn save(
         if let Some(a) = attrs {
             set_attributes(&p, a);
         }
+        // Said in the cabinet's change log: the other servers (the one that sends to B2
+        // among them) read this folder again and see the notes changed.
+        crate::changes::note_paths([p.as_path()]);
         Ok(Saved::Done(Notes {
             memo,
             exists: true,
@@ -226,6 +229,167 @@ pub fn forget_rows(conn: &mut vf_core::db::Connection, device_id: &str) -> Resul
     .map_err(|e| e.to_string())?;
     mark(conn)?;
     Ok(ids.len())
+}
+
+// ---------------------------------------------------------------------------------------------
+// The notes' backup to B2 (PA-79). The files are not documents, so they do not travel in the
+// manifest: `vf-sync` keeps one object per client with its notes files. Here is what tells it
+// which clients' notes changed, from listings made anyway (no folder is read for this alone).
+
+/// The largest notes file backed up (FileCenter's are a few hundred bytes).
+pub const BACKUP_MAX: u64 = 256 * 1024;
+
+/// A file as a folder's listing gave it: its path, and its size, time and attributes.
+pub type Listed = (PathBuf, Option<(u64, i64, u32)>);
+
+/// What a client folder's listing says of its notes files: their paths, sizes and times, as
+/// one short word. `None`: the folder has none.
+pub fn stamp(listed: &[Listed]) -> Option<String> {
+    use std::hash::{Hash, Hasher};
+    let mut notes: Vec<(String, u64, i64)> = listed
+        .iter()
+        .filter(|(p, _)| {
+            p.file_name()
+                .is_some_and(|n| is_note_file(&n.to_string_lossy()))
+        })
+        .map(|(p, st)| {
+            let (size, time) = st.map_or((0, 0), |s| (s.0, s.1));
+            (p.to_string_lossy().to_lowercase(), size, time)
+        })
+        .collect();
+    if notes.is_empty() {
+        return None;
+    }
+    notes.sort();
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    notes.hash(&mut h);
+    Some(format!("{}:{:x}", notes.len(), h.finish()))
+}
+
+fn state(conn: &vf_core::db::Connection, k: &str) -> Option<String> {
+    conn.query_row("SELECT v FROM local_state WHERE k = ?1", [k], |r| r.get(0))
+        .ok()
+}
+
+fn set_state(conn: &vf_core::db::Connection, k: &str, v: &str) -> Result<(), String> {
+    conn.execute(
+        "INSERT INTO local_state (k, v) VALUES (?1, ?2)
+         ON CONFLICT(k) DO UPDATE SET v = excluded.v",
+        [k, v],
+    )
+    .map(|_| ())
+    .map_err(|e| e.to_string())
+}
+
+/// A client's folder was listed: when its notes files are not as last seen (or were never
+/// seen), the client's notes wait to go to B2.
+pub fn listed(conn: &vf_core::db::Connection, client_id: &str, stamp: Option<String>) {
+    let Some(stamp) = stamp else { return };
+    let k = format!("notes_seen:{client_id}");
+    if state(conn, &k).as_deref() == Some(stamp.as_str()) {
+        return;
+    }
+    if set_state(conn, &k, &stamp).is_ok() {
+        let _ = mark_changed(conn, client_id);
+    }
+}
+
+/// The notes of `client_id` changed (saved here): they wait to go to B2.
+pub fn mark_changed(conn: &vf_core::db::Connection, client_id: &str) -> Result<(), String> {
+    set_state(
+        conn,
+        &format!("notes_dirty:{client_id}"),
+        &vf_core::new_id(),
+    )
+}
+
+/// The clients whose notes wait to go to B2, each with its mark.
+pub fn waiting(conn: &vf_core::db::Connection) -> Result<Vec<(String, String)>, String> {
+    let mut st = conn
+        .prepare("SELECT k, v FROM local_state WHERE k LIKE 'notes_dirty:%' ORDER BY k")
+        .map_err(|e| e.to_string())?;
+    let rows = st
+        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+        .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
+        .map_err(|e| e.to_string())?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|(k, v)| Some((k.strip_prefix("notes_dirty:")?.to_string(), v)))
+        .collect())
+}
+
+/// The notes went up: the client waits no longer, unless they changed again meanwhile (its
+/// mark is then another).
+pub fn sent(conn: &vf_core::db::Connection, client_id: &str, mark: &str) -> Result<(), String> {
+    conn.execute(
+        "DELETE FROM local_state WHERE k = ?1 AND v = ?2",
+        [&format!("notes_dirty:{client_id}"), mark],
+    )
+    .map(|_| ())
+    .map_err(|e| e.to_string())
+}
+
+/// Every notes file under the client folder `folder`, by its path below it (`/`-separated),
+/// with its bytes. A file over [`BACKUP_MAX`] or that cannot be read is left out.
+pub fn collect(folder: &Path) -> std::collections::BTreeMap<String, Vec<u8>> {
+    let mut out = std::collections::BTreeMap::new();
+    for p in crate::rebuild::cabinet_files(folder) {
+        if !crate::rebuild::is_notes(&p) {
+            continue;
+        }
+        if std::fs::metadata(&p).map_or(true, |m| m.len() > BACKUP_MAX) {
+            continue;
+        }
+        if let Ok(bytes) = std::fs::read(&p) {
+            out.insert(crate::rebuild::rel(folder, &p), bytes);
+        }
+    }
+    out
+}
+
+/// Whether `rel` can be a notes file's path below a client folder: plain folder names, no way
+/// out of the folder, and a notes file's name at the end.
+pub fn safe_backup_path(rel: &str) -> bool {
+    let mut segs = rel.split('/').peekable();
+    let mut last = "";
+    while let Some(s) = segs.next() {
+        if s.is_empty()
+            || s == "."
+            || s == ".."
+            || s.contains(['\\', ':'])
+            || (segs.peek().is_some() && s.eq_ignore_ascii_case(crate::cabinet::VIBE_DIR))
+        {
+            return false;
+        }
+        last = s;
+    }
+    is_note_file(last)
+}
+
+/// Puts a backed-up notes file back at `rel` below `folder`, only where there is none: notes
+/// that are there are never written over. Returns whether it was written.
+pub fn put_back(folder: &Path, rel: &str, bytes: &[u8]) -> Result<bool, String> {
+    use std::io::Write;
+    if !safe_backup_path(rel) || bytes.len() as u64 > BACKUP_MAX {
+        return Err("a notes file's path or size is not one a backup has".into());
+    }
+    let p = folder.join(rel);
+    if let Some(dir) = p.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    }
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&p)
+    {
+        Ok(mut f) => f
+            .write_all(bytes)
+            .and_then(|()| f.sync_all())
+            .map(|()| true)
+            .map_err(|e| format!("{}: {e}", p.display())),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
+        Err(e) => Err(format!("{}: {e}", p.display())),
+    }
 }
 
 /// A new file, as FileCenter writes one with nothing in it.
@@ -587,6 +751,67 @@ mod tests {
         let shown = read(&folder).unwrap();
         done(save(t.path(), &folder, &shown, "mine", false).unwrap());
         assert_eq!(read(&folder).unwrap().memo, "mine");
+    }
+
+    #[test]
+    fn what_tells_the_backup_that_notes_changed() {
+        let t = tempfile::tempdir().unwrap();
+        let conn = vf_core::db::open(&t.path().join("c.db"), vf_core::db::Storage::Local).unwrap();
+        let at = |size: u64, time: i64| {
+            vec![
+                (PathBuf::from("C/!fcinfo.ini"), Some((size, time, 0))),
+                (PathBuf::from("C/w2.pdf"), Some((9, 9, 0))),
+            ]
+        };
+        assert_eq!(stamp(&[(PathBuf::from("C/w2.pdf"), None)]), None);
+        // First seen: waits. Seen again the same: no new wait. Changed: waits again.
+        listed(&conn, "c1", stamp(&at(10, 100)));
+        let w = waiting(&conn).unwrap();
+        assert_eq!(w.len(), 1);
+        assert_eq!(w[0].0, "c1");
+        sent(&conn, "c1", &w[0].1).unwrap();
+        listed(&conn, "c1", stamp(&at(10, 100)));
+        assert!(waiting(&conn).unwrap().is_empty());
+        listed(&conn, "c1", stamp(&at(12, 200)));
+        let w = waiting(&conn).unwrap();
+        assert_eq!(w.len(), 1);
+        // Changed again while they went up: the older mark does not clear the wait.
+        mark_changed(&conn, "c1").unwrap();
+        sent(&conn, "c1", &w[0].1).unwrap();
+        assert_eq!(waiting(&conn).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn notes_are_put_back_only_where_there_are_none() {
+        let (_t, folder) = cabinet();
+        std::fs::create_dir_all(folder.join("Payroll")).unwrap();
+        std::fs::write(folder.join("!fcinfo.ini"), "top").unwrap();
+        std::fs::write(folder.join("Payroll/!fcinfo.ini"), "sub").unwrap();
+        std::fs::write(folder.join("Payroll/w2.pdf"), "x").unwrap();
+        let all = collect(&folder);
+        assert_eq!(
+            all.keys().collect::<Vec<_>>(),
+            ["!fcinfo.ini", "Payroll/!fcinfo.ini"]
+        );
+        // Notes that are there stay; a missing one comes back, its folder made.
+        assert!(!put_back(&folder, "!fcinfo.ini", b"from the backup").unwrap());
+        assert_eq!(std::fs::read(folder.join("!fcinfo.ini")).unwrap(), b"top");
+        assert!(put_back(&folder, "Sales Tax/2025/!fcinfo.ini", b"back").unwrap());
+        assert_eq!(
+            std::fs::read(folder.join("Sales Tax/2025/!fcinfo.ini")).unwrap(),
+            b"back"
+        );
+        for bad in [
+            "../!fcinfo.ini",
+            "a/../../!fcinfo.ini",
+            "/!fcinfo.ini",
+            "C:/x/!fcinfo.ini",
+            "Payroll/w2.pdf",
+            "_Vibe/!fcinfo.ini",
+            "",
+        ] {
+            assert!(put_back(&folder, bad, b"x").is_err(), "{bad}");
+        }
     }
 
     #[test]

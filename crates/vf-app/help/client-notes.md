@@ -12,7 +12,11 @@ The notes show when the client itself is selected. In one of the client's folder
 
 The notes are kept in a file named `!fcinfo.ini` in the client's top folder. FileCenter keeps its notes for a folder in that file, in the part headed `[Memo]`. Vibe Files reads and writes that part only. Everything else in the file is left exactly as it was, so FileCenter goes on reading it.
 
-`!fcinfo.ini` is not a document. It is not listed in Browse's **Documents** list, is not counted, and is not sent to B2. **Explorer** view still lists it, because that view shows the folder as it is on disk. Leave the file where it is.
+`!fcinfo.ini` is not a document. It is not listed in Browse's **Documents** list and is not counted. **Explorer** view still lists it, because that view shows the folder as it is on disk. Leave the file where it is.
+
+## Backup to B2
+
+With B2 sync set up, a client's notes files are backed up to B2 with the next push after they change: at once for notes saved in Vibe Files, and after the next integrity sweep (weekly, or **Admin** › **Integrity sweep**) for notes changed in FileCenter. The files in the client's sub-folders go too. A restore from B2 puts each notes file back where the folder has none; notes that are there are never replaced. An ordinary pull on another PC does not bring notes over.
 
 ## Changing the notes
 

@@ -374,6 +374,87 @@ fn a_notes_file_is_never_sent_or_deleted_by_sync() {
     );
 }
 
+/// PA-79: the clients' notes files are backed up to B2 beside the manifest (they are not
+/// documents) and come back with a restore, byte for byte, sub-folders included. Nothing is
+/// sent again until notes change.
+#[test]
+fn notes_files_are_backed_up_and_restored() {
+    let t = tempfile::tempdir().unwrap();
+    let store = Remote::memory();
+    let mut a = pc_a(t.path(), store.clone());
+    let top = "Anderson Farms LLC (1042)/!fcinfo.ini";
+    let sub = "Anderson Farms LLC (1042)/Income Tax/2025/!fcinfo.ini";
+    // ANSI, as FileCenter writes: a byte that is not UTF-8.
+    let top_bytes = b"[Fields]\r\n\r\n[Memo]\r\ninvented caf\xE9 note\r\n\r\n[System]\r\n".to_vec();
+    std::fs::write(a.root.join(top), &top_bytes).unwrap();
+    put(&a.root, sub, "[Memo]\r\nyear folder note\r\n");
+    // A listing of the client's folder (an index, the weekly sweep) sees the notes files.
+    vf_fs::rebuild::rebuild(&mut a.conn, &a.root, "dev-a").unwrap();
+    assert_eq!(vf_fs::fcinfo::waiting(&a.conn).unwrap().len(), 1);
+    vf_sync::push::push(&mut a.conn, &a.root, &a.sync, None).unwrap();
+    assert!(vf_fs::fcinfo::waiting(&a.conn).unwrap().is_empty());
+    // One object for the client, its name and body saying nothing readable.
+    let remote = Remote::new(store.clone(), &a.sync.cabinet_id);
+    let keys = remote.list("notes/").unwrap();
+    assert_eq!(keys.len(), 1);
+    assert!(!keys[0].contains("Anderson") && !keys[0].contains("fcinfo"));
+    let body = remote.get(&keys[0]).unwrap().unwrap();
+    assert!(!body.windows(8).any(|w| w == b"invented"));
+
+    let b = pc_b(t.path(), store.clone(), &a);
+    assert_eq!(std::fs::read(b.root.join(top)).unwrap(), top_bytes);
+    assert_eq!(
+        std::fs::read_to_string(b.root.join(sub)).unwrap(),
+        "[Memo]\r\nyear folder note\r\n"
+    );
+    let rows: i64 = b
+        .conn
+        .query_row(
+            "SELECT count(*) FROM document WHERE lower(rel_path) LIKE '%!fcinfo.ini'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(rows, 0, "back as files, not as documents");
+
+    // Nothing changed: nothing is sent. Notes saved in Vibe Files: sent with the next push.
+    assert_eq!(
+        vf_sync::push::push_notes(&a.conn, &a.root, &a.sync).unwrap(),
+        0
+    );
+    let client: String = a
+        .conn
+        .query_row(
+            "SELECT id FROM client WHERE folder_rel = 'Anderson Farms LLC (1042)'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    std::fs::write(a.root.join(top), b"[Memo]\r\nchanged\r\n").unwrap();
+    vf_fs::fcinfo::mark_changed(&a.conn, &client).unwrap();
+    assert_eq!(
+        vf_sync::push::push_notes(&a.conn, &a.root, &a.sync).unwrap(),
+        1
+    );
+    // Notes that are there are never written over by the backup.
+    let b_before = std::fs::read(b.root.join(top)).unwrap();
+    assert_eq!(
+        vf_sync::restore::restore_notes(&b.conn, &b.root, &b.sync).unwrap(),
+        0
+    );
+    assert_eq!(std::fs::read(b.root.join(top)).unwrap(), b_before);
+    // A missing one comes back as the backup now has it.
+    std::fs::remove_file(b.root.join(top)).unwrap();
+    assert_eq!(
+        vf_sync::restore::restore_notes(&b.conn, &b.root, &b.sync).unwrap(),
+        1
+    );
+    assert_eq!(
+        std::fs::read(b.root.join(top)).unwrap(),
+        b"[Memo]\r\nchanged\r\n"
+    );
+}
+
 #[test]
 fn a_forced_collision_keeps_both_and_raises_a_conflict() {
     let t = tempfile::tempdir().unwrap();

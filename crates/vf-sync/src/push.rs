@@ -247,9 +247,59 @@ pub fn push_in_rounds(
             return Ok(rep);
         }
         if !more {
+            // The clients' notes files (PA-79), after the documents: a failure here leaves
+            // them waiting for the next push and does not undo this one.
+            if only.is_none()
+                && let Err(e) = push_notes(conn, root, s)
+            {
+                tracing::warn!(kind = %kind_of(&e), "sync push: the notes files wait");
+            }
             return Ok(rep);
         }
     }
+}
+
+/// An error's kind for the log (never its text: it can name a client's folder).
+fn kind_of(e: &SyncError) -> &'static str {
+    match e {
+        SyncError::Remote(_) => "bucket",
+        SyncError::Format(_) => "bucket object",
+        SyncError::Crypto(_) => "decrypt",
+        _ => "local",
+    }
+}
+
+/// Sends the notes files of the clients whose notes changed (`vf_fs::fcinfo::waiting`): one
+/// object a client, `notes/<client_id>`, holding every notes file under its folder. A client
+/// whose folder has none now keeps what the bucket has (a backup is not emptied by a file
+/// that went missing).
+pub fn push_notes(conn: &Connection, root: &Path, s: &Sync) -> Result<usize> {
+    let mut sent = 0;
+    for (client, mark) in vf_fs::fcinfo::waiting(conn).map_err(SyncError::Local)? {
+        if stopping(&s.cabinet_id) {
+            break;
+        }
+        if !layout::safe_client_id(&client) {
+            continue;
+        }
+        let Some(folder) = catalog::client_folder(conn, &client)? else {
+            continue; // no folder (yet): it waits
+        };
+        let files = vf_fs::fcinfo::collect(&root.join(&folder));
+        if !files.is_empty() {
+            let body = crate::layout::ClientNotes {
+                files: files
+                    .iter()
+                    .map(|(rel, bytes)| (rel.clone(), crate::crypto::hex(bytes)))
+                    .collect(),
+                written_by: s.device_name.clone(),
+            };
+            s.put_json(&layout::notes_key(&client), &body)?;
+            sent += 1;
+        }
+        vf_fs::fcinfo::sent(conn, &client, &mark).map_err(SyncError::Local)?;
+    }
+    Ok(sent)
 }
 
 /// Pushes one client from a computer that does not run the cabinet's sync (PA-41): only that

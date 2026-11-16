@@ -279,6 +279,10 @@ pub fn poll(b: &mut Browse, env: &mut Env) {
                 n.error = None;
             }
             audit(env, &s.client_id);
+            // They wait to go to B2 with the next push (PA-79).
+            if let Err(e) = fcinfo::mark_changed(env.conn, &s.client_id) {
+                tracing::warn!(kind = crate::logging::kind(&e), "notes backup mark");
+            }
             b.notice = Some("Notes saved.".into());
         }
         Ok(Saved::Changed(now)) if here => n.newer = Some(now),
