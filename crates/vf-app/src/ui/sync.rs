@@ -231,6 +231,8 @@ pub struct SyncTab {
     refreshed: Option<Instant>,
     /// The counts being made on their own thread (PA-34: they read every document).
     counting: Option<Receiver<Counted>>,
+    /// The counts and this PC's last push and pull have been read once.
+    counted: bool,
     last_auto: Option<Instant>,
     /// When the remembered key was last tried.
     recall_at: Option<Instant>,
@@ -467,6 +469,7 @@ impl SyncTab {
             match rx.try_recv() {
                 Ok((pending, conflicts, st, held)) => {
                     self.counting = None;
+                    self.counted = true;
                     self.pending = pending;
                     self.table_stale = true;
                     if held.is_some() {
@@ -1411,6 +1414,12 @@ fn unlocked(ui: &mut egui::Ui, t: &mut SyncTab, env: &mut Env, v: &View<'_>) {
                 format!("{} conflicts", t.conflicts.len())
             } else if total > 0 {
                 format!("{total} pending")
+            } else if !t.counted {
+                "checking…".to_string()
+            } else if t.last_push.is_none() && t.last_pull.is_none() {
+                // Nothing waiting, and nothing ever exchanged from this catalog: not "in
+                // sync" (owner 2026-11-16: Browse's startup check said never run).
+                "not synced yet on this PC".to_string()
             } else {
                 "in sync".to_string()
             });

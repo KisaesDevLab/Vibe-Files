@@ -145,7 +145,11 @@ fn sync_state(conn: &Connection) -> Result<String, String> {
         return Err(format!("{conflicts} conflicts to resolve (Sync tab)"));
     }
     let Some(last) = last else {
-        return Err("set up but never run: unlock it in the Sync tab".into());
+        // (Not "unlock it": this is said when sync is unlocked too, owner 2026-11-16.)
+        return Err(
+            "set up, but this PC's catalog has not pushed to B2 or pulled from it yet: Push now or Pull now in the Sync tab"
+                .into(),
+        );
     };
     let age = chrono::DateTime::parse_from_rfc3339(&last)
         .map(|t| (chrono::Utc::now() - t.with_timezone(&chrono::Utc)).num_days())

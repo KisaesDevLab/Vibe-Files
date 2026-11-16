@@ -110,6 +110,8 @@ pub struct OpenCabinet {
     /// Rows an earlier build made for clients' notes files being taken out of the catalog
     /// (PA-76), behind the window: it reads every document's path.
     note_rows: Option<crate::ui::job::Job<Result<usize, String>>>,
+    /// The rest of opening ([`ready`]), behind the window (PA-82).
+    ready: Option<crate::ui::job::Job<Result<Readied, String>>>,
 }
 
 pub struct VibeFilesApp {
@@ -346,15 +348,15 @@ impl VibeFilesApp {
                 ),
                 Mode::Open => session::open_staged(&data, &device, &root),
             };
-            // The rest of opening (it reads and writes the share) here too, not on the UI
-            // thread once the cabinet shows (QA A6).
-            let r = r.map(|mut o| {
-                session::step(
-                    "Getting the cabinet ready: print capture rules, the client list, legal holds, the trash",
-                );
-                let mut p = prepare(&mut o, &device);
-                p.login = login;
-                p.inbox_problem = inbox_problem;
+            // The rest of opening (print capture rules, the client list, legal holds, the
+            // trash: it reads and writes the share) runs behind the window once the cabinet
+            // shows ([`ready`], PA-82): nobody waits for it at "Opening the cabinet…".
+            let r = r.map(|o| {
+                let p = Prepared {
+                    device,
+                    login,
+                    inbox_problem,
+                };
                 (o, p)
             });
             session::steps_done();
@@ -387,9 +389,6 @@ impl VibeFilesApp {
             Ok((
                 mut opened,
                 Prepared {
-                    rules_problem,
-                    emptied,
-                    chain,
                     device,
                     login,
                     inbox_problem,
@@ -450,11 +449,6 @@ impl VibeFilesApp {
                 browse.sheets_dir = self.data.join("sheets");
                 browse.set_prefs(self.config.prefs.clone().for_user(&config::windows_user()));
                 browse.saved = vf_index::saved::load(&opened.root);
-                if let Some(e) = rules_problem {
-                    browse.error = Some(format!(
-                        "Print capture (Admin › Print capture & parsers): {e}"
-                    ));
-                }
                 if let Some(e) = inbox_problem {
                     browse.error = Some(format!(
                         "Your own inbox from firm.toml (my_inbox) is not used: {e}"
@@ -467,23 +461,21 @@ impl VibeFilesApp {
                     ),
                     None => format!("Indexed: {r}"),
                 });
-                match &emptied {
-                    Ok(n) if *n > 0 => tracing::info!(documents = n, "old trash emptied"),
-                    Err(e) => {
-                        tracing::warn!(kind = crate::logging::kind(e), "emptying old trash failed")
-                    }
-                    _ => {}
-                }
-                match emptied {
-                    Ok(0) => {}
-                    Ok(n) => {
-                        browse.notice = Some(format!(
-                            "Emptied {n} documents that were in the trash over {} days.",
-                            vf_fs::trash::AUTO_EMPTY_DAYS
-                        ))
-                    }
-                    Err(e) => add_error(&mut browse.error, format!("Emptying old trash: {e}")),
-                }
+                let chain = crate::ui::audit::ChainCheck::later();
+                // The rest of opening, behind the window (PA-82), on its own connection.
+                let ready = {
+                    let (catalog, root, device) = (
+                        opened.catalog.clone(),
+                        opened.root.clone(),
+                        self.config.device_id.clone(),
+                    );
+                    crate::ui::job::Job::start(ctx, "Getting the cabinet ready…", move || {
+                        let mut conn = vf_core::db::open(&catalog, vf_core::db::Storage::Local)
+                            .map_err(|e| e.to_string())?;
+                        Ok(ready(&mut conn, &root, &device))
+                    })
+                    .ok()
+                };
                 let checks = {
                     let (tx, rx) = mpsc::channel();
                     let (catalog, root, ctx) =
@@ -538,6 +530,7 @@ impl VibeFilesApp {
                 };
                 self.screen = Screen::Open(Box::new(OpenCabinet {
                     note_rows,
+                    ready,
                     chain,
                     mirrored_at: None,
                     mirror_job: None,
@@ -737,6 +730,46 @@ impl eframe::App for VibeFilesApp {
                     tracing::warn!(kind = crate::logging::kind(&e), "notes files' rows");
                 }
                 _ => {}
+            }
+            match crate::ui::job::take(&mut o.ready) {
+                Some(Ok(Ok(r))) => {
+                    if let Some(e) = r.rules_problem {
+                        add_error(
+                            &mut o.browse.error,
+                            format!("Print capture (Admin › Print capture & parsers): {e}"),
+                        );
+                    }
+                    match r.emptied {
+                        Ok(0) => {}
+                        Ok(n) => {
+                            tracing::info!(documents = n, "old trash emptied");
+                            o.browse.notice = Some(format!(
+                                "Emptied {n} documents that were in the trash over {} days.",
+                                vf_fs::trash::AUTO_EMPTY_DAYS
+                            ));
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                kind = crate::logging::kind(&e),
+                                "emptying old trash failed"
+                            );
+                            add_error(&mut o.browse.error, format!("Emptying old trash: {e}"));
+                        }
+                    }
+                    // What it changed in the catalog (the undo list, held and emptied
+                    // documents) shows.
+                    if r.changed {
+                        o.browse.reload(&o.opened.conn);
+                    }
+                }
+                Some(Ok(Err(e))) | Some(Err(e)) => {
+                    tracing::warn!(kind = crate::logging::kind(&e), "cabinet not made ready");
+                    add_error(
+                        &mut o.browse.error,
+                        format!("The cabinet's housekeeping at opening did not run: {e}"),
+                    );
+                }
+                None => {}
             }
             // (And for the other servers' changes left for behind the window, Q-112.)
             o.sweep.hold = o.indexing.is_some() || o.servers.first_pending();
@@ -1099,6 +1132,7 @@ impl eframe::App for VibeFilesApp {
                     admin_unlocked,
                     admin_typed,
                     admin_msg,
+                    ready: o_ready,
                     ..
                 } = &mut **o;
                 let mut env = browse::Env {
@@ -1115,7 +1149,16 @@ impl eframe::App for VibeFilesApp {
                     let a = tab_admin.get_or_insert_with(|| Admin::load(&env));
                     !a.open.is_empty() && !a.unlock_requested
                 };
-                if admin_locked && !some_open {
+                if let Some(j) = o_ready.as_ref().filter(|_| self.tab == Tab::Admin) {
+                    // The legal holds placed on other PCs are still being read (PA-82):
+                    // nothing is emptied from the trash or disposed of before they are.
+                    egui::CentralPanel::default().show(ui, |ui| {
+                        j.show(ui);
+                        ui.label(crate::ui::widgets::caption(
+                            "Admin opens once the cabinet's legal holds and trash have been read.",
+                        ));
+                    });
+                } else if admin_locked && !some_open {
                     let mut back = false;
                     let can_go_back = tab_admin.as_ref().is_some_and(|a| !a.open.is_empty());
                     egui::CentralPanel::default().show(ui, |ui| {
@@ -1521,13 +1564,18 @@ fn add_error(line: &mut Option<String>, msg: String) {
     });
 }
 
-/// What opening a cabinet does after the catalog is open, on the opening thread.
-pub struct Prepared {
+/// What [`ready`] found and did.
+pub struct Readied {
     /// Print capture rules not in line (shown on Browse).
     rules_problem: Option<String>,
     /// Documents the 90-day trash rule emptied.
     emptied: Result<usize, String>,
-    chain: crate::ui::audit::ChainCheck,
+    /// The catalog was changed: Browse reads it again.
+    changed: bool,
+}
+
+/// What the opening thread hands over with the open cabinet.
+pub struct Prepared {
     /// The id this login works under: on a session host, the one the cabinet remembers for
     /// the login (PA-69), which may not be the one in this host's settings.
     device: String,
@@ -1538,9 +1586,6 @@ pub struct Prepared {
     inbox_problem: Option<String>,
 }
 
-/// The work of opening a cabinet that reads and writes the share or the whole catalog: print
-/// capture rules, this workstation's registration, legal holds, the old trash, the audit chain.
-/// Runs on the opening thread, so the window never freezes after the cabinet shows (QA A6).
 /// Removes what the check-out build left (Q-52): rows in the catalog's `lock` table (nothing
 /// writes them any more) and `_Vibe/locks/*.lock`, `_Vibe/intake.lock` on the server.
 fn clear_check_out_leftovers(conn: &mut vf_core::db::Connection, root: &std::path::Path) {
@@ -1559,8 +1604,22 @@ fn clear_check_out_leftovers(conn: &mut vf_core::db::Connection, root: &std::pat
     let _ = std::fs::remove_dir(vibe.join("locks"));
 }
 
-fn prepare(opened: &mut Opened, device_id: &str) -> Prepared {
-    let root = opened.root.clone();
+/// The work of opening a cabinet that reads and writes the share or the whole catalog: print
+/// capture rules, this workstation's registration, legal holds, the old trash. Runs behind
+/// the window on its own connection (PA-82, owner 2026-11-16: it kept the opening screen up;
+/// before, on the opening thread, QA A6). How long each part took goes to the log.
+fn ready(conn: &mut vf_core::db::Connection, root: &Path, device_id: &str) -> Readied {
+    let mut at = std::time::Instant::now();
+    let mut lap = |part: &'static str| {
+        tracing::info!(
+            part,
+            ms = at.elapsed().as_millis() as u64,
+            "opening: behind the window"
+        );
+        at = std::time::Instant::now();
+    };
+    let root = root.to_path_buf();
+    let before = conn.total_changes();
     // Print captures are filed by their doc types' folders (Admin › Print capture): Filer's
     // rules are brought in line before Intake first loads them.
     let _ = vf_ingest::parsers::seed_if_missing(&root);
@@ -1578,12 +1637,15 @@ fn prepare(opened: &mut Opened, device_id: &str) -> Prepared {
     }
     // Check-out was built and removed the same day (Q-52): a catalog that copied other PCs'
     // check-outs, and lock files on the server, would otherwise refuse edits for good.
-    clear_check_out_leftovers(&mut opened.conn, &root);
+    lap("print capture rules");
+    clear_check_out_leftovers(conn, &root);
+    lap("old check-outs");
     // Intake's client box lists Filer's client list: clients known only from their folders
     // are put in it (owner 2026-11-04: no client to pick in Intake).
-    if let Err(e) = vf_fs::clients::ensure_listed(&opened.conn, &root) {
+    if let Err(e) = vf_fs::clients::ensure_listed(conn, &root) {
         tracing::warn!(kind = crate::logging::kind(&e), "client list not completed");
     }
+    lap("client list");
     // This workstation in the cabinet's list (the Safeguards appendix lists them).
     if let Err(e) =
         vf_fs::safeguards::register_device(&root, device_id, crate::server::server_mode())
@@ -1595,14 +1657,19 @@ fn prepare(opened: &mut Opened, device_id: &str) -> Prepared {
     }
     // Legal holds placed on other workstations first (P07): nothing they cover may be emptied
     // below.
-    if let Err(e) = vf_fs::holds::sync(&mut opened.conn, &root, device_id) {
-        tracing::warn!(kind = crate::logging::kind(&e), "legal holds not synced");
+    lap("workstation list");
+    let held = patient(|| vf_fs::holds::sync(conn, &root, device_id));
+    if let Err(e) = &held {
+        tracing::warn!(kind = crate::logging::kind(e), "legal holds not synced");
     }
+    lap("legal holds");
     // This login's undo list as the cabinet has it (Q-105): a catalog made this morning
     // still offers yesterday's changes to undo.
-    if let Err(e) = vf_fs::undolist::restore(&mut opened.conn, &root, device_id) {
-        tracing::warn!(kind = crate::logging::kind(&e), "undo list not restored");
+    let undo = patient(|| vf_fs::undolist::restore(conn, &root, device_id));
+    if let Err(e) = &undo {
+        tracing::warn!(kind = crate::logging::kind(e), "undo list not restored");
     }
+    lap("undo list");
     // Intake folders nobody has used for a month (hosts given a new id at every reset left
     // one each) are set aside, so they are not read at every open and every batch.
     let idle = vf_fs::intake::archive_idle(&root, device_id);
@@ -1610,15 +1677,30 @@ fn prepare(opened: &mut Opened, device_id: &str) -> Prepared {
         tracing::info!(idle, "idle Intake folders set aside");
     }
     // Trash older than 90 days empties on its own (Q-15; held documents stay).
-    let emptied = vf_fs::trash::auto_empty(&mut opened.conn, &root, device_id);
-    let chain = crate::ui::audit::ChainCheck::later();
-    Prepared {
+    lap("idle Intake folders");
+    let emptied = patient(|| vf_fs::trash::auto_empty(conn, &root, device_id));
+    lap("old trash");
+    // Browse reads the catalog again only when a row was written here.
+    let changed = conn.total_changes() != before;
+    Readied {
         rules_problem,
         emptied,
-        chain,
-        device: device_id.to_string(),
-        login: None,
-        inbox_problem: None,
+        changed,
+    }
+}
+
+/// `work` again, a few times, when the catalog was busy: behind the window it writes while
+/// the index does (PA-82), and a write that lost its turn is no problem to show in red.
+fn patient<T>(mut work: impl FnMut() -> Result<T, String>) -> Result<T, String> {
+    let mut tries = 0;
+    loop {
+        match work() {
+            Err(e) if tries < 5 && (e.contains("locked") || e.contains("busy")) => {
+                tries += 1;
+                std::thread::sleep(std::time::Duration::from_secs(2));
+            }
+            r => return r,
+        }
     }
 }
 
@@ -2056,7 +2138,8 @@ mod tests {
                 remote,
                 keys,
                 cabinet_id: id,
-                device_id: "dev-1".into(),
+                // The id the Sync tab reads this PC's last push under.
+                device_id: o.opened.sync_device.clone(),
                 device_name: "OFFICE-PC".into(),
             });
         }
@@ -3873,7 +3956,11 @@ mod tests {
         h.step();
         if matches!(h.state().screen, Screen::Busy { .. }) {
             click(&mut h, "Open a different cabinet");
-            assert!(matches!(h.state().screen, Screen::Wizard(_)));
+            // (Or the cabinet opened in that very frame: opening is short now, PA-82.)
+            assert!(matches!(
+                h.state().screen,
+                Screen::Wizard(_) | Screen::Open(_)
+            ));
         }
         // The abandoned opening lets go of the data folder before the next one.
         std::thread::sleep(std::time::Duration::from_millis(500));
