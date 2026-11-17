@@ -404,23 +404,36 @@ pub struct Index {
     /// The latest record per cabinet path, whatever its content (PA-39).
     by_rel: HashMap<String, Record>,
     pub bad_lines: usize,
+    /// Record files that are there and could not be read just now (the share, another PC
+    /// writing): how many. Their folders' documents are not "without a record": whoever
+    /// would write records for them must not (QA 2026-11-17).
+    pub unreadable: usize,
 }
 
 impl Index {
     /// `folders`: cabinet-relative client folders (each may hold `_Vibe/docmeta.jsonl`).
     pub fn load(root: &Path, folders: &[String]) -> Index {
         let mut ix = Index::default();
-        if let Ok(text) = std::fs::read_to_string(root.join(VIBE_DIR).join(FILE)) {
-            ix.read(&text, "");
+        // No file is no records; a file that cannot be read is counted, not taken for none.
+        let text_of = |p: std::path::PathBuf| match std::fs::read_to_string(p) {
+            Ok(t) => Ok(Some(t)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(_) => Err(()),
+        };
+        match text_of(root.join(VIBE_DIR).join(FILE)) {
+            Ok(Some(text)) => ix.read(&text, ""),
+            Ok(None) => {}
+            Err(()) => ix.unreadable += 1,
         }
         // Several files at a time (thousands of client folders on a share, PA-60); taken in
         // the folders' order, as before.
-        let texts = crate::rebuild::par_map(folders, |f| {
-            std::fs::read_to_string(root.join(f).join(VIBE_DIR).join(FILE)).ok()
-        });
+        let texts =
+            crate::rebuild::par_map(folders, |f| text_of(root.join(f).join(VIBE_DIR).join(FILE)));
         for (f, text) in folders.iter().zip(texts) {
-            if let Some(text) = text {
-                ix.read(&text, f);
+            match text {
+                Ok(Some(text)) => ix.read(&text, f),
+                Ok(None) => {}
+                Err(()) => ix.unreadable += 1,
             }
         }
         ix
@@ -609,8 +622,22 @@ mod tests {
             "undo appends the old values"
         );
         assert!(vf_core::tx::last_undoable(&f.conn, "dev", &UNDOABLE).is_none());
+        // QA 2026-11-17: a records file that is there and cannot be read is counted, not
+        // taken for "no records"; one that is not there is none.
+        let other = f.root.join("Other (2)/_Vibe");
+        std::fs::create_dir_all(other.join(FILE)).unwrap(); // a folder where the file goes
+        let ix = Index::load(
+            &f.root,
+            &[
+                "Acme LLC (1001)".into(),
+                "Other (2)".into(),
+                "None (3)".into(),
+            ],
+        );
+        assert_eq!(ix.unreadable, 1);
         // And the file's last word is the old state.
         let ix = Index::load(&f.root, &["Acme LLC (1001)".into()]);
+        assert_eq!(ix.unreadable, 0);
         let r = ix
             .get(
                 "Acme LLC (1001)/Income Tax/2025/doc 007.pdf",

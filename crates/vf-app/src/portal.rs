@@ -50,16 +50,25 @@ pub fn register_inbox(root: &Path) -> Result<bool, String> {
     std::fs::create_dir_all(&dir).map_err(|e| format!("cannot make {}: {e}", dir.display()))?;
     let master = vf_fs::clients::master_dir(root);
     std::fs::create_dir_all(&master).map_err(|e| e.to_string())?;
-    let (mut fs, _) = filer_intake::config::Settings::load_or_default(&master);
-    // Intake's settings are shared by every PC: keep the path every PC reaches (a mapped
-    // drive's \\server\share form), and compare in that form (QA 2026-11-09).
-    let dir = portable(&dir);
-    if fs.inboxes.iter().any(|p| portable(p) == dir) {
-        return Ok(false);
-    }
-    fs.inboxes.push(dir);
-    fs.save(&master).map_err(|e| e.to_string())?;
-    Ok(true)
+    // Read, changed and written as one under the lock Intake's settings are saved under
+    // (a save on another PC in between was lost; QA 2026-11-17).
+    vf_fs::lock::with(root, "intake-settings", "Intake's settings", || {
+        let (mut fs, savable) = filer_intake::config::Settings::load_or_default(&master);
+        // Settings that could not be read are Filer's defaults: saving those would replace
+        // the firm's inboxes, client CSV and column map with one inbox.
+        if !savable {
+            return Err("Intake's settings cannot be read just now, so the Portal inbox was not added to them. Save the portal settings again in a moment.".to_string());
+        }
+        // Intake's settings are shared by every PC: keep the path every PC reaches (a
+        // mapped drive's \\server\share form), and compare in that form (QA 2026-11-09).
+        let dir = portable(&dir);
+        if fs.inboxes.iter().any(|p| portable(p) == dir) {
+            return Ok(false);
+        }
+        fs.inboxes.push(dir);
+        fs.save(&master).map_err(|e| e.to_string())?;
+        Ok(true)
+    })
 }
 
 /// Fetches every waiting upload into the Portal inbox (on a thread).

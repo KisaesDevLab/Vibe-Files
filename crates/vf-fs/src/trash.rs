@@ -1281,9 +1281,13 @@ mod tests {
         );
         let dump = format!(
             "{:?}",
-            conn.query_row("SELECT group_concat(detail) FROM audit", [], |r| r
-                .get::<_, String>(0))
-                .unwrap()
+            // Without each row's transaction id (random: one run in a few hundred held "2222").
+            conn.query_row(
+                "SELECT group_concat(json_remove(detail, '$.tx')) FROM audit",
+                [],
+                |r| r.get::<_, String>(0)
+            )
+            .unwrap()
         );
         assert!(
             !dump.contains("2222"),

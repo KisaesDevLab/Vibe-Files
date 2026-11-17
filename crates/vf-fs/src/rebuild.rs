@@ -1748,6 +1748,16 @@ fn rebuild_scoped(
         .filter(|f| only.is_none() || in_scope(f))
         .collect();
     let meta = crate::docmeta::Index::load(root, &folder_rels);
+    // Records that are there and cannot be read just now: this part waits (the indexer
+    // takes it again). Going on would catalog those documents as having no record, under
+    // new ids, and write that into the folders' records for every other PC (QA 2026-11-17).
+    if meta.unreadable > 0 {
+        return Err(RebuildError::Io(format!(
+            "the records of {} client folder{} cannot be read just now",
+            meta.unreadable,
+            if meta.unreadable == 1 { "" } else { "s" }
+        )));
+    }
     rep.docmeta_bad_lines = meta.bad_lines;
     // Online-only files left unread (PA-39): another PC that filed or changed one noted its
     // fingerprint in the folder's docmeta.jsonl, with the size and time of the file it was read

@@ -279,6 +279,18 @@ fn audit_pull(conn: &mut Connection, s: &Sync, rep: &PullReport) -> Result<()> {
 /// The admin password file, relative to `_Vibe` (vf_fs::trash::pin_file).
 const PIN_FILE: &str = "trash_pin.json";
 
+/// The cabinet lock a master file (relative to `_Vibe`) is written under by the rest of the
+/// program, and what it is called in a message.
+fn file_lock(rel: &str) -> (&'static str, &'static str) {
+    match rel {
+        PIN_FILE => ("admin", "the admin settings"),
+        "clients.vf.json" => ("clients", "the client list"),
+        "doc_types.json" => ("doc-types", "the doc types"),
+        r if r == vf_fs::holds::FILE => ("holds", "the legal holds"),
+        r if r.starts_with("retention") => ("retention", "the retention classes"),
+        r => vf_fs::intake::shared_lock(r),
+    }
+}
 /// Writes the bucket's master files where this workstation has not changed them since the last
 /// exchange, then brings the catalog in line. Returns the hashes now exchanged.
 fn apply_files(
@@ -297,57 +309,71 @@ fn apply_files(
     let mut files_conflicts: Vec<String> = vec![];
     for (rel, text) in files {
         let p = vibe.join(rel);
-        let local = std::fs::read_to_string(&p).ok();
-        let remote_h = sha256(text.as_bytes());
-        if local.as_deref() == Some(text.as_str()) {
-            merged.insert(rel.clone(), remote_h);
-            continue;
-        }
-        let local_h = local.as_ref().map(|t| sha256(t.as_bytes()));
-        // The admin password file deleted here after it was exchanged (the "forgotten password"
-        // reset): a removal, not a file to restore. The removed marker goes up instead
-        // (owner 2026-11-04).
-        if local.is_none() && rel == PIN_FILE && base.get(rel) == Some(&remote_h) {
-            cabinet::write_replace(&p, vf_fs::trash::REMOVED_MARKER.as_bytes())?;
-            continue;
-        }
-        if local.is_none() || local_h.as_ref() == base.get(rel) {
-            if let Some(d) = p.parent() {
-                std::fs::create_dir_all(d).map_err(|e| SyncError::Local(e.to_string()))?;
+        // Each file under the cabinet lock it is written under elsewhere, read, compared and
+        // written as one: a save on another PC between this pull's read and its write was
+        // written over (QA 2026-11-17).
+        let (lock, what) = file_lock(rel);
+        vf_fs::lock::with(root, lock, what, || -> std::result::Result<(), String> {
+            // Not there is the only "none": a file that cannot be read just now (the share,
+            // another PC writing it) was taken for missing, the bucket's copy written over
+            // it, and the admin password file for one deleted here and its removal sent up.
+            let local = match std::fs::read_to_string(&p) {
+                Ok(t) => Some(t),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+                Err(e) => return Err(format!("{} cannot be read: {e}", p.display())),
+            };
+            let remote_h = sha256(text.as_bytes());
+            if local.as_deref() == Some(text.as_str()) {
+                merged.insert(rel.clone(), remote_h);
+                return Ok(());
             }
-            cabinet::write_replace(&p, text.as_bytes())?;
-            merged.insert(rel.clone(), remote_h);
-            wrote += 1;
-            continue;
-        }
-        // Changed on both PCs since the last exchange.
-        let mine = local.unwrap_or_default();
-        if rel == vf_fs::holds::FILE
-            && let Some(m) = vf_fs::holds::merge_text(&mine, text)
-        {
-            // Legal holds are never lost: both sides' holds, a release on either side kept.
-            cabinet::write_replace(&p, m.as_bytes())?;
-            merged.insert(rel.clone(), remote_h);
-            wrote += 1;
-        } else {
-            // This PC's copy stays (and goes up with the next push); the other one is kept
-            // beside it for a person to compare, and the pull reports it.
-            let other = vibe.join("conflicts").join(format!(
-                "{}.from-{}",
-                rel.replace('/', "_"),
-                conflict_device(if from_device.is_empty() {
-                    "another PC"
-                } else {
-                    from_device
-                })
-            ));
-            if let Some(d) = other.parent() {
-                std::fs::create_dir_all(d).map_err(|e| SyncError::Local(e.to_string()))?;
+            let local_h = local.as_ref().map(|t| sha256(t.as_bytes()));
+            // The admin password file deleted here after it was exchanged (the "forgotten
+            // password" reset): a removal, not a file to restore. The removed marker goes up
+            // instead (owner 2026-11-04).
+            if local.is_none() && rel == PIN_FILE && base.get(rel) == Some(&remote_h) {
+                return cabinet::write_replace(&p, vf_fs::trash::REMOVED_MARKER.as_bytes());
             }
-            cabinet::write_replace(&other, text.as_bytes())?;
-            merged.insert(rel.clone(), remote_h);
-            files_conflicts.push(rel.clone());
-        }
+            if local.is_none() || local_h.as_ref() == base.get(rel) {
+                if let Some(d) = p.parent() {
+                    std::fs::create_dir_all(d).map_err(|e| e.to_string())?;
+                }
+                cabinet::write_replace(&p, text.as_bytes())?;
+                merged.insert(rel.clone(), remote_h);
+                wrote += 1;
+                return Ok(());
+            }
+            // Changed on both PCs since the last exchange.
+            let mine = local.unwrap_or_default();
+            if rel == vf_fs::holds::FILE
+                && let Some(m) = vf_fs::holds::merge_text(&mine, text)
+            {
+                // Legal holds are never lost: both sides' holds, a release on either side kept.
+                cabinet::write_replace(&p, m.as_bytes())?;
+                merged.insert(rel.clone(), remote_h);
+                wrote += 1;
+            } else {
+                // This PC's copy stays (and goes up with the next push); the other one is
+                // kept beside it for a person to compare, and the pull reports it.
+                let other = vibe.join("conflicts").join(format!(
+                    "{}.from-{}",
+                    rel.replace('/', "_"),
+                    conflict_device(if from_device.is_empty() {
+                        "another PC"
+                    } else {
+                        from_device
+                    })
+                ));
+                if let Some(d) = other.parent() {
+                    std::fs::create_dir_all(d).map_err(|e| e.to_string())?;
+                }
+                cabinet::write_replace(&other, text.as_bytes())?;
+                merged.insert(rel.clone(), remote_h);
+                files_conflicts.push(rel.clone());
+            }
+            Ok(())
+        })
+        .map_err(SyncError::Local)?;
     }
     if !files_conflicts.is_empty() {
         tracing::warn!(
