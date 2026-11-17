@@ -99,9 +99,11 @@ pub fn plan(conn: &Connection, root: &Path, src_root: &Path) -> Result<MergePlan
         return Err("One cabinet is inside the other: pick a separate cabinet.".into());
     }
     // Names from the source's client list where it has one, else from the sentinel.
+    // (A client list that is there and cannot be read is said, not passed over: the new
+    // clients would be made under the names their folders had when they were first bound.)
     let src_names: HashMap<String, String> = clients::load(src_root)
-        .ok()
-        .and_then(|m| m.list)
+        .map_err(|e| format!("The other cabinet's client list cannot be read ({e})."))?
+        .list
         .map(|l| {
             l.clients
                 .into_iter()
@@ -139,9 +141,25 @@ pub fn plan(conn: &Connection, root: &Path, src_root: &Path) -> Result<MergePlan
         .map_err(|e| format!("cannot read {}: {e}", src_root.display()))?;
     for folder in tops {
         let src_folder = rel_of(src_root, &folder);
-        let Ok(Some(s)) = filer_intake::sentinel::read_sentinel(&folder) else {
-            p.unbound.push(src_folder);
-            continue;
+        // No client file: not a client's folder, left where it is. One that cannot be read
+        // just now is not that: the merge is not planned without it (it was listed with
+        // the folders "left where they are" and skipped in silence; QA 2026-11-17).
+        let s = match filer_intake::sentinel::read_sentinel(&folder) {
+            Ok(Some(s)) => s,
+            Ok(None) => {
+                p.unbound.push(src_folder);
+                continue;
+            }
+            Err(e) if std::fs::read(filer_intake::sentinel::sentinel_path(&folder)).is_err() => {
+                return Err(format!(
+                    "The client file of {src_folder} in the other cabinet cannot be read just now ({e}). Try again in a moment."
+                ));
+            }
+            // It reads and is not a client file: as a folder with none.
+            Err(_) => {
+                p.unbound.push(src_folder);
+                continue;
+            }
         };
         let ext = s.tax_software_id.clone();
         let name = src_names
@@ -231,6 +249,20 @@ pub fn apply(
                             ),
                         )
                     })?;
+                // The folder as it is on disk now, not as this computer's catalog last saw
+                // it: renamed since on another computer (a new name, a new ID), the files
+                // were filed in a folder made again under the old name, with no client file
+                // (QA 2026-11-17). It must still be this client's.
+                let is_theirs = filer_intake::sentinel::read_sentinel(&root.join(f))
+                    .ok()
+                    .flatten()
+                    .is_some_and(|s| s.client_id.to_string() == id);
+                if !is_theirs {
+                    return Err(format!(
+                        "{} ({}): its folder here is no longer {f} (it was renamed or moved on another computer, or cannot be read just now). Look at the merge again.",
+                        c.name, c.ext_id
+                    ));
+                }
                 (id, f.clone())
             }
             None => {

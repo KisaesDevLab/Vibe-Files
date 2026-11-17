@@ -1476,11 +1476,19 @@ pub fn apply_with(
         }
         _ => Applied::default(),
     };
-    let save = |out: &Applied| {
-        let _ = crate::cabinet::write_replace(
+    // The record of what was done so far. One that cannot be written stops the import
+    // there: what follows could not be undone from this page, and the files a merge moved
+    // would not be held as they are for its undo (it was discarded; QA 2026-11-17).
+    let save = |out: &Applied| -> Result<(), String> {
+        crate::cabinet::write_replace(
             &last_path(root),
             &serde_json::to_vec_pretty(out).expect("serializes"),
-        );
+        )
+        .map_err(|e| {
+            format!(
+                "The import stopped: its record could not be written ({e}). What was done before this is on record and can be undone; the last step may not be."
+            )
+        })
     };
     // Folders set to Merge (owner 2026-11-12): the plan is checked as if their files were in
     // the folder kept; they are moved only once every check below has passed (QA 2026-11-12).
@@ -1525,14 +1533,13 @@ pub fn apply_with(
                     c.name, c.ext_id
                 ));
             }
-            let has: Option<String> = conn
-                .query_row(
-                    "SELECT folder_rel FROM client WHERE ext_id = ?1 AND deleted_at IS NULL
+            // (Read, or said: a failed read let a client be given a second folder.)
+            let has: Option<String> = vf_core::db::row_or_none(conn.query_row(
+                "SELECT folder_rel FROM client WHERE ext_id = ?1 AND deleted_at IS NULL
                        AND folder_rel IS NOT NULL",
-                    [&c.ext_id],
-                    |r| r.get(0),
-                )
-                .ok();
+                [&c.ext_id],
+                |r| r.get(0),
+            ))?;
             if let Some(f) = has.filter(|f| *f != r.rel) {
                 return Err(format!(
                     "{} ({}) has a folder already ({f}): choose another client for {}.",
@@ -1602,7 +1609,7 @@ pub fn apply_with(
         let (tx_id, moved) = merge_folders(conn, root, &target, &src_rels, device_id)?;
         out.merge_txs.push(tx_id);
         out.merged += sources.len();
-        save(&out);
+        save(&out)?;
         let new_rel: HashMap<&str, &str> = moved
             .iter()
             .map(|(a, b)| (a.as_str(), b.as_str()))
@@ -1695,7 +1702,7 @@ pub fn apply_with(
             out.bound += bound;
             out.renamed += renamed;
             // Saved at once: a failure later in the batch still leaves these ties undoable.
-            save(&out);
+            save(&out)?;
         }
 
         // Catalog rows for the batch's files, attached to their new clients (old names too: a
@@ -1718,7 +1725,7 @@ pub fn apply_with(
             }
         }
         if held {
-            save(&out);
+            save(&out)?;
         }
         rebuild::rebuild_folders(conn, root, device_id, &scope).map_err(|e| e.to_string())?;
 
@@ -1796,10 +1803,10 @@ pub fn apply_with(
             }
         }
         progress.fetch_add(batch.len(), std::sync::atomic::Ordering::Relaxed);
-        save(&out);
+        save(&out)?;
     }
     out.finished = true;
-    save(&out);
+    save(&out)?;
     Ok(out)
 }
 

@@ -61,13 +61,18 @@ pub fn flatten_doc(doc: &mut Document) -> Result<usize, String> {
             if subtype == b"Popup" || flags & 2 != 0 {
                 continue; // hidden or a popup: dropped
             }
-            let Some(ap) = appearance(doc, &d) else {
-                continue; // nothing to draw (no appearance): dropped
-            };
-            let Some(rect) = rect(&d) else { continue };
-            if let Some(m) = placement(doc, ap, rect) {
-                draws.push((ap, m));
-                total += 1;
+            // What cannot be drawn into the page (no appearance of its own, as some
+            // programs write a highlight or a note; no place) stays an annotation: it was
+            // taken off the page and the flatten still said it had worked (QA 2026-11-17).
+            let drawn = appearance(doc, &d)
+                .zip(rect(&d))
+                .and_then(|(ap, rect)| placement(doc, ap, rect).map(|m| (ap, m)));
+            match drawn {
+                Some(draw) => {
+                    draws.push(draw);
+                    total += 1;
+                }
+                None => keep.push(a),
             }
         }
         if draws.is_empty() && keep.is_empty() {
@@ -229,15 +234,7 @@ fn burn_in(
             m[0], m[1], m[2], m[3], m[4], m[5]
         ));
     }
-    let existing: Vec<Object> = match doc
-        .get_dictionary(page)
-        .map_err(|e| e.to_string())?
-        .get(b"Contents")
-    {
-        Ok(Object::Reference(id)) => vec![Object::Reference(*id)],
-        Ok(Object::Array(a)) => a.clone(),
-        _ => vec![],
-    };
+    let existing = crate::layer::page_contents(doc, page)?;
     let push = doc.add_object(Stream::new(Dictionary::new(), b"q\n".to_vec()));
     let tail = doc.add_object(Stream::new(Dictionary::new(), ops.into_bytes()));
     let mut contents = vec![Object::Reference(push)];

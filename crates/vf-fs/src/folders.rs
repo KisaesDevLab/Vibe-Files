@@ -347,6 +347,12 @@ fn move_folder(
             .into_iter()
             .collect();
         let ix = docmeta::Index::load(root, &folders);
+        // Records that are there and cannot be read just now: the folder is not renamed
+        // without them (a document known by its path alone kept its record at the old
+        // path, and the other computers lost its doc type, year and tags; QA 2026-11-17).
+        if !ix.unreadable.is_empty() {
+            return Err("The records of the documents in this folder cannot be read just now, so it was not renamed or moved. Try again in a moment.".into());
+        }
         let mut by_file: std::collections::BTreeMap<PathBuf, (Vec<String>, Vec<String>)> =
             Default::default();
         for m in &metas {

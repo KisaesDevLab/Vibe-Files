@@ -231,6 +231,7 @@ pub fn plan(conn: &Connection, root: &Path, from: &str, into: &str) -> Result<Pl
     }
     let vibe = cabinet::VIBE_DIR;
     let (mut on_disk, mut dirs, mut own_records) = (vec![], vec![], false);
+    let mut notes: Vec<String> = vec![];
     if let Some(f) = &from.folder {
         if !root.join(f).is_dir() {
             return Err(format!("The folder {f} is not on disk."));
@@ -239,7 +240,15 @@ pub fn plan(conn: &Connection, root: &Path, from: &str, into: &str) -> Result<Pl
         let own = format!("{f}/{vibe}");
         own_records = root.join(&own).is_dir();
         let mine = |r: &String| r.eq_ignore_ascii_case(&own) || under(r, &own);
-        on_disk = files.into_iter().filter(|r| !mine(r)).collect();
+        // The client's notes files (FileCenter's `!fcinfo.ini`, PA-76) are never documents,
+        // so never "in the catalog": they go with the client, moved like its documents
+        // below. Counted with the files "not in the catalog yet", a client with notes could
+        // never be merged, and Refresh (the advice given) never changed that (QA 2026-11-17).
+        let is_notes = |r: &String| crate::fcinfo::is_note_file(r.rsplit('/').next().unwrap_or(r));
+        let (n, rest): (Vec<String>, Vec<String>) =
+            files.into_iter().filter(|r| !mine(r)).partition(is_notes);
+        notes = n;
+        on_disk = rest;
         dirs = all.into_iter().filter(|r| !mine(r)).collect();
         dirs.push(f.clone());
     }
@@ -367,6 +376,28 @@ pub fn plan(conn: &Connection, root: &Path, from: &str, into: &str) -> Result<Pl
             to,
         });
     }
+    // The notes files, to the same place in the kept client's folder; a name taken there
+    // (the kept client has notes too) keeps both. No document id: they are files only.
+    if let Some(f) = from.folder.as_deref() {
+        for rel in notes {
+            let tail = &rel[f.len() + 1..];
+            let (sub, name) = match tail.rsplit_once('/') {
+                Some((d, n)) => (format!("{into_folder}/{d}"), n),
+                None => (into_folder.clone(), tail),
+            };
+            let free = crate::rename::free_name(name, |n| {
+                taken.contains(&format!("{sub}/{n}").to_lowercase())
+            });
+            let to = format!("{sub}/{free}");
+            taken.insert(to.to_lowercase());
+            moves.push(Move {
+                doc_id: String::new(),
+                kept_both: free != name,
+                from: rel,
+                to,
+            });
+        }
+    }
     let held = holds::load(root)?
         .iter()
         .filter(|h| h.active() && h.client_id.as_deref() == Some(from.id.as_str()))
@@ -443,6 +474,14 @@ pub fn apply(
         let mut tx = Transaction::new(LABEL);
         let mut lines: BTreeMap<PathBuf, Vec<String>> = BTreeMap::new();
         for m in &plan.moves {
+            // A notes file: moved, and nothing of the catalog or the records to change.
+            if m.doc_id.is_empty() {
+                tx = tx.file(FileOp::Move {
+                    src: root.join(&m.from),
+                    dst: root.join(&m.to),
+                });
+                continue;
+            }
             let meta = docmeta::load(conn, &m.doc_id)?;
             if m.from != m.to {
                 tx = tx.file(FileOp::Move {
@@ -1062,6 +1101,40 @@ mod tests {
     /// QA 2026-11-17: once an undo has moved the documents back, a list that cannot be put
     /// back as well (the share for a moment) is said, not an error: the merge is undone, and
     /// marked so, and is not offered again.
+    #[test]
+    fn a_client_with_a_notes_file_is_merged_and_its_notes_go_with_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (root, _csv, mut conn, kept, dup) = cabinet(tmp.path());
+        put(
+            &root.join(DUP).join("!fcinfo.ini"),
+            "[Memo]\r\ncall in March\r\n",
+        );
+        put(
+            &root.join(KEPT).join("!fcinfo.ini"),
+            "[Memo]\r\nthe kept one's\r\n",
+        );
+        let p = plan(&conn, &root, &dup, &kept).expect("notes are not a reason to refuse");
+        let m = apply(&mut conn, &root, &p, "dev").unwrap();
+        assert!(!root.join(DUP).exists(), "its folder is gone");
+        assert_eq!(
+            std::fs::read_to_string(root.join(KEPT).join("!fcinfo.ini")).unwrap(),
+            "[Memo]\r\nthe kept one's\r\n",
+            "the kept client's notes are as they were"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join(KEPT).join("!fcinfo (2).ini")).unwrap(),
+            "[Memo]\r\ncall in March\r\n",
+            "the merged client's notes are beside them"
+        );
+        // And back with it.
+        undo(&mut conn, &root, &m, "dev").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(root.join(DUP).join("!fcinfo.ini")).unwrap(),
+            "[Memo]\r\ncall in March\r\n"
+        );
+        assert!(!root.join(KEPT).join("!fcinfo (2).ini").exists());
+    }
+
     #[test]
     fn an_undo_whose_lists_cannot_be_put_back_is_still_an_undo() {
         let tmp = tempfile::tempdir().unwrap();

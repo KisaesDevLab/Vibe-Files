@@ -438,7 +438,9 @@ impl Ds<'_> {
         let mut data = Vec::new();
         data.try_reserve_exact(page_bytes)
             .map_err(|_| TWCC_LOWMEMORY)?;
-        data.resize(page_bytes, 0);
+        // White until the scanner fills it (every pixel kind's highest value is white): rows
+        // it never sends were black, a band across the page.
+        data.resize(page_bytes, 0xFF);
         let mut rows_seen = 0u32;
         loop {
             let mut x = ImageMemXfer {
@@ -486,7 +488,7 @@ impl Ds<'_> {
                     if data.len() < need {
                         data.try_reserve(need - data.len())
                             .map_err(|_| TWCC_LOWMEMORY)?;
-                        data.resize(need, 0);
+                        data.resize(need, 0xFF);
                     }
                     for r in 0..rows {
                         let src = &buf[r * bpr..r * bpr + take];
@@ -502,7 +504,13 @@ impl Ds<'_> {
                 _ => return Err(self.status()),
             }
         }
-        let height = known_height.unwrap_or(rows_seen);
+        // As many rows as came: a page shorter or longer than the driver announced is
+        // written at its own length (it was padded, or cut, to the announced one; QA
+        // 2026-11-17). With no row at all, the announced length stands.
+        let height = match (known_height, rows_seen) {
+            (Some(k), 0) => k,
+            (_, seen) => seen,
+        };
         data.truncate(row * height as usize);
         Ok(Some(Page {
             width,
@@ -511,23 +519,6 @@ impl Ds<'_> {
             pixel,
             data,
         }))
-    }
-
-    /// Ends the current transfer; returns how many are still pending (-1 = unknown).
-    fn end_transfer(&mut self) -> i16 {
-        let mut p = PendingXfers::default();
-        if self.call(
-            DG_CONTROL,
-            DAT_PENDINGXFERS,
-            MSG_ENDXFER,
-            &mut p as *mut _ as *mut c_void,
-        ) != TWRC_SUCCESS
-        {
-            return self.reset();
-        }
-        let n = p.count as i16;
-        self.state = if n == 0 { State::Enabled } else { State::Ready };
-        n
     }
 
     /// Drops every pending transfer (back to state 5).
@@ -553,7 +544,14 @@ impl Ds<'_> {
         loop {
             let failed = match self.transfer_page() {
                 Ok(Some(p)) => sink(p).err(),
-                Ok(None) => None,
+                // The scanner cancelled this page and goes on: said with the result (the
+                // page was left out without a word; QA 2026-11-17).
+                Ok(None) => {
+                    out.stopped.get_or_insert_with(|| {
+                        "the scanner cancelled a page, which is not in the scan: check the pages against the paper".into()
+                    });
+                    None
+                }
                 Err(cc) => Some(condition(cc)),
             };
             match failed {
@@ -575,7 +573,26 @@ impl Ds<'_> {
                     return;
                 }
             }
-            if self.end_transfer() == 0 {
+            // Whether more pages wait; a scanner that could not say (its answer failed) is
+            // taken as stopped, and said so: the batch used to end there as if complete.
+            let mut p = PendingXfers::default();
+            if self.call(
+                DG_CONTROL,
+                DAT_PENDINGXFERS,
+                MSG_ENDXFER,
+                &mut p as *mut _ as *mut c_void,
+            ) != TWRC_SUCCESS
+            {
+                let why = condition(self.status());
+                self.reset();
+                out.stopped.get_or_insert_with(|| {
+                    format!("the scanner stopped between pages ({why}): pages may be missing")
+                });
+                return;
+            }
+            let n = p.count as i16;
+            self.state = if n == 0 { State::Enabled } else { State::Ready };
+            if n == 0 {
                 return;
             }
         }

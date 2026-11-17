@@ -182,13 +182,20 @@ fn scan(req: &ScanRequest) -> ScanReply {
                 let file = format!("page-{:04}.raw", files.len() + 1);
                 std::fs::write(out.join(&file), &p.data)
                     .map_err(|e| format!("cannot keep page {}: {e}", files.len() + 1))?;
-                files.push(PageFile {
+                let page = PageFile {
                     file,
                     width: p.width,
                     height: p.height,
                     dpi: p.dpi,
                     pixel: p.pixel,
-                });
+                };
+                // What the page is, beside it: when this program stops before it can
+                // answer (a driver that crashes it at page 78 of 80), the pages already
+                // scanned can still be read back ([`pages_left`]).
+                if let Ok(text) = serde_json::to_string(&page) {
+                    let _ = std::fs::write(out.join(format!("{}.json", page.file)), text);
+                }
+                files.push(page);
                 Ok(())
             });
             r.map(|s| (s, files))
@@ -388,8 +395,56 @@ pub fn scan32(source: &str, settings: &Settings) -> Result<Scanned, String> {
         let reply: ScanReply = run(&exe, &["scan".as_ref(), req_path.as_os_str()], None)?;
         read_reply(&dir, reply)
     })();
+    // The helper stopped, or a page came back unreadable: the pages scanned before that are
+    // paper someone fed. They are read back from the folder and kept, with the reason; they
+    // used to be deleted with it (QA 2026-11-17).
+    let result = result.or_else(|why| {
+        let pages = pages_left(&dir);
+        if pages.is_empty() {
+            return Err(why);
+        }
+        Ok(Scanned {
+            stopped: Some(format!(
+                "{why}; the {} page{} scanned before that {} kept",
+                pages.len(),
+                if pages.len() == 1 { "" } else { "s" },
+                if pages.len() == 1 { "is" } else { "are" }
+            )),
+            pages,
+            cancelled: false,
+        })
+    });
     let _ = std::fs::remove_dir_all(&dir);
     result
+}
+
+/// The whole pages the helper left in `dir`, in order, up to the first that is missing or
+/// not whole: each page's file with what it is beside it (`page-NNNN.raw.json`).
+fn pages_left(dir: &Path) -> Vec<Page> {
+    let mut pages = Vec::new();
+    for n in 1.. {
+        let file = format!("page-{n:04}.raw");
+        let Some(p) = std::fs::read(dir.join(format!("{file}.json")))
+            .ok()
+            .and_then(|b| serde_json::from_slice::<PageFile>(&b).ok())
+        else {
+            break;
+        };
+        let Ok(data) = std::fs::read(dir.join(&file)) else {
+            break;
+        };
+        if data.len() != p.pixel.row_bytes(p.width) * p.height as usize {
+            break;
+        }
+        pages.push(Page {
+            width: p.width,
+            height: p.height,
+            dpi: p.dpi,
+            pixel: p.pixel,
+            data,
+        });
+    }
+    pages
 }
 
 /// The pages a [`ScanReply`] names, read back from `dir`.
@@ -509,5 +564,36 @@ mod tests {
         let back: ScanRequest =
             serde_json::from_str(&serde_json::to_string(&req).unwrap()).unwrap();
         assert_eq!(back, req);
+    }
+    /// QA 2026-11-17: when the helper stops before it answers, the pages it had scanned are
+    /// read back from its folder, up to the first one that is not whole.
+    #[test]
+    fn pages_the_helper_left_are_read_back() {
+        let t = tempfile::tempdir().unwrap();
+        let dir = t.path();
+        let page = |n: usize, whole: bool| {
+            let p = PageFile {
+                file: format!("page-{n:04}.raw"),
+                width: 16,
+                height: 4,
+                dpi: 300.0,
+                pixel: Pixel::Gray,
+            };
+            let len = if whole { 16 * 4 } else { 10 };
+            std::fs::write(dir.join(&p.file), vec![200u8; len]).unwrap();
+            std::fs::write(
+                dir.join(format!("{}.json", p.file)),
+                serde_json::to_string(&p).unwrap(),
+            )
+            .unwrap();
+        };
+        assert!(pages_left(dir).is_empty());
+        page(1, true);
+        page(2, true);
+        page(3, false); // the page being written when it stopped
+        page(4, true);
+        let left = pages_left(dir);
+        assert_eq!(left.len(), 2, "the whole pages before the one cut short");
+        assert_eq!((left[0].width, left[0].height), (16, 4));
     }
 }

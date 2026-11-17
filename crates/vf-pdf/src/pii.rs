@@ -122,8 +122,18 @@ pub fn find_on_page(page: usize, chars: &[(char, Option<[f32; 4]>)], kinds: &[Ki
         if !kinds.contains(kind) {
             continue;
         }
-        for caps in re.captures_iter(&text) {
-            let Some(m) = caps.get(*group) else { continue };
+        // Searched on from the end of the number found, not from the end of the whole
+        // match: the patterns end by taking the character after the number (so it is not
+        // part of a longer one), and the next number needs that same character in front of
+        // it. Two numbers one character apart ("123-45-6789 987-65-4321", or one under the
+        // other on a form) gave only the first, and the second stayed in a redacted copy
+        // (QA 2026-11-17).
+        let mut from = 0;
+        while from <= text.len() {
+            let Some(caps) = re.captures_at(&text, from) else {
+                break;
+            };
+            let Some(m) = caps.get(*group) else { break };
             let (a, b) = (char_at(m.start()), char_at(m.end()));
             out.push(Found {
                 page,
@@ -131,6 +141,11 @@ pub fn find_on_page(page: usize, chars: &[(char, Option<[f32; 4]>)], kinds: &[Ki
                 value: m.as_str().to_string(),
                 rects: line_boxes(&chars[a..b]),
             });
+            // Always forward (a number is never empty).
+            from = m.end().max(from + 1);
+            while from < text.len() && !text.is_char_boundary(from) {
+                from += 1;
+            }
         }
     }
     out.sort_by(|x, y| (x.kind, &x.value).cmp(&(y.kind, &y.value)));
@@ -173,6 +188,37 @@ mod tests {
         assert_eq!(f.len(), 1);
         assert_eq!(f[0].value, "987654321");
         assert!(find_on_page(0, &chars("Invoice 987654321"), &[Kind::Ssn]).is_empty());
+    }
+
+    /// QA 2026-11-17: numbers one character apart (side by side, or one under the other on
+    /// a form: pdfium puts one generated space or line break between them) are each found.
+    /// Only the first was, and the second stayed readable in a redacted copy.
+    #[test]
+    fn numbers_one_character_apart_are_each_found() {
+        let chars = |t: &str| t.chars().map(|c| (c, None)).collect::<Vec<_>>();
+        let values = |t: &str, k: Kind| -> Vec<String> {
+            let mut v: Vec<String> = find_on_page(0, &chars(t), &[k])
+                .into_iter()
+                .map(|f| f.value)
+                .collect();
+            v.sort();
+            v
+        };
+        assert_eq!(
+            values("123-45-6789 987-65-4321", Kind::Ssn),
+            ["123-45-6789", "987-65-4321"]
+        );
+        assert_eq!(
+            values("111-22-3333\n444-55-6666\n777-88-9999", Kind::Ssn),
+            ["111-22-3333", "444-55-6666", "777-88-9999"]
+        );
+        assert_eq!(
+            values("07-1234567 12-7654321", Kind::Ein),
+            ["07-1234567", "12-7654321"]
+        );
+        // Still not a part of a longer number.
+        assert!(values("1123-45-67890", Kind::Ssn).is_empty());
+        assert!(values("123-45-6789-0", Kind::Ssn).is_empty());
     }
 
     fn run(text: &str) -> Vec<(char, Option<[f32; 4]>)> {

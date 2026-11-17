@@ -278,18 +278,32 @@ fn add_font(doc: &mut Document, page: ObjectId, font: ObjectId) -> Result<(), St
     Ok(())
 }
 
+/// The page's content streams, as the list a new `/Contents` array can be built from. A
+/// page's `/Contents` is a stream, an array of streams, or a reference to either: a
+/// reference to an array was taken for a stream and put inside the new array, which no
+/// reader has to accept (the page's own content could then go missing from view while the
+/// file was reported saved; QA 2026-11-17). Its streams are taken out of it.
+pub(crate) fn page_contents(doc: &Document, page: ObjectId) -> Result<Vec<Object>, String> {
+    Ok(
+        match doc
+            .get_dictionary(page)
+            .map_err(|e| e.to_string())?
+            .get(b"Contents")
+        {
+            Ok(Object::Reference(id)) => match doc.get_object(*id) {
+                Ok(Object::Array(a)) => a.clone(),
+                _ => vec![Object::Reference(*id)],
+            },
+            Ok(Object::Array(a)) => a.clone(),
+            _ => vec![],
+        },
+    )
+}
+
 /// `q <existing content> Q <layer>`: whatever state the page's own content leaves behind
 /// does not move the layer.
 fn wrap_contents(doc: &mut Document, page: ObjectId, ops: Vec<Operation>) -> Result<(), String> {
-    let existing: Vec<Object> = match doc
-        .get_dictionary(page)
-        .map_err(|e| e.to_string())?
-        .get(b"Contents")
-    {
-        Ok(Object::Reference(id)) => vec![Object::Reference(*id)],
-        Ok(Object::Array(a)) => a.clone(),
-        _ => vec![],
-    };
+    let existing = page_contents(doc, page)?;
     let push = doc.add_object(Stream::new(Dictionary::new(), b"q\n".to_vec()));
     let mut layer = b"Q\n".to_vec();
     layer.extend(
@@ -344,5 +358,30 @@ mod tests {
     #[test]
     fn win_ansi_keeps_latin_and_replaces_the_rest() {
         assert_eq!(win_ansi("Café 12–34 €"), b"Caf\xe9 12-34 ?".to_vec());
+    }
+    /// QA 2026-11-17: a page's `/Contents` given as a reference to an array of streams is
+    /// taken apart into its streams, not put whole inside the new array.
+    #[test]
+    fn a_reference_to_an_array_of_content_streams_is_taken_apart() {
+        let mut d = Document::with_version("1.5");
+        let stream = d.add_object(Stream::new(Dictionary::new(), b"BT ET".to_vec()));
+        let array = d.add_object(Object::Array(vec![Object::Reference(stream)]));
+        let refs = |d: &Document, contents: Object| -> Vec<ObjectId> {
+            let mut d = d.clone();
+            let mut p = Dictionary::new();
+            p.set("Contents", contents);
+            let page = d.add_object(p);
+            page_contents(&d, page)
+                .unwrap()
+                .iter()
+                .map(|o| o.as_reference().unwrap())
+                .collect()
+        };
+        assert_eq!(refs(&d, Object::Reference(array)), [stream]);
+        assert_eq!(refs(&d, Object::Reference(stream)), [stream]);
+        assert_eq!(
+            refs(&d, Object::Array(vec![Object::Reference(stream)])),
+            [stream]
+        );
     }
 }
