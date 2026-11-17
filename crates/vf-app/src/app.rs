@@ -2594,9 +2594,26 @@ mod tests {
                     h.step();
                 }
             };
-        wait(&mut h, "the form read", &|h| {
-            h.query_by_label("read").is_some()
-        });
+        // Preview is pressed until the form is read: a press on a frame that is being drawn
+        // again is lost (one run in ten of the whole suite waited here for ever).
+        {
+            let start = std::time::Instant::now();
+            let mut pressed = start;
+            while h.query_by_label("read").is_none() {
+                assert!(
+                    start.elapsed() < crate::ui::test_util::PATIENCE,
+                    "the form read"
+                );
+                if pressed.elapsed() > std::time::Duration::from_secs(3) {
+                    if let Some(p) = h.query_by_label("Preview") {
+                        p.click();
+                    }
+                    pressed = std::time::Instant::now();
+                }
+                std::thread::sleep(std::time::Duration::from_millis(30));
+                h.step();
+            }
+        }
         let sha = filer_intake::commit::sha256_file(&form).unwrap();
         let hint = vf_fs::hints::load(&root)
             .get(&sha)
