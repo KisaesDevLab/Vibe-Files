@@ -13,21 +13,43 @@ A CSV file with two columns: the client's name and its ID. The first row holds t
 1. Open **Admin › Clients from a list**.
 2. Press **Choose…**, pick the CSV, then **Read the list**.
 3. Check **ID column** and **Name column**. Vibe Files guesses them; change them if the guess is wrong.
-4. Leave **Names match at least** at 97 %, or change it. 97 % allows a missing comma, or `Inc` for `Inc.`. A lower number finds more matches, and more wrong ones.
+4. Leave **Names match at least** at 97 %, or lower it to see more names that are only close.
 5. Press **Find matches**. Nothing is changed.
 
 Each row of the list is matched to one client:
 
-- by its ID, when a client has that ID already (only the name's spelling changes);
-- otherwise by name, to the one client whose name agrees closely enough.
+- by its ID, when a client has that ID and its name agrees. `01002`, `1002` and `10-02` count as one ID;
+- otherwise by name. The client's name and its folder's name are both tried.
+
+## How names are compared
+
+Names are compared word by word, not letter by letter:
+
+- **Same name**: the same apart from capitals, punctuation and `Last, First`.
+- **Same, written differently**: the same words once what carries no meaning is set aside: `&` and `and`, `LLC`, `Inc` or `Incorporated`, a leading `The`, a middle initial on one side, `(deceased)` or the ID in a folder's name, or the words in another order.
+- **Close: look**: something differs that can mean another client: a number, `Jr` or `II` on one side, two legal forms (`LLC` and `Inc`), one word more, a word shortened or a letter off. These are shown only when their percentage reaches **Names match at least**.
+
+`Smith, John` and `Smith, Jon`, or `Baker Properties 1` and `Baker Properties 2`, are never offered as a match.
 
 ## What the list shows
 
-- **Name 98%**: the names match and the client has no ID yet.
-- **Name 98% · has another ID**: the names match, but the client has a different ID. Two people of one name are not one client, so look before you tick.
-- **Same ID · name 96%**: the client has this ID; the list spells its name another way.
+The **Match** column says which of the three it is, and what the client has now: no ID yet, **has another ID** (look before you tick), or **Same ID** with the name written another way.
 
-Use **Show** and **Name or ID contains** to narrow the list. **Tick the ones shown** ticks every match shown, but clients that have another ID are ticked only when **Show** is set to **Has another ID**.
+Use **Show** and **Name or ID contains** to narrow the list. **Tick the ones shown** ticks only what is surely one client:
+
+- with **Show** on **All matches**: the ones with the same name;
+- names written differently only when **Show** is set to **Same name, written differently**;
+- clients that have another ID only when **Show** is set to **Has another ID**;
+- close matches never: tick those one at a time.
+
+## What did not match
+
+Under the counts, the **Not matched** line counts the discrepancies, and two folded lists show them with the nearest thing to each and how close it is:
+
+- **On the list, no client**: rows no client matches. The nearest may be a folder with no client file; [Folder import](help:folder-import) makes such a folder a client.
+- **Clients not on the list**: clients no row is for.
+
+**Save the comparison as CSV…** writes all of it (matches, both lists, folders with no client file, and what is not changed) to open in Excel.
 
 Under the counts, **Some are not changed: more than one match** lists what Vibe Files will not touch:
 

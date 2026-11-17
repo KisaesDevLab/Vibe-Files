@@ -1663,6 +1663,14 @@ ANDE1042,Anderson Farms LLC
             h.query_by_label("2 pairs among 4 clients · 1 ticked")
                 .is_some()
         );
+        // Owner 2026-11-17: Keep is the choice and the tick in one.
+        h.get_by_label("Keep 6001 of Cole Trust  6001 and Cole Trust  6002")
+            .click();
+        h.run();
+        assert!(
+            h.query_by_label("2 pairs among 4 clients · 2 ticked")
+                .is_some()
+        );
         click(
             &mut h,
             "Not the same: Cole Trust  6001 and Cole Trust  6002",

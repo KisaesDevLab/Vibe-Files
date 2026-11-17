@@ -19,7 +19,7 @@ use filer_core::clients::{loose_id, normalize_name};
 use vf_core::db::Connection;
 
 use crate::clientmerge::{self, Merged};
-use crate::{cabinet, clients};
+use crate::{cabinet, clients, listupdate};
 
 /// Two names are the same client's at this score or better.
 pub const NAME_MATCH: f64 = 0.97;
@@ -101,7 +101,7 @@ pub(crate) fn score(a: &[String], b: &[String]) -> f64 {
 }
 
 /// The ID as two similar clients' IDs are compared: [`loose_id`] without leading zeros.
-pub(crate) fn id_key(id: &str) -> String {
+pub fn id_key(id: &str) -> String {
     let l = loose_id(id);
     let t = l.trim_start_matches('0');
     // Nothing but zeros is one ID however many of them.
@@ -279,6 +279,29 @@ fn rank(pairs: &mut [Pair]) {
     });
 }
 
+/// The IDs in the CSV at `csv`, as [`id_key`] compares them: for marking, in every pair,
+/// the client whose ID is on the firm's list as the one to keep. The ID column is told by
+/// its name (`ID`, `Client ID` …) or, in a list of two columns, by its shorter values.
+pub fn ids_on_list(csv: &Path) -> Result<HashSet<String>, String> {
+    let cols = listupdate::columns(csv)?;
+    let Some(id) = cols.id else {
+        return Err("The list's ID column could not be told: name it ID in its first row.".into());
+    };
+    let table = filer_core::clients::read_csv(csv).map_err(|e| e.to_string())?;
+    let col = table
+        .headers
+        .iter()
+        .position(|h| *h == id)
+        .ok_or("the ID column is gone")?;
+    Ok(table
+        .rows
+        .iter()
+        .filter_map(|r| r.get(col))
+        .map(|v| id_key(v))
+        .filter(|k| !k.is_empty())
+        .collect())
+}
+
 /// One ticked pair: client `from` (uuid) is merged into client `into`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Choice {
@@ -306,6 +329,19 @@ pub struct Preview {
     /// The kept client has no ID, so the merged client's relationships cannot become its
     /// own: they are dropped.
     pub drops_relationships: bool,
+    /// The kept client has no folder: the other's folder becomes its folder, (now, after
+    /// its rename for the kept client's name and ID; the same when its name stays).
+    pub adopts: Option<(String, String)>,
+}
+
+/// Whether merging `from` into `into` is the kept client taking the other's folder: the
+/// one kept has none and the other has one (owner 2026-11-17: the client with the right ID
+/// came from the firm's list and has no folder; the folder is under the old ID). Returns
+/// the kept client's ID and name.
+fn adopting(conn: &Connection, from: &str, into: &str) -> Result<Option<(String, String)>, String> {
+    let (_, _, from_folder) = listupdate::client_row(conn, from)?;
+    let (id, name, into_folder) = listupdate::client_row(conn, into)?;
+    Ok((into_folder.is_none() && from_folder.is_some()).then_some((id, name)))
 }
 
 /// `id` after the merges in `gone` (merged client → kept client).
@@ -349,6 +385,33 @@ pub fn preview(
                 .any(|id| touched.contains(id.as_str()));
             let r = if from == into {
                 Err("These two are one client already after the merges above.".to_string())
+            } else if let Some((id, name)) = adopting(conn, &from, &into).unwrap_or(None) {
+                // The kept client's place on the list goes to the client with the folder,
+                // which then takes its ID and name: checked as those two steps.
+                clientmerge::plan(conn, root, &into, &from).and_then(|p| {
+                    let change = listupdate::Change {
+                        client: from.clone(),
+                        id,
+                        name,
+                    };
+                    let freed: HashSet<String> = [into.clone()].into();
+                    let planned = listupdate::preview_freeing(conn, root, &[change], &freed)?
+                        .pop()
+                        .map(|(_, r)| r)
+                        .unwrap_or_else(|| Err("nothing planned".into()))?;
+                    let folder = p.into.folder.clone().unwrap_or_default();
+                    Ok(Preview {
+                        from: format!("{}  {}", p.into.name, p.into.ext_id),
+                        into: format!("{}  {}", p.from.name, p.from.ext_id),
+                        moves: 0,
+                        kept_both: 0,
+                        holds: p.holds,
+                        relationships: p.relationships,
+                        drops_relationships: false,
+                        after_another,
+                        adopts: Some(planned.folder.unwrap_or((folder.clone(), folder))),
+                    })
+                })
             } else {
                 clientmerge::plan(conn, root, &from, &into).map(|p| Preview {
                     from: format!("{}  {}", p.from.name, p.from.ext_id),
@@ -363,6 +426,7 @@ pub fn preview(
                     relationships: p.relationships,
                     drops_relationships: p.relationships > 0 && p.into.ext_id.trim().is_empty(),
                     after_another,
+                    adopts: None,
                 })
             };
             if r.is_ok() {
@@ -377,11 +441,82 @@ pub fn preview(
 /// How one pair of a run ended.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Outcome {
-    Merged(Box<Merged>),
+    Merged(Box<Ran>),
     /// Nothing to do (the two became one client earlier in the run), or the run was stopped.
     Skipped(String),
     /// Refused: nothing of this pair was changed.
     Failed(String),
+}
+
+/// One merge of a run, as its undo needs it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Ran {
+    pub merged: Merged,
+    /// The kept client had no folder and took the other's (see [`Preview::adopts`]).
+    pub adopted: Option<Adopted>,
+}
+
+/// What a kept client taking the other's folder changed besides the merge.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Adopted {
+    /// The client with the folder, given the kept client's ID and name.
+    pub done: listupdate::Done,
+    /// Its own row in the client CSV (under its old ID), taken out.
+    pub old_csv_row: Option<String>,
+}
+
+/// The kept client `kept` (no folder) and the client `other` (the folder): one client with
+/// the kept one's ID and name and the other's folder, documents and identity in the
+/// catalog. Nothing is moved file by file: the folder is renamed. As two steps that are
+/// each undone by their own undo: `kept` is merged into `other` (its place on the client
+/// list, its relationships and holds; it has no documents), then `other` takes its ID and
+/// name. The catalog identity that stays is the folder's, so its documents, versions and
+/// B2 objects are untouched.
+fn adopt(
+    conn: &mut Connection,
+    root: &Path,
+    device_id: &str,
+    other: &str,
+    kept: &str,
+    id: String,
+    name: String,
+) -> Result<Ran, String> {
+    let plan = clientmerge::plan(conn, root, kept, other)?;
+    let merged = clientmerge::apply(conn, root, &plan, device_id)?;
+    let change = listupdate::Change {
+        client: other.to_string(),
+        id,
+        name,
+    };
+    // The same ID and name already (the two differed in nothing else): the merge is all.
+    let (now_id, now_name, _) = listupdate::client_row(conn, other)?;
+    if now_id == change.id.trim() && now_name == change.name.trim() {
+        return Ok(Ran {
+            merged,
+            adopted: None,
+        });
+    }
+    match listupdate::change_one(conn, root, device_id, &change, true) {
+        Ok((done, _)) => {
+            // The client CSV: the kept client's own row is the firm's, and stays; the
+            // row under the folder's old ID goes.
+            let old_csv_row = clients::remove_from_csv(root, &done.old_id).ok().flatten();
+            if let Some(row) = &merged.csv_row {
+                let _ = clients::restore_csv_row(root, &merged.from.ext_id, row);
+            }
+            Ok(Ran {
+                merged,
+                adopted: Some(Adopted { done, old_csv_row }),
+            })
+        }
+        // The folder's client could not take the ID: the two are as they were.
+        Err(e) => match clientmerge::undo(conn, root, &merged, device_id) {
+            Ok(_) => Err(e),
+            Err(u) => Err(format!(
+                "{e} The kept client's place on the client list could not be put back ({u}): it is merged into the one with the folder, under that one's ID."
+            )),
+        },
+    }
 }
 
 /// Merges each of `choices` in order, each as its own merge (its own Transaction and record,
@@ -411,14 +546,30 @@ pub fn merge_many(
             Outcome::Skipped("Already one client after an earlier merge of this run.".into())
         } else {
             // Planned now, as things are after the merges before it.
-            match clientmerge::plan(conn, root, &from, &into)
-                .and_then(|p| clientmerge::apply(conn, root, &p, device_id))
-            {
-                Ok(m) => {
-                    gone.insert(from, into);
-                    Outcome::Merged(Box::new(m))
-                }
+            match adopting(conn, &from, &into) {
                 Err(e) => Outcome::Failed(e),
+                Ok(Some((id, name))) => {
+                    match adopt(conn, root, device_id, &from, &into, id, name) {
+                        Ok(r) => {
+                            // The identity that stays is the folder's.
+                            gone.insert(into, from);
+                            Outcome::Merged(Box::new(r))
+                        }
+                        Err(e) => Outcome::Failed(e),
+                    }
+                }
+                Ok(None) => match clientmerge::plan(conn, root, &from, &into)
+                    .and_then(|p| clientmerge::apply(conn, root, &p, device_id))
+                {
+                    Ok(m) => {
+                        gone.insert(from, into);
+                        Outcome::Merged(Box::new(Ran {
+                            merged: m,
+                            adopted: None,
+                        }))
+                    }
+                    Err(e) => Outcome::Failed(e),
+                },
             }
         };
         out.push((c.clone(), r));
@@ -440,13 +591,28 @@ pub fn undo_many(
     conn: &mut Connection,
     root: &Path,
     device_id: &str,
-    merged: &[Merged],
+    merged: &[Ran],
 ) -> Vec<(String, PutBack)> {
     let mut out = Vec::new();
-    for m in merged.iter().rev() {
+    for ran in merged.iter().rev() {
+        let m = &ran.merged;
+        // A kept client that took the other's folder: the folder's client gets its own ID,
+        // name and CSV row back first, then the kept one its place on the list.
+        let renamed = match &ran.adopted {
+            None => Ok(()),
+            Some(a) => listupdate::put_back_one(conn, root, device_id, &a.done).map(|()| {
+                if let Some(row) = &a.old_csv_row {
+                    let _ = clients::restore_csv_row(root, &a.done.old_id, row);
+                }
+                // (The merge's undo puts the kept client's row back: not twice.)
+                if m.csv_row.is_some() {
+                    let _ = clients::remove_from_csv(root, &m.from.ext_id);
+                }
+            }),
+        };
         // With what the undo could not put back of the client's own (its place on the
         // list, its relationships, its holds), for the page to say.
-        let r = clientmerge::undo_noted(conn, root, m, device_id);
+        let r = renamed.and_then(|()| clientmerge::undo_noted(conn, root, m, device_id));
         let failed = r.is_err();
         out.push((format!("{}  {}", m.from.name, m.from.ext_id), r));
         if failed {
@@ -707,6 +873,144 @@ mod tests {
 
     /// A chain (A~B, B~C) with keep choices that pull two ways ends as one client, a refused
     /// pair does not stop the run, and the run is put back last first.
+    /// Owner 2026-11-17: the client to keep is the one with the right ID, which came from
+    /// the firm's list and has no folder; the folder is under the old ID. Keeping it makes
+    /// the other's folder its folder (renamed, nothing moved file by file), and the undo
+    /// puts both back.
+    #[test]
+    fn a_kept_client_with_no_folder_takes_the_others_folder() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (root, mut conn) = cabinet(tmp.path(), &[("6 R Farms LLC", "6RFA1001")], &[]);
+        // The firm's list brought the same client under its real ID: on the client list
+        // and in the client CSV, with no folder.
+        let listed = Uuid::new_v4();
+        let mut list = clients::load(&root).unwrap().list.unwrap();
+        list.uuids.insert("7974_6RFA".into(), listed);
+        list.clients.push(Client {
+            id: "7974_6RFA".into(),
+            uuid: listed,
+            name: "6 R Farms, LLC".into(),
+            extra: BTreeMap::new(),
+        });
+        clients::save_list(&root, &list).unwrap();
+        let csv = tmp.path().join("clients.csv");
+        std::fs::write(
+            &csv,
+            "id,name\r\n7974_6RFA,\"6 R Farms, LLC\"\r\n6RFA1001,6 R Farms LLC\r\n",
+        )
+        .unwrap();
+        crate::rebuild::sync_clients(&mut conn, &root, "dev", "clients_import").unwrap();
+        assert_eq!(live(&conn), ["6RFA1001", "7974_6RFA"]);
+        let folder_client = uuid_of(&conn, "6RFA1001");
+        let kept = uuid_of(&conn, "7974_6RFA");
+        assert_eq!(kept, listed.to_string());
+
+        let choices = [Choice {
+            from: folder_client.clone(),
+            into: kept.clone(),
+        }];
+        let p = preview(&conn, &root, &choices).unwrap();
+        let pv = p[0]
+            .1
+            .as_ref()
+            .expect("a client with no folder can be kept");
+        assert_eq!(pv.moves, 0);
+        assert_eq!(
+            pv.adopts,
+            Some((
+                "6 R Farms LLC (6RFA1001)".to_string(),
+                "6 R Farms, LLC (7974_6RFA)".to_string()
+            ))
+        );
+        assert!(
+            root.join("6 R Farms LLC (6RFA1001)").is_dir(),
+            "nothing changed"
+        );
+
+        let (done, stop) = (AtomicUsize::new(0), AtomicBool::new(false));
+        let out = merge_many(&mut conn, &root, "dev", &choices, &done, &stop);
+        let Outcome::Merged(ran) = &out[0].1 else {
+            panic!("{:?}", out[0].1);
+        };
+        assert!(ran.adopted.is_some());
+        // One client: the kept one's ID and name, the folder and its documents.
+        assert_eq!(live(&conn), ["7974_6RFA"]);
+        let (name, folder): (String, String) = conn
+            .query_row(
+                "SELECT name, folder_rel FROM client WHERE deleted_at IS NULL",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            (name.as_str(), folder.as_str()),
+            ("6 R Farms, LLC", "6 R Farms, LLC (7974_6RFA)")
+        );
+        assert!(
+            root.join("6 R Farms, LLC (7974_6RFA)/Income Tax/2025/return.pdf")
+                .is_file()
+        );
+        assert!(!root.join("6 R Farms LLC (6RFA1001)").exists());
+        let doc: (String, String) = conn
+            .query_row(
+                "SELECT rel_path, client_id FROM document WHERE deleted_at IS NULL",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            doc,
+            (
+                "6 R Farms, LLC (7974_6RFA)/Income Tax/2025/return.pdf".to_string(),
+                folder_client.clone()
+            ),
+            "the document is the same document, of the same catalog client"
+        );
+        let on_list = clients::load(&root).unwrap();
+        let ids: Vec<&str> = on_list.clients().iter().map(|c| c.id.as_str()).collect();
+        assert_eq!(ids, ["7974_6RFA"]);
+        let text = std::fs::read_to_string(&csv).unwrap();
+        assert!(
+            text.contains("7974_6RFA,\"6 R Farms, LLC\""),
+            "the firm's row stays: {text}"
+        );
+        assert!(
+            !text.contains("6RFA1001"),
+            "the old ID's row is gone: {text}"
+        );
+
+        // And back: two clients, the folder under its old name, both rows.
+        let back = undo_many(&mut conn, &root, "dev", &[(**ran).clone()]);
+        assert!(back.iter().all(|(_, r)| r.is_ok()), "{back:?}");
+        assert_eq!(live(&conn), ["6RFA1001", "7974_6RFA"]);
+        assert!(
+            root.join("6 R Farms LLC (6RFA1001)/Income Tax/2025/return.pdf")
+                .is_file()
+        );
+        assert!(!root.join("6 R Farms, LLC (7974_6RFA)").exists());
+        let text = std::fs::read_to_string(&csv).unwrap();
+        assert!(
+            text.contains("7974_6RFA") && text.contains("6RFA1001"),
+            "{text}"
+        );
+        assert_eq!(text.matches("7974_6RFA").count(), 1, "not twice: {text}");
+    }
+
+    /// The firm's list marks the one to keep: its IDs, compared as IDs are.
+    #[test]
+    fn the_ids_on_a_list_are_read_for_marking_the_one_to_keep() {
+        let tmp = tempfile::tempdir().unwrap();
+        let csv = tmp.path().join("firm.csv");
+        std::fs::write(
+            &csv,
+            "Client Name,Client ID\r\n\"6 R Farms, LLC\",7974_6RFA\r\nOther,00-12\r\n",
+        )
+        .unwrap();
+        let ids = ids_on_list(&csv).unwrap();
+        assert!(ids.contains(&id_key("7974-6rfa")) && ids.contains(&id_key("12")));
+        assert_eq!(ids.len(), 2);
+    }
+
     #[test]
     fn a_run_merges_a_chain_goes_past_a_refusal_and_is_put_back() {
         let tmp = tempfile::tempdir().unwrap();
@@ -777,7 +1081,7 @@ mod tests {
         assert!(!root.join("Baker Co (3001)").exists());
 
         // Put back, the last merge first: three clients and their folders again.
-        let merged: Vec<Merged> = out
+        let merged: Vec<Ran> = out
             .into_iter()
             .filter_map(|(_, o)| match o {
                 Outcome::Merged(m) => Some(*m),
@@ -801,7 +1105,7 @@ mod tests {
         // QA 2026-11-17: an undo that cannot be made stops the rest (they may hold its
         // documents): the earlier merge of the chain is not put back as an empty client.
         let out = merge_many(&mut conn, &root, "dev", &choices, &done, &stop);
-        let merged: Vec<Merged> = out
+        let merged: Vec<Ran> = out
             .into_iter()
             .filter_map(|(_, o)| match o {
                 Outcome::Merged(m) => Some(*m),

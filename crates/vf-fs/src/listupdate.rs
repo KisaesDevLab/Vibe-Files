@@ -751,6 +751,17 @@ pub fn preview(
     root: &Path,
     changes: &[Change],
 ) -> Result<Vec<Previewed>, String> {
+    preview_freeing(conn, root, changes, &HashSet::new())
+}
+
+/// [`preview`], the IDs of the clients `freed` (uuids) counting as free: they are being
+/// merged away in the same step (Similar clients, a client kept that has no folder).
+pub(crate) fn preview_freeing(
+    conn: &Connection,
+    root: &Path,
+    changes: &[Change],
+    freed: &HashSet<String>,
+) -> Result<Vec<Previewed>, String> {
     let (tree, _, err) = template::load_or_seed(&clients::master_dir(root));
     if let Some(e) = err {
         return Err(e);
@@ -782,6 +793,7 @@ pub fn preview(
         };
         if let Some(other) = holder.get(&c.id.trim().to_uppercase())
             && other.0 != *uuid
+            && !freed.contains(&other.0)
         {
             return Err(format!("{} is {}'s ID already.", c.id, other.2));
         }
@@ -905,7 +917,10 @@ pub enum Outcome {
     Refused(String),
 }
 
-fn client_row(conn: &Connection, uuid: &str) -> Result<(String, String, Option<String>), String> {
+pub(crate) fn client_row(
+    conn: &Connection,
+    uuid: &str,
+) -> Result<(String, String, Option<String>), String> {
     conn.query_row(
         "SELECT ext_id, name, folder_rel FROM client WHERE id = ?1 AND deleted_at IS NULL",
         [uuid],
@@ -918,6 +933,95 @@ fn client_row(conn: &Connection, uuid: &str) -> Result<(String, String, Option<S
         },
     )
     .map_err(|e| vf_core::db::missing_or(e, "That client is not in the catalog any more."))
+}
+
+/// Makes one change: the client takes the list's ID and name, and its folder is renamed.
+/// `leave_csv`: the client CSV is not touched (the caller sees to it).
+pub(crate) fn change_one(
+    conn: &mut Connection,
+    root: &Path,
+    device_id: &str,
+    c: &Change,
+    leave_csv: bool,
+) -> Result<(Done, Option<String>), String> {
+    let (old_id, old_name, old_folder) = client_row(conn, &c.client)?;
+    let (new_folder, note) = if old_id == c.id.trim() {
+        let plan = folders::plan_client_rename(conn, root, &c.client, &c.name)?;
+        folders::rename_client(conn, root, &plan, device_id)?;
+        (plan.folder.map(|(_, n)| n).or(old_folder.clone()), None)
+    } else {
+        let mut plan = folders::plan_client_id_named(conn, root, &c.client, &c.id, Some(&c.name))?;
+        plan.leave_csv = leave_csv;
+        let note = folders::set_client_id(conn, root, &plan, device_id)?;
+        (plan.folder.map(|(_, n)| n).or(old_folder.clone()), note)
+    };
+    Ok((
+        Done {
+            client: c.client.clone(),
+            old_id,
+            old_name,
+            old_folder,
+            new_id: c.id.trim().to_string(),
+            new_name: c.name.trim().to_string(),
+            new_folder,
+        },
+        note,
+    ))
+}
+
+/// Puts one change back: the client gets the ID, name and folder it had. Refused when it
+/// was changed again since. The client CSV is left as it is.
+pub(crate) fn put_back_one(
+    conn: &mut Connection,
+    root: &Path,
+    device_id: &str,
+    d: &Done,
+) -> Result<(), String> {
+    let (ext_id, name, folder) = client_row(conn, &d.client)?;
+    if ext_id != d.new_id || name != d.new_name || folder != d.new_folder {
+        return Err("It was changed again since (its ID, name or folder): not put back.".into());
+    }
+    let folder_back = match (&d.new_folder, &d.old_folder) {
+        (Some(n), Some(o)) if n != o => {
+            if root.join(o).exists() {
+                return Err(format!("A folder named {o} is in the cabinet again."));
+            }
+            Some((n.clone(), o.clone()))
+        }
+        _ => None,
+    };
+    if d.old_id == d.new_id {
+        let plan = ClientRename {
+            client_id: d.client.clone(),
+            ext_id: d.old_id.clone(),
+            old_name: d.new_name.clone(),
+            new_name: d.old_name.clone(),
+            folder: folder_back,
+        };
+        folders::rename_client(conn, root, &plan, device_id)
+    } else {
+        // Another client may have been given the old ID meanwhile.
+        let taken: Option<String> = vf_core::db::row_or_none(conn.query_row(
+            "SELECT name FROM client WHERE ext_id = ?1 COLLATE NOCASE AND id <> ?2
+                   AND deleted_at IS NULL AND ?1 <> ''",
+            [&d.old_id, &d.client],
+            |r| r.get(0),
+        ))?;
+        if let Some(n) = taken {
+            return Err(format!("{} is {n}'s ID now.", d.old_id));
+        }
+        let plan = ClientIdChange {
+            client_id: d.client.clone(),
+            old_id: d.new_id.clone(),
+            new_id: d.old_id.clone(),
+            name: d.new_name.clone(),
+            folder: folder_back,
+            folder_now: d.new_folder.clone(),
+            new_name: Some(d.old_name.clone()),
+            leave_csv: true,
+        };
+        folders::set_client_id(conn, root, &plan, device_id).map(|_| ())
+    }
 }
 
 /// Makes `changes` one client after another, each written to the run's record as it is
@@ -940,31 +1044,7 @@ pub fn apply(
         if stop.load(Relaxed) {
             break;
         }
-        let r = (|| -> Result<(Done, Option<String>), String> {
-            let (old_id, old_name, old_folder) = client_row(conn, &c.client)?;
-            let (new_folder, note) = if old_id == c.id.trim() {
-                let plan = folders::plan_client_rename(conn, root, &c.client, &c.name)?;
-                folders::rename_client(conn, root, &plan, device_id)?;
-                (plan.folder.map(|(_, n)| n).or(old_folder.clone()), None)
-            } else {
-                let plan =
-                    folders::plan_client_id_named(conn, root, &c.client, &c.id, Some(&c.name))?;
-                let note = folders::set_client_id(conn, root, &plan, device_id)?;
-                (plan.folder.map(|(_, n)| n).or(old_folder.clone()), note)
-            };
-            Ok((
-                Done {
-                    client: c.client.clone(),
-                    old_id,
-                    old_name,
-                    old_folder,
-                    new_id: c.id.trim().to_string(),
-                    new_name: c.name.trim().to_string(),
-                    new_folder,
-                },
-                note,
-            ))
-        })();
+        let r = change_one(conn, root, device_id, c, false);
         done.fetch_add(1, Relaxed);
         match r {
             Ok((d, note)) => {
@@ -1004,55 +1084,7 @@ pub fn undo(
 ) -> Vec<(String, Result<(), String>)> {
     let mut out = Vec::new();
     for d in run.done.iter().rev() {
-        let r = (|| -> Result<(), String> {
-            let (ext_id, name, folder) = client_row(conn, &d.client)?;
-            if ext_id != d.new_id || name != d.new_name || folder != d.new_folder {
-                return Err(
-                    "It was changed again since (its ID, name or folder): not put back.".into(),
-                );
-            }
-            let folder_back = match (&d.new_folder, &d.old_folder) {
-                (Some(n), Some(o)) if n != o => {
-                    if root.join(o).exists() {
-                        return Err(format!("A folder named {o} is in the cabinet again."));
-                    }
-                    Some((n.clone(), o.clone()))
-                }
-                _ => None,
-            };
-            if d.old_id == d.new_id {
-                let plan = ClientRename {
-                    client_id: d.client.clone(),
-                    ext_id: d.old_id.clone(),
-                    old_name: d.new_name.clone(),
-                    new_name: d.old_name.clone(),
-                    folder: folder_back,
-                };
-                folders::rename_client(conn, root, &plan, device_id)
-            } else {
-                // Another client may have been given the old ID meanwhile.
-                let taken: Option<String> = vf_core::db::row_or_none(conn.query_row(
-                    "SELECT name FROM client WHERE ext_id = ?1 COLLATE NOCASE AND id <> ?2
-                       AND deleted_at IS NULL AND ?1 <> ''",
-                    [&d.old_id, &d.client],
-                    |r| r.get(0),
-                ))?;
-                if let Some(n) = taken {
-                    return Err(format!("{} is {n}'s ID now.", d.old_id));
-                }
-                let plan = ClientIdChange {
-                    client_id: d.client.clone(),
-                    old_id: d.new_id.clone(),
-                    new_id: d.old_id.clone(),
-                    name: d.new_name.clone(),
-                    folder: folder_back,
-                    folder_now: d.new_folder.clone(),
-                    new_name: Some(d.old_name.clone()),
-                    leave_csv: true,
-                };
-                folders::set_client_id(conn, root, &plan, device_id).map(|_| ())
-            }
-        })();
+        let r = put_back_one(conn, root, device_id, d);
         done.fetch_add(1, Relaxed);
         let failed = r.is_err();
         if !failed {

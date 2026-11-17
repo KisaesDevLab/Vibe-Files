@@ -14,8 +14,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering::Relaxed};
 use egui::{Align, Layout, RichText};
 use egui_extras::{Column, TableBuilder};
 use vf_core::db::Connection;
-use vf_fs::clientmerge::Merged;
-use vf_fs::similar::{self, Choice, Found, Outcome, Pair, Preview, Side, Why};
+use vf_fs::similar::{self, Choice, Found, Outcome, Pair, Preview, Ran, Side, Why};
 
 use crate::ui::browse::Env;
 use crate::ui::job::{self, Job};
@@ -48,7 +47,7 @@ enum Marked {
     All,
 }
 type Previewed = Vec<(Choice, Result<Preview, String>)>;
-type Ran = Vec<(Choice, Outcome)>;
+type RunOut = Vec<(Choice, Outcome)>;
 /// For each merge put back: the client, and how many documents went back or why not.
 type PutBack = Vec<(String, similar::PutBack)>;
 
@@ -68,11 +67,11 @@ pub struct SimilarPage {
     marking: Option<Job<Result<Marked, String>>>,
     /// What the ticked merges would do, shown for a yes or no.
     preview: Option<Previewed>,
-    work: Option<Job<Result<Ran, String>>>,
+    work: Option<Job<Result<RunOut, String>>>,
     progress: Arc<Progress>,
     of: usize,
     /// The merges of the last run, for its undo.
-    last_run: Vec<Merged>,
+    last_run: Vec<Ran>,
     undoing: Option<Job<Result<PutBack, String>>>,
     /// What the last run or undo did, pair by pair (the ones that need a look).
     results: Vec<String>,
@@ -81,6 +80,8 @@ pub struct SimilarPage {
     /// The catalog changed: Browse re-reads.
     pub changed: bool,
     refind: bool,
+    /// The firm's list being read, to mark the one to keep in every pair.
+    listing: Option<Job<Result<std::collections::HashSet<String>, String>>>,
     /// The pairs the last run took off the list (a client in them was merged away): where
     /// each was, the pair, and the merged client. Put back when that merge is undone. The
     /// clients are compared again only when the person presses Find (owner 2026-11-17: a
@@ -90,6 +91,10 @@ pub struct SimilarPage {
 
 fn key(p: &Pair) -> Key {
     (p.a.id.clone(), p.b.id.clone())
+}
+
+fn pairs_text(n: usize) -> String {
+    pairs(n)
 }
 
 fn pairs(n: usize) -> String {
@@ -114,6 +119,16 @@ fn id_or_name(s: &Side) -> &str {
 }
 
 impl SimilarPage {
+    /// Reads the firm's list at `csv` on a thread, to mark the one to keep in every pair.
+    pub fn mark_from(&mut self, ctx: &egui::Context, csv: std::path::PathBuf) {
+        match Job::start(ctx, "Reading the list…", move || {
+            similar::ids_on_list(&csv)
+        }) {
+            Ok(j) => self.listing = Some(j),
+            Err(e) => self.error = Some(e),
+        }
+    }
+
     /// Whether the clients are being compared (tests).
     #[cfg(test)]
     pub fn is_finding(&self) -> bool {
@@ -128,12 +143,12 @@ impl SimilarPage {
     /// Why the pair cannot be ticked yet.
     fn blocked(&self, p: &Pair) -> Option<String> {
         let keep_a = self.keep_a(p)?;
-        let kept = if keep_a { &p.a } else { &p.b };
-        kept.folder.is_none().then(|| {
-            format!(
-                "{} has no folder to merge into. Keep the other one, or create its folder in Browse first.",
-                who(kept)
-            )
+        let (kept, other) = if keep_a { (&p.a, &p.b) } else { (&p.b, &p.a) };
+        // A kept client with no folder takes the other's folder (owner 2026-11-17: the
+        // client with the right ID came from the firm's list and has none).
+        (kept.folder.is_none() && other.folder.is_none()).then(|| {
+            "Neither of these has a folder in the cabinet, so there is nothing to merge."
+                .to_string()
         })
     }
 
@@ -207,25 +222,29 @@ impl SimilarPage {
     }
 
     /// Takes the pairs with a merged-away client off the list, remembered for the undo.
-    fn set_aside(&mut self, gone: &BTreeSet<String>) {
+    fn set_aside(&mut self, gone: &HashMap<String, String>) {
         let Some(f) = &mut self.found else {
             return;
         };
         let mut kept = Vec::with_capacity(f.pairs.len());
         for (i, x) in std::mem::take(&mut f.pairs).into_iter().enumerate() {
-            let by = [&x.a.id, &x.b.id].into_iter().find(|id| gone.contains(*id));
-            match by {
-                Some(id) => {
-                    let id = id.clone();
+            // (`gone`: a client of a merge → the client that merge took off the list.)
+            let owner = [&x.a.id, &x.b.id]
+                .into_iter()
+                .find_map(|id| gone.get(id))
+                .cloned();
+            match owner {
+                Some(owner) => {
                     self.picked.remove(&key(&x));
                     self.keep.remove(&key(&x));
-                    self.set_aside.push((i, x, id));
+                    self.set_aside.push((i, x, owner));
                 }
                 None => kept.push(x),
             }
         }
         f.pairs = kept;
-        f.clients = f.clients.saturating_sub(gone.len());
+        let off: BTreeSet<&String> = gone.values().collect();
+        f.clients = f.clients.saturating_sub(off.len());
     }
 
     /// Puts back the pairs set aside for the merges that were undone.
@@ -290,7 +309,7 @@ impl SimilarPage {
                     // The clients that are their own again come back into the list.
                     let back: BTreeSet<String> = self.last_run[left..]
                         .iter()
-                        .map(|m| m.from.id.clone())
+                        .map(|m| m.merged.from.id.clone())
                         .collect();
                     self.bring_back(&back);
                     self.last_run.truncate(left);
@@ -325,22 +344,30 @@ impl SimilarPage {
             .flat_map(|p| [(p.a.id.as_str(), who(&p.a)), (p.b.id.as_str(), who(&p.b))])
             .collect();
         let name = |id: &str| names.get(id).cloned().unwrap_or_else(|| id.to_string());
-        let (mut merged, mut moved) = (vec![], 0);
-        let mut gone: BTreeSet<String> = BTreeSet::new();
+        let (mut merged, mut moved, mut adopted) = (vec![], 0, 0);
+        let mut gone: HashMap<String, String> = HashMap::new();
         self.results.clear();
         for (c, o) in out {
             match o {
                 Outcome::Merged(m) => {
                     moved += m
+                        .merged
                         .moves
                         .iter()
                         .filter(|x| x.from != x.to && !x.is_notes())
                         .count();
-                    if let Some(n) = &m.note {
+                    if let Some(n) = &m.merged.note {
                         self.results
                             .push(format!("{} into {}: {n}", name(&c.from), name(&c.into)));
                     }
-                    gone.insert(c.from.clone());
+                    // The client the merge took off the list; where the kept one took the
+                    // other's folder, the rows of both are out of date.
+                    let off = m.merged.from.id.clone();
+                    gone.insert(c.from.clone(), off.clone());
+                    if m.adopted.is_some() {
+                        gone.insert(c.into.clone(), off.clone());
+                        adopted += 1;
+                    }
                     merged.push(*m);
                 }
                 Outcome::Skipped(why) => self.results.push(format!(
@@ -357,9 +384,14 @@ impl SimilarPage {
         }
         drop(names);
         self.notice = Some(format!(
-            "Merged {}: {} moved. The list is not compared again until you press Find similar clients.{}",
+            "Merged {}: {} moved{}. The list is not compared again until you press Find similar clients.{}",
             pairs(merged.len()),
             docs(moved),
+            match adopted {
+                0 => String::new(),
+                1 => ", 1 folder taken over by the kept client".to_string(),
+                n => format!(", {n} folders taken over by the kept clients"),
+            },
             if self.results.is_empty() {
                 ""
             } else {
@@ -428,6 +460,37 @@ pub fn show(ui: &mut egui::Ui, p: &mut SimilarPage, env: &mut Env, catalog: &Pat
             Err(e) => p.error = Some(e),
         }
     }
+    if let Some(r) = job::take(&mut p.listing) {
+        match r.and_then(|r| r) {
+            Ok(ids) => {
+                let (mut marked, mut not) = (0, 0);
+                let pairs: Vec<(Key, bool, bool)> = p
+                    .found
+                    .iter()
+                    .flat_map(|f| &f.pairs)
+                    .map(|x| {
+                        let on = |s: &Side| ids.contains(&similar::id_key(&s.ext_id));
+                        (key(x), on(&x.a), on(&x.b))
+                    })
+                    .collect();
+                for (k, a, b) in pairs {
+                    if a != b {
+                        p.keep.insert(k, a);
+                        marked += 1;
+                    } else {
+                        not += 1;
+                    }
+                }
+                p.notice = Some(format!(
+                    "Keep is marked on {} where one client's ID is on the list. {} have both or neither on it: choose on each row. Nothing is ticked yet: look, then tick.",
+                    pairs_text(marked),
+                    pairs_text(not)
+                ));
+                p.error = None;
+            }
+            Err(e) => p.error = Some(format!("The list could not be read: {e}")),
+        }
+    }
     p.poll();
     if std::mem::take(&mut p.refind) {
         p.find(&ctx, env, catalog);
@@ -443,7 +506,8 @@ pub fn show(ui: &mut egui::Ui, p: &mut SimilarPage, env: &mut Env, catalog: &Pat
         && p.marking.is_none()
         && p.previewing.is_none()
         && p.work.is_none()
-        && p.undoing.is_none();
+        && p.undoing.is_none()
+        && p.listing.is_none();
     ui.horizontal(|ui| {
         if ui
             .add_enabled(idle, egui::Button::new("Find similar clients"))
@@ -461,6 +525,7 @@ pub fn show(ui: &mut egui::Ui, p: &mut SimilarPage, env: &mut Env, catalog: &Pat
             .chain([p.previewing.as_ref().map(|j| j as &dyn Shown)])
             .chain([p.undoing.as_ref().map(|j| j as &dyn Shown)])
             .chain([p.marking.as_ref().map(|j| j as &dyn Shown)])
+            .chain([p.listing.as_ref().map(|j| j as &dyn Shown)])
             .flatten()
         {
             j.draw(ui);
@@ -612,6 +677,16 @@ pub fn show(ui: &mut egui::Ui, p: &mut SimilarPage, env: &mut Env, catalog: &Pat
         if ui.small_btn("Tick none").clicked() {
             p.picked.clear();
         }
+        if ui
+            .add_enabled(idle, egui::Button::new("Mark Keep from a list…").small())
+            .on_hover_text("Choose your list of client names and IDs (CSV). In every pair where exactly one client's ID is on it, that client is marked Keep. Nothing is ticked or merged.")
+            .clicked()
+            && let Some(csv) = rfd::FileDialog::new()
+                .add_filter("CSV", &["csv", "txt"])
+                .pick_file()
+        {
+            p.mark_from(ui.ctx(), csv);
+        }
     });
     let n = p.picked.len();
     if ui
@@ -649,7 +724,7 @@ pub fn show(ui: &mut egui::Ui, p: &mut SimilarPage, env: &mut Env, catalog: &Pat
         .count();
     if to_choose > 0 {
         ui.label(widgets::caption(format!(
-            "{} cannot be ticked yet: neither or both clients are in the client CSV, so press Keep on the one that stays first.",
+            "{} have no client marked to keep yet: press Keep on the one that stays (that also ticks the pair), or use Mark Keep from a list….",
             pairs(to_choose)
         )));
     }
@@ -688,8 +763,13 @@ fn confirm(ui: &mut egui::Ui, p: &mut SimilarPage, env: &mut Env, catalog: &Path
         ui.set_width(620.0);
         ui.heading(format!("Merge {}?", pairs(ok.len())));
         ui.label(format!(
-            "{} move to the kept clients' folders.{} The merged clients leave the client list and the client CSV; their relationships and legal holds become the kept clients'.",
+            "{} move to the kept clients' folders.{}{} The merged clients leave the client list and the client CSV; their relationships and legal holds become the kept clients'.",
             docs(moves),
+            match ok.iter().filter(|x| x.adopts.is_some()).count() {
+                0 => String::new(),
+                1 => " 1 kept client has no folder and takes the other's folder as it is, renamed for it.".to_string(),
+                n => format!(" {n} kept clients have no folder and take the other's folder as it is, renamed for them."),
+            },
             if both > 0 {
                 format!(
                     " {both} have a name already taken there: both are kept, the one moved with \" (2)\"."
@@ -720,6 +800,13 @@ fn confirm(ui: &mut egui::Ui, p: &mut SimilarPage, env: &mut Env, catalog: &Path
                             ""
                         }
                     ));
+                    if let Some((from, to)) = &x.adopts {
+                        ui.label(widgets::caption(if from == to {
+                            format!("   {} has no folder: the folder {from} becomes its folder.", x.into.trim())
+                        } else {
+                            format!("   {} has no folder: the folder {from} becomes its folder, renamed {to}.", x.into.trim())
+                        }));
+                    }
                     if x.drops_relationships {
                         ui.label(widgets::caption(format!(
                             "   {} has no ID, so the relationships of {} cannot become its own: they are dropped.",
@@ -934,13 +1021,16 @@ fn grid(ui: &mut egui::Ui, p: &mut SimilarPage, env: &mut Env) {
     }
     if let Some((k, a)) = keep {
         p.keep.insert(k.clone(), a);
-        // A tick stands only while the kept one has a folder.
-        if let Some(x) = p
+        // Keep is the choice and the tick in one (owner 2026-11-17); the tick box takes it
+        // off again. Not where the pair cannot be merged as chosen.
+        let ok = p
             .found
             .as_ref()
             .and_then(|f| f.pairs.iter().find(|x| key(x) == k))
-            && !p.can_tick(x)
-        {
+            .is_some_and(|x| p.can_tick(x));
+        if ok {
+            p.picked.insert(k);
+        } else {
             p.picked.remove(&k);
         }
     }
