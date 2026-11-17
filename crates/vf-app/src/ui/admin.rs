@@ -20,6 +20,7 @@ pub enum Page {
     Bulk,
     /// Clients made twice, merged together (PA-90).
     Similar,
+    ListUpdate,
     Sweep,
     Retention,
     Disposition,
@@ -53,6 +54,7 @@ const NAV: &[(&str, &[&str])] = &[
             "Folder import",
             "Merge cabinets",
             "Similar clients",
+            "Clients from a list",
             "Bulk changes",
         ],
     ),
@@ -89,6 +91,7 @@ fn page_of(item: &str) -> Option<Page> {
         "Merge cabinets" => Page::Merge,
         "Bulk changes" => Page::Bulk,
         "Similar clients" => Page::Similar,
+        "Clients from a list" => Page::ListUpdate,
         "Print capture & parsers" => Page::PrintCapture,
         "Portal" => Page::Portal,
         "Portal requests" => Page::PortalRequests,
@@ -180,6 +183,8 @@ pub struct Admin {
     pub bulk: crate::ui::bulk::BulkPage,
     /// Similar clients page (PA-90).
     pub similar: crate::ui::similar::SimilarPage,
+    /// Clients from a list page (PA-94).
+    pub listupdate: crate::ui::listupdate::ListUpdatePage,
     /// Admin password page (PA-24).
     pub password: crate::ui::admin_password::PasswordPage,
     /// "Lock Admin" pressed (the app ends the unlocked session).
@@ -229,6 +234,7 @@ impl Admin {
             trash: Default::default(),
             bulk: Default::default(),
             similar: Default::default(),
+            listupdate: Default::default(),
             password: Default::default(),
             lock_requested: false,
             open: vf_fs::trash::open_pages(env.root),
@@ -393,6 +399,10 @@ impl Admin {
         if std::mem::take(&mut self.similar.changed) {
             self.changed = true;
         }
+        self.listupdate.poll();
+        if std::mem::take(&mut self.listupdate.changed) {
+            self.changed = true;
+        }
     }
 }
 
@@ -519,6 +529,12 @@ pub fn show(ui: &mut egui::Ui, a: &mut Admin, env: &mut Env, sweep: SweepEnv, lo
         Page::Similar => {
             crate::ui::similar::show(ui, &mut a.similar, env, sweep.catalog);
             if std::mem::take(&mut a.similar.changed) {
+                a.changed = true;
+            }
+        }
+        Page::ListUpdate => {
+            crate::ui::listupdate::show(ui, &mut a.listupdate, env, sweep.catalog);
+            if std::mem::take(&mut a.listupdate.changed) {
                 a.changed = true;
             }
         }
@@ -653,6 +669,13 @@ fn nav(ui: &mut egui::Ui, a: &mut Admin, has_password: bool, locked: bool) {
             } else if *item == "Bulk changes" {
                 if ui.selectable_label(a.page == Page::Bulk, *item).clicked() {
                     a.page = Page::Bulk;
+                }
+            } else if *item == "Clients from a list" {
+                if ui
+                    .selectable_label(a.page == Page::ListUpdate, *item)
+                    .clicked()
+                {
+                    a.page = Page::ListUpdate;
                 }
             } else if *item == "Similar clients" {
                 if ui
@@ -1690,6 +1713,119 @@ ANDE1042,Anderson Farms LLC
             h.state()
                 .root
                 .join("Baker Co. (3002)/Income Tax/2025/return.pdf")
+                .is_file()
+        );
+    }
+
+    /// Q-131 (owner 2026-11-17): Admin › Clients from a list matches a list of names and
+    /// IDs to the clients by name, changes the ticked ones (ID, name, folder) after a yes,
+    /// does not match again by itself, and puts the update back.
+    #[test]
+    fn clients_take_their_id_and_name_from_a_list() {
+        let mut h = harness();
+        let list = {
+            let s = h.state_mut();
+            let firm = uuid::Uuid::new_v4();
+            let file = vf_fs::cabinet::CabinetFile {
+                cabinet_id: vf_core::new_id(),
+                firm_id: firm.to_string(),
+                schema_version: vf_core::db::SCHEMA_VERSION,
+                layout_version: 1,
+                created: vf_core::now_rfc3339(),
+                name: None,
+            };
+            std::fs::write(
+                s.root.join("_Vibe/cabinet.json"),
+                serde_json::to_vec(&file).unwrap(),
+            )
+            .unwrap();
+            for (name, id) in [("Baker Co", "OLD1"), ("Cole Trust", "6001")] {
+                let folder = s.root.join(format!("{name} ({id})"));
+                std::fs::create_dir_all(folder.join("Income Tax/2025")).unwrap();
+                filer_intake::sentinel::write_sentinel(
+                    &s.root,
+                    &folder,
+                    &filer_core::clients::Client {
+                        id: id.into(),
+                        uuid: uuid::Uuid::new_v4(),
+                        name: name.into(),
+                        extra: Default::default(),
+                    },
+                    firm,
+                )
+                .unwrap();
+                std::fs::write(folder.join("Income Tax/2025/return.pdf"), id).unwrap();
+            }
+            vf_fs::rebuild::rebuild(&mut s.conn, &s.root, "dev").unwrap();
+            vf_fs::clients::ensure_listed(&s.conn, &s.root).unwrap();
+            // The firm's list: one client under its real ID and spelling, one as it is.
+            let list = s.root.parent().unwrap().join("firm list.csv");
+            std::fs::write(&list, "Name,ID\r\nBaker Co.,3001\r\nCole Trust,6001\r\n").unwrap();
+            list
+        };
+        let ids = |h: &Harness<'static, State>| -> Vec<String> {
+            let mut st = h
+                .state()
+                .conn
+                .prepare("SELECT ext_id FROM client WHERE deleted_at IS NULL ORDER BY ext_id")
+                .unwrap();
+            st.query_map([], |r| r.get(0))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap()
+        };
+        click(&mut h, "Clients from a list");
+        assert_eq!(h.state().a.page, Page::ListUpdate);
+        h.state_mut().a.listupdate.path = list.display().to_string();
+        h.run();
+        click(&mut h, "Read the list");
+        h.run();
+        click(&mut h, "Find matches");
+        h.run();
+        let line = |ticked: usize| {
+            format!(
+                "2 rows on the list · 1 to look at (0 with no ID yet, 1 with another ID, 0 with the ID and another spelling) · 1 right already · 0 match no client · {ticked} ticked"
+            )
+        };
+        assert!(
+            h.query_by_label(&line(0)).is_some(),
+            "{:?}",
+            h.state().a.listupdate.error
+        );
+        // A client that has another ID is not ticked with the rest: it is looked at.
+        click(&mut h, "Tick the ones shown");
+        assert!(h.query_by_label(&line(0)).is_some());
+        h.state_mut().a.listupdate.show_other_ids();
+        h.run();
+        click(&mut h, "Tick the ones shown");
+        assert!(h.query_by_label(&line(1)).is_some());
+        click(&mut h, "Update the 1 client ticked…");
+        h.run();
+        assert!(h.query_by_label("Update 1 client?").is_some());
+        assert_eq!(ids(&h), ["6001", "OLD1"], "the preview changes nothing");
+        click(&mut h, "Yes, update 1 client");
+        h.run();
+        assert_eq!(
+            ids(&h),
+            ["3001", "6001"],
+            "{:?} {:?}",
+            h.state().a.listupdate.error,
+            h.state().a.listupdate.notice
+        );
+        assert!(h.state().a.changed, "Browse reads the catalog again");
+        let root = h.state().root.clone();
+        assert!(
+            root.join("Baker Co. (3001)/Income Tax/2025/return.pdf")
+                .is_file()
+        );
+        assert!(!root.join("Baker Co (OLD1)").exists());
+        // Its row left the list; nothing was matched again.
+        assert!(!h.state().a.listupdate.is_finding());
+        click(&mut h, "Undo the last update (1 client)");
+        h.run();
+        assert_eq!(ids(&h), ["6001", "OLD1"]);
+        assert!(
+            root.join("Baker Co (OLD1)/Income Tax/2025/return.pdf")
                 .is_file()
         );
     }

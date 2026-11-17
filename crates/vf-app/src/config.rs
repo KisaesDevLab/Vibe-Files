@@ -254,6 +254,10 @@ pub struct Ingest {
     /// 2026-11-04).
     #[serde(default = "yes")]
     pub driver_ui: bool,
+    /// The Windows users who folded Intake's top strip away (owner 2026-11-17): the Scans
+    /// folder, portal, inboxes and scanner rows give their room to the queue.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
+    pub strip_folded_by_user: std::collections::BTreeSet<String>,
     /// TWAIN: load the scanner's 64-bit driver into Vibe Files itself, as before 2026-11-17,
     /// instead of into the scanning helper. Off unless a scanner does not work from the
     /// helper: a fault in the driver then closes Vibe Files, and its scan cannot be stopped.
@@ -277,6 +281,7 @@ impl Default for Ingest {
             inboxes_by_user: Default::default(),
             driver_ui: true,
             scan_driver_in_app: false,
+            strip_folded_by_user: Default::default(),
             scan_profile: None,
             scan_profiles: vec![],
         }

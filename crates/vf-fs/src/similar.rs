@@ -79,7 +79,7 @@ pub struct Found {
 /// The name as it is compared: normalized, and "First Last" for "Last, First" (what
 /// `filer_core::clients::name_score` compares, kept here so a client's name is normalized
 /// once, not once per pair).
-fn name_keys(name: &str) -> Vec<String> {
+pub(crate) fn name_keys(name: &str) -> Vec<String> {
     let mut out = Vec::new();
     let plain = normalize_name(name);
     if !plain.is_empty() {
@@ -94,7 +94,7 @@ fn name_keys(name: &str) -> Vec<String> {
     out
 }
 
-fn score(a: &[String], b: &[String]) -> f64 {
+pub(crate) fn score(a: &[String], b: &[String]) -> f64 {
     a.iter()
         .flat_map(|x| b.iter().map(move |y| strsim::jaro_winkler(x, y)))
         .fold(0.0, f64::max)

@@ -866,6 +866,40 @@ impl IngestState {
                     .inner_margin(egui::Margin::symmetric(16, 8)),
             )
             .show(ui, |ui| {
+                // Folded away (owner 2026-11-17): one line, and the room goes to the queue.
+                // What needs a person (a warning, a file already in the cabinet, the last
+                // lines of what happened) is shown either way, below.
+                let user = crate::config::windows_user();
+                let folded = prefs.strip_folded_by_user.contains(&user);
+                let fold = |to: bool, s: &mut Self| {
+                    let mut p = prefs.clone();
+                    if to {
+                        p.strip_folded_by_user.insert(user.clone());
+                    } else {
+                        p.strip_folded_by_user.remove(&user);
+                    }
+                    s.changed = Some(p);
+                };
+                if folded {
+                    ui.horizontal(|ui| {
+                        if ui
+                            .small_btn("Show scanning and inboxes")
+                            .on_hover_text("Shows the Scans folder, portal uploads, your inboxes and the scanner again.")
+                            .clicked()
+                        {
+                            fold(false, self);
+                        }
+                        ui.label(widgets::caption(format!(
+                            "{} waiting in the Scans folder",
+                            self.waiting()
+                        )));
+                        if self.scanning() {
+                            ui.spinner();
+                            ui.label(widgets::caption("Scanning…"));
+                        }
+                    });
+                }
+                if !folded {
                 ui.horizontal(|ui| {
                     ui.label(RichText::new("Scans folder").strong());
                     let shown = prefs
@@ -913,10 +947,20 @@ impl IngestState {
                             Err(e) => self.warning = Some(e),
                         }
                     }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui
+                            .small_btn("Hide")
+                            .on_hover_text("Folds these rows away to give the queue more room. Remembered for your Windows login.")
+                            .clicked()
+                        {
+                            fold(true, self);
+                        }
+                    });
                 });
                 self.portal_row(ui);
                 self.my_inboxes_row(ui, prefs, root);
                 self.scan_row(ui, prefs);
+                }
                 for (i, d) in self.pre_dupes.iter().enumerate() {
                     ui.horizontal(|ui| {
                         ui.label(

@@ -21,6 +21,7 @@ pub mod import_tree;
 pub mod ingest;
 pub mod intake;
 pub mod job;
+pub mod listupdate;
 pub mod merge_page;
 pub mod meta_editor;
 pub mod move_to;

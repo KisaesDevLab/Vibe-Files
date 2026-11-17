@@ -59,6 +59,10 @@ of its `src/` (QUESTIONS Q-16). Upstream `main.rs` is not vendored; `vf-app` is 
      between (`years_in`; never against an UltraTax tax year); a folder is bound on commit
      only by name (`name_score` at the auto threshold) and when it is the only one.
 
+   - `filer-core/src/datafile.rs` `write_atomic` (marked `Vibe Files (PA-94)`, owner's report
+     2026-11-17: "last_batch.json could not be written: Access is denied"): a temp file of
+     its own name per save, and a refused rename tried again for about a second.
+
 Logic edits are those of item 6 only. Check with:
 `diff -r <upstream>/src crates/filer-*/src` (only the four attribute lines and the `settle`
 helpers of item 5 differ).

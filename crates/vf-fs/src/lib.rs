@@ -22,6 +22,7 @@ pub mod holds;
 pub mod identity;
 pub mod import;
 pub mod intake;
+pub mod listupdate;
 pub mod lock;
 pub mod measure;
 pub mod merge;

@@ -10,6 +10,8 @@ At the top of the **Intake** tab, next to **Scans folder**, press **Choose…** 
 
 You can also save files into the Scans folder yourself, for example photos from a phone. PDFs and pictures (`.jpg`, `.png`, `.tif`, `.bmp`, `.heic`) are taken; pictures are made into PDFs first.
 
+To give the queue more room, press **Hide** at the right of the strip's first row; **Show scanning and inboxes** brings the rows back. The choice is remembered for your Windows login.
+
 ## Picking the scanner
 
 The **Scanner** row lists the scanners this PC can see, by their TWAIN or WIA driver. Pick yours from the list; Vibe Files remembers the choice for your Windows login on this PC. If yours is missing, plug it in and press **Look again**.

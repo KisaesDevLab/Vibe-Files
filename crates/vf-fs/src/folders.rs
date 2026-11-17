@@ -643,6 +643,11 @@ pub struct ClientIdChange {
     pub folder: Option<(String, String)>,
     /// The client's folder now, when it has one (its sentinel is rewritten).
     pub folder_now: Option<String>,
+    /// The client's name changes with its ID (an update from a list, PA-94): one change,
+    /// one rename of its folder.
+    pub new_name: Option<String>,
+    /// The client CSV is left as it is (an update from a list being put back).
+    pub leave_csv: bool,
 }
 
 /// Plans giving client `client_id` (uuid) the ID `id`.
@@ -652,6 +657,21 @@ pub fn plan_client_id(
     client_id: &str,
     id: &str,
 ) -> Result<ClientIdChange, String> {
+    plan_client_id_named(conn, root, client_id, id, None)
+}
+
+/// [`plan_client_id`], the client's name changing to `new_name` with it.
+pub fn plan_client_id_named(
+    conn: &Connection,
+    root: &Path,
+    client_id: &str,
+    id: &str,
+    new_name: Option<&str>,
+) -> Result<ClientIdChange, String> {
+    let new_name = new_name.map(|n| n.trim().to_owned());
+    if new_name.as_deref().is_some_and(str::is_empty) {
+        return Err("The client's name is blank.".into());
+    }
     let new_id = id.trim().to_owned();
     if new_id.is_empty() {
         return Err("Type the client's ID.".into());
@@ -710,7 +730,9 @@ pub fn plan_client_id(
         let c = filer_core::clients::Client {
             id: new_id.clone(),
             uuid: uuid::Uuid::parse_str(client_id).map_err(|e| e.to_string())?,
-            name: listed.as_ref().map_or(name.clone(), |c| c.name.clone()),
+            name: new_name
+                .clone()
+                .unwrap_or_else(|| listed.as_ref().map_or(name.clone(), |c| c.name.clone())),
             extra: listed.map(|c| c.extra).unwrap_or_default(),
         };
         let want = template::client_folder_name(&tree, &c).map_err(|e| e.to_string())?;
@@ -738,6 +760,8 @@ pub fn plan_client_id(
         name,
         folder,
         folder_now,
+        new_name,
+        leave_csv: false,
     })
 }
 
@@ -765,7 +789,9 @@ pub fn set_client_id(
         // The list as it is now, under the lock: another computer may have given this ID
         // to a client since the preview (two clients then had one ID; QA 2026-11-17).
         if let Some(other) = list.clients.iter().find(|c| {
-            c.uuid.to_string() != plan.client_id && c.id.eq_ignore_ascii_case(&plan.new_id)
+            !plan.new_id.trim().is_empty()
+                && c.uuid.to_string() != plan.client_id
+                && c.id.eq_ignore_ascii_case(&plan.new_id)
         }) {
             return Err(format!(
                 "{} is {}'s ID already (set on another computer just now): choose another ID.",
@@ -780,14 +806,23 @@ pub fn set_client_id(
             return Err(format!("{} is not on the client list.", plan.old_id));
         };
         c.id = plan.new_id.clone();
+        if let Some(n) = &plan.new_name {
+            c.name = n.clone();
+        }
         let (uuid, name) = (c.uuid, c.name.clone());
         list.uuids
             .retain(|k, v| *v != uuid && !k.eq_ignore_ascii_case(&plan.old_id));
-        list.uuids.insert(plan.new_id.clone(), uuid);
+        // (No entry for a client put back to having no ID.)
+        if !plan.new_id.trim().is_empty() {
+            list.uuids.insert(plan.new_id.clone(), uuid);
+        }
         clients::save_list(root, &list)?;
-        let is_old = |x: &str| x.eq_ignore_ascii_case(&plan.old_id);
+        // A client that had no ID has no relationships by it: a blank is not an ID to look
+        // for (every relationship with a blank end would have been given this client's).
+        let had_id = !plan.old_id.trim().is_empty();
+        let is_old = |x: &str| had_id && x.eq_ignore_ascii_case(&plan.old_id);
         let swap = |x: &mut String| {
-            if x.eq_ignore_ascii_case(&plan.old_id) {
+            if is_old(x) {
                 *x = plan.new_id.clone();
             }
         };
@@ -898,7 +933,18 @@ pub fn set_client_id(
 
         // On the CSV Intake re-imports, so it is kept (as a client made with + New client).
         let partner = master.meta.partners.get(&plan.client_id).cloned();
-        let note =
+        // An update from a list whose ID the client CSV has already (the list is often that
+        // CSV): nothing to change there, and no second row for it. Nor for a blank ID.
+        let in_csv_already = plan.leave_csv
+            || plan.new_id.trim().is_empty()
+            || (plan.new_name.is_some()
+                && clients::csv_ids(root).ok().flatten().is_some_and(|ids| {
+                    ids.iter()
+                        .any(|i| i.trim().eq_ignore_ascii_case(plan.new_id.trim()))
+                }));
+        let note = if in_csv_already {
+            None
+        } else {
             clients::change_id_in_csv(root, &plan.old_id, &plan.new_id, &name, partner.as_deref())
                 .err()
                 .map(|e| {
@@ -906,7 +952,8 @@ pub fn set_client_id(
                         "The client CSV was not updated ({e}): add {} there.",
                         plan.new_id
                     )
-                });
+                })
+        };
         // Only this client's folder (its sentinel was rewritten) is read again (PA-61).
         let reread: Vec<String> = plan
             .folder
