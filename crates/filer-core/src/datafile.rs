@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 /// Vibe Files (PA-94): the temp file has a name of its own (two sessions saving the same
 /// file at once shared `<path>.tmp`), and a rename Windows refuses because the file is open
 /// just then (another session reading it, a virus scanner; "Access is denied" on a share)
-/// is tried again for a moment. A commit's `last_batch.json` was left unwritten by it.
+/// is tried again for a moment (under half a second). A commit's `last_batch.json` was left unwritten by it.
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
     let name = path
         .file_name()
@@ -22,9 +22,9 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
     loop {
         match std::fs::rename(&tmp, path) {
             Ok(()) => return Ok(()),
-            // In use just now: a few tries, about a second in all.
+            // In use just now: a few tries, under half a second in all.
             Err(e)
-                if tries < 8
+                if tries < 5
                     && (e.kind() == std::io::ErrorKind::PermissionDenied
                         || matches!(e.raw_os_error(), Some(32 | 33))) =>
             {

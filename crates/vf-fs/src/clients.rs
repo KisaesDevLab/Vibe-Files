@@ -588,10 +588,13 @@ pub fn change_id_in_csv(
             .iter()
             .position(|h| h.trim() == id_h)
             .ok_or_else(|| format!("no column {id_h} in {}", csv.display()))?;
+        // (A client that had no ID has no row by it: a blank is not looked for, or the
+        // first row with a blank ID would be taken for the client's.)
         let hit = records.iter().skip(1).find(|&&(a, b)| {
-            fields_of(&text[a..b])
-                .get(col)
-                .is_some_and(|v| v.trim().eq_ignore_ascii_case(old.trim()))
+            !old.trim().is_empty()
+                && fields_of(&text[a..b])
+                    .get(col)
+                    .is_some_and(|v| v.trim().eq_ignore_ascii_case(old.trim()))
         });
         let Some(&(a, b)) = hit else {
             return append_to_csv(root, new, name, partner).map(|_| Some(csv));

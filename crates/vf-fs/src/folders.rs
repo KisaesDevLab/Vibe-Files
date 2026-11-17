@@ -798,18 +798,40 @@ pub fn set_client_id(
                 plan.new_id, other.name
             ));
         }
-        let Some(c) = list
+        // The client list holds clients by their ID: one with no ID is not on it (it is
+        // known by its folder alone), comes onto it with its first ID, and leaves it when
+        // it is put back to having none. (Setting the ID of such a client was refused as
+        // "not on the client list"; PA-94.)
+        let at = list
             .clients
-            .iter_mut()
-            .find(|c| c.uuid.to_string() == plan.client_id)
-        else {
-            return Err(format!("{} is not on the client list.", plan.old_id));
+            .iter()
+            .position(|c| c.uuid.to_string() == plan.client_id);
+        let (uuid, name) = match at {
+            Some(i) if plan.new_id.trim().is_empty() => {
+                let c = list.clients.remove(i);
+                (c.uuid, plan.new_name.clone().unwrap_or(c.name))
+            }
+            Some(i) => {
+                let c = &mut list.clients[i];
+                c.id = plan.new_id.clone();
+                if let Some(n) = &plan.new_name {
+                    c.name = n.clone();
+                }
+                (c.uuid, c.name.clone())
+            }
+            None if plan.old_id.trim().is_empty() => {
+                let uuid = uuid::Uuid::parse_str(&plan.client_id).map_err(|e| e.to_string())?;
+                let name = plan.new_name.clone().unwrap_or_else(|| plan.name.clone());
+                list.clients.push(filer_core::clients::Client {
+                    id: plan.new_id.clone(),
+                    uuid,
+                    name: name.clone(),
+                    extra: Default::default(),
+                });
+                (uuid, name)
+            }
+            None => return Err(format!("{} is not on the client list.", plan.old_id)),
         };
-        c.id = plan.new_id.clone();
-        if let Some(n) = &plan.new_name {
-            c.name = n.clone();
-        }
-        let (uuid, name) = (c.uuid, c.name.clone());
         list.uuids
             .retain(|k, v| *v != uuid && !k.eq_ignore_ascii_case(&plan.old_id));
         // (No entry for a client put back to having no ID.)
