@@ -4281,11 +4281,32 @@ mod tests {
         h.get_by_role_and_label(Role::ComboBox, "Partner").click();
         h.run_steps(3);
         h.get_by_label("All partners").click();
-        h.run_steps(4);
-        let Screen::Open(o) = &h.state().screen else {
-            unreachable!()
+        // Waited for and pressed again, not counted in frames: a press on a frame that is
+        // being drawn again is lost (one run in twenty of the whole suite).
+        let start = std::time::Instant::now();
+        let mut pressed = start;
+        let partner = |h: &egui_kittest::Harness<'static, VibeFilesApp>| match &h.state().screen {
+            Screen::Open(o) => o.browse.prefs.partner.clone(),
+            _ => unreachable!(),
         };
-        assert_eq!(o.browse.prefs.partner, None, "Browse follows the review");
+        while partner(&h).is_some() {
+            assert!(
+                start.elapsed() < crate::ui::test_util::PATIENCE,
+                "Browse follows the review"
+            );
+            if pressed.elapsed() > std::time::Duration::from_secs(2) {
+                if h.query_by_label("All partners").is_none() {
+                    h.get_by_role_and_label(Role::ComboBox, "Partner").click();
+                    h.run_steps(3);
+                }
+                if let Some(a) = h.query_by_label("All partners") {
+                    a.click();
+                }
+                pressed = std::time::Instant::now();
+            }
+            std::thread::sleep(std::time::Duration::from_millis(30));
+            h.step();
+        }
     }
 
     /// Filer's screen loads once on the Intake tab, not on every frame (regression found
