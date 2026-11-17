@@ -77,6 +77,23 @@ The scanner changes after 0.1.45 were tried only against a simulated scanner.
 2. If the scanner jams or is stopped part way: the pages scanned before that are kept, and a
    line says why it stopped.
 
+After 0.1.45 the scanner's driver runs in a helper program (a second `vibe-files.exe` in
+Task Manager while a scan runs), so these need the real scanner too:
+
+3. An ordinary scan with **Use the driver's own window** on: the driver's window opens in
+   front, and the scan arrives in Intake as before.
+   - If the scanner is not listed, or does not scan: tick **Run the driver inside Vibe
+     Files**, try again, and send **Scanner details** (Copy).
+4. Start a batch and press **Stop** in Vibe Files half way.
+   - Expected: the scan ends within a few seconds; the pages scanned so far are the PDF; the
+     line says the scan was stopped.
+5. Start a batch and, half way, end the second `vibe-files.exe` (the smaller one) in Task
+   Manager. This stands in for a driver that fails.
+   - Expected: Vibe Files stays open; the pages before that are the PDF; the line says the
+     scanner's driver stopped working, with a code.
+6. One long batch: about 100 sheets, both sides, colour.
+   - Expected: it finishes. Note Vibe Files' memory in Task Manager at its highest.
+
 ## What to send back
 
 - For each lettered case: went as described, or what was on the screen instead.

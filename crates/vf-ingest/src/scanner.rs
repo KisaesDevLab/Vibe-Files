@@ -155,12 +155,28 @@ pub fn page_ink(rgb: &image::RgbImage) -> f32 {
 }
 
 /// Turns the page images of one scan, in order, into one PDF at `out`.
+///
+/// Each file is read when its turn comes: every page of a batch read first, as full
+/// pictures, was gigabytes for a long batch, and a program that cannot get memory is closed
+/// by Windows with everything open in it.
 pub fn assemble(pages: &[PathBuf], profile: &Profile, out: &Path) -> Result<Assembled, String> {
-    let mut frames: Vec<Frame> = Vec::new();
-    for p in pages {
-        frames.extend(images::decode(p)?);
+    let unread = std::cell::RefCell::new(None);
+    let frames = pages
+        .iter()
+        .map_while(|p| match images::decode(p) {
+            Ok(f) => Some(f),
+            Err(e) => {
+                unread.replace(Some(e));
+                None
+            }
+        })
+        .flatten();
+    let made = assemble_frames(frames, profile, out);
+    // A page that cannot be read fails the scan, as before (its page files are kept).
+    match unread.take() {
+        Some(e) => Err(e),
+        None => made,
     }
-    assemble_frames(frames, profile, out)
 }
 
 /// Turns the pages of one scan, in order, into one PDF at `out`.
@@ -235,11 +251,57 @@ pub struct Devices {
     pub details: Vec<String>,
 }
 
+/// How scans are run.
+#[derive(Debug, Clone, Default)]
+pub struct How {
+    /// Set to end the scan that is running: the pages scanned so far are kept.
+    pub stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// The scanner's 64-bit driver is loaded into this program, as before 2026-11-17,
+    /// instead of into a helper. For a driver that does not work from the helper: a fault
+    /// in it then closes this program, and its scan cannot be stopped.
+    pub driver_in_app: bool,
+}
+
+/// The helper the 64-bit drivers run in, unless they are to run in this program.
+fn native_helper(driver_in_app: bool) -> Option<crate::twain::helper::Helper> {
+    if driver_in_app {
+        return None;
+    }
+    crate::twain::helper::Helper::native()
+}
+
 /// The scanners on this workstation: TWAIN sources (64-bit) and WIA scanners.
-pub fn devices() -> Devices {
+/// `driver_in_app`: see [`How`].
+pub fn devices(driver_in_app: bool) -> Devices {
     let mut d = Devices::default();
     let mut details = session_details();
-    match crate::twain::sources() {
+    // Listing loads every driver too: in the helper, so one that faults or never answers
+    // does not take this program with it.
+    use crate::twain::helper::Listed;
+    let native = native_helper(driver_in_app).map(|h| h.list());
+    let mut manager_report = None;
+    let sources = match native {
+        None => crate::twain::sources().map(|v| {
+            v.into_iter()
+                .map(|s| Listed {
+                    name: s.name,
+                    manufacturer: s.manufacturer,
+                    family: s.family,
+                    twain2: s.twain2,
+                    dsm: String::new(),
+                })
+                .collect::<Vec<_>>()
+        }),
+        Some(Err(e)) => Err(format!("The scanning helper did not answer: {e}")),
+        Some(Ok(reply)) => {
+            manager_report = Some(reply.manager);
+            match reply.error {
+                Some(e) => Err(e),
+                None => Ok(reply.sources),
+            }
+        }
+    };
+    match sources {
         Ok(sources) => {
             details.push(format!(
                 "TWAIN sources the 64-bit manager lists: {}",
@@ -287,7 +349,8 @@ pub fn devices() -> Devices {
     }
     details.push("TWAIN manager (TWAINDSM.dll):".into());
     details.extend(
-        crate::twain::dsm_report()
+        manager_report
+            .unwrap_or_else(crate::twain::dsm_report)
             .into_iter()
             .map(|l| format!("  {l}")),
     );
@@ -694,6 +757,118 @@ pub fn assemble_twain(
     Ok(a)
 }
 
+/// The pages of one scan made through a helper, read from their files one at a time, as one
+/// PDF at `out`.
+pub fn assemble_files(
+    files: &crate::twain::helper::ScannedFiles,
+    profile: &Profile,
+    out: &Path,
+) -> Result<Assembled, String> {
+    if files.pages.is_empty() {
+        return Err(match (&files.stopped, files.cancelled) {
+            (_, true) => "scan cancelled".into(),
+            (Some(why), _) => format!("the scanner stopped before the first page: {why}"),
+            (None, _) => "the scanner returned no pages".into(),
+        });
+    }
+    let unread = std::cell::RefCell::new(None);
+    let frames = (0..files.pages.len()).map_while(|i| match files.page(i) {
+        Ok(p) => Some(p.to_frame()),
+        Err(e) => {
+            unread.replace(Some(e));
+            None
+        }
+    });
+    let made = assemble_frames(frames, profile, out);
+    // A page that cannot be read back fails the scan: its pages are kept (see
+    // [`keep_as_pictures`]), never a PDF that ends early without a word.
+    if let Some(e) = unread.take() {
+        return Err(e);
+    }
+    let mut a = made?;
+    a.stopped = files.stopped.clone();
+    Ok(a)
+}
+
+/// A scan through a helper whose PDF could not be made: its pages, paper someone fed, are
+/// written as pictures (`page-0001.png` …) with the reason, in the Scans folder's `_failed`
+/// or, when that cannot be written, on this PC. Returns `why` with where they are.
+fn keep_as_pictures(
+    files: &crate::twain::helper::ScannedFiles,
+    scans_dir: &Path,
+    why: &str,
+) -> String {
+    if files.pages.is_empty() {
+        files.discard();
+        return why.to_string();
+    }
+    let day = vf_core::now_rfc3339()
+        .get(..10)
+        .unwrap_or("undated")
+        .to_string();
+    let name = format!("scan-{}", uuid::Uuid::now_v7().simple());
+    let places = [
+        scans_dir.join(crate::pipeline::FAILED_DIR).join(day),
+        std::env::temp_dir().join("Vibe Files scans"),
+    ];
+    for place in places {
+        let dir = place.join(&name);
+        if std::fs::create_dir_all(&dir).is_err() {
+            continue;
+        }
+        let all = (0..files.pages.len()).all(|i| {
+            files.page(i).is_ok_and(|p| {
+                p.to_frame()
+                    .rgb
+                    .save(dir.join(format!("page-{:04}.png", i + 1)))
+                    .is_ok()
+            })
+        });
+        if all {
+            let _ = std::fs::write(dir.join("error.txt"), why);
+            files.discard();
+            return format!(
+                "{why} (the scanned pages are kept as pictures in {})",
+                dir.display()
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    // Not even that: they stay as the helper wrote them, never deleted.
+    format!(
+        "{why} (the scanned pages are kept, as the scanner sent them, in {})",
+        files.dir.display()
+    )
+}
+
+/// One TWAIN scan through `helper`, as a PDF in `scans_dir`.
+fn scan_through(
+    helper: &crate::twain::helper::Helper,
+    source: &str,
+    profile: &Profile,
+    driver_ui: bool,
+    scans_dir: &Path,
+    how: &How,
+) -> Result<(PathBuf, Assembled), String> {
+    let files = helper.scan(source, &twain_settings(profile, driver_ui), &how.stop)?;
+    let profile = for_twain(profile, driver_ui);
+    let mut made = false;
+    let r = deliver_kept(scans_dir, |tmp| {
+        let a = assemble_files(&files, &profile, tmp)?;
+        made = true;
+        Ok(a)
+    });
+    match r {
+        // The PDF is made (delivered, or kept on this PC with the message saying where).
+        _ if made => {
+            files.discard();
+            r
+        }
+        Ok(_) => r,
+        Err(e) => Err(keep_as_pictures(&files, scans_dir, &e)),
+    }
+}
+
 // ---------------------------------------------------------------------------------------------
 // WIA
 
@@ -722,7 +897,13 @@ pub fn wia_devices() -> Result<Vec<Device>, String> {
 }
 
 /// Scans with `profile` into `dir` and returns the page image files, in page order.
-pub fn scan_pages(device_id: &str, profile: &Profile, dir: &Path) -> Result<Vec<PathBuf>, String> {
+/// `stop`: set to end the scan (the files written so far stay in `dir`).
+pub fn scan_pages(
+    device_id: &str,
+    profile: &Profile,
+    dir: &Path,
+    stop: &std::sync::atomic::AtomicBool,
+) -> Result<Vec<PathBuf>, String> {
     use windows::Devices::Scanners::{
         ImageScanner, ImageScannerColorMode, ImageScannerFormat, ImageScannerResolution,
         ImageScannerScanSource,
@@ -806,9 +987,21 @@ pub fn scan_pages(device_id: &str, profile: &Profile, dir: &Path) -> Result<Vec<
     let folder = StorageFolder::GetFolderFromPathAsync(&HSTRING::from(abs.as_os_str()))
         .and_then(|op| op.join())
         .map_err(err("scan folder"))?;
-    let result = scanner
+    let op = scanner
         .ScanFilesToFolderAsync(source, &folder)
-        .and_then(|op| op.join())
+        .map_err(err("scan failed (is there paper in the feeder?)"))?;
+    // Waited for in steps, so the person can stop a scan that never ends (it was waited
+    // for without end).
+    // (0: started, still running.)
+    while op.Status().map_err(err("scan"))?.0 == 0 {
+        if stop.load(std::sync::atomic::Ordering::SeqCst) {
+            let _ = op.Cancel();
+            return Err("the scan was stopped".into());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    let result = op
+        .GetResults()
         .map_err(err("scan failed (is there paper in the feeder?)"))?;
     let files = result.ScannedFiles().map_err(err("scanned files"))?;
     let mut out = Vec::new();
@@ -827,25 +1020,36 @@ pub fn scan_pages(device_id: &str, profile: &Profile, dir: &Path) -> Result<Vec<
 /// Scans with `profile` and leaves one PDF in `scans_dir` for the Scans folder worker.
 /// Returns its path and what was done. `driver_ui`: for a TWAIN source, show the driver's
 /// own window and let its settings and profiles drive the scan.
+///
+/// A TWAIN scanner's driver runs in a helper program, not in this one (see
+/// `twain::helper`): a fault in it ends the helper and the pages scanned before it are
+/// kept. `how`: Stop, and the way back to the driver inside this program.
 pub fn scan_to(
     device_id: &str,
     profile: &Profile,
     driver_ui: bool,
     scans_dir: &Path,
+    how: &How,
 ) -> Result<(PathBuf, Assembled), String> {
+    use crate::twain::helper::{HELPER_EXE, Helper};
     if let Some(source) = device_id.strip_prefix(TWAIN32_PREFIX) {
-        let scanned = crate::twain::helper::scan32(source, &twain_settings(profile, driver_ui))?;
-        let profile = for_twain(profile, driver_ui);
-        return deliver_kept(scans_dir, |tmp| assemble_twain(scanned, &profile, tmp));
+        let helper =
+            Helper::bits32().ok_or_else(|| format!("{HELPER_EXE} is not beside the program"))?;
+        return scan_through(&helper, source, profile, driver_ui, scans_dir, how);
     }
     if let Some(source) = device_id.strip_prefix(TWAIN_PREFIX) {
+        if let Some(helper) = native_helper(how.driver_in_app) {
+            return scan_through(&helper, source, profile, driver_ui, scans_dir, how);
+        }
+        // The driver inside this program (the person's choice, or a program that is not
+        // vibe-files.exe): as before, held in memory, and not to be stopped.
         let scanned = crate::twain::scan(source, &twain_settings(profile, driver_ui))?;
         let profile = for_twain(profile, driver_ui);
         return deliver_kept(scans_dir, |tmp| assemble_twain(scanned, &profile, tmp));
     }
     // Hidden from the worker (it skips dot names and folders).
     let work = scans_dir.join(format!(".scan-{}", uuid::Uuid::now_v7().simple()));
-    let r = scan_pages(device_id, profile, &work)
+    let r = scan_pages(device_id, profile, &work, &how.stop)
         .and_then(|pages| deliver(scans_dir, |tmp| assemble(&pages, profile, tmp)));
     match &r {
         Ok(_) => {
@@ -1027,6 +1231,118 @@ mod tests {
         assert!(assemble(&only_blank, profile, &out).is_err());
     }
 
+    /// The pages of a scan made through a helper, as the helper leaves them: gray rows in
+    /// files, `inked` of them with text.
+    fn scanned_files(dir: &Path, inked: &[bool]) -> crate::twain::helper::ScannedFiles {
+        use crate::twain::Pixel;
+        use crate::twain::helper::{PageFile, ScannedFiles};
+        let (w, h) = (200u32, 250u32);
+        let pages = inked
+            .iter()
+            .enumerate()
+            .map(|(i, ink)| {
+                let mut data = vec![250u8; (w * h) as usize];
+                if *ink {
+                    for y in (40..200).step_by(8) {
+                        for x in 30..170 {
+                            data[(y * w + x) as usize] = 10;
+                        }
+                    }
+                }
+                let file = format!("page-{:04}.raw", i + 1);
+                std::fs::write(dir.join(&file), data).unwrap();
+                PageFile {
+                    file,
+                    width: w,
+                    height: h,
+                    dpi: 100.0,
+                    pixel: Pixel::Gray,
+                }
+            })
+            .collect();
+        ScannedFiles {
+            dir: dir.to_path_buf(),
+            pages,
+            stopped: None,
+            cancelled: false,
+        }
+    }
+
+    /// A scan through a helper is made into its PDF from the page files, one at a time,
+    /// and says why the scanner stopped when it did.
+    #[test]
+    fn a_helpers_page_files_become_the_pdf() {
+        let t = tempfile::tempdir().unwrap();
+        let raw = t.path().join("raw");
+        std::fs::create_dir(&raw).unwrap();
+        let mut files = scanned_files(&raw, &[true, false, true]);
+        files.stopped = Some("paper jam".into());
+        let out = t.path().join("scan.pdf");
+        let a = assemble_files(&files, &default_profiles()[0], &out).unwrap();
+        assert_eq!((a.scanned, a.blank, a.normalized.pages), (3, 1, 2));
+        assert_eq!(a.stopped.as_deref(), Some("paper jam"));
+        assert_eq!(lopdf::Document::load(&out).unwrap().get_pages().len(), 2);
+        // A page that cannot be read back fails the scan: never a PDF that ends early.
+        std::fs::write(raw.join("page-0003.raw"), [0u8; 9]).unwrap();
+        let e = assemble_files(&files, &default_profiles()[0], &out).unwrap_err();
+        assert!(e.contains("page 3 came back damaged"), "{e}");
+    }
+
+    /// When the PDF cannot be made, the pages (paper someone fed) are kept as pictures a
+    /// person can open, with the reason, and the helper's own files are cleared away.
+    #[test]
+    fn pages_whose_pdf_cannot_be_made_are_kept_as_pictures() {
+        let t = tempfile::tempdir().unwrap();
+        let (raw, scans) = (t.path().join("raw"), t.path().join("Scans"));
+        std::fs::create_dir(&raw).unwrap();
+        std::fs::create_dir(&scans).unwrap();
+        // Every page judged blank: no PDF.
+        let files = scanned_files(&raw, &[false, false]);
+        let out = t.path().join("scan.pdf");
+        let e = assemble_files(&files, &default_profiles()[0], &out).unwrap_err();
+        assert!(e.contains("blank"), "{e}");
+        let said = keep_as_pictures(&files, &scans, &e);
+        assert!(said.contains("kept as pictures in"), "{said}");
+        let kept: Vec<PathBuf> = walk(&scans.join(crate::pipeline::FAILED_DIR));
+        let names: Vec<String> = kept
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, ["error.txt", "page-0001.png", "page-0002.png"]);
+        assert_eq!(image::open(&kept[1]).unwrap().width(), 200);
+        assert!(!raw.exists(), "the helper's files are cleared away");
+        // The Scans folder away: on this PC instead; the reason is still said.
+        std::fs::create_dir(&raw).unwrap();
+        let files = scanned_files(&raw, &[false]);
+        let gone = t.path().join("not there").join("Scans");
+        std::fs::write(t.path().join("not there"), "a file in the way").unwrap();
+        let said = keep_as_pictures(&files, &gone, "the reason");
+        assert!(
+            said.starts_with("the reason (the scanned pages are kept as pictures in"),
+            "{said}"
+        );
+        let dir = PathBuf::from(said.rsplit_once(" in ").unwrap().1.trim_end_matches(')'));
+        assert!(dir.join("page-0001.png").is_file());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Every file under `dir`, sorted.
+    fn walk(dir: &Path) -> Vec<PathBuf> {
+        let mut out = Vec::new();
+        let mut stack = vec![dir.to_path_buf()];
+        while let Some(d) = stack.pop() {
+            for e in std::fs::read_dir(&d).unwrap().flatten() {
+                if e.path().is_dir() {
+                    stack.push(e.path());
+                } else {
+                    out.push(e.path());
+                }
+            }
+        }
+        out.sort();
+        out
+    }
+
     #[test]
     fn profiles_round_trip_with_defaults() {
         let p: Profile =
@@ -1041,7 +1357,7 @@ mod tests {
     /// Lists this workstation's scanners without failing when there are none (CI, laptops).
     #[test]
     fn device_list_works_with_or_without_a_scanner() {
-        let d = devices();
+        let d = devices(false);
         assert!(d.list.iter().all(|d| !d.id.is_empty()), "{d:?}");
         // The shipped TWAIN manager loads in debug builds: no note about it missing.
         assert!(

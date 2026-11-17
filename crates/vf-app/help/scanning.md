@@ -47,6 +47,14 @@ The PDF is saved in the Scans folder. Within a few seconds it is split at any co
 
 > A cover sheet's blank back is dropped in a both-sides scan even with the driver's window on, so you do not need to remove it.
 
+## Stopping a scan, and when something goes wrong
+
+While a scan runs, **Stop** is beside the spinner. It ends the scan; the pages scanned so far are kept and made into the PDF.
+
+A TWAIN scanner's driver runs in a small helper program, not inside Vibe Files. If the driver fails part way, Vibe Files stays open, the pages scanned before that are kept, and the line under the strip says why it stopped. If the PDF cannot be made, the pages are saved as pictures in the Scans folder's `_failed` folder, and the line says where.
+
+**Run the driver inside Vibe Files** is off, and should stay off. Turn it on only if your scanner does not scan with it off: a driver fault then closes Vibe Files, and **Stop** does not work.
+
 ## Scanning from Browse
 
 The **Scan** button in Browse uses the same scanner and settings. With a client's folder open, the scan is filed straight into that folder as one document; see [Scan and print from Browse](help:browse-scan-print).

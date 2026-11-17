@@ -254,6 +254,11 @@ pub struct Ingest {
     /// 2026-11-04).
     #[serde(default = "yes")]
     pub driver_ui: bool,
+    /// TWAIN: load the scanner's 64-bit driver into Vibe Files itself, as before 2026-11-17,
+    /// instead of into the scanning helper. Off unless a scanner does not work from the
+    /// helper: a fault in the driver then closes Vibe Files, and its scan cannot be stopped.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub scan_driver_in_app: bool,
     /// Last scan profile used, by name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scan_profile: Option<String>,
@@ -271,6 +276,7 @@ impl Default for Ingest {
             scanner_by_user: Default::default(),
             inboxes_by_user: Default::default(),
             driver_ui: true,
+            scan_driver_in_app: false,
             scan_profile: None,
             scan_profiles: vec![],
         }

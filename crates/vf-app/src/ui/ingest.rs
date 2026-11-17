@@ -68,6 +68,10 @@ pub struct IngestState {
     look_job: Option<crate::ui::job::Job<Looked>>,
     /// A scan running on its own thread.
     scan_job: Option<Receiver<Result<(PathBuf, scanner::Assembled), String>>>,
+    /// Set by Stop: the running scan ends and keeps the pages scanned so far.
+    scan_stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// `Ingest::scan_driver_in_app` as the scanners were last listed with.
+    driver_in_app: bool,
     /// The portal's line in the strip, set by the app each frame; `None` when no portal is set
     /// up (PA-38).
     pub portal: Option<crate::ui::portal::PortalLine>,
@@ -503,8 +507,9 @@ impl IngestState {
         }
         let (tx, rx) = std::sync::mpsc::channel();
         let ctx = ctx.clone();
+        let in_app = self.driver_in_app;
         std::thread::spawn(move || {
-            let _ = tx.send(scanner::devices());
+            let _ = tx.send(scanner::devices(in_app));
             ctx.request_repaint();
         });
         self.devices = None;
@@ -565,8 +570,21 @@ impl IngestState {
         let driver_ui = current.kind == Kind::Twain && prefs.driver_ui;
         self.finished_scans.retain(|(d, _)| *d != dir);
         self.scan_dir = Some(dir.clone());
+        let how = scanner::How {
+            stop: Default::default(),
+            driver_in_app: prefs.scan_driver_in_app,
+        };
+        self.scan_stop = how.stop.clone();
         std::thread::spawn(move || {
-            let _ = tx.send(scanner::scan_to(&id, &profile, driver_ui, &dir));
+            // Whatever goes wrong in the scan is a line in Intake, never the end of the
+            // program.
+            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                scanner::scan_to(&id, &profile, driver_ui, &dir, &how)
+            }))
+            .unwrap_or_else(|_| {
+                Err("the scan stopped unexpectedly; the pages scanned may be in the Scans folder's _failed folder".into())
+            });
+            let _ = tx.send(r);
             ctx.request_repaint();
         });
         self.scan_job = Some(rx);
@@ -582,6 +600,12 @@ impl IngestState {
     /// Scan row: scanner, profile, Scan. The PDF lands in the Scans folder; the worker splits
     /// and delivers it like any other file there.
     fn scan_row(&mut self, ui: &mut egui::Ui, prefs: &Ingest) {
+        // Where the drivers load changed: the scanners are listed again that way.
+        if self.driver_in_app != prefs.scan_driver_in_app && !self.scanning() {
+            self.driver_in_app = prefs.scan_driver_in_app;
+            self.devices = None;
+            self.devices_job = None;
+        }
         if self.devices.is_none() && self.devices_job.is_none() {
             self.list_devices(ui.ctx());
         }
@@ -629,9 +653,15 @@ impl IngestState {
             {
                 self.list_devices(ui.ctx());
             }
+            // A 32-bit scanner's driver is always in its helper.
+            let own_driver = current.kind == Kind::Twain && !current.name.ends_with("32-bit)");
             if current.kind == Kind::Twain {
                 ui.checkbox(&mut p.driver_ui, "Use the driver's own window")
                     .on_hover_text("The scanner driver's window opens and its settings and profiles (PaperStream IP) are used instead of the profile here.");
+            }
+            if own_driver {
+                ui.checkbox(&mut p.scan_driver_in_app, "Run the driver inside Vibe Files")
+                    .on_hover_text("Leave off: the scanner's driver then runs in a helper program, so a fault in the driver cannot close Vibe Files, and a scan can be stopped. Turn on only if this scanner does not scan with it off.");
             }
             let profiles = prefs.profiles();
             let profile = prefs
@@ -666,6 +696,16 @@ impl IngestState {
                 });
             if busy {
                 ui.spinner();
+                let can_stop = !(own_driver && prefs.scan_driver_in_app);
+                if ui
+                    .add_enabled(can_stop, egui::Button::new("Stop").small())
+                    .on_hover_text("Ends the scan. The pages scanned so far are kept.")
+                    .on_disabled_hover_text("A scan with the driver inside Vibe Files cannot be stopped from here: use the scanner's own window.")
+                    .clicked()
+                {
+                    self.scan_stop
+                        .store(true, std::sync::atomic::Ordering::SeqCst);
+                }
             }
             if go.clicked() {
                 scan_now = true;

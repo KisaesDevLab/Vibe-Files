@@ -42,6 +42,16 @@ struct Args {
 }
 
 fn main() -> anyhow::Result<std::process::ExitCode> {
+    // The program as its own scanning helper (`vf_ingest::twain::helper`): the scanner's
+    // driver loads into that copy, never into the one with the cabinet open. First of all:
+    // the helper opens no data folder, catalog, log or window.
+    {
+        use vf_ingest::twain::helper::{HELPER_ARG, helper_main};
+        let args: Vec<String> = std::env::args().skip(1).collect();
+        if args.first().is_some_and(|a| a == HELPER_ARG) {
+            std::process::exit(helper_main(&args));
+        }
+    }
     // Intake's recording asks print capture's profiles what a printed name says (PA-86).
     vf_fs::intake::set_name_reader(|root| {
         vf_ingest::pipeline::name_reader(root).unwrap_or_else(|e| {
