@@ -236,6 +236,13 @@ fn migrate(conn: &Connection, path: &Path) -> Result<()> {
         for (i, sql) in MIGRATIONS.iter().enumerate().skip(current as usize) {
             let to = i as u32 + 1;
             let tx = begin_write(conn)?;
+            // Read again now that the write is this connection's: another login on this
+            // computer, started at the same moment after an update, may have made this step
+            // while this one waited. Most steps cannot be made twice ("duplicate column
+            // name", QA 2026-11-17).
+            if user_version(&tx)? >= to {
+                continue;
+            }
             // Only the migration that rebuilds a referenced table is checked (each check reads
             // every child table: code review 2026-11-13).
             let checked = to == REBUILDS_DOCUMENT;
@@ -283,9 +290,27 @@ fn compact_due(conn: &Connection) {
     if !due {
         return;
     }
+    // Tried without waiting, and not again in this run once it could not be: every connection the program
+    // opens (each worker opens its own) used to try, and while another login's VACUUM ran
+    // each waited ten seconds for nothing (QA 2026-11-17).
+    static GAVE_UP: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+    let file = conn.path().unwrap_or_default().to_lowercase();
+    if GAVE_UP
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .contains(&file)
+    {
+        return;
+    }
+    let _ = conn.busy_timeout(std::time::Duration::ZERO);
     let _ = conn.pragma_update(None, "temp_store", "FILE");
     let done = conn.execute_batch("VACUUM").is_ok();
     let _ = conn.pragma_update(None, "temp_store", "MEMORY");
+    let _ = conn.busy_timeout(std::time::Duration::from_secs(10));
+    if !done {
+        // Busy now (another login has the catalog): the next run of the program tries.
+        GAVE_UP.lock().unwrap_or_else(|e| e.into_inner()).push(file);
+    }
     if done {
         let _ = conn.execute("DELETE FROM local_state WHERE k = ?1", [COMPACT_KEY]);
     }
@@ -308,11 +333,13 @@ fn backup(conn: &Connection, path: &Path, from: u32) -> Result<PathBuf> {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or_default();
+    // With this process's id: two logins migrating in the same second each write their own.
     let name = format!(
-        "{}.v{from}-{secs}.bak",
+        "{}.v{from}-{secs}-{}.bak",
         path.file_name()
             .map(|n| n.to_string_lossy())
-            .unwrap_or_default()
+            .unwrap_or_default(),
+        std::process::id()
     );
     let dst_path = path.with_file_name(name);
     let mut dst = Connection::open(&dst_path)?;

@@ -36,11 +36,19 @@ pub struct Held {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Busy {
     pub who: String,
+    /// Not held by anyone that could be seen: the lock file could be neither made nor read
+    /// (the share's error, as it said it).
+    pub trouble: Option<String>,
 }
 
 impl Busy {
     /// "… is changing {what} right now. Try again in a moment." Nothing was changed.
     pub fn message(&self, what: &str) -> String {
+        if let Some(e) = &self.trouble {
+            return format!(
+                "The cabinet could not be reached to change {what} ({e}). Nothing was changed: try again in a moment."
+            );
+        }
         let who = if self.who.trim().is_empty() {
             "Someone else"
         } else {
@@ -115,18 +123,35 @@ pub fn still_mine() -> Result<(), String> {
     let held: Vec<(PathBuf, String, String)> = FILES.with(|m| m.borrow().clone());
     for (path, token, what) in held {
         // The holder's own heartbeat rewrites the file: an empty read is looked at again.
+        // So is a read that failed (the share, for a moment): only a lock file that is
+        // gone, or that reads as someone else's, was taken over (QA 2026-11-17: one failed
+        // read at the moment of saving told the person someone else had gone ahead).
         let mut ours = false;
-        for _ in 0..5 {
+        let mut unread = None;
+        for _ in 0..20 {
             match std::fs::read_to_string(&path) {
                 Ok(t) if t.starts_with(token.as_str()) => {
                     ours = true;
                     break;
                 }
                 Ok(t) if t.trim().is_empty() => {
+                    unread = None;
                     std::thread::sleep(Duration::from_millis(30));
                 }
-                _ => break,
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                    unread = Some(e.to_string());
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+                _ => {
+                    unread = None;
+                    break;
+                }
             }
+        }
+        if let (false, Some(e)) = (ours, &unread) {
+            return Err(format!(
+                "The cabinet could not be reached to save {what} ({e}). Nothing was saved: make the change again in a moment."
+            ));
         }
         if !ours {
             return Err(format!(
@@ -223,10 +248,13 @@ pub(crate) fn take_at(
                             }
                             last = Instant::now();
                             // Only while it is still this holder's (taken over: left alone).
-                            let mine = std::fs::read_to_string(&path2)
-                                .is_ok_and(|t| t.starts_with(token2.as_str()));
-                            if !mine {
-                                return;
+                            // A read that failed for a moment is not a takeover: this beat is
+                            // missed, the next one is made (one failed read ended the beats
+                            // for good, and a long change then lost its lock; QA 2026-11-17).
+                            match std::fs::read_to_string(&path2) {
+                                Ok(t) if t.starts_with(token2.as_str()) => {}
+                                Err(e) if e.kind() != std::io::ErrorKind::NotFound => continue,
+                                _ => return,
                             }
                             n += 1;
                             let _ = std::fs::write(&path2, format!("{token2} {n} {who2}"));
@@ -283,7 +311,10 @@ pub(crate) fn take_at(
                     continue;
                 }
                 if wait.is_some_and(|w| started.elapsed() >= w) {
-                    return Err(Busy { who: holder });
+                    return Err(Busy {
+                        who: holder,
+                        trouble: None,
+                    });
                 }
                 std::thread::sleep(Duration::from_millis(100).min(beat));
             }
@@ -292,14 +323,19 @@ pub(crate) fn take_at(
             // a cabinet that really cannot be written (a read-only share) has nothing to
             // guard. Taking any error for that let a change run with no lock beside the
             // real holder (code review 2026-11-14).
-            Err(_) => {
+            Err(e) => {
                 let since = *trouble.get_or_insert_with(Instant::now);
                 if since.elapsed() >= Duration::from_secs(3) {
                     if !writable(path) {
                         return Ok(none());
                     }
                     if wait.is_some_and(|w| started.elapsed() >= w) {
-                        return Err(Busy { who: holder });
+                        // Nobody was seen to hold it: said as what it is, not as "someone
+                        // else is changing it".
+                        return Err(Busy {
+                            trouble: holder.is_empty().then(|| e.to_string()),
+                            who: holder,
+                        });
                     }
                 }
                 std::thread::sleep(Duration::from_millis(100).min(beat));

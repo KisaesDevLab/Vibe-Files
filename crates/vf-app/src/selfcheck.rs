@@ -14,12 +14,29 @@ pub struct Check {
     pub detail: String,
 }
 
+/// Whether an error's text is the catalog being busy (another connection writing: the index,
+/// a sync, another login's update), not something wrong with it.
+pub fn is_busy_text(e: &str) -> bool {
+    let e = e.to_ascii_lowercase();
+    e.contains("database is locked")
+        || e.contains("database is busy")
+        || e.contains("database table is locked")
+}
+
 fn check(name: &'static str, r: Result<String, String>) -> Check {
     match r {
         Ok(detail) => Check {
             name,
             ok: true,
             detail,
+        },
+        // Busy is not a failed check (QA 2026-11-17: a healthy catalog another connection
+        // was writing showed "Catalog integrity: database is locked" in red). Not checked
+        // this time; it is at the next open.
+        Err(e) if is_busy_text(&e) => Check {
+            name,
+            ok: true,
+            detail: "not checked just now (the catalog was busy)".into(),
         },
         Err(detail) => Check {
             name,
@@ -167,14 +184,18 @@ fn sync_state(conn: &Connection, runs_on: Option<&str>) -> Result<String, String
             |r| r.get(0),
         )
         .map_err(|e| e.to_string())?;
+    // A read that failed is an error (busy: not checked this time), not "never exchanged".
     let last: Option<String> = conn
         .query_row(
             "SELECT max(coalesce(last_pull, ''), coalesce(last_push, '')) FROM sync_state",
             [],
-            |r| r.get(0),
+            |r| r.get::<_, Option<String>>(0),
         )
-        .ok()
-        .filter(|s: &String| !s.is_empty());
+        .or_else(|e| match e {
+            vf_core::db::SqlError::QueryReturnedNoRows => Ok(None),
+            e => Err(e.to_string()),
+        })?
+        .filter(|s| !s.is_empty());
     if conflicts > 0 {
         return Err(format!("{conflicts} conflicts to resolve (Sync tab)"));
     }

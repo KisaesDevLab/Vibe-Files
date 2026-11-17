@@ -488,10 +488,18 @@ impl VibeFilesApp {
                         vf_core::db::open(&catalog, vf_core::db::Storage::Local)
                             .map(|c| crate::selfcheck::run(&c, &root, synced))
                             .unwrap_or_else(|e| {
+                                // Busy: nothing was checked and nothing is wrong. Else it
+                                // is the catalog that could not be opened, said as that
+                                // (not as a failed integrity check).
+                                if e.is_busy() {
+                                    return vec![];
+                                }
                                 vec![crate::selfcheck::Check {
-                                    name: "Catalog integrity",
+                                    name: "Catalog",
                                     ok: false,
-                                    detail: e.to_string(),
+                                    detail: format!(
+                                        "could not be opened for the startup check: {e}"
+                                    ),
                                 }]
                             })
                     };
@@ -1712,7 +1720,7 @@ fn patient<T>(mut work: impl FnMut() -> Result<T, String>) -> Result<T, String> 
     let mut tries = 0;
     loop {
         match work() {
-            Err(e) if tries < 5 && (e.contains("locked") || e.contains("busy")) => {
+            Err(e) if tries < 5 && crate::selfcheck::is_busy_text(&e) => {
                 tries += 1;
                 std::thread::sleep(std::time::Duration::from_secs(2));
             }
