@@ -5992,6 +5992,7 @@ dependencies = [
  "regex",
  "serde",
  "serde_json",
+ "strsim",
  "tempfile",
  "thiserror 2.0.21",
  "time",

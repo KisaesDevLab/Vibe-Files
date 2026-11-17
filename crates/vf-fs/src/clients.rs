@@ -1077,6 +1077,26 @@ fn csv_fields(rec: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// The IDs in the client CSV Intake uses, in capitals (PA-90: which of two similar clients is
+/// the one the CSV lists). `None`: no CSV is set, or it has no ID column.
+pub fn csv_ids(root: &Path) -> Result<Option<std::collections::HashSet<String>>, String> {
+    let Some((_, _, text, _, records, col)) = csv_read(root)? else {
+        return Ok(None);
+    };
+    Ok(Some(
+        records
+            .iter()
+            .skip(1)
+            .filter_map(|&(a, b)| {
+                csv_fields(&text[a..b])
+                    .get(col)
+                    .map(|v| v.trim().to_uppercase())
+            })
+            .filter(|v| !v.is_empty())
+            .collect(),
+    ))
+}
+
 /// Takes client `id`'s row out of the client CSV Intake uses (a client merged into another,
 /// owner 2026-11-14), the rest of the file byte for byte, so a re-import does not bring the
 /// client back. Returns the row as it was; `None`: no CSV, or the client is not in it.

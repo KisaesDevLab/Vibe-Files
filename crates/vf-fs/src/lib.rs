@@ -31,6 +31,7 @@ pub mod rebuild;
 pub mod rename;
 pub mod retention;
 pub mod safeguards;
+pub mod similar;
 pub mod sweep;
 pub mod tapes;
 pub mod trash;
