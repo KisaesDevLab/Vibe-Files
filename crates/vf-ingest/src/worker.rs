@@ -95,11 +95,21 @@ pub fn staged_files(dir: &Path) -> Vec<(PathBuf, u64)> {
 /// never act on each other's. A run that stops on the same file twice in a row (a crash it
 /// causes, not a quit) has it set aside rather than tried on every start (QA I4, QA2 #1/#13).
 pub fn marker(dir: &Path, device_id: &str) -> PathBuf {
-    let id: String = device_id
+    dir.join(format!(".vf-processing-{}.txt", here(device_id)))
+}
+
+/// This computer's name (a login keeps one device id on every session host it signs in
+/// to: what is "this copy's own" in a shared staging folder is the id on this computer).
+fn computer() -> String {
+    std::env::var("COMPUTERNAME").unwrap_or_default()
+}
+
+/// `device_id` on this computer, as a part of a file name.
+fn here(device_id: &str) -> String {
+    format!("{device_id}-{}", computer())
         .chars()
         .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
-        .collect();
-    dir.join(format!(".vf-processing-{id}.txt"))
+        .collect()
 }
 
 /// Runs in a row that stopped on a file before it is set aside.
@@ -140,11 +150,7 @@ fn stamp(p: &Path) -> Option<(u64, std::time::SystemTime)> {
 /// so a restart does not deliver them again (QA2 #3): `<name>\t<size>\t<mtime secs>` lines,
 /// one file per PC (QA3 E8).
 pub fn handled_file(dir: &Path, device_id: &str) -> PathBuf {
-    let id: String = device_id
-        .chars()
-        .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
-        .collect();
-    dir.join(format!(".vf-handled-{id}.txt"))
+    dir.join(format!(".vf-handled-{}.txt", here(device_id)))
 }
 
 fn secs(t: std::time::SystemTime) -> u64 {
@@ -204,6 +210,16 @@ const DONE: &str = "done:";
 /// file; a stale one (older than [`CLAIM_STALE`], or this PC's own from a run that stopped) is
 /// taken over. `None` = another copy has it.
 pub fn claim(p: &Path, device_id: &str) -> Option<PathBuf> {
+    claim_on(p, device_id, &computer())
+}
+
+/// [`claim`] as the copy of `device_id` running on `computer`. A claim is this copy's own
+/// (left by a run of it that stopped) only when it names this device **and** this computer:
+/// one login signed in on two session hosts has one device id, and each took the other's
+/// claim for its own and delivered the same file (QA 2026-11-17). On one computer a login
+/// runs one copy at a time (the data folder's lock), so there it is a run that stopped.
+pub fn claim_on(p: &Path, device_id: &str, computer: &str) -> Option<PathBuf> {
+    let me = format!("{device_id}@{computer}");
     let c = claim_file(p)?;
     for _ in 0..2 {
         match std::fs::OpenOptions::new()
@@ -213,7 +229,7 @@ pub fn claim(p: &Path, device_id: &str) -> Option<PathBuf> {
         {
             Ok(mut f) => {
                 use std::io::Write;
-                let _ = f.write_all(device_id.as_bytes());
+                let _ = f.write_all(me.as_bytes());
                 // Taken while another copy finished it: nothing left to do.
                 if !p.is_file() {
                     let _ = std::fs::remove_file(&c);
@@ -226,7 +242,9 @@ pub fn claim(p: &Path, device_id: &str) -> Option<PathBuf> {
                 if std::fs::read_to_string(&c).is_ok_and(|t| t.starts_with(DONE)) {
                     return None;
                 }
-                let mine = std::fs::read_to_string(&c).is_ok_and(|t| t.trim() == device_id);
+                // (A claim from before the computer was written in it names the device alone.)
+                let mine = std::fs::read_to_string(&c)
+                    .is_ok_and(|t| t.trim() == me || t.trim() == device_id);
                 let stale = std::fs::metadata(&c)
                     .and_then(|m| m.modified())
                     .ok()

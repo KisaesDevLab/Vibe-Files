@@ -1720,7 +1720,7 @@ fn ready(conn: &mut vf_core::db::Connection, root: &Path, device_id: &str) -> Re
 
 /// `work` again, a few times, when the catalog was busy: behind the window it writes while
 /// the index does (PA-82), and a write that lost its turn is no problem to show in red.
-fn patient<T>(mut work: impl FnMut() -> Result<T, String>) -> Result<T, String> {
+pub(crate) fn patient<T>(mut work: impl FnMut() -> Result<T, String>) -> Result<T, String> {
     let mut tries = 0;
     loop {
         match work() {

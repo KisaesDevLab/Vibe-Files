@@ -768,6 +768,15 @@ pub fn also_matched(root: &Path) -> Vec<(String, String)> {
 /// touched. A profile that does not read changes nothing (an error); rows that cannot become a
 /// rule are reported in [`Synced::problems`].
 pub fn sync_filer_rules_report(root: &Path) -> Result<Synced, String> {
+    // Read, worked out and written as one under the lock Intake's rules are saved under:
+    // every PC does this at every open, and a rule saved on another PC in between was
+    // written over (QA 2026-11-17). Another PC at it right now: left to it.
+    let Ok(_held) = vf_fs::lock::take(root, "intake-settings") else {
+        return Ok(Synced {
+            changed: false,
+            problems: vec![],
+        });
+    };
     let (before, file, problems) = plan_rules(root, None)?;
     let changed = file != before;
     if changed {
@@ -1007,6 +1016,16 @@ pub fn dir(root: &Path) -> PathBuf {
 /// Writes the seeded profile when the folder has none, and replaces an unedited copy of the
 /// first seeded UltraTax profile. Returns whether it wrote.
 pub fn seed_if_missing(root: &Path) -> Result<bool, String> {
+    // Under the lock Intake's settings are saved under: two PCs opening the cabinet at the
+    // same moment each rewrote the profile files. Another PC at it right now: left to it.
+    let Ok(_held) = vf_fs::lock::take(root, "intake-settings") else {
+        return Ok(false);
+    };
+    seed_if_missing_held(root)
+}
+
+/// [`seed_if_missing`], the lock held.
+fn seed_if_missing_held(root: &Path) -> Result<bool, String> {
     let d = dir(root);
     let ut = d.join("ultratax.toml");
     // An unedited earlier seed (regex profiles) becomes the UltraTax set-up (PA-22).

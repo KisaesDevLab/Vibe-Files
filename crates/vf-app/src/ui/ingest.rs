@@ -406,8 +406,20 @@ impl IngestState {
             device_id.to_string(),
         );
         let work = move || {
-            let Ok(mut conn) = vf_core::db::open(&catalog, vf_core::db::Storage::Local) else {
-                return Vec::new();
+            // Waited for when the catalog is busy: skipped, a duplicate goes to Intake
+            // unremarked.
+            let opened = crate::app::patient(|| {
+                vf_core::db::open(&catalog, vf_core::db::Storage::Local).map_err(|e| e.to_string())
+            });
+            let mut conn = match opened {
+                Ok(c) => c,
+                Err(e) => {
+                    tracing::warn!(
+                        kind = crate::logging::kind(&e),
+                        "scans not checked for duplicates: the catalog could not be opened"
+                    );
+                    return Vec::new();
+                }
             };
             let mut out = Vec::new();
             for (path, staging, hashes) in batch {

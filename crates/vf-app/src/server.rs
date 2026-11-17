@@ -570,6 +570,10 @@ pub struct Watch {
     client: Option<String>,
     /// The first read, left by opening the cabinet for the window, has not finished.
     first: bool,
+    /// The read just made could not be (the catalog busy, the share away): set by its thread.
+    failed: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Then the next one is made at this time, not in a quarter of an hour.
+    again: Option<std::time::Instant>,
     /// Make the copy the other servers start from again at the next read, whatever its age.
     seed_now: bool,
     /// That copy was asked for and not made (the share refused it, another server had it
@@ -590,6 +594,8 @@ impl Default for Watch {
             last: Some(std::time::Instant::now()),
             client: None,
             first: false,
+            failed: Default::default(),
+            again: None,
             seed_now: false,
             seed_owed: Default::default(),
             seed_busy: Default::default(),
@@ -606,6 +612,8 @@ impl Watch {
             last: None,
             client: None,
             first: true,
+            failed: Default::default(),
+            again: None,
             seed_now: false,
             seed_owed: Default::default(),
             seed_busy: Default::default(),
@@ -645,7 +653,15 @@ impl Watch {
             return match rx.try_recv() {
                 Ok(folders) => {
                     self.job = None;
-                    self.first = false;
+                    // A read that could not be made is not the read: what waits for the
+                    // first one (the sweep, B2 sync, Intake's recording) goes on waiting,
+                    // and it is made again in half a minute (QA 2026-11-17: a busy catalog
+                    // let those run on a catalog as old as the copy it started from).
+                    if self.failed.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                        self.again = Some(std::time::Instant::now() + AT_MOST);
+                    } else {
+                        self.first = false;
+                    }
                     !folders.is_empty()
                 }
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
@@ -658,20 +674,24 @@ impl Watch {
         }
         let since = self.last.map(|t| t.elapsed());
         let other_client = client.is_some() && client != self.client;
-        let due = match since {
-            None => true,
-            Some(e) => e >= EVERY || (other_client && e >= AT_MOST),
-        };
+        let again = self.again.is_some_and(|t| std::time::Instant::now() >= t);
+        let due = again
+            || match since {
+                None => true,
+                Some(e) => e >= EVERY || (other_client && e >= AT_MOST),
+            };
         if !due {
-            ctx.request_repaint_after(EVERY);
+            ctx.request_repaint_after(if self.again.is_some() { AT_MOST } else { EVERY });
             return false;
         }
+        self.again = None;
         self.last = Some(std::time::Instant::now());
         self.client = client;
         use std::sync::atomic::Ordering;
         let seed_now =
             std::mem::take(&mut self.seed_now) | self.seed_owed.swap(false, Ordering::SeqCst);
         let (seed_owed, seed_busy) = (self.seed_owed.clone(), self.seed_busy.clone());
+        let failed = self.failed.clone();
         let (catalog, root, writer, device) = (
             catalog.to_path_buf(),
             root.to_path_buf(),
@@ -684,13 +704,18 @@ impl Watch {
             .name("other-servers".into())
             .spawn(move || {
                 let mut folders = vec![];
-                if let Ok(mut conn) = vf_core::db::open(&catalog, vf_core::db::Storage::Local) {
-                    match vf_fs::changes::catch_up(&mut conn, &root, &writer, &device) {
-                        Ok(f) => folders = f,
-                        Err(e) => tracing::warn!(
+                match vf_core::db::open(&catalog, vf_core::db::Storage::Local)
+                    .map_err(|e| e.to_string())
+                    .and_then(|mut conn| {
+                        vf_fs::changes::catch_up(&mut conn, &root, &writer, &device)
+                    }) {
+                    Ok(f) => folders = f,
+                    Err(e) => {
+                        tracing::warn!(
                             kind = crate::logging::kind(&e),
-                            "other servers' changes not read"
-                        ),
+                            "other servers' changes not read: tried again shortly"
+                        );
+                        failed.store(true, Ordering::SeqCst);
                     }
                 }
                 // The read is done: said before the copy below, which takes minutes for a

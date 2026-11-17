@@ -300,7 +300,31 @@ impl Shared {
                 set_aside(&p);
                 copy_over(&m, &p)?;
             } else if pc_newer {
-                bring(f, &p, &m)?;
+                // To the cabinet under the lock the file is written under, and only if the
+                // cabinet's copy is still the older one once the lock is held (it was
+                // written with no lock, on its date alone; QA 2026-11-17).
+                let (lock, what) = shared_lock(f);
+                let cabinet_was = mtime(&m);
+                let sent = crate::lock::with(root, lock, what, || {
+                    if mtime(&m) != cabinet_was {
+                        return Ok(false);
+                    }
+                    bring(f, &p, &m).map(|_| true)
+                });
+                match sent {
+                    Ok(true) => {}
+                    // Changed in the cabinet meanwhile: left to the poll as changed on
+                    // both sides (the cabinet's copy comes in, this PC's is set aside).
+                    Ok(false) => {
+                        self.seen.insert(f, (None, None));
+                        continue;
+                    }
+                    // The lock is someone else's just now: the poll sends this PC's save.
+                    Err(_) => {
+                        self.seen.insert(f, (mtime(&m), None));
+                        continue;
+                    }
+                }
             } else if m.is_file() {
                 bring(f, &m, &p)?;
             }

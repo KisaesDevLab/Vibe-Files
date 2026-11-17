@@ -2003,7 +2003,14 @@ impl Browse {
             match self.catalog.clone() {
                 Some(catalog) => {
                     match crate::ui::job::Job::start(ctx, "Reading the folder…", move || {
-                        let conn = vf_core::db::open(&catalog, vf_core::db::Storage::Local).ok();
+                        // Waited for when the catalog is busy: without it the folder is
+                        // listed with none of the catalog's details, as if its files were
+                        // not documents.
+                        let conn = crate::app::patient(|| {
+                            vf_core::db::open(&catalog, vf_core::db::Storage::Local)
+                                .map_err(|e| e.to_string())
+                        })
+                        .ok();
                         crate::ui::explorer::list(&root, &dir, conn.as_ref())
                     }) {
                         Ok(j) => self.ex.job = Some(j),

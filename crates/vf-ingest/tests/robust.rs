@@ -93,6 +93,28 @@ fn only_one_copy_claims_a_staged_file() {
     assert!(claim(&p, "pc-b").is_none(), "the other copy leaves it");
     // This PC's own leftover claim (a run that stopped) is taken over.
     assert!(claim(&p, "pc-a").is_some());
+    // QA 2026-11-17: one login on two session hosts has one device id. The copy on the
+    // other host leaves this host's claim alone; this host's own is still taken over.
+    {
+        use vf_ingest::worker::claim_on;
+        let q = t
+            .path()
+            .join("Invented Client_2025_1040_Govt Copy_INVE1001.pdf");
+        std::fs::write(&q, "invented").unwrap();
+        let held = claim_on(&q, "login-id", "HOST-1").expect("first claim");
+        assert!(
+            claim_on(&q, "login-id", "HOST-2").is_none(),
+            "the other host leaves it"
+        );
+        assert!(
+            claim_on(&q, "login-id", "HOST-1").is_some(),
+            "a run that stopped here"
+        );
+        // A claim from before the computer was written in it is the device's, as it was.
+        std::fs::write(&held, "login-id").unwrap();
+        assert!(claim_on(&q, "login-id", "HOST-2").is_some());
+        std::fs::remove_file(&held).ok();
+    }
     // Delivered but its original could not be moved out: marked done, no PC takes it again,
     // this one included (QA 2026-11-04).
     std::fs::write(&a, "done:pc-a").unwrap();

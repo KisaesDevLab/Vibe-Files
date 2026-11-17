@@ -552,24 +552,37 @@ impl SyncTab {
         let spawned = std::thread::Builder::new()
             .name("sync-counts".into())
             .spawn(move || {
-                let Ok(conn) = vf_core::db::open(&catalog, Storage::Local) else {
-                    return;
-                };
-                // Read here, not on the window's thread (the file is on the share).
-                let rules = vf_sync::rules::Rules::load_or_default(&root);
-                let pending = vf_sync::catalog::pending(&conn, &rules).unwrap_or_default();
-                let held = want_held
-                    .then(|| vf_sync::catalog::held(&conn, &rules).ok())
-                    .flatten();
-                let conflicts = vf_sync::restore::conflicts(&conn).unwrap_or_default();
-                let st = conn
-                    .query_row(
+                // Counts that could not be read are not sent: the page keeps what it had
+                // (or "checking…"), and counts again. Sent as zeros, a busy catalog read as
+                // "nothing to send, no conflicts, never synced" (QA 2026-11-17).
+                let counted = || {
+                    let conn = crate::app::patient(|| {
+                        vf_core::db::open(&catalog, Storage::Local).map_err(|e| e.to_string())
+                    })
+                    .ok()?;
+                    // Read here, not on the window's thread (the file is on the share).
+                    let rules = vf_sync::rules::Rules::load_or_default(&root);
+                    let pending = vf_sync::catalog::pending(&conn, &rules).ok()?;
+                    let held = match want_held {
+                        true => Some(vf_sync::catalog::held(&conn, &rules).ok()?),
+                        false => None,
+                    };
+                    let conflicts = vf_sync::restore::conflicts(&conn).ok()?;
+                    let st = match conn.query_row(
                         "SELECT last_manifest_rev, last_push, last_pull FROM sync_state WHERE device_id = ?1",
                         [&device],
                         |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-                    )
-                    .ok();
-                let _ = tx.send((pending, conflicts, st, held));
+                    ) {
+                        Ok(st) => Some(st),
+                        // No row: this catalog has not exchanged yet.
+                        Err(vf_core::db::SqlError::QueryReturnedNoRows) => None,
+                        Err(_) => return None,
+                    };
+                    Some((pending, conflicts, st, held))
+                };
+                if let Some(c) = counted() {
+                    let _ = tx.send(c);
+                }
                 ctx.request_repaint();
             });
         if spawned.is_ok() {
