@@ -429,9 +429,18 @@ pub fn active_for(
     client_id: Option<&str>,
     doc_ids: &[String],
 ) -> Vec<Hold> {
-    let Ok(holds) = load(root) else {
-        return vec![];
-    };
+    active_for_checked(root, conn, client_id, doc_ids).unwrap_or_default()
+}
+
+/// [`active_for`]; `Err` when the cabinet's holds cannot be read just now. That is not "no
+/// hold": the banner of a document under hold must not go away on a failed read.
+pub fn active_for_checked(
+    root: &Path,
+    conn: &Connection,
+    client_id: Option<&str>,
+    doc_ids: &[String],
+) -> Result<Vec<Hold>, String> {
+    let holds = load(root)?;
     let docs: Vec<(String, Option<String>, Option<String>)> = doc_ids
         .iter()
         .filter_map(|d| {
@@ -443,7 +452,7 @@ pub fn active_for(
             .ok()
         })
         .collect();
-    holds
+    Ok(holds
         .into_iter()
         .filter(|h| h.active())
         .filter(|h| {
@@ -459,7 +468,7 @@ pub fn active_for(
             });
             by_client || by_doc
         })
-        .collect()
+        .collect())
 }
 
 /// A client merged into another ([`crate::clientmerge`]): the holds on client `from` become

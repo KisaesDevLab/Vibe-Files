@@ -47,7 +47,12 @@ pub fn list(conn: &Connection, root: &Path, doc_id: &str) -> Result<Vec<Version>
     let mut out = Vec::new();
     for r in rows {
         let (hash, size, created, created_by, reason) = r.map_err(|e| e.to_string())?;
-        let kept = cabinet::version_path(root, &hash).is_file();
+        // Kept unless it is seen not to be there (a share that is away is not "not kept").
+        let stored = cabinet::version_path(root, &hash);
+        let kept = match std::fs::metadata(&stored) {
+            Ok(m) => m.is_file(),
+            Err(e) => !cabinet::is_absent(&stored, &e),
+        };
         out.push(Version {
             hash,
             size,
@@ -66,10 +71,14 @@ fn stored(root: &Path, hash: &str) -> Result<PathBuf, String> {
         return Err("not a version hash".into());
     }
     let p = cabinet::version_path(root, hash);
-    if !p.is_file() {
-        return Err("this version's content was not kept".into());
+    match std::fs::metadata(&p) {
+        Ok(m) if m.is_file() => Ok(p),
+        Ok(_) => Err("this version's content was not kept".into()),
+        Err(e) if cabinet::is_absent(&p, &e) => Err("this version's content was not kept".into()),
+        Err(e) => Err(format!(
+            "this version's content cannot be reached just now ({e}): try again in a moment"
+        )),
     }
-    Ok(p)
 }
 
 /// Copies version `hash` to `dest` (which must not exist), verified by hash.

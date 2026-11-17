@@ -188,6 +188,9 @@ pub struct SyncTab {
     /// The cabinet's B2 rules as last read, when, and whether a list was ever saved (PA-63).
     /// The file is on the share: read every 30 s and after a save, not every frame.
     b2_rules: Option<(Instant, Vec<B2Rule>, bool)>,
+    /// The rules could not be read at this time, and why: said on the page, the rules as
+    /// last read kept (they showed as the rule of before PA-63, as if none were saved).
+    b2_unread: Option<(Instant, String)>,
     /// What a rule can name, read with the rules: doc types (id, name) and the cabinet
     /// template's folders below a client folder.
     rule_choices: (Vec<(String, String)>, Vec<String>),
@@ -1894,12 +1897,30 @@ fn client_table(ui: &mut egui::Ui, t: &mut SyncTab, env: &mut Env, v: &View<'_>,
 /// (`clients.vf.json`); changed with the admin password, like the other settings.
 fn b2_rule_section(ui: &mut egui::Ui, t: &mut SyncTab, env: &mut Env, admin: bool) {
     ui.label(RichText::new("What goes to B2").strong());
-    if t.b2_rules
+    let due = t
+        .b2_rules
         .as_ref()
         .is_none_or(|(at, ..)| at.elapsed() > Duration::from_secs(30))
-    {
-        // One small file (never the whole client list), and the names a rule can use.
-        let b2 = vf_fs::clients::load_b2(env.root).unwrap_or_default();
+        && t.b2_unread
+            .as_ref()
+            .is_none_or(|(at, _)| at.elapsed() > Duration::from_secs(10));
+    // One small file (never the whole client list), and the names a rule can use.
+    let read = due.then(|| vf_fs::clients::load_b2(env.root));
+    if let Some(Err(e)) = &read {
+        t.b2_unread = Some((Instant::now(), e.clone()));
+    }
+    if let Some((_, e)) = &t.b2_unread {
+        ui.colored_label(
+            theme::error(),
+            format!("The cabinet's B2 rules could not be read just now ({e}). They are read again in a moment."),
+        );
+        if t.b2_rules.is_none() {
+            // Never read: nothing true to show, and nothing to save over.
+            return;
+        }
+    }
+    if let Some(Ok(b2)) = read {
+        t.b2_unread = None;
         let saved = b2.rules.is_some();
         t.b2_rules = Some((Instant::now(), vf_sync::rules::listed(&b2), saved));
         if t.b2_choices != b2.clients {

@@ -126,6 +126,11 @@ impl Lookup {
 /// Whether what [`process`] reads of the cabinet before it touches a file (the client list,
 /// the doc types) can be read now.
 pub fn cabinet_ready(root: &Path) -> Result<(), String> {
+    // The print-capture profiles too: unread, a print is named by nothing and filed under
+    // its raw name with no doc type or year.
+    if let Some(e) = crate::parsers::unreadable(root) {
+        return Err(e);
+    }
     Lookup::load(root).map(|_| ())
 }
 

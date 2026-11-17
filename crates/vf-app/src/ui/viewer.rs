@@ -4655,7 +4655,11 @@ fn tape_panel(ui: &mut egui::Ui, v: &mut Viewer, env: &mut Env<'_>, doc: &Doc) {
                     .unwrap_or_default();
                 ui.menu_button("History", |ui| {
                     if hist.is_empty() {
-                        ui.label(widgets::caption("No tapes on this document yet."));
+                        ui.label(widgets::caption(if vf_fs::tapes::unreadable(env.root) {
+                            "The tapes kept in the cabinet could not be read just now."
+                        } else {
+                            "No tapes on this document yet."
+                        }));
                     }
                     for (label, name, lines) in hist {
                         if ui.button(label).clicked() {

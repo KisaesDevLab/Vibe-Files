@@ -439,6 +439,9 @@ pub struct Browse {
     /// Legal holds covering what is shown (P07 step 4), for the selection / client they were
     /// read for.
     holds_seen: Option<(String, Vec<vf_fs::holds::Hold>)>,
+    /// The cabinet's holds could not be read at this time (looked at again a few seconds
+    /// later; said in place of the banner).
+    holds_unread: Option<std::time::Instant>,
     /// The reason typed for a new hold, while the form is open.
     hold_reason: Option<String>,
     /// A hold being placed on its thread (documents not read yet are fingerprinted first,
@@ -639,6 +642,7 @@ impl Browse {
             scan_watching: false,
             scan_target: None,
             holds_seen: None,
+            holds_unread: None,
             hold_reason: None,
             hold_job: None,
             portal_open: None,
@@ -5107,14 +5111,31 @@ fn legal_holds(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env) {
         }
         format!("{client:?}|{}|{folded:x}", b.selected.len())
     };
-    if b.holds_seen.as_ref().is_none_or(|(k, _)| *k != key) {
+    if b.holds_seen.as_ref().is_none_or(|(k, _)| *k != key)
+        && b.holds_unread
+            .is_none_or(|at| at.elapsed() > std::time::Duration::from_secs(5))
+    {
         let docs: Vec<String> = b
             .selected
             .iter()
             .map(|&i| b.snap.docs[i].id.clone())
             .collect();
-        let found = vf_fs::holds::active_for(env.root, env.conn, client.as_deref(), &docs);
-        b.holds_seen = Some((key, found));
+        match vf_fs::holds::active_for_checked(env.root, env.conn, client.as_deref(), &docs) {
+            Ok(found) => {
+                b.holds_seen = Some((key, found));
+                b.holds_unread = None;
+            }
+            // Not read: not "no hold". What was shown is not kept for another selection.
+            Err(_) => {
+                b.holds_seen = None;
+                b.holds_unread = Some(std::time::Instant::now());
+            }
+        }
+    }
+    if b.holds_unread.is_some() {
+        ui.label(widgets::caption(
+            "Whether a legal hold covers this could not be read from the cabinet just now.",
+        ));
     }
     let holds = b
         .holds_seen

@@ -11,6 +11,9 @@ use crate::ui::new_client::NewClientDialog;
 use crate::ui::theme;
 use crate::ui::widgets::UiExt as _;
 
+/// A client's B2 choice when the cabinet's rules could not be read: not a choice, a mark.
+const B2_UNREAD: &str = "?unread";
+
 /// The add-relationship form.
 #[derive(Debug, Clone, Default)]
 pub struct RelForm {
@@ -272,9 +275,15 @@ pub fn show(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env, ci: usize) {
         .as_ref()
         .is_none_or(|(id, _, at)| *id != c.id || at.elapsed() > std::time::Duration::from_secs(10))
     {
-        let now = clients::load_b2(env.root)
-            .ok()
-            .and_then(|b2| b2.clients.get(&c.id).cloned());
+        // Not read: what was shown for this client stays; for a client not shown yet it is
+        // said as not known (it showed as "The firm's rule" for a client set to Never send).
+        let now = match clients::load_b2(env.root) {
+            Ok(b2) => b2.clients.get(&c.id).cloned(),
+            Err(_) => match &b.b2_choice {
+                Some((id, was, _)) if *id == c.id => was.clone(),
+                _ => Some(B2_UNREAD.to_string()),
+            },
+        };
         b.b2_choice = Some((c.id.clone(), now, std::time::Instant::now()));
     }
     let current = b.b2_choice.as_ref().and_then(|(_, v, _)| v.clone());
@@ -282,6 +291,7 @@ pub fn show(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env, ci: usize) {
     let label = |v: Option<&str>| match v {
         Some("always") => "Always send",
         Some("never") => "Never send",
+        Some(B2_UNREAD) => "Not known just now (the cabinet's rules could not be read)",
         _ => "The firm's rule",
     };
     let mut pick = current.clone();

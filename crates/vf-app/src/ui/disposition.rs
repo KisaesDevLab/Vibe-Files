@@ -402,8 +402,17 @@ pub fn show(ui: &mut egui::Ui, p: &mut DispositionPage, env: &mut Env, catalog: 
 
         ui.add_space(10.0);
         ui.label(RichText::new("Waiting for destruction").strong());
+        // A read that failed is said and tried again, not kept as "nothing approved".
         if p.waiting.is_none() {
-            p.waiting = Some(disposition::pending(env.conn).unwrap_or_default());
+            match disposition::pending(env.conn) {
+                Ok(w) => p.waiting = Some(w),
+                Err(e) => {
+                    ui.colored_label(
+                        crate::ui::theme::error(),
+                        format!("What waits for destruction could not be read just now ({e})."),
+                    );
+                }
+            }
         }
         let pending = p.waiting.clone().unwrap_or_default();
         let today_s = today.to_string();
@@ -480,7 +489,15 @@ pub fn show(ui: &mut egui::Ui, p: &mut DispositionPage, env: &mut Env, catalog: 
         ui.add_space(10.0);
         ui.label(RichText::new("Runs").strong());
         if p.runs.is_none() {
-            p.runs = Some(disposition::runs(env.conn, None).unwrap_or_default());
+            match disposition::runs(env.conn, None) {
+                Ok(r) => p.runs = Some(r),
+                Err(e) => {
+                    ui.colored_label(
+                        crate::ui::theme::error(),
+                        format!("The runs could not be read just now ({e})."),
+                    );
+                }
+            }
         }
         let runs = p.runs.clone().unwrap_or_default();
         if runs.is_empty() {

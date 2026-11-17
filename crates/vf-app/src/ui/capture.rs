@@ -55,6 +55,17 @@ impl CapturePage {
             .and_then(|(path, _)| self.files.iter().position(|(p, _)| p == path));
         match (keep, at) {
             (true, Some(i)) => self.pick = i,
+            // Its file is still there and could not be read this time: the edit is kept.
+            (true, None)
+                if self.draft_of.as_ref().is_some_and(|(path, _)| {
+                    std::fs::metadata(path)
+                        .map_or_else(|e| !vf_fs::cabinet::is_absent(path, &e), |_| true)
+                }) =>
+            {
+                self.error = Some(
+                    "The profiles could not be read just now: the one being edited is kept as you left it.".into(),
+                );
+            }
             (true, None) => {
                 self.draft = None;
                 self.draft_of = None;

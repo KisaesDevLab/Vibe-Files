@@ -37,6 +37,13 @@ pub fn save(root: &Path, t: &Saved) -> Result<(), String> {
     crate::cabinet::append_text(&p, &line).map_err(|e| format!("{}: {e}", p.display()))
 }
 
+/// The cabinet's tapes are there and could not be read just now ([`history`] is empty then,
+/// as it is when no tape was kept).
+pub fn unreadable(root: &Path) -> bool {
+    let p = path(root);
+    std::fs::read(&p).is_err_and(|e| !crate::cabinet::is_absent(&p, &e))
+}
+
 /// The tapes saved on a document, newest first.
 pub fn history(root: &Path, doc_id: &str, rel_path: &str) -> Vec<Saved> {
     let Ok(text) = std::fs::read_to_string(path(root)) else {

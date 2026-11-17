@@ -321,6 +321,20 @@ impl Admin {
         if let Edit::Remove(id) = &edit
             && let Some(t) = self.types.iter().find(|x| &x.id == id)
         {
+            // The profiles must all read, as for a rename: one that cannot be read may be
+            // the one that uses this doc type.
+            let (_, errs) = vf_ingest::parsers::load_files(env.root);
+            if let Some(e) = vf_ingest::parsers::unreadable(env.root).or_else(|| {
+                (!errs.is_empty()).then(|| {
+                    format!(
+                        "a print capture profile cannot be read ({})",
+                        errs.join("; ")
+                    )
+                })
+            }) {
+                self.error = Some(format!("Not removed: {e}."));
+                return false;
+            }
             let users = vf_ingest::parsers::profiles_using(env.root, &t.name);
             if !users.is_empty() {
                 self.error = Some(format!(

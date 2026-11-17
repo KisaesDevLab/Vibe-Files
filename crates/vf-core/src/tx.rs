@@ -710,42 +710,42 @@ pub fn undo(
     let forget = |conn: &Connection| {
         let _ = clear_journal(conn, &journal_id);
     };
-    let sql_tx = match rusqlite::Transaction::new_unchecked(conn, TransactionBehavior::Immediate) {
-        Ok(t) => t,
-        Err(e) => {
-            forget(conn);
-            return Err(e.into());
-        }
-    };
-    let prepared = (|| -> Result<()> {
+    // The catalog's write lock is held only while the catalog is written, never while the
+    // files go back on the share (as in `commit`: undoing a move of a thousand documents
+    // held it for the whole of it, and the other sessions sharing the catalog, and this
+    // PC's own index, waited ten seconds and failed; QA 2026-11-17).
+    let write = |sql_tx: &rusqlite::Transaction<'_>| -> Result<AuditRow> {
         for s in record.catalog_undo.iter().rev() {
-            s.run(&sql_tx)?;
+            s.run(sql_tx)?;
         }
         sql_tx.execute(
             "UPDATE undo_record SET undone = 1 WHERE tx_id = ?1",
             [tx_id],
         )?;
         sql_tx.execute("DELETE FROM tx_journal WHERE tx_id = ?1", [&journal_id])?;
-        Ok(())
-    })();
-    if let Err(e) = prepared {
-        drop(sql_tx);
+        audit::append(
+            sql_tx,
+            &crate::now_rfc3339(),
+            actor.user.as_deref(),
+            &actor.device_id,
+            &AuditEntry::new(
+                "undo",
+                None,
+                serde_json::json!({"tx": tx_id, "label": label, "files": record.applied.len()}),
+            ),
+        )
+    };
+    // 1. The catalog's side is tried and rolled back: when it cannot be written, no file
+    // has been touched.
+    let tried = rusqlite::Transaction::new_unchecked(conn, TransactionBehavior::Immediate)
+        .map_err(Error::from)
+        .and_then(|sql_tx| write(&sql_tx).map(|_| ()));
+    if let Err(e) = tried {
         forget(conn);
         return Err(e);
     }
-    let row = audit::append(
-        &sql_tx,
-        &crate::now_rfc3339(),
-        actor.user.as_deref(),
-        &actor.device_id,
-        &AuditEntry::new(
-            "undo",
-            None,
-            serde_json::json!({"tx": tx_id, "label": label, "files": record.applied.len()}),
-        ),
-    )?;
-    // Newest first; if one fails, the ones already reversed are applied again, so the files
-    // stay as the catalog (left as it was) says.
+    // 2. The files, newest first; if one fails, the ones already reversed are applied again,
+    // so the files stay as the catalog (left as it was) says.
     let mut done: Vec<&AppliedOp> = Vec::new();
     let mut failed: Vec<String> = Vec::new();
     for a in record.applied.iter().rev() {
@@ -763,7 +763,6 @@ pub fn undo(
                 failed.push(format!("{:?} could not be put back: {e}", a.op));
             }
         }
-        drop(sql_tx);
         forget(conn);
         return Err(Error::FileOp {
             error: "undo could not reverse every file change; the files and the catalog were left as they were"
@@ -771,14 +770,38 @@ pub fn undo(
             not_reversed: failed,
         });
     }
-    if let Err(e) = sql_tx.commit() {
-        // Put the files back as the catalog still has them.
-        for a in &record.applied {
-            let _ = fs.apply(&a.op);
+    // 3. The catalog, in one short transaction; a catalog another session is busy in is
+    // waited for now that the files have gone back.
+    let patience = if record.applied.is_empty() {
+        std::time::Duration::ZERO
+    } else {
+        FINISH_WAIT
+    };
+    let since = std::time::Instant::now();
+    let begun = loop {
+        match rusqlite::Transaction::new_unchecked(conn, TransactionBehavior::Immediate) {
+            Err(e) if is_busy(&e) && since.elapsed() < patience => {
+                std::thread::sleep(std::time::Duration::from_millis(250));
+            }
+            r => break r,
         }
-        forget(conn);
-        return Err(e.into());
-    }
+    };
+    let stored = begun.map_err(Error::from).and_then(|sql_tx| {
+        let row = write(&sql_tx)?;
+        sql_tx.commit()?;
+        Ok(row)
+    });
+    let row = match stored {
+        Ok(row) => row,
+        Err(e) => {
+            // Put the files back as the catalog still has them.
+            for a in &record.applied {
+                let _ = fs.apply(&a.op);
+            }
+            forget(conn);
+            return Err(e);
+        }
+    };
     Ok(vec![row])
 }
 

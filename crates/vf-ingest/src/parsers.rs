@@ -182,6 +182,34 @@ pub fn load_files(root: &Path) -> (Vec<(PathBuf, Profile)>, Vec<String>) {
     (out, errors)
 }
 
+/// Why the profiles cannot be read just now, when that is so: their folder cannot be listed,
+/// or one of them is there and cannot be read (a profile that reads and makes no sense is a
+/// profile to put right, not this). [`load`] and [`load_files`] leave such a profile out,
+/// which is not "no profile": a print is then named by nothing, a doc type looks unused.
+pub fn unreadable(root: &Path) -> Option<String> {
+    let d = dir(root);
+    let rd = match std::fs::read_dir(&d) {
+        Ok(rd) => rd,
+        Err(e) if vf_fs::cabinet::is_absent(&d, &e) => return None,
+        Err(e) => {
+            return Some(format!(
+                "the print-capture profiles cannot be read just now ({e})"
+            ));
+        }
+    };
+    rd.filter_map(Result::ok)
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|x| x == "toml"))
+        .find_map(|p| {
+            std::fs::read(&p).err().map(|e| {
+                format!(
+                    "the print-capture profile {} cannot be read just now ({e})",
+                    p.display()
+                )
+            })
+        })
+}
+
 /// Writes `profile` to `path` (in the parsers folder) after checking it compiles. The file's
 /// comments are replaced by a header: the editor in Admin is the way to change it.
 pub fn save_profile(path: &Path, profile: &Profile) -> Result<(), String> {
@@ -1050,12 +1078,15 @@ fn seed_if_missing_held(root: &Path) -> Result<bool, String> {
     if wrote {
         return Ok(true);
     }
-    let any = std::fs::read_dir(&d)
-        .map(|rd| {
-            rd.filter_map(Result::ok)
-                .any(|e| e.path().extension().is_some_and(|x| x == "toml"))
-        })
-        .unwrap_or(false);
+    // No folder is no profiles. A folder that cannot be listed just now is not: nothing is
+    // seeded beside the firm's profiles (QA 2026-11-17).
+    let any = match std::fs::read_dir(&d) {
+        Ok(rd) => rd
+            .filter_map(Result::ok)
+            .any(|e| e.path().extension().is_some_and(|x| x == "toml")),
+        Err(e) if vf_fs::cabinet::is_absent(&d, &e) => false,
+        Err(_) => return Ok(false),
+    };
     if any {
         return Ok(false);
     }
