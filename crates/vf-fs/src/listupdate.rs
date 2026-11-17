@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 use vf_core::db::Connection;
 
 use crate::folders::{self, ClientIdChange, ClientRename};
-use crate::similar::{name_keys, score};
+use crate::namematch::{self, Name, Tier};
 use crate::{cabinet, clients};
 
 /// The name match asked for unless the person changes it.
@@ -154,9 +154,21 @@ pub enum Kind {
 pub struct Match {
     pub row: Row,
     pub client: Who,
-    /// How closely the names agree, 0 to 1.
+    /// How closely the names agree, 0 to 1, and how sure that is (see `namematch`).
     pub score: f64,
+    pub tier: Tier,
     pub kind: Kind,
+}
+
+/// The nearest client or folder to a row that has no match: for a person to look at.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Nearest {
+    pub name: String,
+    pub id: String,
+    pub folder: Option<String>,
+    pub score: f64,
+    /// A top folder of the cabinet with no client file (not a client yet).
+    pub unbound: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -168,61 +180,15 @@ pub struct Found {
     pub rows: usize,
     /// Rows whose client has this ID and this name already.
     pub already: usize,
-    /// Rows no client matches.
-    pub unmatched: usize,
     /// Clients in the catalog.
     pub clients: usize,
-}
-
-/// The least Jaro two names must reach for their Jaro-Winkler to reach `pct` (Winkler adds
-/// at most 0.4 of what is missing: a shared start of up to four letters).
-fn jaro_floor(pct: f64) -> f64 {
-    1.0 - (1.0 - pct) / 0.6
-}
-
-/// A name as it is compared, with what a cheap test needs: its length and how many of each
-/// letter it has. Every row against every client is tens of millions of pairs; the letters
-/// two names share at all bound how alike they can be, and that takes a few dozen
-/// additions where comparing them letter by letter takes hundreds of steps.
-struct NameKey {
-    len: usize,
-    letters: [u8; 38],
-}
-
-impl NameKey {
-    fn of(text: &str) -> NameKey {
-        let mut letters = [0u8; 38];
-        let mut len = 0;
-        for c in text.chars() {
-            len += 1;
-            let i = match c {
-                'a'..='z' => c as usize - 'a' as usize,
-                '0'..='9' => 26 + c as usize - '0' as usize,
-                ' ' => 36,
-                _ => 37,
-            };
-            letters[i] = letters[i].saturating_add(1);
-        }
-        NameKey { len, letters }
-    }
-
-    /// Whether this name and `other` can reach a Jaro of `floor`: Jaro is at most
-    /// (m/len + m/len' + 1) / 3 for m letters matched, and no more letters can be matched
-    /// than the two names share. (Letters outside a to z and the digits are counted as one
-    /// kind, which only makes the bound looser.)
-    fn can_reach(&self, other: &NameKey, floor: f64) -> bool {
-        if self.len == 0 || other.len == 0 {
-            return false;
-        }
-        let shared: usize = self
-            .letters
-            .iter()
-            .zip(&other.letters)
-            .map(|(a, b)| *a.min(b) as usize)
-            .sum();
-        let m = shared as f64;
-        (m / self.len as f64 + m / other.len as f64 + 1.0) / 3.0 >= floor - 1e-9
-    }
+    /// The discrepancies, one way: rows of the list no client matches, each with the
+    /// nearest client or folder.
+    pub no_client: Vec<(Row, Option<Nearest>)>,
+    /// And the other: clients no row of the list is for, each with the nearest row.
+    pub no_row: Vec<(Who, Option<(Row, f64)>)>,
+    /// Top folders of the cabinet with no client file.
+    pub unbound: Vec<String>,
 }
 
 fn who_text(w: &Who) -> String {
@@ -233,9 +199,75 @@ fn who_text(w: &Who) -> String {
     }
 }
 
-/// Matches the list's `rows` to the catalog's clients. `pct`: how closely names must agree
-/// (0 to 1). Nothing is changed.
-pub fn find(conn: &Connection, rows: &[Row], pct: f64) -> Result<Found, String> {
+/// Whether match `a` is better than `b`: the surer tier, then the higher score.
+fn better(a: (f64, Tier), b: (f64, Tier)) -> bool {
+    a.1 < b.1 || (a.1 == b.1 && a.0 > b.0)
+}
+
+/// Whether `best` stands clear of `next`: a surer tier, or (two close ones) a score well
+/// above. Two exact matches, or two by rule, are a tie.
+fn clear_of(best: (f64, Tier), next: (f64, Tier)) -> bool {
+    best.1 < next.1 || (best.1 == Tier::Near && best.0 - next.0 >= 0.03)
+}
+
+/// Names by the words they can be looked up by.
+#[derive(Default)]
+struct Index(HashMap<String, Vec<usize>>);
+
+impl Index {
+    fn add(&mut self, i: usize, n: &Name) {
+        for k in n.lookup_keys() {
+            let v = self.0.entry(k).or_default();
+            if v.last() != Some(&i) {
+                v.push(i);
+            }
+        }
+    }
+
+    /// The entries that can be `n`: those sharing one of its two rarest words. (The same
+    /// name shares every word, the rarest too; a name one word off still shares the next
+    /// rarest. Looking under every word would bring half the cabinet for "Smith" or
+    /// "Farms".)
+    fn sharing(&self, n: &Name) -> Vec<usize> {
+        let keys = n.lookup_keys();
+        let mut lists: Vec<&Vec<usize>> = keys.iter().filter_map(|k| self.0.get(k)).collect();
+        lists.sort_by_key(|l| l.len());
+        let mut out: Vec<usize> = lists.into_iter().take(2).flatten().copied().collect();
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
+}
+
+/// The top folders of the cabinet that are no client's (and hold no client's folder).
+fn unbound_folders(root: &Path, all: &[Who]) -> Result<Vec<String>, String> {
+    let bound: HashSet<String> = all
+        .iter()
+        .filter_map(|c| c.folder.as_deref())
+        .map(|f| f.split('/').next().unwrap_or(f).to_lowercase())
+        .collect();
+    let mut out: Vec<String> = std::fs::read_dir(root)
+        .map_err(|e| format!("The cabinet's folders cannot be listed ({e})."))?
+        .flatten()
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| !n.starts_with(['_', '.', '~']) && !bound.contains(&n.to_lowercase()))
+        .collect();
+    out.sort_by_key(|n| n.to_lowercase());
+    Ok(out)
+}
+
+/// Matches the list's `rows` to the catalog's clients, by ID and by name (see `namematch`;
+/// the client's name and its folder's name are both tried). `pct`: how closely names must
+/// agree for a match that is only close (0 to 1); the same name, however it is written, is
+/// a match at any `pct`. `root`: the cabinet, to also name its folders with no client
+/// file; `None` leaves those out. Nothing is changed.
+pub fn find(
+    conn: &Connection,
+    root: Option<&Path>,
+    rows: &[Row],
+    pct: f64,
+) -> Result<Found, String> {
     let mut st = conn
         .prepare(
             "SELECT c.id, c.ext_id, c.name, c.folder_rel,
@@ -261,101 +293,172 @@ pub fn find(conn: &Connection, rows: &[Row], pct: f64) -> Result<Found, String> 
         clients: all.len(),
         ..Default::default()
     };
-    let upper = |s: &str| s.trim().to_uppercase();
+    // IDs are compared as Similar clients compares them: `01002`, `1002` and `10-02` are
+    // one ID. "Right already" still means written the same.
+    let loose = |s: &str| crate::similar::id_key(s);
     // An ID on the list twice names two clients or one twice: neither row is used.
     let mut seen: HashMap<String, usize> = HashMap::new();
     for r in rows {
-        *seen.entry(upper(&r.id)).or_default() += 1;
+        *seen.entry(loose(&r.id)).or_default() += 1;
     }
     let mut said: HashSet<String> = HashSet::new();
     let rows: Vec<&Row> = rows
         .iter()
         .filter(|r| {
-            let twice = seen[&upper(&r.id)] > 1;
-            if twice && said.insert(upper(&r.id)) {
+            let twice = seen[&loose(&r.id)] > 1;
+            if twice && said.insert(loose(&r.id)) {
                 out.unclear.push(format!(
                     "The ID {} is on the list {} times: none of its rows is used.",
                     r.id.trim(),
-                    seen[&upper(&r.id)]
+                    seen[&loose(&r.id)]
                 ));
             }
             !twice
         })
         .collect();
-    let by_id: HashMap<String, usize> = all
+    // A client's name, and its folder's own name (the two can differ: a folder renamed in
+    // Explorer, a name changed on the list).
+    let cn: Vec<(Name, Option<Name>)> = all
         .iter()
-        .enumerate()
-        .filter(|(_, c)| !c.ext_id.trim().is_empty())
-        .map(|(i, c)| (upper(&c.ext_id), i))
+        .map(|c| {
+            let folder = c
+                .folder
+                .as_deref()
+                .map(|f| f.rsplit('/').next().unwrap_or(f))
+                .map(|f| Name::of(f, Some(&c.ext_id)));
+            (Name::of(&c.name, Some(&c.ext_id)), folder)
+        })
         .collect();
-    let keys: Vec<Vec<String>> = all.iter().map(|c| name_keys(&c.name)).collect();
-    // The client that has a row's ID, with how closely its name agrees with the row's.
-    let holder_of = |r: &Row| -> Option<(usize, f64)> {
-        by_id
-            .get(&upper(&r.id))
-            .map(|&ci| (ci, score(&name_keys(&r.name), &keys[ci])))
+    let rn: Vec<Name> = rows
+        .iter()
+        .map(|r| Name::of(&r.name, Some(&r.id)))
+        .collect();
+    let against = |n: &Name, ci: usize| -> Option<(f64, Tier)> {
+        let by_name = namematch::compare(n, &cn[ci].0);
+        let by_folder = cn[ci].1.as_ref().and_then(|f| namematch::compare(n, f));
+        match (by_name, by_folder) {
+            (Some(a), Some(b)) => Some(if better(b, a) { b } else { a }),
+            (a, b) => a.or(b),
+        }
+    };
+    // A match: the same name, or close enough for the % asked.
+    let is_match = |v: (f64, Tier)| v.1 != Tier::Near || v.0 >= pct;
+    let mut clients_by_word = Index::default();
+    for (ci, (name, folder)) in cn.iter().enumerate() {
+        clients_by_word.add(ci, name);
+        if let Some(f) = folder {
+            clients_by_word.add(ci, f);
+        }
+    }
+    let mut by_id: HashMap<String, Vec<usize>> = HashMap::new();
+    for (ci, c) in all.iter().enumerate() {
+        if !c.ext_id.trim().is_empty() {
+            by_id.entry(loose(&c.ext_id)).or_default().push(ci);
+        }
+    }
+    // The one client that has a row's ID, with how its name agrees with the row's.
+    let holder_of = |ri: usize| -> Option<(usize, Option<(f64, Tier)>)> {
+        match by_id.get(&loose(&rows[ri].id)).map(Vec::as_slice) {
+            Some([ci]) => Some((*ci, against(&rn[ri], *ci))),
+            _ => None,
+        }
     };
     // A client that has an ID of the list *and* its name is that row's client, and no other
     // row's. An ID alone is not enough: the cabinet's IDs came from folder names, and an
     // old one can be another client's ID on the list.
-    let claimed: HashSet<usize> = rows
-        .iter()
-        .filter_map(|r| holder_of(r))
-        .filter(|(_, s)| *s >= pct)
+    let claimed: HashSet<usize> = (0..rows.len())
+        .filter_map(holder_of)
+        .filter(|(_, v)| v.is_some_and(is_match))
         .map(|(ci, _)| ci)
         .collect();
-    let quick: Vec<Vec<NameKey>> = keys
-        .iter()
-        .map(|k| k.iter().map(|x| NameKey::of(x)).collect())
-        .collect();
-    let floor = jaro_floor(pct);
-    // By name: (row, client, score), one client per row; then one row per client.
-    let mut by_name: Vec<(usize, usize, f64)> = Vec::new();
-    for (ri, r) in rows.iter().enumerate() {
-        let rk = name_keys(&r.name);
-        let rq: Vec<NameKey> = rk.iter().map(|x| NameKey::of(x)).collect();
-        // The clients no row has by ID whose names agree with this row's.
-        let by_its_name = || -> Vec<(usize, f64)> {
-            let mut hits = Vec::new();
-            for ci in 0..all.len() {
-                if claimed.contains(&ci) {
-                    continue;
-                }
-                // Too few letters in common to reach `pct`, however they are ordered.
-                if !rq
-                    .iter()
-                    .any(|a| quick[ci].iter().any(|b| a.can_reach(b, floor)))
-                {
-                    continue;
-                }
-                let s = score(&rk, &keys[ci]);
-                if s >= pct {
-                    hits.push((ci, s));
-                }
+    // Every client sharing a word with row `ri` that no row has by its ID, the best first.
+    let candidates = |ri: usize| -> Vec<(usize, (f64, Tier))> {
+        let mut v: Vec<(usize, (f64, Tier))> = clients_by_word
+            .sharing(&rn[ri])
+            .into_iter()
+            .filter(|ci| !claimed.contains(ci))
+            .filter_map(|ci| against(&rn[ri], ci).map(|s| (ci, s)))
+            .collect();
+        v.sort_by(|x, y| {
+            x.1.1
+                .cmp(&y.1.1)
+                .then(y.1.0.total_cmp(&x.1.0))
+                .then(x.0.cmp(&y.0))
+        });
+        v
+    };
+    let unbound = match root {
+        Some(root) => unbound_folders(root, &all)?,
+        None => vec![],
+    };
+    let un: Vec<Name> = unbound.iter().map(|f| Name::of(f, None)).collect();
+    let mut unbound_by_word = Index::default();
+    for (i, n) in un.iter().enumerate() {
+        unbound_by_word.add(i, n);
+    }
+    // The nearest thing to a row with no match: a client, or a folder with no client file.
+    let nearest = |ri: usize, cands: &[(usize, (f64, Tier))]| -> Option<Nearest> {
+        let client = cands.first().map(|(ci, v)| {
+            let c = &all[*ci];
+            Nearest {
+                name: c.name.clone(),
+                id: c.ext_id.clone(),
+                folder: c.folder.clone(),
+                score: v.0,
+                unbound: false,
             }
-            hits
-        };
-        match holder_of(r) {
-            Some((ci, s)) if s >= pct => {
+        });
+        let folder = unbound_by_word
+            .sharing(&rn[ri])
+            .into_iter()
+            .filter_map(|i| namematch::compare(&rn[ri], &un[i]).map(|v| (i, v)))
+            .max_by(|x, y| x.1.0.total_cmp(&y.1.0))
+            .map(|(i, v)| Nearest {
+                name: unbound[i].clone(),
+                id: String::new(),
+                folder: Some(unbound[i].clone()),
+                score: v.0,
+                unbound: true,
+            });
+        match (client, folder) {
+            (Some(c), Some(f)) => Some(if f.score > c.score { f } else { c }),
+            (c, f) => c.or(f),
+        }
+        .filter(|n| n.score >= 0.5)
+    };
+    let mut touched: HashSet<usize> = HashSet::new();
+    // Rows that have their client: not offered as "the nearest row" to another.
+    let mut rows_done: HashSet<usize> = HashSet::new();
+    // By name: (row, client, how well), one client per row; then one row per client.
+    let mut by_name: Vec<(usize, usize, (f64, Tier))> = Vec::new();
+    for (ri, r) in rows.iter().enumerate() {
+        match holder_of(ri) {
+            Some((ci, Some(v))) if is_match(v) => {
                 let c = &all[ci];
+                touched.insert(ci);
+                rows_done.insert(ri);
                 // On the client list with this ID but with no folder, while a client of
                 // the same name has the folder (the list was imported beside clients made
                 // from folders): one client twice. Not "right already".
                 let twins: Vec<String> = if c.folder.is_none() {
-                    by_its_name()
+                    candidates(ri)
                         .iter()
-                        .filter(|(x, _)| all[*x].folder.is_some())
-                        .map(|(x, _)| who_text(&all[*x]))
+                        .filter(|(x, v)| is_match(*v) && all[*x].folder.is_some())
+                        .map(|(x, _)| {
+                            touched.insert(*x);
+                            who_text(&all[*x])
+                        })
                         .collect()
                 } else {
                     vec![]
                 };
                 if !twins.is_empty() {
                     out.unclear.push(format!(
-                        "{} ({}) is a client with no folder, and {} has a folder under that name: they look like one client. Merge them in Admin › Similar clients (keep the one with the folder), then find again.",
+                        "{} ({}) is a client with no folder, and {} has a folder under that name: they look like one client. Merge them in Admin › Similar clients (keep {}), then find again.",
                         r.name,
                         r.id,
-                        twins.join("; ")
+                        twins.join("; "),
+                        r.id
                     ));
                 } else if c.name.trim() == r.name.trim() && c.ext_id.trim() == r.id.trim() {
                     out.already += 1;
@@ -363,7 +466,8 @@ pub fn find(conn: &Connection, rows: &[Row], pct: f64) -> Result<Found, String> 
                     out.matches.push(Match {
                         row: (*r).clone(),
                         client: c.clone(),
-                        score: s,
+                        score: v.0,
+                        tier: v.1,
                         kind: Kind::SameId,
                     });
                 }
@@ -382,63 +486,241 @@ pub fn find(conn: &Connection, rows: &[Row], pct: f64) -> Result<Found, String> 
             }
             None => {}
         }
-        let hits = by_its_name();
-        match hits.as_slice() {
-            [] => out.unmatched += 1,
-            [(ci, s)] => by_name.push((ri, *ci, *s)),
-            many => out.unclear.push(format!(
-                "{} ({}) matches {} clients: {}. If they are one client, merge them in Admin › Similar clients first, then find again.",
-                r.name,
+        // The ID written (loosely) on two or more clients: which one is not for this page.
+        if let Some(many) = by_id.get(&loose(&r.id)) {
+            for ci in many {
+                touched.insert(*ci);
+            }
+            out.unclear.push(format!(
+                "The ID {} ({} on the list) is on {} clients in the cabinet: {}. Merge them in Admin › Similar clients first, then find again.",
                 r.id,
+                r.name,
                 many.len(),
                 many.iter()
-                    .map(|(ci, _)| who_text(&all[*ci]))
+                    .map(|ci| who_text(&all[*ci]))
                     .collect::<Vec<_>>()
                     .join("; ")
-            )),
-        }
-    }
-    let mut rows_of: HashMap<usize, Vec<usize>> = HashMap::new();
-    for (ri, ci, _) in &by_name {
-        rows_of.entry(*ci).or_default().push(*ri);
-    }
-    let mut said: HashSet<usize> = HashSet::new();
-    for (ri, ci, s) in by_name {
-        let c = &all[ci];
-        if rows_of[&ci].len() > 1 {
-            if said.insert(ci) {
-                out.unclear.push(format!(
-                    "{} is matched by {} rows of the list: {}. It is not changed.",
-                    who_text(c),
-                    rows_of[&ci].len(),
-                    rows_of[&ci]
-                        .iter()
-                        .map(|i| format!("{} ({})", rows[*i].name, rows[*i].id))
-                        .collect::<Vec<_>>()
-                        .join("; ")
-                ));
-            }
+            ));
             continue;
         }
+        let cands = candidates(ri);
+        let hits: Vec<&(usize, (f64, Tier))> = cands.iter().filter(|(_, v)| is_match(*v)).collect();
+        match hits.as_slice() {
+            [] => out.no_client.push(((*r).clone(), nearest(ri, &cands))),
+            [one] => by_name.push((ri, one.0, one.1)),
+            [best, next, ..] if clear_of(best.1, next.1) => by_name.push((ri, best.0, best.1)),
+            [best, ..] => {
+                // As good as each other: the same client made twice, or two of one name.
+                let tied: Vec<String> = hits
+                    .iter()
+                    .filter(|(_, v)| !clear_of(best.1, *v))
+                    .map(|(ci, _)| {
+                        touched.insert(*ci);
+                        who_text(&all[*ci])
+                    })
+                    .collect();
+                out.unclear.push(format!(
+                    "{} ({}) matches {} clients: {}. If they are one client, merge them in Admin › Similar clients first, then find again.",
+                    r.name,
+                    r.id,
+                    tied.len(),
+                    tied.join("; ")
+                ));
+            }
+        }
+    }
+    type Scored = (usize, (f64, Tier));
+    let mut rows_of: HashMap<usize, Vec<Scored>> = HashMap::new();
+    for (ri, ci, v) in &by_name {
+        rows_of.entry(*ci).or_default().push((*ri, *v));
+    }
+    let mut clients_in_order: Vec<usize> = rows_of.keys().copied().collect();
+    clients_in_order.sort_unstable();
+    for ci in clients_in_order {
+        let mut its = rows_of.remove(&ci).expect("is there");
+        its.sort_by(|x, y| {
+            x.1.1
+                .cmp(&y.1.1)
+                .then(y.1.0.total_cmp(&x.1.0))
+                .then(x.0.cmp(&y.0))
+        });
+        let c = &all[ci];
+        touched.insert(ci);
+        if its.len() > 1 && !clear_of(its[0].1, its[1].1) {
+            out.unclear.push(format!(
+                "{} is matched by {} rows of the list: {}. It is not changed.",
+                who_text(c),
+                its.len(),
+                its.iter()
+                    .map(|(i, _)| format!("{} ({})", rows[*i].name, rows[*i].id))
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            ));
+            continue;
+        }
+        let (ri, v) = its[0];
+        rows_done.insert(ri);
         out.matches.push(Match {
             row: rows[ri].clone(),
             client: c.clone(),
-            score: s,
+            score: v.0,
+            tier: v.1,
             kind: if c.ext_id.trim().is_empty() {
                 Kind::NoId
             } else {
                 Kind::OtherId
             },
         });
+        // The rows a better one took the client from have no client.
+        for (i, v) in &its[1..] {
+            out.no_client.push((
+                rows[*i].clone(),
+                Some(Nearest {
+                    name: c.name.clone(),
+                    id: c.ext_id.clone(),
+                    folder: c.folder.clone(),
+                    score: v.0.min(namematch::NEAR_MAX),
+                    unbound: false,
+                }),
+            ));
+        }
     }
+    // The clients no row is for, each with the nearest row of the list.
+    let mut rows_by_word = Index::default();
+    for (ri, n) in rn.iter().enumerate() {
+        rows_by_word.add(ri, n);
+    }
+    for (ci, c) in all.iter().enumerate() {
+        if touched.contains(&ci) {
+            continue;
+        }
+        let mut near: Vec<usize> = rows_by_word.sharing(&cn[ci].0);
+        if let Some(f) = &cn[ci].1 {
+            near.extend(rows_by_word.sharing(f));
+        }
+        let best = near
+            .into_iter()
+            .filter(|ri| !rows_done.contains(ri))
+            .filter_map(|ri| against(&rn[ri], ci).map(|v| (ri, v.0)))
+            .max_by(|x, y| x.1.total_cmp(&y.1).then(y.0.cmp(&x.0)))
+            .filter(|(_, s)| *s >= 0.5)
+            .map(|(ri, s)| (rows[ri].clone(), s));
+        out.no_row.push((c.clone(), best));
+    }
+    out.unbound = unbound;
     out.matches.sort_by(|x, y| {
-        x.kind
-            .cmp(&y.kind)
+        x.tier
+            .cmp(&y.tier)
+            .then(x.kind.cmp(&y.kind))
             .then(y.score.total_cmp(&x.score))
             .then_with(|| x.row.name.to_lowercase().cmp(&y.row.name.to_lowercase()))
     });
+    out.no_client.sort_by_key(|(r, _)| r.name.to_lowercase());
     out.unclear.sort();
     Ok(out)
+}
+
+fn csv_cell(s: &str) -> String {
+    if s.contains([',', '"', '\n', '\r']) {
+        format!("\"{}\"", s.replace('"', "\"\""))
+    } else {
+        s.to_string()
+    }
+}
+
+/// The whole comparison as a CSV for a spreadsheet: every match, every row with no client,
+/// every client with no row, every folder with no client file, and what is not changed.
+pub fn report_csv(f: &Found) -> String {
+    let mut out = String::from(
+        "Status,List name,List ID,Client or folder,Client ID,Folder,Documents,Match %,Note\r\n",
+    );
+    let pct = |s: f64| format!("{:.0}", (s * 100.0).floor());
+    let mut line = |cells: [&str; 9]| {
+        out.push_str(&cells.map(csv_cell).join(","));
+        out.push_str("\r\n");
+    };
+    for m in &f.matches {
+        let status = match m.tier {
+            Tier::Exact => "Match: same name",
+            Tier::Rule => "Match: same name, written differently",
+            Tier::Near => "Close: look",
+        };
+        let note = match m.kind {
+            Kind::NoId => "the client has no ID",
+            Kind::OtherId => "the client has another ID",
+            Kind::SameId => "the client has this ID",
+        };
+        line([
+            status,
+            &m.row.name,
+            &m.row.id,
+            &m.client.name,
+            &m.client.ext_id,
+            m.client.folder.as_deref().unwrap_or(""),
+            &m.client.docs.to_string(),
+            &pct(m.score),
+            note,
+        ]);
+    }
+    for (r, n) in &f.no_client {
+        match n {
+            Some(n) => line([
+                "On the list, no client",
+                &r.name,
+                &r.id,
+                &n.name,
+                &n.id,
+                n.folder.as_deref().unwrap_or(""),
+                "",
+                &pct(n.score),
+                if n.unbound {
+                    "nearest: a folder with no client file (Admin › Folder import binds it)"
+                } else {
+                    "nearest client, not a match"
+                },
+            ]),
+            None => line([
+                "On the list, no client",
+                &r.name,
+                &r.id,
+                "",
+                "",
+                "",
+                "",
+                "",
+                "",
+            ]),
+        }
+    }
+    for (c, n) in &f.no_row {
+        let (rn, ri, s, note) = match n {
+            Some((r, s)) => (
+                r.name.as_str(),
+                r.id.as_str(),
+                pct(*s),
+                "nearest row, not a match",
+            ),
+            None => ("", "", String::new(), ""),
+        };
+        line([
+            "Client, not on the list",
+            rn,
+            ri,
+            &c.name,
+            &c.ext_id,
+            c.folder.as_deref().unwrap_or(""),
+            &c.docs.to_string(),
+            &s,
+            note,
+        ]);
+    }
+    for u in &f.unbound {
+        line(["Folder with no client file", "", "", u, "", u, "", "", ""]);
+    }
+    for u in &f.unclear {
+        line(["Not changed", "", "", "", "", "", "", "", u]);
+    }
+    out
 }
 
 /// One ticked match: client `client` (uuid) takes the list's `id` and `name`.
@@ -906,8 +1188,11 @@ mod tests {
             row("Twice One", "DUP5"),
             row("Twice Two", "dup5"),
         ];
-        let f = find(&c.conn, &rows, NAME_MATCH).unwrap();
-        assert_eq!((f.rows, f.already, f.unmatched, f.clients), (7, 1, 1, 6));
+        let f = find(&c.conn, None, &rows, NAME_MATCH).unwrap();
+        assert_eq!(
+            (f.rows, f.already, f.no_client.len(), f.clients),
+            (7, 1, 1, 6)
+        );
         let got: Vec<(&str, &str, Kind)> = f
             .matches
             .iter()
@@ -932,14 +1217,14 @@ mod tests {
         c.conn
             .execute("UPDATE client SET ext_id = '' WHERE id = ?1", [&acme])
             .unwrap();
-        let f = find(&c.conn, &rows, NAME_MATCH).unwrap();
+        let f = find(&c.conn, None, &rows, NAME_MATCH).unwrap();
         assert_eq!(f.matches[0].kind, Kind::NoId);
         // A client two rows match is not changed.
         let rows = [
             row("Acme Holdings LLC", "A1"),
             row("Acme Holdings, LLC", "A2"),
         ];
-        let f = find(&c.conn, &rows, NAME_MATCH).unwrap();
+        let f = find(&c.conn, None, &rows, NAME_MATCH).unwrap();
         assert!(f.matches.is_empty());
         assert!(
             f.unclear[0].contains("matched by 2 rows"),
@@ -952,7 +1237,7 @@ mod tests {
             row("Somebody Quite Different", "NOPE9"),
             row("Nothing Like It", "REAL7"),
         ];
-        let f = find(&c.conn, &rows, NAME_MATCH).unwrap();
+        let f = find(&c.conn, None, &rows, NAME_MATCH).unwrap();
         assert_eq!(f.matches.len(), 1, "{f:?}");
         assert_eq!(
             (f.matches[0].row.id.as_str(), f.matches[0].kind),
@@ -977,7 +1262,7 @@ mod tests {
         c.conn
             .execute("UPDATE client SET ext_id = 'OLDZ' WHERE id = ?1", [&zeta])
             .unwrap();
-        let f = find(&c.conn, &[row("Zeta Farms Inc", "ZF9")], NAME_MATCH).unwrap();
+        let f = find(&c.conn, None, &[row("Zeta Farms Inc", "ZF9")], NAME_MATCH).unwrap();
         assert_eq!((f.already, f.matches.len()), (0, 0), "{f:?}");
         assert!(f.unclear[0].contains("no folder"), "{:?}", f.unclear);
         c.conn
@@ -985,8 +1270,8 @@ mod tests {
             .unwrap();
         // A lower % finds more.
         let rows = [row("Acme Holding", "A1")];
-        assert!(find(&c.conn, &rows, 0.99).unwrap().matches.is_empty());
-        assert_eq!(find(&c.conn, &rows, 0.90).unwrap().matches.len(), 1);
+        assert!(find(&c.conn, None, &rows, 0.99).unwrap().matches.is_empty());
+        assert_eq!(find(&c.conn, None, &rows, 0.90).unwrap().matches.len(), 1);
     }
 
     #[test]
@@ -1158,7 +1443,7 @@ mod tests {
         .unwrap();
 
         let rows = [row("Acme Holdings, LLC", "ACME1002")];
-        let f = find(&c.conn, &rows, NAME_MATCH).unwrap();
+        let f = find(&c.conn, None, &rows, NAME_MATCH).unwrap();
         assert_eq!(f.matches.len(), 1, "{f:?}");
         assert_eq!(f.matches[0].kind, Kind::NoId);
         let changes = [Change {
@@ -1215,45 +1500,102 @@ mod tests {
         assert!(!listed.clients().iter().any(|x| x.uuid.to_string() == acme));
     }
 
-    /// The quick test before two names are compared never turns away a pair that matches.
+    /// Review 2026-11-17: IDs are compared loosely, a folder's own name counts, and what
+    /// does not match is listed both ways with the nearest thing to it, and saved as a CSV.
     #[test]
-    fn the_quick_test_never_loses_a_match() {
-        let names = [
-            "Acme Holdings LLC",
-            "Acme Holdings, LLC",
-            "Acme Holding LLC",
-            "ACME HOLDINGS L.L.C.",
-            "Smith, Pat",
-            "Pat Smith",
-            "Smith, Patricia",
-            "Smyth, Pat",
-            "Zeta Farms Inc",
-            "Zeta Farms, Inc.",
-            "Zeta Farm Inc",
-            "O'Brien & Sons 2nd",
-            "OBrien and Sons 2nd",
-            "Cole Family Trust",
-            "Cole Family Trust dtd 1999",
-            "Café Niño LLC",
-            "Cafe Nino LLC",
+    fn the_discrepancies_are_listed_both_ways() {
+        let mut c = cab();
+        let smith = client(&mut c, "01002", "Smith, John");
+        let dining = client(&mut c, "OLD7", "Dining Hall LLC");
+        let _jon = client(&mut c, "OLD8", "Smith, Jon");
+        let _stray = client(&mut c, "OLD9", "Nobody On The List");
+        // The catalog's name for one client went wrong; its folder still says who it is.
+        c.conn
+            .execute(
+                "UPDATE client SET name = 'Something Else Entirely' WHERE id = ?1",
+                [&dining],
+            )
+            .unwrap();
+        // A folder nobody bound to a client.
+        std::fs::create_dir(c.root.join("Baker Farms 2019")).unwrap();
+        let rows = [
+            row("Smith, John A", "1002"),
+            row("The Dining Hall, L.L.C.", "DINI1999"),
+            row("Smith, Joan", "JOAN1"),
+            row("Baker Farms", "BAKE1"),
         ];
-        for pct in [0.80, 0.90, 0.97, 1.0] {
-            let floor = jaro_floor(pct);
-            for a in names {
-                for b in names {
-                    let (ka, kb) = (name_keys(a), name_keys(b));
-                    let quick = ka.iter().any(|x| {
-                        kb.iter()
-                            .any(|y| NameKey::of(x).can_reach(&NameKey::of(y), floor))
-                    });
-                    assert!(
-                        quick || score(&ka, &kb) < pct,
-                        "{a} / {b} at {pct}: {} was turned away",
-                        score(&ka, &kb)
-                    );
-                }
-            }
+        let f = find(&c.conn, Some(&c.root), &rows, NAME_MATCH).unwrap();
+        let got: Vec<(&str, &str, Kind, Tier)> = f
+            .matches
+            .iter()
+            .map(|m| (m.row.id.as_str(), m.client.id.as_str(), m.kind, m.tier))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("DINI1999", dining.as_str(), Kind::OtherId, Tier::Rule),
+                ("1002", smith.as_str(), Kind::SameId, Tier::Rule),
+            ],
+            "{f:#?}"
+        );
+        // Rows with no client, each with the nearest thing: a client that is not the same
+        // person, and a folder with no client file.
+        let none: Vec<(&str, Option<(&str, bool)>)> = f
+            .no_client
+            .iter()
+            .map(|(r, n)| {
+                (
+                    r.id.as_str(),
+                    n.as_ref().map(|n| (n.name.as_str(), n.unbound)),
+                )
+            })
+            .collect();
+        assert_eq!(
+            none,
+            [
+                ("BAKE1", Some(("Baker Farms 2019", true))),
+                ("JOAN1", Some(("Smith, Jon", false))),
+            ]
+        );
+        assert!(f.no_client[1].1.as_ref().unwrap().score <= 0.6);
+        // Clients no row is for, with the nearest row.
+        let lone: Vec<(&str, Option<&str>)> = f
+            .no_row
+            .iter()
+            .map(|(c, r)| (c.name.as_str(), r.as_ref().map(|(r, _)| r.id.as_str())))
+            .collect();
+        assert_eq!(
+            lone,
+            [("Nobody On The List", None), ("Smith, Jon", Some("JOAN1"))]
+        );
+        assert_eq!(f.unbound, ["Baker Farms 2019"]);
+        let csv = report_csv(&f);
+        assert_eq!(csv.lines().count(), 1 + 2 + 2 + 2 + 1, "{csv}");
+        for line in [
+            r#""Match: same name, written differently","The Dining Hall, L.L.C.",DINI1999,"#,
+            r#""On the list, no client",Baker Farms,BAKE1,Baker Farms 2019,"#,
+            r#""Client, not on the list",,,Nobody On The List,OLD9,"#,
+            "Folder with no client file,,,Baker Farms 2019,",
+        ] {
+            assert!(csv.contains(line), "{line} is not in:\n{csv}");
         }
+        // Two clients that are almost one name are never offered as a match, at any %.
+        let f = find(&c.conn, None, &[row("Smith, Joan", "JOAN1")], 0.80).unwrap();
+        assert!(f.matches.is_empty(), "{:?}", f.matches);
+    }
+
+    /// When a row matches one client surely and another only closely, the sure one is
+    /// its client; two as sure as each other are listed, not picked.
+    #[test]
+    fn a_row_takes_its_clear_best_client() {
+        let mut c = cab();
+        let trust = client(&mut c, "T1", "Cole Family Trust");
+        let _second = client(&mut c, "T2", "Cole Family Trust II");
+        let f = find(&c.conn, None, &[row("Cole Family Trust", "COLE7")], 0.85).unwrap();
+        assert_eq!(f.matches.len(), 1, "{f:#?}");
+        assert_eq!(f.matches[0].client.id, trust);
+        assert_eq!(f.matches[0].tier, Tier::Exact);
+        assert!(f.unclear.is_empty());
     }
 
     /// How long matching takes at the firm's size (run by hand: `--ignored --nocapture`).
@@ -1285,13 +1627,13 @@ mod tests {
         }
         let rows: Vec<Row> = (0..8000).map(|i| row(&name(i), &format!("N{i}"))).collect();
         let t = std::time::Instant::now();
-        let f = find(&c.conn, &rows, NAME_MATCH).unwrap();
+        let f = find(&c.conn, None, &rows, NAME_MATCH).unwrap();
         println!(
-            "8000 x 8000: {:?}; {} matches, {} unclear, {} unmatched",
+            "8000 x 8000: {:?}; {} matches, {} unclear, {} with no client",
             t.elapsed(),
             f.matches.len(),
             f.unclear.len(),
-            f.unmatched
+            f.no_client.len()
         );
     }
 

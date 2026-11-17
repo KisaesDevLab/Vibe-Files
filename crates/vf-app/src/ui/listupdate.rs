@@ -17,6 +17,7 @@ use egui::{Align, Layout, RichText};
 use egui_extras::{Column, TableBuilder};
 use vf_core::db::Connection;
 use vf_fs::listupdate::{self, Change, Columns, Found, Kind, Match, Outcome, Previewed, Run};
+use vf_fs::namematch::Tier;
 
 use crate::ui::browse::Env;
 use crate::ui::job::{self, Job};
@@ -29,6 +30,11 @@ const ROW_H: f32 = 26.0;
 enum Group {
     #[default]
     All,
+    /// By how sure the match is.
+    Exact,
+    Rule,
+    Near,
+    /// By what the client has now.
     NoId,
     OtherId,
     SameId,
@@ -146,6 +152,9 @@ impl ListUpdatePage {
             .enumerate()
             .filter(|(_, m)| match self.group {
                 Group::All => true,
+                Group::Exact => m.tier == Tier::Exact,
+                Group::Rule => m.tier == Tier::Rule,
+                Group::Near => m.tier == Tier::Near,
                 Group::NoId => m.kind == Kind::NoId,
                 Group::OtherId => m.kind == Kind::OtherId,
                 Group::SameId => m.kind == Kind::SameId,
@@ -403,7 +412,7 @@ pub fn show(ui: &mut egui::Ui, p: &mut ListUpdatePage, env: &mut Env, catalog: &
                     .suffix(" %"),
             )
             .labelled_by(l.id)
-            .on_hover_text("How closely a name on the list must agree with a client's name. 97 % allows a missing comma or \"Inc\" for \"Inc.\"; lower finds more, and more wrong ones.");
+            .on_hover_text("The same name is always a match, however it is written (\"&\" or \"and\", \"Inc\" or \"Incorporated\", a middle initial, the words in another order). This number is for names that are only close (a word shortened, a number or \"Jr\" on one side): lower it to see more of those. They are marked, and ticked one at a time.");
             let ready = !p.id_col.is_empty() && !p.name_col.is_empty() && p.id_col != p.name_col;
             if ui
                 .add_enabled(idle && ready, egui::Button::new("Find matches"))
@@ -427,7 +436,7 @@ pub fn show(ui: &mut egui::Ui, p: &mut ListUpdatePage, env: &mut Env, catalog: &
                     move |conn, root, _| -> Result<Looked, String> {
                         let (rows, blank) = listupdate::read_rows(&path, &id, &name)?;
                         Ok(Looked {
-                            found: listupdate::find(conn, &rows, pct)?,
+                            found: listupdate::find(conn, Some(root), &rows, pct)?,
                             blank,
                             last: listupdate::load_last(root)?,
                         })
@@ -510,27 +519,117 @@ pub fn show(ui: &mut egui::Ui, p: &mut ListUpdatePage, env: &mut Env, catalog: &
         return;
     };
     ui.add_space(6.0);
-    let count = |k: Kind| f.matches.iter().filter(|m| m.kind == k).count();
+    let tier = |t: Tier| f.matches.iter().filter(|m| m.tier == t).count();
     ui.label(format!(
-        "{} rows on the list · {} to look at ({} with no ID yet, {} with another ID, {} with the ID and another spelling) · {} right already · {} match no client{} · {} ticked",
+        "{} rows on the list · {} matches ({} same name, {} written differently, {} close) · {} right already · {} ticked",
         f.rows,
         f.matches.len(),
-        count(Kind::NoId),
-        count(Kind::OtherId),
-        count(Kind::SameId),
+        tier(Tier::Exact),
+        tier(Tier::Rule),
+        tier(Tier::Near),
         f.already,
-        f.unmatched,
+        p.picked.len()
+    ));
+    // The discrepancies, both ways.
+    ui.label(format!(
+        "Not matched: {} rows of the list have no client · {} clients are not on the list · {} folders have no client file{}",
+        f.no_client.len(),
+        f.no_row.len(),
+        f.unbound.len(),
         if p.blank > 0 {
             format!(" · {} rows with a blank left out", p.blank)
         } else {
             String::new()
         },
-        p.picked.len()
     ));
-    if f.unmatched > 0 {
+    ui.horizontal(|ui| {
+        if ui
+            .small_btn("Save the comparison as CSV…")
+            .on_hover_text("Every match, every row with no client and every client or folder with no row, each with the nearest thing to it and how close that is, to open in Excel.")
+            .clicked()
+            && let Some(to) = rfd::FileDialog::new()
+                .add_filter("CSV", &["csv"])
+                .set_file_name("client list comparison.csv")
+                .save_file()
+        {
+            // With the mark Excel needs to read the accents.
+            let text = format!("\u{feff}{}", listupdate::report_csv(f));
+            match std::fs::write(&to, text) {
+                Ok(()) => p.notice = Some(format!("Saved {}.", to.display())),
+                Err(e) => p.error = Some(format!("{} could not be written: {e}", to.display())),
+            }
+        }
         ui.label(widgets::caption(
-            "Rows that match no client are not added here: Browse › Import clients CSV… adds the list's clients.",
+            "Rows with no client are not added here: Browse › Import clients CSV… adds the list's clients.",
         ));
+    });
+    let pct = |s: f64| format!("{:.0}%", (s * 100.0).floor());
+    if !f.no_client.is_empty() {
+        egui::CollapsingHeader::new(format!("On the list, no client ({})", f.no_client.len()))
+            .id_salt("listupdate-no-client")
+            .show(ui, |ui| {
+                egui::ScrollArea::vertical()
+                    .id_salt("listupdate-no-client-list")
+                    .max_height(160.0)
+                    .show(ui, |ui| {
+                        for (r, n) in f.no_client.iter().take(500) {
+                            ui.label(widgets::caption(match n {
+                                Some(n) if n.unbound => format!(
+                                    "{} ({}) · nearest: the folder {} ({}), which has no client file",
+                                    r.name,
+                                    r.id,
+                                    n.name,
+                                    pct(n.score)
+                                ),
+                                Some(n) => format!(
+                                    "{} ({}) · nearest: {} ({}), {}",
+                                    r.name,
+                                    r.id,
+                                    n.name,
+                                    id_text(&n.id),
+                                    pct(n.score)
+                                ),
+                                None => format!("{} ({}) · nothing like it", r.name, r.id),
+                            }));
+                        }
+                        if f.no_client.len() > 500 {
+                            ui.label(widgets::caption("The first 500 are shown; the saved comparison has all."));
+                        }
+                    });
+            });
+    }
+    if !f.no_row.is_empty() {
+        egui::CollapsingHeader::new(format!("Clients not on the list ({})", f.no_row.len()))
+            .id_salt("listupdate-no-row")
+            .show(ui, |ui| {
+                egui::ScrollArea::vertical()
+                    .id_salt("listupdate-no-row-list")
+                    .max_height(160.0)
+                    .show(ui, |ui| {
+                        for (c, n) in f.no_row.iter().take(500) {
+                            ui.label(widgets::caption(match n {
+                                Some((r, s)) => format!(
+                                    "{} ({}) · nearest row: {} ({}), {}",
+                                    c.name,
+                                    id_text(&c.ext_id),
+                                    r.name,
+                                    r.id,
+                                    pct(*s)
+                                ),
+                                None => format!(
+                                    "{} ({}) · nothing like it on the list",
+                                    c.name,
+                                    id_text(&c.ext_id)
+                                ),
+                            }));
+                        }
+                        if f.no_row.len() > 500 {
+                            ui.label(widgets::caption(
+                                "The first 500 are shown; the saved comparison has all.",
+                            ));
+                        }
+                    });
+            });
     }
     if !f.unclear.is_empty() {
         let text = f.unclear.join("\n");
@@ -570,12 +669,18 @@ pub fn show(ui: &mut egui::Ui, p: &mut ListUpdatePage, env: &mut Env, catalog: &
         egui::ComboBox::from_id_salt("listupdate-group")
             .selected_text(match p.group {
                 Group::All => "All matches",
+                Group::Exact => "Same name",
+                Group::Rule => "Same name, written differently",
+                Group::Near => "Close: look",
                 Group::NoId => "No ID yet",
                 Group::OtherId => "Has another ID",
                 Group::SameId => "Same ID, another spelling",
             })
             .show_ui(ui, |ui| {
                 ui.selectable_value(&mut p.group, Group::All, "All matches");
+                ui.selectable_value(&mut p.group, Group::Exact, "Same name");
+                ui.selectable_value(&mut p.group, Group::Rule, "Same name, written differently");
+                ui.selectable_value(&mut p.group, Group::Near, "Close: look");
                 ui.selectable_value(&mut p.group, Group::NoId, "No ID yet");
                 ui.selectable_value(&mut p.group, Group::OtherId, "Has another ID");
                 ui.selectable_value(&mut p.group, Group::SameId, "Same ID, another spelling");
@@ -594,15 +699,15 @@ pub fn show(ui: &mut egui::Ui, p: &mut ListUpdatePage, env: &mut Env, catalog: &
         let shown = p.shown();
         if ui
             .small_btn("Tick the ones shown")
-            .on_hover_text("Ticks every match shown. Clients that have another ID already are ticked only when Show is set to them: look at those first.")
+            .on_hover_text("Ticks the matches shown whose name is the same. Names written differently are ticked only when Show is set to them, and clients that have another ID only when Show is set to those: look down the list first. Close matches are never ticked for you.")
             .clicked()
             && let Some(f) = &p.found
         {
-            let all = p.group == Group::OtherId;
+            let group = p.group;
             let add: Vec<String> = shown
                 .iter()
                 .map(|&i| &f.matches[i])
-                .filter(|m| all || m.kind != Kind::OtherId)
+                .filter(|m| bulk_tickable(m, group))
                 .map(|m| m.client.id.clone())
                 .collect();
             p.picked.extend(add);
@@ -759,19 +864,51 @@ fn confirm(ui: &mut egui::Ui, p: &mut ListUpdatePage, env: &mut Env, catalog: &P
     }
 }
 
+/// Whether Tick the ones shown ticks `m` with Show set to `group`. A wrong match renames a
+/// folder and changes an ID, so only what is surely one client is ticked for the person,
+/// and each less sure kind only when they have asked to see that kind by itself.
+fn bulk_tickable(m: &Match, group: Group) -> bool {
+    match (m.tier, m.kind) {
+        (Tier::Near, _) => false,
+        (_, Kind::OtherId) => group == Group::OtherId && m.tier == Tier::Exact,
+        (Tier::Exact, _) => true,
+        (Tier::Rule, _) => group == Group::Rule,
+    }
+}
+
 fn kind_cell(ui: &mut egui::Ui, m: &Match) {
     let pct = format!("{:.0}%", (m.score * 100.0).floor());
-    match m.kind {
-        Kind::NoId => ui
-            .label(format!("Name {pct}"))
-            .on_hover_text("The names match and the client has no ID yet."),
-        Kind::OtherId => ui
-            .label(RichText::new(format!("Name {pct} · has another ID")).color(theme::warn()))
-            .on_hover_text("The names match, but the client has a different ID already. Two people of one name are not one client: look before you tick."),
-        Kind::SameId => ui
-            .label(format!("Same ID · name {pct}"))
-            .on_hover_text("The client has this ID already; its name is written another way on the list."),
+    let (name, why) = match m.tier {
+        Tier::Exact => (
+            "Same name".to_string(),
+            "The same name apart from capitals, punctuation and \"Last, First\".",
+        ),
+        Tier::Rule => (
+            "Same, written differently".to_string(),
+            "The same words once legal forms (LLC, Inc), \"the\", \"and\" and a middle initial on one side are set aside, or in another order.",
+        ),
+        Tier::Near => (
+            format!("Close {pct}: look"),
+            "Close, with a difference that can mean another client: a number, Jr or II on one side, two legal forms, a word more, a word shortened or a letter off.",
+        ),
     };
+    let (text, mark) = match m.kind {
+        Kind::NoId => (name, m.tier == Tier::Near),
+        Kind::OtherId => (format!("{name} · has another ID"), true),
+        Kind::SameId => (
+            format!("Same ID · {}", name.to_lowercase()),
+            m.tier == Tier::Near,
+        ),
+    };
+    let text = if mark {
+        RichText::new(text).color(theme::warn())
+    } else {
+        RichText::new(text)
+    };
+    ui.label(text).on_hover_text(match m.kind {
+        Kind::OtherId => format!("{why} The client has a different ID already: two people of one name are not one client, so look before you tick."),
+        _ => why.to_string(),
+    });
 }
 
 fn grid(ui: &mut egui::Ui, p: &mut ListUpdatePage) {

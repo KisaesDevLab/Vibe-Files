@@ -1784,7 +1784,7 @@ ANDE1042,Anderson Farms LLC
         h.run();
         let line = |ticked: usize| {
             format!(
-                "2 rows on the list · 1 to look at (0 with no ID yet, 1 with another ID, 0 with the ID and another spelling) · 1 right already · 0 match no client · {ticked} ticked"
+                "2 rows on the list · 1 matches (1 same name, 0 written differently, 0 close) · 1 right already · {ticked} ticked"
             )
         };
         assert!(

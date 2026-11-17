@@ -101,7 +101,7 @@ pub(crate) fn score(a: &[String], b: &[String]) -> f64 {
 }
 
 /// The ID as two similar clients' IDs are compared: [`loose_id`] without leading zeros.
-fn id_key(id: &str) -> String {
+pub(crate) fn id_key(id: &str) -> String {
     let l = loose_id(id);
     let t = l.trim_start_matches('0');
     // Nothing but zeros is one ID however many of them.

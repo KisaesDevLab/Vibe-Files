@@ -27,6 +27,7 @@ pub mod lock;
 pub mod measure;
 pub mod merge;
 pub mod moveto;
+pub mod namematch;
 pub mod newclient;
 pub mod rebuild;
 pub mod rename;
