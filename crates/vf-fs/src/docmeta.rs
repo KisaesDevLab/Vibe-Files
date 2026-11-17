@@ -418,9 +418,9 @@ impl Index {
         // No file is no records; a file that cannot be read is counted, not taken for none.
         // Bytes that are not text (an append cut short) spoil their own line only, which is
         // then counted with the bad lines: the rest of the file is read.
-        let text_of = |p: std::path::PathBuf| match std::fs::read(p) {
+        let text_of = |p: std::path::PathBuf| match std::fs::read(&p) {
             Ok(b) => Ok(Some(String::from_utf8_lossy(&b).into_owned())),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) if crate::cabinet::is_absent(&p, &e) => Ok(None),
             Err(_) => Err(()),
         };
         match text_of(root.join(VIBE_DIR).join(FILE)) {

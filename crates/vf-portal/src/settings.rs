@@ -143,6 +143,19 @@ pub fn load(root: &Path, cabinet_id: &str) -> Option<PortalSettings> {
         .then_some(s)
 }
 
+/// The settings file is there and could not be read or understood just now (the share for a
+/// moment, another PC saving it). [`load`] gives `None` then, as it does for "not set": who
+/// acts on "not set" (taking the lists of documents off the portal) asks this first.
+pub fn unreadable(root: &Path) -> bool {
+    match std::fs::read(file(root)) {
+        Ok(b) => {
+            let b = zeroize::Zeroizing::new(b);
+            serde_json::from_slice::<PortalSettings>(&b).is_err()
+        }
+        Err(e) => e.kind() != std::io::ErrorKind::NotFound,
+    }
+}
+
 pub fn save(root: &Path, s: &PortalSettings) -> Result<(), String> {
     let p = file(root);
     if let Some(d) = p.parent() {

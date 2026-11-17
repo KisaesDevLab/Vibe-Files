@@ -1780,14 +1780,34 @@ pub fn undo(
 ) -> Result<(), String> {
     // Each step once: a retry after one step failed (a folder open in Explorer) skips what was
     // undone already, and the progress is saved.
-    let undone = |conn: &Connection, t: &str| -> bool {
+    let undone = |conn: &Connection, t: &str| -> Result<bool, String> {
         conn.query_row(
             "SELECT undone FROM undo_record WHERE tx_id = ?1",
             [t],
             |r| r.get::<_, bool>(0),
         )
-        .unwrap_or(true)
+        .map_err(|e| {
+            vf_core::db::missing_or(
+                e,
+                "This import was made on another computer (this one's catalog has no record of it): undo it there.",
+            )
+        })
     };
+    // Every step is this catalog's before anything is undone. The record of the last import
+    // is in the cabinet, where every PC sees it: on a PC that did not make the import a
+    // step with no record here was taken for "already undone", nothing went back, the
+    // press said it had worked, and the record the other PC needed was deleted (QA
+    // 2026-11-17).
+    for t in applied
+        .meta_tx
+        .iter()
+        .chain(&applied.meta_txs)
+        .chain(&applied.bind_tx)
+        .chain(&applied.bind_txs)
+        .chain(&applied.merge_txs)
+    {
+        undone(conn, t)?;
+    }
     let mut left = applied.clone();
     let metas: Vec<String> = applied
         .meta_tx
@@ -1796,7 +1816,7 @@ pub fn undo(
         .cloned()
         .collect();
     for t in metas.iter().rev() {
-        if !undone(conn, t) {
+        if !undone(conn, t)? {
             crate::fileops::undo(conn, root, t, device_id)?;
         }
         left.meta_tx = None;
@@ -1813,13 +1833,13 @@ pub fn undo(
         .cloned()
         .collect();
     for t in binds.iter().rev() {
-        if !undone(conn, t) {
+        if !undone(conn, t)? {
             crate::fileops::undo(conn, root, t, device_id)?;
         }
     }
     // The merges last (done first): the files go back to their folders.
     for t in applied.merge_txs.iter().rev() {
-        if !undone(conn, t) {
+        if !undone(conn, t)? {
             crate::fileops::undo(conn, root, t, device_id)?;
         }
     }

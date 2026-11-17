@@ -658,6 +658,10 @@ pub fn pending(conn: &Connection) -> Result<Vec<Pending>, String> {
     rows.collect::<Result<_, _>>().map_err(|e| e.to_string())
 }
 
+/// A document whose file is there and could not be read for its check just now (open in
+/// another program, the share): not destroyed in this run, and its approval is kept.
+const NOT_READ: &str = "the file could not be read just now (it may be open in another program): left for another run, its approval kept";
+
 /// Why an approved document may not be destroyed now (`None`: it may). Its retention under its
 /// current doc type, class and year must still have ended; its content must be the approved
 /// one (when recorded); the file must be there with the catalog's content.
@@ -697,7 +701,13 @@ fn still_due(
     match filer_intake::commit::sha256_file(&root.join(rel)) {
         Ok(h) if h == hash => Ok(None),
         Ok(_) => Ok(Some("the file on disk is not the catalog's content".into())),
-        Err(_) => Ok(Some("the file is not there".into())),
+        // Not there; or there and not readable just now (open in another program, the
+        // share): left for another run, its approval kept ([`NOT_READ`]).
+        Err(e) if !root.join(rel).exists() => {
+            let _ = e;
+            Ok(Some("the file is not there".into()))
+        }
+        Err(_) => Ok(Some(NOT_READ.into())),
     }
 }
 
@@ -808,15 +818,19 @@ pub fn destroy_pulled(
         wipe(&file).map_err(|e| format!("cannot destroy {rel}: {e}"))?;
     }
     for h in &hashes {
-        let used: bool = conn
-            .query_row(
+        // Used by another document unless the catalog says it is not: a read that fails
+        // (the catalog busy) is "used", and the stored content stays. Destroying cannot be
+        // taken back (QA 2026-11-17: a failed read counted as "not used").
+        let used: bool = !matches!(
+            conn.query_row(
                 "SELECT 1 FROM document WHERE hash = ?1 AND id != ?2
                    AND coalesce(tombstone_reason, '') NOT IN ('disposed', 'purged')
                  UNION SELECT 1 FROM version WHERE hash = ?1 AND doc_id != ?2",
                 [h, doc_id],
                 |_| Ok(()),
-            )
-            .is_ok();
+            ),
+            Err(vf_core::db::SqlError::QueryReturnedNoRows)
+        );
         if used {
             continue;
         }
@@ -919,7 +933,15 @@ pub fn destroy_due(
             // The document as it is now: still eligible under its current class and year,
             // the content that was approved, and on disk as the catalog says.
             if let Some(why) = still_due(conn, root, &v.doc_id, &v.rel_path, &v.hash, today)? {
-                changed.push((v.doc_id.clone(), format!("{}: {why}", v.rel_path)));
+                // Not readable just now: said, and its approval stays (no id: nothing is
+                // deleted for it below). It used to read as "the file is not there" and
+                // the approval had to be made again (QA 2026-11-17).
+                let id = if why == NOT_READ {
+                    String::new()
+                } else {
+                    v.doc_id.clone()
+                };
+                changed.push((id, format!("{}: {why}", v.rel_path)));
                 continue;
             }
             v.hashes.push(v.hash.clone());
@@ -973,10 +995,13 @@ pub fn destroy_due(
             Ok(st) => st,
             Err(_) => return true,
         };
-        let users: Vec<String> = st
-            .query_map([hash], |r| r.get(0))
-            .map(|rows| rows.flatten().collect())
-            .unwrap_or_default();
+        // A read that fails is "shared": the content stays.
+        let Ok(rows) = st.query_map([hash], |r| r.get::<_, String>(0)) else {
+            return true;
+        };
+        let Ok(users) = rows.collect::<Result<Vec<String>, _>>() else {
+            return true;
+        };
         users.iter().any(|u| !ids.contains(u.as_str()))
     };
     // Leftover copies in the cabinet's working folders, by content.
@@ -1027,10 +1052,13 @@ pub fn destroy_due(
             let sidecar = stored.with_extension("json");
             // Each workstation has its own catalog: the sidecar (in the cabinet) says whether a
             // document elsewhere had this content as a version too. Then it stays.
-            let elsewhere = std::fs::read_to_string(&sidecar)
-                .ok()
-                .and_then(|t| serde_json::from_str::<Vec<cabinet::VersionSidecar>>(&t).ok())
-                .is_some_and(|es| es.iter().any(|e| e.rel_path != v.rel_path));
+            // No sidecar: no other document. One that cannot be read or understood (another
+            // PC writing it): taken as naming another document, and the content stays.
+            let elsewhere = match std::fs::read_to_string(&sidecar) {
+                Ok(t) => serde_json::from_str::<Vec<cabinet::VersionSidecar>>(&t)
+                    .map_or(true, |es| es.iter().any(|e| e.rel_path != v.rel_path)),
+                Err(e) => e.kind() != std::io::ErrorKind::NotFound,
+            };
             if elsewhere {
                 continue;
             }
@@ -1189,8 +1217,17 @@ pub fn destroy_due(
         json!({ "run": run_id, "documents": done.len(), "copies": rep.copies,
                 "certificate": cert_rel }),
     ));
-    tx.commit(conn, &mut NoFileOps, &Actor::device(device_id))
-        .map_err(|e| e.to_string())?;
+    // The files are destroyed and the certificate written: the catalog is waited for when
+    // another connection is writing it, and if it still cannot be written that is said as
+    // what it is (the documents would otherwise stay listed, pointing at wiped files, under
+    // a bare "database is locked").
+    tx.waits()
+        .commit(conn, &mut NoFileOps, &Actor::device(device_id))
+        .map_err(|e| {
+            format!(
+                "The documents were destroyed and the certificate was written ({cert_rel}), but the catalog could not be updated ({e}). They are still listed: run the integrity sweep (Admin › Integrity sweep) and mark them missing, and keep the certificate."
+            )
+        })?;
     // The files it destroyed, for the other servers (PA-36).
     let gone: Vec<std::path::PathBuf> = done.iter().map(|v| root.join(&v.rel_path)).collect();
     crate::changes::note_paths(gone.iter().map(|p| p.as_path()));

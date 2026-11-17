@@ -190,7 +190,18 @@ pub fn send_lists(root: &Path, catalog: &Path, device: &str) -> ListReport {
         {
             return yes;
         }
-        let yes = listing_settings(root).is_some_and(|now| now.url == s.url);
+        // Settings that cannot be read just now are not "unticked": the answer before
+        // stands. Taken for unticked, one failed read of the share took every client's
+        // list off the portal (QA 2026-11-17).
+        let yes = match listing_settings(root) {
+            Some(now) => now.url == s.url,
+            None if vf_portal::settings::unreadable(root)
+                || vf_fs::cabinet::read(root).is_err() =>
+            {
+                asked.is_none_or(|(_, before)| before)
+            }
+            None => false,
+        };
         asked = Some((std::time::Instant::now(), yes));
         yes
     })

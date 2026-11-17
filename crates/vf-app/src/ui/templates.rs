@@ -15,6 +15,9 @@ pub struct TemplatesPage {
     tree: Option<TemplateNode>,
     /// The tree as saved, to tell an edit.
     saved: Option<TemplateNode>,
+    /// The cabinet's template is there and could not be read: the default is shown, and
+    /// it is not saved.
+    unreadable: bool,
     /// The selected node: child indexes from the root (empty = the client folder).
     selected: Vec<usize>,
     /// The Name field.
@@ -45,7 +48,11 @@ fn rows(n: &TemplateNode, path: &mut Vec<usize>, out: &mut Vec<(Vec<usize>, Stri
 pub fn show(ui: &mut egui::Ui, p: &mut TemplatesPage, env: &mut Env) {
     let dir = vf_fs::clients::master_dir(env.root);
     if p.tree.is_none() {
-        let (tree, _, err) = template::load_or_seed(&dir);
+        // Whether what was loaded may be saved over the file: not when the file is there
+        // and could not be read (the default tree is shown then; saved, it replaced the
+        // firm's template for every PC: QA 2026-11-17).
+        let (tree, savable, err) = template::load_or_seed(&dir);
+        p.unreadable = !savable;
         p.error = err;
         p.saved = Some(tree.clone());
         p.tree = Some(tree);
@@ -176,10 +183,31 @@ pub fn show(ui: &mut egui::Ui, p: &mut TemplatesPage, env: &mut Env) {
     let mut discard = false;
     ui.horizontal(|ui| {
         if ui
-            .add_enabled(dirty && problems.is_empty(), widgets::primary_button("Save template"))
+            .add_enabled(
+                dirty && problems.is_empty() && !p.unreadable,
+                widgets::primary_button("Save template"),
+            )
+            .on_disabled_hover_text(if p.unreadable {
+                "The cabinet's template could not be read, so what is shown is the default: it is not saved over the firm's. Open this page again in a moment."
+            } else {
+                "Nothing to save, or the problems above."
+            })
             .clicked()
         {
-            match template::save(&dir, tree) {
+            // Under the template's lock, and only over the template this page was showing:
+            // another admin's save since then is not written over.
+            let shown = p.saved.clone();
+            let saved = vf_fs::lock::with(env.root, "template", "the folder template", || {
+                let (now, savable, _) = template::load_or_seed(&dir);
+                if !savable {
+                    return Err("The cabinet's template cannot be read just now: nothing was saved. Try again in a moment.".to_string());
+                }
+                if shown.as_ref() != Some(&now) {
+                    return Err("The template was changed on another computer while this page was open: nothing was saved. Leave the page and open it again to see theirs.".to_string());
+                }
+                template::save(&dir, tree).map_err(|e| e.to_string())
+            });
+            match saved {
                 Ok(()) => {
                     let audited = vf_core::tx::Transaction::new("template_edit")
                         .audit(vf_core::audit::AuditEntry::new(

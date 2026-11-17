@@ -360,6 +360,8 @@ pub struct Transaction {
     catalog_undo: Vec<Stmt>,
     audit: Vec<AuditEntry>,
     extra: serde_json::Value,
+    /// A catalog busy with another connection's write is waited for ([`Transaction::waits`]).
+    waits: bool,
 }
 
 #[derive(Debug)]
@@ -395,6 +397,15 @@ impl Transaction {
     }
     pub fn extra(mut self, extra: serde_json::Value) -> Self {
         self.extra = extra;
+        self
+    }
+
+    /// For a record of something already done outside this transaction that cannot be taken
+    /// back (files destroyed): a catalog busy with another connection's write is waited for,
+    /// for minutes if need be, as it is when a transaction's own files have moved. Without
+    /// it a transaction with no file operations fails at once on a busy catalog.
+    pub fn waits(mut self) -> Self {
+        self.waits = true;
         self
     }
 
@@ -444,9 +455,40 @@ impl Transaction {
         }
         let forget = |conn: &Connection| {
             if journaled {
-                let _ = clear_journal(conn, &tx_id);
+                // Until it is gone: the catalog that was too busy for this change may be
+                // too busy for this too, and a row left behind is taken at the next open
+                // for a change cut short, whose files recovery then moves back (QA
+                // 2026-11-17).
+                let since = std::time::Instant::now();
+                while let Err(e) = clear_journal(conn, &tx_id) {
+                    if !e.is_busy() || since.elapsed() > std::time::Duration::from_secs(60) {
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(250));
+                }
             }
         };
+        let waits = self.waits;
+        let begin = |conn: &mut Connection, patience: std::time::Duration| {
+            let since = std::time::Instant::now();
+            loop {
+                match conn.execute_batch("BEGIN IMMEDIATE") {
+                    Err(e) if is_busy(&e) && since.elapsed() < patience => {
+                        std::thread::sleep(std::time::Duration::from_millis(250));
+                    }
+                    Err(e) => break Err(e),
+                    Ok(()) => {
+                        // Given back at once: only that the catalog can be written now.
+                        let _ = conn.execute_batch("ROLLBACK");
+                        break Ok(());
+                    }
+                }
+            }
+        };
+        if waits {
+            // Waited for here, before the trial below (which does not wait).
+            let _ = begin(conn, FINISH_WAIT);
+        }
         // The catalog's write lock is held only while the catalog is written, never while
         // files are moved on the share (QA #2: trashing a thousand documents held it for most
         // of a minute, and the other sessions sharing the catalog waited and then failed).
@@ -521,7 +563,7 @@ impl Transaction {
         // The files have moved: a catalog another session is busy in is waited for (minutes
         // if need be), not a reason to move a thousand files back.
         let begun = {
-            let patience = if self.files.is_empty() {
+            let patience = if self.files.is_empty() && !waits {
                 std::time::Duration::ZERO
             } else {
                 FINISH_WAIT

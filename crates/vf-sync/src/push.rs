@@ -655,10 +655,29 @@ fn push_once(
     let sent_before = catalog::sent_ids(conn)?;
     // The admin password file deleted here after it was exchanged (the forgotten-password
     // reset): sent as removed, so the other places drop it too (owner 2026-11-04).
+    // Deleted means not there. A file that cannot be looked at just now (the share for a
+    // moment) is not: taken for deleted, the push wrote the removal and the password was
+    // gone everywhere (QA 2026-11-17, the same mistake as in the pull).
     let pin = vf_fs::trash::pin_file(root);
-    if !pin.exists() && catalog::files_base(conn)?.contains_key("trash_pin.json") {
-        vf_fs::cabinet::write_replace(&pin, vf_fs::trash::REMOVED_MARKER.as_bytes())
-            .map_err(|e| SyncError::Local(e.to_string()))?;
+    let deleted = match std::fs::metadata(&pin) {
+        Ok(_) => false,
+        Err(e) if vf_fs::cabinet::is_absent(&pin, &e) => true,
+        Err(e) => {
+            return Err(SyncError::Local(format!(
+                "{} cannot be looked at just now ({e}): nothing was sent",
+                pin.display()
+            )));
+        }
+    };
+    if deleted && catalog::files_base(conn)?.contains_key("trash_pin.json") {
+        vf_fs::lock::with(root, "admin", "the admin settings", || {
+            // Still not there, now that the lock is held.
+            if pin.exists() {
+                return Ok(());
+            }
+            vf_fs::cabinet::write_replace(&pin, vf_fs::trash::REMOVED_MARKER.as_bytes())
+        })
+        .map_err(SyncError::Local)?;
         vf_fs::trash::pin_changed();
     }
     let files = master_files(root);

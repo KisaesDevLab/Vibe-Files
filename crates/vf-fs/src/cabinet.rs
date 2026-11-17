@@ -147,6 +147,14 @@ pub fn append_text(p: &Path, text: &str) -> std::io::Result<()> {
     f.sync_all()
 }
 
+/// Whether `e`, from opening or reading `p`, means the file is not there, as against its
+/// folder not being reachable: Windows says "not found" for both (a share that is away
+/// gives "the network path was not found"), and only the first is "no file". Not there:
+/// a folder above it can still be seen.
+pub fn is_absent(p: &Path, e: &std::io::Error) -> bool {
+    e.kind() == std::io::ErrorKind::NotFound && p.ancestors().skip(1).take(4).any(|a| a.is_dir())
+}
+
 /// A shared JSON file read before it is changed and written back: `None` when it is not
 /// there. A file that is there and cannot be read or understood is an error, never "empty":
 /// the write that follows would put the one new entry over everything in it (a share that
@@ -156,7 +164,7 @@ pub fn read_json_for_write<T: serde::de::DeserializeOwned>(p: &Path) -> Result<O
         Ok(b) => serde_json::from_slice(&b)
             .map(Some)
             .map_err(|e| format!("{} cannot be read ({e}); it was left as it is", p.display())),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) if is_absent(p, &e) => Ok(None),
         Err(e) => Err(format!(
             "{} cannot be read just now ({e}); nothing was changed",
             p.display()

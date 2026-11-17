@@ -321,7 +321,7 @@ fn apply_files(
             // it, and the admin password file for one deleted here and its removal sent up.
             let local = match std::fs::read_to_string(&p) {
                 Ok(t) => Some(t),
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+                Err(e) if cabinet::is_absent(&p, &e) => None,
                 Err(e) => return Err(format!("{} cannot be read: {e}", p.display())),
             };
             let remote_h = sha256(text.as_bytes());

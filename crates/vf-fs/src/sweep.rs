@@ -435,6 +435,16 @@ pub fn adopt_modified(
     Ok(items.iter().map(|m| m.rel_path.clone()).collect())
 }
 
+/// Whether document `id` is still live at `rel`.
+fn still_at(conn: &Connection, id: &str, rel: &str) -> bool {
+    conn.query_row(
+        "SELECT 1 FROM document WHERE id = ?1 AND rel_path = ?2 AND deleted_at IS NULL",
+        [id, rel],
+        |_| Ok(()),
+    )
+    .is_ok()
+}
+
 /// Follows moves made outside the app: each document's path becomes where its content is now.
 pub fn follow_moves(
     conn: &mut Connection,
@@ -442,6 +452,19 @@ pub fn follow_moves(
     device_id: &str,
     items: &[(Missing, Unknown)],
 ) -> Result<usize, String> {
+    // As things are now, not as the sweep found them minutes ago (another PC, or this PC's
+    // own change-follower, may have moved the document since): only a document still at the
+    // path it was missed at, whose file is still gone there and still at the new place.
+    let items: Vec<(Missing, Unknown)> = items
+        .iter()
+        .filter(|(m, u)| {
+            still_at(conn, &m.doc_id, &m.rel_path)
+                && !root.join(&m.rel_path).exists()
+                && root.join(&u.rel_path).is_file()
+        })
+        .cloned()
+        .collect();
+    let items = &items[..];
     if items.is_empty() {
         return Ok(0);
     }
@@ -497,6 +520,15 @@ pub fn mark_missing(
     device_id: &str,
     items: &[Missing],
 ) -> Result<usize, String> {
+    // As things are now (see [`follow_moves`]): a document moved since the sweep looked,
+    // or whose file is back, is not missing. Marked on the old report, a live document was
+    // tombstoned and its delete sent to B2 (QA 2026-11-17).
+    let items: Vec<Missing> = items
+        .iter()
+        .filter(|m| still_at(conn, &m.doc_id, &m.rel_path) && !root.join(&m.rel_path).exists())
+        .cloned()
+        .collect();
+    let items = &items[..];
     if items.is_empty() {
         return Ok(0);
     }
