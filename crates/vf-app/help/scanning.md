@@ -49,7 +49,7 @@ The PDF is saved in the Scans folder. Within a few seconds it is split at any co
 
 ## Stopping a scan, and when something goes wrong
 
-While a scan runs, **Stop** is beside the spinner. It ends the scan; the pages scanned so far are kept and made into the PDF.
+While a scan runs, **Stop** is beside the spinner (in Browse: **Stop scan**). It ends the scan. With a TWAIN scanner, the pages scanned so far are made into the PDF. With a Windows (WIA) scanner, they are kept as page files in the Scans folder's `_failed` folder.
 
 A TWAIN scanner's driver runs in a small helper program, not inside Vibe Files. If the driver fails part way, Vibe Files stays open, the pages scanned before that are kept, and the line under the strip says why it stopped. If the PDF cannot be made, the pages are saved as pictures in the Scans folder's `_failed` folder, and the line says where.
 

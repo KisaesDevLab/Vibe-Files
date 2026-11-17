@@ -1337,6 +1337,9 @@ impl eframe::App for VibeFilesApp {
                             }
                         }
                     }
+                    if std::mem::take(&mut tab_browse.scan_stop_request) {
+                        o_intake.ingest.stop_scan();
+                    }
                     if tab_browse.scan_watching && !o_intake.ingest.scanning() {
                         tab_browse.scan_watching = false;
                         match tab_browse.scan_target.take() {

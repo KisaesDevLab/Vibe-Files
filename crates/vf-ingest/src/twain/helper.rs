@@ -720,7 +720,13 @@ mod tests {
                 std::fs::write(out.join(format!("page-{:04}.raw", n + 1)), [0u8; 20]).unwrap();
                 std::process::exit(0xC000_0005u32 as i32);
             }
-            _ => std::thread::sleep(Duration::from_secs(600)),
+            _ => {
+                // Its pages are written: said, for the test that then presses Stop.
+                if let Ok(ready) = std::env::var("VF_STAND_IN_READY") {
+                    std::fs::write(ready, "ready").unwrap();
+                }
+                std::thread::sleep(Duration::from_secs(600))
+            }
         }
     }
 
@@ -771,11 +777,20 @@ mod tests {
     fn a_helper_that_never_answers_is_stopped() {
         let _one = STAND_INS.lock().unwrap_or_else(|e| e.into_inner());
         let stop = std::sync::Arc::new(AtomicBool::new(false));
+        let t = tempfile::tempdir().unwrap();
+        let ready = t.path().join("ready");
+        // SAFETY: as in `stand_in`.
+        unsafe { std::env::set_var("VF_STAND_IN_READY", &ready) };
         let helper = stand_in("hang:2");
         let presser = {
             let stop = stop.clone();
             std::thread::spawn(move || {
-                std::thread::sleep(Duration::from_secs(3));
+                // Stop is pressed once the stand-in has scanned its pages, however long a
+                // loaded machine takes to start it.
+                let waited = Instant::now();
+                while !ready.is_file() && waited.elapsed() < Duration::from_secs(120) {
+                    std::thread::sleep(Duration::from_millis(50));
+                }
                 stop.store(true, Ordering::SeqCst);
                 Instant::now()
             })
@@ -796,6 +811,8 @@ mod tests {
         assert!(!s.cancelled);
         s.discard();
         // And a listing that never answers gives up by itself.
+        // SAFETY: as in `stand_in`.
+        unsafe { std::env::remove_var("VF_STAND_IN_READY") };
         let e = stand_in("hang:0")
             .run::<ListReply>(&["list".as_ref()], Some(Duration::from_secs(2)), None)
             .unwrap_err();

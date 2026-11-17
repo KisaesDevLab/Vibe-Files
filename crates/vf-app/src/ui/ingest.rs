@@ -520,6 +520,12 @@ impl IngestState {
         self.scan_job.is_some()
     }
 
+    /// Ends the running scan (Stop): the pages scanned so far are kept.
+    pub fn stop_scan(&self) {
+        self.scan_stop
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
     /// The last scan's outcome line, for Browse's Scan button (owner 2026-11-04).
     pub fn last_line(&self) -> Option<&str> {
         self.log.first().map(String::as_str)
@@ -545,6 +551,13 @@ impl IngestState {
     ) -> Result<String, String> {
         if self.scanning() {
             return Err("A scan is running.".into());
+        }
+        // Listed the way the scan will run (a scan from Browse can come before Intake's
+        // row was ever drawn): a list made the other way is made again.
+        if self.driver_in_app != prefs.scan_driver_in_app {
+            self.driver_in_app = prefs.scan_driver_in_app;
+            self.devices = None;
+            self.devices_job = None;
         }
         let Some(found) = self.devices.clone() else {
             if self.devices_job.is_none() {
@@ -703,8 +716,7 @@ impl IngestState {
                     .on_disabled_hover_text("A scan with the driver inside Vibe Files cannot be stopped from here: use the scanner's own window.")
                     .clicked()
                 {
-                    self.scan_stop
-                        .store(true, std::sync::atomic::Ordering::SeqCst);
+                    self.stop_scan();
                 }
             }
             if go.clicked() {

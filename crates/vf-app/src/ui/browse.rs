@@ -431,6 +431,8 @@ pub struct Browse {
     pub scan_request: bool,
     /// A scan started from here is running: its outcome is shown here when it ends.
     pub scan_watching: bool,
+    /// "Stop scan" clicked: the app ends the running scan.
+    pub scan_stop_request: bool,
     /// Where that scan is filed: the folder shown when Scan was pressed (owner 2026-11-04),
     /// and the private folder it is scanned into; `None` = to the Scans folder and Intake.
     pub scan_target: Option<(ScanTarget, PathBuf)>,
@@ -640,6 +642,7 @@ impl Browse {
             print: Default::default(),
             print_request: false,
             scan_watching: false,
+            scan_stop_request: false,
             scan_target: None,
             holds_seen: None,
             holds_unread: None,
@@ -3784,6 +3787,14 @@ fn grid(ui: &mut egui::Ui, b: &mut Browse, conn: &Connection) {
             .clicked()
         {
             b.scan_request = true;
+        }
+        if b.scan_watching
+            && ui
+                .button("Stop scan")
+                .on_hover_text("Ends the scan that is running. The pages scanned so far are kept.")
+                .clicked()
+        {
+            b.scan_stop_request = true;
         }
         sync_menu(ui, b);
         // Open until a click outside: several columns ticked at once.

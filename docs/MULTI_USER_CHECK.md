@@ -93,6 +93,8 @@ Task Manager while a scan runs), so these need the real scanner too:
      scanner's driver stopped working, with a code.
 6. One long batch: about 100 sheets, both sides, colour.
    - Expected: it finishes. Note Vibe Files' memory in Task Manager at its highest.
+   - While it scans, the pages wait on this PC's own disk (the Windows temporary folder),
+     about 25 MB a colour side: such a batch needs about 5 GB free there.
 
 ## What to send back
 
