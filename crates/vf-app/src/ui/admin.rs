@@ -1670,9 +1670,22 @@ ANDE1042,Anderson Farms LLC
                 .join("Baker Co (3001)/Income Tax/2025/return (2).pdf")
                 .is_file()
         );
+        // Owner 2026-11-17: the clients are not compared again after a merge (the list was
+        // greyed for as long as that took); the merged client's row just leaves the list.
+        assert!(
+            !h.state().a.similar.is_finding(),
+            "no compare after a merge"
+        );
+        assert!(h.query_by_label("No similar clients among 3.").is_some());
         click(&mut h, "Undo this merge");
         h.run();
         assert_eq!(clients(&h), ["3001", "3002", "6001", "6002"]);
+        // And it is back in the list when the merge is undone, again without a compare.
+        assert!(!h.state().a.similar.is_finding());
+        assert!(
+            h.query_by_label("1 pair among 4 clients · 0 ticked")
+                .is_some()
+        );
         assert!(
             h.state()
                 .root

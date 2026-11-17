@@ -81,6 +81,11 @@ pub struct SimilarPage {
     /// The catalog changed: Browse re-reads.
     pub changed: bool,
     refind: bool,
+    /// The pairs the last run took off the list (a client in them was merged away): where
+    /// each was, the pair, and the merged client. Put back when that merge is undone. The
+    /// clients are compared again only when the person presses Find (owner 2026-11-17: a
+    /// compare after every merge greyed the list for as long as it took).
+    set_aside: Vec<(usize, Pair, String)>,
 }
 
 fn key(p: &Pair) -> Key {
@@ -109,6 +114,12 @@ fn id_or_name(s: &Side) -> &str {
 }
 
 impl SimilarPage {
+    /// Whether the clients are being compared (tests).
+    #[cfg(test)]
+    pub fn is_finding(&self) -> bool {
+        self.finding.is_some()
+    }
+
     /// Which of the pair is kept (true: the first), when it is settled.
     fn keep_a(&self, p: &Pair) -> Option<bool> {
         self.keep.get(&key(p)).copied().or(p.keep_a)
@@ -195,7 +206,47 @@ impl SimilarPage {
         }
     }
 
+    /// Takes the pairs with a merged-away client off the list, remembered for the undo.
+    fn set_aside(&mut self, gone: &BTreeSet<String>) {
+        let Some(f) = &mut self.found else {
+            return;
+        };
+        let mut kept = Vec::with_capacity(f.pairs.len());
+        for (i, x) in std::mem::take(&mut f.pairs).into_iter().enumerate() {
+            let by = [&x.a.id, &x.b.id].into_iter().find(|id| gone.contains(*id));
+            match by {
+                Some(id) => {
+                    let id = id.clone();
+                    self.picked.remove(&key(&x));
+                    self.keep.remove(&key(&x));
+                    self.set_aside.push((i, x, id));
+                }
+                None => kept.push(x),
+            }
+        }
+        f.pairs = kept;
+        f.clients = f.clients.saturating_sub(gone.len());
+    }
+
+    /// Puts back the pairs set aside for the merges that were undone.
+    fn bring_back(&mut self, back: &BTreeSet<String>) {
+        let Some(f) = &mut self.found else {
+            return;
+        };
+        let (mut again, rest): (Vec<_>, Vec<_>) = std::mem::take(&mut self.set_aside)
+            .into_iter()
+            .partition(|(_, _, id)| back.contains(id));
+        self.set_aside = rest;
+        again.sort_by_key(|(i, _, _)| *i);
+        for (i, x, _) in again {
+            let at = i.min(f.pairs.len());
+            f.pairs.insert(at, x);
+        }
+        f.clients += back.len();
+    }
+
     fn took(&mut self, f: Found) {
+        self.set_aside.clear();
         let live: BTreeSet<Key> = f.pairs.iter().map(key).collect();
         self.picked.retain(|k| live.contains(k));
         self.keep.retain(|k, _| live.contains(k));
@@ -236,6 +287,12 @@ impl SimilarPage {
                         })
                         .collect();
                     let left = self.last_run.len().saturating_sub(ok);
+                    // The clients that are their own again come back into the list.
+                    let back: BTreeSet<String> = self.last_run[left..]
+                        .iter()
+                        .map(|m| m.from.id.clone())
+                        .collect();
+                    self.bring_back(&back);
                     self.last_run.truncate(left);
                     self.notice = Some(format!(
                         "{} put back.{}",
@@ -254,7 +311,6 @@ impl SimilarPage {
                         }
                     ));
                     self.changed = true;
-                    self.refind = true;
                 }
                 Err(e) => self.error = Some(e),
             }
@@ -270,6 +326,7 @@ impl SimilarPage {
             .collect();
         let name = |id: &str| names.get(id).cloned().unwrap_or_else(|| id.to_string());
         let (mut merged, mut moved) = (vec![], 0);
+        let mut gone: BTreeSet<String> = BTreeSet::new();
         self.results.clear();
         for (c, o) in out {
             match o {
@@ -283,6 +340,7 @@ impl SimilarPage {
                         self.results
                             .push(format!("{} into {}: {n}", name(&c.from), name(&c.into)));
                     }
+                    gone.insert(c.from.clone());
                     merged.push(*m);
                 }
                 Outcome::Skipped(why) => self.results.push(format!(
@@ -297,8 +355,9 @@ impl SimilarPage {
                 )),
             }
         }
+        drop(names);
         self.notice = Some(format!(
-            "Merged {}: {} moved.{}",
+            "Merged {}: {} moved. The list is not compared again until you press Find similar clients.{}",
             pairs(merged.len()),
             docs(moved),
             if self.results.is_empty() {
@@ -311,10 +370,13 @@ impl SimilarPage {
         // A run that merged nothing leaves the last run's Undo as it was.
         if !merged.is_empty() {
             self.last_run = merged;
+            // Only the last run can be undone: what earlier runs set aside stays off.
+            self.set_aside.clear();
+            // The merged clients' rows leave the list; nothing is compared again.
+            self.set_aside(&gone);
         }
         self.picked.clear();
         self.changed = true;
-        self.refind = true;
     }
 }
 
@@ -579,6 +641,18 @@ pub fn show(ui: &mut egui::Ui, p: &mut SimilarPage, env: &mut Env, catalog: &Pat
         }
     }
     confirm(ui, p, env, catalog);
+    let to_choose = p
+        .found
+        .iter()
+        .flat_map(|f| &f.pairs)
+        .filter(|x| p.keep_a(x).is_none())
+        .count();
+    if to_choose > 0 {
+        ui.label(widgets::caption(format!(
+            "{} cannot be ticked yet: neither or both clients are in the client CSV, so press Keep on the one that stays first.",
+            pairs(to_choose)
+        )));
+    }
     ui.add_space(6.0);
     // Not while a run, an undo or a mark is being made: a tick made then would be wiped
     // when it ends, and a mark would wait on the cabinet's lock in front of the window.
