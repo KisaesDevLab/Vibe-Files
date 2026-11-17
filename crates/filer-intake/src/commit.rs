@@ -118,10 +118,17 @@ pub fn transfer(
     let (_, sha) = copy_verified(src, dst)?;
     // The copy is verified; only now may the original go.
     if let Err(e) = std::fs::remove_file(src) {
-        let _ = std::fs::remove_file(dst);
-        return Err(format!(
-            "copied and verified, but the original could not be removed ({e}); the copy was taken back"
-        ));
+        // Vibe Files (PA-89): said as it is. When the copy cannot be taken back either, the
+        // file is now in both places, and the person must know which to remove.
+        return Err(match std::fs::remove_file(dst) {
+            Ok(()) => format!(
+                "copied and verified, but the original could not be removed ({e}); the copy was taken back"
+            ),
+            Err(e2) => format!(
+                "copied and verified, but the original could not be removed ({e}) and the copy at {} could not be taken back ({e2}): the file is in both places",
+                dst.display()
+            ),
+        });
     }
     Ok((Method::CopyVerifyDelete, bytes, Some(sha)))
 }
@@ -885,6 +892,10 @@ impl Ctx<'_> {
                     b.original.display(),
                     b.kept.display()
                 ));
+                // Vibe Files (PA-89): still the batch's to look after. Dropped from the
+                // batch, the kept file was cleared away at the next commit and the
+                // overwritten original was gone for good.
+                self.lb.backups.push(b);
             }
         }
     }
@@ -1298,7 +1309,10 @@ pub fn run_unpack(input: &UnpackInput, progress: &AtomicUsize) -> UnpackReport {
 
     // The zip goes once something was unpacked, after a verified copy is kept for undo.
     let mut zip_deleted = false;
-    if written > 0 && stopped.is_none() {
+    // Vibe Files (PA-89): and only when every entry was unpacked. With one that failed (a path
+    // too long, a damaged entry), the zip stays where it is: it was moved to the undo folder
+    // and cleared away at the next commit, and that entry was lost.
+    if written > 0 && stopped.is_none() && errors.is_empty() {
         let dir = t.data_dir.join(UNDO_ZIPS_DIR);
         let kept = dir.join(format!("{batch}.zip"));
         // Moved, or copied and hash-verified before the original goes (CLAUDE.md §7, X139).

@@ -36,7 +36,17 @@ of its `src/` (QUESTIONS Q-16). Upstream `main.rs` is not vendored; `vf-app` is 
    the header is drawn again did nothing) and four fixed five-frame waits are `wait_for_label`.
    To go upstream with the next re-vendor, or be applied again after it.
 
-No logic edits. Check with:
+6. **Logic, for safety** (owner 2026-11-16, PA-89, after a review of the file-moving code; to go
+   upstream). Each is marked `Vibe Files (PA-89)` where it is:
+   - `undo.rs`: a split's piece is deleted on undo only while its original is still there (in
+     its inbox, or where the batch kept it); a combined PDF with no record of its originals is
+     kept; a client folder that still holds a document of the batch keeps its client file.
+   - `commit.rs` `run_unpack`: the zip is removed only when every entry was unpacked.
+   - `commit.rs` `transfer`: says so when the copy could not be taken back either.
+   - `commit.rs` roll-back: an overwritten file that could not be put back stays in the batch's
+     backups.
+
+Logic edits are those of item 6 only. Check with:
 `diff -r <upstream>/src crates/filer-*/src` (only the four attribute lines and the `settle`
 helpers of item 5 differ).
 
