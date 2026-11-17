@@ -2449,6 +2449,36 @@ mod tests {
         assert_eq!(h.state().help.current, Some("viewer"));
     }
 
+    /// Waits for `ok` on Intake's Preview, pressing **Preview** again every few seconds: a
+    /// press on a frame that is being drawn again is lost (one run in ten of the whole suite
+    /// waited for ever after a single press). If it never comes, says whether the row for
+    /// `file` was on the screen at all (the press was lost, or the plan never came).
+    fn preview_until(
+        h: &mut egui_kittest::Harness<'static, VibeFilesApp>,
+        what: &str,
+        file: &str,
+        ok: &dyn Fn(&egui_kittest::Harness<'static, VibeFilesApp>) -> bool,
+    ) {
+        let start = std::time::Instant::now();
+        let mut pressed = start;
+        while !ok(h) {
+            assert!(
+                start.elapsed() < crate::ui::test_util::PATIENCE,
+                "{what}: never. Row for {file} on screen: {}; Preview tab on screen: {}",
+                h.query_all_by_label_contains(file).next().is_some(),
+                h.query_by_label("Preview").is_some()
+            );
+            if pressed.elapsed() > std::time::Duration::from_secs(3) {
+                if let Some(p) = h.query_by_label("Preview") {
+                    p.click();
+                }
+                pressed = std::time::Instant::now();
+            }
+            std::thread::sleep(std::time::Duration::from_millis(30));
+            h.step();
+        }
+    }
+
     /// Intake › Setup is behind the admin password (owner 2026-11-04); a file whose client is
     /// not found offers "New client…": Vibe's New client dialog creates the client and the row
     /// gets it.
@@ -2496,15 +2526,9 @@ mod tests {
         // The row with no client: New client… opens Vibe's dialog, filled from the name.
         h.get_by_label("Preview").click();
         let label = "New client for Newco LLC_NEWC2002_2025 W-2.pdf";
-        let start = std::time::Instant::now();
-        while h.query_by_label(label).is_none() {
-            assert!(
-                start.elapsed() < crate::ui::test_util::PATIENCE,
-                "row planned"
-            );
-            std::thread::sleep(std::time::Duration::from_millis(30));
-            h.step();
-        }
+        preview_until(&mut h, "row planned", "Newco LLC_NEWC2002", &|h| {
+            h.query_by_label(label).is_some()
+        });
         // Pressed until the dialog is there (a press that lands while the row is still
         // being planned again does nothing; seen on a busy machine).
         let start = std::time::Instant::now();
@@ -2594,26 +2618,9 @@ mod tests {
                     h.step();
                 }
             };
-        // Preview is pressed until the form is read: a press on a frame that is being drawn
-        // again is lost (one run in ten of the whole suite waited here for ever).
-        {
-            let start = std::time::Instant::now();
-            let mut pressed = start;
-            while h.query_by_label("read").is_none() {
-                assert!(
-                    start.elapsed() < crate::ui::test_util::PATIENCE,
-                    "the form read"
-                );
-                if pressed.elapsed() > std::time::Duration::from_secs(3) {
-                    if let Some(p) = h.query_by_label("Preview") {
-                        p.click();
-                    }
-                    pressed = std::time::Instant::now();
-                }
-                std::thread::sleep(std::time::Duration::from_millis(30));
-                h.step();
-            }
-        }
+        preview_until(&mut h, "the form read", "scan0001.pdf", &|h| {
+            h.query_by_label("read").is_some()
+        });
         let sha = filer_intake::commit::sha256_file(&form).unwrap();
         let hint = vf_fs::hints::load(&root)
             .get(&sha)
@@ -2685,7 +2692,7 @@ mod tests {
                     h.step();
                 }
             };
-        wait(&mut h, "both tabs", &|h| {
+        preview_until(&mut h, "both tabs", "pdf", &|h| {
             h.query_by_label("My inbox (1)").is_some()
         });
         assert!(h.query_by_label("Shared inbox (1)").is_some());
