@@ -72,19 +72,18 @@ pub fn to_pdf(src: &Path, out: &Path) -> Result<Normalized, String> {
 }
 
 /// One page per frame: optionally deskewed, at most 300 dpi, written to `out`.
+///
+/// The frames are taken one at a time and each page is kept as its JPEG only: a batch of a
+/// hundred sheets, both sides, held as full pictures was gigabytes, and a session host that
+/// could not give that much lost the scan with the program (QA 2026-11-17). A caller that
+/// can make its frames as they are asked for (a scan's packed pages) passes them so.
 pub fn frames_to_pdf(
-    frames: Vec<Frame>,
+    frames: impl IntoIterator<Item = Frame>,
     straighten: bool,
     out: &Path,
 ) -> Result<Normalized, String> {
-    if frames.is_empty() {
-        return Err("no pages".into());
-    }
-    let mut n = Normalized {
-        pages: frames.len(),
-        ..Default::default()
-    };
-    let mut pages = Vec::new();
+    let mut n = Normalized::default();
+    let mut pages: Vec<Encoded> = Vec::new();
     for f in frames {
         n.rotated |= f.orientation > 1;
         let (rgb, deskewed) = if straighten {
@@ -107,10 +106,48 @@ pub fn frames_to_pdf(
         } else {
             rgb
         };
-        pages.push((rgb, w_in * 72.0, h_in * 72.0));
+        pages.push(Encoded::of(&rgb, w_in * 72.0, h_in * 72.0)?);
     }
+    if pages.is_empty() {
+        return Err(NO_PAGES.into());
+    }
+    n.pages = pages.len();
     write_pdf(out, &pages)?;
     Ok(n)
+}
+
+/// What [`frames_to_pdf`] says when it was given no frame.
+pub const NO_PAGES: &str = "no pages";
+
+/// A page as it goes into the PDF: its JPEG and its sizes.
+struct Encoded {
+    jpeg: Vec<u8>,
+    width: u32,
+    height: u32,
+    gray: bool,
+    /// The page's size in points.
+    page: (f32, f32),
+}
+
+impl Encoded {
+    fn of(rgb: &RgbImage, pw: f32, ph: f32) -> Result<Encoded, String> {
+        let gray = is_gray(rgb);
+        let mut jpeg = Vec::new();
+        let mut enc = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 85);
+        let r = if gray {
+            enc.encode_image(&DynamicImage::ImageRgb8(rgb.clone()).to_luma8())
+        } else {
+            enc.encode_image(rgb)
+        };
+        r.map_err(|e| format!("cannot encode the page image: {e}"))?;
+        Ok(Encoded {
+            jpeg,
+            width: rgb.width(),
+            height: rgb.height(),
+            gray,
+            page: (pw, ph),
+        })
+    }
 }
 
 /// The page an image goes on, in inches: its own size at its stated dpi, or Letter.
@@ -123,7 +160,7 @@ fn page_inches(w: u32, h: u32, dpi: Option<f32>) -> (f32, f32) {
 }
 
 /// Writes one page per image, each image filling its page (aspect kept, centred), as JPEG.
-fn write_pdf(out: &Path, pages: &[(RgbImage, f32, f32)]) -> Result<(), String> {
+fn write_pdf(out: &Path, pages: &[Encoded]) -> Result<(), String> {
     let mut pdf = Pdf::new();
     let (catalog, tree) = (Ref::new(1), Ref::new(2));
     let mut next = 3;
@@ -138,21 +175,13 @@ fn write_pdf(out: &Path, pages: &[(RgbImage, f32, f32)]) -> Result<(), String> {
     pdf.pages(tree)
         .kids(kids.iter().copied())
         .count(kids.len() as i32);
-    for ((rgb, pw, ph), (page, content, img)) in pages.iter().zip(objs) {
-        let gray = is_gray(rgb);
-        let mut jpeg = Vec::new();
-        let mut enc = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 85);
-        let r = if gray {
-            enc.encode_image(&DynamicImage::ImageRgb8(rgb.clone()).to_luma8())
-        } else {
-            enc.encode_image(rgb)
-        };
-        r.map_err(|e| format!("cannot encode the page image: {e}"))?;
-        let mut x = pdf.image_xobject(img, &jpeg);
+    for (e, (page, content, img)) in pages.iter().zip(objs) {
+        let (pw, ph) = (&e.page.0, &e.page.1);
+        let mut x = pdf.image_xobject(img, &e.jpeg);
         x.filter(Filter::DctDecode);
-        x.width(rgb.width() as i32);
-        x.height(rgb.height() as i32);
-        if gray {
+        x.width(e.width as i32);
+        x.height(e.height as i32);
+        if e.gray {
             x.color_space().device_gray();
         } else {
             x.color_space().device_rgb();
@@ -160,8 +189,8 @@ fn write_pdf(out: &Path, pages: &[(RgbImage, f32, f32)]) -> Result<(), String> {
         x.bits_per_component(8);
         drop(x);
 
-        let s = (pw / rgb.width() as f32).min(ph / rgb.height() as f32);
-        let (iw, ih) = (rgb.width() as f32 * s, rgb.height() as f32 * s);
+        let s = (pw / e.width as f32).min(ph / e.height as f32);
+        let (iw, ih) = (e.width as f32 * s, e.height as f32 * s);
         let mut c = Content::new();
         c.save_state();
         c.transform([iw, 0.0, 0.0, ih, (pw - iw) / 2.0, (ph - ih) / 2.0]);

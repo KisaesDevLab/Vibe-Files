@@ -164,20 +164,30 @@ pub fn assemble(pages: &[PathBuf], profile: &Profile, out: &Path) -> Result<Asse
 }
 
 /// Turns the pages of one scan, in order, into one PDF at `out`.
+///
+/// The frames are taken one at a time (see [`images::frames_to_pdf`]): a caller with packed
+/// pages passes them as they are unpacked, so a long batch is never held as full pictures.
 pub fn assemble_frames(
-    mut frames: Vec<Frame>,
+    frames: impl IntoIterator<Item = Frame>,
     profile: &Profile,
     out: &Path,
 ) -> Result<Assembled, String> {
-    let scanned = frames.len();
-    if profile.drop_blank {
-        frames.retain(|f| page_ink(&f.rgb) >= profile.blank_ink);
-    }
-    let blank = scanned - frames.len();
-    if frames.is_empty() {
-        return Err(format!("all {scanned} scanned pages were blank"));
-    }
-    let normalized = images::frames_to_pdf(frames, profile.deskew, out)?;
+    let (mut scanned, mut blank) = (0usize, 0usize);
+    let kept = frames.into_iter().filter(|f| {
+        scanned += 1;
+        let keep = !profile.drop_blank || page_ink(&f.rgb) >= profile.blank_ink;
+        if !keep {
+            blank += 1;
+        }
+        keep
+    });
+    let made = images::frames_to_pdf(kept, profile.deskew, out);
+    let normalized = match made {
+        Err(e) if e == images::NO_PAGES && scanned > 0 => {
+            return Err(format!("all {scanned} scanned pages were blank"));
+        }
+        r => r?,
+    };
     Ok(Assembled {
         scanned,
         blank,
@@ -676,8 +686,9 @@ pub fn assemble_twain(
             None => "the scanner returned no pages".into(),
         });
     }
-    // Each packed page is dropped as its frame is built.
-    let frames = scanned.pages.into_iter().map(|p| p.to_frame()).collect();
+    // Each packed page is unpacked when its turn comes and dropped then: the batch is
+    // never in memory as full pictures.
+    let frames = scanned.pages.into_iter().map(|p| p.to_frame());
     let mut a = assemble_frames(frames, profile, out)?;
     a.stopped = scanned.stopped;
     Ok(a)
