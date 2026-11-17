@@ -35,3 +35,9 @@ You see "Removed from the list." and the removal is recorded in the audit trail.
 - If sync remembered its key for a Windows login, open **Sync** on that PC and press **Forget on this PC** (admin password needed). See [the sync key](help:sync-key).
 - Its data folder holds a full catalog, client names and document text included. Delete the data folder, or wipe the disk, before the PC goes.
 - Then remove it here.
+
+## This computer's log
+
+**This computer's log** › **Show** lists what Vibe Files did on this computer under your login, a day at a time: when it started, when an index of the cabinet began and why, and the kind of any error. It holds no client names or file paths. Choose the **Day**, type a word in **Lines containing** to narrow it (for example `index`), and **Copy** the lines shown to paste them into a message. The times are in UTC.
+
+Under the catalog's numbers, a line says when the last index of this catalog started and why: the catalog was new to the cabinet, the index before it was not finished, or Intake's folder list had client folders the catalog did not.

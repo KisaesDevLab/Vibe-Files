@@ -1464,6 +1464,45 @@ ANDE1042,Anderson Farms LLC
         assert_eq!(n, 1);
     }
 
+    /// Owner 2026-11-17: the log's folder cannot be opened from their login, so Admin ›
+    /// Devices shows this computer's log by day, filtered, with Copy.
+    #[test]
+    fn devices_shows_this_computers_log() {
+        let keep = tempfile::tempdir().unwrap().keep();
+        let dir = crate::logging::set_dir_for_test(&keep);
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(
+            dir.join("vibe-files.2026-11-17.log"),
+            "t1 INFO started\nt2 INFO the catalog is behind Intake's folder index: indexing\nt3 INFO opened\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("vibe-files.2026-11-16.log"), "t0 INFO started\n").unwrap();
+        let mut h = harness();
+        click(&mut h, "Devices");
+        assert!(
+            h.query_by_label_contains("3 lines").is_none(),
+            "closed at first"
+        );
+        click(&mut h, "Show");
+        h.run();
+        assert!(
+            h.query_by_label_contains("3 lines").is_some(),
+            "the newest day is shown"
+        );
+        type_into(&mut h, "Lines containing", "INDEX");
+        h.run();
+        assert!(h.query_by_label_contains("1 line (").is_some());
+        assert!(
+            h.query_by_label_contains("behind Intake's folder index")
+                .is_some()
+        );
+        click(&mut h, "Copy");
+        assert_eq!(
+            h.state().a.devices.notice.as_deref(),
+            Some("Log lines copied.")
+        );
+    }
+
     /// Q-129 (owner 2026-11-16): Admin › Similar clients lists the clients made twice,
     /// nothing ticked; the client the CSV lists is the one kept, and a pair with both in the
     /// CSV waits for a choice; the ticked pairs are merged after a preview, and put back.

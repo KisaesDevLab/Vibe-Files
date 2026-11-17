@@ -204,6 +204,9 @@ pub struct Facts {
     pub clients_with_folder: i64,
     /// An index is asked for or under way.
     pub index_due: bool,
+    /// When the last index of this catalog started (local time) and why, when it is known
+    /// (kept since 0.1.45).
+    pub index_started: Option<(String, String)>,
 }
 
 /// [`Facts`] of the catalog at `file`, through a connection of its own.
@@ -243,6 +246,17 @@ pub fn facts(file: &std::path::Path) -> Result<Facts, String> {
             "SELECT count(*) FROM client WHERE deleted_at IS NULL AND coalesce(folder_rel, '') <> ''",
         )?,
         index_due: vf_fs::rebuild::unfinished_label(&conn).is_some(),
+        index_started: conn
+            .query_row(
+                "SELECT v FROM local_state WHERE k = 'index_started'",
+                [],
+                |r| r.get::<_, String>(0),
+            )
+            .ok()
+            .and_then(|v| {
+                let (when, why) = v.split_once('|')?;
+                Some((widgets::local_time(when), why.to_string()))
+            }),
     })
 }
 
@@ -296,6 +310,11 @@ fn catalog_facts(ui: &mut egui::Ui, p: &mut DevicesPage, env: &mut Env) {
                     .as_deref()
                     .map_or(String::new(), |w| format!(" · last written {w}"))
             ));
+            if let Some((when, why)) = &f.index_started {
+                ui.label(widgets::caption(format!(
+                    "The last index of this catalog started {when}: {why}."
+                )));
+            }
             ui.horizontal(|ui| {
                 if ui.button("Refresh").clicked() {
                     p.facts = None;
@@ -361,14 +380,156 @@ pub struct DevicesPage {
     facts_job: Option<crate::ui::job::Job<Result<Facts, String>>>,
     /// "Index the cabinet again…" was pressed: what it does is shown, to be confirmed.
     ask_index: bool,
+    /// This computer's log, shown on the page (owner 2026-11-17: the folder it is in cannot
+    /// be opened from their login).
+    log: LogView,
     /// This computer's server-mode choice and what Windows says, read once (not every frame).
     server: Option<(crate::server::Setting, bool)>,
     /// This computer's cloud folder choice, read once (PA-39).
     cloud: Option<crate::cloudmode::Setting>,
 }
 
+/// A day of this computer's log, read for the page.
+#[derive(Default)]
+struct LogView {
+    open: bool,
+    /// The days there is a log for, newest first; read when the section opens.
+    days: Option<Vec<String>>,
+    day: String,
+    /// The day's text, and the day it is of.
+    text: Option<(String, Result<String, String>)>,
+    job: Option<crate::ui::job::Job<(String, Result<String, String>)>>,
+    /// Only the lines with this text (capitals or not).
+    filter: String,
+}
+
+/// This computer's log by day, with a filter and Copy: what the program did and when (an
+/// index starting and why, a sync, an error's kind). It holds no client names or paths.
+fn log_section(ui: &mut egui::Ui, p: &mut DevicesPage, dir: Option<&std::path::Path>) {
+    let v = &mut p.log;
+    ui.horizontal(|ui| {
+        ui.label(RichText::new("This computer's log").strong());
+        if ui
+            .button(if v.open { "Hide" } else { "Show" })
+            .on_hover_text("What Vibe Files did on this computer under your login, by day. It holds no client names.")
+            .clicked()
+        {
+            v.open = !v.open;
+            v.days = None;
+        }
+    });
+    if !v.open {
+        return;
+    }
+    let Some(dir) = dir else {
+        ui.label(widgets::caption(
+            "This run keeps no log (its folder could not be made).",
+        ));
+        return;
+    };
+    if let Some((day, text)) = crate::ui::job::take(&mut v.job).and_then(Result::ok) {
+        v.text = Some((day, text));
+    }
+    if v.days.is_none() {
+        let days = crate::logging::days(dir);
+        if !days.contains(&v.day) {
+            v.day = days.first().cloned().unwrap_or_default();
+        }
+        v.days = Some(days);
+        v.text = None;
+    }
+    let days = v.days.clone().unwrap_or_default();
+    if days.is_empty() {
+        ui.label(widgets::caption("No log yet."));
+        return;
+    }
+    ui.horizontal_wrapped(|ui| {
+        let l = ui.label("Day");
+        egui::ComboBox::from_id_salt("devices-log-day")
+            .selected_text(v.day.clone())
+            .show_ui(ui, |ui| {
+                for d in &days {
+                    ui.selectable_value(&mut v.day, d.clone(), d);
+                }
+            })
+            .response
+            .labelled_by(l.id);
+        let l = ui.label("Lines containing");
+        let r = ui
+            .add(
+                egui::TextEdit::singleline(&mut v.filter)
+                    .margin(widgets::SEARCH_MARGIN)
+                    .hint_text("e.g. index")
+                    .desired_width(160.0),
+            )
+            .labelled_by(l.id);
+        widgets::clear_x(ui, &r, &mut v.filter);
+        if ui.button("Read again").clicked() {
+            v.text = None;
+        }
+    });
+    // The day's file, read on a thread (it may be large).
+    if v.job.is_none() && v.text.as_ref().is_none_or(|(d, _)| *d != v.day) {
+        let (dir, day) = (dir.to_path_buf(), v.day.clone());
+        if let Ok(j) = crate::ui::job::Job::start(ui.ctx(), "Reading the log…", move || {
+            let text = crate::logging::read_day(&dir, &day);
+            (day, text)
+        }) {
+            v.job = Some(j);
+        }
+    }
+    if let Some(j) = &v.job {
+        j.show(ui);
+        return;
+    }
+    match &v.text {
+        Some((_, Ok(text))) => {
+            let q = v.filter.trim().to_lowercase();
+            let shown: String = text
+                .lines()
+                .filter(|l| q.is_empty() || l.to_lowercase().contains(&q))
+                .collect::<Vec<_>>()
+                .join("\n");
+            ui.horizontal(|ui| {
+                ui.label(widgets::caption(format!(
+                    "{} line{} (times are UTC; the newest {} of a day are shown)",
+                    shown.lines().count(),
+                    if shown.lines().count() == 1 { "" } else { "s" },
+                    crate::logging::SHOWN
+                )));
+                if ui
+                    .button("Copy")
+                    .on_hover_text("Copies the lines shown, to paste into a message.")
+                    .clicked()
+                {
+                    ui.ctx().copy_text(shown.clone());
+                    p.notice = Some("Log lines copied.".into());
+                }
+            });
+            egui::ScrollArea::both()
+                .id_salt("devices-log")
+                .max_height(260.0)
+                .auto_shrink([false, true])
+                .stick_to_bottom(true)
+                .show(ui, |ui| {
+                    ui.add(
+                        egui::Label::new(RichText::new(shown).monospace().small())
+                            .wrap_mode(egui::TextWrapMode::Extend)
+                            .selectable(true),
+                    );
+                });
+        }
+        Some((_, Err(e))) => {
+            ui.colored_label(crate::ui::theme::error(), e);
+        }
+        None => {}
+    }
+}
+
 pub fn show(ui: &mut egui::Ui, p: &mut DevicesPage, env: &mut Env) {
     shared_section(ui, p, env);
+    ui.add_space(12.0);
+    log_section(ui, p, crate::logging::dir());
     ui.add_space(12.0);
     ui.add_space(12.0);
     servers_section(ui, p, env);

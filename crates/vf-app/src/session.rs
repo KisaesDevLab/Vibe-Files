@@ -306,16 +306,33 @@ fn open_how(data: &Path, device_id: &str, root: &Path, behind: bool) -> Result<O
     // after it was made. Indexed the same way, behind the window.
     let stale =
         behind && known > 0 && label.is_none() && vf_fs::rebuild::behind_folder_index(&conn, root);
-    if stale {
+    let why = if stale {
         // How many, not which (folder names are client names: not for the log).
+        let n = vf_fs::rebuild::folders_not_taken(&conn).len();
         tracing::info!(
-            folders = vf_fs::rebuild::folders_not_taken(&conn).len(),
+            folders = n,
             "the catalog is behind Intake's folder index: indexing"
         );
+        Some(format!(
+            "Intake's folder list had {n} client folder{} this catalog did not",
+            if n == 1 { "" } else { "s" }
+        ))
     } else if let Some(l) = &label {
         tracing::info!(label = %l, "the last index was not finished: indexing");
+        Some("the index before it was not finished".to_string())
     } else if known == 0 {
         tracing::info!("this catalog is new to the cabinet: indexing");
+        Some("this catalog was new to the cabinet".to_string())
+    } else {
+        None
+    };
+    // Kept with the catalog: Admin › Devices says when and why the last index started.
+    if let Some(why) = &why {
+        let _ = conn.execute(
+            "INSERT INTO local_state (k, v) VALUES ('index_started', ?1)
+             ON CONFLICT(k) DO UPDATE SET v = excluded.v",
+            [format!("{}|{why}", vf_core::now_rfc3339())],
+        );
     }
     let in_parts = behind && (known == 0 || label.is_some() || stale);
     let mut staged = None;
