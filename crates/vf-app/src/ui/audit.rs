@@ -33,6 +33,8 @@ pub struct ChainCheck {
     due_now: bool,
     /// On the Audit page's copy: the check is running (a spinner, owner 2026-11-12).
     checking: bool,
+    /// The catalog was busy when it was looked at: checked again at this time.
+    retry: Option<Instant>,
 }
 
 /// A copy for the Audit page (without the running weekly check).
@@ -45,9 +47,13 @@ impl Clone for ChainCheck {
             next: None,
             due_now: false,
             checking: self.is_checking(),
+            retry: None,
         }
     }
 }
+
+/// How long after a check that found the catalog busy the next one is made.
+const BUSY_RETRY: std::time::Duration = std::time::Duration::from_secs(300);
 
 impl ChainCheck {
     /// Checked on its own thread once the window shows (it hashes every row: years of audit
@@ -63,9 +69,17 @@ impl ChainCheck {
             next: None,
             due_now: true,
             checking: false,
+            retry: None,
         }
     }
 
+    /// Not checked, nothing wrong, and no check due on its own.
+    fn later_quiet() -> Self {
+        ChainCheck {
+            due_now: false,
+            ..ChainCheck::later()
+        }
+    }
     /// "Verify now": checked on its thread from the next frame, as the weekly check is.
     pub fn verify_now(&mut self) {
         if self.next.is_none() {
@@ -79,7 +93,17 @@ impl ChainCheck {
     }
 
     pub fn run(conn: &Connection) -> Self {
-        let result = audit::verify(conn).map_err(|e| e.to_string());
+        let verified = audit::verify(conn);
+        // Busy part way through (the index or a sync writing): as when it could not be
+        // opened, nothing is wrong with the trail; looked at again in a few minutes.
+        if verified.as_ref().err().is_some_and(|e| e.is_busy()) {
+            tracing::info!("audit chain not checked yet: the catalog is busy");
+            return ChainCheck {
+                retry: Some(Instant::now() + BUSY_RETRY),
+                ..ChainCheck::later_quiet()
+            };
+        }
+        let result = verified.map_err(|e| e.to_string());
         match &result {
             Ok(r) => match &r.broken {
                 None => tracing::info!(rows = r.rows, "audit chain verified"),
@@ -94,6 +118,7 @@ impl ChainCheck {
             next: None,
             due_now: false,
             checking: false,
+            retry: None,
         }
     }
 
@@ -108,22 +133,45 @@ impl ChainCheck {
             }
             return;
         }
-        if !self.due_now && self.at.elapsed() < WEEK {
+        // A check that found the catalog busy is made again a few minutes later.
+        let again = self.retry.is_some_and(|t| Instant::now() >= t);
+        if !self.due_now && !again && self.at.elapsed() < WEEK {
             return;
         }
         self.due_now = false;
+        self.retry = None;
         let (tx, rx) = std::sync::mpsc::channel();
         let (catalog, ctx) = (catalog.to_path_buf(), ctx.clone());
         let check = move || {
             vf_core::db::open(&catalog, vf_core::db::Storage::Local)
                 .map(|conn| ChainCheck::run(&conn))
-                .unwrap_or_else(|e| ChainCheck {
-                    at: Instant::now(),
-                    when: widgets::local_time(&vf_core::now_rfc3339()),
-                    result: Err(e.to_string()),
-                    next: None,
-                    due_now: false,
-                    checking: false,
+                .unwrap_or_else(|e| {
+                    // Busy (the index or a sync is writing): nothing is wrong with the
+                    // trail. Not a red line; looked at again in a few minutes.
+                    let busy = e.is_busy();
+                    if busy {
+                        tracing::info!("audit chain not checked yet: the catalog is busy");
+                    }
+                    ChainCheck {
+                        at: Instant::now(),
+                        when: if busy {
+                            String::new()
+                        } else {
+                            widgets::local_time(&vf_core::now_rfc3339())
+                        },
+                        result: if busy {
+                            Ok(audit::VerifyReport {
+                                rows: 0,
+                                broken: None,
+                            })
+                        } else {
+                            Err(e.to_string())
+                        },
+                        next: None,
+                        due_now: false,
+                        checking: false,
+                        retry: busy.then(|| Instant::now() + BUSY_RETRY),
+                    }
                 })
         };
         if cfg!(test) {

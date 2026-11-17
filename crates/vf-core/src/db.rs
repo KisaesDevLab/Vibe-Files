@@ -138,10 +138,17 @@ pub fn open(path: &Path, storage: Storage) -> Result<Connection> {
         path,
         OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE,
     )?;
-    conn.query_row("SELECT count(*) FROM sqlite_master", [], |_| Ok(()))
-        .map_err(|_| Error::NotACatalog)?;
-    // OCR workers hold their own connections (P03); wait for a writer rather than fail.
+    // Other connections write (the index, a sync): wait for a writer rather than fail. Set
+    // before the first read: a catalog that was only busy was refused at once below, as
+    // "not a Vibe Files catalog" (owner 2026-11-17, a PC whose index was running).
     conn.busy_timeout(std::time::Duration::from_secs(10))?;
+    conn.query_row("SELECT count(*) FROM sqlite_master", [], |_| Ok(()))
+        .map_err(|e| match e.sqlite_error_code() {
+            // Only a file SQLite cannot read as a database is "not a catalog"; a busy or
+            // unreadable one says what it is.
+            Some(rusqlite::ErrorCode::NotADatabase) => Error::NotACatalog,
+            _ => Error::Sql(e),
+        })?;
     conn.pragma_update(None, "foreign_keys", true)?;
     let storage = storage_of(path, storage);
     let mode = match storage {
@@ -576,6 +583,25 @@ mod tests {
             .filter(|e| e.as_ref().unwrap().path().extension() == Some("bak".as_ref()))
             .count();
         assert_eq!(baks, 1);
+    }
+
+    /// Owner 2026-11-17: a catalog another connection is writing is busy, not "not a Vibe
+    /// Files catalog" (the audit check said so on a PC whose index was running).
+    #[test]
+    fn a_busy_catalog_is_busy_not_foreign() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("catalog.db");
+        let writer = open(&path, Storage::Local).unwrap();
+        // Held as SQLite holds a catalog on a share while it is written.
+        writer
+            .execute_batch("PRAGMA locking_mode = EXCLUSIVE; BEGIN EXCLUSIVE;")
+            .unwrap();
+        let e = open(&path, Storage::Local).unwrap_err();
+        assert!(e.is_busy(), "{e}");
+        assert!(!matches!(e, Error::NotACatalog));
+        writer
+            .execute_batch("COMMIT; PRAGMA locking_mode = NORMAL;")
+            .unwrap();
     }
 
     /// An encrypted catalog from before PA-18 (or any other file) is refused, not overwritten.
