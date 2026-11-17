@@ -3130,11 +3130,34 @@ mod tests {
         h.key_press(egui::Key::Escape);
         h.run_steps(3);
         assert_eq!(amounts(&h), [1000, 2550, 3550]);
-        // One step of the tape's own Undo.
-        if let Screen::Open(o) = &mut h.state_mut().screen {
-            o.viewer.tape.tape.undo();
-        }
+        // QA 2026-11-17: Undo pressed with a box open takes the change back, and the box's
+        // text is not written onto the tape that came back.
+        h.get_by_label("Amount 25.50 of line 2").click();
+        h.run_steps(3);
+        assert!(h.query_by_label("Amount of line 2").is_some());
+        let undo: Vec<_> = h.query_all_by_label("Undo").collect();
+        assert_eq!(undo.len(), 1, "the tape's Undo");
+        undo[0].click();
+        h.run_steps(3);
         assert_eq!(amounts(&h), [1000, 2000, 3000]);
+        assert!(
+            h.query_by_label("Amount of line 2").is_none(),
+            "the box is gone"
+        );
+        // An emptied box changes nothing and says nothing.
+        if let Screen::Open(o) = &mut h.state_mut().screen {
+            o.viewer.error = None;
+        }
+        h.get_by_label("Amount 20.00 of line 2").click();
+        h.run_steps(3);
+        h.key_press(egui::Key::Backspace);
+        h.key_press(egui::Key::Enter);
+        h.run_steps(3);
+        assert_eq!(amounts(&h), [1000, 2000, 3000]);
+        let Screen::Open(o) = &h.state().screen else {
+            unreachable!()
+        };
+        assert_eq!(o.viewer.error, None);
     }
 
     /// PA-14: a tape picked off the page, totalled, pasted and saved is a real annotation in

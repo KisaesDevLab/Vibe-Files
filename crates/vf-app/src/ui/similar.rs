@@ -39,6 +39,14 @@ struct Progress {
 }
 
 type Key = (String, String);
+
+/// What a job on the "not the same" marks did.
+enum Marked {
+    /// This pair was marked.
+    Pair(Key),
+    /// Every mark was forgotten.
+    All,
+}
 type Previewed = Vec<(Choice, Result<Preview, String>)>;
 type Ran = Vec<(Choice, Outcome)>;
 /// For each merge put back: the client, and how many documents went back or why not.
@@ -54,7 +62,10 @@ pub struct SimilarPage {
     picked: BTreeSet<Key>,
     /// Which one is kept where a person chose (true: the first).
     keep: HashMap<Key, bool>,
-    previewing: Option<Job<Result<Previewed, String>>>,
+    previewing: Option<Job<Result<Result<Previewed, String>, String>>>,
+    /// A "Not the same" mark being written, or every mark being forgotten (a file in the
+    /// cabinet, under its lock: not on the window's thread).
+    marking: Option<Job<Result<Marked, String>>>,
     /// What the ticked merges would do, shown for a yes or no.
     preview: Option<Previewed>,
     work: Option<Job<Result<Ran, String>>>,
@@ -86,6 +97,15 @@ fn docs(n: usize) -> String {
 
 fn who(s: &Side) -> String {
     format!("{}  {}", s.name, s.ext_id)
+}
+
+/// The client's ID for a button, or its name when it has none.
+fn id_or_name(s: &Side) -> &str {
+    if s.ext_id.trim().is_empty() {
+        &s.name
+    } else {
+        &s.ext_id
+    }
 }
 
 impl SimilarPage {
@@ -180,6 +200,16 @@ impl SimilarPage {
         self.picked.retain(|k| live.contains(k));
         self.keep.retain(|k, _| live.contains(k));
         self.found = Some(f);
+        // A tick stands only while the pair can still be merged as chosen (the CSV may have
+        // changed which one is kept, or the kept one lost its folder).
+        let still: BTreeSet<Key> = self
+            .found
+            .iter()
+            .flat_map(|f| &f.pairs)
+            .filter(|p| self.can_tick(p))
+            .map(key)
+            .collect();
+        self.picked.retain(|k| still.contains(k));
     }
 
     /// Takes a finished run or undo, whichever tab is shown (the app calls this each frame):
@@ -194,11 +224,14 @@ impl SimilarPage {
         if let Some(r) = job::take(&mut self.undoing) {
             match r.and_then(|r| r) {
                 Ok(back) => {
+                    // Put back from the end of the run; it stops at the first that cannot be.
                     let ok = back.iter().filter(|(_, r)| r.is_ok()).count();
                     self.results = back
                         .iter()
                         .filter_map(|(c, r)| r.as_ref().err().map(|e| format!("{c}: {e}")))
                         .collect();
+                    let left = self.last_run.len().saturating_sub(ok);
+                    self.last_run.truncate(left);
                     self.notice = Some(format!(
                         "{} put back.{}",
                         if ok == 1 {
@@ -206,13 +239,15 @@ impl SimilarPage {
                         } else {
                             format!("{ok} merges")
                         },
-                        if self.results.is_empty() {
-                            ""
+                        if left == 0 {
+                            String::new()
                         } else {
-                            " Some could not be:"
+                            format!(
+                                " Stopped there: {left} of the run {} still merged (the reason is below). Put right what it says, then press Undo again.",
+                                if left == 1 { "is" } else { "are" }
+                            )
                         }
                     ));
-                    self.last_run.clear();
                     self.changed = true;
                     self.refind = true;
                 }
@@ -264,7 +299,10 @@ impl SimilarPage {
             }
         ));
         self.error = None;
-        self.last_run = merged;
+        // A run that merged nothing leaves the last run's Undo as it was.
+        if !merged.is_empty() {
+            self.last_run = merged;
+        }
         self.picked.clear();
         self.changed = true;
         self.refind = true;
@@ -300,8 +338,22 @@ pub fn show(ui: &mut egui::Ui, p: &mut SimilarPage, env: &mut Env, catalog: &Pat
         }
     }
     if let Some(r) = job::take(&mut p.previewing) {
-        match r.and_then(|r| r) {
+        match r.and_then(|r| r).and_then(|r| r) {
             Ok(pv) => p.preview = Some(pv),
+            Err(e) => p.error = Some(e),
+        }
+    }
+    if let Some(r) = job::take(&mut p.marking) {
+        match r.and_then(|r| r) {
+            Ok(Marked::Pair(k)) => {
+                p.picked.remove(&k);
+                p.keep.remove(&k);
+                if let Some(f) = &mut p.found {
+                    f.pairs.retain(|x| key(x) != k);
+                    f.dismissed += 1;
+                }
+            }
+            Ok(Marked::All) => p.refind = true,
             Err(e) => p.error = Some(e),
         }
     }
@@ -316,8 +368,11 @@ pub fn show(ui: &mut egui::Ui, p: &mut SimilarPage, env: &mut Env, catalog: &Pat
         ));
     });
     ui.add_space(6.0);
-    let idle =
-        p.finding.is_none() && p.previewing.is_none() && p.work.is_none() && p.undoing.is_none();
+    let idle = p.finding.is_none()
+        && p.marking.is_none()
+        && p.previewing.is_none()
+        && p.work.is_none()
+        && p.undoing.is_none();
     ui.horizontal(|ui| {
         if ui
             .add_enabled(idle, egui::Button::new("Find similar clients"))
@@ -334,6 +389,7 @@ pub fn show(ui: &mut egui::Ui, p: &mut SimilarPage, env: &mut Env, catalog: &Pat
             .into_iter()
             .chain([p.previewing.as_ref().map(|j| j as &dyn Shown)])
             .chain([p.undoing.as_ref().map(|j| j as &dyn Shown)])
+            .chain([p.marking.as_ref().map(|j| j as &dyn Shown)])
             .flatten()
         {
             j.draw(ui);
@@ -424,12 +480,18 @@ pub fn show(ui: &mut egui::Ui, p: &mut SimilarPage, env: &mut Env, catalog: &Pat
         });
         if dismissed > 0
             && ui
-                .small_btn(format!("Show the {dismissed} marked not the same"))
+                .add_enabled(
+                    idle,
+                    egui::Button::new(format!("Show the {dismissed} marked not the same")).small(),
+                )
                 .on_hover_text("Forgets every \"Not the same\" mark, on every PC, and finds again.")
                 .clicked()
         {
-            match similar::forget_dismissed(env.root) {
-                Ok(_) => p.refind = true,
+            let root = env.root.to_path_buf();
+            match Job::start(&ctx, "Forgetting the marks…", move || {
+                similar::forget_dismissed(&root).map(|_| Marked::All)
+            }) {
+                Ok(j) => p.marking = Some(j),
                 Err(e) => p.error = Some(e),
             }
         }
@@ -509,7 +571,9 @@ pub fn show(ui: &mut egui::Ui, p: &mut SimilarPage, env: &mut Env, catalog: &Pat
     }
     confirm(ui, p, env, catalog);
     ui.add_space(6.0);
-    grid(ui, p, env);
+    // Not while a run, an undo or a mark is being made: a tick made then would be wiped
+    // when it ends, and a mark would wait on the cabinet's lock in front of the window.
+    ui.add_enabled_ui(idle, |ui| grid(ui, p, env));
 }
 
 /// A job of any result, to draw its spinner.
@@ -573,6 +637,13 @@ fn confirm(ui: &mut egui::Ui, p: &mut SimilarPage, env: &mut Env, catalog: &Path
                             ""
                         }
                     ));
+                    if x.drops_relationships {
+                        ui.label(widgets::caption(format!(
+                            "   {} has no ID, so the relationships of {} cannot become its own: they are dropped.",
+                            x.into.trim(),
+                            x.from.trim()
+                        )));
+                    }
                 }
                 if !refused.is_empty() {
                     ui.add_space(6.0);
@@ -729,7 +800,7 @@ fn grid(ui: &mut egui::Ui, p: &mut SimilarPage, env: &mut Env) {
                                 let r = ui
                                     .selectable_label(
                                         keep_a == Some(is_a),
-                                        format!("Keep {}", side.ext_id),
+                                        format!("Keep {}", id_or_name(side)),
                                     )
                                     .on_hover_text(format!(
                                         "{} stays; the other client's documents move into its folder.",
@@ -740,7 +811,12 @@ fn grid(ui: &mut egui::Ui, p: &mut SimilarPage, env: &mut Env) {
                                         egui::accesskit::Role::RadioButton,
                                         true,
                                         keep_a == Some(is_a),
-                                        format!("Keep {} of {} and {}", side.ext_id, who(&x.a), who(&x.b)),
+                                        format!(
+                                            "Keep {} of {} and {}",
+                                            id_or_name(side),
+                                            who(&x.a),
+                                            who(&x.b)
+                                        ),
                                     )
                                 });
                                 if r.clicked() {
@@ -786,15 +862,11 @@ fn grid(ui: &mut egui::Ui, p: &mut SimilarPage, env: &mut Env) {
         }
     }
     if let Some(k) = not_same {
-        match similar::dismiss(env.root, &k.0, &k.1) {
-            Ok(()) => {
-                p.picked.remove(&k);
-                p.keep.remove(&k);
-                if let Some(f) = &mut p.found {
-                    f.pairs.retain(|x| key(x) != k);
-                    f.dismissed += 1;
-                }
-            }
+        let root = env.root.to_path_buf();
+        match Job::start(ui.ctx(), "Marking the pair…", move || {
+            similar::dismiss(&root, &k.0, &k.1).map(|()| Marked::Pair(k))
+        }) {
+            Ok(j) => p.marking = Some(j),
             Err(e) => p.error = Some(e),
         }
     }

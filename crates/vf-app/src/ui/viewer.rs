@@ -275,8 +275,9 @@ pub struct TapeState {
     flash: Option<(usize, [f32; 4], std::time::Instant)>,
     /// While dragging in pick mode: how many amounts, their sum.
     pub drag_status: Option<String>,
-    /// An amount on the tape being changed: (line, the text typed, focus still to be given).
-    pub edit_amount: Option<(usize, String, bool)>,
+    /// An amount on the tape being changed: (line, the text typed, focus still to be given,
+    /// the tape's revision when the box opened: a tape changed since is another tape).
+    pub edit_amount: Option<(usize, String, bool, u64)>,
 }
 
 impl Default for TapeState {
@@ -4470,7 +4471,11 @@ fn tape_history(v: &mut Viewer, env: &Env<'_>, doc: &Doc) {
 fn tape_panel(ui: &mut egui::Ui, v: &mut Viewer, env: &mut Env<'_>, doc: &Doc) {
     use vf_core::tape::{Key as K, Op, format_cents};
     tape_history(v, env, doc);
-    tape_keys(ui, v);
+    // While an amount is being changed the keys are the box's: Esc gives the change up (and
+    // not pick mode too), a digit typed before the box has the cursor is not posted.
+    if v.tape.edit_amount.is_none() {
+        tape_keys(ui, v);
+    }
     let mut jump: Option<(usize, [f32; 4])> = None;
     // An amount on the tape clicked to be changed, and a change ended (`None`: given up).
     let mut start_edit: Option<(usize, String)> = None;
@@ -4694,6 +4699,13 @@ fn tape_panel(ui: &mut egui::Ui, v: &mut Viewer, env: &mut Env<'_>, doc: &Doc) {
                 }
             });
             ui.separator();
+            // The tape changed under an open box (Undo, Redo, Clear, a tape from History, a
+            // pick, a key): the change is given up, not written onto another tape's line.
+            // Here, after the buttons above have acted in this frame (QA 2026-11-17).
+            let rev = v.tape.tape.revision();
+            if v.tape.edit_amount.as_ref().is_some_and(|e| e.3 != rev) {
+                v.tape.edit_amount = None;
+            }
             egui::ScrollArea::vertical()
                 .id_salt("tape-lines")
                 .max_height(ui.available_height().max(120.0))
@@ -4730,7 +4742,7 @@ fn tape_panel(ui: &mut egui::Ui, v: &mut Viewer, env: &mut Env<'_>, doc: &Doc) {
                                 if total {
                                     amount = amount.strong();
                                 }
-                                if let Some((_, text, focus)) =
+                                if let Some((_, text, focus, _)) =
                                     v.tape.edit_amount.as_mut().filter(|e| e.0 == i)
                                 {
                                     // Being changed: Enter (or a click elsewhere) takes it,
@@ -4827,7 +4839,7 @@ fn tape_panel(ui: &mut egui::Ui, v: &mut Viewer, env: &mut Env<'_>, doc: &Doc) {
         }
     }
     if let Some((i, text)) = start_edit {
-        v.tape.edit_amount = Some((i, text, true));
+        v.tape.edit_amount = Some((i, text, true, v.tape.tape.revision()));
     }
 }
 
@@ -4835,6 +4847,10 @@ fn tape_panel(ui: &mut egui::Ui, v: &mut Viewer, env: &mut Env<'_>, doc: &Doc) {
 /// out again from it. Text that is not an amount, or an amount the tape cannot hold, is said
 /// and the line stays as it was.
 fn set_tape_amount(v: &mut Viewer, i: usize, text: &str) {
+    // An emptied box: given up.
+    if text.trim().is_empty() {
+        return;
+    }
     match vf_core::tape::parse_amount(text) {
         None => {
             v.error = Some(format!(

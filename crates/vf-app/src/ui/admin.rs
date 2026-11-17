@@ -1568,7 +1568,7 @@ ANDE1042,Anderson Farms LLC
             h.query_by_label("1 pair among 4 clients · 1 ticked")
                 .is_some()
         );
-        assert_eq!(vf_fs::similar::dismissed(&h.state().root).len(), 1);
+        assert_eq!(vf_fs::similar::dismissed(&h.state().root).unwrap().len(), 1);
 
         click(&mut h, "Merge the 1 pair ticked…");
         h.run();

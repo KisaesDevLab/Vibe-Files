@@ -14,8 +14,10 @@ use vf_sync::{Keys, Remote, Sync};
 
 const PASS: &str = "correct horse battery staple";
 const FAST: KdfParams = KdfParams {
-    m_kib: 256,
-    t: 1,
+    // 1 MiB and 2 passes: the least the portal's Argon2 takes (it opens the bucket
+    // `writes_a_bucket_for_the_portals_tests` writes).
+    m_kib: 1024,
+    t: 2,
     p: 1,
 };
 
@@ -2119,4 +2121,64 @@ fn the_documents_in_b2_are_listed_by_client() {
     assert!(!names(&after, "1042").contains(&"Income Tax/2025/W-2 Northwind.pdf".to_string()));
     let rev_after = after.clients.iter().find(|c| c.code == "1042").unwrap().rev;
     assert!(rev_after > anderson.rev, "the segment moved on");
+}
+
+/// Writes a small pushed bucket into the folder `VF_PORTAL_FIXTURE` names, with `expect.json`
+/// beside it (the passphrase, the clients and each document's content): Vibe-Portal's tests
+/// open it with the portal's own reader of the bucket, so the two cannot drift apart unseen.
+/// Does nothing unless the variable is set.
+#[test]
+fn writes_a_bucket_for_the_portals_tests() {
+    let Ok(dir) = std::env::var("VF_PORTAL_FIXTURE") else {
+        return;
+    };
+    let dir = PathBuf::from(dir);
+    let t = tempfile::tempdir().unwrap();
+    let store = Remote::folder(&dir.join("bucket")).unwrap();
+    let mut a = pc_a(t.path(), store);
+    vf_sync::push::push(&mut a.conn, &a.root, &a.sync, None).unwrap();
+    // One document deleted after the push, and pushed again: the manifest keeps its tombstone.
+    let gone = doc_id(&a.conn, "EIN letter.pdf");
+    std::fs::remove_file(
+        a.root
+            .join("Anderson Farms LLC (1042)/Permanent/Setup/EIN letter.pdf"),
+    )
+    .unwrap();
+    vf_fs::rebuild::rebuild(&mut a.conn, &a.root, "dev-a").unwrap();
+    vf_sync::push::push(&mut a.conn, &a.root, &a.sync, None).unwrap();
+    let l = vf_sync::listed::listed(&a.conn, "dev-a").unwrap();
+    let body = |path: &str| match path {
+        "Income Tax/2025/W-2 Northwind.pdf" => "w2 2025 invented",
+        "Payroll/2025/941 Q1.pdf" => "941 invented",
+        _ => "",
+    };
+    let clients: Vec<serde_json::Value> = l
+        .clients
+        .iter()
+        .map(|c| {
+            serde_json::json!({
+                "id": c.id,
+                "code": c.code,
+                "name": c.name,
+                "docs": c.docs.iter().map(|d| serde_json::json!({
+                    "docId": d.doc_id,
+                    "path": d.path,
+                    "size": d.size,
+                    "taxYear": d.tax_year,
+                    "content": body(&d.path),
+                })).collect::<Vec<_>>(),
+            })
+        })
+        .collect();
+    let expect = serde_json::json!({
+        "passphrase": PASS,
+        "cabinetId": a.sync.cabinet_id,
+        "deletedDocId": gone,
+        "clients": clients,
+    });
+    std::fs::write(
+        dir.join("expect.json"),
+        serde_json::to_vec_pretty(&expect).unwrap(),
+    )
+    .unwrap();
 }

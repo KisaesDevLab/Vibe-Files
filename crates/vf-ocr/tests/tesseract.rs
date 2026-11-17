@@ -298,9 +298,16 @@ fn a_stop_part_way_writes_nothing() {
 #[test]
 fn words_come_back_without_tesseracts_config_files() {
     let Some(found) = engine() else { return };
-    let Some(data) = found.tessdata.clone() else {
-        return; // Tesseract's own default place: nothing to copy from.
-    };
+    // The language data beside the program found; else the usual install.
+    let data = found
+        .tessdata
+        .clone()
+        .unwrap_or_else(|| std::path::PathBuf::from(r"C:\Program Files\Tesseract-OCR\tessdata"));
+    assert!(
+        data.join("eng.traineddata").is_file(),
+        "no eng.traineddata in {} to test with (set VF_SKIP_TESSERACT=1 to skip)",
+        data.display()
+    );
     let dir = tempfile::tempdir().unwrap();
     let bare = dir.path().join("tessdata");
     std::fs::create_dir_all(&bare).unwrap();

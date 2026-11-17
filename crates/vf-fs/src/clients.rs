@@ -1077,8 +1077,8 @@ fn csv_fields(rec: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// The IDs in the client CSV Intake uses, in capitals (PA-90: which of two similar clients is
-/// the one the CSV lists). `None`: no CSV is set, or it has no ID column.
+/// The IDs in the client CSV Intake uses, as written there (PA-90: which of two similar
+/// clients is the one the CSV lists). `None`: no CSV is set, or it has no ID column.
 pub fn csv_ids(root: &Path) -> Result<Option<std::collections::HashSet<String>>, String> {
     let Some((_, _, text, _, records, col)) = csv_read(root)? else {
         return Ok(None);
@@ -1090,7 +1090,7 @@ pub fn csv_ids(root: &Path) -> Result<Option<std::collections::HashSet<String>>,
             .filter_map(|&(a, b)| {
                 csv_fields(&text[a..b])
                     .get(col)
-                    .map(|v| v.trim().to_uppercase())
+                    .map(|v| v.trim().to_string())
             })
             .filter(|v| !v.is_empty())
             .collect(),
@@ -1106,11 +1106,17 @@ pub fn remove_from_csv(root: &Path, id: &str) -> Result<Option<String>, String> 
         let Some((csv, raw, text, enc, records, col)) = csv_read(root)? else {
             return Ok(None);
         };
-        let hit = records.iter().skip(1).find(|&&(a, b)| {
-            csv_fields(&text[a..b])
-                .get(col)
-                .is_some_and(|v| v.trim().eq_ignore_ascii_case(id.trim()))
-        });
+        // The row with exactly this ID before one that differs in capitals (two clients
+        // whose IDs differ only so: the other's row is not this client's; QA 2026-11-17).
+        let row_of = |same: &dyn Fn(&str) -> bool| {
+            records.iter().skip(1).find(|&&(a, b)| {
+                csv_fields(&text[a..b])
+                    .get(col)
+                    .is_some_and(|v| same(v.trim()))
+            })
+        };
+        let hit =
+            row_of(&|v| v == id.trim()).or_else(|| row_of(&|v| v.eq_ignore_ascii_case(id.trim())));
         let Some(&(a, b)) = hit else {
             return Ok(None);
         };

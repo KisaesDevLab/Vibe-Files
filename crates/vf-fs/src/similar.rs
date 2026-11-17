@@ -104,7 +104,12 @@ fn score(a: &[String], b: &[String]) -> f64 {
 fn id_key(id: &str) -> String {
     let l = loose_id(id);
     let t = l.trim_start_matches('0');
-    if t.is_empty() { l } else { t.to_string() }
+    // Nothing but zeros is one ID however many of them.
+    if t.is_empty() && !l.is_empty() {
+        "0".to_string()
+    } else {
+        t.to_string()
+    }
 }
 
 fn dismissed_path(root: &Path) -> PathBuf {
@@ -119,19 +124,24 @@ fn key(a: &str, b: &str) -> (String, String) {
     }
 }
 
-/// The pairs marked "not the same", each as its two client uuids in order.
-pub fn dismissed(root: &Path) -> BTreeSet<(String, String)> {
-    std::fs::read(dismissed_path(root))
-        .ok()
-        .and_then(|b| serde_json::from_slice(&b).ok())
-        .unwrap_or_default()
+/// The pairs marked "not the same", each as its two client uuids in order. No file: none.
+/// A file that cannot be read is an error, not "none": the next mark would write a file
+/// with that one pair and every earlier mark would be gone (QA 2026-11-17).
+pub fn dismissed(root: &Path) -> Result<BTreeSet<(String, String)>, String> {
+    let file = dismissed_path(root);
+    match std::fs::read(&file) {
+        Ok(b) => serde_json::from_slice(&b)
+            .map_err(|e| format!("{} cannot be read: {e}", file.display())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(BTreeSet::new()),
+        Err(e) => Err(format!("{} cannot be read: {e}", file.display())),
+    }
 }
 
 /// Marks clients `a` and `b` (uuids) as not the same client: [`find`] leaves the pair out,
 /// on every PC.
 pub fn dismiss(root: &Path, a: &str, b: &str) -> Result<(), String> {
     crate::lock::with(root, "clients", "the client list", || {
-        let mut all = dismissed(root);
+        let mut all = dismissed(root)?;
         all.insert(key(a, b));
         let bytes = serde_json::to_vec_pretty(&all).map_err(|e| e.to_string())?;
         cabinet::write_replace(&dismissed_path(root), &bytes)
@@ -141,7 +151,8 @@ pub fn dismiss(root: &Path, a: &str, b: &str) -> Result<(), String> {
 /// Forgets every "not the same" mark. How many there were.
 pub fn forget_dismissed(root: &Path) -> Result<usize, String> {
     crate::lock::with(root, "clients", "the client list", || {
-        let n = dismissed(root).len();
+        // Unreadable: started again, which is what was asked for.
+        let n = dismissed(root).map_or(1, |d| d.len());
         if n > 0 {
             cabinet::write_replace(&dismissed_path(root), b"[]")?;
         }
@@ -176,7 +187,7 @@ pub fn find(conn: &Connection, root: &Path) -> Result<Found, String> {
             let ext: String = r.get(1)?;
             Ok(Side {
                 id: r.get(0)?,
-                in_csv: !ext.trim().is_empty() && csv.contains(&ext.trim().to_uppercase()),
+                in_csv: false,
                 ext_id: ext,
                 name: r.get(2)?,
                 folder: r.get::<_, Option<String>>(3)?.filter(|f| !f.is_empty()),
@@ -185,11 +196,35 @@ pub fn find(conn: &Connection, root: &Path) -> Result<Found, String> {
         })
         .and_then(|rows| rows.collect())
         .map_err(|e| e.to_string())?;
+    // Which clients the CSV lists: the one whose ID is written there exactly; one that
+    // differs only in capitals when no other client has it exactly (`AC20` and `ac20` with
+    // `AC20` in the CSV: only the first is listed).
+    let exact: HashSet<&str> = sides
+        .iter()
+        .map(|s| s.ext_id.trim())
+        .filter(|id| csv.contains(*id))
+        .collect();
+    let exact_upper: HashSet<String> = exact.iter().map(|id| id.to_uppercase()).collect();
+    let csv_upper: HashSet<String> = csv.iter().map(|id| id.to_uppercase()).collect();
+    let listed: Vec<bool> = sides
+        .iter()
+        .map(|s| {
+            let id = s.ext_id.trim();
+            !id.is_empty()
+                && (exact.contains(id)
+                    || (csv_upper.contains(&id.to_uppercase())
+                        && !exact_upper.contains(&id.to_uppercase())))
+        })
+        .collect();
+    let mut sides = sides;
+    for (s, l) in sides.iter_mut().zip(listed) {
+        s.in_csv = l;
+    }
     let keys: Vec<(Vec<String>, String)> = sides
         .iter()
         .map(|s| (name_keys(&s.name), id_key(&s.ext_id)))
         .collect();
-    let not_same = dismissed(root);
+    let not_same = dismissed(root)?;
     let mut out = Found {
         clients: sides.len(),
         csv_note,
@@ -218,19 +253,30 @@ pub fn find(conn: &Connection, root: &Path) -> Result<Found, String> {
                     _ => None,
                 },
             });
+            // Kept within bounds while comparing (hundreds of clients under one placeholder
+            // name are tens of thousands of pairs).
+            if out.pairs.len() > LIMIT * 4 {
+                rank(&mut out.pairs);
+                out.pairs.truncate(LIMIT + 1);
+            }
         }
     }
-    out.pairs.sort_by(|x, y| {
-        x.why
-            .cmp(&y.why)
-            .then(y.name_score.total_cmp(&x.name_score))
-            .then_with(|| x.a.name.to_lowercase().cmp(&y.a.name.to_lowercase()))
-    });
+    rank(&mut out.pairs);
     if out.pairs.len() > LIMIT {
         out.pairs.truncate(LIMIT);
         out.more = true;
     }
     Ok(out)
+}
+
+/// Same-ID pairs first, then the best name matches.
+fn rank(pairs: &mut [Pair]) {
+    pairs.sort_by(|x, y| {
+        x.why
+            .cmp(&y.why)
+            .then(y.name_score.total_cmp(&x.name_score))
+            .then_with(|| x.a.name.to_lowercase().cmp(&y.a.name.to_lowercase()))
+    });
 }
 
 /// One ticked pair: client `from` (uuid) is merged into client `into`.
@@ -239,6 +285,9 @@ pub struct Choice {
     pub from: String,
     pub into: String,
 }
+
+/// One pair of a preview: what merging it would do, or why it cannot be merged.
+pub type Previewed = (Choice, Result<Preview, String>);
 
 /// What merging one pair would do, for the preview.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -254,6 +303,9 @@ pub struct Preview {
     /// A client of this pair is in an earlier pair too: the numbers are as things stand
     /// now, before that merge.
     pub after_another: bool,
+    /// The kept client has no ID, so the merged client's relationships cannot become its
+    /// own: they are dropped.
+    pub drops_relationships: bool,
 }
 
 /// `id` after the merges in `gone` (merged client → kept client).
@@ -271,15 +323,19 @@ fn now_is(gone: &HashMap<String, String>, id: &str) -> String {
 }
 
 /// What merging each of `choices` would do, in order. Nothing is written. A pair that cannot
-/// be merged says why.
+/// be merged says why. `Err`: no merge can be made at all now (the client CSV Intake uses
+/// cannot be reached: every merge takes the merged client out of it).
 pub fn preview(
     conn: &Connection,
     root: &Path,
     choices: &[Choice],
-) -> Vec<(Choice, Result<Preview, String>)> {
+) -> Result<Vec<Previewed>, String> {
+    clients::intake_csv_reachable(root).map_err(|_| {
+        "The client CSV Intake uses cannot be reached from this PC. Every merge takes the merged client out of it, so nothing can be merged until it can.".to_string()
+    })?;
     let mut gone: HashMap<String, String> = HashMap::new();
     let mut touched: HashSet<String> = HashSet::new();
-    choices
+    Ok(choices
         .iter()
         .map(|c| {
             let (from, into) = (now_is(&gone, &c.from), now_is(&gone, &c.into));
@@ -296,6 +352,7 @@ pub fn preview(
                     kept_both: p.kept_both(),
                     holds: p.holds,
                     relationships: p.relationships,
+                    drops_relationships: p.relationships > 0 && p.into.ext_id.trim().is_empty(),
                     after_another,
                 })
             };
@@ -305,7 +362,7 @@ pub fn preview(
             touched.extend([c.from.clone(), c.into.clone(), from, into]);
             (c.clone(), r)
         })
-        .collect()
+        .collect())
 }
 
 /// How one pair of a run ended.
@@ -361,24 +418,27 @@ pub fn merge_many(
     out
 }
 
-/// Puts the merges of a run back, the last one first. For each (in that order): the client
-/// merged away, and how many documents went back or why it could not be undone.
+/// Puts the merges of a run back, the last one first, and stops at the first that cannot be
+/// (the ones before it in the run may hold its documents: A into B, then B into C; with C's
+/// merge not put back, putting A's back would restore an empty client; QA 2026-11-17). For
+/// each one tried (in that order): the client merged away, and how many documents went back
+/// or why it could not be undone. The merges not tried are still merged.
 pub fn undo_many(
     conn: &mut Connection,
     root: &Path,
     device_id: &str,
     merged: &[Merged],
 ) -> Vec<(String, Result<usize, String>)> {
-    merged
-        .iter()
-        .rev()
-        .map(|m| {
-            (
-                format!("{}  {}", m.from.name, m.from.ext_id),
-                clientmerge::undo(conn, root, m, device_id),
-            )
-        })
-        .collect()
+    let mut out = Vec::new();
+    for m in merged.iter().rev() {
+        let r = clientmerge::undo(conn, root, m, device_id);
+        let failed = r.is_err();
+        out.push((format!("{}  {}", m.from.name, m.from.ext_id), r));
+        if failed {
+            break;
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -488,7 +548,10 @@ mod tests {
             );
         }
         assert_eq!(id_key("01-ha_1001"), "1HA1001");
-        assert_eq!(id_key("000"), "000");
+        assert_eq!(
+            (id_key("000"), id_key("0"), id_key("")),
+            ("0".into(), "0".into(), String::new())
+        );
     }
 
     #[test]
@@ -550,6 +613,65 @@ mod tests {
         assert_eq!(find(&conn, &root).unwrap().pairs.len(), 3);
     }
 
+    /// QA 2026-11-17: IDs that differ only in capitals. The CSV lists the one written as it
+    /// has it; merging the other leaves the kept client's CSV row alone.
+    #[test]
+    fn ids_that_differ_in_capitals_keep_the_csvs_row() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (root, mut conn) = cabinet(
+            tmp.path(),
+            &[("Acme LLC", "AC20"), ("Acme Holdings of Ohio", "ac20")],
+            &["AC20"],
+        );
+        let f = find(&conn, &root).unwrap();
+        assert_eq!(f.pairs.len(), 1);
+        let p = &f.pairs[0];
+        let (kept, gone) = if p.keep_a == Some(true) {
+            (&p.a, &p.b)
+        } else {
+            (&p.b, &p.a)
+        };
+        assert_eq!(
+            (kept.ext_id.as_str(), gone.in_csv),
+            ("AC20", false),
+            "{p:?}"
+        );
+        let choice = Choice {
+            from: gone.id.clone(),
+            into: kept.id.clone(),
+        };
+        let (done, stop) = (AtomicUsize::new(0), AtomicBool::new(false));
+        let out = merge_many(&mut conn, &root, "dev", &[choice], &done, &stop);
+        assert!(matches!(out[0].1, Outcome::Merged(_)), "{:?}", out[0].1);
+        let csv = std::fs::read_to_string(tmp.path().join("clients.csv")).unwrap();
+        assert!(csv.contains("AC20"), "the kept client's row stays: {csv}");
+    }
+
+    /// QA 2026-11-17: a mark file that cannot be read is said, and not written over; with the
+    /// CSV out of reach nothing can be merged, said before anything is ticked through.
+    #[test]
+    fn an_unreadable_mark_file_and_a_csv_out_of_reach_are_said() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (root, conn) = cabinet(
+            tmp.path(),
+            &[("Baker Co", "3001"), ("Baker Co", "3002")],
+            &["3001"],
+        );
+        let (a, b) = (uuid_of(&conn, "3001"), uuid_of(&conn, "3002"));
+        std::fs::write(dismissed_path(&root), "not json").unwrap();
+        assert!(dismiss(&root, &a, &b).is_err());
+        assert!(find(&conn, &root).is_err());
+        assert_eq!(
+            std::fs::read_to_string(dismissed_path(&root)).unwrap(),
+            "not json"
+        );
+        std::fs::remove_file(dismissed_path(&root)).unwrap();
+        std::fs::remove_file(tmp.path().join("clients.csv")).unwrap();
+        let choice = Choice { from: b, into: a };
+        let e = preview(&conn, &root, &[choice]).unwrap_err();
+        assert!(e.contains("cannot be reached"), "{e}");
+    }
+
     #[test]
     fn without_a_csv_no_pair_has_a_default() {
         let tmp = tempfile::tempdir().unwrap();
@@ -607,7 +729,7 @@ mod tests {
                 into: c.clone(),
             }, // one client already
         ];
-        let p = preview(&conn, &root, &choices);
+        let p = preview(&conn, &root, &choices).unwrap();
         assert!(p[0].1.is_ok() && p[1].1.is_err(), "{p:?}");
         assert!(p[2].1.as_ref().is_ok_and(|x| x.after_another), "{p:?}");
         assert!(p[3].1.is_err());
@@ -660,6 +782,32 @@ mod tests {
                 "{f}"
             );
         }
+
+        // QA 2026-11-17: an undo that cannot be made stops the rest (they may hold its
+        // documents): the earlier merge of the chain is not put back as an empty client.
+        let out = merge_many(&mut conn, &root, "dev", &choices, &done, &stop);
+        let merged: Vec<Merged> = out
+            .into_iter()
+            .filter_map(|(_, o)| match o {
+                Outcome::Merged(m) => Some(*m),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(merged.len(), 2);
+        // The folder of the last one merged away is in the cabinet again.
+        std::fs::create_dir_all(root.join("Baker Co (3001)")).unwrap();
+        let back = undo_many(&mut conn, &root, "dev", &merged);
+        assert_eq!(back.len(), 1, "stopped at the first: {back:?}");
+        assert!(back[0].1.is_err());
+        assert_eq!(
+            live(&conn),
+            ["3003", "6001", "6002"],
+            "nothing half put back"
+        );
+        std::fs::remove_dir(root.join("Baker Co (3001)")).unwrap();
+        let back = undo_many(&mut conn, &root, "dev", &merged);
+        assert!(back.iter().all(|(_, r)| r.is_ok()), "{back:?}");
+        assert_eq!(live(&conn).len(), 5);
 
         // Stopped: nothing more is merged.
         stop.store(true, Relaxed);

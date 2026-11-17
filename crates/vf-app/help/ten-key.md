@@ -37,9 +37,9 @@ With **Labels from box captions** on, each picked line is labelled with the word
 
 ## Changing an amount on the tape
 
-Click an amount on the tape to change it (double-click an amount that was picked from the page; one click shows where it came from). The box opens with the amount selected: type the new one, or use the arrow keys to change a digit, then press Enter. Esc leaves it as it was.
+Click an amount on the tape to change it (double-click an amount that was picked from the page; one click shows where it came from). The box opens with the amount selected: type the new one, or use the arrow keys to change a digit, then press Enter or click elsewhere. Esc, or an emptied box, leaves it as it was. Undo, Redo, Clear or a tape from History while the box is open also give the change up.
 
-The tape is worked out again from the change: every subtotal, total and grand total after it, and the result of a × or ÷ the amount is part of. Subtotals, totals and the results of × and ÷ cannot be typed over; change one of the amounts they come from. **Undo** takes a change back.
+The tape is worked out again from the change: every subtotal, total and grand total after it, the result of a × or ÷ the amount is part of, and a × or ÷ that worked on the running total. Amounts that are worked out (subtotals, totals, results) cannot be typed over; change one of the amounts they come from. An amount picked from the page keeps its link to the page after you correct it. **Undo** takes a change back.
 
 ## Undo, Redo and History
 

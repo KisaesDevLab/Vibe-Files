@@ -187,10 +187,21 @@ impl OcrEngine for Tesseract {
         let text = String::from_utf8_lossy(&out.stdout);
         // Not the word table: said, not taken for a page without words.
         if !is_tsv(&text) {
+            // What it said first (later lines are often warnings), else how its output began.
             let err = String::from_utf8_lossy(&out.stderr);
+            let said = err
+                .lines()
+                .map(str::trim)
+                .find(|l| !l.is_empty())
+                .map(str::to_string)
+                .unwrap_or_else(|| {
+                    format!(
+                        "its output began: {}",
+                        text.chars().take(80).collect::<String>()
+                    )
+                });
             return Err(OcrError::Failed(format!(
-                "Tesseract did not give its word table ({})",
-                err.lines().last().unwrap_or("no message").trim()
+                "Tesseract did not give its word table ({said})"
             )));
         }
         let mut p = parse_tsv(&text);

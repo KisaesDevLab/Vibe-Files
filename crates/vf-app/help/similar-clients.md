@@ -33,11 +33,13 @@ Nothing is ticked for you.
 
 Each pair is merged the same way as **Merge into another client…** in Browse: the documents move into the kept client's folder, the merged client leaves the client list and the client CSV, and its relationships and legal holds become the kept client's. A pair that is refused does not stop the others; the page lists it with the reason.
 
-A merge is refused when the client's folder holds files the catalog does not have yet, or documents that are no longer on disk. Open the client in Browse, press **Refresh**, then find and merge again. Wait for the first index of a cabinet to finish before merging.
+A merge is refused when the client's folder holds files the catalog does not have yet, or documents that are no longer on disk: open the client in Browse, press **Refresh**, then find and merge again. It is also refused while one of its documents is checked out, when a moved file's path would be too long, or while another PC is changing the client list. Wait for the first index of a cabinet to finish before merging.
+
+Nothing can be merged while the client CSV that Intake uses cannot be reached from this PC, because every merge takes the merged client out of it. The page says so when you ask for the preview.
 
 ## Putting a run back
 
-After a run, **Undo these merges** puts the merged clients back, the last one first: their folders, documents, place on the client list and in the CSV. It is offered until you leave the program or run another merge; after that, only the cabinet's last merge can be undone, from Browse's **Merge into another client…** window.
+After a run, **Undo these merges** puts the merged clients back, the last one first: their folders, documents, place on the client list and in the CSV. If one cannot be put back it stops there, says why, and keeps the rest for another try. It is offered until you close the cabinet or run another merge; after that, only the cabinet's last merge can be undone, from Browse's **Merge into another client…** window.
 
 ## Not the same
 

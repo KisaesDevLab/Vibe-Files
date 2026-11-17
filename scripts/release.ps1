@@ -1,3 +1,4 @@
+#requires -Version 7
 # Portable release of Vibe Files (PHASES P13 step 6; QUESTIONS Q-30..Q-34).
 #
 #   pwsh scripts/release.ps1            # build, stage, zip, hash, winget manifests
@@ -87,14 +88,21 @@ Copy-Item (Join-Path $Tesseract 'doc\LICENSE') (Join-Path $t 'LICENSE')
 # The shipped Tesseract must give its word table the way the program asks for it (0.1.36 to
 # 0.1.43 asked through tessdata\configs\tsv, which is not shipped: OCR found no text).
 Add-Type -AssemblyName System.Drawing
-$probe = Join-Path $env:TEMP "vf-release-ocr-probe.png"
-$bmp = New-Object System.Drawing.Bitmap 1200, 300
-$g = [System.Drawing.Graphics]::FromImage($bmp); $g.Clear([System.Drawing.Color]::White)
-$g.DrawString('Release probe 48,250.00', (New-Object System.Drawing.Font 'Arial', 40), [System.Drawing.Brushes]::Black, 40, 100)
-$g.Dispose(); $bmp.Save($probe); $bmp.Dispose()
-$tsv = & (Join-Path $t 'tesseract.exe') $probe stdout -l eng --psm 3 --dpi 300 --tessdata-dir (Join-Path $t 'tessdata') -c tessedit_create_tsv=1 2>$null
-Remove-Item $probe -ErrorAction SilentlyContinue
-if (-not ($tsv | Where-Object { $_ -match '^5\t' })) { throw 'the staged Tesseract gives no word table: OCR would find no text' }
+$probe = Join-Path $env:TEMP ("vf-release-ocr-probe-{0}.png" -f [guid]::NewGuid().ToString('N'))
+$probeErr = "$probe.err"
+try {
+    $bmp = New-Object System.Drawing.Bitmap 1200, 300
+    $font = New-Object System.Drawing.Font 'Arial', 40
+    $g = [System.Drawing.Graphics]::FromImage($bmp); $g.Clear([System.Drawing.Color]::White)
+    $g.DrawString('Release probe 48,250.00', $font, [System.Drawing.Brushes]::Black, 40, 100)
+    $g.Dispose(); $font.Dispose(); $bmp.Save($probe); $bmp.Dispose()
+    $tsv = & (Join-Path $t 'tesseract.exe') $probe stdout -l eng --psm 3 --dpi 300 --tessdata-dir (Join-Path $t 'tessdata') -c tessedit_create_tsv=1 2>$probeErr
+    $said = if (Test-Path $probeErr) { (Get-Content $probeErr -Raw) } else { '' }
+    if ($LASTEXITCODE) { throw "the staged Tesseract failed (exit $LASTEXITCODE): $said" }
+    if (-not ($tsv | Where-Object { $_ -match '^5\t' })) { throw "the staged Tesseract gives no word table: OCR would find no text. $said" }
+} finally {
+    Remove-Item $probe, $probeErr -ErrorAction SilentlyContinue
+}
 
 $zip = Join-Path $dist "$name.zip"
 if (Test-Path $zip) { Remove-Item $zip }

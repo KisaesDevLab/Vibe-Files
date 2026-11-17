@@ -550,7 +550,14 @@ pub fn apply(
             Ok(ids) => m.holds = ids,
             Err(e) => notes.push(format!("The legal holds were not changed: {e}")),
         }
-        if !from.ext_id.is_empty() {
+        // Two clients whose IDs differ only in capitals: the CSV row is taken out only when
+        // it is the merged client's own (written exactly so), never the kept client's.
+        let kept_ones_row = from.ext_id.trim().eq_ignore_ascii_case(into.ext_id.trim())
+            && !clients::csv_ids(root)
+                .ok()
+                .flatten()
+                .is_some_and(|ids| ids.contains(from.ext_id.trim()));
+        if !from.ext_id.is_empty() && !kept_ones_row {
             match clients::remove_from_csv(root, &from.ext_id) {
                 Ok(row) => m.csv_row = row,
                 Err(e) => notes.push(format!(
