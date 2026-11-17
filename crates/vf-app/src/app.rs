@@ -4429,12 +4429,22 @@ mod tests {
         // The tick box, not the page of the same name in the list.
         use egui_kittest::kittest::NodeT;
         for name in ["Devices", "Audit trail"] {
-            let boxes: Vec<_> = h
-                .query_all_by_label(name)
-                .filter(|n| n.accesskit_node().role() == egui::accesskit::Role::CheckBox)
-                .collect();
-            assert_eq!(boxes.len(), 1, "{name}");
-            boxes[0].click();
+            let tick = |h: &egui_kittest::Harness<'static, VibeFilesApp>, press: bool| {
+                let boxes: Vec<_> = h
+                    .query_all_by_label(name)
+                    .filter(|n| n.accesskit_node().role() == egui::accesskit::Role::CheckBox)
+                    .collect();
+                assert_eq!(boxes.len(), 1, "{name}");
+                if press {
+                    boxes[0].click();
+                } else {
+                    // The list scrolls: a page low in it is brought into view first.
+                    boxes[0].scroll_to_me();
+                }
+            };
+            tick(&h, false);
+            h.run();
+            tick(&h, true);
             h.run();
         }
         assert_eq!(
