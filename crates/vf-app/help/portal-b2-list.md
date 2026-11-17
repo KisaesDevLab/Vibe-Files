@@ -25,7 +25,7 @@ With Vibe Portal 0.3.16 or later, an admin can enter your **sync passphrase** on
 
 - A client's page on the staff page has **Add to portal** on each document in its list. The portal reads the document from B2 itself and keeps its own copy, shown to nobody until staff choose who sees it.
 - **The portal's appliance can then open every document Vibe Files has in B2**, not only the ones added. Until the passphrase is entered there it can open none. Leave it out if that matters more; sharing from Vibe Files works either way.
-- A document added that way is replaced on the portal by itself when a changed version is pushed to B2 (Vibe Portal 0.3.17 or later). One shared from Vibe Files changes only when it is shared again from here.
+- A document added that way follows B2 (Vibe Portal 0.3.18 or later): it is replaced on the portal by itself when a changed version is pushed, and **removed from the portal when it is deleted here or taken out of B2**. One shared from Vibe Files changes only when it is shared again from here, and stays until it is removed there.
 - Vibe Files finds such a document as one on the portal: Browse marks it, and sharing it from here does not add it twice.
 
 **Remove** on the same page of the portal takes the key off it again. The portal's guide says more.
