@@ -1125,6 +1125,7 @@ fn put_back_adopted(
             },
             old_csv_row: a.old_csv_row.clone(),
         }),
+        reid: None,
     };
     crate::similar::undo_many(conn, root, device_id, &[ran])
         .pop()

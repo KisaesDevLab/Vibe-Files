@@ -25,6 +25,8 @@ The client whose ID is in the client CSV that Intake uses is the one kept. When 
 
 **Tick the ones shown** ticks only pairs that are surely one client: the same ID, or the same name apart from capitals and punctuation. Pairs that are only alike (`John` and `Jon`) are ticked one at a time.
 
+When neither ID is right, type the right one in the **or new ID** box on the row instead. The two are merged into the one with the folder (with two folders, the one with more documents), and that client is given the ID you typed; its folder is renamed for it. Typing an ID ticks the pair, as **Keep** does.
+
 To mark many at once, press **Mark Keep from a list…** and choose your list of client names and IDs (CSV). In every pair where exactly one client's ID is on the list, that client is marked. Nothing is ticked or merged by this.
 
 The client you keep does not need a folder. When it has none and the other client has the folder (a client that came from your list beside the same client made from its folder), the folder with everything in it becomes the kept client's and is renamed for it, for example `6 R Farms, LLC (7974_6RFA)`. Nothing is moved file by file.

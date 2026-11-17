@@ -1723,6 +1723,36 @@ ANDE1042,Anderson Farms LLC
                 .join("Baker Co. (3002)/Income Tax/2025/return.pdf")
                 .is_file()
         );
+        // Owner 2026-11-17: an ID neither has, typed on the row, merges both under it.
+        type_into(
+            &mut h,
+            "New ID for Baker Co  3001 and Baker Co.  3002",
+            "BAKE7",
+        );
+        h.run();
+        assert!(
+            h.query_by_label("1 pair among 4 clients · 1 ticked")
+                .is_some(),
+            "typing an ID ticks the pair"
+        );
+        click(&mut h, "Merge the 1 pair ticked…");
+        h.run();
+        assert!(h.query_by_label("Merge 1 pair?").is_some());
+        click(&mut h, "Yes, merge 1 pair");
+        h.run();
+        assert_eq!(
+            clients(&h),
+            ["6001", "6002", "BAKE7"],
+            "{:?} {:?}",
+            h.state().a.similar.error,
+            h.state().a.similar.notice
+        );
+        assert!(
+            h.state()
+                .root
+                .join("Baker Co (BAKE7)/Income Tax/2025/return (2).pdf")
+                .is_file()
+        );
     }
 
     /// Q-131 (owner 2026-11-17): Admin › Clients from a list matches a list of names and

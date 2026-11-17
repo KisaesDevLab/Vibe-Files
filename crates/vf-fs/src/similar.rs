@@ -307,6 +307,9 @@ pub fn ids_on_list(csv: &Path) -> Result<HashSet<String>, String> {
 pub struct Choice {
     pub from: String,
     pub into: String,
+    /// An ID neither of the two has, typed by the person: after the merge the client that
+    /// stays is given it, and its folder is renamed (owner 2026-11-17).
+    pub new_id: Option<String>,
 }
 
 /// One pair of a preview: what merging it would do, or why it cannot be merged.
@@ -332,6 +335,8 @@ pub struct Preview {
     /// The kept client has no folder: the other's folder becomes its folder, (now, after
     /// its rename for the kept client's name and ID; the same when its name stays).
     pub adopts: Option<(String, String)>,
+    /// The ID the client that stays is given after the merge ([`Choice::new_id`]).
+    pub new_id: Option<String>,
 }
 
 /// Whether merging `from` into `into` is the kept client taking the other's folder: the
@@ -415,6 +420,7 @@ pub fn preview(
                         drops_relationships: false,
                         after_another,
                         adopts: Some(planned.folder.unwrap_or((folder.clone(), folder))),
+                        new_id: None,
                     })
                 })
             } else {
@@ -432,8 +438,40 @@ pub fn preview(
                     drops_relationships: p.relationships > 0 && p.into.ext_id.trim().is_empty(),
                     after_another,
                     adopts: None,
+                    new_id: None,
                 })
             };
+            // A new ID for the client that stays: free (the two's own IDs count as free: one
+            // of them goes) and fit to be an ID.
+            let r = r.and_then(|mut p| {
+                let Some(id) = c.new_id.as_deref().map(str::trim).filter(|i| !i.is_empty()) else {
+                    return Ok(p);
+                };
+                let stays = if p.adopts.is_some() { &from } else { &into };
+                let (_, name, _) = listupdate::client_row(conn, stays)?;
+                let change = listupdate::Change {
+                    client: stays.clone(),
+                    id: id.to_string(),
+                    name,
+                    twin: None,
+                };
+                if clients::is_tin_value(id) {
+                    return Err(
+                        "That ID looks like an SSN or EIN. Use the tax software's client ID."
+                            .into(),
+                    );
+                }
+                if id.contains(['/', '\\', ':', '*', '?', '"', '<', '>', '|']) {
+                    return Err("An ID cannot hold / \\ : * ? \" < > |.".into());
+                }
+                let freed: HashSet<String> = [from.clone(), into.clone()].into();
+                listupdate::preview_freeing(conn, root, &[change], &freed)?
+                    .pop()
+                    .map(|(_, r)| r)
+                    .unwrap_or_else(|| Err("nothing planned".into()))?;
+                p.new_id = Some(id.to_string());
+                Ok(p)
+            });
             match &r {
                 // The identity that stays is the folder's.
                 Ok(p) if p.adopts.is_some() => {
@@ -485,6 +523,8 @@ pub struct Ran {
     pub merged: Merged,
     /// The kept client had no folder and took the other's (see [`Preview::adopts`]).
     pub adopted: Option<Adopted>,
+    /// The client that stays was given a new ID after the merge ([`Choice::new_id`]).
+    pub reid: Option<listupdate::Done>,
 }
 
 /// What a kept client taking the other's folder changed besides the merge.
@@ -526,6 +566,7 @@ pub(crate) fn adopt(
         return Ok(Ran {
             merged,
             adopted: None,
+            reid: None,
         });
     }
     match listupdate::change_one(conn, root, device_id, &change, true) {
@@ -551,6 +592,7 @@ pub(crate) fn adopt(
             Ok(Ran {
                 merged,
                 adopted: Some(Adopted { done, old_csv_row }),
+                reid: None,
             })
         }
         // The folder's client could not take the ID: the two are as they were.
@@ -613,11 +655,43 @@ pub fn merge_many(
                         Outcome::Merged(Box::new(Ran {
                             merged: m,
                             adopted: None,
+                            reid: None,
                         }))
                     }
                     Err(e) => Outcome::Failed(e),
                 },
             }
+        };
+        // The new ID, for the client that stays (the folder's, where the kept one had none).
+        let r = match (
+            r,
+            c.new_id.as_deref().map(str::trim).filter(|i| !i.is_empty()),
+        ) {
+            (Outcome::Merged(mut ran), Some(id)) => {
+                let stays = now_is(&gone, &c.into);
+                let set = listupdate::client_row(conn, &stays).and_then(|(_, name, _)| {
+                    let change = listupdate::Change {
+                        client: stays.clone(),
+                        id: id.to_string(),
+                        name,
+                        twin: None,
+                    };
+                    listupdate::change_one(conn, root, device_id, &change, false)
+                });
+                match set {
+                    Ok((d, _)) => ran.reid = Some(d),
+                    // Merged all the same: said, so the ID is set by hand.
+                    Err(e) => {
+                        let said = format!("Merged, but the ID {id} could not be given: {e}");
+                        ran.merged.note = Some(match ran.merged.note.take() {
+                            Some(n) => format!("{n} {said}"),
+                            None => said,
+                        });
+                    }
+                }
+                Outcome::Merged(ran)
+            }
+            (r, _) => r,
         };
         out.push((c.clone(), r));
         done.fetch_add(1, Relaxed);
@@ -645,9 +719,15 @@ pub fn undo_many(
         let m = &ran.merged;
         // A kept client that took the other's folder: the folder's client gets its own ID,
         // name and CSV row back first, then the kept one its place on the list.
-        let renamed = match &ran.adopted {
+        // A new ID given after the merge goes first: the client gets its own back.
+        let reid = match &ran.reid {
             None => Ok(()),
-            Some(a) => listupdate::put_back_one(conn, root, device_id, &a.done).map(|()| {
+            Some(d) => listupdate::put_back_one(conn, root, device_id, d),
+        };
+        let renamed = match (&reid, &ran.adopted) {
+            (Err(e), _) => Err(e.clone()),
+            (_, None) => Ok(()),
+            (_, Some(a)) => listupdate::put_back_one(conn, root, device_id, &a.done).map(|()| {
                 if let Some(row) = &a.old_csv_row {
                     let _ = clients::restore_csv_row(root, &a.done.old_id, row);
                 }
@@ -867,6 +947,7 @@ mod tests {
         let choice = Choice {
             from: gone.id.clone(),
             into: kept.id.clone(),
+            new_id: None,
         };
         let (done, stop) = (AtomicUsize::new(0), AtomicBool::new(false));
         let out = merge_many(&mut conn, &root, "dev", &[choice], &done, &stop);
@@ -895,7 +976,11 @@ mod tests {
         );
         std::fs::remove_file(dismissed_path(&root)).unwrap();
         std::fs::remove_file(tmp.path().join("clients.csv")).unwrap();
-        let choice = Choice { from: b, into: a };
+        let choice = Choice {
+            from: b,
+            into: a,
+            new_id: None,
+        };
         let e = preview(&conn, &root, &[choice]).unwrap_err();
         assert!(e.contains("cannot be reached"), "{e}");
     }
@@ -955,6 +1040,7 @@ mod tests {
         let choices = [Choice {
             from: folder_client.clone(),
             into: kept.clone(),
+            new_id: None,
         }];
         let p = preview(&conn, &root, &choices).unwrap();
         let pv = p[0]
@@ -1095,10 +1181,12 @@ mod tests {
             Choice {
                 from: folder.clone(),
                 into: uuid_of(&conn, "K1"),
+                new_id: None,
             },
             Choice {
                 from: folder.clone(),
                 into: uuid_of(&conn, "K2"),
+                new_id: None,
             },
         ];
         let p = preview(&conn, &root, &choices).unwrap();
@@ -1130,6 +1218,72 @@ mod tests {
         };
         let e = clientmerge::undo(&mut conn, &root, &ran.merged, "dev").unwrap_err();
         assert!(e.contains("cannot be undone by itself"), "{e}");
+    }
+
+    /// Owner 2026-11-17: an ID neither has can be typed; the two are merged and the one
+    /// that stays is given it, its folder renamed. The undo gives each its own again.
+    #[test]
+    fn two_clients_are_merged_under_a_new_id() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (root, mut conn) = cabinet(
+            tmp.path(),
+            &[
+                ("Baker Co", "3001"),
+                ("Baker Co.", "3002"),
+                ("Other", "9000"),
+            ],
+            &[],
+        );
+        let (a, b) = (uuid_of(&conn, "3001"), uuid_of(&conn, "3002"));
+        let choice = |id: &str| Choice {
+            from: b.clone(),
+            into: a.clone(),
+            new_id: Some(id.into()),
+        };
+        // Another client's ID is refused before anything is done; one of the two's own is not.
+        let p = preview(&conn, &root, &[choice("9000")]).unwrap();
+        assert!(
+            p[0].1.as_ref().is_err_and(|e| e.contains("ID already")),
+            "{:?}",
+            p[0].1
+        );
+        let p = preview(&conn, &root, &[choice("3002")]).unwrap();
+        assert!(p[0].1.is_ok(), "{:?}", p[0].1);
+        let p = preview(&conn, &root, &[choice("BAKE7777")]).unwrap();
+        assert_eq!(p[0].1.as_ref().unwrap().new_id.as_deref(), Some("BAKE7777"));
+
+        let out = merge_many(
+            &mut conn,
+            &root,
+            "dev",
+            &[choice("BAKE7777")],
+            &AtomicUsize::new(0),
+            &AtomicBool::new(false),
+        );
+        let Outcome::Merged(ran) = &out[0].1 else {
+            panic!("{:?}", out[0].1);
+        };
+        assert!(ran.reid.is_some(), "{:?}", ran.merged.note);
+        assert_eq!(live(&conn), ["9000", "BAKE7777"]);
+        let folder = root.join("Baker Co (BAKE7777)/Income Tax/2025");
+        assert!(folder.join("return.pdf").is_file());
+        assert!(
+            folder.join("return (2).pdf").is_file(),
+            "both clients' files"
+        );
+        assert!(!root.join("Baker Co (3001)").exists() && !root.join("Baker Co. (3002)").exists());
+
+        let back = undo_many(&mut conn, &root, "dev", &[(**ran).clone()]);
+        assert!(back.iter().all(|(_, r)| r.is_ok()), "{back:?}");
+        assert_eq!(live(&conn), ["3001", "3002", "9000"]);
+        assert!(
+            root.join("Baker Co (3001)/Income Tax/2025/return.pdf")
+                .is_file()
+        );
+        assert!(
+            root.join("Baker Co. (3002)/Income Tax/2025/return.pdf")
+                .is_file()
+        );
     }
 
     /// The firm's list marks the one to keep: its IDs, compared as IDs are.
@@ -1170,18 +1324,22 @@ mod tests {
             Choice {
                 from: b.clone(),
                 into: a.clone(),
+                new_id: None,
             }, // 3002 into 3001
             Choice {
                 from: e.clone(),
                 into: d.clone(),
+                new_id: None,
             }, // refused
             Choice {
                 from: b.clone(),
                 into: c.clone(),
+                new_id: None,
             }, // 3002 is 3001 now: 3001 into 3003
             Choice {
                 from: a.clone(),
                 into: c.clone(),
+                new_id: None,
             }, // one client already
         ];
         let p = preview(&conn, &root, &choices).unwrap();

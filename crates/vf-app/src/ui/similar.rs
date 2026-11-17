@@ -61,6 +61,9 @@ pub struct SimilarPage {
     picked: BTreeSet<Key>,
     /// Which one is kept where a person chose (true: the first).
     keep: HashMap<Key, bool>,
+    /// An ID neither has, typed on the row: the two are merged under it (owner
+    /// 2026-11-17). Instead of a Keep choice.
+    new_ids: HashMap<Key, String>,
     previewing: Option<Job<Result<Result<Previewed, String>, String>>>,
     /// A "Not the same" mark being written, or every mark being forgotten (a file in the
     /// cabinet, under its lock: not on the window's thread).
@@ -142,18 +145,27 @@ impl SimilarPage {
 
     /// Why the pair cannot be ticked yet.
     fn blocked(&self, p: &Pair) -> Option<String> {
-        let keep_a = self.keep_a(p)?;
-        let (kept, other) = if keep_a { (&p.a, &p.b) } else { (&p.b, &p.a) };
+        if self.keep_a(p).is_none() && self.new_id(p).is_none() {
+            return None;
+        }
         // A kept client with no folder takes the other's folder (owner 2026-11-17: the
         // client with the right ID came from the firm's list and has none).
-        (kept.folder.is_none() && other.folder.is_none()).then(|| {
+        (p.a.folder.is_none() && p.b.folder.is_none()).then(|| {
             "Neither of these has a folder in the cabinet, so there is nothing to merge."
                 .to_string()
         })
     }
 
+    /// The new ID typed for the pair, when there is one.
+    fn new_id(&self, p: &Pair) -> Option<&str> {
+        self.new_ids
+            .get(&key(p))
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+    }
+
     fn can_tick(&self, p: &Pair) -> bool {
-        self.keep_a(p).is_some() && self.blocked(p).is_none()
+        (self.keep_a(p).is_some() || self.new_id(p).is_some()) && self.blocked(p).is_none()
     }
 
     /// The pairs the filter and the group show, by their place in the found list.
@@ -189,14 +201,20 @@ impl SimilarPage {
             .iter()
             .filter(|p| self.picked.contains(&key(p)))
             .filter_map(|p| {
-                let (kept, gone) = if self.keep_a(p)? {
-                    (&p.a, &p.b)
-                } else {
-                    (&p.b, &p.a)
+                // With a new ID typed: into the one with the folder, or with more documents.
+                let keep_a = match self.new_id(p) {
+                    Some(_) => match (p.a.folder.is_some(), p.b.folder.is_some()) {
+                        (true, false) => true,
+                        (false, true) => false,
+                        _ => p.a.docs >= p.b.docs,
+                    },
+                    None => self.keep_a(p)?,
                 };
+                let (kept, gone) = if keep_a { (&p.a, &p.b) } else { (&p.b, &p.a) };
                 Some(Choice {
                     from: gone.id.clone(),
                     into: kept.id.clone(),
+                    new_id: self.new_id(p).map(str::to_string),
                 })
             })
             .collect()
@@ -269,6 +287,7 @@ impl SimilarPage {
         let live: BTreeSet<Key> = f.pairs.iter().map(key).collect();
         self.picked.retain(|k| live.contains(k));
         self.keep.retain(|k, _| live.contains(k));
+        self.new_ids.retain(|k, _| live.contains(k));
         self.found = Some(f);
         // A tick stands only while the pair can still be merged as chosen (the CSV may have
         // changed which one is kept, or the kept one lost its folder).
@@ -800,6 +819,12 @@ fn confirm(ui: &mut egui::Ui, p: &mut SimilarPage, env: &mut Env, catalog: &Path
                             ""
                         }
                     ));
+                    if let Some(id) = &x.new_id {
+                        ui.label(widgets::caption(format!(
+                            "   Then {} is given the ID {id}, and its folder is renamed for it.",
+                            x.into.trim()
+                        )));
+                    }
                     if let Some((from, to)) = &x.adopts {
                         ui.label(widgets::caption(if from == to {
                             format!("   {} has no folder: the folder {from} becomes its folder.", x.into.trim())
@@ -896,6 +921,7 @@ fn grid(ui: &mut egui::Ui, p: &mut SimilarPage, env: &mut Env) {
     let shown = p.shown();
     let mut toggled: Option<(Key, bool)> = None;
     let mut keep: Option<(Key, bool)> = None;
+    let mut typed: Option<(Key, String)> = None;
     let mut not_same: Option<Key> = None;
     ui.visuals_mut().selection.stroke.color = theme::ink();
     let Some(f) = &p.found else {
@@ -909,13 +935,13 @@ fn grid(ui: &mut egui::Ui, p: &mut SimilarPage, env: &mut Env) {
                 .cell_layout(Layout::left_to_right(Align::Center))
                 .column(Column::exact(24.0))
                 .column(Column::initial(96.0).at_least(70.0).clip(true).resizable(true))
-                .column(Column::initial(330.0).at_least(140.0).clip(true).resizable(true))
-                .column(Column::initial(330.0).at_least(140.0).clip(true).resizable(true))
-                .column(Column::initial(210.0).at_least(120.0).clip(true).resizable(true))
+                .column(Column::initial(290.0).at_least(140.0).clip(true).resizable(true))
+                .column(Column::initial(290.0).at_least(140.0).clip(true).resizable(true))
+                .column(Column::initial(290.0).at_least(160.0).clip(true).resizable(true))
                 .column(Column::exact(110.0))
                 .header(28.0, |mut h| {
                     h.col(|_| {});
-                    for name in ["Match", "Client", "Similar client", "Keep", ""] {
+                    for name in ["Match", "Client", "Similar client", "Keep, or a new ID", ""] {
                         h.col(|ui| {
                             ui.label(RichText::new(name.to_uppercase()).small().color(theme::ink_muted()));
                         });
@@ -993,6 +1019,25 @@ fn grid(ui: &mut egui::Ui, p: &mut SimilarPage, env: &mut Env) {
                                     keep = Some((k.clone(), is_a));
                                 }
                             }
+                            // Or an ID neither has: both are merged under it.
+                            let mut text = p.new_ids.get(&k).cloned().unwrap_or_default();
+                            let r = ui
+                                .add(
+                                    egui::TextEdit::singleline(&mut text)
+                                        .hint_text("or new ID")
+                                        .desired_width(76.0),
+                                )
+                                .on_hover_text("Type an ID that neither client has. The two are merged into the one with the folder (with two folders: the one with more documents), and it is given this ID; its folder is renamed for it.");
+                            r.widget_info(|| {
+                                egui::WidgetInfo::labeled(
+                                    egui::accesskit::Role::TextInput,
+                                    true,
+                                    format!("New ID for {} and {}", who(&x.a), who(&x.b)),
+                                )
+                            });
+                            if r.changed() {
+                                typed = Some((k.clone(), text));
+                            }
                         });
                         row.col(|ui| {
                             let r = ui
@@ -1019,7 +1064,27 @@ fn grid(ui: &mut egui::Ui, p: &mut SimilarPage, env: &mut Env) {
             p.picked.remove(&k);
         }
     }
+    if let Some((k, text)) = typed {
+        // A new ID is the choice instead of Keep, and ticks the pair as Keep does.
+        if text.trim().is_empty() {
+            p.new_ids.remove(&k);
+        } else {
+            p.new_ids.insert(k.clone(), text);
+            p.keep.remove(&k);
+        }
+        let ok = p
+            .found
+            .as_ref()
+            .and_then(|f| f.pairs.iter().find(|x| key(x) == k))
+            .is_some_and(|x| p.can_tick(x));
+        if ok {
+            p.picked.insert(k);
+        } else {
+            p.picked.remove(&k);
+        }
+    }
     if let Some((k, a)) = keep {
+        p.new_ids.remove(&k);
         p.keep.insert(k.clone(), a);
         // Keep is the choice and the tick in one (owner 2026-11-17); the tick box takes it
         // off again. Not where the pair cannot be merged as chosen.
