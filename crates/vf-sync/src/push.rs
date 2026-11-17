@@ -300,7 +300,10 @@ pub fn push_notes(conn: &Connection, root: &Path, s: &Sync) -> Result<usize> {
         let Some(folder) = catalog::client_folder(conn, &client)? else {
             continue; // no folder (yet): it waits
         };
-        let files = vf_fs::fcinfo::collect(&root.join(&folder));
+        // Not read just now: this client's notes wait, still marked to send.
+        let Ok(files) = vf_fs::fcinfo::collect_checked(&root.join(&folder)) else {
+            continue;
+        };
         if !files.is_empty() {
             let body = crate::layout::ClientNotes {
                 files: files

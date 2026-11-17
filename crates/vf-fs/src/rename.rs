@@ -147,7 +147,12 @@ impl Planner {
                         r.get(8)?,
                     ))
                 })
-                .map_err(|e| format!("document {id}: {e}"))?;
+                .map_err(|e| {
+                vf_core::db::missing_or(
+                    e,
+                    "A document selected is no longer in the catalog (it was moved or trashed meanwhile): refresh the list and select again.",
+                )
+            })?;
             let (id, rel, year, doc_type, locked_by, ext, client_id, name, extra) = r;
             let mut tokens = match (ext, client_id, name) {
                 (Some(ext), Some(cid), Some(name)) => clients

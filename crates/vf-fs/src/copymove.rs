@@ -133,7 +133,12 @@ pub fn plan(
     for id in ids {
         let (rel, locked_by): (String, Option<String>) = st
             .query_row([id], |r| Ok((r.get(0)?, r.get(1)?)))
-            .map_err(|e| format!("document {id}: {e}"))?;
+            .map_err(|e| {
+                vf_core::db::missing_or(
+                    e,
+                    "A document selected is no longer in the catalog (it was moved or trashed meanwhile): refresh the list and select again.",
+                )
+            })?;
         let (dir, name) = rel.rsplit_once('/').unwrap_or(("", &rel));
         // A document under legal hold stays with its client and in this cabinet (a copy is fine).
         let held = mode == Mode::Move

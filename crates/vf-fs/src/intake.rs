@@ -852,7 +852,7 @@ fn record(
         .prepare("SELECT id, name FROM doc_type WHERE deleted_at IS NULL")
         .and_then(|mut st| st.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect())
         .map_err(|e| e.to_string())?;
-    let hints = crate::hints::load(root);
+    let hints = crate::hints::load_checked(root)?;
     // Made when the first file with no hint comes.
     let mut name_reader: Option<Option<NameReader>> = None;
     // Payer → client corrections to learn once the batch is recorded (P08 step 4).

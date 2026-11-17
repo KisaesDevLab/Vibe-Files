@@ -51,7 +51,12 @@ pub fn plan(
     for id in ids {
         let (rel, client_folder, locked_by): (String, Option<String>, Option<String>) = st
             .query_row([id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
-            .map_err(|e| format!("document {id}: {e}"))?;
+            .map_err(|e| {
+                vf_core::db::missing_or(
+                    e,
+                    "A document selected is no longer in the catalog (it was moved or trashed meanwhile): refresh the list and select again.",
+                )
+            })?;
         let (dir, name) = rel.rsplit_once('/').unwrap_or(("", &rel));
         let inside = |cf: &str| dest == cf || dest.starts_with(&format!("{cf}/"));
         let outcome = if let Some(u) = locked_by {

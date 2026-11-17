@@ -82,17 +82,28 @@ fn record(env: &mut Env, label: &str, entries: Vec<AuditEntry>) -> Option<String
     if entries.is_empty() {
         return None;
     }
-    let mut tx = vf_core::tx::Transaction::new(label);
-    for e in entries {
-        tx = tx.audit(e);
+    // What it records is done already: a catalog busy for a moment (the index writing) is
+    // tried again, a few times (this is the window's thread), before the row is given up
+    // and that is said.
+    let mut tries = 0;
+    loop {
+        let mut tx = vf_core::tx::Transaction::new(label);
+        for e in &entries {
+            tx = tx.audit(e.clone());
+        }
+        match tx.commit(
+            env.conn,
+            &mut vf_core::tx::NoFileOps,
+            &vf_core::tx::Actor::device(env.device_id),
+        ) {
+            Ok(_) => return None,
+            Err(e) if e.is_busy() && tries < 4 => {
+                tries += 1;
+                std::thread::sleep(std::time::Duration::from_millis(750));
+            }
+            Err(e) => return Some(format!(" This was NOT recorded in the audit trail: {e}")),
+        }
     }
-    tx.commit(
-        env.conn,
-        &mut vf_core::tx::NoFileOps,
-        &vf_core::tx::Actor::device(env.device_id),
-    )
-    .err()
-    .map(|e| format!(" This was NOT recorded in the audit trail: {e}"))
 }
 
 fn cabinet_id(root: &Path) -> Option<String> {
@@ -2143,6 +2154,13 @@ fn stop(a: &mut AdminPortal, ctx: &egui::Context, env: &mut Env) {
     a.err = None;
     // The lists of documents in B2 leave the portal with it (PA-80): read before the key goes.
     // Whether or not the setting is ticked now: an untick whose removal failed left them there.
+    // Settings that are there and cannot be read just now: nothing is stopped on a guess
+    // (they read as "not set": the file was removed and the lists of documents stayed on
+    // the portal under "The portal is no longer used."; QA 2026-11-17).
+    if settings::unreadable(env.root) {
+        a.err = Some("Not stopped: the portal settings in the cabinet could not be read just now. Try again in a moment.".into());
+        return;
+    }
     let listing = cabinet_id(env.root).and_then(|id| settings::load(env.root, &id));
     // Said when it fails (a read-only share): every PC would otherwise keep using it.
     if let Err(e) = settings::clear(env.root) {
@@ -2205,6 +2223,10 @@ fn save(a: &mut AdminPortal, ctx: &egui::Context, env: &mut Env) {
     // Saved only when the cabinet's settings are still the ones this form was filled from: a
     // change made on another PC meanwhile is not written over (as the B2 rules, PA-68).
     let saved = vf_fs::lock::with(env.root, "portal", "the portal settings", || {
+        // Not readable is not "changed by someone else".
+        if settings::unreadable(env.root) {
+            return Err("The portal settings in the cabinet could not be read just now: nothing was saved. Try again in a moment.".to_string());
+        }
         if settings::load(env.root, &id) != a.shown {
             return Err(STALE.to_string());
         }

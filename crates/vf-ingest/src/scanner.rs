@@ -825,12 +825,12 @@ pub fn scan_to(
     if let Some(source) = device_id.strip_prefix(TWAIN32_PREFIX) {
         let scanned = crate::twain::helper::scan32(source, &twain_settings(profile, driver_ui))?;
         let profile = for_twain(profile, driver_ui);
-        return deliver(scans_dir, |tmp| assemble_twain(scanned, &profile, tmp));
+        return deliver_kept(scans_dir, |tmp| assemble_twain(scanned, &profile, tmp));
     }
     if let Some(source) = device_id.strip_prefix(TWAIN_PREFIX) {
         let scanned = crate::twain::scan(source, &twain_settings(profile, driver_ui))?;
         let profile = for_twain(profile, driver_ui);
-        return deliver(scans_dir, |tmp| assemble_twain(scanned, &profile, tmp));
+        return deliver_kept(scans_dir, |tmp| assemble_twain(scanned, &profile, tmp));
     }
     // Hidden from the worker (it skips dot names and folders).
     let work = scans_dir.join(format!(".scan-{}", uuid::Uuid::now_v7().simple()));
@@ -886,6 +886,48 @@ fn keep_failed_pages(work: &Path, scans_dir: &Path, error: &str) -> Option<PathB
     let dst = crate::pipeline::rename_free(work, &dir, &name).ok()?;
     let _ = std::fs::write(dst.join("error.txt"), error);
     Some(dst)
+}
+
+/// [`deliver`] for a scan whose pages are held in memory only (TWAIN): the PDF is built on
+/// this PC's own disk first and then taken to the Scans folder. When the Scans folder cannot
+/// be written (its share is away, the disk is full), the PDF stays where it was built and
+/// the message says where: the pages are paper someone fed, and used to be gone with the
+/// error (QA 2026-11-17; a WIA scan keeps its page files, as before).
+pub fn deliver_kept(
+    scans_dir: &Path,
+    make: impl FnOnce(&Path) -> Result<Assembled, String>,
+) -> Result<(PathBuf, Assembled), String> {
+    let local = std::env::temp_dir().join("Vibe Files scans");
+    std::fs::create_dir_all(&local).map_err(|e| format!("cannot make {}: {e}", local.display()))?;
+    let built = crate::pipeline::free_name(&local, &format!("Scan {}.pdf", stamp()));
+    let a = make(&built).inspect_err(|_| {
+        let _ = std::fs::remove_file(&built);
+    })?;
+    // Copied under a hidden name, named when whole, as `deliver` does.
+    let name = built
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let tmp = scans_dir.join(format!(".scan-{}.pdf.tmp", uuid::Uuid::now_v7().simple()));
+    let taken = std::fs::copy(&built, &tmp)
+        .map_err(|e| e.to_string())
+        .and_then(|_| {
+            crate::pipeline::rename_free(&tmp, scans_dir, &name).map_err(|e| e.to_string())
+        });
+    match taken {
+        Ok(out) => {
+            let _ = std::fs::remove_file(&built);
+            Ok((out, a))
+        }
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp);
+            Err(format!(
+                "The scan could not be put in {} ({e}). It is kept as {}: move it to the Scans folder once that can be reached.",
+                scans_dir.display(),
+                built.display()
+            ))
+        }
+    }
 }
 
 /// Writes the scan's PDF under a hidden name, then gives it its `Scan <date>.pdf` name.
@@ -1118,5 +1160,32 @@ mod tests {
             ..Default::default()
         };
         assert!(a.note().contains("the scanner stopped: paper jam"));
+    }
+
+    /// QA 2026-11-17: a scan held in memory (TWAIN) is built on this PC first. When the
+    /// Scans folder cannot be written the PDF stays there and the message says where; when
+    /// it can, the PDF arrives and nothing is left behind.
+    #[test]
+    fn a_scan_that_cannot_reach_the_scans_folder_is_kept() {
+        let make = |out: &Path| -> Result<Assembled, String> {
+            std::fs::write(out, b"%PDF-1.7 invented scan").map_err(|e| e.to_string())?;
+            Ok(Assembled::default())
+        };
+        // A Scans folder that is not there (its share away).
+        let away = Path::new(r"\\localhost\vf-no-such-share-7f3a\Scans");
+        let e = deliver_kept(away, make).unwrap_err();
+        let kept = e
+            .split("It is kept as ")
+            .nth(1)
+            .and_then(|r| r.split(": move it").next())
+            .map(PathBuf::from)
+            .expect("the message says where");
+        assert_eq!(std::fs::read(&kept).unwrap(), b"%PDF-1.7 invented scan");
+        std::fs::remove_file(&kept).unwrap();
+        // One that is: delivered, and nothing left where it was built.
+        let t = tempfile::tempdir().unwrap();
+        let (out, _) = deliver_kept(t.path(), make).unwrap();
+        assert_eq!(std::fs::read(&out).unwrap(), b"%PDF-1.7 invented scan");
+        assert!(out.starts_with(t.path()));
     }
 }

@@ -160,9 +160,23 @@ pub fn create(
         let c = &plan.client;
         if !plan.in_master {
             let mut list = master.list.take().unwrap_or_else(empty_list);
-            list.clients.push(c.clone());
-            list.uuids.insert(c.id.clone(), c.uuid);
-            clients::save_list(root, &list)?;
+            // The list as it is now, under the lock, not as the preview saw it: another
+            // computer may have made a client with this ID since. It got a second entry,
+            // and the ID pointed at this one's folder (QA 2026-11-17).
+            match list.match_by_id(&c.id) {
+                Some(l) if l.uuid != c.uuid => {
+                    return Err(format!(
+                        "{} is {}'s ID already (the client was added on another computer just now): give the new client another ID.",
+                        c.id, l.name
+                    ));
+                }
+                Some(_) => {}
+                None => {
+                    list.clients.push(c.clone());
+                    list.uuids.insert(c.id.clone(), c.uuid);
+                    clients::save_list(root, &list)?;
+                }
+            }
         }
         if let Some(et) = &plan.entity_type {
             master

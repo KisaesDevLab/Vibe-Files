@@ -180,6 +180,14 @@ pub fn record(
     let printed = out.iter().filter(|o| o.2.is_ok()).count();
     // The print was sent; a failed audit write is said, never swallowed (QA 2026-11-04).
     let unrecorded = if printed > 0 {
+        // The print is sent: a catalog busy with another write (the index) is waited for,
+        // a few seconds at most (this is the window's thread), before its record is tried.
+        for _ in 0..4 {
+            if conn.execute_batch("BEGIN IMMEDIATE; ROLLBACK;").is_ok() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(750));
+        }
         tx.commit(
             conn,
             &mut vf_core::tx::NoFileOps,

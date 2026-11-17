@@ -347,6 +347,34 @@ pub fn collect(folder: &Path) -> std::collections::BTreeMap<String, Vec<u8>> {
     out
 }
 
+/// [`collect`]; `Err` when the folder cannot be reached or one of its notes files is there
+/// and cannot be read just now. Collected without it, the backup in B2 was replaced by one
+/// with a file missing, or nothing was sent, and the notes were marked sent either way
+/// (QA 2026-11-17).
+pub fn collect_checked(
+    folder: &Path,
+) -> Result<std::collections::BTreeMap<String, Vec<u8>>, String> {
+    if !folder.is_dir() {
+        return Err(format!("{} cannot be reached just now", folder.display()));
+    }
+    let mut out = std::collections::BTreeMap::new();
+    for p in crate::rebuild::cabinet_files(folder) {
+        if !crate::rebuild::is_notes(&p) {
+            continue;
+        }
+        let size = std::fs::metadata(&p)
+            .map_err(|e| format!("{} cannot be read just now: {e}", p.display()))?
+            .len();
+        if size > BACKUP_MAX {
+            continue;
+        }
+        let bytes = std::fs::read(&p)
+            .map_err(|e| format!("{} cannot be read just now: {e}", p.display()))?;
+        out.insert(crate::rebuild::rel(folder, &p), bytes);
+    }
+    Ok(out)
+}
+
 /// Whether `rel` can be a notes file's path below a client folder: plain folder names, no way
 /// out of the folder, and a notes file's name at the end.
 pub fn safe_backup_path(rel: &str) -> bool {
@@ -823,5 +851,18 @@ mod tests {
         done(save(t.path(), &folder, &shown, "changed", false).unwrap());
         assert_eq!(read(&folder).unwrap().memo, "changed");
         assert_eq!(attributes(&path(&folder)), Some(0x2 | 0x20));
+    }
+
+    /// QA 2026-11-17: a client folder that cannot be reached is an error for the backup, not
+    /// "no notes" (they were marked sent with nothing, or part, sent).
+    #[test]
+    fn notes_of_a_folder_that_cannot_be_reached_are_not_no_notes() {
+        let t = tempfile::tempdir().unwrap();
+        assert!(collect_checked(&t.path().join("gone")).is_err());
+        let folder = t.path().join("Invented Client (1001)");
+        std::fs::create_dir_all(&folder).unwrap();
+        assert!(collect_checked(&folder).unwrap().is_empty());
+        std::fs::write(folder.join(NAME), "[Memo]\r\ncall in March\r\n").unwrap();
+        assert_eq!(collect_checked(&folder).unwrap().len(), 1);
     }
 }

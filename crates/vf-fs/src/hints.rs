@@ -105,6 +105,24 @@ pub fn append(root: &Path, hint: &Hint) -> Result<(), String> {
     crate::cabinet::append_text(&p, &line).map_err(|e| format!("cannot write {}: {e}", p.display()))
 }
 
+/// [`load`]; `Err` when the hints are there and cannot be read just now. Read as "no hints",
+/// a batch recorded at that moment filed every scanned, printed or recognized document
+/// without its doc type, year and source, with nothing said (QA 2026-11-17).
+pub fn load_checked(root: &Path) -> Result<HashMap<String, Hint>, String> {
+    let p = path(root);
+    match std::fs::read(&p) {
+        Ok(b) => Ok(String::from_utf8_lossy(&b)
+            .lines()
+            .filter_map(|l| serde_json::from_str::<Hint>(l).ok())
+            .map(|h| (h.sha256.clone(), h))
+            .collect()),
+        Err(e) if crate::cabinet::is_absent(&p, &e) => Ok(HashMap::new()),
+        Err(e) => Err(format!(
+            "What the scans and prints of this batch are (their doc type and year) cannot be read just now ({e}): the batch is recorded at the next look."
+        )),
+    }
+}
+
 /// Every hint by hash; a later line for the same hash wins. Unreadable lines are skipped.
 pub fn load(root: &Path) -> HashMap<String, Hint> {
     std::fs::read_to_string(path(root))
@@ -138,5 +156,17 @@ mod tests {
         let all = load(t.path());
         assert_eq!(all.len(), 1);
         assert_eq!(all["abc"].tax_year, Some(2025));
+    }
+
+    /// QA 2026-11-17: hints that are there and cannot be read are an error, not "no hints"
+    /// (a batch recorded then lost every document's doc type and year); none is none.
+    #[test]
+    fn hints_that_cannot_be_read_are_not_no_hints() {
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path();
+        std::fs::create_dir_all(root.join("_Vibe")).unwrap();
+        assert!(load_checked(root).unwrap().is_empty());
+        std::fs::create_dir_all(path(root)).unwrap(); // a folder where the file goes
+        assert!(load_checked(root).is_err());
     }
 }

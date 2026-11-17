@@ -222,7 +222,15 @@ pub fn apply(
                         [&c.ext_id],
                         |r| r.get(0),
                     )
-                    .map_err(|e| format!("{}: {e}", c.ext_id))?;
+                    .map_err(|e| {
+                        vf_core::db::missing_or(
+                            e,
+                            &format!(
+                                "Client {} is no longer in this cabinet's catalog: look at the merge again.",
+                                c.ext_id
+                            ),
+                        )
+                    })?;
                 (id, f.clone())
             }
             None => {

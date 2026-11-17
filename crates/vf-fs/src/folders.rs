@@ -744,6 +744,16 @@ pub fn set_client_id(
             .list
             .take()
             .unwrap_or_else(crate::newclient::empty_list);
+        // The list as it is now, under the lock: another computer may have given this ID
+        // to a client since the preview (two clients then had one ID; QA 2026-11-17).
+        if let Some(other) = list.clients.iter().find(|c| {
+            c.uuid.to_string() != plan.client_id && c.id.eq_ignore_ascii_case(&plan.new_id)
+        }) {
+            return Err(format!(
+                "{} is {}'s ID already (set on another computer just now): choose another ID.",
+                plan.new_id, other.name
+            ));
+        }
         let Some(c) = list
             .clients
             .iter_mut()

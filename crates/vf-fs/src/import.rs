@@ -1433,6 +1433,13 @@ pub fn apply_with(
     progress_total: &std::sync::atomic::AtomicUsize,
 ) -> Result<Applied, String> {
     let cab = crate::cabinet::read(root)?;
+    // The record of the last import, when it is there, must be readable before this one
+    // starts: an import stopped part way is continued in it, and one that could not be read
+    // was begun again empty and written over the earlier batches, which could then no
+    // longer be undone (QA 2026-11-17).
+    crate::cabinet::read_json_for_write::<Applied>(&last_path(root)).map_err(|e| {
+        format!("The record of the last import cannot be read, so this one was not started: {e}")
+    })?;
     // An import stopped part way: this one continues its record.
     let mut out = match load_last(root) {
         Some(l)
@@ -1529,30 +1536,38 @@ pub fn apply_with(
     // the Transaction leaves list entries the next rebuild shows, never a folder half-bound.
     let new: Vec<&ClientPick> = chosen.iter().filter(|c| c.2.new).map(|c| c.2).collect();
     if !new.is_empty() {
-        let mut list = client_list(root)?;
-        if let Some((c, l)) = new.iter().find_map(|c| {
-            list.match_by_id(&c.ext_id)
-                .filter(|l| l.uuid != c.uuid)
-                .map(|l| (c, l))
-        }) {
-            return Err(format!(
-                "{} is {}'s ID already: give the new client {} another ID.",
-                c.ext_id, l.name, c.name
-            ));
-        }
-        for c in &new {
-            if list.match_by_id(&c.ext_id).is_none() {
-                list.clients.push(Client {
-                    id: c.ext_id.clone(),
-                    uuid: c.uuid,
-                    name: c.name.clone(),
-                    extra: Default::default(),
-                });
-                list.uuids.insert(c.ext_id.clone(), c.uuid);
-                out.new_clients += 1;
+        // Read, changed and written as one under the client list's lock, as every other
+        // change to it is: a client added on another computer meanwhile was written over
+        // (QA 2026-11-17).
+        let added = crate::lock::with(root, "clients", "the client list", || {
+            let mut list = client_list(root)?;
+            if let Some((c, l)) = new.iter().find_map(|c| {
+                list.match_by_id(&c.ext_id)
+                    .filter(|l| l.uuid != c.uuid)
+                    .map(|l| (c, l))
+            }) {
+                return Err(format!(
+                    "{} is {}'s ID already: give the new client {} another ID.",
+                    c.ext_id, l.name, c.name
+                ));
             }
-        }
-        clients::save_list(root, &list)?;
+            let mut added = 0;
+            for c in &new {
+                if list.match_by_id(&c.ext_id).is_none() {
+                    list.clients.push(Client {
+                        id: c.ext_id.clone(),
+                        uuid: c.uuid,
+                        name: c.name.clone(),
+                        extra: Default::default(),
+                    });
+                    list.uuids.insert(c.ext_id.clone(), c.uuid);
+                    added += 1;
+                }
+            }
+            clients::save_list(root, &list)?;
+            Ok(added)
+        })?;
+        out.new_clients += added;
     }
 
     // The merges, one Transaction per client: the moved files are planned under the folder kept
