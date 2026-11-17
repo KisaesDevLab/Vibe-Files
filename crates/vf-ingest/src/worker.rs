@@ -368,10 +368,14 @@ fn run(config: Arc<Mutex<Config>>, waiting: Arc<AtomicUsize>, tx: Sender<Event>,
                 {
                     Vec::new()
                 }
-                _ => {
+                // Read again: the next trouble is waited for anew.
+                Ok(()) => {
                     waited = None;
                     ready
                 }
+                // Waited long enough (or not a passing kind): the files go on, and go on at
+                // every pass from now on, not after another wait each time.
+                Err(_) => ready,
             }
         };
         if let (Some(inbox), false) = (&cfg.inbox, ready.is_empty()) {

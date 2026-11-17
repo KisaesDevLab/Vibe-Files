@@ -152,7 +152,7 @@ pub fn unreadable(root: &Path) -> bool {
             let b = zeroize::Zeroizing::new(b);
             serde_json::from_slice::<PortalSettings>(&b).is_err()
         }
-        Err(e) => e.kind() != std::io::ErrorKind::NotFound,
+        Err(e) => !vf_fs::cabinet::is_absent(&file(root), &e),
     }
 }
 

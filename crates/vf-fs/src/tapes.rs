@@ -41,7 +41,7 @@ pub fn save(root: &Path, t: &Saved) -> Result<(), String> {
 /// as it is when no tape was kept).
 pub fn unreadable(root: &Path) -> bool {
     let p = path(root);
-    std::fs::read(&p).is_err_and(|e| !crate::cabinet::is_absent(&p, &e))
+    std::fs::metadata(&p).is_err_and(|e| !crate::cabinet::is_absent(&p, &e))
 }
 
 /// The tapes saved on a document, newest first.

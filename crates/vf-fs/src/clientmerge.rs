@@ -1054,6 +1054,34 @@ mod tests {
             .unwrap()
     }
 
+    /// QA 2026-11-17: once an undo has moved the documents back, a list that cannot be put
+    /// back as well (the share for a moment) is said, not an error: the merge is undone, and
+    /// marked so, and is not offered again.
+    #[test]
+    fn an_undo_whose_lists_cannot_be_put_back_is_still_an_undo() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (root, _csv, mut conn, kept, dup) = cabinet(tmp.path());
+        let p = plan(&conn, &root, &dup, &kept).unwrap();
+        let m = apply(&mut conn, &root, &p, "dev").unwrap();
+        // The relationships cannot be read when the undo comes to them.
+        let rels = clients::master_dir(&root).join("relationships.json");
+        let text = std::fs::read(&rels).unwrap();
+        std::fs::remove_file(&rels).unwrap();
+        std::fs::create_dir(&rels).unwrap();
+        let (back, note) = undo_noted(&mut conn, &root, &m, "dev").unwrap();
+        assert_eq!(back, m.moves.len(), "every document went back");
+        assert!(
+            note.as_deref()
+                .is_some_and(|n| n.contains("were not all put back")),
+            "{note:?}"
+        );
+        assert!(root.join(DUP).join("Income Tax/2024/return.pdf").is_file());
+        // Marked undone: not offered as the last merge, and not undone twice.
+        assert!(load_last(&root).is_none());
+        std::fs::remove_dir(&rels).unwrap();
+        std::fs::write(&rels, text).unwrap();
+    }
+
     #[test]
     fn a_client_is_merged_into_another_and_put_back() {
         let tmp = tempfile::tempdir().unwrap();

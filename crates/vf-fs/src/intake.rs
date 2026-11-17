@@ -679,6 +679,35 @@ fn reconcile_dir(
     }
 }
 
+/// The hints of a batch's scans and prints. While they are there and cannot be read the
+/// batch is not recorded (`Err`: it is at the next look), so its documents do not lose their
+/// doc type and year to a moment's trouble; but only for five minutes from the first
+/// failure. Hints that can never be read must not keep every batch out of the catalog for
+/// good: after that the batch is recorded without them.
+fn hints_or_wait(root: &Path) -> Result<HashMap<String, Hint>, String> {
+    static SINCE: std::sync::Mutex<Option<(std::path::PathBuf, std::time::Instant)>> =
+        std::sync::Mutex::new(None);
+    let mut since = SINCE.lock().unwrap_or_else(|p| p.into_inner());
+    match crate::hints::load_checked(root) {
+        Ok(h) => {
+            *since = None;
+            Ok(h)
+        }
+        Err(e) => {
+            let first = match &*since {
+                Some((r, at)) if r == root => *at,
+                _ => std::time::Instant::now(),
+            };
+            *since = Some((root.to_path_buf(), first));
+            if first.elapsed() < std::time::Duration::from_secs(300) {
+                Err(e)
+            } else {
+                Ok(HashMap::new())
+            }
+        }
+    }
+}
+
 /// A file a batch put in the cabinet: where, for which client (CSV ID), its size, and its
 /// SHA-256 when the batch logged one.
 pub(crate) struct FiledFile {
@@ -852,7 +881,8 @@ fn record(
         .prepare("SELECT id, name FROM doc_type WHERE deleted_at IS NULL")
         .and_then(|mut st| st.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect())
         .map_err(|e| e.to_string())?;
-    let hints = crate::hints::load_checked(root)?;
+    // Waited for while they cannot be read, for a few minutes ([`hints_or_wait`]).
+    let hints = hints_or_wait(root)?;
     // Made when the first file with no hint comes.
     let mut name_reader: Option<Option<NameReader>> = None;
     // Payer → client corrections to learn once the batch is recorded (P08 step 4).

@@ -82,30 +82,20 @@ fn record(env: &mut Env, label: &str, entries: Vec<AuditEntry>) -> Option<String
     if entries.is_empty() {
         return None;
     }
-    // What it records is done already: a catalog busy for a moment (the index writing) is
-    // tried again, a few times (this is the window's thread), before the row is given up
-    // and that is said.
-    let mut tries = 0;
-    loop {
-        let mut tx = vf_core::tx::Transaction::new(label);
-        for e in &entries {
-            tx = tx.audit(e.clone());
-        }
-        match tx.commit(
-            env.conn,
-            &mut vf_core::tx::NoFileOps,
-            &vf_core::tx::Actor::device(env.device_id),
-        ) {
-            Ok(_) => return None,
-            Err(e) if e.is_busy() && tries < 4 => {
-                tries += 1;
-                std::thread::sleep(std::time::Duration::from_millis(750));
-            }
-            Err(e) => return Some(format!(" This was NOT recorded in the audit trail: {e}")),
-        }
+    // (One try: the connection itself waits ten seconds for another writer, and this is the
+    // window's thread.)
+    let mut tx = vf_core::tx::Transaction::new(label);
+    for e in entries {
+        tx = tx.audit(e);
     }
+    tx.commit(
+        env.conn,
+        &mut vf_core::tx::NoFileOps,
+        &vf_core::tx::Actor::device(env.device_id),
+    )
+    .err()
+    .map(|e| format!(" This was NOT recorded in the audit trail: {e}"))
 }
-
 fn cabinet_id(root: &Path) -> Option<String> {
     vf_fs::cabinet::read(root).ok().map(|c| c.cabinet_id)
 }

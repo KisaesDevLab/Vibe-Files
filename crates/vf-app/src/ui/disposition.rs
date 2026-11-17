@@ -39,6 +39,8 @@ pub struct DispositionPage {
     /// What waits for destruction and the past runs, read once per refresh (they were read
     /// from the catalog on every repaint).
     waiting: Option<Vec<disposition::Pending>>,
+    /// The catalog could not be read for this page at this time, and why.
+    unread: Option<(std::time::Instant, String)>,
     runs: Option<Vec<disposition::Run>>,
 }
 
@@ -402,17 +404,26 @@ pub fn show(ui: &mut egui::Ui, p: &mut DispositionPage, env: &mut Env, catalog: 
 
         ui.add_space(10.0);
         ui.label(RichText::new("Waiting for destruction").strong());
-        // A read that failed is said and tried again, not kept as "nothing approved".
-        if p.waiting.is_none() {
+        // A read that failed is said and tried again (every ten seconds, not every frame:
+        // each try can wait that long on a busy catalog), not kept as "nothing approved".
+        let again = p
+            .unread
+            .as_ref()
+            .is_none_or(|(at, _)| at.elapsed() > std::time::Duration::from_secs(10));
+        if p.waiting.is_none() && again {
             match disposition::pending(env.conn) {
-                Ok(w) => p.waiting = Some(w),
-                Err(e) => {
-                    ui.colored_label(
-                        crate::ui::theme::error(),
-                        format!("What waits for destruction could not be read just now ({e})."),
-                    );
+                Ok(w) => {
+                    p.waiting = Some(w);
+                    p.unread = None;
                 }
+                Err(e) => p.unread = Some((std::time::Instant::now(), e)),
             }
+        }
+        if let Some((_, e)) = &p.unread {
+            ui.colored_label(
+                crate::ui::theme::error(),
+                format!("The catalog could not be read just now ({e}); it is read again in a moment."),
+            );
         }
         let pending = p.waiting.clone().unwrap_or_default();
         let today_s = today.to_string();
@@ -488,15 +499,10 @@ pub fn show(ui: &mut egui::Ui, p: &mut DispositionPage, env: &mut Env, catalog: 
 
         ui.add_space(10.0);
         ui.label(RichText::new("Runs").strong());
-        if p.runs.is_none() {
+        if p.runs.is_none() && again {
             match disposition::runs(env.conn, None) {
                 Ok(r) => p.runs = Some(r),
-                Err(e) => {
-                    ui.colored_label(
-                        crate::ui::theme::error(),
-                        format!("The runs could not be read just now ({e})."),
-                    );
-                }
+                Err(e) => p.unread = Some((std::time::Instant::now(), e)),
             }
         }
         let runs = p.runs.clone().unwrap_or_default();

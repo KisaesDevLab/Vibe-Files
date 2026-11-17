@@ -6,6 +6,11 @@
 //! share (no administrative share, not an administrator) the cabinet is used by its local
 //! path, which still runs every computer against the others.
 //!
+//! These are threads of one process. They show that the cabinet's locks, the catalogs and
+//! the shared files hold up under several workers over a network path; they do not run
+//! several copies of the program, on several machines, each with its own window, worker
+//! threads and Windows login. `docs/MULTI_USER_CHECK.md` is for that.
+//!
 //! What must hold however the work interleaves:
 //! - a shared list several computers add to at once holds every addition (no save writes
 //!   over another's);
@@ -225,6 +230,11 @@ fn documents(conn: &Connection) -> BTreeMap<String, String> {
 /// Four computers index a cabinet new to all of them at the same moment (the morning every
 /// session host starts). Each ends with every document, under the same id on every
 /// computer, and each client folder's records name each document once.
+///
+/// What this shows: `rebuild::index` takes the cabinet's index lock, so the four take their
+/// turn; the test proves that the turn-taking holds through the network path and that the
+/// later ones take the first one's ids from the folders' records. It does not show four
+/// indexes writing records at the same instant: the lock is what keeps that from happening.
 #[test]
 fn computers_indexing_at_once_agree_on_every_document() {
     const PCS: usize = 4;

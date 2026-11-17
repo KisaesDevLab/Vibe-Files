@@ -376,6 +376,39 @@ mod tests {
     }
 
     /// P01 done-when: the folder tree matches the template and the sentinel is valid SentinelV1.
+    /// QA 2026-11-17: the ID is checked again when the client is made, under the client
+    /// list's lock. Another computer that made a client with it since the preview keeps it;
+    /// this one is refused and the list has the ID once.
+    #[test]
+    fn an_id_taken_since_the_preview_is_refused() {
+        let mut c = cab();
+        let p = plan(&c.conn, &c.root, &req("1042", "Anderson Farms LLC")).unwrap();
+        // Meanwhile, on another computer: a client with that ID goes on the list.
+        let theirs = Uuid::new_v4();
+        let mut list = empty_list();
+        list.clients.push(filer_core::clients::Client {
+            id: "1042".into(),
+            uuid: theirs,
+            name: "Another Client Inc".into(),
+            extra: Default::default(),
+        });
+        list.uuids.insert("1042".into(), theirs);
+        clients::save_list(&c.root, &list).unwrap();
+        let e = create(&mut c.conn, &c.root, &p, "dev-1").unwrap_err();
+        assert!(
+            e.contains("Another Client Inc") && e.contains("already"),
+            "{e}"
+        );
+        let list = clients::load(&c.root).unwrap().list.unwrap();
+        assert_eq!(list.clients.len(), 1);
+        assert_eq!(
+            list.uuids.get("1042"),
+            Some(&theirs),
+            "the ID is still theirs"
+        );
+        assert!(!c.root.join(&p.folder_rel).exists(), "no folder was made");
+    }
+
     #[test]
     fn creates_template_tree_and_valid_sentinel() {
         let mut c = cab();

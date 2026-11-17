@@ -275,6 +275,8 @@ pub struct TapeState {
     flash: Option<(usize, [f32; 4], std::time::Instant)>,
     /// While dragging in pick mode: how many amounts, their sum.
     pub drag_status: Option<String>,
+    /// The cabinet's kept tapes could not be reached when the history was read.
+    unreadable: bool,
     /// An amount on the tape being changed: (line, the text typed, focus still to be given,
     /// the tape's revision when the box opened: a tape changed since is another tape).
     pub edit_amount: Option<(usize, String, bool, u64)>,
@@ -289,6 +291,7 @@ impl Default for TapeState {
             captions: true,
             include_labels: true,
             link: true,
+            unreadable: false,
             edit_amount: None,
             note: String::new(),
             placing: false,
@@ -4438,6 +4441,8 @@ fn tape_history(v: &mut Viewer, env: &Env<'_>, doc: &Doc) {
         .map(|p| p.to_string_lossy().replace('\\', "/"))
         .unwrap_or_default();
     let mut list: Vec<TapeEntry> = Vec::new();
+    // Looked at once with the history (not on every frame the History menu is open).
+    v.tape.unreadable = vf_fs::tapes::unreadable(env.root);
     let found = annot::read_tapes(&doc.path).unwrap_or_default();
     v.tape.on_file = found.iter().map(|t| (t.page, t.rect)).collect();
     for t in found {
@@ -4655,7 +4660,7 @@ fn tape_panel(ui: &mut egui::Ui, v: &mut Viewer, env: &mut Env<'_>, doc: &Doc) {
                     .unwrap_or_default();
                 ui.menu_button("History", |ui| {
                     if hist.is_empty() {
-                        ui.label(widgets::caption(if vf_fs::tapes::unreadable(env.root) {
+                        ui.label(widgets::caption(if v.tape.unreadable {
                             "The tapes kept in the cabinet could not be read just now."
                         } else {
                             "No tapes on this document yet."

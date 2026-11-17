@@ -585,6 +585,54 @@ mod tests {
         std::fs::write(p, body).unwrap();
     }
 
+    /// QA 2026-11-17: a merge that stops at a later client (its folder cannot be made) has
+    /// moved the clients before it. They are on record, so the merge can be undone; it used
+    /// to write its record only at the very end.
+    #[test]
+    fn a_merge_that_stops_part_way_can_be_undone() {
+        let mut here = cab("here");
+        let mut there = cab("there");
+        let acme = client(&mut there, "ACME1002", "Acme LLC");
+        let zeta = client(&mut there, "ZETA1009", "Zeta Farms");
+        put(
+            &there.root,
+            &format!("{acme}/Bookkeeping/2025/ledger.pdf"),
+            "invented ledger",
+        );
+        put(
+            &there.root,
+            &format!("{zeta}/Bookkeeping/2025/books.pdf"),
+            "invented books",
+        );
+        crate::rebuild::rebuild(&mut there.conn, &there.root, "dev").unwrap();
+        let p = plan(&here.conn, &here.root, &there.root).unwrap();
+        // Something is in the way of the second client's folder here (made meanwhile on
+        // another PC): that client cannot be taken in, and the merge stops there.
+        std::fs::write(here.root.join(&zeta), "in the way").unwrap();
+        let done = std::sync::atomic::AtomicUsize::new(0);
+        let stopped = apply(&mut here.conn, &here.root, &p, "dev", &done);
+        assert!(stopped.is_err(), "{stopped:?}");
+        let moved = here
+            .root
+            .join(format!("{acme}/Bookkeeping/2025/ledger.pdf"));
+        assert!(
+            moved.is_file(),
+            "the first client was moved before it stopped"
+        );
+        // On record, and undone from it.
+        let m = load_last(&here.root).expect("a record of what was moved");
+        assert_eq!((m.clients, m.moved), (1, 1));
+        undo(&mut here.conn, &here.root, &m, "dev").unwrap();
+        assert!(!moved.exists());
+        assert!(
+            there
+                .root
+                .join(format!("{acme}/Bookkeeping/2025/ledger.pdf"))
+                .is_file(),
+            "back in the cabinet it came from"
+        );
+    }
+
     #[test]
     fn a_cabinet_merges_by_client_id_and_undoes() {
         let mut here = cab("here");

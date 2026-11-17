@@ -1437,9 +1437,26 @@ pub fn apply_with(
     // starts: an import stopped part way is continued in it, and one that could not be read
     // was begun again empty and written over the earlier batches, which could then no
     // longer be undone (QA 2026-11-17).
-    crate::cabinet::read_json_for_write::<Applied>(&last_path(root)).map_err(|e| {
-        format!("The record of the last import cannot be read, so this one was not started: {e}")
-    })?;
+    // Only one that cannot be reached stops it. One that reads and makes no sense (a
+    // record cut short, or one of a build this one does not know) can never be continued
+    // or undone: it is set aside, so the import page is not closed for good by it.
+    let last = last_path(root);
+    match std::fs::read(&last) {
+        Ok(b) if serde_json::from_slice::<Applied>(&b).is_err() => {
+            let aside = last.with_extension(format!(
+                "json.unreadable-{}",
+                vf_core::now_rfc3339().replace(':', "")
+            ));
+            let _ = std::fs::rename(&last, aside);
+        }
+        Ok(_) => {}
+        Err(e) if crate::cabinet::is_absent(&last, &e) => {}
+        Err(e) => {
+            return Err(format!(
+                "The record of the last import cannot be read just now ({e}), so this one was not started: try again in a moment."
+            ));
+        }
+    }
     // An import stopped part way: this one continues its record.
     let mut out = match load_last(root) {
         Some(l)

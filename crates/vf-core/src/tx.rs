@@ -880,6 +880,53 @@ mod tests {
             .unwrap()
     }
 
+    /// QA 2026-11-17: while an undo's files go back, the catalog is not held: another
+    /// session's write gets through at once (it used to wait ten seconds and fail when
+    /// many files were being moved back).
+    #[test]
+    fn another_session_writes_while_an_undo_moves_its_files() {
+        /// A file system whose reverse of each file is the moment another session writes.
+        struct Busy {
+            inner: FakeFs,
+            catalog: PathBuf,
+            wrote: Vec<bool>,
+        }
+        impl FileOps for Busy {
+            fn apply(&mut self, op: &FileOp) -> std::result::Result<AppliedOp, String> {
+                self.inner.apply(op)
+            }
+            fn reverse(&mut self, a: &AppliedOp) -> std::result::Result<(), String> {
+                let other = Connection::open(&self.catalog).unwrap();
+                // No waiting at all: held, this fails at once.
+                other.busy_timeout(std::time::Duration::ZERO).unwrap();
+                self.wrote.push(
+                    other
+                        .execute(
+                            "INSERT OR REPLACE INTO local_state (k, v) VALUES ('other', '1')",
+                            [],
+                        )
+                        .is_ok(),
+                );
+                self.inner.reverse(a)
+            }
+        }
+        let (t, mut c, actor) = setup();
+        let mut fs = Busy {
+            inner: FakeFs::default(),
+            catalog: t.path().join("c.db"),
+            wrote: vec![],
+        };
+        fs.inner
+            .files
+            .extend(["/in/a.pdf".into(), "/in/b.pdf".into()]);
+        let done = tx_two_moves().commit(&mut c, &mut fs, &actor).unwrap();
+        undo(&mut c, &mut fs, &actor, &done.tx_id).unwrap();
+        assert_eq!(fs.wrote, [true, true], "the catalog was free both times");
+        assert!(fs.inner.files.contains(&PathBuf::from("/in/a.pdf")));
+        assert_eq!(count(&c, "device"), 0, "and the undo's own write is made");
+        assert_eq!(count(&c, "tx_journal"), 0);
+    }
+
     #[test]
     fn commit_applies_everything_and_undo_reverses_it() {
         let (_t, mut c, actor) = setup();
