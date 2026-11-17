@@ -2213,3 +2213,28 @@ fn an_unreadable_admin_password_file_is_not_a_removal() {
     assert!(vf_fs::trash::check_pin(&a.root, "482193"));
     assert!(vf_fs::trash::check_pin(&b.root, "482193"));
 }
+
+/// QA 2026-11-17: the push's side of the same thing. A password file that is there and
+/// cannot be read is not "deleted here": no removal is written, and nothing is sent without
+/// it (the push says so).
+#[test]
+fn a_push_does_not_send_a_removal_for_an_unreadable_admin_password_file() {
+    let t = tempfile::tempdir().unwrap();
+    let store = Remote::memory();
+    let mut a = pc_a(t.path(), store.clone());
+    vf_fs::trash::set_pin(&mut a.conn, &a.root, "dev-a", None, "482193").unwrap();
+    vf_sync::push::push(&mut a.conn, &a.root, &a.sync, None).unwrap();
+    let mut b = pc_b(t.path(), store.clone(), &a);
+    let pin = vf_fs::trash::pin_file(&b.root);
+    let text = std::fs::read(&pin).unwrap();
+    std::fs::remove_file(&pin).unwrap();
+    std::fs::create_dir(&pin).unwrap();
+    let e = vf_sync::push::push(&mut b.conn, &b.root, &b.sync, None).unwrap_err();
+    assert!(e.to_string().contains("Nothing was sent"), "{e}");
+    assert!(pin.is_dir(), "no removal written in its place");
+    std::fs::remove_dir(&pin).unwrap();
+    std::fs::write(&pin, text).unwrap();
+    vf_sync::push::push(&mut b.conn, &b.root, &b.sync, None).unwrap();
+    vf_sync::pull::pull(&mut a.conn, &a.root, &a.sync).unwrap();
+    assert!(vf_fs::trash::check_pin(&a.root, "482193"), "A still has it");
+}

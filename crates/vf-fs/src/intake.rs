@@ -594,7 +594,10 @@ fn reconcile_dir(
     }
     let batch = lb.batch.to_string();
     // Filed before this catalog was made from the listing: its files are in it already.
-    let was = recorded(conn, &batch)?;
+    // The catalog busy just now: looked at again at the next look, not an error to show.
+    let Ok(was) = recorded(conn, &batch) else {
+        return Ok(out);
+    };
     if was.is_none()
         && cataloged_before(conn).is_some_and(|t| lb.committed_at.timestamp_micros() < t)
     {
@@ -1721,6 +1724,23 @@ mod tests {
         let mut f = fx();
         let acme = client("1001", "Acme LLC");
         let rep = file(&f, &acme, &["w2.pdf", "1099-int.pdf"], false);
+        // QA 2026-11-17: another session sharing this catalog is recording (it holds the
+        // lock beside the catalog): this one records nothing, and does once it is free.
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            let lock = format!("{}.intake-record.lock", f.conn.path().unwrap());
+            let held = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .share_mode(0)
+                .open(&lock)
+                .unwrap();
+            assert!(!reconcile(&mut f.conn, &f.root, "dev").unwrap().changed());
+            assert_eq!(n(&f.conn, "SELECT count(*) FROM document"), 0);
+            drop(held);
+        }
         let r = reconcile(&mut f.conn, &f.root, "dev").unwrap();
         let batch = rep.last_batch.batch.to_string();
         assert_eq!(r.recorded, Some((batch, 2, 0)));

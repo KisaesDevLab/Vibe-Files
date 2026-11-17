@@ -1464,6 +1464,33 @@ ANDE1042,Anderson Farms LLC
         assert_eq!(n, 1);
     }
 
+    /// QA 2026-11-17: a folder template that is there and cannot be understood (a save cut
+    /// short, a newer build's file) shows the default tree, and that default is not saved
+    /// over the firm's template.
+    #[test]
+    fn an_unreadable_folder_template_is_not_saved_over() {
+        let mut h = harness();
+        let file = vf_fs::clients::master_dir(&h.state().root).join("template.json");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, "{ \"name\": \"{Client} ({ID})\", ").unwrap();
+        click(&mut h, "Folder templates");
+        h.run();
+        assert!(h.query_by_label_contains("could not be read").is_some());
+        // Something changed on the page, so only the unreadable file keeps Save off.
+        type_into(&mut h, "Name", "Renamed");
+        h.run();
+        {
+            use egui_kittest::kittest::NodeT;
+            let save = h.get_by_label("Save template");
+            assert!(save.accesskit_node().is_disabled(), "Save is off");
+        }
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            "{ \"name\": \"{Client} ({ID})\", ",
+            "left as it was"
+        );
+    }
+
     /// Owner 2026-11-17: the log's folder cannot be opened from their login, so Admin ›
     /// Devices shows this computer's log by day, filtered, with Copy.
     #[test]

@@ -201,11 +201,11 @@ pub fn claim_file(p: &Path) -> Option<PathBuf> {
     Some(p.with_file_name(format!(".vf-claim-{name}.txt")))
 }
 
-/// How long a staged file is taken again after errors that pass ([`passing`]).
+/// How long staged files wait while the cabinet's lists cannot be read ([`passing`]).
 const PASSING_FOR: Duration = Duration::from_secs(300);
 
-/// Whether an error from processing a staged file is of the cabinet at this moment (someone
-/// else saving a shared file, the share or the catalog not answering), not of the file.
+/// Whether an error from reading the cabinet's lists is of the cabinet at this moment
+/// (someone else saving a shared file, the share not answering), not a lasting one.
 fn passing(error: &str) -> bool {
     let e = error.to_ascii_lowercase();
     [
@@ -304,8 +304,8 @@ fn run(config: Arc<Mutex<Config>>, waiting: Arc<AtomicUsize>, tx: Sender<Event>,
     // Size seen on the previous pass: a file is processed when it has the same, non-zero size
     // twice in a row and can be opened for writing (no one else is still writing it).
     let mut sizes: HashMap<PathBuf, u64> = HashMap::new();
-    // Staged files whose processing met a passing error, and since when.
-    let mut waited: HashMap<PathBuf, std::time::Instant> = HashMap::new();
+    // Since when the cabinet's lists could not be read for the files that are ready.
+    let mut waited: Option<std::time::Instant> = None;
     // Handled, but could not be moved out of the folder (open in another program): not handled
     // again until it changes (QA I5).
     let mut stuck: HashMap<PathBuf, (u64, u64)> = HashMap::new();
@@ -352,6 +352,28 @@ fn run(config: Arc<Mutex<Config>>, waiting: Arc<AtomicUsize>, tx: Sender<Event>,
         }
         waiting.store(seen.len(), Ordering::Relaxed);
         sizes = seen;
+        // What every file needs of the cabinet first (the client list, the doc types), looked
+        // at before any file is touched: when it cannot be read just now (another PC saving
+        // it, the share for a moment) the files wait for the next pass, for a few minutes.
+        // Processed then, each failed and went to the failed folder for good (QA
+        // 2026-11-17). Before any work: nothing is delivered or read twice.
+        let ready = if ready.is_empty() {
+            ready
+        } else {
+            match pipeline::cabinet_ready(&cfg.root) {
+                Err(e)
+                    if passing(&e)
+                        && waited.get_or_insert_with(std::time::Instant::now).elapsed()
+                            < PASSING_FOR =>
+                {
+                    Vec::new()
+                }
+                _ => {
+                    waited = None;
+                    ready
+                }
+            }
+        };
         if let (Some(inbox), false) = (&cfg.inbox, ready.is_empty()) {
             let pdfium = cfg
                 .pdfium_dir
@@ -371,28 +393,8 @@ fn run(config: Arc<Mutex<Config>>, waiting: Arc<AtomicUsize>, tx: Sender<Event>,
                     continue;
                 };
                 let ev = match process_guarded(&ctx, &p, origin) {
-                    Ok(done) => {
-                        waited.remove(&p);
-                        Event::Processed(done)
-                    }
-                    // Something of the cabinet's could not be read or written just now
-                    // (another PC saving the client list, the share for a moment): nothing
-                    // is wrong with this file. Left where it is and taken again, for a few
-                    // minutes; it used to go to the failed folder and stay there (QA
-                    // 2026-11-17).
-                    Err(error)
-                        if passing(&error)
-                            && waited
-                                .entry(p.clone())
-                                .or_insert_with(std::time::Instant::now)
-                                .elapsed()
-                                < PASSING_FOR =>
-                    {
-                        let _ = std::fs::remove_file(&claimed);
-                        continue;
-                    }
+                    Ok(done) => Event::Processed(done),
                     Err(error) => {
-                        waited.remove(&p);
                         let _ = pipeline::set_aside(&p, &error);
                         Event::Failed {
                             staged: p.clone(),

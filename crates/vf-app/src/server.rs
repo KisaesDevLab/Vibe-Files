@@ -608,6 +608,8 @@ pub struct Watch {
     seed_showing: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// Then the next one is made at this time, not in a quarter of an hour.
     again: Option<std::time::Instant>,
+    /// Reads in a row that could not be made.
+    fails: u32,
     /// Make the copy the other servers start from again at the next read, whatever its age.
     seed_now: bool,
     /// That copy was asked for and not made (the share refused it, another server had it
@@ -631,6 +633,7 @@ impl Default for Watch {
             failed: Default::default(),
             seed_showing: Default::default(),
             again: None,
+            fails: 0,
             seed_now: false,
             seed_owed: Default::default(),
             seed_busy: Default::default(),
@@ -650,6 +653,7 @@ impl Watch {
             failed: Default::default(),
             seed_showing: Default::default(),
             again: None,
+            fails: 0,
             seed_now: false,
             seed_owed: Default::default(),
             seed_busy: Default::default(),
@@ -699,9 +703,21 @@ impl Watch {
                     // first one (the sweep, B2 sync, Intake's recording) goes on waiting,
                     // and it is made again in half a minute (QA 2026-11-17: a busy catalog
                     // let those run on a catalog as old as the copy it started from).
+                    // Five times: a read that never works (a log that cannot be read at
+                    // all) must not keep the sweep, B2 sync and Intake's recording waiting
+                    // for good. After that it is tried at the usual pace.
                     if self.failed.swap(false, std::sync::atomic::Ordering::SeqCst) {
-                        self.again = Some(std::time::Instant::now() + AT_MOST);
+                        self.fails += 1;
+                        if self.fails < 5 {
+                            self.again = Some(std::time::Instant::now() + AT_MOST);
+                        } else {
+                            tracing::warn!(
+                                "other servers' changes not read after five tries: going on without"
+                            );
+                            self.first = false;
+                        }
                     } else {
+                        self.fails = 0;
                         self.first = false;
                     }
                     !folders.is_empty()

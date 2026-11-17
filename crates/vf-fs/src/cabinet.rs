@@ -384,4 +384,20 @@ mod tests {
         assert_eq!(f.name, None);
         assert_eq!(f.display_name(Path::new("C:/Firm/Clients")), "Clients");
     }
+    /// QA 2026-11-17: "not there" is said only of a file whose folder can be seen. A share
+    /// that is away gives "not found" too, and must not read as "no file".
+    #[test]
+    fn a_file_on_a_share_that_is_away_is_not_absent() {
+        let t = tempfile::tempdir().unwrap();
+        let here = t.path().join("_Vibe").join("x.json");
+        std::fs::create_dir_all(here.parent().unwrap()).unwrap();
+        let e = std::fs::read(&here).unwrap_err();
+        assert!(is_absent(&here, &e), "{e:?}");
+        assert_eq!(read_json_for_write::<Vec<String>>(&here).unwrap(), None);
+        // A share nobody has.
+        let away = Path::new(r"\\localhost\vf-no-such-share-7f3a\Clients\_Vibe\x.json");
+        let e = std::fs::read(away).unwrap_err();
+        assert!(!is_absent(away, &e), "{e:?}");
+        assert!(read_json_for_write::<Vec<String>>(away).is_err());
+    }
 }

@@ -703,11 +703,13 @@ fn still_due(
         Ok(_) => Ok(Some("the file on disk is not the catalog's content".into())),
         // Not there; or there and not readable just now (open in another program, the
         // share): left for another run, its approval kept ([`NOT_READ`]).
-        Err(e) if !root.join(rel).exists() => {
-            let _ = e;
-            Ok(Some("the file is not there".into()))
+        Err(_) => {
+            let p = root.join(rel);
+            match std::fs::metadata(&p) {
+                Err(e) if cabinet::is_absent(&p, &e) => Ok(Some("the file is not there".into())),
+                _ => Ok(Some(NOT_READ.into())),
+            }
         }
-        Err(_) => Ok(Some(NOT_READ.into())),
     }
 }
 
@@ -1225,7 +1227,7 @@ pub fn destroy_due(
         .commit(conn, &mut NoFileOps, &Actor::device(device_id))
         .map_err(|e| {
             format!(
-                "The documents were destroyed and the certificate was written ({cert_rel}), but the catalog could not be updated ({e}). They are still listed: run the integrity sweep (Admin › Integrity sweep) and mark them missing, and keep the certificate."
+                "The documents were destroyed and the certificate was written ({cert_rel}), but this computer's catalog could not be updated ({e}). They are still listed here, with no file behind them. Keep the certificate: it is the record of what was destroyed."
             )
         })?;
     // The files it destroyed, for the other servers (PA-36).
@@ -1595,6 +1597,59 @@ mod tests {
             )
             .unwrap();
         assert_eq!(left, 0, "their approvals are cleared");
+    }
+
+    /// QA 2026-11-17: whether another document (on another PC) has this content as a version
+    /// is in the version's sidecar. One that cannot be read is taken as saying yes: the
+    /// stored content is not wiped (it used to read as "nobody else", and a wipe cannot be
+    /// taken back).
+    #[test]
+    fn a_version_whose_sidecar_cannot_be_read_is_not_wiped() {
+        let mut f = fx();
+        let root = f.root.clone();
+        let tmp = crate::content::tmp_file(&root, "pdf").unwrap();
+        std::fs::write(&tmp, b"return with annotations").unwrap();
+        let rep = crate::content::replace(
+            &mut f.conn,
+            &root,
+            "dev",
+            "ret-2018",
+            &tmp,
+            crate::content::Change {
+                label: "annotate",
+                created_by: "annotate",
+                reason: "before annotations",
+                detail: json!({}),
+                extra: vec![],
+                based_on: None,
+            },
+        )
+        .unwrap()
+        .unwrap();
+        let old = cabinet::version_path(&root, &rep.old_hash);
+        assert!(old.is_file());
+        // Unreadable: a folder where the sidecar is.
+        let sidecar = old.with_extension("json");
+        std::fs::remove_file(&sidecar).unwrap();
+        std::fs::create_dir(&sidecar).unwrap();
+        let today = d(2026, 11, 3);
+        let lines: Vec<Line> = eligible(&f.conn, &root, today)
+            .unwrap()
+            .lines
+            .into_iter()
+            .filter(|l| l.doc_id == "ret-2018")
+            .collect();
+        approve(&mut f.conn, &f.root, "dev", &lines, today).unwrap();
+        let run = destroy_due(&mut f.conn, &root, "dev", d(2026, 12, 3), "Firm").unwrap();
+        assert_eq!(run.destroyed, 1, "{run:?}");
+        assert!(
+            !root.join("B/2018/return.pdf").exists(),
+            "the document itself goes"
+        );
+        assert!(
+            old.is_file(),
+            "the stored version stays: who else has it is not known"
+        );
     }
 
     /// PHASES P07 done-when 3: secure delete leaves no copy in the versions store, the

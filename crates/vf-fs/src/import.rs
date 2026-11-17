@@ -1852,6 +1852,26 @@ pub fn undo(
 mod tests {
     use super::*;
 
+    /// QA 2026-11-17: the record of the last import is in the cabinet, where every PC sees
+    /// it. Undo on a PC whose catalog did not make the import is refused before anything is
+    /// touched, and the record stays for the PC that did.
+    #[test]
+    fn undo_on_a_pc_that_did_not_import_is_refused_and_the_record_stays() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("cabinet");
+        std::fs::create_dir_all(root.join("_Vibe")).unwrap();
+        let mut conn =
+            vf_core::db::open(&tmp.path().join("catalog.db"), vf_core::db::Storage::Local).unwrap();
+        let applied = Applied {
+            bind_txs: vec!["a-transaction-of-another-catalog".into()],
+            finished: true,
+            ..Default::default()
+        };
+        std::fs::write(last_path(&root), serde_json::to_vec(&applied).unwrap()).unwrap();
+        let e = undo(&mut conn, &root, &applied, "dev").unwrap_err();
+        assert!(e.contains("another computer"), "{e}");
+        assert!(last_path(&root).is_file(), "the record stays");
+    }
     #[test]
     fn years_are_found_inside_words() {
         assert_eq!(year_in("2023 Tax Return"), Some(2023));

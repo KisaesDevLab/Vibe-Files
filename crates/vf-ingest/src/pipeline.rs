@@ -123,6 +123,12 @@ impl Lookup {
 }
 
 /// Processes one staged file. On error nothing was delivered and the file is where it was.
+/// Whether what [`process`] reads of the cabinet before it touches a file (the client list,
+/// the doc types) can be read now.
+pub fn cabinet_ready(root: &Path) -> Result<(), String> {
+    Lookup::load(root).map(|_| ())
+}
+
 pub fn process(ctx: &Context<'_>, staged: &Path, origin: Origin) -> Result<Processed, String> {
     let name = staged
         .file_name()

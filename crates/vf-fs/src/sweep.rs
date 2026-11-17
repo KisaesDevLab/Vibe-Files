@@ -435,14 +435,20 @@ pub fn adopt_modified(
     Ok(items.iter().map(|m| m.rel_path.clone()).collect())
 }
 
-/// Whether document `id` is still live at `rel`.
-fn still_at(conn: &Connection, id: &str, rel: &str) -> bool {
-    conn.query_row(
+/// Whether document `id` is still live at `rel`. `Err`: the catalog could not be read just
+/// now (nothing is then changed on a guess either way).
+fn still_at(conn: &Connection, id: &str, rel: &str) -> Result<bool, String> {
+    match conn.query_row(
         "SELECT 1 FROM document WHERE id = ?1 AND rel_path = ?2 AND deleted_at IS NULL",
         [id, rel],
         |_| Ok(()),
-    )
-    .is_ok()
+    ) {
+        Ok(()) => Ok(true),
+        Err(vf_core::db::SqlError::QueryReturnedNoRows) => Ok(false),
+        Err(e) => Err(format!(
+            "The catalog could not be read just now ({e}). Nothing was changed: try again in a moment."
+        )),
+    }
 }
 
 /// Follows moves made outside the app: each document's path becomes where its content is now.
@@ -455,15 +461,16 @@ pub fn follow_moves(
     // As things are now, not as the sweep found them minutes ago (another PC, or this PC's
     // own change-follower, may have moved the document since): only a document still at the
     // path it was missed at, whose file is still gone there and still at the new place.
-    let items: Vec<(Missing, Unknown)> = items
-        .iter()
-        .filter(|(m, u)| {
-            still_at(conn, &m.doc_id, &m.rel_path)
-                && !root.join(&m.rel_path).exists()
-                && root.join(&u.rel_path).is_file()
-        })
-        .cloned()
-        .collect();
+    let mut now_items = Vec::new();
+    for (m, u) in items {
+        if still_at(conn, &m.doc_id, &m.rel_path)?
+            && !root.join(&m.rel_path).exists()
+            && root.join(&u.rel_path).is_file()
+        {
+            now_items.push((m.clone(), u.clone()));
+        }
+    }
+    let items = now_items;
     let items = &items[..];
     if items.is_empty() {
         return Ok(0);
@@ -523,11 +530,13 @@ pub fn mark_missing(
     // As things are now (see [`follow_moves`]): a document moved since the sweep looked,
     // or whose file is back, is not missing. Marked on the old report, a live document was
     // tombstoned and its delete sent to B2 (QA 2026-11-17).
-    let items: Vec<Missing> = items
-        .iter()
-        .filter(|m| still_at(conn, &m.doc_id, &m.rel_path) && !root.join(&m.rel_path).exists())
-        .cloned()
-        .collect();
+    let mut now_items = Vec::new();
+    for m in items {
+        if still_at(conn, &m.doc_id, &m.rel_path)? && !root.join(&m.rel_path).exists() {
+            now_items.push(m.clone());
+        }
+    }
+    let items = now_items;
     let items = &items[..];
     if items.is_empty() {
         return Ok(0);
@@ -1369,6 +1378,27 @@ mod tests {
         let mut unknown: Vec<&str> = d.unknown.iter().map(|u| u.rel_path.as_str()).collect();
         unknown.sort();
         assert!(unknown[0].ends_with("notice.pdf") && unknown[1].ends_with("scan.pdf"));
+
+        // QA 2026-11-17: a report is acted on as things are now. The file reported missing
+        // is back (restored on another PC meanwhile): it is not marked missing.
+        std::fs::write(year.join("1099.pdf"), "back again").unwrap();
+        assert_eq!(
+            mark_missing(&mut conn, &root, "dev", &d.missing).unwrap(),
+            0
+        );
+        let live: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM document WHERE rel_path LIKE '%/1099.pdf' AND deleted_at IS NULL",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(live, 1, "still a document");
+        std::fs::remove_file(year.join("1099.pdf")).unwrap();
+        // And a move is followed only while the file is still where the report found it.
+        std::fs::rename(other.join("k1.pdf"), other.join("k1 elsewhere.pdf")).unwrap();
+        assert_eq!(follow_moves(&mut conn, &root, "dev", &d.moved).unwrap(), 0);
+        std::fs::rename(other.join("k1 elsewhere.pdf"), other.join("k1.pdf")).unwrap();
 
         follow_moves(&mut conn, &root, "dev", &d.moved).unwrap();
         mark_missing(&mut conn, &root, "dev", &d.missing).unwrap();
