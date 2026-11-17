@@ -1153,14 +1153,49 @@ pub fn behind_folder_index(conn: &Connection, root: &Path) -> bool {
         .unwrap_or_default();
     // (The folder's client file is asked for only for a folder the catalog has none for:
     // none at all once the two are in line.)
-    let behind = bound.iter().any(|(id, name)| {
-        !have.contains(&id.to_uppercase()) && sentinel::sentinel_path(&root.join(name)).is_file()
-    });
-    let _ = conn.execute(
-        "INSERT INTO local_state (k, v) VALUES (?1, ?2) ON CONFLICT(k) DO UPDATE SET v = excluded.v",
-        [KEY, scanned_at.as_str()],
-    );
+    let mut missing: Vec<String> = bound
+        .iter()
+        .filter(|(id, name)| {
+            !have.contains(&id.to_uppercase())
+                && sentinel::sentinel_path(&root.join(name)).is_file()
+        })
+        .map(|(id, name)| format!("{}|{}", id.to_uppercase(), name.to_lowercase()))
+        .collect();
+    missing.sort();
+    let missing = missing.join("\n");
+    // The same folders an index was already made for and could not take (owner 2026-11-17:
+    // the whole cabinet was listed again every morning, after each new scan by Intake, for
+    // folders no index brings in): not again until the list of them changes.
+    const TRIED: &str = "indexed_for_missing";
+    let tried: Option<String> = conn
+        .query_row("SELECT v FROM local_state WHERE k = ?1", [TRIED], |r| {
+            r.get(0)
+        })
+        .ok();
+    let behind = !missing.is_empty() && tried.as_deref() != Some(missing.as_str());
+    let set = |k: &str, v: &str| {
+        let _ = conn.execute(
+            "INSERT INTO local_state (k, v) VALUES (?1, ?2) ON CONFLICT(k) DO UPDATE SET v = excluded.v",
+            [k, v],
+        );
+    };
+    set(KEY, scanned_at.as_str());
+    if behind || missing.is_empty() {
+        set(TRIED, missing.as_str());
+    }
     behind
+}
+
+/// The folders Intake's folder index binds to a client that the catalog has no folder for,
+/// as `ID|folder` lines: what [`behind_folder_index`] last indexed for. For the log.
+pub fn folders_not_taken(conn: &Connection) -> Vec<String> {
+    conn.query_row(
+        "SELECT v FROM local_state WHERE k = 'indexed_for_missing'",
+        [],
+        |r| r.get::<_, String>(0),
+    )
+    .map(|v| v.lines().map(str::to_string).collect())
+    .unwrap_or_default()
 }
 
 /// The folders of a cabinet as [`scan_folders`] found them.

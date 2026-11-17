@@ -307,7 +307,15 @@ fn open_how(data: &Path, device_id: &str, root: &Path, behind: bool) -> Result<O
     let stale =
         behind && known > 0 && label.is_none() && vf_fs::rebuild::behind_folder_index(&conn, root);
     if stale {
-        tracing::info!("the catalog is behind Intake's folder index: indexing");
+        // How many, not which (folder names are client names: not for the log).
+        tracing::info!(
+            folders = vf_fs::rebuild::folders_not_taken(&conn).len(),
+            "the catalog is behind Intake's folder index: indexing"
+        );
+    } else if let Some(l) = &label {
+        tracing::info!(label = %l, "the last index was not finished: indexing");
+    } else if known == 0 {
+        tracing::info!("this catalog is new to the cabinet: indexing");
     }
     let in_parts = behind && (known == 0 || label.is_some() || stale);
     let mut staged = None;
@@ -470,6 +478,31 @@ pub(crate) mod tests {
         assert!(open_staged(&pc2, "dev-2", &root).unwrap().staged.is_none());
         index("2026-11-16T11:07:00Z");
         assert!(open_staged(&pc2, "dev-2", &root).unwrap().staged.is_none());
+
+        // Owner 2026-11-17: a folder Intake's index binds that no index can take (here: its
+        // own client file names another client) is indexed for once, not after every scan.
+        let odd = |at: &str| {
+            let f = serde_json::json!({
+                "root": root, "scanned_at": at,
+                "folders": [
+                    { "path": folder, "client_id": "1042", "status": "bound" },
+                    { "path": folder, "client_id": "9999", "status": "bound" },
+                ],
+            });
+            std::fs::write(root.join("_Vibe/folders.json"), f.to_string()).unwrap();
+        };
+        odd("2026-11-17T08:00:00Z");
+        let mut o = open_staged(&pc2, "dev-2", &root).unwrap();
+        let staged = o.staged.take().expect("tried once");
+        let shared = crate::indexer::Shared::new(&staged);
+        crate::indexer::run(&mut o.conn, &root, "dev-2", &staged, &shared, &|| {});
+        assert_eq!(vf_fs::rebuild::folders_not_taken(&o.conn).len(), 1);
+        drop(o);
+        odd("2026-11-18T08:00:00Z");
+        assert!(
+            open_staged(&pc2, "dev-2", &root).unwrap().staged.is_none(),
+            "the same folder is not indexed for again after another scan"
+        );
     }
     /// PA-86: Admin › Devices says what the catalog in use holds, and "Index the cabinet
     /// again" has the next open index it behind the window.
