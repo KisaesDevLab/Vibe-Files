@@ -15,6 +15,7 @@ With no password set, the top of the list shows **No admin password: set one**, 
 - **Folder templates**: the folders a new client gets. See [folder templates](help:folder-templates).
 - **Folder import**: adopts folders already in the cabinet and binds them to clients. See [Importing an existing folder tree](help:folder-import).
 - **Merge cabinets**: moves another cabinet's client folders into this one. See [Merging cabinets](help:merge-cabinets).
+- **Similar clients**: lists clients made twice and merges the ones you tick. See [Similar clients](help:similar-clients).
 - **Bulk changes**: finds documents by part of their file name and changes, renames or trashes them together. See [Bulk changes](help:bulk-changes).
 
 ## INTAKE

@@ -32,6 +32,7 @@ pub mod print_ui;
 pub mod rename;
 pub mod retention;
 pub mod search;
+pub mod similar;
 pub mod sweep;
 pub mod sync;
 pub mod templates;

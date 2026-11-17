@@ -18,6 +18,8 @@ pub enum Page {
     Trash,
     /// Find by file name, change or trash many (PA-78).
     Bulk,
+    /// Clients made twice, merged together (PA-90).
+    Similar,
     Sweep,
     Retention,
     Disposition,
@@ -50,6 +52,7 @@ const NAV: &[(&str, &[&str])] = &[
             "Folder templates",
             "Folder import",
             "Merge cabinets",
+            "Similar clients",
             "Bulk changes",
         ],
     ),
@@ -85,6 +88,7 @@ fn page_of(item: &str) -> Option<Page> {
         "Folder import" => Page::Import,
         "Merge cabinets" => Page::Merge,
         "Bulk changes" => Page::Bulk,
+        "Similar clients" => Page::Similar,
         "Print capture & parsers" => Page::PrintCapture,
         "Portal" => Page::Portal,
         "Portal requests" => Page::PortalRequests,
@@ -174,6 +178,8 @@ pub struct Admin {
     pub trash: crate::ui::trash::TrashPage,
     /// Bulk changes page (PA-78).
     pub bulk: crate::ui::bulk::BulkPage,
+    /// Similar clients page (PA-90).
+    pub similar: crate::ui::similar::SimilarPage,
     /// Admin password page (PA-24).
     pub password: crate::ui::admin_password::PasswordPage,
     /// "Lock Admin" pressed (the app ends the unlocked session).
@@ -222,6 +228,7 @@ impl Admin {
             chain: None,
             trash: Default::default(),
             bulk: Default::default(),
+            similar: Default::default(),
             password: Default::default(),
             lock_requested: false,
             open: vf_fs::trash::open_pages(env.root),
@@ -368,6 +375,10 @@ impl Admin {
         if std::mem::take(&mut self.bulk.changed) {
             self.changed = true;
         }
+        self.similar.poll();
+        if std::mem::take(&mut self.similar.changed) {
+            self.changed = true;
+        }
     }
 }
 
@@ -488,6 +499,12 @@ pub fn show(ui: &mut egui::Ui, a: &mut Admin, env: &mut Env, sweep: SweepEnv, lo
         Page::Bulk => {
             crate::ui::bulk::show(ui, &mut a.bulk, env, sweep.catalog);
             if std::mem::take(&mut a.bulk.changed) {
+                a.changed = true;
+            }
+        }
+        Page::Similar => {
+            crate::ui::similar::show(ui, &mut a.similar, env, sweep.catalog);
+            if std::mem::take(&mut a.similar.changed) {
                 a.changed = true;
             }
         }
@@ -622,6 +639,13 @@ fn nav(ui: &mut egui::Ui, a: &mut Admin, has_password: bool, locked: bool) {
             } else if *item == "Bulk changes" {
                 if ui.selectable_label(a.page == Page::Bulk, *item).clicked() {
                     a.page = Page::Bulk;
+                }
+            } else if *item == "Similar clients" {
+                if ui
+                    .selectable_label(a.page == Page::Similar, *item)
+                    .clicked()
+                {
+                    a.page = Page::Similar;
                 }
             } else if *item == "Trash" {
                 if ui.selectable_label(a.page == Page::Trash, *item).clicked() {
@@ -1438,6 +1462,143 @@ ANDE1042,Anderson Farms LLC
             )
             .unwrap();
         assert_eq!(n, 1);
+    }
+
+    /// Q-129 (owner 2026-11-16): Admin › Similar clients lists the clients made twice,
+    /// nothing ticked; the client the CSV lists is the one kept, and a pair with both in the
+    /// CSV waits for a choice; the ticked pairs are merged after a preview, and put back.
+    #[test]
+    fn similar_clients_are_listed_merged_and_put_back() {
+        let mut h = harness();
+        {
+            let s = h.state_mut();
+            let firm = uuid::Uuid::new_v4();
+            // The harness's folder as a cabinet (the client merge reads its cabinet file).
+            let file = vf_fs::cabinet::CabinetFile {
+                cabinet_id: vf_core::new_id(),
+                firm_id: firm.to_string(),
+                schema_version: vf_core::db::SCHEMA_VERSION,
+                layout_version: 1,
+                created: vf_core::now_rfc3339(),
+                name: None,
+            };
+            std::fs::write(
+                s.root.join("_Vibe/cabinet.json"),
+                serde_json::to_vec(&file).unwrap(),
+            )
+            .unwrap();
+            let all = [
+                ("Baker Co", "3001"),
+                ("Baker Co.", "3002"),
+                ("Cole Trust", "6001"),
+                ("Cole Trust", "6002"),
+            ];
+            for (name, id) in all {
+                let folder = s.root.join(format!("{name} ({id})"));
+                std::fs::create_dir_all(folder.join("Income Tax/2025")).unwrap();
+                filer_intake::sentinel::write_sentinel(
+                    &s.root,
+                    &folder,
+                    &filer_core::clients::Client {
+                        id: id.into(),
+                        uuid: uuid::Uuid::new_v4(),
+                        name: name.into(),
+                        extra: Default::default(),
+                    },
+                    firm,
+                )
+                .unwrap();
+                std::fs::write(folder.join("Income Tax/2025/return.pdf"), id).unwrap();
+            }
+            // The CSV lists one Baker and both Coles.
+            let csv = s.root.parent().unwrap().join("clients.csv");
+            std::fs::write(
+                &csv,
+                "id,name\r\n3001,Baker Co\r\n6001,Cole Trust\r\n6002,Cole Trust\r\n",
+            )
+            .unwrap();
+            filer_core::config::Settings {
+                root: Some(s.root.clone()),
+                csv_path: Some(csv),
+                column_map: filer_core::config::ColumnMap {
+                    id: Some("id".into()),
+                    name: Some("name".into()),
+                    extras: vec![],
+                    partner: None,
+                },
+                ..Default::default()
+            }
+            .save(&vf_fs::clients::master_dir(&s.root))
+            .unwrap();
+            vf_fs::rebuild::rebuild(&mut s.conn, &s.root, "dev").unwrap();
+            vf_fs::clients::ensure_listed(&s.conn, &s.root).unwrap();
+        }
+        let clients = |h: &Harness<'static, State>| -> Vec<String> {
+            let mut st = h
+                .state()
+                .conn
+                .prepare("SELECT ext_id FROM client WHERE deleted_at IS NULL ORDER BY ext_id")
+                .unwrap();
+            st.query_map([], |r| r.get(0))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap()
+        };
+        click(&mut h, "Similar clients");
+        assert_eq!(h.state().a.page, Page::Similar);
+        click(&mut h, "Find similar clients");
+        h.run();
+        assert!(
+            h.query_by_label("2 pairs among 4 clients · 0 ticked")
+                .is_some(),
+            "{:?}",
+            h.state().a.similar.error
+        );
+        // Only the pair with a client to keep is ticked; the Coles wait for a choice.
+        click(&mut h, "Tick the ones shown");
+        assert!(
+            h.query_by_label("2 pairs among 4 clients · 1 ticked")
+                .is_some()
+        );
+        click(
+            &mut h,
+            "Not the same: Cole Trust  6001 and Cole Trust  6002",
+        );
+        assert!(
+            h.query_by_label("1 pair among 4 clients · 1 ticked")
+                .is_some()
+        );
+        assert_eq!(vf_fs::similar::dismissed(&h.state().root).len(), 1);
+
+        click(&mut h, "Merge the 1 pair ticked…");
+        h.run();
+        assert!(h.query_by_label("Merge 1 pair?").is_some());
+        assert_eq!(clients(&h).len(), 4, "the preview writes nothing");
+        click(&mut h, "Yes, merge 1 pair");
+        h.run();
+        assert_eq!(
+            clients(&h),
+            ["3001", "6001", "6002"],
+            "{:?} {:?}",
+            h.state().a.similar.error,
+            h.state().a.similar.notice
+        );
+        assert!(h.state().a.changed, "Browse reads the catalog again");
+        assert!(
+            h.state()
+                .root
+                .join("Baker Co (3001)/Income Tax/2025/return (2).pdf")
+                .is_file()
+        );
+        click(&mut h, "Undo this merge");
+        h.run();
+        assert_eq!(clients(&h), ["3001", "3002", "6001", "6002"]);
+        assert!(
+            h.state()
+                .root
+                .join("Baker Co. (3002)/Income Tax/2025/return.pdf")
+                .is_file()
+        );
     }
 
     /// Q-117 (owner 2026-11-15): Admin › Bulk changes finds documents by part of their file
