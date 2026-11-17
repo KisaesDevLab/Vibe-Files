@@ -157,12 +157,18 @@ pub(crate) fn opening_line(step: &str, since: std::time::Duration) -> String {
 pub(crate) fn behind_the_window(
     listing: Option<(usize, usize, usize)>,
     others: bool,
+    copy: bool,
 ) -> Option<String> {
     match listing {
         Some((done, all, docs)) => Some(format!(
             "Indexing: {done} of {all} client folders, {docs} documents"
         )),
         None if others => Some("Reading changes made on other servers".into()),
+        // After an index: said until it is made, so the program is not closed on it.
+        None if copy => Some(
+            "Leaving a copy of the index for the other computers: keep Vibe Files open until this line goes"
+                .into(),
+        ),
         None => None,
     }
 }
@@ -815,7 +821,9 @@ impl eframe::App for VibeFilesApp {
                     o.browse.indexing = None;
                     o.index_wait = None;
                     o.indexing = None;
-                    // The other servers start from this catalog's copy: made again now.
+                    // The other servers start from this catalog's copy: made again now, and
+                    // noted in the catalog until it is (the program may be closed first).
+                    crate::server::owe_seed(&o.opened.conn);
                     o.servers.seed_after_index();
                     o.browse.reload(&o.opened.conn);
                     if o.browse.notice.is_none() {
@@ -1025,6 +1033,7 @@ impl eframe::App for VibeFilesApp {
             working = behind_the_window(
                 o.indexing.as_ref().map(|(ix, _)| ix.shared.progress()),
                 o.servers.busy(),
+                o.servers.leaving_copy(),
             );
         }
         chrome::footer(

@@ -381,6 +381,38 @@ fn lock(p: &Path) -> Result<std::fs::File> {
     }
 }
 
+/// `local_state` key: this server finished an index and the copy the others start from has
+/// not been made since.
+const SEED_OWED: &str = "seed_owed";
+
+/// Notes in the catalog that the copy for the other servers is owed (an index has just
+/// finished): kept across a close of the program, until the copy is made.
+pub fn owe_seed(conn: &Connection) {
+    let _ = conn.execute(
+        "INSERT OR REPLACE INTO local_state (k, v) VALUES (?1, '1')",
+        [SEED_OWED],
+    );
+}
+
+fn seed_is_owed(catalog: &Path) -> bool {
+    Connection::open_with_flags(catalog, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .and_then(|c| {
+            c.busy_timeout(std::time::Duration::from_secs(10))?;
+            c.query_row(
+                "SELECT 1 FROM local_state WHERE k = ?1",
+                [SEED_OWED],
+                |_| Ok(()),
+            )
+        })
+        .is_ok()
+}
+
+fn seed_made(catalog: &Path) {
+    if let Ok(c) = vf_core::db::open(catalog, vf_core::db::Storage::Local) {
+        let _ = c.execute("DELETE FROM local_state WHERE k = ?1", [SEED_OWED]);
+    }
+}
+
 /// This catalog's id in the cabinet's change logs (made once, kept in the catalog).
 pub fn writer_id(conn: &Connection) -> String {
     let _ = conn.execute(
@@ -572,6 +604,8 @@ pub struct Watch {
     first: bool,
     /// The read just made could not be (the catalog busy, the share away): set by its thread.
     failed: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// The copy after an index is being made now.
+    seed_showing: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// Then the next one is made at this time, not in a quarter of an hour.
     again: Option<std::time::Instant>,
     /// Make the copy the other servers start from again at the next read, whatever its age.
@@ -595,6 +629,7 @@ impl Default for Watch {
             client: None,
             first: false,
             failed: Default::default(),
+            seed_showing: Default::default(),
             again: None,
             seed_now: false,
             seed_owed: Default::default(),
@@ -613,6 +648,7 @@ impl Watch {
             client: None,
             first: true,
             failed: Default::default(),
+            seed_showing: Default::default(),
             again: None,
             seed_now: false,
             seed_owed: Default::default(),
@@ -630,6 +666,12 @@ impl Watch {
     /// The other servers' changes are being read now (said in the footer).
     pub fn busy(&self) -> bool {
         self.job.is_some()
+    }
+
+    /// The copy the other servers start from is being made after this server's index (said
+    /// in the footer: it takes minutes, and closing the program stops it).
+    pub fn leaving_copy(&self) -> bool {
+        self.seed_showing.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// The read opening left for behind the window is still to come or running: until it is
@@ -692,6 +734,7 @@ impl Watch {
             std::mem::take(&mut self.seed_now) | self.seed_owed.swap(false, Ordering::SeqCst);
         let (seed_owed, seed_busy) = (self.seed_owed.clone(), self.seed_busy.clone());
         let failed = self.failed.clone();
+        let seed_showing = self.seed_showing.clone();
         let (catalog, root, writer, device) = (
             catalog.to_path_buf(),
             root.to_path_buf(),
@@ -736,8 +779,17 @@ impl Watch {
                     }
                     return;
                 }
+                // Owed since an index finished, by this run or one before it: the program
+                // closed before the copy was made left the others starting from a copy made
+                // before that index, and each indexed the cabinet again (owner 2026-11-17).
+                let seed_now = seed_now || seed_is_owed(&catalog);
+                seed_showing.store(seed_now, Ordering::SeqCst);
                 let made = publish_seed(&catalog, &root, &writer, seed_now);
+                seed_showing.store(false, Ordering::SeqCst);
                 seed_busy.store(false, Ordering::SeqCst);
+                if seed_now && matches!(made, Ok(true)) {
+                    seed_made(&catalog);
+                }
                 if let Err(e) = &made {
                     tracing::warn!(
                         kind = crate::logging::kind(&e.to_string()),
@@ -981,14 +1033,30 @@ mod tests {
     fn the_footer_says_what_goes_on_behind_the_window() {
         let words = crate::app::behind_the_window;
         assert_eq!(
-            words(Some((3, 40, 1200)), true).as_deref(),
+            words(Some((3, 40, 1200)), true, true).as_deref(),
             Some("Indexing: 3 of 40 client folders, 1200 documents")
         );
         assert_eq!(
-            words(None, true).as_deref(),
+            words(None, true, false).as_deref(),
             Some("Reading changes made on other servers")
         );
-        assert_eq!(words(None, false), None);
+        assert_eq!(words(None, false, false), None);
+        // Owner 2026-11-17: the copy the other computers start from, made after an index,
+        // is said too (closed on, they index the cabinet again), and it is owed until made.
+        assert!(
+            words(None, false, true).is_some_and(|w| w.starts_with("Leaving a copy of the index"))
+        );
+        {
+            let t = tempfile::tempdir().unwrap();
+            let catalog = t.path().join("catalog.db");
+            let c = vf_core::db::open(&catalog, vf_core::db::Storage::Local).unwrap();
+            assert!(!seed_is_owed(&catalog));
+            owe_seed(&c);
+            drop(c);
+            assert!(seed_is_owed(&catalog), "kept across a close of the program");
+            seed_made(&catalog);
+            assert!(!seed_is_owed(&catalog));
+        }
         assert!(Watch::due_now().last.is_none());
         assert!(Watch::default().last.is_some());
         assert!(!Watch::due_now().busy());
