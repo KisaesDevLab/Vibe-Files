@@ -55,7 +55,9 @@ pub fn learn(root: &Path, payer: &str, client_id: &str) -> Result<(), String> {
         if payer.is_empty() {
             return Ok(());
         }
-        let mut all = load(root);
+        let mut all = crate::cabinet::read_json_for_write::<FileV1>(&path(root))?
+            .map(|f| f.aliases)
+            .unwrap_or_default();
         all.retain(|a| key(&a.payer) != key(payer));
         all.push(Alias {
             payer: payer.into(),

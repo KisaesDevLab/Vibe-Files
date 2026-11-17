@@ -492,9 +492,24 @@ fn intake_csv(root: &Path) -> Option<(PathBuf, ColumnMap)> {
     Some((csv, settings.column_map))
 }
 
+/// Intake's settings are there and could not be read just now (they read as Filer's
+/// defaults then: no client CSV). Whether a CSV is set is then not known, which is not "none":
+/// an ID changed or a client merged then would not reach the CSV, and the next import would
+/// bring the old client back (QA 2026-11-17).
+fn intake_settings_unread(root: &Path) -> Result<(), String> {
+    let dir = master_dir(root);
+    let (_, savable) = filer_core::config::Settings::load_or_default(&dir);
+    if savable {
+        Ok(())
+    } else {
+        Err("Intake's settings in the cabinet cannot be read just now, so the client CSV cannot be looked at. Try again in a moment.".into())
+    }
+}
+
 /// Refused when the client CSV Intake uses is set but cannot be reached from this PC (an ID
 /// changed without it would come back at the next re-import).
 pub fn intake_csv_reachable(root: &Path) -> Result<(), String> {
+    intake_settings_unread(root)?;
     match intake_csv(root) {
         Some((csv, _)) if !csv.is_file() => Err(format!(
             "The client CSV Intake uses ({}) cannot be reached from this PC: it must take the new ID too.",
@@ -517,6 +532,7 @@ pub fn change_id_in_csv(
 ) -> Result<Option<PathBuf>, String> {
     // Under the cabinet lock (PA-68): read, changed and written back as one.
     crate::lock::with(root, "clients", "the client list", || {
+        intake_settings_unread(root)?;
         let Some((csv, map)) = intake_csv(root) else {
             return Ok(None);
         };
@@ -1022,6 +1038,7 @@ fn csv_read(
     )>,
     String,
 > {
+    intake_settings_unread(root)?;
     let Some((csv, map)) = intake_csv(root) else {
         return Ok(None);
     };

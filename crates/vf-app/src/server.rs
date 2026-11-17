@@ -216,11 +216,13 @@ fn in_use(catalog: &Path) -> bool {
         .flatten()
         .filter(|e| e.path().extension().is_some_and(|x| x == "lock"))
         .any(|e| {
+            // Held: a sharing violation. A lock file that cannot be opened for another
+            // reason is not a session.
             std::fs::OpenOptions::new()
                 .read(true)
                 .share_mode(0)
                 .open(e.path())
-                .is_err()
+                .is_err_and(|e| e.raw_os_error() == Some(32))
         })
 }
 
@@ -363,6 +365,15 @@ fn lock(p: &Path) -> Result<std::fs::File> {
             Err(e) if start.elapsed() > std::time::Duration::from_secs(30 * 60) => {
                 return Err(e).with_context(|| format!("waiting for {}", p.display()));
             }
+            // Not another login holding it (that is a sharing violation): the place cannot
+            // be used. Said after a few tries, not waited on for half an hour under "another
+            // login may be making it".
+            Err(e)
+                if e.raw_os_error() != Some(32)
+                    && start.elapsed() > std::time::Duration::from_secs(15) =>
+            {
+                return Err(e).with_context(|| format!("{} cannot be opened", p.display()));
+            }
             Err(_) => std::thread::sleep(std::time::Duration::from_millis(250)),
         }
     }
@@ -419,7 +430,10 @@ pub fn publish_seed(catalog: &Path, root: &Path, writer: &str, now: bool) -> Res
     copy_catalog(catalog, &part)?;
     {
         let c = Connection::open(&part)?;
-        let mut seen = vf_fs::changes::load_seen(&c).unwrap_or_default();
+        let mut seen = vf_fs::changes::load_seen(&c)
+            .ok()
+            .flatten()
+            .unwrap_or_default();
         seen.insert(vf_fs::changes::safe_id(writer), own);
         vf_fs::changes::save_seen(&c, &seen).map_err(anyhow::Error::msg)?;
     }
@@ -440,6 +454,12 @@ fn main_path(root: &Path) -> PathBuf {
 
 pub fn main_server(root: &Path) -> Option<MainServer> {
     serde_json::from_slice(&std::fs::read(main_path(root)).ok()?).ok()
+}
+
+/// The cabinet names a main server and the note could not be read just now (which computer
+/// B2 sync runs on is then not known, which is not "none").
+pub fn main_unreadable(root: &Path) -> bool {
+    main_path(root).exists() && main_server(root).is_none()
 }
 
 /// Makes this computer the main server.
@@ -896,7 +916,7 @@ mod tests {
             .ok();
         assert_eq!(sync, None, "server A's own state is not copied");
         // A's change before the seed is not news to B.
-        let mut seen = vf_fs::changes::load_seen(&c).unwrap();
+        let mut seen = vf_fs::changes::load_seen(&c).unwrap().unwrap();
         assert!(vf_fs::changes::changed_since(&root, "server-b", &mut seen, true).is_empty());
         // Another cabinet's catalog is not used.
         let other = provision_in(&t.path().join("C"), "cab-2", &root, None, &[]).unwrap();

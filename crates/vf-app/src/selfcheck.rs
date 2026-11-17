@@ -115,9 +115,17 @@ pub fn run_with(
         None => (None, None),
     };
     if sync_configured {
+        // The cabinet's notes of which computer syncs, or of its last push, could not be
+        // read just now: not checked, rather than "has not sent the cabinet to B2 yet" or
+        // "this PC has not pushed" in red (QA 2026-11-17).
+        let unread =
+            one_main && (crate::server::main_unreadable(root) || crate::lastpush::unreadable(root));
         out.push(check(
             "Sync",
             match &main {
+                _ if unread => Ok(
+                    "not checked just now (the cabinet's sync notes could not be read)".into(),
+                ),
                 // Named, and it has never sent the cabinet: nothing is going to B2, whatever
                 // this catalog's own state.
                 Some(m) if last_push.is_none() => Err(format!(

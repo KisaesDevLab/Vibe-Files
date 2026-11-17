@@ -137,6 +137,23 @@ pub fn append_text(p: &Path, text: &str) -> std::io::Result<()> {
     f.sync_all()
 }
 
+/// A shared JSON file read before it is changed and written back: `None` when it is not
+/// there. A file that is there and cannot be read or understood is an error, never "empty":
+/// the write that follows would put the one new entry over everything in it (a share that
+/// hiccups, or a file a newer build wrote that this one does not know; QA 2026-11-17).
+pub fn read_json_for_write<T: serde::de::DeserializeOwned>(p: &Path) -> Result<Option<T>, String> {
+    match std::fs::read(p) {
+        Ok(b) => serde_json::from_slice(&b)
+            .map(Some)
+            .map_err(|e| format!("{} cannot be read ({e}); it was left as it is", p.display())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!(
+            "{} cannot be read just now ({e}); nothing was changed",
+            p.display()
+        )),
+    }
+}
+
 pub fn write_replace(p: &Path, bytes: &[u8]) -> Result<(), String> {
     use std::io::Write;
     if let Some(dir) = p.parent() {

@@ -664,7 +664,16 @@ impl Prefs {
 /// the old text (QA A2). Returns the new config and the old file's new name.
 pub fn set_aside_bad(data: &Path) -> Result<(Config, PathBuf)> {
     let p = data.join(CONFIG_FILE);
-    let text = std::fs::read_to_string(&p).unwrap_or_default();
+    // Only a file that reads and makes no sense is set aside. One that cannot be read just
+    // now (the exe's folder on a share, a virus scanner) is left: set aside, this PC got a
+    // new identity and lost its sync settings and last cabinet for a hiccup (QA 2026-11-17).
+    let bytes = std::fs::read(&p).with_context(|| {
+        format!(
+            "{} cannot be read just now; close Vibe Files and open it again",
+            p.display()
+        )
+    })?;
+    let text = String::from_utf8_lossy(&bytes);
     let device_id = text
         .lines()
         .find_map(|l| {

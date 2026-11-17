@@ -292,6 +292,9 @@ fn still_running(owner: &str) -> bool {
             let _ = std::fs::remove_file(&path);
             false
         }
+        // No lock file: that copy is not running (it removes its file as it ends). Any
+        // other error is left as "may be running": its changes are not reversed on a guess.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
         Err(_) => true,
     }
 }

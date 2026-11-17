@@ -41,6 +41,11 @@ pub fn read(root: &Path) -> Option<LastPush> {
     serde_json::from_slice(&std::fs::read(path(root)).ok()?).ok()
 }
 
+/// The note of the last whole push is there and could not be read just now.
+pub fn unreadable(root: &Path) -> bool {
+    path(root).exists() && read(root).is_none()
+}
+
 /// The startup check: `None` when this cabinet has never been pushed in full (sync not used),
 /// else whether the last full push is recent enough.
 pub fn check(root: &Path) -> Option<Result<String, String>> {

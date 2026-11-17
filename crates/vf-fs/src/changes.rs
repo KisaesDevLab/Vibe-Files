@@ -130,13 +130,18 @@ pub type Seen = BTreeMap<String, u64>;
 
 const SEEN_KEY: &str = "changes_seen";
 
-/// What this catalog has read of the logs; `None` before its first look.
-pub fn load_seen(conn: &vf_core::db::Connection) -> Option<Seen> {
-    conn.query_row("SELECT v FROM local_state WHERE k = ?1", [SEEN_KEY], |r| {
+/// What this catalog has read of the logs; `None` before its first look. `Err`: it could not
+/// be read just now (the catalog busy). That is not a first look: taken for one, every log
+/// was marked as read to its end and what the other servers noted since the last look was
+/// never read (QA 2026-11-17).
+pub fn load_seen(conn: &vf_core::db::Connection) -> Result<Option<Seen>, String> {
+    match conn.query_row("SELECT v FROM local_state WHERE k = ?1", [SEEN_KEY], |r| {
         r.get::<_, String>(0)
-    })
-    .ok()
-    .and_then(|v| serde_json::from_str(&v).ok())
+    }) {
+        Ok(v) => Ok(serde_json::from_str(&v).ok()),
+        Err(vf_core::db::SqlError::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(e.to_string()),
+    }
 }
 
 pub fn save_seen(conn: &vf_core::db::Connection, seen: &Seen) -> Result<(), String> {
@@ -208,7 +213,7 @@ pub fn changed_since(root: &Path, me: &str, seen: &mut Seen, from_start: bool) -
 /// old): every log's current end is marked as read, so changes noted from now on, during the
 /// build, are read afterwards. Nothing when the catalog has looked before.
 pub fn mark_start(conn: &vf_core::db::Connection, root: &Path, me: &str) -> Result<(), String> {
-    if load_seen(conn).is_some() {
+    if load_seen(conn)?.is_some() {
         return Ok(());
     }
     let mut seen = Seen::new();
@@ -256,7 +261,7 @@ pub fn catch_up(
     let _one = conn
         .path()
         .map(|p| hold(&PathBuf::from(format!("{p}.catch-up.lock"))));
-    let loaded = load_seen(conn);
+    let loaded = load_seen(conn)?;
     let first = loaded.is_none();
     let mut seen = loaded.unwrap_or_default();
     // A catalog that has seen no log yet was just built from the disk: it starts at the logs'

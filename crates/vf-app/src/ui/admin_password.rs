@@ -205,6 +205,9 @@ pub fn lock_screen(
                     *msg = None;
                     out = Unlock::Unlocked;
                 }
+                Ok(false) if trash::pin_unreadable(env.root) => {
+                    *msg = Some(trash::PIN_UNREADABLE.into())
+                }
                 Ok(false) => *msg = Some("That admin password is not right.".into()),
                 Err(w) => *msg = Some(format!("Too many wrong passwords: try again in {w} s.")),
             }

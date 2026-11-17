@@ -247,7 +247,11 @@ pub fn show(ctx: &egui::Context, d: &mut ImportDialog, env: &mut Env) -> DialogO
                         false
                     }
                     Ok(false) => {
-                        d.error = Some("That admin password is not right.".into());
+                        d.error = Some(if vf_fs::trash::pin_unreadable(env.root) {
+                            vf_fs::trash::PIN_UNREADABLE.into()
+                        } else {
+                            "That admin password is not right.".into()
+                        });
                         true
                     }
                     Err(w) => {

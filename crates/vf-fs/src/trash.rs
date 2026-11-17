@@ -841,6 +841,15 @@ fn is_removed_marker(text: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// A password is set and its file could not be read just now (a share hiccup, a write in
+/// progress): a password typed cannot be checked, which is not the same as it being wrong.
+pub fn pin_unreadable(root: &Path) -> bool {
+    has_pin(root) && stored_pin(root).is_none()
+}
+
+/// What is said then.
+pub const PIN_UNREADABLE: &str = "The admin password cannot be checked just now: its file in the cabinet could not be read. Try again in a moment.";
+
 /// Whether `pin` is the firm PIN. After three wrong tries in a row it is not checked for a while
 /// ([`pin_wait`]) and this is `false`.
 pub fn check_pin(root: &Path, pin: &str) -> bool {
@@ -866,6 +875,9 @@ pub fn set_pin(
 ) -> Result<(), String> {
     crate::lock::with(root, "admin", "the admin settings", || {
         let had = has_pin(root);
+        if pin_unreadable(root) {
+            return Err(PIN_UNREADABLE.into());
+        }
         if had && !current.is_some_and(|c| check_pin(root, c)) {
             return Err("the current admin password is not right".into());
         }
@@ -935,6 +947,9 @@ pub fn remove_pin(
 ) -> Result<(), String> {
     // Under the cabinet lock (PA-68): read, changed and written back as one.
     crate::lock::with(root, "admin", "the admin settings", || {
+        if pin_unreadable(root) {
+            return Err(PIN_UNREADABLE.into());
+        }
         if !check_pin(root, current) {
             return Err("the current admin password is not right".into());
         }

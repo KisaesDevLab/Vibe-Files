@@ -44,11 +44,14 @@ pub fn register_device(root: &Path, device_id: &str, server: bool) -> Result<(),
     std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
     let file = dir.join(format!("{device_id}.json"));
     let now = vf_core::now_rfc3339();
-    let first_seen = std::fs::read_to_string(&file)
-        .ok()
-        .and_then(|t| serde_json::from_str::<Device>(&t).ok())
-        .map(|d| d.first_seen)
-        .unwrap_or_else(|| now.clone());
+    let first_seen = match std::fs::read_to_string(&file) {
+        Ok(t) => serde_json::from_str::<Device>(&t)
+            .map(|d| d.first_seen)
+            .unwrap_or_else(|_| now.clone()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => now.clone(),
+        // There and unreadable just now: left as it is (when this PC was first seen is in it).
+        Err(_) => return Ok(()),
+    };
     let d = Device {
         id: device_id.into(),
         name: std::env::var("COMPUTERNAME").unwrap_or_else(|_| "unknown".into()),

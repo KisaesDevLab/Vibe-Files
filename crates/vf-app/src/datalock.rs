@@ -86,6 +86,12 @@ fn acquire_as(
             }
             Ok(DataLock { _file: file, who })
         }
+        // Not held by another copy: the folder itself cannot be used (access denied, a
+        // read-only place, a share that is away). Said as that, not as "already open".
+        Err(e) if e.raw_os_error() != Some(32) => Err(format!(
+            "The data folder {} cannot be used: {e}. Check that you can write there, or use another data folder (--data).",
+            data.display()
+        )),
         Err(_) => {
             let h = holder(data);
             Err(format!(

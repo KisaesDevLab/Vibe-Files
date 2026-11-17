@@ -46,7 +46,8 @@ pub fn add(root: &Path, name: &str, query: &Query, device: &str) -> Result<Strin
         if name.is_empty() {
             return Err("Give the search a name.".into());
         }
-        let mut all = load(root);
+        let mut all: Vec<SavedSearch> =
+            vf_fs::cabinet::read_json_for_write(&path(root))?.unwrap_or_default();
         let id = all
             .iter()
             .find(|s| s.name.eq_ignore_ascii_case(name))
@@ -68,7 +69,8 @@ pub fn add(root: &Path, name: &str, query: &Query, device: &str) -> Result<Strin
 pub fn remove(root: &Path, id: &str) -> Result<(), String> {
     // Under the cabinet lock (PA-68): read, changed and written back as one.
     vf_fs::lock::with(root, "saved-searches", "the saved searches", || {
-        let mut all = load(root);
+        let mut all: Vec<SavedSearch> =
+            vf_fs::cabinet::read_json_for_write(&path(root))?.unwrap_or_default();
         all.retain(|s| s.id != id);
         write(root, &all)
     })

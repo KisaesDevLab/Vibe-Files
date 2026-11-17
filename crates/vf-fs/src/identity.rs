@@ -61,6 +61,11 @@ pub fn login_device(root: &Path, login: &str, mine: &str) -> String {
         if let Some(id) = read(&p) {
             return Ok(id);
         }
+        // The login's file is there and could not be read: this session works under this
+        // PC's id, and the file (the login's id on every host) is not written over.
+        if p.exists() {
+            return Ok(mine.to_string());
+        }
         let f = LoginFile {
             login: login.trim().to_string(),
             device_id: mine.to_string(),

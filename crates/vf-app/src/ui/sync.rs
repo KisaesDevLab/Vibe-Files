@@ -1011,8 +1011,13 @@ pub(crate) fn sync_lock(catalog: &Path) -> Result<std::fs::File, String> {
         .truncate(false)
         .share_mode(0)
         .open(data_dir(catalog).join("sync.lock"))
-        .map_err(|_| {
-            "Another session on this computer is syncing this cabinet now; its changes and yours go up together next time.".to_string()
+        .map_err(|e| {
+            // Held by another session (a sharing violation); anything else is said as it is.
+            if e.raw_os_error() == Some(32) {
+                "Another session on this computer is syncing this cabinet now; its changes and yours go up together next time.".to_string()
+            } else {
+                format!("Sync could not start: its lock file beside the catalog could not be opened ({e}).")
+            }
         })
 }
 
