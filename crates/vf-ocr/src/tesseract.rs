@@ -162,7 +162,11 @@ impl OcrEngine for Tesseract {
         if let Some(d) = &self.tessdata {
             cmd.arg("--tessdata-dir").arg(d);
         }
-        cmd.arg("tsv");
+        // The word table, asked for by its setting and not by the `tsv` config file: the
+        // Tesseract shipped beside the program has no `tessdata\configs`, and with the file
+        // missing Tesseract printed plain text and still ended well, which read as a page
+        // with no words (owner 2026-11-16: "No text was found" on every scan).
+        cmd.args(["-c", "tessedit_create_tsv=1"]);
         let out = output_within(&mut cmd, PAGE_TIMEOUT);
         let _ = std::fs::remove_file(&tmp);
         let out = out.map_err(|e| match e.kind() {
@@ -180,11 +184,27 @@ impl OcrEngine for Tesseract {
                     .to_string(),
             ));
         }
-        let mut p = parse_tsv(&String::from_utf8_lossy(&out.stdout));
+        let text = String::from_utf8_lossy(&out.stdout);
+        // Not the word table: said, not taken for a page without words.
+        if !is_tsv(&text) {
+            let err = String::from_utf8_lossy(&out.stderr);
+            return Err(OcrError::Failed(format!(
+                "Tesseract did not give its word table ({})",
+                err.lines().last().unwrap_or("no message").trim()
+            )));
+        }
+        let mut p = parse_tsv(&text);
         p.width = page.width();
         p.height = page.height();
         Ok(p)
     }
+}
+
+/// Whether `out` is Tesseract's word table (its header row), not plain text.
+fn is_tsv(out: &str) -> bool {
+    out.lines()
+        .next()
+        .is_some_and(|h| h.starts_with("level\t") && h.contains("\tconf\t"))
 }
 
 /// Tesseract TSV → words in reading order. Columns: level page_num block_num par_num line_num
@@ -243,6 +263,13 @@ mod tests {
         assert_eq!(p.words[1].bbox, [440, 400, 400, 40]);
         assert_eq!(p.words[1].conf, 91.2);
         assert_eq!(p.text(), "EIN 12-3456789\nAcme\nLLC");
+    }
+
+    #[test]
+    fn plain_text_is_not_the_word_table() {
+        assert!(is_tsv(TSV));
+        assert!(!is_tsv("Form W-2 Wage and Tax Statement\n"));
+        assert!(!is_tsv(""));
     }
 
     #[test]

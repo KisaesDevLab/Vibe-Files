@@ -291,3 +291,39 @@ fn a_stop_part_way_writes_nothing() {
         assert!(vf_pdf::text::page_text(&page).contains("word"));
     }
 }
+
+/// The Tesseract shipped beside the program has its language data and no `configs` folder
+/// (0.1.36 to 0.1.43 asked for the word table through `configs\tsv`, got plain text, and said
+/// "No text was found" on every scan). The words come back from such a folder.
+#[test]
+fn words_come_back_without_tesseracts_config_files() {
+    let Some(found) = engine() else { return };
+    let Some(data) = found.tessdata.clone() else {
+        return; // Tesseract's own default place: nothing to copy from.
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let bare = dir.path().join("tessdata");
+    std::fs::create_dir_all(&bare).unwrap();
+    std::fs::copy(data.join("eng.traineddata"), bare.join("eng.traineddata")).unwrap();
+    let shipped = Tesseract {
+        tessdata: Some(bare),
+        ..found
+    };
+    let pdf = scanned(dir.path(), 0);
+    let doc = pdfium().load_pdf_from_file(&pdf, None).unwrap();
+    let img = doc
+        .pages()
+        .first()
+        .unwrap()
+        .render_with_config(&PdfRenderConfig::new().set_target_width(2550))
+        .unwrap()
+        .as_image()
+        .unwrap()
+        .to_luma8();
+    let page = shipped.recognize(&img, 300).unwrap();
+    assert!(
+        page.text().contains("12-3456789"),
+        "the words of the page: {:?}",
+        page.text()
+    );
+}

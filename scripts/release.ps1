@@ -84,6 +84,17 @@ foreach ($f in 'eng.traineddata', 'osd.traineddata') {
 }
 Copy-Item (Join-Path $Tesseract 'doc\LICENSE') (Join-Path $t 'LICENSE')
 & (Join-Path $t 'tesseract.exe') --version | Select-Object -First 1
+# The shipped Tesseract must give its word table the way the program asks for it (0.1.36 to
+# 0.1.43 asked through tessdata\configs\tsv, which is not shipped: OCR found no text).
+Add-Type -AssemblyName System.Drawing
+$probe = Join-Path $env:TEMP "vf-release-ocr-probe.png"
+$bmp = New-Object System.Drawing.Bitmap 1200, 300
+$g = [System.Drawing.Graphics]::FromImage($bmp); $g.Clear([System.Drawing.Color]::White)
+$g.DrawString('Release probe 48,250.00', (New-Object System.Drawing.Font 'Arial', 40), [System.Drawing.Brushes]::Black, 40, 100)
+$g.Dispose(); $bmp.Save($probe); $bmp.Dispose()
+$tsv = & (Join-Path $t 'tesseract.exe') $probe stdout -l eng --psm 3 --dpi 300 --tessdata-dir (Join-Path $t 'tessdata') -c tessedit_create_tsv=1 2>$null
+Remove-Item $probe -ErrorAction SilentlyContinue
+if (-not ($tsv | Where-Object { $_ -match '^5\t' })) { throw 'the staged Tesseract gives no word table: OCR would find no text' }
 
 $zip = Join-Path $dist "$name.zip"
 if (Test-Path $zip) { Remove-Item $zip }
