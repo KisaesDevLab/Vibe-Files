@@ -163,7 +163,7 @@ fn read_meta(root: &Path) -> Result<ClientMeta, String> {
         Ok(t) => {
             serde_json::from_str(&t).map_err(|e| format!("{SIDECAR_FILE} could not be read: {e}"))
         }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(ClientMeta::default()),
+        Err(e) if crate::cabinet::not_there(root, &e) => Ok(ClientMeta::default()),
         Err(e) => Err(format!("{SIDECAR_FILE} could not be read: {e}")),
     }
 }
@@ -263,7 +263,7 @@ pub fn load(root: &Path) -> Result<Master, String> {
     let meta = match std::fs::read_to_string(dir.join(SIDECAR_FILE)) {
         Ok(t) => serde_json::from_str(&t)
             .map_err(|e| format!("{SIDECAR_FILE} could not be read: {e}"))?,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => ClientMeta::default(),
+        Err(e) if crate::cabinet::not_there(root, &e) => ClientMeta::default(),
         Err(e) => return Err(format!("{SIDECAR_FILE} could not be read: {e}")),
     };
     Ok(Master { list, rels, meta })

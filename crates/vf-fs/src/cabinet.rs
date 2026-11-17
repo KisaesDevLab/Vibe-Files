@@ -44,7 +44,7 @@ pub fn read(root: &Path) -> Result<CabinetFile, String> {
     let text = std::fs::read_to_string(&p).map_err(|e| {
         // No cabinet file: not a cabinet. Any other error is the folder (or its share) not
         // being reachable just now, which says nothing about what the folder is.
-        if e.kind() == std::io::ErrorKind::NotFound {
+        if e.kind() == std::io::ErrorKind::NotFound && root.is_dir() {
             format!(
                 "{} is not a Vibe Files cabinet (cannot read {}: {e})",
                 root.display(),
@@ -155,6 +155,12 @@ pub fn is_absent(p: &Path, e: &std::io::Error) -> bool {
     e.kind() == std::io::ErrorKind::NotFound && p.ancestors().skip(1).take(4).any(|a| a.is_dir())
 }
 
+/// [`is_absent`] for a file of the cabinet at `root`, when the file's own path is not at
+/// hand: "not found" while the cabinet's folder itself can be seen (a cabinet being made has
+/// no `_Vibe` folder yet; a share that is away has no folder at all).
+pub fn not_there(root: &Path, e: &std::io::Error) -> bool {
+    e.kind() == std::io::ErrorKind::NotFound && root.is_dir()
+}
 /// A shared JSON file read before it is changed and written back: `None` when it is not
 /// there. A file that is there and cannot be read or understood is an error, never "empty":
 /// the write that follows would put the one new entry over everything in it (a share that
@@ -281,7 +287,7 @@ pub fn add_version_sidecar(root: &Path, hash: &str, entry: VersionSidecar) -> Re
     let mut entries: Vec<VersionSidecar> = match std::fs::read_to_string(&sidecar) {
         Ok(t) => serde_json::from_str(&t)
             .map_err(|e| format!("{} is not valid: {e}", sidecar.display()))?,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => vec![],
+        Err(e) if not_there(root, &e) => vec![],
         Err(e) => return Err(format!("cannot read {}: {e}", sidecar.display())),
     };
     entries.push(entry);

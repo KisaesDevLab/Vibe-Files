@@ -103,6 +103,10 @@ pub fn show(ctx: &egui::Context, d: &mut MergeDialog, env: &mut Env) -> DialogOu
                         m.into.name
                     ));
                 }
+                if let Some(note) = &m.note {
+                    message.push(' ');
+                    message.push_str(note);
+                }
                 out = DialogOutcome::Done(Done {
                     message,
                     show: Some(m.from.id.clone()),
@@ -255,7 +259,14 @@ pub fn show(ctx: &egui::Context, d: &mut MergeDialog, env: &mut Env) -> DialogOu
                 {
                     d.error = None;
                     start(ctx, d, env, "Putting the client back…", move |conn, root, device| {
-                        Work::Undone(clientmerge::undo(conn, root, &m, device).map(|n| (m, n)))
+                        Work::Undone(clientmerge::undo_noted(conn, root, &m, device).map(
+                            |(n, note)| {
+                                // What could not be put back as well, to say with the result.
+                                let mut m = m;
+                                m.note = note;
+                                (m, n)
+                            },
+                        ))
                     });
                 }
             });

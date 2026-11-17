@@ -701,6 +701,17 @@ pub fn undo(
     m: &Merged,
     device_id: &str,
 ) -> Result<usize, String> {
+    undo_noted(conn, root, m, device_id).map(|(back, _)| back)
+}
+
+/// [`undo`], with what could not be put back as well once the documents were (the client's
+/// place on the list, its relationships, its holds): to tell the person.
+pub fn undo_noted(
+    conn: &mut Connection,
+    root: &Path,
+    m: &Merged,
+    device_id: &str,
+) -> Result<(usize, Option<String>), String> {
     crate::lock::with(root, "clients", "the client list", || {
         if m.undone.is_some() {
             return Err("That merge was undone already.".into());
@@ -817,70 +828,100 @@ pub fn undo(
         ));
         crate::fileops::commit(conn, root, tx, device_id)?;
 
+        // The documents are back: from here on nothing is an error for the undo. What
+        // could not be put back as well is said, and the merge is marked undone whatever
+        // happens (it used to stop at the first of these with a bare error, the undo still
+        // offered, and the next press said "a folder named … is in the cabinet again";
+        // QA 2026-11-17).
+        let mut notes: Vec<String> = Vec::new();
         // The lists as they were, where they still can be.
-        let mut master = clients::load(root)?;
-        if let Some(c) = &m.client {
-            let mut list = master
-                .list
-                .take()
-                .unwrap_or_else(crate::newclient::empty_list);
-            if !list.clients.iter().any(|x| x.uuid == c.uuid) {
-                list.uuids.insert(c.id.clone(), c.uuid);
-                list.clients.push(c.clone());
-                clients::save_list(root, &list)?;
-            }
-        }
-        if !m.rels_removed.is_empty() {
-            let mut rels = master.rels.clone();
-            rels.records
-                .retain(|r| !m.rels_added.iter().any(|a| a == r));
-            for r in &m.rels_removed {
-                if !rels.records.iter().any(|x| same_rel(x, r)) {
-                    rels.records.push(r.clone());
+        let lists = (|| -> Result<(), String> {
+            let mut master = clients::load(root)?;
+            if let Some(c) = &m.client {
+                let mut list = master
+                    .list
+                    .take()
+                    .unwrap_or_else(crate::newclient::empty_list);
+                if !list.clients.iter().any(|x| x.uuid == c.uuid) {
+                    list.uuids.insert(c.id.clone(), c.uuid);
+                    list.clients.push(c.clone());
+                    clients::save_list(root, &list)?;
                 }
             }
-            clients::save_rels(root, &rels)?;
-        }
-        let mut meta = master.meta.clone();
-        meta.shares
-            .retain(|r| !m.shares_added.iter().any(|a| a == r));
-        for r in &m.shares_removed {
-            if !meta.shares.iter().any(|x| same_share(x, r)) {
-                meta.shares.push(r.clone());
+            if !m.rels_removed.is_empty() {
+                let mut rels = master.rels.clone();
+                rels.records
+                    .retain(|r| !m.rels_added.iter().any(|a| a == r));
+                for r in &m.rels_removed {
+                    if !rels.records.iter().any(|x| same_rel(x, r)) {
+                        rels.records.push(r.clone());
+                    }
+                }
+                clients::save_rels(root, &rels)?;
             }
-        }
-        for (key, v) in &m.details {
-            let map = match key.as_str() {
-                "entity_type" => &mut meta.entity_types,
-                "tin_last4" => &mut meta.tin_last4,
-                "partner" => &mut meta.partners,
-                _ => &mut meta.b2_clients,
-            };
-            map.entry(m.from.id.clone()).or_insert_with(|| v.clone());
-        }
-        if meta != master.meta {
-            clients::save_meta(root, &meta)?;
+            let mut meta = master.meta.clone();
+            meta.shares
+                .retain(|r| !m.shares_added.iter().any(|a| a == r));
+            for r in &m.shares_removed {
+                if !meta.shares.iter().any(|x| same_share(x, r)) {
+                    meta.shares.push(r.clone());
+                }
+            }
+            for (key, v) in &m.details {
+                let map = match key.as_str() {
+                    "entity_type" => &mut meta.entity_types,
+                    "tin_last4" => &mut meta.tin_last4,
+                    "partner" => &mut meta.partners,
+                    _ => &mut meta.b2_clients,
+                };
+                map.entry(m.from.id.clone()).or_insert_with(|| v.clone());
+            }
+            if meta != master.meta {
+                clients::save_meta(root, &meta)?;
+            }
+            Ok(())
+        })();
+        if let Err(e) = lists {
+            notes.push(format!(
+                "The client's place on the client list, its relationships or its details were not all put back ({e}): look at {} in Browse and add what is missing.",
+                m.from.name
+            ));
         }
         let paths: HashMap<String, String> = m
             .moves
             .iter()
             .map(|x| (x.to.to_lowercase(), x.from.clone()))
             .collect();
-        holds::move_back(conn, root, device_id, &m.holds, &m.from.id, &paths)?;
+        if let Err(e) = holds::move_back(conn, root, device_id, &m.holds, &m.from.id, &paths) {
+            notes.push(format!(
+                "Its legal holds were not moved back ({e}): they are still on {}.",
+                m.into.name
+            ));
+        }
         if let Some(row) = &m.csv_row {
             // Not a reason to fail: the client is on the list again either way.
             let _ = clients::restore_csv_row(root, &m.from.ext_id, row);
         }
         let mut done = m.clone();
         done.undone = Some(now);
-        save(root, &done)?;
+        if !notes.is_empty() {
+            done.note = Some(notes.join(" "));
+        }
+        if let Err(e) = save(root, &done) {
+            notes.push(format!(
+                "The merge's record could not be marked undone ({e}): it may be offered again; it is undone."
+            ));
+        }
         let reread: Vec<String> = m.from.folder.iter().cloned().collect();
-        rebuild::sync_clients_edited(conn, root, device_id, "clients_edit", &reread)
-            .map_err(|e| e.to_string())?;
-        Ok(back)
+        if let Err(e) = rebuild::sync_clients_edited(conn, root, device_id, "clients_edit", &reread)
+        {
+            notes.push(format!(
+                "This catalog's client list was not brought up to date ({e}); it is at the next open."
+            ));
+        }
+        Ok((back, (!notes.is_empty()).then(|| notes.join(" "))))
     })
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;

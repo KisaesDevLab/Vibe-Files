@@ -35,6 +35,9 @@ pub struct MergePage {
     side: Option<crate::ui::job::Job<Side>>,
     pub last: Option<Merged>,
     loaded_last: bool,
+    /// A merge that stopped: its error, and the transactions of the record that was there
+    /// before it (to tell whether it moved anything).
+    stopped: Option<(String, Vec<String>)>,
     pub notice: Option<String>,
     pub error: Option<String>,
     /// The catalog changed: Browse re-reads.
@@ -144,7 +147,17 @@ impl MergePage {
                 ));
                 self.last = Some(m);
             }
-            Err(e) => self.error = Some(format!("The merge stopped: {e}")),
+            Err(e) => {
+                // What was moved before it stopped is on record: read again (in `show`),
+                // so Undo is for this merge and the message says how far it got.
+                let before = self
+                    .last
+                    .as_ref()
+                    .map(|m| m.txs.clone())
+                    .unwrap_or_default();
+                self.stopped = Some((e, before));
+                self.loaded_last = false;
+            }
         }
     }
 }
@@ -153,6 +166,20 @@ pub fn show(ui: &mut egui::Ui, p: &mut MergePage, env: &mut Env, catalog: &Path)
     if !p.loaded_last {
         p.last = merge::load_last(env.root);
         p.loaded_last = true;
+        if let Some((e, before)) = p.stopped.take() {
+            // The record is this merge's when it is not the one that was there before.
+            let moved = p
+                .last
+                .as_ref()
+                .filter(|m| m.txs != before)
+                .map(|m| (m.clients, m.moved));
+            p.error = Some(match moved {
+                Some((clients, files)) => format!(
+                    "The merge stopped: {e} Before that {clients} clients ({files} files) were moved, and stay moved: Undo the last merge (below) takes them back."
+                ),
+                None => format!("The merge stopped: {e} Nothing was moved."),
+            });
+        }
     }
     p.poll();
     p.poll_side();

@@ -123,7 +123,7 @@ pub fn load(root: &Path) -> Result<Option<Vec<DocType>>, String> {
             }
             Ok(Some(f.types))
         }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) if crate::cabinet::not_there(root, &e) => Ok(None),
         Err(e) => Err(format!("{FILE} could not be read: {e}")),
     }
 }

@@ -76,7 +76,7 @@ pub fn read(folder: &Path) -> Result<Notes, String> {
                 raw,
             })
         }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Notes {
+        Err(e) if crate::cabinet::is_absent(&p, &e) => Ok(Notes {
             memo: String::new(),
             exists: false,
             raw: Vec::new(),

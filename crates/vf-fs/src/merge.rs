@@ -408,6 +408,13 @@ pub fn apply(
         // Source folders left empty go (never one holding anything; never remove_dir_all).
         out.removed_dirs
             .extend(remove_empty_dirs(&src_root.join(&c.src_folder)));
+        // The record so far, after each client: a merge that stops at a later client (a
+        // file open on another PC) has moved these already, and without a record they
+        // could not be undone (it was written only at the very end; QA 2026-11-17).
+        let _ = cabinet::write_replace(
+            &last_path(root),
+            &serde_json::to_vec_pretty(&out).expect("serializes"),
+        );
     }
 
     // The source's audit trail, kept as read-only history beside this cabinet's own.
@@ -441,10 +448,18 @@ pub fn apply(
             );
         }
     }
-    let _ = cabinet::write_replace(
+    // The whole record; a failure is said (without it this merge cannot be undone from
+    // the page), not dropped.
+    cabinet::write_replace(
         &last_path(root),
         &serde_json::to_vec_pretty(&out).expect("serializes"),
-    );
+    )
+    .map_err(|e| {
+        format!(
+            "The merge is done ({} clients, {} files), but its record could not be written ({e}), so it cannot be undone from this page.",
+            out.clients, out.moved
+        )
+    })?;
     Ok(out)
 }
 

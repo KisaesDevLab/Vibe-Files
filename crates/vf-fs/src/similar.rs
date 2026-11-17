@@ -132,7 +132,7 @@ pub fn dismissed(root: &Path) -> Result<BTreeSet<(String, String)>, String> {
     match std::fs::read(&file) {
         Ok(b) => serde_json::from_slice(&b)
             .map_err(|e| format!("{} cannot be read: {e}", file.display())),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(BTreeSet::new()),
+        Err(e) if crate::cabinet::not_there(root, &e) => Ok(BTreeSet::new()),
         Err(e) => Err(format!("{} cannot be read: {e}", file.display())),
     }
 }

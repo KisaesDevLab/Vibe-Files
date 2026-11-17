@@ -48,7 +48,7 @@ pub fn register_device(root: &Path, device_id: &str, server: bool) -> Result<(),
         Ok(t) => serde_json::from_str::<Device>(&t)
             .map(|d| d.first_seen)
             .unwrap_or_else(|_| now.clone()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => now.clone(),
+        Err(e) if crate::cabinet::not_there(root, &e) => now.clone(),
         // There and unreadable just now: left as it is (when this PC was first seen is in it).
         Err(_) => return Ok(()),
     };

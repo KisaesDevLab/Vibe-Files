@@ -807,7 +807,7 @@ pub fn has_pin(root: &Path) -> bool {
     let set = match std::fs::read_to_string(&file) {
         // Removed: the file says so, so sync carries the removal (owner 2026-11-04).
         Ok(t) => !is_removed_marker(&t),
-        Err(e) => e.kind() != std::io::ErrorKind::NotFound,
+        Err(e) => !crate::cabinet::not_there(root, &e),
     };
     if let Ok(mut seen) = PIN_SEEN.lock() {
         *seen = Some((file, set, std::time::Instant::now()));

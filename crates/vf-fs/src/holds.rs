@@ -79,7 +79,7 @@ pub fn load(root: &Path) -> Result<Vec<Hold>, String> {
             }
             Ok(f.holds)
         }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(vec![]),
+        Err(e) if crate::cabinet::not_there(root, &e) => Ok(vec![]),
         Err(e) => Err(format!("{FILE} could not be read: {e}")),
     }
 }

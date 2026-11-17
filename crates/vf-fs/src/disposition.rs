@@ -327,7 +327,7 @@ pub fn sync_decisions(
 ) -> Result<usize, String> {
     let text = match std::fs::read_to_string(decisions_path(root)) {
         Ok(t) => t,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(e) if crate::cabinet::not_there(root, &e) => return Ok(0),
         Err(e) => return Err(format!("{DECISIONS_FILE}: {e}")),
     };
     // The latest decision for each document wins. Each line is matched to its document first
@@ -1059,7 +1059,7 @@ pub fn destroy_due(
             let elsewhere = match std::fs::read_to_string(&sidecar) {
                 Ok(t) => serde_json::from_str::<Vec<cabinet::VersionSidecar>>(&t)
                     .map_or(true, |es| es.iter().any(|e| e.rel_path != v.rel_path)),
-                Err(e) => e.kind() != std::io::ErrorKind::NotFound,
+                Err(e) => !crate::cabinet::not_there(root, &e),
             };
             if elsewhere {
                 continue;
