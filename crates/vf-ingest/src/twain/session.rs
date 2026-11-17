@@ -858,6 +858,68 @@ mod tests {
         assert_closed_in_order(&log);
     }
 
+    /// QA 2026-11-17: a page that ends before the length the driver announced is written
+    /// at the length that came (it was padded to the announced one, in black).
+    #[test]
+    fn a_page_shorter_than_announced_is_as_long_as_what_came() {
+        let (r, _) = run(
+            Scanner {
+                short_by: 40,
+                ..Scanner::fi7160()
+            },
+            settings(),
+        );
+        let r = r.unwrap();
+        assert_eq!(r.pages.len(), 4);
+        for p in &r.pages {
+            assert_eq!((p.width, p.height), (200, 210));
+            assert_eq!(p.data.len(), 200 * 210);
+        }
+    }
+
+    /// QA 2026-11-17: a page the scanner cancels is not in the scan, and that is said.
+    #[test]
+    fn a_page_the_scanner_cancels_is_said() {
+        let (r, _) = run(
+            Scanner {
+                cancel_page: Some(1),
+                ..Scanner::fi7160()
+            },
+            settings(),
+        );
+        let r = r.unwrap();
+        assert_eq!(r.pages.len(), 3, "the other pages are kept");
+        assert!(
+            r.stopped
+                .as_deref()
+                .is_some_and(|s| s.contains("cancelled a page")),
+            "{:?}",
+            r.stopped
+        );
+    }
+
+    /// QA 2026-11-17: a scanner that cannot say whether more pages wait has stopped, and
+    /// that is said; the batch used to end there as if it were complete.
+    #[test]
+    fn a_scanner_that_stops_between_pages_is_said() {
+        let (r, _) = run(
+            Scanner {
+                endxfer_fails_at: Some(1),
+                ..Scanner::fi7160()
+            },
+            settings(),
+        );
+        let r = r.unwrap();
+        assert_eq!(r.pages.len(), 2, "the pages scanned before it are kept");
+        assert!(
+            r.stopped
+                .as_deref()
+                .is_some_and(|s| s.contains("stopped between pages")),
+            "{:?}",
+            r.stopped
+        );
+    }
+
     #[test]
     fn duplex_on_a_one_sided_scanner_is_refused_and_closed() {
         let (r, log) = run(

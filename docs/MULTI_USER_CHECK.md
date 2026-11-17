@@ -65,6 +65,18 @@ on one PC while nobody else works).
    - Not expected: "is not a Vibe Files cabinet", an admin password that stopped working, a
      client that lost its documents, or a client list that came back empty.
 
+## F. One scan on the real scanner
+
+The scanner changes after 0.1.45 were tried only against a simulated scanner.
+
+1. Scan a batch of about ten sheets, both sides, with one short sheet (a receipt or a half
+   page) in the middle.
+   - Expected: every side is in the PDF, in order. The short sheet is a short page, with no
+     black band below it.
+   - Not expected: a page missing without a line saying so, or a page cut off.
+2. If the scanner jams or is stopped part way: the pages scanned before that are kept, and a
+   line says why it stopped.
+
 ## What to send back
 
 - For each lettered case: went as described, or what was on the screen instead.

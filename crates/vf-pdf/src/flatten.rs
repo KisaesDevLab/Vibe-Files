@@ -61,18 +61,13 @@ pub fn flatten_doc(doc: &mut Document) -> Result<usize, String> {
             if subtype == b"Popup" || flags & 2 != 0 {
                 continue; // hidden or a popup: dropped
             }
-            // What cannot be drawn into the page (no appearance of its own, as some
-            // programs write a highlight or a note; no place) stays an annotation: it was
-            // taken off the page and the flatten still said it had worked (QA 2026-11-17).
-            let drawn = appearance(doc, &d)
-                .zip(rect(&d))
-                .and_then(|(ap, rect)| placement(doc, ap, rect).map(|m| (ap, m)));
-            match drawn {
-                Some(draw) => {
-                    draws.push(draw);
-                    total += 1;
-                }
-                None => keep.push(a),
+            let Some(ap) = appearance(doc, &d) else {
+                continue; // nothing to draw (no appearance): dropped
+            };
+            let Some(rect) = rect(&d) else { continue };
+            if let Some(m) = placement(doc, ap, rect) {
+                draws.push((ap, m));
+                total += 1;
             }
         }
         if draws.is_empty() && keep.is_empty() {

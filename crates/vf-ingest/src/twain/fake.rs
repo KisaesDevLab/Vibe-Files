@@ -32,6 +32,12 @@ pub struct Scanner {
     pub jam_after: Option<usize>,
     /// The user closes the driver's window without scanning.
     pub cancel_in_ui: bool,
+    /// Every page ends this many rows before the length the driver announced.
+    pub short_by: u32,
+    /// The scanner cancels this page (0-based) and goes on with the next.
+    pub cancel_page: Option<usize>,
+    /// Ending the transfer of this page (0-based) fails.
+    pub endxfer_fails_at: Option<usize>,
 }
 
 impl Scanner {
@@ -46,6 +52,9 @@ impl Scanner {
             blank: vec![],
             jam_after: None,
             cancel_in_ui: false,
+            short_by: 0,
+            cancel_page: None,
+            endxfer_fails_at: None,
         }
     }
 
@@ -486,7 +495,12 @@ impl Fake {
                 if mem.flags != TWMF_APPOWNS | TWMF_POINTER || mem.the_mem.is_null() {
                     return self.fail(TWCC_BADVALUE);
                 }
+                if self.scanner().cancel_page == Some(self.sent) {
+                    self.state = 7;
+                    return TWRC_CANCEL;
+                }
                 let (w, h) = self.size();
+                let h = h - self.scanner().short_by;
                 let row = self.row_bytes(self.sent, 0).len();
                 let bpr = row.div_ceil(4) * 4; // padded rows, as drivers send them
                 let rows = ((mem.length as usize / bpr) as u32)
@@ -525,6 +539,10 @@ impl Fake {
             (DAT_PENDINGXFERS, MSG_ENDXFER) => {
                 if self.state != 6 && self.state != 7 {
                     return self.seq();
+                }
+                if self.scanner().endxfer_fails_at == Some(self.sent) {
+                    self.state = 6;
+                    return self.fail(TWCC_PAPERJAM);
                 }
                 self.sent += 1;
                 self.row = 0;

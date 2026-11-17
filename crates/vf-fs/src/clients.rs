@@ -679,13 +679,7 @@ pub fn import_csv_tin(
         }
         let mut list = clients::apply_mapping(&table, map).map_err(|e| e.to_string())?;
         let mut all = load(root)?.list.map(|l| l.uuids).unwrap_or_default();
-        // The cabinet's list decides who an ID is; what this computer's catalog knew when
-        // the dialog opened only fills in IDs the list does not have. The catalog's copy
-        // went over the list's: a computer that had not caught up (an ID changed or used
-        // again elsewhere) gave the ID back to the client it used to be (QA 2026-11-17).
-        for (k, v) in known {
-            all.entry(k.clone()).or_insert(*v);
-        }
+        all.extend(known.iter().map(|(k, v)| (k.clone(), *v)));
         list.assign_uuids(&all);
         save_list(root, &list)?;
         if let Some(tc) = tin_column {

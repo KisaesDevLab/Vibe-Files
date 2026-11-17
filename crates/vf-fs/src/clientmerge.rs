@@ -77,6 +77,25 @@ impl Plan {
     pub fn kept_both(&self) -> usize {
         self.moves.iter().filter(|m| m.kept_both).count()
     }
+
+    /// The documents that move (the client's notes files move too, and are not counted).
+    pub fn documents(&self) -> usize {
+        self.moves.iter().filter(|m| !m.is_notes()).count()
+    }
+}
+
+impl Move {
+    /// A notes file (`!fcinfo.ini`) going with its client: a file only, no document.
+    pub fn is_notes(&self) -> bool {
+        self.doc_id.is_empty()
+    }
+}
+
+impl Merged {
+    /// The documents that moved (see [`Plan::documents`]).
+    pub fn documents(&self) -> usize {
+        self.moves.iter().filter(|m| !m.is_notes()).count()
+    }
 }
 
 /// What a merge did: the record its undo works from.
@@ -129,18 +148,19 @@ fn dir(root: &Path) -> PathBuf {
 
 /// The cabinet's last merge (for Undo), when it has not been undone.
 pub fn load_last(root: &Path) -> Option<Merged> {
-    // A record that cannot be read may be the last merge: then which merge is the last is
-    // not known, and none is offered (an older one used to be offered as "the last merge",
-    // and undoing that one out of turn is not what the person asked for; QA 2026-11-17).
-    let mut all: Vec<Merged> = Vec::new();
-    for e in std::fs::read_dir(dir(root)).ok()?.flatten() {
-        if !e.path().extension().is_some_and(|x| x == "json") {
-            continue;
-        }
-        all.push(serde_json::from_slice(&std::fs::read(e.path()).ok()?).ok()?);
-    }
-    all.sort_by(|a, b| a.when.cmp(&b.when));
-    all.pop().filter(|m| m.undone.is_none())
+    // The newest record decides (their names are their transaction ids, which sort by
+    // time). When that one cannot be read, which merge is the last is not known and none is
+    // offered: an older one used to be offered as "the last merge". An older record that
+    // cannot be read hides nothing.
+    let mut files: Vec<PathBuf> = std::fs::read_dir(dir(root))
+        .ok()?
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|x| x == "json"))
+        .collect();
+    files.sort();
+    let newest: Merged = serde_json::from_slice(&std::fs::read(files.pop()?).ok()?).ok()?;
+    Some(newest).filter(|m| m.undone.is_none())
 }
 
 /// Writes the merge's record. Not through [`cabinet::write_replace`]: the record is this
@@ -550,7 +570,7 @@ pub fn apply(
                 json!({
                     "from": from.ext_id, "from_folder": from.folder,
                     "into": into.ext_id, "into_folder": into.folder,
-                    "documents": plan.moves.len(), "kept_both": plan.kept_both(),
+                    "documents": plan.documents(), "kept_both": plan.kept_both(),
                 }),
             ));
         let done = crate::fileops::commit(conn, root, tx, device_id)?;
@@ -1133,6 +1153,20 @@ mod tests {
             "[Memo]\r\ncall in March\r\n"
         );
         assert!(!root.join(KEPT).join("!fcinfo (2).ini").exists());
+    }
+
+    /// The newest record decides what the last merge is: an older one that cannot be read
+    /// hides nothing, and a newest one that cannot be read offers none.
+    #[test]
+    fn the_newest_record_decides_the_last_merge() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (root, _csv, mut conn, kept, dup) = cabinet(tmp.path());
+        let p = plan(&conn, &root, &dup, &kept).unwrap();
+        let m = apply(&mut conn, &root, &p, "dev").unwrap();
+        std::fs::write(dir(&root).join("00000000.json"), "not a record").unwrap();
+        assert_eq!(load_last(&root).map(|l| l.tx_id), Some(m.tx_id.clone()));
+        std::fs::write(dir(&root).join("zzzzzzzz.json"), "not a record").unwrap();
+        assert!(load_last(&root).is_none());
     }
 
     #[test]

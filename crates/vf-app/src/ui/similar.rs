@@ -50,7 +50,7 @@ enum Marked {
 type Previewed = Vec<(Choice, Result<Preview, String>)>;
 type Ran = Vec<(Choice, Outcome)>;
 /// For each merge put back: the client, and how many documents went back or why not.
-type PutBack = Vec<(String, Result<usize, String>)>;
+type PutBack = Vec<(String, similar::PutBack)>;
 
 #[derive(Default)]
 pub struct SimilarPage {
@@ -228,7 +228,12 @@ impl SimilarPage {
                     let ok = back.iter().filter(|(_, r)| r.is_ok()).count();
                     self.results = back
                         .iter()
-                        .filter_map(|(c, r)| r.as_ref().err().map(|e| format!("{c}: {e}")))
+                        .filter_map(|(c, r)| match r {
+                            Err(e) => Some(format!("{c}: {e}")),
+                            // Put back, but not all of the client's own: said too.
+                            Ok((_, Some(note))) => Some(format!("{c}: {note}")),
+                            Ok((_, None)) => None,
+                        })
                         .collect();
                     let left = self.last_run.len().saturating_sub(ok);
                     self.last_run.truncate(left);
@@ -269,7 +274,11 @@ impl SimilarPage {
         for (c, o) in out {
             match o {
                 Outcome::Merged(m) => {
-                    moved += m.moves.iter().filter(|x| x.from != x.to).count();
+                    moved += m
+                        .moves
+                        .iter()
+                        .filter(|x| x.from != x.to && !x.is_notes())
+                        .count();
                     if let Some(n) = &m.note {
                         self.results
                             .push(format!("{} into {}: {n}", name(&c.from), name(&c.into)));

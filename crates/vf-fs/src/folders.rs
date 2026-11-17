@@ -350,8 +350,11 @@ fn move_folder(
         // Records that are there and cannot be read just now: the folder is not renamed
         // without them (a document known by its path alone kept its record at the old
         // path, and the other computers lost its doc type, year and tags; QA 2026-11-17).
-        if !ix.unreadable.is_empty() {
-            return Err("The records of the documents in this folder cannot be read just now, so it was not renamed or moved. Try again in a moment.".into());
+        // Only when it matters: a document with a fingerprint is found again by its
+        // content wherever its record says it is. (So records that can never be read do
+        // not keep a folder of read documents from ever being renamed.)
+        if !ix.unreadable.is_empty() && metas.iter().any(|m| m.hash.is_none()) {
+            return Err("The records of the documents in this folder cannot be read just now, and some of its documents are known by their place alone, so it was not renamed or moved. Try again in a moment.".into());
         }
         let mut by_file: std::collections::BTreeMap<PathBuf, (Vec<String>, Vec<String>)> =
             Default::default();
@@ -1334,6 +1337,34 @@ mod tests {
             assert!(!c.root.join(d).exists(), "{d}");
         }
         assert!(kept.is_dir());
+    }
+
+    /// QA 2026-11-17: a folder is not renamed while its documents' records cannot be read
+    /// and a document in it is known by its place alone; with every document
+    /// fingerprinted it is (records that can never be read do not close it for good).
+    #[test]
+    fn a_folder_is_not_renamed_past_records_that_cannot_be_read() {
+        let (mut c, _) = cab();
+        let cf = "Smith, Pat (SMIT1001)";
+        let records = c.root.join(cf).join("_Vibe").join(docmeta::FILE);
+        let _ = std::fs::remove_file(&records);
+        std::fs::create_dir_all(&records).unwrap(); // a folder where the file goes
+        c.conn
+            .execute("UPDATE document SET hash = NULL WHERE id = 'd1'", [])
+            .unwrap();
+        let from = format!("{cf}/Correspondence");
+        let e = rename_folder(&mut c.conn, &c.root, &from, "Letters", "dev").unwrap_err();
+        assert!(e.contains("cannot be read just now"), "{e}");
+        assert!(c.root.join(&from).is_dir(), "nothing was moved");
+        assert_eq!(doc_path(&c), format!("{from}/letter.pdf"));
+        c.conn
+            .execute(
+                "UPDATE document SET hash = ?1 WHERE id = 'd1'",
+                [format!("{:064x}", 1)],
+            )
+            .unwrap();
+        rename_folder(&mut c.conn, &c.root, &from, "Letters", "dev").unwrap();
+        assert_eq!(doc_path(&c), format!("{cf}/Letters/letter.pdf"));
     }
 
     #[test]

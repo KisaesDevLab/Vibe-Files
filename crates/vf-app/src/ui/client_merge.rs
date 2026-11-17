@@ -78,7 +78,7 @@ pub fn show(ctx: &egui::Context, d: &mut MergeDialog, env: &mut Env) -> DialogOu
                     "Merged {} into {}: {} moved.",
                     m.from.name,
                     m.into.name,
-                    plural(m.moves.len(), "document", "documents")
+                    plural(m.documents(), "document", "documents")
                 );
                 if let Some(n) = &m.note {
                     message.push(' ');
@@ -179,7 +179,7 @@ pub fn show(ctx: &egui::Context, d: &mut MergeDialog, env: &mut Env) -> DialogOu
                 let to = p.into.folder.as_deref().unwrap_or_default();
                 ui.label(format!(
                     "{} to {to}.",
-                    match p.moves.len() {
+                    match p.documents() {
                         0 => "No documents move".to_string(),
                         1 => "1 document moves".to_string(),
                         n => format!("{n} documents move"),

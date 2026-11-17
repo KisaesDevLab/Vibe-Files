@@ -99,11 +99,10 @@ pub fn plan(conn: &Connection, root: &Path, src_root: &Path) -> Result<MergePlan
         return Err("One cabinet is inside the other: pick a separate cabinet.".into());
     }
     // Names from the source's client list where it has one, else from the sentinel.
-    // (A client list that is there and cannot be read is said, not passed over: the new
-    // clients would be made under the names their folders had when they were first bound.)
+    // (Without it, from each folder's client file.)
     let src_names: HashMap<String, String> = clients::load(src_root)
-        .map_err(|e| format!("The other cabinet's client list cannot be read ({e})."))?
-        .list
+        .ok()
+        .and_then(|m| m.list)
         .map(|l| {
             l.clients
                 .into_iter()
@@ -142,18 +141,19 @@ pub fn plan(conn: &Connection, root: &Path, src_root: &Path) -> Result<MergePlan
     for folder in tops {
         let src_folder = rel_of(src_root, &folder);
         // No client file: not a client's folder, left where it is. One that cannot be read
-        // just now is not that: the merge is not planned without it (it was listed with
-        // the folders "left where they are" and skipped in silence; QA 2026-11-17).
+        // is listed with those too, and said as what it is (it was listed as a folder with
+        // no client file; QA 2026-11-17). The rest of the merge goes on: one client file
+        // that can never be read must not close the whole merge.
         let s = match filer_intake::sentinel::read_sentinel(&folder) {
             Ok(Some(s)) => s,
             Ok(None) => {
                 p.unbound.push(src_folder);
                 continue;
             }
-            Err(e) if std::fs::read(filer_intake::sentinel::sentinel_path(&folder)).is_err() => {
-                return Err(format!(
-                    "The client file of {src_folder} in the other cabinet cannot be read just now ({e}). Try again in a moment."
-                ));
+            Err(_) if std::fs::read(filer_intake::sentinel::sentinel_path(&folder)).is_err() => {
+                p.unbound
+                    .push(format!("{src_folder} (its client file could not be read)"));
+                continue;
             }
             // It reads and is not a client file: as a folder with none.
             Err(_) => {
@@ -662,6 +662,67 @@ mod tests {
                 .join(format!("{acme}/Bookkeeping/2025/ledger.pdf"))
                 .is_file(),
             "back in the cabinet it came from"
+        );
+    }
+
+    /// QA 2026-11-17: a client's folder here that was renamed after the merge was looked
+    /// at (on another computer) stops the merge; its files are not filed under the old name.
+    #[test]
+    fn a_merge_stops_when_a_clients_folder_here_was_renamed_since() {
+        let mut here = cab("here");
+        let mut there = cab("there");
+        let smith_here = client(&mut here, "SMIT1001", "Smith, Pat");
+        let smith_there = client(&mut there, "SMIT1001", "Smith, Pat");
+        let rel = format!("{smith_there}/Income Tax/2024/return.pdf");
+        put(&there.root, &rel, "invented return");
+        crate::rebuild::rebuild(&mut there.conn, &there.root, "dev").unwrap();
+        let p = plan(&here.conn, &here.root, &there.root).unwrap();
+        std::fs::rename(
+            here.root.join(&smith_here),
+            here.root.join("Smith, Patricia (SMIT1001)"),
+        )
+        .unwrap();
+        let done = std::sync::atomic::AtomicUsize::new(0);
+        let e = apply(&mut here.conn, &here.root, &p, "dev", &done).unwrap_err();
+        assert!(e.contains("is no longer"), "{e}");
+        assert!(there.root.join(&rel).is_file(), "nothing was moved");
+        assert!(
+            !here.root.join(&smith_here).exists(),
+            "no folder made again"
+        );
+    }
+
+    /// QA 2026-11-17: a client file of the other cabinet that cannot be read is said with
+    /// the folders left where they are, and the rest of the merge is still planned.
+    #[test]
+    fn a_client_file_that_cannot_be_read_is_said_and_the_rest_is_planned() {
+        let here = cab("here");
+        let mut there = cab("there");
+        let acme = client(&mut there, "ACME1002", "Acme LLC");
+        let zeta = client(&mut there, "ZETA1009", "Zeta Farms");
+        put(
+            &there.root,
+            &format!("{acme}/Bookkeeping/2025/ledger.pdf"),
+            "invented",
+        );
+        crate::rebuild::rebuild(&mut there.conn, &there.root, "dev").unwrap();
+        let file = filer_intake::sentinel::sentinel_path(&there.root.join(&zeta));
+        std::fs::remove_file(&file).unwrap();
+        std::fs::create_dir(&file).unwrap(); // a folder where the file goes
+        let p = plan(&here.conn, &here.root, &there.root).unwrap();
+        assert!(
+            p.unbound
+                .iter()
+                .any(|u| u.starts_with(&zeta) && u.contains("could not be read")),
+            "{:?}",
+            p.unbound
+        );
+        let done = std::sync::atomic::AtomicUsize::new(0);
+        apply(&mut { here.conn }, &here.root, &p, "dev", &done).unwrap();
+        assert!(
+            here.root
+                .join(format!("{acme}/Bookkeeping/2025/ledger.pdf"))
+                .is_file()
         );
     }
 

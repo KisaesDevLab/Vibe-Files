@@ -353,7 +353,11 @@ pub fn preview(
                 clientmerge::plan(conn, root, &from, &into).map(|p| Preview {
                     from: format!("{}  {}", p.from.name, p.from.ext_id),
                     into: format!("{}  {}", p.into.name, p.into.ext_id),
-                    moves: p.moves.iter().filter(|m| m.from != m.to).count(),
+                    moves: p
+                        .moves
+                        .iter()
+                        .filter(|m| m.from != m.to && !m.is_notes())
+                        .count(),
                     kept_both: p.kept_both(),
                     holds: p.holds,
                     relationships: p.relationships,
@@ -423,6 +427,10 @@ pub fn merge_many(
     out
 }
 
+/// One merge put back: its documents that went back, and what of the client's own could
+/// not be (see [`clientmerge::undo_noted`]).
+pub type PutBack = Result<(usize, Option<String>), String>;
+
 /// Puts the merges of a run back, the last one first, and stops at the first that cannot be
 /// (the ones before it in the run may hold its documents: A into B, then B into C; with C's
 /// merge not put back, putting A's back would restore an empty client; QA 2026-11-17). For
@@ -433,10 +441,12 @@ pub fn undo_many(
     root: &Path,
     device_id: &str,
     merged: &[Merged],
-) -> Vec<(String, Result<usize, String>)> {
+) -> Vec<(String, PutBack)> {
     let mut out = Vec::new();
     for m in merged.iter().rev() {
-        let r = clientmerge::undo(conn, root, m, device_id);
+        // With what the undo could not put back of the client's own (its place on the
+        // list, its relationships, its holds), for the page to say.
+        let r = clientmerge::undo_noted(conn, root, m, device_id);
         let failed = r.is_err();
         out.push((format!("{}  {}", m.from.name, m.from.ext_id), r));
         if failed {
