@@ -43,7 +43,8 @@ of its `src/` (QUESTIONS Q-16). Upstream `main.rs` is not vendored; `vf-app` is 
      combined PDF is kept when one of its originals that could not be parked
      (`FiledItem.unparked`) is gone; a client folder that still holds a file of the batch
      (item, copy or zip entry) keeps its client file; a batch with only a kept overwritten
-     file can be undone.
+     file can be undone, and its folder is marked (`UNRESTORED_MARK`) so later commits do
+     not clear it.
    - `commit.rs` `run_unpack`: a zip with an entry that failed is put aside in the inbox's
      `_combined` folder (not unpacked twice, not cleared by the next commit; Undo puts it back).
    - `commit.rs` `transfer`: says so when the copy could not be taken back either.
@@ -51,12 +52,12 @@ of its `src/` (QUESTIONS Q-16). Upstream `main.rs` is not vendored; `vf-app` is 
      backups.
    - `plan.rs` / `filer-core/src/parse.rs` (the owner's four choices): a name match is not
      taken when the name carries an ID no client has, or two clients match; an ID found as a
-     word is taken only as a `_` part of its own (first, second or last), when read by the
+     word is taken only as a `_` part of its own (first or second; a two-part ID also last), when read by the
      UltraTax layout, or with the client's name in the file name (`id_is_a_part_of_its_own`);
      only a token shaped like the list's IDs, and no year, counts as "an ID no client has"
      (`looks_like_a_client_id`); two different years in what rules read are not guessed
      between (`years_in`; never against an UltraTax tax year); a folder is bound on commit
-     only by name (`name_score`) and when it is the only one.
+     only by name (`name_score` at the auto threshold) and when it is the only one.
 
 Logic edits are those of item 6 only. Check with:
 `diff -r <upstream>/src crates/filer-*/src` (only the four attribute lines and the `settle`

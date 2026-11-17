@@ -376,7 +376,7 @@ impl Reconciled {
 }
 
 /// Label of the transaction that brings back the rows of files Filer's Undo left filed (PA-89).
-const KEPT_LABEL: &str = "intake_undo_kept";
+pub(crate) const KEPT_LABEL: &str = "intake_undo_kept";
 
 /// The undo record of a recorded Filer batch: (tx id, already undone).
 fn recorded(conn: &Connection, batch: &str) -> Option<(String, bool)> {
@@ -1993,16 +1993,24 @@ mod tests {
             .unwrap()
             .dst
             .clone();
-        // What Undo did, as last_batch.json says it: undone, one file still where it was.
+        // A viewer has k1.pdf open without delete sharing: Filer's Undo cannot take it back.
+        let hold = {
+            use std::os::windows::fs::OpenOptionsExt;
+            std::fs::OpenOptions::new()
+                .read(true)
+                .share_mode(1)
+                .open(&kept)
+                .unwrap()
+        };
         let undo = filer_intake::undo::run_undo(
             &crate::clients::master_dir(&f.root),
             rep.last_batch.clone(),
             false,
         );
+        drop(hold);
         assert!(undo.last_batch.undone);
-        // As when Undo leaves one file where it was filed.
-        std::fs::create_dir_all(kept.parent().unwrap()).unwrap();
-        std::fs::rename(f.inbox.join("k1.pdf"), &kept).unwrap();
+        assert!(kept.is_file(), "{:?}", undo.outcomes);
+        assert!(f.inbox.join("w2.pdf").is_file());
         reconcile(&mut f.conn, &f.root, "dev").unwrap();
         let live: Vec<String> = f
             .conn
@@ -2014,6 +2022,19 @@ mod tests {
             .collect();
         assert_eq!(live.len(), 1, "{live:?}");
         assert!(live[0].ends_with("/k1.pdf"));
+        // Not an entry on the Undo stack, and it goes to B2 as a document, not as a delete.
+        assert!(
+            crate::fileops::undo_stack(&f.conn, "dev")
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            n(
+                &f.conn,
+                "SELECT count(*) FROM sync_pending WHERE op != 'put'"
+            ),
+            0
+        );
         assert!(!reconcile(&mut f.conn, &f.root, "dev").unwrap().changed());
     }
 

@@ -698,10 +698,11 @@ pub fn years_in(text: &str, current_year: i32) -> Vec<u16> {
 
 /// Vibe Files (PA-89): whether `id` stands in `stem` as a part of its own, between
 /// underscores, where a program or a person puts a client's ID on purpose: the first or the
-/// second part (`1001_2025 W-2`, `Smith, John_1001_2025 W-2`) or the last
-/// (`Smith, John_2025_1040_Tax_Return_1001`, as UltraTax prints it); an ID with an
-/// underscore in it as two such parts. A word inside a part that only happens to equal an
-/// ID (`1099` in `1099-R Fidelity`) does not.
+/// second part (`1001_2025 W-2`, `Smith, John_1001_2025 W-2`); an ID with an underscore in
+/// it as two such parts, or as the last two (`…_K1_Package_2614_FOUR`, as print capture
+/// delivers it: two parts together are no accident). A word inside a part that only happens
+/// to equal an ID (`1099` in `1099-R Fidelity`) does not, nor a one-part ID at the end
+/// (`Fidelity_2025_1099`).
 pub fn id_is_a_part_of_its_own(stem: &str, id: &str) -> bool {
     let parts: Vec<&str> = stem.split('_').map(str::trim).collect();
     let n = parts.len();
@@ -713,9 +714,9 @@ pub fn id_is_a_part_of_its_own(stem: &str, id: &str) -> bool {
             .is_some_and(|(x, y)| is(&format!("{x}_{y}")))
     };
     // A name that is one part has no part "of its own" (the ID would be the whole name).
-    n >= 2
-        && (is(parts[0]) || is(parts[1]) || is(parts[n - 1]) || pair(0) || pair(1) || pair(n - 2))
+    n >= 2 && (is(parts[0]) || is(parts[1]) || pair(0) || pair(1) || pair(n - 2))
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -734,8 +735,10 @@ mod tests {
         assert!(part("1001_2025 W-2", "1001"));
         assert!(part("Four State Barns_2614_FOUR_2025 K-1", "2614_FOUR"));
         assert!(part("2614_four_2025 K-1", "2614_FOUR"));
-        // As UltraTax prints it: the ID last, one part or two.
-        assert!(part("Smith, John_2025_1040_Tax_Return_1001", "1001"));
+        // A two-part ID last, as print capture delivers it; a one-part ID last is a word.
+        assert!(!part("Smith, John_2025_1040_Tax_Return_1001", "1001"));
+        assert!(!part("Scan_of_form_1099", "1099"));
+        assert!(!part("Fidelity_2025_1099", "1099"));
         assert!(part(
             "Four State Barns_2025_1065_K1_Package_2614_FOUR",
             "2614_FOUR"

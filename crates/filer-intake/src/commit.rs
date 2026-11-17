@@ -22,6 +22,9 @@ use crate::zipimport::Extractor;
 
 pub const LAST_BATCH_FILE: &str = "last_batch.json";
 pub const OVERWRITTEN_DIR: &str = "overwritten";
+/// Vibe Files (PA-89). In a batch's folder of overwritten files: one of them could not be put
+/// back when its filing failed, so the folder is not cleared by later commits.
+pub const UNRESTORED_MARK: &str = "unrestored";
 /// Parked originals of combined PDFs when no inbox is set (X84 fallback).
 pub const COMBINED_DATA_DIR: &str = "combined";
 /// Note on a move, copy or zip entry whose name got a ` (2)` (Keep both); History shows a pill.
@@ -907,7 +910,11 @@ impl Ctx<'_> {
                 ));
                 // Vibe Files (PA-89): still the batch's to look after. Dropped from the
                 // batch, the kept file was cleared away at the next commit and the
-                // overwritten original was gone for good.
+                // overwritten original was gone for good. Its folder is marked so the next
+                // commit leaves it too (Undo lifts the mark when the file is back).
+                if let Some(dir) = b.kept.parent() {
+                    let _ = std::fs::write(dir.join(UNRESTORED_MARK), b"");
+                }
                 self.lb.backups.push(b);
             }
         }
@@ -1021,6 +1028,12 @@ fn prune_overwritten(data_dir: &Path, keep: Uuid) {
     prune_batch_dirs(&data_dir.join(SPLIT_ORIGINALS_DIR), keep);
 }
 
+/// What a new commit clears, for a test.
+#[cfg(test)]
+pub(crate) fn prune_for_test(data_dir: &Path) {
+    prune_overwritten(data_dir, Uuid::new_v4());
+}
+
 /// Removes the files in each `<base>/<batch>/` except `keep`'s, then the empty folders.
 fn prune_batch_dirs(base: &Path, keep: Uuid) {
     let Ok(batches) = std::fs::read_dir(base) else {
@@ -1028,7 +1041,10 @@ fn prune_batch_dirs(base: &Path, keep: Uuid) {
     };
     for b in batches.flatten() {
         let dir = b.path();
-        if !dir.is_dir() || b.file_name().to_string_lossy() == keep.to_string() {
+        if !dir.is_dir()
+            || b.file_name().to_string_lossy() == keep.to_string()
+            || dir.join(UNRESTORED_MARK).exists()
+        {
             continue;
         }
         if let Ok(files) = std::fs::read_dir(&dir) {
@@ -1330,12 +1346,15 @@ pub fn run_unpack(input: &UnpackInput, progress: &AtomicUsize) -> UnpackReport {
         // Put aside beside where it was, in the folder Intake does not read (`_combined`):
         // it is not unpacked a second time (the entries written would be filed twice, as
         // " (2)"), not cleared at the next commit, and Undo puts it back.
+        // Only ever in an inbox or the data folder (a zip added by hand is anywhere).
+        let dir = match &t.first_inbox {
+            Some(inbox) => inbox.join(crate::intake::COMBINED_DIR),
+            None => t.data_dir.join(COMBINED_DATA_DIR).join(batch.to_string()),
+        };
         let aside = input
             .zip
-            .parent()
-            .map(|d| d.join(crate::intake::COMBINED_DIR))
-            .zip(input.zip.file_name())
-            .map(|(d, n)| (d.clone(), free_path(&d.join(n))));
+            .file_name()
+            .map(|n| (dir.clone(), free_path(&dir.join(n))));
         let kept = aside.and_then(|(dir, kept)| {
             std::fs::create_dir_all(&dir)
                 .map_err(|e| e.to_string())

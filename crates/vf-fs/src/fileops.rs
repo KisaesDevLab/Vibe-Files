@@ -134,6 +134,7 @@ pub fn undo(
 /// bytes are gone).
 pub const NOT_ON_UNDO_STACK: &[&str] = &[
     crate::intake::LABEL,
+    crate::intake::KEPT_LABEL,
     "intake batch",
     "rebuild",
     crate::trash::PURGE_LABEL,

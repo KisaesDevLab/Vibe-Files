@@ -8,7 +8,7 @@ Intake files a document on its own when the file name says clearly whose it is a
 
 A file named `Miller, Robert_9999_2025 W-2.pdf` carries the ID 9999. If no client has that ID, the file is for a client who is not in the client list yet, however well the name matches someone who is. The client of that name is offered as a suggestion; the row says **Needs client**. Click the suggestion to take it, or use **New client…** for a new one.
 
-A year or a form number in that place (`Smith, John_2025_W-2.pdf`) is not an ID: only something shaped like your own client IDs counts.
+A year in that place (`Smith, John_2025_W-2.pdf`) is not an ID, and only something shaped like your own client IDs counts. Where IDs are four digits, a form number there (`Smith, John_1040_2025.pdf`) still looks like one, and the row asks.
 
 Two clients of the same name are offered as well, not picked between.
 
@@ -18,7 +18,7 @@ A name with no ID of its own that is exactly a client's name is still matched wi
 
 `1099-R Fidelity.pdf` is not for a client whose ID is 1099. An ID found as a word in a name is taken as the client's only when:
 
-- it stands as a part of its own between underscores, first, second or last: `1099_2025 W-2.pdf`, `Smith, John_1099_2025 W-2.pdf`, or `Smith, John_2025_Return_1099.pdf`; or
+- it stands as a part of its own between underscores, first or second: `1099_2025 W-2.pdf` or `Smith, John_1099_2025 W-2.pdf` (an ID with an underscore in it, such as `2614_FOUR`, also at the end); or
 - the client's name is in the file name too.
 
 Otherwise the client is offered as a suggestion.

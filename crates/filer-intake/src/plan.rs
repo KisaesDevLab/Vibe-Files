@@ -576,9 +576,8 @@ fn plan_row(
         } else if let Some(c) = p.parsed.id.as_deref().and_then(by_id) {
             // Vibe Files (PA-89, owner 2026-11-16): an ID found in the name is the client's
             // without a click when it was read from its place (the UltraTax layout), stands
-            // as a part of its own between underscores (first, second or last: where a
-            // program or a person puts an ID), or the client's name is in the file name
-            // too. A word that only happens to equal a client's ID (`1099-R Fidelity` and a
+            // as a part of its own between underscores (first or second; a two-part ID also
+            // last), or the client's name is in the file name too. A word that only happens to equal a client's ID (`1099-R Fidelity` and a
             // client 1099) is offered, not taken.
             let id = p.parsed.id.as_deref().unwrap_or_default();
             let name_agrees = {
@@ -1316,7 +1315,7 @@ fn find_folder(build: &Build, client: &Client) -> Option<FolderAction> {
         !name.is_empty()
             && (folder.contains(&name)
                 || crate::clients::name_score(without_id.trim(), &client.name)
-                    >= f64::from(build.input.fuzzy_suggest))
+                    >= f64::from(build.input.fuzzy_auto))
     };
     let mut named = scan
         .folders
@@ -2036,12 +2035,18 @@ mod tests {
             assert_eq!(p.client_match, ClientMatch::Exact, "{n}");
             assert_eq!(p.client.as_ref().unwrap().id, "1001", "{n}");
         }
-        // Code review: an ID that stands last, as UltraTax prints it, is the client's even
+        // Code review: an ID read from its place by the UltraTax layout is the client's even
         // when the name in front is not the client list's.
         let inp = input(&f, &["J and M Smith_2025_1040_Tax_Return_1001.pdf"]);
         let p = &build_plan(&inp).proposals[0];
+        assert!(p.parsed.ultratax.is_some(), "{:?}", p.parsed);
         assert_eq!(p.client_match, ClientMatch::Exact, "{:?}", p.suggestion);
         assert_eq!(p.client.as_ref().unwrap().id, "1001");
+        // A one-part ID that is merely last is a word: asked.
+        let inp = input(&f, &["Fidelity_2025_1001.pdf"]);
+        let p = &build_plan(&inp).proposals[0];
+        assert!(p.client.is_none(), "{:?}", p.client_match);
+        assert_eq!(p.suggestion.as_ref().map(|s| s.1.id.as_str()), Some("1001"));
     }
 
     /// Vibe Files (PA-89, owner 2026-11-16): a name with two different years does not say

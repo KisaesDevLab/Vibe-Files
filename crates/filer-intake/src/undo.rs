@@ -366,6 +366,10 @@ pub fn run_undo(data_dir: &Path, mut lb: LastBatch, force_copy: bool) -> UndoRep
         }
     }
     if let Some(dir) = lb.backups.first().and_then(|b| b.kept.parent()) {
+        // Vibe Files (PA-89): the mark goes once every kept file is back.
+        if lb.backups.iter().all(|b| !b.kept.exists()) {
+            let _ = std::fs::remove_file(dir.join(commit::UNRESTORED_MARK));
+        }
         let _ = std::fs::remove_dir(dir);
     }
 
@@ -2374,11 +2378,30 @@ mod tests {
             blocker(Some(&lb)).as_deref(),
             Some("The last batch filed nothing.")
         );
+        let dir = w.data.join("overwritten").join(lb.batch.to_string());
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("old.pdf"), b"the file that was overwritten").unwrap();
+        std::fs::write(dir.join(crate::commit::UNRESTORED_MARK), b"").unwrap();
         lb.backups.push(crate::commit::Backup {
             original: w.root.join("old.pdf"),
-            kept: w.data.join("overwritten").join("old.pdf"),
+            kept: dir.join("old.pdf"),
         });
         assert_eq!(blocker(Some(&lb)), None);
+        // A later commit leaves the marked folder alone.
+        crate::commit::prune_for_test(&w.data);
+        assert!(
+            dir.join("old.pdf").is_file(),
+            "not cleared by the next commit"
+        );
+        // Undo puts it back and the folder goes.
+        let undo = run_undo(&w.data, lb, false);
+        assert!(undo.warnings.is_empty(), "{:?}", undo.warnings);
+        assert_eq!(
+            std::fs::read(w.root.join("old.pdf")).unwrap(),
+            b"the file that was overwritten"
+        );
+        assert!(!dir.join("old.pdf").exists());
+        assert!(!dir.join(crate::commit::UNRESTORED_MARK).exists());
     }
 
     #[test]
