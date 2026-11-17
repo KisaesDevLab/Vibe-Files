@@ -172,6 +172,9 @@ pub struct RebuildReport {
     pub held_missing: usize,
     /// `docmeta.jsonl` lines that could not be read (skipped).
     pub docmeta_bad_lines: usize,
+    /// Documents new to this catalog left for a later look: their folder's `docmeta.jsonl`
+    /// is there and could not be read.
+    pub docs_waiting_for_records: usize,
     /// Files that could not be read (cabinet paths); their catalog rows were left as they were.
     pub unreadable: Vec<String>,
     /// Online-only files (PA-39) not read: known ones kept as the catalog has them.
@@ -1748,16 +1751,6 @@ fn rebuild_scoped(
         .filter(|f| only.is_none() || in_scope(f))
         .collect();
     let meta = crate::docmeta::Index::load(root, &folder_rels);
-    // Records that are there and cannot be read just now: this part waits (the indexer
-    // takes it again). Going on would catalog those documents as having no record, under
-    // new ids, and write that into the folders' records for every other PC (QA 2026-11-17).
-    if meta.unreadable > 0 {
-        return Err(RebuildError::Io(format!(
-            "the records of {} client folder{} cannot be read just now",
-            meta.unreadable,
-            if meta.unreadable == 1 { "" } else { "s" }
-        )));
-    }
     rep.docmeta_bad_lines = meta.bad_lines;
     // Online-only files left unread (PA-39): another PC that filed or changed one noted its
     // fingerprint in the folder's docmeta.jsonl, with the size and time of the file it was read
@@ -2103,6 +2096,21 @@ fn rebuild_scoped(
                     rep.docs_moved += 1;
                     doc_id_by_rel.insert(f.rel.clone(), id);
                 } else {
+                    // A folder whose records are there and could not be read: its documents
+                    // new to this catalog wait for a look that can read them. Cataloged now
+                    // they would get new ids and blank records, written into the folder for
+                    // every other PC to take (QA 2026-11-17). The rest of the cabinet, and
+                    // this folder's documents the catalog already has, go on.
+                    if !meta.unreadable.is_empty() {
+                        let top = match &f.client_id {
+                            Some(_) => f.rel.split('/').next().unwrap_or_default(),
+                            None => "",
+                        };
+                        if meta.unreadable.contains(top) {
+                            rep.docs_waiting_for_records += 1;
+                            continue;
+                        }
+                    }
                     // The recorded id when no row has it; else a new one.
                     let id = match (recorded, recorded_state) {
                         (Some(rid), None) => rid,
@@ -2649,6 +2657,40 @@ mod tests {
             .map(|r| r.unwrap())
             .collect();
         assert_eq!(filed, [FILED_BY_IMPORT], "the cabinet's existing files");
+    }
+
+    /// QA 2026-11-17: a client folder whose docmeta.jsonl is there and cannot be read: its
+    /// documents new to the catalog wait (no new ids, no blank records written for every other
+    /// PC), the rest of the cabinet is indexed, and they are taken once it reads again.
+    #[test]
+    fn a_folder_whose_records_cannot_be_read_waits_and_the_index_finishes() {
+        let c = cab();
+        // Acme's records file is there and cannot be read (a folder where the file goes).
+        let records = c.root.join("Acme LLC (1002)/_Vibe/docmeta.jsonl");
+        std::fs::create_dir_all(&records).unwrap();
+        let mut conn = open(&c);
+        let rep = index(&mut conn, &c.root, "pc-1").unwrap();
+        assert_eq!(rep.docs_waiting_for_records, 1);
+        let paths: Vec<String> = doc_rows(&conn).into_iter().map(|d| d.0).collect();
+        assert!(
+            paths.iter().any(|p| p.starts_with("Smith, John (1001)/")),
+            "the rest of the cabinet is indexed: {paths:?}"
+        );
+        assert!(
+            !paths.iter().any(|p| p.starts_with("Acme LLC (1002)/")),
+            "its documents wait: {paths:?}"
+        );
+        assert!(records.is_dir(), "nothing was written where its records go");
+        // Readable again: the next index takes them, under one id for every PC.
+        std::fs::remove_dir(&records).unwrap();
+        let rep = index(&mut conn, &c.root, "pc-1").unwrap();
+        assert_eq!(rep.docs_waiting_for_records, 0);
+        assert!(
+            doc_rows(&conn)
+                .iter()
+                .any(|d| d.0.starts_with("Acme LLC (1002)/"))
+        );
+        assert!(records.is_file(), "its record is written now");
     }
 
     /// Q-112 (owner 2026-11-15): an index cut short goes on behind the window whatever its

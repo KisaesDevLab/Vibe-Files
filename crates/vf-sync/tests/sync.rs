@@ -2182,3 +2182,34 @@ fn writes_a_bucket_for_the_portals_tests() {
     )
     .unwrap();
 }
+
+/// QA 2026-11-17: an admin password file that is there and cannot be read is not "deleted
+/// here". The pull stops and says so; the removal is not written or sent up.
+#[test]
+fn an_unreadable_admin_password_file_is_not_a_removal() {
+    let t = tempfile::tempdir().unwrap();
+    let store = Remote::memory();
+    let mut a = pc_a(t.path(), store.clone());
+    vf_fs::trash::set_pin(&mut a.conn, &a.root, "dev-a", None, "482193").unwrap();
+    vf_sync::push::push(&mut a.conn, &a.root, &a.sync, None).unwrap();
+    let mut b = pc_b(t.path(), store.clone(), &a);
+    // Unreadable on B: a folder where the file is.
+    let pin = vf_fs::trash::pin_file(&b.root);
+    let text = std::fs::read(&pin).unwrap();
+    std::fs::remove_file(&pin).unwrap();
+    std::fs::create_dir(&pin).unwrap();
+    // Something new in the bucket, so B's pull takes the master files.
+    std::fs::write(a.root.join("_Vibe/extract_aliases.json"), r#"{"from_a":1}"#).unwrap();
+    vf_sync::push::push(&mut a.conn, &a.root, &a.sync, None).unwrap();
+    let e = vf_sync::pull::pull(&mut b.conn, &b.root, &b.sync).unwrap_err();
+    assert!(e.to_string().contains("cannot be read"), "{e}");
+    assert!(pin.is_dir(), "nothing was written in its place");
+    // Readable again: the password is as it was, on B and (after B's push) on A.
+    std::fs::remove_dir(&pin).unwrap();
+    std::fs::write(&pin, text).unwrap();
+    vf_sync::pull::pull(&mut b.conn, &b.root, &b.sync).unwrap();
+    vf_sync::push::push(&mut b.conn, &b.root, &b.sync, None).unwrap();
+    vf_sync::pull::pull(&mut a.conn, &a.root, &a.sync).unwrap();
+    assert!(vf_fs::trash::check_pin(&a.root, "482193"));
+    assert!(vf_fs::trash::check_pin(&b.root, "482193"));
+}

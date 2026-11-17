@@ -330,8 +330,13 @@ pub fn preview(
     root: &Path,
     choices: &[Choice],
 ) -> Result<Vec<Previewed>, String> {
-    clients::intake_csv_reachable(root).map_err(|_| {
-        "The client CSV Intake uses cannot be reached from this PC. Every merge takes the merged client out of it, so nothing can be merged until it can.".to_string()
+    clients::intake_csv_reachable(root).map_err(|e| {
+        // Intake's settings unreadable is said as that; else the CSV is out of reach.
+        if e.starts_with("Intake's settings") {
+            e
+        } else {
+            "The client CSV Intake uses cannot be reached from this PC. Every merge takes the merged client out of it, so nothing can be merged until it can.".to_string()
+        }
     })?;
     let mut gone: HashMap<String, String> = HashMap::new();
     let mut touched: HashSet<String> = HashSet::new();

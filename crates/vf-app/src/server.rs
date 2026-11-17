@@ -216,13 +216,15 @@ fn in_use(catalog: &Path) -> bool {
         .flatten()
         .filter(|e| e.path().extension().is_some_and(|x| x == "lock"))
         .any(|e| {
-            // Held: a sharing violation. A lock file that cannot be opened for another
-            // reason is not a session.
+            // Held (a sharing violation), or not known: a lock file that cannot be opened
+            // for another reason counts as a session too. This guards moving a catalog:
+            // the safe answer to "may someone have it open?" is yes. Only a file gone
+            // since it was listed (its session just ended) is no session.
             std::fs::OpenOptions::new()
                 .read(true)
                 .share_mode(0)
                 .open(e.path())
-                .is_err_and(|e| e.raw_os_error() == Some(32))
+                .is_err_and(|e| e.kind() != std::io::ErrorKind::NotFound)
         })
 }
 

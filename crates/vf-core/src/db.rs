@@ -628,6 +628,37 @@ mod tests {
         assert_eq!(baks, 1);
     }
 
+    /// QA 2026-11-17: two logins opening an older catalog at the same moment after an update
+    /// both get it, each step made once (the second used to make a step again: "duplicate
+    /// column name").
+    #[test]
+    fn two_openers_migrate_one_catalog_once() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("catalog.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(MIGRATIONS[0]).unwrap();
+            conn.pragma_update(None, "user_version", 1).unwrap();
+        }
+        let start = std::sync::Arc::new(std::sync::Barrier::new(4));
+        // All four started before any is waited for.
+        let threads: Vec<_> = (0..4)
+            .map(|_| {
+                let (path, start) = (path.clone(), start.clone());
+                std::thread::spawn(move || {
+                    start.wait();
+                    open(&path, Storage::Local)
+                        .map(|c| user_version(&c).unwrap())
+                        .map_err(|e| e.to_string())
+                })
+            })
+            .collect();
+        let opened: Vec<_> = threads.into_iter().map(|t| t.join().unwrap()).collect();
+        assert_eq!(opened, vec![Ok(SCHEMA_VERSION); 4]);
+        let conn = open(&path, Storage::Local).unwrap();
+        assert_eq!(tables(&conn), TABLES);
+    }
+
     /// Owner 2026-11-17: a catalog another connection is writing is busy, not "not a Vibe
     /// Files catalog" (the audit check said so on a PC whose index was running).
     #[test]

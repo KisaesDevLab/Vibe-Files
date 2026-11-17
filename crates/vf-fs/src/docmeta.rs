@@ -404,10 +404,11 @@ pub struct Index {
     /// The latest record per cabinet path, whatever its content (PA-39).
     by_rel: HashMap<String, Record>,
     pub bad_lines: usize,
-    /// Record files that are there and could not be read just now (the share, another PC
-    /// writing): how many. Their folders' documents are not "without a record": whoever
-    /// would write records for them must not (QA 2026-11-17).
-    pub unreadable: usize,
+    /// The folders (cabinet-relative; `""`: the cabinet's own file) whose record file is
+    /// there and could not be read (the share for a moment, another PC writing, no access).
+    /// Their documents are not "without a record": whoever would give them new ids and
+    /// write records for them must not (QA 2026-11-17).
+    pub unreadable: std::collections::HashSet<String>,
 }
 
 impl Index {
@@ -415,15 +416,19 @@ impl Index {
     pub fn load(root: &Path, folders: &[String]) -> Index {
         let mut ix = Index::default();
         // No file is no records; a file that cannot be read is counted, not taken for none.
-        let text_of = |p: std::path::PathBuf| match std::fs::read_to_string(p) {
-            Ok(t) => Ok(Some(t)),
+        // Bytes that are not text (an append cut short) spoil their own line only, which is
+        // then counted with the bad lines: the rest of the file is read.
+        let text_of = |p: std::path::PathBuf| match std::fs::read(p) {
+            Ok(b) => Ok(Some(String::from_utf8_lossy(&b).into_owned())),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(_) => Err(()),
         };
         match text_of(root.join(VIBE_DIR).join(FILE)) {
             Ok(Some(text)) => ix.read(&text, ""),
             Ok(None) => {}
-            Err(()) => ix.unreadable += 1,
+            Err(()) => {
+                ix.unreadable.insert(String::new());
+            }
         }
         // Several files at a time (thousands of client folders on a share, PA-60); taken in
         // the folders' order, as before.
@@ -433,7 +438,9 @@ impl Index {
             match text {
                 Ok(Some(text)) => ix.read(&text, f),
                 Ok(None) => {}
-                Err(()) => ix.unreadable += 1,
+                Err(()) => {
+                    ix.unreadable.insert(f.clone());
+                }
             }
         }
         ix
@@ -634,10 +641,10 @@ mod tests {
                 "None (3)".into(),
             ],
         );
-        assert_eq!(ix.unreadable, 1);
+        assert_eq!(ix.unreadable, ["Other (2)".to_string()].into());
         // And the file's last word is the old state.
         let ix = Index::load(&f.root, &["Acme LLC (1001)".into()]);
-        assert_eq!(ix.unreadable, 0);
+        assert!(ix.unreadable.is_empty());
         let r = ix
             .get(
                 "Acme LLC (1001)/Income Tax/2025/doc 007.pdf",

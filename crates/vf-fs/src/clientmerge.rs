@@ -425,8 +425,13 @@ pub fn apply(
             );
         }
         // The CSV must take the change too, or the client is back at the next import.
-        clients::intake_csv_reachable(root).map_err(|_| {
-            "The client CSV Intake uses cannot be reached from this PC: the merged client must be taken out of it too.".to_string()
+        clients::intake_csv_reachable(root).map_err(|e| {
+            // Intake's settings unreadable is said as that; else the CSV is out of reach.
+            if e.starts_with("Intake's settings") {
+                e
+            } else {
+                "The client CSV Intake uses cannot be reached from this PC: the merged client must be taken out of it too.".to_string()
+            }
         })?;
         let (from, into) = (&plan.from, &plan.into);
         let into_folder = into.folder.clone().expect("planned with a folder");

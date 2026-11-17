@@ -327,6 +327,24 @@ mod tests {
     }
 
     #[test]
+    fn intakes_settings_that_cannot_be_read_are_not_written_over() {
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path();
+        let master = vf_fs::clients::master_dir(root);
+        std::fs::create_dir_all(&master).unwrap();
+        // As a save cut short, or a build newer than this one, leaves it.
+        let config = filer_intake::config::Settings::path(&master);
+        std::fs::write(&config, "{ \"inboxes\": [\"S:/Scans\"], ").unwrap();
+        let e = register_inbox(root).unwrap_err();
+        assert!(e.contains("cannot be read"), "{e}");
+        assert_eq!(
+            std::fs::read_to_string(&config).unwrap(),
+            "{ \"inboxes\": [\"S:/Scans\"], ",
+            "left as it was"
+        );
+    }
+
+    #[test]
     fn the_portal_inbox_is_added_to_intake_once_and_is_not_a_client_folder() {
         let t = tempfile::tempdir().unwrap();
         let root = t.path();

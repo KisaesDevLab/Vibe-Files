@@ -240,7 +240,23 @@ fn open_how(data: &Path, device_id: &str, root: &Path, behind: bool) -> Result<O
     let catalog = shared_at.unwrap_or_else(|| data.join(CATALOG_FILE));
     step("Opening the catalog (after an update it is tidied once, which can take minutes)");
     let set_aside = set_aside_encrypted(&catalog)?;
-    let mut conn = db::open(&catalog, Storage::Local)?;
+    // Busy: another login on this computer is updating or tidying the catalog after an
+    // update (minutes, on a large one). Waited for, said on the opening screen; it used to
+    // fail after ten seconds with "database is locked" and go back to the first screen.
+    let mut conn = {
+        let started = std::time::Instant::now();
+        loop {
+            match db::open(&catalog, Storage::Local) {
+                Err(e)
+                    if e.is_busy() && started.elapsed() < std::time::Duration::from_secs(600) =>
+                {
+                    step("Waiting for the catalog: another login on this computer is updating it");
+                    std::thread::sleep(std::time::Duration::from_secs(2));
+                }
+                r => break r?,
+            }
+        }
+    };
     step("Reading the client list");
     // Taxpayer-ID columns a client list may carry (Filer's own wizard) are removed first.
     if let Ok(bad) = vf_fs::clients::strip_tins_on_disk(root)

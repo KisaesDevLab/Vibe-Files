@@ -286,6 +286,7 @@ fn file_lock(rel: &str) -> (&'static str, &'static str) {
         PIN_FILE => ("admin", "the admin settings"),
         "clients.vf.json" => ("clients", "the client list"),
         "doc_types.json" => ("doc-types", "the doc types"),
+        "extract_aliases.json" => ("aliases", "the payer names"),
         r if r == vf_fs::holds::FILE => ("holds", "the legal holds"),
         r if r.starts_with("retention") => ("retention", "the retention classes"),
         r => vf_fs::intake::shared_lock(r),
@@ -307,13 +308,14 @@ fn apply_files(
     let mut merged = base.clone();
     let mut wrote = 0;
     let mut files_conflicts: Vec<String> = vec![];
+    let mut failed: Option<SyncError> = None;
     for (rel, text) in files {
         let p = vibe.join(rel);
         // Each file under the cabinet lock it is written under elsewhere, read, compared and
         // written as one: a save on another PC between this pull's read and its write was
         // written over (QA 2026-11-17).
         let (lock, what) = file_lock(rel);
-        vf_fs::lock::with(root, lock, what, || -> std::result::Result<(), String> {
+        let step = vf_fs::lock::with(root, lock, what, || -> std::result::Result<(), String> {
             // Not there is the only "none": a file that cannot be read just now (the share,
             // another PC writing it) was taken for missing, the bucket's copy written over
             // it, and the admin password file for one deleted here and its removal sent up.
@@ -373,7 +375,14 @@ fn apply_files(
             }
             Ok(())
         })
-        .map_err(SyncError::Local)?;
+        .map_err(SyncError::Local);
+        // A file that could not be taken stops the pull, after the catalog is brought in
+        // line with the files written before it (below): the next pull finds those equal to
+        // the bucket's and would never do it.
+        if let Err(e) = step {
+            failed = Some(e);
+            break;
+        }
     }
     if !files_conflicts.is_empty() {
         tracing::warn!(
@@ -387,6 +396,9 @@ fn apply_files(
         vf_fs::doctypes::sync(conn, root, d, LABEL)?;
         vf_fs::holds::sync(conn, root, d)?;
         vf_fs::rebuild::sync_clients(conn, root, d, LABEL).map_err(|e| e.to_string())?;
+    }
+    if let Some(e) = failed {
+        return Err(e);
     }
     Ok(merged)
 }

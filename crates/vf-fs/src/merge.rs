@@ -88,8 +88,8 @@ fn rel_of(base: &Path, p: &Path) -> String {
 /// Reads the source cabinet at `src_root` against this one (`root`). Writes nothing.
 pub fn plan(conn: &Connection, root: &Path, src_root: &Path) -> Result<MergePlan, String> {
     let here = cabinet::read(root)?;
-    let src = cabinet::read(src_root)
-        .map_err(|e| format!("{} is not a Vibe Files cabinet: {e}", src_root.display()))?;
+    // As `cabinet::read` says it: not a cabinet, or one that cannot be reached just now.
+    let src = cabinet::read(src_root)?;
     if src.cabinet_id == here.cabinet_id {
         return Err("That is this cabinet.".into());
     }
