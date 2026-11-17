@@ -310,17 +310,15 @@ fn move_folder(
     // Any case: the catalog may spell a folder as the template does (`Income Tax`) while the
     // disk has `income tax` (QA 2026-11-05).
     let under = |col: &str| format!("lower(substr({col}, 1, length(?1) + 1)) = lower(?1 || '/')");
-    let locked: Option<String> = conn
-        .query_row(
-            &format!(
-                "SELECT l.user FROM document d JOIN lock l ON l.doc_id = d.id
+    let locked: Option<String> = vf_core::db::row_or_none(conn.query_row(
+        &format!(
+            "SELECT l.user FROM document d JOIN lock l ON l.doc_id = d.id
                  WHERE d.deleted_at IS NULL AND {} LIMIT 1",
-                under("d.rel_path")
-            ),
-            [old],
-            |r| r.get(0),
-        )
-        .ok();
+            under("d.rel_path")
+        ),
+        [old],
+        |r| r.get(0),
+    ))?;
     if let Some(u) = locked {
         return Err(format!("A document in it is checked out by {u}."));
     }
@@ -589,26 +587,37 @@ pub fn rename_client(
             ));
             crate::fileops::commit(conn, root, tx, device_id)?;
         }
-        let mut list = clients::load(root)?
-            .list
-            .unwrap_or_else(crate::newclient::empty_list);
-        let Some(c) = list
-            .clients
-            .iter_mut()
-            .find(|c| c.uuid.to_string() == plan.client_id)
-        else {
-            return Err(format!(
-                "{} is not on the client list; the folder was renamed, the name was not.",
-                plan.ext_id
-            ));
-        };
-        c.name = plan.new_name.clone();
-        clients::save_list(root, &list)?;
+        // From here the folder (when it had one to rename) is renamed: a failure is said
+        // with that, so the person knows what was done and what was not (it used to be a
+        // bare error; QA 2026-11-17).
+        let renamed = plan.folder.as_ref().map(|(_, new)| new.clone());
+        let listed = (|| -> Result<(), String> {
+            let mut list = clients::load(root)?
+                .list
+                .unwrap_or_else(crate::newclient::empty_list);
+            let Some(c) = list
+                .clients
+                .iter_mut()
+                .find(|c| c.uuid.to_string() == plan.client_id)
+            else {
+                return Err(format!("{} is not on the client list", plan.ext_id));
+            };
+            c.name = plan.new_name.clone();
+            clients::save_list(root, &list)
+        })();
+        if let Err(e) = listed {
+            return Err(match &renamed {
+                Some(new) => format!(
+                    "The folder was renamed to {new}, but the client's name on the client list was not changed ({e}). Rename the client again to finish."
+                ),
+                None => format!("The client's name was not changed: {e}."),
+            });
+        }
         // Catalog rows following the list: not an undo of its own. Only this client's folder is
-        // read again (PA-61).
+        // read again (PA-61). The rename is made; a catalog that cannot follow just now does
+        // at the next open, and that is no failure of the rename.
         let reread: Vec<String> = plan.folder.iter().map(|(_, new)| new.clone()).collect();
-        crate::rebuild::sync_clients_edited(conn, root, device_id, "clients_edit", &reread)
-            .map_err(|e| e.to_string())?;
+        let _ = crate::rebuild::sync_clients_edited(conn, root, device_id, "clients_edit", &reread);
         Ok(())
     })
 }
@@ -897,8 +906,9 @@ pub fn set_client_id(
             .or_else(|| plan.folder_now.clone())
             .into_iter()
             .collect();
-        crate::rebuild::sync_clients_edited(conn, root, device_id, "clients_edit", &reread)
-            .map_err(|e| e.to_string())?;
+        // The ID is set; a catalog that cannot follow just now does at the next open. Not a
+        // failure of the change, and the note about the CSV is not dropped for it.
+        let _ = crate::rebuild::sync_clients_edited(conn, root, device_id, "clients_edit", &reread);
         Ok(note)
     })
 }

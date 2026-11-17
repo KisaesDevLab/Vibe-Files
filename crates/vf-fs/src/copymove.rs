@@ -144,12 +144,14 @@ pub fn plan(
         let held = mode == Mode::Move
             && crate::trash::held(conn, id)
             && (t.other_cabinet || {
-                let c: Option<String> = conn
-                    .query_row("SELECT client_id FROM document WHERE id = ?1", [id], |r| {
-                        r.get(0)
-                    })
-                    .ok()
-                    .flatten();
+                // Read, or said: a failed read counted as "another client" and the row said
+                // "under a legal hold: it stays with its client" for a move within it.
+                let c: Option<String> = vf_core::db::row_or_none(conn.query_row(
+                    "SELECT client_id FROM document WHERE id = ?1",
+                    [id],
+                    |r| r.get::<_, Option<String>>(0),
+                ))?
+                .flatten();
                 c != t.client_id
             });
         let outcome = if let Some(u) = locked_by {

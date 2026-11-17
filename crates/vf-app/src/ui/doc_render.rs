@@ -147,7 +147,10 @@ fn run(jobs: &Receiver<Job>, out: &Sender<Done>, ctx: &egui::Context) {
                                     };
                                     (vf_pdf::layer::geometries(&d), fields, locked, signed)
                                 })
-                                .map_err(|e| format!("cannot read the PDF: {e}"))?;
+                                // The structure reader is stricter than the renderer: a
+                                // PDF it cannot take is still shown when pdfium opens it
+                                // (below), without form fields; it used to be refused here.
+                                .unwrap_or_default();
                             let d = p
                                 .load_pdf_from_byte_vec(bytes, None)
                                 .map_err(|e| format!("cannot open the PDF: {e}"))?;

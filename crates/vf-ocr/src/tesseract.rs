@@ -176,11 +176,12 @@ impl OcrEngine for Tesseract {
         })?;
         if !out.status.success() {
             let err = String::from_utf8_lossy(&out.stderr);
+            // What it said first (later lines are often warnings), as below.
             return Err(OcrError::Failed(
                 err.lines()
-                    .last()
+                    .map(str::trim)
+                    .find(|l| !l.is_empty())
                     .unwrap_or("tesseract failed")
-                    .trim()
                     .to_string(),
             ));
         }

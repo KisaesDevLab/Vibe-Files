@@ -70,13 +70,11 @@ pub fn plan(conn: &Connection, root: &Path, req: &NewClient) -> Result<Plan, Str
         None if req.name.trim().is_empty() => return Err("Enter the client name.".into()),
         None => req.name.trim().to_owned(),
     };
-    let row: Option<(String, Option<String>)> = conn
-        .query_row(
-            "SELECT id, folder_rel FROM client WHERE ext_id = ?1 AND deleted_at IS NULL",
-            [ext],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
-        .ok();
+    let row: Option<(String, Option<String>)> = vf_core::db::row_or_none(conn.query_row(
+        "SELECT id, folder_rel FROM client WHERE ext_id = ?1 AND deleted_at IS NULL",
+        [ext],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    ))?;
     if let Some((_, Some(f))) = &row {
         return Err(format!("Client {ext} already has a folder: {f}"));
     }

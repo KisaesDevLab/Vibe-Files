@@ -81,8 +81,12 @@ pub fn redact_document(
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
         )
         .map_err(|e| vf_core::db::missing_or(e, "the document is not in the catalog"))?;
+    // What is under the boxes drawn by hand, to look for afterwards. Not readable: not
+    // redacted (the check would pass with nothing to look for).
+    let under = redact::text_under(pdfium, &root.join(&rel), &plan.drawn).map_err(|e| {
+        format!("Not redacted: what is under the boxes you drew could not be read to check it afterwards ({e}).")
+    })?;
     let tmp = content::tmp_file(root, "pdf")?;
-    let under = redact::text_under(pdfium, &root.join(&rel), &plan.drawn);
     let r = redact::apply(pdfium, &root.join(&rel), &tmp, &plan.boxes()).and_then(|_| {
         let values: Vec<String> = plan
             .found

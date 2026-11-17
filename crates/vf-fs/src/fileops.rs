@@ -128,6 +128,24 @@ pub fn undo(
     Ok(())
 }
 
+/// What is said of a file an undo must look at and cannot read just now.
+fn not_read(p: &Path, e: &std::io::Error) -> String {
+    format!(
+        "{} cannot be read just now ({e}): nothing was undone; try again in a moment",
+        p.display()
+    )
+}
+
+/// [`not_read`] when `p` is there (or its share is away) and cannot be opened; `None` when it
+/// opens, or is simply not there.
+fn unreadable(p: &Path) -> Option<String> {
+    match std::fs::File::open(p) {
+        Ok(_) => None,
+        Err(e) if crate::cabinet::is_absent(p, &e) => None,
+        Err(e) => Some(not_read(p, &e)),
+    }
+}
+
 /// Transactions the undo stack leaves out (P05 step 4): Intake batches (Filer's own Undo),
 /// work done in the background (OCR, rebuild), catalog rows that follow files edited elsewhere
 /// (client master, doc types), records with nothing to undo, and emptying the trash (the
@@ -599,11 +617,17 @@ impl FileOps for FilerFileOps {
             FileOp::Move { src, dst } => {
                 // A moved folder (the folder import's rename) has no size to compare: its
                 // files are checked by the operations that touched them.
-                if !dst.is_dir() && size(dst) != Some(a.bytes) {
-                    return Err(format!(
-                        "{} has changed or is gone since it was filed",
-                        dst.display()
-                    ));
+                // Gone, changed, or not readable just now: each said as what it is (a file
+                // on a share that did not answer used to read "has changed or is gone").
+                match std::fs::metadata(dst) {
+                    Ok(m) if m.is_dir() || m.len() == a.bytes => {}
+                    Ok(_) => {
+                        return Err(format!("{} has changed since it was filed", dst.display()));
+                    }
+                    Err(e) if crate::cabinet::is_absent(dst, &e) => {
+                        return Err(format!("{} is gone since it was filed", dst.display()));
+                    }
+                    Err(e) => return Err(not_read(dst, &e)),
                 }
                 if src.exists() && !vacated.contains(src) {
                     return Err(format!("{} exists again", src.display()));
@@ -612,6 +636,9 @@ impl FileOps for FilerFileOps {
             }
             FileOp::Copy { dst, .. } => match (&a.sha256, commit::sha256_file(dst)) {
                 (Some(want), Ok(have)) if *want == have => Ok(()),
+                (_, Err(_)) if unreadable(dst).is_some() => {
+                    Err(unreadable(dst).unwrap_or_default())
+                }
                 _ => Err(format!(
                     "{} was changed after it was copied; it is left as it is",
                     dst.display()
@@ -636,6 +663,9 @@ impl FileOps for FilerFileOps {
                 let p = filer_intake::sentinel::sentinel_path(folder);
                 match (&a.sha256, commit::sha256_file(&p)) {
                     (Some(want), Ok(have)) if *want == have => Ok(()),
+                    (_, Err(_)) if unreadable(&p).is_some() => {
+                        Err(unreadable(&p).unwrap_or_default())
+                    }
                     _ => Err(format!(
                         "{} was changed or removed; it is left as it is",
                         p.display()

@@ -1732,13 +1732,14 @@ pub fn apply_with(
                     Some((_, rest)) => format!("{dest}/{rest}"),
                     None => continue,
                 };
-                let id: Option<String> = conn
-                    .query_row(
-                        "SELECT id FROM document WHERE rel_path = ?1 AND deleted_at IS NULL",
-                        [&rel_now],
-                        |r| r.get(0),
-                    )
-                    .ok();
+                // Not in the catalog: left. Not readable just now: the import stops here
+                // (the next one continues it), not on with this file's doc type and year
+                // silently left out.
+                let id: Option<String> = vf_core::db::row_or_none(conn.query_row(
+                    "SELECT id FROM document WHERE rel_path = ?1 AND deleted_at IS NULL",
+                    [&rel_now],
+                    |r| r.get(0),
+                ))?;
                 let Some(id) = id else { continue };
                 out.documents += 1;
                 let mut e = MetaEdit::default();

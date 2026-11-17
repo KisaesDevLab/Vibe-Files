@@ -100,17 +100,31 @@ pub fn apply(
 
 /// Numbers (4+ digits) under boxes drawn by hand, from the original: `verify` then checks they
 /// are gone too (a box over a field or over text the finder did not flag).
-pub fn text_under(pdfium: &Pdfium, path: &Path, boxes: &[Redaction]) -> Vec<String> {
+///
+/// `Err` when the original, a page or its text cannot be read. That used to be "nothing
+/// under the boxes": the check then had nothing to look for and passed, and the audit said
+/// the redaction was verified (QA 2026-11-17).
+pub fn text_under(
+    pdfium: &Pdfium,
+    path: &Path,
+    boxes: &[Redaction],
+) -> Result<Vec<String>, String> {
     use pdfium_render::prelude::{PdfPoints, PdfRect};
-    let Ok(doc) = pdfium.load_pdf_from_file(path, None) else {
-        return vec![];
-    };
+    if boxes.is_empty() {
+        return Ok(vec![]);
+    }
+    let doc = pdfium
+        .load_pdf_from_file(path, None)
+        .map_err(|e| format!("the document could not be opened: {e}"))?;
     let mut out = vec![];
     for b in boxes {
-        let Ok(page) = doc.pages().get(b.page as i32) else {
-            continue;
-        };
-        let Ok(t) = page.text() else { continue };
+        let page = doc
+            .pages()
+            .get(b.page as i32)
+            .map_err(|e| format!("page {} could not be read: {e}", b.page + 1))?;
+        let t = page
+            .text()
+            .map_err(|e| format!("the text of page {} could not be read: {e}", b.page + 1))?;
         let [x0, y0, x1, y1] = b.rect;
         let r = PdfRect::new(
             PdfPoints::new(y0.min(y1)),
@@ -130,7 +144,7 @@ pub fn text_under(pdfium: &Pdfium, path: &Path, boxes: &[Redaction]) -> Vec<Stri
     }
     out.sort();
     out.dedup();
-    out
+    Ok(out)
 }
 
 fn pad(r: [f32; 4], d: f32) -> [f32; 4] {
@@ -153,6 +167,13 @@ pub fn verify(pdfium: &Pdfium, path: &Path, values: &[String]) -> Result<(), Str
         .load_pdf_from_file(path, None)
         .map_err(|e| format!("cannot open the redacted PDF: {e}"))?;
     for (i, p) in doc.pages().iter().enumerate() {
+        // A page whose text cannot be read was not checked: said, not passed.
+        p.text().map_err(|e| {
+            format!(
+                "that the text of page {} of the redacted PDF could not be read ({e}), so it could not be checked",
+                i + 1
+            )
+        })?;
         let t = text::page_text(&p);
         if let Some(e) = found(&format!("the text of page {}", i + 1), &t) {
             return Err(e);

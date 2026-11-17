@@ -129,12 +129,16 @@ fn dir(root: &Path) -> PathBuf {
 
 /// The cabinet's last merge (for Undo), when it has not been undone.
 pub fn load_last(root: &Path) -> Option<Merged> {
-    let mut all: Vec<Merged> = std::fs::read_dir(dir(root))
-        .ok()?
-        .flatten()
-        .filter(|e| e.path().extension().is_some_and(|x| x == "json"))
-        .filter_map(|e| serde_json::from_slice(&std::fs::read(e.path()).ok()?).ok())
-        .collect();
+    // A record that cannot be read may be the last merge: then which merge is the last is
+    // not known, and none is offered (an older one used to be offered as "the last merge",
+    // and undoing that one out of turn is not what the person asked for; QA 2026-11-17).
+    let mut all: Vec<Merged> = Vec::new();
+    for e in std::fs::read_dir(dir(root)).ok()?.flatten() {
+        if !e.path().extension().is_some_and(|x| x == "json") {
+            continue;
+        }
+        all.push(serde_json::from_slice(&std::fs::read(e.path()).ok()?).ok()?);
+    }
     all.sort_by(|a, b| a.when.cmp(&b.when));
     all.pop().filter(|m| m.undone.is_none())
 }
@@ -737,11 +741,12 @@ pub fn undo_noted(
             }
         }
         // This catalog may never have known the client (a host new this morning).
-        let known = conn
-            .query_row("SELECT 1 FROM client WHERE id = ?1", [&m.from.id], |_| {
-                Ok(())
-            })
-            .is_ok();
+        let known = vf_core::db::row_or_none(conn.query_row(
+            "SELECT 1 FROM client WHERE id = ?1",
+            [&m.from.id],
+            |_| Ok(()),
+        ))?
+        .is_some();
         if !known {
             tx = tx.catalog(Stmt::new(
                 "INSERT INTO client (id, ext_id, name, folder_rel, device_id, updated_at, deleted_at)

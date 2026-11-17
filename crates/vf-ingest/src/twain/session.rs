@@ -263,7 +263,15 @@ impl Ds<'_> {
         if let Some(feeder) = s.feeder {
             match self.set_bool(CAP_FEEDERENABLED, feeder) {
                 Ok(()) => {}
-                Err(_) if feeder => return Err("this scanner has no document feeder".into()),
+                // As the driver says it: "no feeder" is one reason among several (the
+                // feeder is open, the scanner is busy).
+                Err(cc) if feeder => {
+                    return Err(refused(
+                        cc,
+                        "this scanner has no document feeder",
+                        "the scanner would not use its document feeder",
+                    ));
+                }
                 Err(_) => {} // no feeder to turn off
             }
             if feeder {
@@ -271,8 +279,13 @@ impl Ds<'_> {
             }
         }
         if s.duplex {
-            self.set_bool(CAP_DUPLEXENABLED, true)
-                .map_err(|_| "this scanner cannot scan both sides".to_string())?;
+            self.set_bool(CAP_DUPLEXENABLED, true).map_err(|cc| {
+                refused(
+                    cc,
+                    "this scanner cannot scan both sides",
+                    "the scanner would not scan both sides",
+                )
+            })?;
         } else {
             let _ = self.set_bool(CAP_DUPLEXENABLED, false);
         }
@@ -677,6 +690,16 @@ impl Manager {
     }
 }
 
+/// What to say when the scanner refused to turn something on: `plain` when it simply does
+/// not have it (the setting is not offered, or its value is refused), else `other` with the
+/// driver's own reason (the cover is open, it is in use, it is off).
+fn refused(cc: u16, plain: &str, other: &str) -> String {
+    if matches!(cc, TWCC_BADCAP | TWCC_CAPUNSUPPORTED | TWCC_BADVALUE) {
+        plain.to_string()
+    } else {
+        format!("{other} ({})", condition(cc))
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::super::fake::{Fake, Log, Scanner};

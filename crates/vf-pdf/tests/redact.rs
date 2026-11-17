@@ -282,3 +282,23 @@ fn form_field_values_go_with_the_redaction() {
     assert!(d.catalog().unwrap().get(b"AcroForm").is_err());
     redact::verify(pdfium(), &out, &["987-65-4321".to_string()]).unwrap();
 }
+
+/// QA 2026-11-17: what is under the boxes drawn by hand must be readable from the original,
+/// or the check afterwards has nothing to look for. A document that cannot be opened is an
+/// error (it used to read as "nothing under them", and the redaction was recorded verified).
+#[test]
+fn what_is_under_the_boxes_drawn_must_be_readable() {
+    let t = tempfile::tempdir().unwrap();
+    let not_a_pdf = t.path().join("original.pdf");
+    std::fs::write(&not_a_pdf, b"not a PDF at all").unwrap();
+    let drawn = [Redaction {
+        page: 0,
+        rect: [10.0, 10.0, 200.0, 40.0],
+    }];
+    assert!(redact::text_under(pdfium(), &not_a_pdf, &drawn).is_err());
+    // No box drawn: nothing to read, nothing to look for.
+    assert_eq!(
+        redact::text_under(pdfium(), &not_a_pdf, &[]).unwrap(),
+        Vec::<String>::new()
+    );
+}

@@ -237,7 +237,12 @@ fn split_and_deliver(
             Some((_, note)) => (format!("{stem}.pdf"), note.clone()),
             None => (name.to_string(), "no barcode sheet".into()),
         };
-        out.push(deliver_or_recognized(ctx, lookup, &tmp, &file, note)?);
+        // Not left in the inbox when it could not be delivered (it holds the document).
+        out.push(
+            deliver_or_recognized(ctx, lookup, &tmp, &file, note).inspect_err(|_| {
+                let _ = std::fs::remove_file(&tmp);
+            })?,
+        );
     } else {
         let tmps: Vec<PathBuf> = segments.iter().map(|_| tmp_in(ctx.inbox)).collect();
         let ranges: Vec<_> = segments.iter().map(|s| s.pages.clone()).collect();

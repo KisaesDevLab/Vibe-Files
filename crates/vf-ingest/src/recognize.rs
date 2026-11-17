@@ -289,6 +289,9 @@ fn decide_extract(
     e: vf_extract::Extract,
     original: &str,
 ) -> Option<Outcome> {
+    // The client list could not be read just now: nobody can be matched, which is said as
+    // that below, not as "no client matched" (QA 2026-11-17).
+    let list_unread = vf_fs::clients::load(root).is_err();
     let clients = client_refs(root);
     let aliases: Vec<matching::Alias> = vf_fs::aliases::load(root)
         .into_iter()
@@ -360,7 +363,13 @@ fn decide_extract(
         ),
         None => (
             original.to_string(),
-            format!("recognized {what}; no client matched: choose it in the preview"),
+            if list_unread {
+                format!(
+                    "recognized {what}; the client list could not be read just now, so no client was looked for: choose it in the preview"
+                )
+            } else {
+                format!("recognized {what}; no client matched: choose it in the preview")
+            },
         ),
     };
     Some(Outcome {

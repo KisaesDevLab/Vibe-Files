@@ -72,7 +72,7 @@ pub fn add_text(
             let page = doc
                 .pages()
                 .get(n as i32)
-                .map_err(|_| format!("page {} is not in the PDF", n + 1))?;
+                .map_err(|e| format!("page {} of the PDF could not be read: {e}", n + 1))?;
             let own = vf_pdf::text::page_text(&page);
             // Any text of its own, a layer written here before included: reading the page
             // again would put every word on it twice.

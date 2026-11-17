@@ -76,6 +76,22 @@ pub fn missing_or(e: SqlError, missing: &str) -> String {
     }
 }
 
+/// A row that may not be there: `None` when the catalog has none, `Err` when the catalog
+/// could not be read just now. `.ok()` on such a read made a busy catalog read as "no row",
+/// and whatever was decided on that (the client has no folder yet, nothing is checked out,
+/// no hold) was decided wrongly (QA 2026-11-17).
+pub fn row_or_none<T>(
+    r: std::result::Result<T, SqlError>,
+) -> std::result::Result<Option<T>, String> {
+    match r {
+        Ok(t) => Ok(Some(t)),
+        Err(SqlError::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(format!(
+            "The catalog could not be read just now ({e}). Nothing was changed: try again in a moment."
+        )),
+    }
+}
+
 /// The first 16 bytes of every SQLite database file.
 const SQLITE_HEADER: &[u8; 16] = b"SQLite format 3\0";
 

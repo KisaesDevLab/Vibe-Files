@@ -369,7 +369,7 @@ pub fn show(ui: &mut egui::Ui, p: &mut BulkPage, env: &mut Env, catalog: &Path) 
     if let Some(r) = job::take(&mut p.finding) {
         match r.and_then(|r| r) {
             Ok(f) => p.found(f),
-            Err(e) => p.error = Some(format!("The documents were not found: {e}")),
+            Err(e) => p.error = Some(format!("The documents could not be listed: {e}")),
         }
     }
     p.poll();
