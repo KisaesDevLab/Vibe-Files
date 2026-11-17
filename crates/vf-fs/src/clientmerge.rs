@@ -779,6 +779,23 @@ pub fn undo_noted(
         if m.undone.is_some() {
             return Err("That merge was undone already.".into());
         }
+        // The merged client's ID given to another client since (a kept client with no
+        // folder took the other's folder and that one its ID, PA-95): putting it back
+        // would make two clients of one ID.
+        if !m.from.ext_id.trim().is_empty() {
+            let holder: Option<String> = vf_core::db::row_or_none(conn.query_row(
+                "SELECT name FROM client WHERE ext_id = ?1 COLLATE NOCASE AND id <> ?2
+                   AND deleted_at IS NULL",
+                [&m.from.ext_id, &m.from.id],
+                |r| r.get(0),
+            ))?;
+            if let Some(name) = holder {
+                return Err(format!(
+                    "{} is {name}'s ID now: this merge cannot be undone by itself. Undo it where it was made (Admin › Similar clients or Clients from a list).",
+                    m.from.ext_id
+                ));
+            }
+        }
         let now = vf_core::now_rfc3339();
         let mut tx = Transaction::new(UNDO_LABEL);
         if let Some(f) = &m.from.folder {

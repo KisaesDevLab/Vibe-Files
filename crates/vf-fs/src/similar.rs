@@ -376,6 +376,8 @@ pub fn preview(
     })?;
     let mut gone: HashMap<String, String> = HashMap::new();
     let mut touched: HashSet<String> = HashSet::new();
+    // Clients that took a kept client's ID earlier in the run.
+    let mut took: HashSet<String> = HashSet::new();
     Ok(choices
         .iter()
         .map(|c| {
@@ -385,6 +387,8 @@ pub fn preview(
                 .any(|id| touched.contains(id.as_str()));
             let r = if from == into {
                 Err("These two are one client already after the merges above.".to_string())
+            } else if took.contains(&from) {
+                Err(TWICE.to_string())
             } else if let Some((id, name)) = adopting(conn, &from, &into).unwrap_or(None) {
                 // The kept client's place on the list goes to the client with the folder,
                 // which then takes its ID and name: checked as those two steps.
@@ -393,6 +397,7 @@ pub fn preview(
                         client: from.clone(),
                         id,
                         name,
+                        twin: None,
                     };
                     let freed: HashSet<String> = [into.clone()].into();
                     let planned = listupdate::preview_freeing(conn, root, &[change], &freed)?
@@ -429,8 +434,16 @@ pub fn preview(
                     adopts: None,
                 })
             };
-            if r.is_ok() {
-                gone.insert(from.clone(), into.clone());
+            match &r {
+                // The identity that stays is the folder's.
+                Ok(p) if p.adopts.is_some() => {
+                    took.insert(from.clone());
+                    gone.insert(into.clone(), from.clone());
+                }
+                Ok(_) => {
+                    gone.insert(from.clone(), into.clone());
+                }
+                Err(_) => {}
             }
             touched.extend([c.from.clone(), c.into.clone(), from, into]);
             (c.clone(), r)
@@ -446,6 +459,24 @@ pub enum Outcome {
     Skipped(String),
     /// Refused: nothing of this pair was changed.
     Failed(String),
+}
+
+/// A client with a folder that took a kept client's ID in this run is not given another's:
+/// it would end with the second ID and the first kept client gone.
+const TWICE: &str = "The client with the folder has taken another kept client's ID in this run already. Merge those two kept clients first.";
+
+/// Whether the pair is surely one client: the same ID, or the same name however it is
+/// punctuated (`namematch`'s exact tier). Only these are ticked for the person many at a
+/// time: the pairs are found by how alike the letters are, which lists `Smith, John` with
+/// `Smith, Jon`.
+pub fn surely_one(p: &Pair) -> bool {
+    use crate::namematch::{Name, Tier, compare};
+    p.why == Why::SameId
+        || compare(
+            &Name::of(&p.a.name, Some(&p.a.ext_id)),
+            &Name::of(&p.b.name, Some(&p.b.ext_id)),
+        )
+        .is_some_and(|(_, t)| t == Tier::Exact)
 }
 
 /// One merge of a run, as its undo needs it.
@@ -472,7 +503,7 @@ pub struct Adopted {
 /// list, its relationships and holds; it has no documents), then `other` takes its ID and
 /// name. The catalog identity that stays is the folder's, so its documents, versions and
 /// B2 objects are untouched.
-fn adopt(
+pub(crate) fn adopt(
     conn: &mut Connection,
     root: &Path,
     device_id: &str,
@@ -487,6 +518,7 @@ fn adopt(
         client: other.to_string(),
         id,
         name,
+        twin: None,
     };
     // The same ID and name already (the two differed in nothing else): the merge is all.
     let (now_id, now_name, _) = listupdate::client_row(conn, other)?;
@@ -500,7 +532,19 @@ fn adopt(
         Ok((done, _)) => {
             // The client CSV: the kept client's own row is the firm's, and stays; the
             // row under the folder's old ID goes.
-            let old_csv_row = clients::remove_from_csv(root, &done.old_id).ok().flatten();
+            // (A blank ID is no row's: not looked for.)
+            let old_csv_row = if done.old_id.trim().is_empty() {
+                None
+            } else {
+                clients::remove_from_csv(root, &done.old_id).ok().flatten()
+            };
+            // The kept client's partner, when the folder's client has none (the merge
+            // sets the merged client's details aside for its undo).
+            if let Some(partner) = merged.details.get("partner")
+                && clients::load(root).is_ok_and(|m| !m.meta.partners.contains_key(other))
+            {
+                let _ = clients::set_partner(root, other, Some(partner));
+            }
             if let Some(row) = &merged.csv_row {
                 let _ = clients::restore_csv_row(root, &merged.from.ext_id, row);
             }
@@ -532,6 +576,7 @@ pub fn merge_many(
     stop: &AtomicBool,
 ) -> Vec<(Choice, Outcome)> {
     let mut gone: HashMap<String, String> = HashMap::new();
+    let mut took: HashSet<String> = HashSet::new();
     let mut out = Vec::with_capacity(choices.len());
     for c in choices {
         if stop.load(Relaxed) {
@@ -548,10 +593,12 @@ pub fn merge_many(
             // Planned now, as things are after the merges before it.
             match adopting(conn, &from, &into) {
                 Err(e) => Outcome::Failed(e),
+                _ if took.contains(&from) => Outcome::Failed(TWICE.to_string()),
                 Ok(Some((id, name))) => {
                     match adopt(conn, root, device_id, &from, &into, id, name) {
                         Ok(r) => {
                             // The identity that stays is the folder's.
+                            took.insert(from.clone());
                             gone.insert(into, from);
                             Outcome::Merged(Box::new(r))
                         }
@@ -994,6 +1041,95 @@ mod tests {
             "{text}"
         );
         assert_eq!(text.matches("7974_6RFA").count(), 1, "not twice: {text}");
+    }
+
+    /// Only what is surely one client is ticked many at a time; and a client with a folder
+    /// is not given two kept clients' IDs in one run.
+    #[test]
+    fn pairs_alike_by_letters_only_are_not_surely_one() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (root, mut conn) = cabinet(
+            tmp.path(),
+            &[
+                ("Smith, John", "1001"),
+                ("Smith, Jon", "1002"),
+                ("Baker Co", "3001"),
+                ("Baker Co.", "3002"),
+                ("Cole Trust", "06001"),
+            ],
+            &[],
+        );
+        let f = find(&conn, &root).unwrap();
+        let pair = |a: &str, b: &str| {
+            f.pairs
+                .iter()
+                .find(|p| {
+                    [p.a.ext_id.as_str(), p.b.ext_id.as_str()] == [a, b]
+                        || [p.a.ext_id.as_str(), p.b.ext_id.as_str()] == [b, a]
+                })
+                .unwrap_or_else(|| panic!("no pair {a} / {b}: {:?}", f.pairs))
+        };
+        assert!(
+            !surely_one(pair("1001", "1002")),
+            "John and Jon are two people"
+        );
+        assert!(surely_one(pair("3001", "3002")));
+
+        // Two list clients of one name, no folders, and the one folder: the folder's
+        // client takes the first kept client's ID, and is refused the second.
+        for id in ["K1", "K2"] {
+            let uuid = Uuid::new_v4();
+            let mut list = clients::load(&root).unwrap().list.unwrap();
+            list.uuids.insert(id.into(), uuid);
+            list.clients.push(Client {
+                id: id.into(),
+                uuid,
+                name: "Cole Trust".into(),
+                extra: BTreeMap::new(),
+            });
+            clients::save_list(&root, &list).unwrap();
+        }
+        crate::rebuild::sync_clients(&mut conn, &root, "dev", "clients_import").unwrap();
+        let folder = uuid_of(&conn, "06001");
+        let choices = [
+            Choice {
+                from: folder.clone(),
+                into: uuid_of(&conn, "K1"),
+            },
+            Choice {
+                from: folder.clone(),
+                into: uuid_of(&conn, "K2"),
+            },
+        ];
+        let p = preview(&conn, &root, &choices).unwrap();
+        assert!(p[0].1.is_ok(), "{:?}", p[0].1);
+        assert!(
+            p[1].1.as_ref().is_err_and(|e| e.contains("already")),
+            "{:?}",
+            p[1].1
+        );
+        let out = merge_many(
+            &mut conn,
+            &root,
+            "dev",
+            &choices,
+            &AtomicUsize::new(0),
+            &AtomicBool::new(false),
+        );
+        assert!(matches!(out[0].1, Outcome::Merged(_)), "{:?}", out[0].1);
+        assert!(
+            matches!(&out[1].1, Outcome::Failed(e) if e.contains("already")),
+            "{:?}",
+            out[1].1
+        );
+        assert!(live(&conn).contains(&"K1".to_string()) && live(&conn).contains(&"K2".to_string()));
+        assert!(!live(&conn).contains(&"06001".to_string()));
+        // The merge half alone is not undone while the ID is the folder client's.
+        let Outcome::Merged(ran) = &out[0].1 else {
+            unreachable!()
+        };
+        let e = clientmerge::undo(&mut conn, &root, &ran.merged, "dev").unwrap_err();
+        assert!(e.contains("cannot be undone by itself"), "{e}");
     }
 
     /// The firm's list marks the one to keep: its IDs, compared as IDs are.

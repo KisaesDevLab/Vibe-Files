@@ -42,11 +42,16 @@ Use **Show** and **Name or ID contains** to narrow the list. **Tick the ones sho
 - clients that have another ID only when **Show** is set to **Has another ID**;
 - close matches never: tick those one at a time.
 
+## When the list was already imported
+
+If the list was imported with **Browse › Import clients CSV…** before, each of its clients exists with the right ID and no folder, beside the same client made from its folder under an old ID. The match then shows **folder under another ID**. Updating makes the two one client: the folder, with the list's ID and name. These are ticked with the rest when the name is the same.
+
 ## What did not match
 
 Under the counts, the **Not matched** line counts the discrepancies, and two folded lists show them with the nearest thing to each and how close it is:
 
 - **On the list, no client**: rows no client matches. The nearest may be a folder with no client file; [Folder import](help:folder-import) makes such a folder a client.
+- **On the list as a client, with no folder**: the list's client exists, but no folder in the cabinet has its name.
 - **Clients not on the list**: clients no row is for.
 
 **Save the comparison as CSV…** writes all of it (matches, both lists, folders with no client file, and what is not changed) to open in Excel.

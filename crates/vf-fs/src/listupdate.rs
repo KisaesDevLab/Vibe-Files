@@ -158,6 +158,11 @@ pub struct Match {
     pub score: f64,
     pub tier: Tier,
     pub kind: Kind,
+    /// The list was imported as clients before it was matched: this row's ID is on a
+    /// client of its own that has no folder, while `client` has the folder under an old
+    /// ID. Updating makes the two one client: the folder's, with the list's ID and name
+    /// (`similar::adopt`).
+    pub twin: Option<Who>,
 }
 
 /// The nearest client or folder to a row that has no match: for a person to look at.
@@ -185,6 +190,10 @@ pub struct Found {
     /// The discrepancies, one way: rows of the list no client matches, each with the
     /// nearest client or folder.
     pub no_client: Vec<(Row, Option<Nearest>)>,
+    /// Rows whose ID is on a client that has no folder, and no client with a folder
+    /// matches the name: on the list, nowhere in the cabinet's folders. Each with the
+    /// nearest client or folder.
+    pub no_folder: Vec<(Row, Option<Nearest>)>,
     /// And the other: clients no row of the list is for, each with the nearest row.
     pub no_row: Vec<(Who, Option<(Row, f64)>)>,
     /// Top folders of the cabinet with no client file.
@@ -431,36 +440,62 @@ pub fn find(
     let mut rows_done: HashSet<usize> = HashSet::new();
     // By name: (row, client, how well), one client per row; then one row per client.
     let mut by_name: Vec<(usize, usize, (f64, Tier))> = Vec::new();
+    // For a row matched to a client with a folder: the folderless client that has its ID.
+    let mut twin_of: HashMap<usize, usize> = HashMap::new();
     for (ri, r) in rows.iter().enumerate() {
         match holder_of(ri) {
             Some((ci, Some(v))) if is_match(v) => {
                 let c = &all[ci];
                 touched.insert(ci);
-                rows_done.insert(ri);
-                // On the client list with this ID but with no folder, while a client of
-                // the same name has the folder (the list was imported beside clients made
-                // from folders): one client twice. Not "right already".
-                let twins: Vec<String> = if c.folder.is_none() {
-                    candidates(ri)
+                // On the client list with this ID but with no folder (the list was
+                // imported as clients): the client with the folder, under its old ID or
+                // none, is found by name. Not "right already".
+                if c.folder.is_none() {
+                    let cands = candidates(ri);
+                    let with_folder: Vec<&(usize, (f64, Tier))> = cands
                         .iter()
-                        .filter(|(x, v)| is_match(*v) && all[*x].folder.is_some())
-                        .map(|(x, _)| {
-                            touched.insert(*x);
-                            who_text(&all[*x])
-                        })
-                        .collect()
-                } else {
-                    vec![]
-                };
-                if !twins.is_empty() {
-                    out.unclear.push(format!(
-                        "{} ({}) is a client with no folder, and {} has a folder under that name: they look like one client. Merge them in Admin › Similar clients (keep {}), then find again.",
-                        r.name,
-                        r.id,
-                        twins.join("; "),
-                        r.id
-                    ));
-                } else if c.name.trim() == r.name.trim() && c.ext_id.trim() == r.id.trim() {
+                        .filter(|(x, _)| all[*x].folder.is_some())
+                        .collect();
+                    let hits: Vec<&&(usize, (f64, Tier))> =
+                        with_folder.iter().filter(|(_, v)| is_match(*v)).collect();
+                    match hits.as_slice() {
+                        // No folder anywhere for it: said, with the nearest.
+                        [] => {
+                            rows_done.insert(ri);
+                            let near: Vec<(usize, (f64, Tier))> =
+                                with_folder.iter().map(|x| **x).collect();
+                            out.no_folder.push(((*r).clone(), nearest(ri, &near)));
+                        }
+                        [one] => {
+                            twin_of.insert(ri, ci);
+                            by_name.push((ri, one.0, one.1));
+                        }
+                        [best, next, ..] if clear_of(best.1, next.1) => {
+                            twin_of.insert(ri, ci);
+                            by_name.push((ri, best.0, best.1));
+                        }
+                        [best, ..] => {
+                            let tied: Vec<String> = hits
+                                .iter()
+                                .filter(|(_, v)| !clear_of(best.1, *v))
+                                .map(|(x, _)| {
+                                    touched.insert(*x);
+                                    who_text(&all[*x])
+                                })
+                                .collect();
+                            out.unclear.push(format!(
+                                "{} ({}) has no folder, and {} clients with a folder have that name: {}. If they are one client, merge them in Admin › Similar clients first, then find again.",
+                                r.name,
+                                r.id,
+                                tied.len(),
+                                tied.join("; ")
+                            ));
+                        }
+                    }
+                    continue;
+                }
+                rows_done.insert(ri);
+                if c.name.trim() == r.name.trim() && c.ext_id.trim() == r.id.trim() {
                     out.already += 1;
                 } else {
                     out.matches.push(Match {
@@ -469,6 +504,7 @@ pub fn find(
                         score: v.0,
                         tier: v.1,
                         kind: Kind::SameId,
+                        twin: None,
                     });
                 }
                 continue;
@@ -570,6 +606,7 @@ pub fn find(
             } else {
                 Kind::OtherId
             },
+            twin: twin_of.get(&ri).map(|k| all[*k].clone()),
         });
         // The rows a better one took the client from have no client.
         for (i, v) in &its[1..] {
@@ -645,10 +682,13 @@ pub fn report_csv(f: &Found) -> String {
             Tier::Rule => "Match: same name, written differently",
             Tier::Near => "Close: look",
         };
-        let note = match m.kind {
-            Kind::NoId => "the client has no ID",
-            Kind::OtherId => "the client has another ID",
-            Kind::SameId => "the client has this ID",
+        let note = match (m.kind, &m.twin) {
+            (_, Some(_)) => {
+                "the list's own client has no folder; this client has the folder: they become one"
+            }
+            (Kind::NoId, _) => "the client has no ID",
+            (Kind::OtherId, _) => "the client has another ID",
+            (Kind::SameId, _) => "the client has this ID",
         };
         line([
             status,
@@ -681,6 +721,36 @@ pub fn report_csv(f: &Found) -> String {
             ]),
             None => line([
                 "On the list, no client",
+                &r.name,
+                &r.id,
+                "",
+                "",
+                "",
+                "",
+                "",
+                "",
+            ]),
+        }
+    }
+    for (r, n) in &f.no_folder {
+        match n {
+            Some(n) => line([
+                "On the list, client has no folder",
+                &r.name,
+                &r.id,
+                &n.name,
+                &n.id,
+                n.folder.as_deref().unwrap_or(""),
+                "",
+                &pct(n.score),
+                if n.unbound {
+                    "nearest: a folder with no client file (Admin › Folder import binds it)"
+                } else {
+                    "nearest client with a folder, not a match"
+                },
+            ]),
+            None => line([
+                "On the list, client has no folder",
                 &r.name,
                 &r.id,
                 "",
@@ -729,6 +799,9 @@ pub struct Change {
     pub client: String,
     pub id: String,
     pub name: String,
+    /// The list's own client for this row (uuid), which has the ID and no folder: it and
+    /// `client` become one (see [`Match::twin`]).
+    pub twin: Option<String>,
 }
 
 /// What a change would do, for the yes or no.
@@ -751,7 +824,8 @@ pub fn preview(
     root: &Path,
     changes: &[Change],
 ) -> Result<Vec<Previewed>, String> {
-    preview_freeing(conn, root, changes, &HashSet::new())
+    let twins: HashSet<String> = changes.iter().filter_map(|c| c.twin.clone()).collect();
+    preview_freeing(conn, root, changes, &twins)
 }
 
 /// [`preview`], the IDs of the clients `freed` (uuids) counting as free: they are being
@@ -836,7 +910,7 @@ pub(crate) fn preview_freeing(
 }
 
 /// One change as it was made: what to put back.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Done {
     /// Client uuid.
     pub client: String,
@@ -846,6 +920,20 @@ pub struct Done {
     pub new_id: String,
     pub new_name: String,
     pub new_folder: Option<String>,
+    /// The change also made the list's folderless client and this one into one client
+    /// ([`Change::twin`]): what that merge needs to be put back.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adopted: Option<Box<AdoptedRec>>,
+}
+
+/// See [`Done::adopted`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AdoptedRec {
+    pub merged: crate::clientmerge::Merged,
+    /// The folder client's own row in the client CSV, taken out.
+    pub old_csv_row: Option<String>,
+    /// Whether the folder's client was given the ID and name (not when it had them).
+    pub renamed: bool,
 }
 
 /// A line of a run's record.
@@ -859,7 +947,7 @@ enum Line {
 
 /// A run: its record's file, and the changes of it that have not been put back, in the
 /// order they were made.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct Run {
     pub file: PathBuf,
     pub done: Vec<Done>,
@@ -964,9 +1052,84 @@ pub(crate) fn change_one(
             new_id: c.id.trim().to_string(),
             new_name: c.name.trim().to_string(),
             new_folder,
+            adopted: None,
         },
         note,
     ))
+}
+
+/// [`change_one`] for a row whose ID is on a folderless client of its own (`twin`): that
+/// client and the one with the folder become one, with the list's ID and name.
+fn adopt_one(
+    conn: &mut Connection,
+    root: &Path,
+    device_id: &str,
+    c: &Change,
+    twin: &str,
+) -> Result<(Done, Option<String>), String> {
+    let (old_id, old_name, old_folder) = client_row(conn, &c.client)?;
+    // The ID and name as the list's client has them now (they are what the row says).
+    let (id, name, twin_folder) = client_row(conn, twin)?;
+    if twin_folder.is_some() {
+        return Err("The list's client has a folder of its own now: find again.".into());
+    }
+    let ran = crate::similar::adopt(conn, root, device_id, &c.client, twin, id, name)?;
+    let note = ran.merged.note.clone();
+    let (renamed, old_csv_row, done) = match ran.adopted {
+        Some(a) => (true, a.old_csv_row, a.done),
+        None => {
+            let (new_id, new_name, new_folder) = client_row(conn, &c.client)?;
+            (
+                false,
+                None,
+                Done {
+                    client: c.client.clone(),
+                    old_id,
+                    old_name,
+                    old_folder,
+                    new_id,
+                    new_name,
+                    new_folder,
+                    adopted: None,
+                },
+            )
+        }
+    };
+    Ok((
+        Done {
+            adopted: Some(Box::new(AdoptedRec {
+                merged: ran.merged,
+                old_csv_row,
+                renamed,
+            })),
+            ..done
+        },
+        note,
+    ))
+}
+
+/// Puts back a change that made two clients one ([`adopt_one`]).
+fn put_back_adopted(
+    conn: &mut Connection,
+    root: &Path,
+    device_id: &str,
+    d: &Done,
+    a: &AdoptedRec,
+) -> Result<(), String> {
+    let ran = crate::similar::Ran {
+        merged: a.merged.clone(),
+        adopted: a.renamed.then(|| crate::similar::Adopted {
+            done: Done {
+                adopted: None,
+                ..d.clone()
+            },
+            old_csv_row: a.old_csv_row.clone(),
+        }),
+    };
+    crate::similar::undo_many(conn, root, device_id, &[ran])
+        .pop()
+        .map(|(_, r)| r.map(|_| ()))
+        .unwrap_or_else(|| Err("nothing was put back".into()))
 }
 
 /// Puts one change back: the client gets the ID, name and folder it had. Refused when it
@@ -1044,7 +1207,10 @@ pub fn apply(
         if stop.load(Relaxed) {
             break;
         }
-        let r = change_one(conn, root, device_id, c, false);
+        let r = match &c.twin {
+            Some(twin) => adopt_one(conn, root, device_id, c, twin),
+            None => change_one(conn, root, device_id, c, false),
+        };
         done.fetch_add(1, Relaxed);
         match r {
             Ok((d, note)) => {
@@ -1084,7 +1250,10 @@ pub fn undo(
 ) -> Vec<(String, Result<(), String>)> {
     let mut out = Vec::new();
     for d in run.done.iter().rev() {
-        let r = put_back_one(conn, root, device_id, d);
+        let r = match &d.adopted {
+            Some(a) => put_back_adopted(conn, root, device_id, d, a),
+            None => put_back_one(conn, root, device_id, d),
+        };
         done.fetch_add(1, Relaxed);
         let failed = r.is_err();
         if !failed {
@@ -1295,8 +1464,34 @@ mod tests {
             .execute("UPDATE client SET ext_id = 'OLDZ' WHERE id = ?1", [&zeta])
             .unwrap();
         let f = find(&c.conn, None, &[row("Zeta Farms Inc", "ZF9")], NAME_MATCH).unwrap();
-        assert_eq!((f.already, f.matches.len()), (0, 0), "{f:?}");
-        assert!(f.unclear[0].contains("no folder"), "{:?}", f.unclear);
+        assert_eq!((f.already, f.matches.len()), (0, 1), "{f:?}");
+        let m = &f.matches[0];
+        assert_eq!(
+            m.client.id, zeta,
+            "the client with the folder is the one offered"
+        );
+        assert_eq!(m.twin.as_ref().map(|t| t.id.as_str()), Some("listed-only"));
+        // And with no folder of that name anywhere: said as that, not as right.
+        let f = find(&c.conn, None, &[row("Zeta Farms Inc", "ZF9")], NAME_MATCH);
+        c.conn
+            .execute(
+                "UPDATE client SET name = 'Quite Another Name' WHERE id = ?1",
+                [&zeta],
+            )
+            .unwrap();
+        c.conn
+            .execute(
+                "UPDATE client SET folder_rel = 'Quite Another Name (OLDZ)' WHERE id = ?1",
+                [&zeta],
+            )
+            .unwrap();
+        drop(f);
+        let f = find(&c.conn, None, &[row("Zeta Farms Inc", "ZF9")], NAME_MATCH).unwrap();
+        assert_eq!(
+            (f.already, f.matches.len(), f.no_folder.len()),
+            (0, 0, 1),
+            "{f:?}"
+        );
         c.conn
             .execute("DELETE FROM client WHERE id = 'listed-only'", [])
             .unwrap();
@@ -1317,17 +1512,20 @@ mod tests {
                 client: acme.clone(),
                 id: "ACME1002".into(),
                 name: "Acme Holdings, LLC".into(),
+                twin: None,
             },
             Change {
                 client: zeta.clone(),
                 id: "ZETA1009".into(),
                 name: "Zeta Farms, Inc.".into(),
+                twin: None,
             },
             // An ID another client has: refused, and the run goes on.
             Change {
                 client: held.clone(),
                 id: "ZETA1009".into(),
                 name: "Somebody Else".into(),
+                twin: None,
             },
         ];
         let pv = preview(&c.conn, &c.root, &changes).unwrap();
@@ -1482,6 +1680,7 @@ mod tests {
             client: acme.clone(),
             id: "ACME1002".into(),
             name: "Acme Holdings, LLC".into(),
+            twin: None,
         }];
         let (run, out) = apply(
             &mut c.conn,
@@ -1669,6 +1868,155 @@ mod tests {
         );
     }
 
+    /// The owner's cabinet (2026-11-17): the list was imported as clients, so each row's ID
+    /// is on a client of its own with no folder, beside the client with the folder under
+    /// its old ID. The row is matched to the folder's client, and updating makes the two
+    /// one; the undo makes them two again.
+    #[test]
+    fn a_row_whose_id_is_on_a_folderless_client_makes_the_two_one() {
+        let mut c = cab();
+        let acme = client(&mut c, "OLD1", "Acme Holdings LLC");
+        let listed = uuid::Uuid::new_v4();
+        let mut list = clients::load(&c.root).unwrap().list.unwrap();
+        list.uuids.insert("ACME1002".into(), listed);
+        list.clients.push(filer_core::clients::Client {
+            id: "ACME1002".into(),
+            uuid: listed,
+            name: "Acme Holdings, LLC".into(),
+            extra: Default::default(),
+        });
+        clients::save_list(&c.root, &list).unwrap();
+        crate::rebuild::sync_clients(&mut c.conn, &c.root, "dev", "clients_import").unwrap();
+        let live = |c: &Cab| -> Vec<String> {
+            let mut st = c
+                .conn
+                .prepare("SELECT ext_id FROM client WHERE deleted_at IS NULL ORDER BY ext_id")
+                .unwrap();
+            st.query_map([], |r| r.get(0))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap()
+        };
+        assert_eq!(live(&c), ["ACME1002", "OLD1"]);
+
+        let f = find(
+            &c.conn,
+            Some(&c.root),
+            &[row("Acme Holdings, LLC", "ACME1002")],
+            NAME_MATCH,
+        )
+        .unwrap();
+        assert_eq!((f.matches.len(), f.already), (1, 0), "{f:#?}");
+        let m = &f.matches[0];
+        assert_eq!(
+            (m.client.id.as_str(), m.kind, m.tier),
+            (acme.as_str(), Kind::OtherId, Tier::Exact)
+        );
+        let twin = m.twin.as_ref().expect("the list's own client").id.clone();
+        assert_eq!(twin, listed.to_string());
+        assert!(f.no_row.is_empty() && f.no_client.is_empty(), "{f:#?}");
+
+        let changes = [Change {
+            client: acme.clone(),
+            id: m.row.id.clone(),
+            name: m.row.name.clone(),
+            twin: Some(twin),
+        }];
+        let pv = preview(&c.conn, &c.root, &changes).unwrap();
+        assert_eq!(
+            pv[0]
+                .1
+                .as_ref()
+                .expect("the twin's ID is free for it")
+                .folder,
+            Some((
+                "Acme Holdings LLC (OLD1)".to_string(),
+                "Acme Holdings, LLC (ACME1002)".to_string()
+            ))
+        );
+        let (run, out) = apply(
+            &mut c.conn,
+            &c.root,
+            "dev",
+            &changes,
+            &AtomicUsize::new(0),
+            &AtomicBool::new(false),
+        );
+        assert!(matches!(out[0].1, Outcome::Changed(_)), "{:?}", out[0].1);
+        assert_eq!(live(&c), ["ACME1002"], "one client");
+        assert_eq!(
+            client_row(&c.conn, &acme).unwrap(),
+            (
+                "ACME1002".to_string(),
+                "Acme Holdings, LLC".to_string(),
+                Some("Acme Holdings, LLC (ACME1002)".to_string())
+            ),
+            "the folder's client, with the list's ID and name"
+        );
+        assert!(
+            c.root
+                .join("Acme Holdings, LLC (ACME1002)/Correspondence/letter.pdf")
+                .is_file()
+        );
+        // On record whole, and put back from the record: two clients again.
+        let last = load_last(&c.root).unwrap().unwrap();
+        assert_eq!(last, run);
+        assert!(last.done[0].adopted.is_some());
+        let back = undo(&mut c.conn, &c.root, "dev", &last, &AtomicUsize::new(0));
+        assert!(back.iter().all(|(_, r)| r.is_ok()), "{back:?}");
+        assert_eq!(live(&c), ["ACME1002", "OLD1"]);
+        assert!(
+            c.root
+                .join("Acme Holdings LLC (OLD1)/Correspondence/letter.pdf")
+                .is_file()
+        );
+        assert_eq!(client_row(&c.conn, &listed.to_string()).unwrap().2, None);
+        assert!(load_last(&c.root).unwrap().is_none());
+    }
+
+    /// Looking clients up by their rarest words never loses a pair the comparison would
+    /// call the same name.
+    #[test]
+    fn the_lookup_by_words_never_loses_a_match() {
+        let pairs = [
+            ("Smith, John & Mary", "Smith, John and Mary"),
+            ("Smith John", "John Smith"),
+            ("Smith, John A.", "Smith, John Allen"),
+            ("Acme Holdings Inc", "Acme Holdings Incorporated"),
+            ("The Dining Hall LLC", "Dining Hall LLC"),
+            ("St. Mary's Church", "Saint Marys Church"),
+            ("Smith Family Trust", "Smith Family Trust dtd 1/1/2010"),
+            ("Mc Donald, Ann", "McDonald, Ann"),
+            ("A and B Trucking", "A & B Trucking"),
+            ("Smith, John", "John Smith"),
+            ("O'Brien Plumbing", "OBrien Plumbing"),
+        ];
+        // Among many names sharing its common words.
+        let mut index = Index::default();
+        let crowd: Vec<Name> = (0..300)
+            .map(|i| {
+                Name::of(
+                    &format!("Smith, John Q{i} Holdings Trust Church Trucking"),
+                    None,
+                )
+            })
+            .collect();
+        for (i, n) in crowd.iter().enumerate() {
+            index.add(1000 + i, n);
+        }
+        for (i, (_, b)) in pairs.iter().enumerate() {
+            index.add(i, &Name::of(b, None));
+        }
+        for (i, (a, b)) in pairs.iter().enumerate() {
+            let (na, nb) = (Name::of(a, None), Name::of(b, None));
+            assert!(
+                namematch::compare(&na, &nb).is_some_and(|(_, t)| t != Tier::Near),
+                "{a} / {b}"
+            );
+            assert!(index.sharing(&na).contains(&i), "{a} does not find {b}");
+        }
+    }
+
     #[test]
     fn a_run_can_be_stopped_and_a_client_changed_since_is_not_put_back() {
         let mut c = cab();
@@ -1679,11 +2027,13 @@ mod tests {
                 client: acme.clone(),
                 id: "ACME1002".into(),
                 name: "Acme Holdings LLC".into(),
+                twin: None,
             },
             Change {
                 client: zeta.clone(),
                 id: "ZETA1009".into(),
                 name: "Zeta Farms Inc".into(),
+                twin: None,
             },
         ];
         // Stopped before it began: nothing is changed.

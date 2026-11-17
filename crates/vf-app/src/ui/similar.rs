@@ -662,14 +662,14 @@ pub fn show(ui: &mut egui::Ui, p: &mut SimilarPage, env: &mut Env, catalog: &Pat
         let shown = p.shown();
         if ui
             .small_btn("Tick the ones shown")
-            .on_hover_text("Ticks every pair shown that has a client to keep. Pairs where you must still choose which one is kept are left.")
+            .on_hover_text("Ticks the pairs shown that have a client to keep and are surely one client: the same ID, or the same name apart from capitals and punctuation. Pairs that are only alike (John and Jon, a word more) are left for you to tick one at a time.")
             .clicked()
             && let Some(f) = &p.found
         {
             let add: Vec<Key> = shown
                 .iter()
                 .map(|&i| &f.pairs[i])
-                .filter(|x| p.can_tick(x))
+                .filter(|x| p.can_tick(x) && similar::surely_one(x))
                 .map(key)
                 .collect();
             p.picked.extend(add);

@@ -179,6 +179,7 @@ impl ListUpdatePage {
                 client: m.client.id.clone(),
                 id: m.row.id.clone(),
                 name: m.row.name.clone(),
+                twin: m.twin.as_ref().map(|t| t.id.clone()),
             })
             .collect()
     }
@@ -532,8 +533,9 @@ pub fn show(ui: &mut egui::Ui, p: &mut ListUpdatePage, env: &mut Env, catalog: &
     ));
     // The discrepancies, both ways.
     ui.label(format!(
-        "Not matched: {} rows of the list have no client · {} clients are not on the list · {} folders have no client file{}",
+        "Not matched: {} rows of the list have no client · {} are clients with no folder · {} clients are not on the list · {} folders have no client file{}",
         f.no_client.len(),
+        f.no_folder.len(),
         f.no_row.len(),
         f.unbound.len(),
         if p.blank > 0 {
@@ -597,6 +599,45 @@ pub fn show(ui: &mut egui::Ui, p: &mut ListUpdatePage, env: &mut Env, catalog: &
                         }
                     });
             });
+    }
+    if !f.no_folder.is_empty() {
+        egui::CollapsingHeader::new(format!(
+            "On the list as a client, with no folder ({})",
+            f.no_folder.len()
+        ))
+        .id_salt("listupdate-no-folder")
+        .show(ui, |ui| {
+            egui::ScrollArea::vertical()
+                .id_salt("listupdate-no-folder-list")
+                .max_height(160.0)
+                .show(ui, |ui| {
+                    for (r, n) in f.no_folder.iter().take(500) {
+                        ui.label(widgets::caption(match n {
+                            Some(n) if n.unbound => format!(
+                                "{} ({}) · nearest: the folder {} ({}), which has no client file",
+                                r.name,
+                                r.id,
+                                n.name,
+                                pct(n.score)
+                            ),
+                            Some(n) => format!(
+                                "{} ({}) · nearest client with a folder: {} ({}), {}",
+                                r.name,
+                                r.id,
+                                n.name,
+                                id_text(&n.id),
+                                pct(n.score)
+                            ),
+                            None => format!("{} ({}) · no folder like it", r.name, r.id),
+                        }));
+                    }
+                    if f.no_folder.len() > 500 {
+                        ui.label(widgets::caption(
+                            "The first 500 are shown; the saved comparison has all.",
+                        ));
+                    }
+                });
+        });
     }
     if !f.no_row.is_empty() {
         egui::CollapsingHeader::new(format!("Clients not on the list ({})", f.no_row.len()))
@@ -870,6 +911,8 @@ fn confirm(ui: &mut egui::Ui, p: &mut ListUpdatePage, env: &mut Env, catalog: &P
 fn bulk_tickable(m: &Match, group: Group) -> bool {
     match (m.tier, m.kind) {
         (Tier::Near, _) => false,
+        // The folder of a client the list already has by this ID: its old ID is expected.
+        (Tier::Exact, _) if m.twin.is_some() => true,
         (_, Kind::OtherId) => group == Group::OtherId && m.tier == Tier::Exact,
         (Tier::Exact, _) => true,
         (Tier::Rule, _) => group == Group::Rule,
@@ -893,6 +936,8 @@ fn kind_cell(ui: &mut egui::Ui, m: &Match) {
         ),
     };
     let (text, mark) = match m.kind {
+        Kind::OtherId if m.twin.is_some() => (format!("{name} · folder under another ID"), false),
+        Kind::NoId if m.twin.is_some() => (format!("{name} · folder with no ID"), false),
         Kind::NoId => (name, m.tier == Tier::Near),
         Kind::OtherId => (format!("{name} · has another ID"), true),
         Kind::SameId => (
@@ -905,8 +950,12 @@ fn kind_cell(ui: &mut egui::Ui, m: &Match) {
     } else {
         RichText::new(text)
     };
-    ui.label(text).on_hover_text(match m.kind {
-        Kind::OtherId => format!("{why} The client has a different ID already: two people of one name are not one client, so look before you tick."),
+    ui.label(text).on_hover_text(match (m.kind, &m.twin) {
+        (_, Some(t)) => format!(
+            "{why} The list's ID is on a client of its own with no folder ({}); this client has the folder. Updating makes them one client: this folder, with the list's ID and name.",
+            t.name
+        ),
+        (Kind::OtherId, _) => format!("{why} The client has a different ID already: two people of one name are not one client, so look before you tick."),
         _ => why.to_string(),
     });
 }
