@@ -275,6 +275,8 @@ pub struct TapeState {
     flash: Option<(usize, [f32; 4], std::time::Instant)>,
     /// While dragging in pick mode: how many amounts, their sum.
     pub drag_status: Option<String>,
+    /// An amount on the tape being changed: (line, the text typed, focus still to be given).
+    pub edit_amount: Option<(usize, String, bool)>,
 }
 
 impl Default for TapeState {
@@ -286,6 +288,7 @@ impl Default for TapeState {
             captions: true,
             include_labels: true,
             link: true,
+            edit_amount: None,
             note: String::new(),
             placing: false,
             history: None,
@@ -4469,6 +4472,9 @@ fn tape_panel(ui: &mut egui::Ui, v: &mut Viewer, env: &mut Env<'_>, doc: &Doc) {
     tape_history(v, env, doc);
     tape_keys(ui, v);
     let mut jump: Option<(usize, [f32; 4])> = None;
+    // An amount on the tape clicked to be changed, and a change ended (`None`: given up).
+    let mut start_edit: Option<(usize, String)> = None;
+    let mut end_edit: Option<Option<(usize, String)>> = None;
     {
         {
             ui.horizontal_wrapped(|ui| {
@@ -4724,10 +4730,73 @@ fn tape_panel(ui: &mut egui::Ui, v: &mut Viewer, env: &mut Env<'_>, doc: &Doc) {
                                 if total {
                                     amount = amount.strong();
                                 }
-                                let a = ui.add(egui::Label::new(amount).sense(Sense::click()));
-                                if let Some(src) = l.source {
-                                    let a = a.on_hover_text("Show it on the page");
-                                    if a.clicked() {
+                                if let Some((_, text, focus)) =
+                                    v.tape.edit_amount.as_mut().filter(|e| e.0 == i)
+                                {
+                                    // Being changed: Enter (or a click elsewhere) takes it,
+                                    // Esc leaves the amount as it was.
+                                    let r = ui.add_sized(
+                                        [96.0, 20.0],
+                                        egui::TextEdit::singleline(text)
+                                            .font(egui::TextStyle::Monospace),
+                                    );
+                                    r.widget_info(|| {
+                                        egui::WidgetInfo::labeled(
+                                            egui::accesskit::Role::TextInput,
+                                            true,
+                                            format!("Amount of line {}", i + 1),
+                                        )
+                                    });
+                                    if std::mem::take(focus) {
+                                        // Opened with the amount selected: typing replaces
+                                        // it, an arrow key goes into it to change a digit.
+                                        r.request_focus();
+                                        let mut st = egui::TextEdit::load_state(ui.ctx(), r.id)
+                                            .unwrap_or_default();
+                                        st.cursor.set_char_range(Some(
+                                            egui::text::CCursorRange::two(
+                                                egui::text::CCursor::new(0),
+                                                egui::text::CCursor::new(text.chars().count()),
+                                            ),
+                                        ));
+                                        st.store(ui.ctx(), r.id);
+                                    }
+                                    if ui.input(|x| x.key_pressed(egui::Key::Escape)) {
+                                        end_edit = Some(None);
+                                    } else if r.lost_focus() {
+                                        end_edit = Some(Some((i, text.clone())));
+                                    }
+                                } else {
+                                    let can = v.tape.tape.can_edit(i);
+                                    let a = ui.add(egui::Label::new(amount).sense(Sense::click()));
+                                    let a = match (&can, l.source.is_some()) {
+                                        (Ok(()), true) => a.on_hover_text(
+                                            "Click: show it on the page. Double-click: change the amount.",
+                                        ),
+                                        (Ok(()), false) => {
+                                            a.on_hover_text("Click to change the amount.")
+                                        }
+                                        (Err(why), _) => a.on_hover_text(*why),
+                                    };
+                                    a.widget_info(|| {
+                                        egui::WidgetInfo::labeled(
+                                            egui::accesskit::Role::Button,
+                                            true,
+                                            format!(
+                                                "Amount {} of line {}",
+                                                format_cents(l.amount),
+                                                i + 1
+                                            ),
+                                        )
+                                    });
+                                    let edit = can.is_ok()
+                                        && (a.double_clicked()
+                                            || (a.clicked() && l.source.is_none()));
+                                    if edit {
+                                        start_edit = Some((i, format_cents(l.amount)));
+                                    } else if a.clicked()
+                                        && let Some(src) = l.source
+                                    {
                                         jump = Some((src.page as usize, src.rect));
                                     }
                                 }
@@ -4750,6 +4819,34 @@ fn tape_panel(ui: &mut egui::Ui, v: &mut Viewer, env: &mut Env<'_>, doc: &Doc) {
         }
         v.scroll_to = Some(page);
         v.tape.flash = Some((page, r, std::time::Instant::now()));
+    }
+    if let Some(end) = end_edit {
+        v.tape.edit_amount = None;
+        if let Some((i, text)) = end {
+            set_tape_amount(v, i, &text);
+        }
+    }
+    if let Some((i, text)) = start_edit {
+        v.tape.edit_amount = Some((i, text, true));
+    }
+}
+
+/// Takes `text` as the new amount of tape line `i` (owner 2026-11-16): the tape is worked
+/// out again from it. Text that is not an amount, or an amount the tape cannot hold, is said
+/// and the line stays as it was.
+fn set_tape_amount(v: &mut Viewer, i: usize, text: &str) {
+    match vf_core::tape::parse_amount(text) {
+        None => {
+            v.error = Some(format!(
+                "\"{}\" is not an amount: line {} is unchanged.",
+                text.trim(),
+                i + 1
+            ));
+        }
+        Some(cents) => match v.tape.tape.set_amount(i, cents) {
+            Ok(()) => v.error = None,
+            Err(why) => v.error = Some(format!("Line {} is unchanged: {why}", i + 1)),
+        },
     }
 }
 

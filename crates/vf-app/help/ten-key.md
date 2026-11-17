@@ -35,6 +35,12 @@ A scanned page is a picture, so it has no amounts to pick. The tape then says **
 
 With **Labels from box captions** on, each picked line is labelled with the words beside or above the amount on the form, plus its page. You can edit any label on the tape.
 
+## Changing an amount on the tape
+
+Click an amount on the tape to change it (double-click an amount that was picked from the page; one click shows where it came from). The box opens with the amount selected: type the new one, or use the arrow keys to change a digit, then press Enter. Esc leaves it as it was.
+
+The tape is worked out again from the change: every subtotal, total and grand total after it, and the result of a × or ÷ the amount is part of. Subtotals, totals and the results of × and ÷ cannot be typed over; change one of the amounts they come from. **Undo** takes a change back.
+
 ## Undo, Redo and History
 
 **Undo** and **Redo** step back and forward through every change to the tape. **Copy** puts the tape on the clipboard, as text and as columns for Excel.

@@ -3044,6 +3044,99 @@ mod tests {
         );
     }
 
+    /// Owner 2026-11-16: an amount on the ten-key tape is clicked, typed over, and the tape
+    /// is worked out again; a total is not typed over; text that is no amount changes nothing.
+    #[test]
+    fn ten_key_amount_is_changed_and_the_tape_recalculated() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("Clients");
+        std::fs::create_dir_all(root.join("Old")).unwrap();
+        filer_pdf::pdf::write_test_pdf(&root.join("Old/interest.pdf"), &["Interest income"]);
+        let req = CreateRequest {
+            root: &root,
+            name: "Firm",
+        };
+        drop(session::create(&tmp.path().join("pc1"), "dev-1", &req).unwrap());
+        let mut h = harness(&tmp.path().join("pc1"));
+        click(&mut h, "Open existing");
+        type_into(&mut h, "Cabinet folder", &root.display().to_string());
+        click(&mut h, "Open cabinet");
+        settle(&mut h);
+        h.get_by_label("interest.pdf").click();
+        h.run_steps(4);
+        h.key_press(egui::Key::Enter);
+        let start = std::time::Instant::now();
+        loop {
+            h.step();
+            let Screen::Open(o) = &h.state().screen else {
+                unreachable!()
+            };
+            if o.viewer.ready() {
+                break;
+            }
+            assert!(
+                start.elapsed() < crate::ui::test_util::PATIENCE,
+                "never rendered"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        click(&mut h, "10-key");
+        if let Screen::Open(o) = &mut h.state_mut().screen {
+            o.viewer.tape.tape.keys("10 + 20 + T");
+        }
+        h.run_steps(3);
+        let amounts = |h: &egui_kittest::Harness<'static, VibeFilesApp>| -> Vec<i64> {
+            let Screen::Open(o) = &h.state().screen else {
+                unreachable!()
+            };
+            o.viewer
+                .tape
+                .tape
+                .lines()
+                .iter()
+                .map(|l| l.amount)
+                .collect()
+        };
+        assert_eq!(amounts(&h), [1000, 2000, 3000]);
+        // Click the amount, type the new one, Enter: the total follows.
+        h.get_by_label("Amount 20.00 of line 2").click();
+        h.run_steps(3);
+        h.get_by_label("Amount of line 2").type_text("25.50");
+        h.step();
+        h.key_press(egui::Key::Enter);
+        h.run_steps(3);
+        assert_eq!(amounts(&h), [1000, 2550, 3550]);
+        assert!(
+            h.query_by_label("Amount of line 2").is_none(),
+            "the box is gone"
+        );
+        // The total is worked out, not typed: a click on it opens no box.
+        h.get_by_label("Amount 35.50 of line 3").click();
+        h.run_steps(3);
+        assert!(h.query_by_label("Amount of line 3").is_none());
+        // Not an amount: said, and the line is as it was. Esc gives a change up.
+        h.get_by_label("Amount 10.00 of line 1").click();
+        h.run_steps(3);
+        h.get_by_label("Amount of line 1").type_text("ten");
+        h.step();
+        h.key_press(egui::Key::Enter);
+        h.run_steps(3);
+        assert_eq!(amounts(&h), [1000, 2550, 3550]);
+        assert!(h.query_by_label_contains("is not an amount").is_some());
+        h.get_by_label("Amount 10.00 of line 1").click();
+        h.run_steps(3);
+        h.get_by_label("Amount of line 1").type_text("99");
+        h.step();
+        h.key_press(egui::Key::Escape);
+        h.run_steps(3);
+        assert_eq!(amounts(&h), [1000, 2550, 3550]);
+        // One step of the tape's own Undo.
+        if let Screen::Open(o) = &mut h.state_mut().screen {
+            o.viewer.tape.tape.undo();
+        }
+        assert_eq!(amounts(&h), [1000, 2000, 3000]);
+    }
+
     /// PA-14: a tape picked off the page, totalled, pasted and saved is a real annotation in
     /// the file, its lines remember their source boxes, and it is kept in the history.
     #[test]

@@ -238,6 +238,17 @@ fn div(a: i64, b: i64) -> Option<i64> {
 
 const TOO_LARGE: &str = "Too large for the tape";
 
+/// `left op right` for `×` / `÷`.
+fn calc(left: i64, op: Op, right: i64) -> Result<i64, &'static str> {
+    if op == Op::Times {
+        mul(left, right).ok_or(TOO_LARGE)
+    } else if right == 0 {
+        Err("Cannot divide by zero")
+    } else {
+        div(left, right).ok_or(TOO_LARGE)
+    }
+}
+
 impl Tape {
     pub fn new(name: impl Into<String>) -> Self {
         Tape {
@@ -422,6 +433,108 @@ impl Tape {
         };
         // Later S / T / GT lines and the totals follow.
         self.replay();
+    }
+
+    /// Whether line `i`'s amount can be changed with [`Tape::set_amount`]: an amount that was
+    /// entered or picked (`+`, `−`, and both sides of a `×` / `÷`). `Err` says why not: a
+    /// subtotal or total, or the result of a `×` / `÷` (change one of its sides).
+    pub fn can_edit(&self, i: usize) -> Result<(), &'static str> {
+        let Some(l) = self.state.lines.get(i) else {
+            return Err("No such line");
+        };
+        match l.op {
+            Op::Subtotal | Op::Total | Op::GrandTotal => {
+                Err("A total is worked out from the lines above: change one of those.")
+            }
+            _ if self.results().contains_key(&i) => {
+                Err("This is the result of the × or ÷ above: change one of its sides.")
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// The lines that are the result of the `×` / `÷` before them: line → the line of that
+    /// calculation's left side. (`2 × 3 +` prints `2 ×`, `3 =`, `6 +`: the `6` is a result;
+    /// in `2 × 3 × 4 +` the `6 ×` is one too.)
+    fn results(&self) -> std::collections::BTreeMap<usize, usize> {
+        let l = &self.state.lines;
+        let mut out = std::collections::BTreeMap::new();
+        for j in 0..l.len().saturating_sub(2) {
+            if matches!(l[j].op, Op::Times | Op::Divide)
+                && l[j + 1].op == Op::Equals
+                && matches!(l[j + 2].op, Op::Plus | Op::Minus | Op::Times | Op::Divide)
+                && calc(l[j].amount, l[j].op, l[j + 1].amount) == Ok(l[j + 2].amount)
+            {
+                out.insert(j + 2, j);
+            }
+        }
+        out
+    }
+
+    /// Changes the amount of line `i` (one that was entered or picked, see
+    /// [`Tape::can_edit`]) to `cents` and works the tape out again: the results of `×` / `÷`
+    /// that used it, every subtotal, total and grand total after it, and the running total.
+    /// One undo step. `Err`, and nothing changed, when the line cannot be edited or a result
+    /// would not fit (or divide by zero).
+    pub fn set_amount(&mut self, i: usize, cents: i64) -> Result<(), &'static str> {
+        self.can_edit(i)?;
+        if self.state.lines[i].amount == cents {
+            return Ok(());
+        }
+        let results = self.results();
+        // A `×` / `÷` whose right side is not posted yet, or whose result waits as the entry.
+        let n = self.state.lines.len();
+        let waiting = (n >= 2
+            && matches!(self.state.lines[n - 2].op, Op::Times | Op::Divide)
+            && self.state.lines[n - 1].op == Op::Equals)
+            .then(|| {
+                let l = &self.state.lines;
+                calc(l[n - 2].amount, l[n - 2].op, l[n - 1].amount).ok()
+            })
+            .flatten()
+            .filter(|r| self.state.entry.set == Some(*r));
+        let mut next = self.state.clone();
+        next.lines[i].amount = cents;
+        // In order: a result that is the left side of the next calculation carries on.
+        for (&at, &left) in &results {
+            next.lines[at].amount = calc(
+                next.lines[left].amount,
+                next.lines[left].op,
+                next.lines[left + 1].amount,
+            )?;
+        }
+        if waiting.is_some() {
+            next.entry.set = Some(calc(
+                next.lines[n - 2].amount,
+                next.lines[n - 2].op,
+                next.lines[n - 1].amount,
+            )?);
+        }
+        if let Some((left, op)) = &mut next.pending
+            && let Some(last) = next.lines.last()
+            && last.op == *op
+        {
+            *left = last.amount;
+        }
+        // The totals, checked before anything is kept.
+        let (mut running, mut grand) = (0i64, 0i64);
+        for l in &next.lines {
+            match l.op {
+                Op::Plus => running = running.checked_add(l.amount).ok_or(TOO_LARGE)?,
+                Op::Minus => running = running.checked_sub(l.amount).ok_or(TOO_LARGE)?,
+                Op::Total => {
+                    grand = grand.checked_add(running).ok_or(TOO_LARGE)?;
+                    running = 0;
+                }
+                Op::GrandTotal => grand = 0,
+                _ => {}
+            }
+        }
+        self.save();
+        self.state = next;
+        self.state.error = None;
+        self.replay();
+        Ok(())
     }
 
     fn save(&mut self) {
@@ -860,6 +973,86 @@ mod tests {
         assert_eq!((t.running(), t.grand()), (0, 750));
         let again = Tape::from_lines("t", t.lines().to_vec());
         assert_eq!((again.running(), again.grand()), (0, 750));
+    }
+
+    /// Owner 2026-11-16: an amount on the tape can be changed, and the tape is worked out
+    /// again: totals after it, and the results of a `×` / `÷` that used it.
+    #[test]
+    fn an_amount_is_changed_and_the_tape_worked_out_again() {
+        let amounts =
+            |t: &Tape| -> Vec<(i64, Op)> { t.lines().iter().map(|l| (l.amount, l.op)).collect() };
+        let mut t = Tape::new("t");
+        t.keys("10 + 20 + S 5 - T 7 + T GT");
+        assert_eq!(t.lines()[2].amount, 3000);
+        t.set_amount(1, 2550).unwrap();
+        assert_eq!(
+            amounts(&t),
+            [
+                (1000, Op::Plus),
+                (2550, Op::Plus),
+                (3550, Op::Subtotal),
+                (500, Op::Minus),
+                (3050, Op::Total),
+                (700, Op::Plus),
+                (700, Op::Total),
+                (3750, Op::GrandTotal),
+            ]
+        );
+        // A total is worked out, not typed; the tape is as it was.
+        assert!(t.set_amount(2, 1).is_err() && t.can_edit(4).is_err());
+        assert_eq!(t.lines()[2].amount, 3550);
+        // One undo step.
+        t.undo();
+        assert_eq!(t.lines()[1].amount, 2000);
+        assert_eq!(t.lines()[7].amount, 3200);
+        t.redo();
+        assert_eq!(t.lines()[7].amount, 3750);
+
+        // Either side of a × changes its result, along a chain, and the totals after it.
+        let mut t = Tape::new("t");
+        t.keys("2 * 3 * 4 + 1 + T");
+        assert_eq!(
+            amounts(&t),
+            [
+                (200, Op::Times),
+                (300, Op::Equals),
+                (600, Op::Times),
+                (400, Op::Equals),
+                (2400, Op::Plus),
+                (100, Op::Plus),
+                (2500, Op::Total),
+            ]
+        );
+        assert!(t.can_edit(2).is_err() && t.can_edit(4).is_err(), "results");
+        t.set_amount(1, 500).unwrap();
+        assert_eq!(
+            amounts(&t).iter().map(|a| a.0).collect::<Vec<_>>(),
+            [200, 500, 1000, 400, 4000, 100, 4100]
+        );
+        // A result that would not work out changes nothing.
+        let mut t = Tape::new("t");
+        t.keys("10 / 4 +");
+        assert_eq!(t.running(), 250);
+        assert_eq!(t.set_amount(1, 0), Err("Cannot divide by zero"));
+        assert_eq!(t.running(), 250);
+        assert!(!t.can_undo() || t.lines()[1].amount == 400);
+        // The result of `=` still waiting as the entry follows too.
+        let mut t = Tape::new("t");
+        t.keys("6 * 7 =");
+        t.set_amount(0, 1000).unwrap();
+        assert_eq!(t.display(), "70.00");
+        t.keys("+");
+        assert_eq!(t.running(), 7000);
+        // A × waiting for its right side takes the new left side.
+        let mut t = Tape::new("t");
+        t.keys("6 *");
+        t.set_amount(0, 800).unwrap();
+        t.keys("2 +");
+        assert_eq!(t.running(), 1600);
+        // A tape read back works the same way.
+        let mut again = Tape::from_lines("t", t.lines().to_vec());
+        again.set_amount(1, 300).unwrap();
+        assert_eq!(again.running(), 2400);
     }
 
     /// Amounts too large for the tape are refused, never wrapped (QA 2026-11-04).
