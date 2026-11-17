@@ -3118,7 +3118,9 @@ fn source_hash(env: &Env<'_>, doc: &Doc, seen: Option<&str>) -> Result<String, S
             [&doc.doc_id],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
-        .map_err(|_| format!("{} is no longer in the cabinet.", doc.name))?;
+        .map_err(|e| {
+            vf_core::db::missing_or(e, &format!("{} is no longer in the cabinet.", doc.name))
+        })?;
     if env.root.join(&rel) != doc.path {
         return Err(format!(
             "{} was renamed or moved since it was opened: open it again from Browse.",

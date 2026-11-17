@@ -128,7 +128,7 @@ pub fn delete_as(
                 [id],
                 |r| r.get(0),
             )
-            .map_err(|_| "a document is not in the catalog any more".to_string())?;
+            .map_err(|e| vf_core::db::missing_or(e, "a document is not in the catalog any more"))?;
         // Its record beside the file, for every server's Trash.
         let m = crate::docmeta::load(conn, id)?;
         let size: i64 = conn

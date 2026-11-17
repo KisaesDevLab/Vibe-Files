@@ -91,7 +91,7 @@ pub fn check(
             [doc_id],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
-        .map_err(|_| "the document is not in the catalog".to_string())?;
+        .map_err(|e| vf_core::db::missing_or(e, "the document is not in the catalog"))?;
     if crate::intake::undoable_paths(root).contains(&rel.to_lowercase()) {
         return Ok(Err(Refused::FilerUndo));
     }

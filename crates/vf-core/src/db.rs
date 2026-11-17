@@ -65,6 +65,17 @@ pub fn begin_write(conn: &Connection) -> Result<Transaction<'_>> {
     )?)
 }
 
+/// What to say when a row asked for by its id did not come: `missing` when the catalog has no
+/// such row; else that the catalog could not be read just now (busy with another connection's
+/// write, most often), with what it said. Every such failure used to be "is not in the
+/// catalog" (QA 2026-11-17).
+pub fn missing_or(e: SqlError, missing: &str) -> String {
+    match e {
+        SqlError::QueryReturnedNoRows => missing.to_string(),
+        e => format!("The catalog could not be read just now ({e}). Try again in a moment."),
+    }
+}
+
 /// The first 16 bytes of every SQLite database file.
 const SQLITE_HEADER: &[u8; 16] = b"SQLite format 3\0";
 
@@ -79,7 +90,12 @@ pub fn is_plain_or_missing(path: &Path) -> bool {
     match f.read(&mut head) {
         Ok(0) => true,
         Ok(16) => &head == SQLITE_HEADER,
-        _ => false,
+        // Shorter than a header: not a database.
+        Ok(_) => false,
+        // Could not be read just now: not judged. Taken for "not plain", a healthy catalog
+        // was set aside as an encrypted one and rebuilt (QA 2026-11-17); opening it says
+        // what is wrong if something is.
+        Err(_) => true,
     }
 }
 

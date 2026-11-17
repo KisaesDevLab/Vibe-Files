@@ -80,7 +80,7 @@ pub fn redact_document(
             [doc_id],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
         )
-        .map_err(|_| "the document is not in the catalog".to_string())?;
+        .map_err(|e| vf_core::db::missing_or(e, "the document is not in the catalog"))?;
     let tmp = content::tmp_file(root, "pdf")?;
     let under = redact::text_under(pdfium, &root.join(&rel), &plan.drawn);
     let r = redact::apply(pdfium, &root.join(&rel), &tmp, &plan.boxes()).and_then(|_| {

@@ -163,6 +163,9 @@ pub fn default_data(exe: &Path, local_app_data: Option<PathBuf>, login: Option<&
     match std::fs::read_to_string(&owner_file) {
         Ok(owner) if owner.trim().eq_ignore_ascii_case(me) => beside,
         Ok(_) => personal.unwrap_or(beside),
+        // There, and not readable just now: not "no owner yet" (this login would write its
+        // own name over the owner's, who then lands in another data folder).
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => personal.unwrap_or(beside),
         Err(_) => {
             // No owner yet: this login takes the folder beside the exe if it can write there.
             if std::fs::create_dir_all(&beside).is_ok() && std::fs::write(&owner_file, me).is_ok() {

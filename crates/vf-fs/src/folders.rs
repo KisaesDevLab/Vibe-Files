@@ -153,7 +153,7 @@ pub fn plan_template(
             [cf],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
-        .map_err(|_| "That folder is not a client's.".to_string())?;
+        .map_err(|e| vf_core::db::missing_or(e, "That folder is not a client's."))?;
     // The client as the client list has it (its columns can be in a folder's name).
     let master = crate::clients::load(root)?;
     let client = master
@@ -503,7 +503,7 @@ pub fn plan_client_rename(
             [client_id],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
-        .map_err(|_| "That client is not in the catalog.".to_string())?;
+        .map_err(|e| vf_core::db::missing_or(e, "That client is not in the catalog."))?;
     let mut folder = None;
     if let Some(cur) = folder_rel.filter(|f| !f.is_empty()) {
         let (tree, _, err) = template::load_or_seed(&clients::master_dir(root));
@@ -653,7 +653,7 @@ pub fn plan_client_id(
             [client_id],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
-        .map_err(|_| "That client is not in the catalog.".to_string())?;
+        .map_err(|e| vf_core::db::missing_or(e, "That client is not in the catalog."))?;
     if new_id == old_id {
         return Err("That is the client's ID already.".into());
     }

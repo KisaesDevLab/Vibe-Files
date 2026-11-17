@@ -346,7 +346,7 @@ pub fn place(
                     .query_row("SELECT rel_path FROM document WHERE id = ?1", [d], |r| {
                         r.get(0)
                     })
-                    .map_err(|_| "a document is not in the catalog".to_string())?;
+                    .map_err(|e| vf_core::db::missing_or(e, "a document is not in the catalog"))?;
                 // The hold follows the content through a rename: a document not read yet is
                 // read now (PA-60). A file that cannot be read is still held, by its path.
                 let hash = match conn

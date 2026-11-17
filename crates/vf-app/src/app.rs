@@ -473,8 +473,12 @@ impl VibeFilesApp {
                         self.config.device_id.clone(),
                     );
                     crate::ui::job::Job::start(ctx, "Getting the cabinet ready…", move || {
-                        let mut conn = vf_core::db::open(&catalog, vf_core::db::Storage::Local)
-                            .map_err(|e| e.to_string())?;
+                        // Tried again when the catalog is busy (the index writes meanwhile):
+                        // not "the housekeeping did not run: database is locked" in red.
+                        let mut conn = patient(|| {
+                            vf_core::db::open(&catalog, vf_core::db::Storage::Local)
+                                .map_err(|e| e.to_string())
+                        })?;
                         Ok(ready(&mut conn, &root, &device))
                     })
                     .ok()
@@ -833,7 +837,7 @@ impl eframe::App for VibeFilesApp {
                     );
                 } else if sh.waiting() {
                     o.browse.index_line = Some(format!(
-                        "The cabinet cannot be read just now: listing its files waits and tries again ({done} of {all} client folders listed)."
+                        "Listing the cabinet's files is waiting and will try again: the cabinet, or this computer's catalog, could not be reached just now ({done} of {all} client folders listed)."
                     ));
                     ui.ctx()
                         .request_repaint_after(std::time::Duration::from_secs(1));

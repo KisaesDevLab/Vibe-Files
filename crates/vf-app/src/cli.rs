@@ -526,7 +526,12 @@ fn export_client(
             [ext_id],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
-        .map_err(|_| anyhow::anyhow!("no client with ID {ext_id}"))?;
+        .map_err(|e| {
+            anyhow::anyhow!(vf_core::db::missing_or(
+                e,
+                &format!("no client with ID {ext_id}")
+            ))
+        })?;
     let mut st = conn.prepare(
         "SELECT d.rel_path, d.hash, d.size, t.name, d.tax_year, d.status FROM document d
          LEFT JOIN doc_type t ON t.id = d.doc_type_id

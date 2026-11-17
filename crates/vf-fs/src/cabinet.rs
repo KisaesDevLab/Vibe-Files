@@ -42,11 +42,21 @@ pub fn cabinet_file(root: &Path) -> PathBuf {
 pub fn read(root: &Path) -> Result<CabinetFile, String> {
     let p = cabinet_file(root);
     let text = std::fs::read_to_string(&p).map_err(|e| {
-        format!(
-            "{} is not a Vibe Files cabinet (cannot read {}: {e})",
-            root.display(),
-            p.display()
-        )
+        // No cabinet file: not a cabinet. Any other error is the folder (or its share) not
+        // being reachable just now, which says nothing about what the folder is.
+        if e.kind() == std::io::ErrorKind::NotFound {
+            format!(
+                "{} is not a Vibe Files cabinet (cannot read {}: {e})",
+                root.display(),
+                p.display()
+            )
+        } else {
+            format!(
+                "The cabinet at {} cannot be reached just now (cannot read {}: {e})",
+                root.display(),
+                p.display()
+            )
+        }
     })?;
     serde_json::from_str(&text).map_err(|e| format!("{} is not valid: {e}", p.display()))
 }

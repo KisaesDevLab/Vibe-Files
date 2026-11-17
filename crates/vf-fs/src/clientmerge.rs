@@ -168,7 +168,7 @@ fn who(conn: &Connection, id: &str) -> Result<Who, String> {
             })
         },
     )
-    .map_err(|_| "That client is not in the catalog.".to_string())
+    .map_err(|e| vf_core::db::missing_or(e, "That client is not in the catalog."))
 }
 
 /// Every file and folder under `dir`, cabinet-relative with `/` (`base` is `dir`'s own

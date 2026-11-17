@@ -179,7 +179,7 @@ pub fn trash(
             [doc_id],
             |r| r.get(0),
         )
-        .map_err(|_| "the document is not in the catalog any more".to_string())?;
+        .map_err(|e| vf_core::db::missing_or(e, "the document is not in the catalog any more"))?;
     let src = root.join(&rel);
     let name = src
         .file_name()

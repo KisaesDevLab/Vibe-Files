@@ -71,8 +71,7 @@ fn target(conn: &Connection, root: &Path, dest: &Dest) -> Result<Target, String>
     if top.eq_ignore_ascii_case(crate::cabinet::VIBE_DIR) {
         return Err("Not into _Vibe.".into());
     }
-    crate::cabinet::read(&dest.root)
-        .map_err(|_| format!("{} is not a Vibe Files cabinet.", dest.root.display()))?;
+    crate::cabinet::read(&dest.root)?;
     let path = template::checked_join(&dest.root, Path::new(folder)).map_err(|e| e.to_string())?;
     if !path.is_dir() {
         return Err(format!("The folder {folder} is not on disk."));
