@@ -84,7 +84,7 @@ macro_rules! articles {
 articles! {
     Start: "welcome", "first-run", "screen-tour", "shortcuts";
     Browse: "browse", "search", "explorer-view", "documents", "client-notes", "moving-renaming", "new-files", "browse-scan-print", "undo";
-    Intake: "intake", "intake-rules", "just-filed", "scanning", "cover-sheets", "print-capture",
+    Intake: "intake", "intake-asks", "intake-rules", "just-filed", "scanning", "cover-sheets", "print-capture",
         "several-pcs", "cloud-folders", "ocr";
     Viewer: "viewer", "annotations", "forms", "ten-key", "page-tools", "printing";
     Sync: "sync", "sync-rules", "sync-key", "sync-conflicts", "portal", "portal-requests", "portal-inbox", "portal-secure-links", "portal-b2-list";

@@ -670,9 +670,74 @@ pub fn detect_year(text: &str, current_year: i32) -> Option<u16> {
     None
 }
 
+/// Vibe Files (PA-89): every different year [`detect_year`] could read in `text`, in the
+/// order they stand. Two or more: the name does not say which is the tax year.
+pub fn years_in(text: &str, current_year: i32) -> Vec<u16> {
+    let range = (current_year - YEARS_BACK)..=(current_year + YEARS_AHEAD);
+    let bytes = text.as_bytes();
+    let mut out: Vec<u16> = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        if !bytes[i].is_ascii_digit() {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < bytes.len() && bytes[i].is_ascii_digit() {
+            i += 1;
+        }
+        if i - start == 4 {
+            let year: i32 = text[start..i].parse().expect("four ASCII digits");
+            if range.contains(&year) && !out.contains(&(year as u16)) {
+                out.push(year as u16);
+            }
+        }
+    }
+    out
+}
+
+/// Vibe Files (PA-89): whether `id` stands in `stem` as a part of its own where a person puts
+/// a client's ID on purpose: the first or the second `_` part (`1001_2025 W-2`,
+/// `Smith, John_1001_2025 W-2`), an ID with an underscore in it as two such parts. A word
+/// that only happens to equal an ID (`1099` in `1099-R Fidelity`) does not.
+pub fn id_is_a_leading_part(stem: &str, id: &str) -> bool {
+    let parts: Vec<&str> = stem.split('_').map(str::trim).collect();
+    let is = |s: &str| s.eq_ignore_ascii_case(id.trim());
+    let pair = |a: usize| {
+        parts
+            .get(a)
+            .zip(parts.get(a + 1))
+            .is_some_and(|(x, y)| is(&format!("{x}_{y}")))
+    };
+    parts.first().is_some_and(|p| is(p))
+        || parts.get(1).is_some_and(|p| is(p))
+        || pair(0)
+        || pair(1)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Vibe Files (PA-89).
+    #[test]
+    fn two_years_and_an_id_as_a_part() {
+        assert_eq!(
+            years_in("Smith 2020 Family Trust 2025 1041", 2026),
+            [2020, 2025]
+        );
+        assert_eq!(years_in("2025 W-2 2025 copy", 2026), [2025]);
+        assert_eq!(years_in("1040 1120S 20251", 2026), Vec::<u16>::new());
+        assert!(id_is_a_leading_part("Smith, John_1001_2025 W-2", "1001"));
+        assert!(id_is_a_leading_part("1001_2025 W-2", "1001"));
+        assert!(id_is_a_leading_part(
+            "Four State Barns_2614_FOUR_2025 K-1",
+            "2614_FOUR"
+        ));
+        assert!(id_is_a_leading_part("2614_four_2025 K-1", "2614_FOUR"));
+        assert!(!id_is_a_leading_part("1099-R Fidelity", "1099"));
+        assert!(!id_is_a_leading_part("Scan_of_form_1099", "1099"));
+    }
 
     #[test]
     fn default_pattern_parses_convention() {

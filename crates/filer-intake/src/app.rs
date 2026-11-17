@@ -2938,7 +2938,9 @@ mod combine_ui_tests {
         let names = [
             "Smith, John_1001_2025 1040.pdf",
             "Baker Farms_1004_notes.pdf",
-            "Smith, Jon_9999_2025 W-2.pdf",
+            // Vibe Files (PA-89): matched by its name alone. With an ID no client has in it
+            // (`Smith, Jon_9999_…`, as this was) a name match is offered, no longer taken.
+            "Smith, John.pdf",
         ];
         for n in names {
             crate::pdf::write_test_pdf(&inbox.join(n), &[n]);

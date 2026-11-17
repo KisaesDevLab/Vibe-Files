@@ -16,7 +16,7 @@ The **Intake** tab opens on **Preview**. Every PDF in an inbox folder (set in **
 
 - **File**: the file name. Right-click it for the row menu.
 - **Date**: when the file was last changed (point at it for the time).
-- **Client**: the client the ID matched, for example `Smith, John (SMIT1001)`. A `fuzzy` pill with a score means it matched by name, not ID: check it.
+- **Client**: the client the ID matched, for example `Smith, John (SMIT1001)`. A `fuzzy` pill with a score means it matched by name, not ID: check it. See [When Intake asks first](help:intake-asks).
 - **Rule**: the rule that sets the folder and name. Click it to choose another rule.
 - **Year**: the tax year. Amber when missing.
 - **Destination**: the folder and file name it will get.

@@ -45,6 +45,11 @@ of its `src/` (QUESTIONS Q-16). Upstream `main.rs` is not vendored; `vf-app` is 
    - `commit.rs` `transfer`: says so when the copy could not be taken back either.
    - `commit.rs` roll-back: an overwritten file that could not be put back stays in the batch's
      backups.
+   - `plan.rs` / `filer-core/src/parse.rs` (the owner's four choices): a name match is not
+     taken when the name carries an ID no client has, or two clients match; an ID found as a
+     word is taken only as a leading `_` part or with the client's name in the file name
+     (`id_is_a_leading_part`); two different years in a name are not guessed between
+     (`years_in`); a folder is bound on commit only by name and when it is the only one.
 
 Logic edits are those of item 6 only. Check with:
 `diff -r <upstream>/src crates/filer-*/src` (only the four attribute lines and the `settle`

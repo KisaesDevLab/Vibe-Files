@@ -549,14 +549,47 @@ fn plan_row(
         } else if edits.manual_client_only {
             // No automatic match.
         } else if let Some(c) = p.parsed.id.as_deref().and_then(by_id) {
-            p.client = Some(c);
-            p.client_match = ClientMatch::Exact;
-        } else if let Some((score, c)) = list.fuzzy_by_name(&p.parsed.name, 1).first() {
-            if *score >= f64::from(input.fuzzy_auto) {
-                p.client = Some((*c).clone());
-                p.client_match = ClientMatch::Fuzzy(*score);
-            } else if *score >= f64::from(input.fuzzy_suggest) {
-                p.suggestion = Some((*score, (*c).clone()));
+            // Vibe Files (PA-89, owner 2026-11-16): an ID found in the name is the client's
+            // without a click only when it stands where a person puts an ID (a leading `_`
+            // part) or the client's name is in the file name too. A word that only happens
+            // to equal a client's ID (`1099-R Fidelity` and a client 1099) is offered, not
+            // taken.
+            let id = p.parsed.id.as_deref().unwrap_or_default();
+            let name_agrees = {
+                let (stem, name) = (
+                    crate::clients::normalize_name(&p.parsed.stem),
+                    crate::clients::normalize_name(&c.name),
+                );
+                (!name.is_empty() && stem.contains(&name))
+                    || list
+                        .fuzzy_by_name(&p.parsed.name, 5)
+                        .iter()
+                        .any(|(s, m)| m.id == c.id && *s >= f64::from(input.fuzzy_suggest))
+            };
+            if crate::parse::id_is_a_leading_part(&p.parsed.stem, id) || name_agrees {
+                p.client = Some(c);
+                p.client_match = ClientMatch::Exact;
+            } else {
+                p.suggestion = Some((1.0, c));
+            }
+        } else {
+            // Vibe Files (PA-89, owner 2026-11-16): a name match is taken without a click
+            // only when the name carries no ID of its own (an ID that is in no client list
+            // is another client: `Miller, Robert_9999_…` is not client 1201 of that name)
+            // and no second client matches as well (two clients of one name: the first was
+            // taken). Else it is offered.
+            let top = list.fuzzy_by_name(&p.parsed.name, 2);
+            if let Some((score, c)) = top.first() {
+                let unknown_id = p.parsed.id.is_some();
+                let tie = top
+                    .get(1)
+                    .is_some_and(|(s, _)| *s >= f64::from(input.fuzzy_auto));
+                if *score >= f64::from(input.fuzzy_auto) && !unknown_id && !tie {
+                    p.client = Some((*c).clone());
+                    p.client_match = ClientMatch::Fuzzy(*score);
+                } else if *score >= f64::from(input.fuzzy_suggest) {
+                    p.suggestion = Some((*score, (*c).clone()));
+                }
             }
         }
     }
@@ -604,8 +637,21 @@ fn plan_row(
     p.rule_name = rule.name.clone();
 
     // Year.
+    // Vibe Files (PA-89, owner 2026-11-16): a name with two different years in what the year
+    // is read from (`Smith 2020 Family Trust 2025 1041`) does not say which is the tax year.
+    // The first was taken; now the batch's year, else the row asks.
+    let two_years = {
+        let rest = crate::parse::years_in(&p.parsed.rest, input.current_year);
+        if rest.is_empty() {
+            crate::parse::years_in(&p.parsed.stem, input.current_year).len() > 1
+        } else {
+            rest.len() > 1
+        }
+    };
     (p.year, p.year_source) = match (edits.year, p.parsed.year, input.batch.year) {
         (Some(y), _, _) => (Some(y), YearSource::Row),
+        (None, Some(_), Some(y)) if two_years => (Some(y), YearSource::Batch),
+        (None, Some(_), None) if two_years => (None, YearSource::None),
         (None, Some(y), _) => (Some(y), YearSource::Filename),
         (None, None, Some(y)) => (Some(y), YearSource::Batch),
         _ => (None, YearSource::None),
@@ -1226,11 +1272,21 @@ fn find_folder(build: &Build, client: &Client) -> Option<FolderAction> {
             .is_dir(&b.path)
             .then(|| FolderAction::Exists(b.path.clone()));
     }
-    scan.folders
+    // Vibe Files (PA-89, owner 2026-11-16): bound on commit only when the folder's name has
+    // the client's name in it too, and it is the only such folder. The ID at the end of a
+    // folder's name alone bound `Scans_2024` to a client 2024, and the first of two folders
+    // ending `(1004)`.
+    let name = crate::clients::normalize_name(&client.name);
+    let mut named = scan
+        .folders
         .iter()
         .filter(mine)
-        .find(|b| b.status == FolderStatus::UnboundNamed && build.fs.is_dir(&b.path))
-        .map(|b| FolderAction::WillBind(b.path.clone()))
+        .filter(|b| b.status == FolderStatus::UnboundNamed && build.fs.is_dir(&b.path))
+        .filter(|b| !name.is_empty() && crate::clients::normalize_name(&b.name()).contains(&name));
+    match (named.next(), named.next()) {
+        (Some(b), None) => Some(FolderAction::WillBind(b.path.clone())),
+        _ => None,
+    }
 }
 
 /// The client's sentinel is in two or more folders (Duplicate in the last scan).
@@ -1865,11 +1921,14 @@ mod tests {
         assert_eq!(build_plan(&inp).proposals[0].status, RowStatus::Ready);
     }
 
+    /// Vibe Files (PA-89, owner 2026-11-16; before: such a name resolved without a click). A
+    /// name that carries an ID no client has is another client's, however close the name: the
+    /// client of that name is offered, not taken. A name with no ID of its own that is a
+    /// client's name still resolves without a click.
     #[test]
-    fn close_name_match_resolves_without_a_click() {
+    fn a_close_name_with_an_unknown_id_is_offered_not_taken() {
         let f = fixture();
-        // No usable ID; the name matches "Smith, John" at or above fuzzy_auto.
-        let mut inp = input(&f, &["Smith John_9999_2025_1040.pdf"]);
+        let mut inp = input(&f, &["Smith John_9999_2025_1040.pdf", "Smith, John.pdf"]);
         bind(
             &f,
             &mut inp,
@@ -1877,15 +1936,135 @@ mod tests {
             "1001",
             FolderStatus::Bound,
         );
-        let p = &build_plan(&inp).proposals[0];
+        let out = build_plan(&inp);
+        let p = row(&out, "Smith John_9999_2025_1040.pdf");
+        assert_eq!(p.client_match, ClientMatch::None);
+        assert!(p.client.is_none());
+        assert!(
+            matches!(&p.suggestion, Some((s, c)) if *s >= 0.97 && c.id == "1001"),
+            "{:?}",
+            p.suggestion
+        );
+        assert_eq!(p.status, RowStatus::NeedsClient);
+        let p = row(&out, "Smith, John.pdf");
         assert!(
             matches!(p.client_match, ClientMatch::Fuzzy(s) if s >= 0.97),
             "{:?}",
             p.client_match
         );
         assert_eq!(p.client.as_ref().unwrap().id, "1001");
-        assert!(p.suggestion.is_none());
-        assert_eq!(p.status, RowStatus::Ready);
+    }
+
+    /// Vibe Files (PA-89, owner 2026-11-16): a word in a name that only happens to equal a
+    /// client's ID is offered, not taken; with the client's name in the file name too, or the
+    /// ID standing as a leading part, it is the client's as before.
+    #[test]
+    fn a_word_that_equals_a_client_id_is_offered_unless_the_name_agrees() {
+        let f = fixture();
+        let names = [
+            "1001-R brokerage statement 2025.pdf",
+            "Smith, John 2025 W-2 1001.pdf",
+            "1001_2025 W-2.pdf",
+        ];
+        let mut inp = input(&f, &names);
+        bind(
+            &f,
+            &mut inp,
+            "Smith, John (1001)",
+            "1001",
+            FolderStatus::Bound,
+        );
+        let out = build_plan(&inp);
+        let p = row(&out, names[0]);
+        assert!(p.client.is_none(), "{:?}", p.client_match);
+        assert!(matches!(&p.suggestion, Some((_, c)) if c.id == "1001"));
+        assert_eq!(p.status, RowStatus::NeedsClient);
+        for n in &names[1..] {
+            let p = row(&out, n);
+            assert_eq!(p.client_match, ClientMatch::Exact, "{n}");
+            assert_eq!(p.client.as_ref().unwrap().id, "1001", "{n}");
+        }
+    }
+
+    /// Vibe Files (PA-89, owner 2026-11-16): a name with two different years does not say
+    /// which is the tax year: the batch's year, else the row asks. One year is read as before.
+    #[test]
+    fn two_different_years_in_a_name_are_asked_about() {
+        let f = fixture();
+        let two = "Smith, John_1001_2020 Family Trust 2025 1041.pdf";
+        let one = "Smith, John_1001_2025 1040.pdf";
+        let mut inp = input(&f, &[two, one]);
+        bind(
+            &f,
+            &mut inp,
+            "Smith, John (1001)",
+            "1001",
+            FolderStatus::Bound,
+        );
+        let out = build_plan(&inp);
+        let p = row(&out, two);
+        assert_eq!((p.year, p.year_source), (None, YearSource::None));
+        assert_eq!(p.status, RowStatus::NeedsYear);
+        let p = row(&out, one);
+        assert_eq!((p.year, p.year_source), (Some(2025), YearSource::Filename));
+        // The batch's year settles it.
+        inp.batch.year = Some(2025);
+        let out = build_plan(&inp);
+        let p = row(&out, two);
+        assert_eq!((p.year, p.year_source), (Some(2025), YearSource::Batch));
+    }
+
+    /// Vibe Files (PA-89, owner 2026-11-16): a folder with no client file is bound on commit
+    /// only when its name has the client's name in it and it is the only such folder. A
+    /// folder that only ends in the client's ID is left alone.
+    #[test]
+    fn a_folder_is_bound_on_commit_only_by_name_and_when_it_is_the_only_one() {
+        let f = fixture();
+        let file = "Smith, John_1001_2025_1040.pdf";
+        // Only the ID in its name: not bound; the client's own folder is made.
+        let mut inp = input(&f, &[file]);
+        bind(
+            &f,
+            &mut inp,
+            "Scans_1001",
+            "1001",
+            FolderStatus::UnboundNamed,
+        );
+        let p = &build_plan(&inp).proposals[0];
+        assert!(
+            matches!(&p.folder, Some(FolderAction::WillCreate(_))),
+            "{:?}",
+            p.folder
+        );
+        // The client's name in it, and the only one: bound.
+        let mut inp = input(&f, &[file]);
+        bind(
+            &f,
+            &mut inp,
+            "Smith, John (1001)",
+            "1001",
+            FolderStatus::UnboundNamed,
+        );
+        let p = &build_plan(&inp).proposals[0];
+        assert!(
+            matches!(&p.folder, Some(FolderAction::WillBind(d)) if d.ends_with("Smith, John (1001)")),
+            "{:?}",
+            p.folder
+        );
+        // Two with the client's name: neither is bound.
+        bind(
+            &f,
+            &mut inp,
+            "Smith, John old (1001)",
+            "1001",
+            FolderStatus::UnboundNamed,
+        );
+        let p = &build_plan(&inp).proposals[0];
+        assert!(
+            !matches!(&p.folder, Some(FolderAction::WillBind(_))),
+            "{:?}",
+            p.folder
+        );
     }
 
     #[test]
