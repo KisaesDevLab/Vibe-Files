@@ -278,6 +278,10 @@ pub fn fetch_again(
     let Some(_lock) = inbox::take_lock(&tmp, &portal.actor_name()) else {
         return Err("Another PC is fetching uploads: try again in a minute.".into());
     };
+    // The list of what was fetched must be readable: unread, the two refusals below see
+    // nothing and an upload already filed is fetched and filed again.
+    inbox::received_checked(root)
+        .map_err(|e| format!("{e} Nothing was fetched: try again in a moment."))?;
     let all = arrivals(root);
     if let Some(r) = all.by_upload.get(&u.upload.upload_id) {
         if root.join(&r.saved_as).exists() {

@@ -476,6 +476,19 @@ fn remove_empty_dirs(dir: &Path) -> Vec<PathBuf> {
 /// Undoes the last merge: every client's Transaction, newest first, then the history copy.
 /// New clients and their folders stay (empty); their catalog rows are kept.
 pub fn undo(conn: &mut Connection, root: &Path, m: &Merged, device_id: &str) -> Result<(), String> {
+    // Every step is this catalog's before anything is put back: the record of the last
+    // merge is in the cabinet, where every PC sees it, and on a PC that did not make the
+    // merge the first step failed with "Query returned no rows" after the source folders
+    // had been made again (QA 2026-11-17).
+    for tx in m.history_tx.iter().chain(&m.txs) {
+        conn.query_row("SELECT 1 FROM undo_record WHERE tx_id = ?1", [tx], |_| Ok(()))
+            .map_err(|e| {
+                vf_core::db::missing_or(
+                    e,
+                    "This merge was made on another computer (this one's catalog has no record of it): undo it there.",
+                )
+            })?;
+    }
     if let Some(h) = &m.history_tx {
         crate::fileops::undo(conn, root, h, device_id)?;
     }

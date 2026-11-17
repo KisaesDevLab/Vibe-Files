@@ -63,6 +63,15 @@ fn servers_section(ui: &mut egui::Ui, p: &mut DevicesPage, env: &mut Env) {
     } else {
         "PC"
     };
+    // The cabinet's note of it is there and could not be read just now: said, and the role
+    // is not offered (it read as "no server yet", with a button that took the role from the
+    // one that has it; QA 2026-11-17).
+    if main.is_none() && crate::server::main_unreadable(env.root) {
+        ui.label(widgets::caption(format!(
+            "Which {machine} runs text recognition and B2 sync could not be read from the cabinet just now. Open this page again in a moment."
+        )));
+        return;
+    }
     ui.horizontal(|ui| {
         ui.label(match &main {
             Some(m) if m.computer.eq_ignore_ascii_case(&here) => {

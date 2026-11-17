@@ -403,14 +403,21 @@ impl Reconciled {
 pub(crate) const KEPT_LABEL: &str = "intake_undo_kept";
 
 /// The undo record of a recorded Filer batch: (tx id, already undone).
-fn recorded(conn: &Connection, batch: &str) -> Option<(String, bool)> {
-    conn.query_row(
+/// `Err`: the catalog could not be read just now. That is not "not recorded": taken for it,
+/// a batch already recorded was recorded again (QA 2026-11-17).
+fn recorded(conn: &Connection, batch: &str) -> Result<Option<(String, bool)>, String> {
+    match conn.query_row(
         "SELECT tx_id, undone FROM undo_record
          WHERE label = ?1 AND json_extract(record, '$.extra.filer_batch') = ?2",
         [LABEL, batch],
         |r| Ok((r.get(0)?, r.get(1)?)),
-    )
-    .ok()
+    ) {
+        Ok(r) => Ok(Some(r)),
+        Err(vf_core::db::SqlError::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(format!(
+            "The catalog could not be read just now ({e}): the batch is recorded at the next look."
+        )),
+    }
 }
 
 /// Brings the catalog in line with Filer's last batch: records a finished batch not recorded
@@ -464,7 +471,14 @@ pub fn unrecorded_paths(conn: &Connection, root: &Path) -> std::collections::Has
         let Some(lb) = load_last_batch(&d) else {
             continue;
         };
-        if lb.undone || (!lb.in_progress && recorded(conn, &lb.batch.to_string()).is_some()) {
+        // (A read that failed: taken as not recorded yet, so its files stay Intake's.)
+        if lb.undone
+            || (!lb.in_progress
+                && recorded(conn, &lb.batch.to_string())
+                    .ok()
+                    .flatten()
+                    .is_some())
+        {
             continue;
         }
         // Filed before this catalog was made from the listing: cataloged then, never recorded.
@@ -516,6 +530,30 @@ pub fn reconcile(
     // Other processes cannot share the catalog (the data folder's in-use lock).
     static ONE: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let _one = ONE.lock().unwrap_or_else(|p| p.into_inner());
+    // And one at a time among the sessions that share this catalog (several logins on one
+    // session host): a file beside it, held alone while a batch is recorded. Each session
+    // saw the batch unrecorded and recorded it: a second undo record and a second set of
+    // audit rows, or a red "UNIQUE constraint" (QA 2026-11-17). Held by another session:
+    // that one records it; this one looks again at its next look.
+    let _others = match conn.path().filter(|p| !p.is_empty()) {
+        Some(p) => {
+            use std::os::windows::fs::OpenOptionsExt;
+            match std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .share_mode(0)
+                .open(format!("{p}.intake-record.lock"))
+            {
+                Ok(f) => Some(f),
+                Err(e) if e.raw_os_error() == Some(32) => return Ok(Reconciled::default()),
+                // The file cannot be made (a read-only place): as before, no guard.
+                Err(_) => None,
+            }
+        }
+        None => None,
+    };
     // Every PC's last batch (Q-53), and the cabinet's own from before.
     let mut out = Reconciled::default();
     for dir in batch_dirs(root) {
@@ -556,12 +594,13 @@ fn reconcile_dir(
     }
     let batch = lb.batch.to_string();
     // Filed before this catalog was made from the listing: its files are in it already.
-    if recorded(conn, &batch).is_none()
+    let was = recorded(conn, &batch)?;
+    if was.is_none()
         && cataloged_before(conn).is_some_and(|t| lb.committed_at.timestamp_micros() < t)
     {
         return Ok(out);
     }
-    match (recorded(conn, &batch), lb.undone) {
+    match (was, lb.undone) {
         (None, false) => {
             let backups: Vec<(std::path::PathBuf, std::path::PathBuf)> = lb
                 .backups
@@ -1535,7 +1574,7 @@ mod tests {
             "both batches recorded"
         );
         for batch in [ra.last_batch.batch, rb.last_batch.batch] {
-            assert!(recorded(&f.conn, &batch.to_string()).is_some());
+            assert!(recorded(&f.conn, &batch.to_string()).unwrap().is_some());
         }
         // PC A's Undo: its own batch only.
         filer_intake::undo::run_undo(&a, ra.last_batch, false);
@@ -1608,7 +1647,11 @@ mod tests {
         assert_eq!(unrecorded_paths(&conn, &f.root).len(), 1);
         let r = reconcile(&mut conn, &f.root, "pc-new").unwrap();
         assert!(r.recorded.is_some());
-        assert!(recorded(&conn, &r3.last_batch.batch.to_string()).is_some());
+        assert!(
+            recorded(&conn, &r3.last_batch.batch.to_string())
+                .unwrap()
+                .is_some()
+        );
         assert_eq!(
             n(
                 &conn,
@@ -1651,9 +1694,21 @@ mod tests {
             ],
             "the first and the last batch, not the undone one"
         );
-        assert!(recorded(&f.conn, &r1.last_batch.batch.to_string()).is_some());
-        assert!(recorded(&f.conn, &r2.last_batch.batch.to_string()).is_none());
-        assert!(recorded(&f.conn, &r3.last_batch.batch.to_string()).is_some());
+        assert!(
+            recorded(&f.conn, &r1.last_batch.batch.to_string())
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            recorded(&f.conn, &r2.last_batch.batch.to_string())
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            recorded(&f.conn, &r3.last_batch.batch.to_string())
+                .unwrap()
+                .is_some()
+        );
         // Again: nothing more.
         let again = reconcile(&mut f.conn, &f.root, "dev").unwrap();
         assert!(!again.changed());

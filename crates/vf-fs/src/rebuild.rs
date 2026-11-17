@@ -601,7 +601,7 @@ fn scan_scoped(
     };
     let named = |f: &str| only.iter().any(|o| o.eq_ignore_ascii_case(f));
     let read = |folder: &Path| -> Result<Option<(sentinel::Sentinel, String)>, RebuildError> {
-        match sentinel::read_sentinel(folder) {
+        match read_sentinel_patient(folder) {
             Ok(Some(s)) => {
                 let hash = sha256_file(&sentinel::sentinel_path(folder))
                     .map_err(|e| RebuildError::Io(e.to_string()))?;
@@ -948,7 +948,7 @@ pub fn sync_clients_edited(
             }),
             _ => {
                 let folder = root.join(&folder_rel);
-                match sentinel::read_sentinel(&folder) {
+                match read_sentinel_patient(&folder) {
                     Ok(Some(s)) => {
                         let sentinel_hash = sha256_file(&sentinel::sentinel_path(&folder))
                             .map_err(|e| RebuildError::Io(e.to_string()))?;
@@ -1201,6 +1201,23 @@ pub fn folders_not_taken(conn: &Connection) -> Vec<String> {
     .unwrap_or_default()
 }
 
+/// A client folder's sentinel, read again a few times when the read itself fails (the share
+/// for a moment, another PC renaming or merging the client just now). Taken at once for "no
+/// valid sentinel", the folder was un-cliented in this catalog and every document in it lost
+/// its client until the next index (QA 2026-11-17). A sentinel that is there and makes no
+/// sense, or cannot be read at all, is still that after the tries.
+fn read_sentinel_patient(folder: &Path) -> Result<Option<sentinel::Sentinel>, String> {
+    let mut last = sentinel::read_sentinel(folder);
+    for _ in 0..3 {
+        // Only when the file cannot be read; not when it reads and is not a sentinel.
+        if last.is_ok() || std::fs::read(sentinel::sentinel_path(folder)).is_ok() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
+        last = sentinel::read_sentinel(folder);
+    }
+    last
+}
 /// The folders of a cabinet as [`scan_folders`] found them.
 type Scan = (Vec<Bound>, Vec<(PathBuf, Option<String>)>);
 

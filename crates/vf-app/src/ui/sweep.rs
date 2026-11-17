@@ -32,6 +32,26 @@ fn sweep_lock(catalog: &Path) -> Option<std::fs::File> {
         .ok()
 }
 
+/// Why the sweep's lock cannot be had: another session holds it (a sharing violation), or
+/// the file cannot be opened at all (said as that, not as "another session").
+fn sweep_lock_trouble(catalog: &Path) -> Option<String> {
+    use std::os::windows::fs::OpenOptionsExt;
+    let dir = catalog.parent()?;
+    match std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .share_mode(0)
+        .open(dir.join("sweep.lock"))
+    {
+        Err(e) if e.raw_os_error() != Some(32) => Some(format!(
+            "The integrity sweep could not start: its lock file beside the catalog could not be opened ({e})."
+        )),
+        _ => None,
+    }
+}
+
 /// Which list a finished action clears from the result shown.
 enum Act {
     Moves,
@@ -91,7 +111,7 @@ impl SweepState {
                     Some(_held) => vf_core::db::open(&catalog, Storage::Local)
                         .map_err(|e| e.to_string())
                         .and_then(|conn| sweep::scan(&conn, &root)),
-                    None => Err(BUSY.to_string()),
+                    None => Err(sweep_lock_trouble(&catalog).unwrap_or_else(|| BUSY.to_string())),
                 };
                 let _ = tx.send(r);
                 ctx.request_repaint();

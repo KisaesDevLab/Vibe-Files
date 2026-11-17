@@ -201,6 +201,26 @@ pub fn claim_file(p: &Path) -> Option<PathBuf> {
     Some(p.with_file_name(format!(".vf-claim-{name}.txt")))
 }
 
+/// How long a staged file is taken again after errors that pass ([`passing`]).
+const PASSING_FOR: Duration = Duration::from_secs(300);
+
+/// Whether an error from processing a staged file is of the cabinet at this moment (someone
+/// else saving a shared file, the share or the catalog not answering), not of the file.
+fn passing(error: &str) -> bool {
+    let e = error.to_ascii_lowercase();
+    [
+        "right now",
+        "just now",
+        "cannot be reached",
+        "database is locked",
+        "database is busy",
+        "cannot read the client list",
+        "used by another process",
+    ]
+    .iter()
+    .any(|w| e.contains(w))
+}
+
 /// A claim marked done: the file was delivered by the PC named after it.
 const DONE: &str = "done:";
 
@@ -284,6 +304,8 @@ fn run(config: Arc<Mutex<Config>>, waiting: Arc<AtomicUsize>, tx: Sender<Event>,
     // Size seen on the previous pass: a file is processed when it has the same, non-zero size
     // twice in a row and can be opened for writing (no one else is still writing it).
     let mut sizes: HashMap<PathBuf, u64> = HashMap::new();
+    // Staged files whose processing met a passing error, and since when.
+    let mut waited: HashMap<PathBuf, std::time::Instant> = HashMap::new();
     // Handled, but could not be moved out of the folder (open in another program): not handled
     // again until it changes (QA I5).
     let mut stuck: HashMap<PathBuf, (u64, u64)> = HashMap::new();
@@ -349,8 +371,28 @@ fn run(config: Arc<Mutex<Config>>, waiting: Arc<AtomicUsize>, tx: Sender<Event>,
                     continue;
                 };
                 let ev = match process_guarded(&ctx, &p, origin) {
-                    Ok(done) => Event::Processed(done),
+                    Ok(done) => {
+                        waited.remove(&p);
+                        Event::Processed(done)
+                    }
+                    // Something of the cabinet's could not be read or written just now
+                    // (another PC saving the client list, the share for a moment): nothing
+                    // is wrong with this file. Left where it is and taken again, for a few
+                    // minutes; it used to go to the failed folder and stay there (QA
+                    // 2026-11-17).
+                    Err(error)
+                        if passing(&error)
+                            && waited
+                                .entry(p.clone())
+                                .or_insert_with(std::time::Instant::now)
+                                .elapsed()
+                                < PASSING_FOR =>
+                    {
+                        let _ = std::fs::remove_file(&claimed);
+                        continue;
+                    }
                     Err(error) => {
+                        waited.remove(&p);
                         let _ = pipeline::set_aside(&p, &error);
                         Event::Failed {
                             staged: p.clone(),

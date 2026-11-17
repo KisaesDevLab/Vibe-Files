@@ -401,13 +401,30 @@ pub fn append_received(root: &Path, rows: &[Received]) -> std::io::Result<()> {
 
 /// Every received upload, oldest first.
 pub fn all_received(root: &Path) -> Vec<Received> {
-    std::fs::read_to_string(received_log(root))
-        .map(|text| {
-            text.lines()
-                .filter_map(|l| serde_json::from_str(l).ok())
-                .collect()
-        })
-        .unwrap_or_default()
+    received_checked(root).unwrap_or_default()
+}
+
+/// [`all_received`]; `Err` when the list is there and cannot be read just now. That is not
+/// "nothing received": taken for it, uploads already fetched and filed showed as "not in the
+/// Portal inbox", and could be fetched and filed a second time (QA 2026-11-17).
+pub fn received_checked(root: &Path) -> Result<Vec<Received>, String> {
+    let p = received_log(root);
+    match std::fs::read_to_string(&p) {
+        Ok(text) => Ok(text
+            .lines()
+            .filter_map(|l| serde_json::from_str(l).ok())
+            .collect()),
+        // Not there (and its cabinet can be seen: a share that is away says "not found" too).
+        Err(e)
+            if e.kind() == std::io::ErrorKind::NotFound
+                && p.ancestors().skip(1).take(4).any(|a| a.is_dir()) =>
+        {
+            Ok(vec![])
+        }
+        Err(e) => Err(format!(
+            "The list of uploads already fetched cannot be read just now ({e})."
+        )),
+    }
 }
 
 /// The newest `n` received uploads, newest first.

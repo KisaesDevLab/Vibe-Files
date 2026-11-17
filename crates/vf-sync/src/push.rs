@@ -135,26 +135,41 @@ pub fn stopping(cabinet_id: &str) -> bool {
 
 /// The cabinet's master files (`_Vibe`-relative path → text), and parser profiles.
 pub fn master_files(root: &Path) -> BTreeMap<String, String> {
+    master_files_checked(root).unwrap_or_default()
+}
+
+/// [`master_files`]; `Err` when one of them is there and cannot be read just now (another PC
+/// saving it, the share for a moment), or the taxpayer-ID columns could not be taken out of
+/// the client list. Sent without it, the bucket's revision had no client list (or one with
+/// those columns) and the push said it had worked (QA 2026-11-17).
+pub fn master_files_checked(root: &Path) -> std::result::Result<BTreeMap<String, String>, String> {
     let vibe = root.join(vf_fs::cabinet::VIBE_DIR);
     let mut out = BTreeMap::new();
     // Taxpayer-ID columns are stripped from the client list on disk before it is sent.
-    let _ = vf_fs::clients::strip_tins_on_disk(root);
-    for f in layout::MASTER_FILES {
-        if let Ok(t) = std::fs::read_to_string(vibe.join(f)) {
-            out.insert((*f).to_string(), t);
+    vf_fs::clients::strip_tins_on_disk(root)
+        .map_err(|e| format!("the client list could not be made ready to send ({e})"))?;
+    let mut take = |name: String, p: std::path::PathBuf| -> std::result::Result<(), String> {
+        match std::fs::read_to_string(&p) {
+            Ok(t) => {
+                out.insert(name, t);
+                Ok(())
+            }
+            Err(e) if vf_fs::cabinet::is_absent(&p, &e) => Ok(()),
+            Err(e) => Err(format!("{} cannot be read just now ({e})", p.display())),
         }
+    };
+    for f in layout::MASTER_FILES {
+        take((*f).to_string(), vibe.join(f))?;
     }
     if let Ok(rd) = std::fs::read_dir(vibe.join("parsers")) {
         for e in rd.flatten() {
             let n = e.file_name().to_string_lossy().into_owned();
-            if n.ends_with(".toml")
-                && let Ok(t) = std::fs::read_to_string(e.path())
-            {
-                out.insert(format!("parsers/{n}"), t);
+            if n.ends_with(".toml") {
+                take(format!("parsers/{n}"), e.path())?;
             }
         }
     }
-    out
+    Ok(out)
 }
 
 pub fn files_hashes(files: &BTreeMap<String, String>) -> BTreeMap<String, String> {
@@ -680,7 +695,8 @@ fn push_once(
         .map_err(SyncError::Local)?;
         vf_fs::trash::pin_changed();
     }
-    let files = master_files(root);
+    let files = master_files_checked(root)
+        .map_err(|e| SyncError::Local(format!("Nothing was sent: {e}. Try again in a moment.")))?;
     let hashes = files_hashes(&files);
     let files_dirty = hashes != catalog::files_base(conn)?;
 
@@ -784,8 +800,16 @@ fn push_once(
             continue; // a client with no folder has no segment
         };
         let sentinel_path = filer_intake::sentinel::sentinel_path(&root.join(&folder));
-        let Ok(sentinel) = std::fs::read_to_string(&sentinel_path) else {
-            continue;
+        let sentinel = match std::fs::read_to_string(&sentinel_path) {
+            Ok(s) => s,
+            // No client file: not a client's folder (any more), nothing to send for it.
+            Err(e) if vf_fs::cabinet::is_absent(&sentinel_path, &e) => continue,
+            // There and not readable just now: counted as not sent, so the push is not
+            // recorded as a whole one (it was left out in silence; QA 2026-11-17).
+            Err(_) => {
+                rep.skipped += 1;
+                continue;
+            }
         };
         // Documents not fingerprinted yet (PA-60) that this push sends are read first; one
         // that cannot be read now waits for the next push.
