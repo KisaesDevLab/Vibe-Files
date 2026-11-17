@@ -54,6 +54,9 @@ pub fn blocker(lb: Option<&LastBatch>) -> Option<String> {
         && lb.zip.is_none()
         && lb.routed_zips.is_empty()
         && lb.renamed_dirs.is_empty()
+        // Vibe Files (PA-89): an overwritten file the batch still keeps (it could not be
+        // put back when the filing failed) is something to undo: Undo puts it back.
+        && lb.backups.is_empty()
     {
         return Some("The last batch filed nothing.".into());
     }
@@ -129,6 +132,10 @@ pub fn run_undo(data_dir: &Path, mut lb: LastBatch, force_copy: bool) -> UndoRep
             }
         };
 
+    // Vibe Files (PA-89): files of the batch that stay where they were filed (a copy or an
+    // unpacked entry changed since, or one that could not be removed): their folder keeps
+    // its client file below.
+    let left = std::cell::RefCell::new(Vec::<PathBuf>::new());
     // A file the app wrote (copy or unpacked entry): removed only if unchanged since written.
     let remove_if_unchanged = |dst: &Path, sha: &str, client: &str| match commit::sha256_file(dst) {
         Ok(h) if h == sha => match std::fs::remove_file(dst) {
@@ -139,6 +146,7 @@ pub fn run_undo(data_dir: &Path, mut lb: LastBatch, force_copy: bool) -> UndoRep
                 warnings
                     .borrow_mut()
                     .push(format!("{}: {msg}", dst.display()));
+                left.borrow_mut().push(dst.to_path_buf());
             }
         },
         Ok(_) => {
@@ -147,9 +155,15 @@ pub fn run_undo(data_dir: &Path, mut lb: LastBatch, force_copy: bool) -> UndoRep
             warnings
                 .borrow_mut()
                 .push(format!("{}: {msg}", dst.display()));
+            left.borrow_mut().push(dst.to_path_buf());
         }
         Err(_) => record(Some(dst), None, Some(client), Some("already gone")),
     };
+    // The originals this batch left in their inbox, partly filed, with their size then.
+    let partly: Vec<commit::PartialSplit> = commit::load_partial(data_dir)
+        .into_iter()
+        .filter(|p| p.batch == lb.batch)
+        .collect();
 
     // 1. Files back where they came from (newest first).
     let mut outcomes = Vec::new();
@@ -166,11 +180,22 @@ pub fn run_undo(data_dir: &Path, mut lb: LastBatch, force_copy: bool) -> UndoRep
             // back, where the batch left it (a partly filed split stays in its inbox) or
             // where the batch kept it. With the original gone (deleted or moved since), the
             // piece is the only copy of those pages: it stays filed and that is said.
-            let original_there = original.is_file()
-                || lb
-                    .split_originals
-                    .iter()
-                    .any(|m| &m.original == original && m.kept.is_file());
+            // Where the batch kept it (every piece filed): that file, and no other. A file
+            // at the inbox path now is not it (a new scan of the same name).
+            let kept = lb.split_originals.iter().find(|m| &m.original == original);
+            // Left in its inbox (partly filed): still there with the size it had.
+            let in_inbox = || {
+                let size_now = std::fs::metadata(original).ok().filter(|m| m.is_file());
+                match partly.iter().find(|p| &p.original == original) {
+                    Some(p) => size_now.is_some_and(|m| p.size.is_none_or(|s| s == m.len())),
+                    // No record of how the batch left it (a batch from before): as it was.
+                    None => size_now.is_some(),
+                }
+            };
+            let original_there = match kept {
+                Some(m) => m.kept.is_file(),
+                None => in_inbox(),
+            };
             let result = if original_there {
                 std::fs::remove_file(&item.dst)
                     .map(|()| {
@@ -203,7 +228,17 @@ pub fn run_undo(data_dir: &Path, mut lb: LastBatch, force_copy: bool) -> UndoRep
             // again and the combined file stays, so nothing is filed twice.
             let mut back: Vec<(PathBuf, PathBuf)> = Vec::new();
             let mut problem = None;
-            for m in &item.merged {
+            // Vibe Files (PA-89): an original that could not be parked stayed where it was
+            // (`unparked`). The combined PDF goes only while each of those is still there;
+            // with one gone, the combined PDF is the only copy of its pages: nothing is
+            // moved and it stays filed.
+            if let Some(gone) = item.unparked.iter().find(|o| !o.is_file()) {
+                problem = Some(format!(
+                    "its original {} is no longer there, so the combined PDF is the only copy of those pages",
+                    gone.display()
+                ));
+            }
+            for m in item.merged.iter().filter(|_| problem.is_none()) {
                 let restore = restore_moved(m, force_copy);
                 match restore {
                     Ok(target) => {
@@ -235,19 +270,6 @@ pub fn run_undo(data_dir: &Path, mut lb: LastBatch, force_copy: bool) -> UndoRep
                     Err(format!(
                         "the combined PDF was kept because an original could not go back: {e}"
                     ))
-                }
-                // Vibe Files (PA-89): a combined PDF whose originals the batch could not keep
-                // has nothing recorded to give the pages back from: it stays filed, and that
-                // is said, rather than deleted on the hope the originals are still about.
-                None if item.merged.is_empty() => {
-                    let msg = "kept: the batch has no record of where its originals are, so the combined PDF may be the only copy".to_string();
-                    record(
-                        Some(&item.dst),
-                        None,
-                        Some(&item.client_id),
-                        Some(msg.as_str()),
-                    );
-                    Err(msg)
                 }
                 None => std::fs::remove_file(&item.dst)
                     .map(|()| {
@@ -351,10 +373,12 @@ pub fn run_undo(data_dir: &Path, mut lb: LastBatch, force_copy: bool) -> UndoRep
     // Vibe Files (PA-89): not the client file of a folder that still holds a document of this
     // batch that could not go back: the folder would stop being the client's while the
     // document is in it.
+    let left = left.into_inner();
     let still_filed: Vec<&PathBuf> = outcomes
         .iter()
         .filter(|(_, r)| r.is_err())
         .map(|(dst, _)| dst)
+        .chain(&left)
         .collect();
     for f in &lb.created_files {
         // `<client folder>/_Vibe/client.json`: the client folder is two levels up.
@@ -1474,10 +1498,12 @@ mod tests {
         );
     }
 
-    /// Vibe Files (PA-89): a zip one of whose entries could not be unpacked stays where it is.
-    /// It was moved to the undo folder, which the next commit clears, and that entry was lost.
+    /// Vibe Files (PA-89): a zip one of whose entries could not be unpacked is put aside beside
+    /// its inbox (in `_combined`, which Intake does not read), not into the undo folder the
+    /// next commit clears (the entry was lost) and not left to be unpacked again (the entries
+    /// written were written twice). Undo puts it back and takes the written entries away.
     #[test]
-    fn a_zip_with_an_entry_that_failed_is_not_removed() {
+    fn a_zip_with_an_entry_that_failed_is_put_aside() {
         let cw = copy_world();
         let zip = cw.inbox.join("part.zip");
         crate::zipimport::tests::make_zip(
@@ -1528,10 +1554,33 @@ mod tests {
             !report.errors.is_empty() && report.stopped.is_none(),
             "{report:?}"
         );
-        assert!(!report.zip_deleted);
-        assert!(zip.is_file(), "the zip is still in the inbox");
-        assert!(report.last_batch.zip.is_none());
+        let aside = cw.inbox.join(crate::intake::COMBINED_DIR).join("part.zip");
+        assert!(
+            !zip.exists() && aside.is_file(),
+            "put aside, out of Intake's way"
+        );
+        assert!(
+            report.zip_deleted,
+            "its draft goes: it is not unpacked again"
+        );
+        assert!(
+            !aside.starts_with(&cw.data),
+            "not where the next commit clears"
+        );
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|w| w.contains("could not be unpacked")),
+            "{:?}",
+            report.warnings
+        );
         assert_eq!(std::fs::read(dest_dir.join("Jan.pdf")).unwrap(), b"new jan");
+        // Undo: the entry written goes, the zip is back in the inbox.
+        let undo = run_undo(&cw.data, report.last_batch.clone(), false);
+        assert!(undo.warnings.is_empty(), "{:?}", undo.warnings);
+        assert!(!dest_dir.join("Jan.pdf").exists());
+        assert!(zip.is_file() && !aside.exists());
     }
     /// P07b Mode A collisions: Skip leaves the existing file, Overwrite replaces it (the old one
     /// kept for undo); undo puts the old file back byte for byte.
@@ -2254,6 +2303,84 @@ mod tests {
         assert!(paths.iter().all(|p| p.exists()));
     }
 
+    /// Vibe Files (PA-89, code review): a combined PDF one of whose originals could not be
+    /// parked and is since gone is the only copy of that original's pages. Undo keeps it
+    /// filed, and puts none of the parked originals back (they would be filed twice).
+    #[test]
+    fn a_combined_pdf_stays_when_an_unparked_original_is_gone() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let w = world();
+        let (paths, input) = combined_input(
+            &w,
+            &w.inbox,
+            Source::Inbox(w.inbox.clone()),
+            Some(w.inbox.clone()),
+        );
+        let hold = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(1)
+            .open(&paths[1])
+            .unwrap();
+        let report = run_commit(&input, &AtomicUsize::new(0));
+        drop(hold);
+        let lb = report.last_batch;
+        assert_eq!(lb.items[0].unparked, vec![paths[1].clone()]);
+        // The one left in the inbox is deleted since.
+        std::fs::remove_file(&paths[1]).unwrap();
+        let undo = run_undo(&w.data, lb.clone(), false);
+        assert!(lb.items[0].dst.is_file(), "the combined PDF is kept");
+        assert!(
+            undo.outcomes[0]
+                .1
+                .as_ref()
+                .is_err_and(|e| e.contains("only copy")),
+            "{:?}",
+            undo.outcomes
+        );
+        assert!(
+            !paths[0].exists() && !paths[2].exists(),
+            "the parked originals are not put back beside a combined PDF still filed"
+        );
+        assert!(lb.items[0].merged.iter().all(|m| m.kept.is_file()));
+    }
+
+    /// Vibe Files (PA-89, code review): an overwritten file the batch still keeps is something
+    /// to undo, also when the batch filed nothing else.
+    #[test]
+    fn a_batch_with_only_a_kept_overwritten_file_can_be_undone() {
+        let w = world();
+        let out = plan::build_plan(&plan_input(&w, files(&w)));
+        let input = CommitInput::from_plan(
+            &out.proposals,
+            &HashMap::new(),
+            &[],
+            crate::commit::CommitTarget {
+                root: w.root.clone(),
+                first_inbox: Some(w.inbox.clone()),
+                data_dir: w.data.clone(),
+                firm_id: Uuid::new_v4(),
+                template: crate::template::default_tree(),
+            },
+        );
+        let mut lb = run_commit(&input, &AtomicUsize::new(0)).last_batch;
+        lb.items.clear();
+        lb.created_files.clear();
+        lb.zip_entries.clear();
+        lb.routed_zips.clear();
+        lb.renamed_dirs.clear();
+        lb.zip = None;
+        lb.backups.clear();
+        assert_eq!(
+            blocker(Some(&lb)).as_deref(),
+            Some("The last batch filed nothing.")
+        );
+        lb.backups.push(crate::commit::Backup {
+            original: w.root.join("old.pdf"),
+            kept: w.data.join("overwritten").join("old.pdf"),
+        });
+        assert_eq!(blocker(Some(&lb)), None);
+    }
+
     #[test]
     fn original_changed_after_combining_blocks_that_row() {
         let w = world();
@@ -2614,6 +2741,27 @@ mod tests {
         }
         assert!(undo.outcomes.iter().all(|o| o.1.is_err()));
 
+        // Code review: a file now at the original's old path is not the original. Every
+        // piece filed, the kept original gone, and a new scan of the same name in the inbox.
+        let w = world();
+        let original = print_run(&w.inbox);
+        let (_, input) = split_input(&w, &original, &[0, 1, 2]);
+        let lb = run_commit(&input, &AtomicUsize::new(0)).last_batch;
+        std::fs::remove_file(&lb.split_originals[0].kept).unwrap();
+        std::fs::write(&original, b"another scan of the same name").unwrap();
+        let undo = run_undo(&w.data, lb.clone(), false);
+        assert!(lb.items.iter().all(|i| i.dst.is_file()), "pieces kept");
+        assert!(undo.outcomes.iter().all(|o| o.1.is_err()));
+
+        // Partly filed, and the original in the inbox replaced by a file of another size.
+        let w = world();
+        let original = print_run(&w.inbox);
+        let (_, input) = split_input(&w, &original, &[0, 1]);
+        let lb = run_commit(&input, &AtomicUsize::new(0)).last_batch;
+        std::fs::write(&original, b"rescanned").unwrap();
+        let undo = run_undo(&w.data, lb.clone(), false);
+        assert!(lb.items.iter().all(|i| i.dst.is_file()), "pieces kept");
+        assert!(undo.outcomes.iter().all(|o| o.1.is_err()));
         // With the original where the batch left it, the pieces go as before.
         let w = world();
         let original = print_run(&w.inbox);

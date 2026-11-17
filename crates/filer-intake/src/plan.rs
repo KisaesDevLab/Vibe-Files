@@ -520,6 +520,31 @@ impl FsMemo {
     }
 }
 
+/// Vibe Files (PA-89): whether `token` (what a name carries where an ID goes) could be a
+/// client ID of this list: not a year, and of the same shape (which places are digits, which
+/// letters, and the punctuation between) as some client's ID. `9999` is one where IDs are
+/// four digits; `2025` and, where IDs look like `SMIT1001`, `1040` are not.
+fn looks_like_a_client_id(list: &ClientList, token: &str, current_year: i32) -> bool {
+    let token = token.trim();
+    if token.chars().count() == 4 && crate::parse::detect_year(token, current_year).is_some() {
+        return false;
+    }
+    let shape = |s: &str| -> String {
+        s.chars()
+            .map(|c| {
+                if c.is_ascii_digit() {
+                    '9'
+                } else if c.is_alphabetic() {
+                    'A'
+                } else {
+                    c
+                }
+            })
+            .collect()
+    };
+    let want = shape(token);
+    !want.is_empty() && list.clients.iter().any(|c| shape(c.id.trim()) == want)
+}
 /// Fills `p` and returns its status. Stops at the first thing that blocks the row.
 fn plan_row(
     b: &Build,
@@ -550,10 +575,11 @@ fn plan_row(
             // No automatic match.
         } else if let Some(c) = p.parsed.id.as_deref().and_then(by_id) {
             // Vibe Files (PA-89, owner 2026-11-16): an ID found in the name is the client's
-            // without a click only when it stands where a person puts an ID (a leading `_`
-            // part) or the client's name is in the file name too. A word that only happens
-            // to equal a client's ID (`1099-R Fidelity` and a client 1099) is offered, not
-            // taken.
+            // without a click when it was read from its place (the UltraTax layout), stands
+            // as a part of its own between underscores (first, second or last: where a
+            // program or a person puts an ID), or the client's name is in the file name
+            // too. A word that only happens to equal a client's ID (`1099-R Fidelity` and a
+            // client 1099) is offered, not taken.
             let id = p.parsed.id.as_deref().unwrap_or_default();
             let name_agrees = {
                 let (stem, name) = (
@@ -561,12 +587,13 @@ fn plan_row(
                     crate::clients::normalize_name(&c.name),
                 );
                 (!name.is_empty() && stem.contains(&name))
-                    || list
-                        .fuzzy_by_name(&p.parsed.name, 5)
-                        .iter()
-                        .any(|(s, m)| m.id == c.id && *s >= f64::from(input.fuzzy_suggest))
+                    || crate::clients::name_score(&p.parsed.name, &c.name)
+                        >= f64::from(input.fuzzy_suggest)
             };
-            if crate::parse::id_is_a_leading_part(&p.parsed.stem, id) || name_agrees {
+            if p.parsed.ultratax.is_some()
+                || crate::parse::id_is_a_part_of_its_own(&p.parsed.stem, id)
+                || name_agrees
+            {
                 p.client = Some(c);
                 p.client_match = ClientMatch::Exact;
             } else {
@@ -574,13 +601,20 @@ fn plan_row(
             }
         } else {
             // Vibe Files (PA-89, owner 2026-11-16): a name match is taken without a click
-            // only when the name carries no ID of its own (an ID that is in no client list
-            // is another client: `Miller, Robert_9999_…` is not client 1201 of that name)
-            // and no second client matches as well (two clients of one name: the first was
-            // taken). Else it is offered.
+            // only when the name carries no client ID of its own (an ID that is in no
+            // client list is another client: `Miller, Robert_9999_…` is not client 1201 of
+            // that name) and no second client matches as well (two clients of one name: the
+            // first was taken). Else it is offered.
             let top = list.fuzzy_by_name(&p.parsed.name, 2);
             if let Some((score, c)) = top.first() {
-                let unknown_id = p.parsed.id.is_some();
+                // What the name's ID place holds is often a year or a form number
+                // (`Smith, John_2025_W-2`, `Smith, John_1040_2025 return`): only something
+                // shaped like this client list's own IDs counts as an ID.
+                let unknown_id = p
+                    .parsed
+                    .id
+                    .as_deref()
+                    .is_some_and(|id| looks_like_a_client_id(list, id, input.current_year));
                 let tie = top
                     .get(1)
                     .is_some_and(|(s, _)| *s >= f64::from(input.fuzzy_auto));
@@ -593,7 +627,6 @@ fn plan_row(
             }
         }
     }
-
     // Rule.
     let override_rule = edits
         .rule_id
@@ -640,14 +673,11 @@ fn plan_row(
     // Vibe Files (PA-89, owner 2026-11-16): a name with two different years in what the year
     // is read from (`Smith 2020 Family Trust 2025 1041`) does not say which is the tax year.
     // The first was taken; now the batch's year, else the row asks.
-    let two_years = {
-        let rest = crate::parse::years_in(&p.parsed.rest, input.current_year);
-        if rest.is_empty() {
-            crate::parse::years_in(&p.parsed.stem, input.current_year).len() > 1
-        } else {
-            rest.len() > 1
-        }
-    };
+    // Only in what rules read (`rest`), where the year is taken from: a year in the client's
+    // name, or a client ID that looks like one, is no second year. And never against a tax
+    // year read from its own place (the UltraTax layout).
+    let two_years = p.parsed.ultratax.is_none()
+        && crate::parse::years_in(&p.parsed.rest, input.current_year).len() > 1;
     (p.year, p.year_source) = match (edits.year, p.parsed.year, input.batch.year) {
         (Some(y), _, _) => (Some(y), YearSource::Row),
         (None, Some(_), Some(y)) if two_years => (Some(y), YearSource::Batch),
@@ -1276,13 +1306,24 @@ fn find_folder(build: &Build, client: &Client) -> Option<FolderAction> {
     // the client's name in it too, and it is the only such folder. The ID at the end of a
     // folder's name alone bound `Scans_2024` to a client 2024, and the first of two folders
     // ending `(1004)`.
-    let name = crate::clients::normalize_name(&client.name);
+    // The folder's name without the ID in it, scored against the client's name as names are
+    // elsewhere (`John Smith (1001)` and `Smith, John` are the same name).
+    let id = crate::clients::normalize_name(&client.id);
+    let agrees = |b: &&crate::sentinel::FolderBinding| {
+        let folder = crate::clients::normalize_name(&b.name());
+        let name = crate::clients::normalize_name(&client.name);
+        let without_id = folder.replace(&id, " ");
+        !name.is_empty()
+            && (folder.contains(&name)
+                || crate::clients::name_score(without_id.trim(), &client.name)
+                    >= f64::from(build.input.fuzzy_suggest))
+    };
     let mut named = scan
         .folders
         .iter()
         .filter(mine)
         .filter(|b| b.status == FolderStatus::UnboundNamed && build.fs.is_dir(&b.path))
-        .filter(|b| !name.is_empty() && crate::clients::normalize_name(&b.name()).contains(&name));
+        .filter(agrees);
     match (named.next(), named.next()) {
         (Some(b), None) => Some(FolderAction::WillBind(b.path.clone())),
         _ => None,
@@ -1953,6 +1994,17 @@ mod tests {
             p.client_match
         );
         assert_eq!(p.client.as_ref().unwrap().id, "1001");
+        // Code review: a year where an ID goes is not another client's ID. The name still
+        // resolves without a click.
+        let inp = input(&f, &["Smith, John_2025_W-2.pdf"]);
+        let p = &build_plan(&inp).proposals[0];
+        assert!(
+            matches!(p.client_match, ClientMatch::Fuzzy(_)),
+            "{:?} {:?}",
+            p.client_match,
+            p.suggestion
+        );
+        assert_eq!(p.client.as_ref().unwrap().id, "1001");
     }
 
     /// Vibe Files (PA-89, owner 2026-11-16): a word in a name that only happens to equal a
@@ -1984,6 +2036,12 @@ mod tests {
             assert_eq!(p.client_match, ClientMatch::Exact, "{n}");
             assert_eq!(p.client.as_ref().unwrap().id, "1001", "{n}");
         }
+        // Code review: an ID that stands last, as UltraTax prints it, is the client's even
+        // when the name in front is not the client list's.
+        let inp = input(&f, &["J and M Smith_2025_1040_Tax_Return_1001.pdf"]);
+        let p = &build_plan(&inp).proposals[0];
+        assert_eq!(p.client_match, ClientMatch::Exact, "{:?}", p.suggestion);
+        assert_eq!(p.client.as_ref().unwrap().id, "1001");
     }
 
     /// Vibe Files (PA-89, owner 2026-11-16): a name with two different years does not say
@@ -2012,6 +2070,11 @@ mod tests {
         let out = build_plan(&inp);
         let p = row(&out, two);
         assert_eq!((p.year, p.year_source), (Some(2025), YearSource::Batch));
+        // Code review: a year in the client's name is no second year; the one in what rules
+        // read is the tax year, as before.
+        let inp = input(&f, &["Smith 2020 Family Trust_1001_2025 1041.pdf"]);
+        let p = &build_plan(&inp).proposals[0];
+        assert_eq!((p.year, p.year_source), (Some(2025), YearSource::Filename));
     }
 
     /// Vibe Files (PA-89, owner 2026-11-16): a folder with no client file is bound on commit
@@ -2048,6 +2111,21 @@ mod tests {
         let p = &build_plan(&inp).proposals[0];
         assert!(
             matches!(&p.folder, Some(FolderAction::WillBind(d)) if d.ends_with("Smith, John (1001)")),
+            "{:?}",
+            p.folder
+        );
+        // Code review: the name the other way round is the same name.
+        let mut swapped = input(&f, &[file]);
+        bind(
+            &f,
+            &mut swapped,
+            "John Smith (1001)",
+            "1001",
+            FolderStatus::UnboundNamed,
+        );
+        let p = &build_plan(&swapped).proposals[0];
+        assert!(
+            matches!(&p.folder, Some(FolderAction::WillBind(d)) if d.ends_with("John Smith (1001)")),
             "{:?}",
             p.folder
         );

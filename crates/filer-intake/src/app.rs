@@ -5082,6 +5082,7 @@ mod r2_tests {
             piece_of,
             copies: Vec::new(),
             from_zip: None,
+            unparked: Vec::new(),
         };
         let lb = commit::LastBatch {
             batch: uuid::Uuid::new_v4(),

@@ -696,12 +696,15 @@ pub fn years_in(text: &str, current_year: i32) -> Vec<u16> {
     out
 }
 
-/// Vibe Files (PA-89): whether `id` stands in `stem` as a part of its own where a person puts
-/// a client's ID on purpose: the first or the second `_` part (`1001_2025 W-2`,
-/// `Smith, John_1001_2025 W-2`), an ID with an underscore in it as two such parts. A word
-/// that only happens to equal an ID (`1099` in `1099-R Fidelity`) does not.
-pub fn id_is_a_leading_part(stem: &str, id: &str) -> bool {
+/// Vibe Files (PA-89): whether `id` stands in `stem` as a part of its own, between
+/// underscores, where a program or a person puts a client's ID on purpose: the first or the
+/// second part (`1001_2025 W-2`, `Smith, John_1001_2025 W-2`) or the last
+/// (`Smith, John_2025_1040_Tax_Return_1001`, as UltraTax prints it); an ID with an
+/// underscore in it as two such parts. A word inside a part that only happens to equal an
+/// ID (`1099` in `1099-R Fidelity`) does not.
+pub fn id_is_a_part_of_its_own(stem: &str, id: &str) -> bool {
     let parts: Vec<&str> = stem.split('_').map(str::trim).collect();
+    let n = parts.len();
     let is = |s: &str| s.eq_ignore_ascii_case(id.trim());
     let pair = |a: usize| {
         parts
@@ -709,12 +712,10 @@ pub fn id_is_a_leading_part(stem: &str, id: &str) -> bool {
             .zip(parts.get(a + 1))
             .is_some_and(|(x, y)| is(&format!("{x}_{y}")))
     };
-    parts.first().is_some_and(|p| is(p))
-        || parts.get(1).is_some_and(|p| is(p))
-        || pair(0)
-        || pair(1)
+    // A name that is one part has no part "of its own" (the ID would be the whole name).
+    n >= 2
+        && (is(parts[0]) || is(parts[1]) || is(parts[n - 1]) || pair(0) || pair(1) || pair(n - 2))
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -728,15 +729,22 @@ mod tests {
         );
         assert_eq!(years_in("2025 W-2 2025 copy", 2026), [2025]);
         assert_eq!(years_in("1040 1120S 20251", 2026), Vec::<u16>::new());
-        assert!(id_is_a_leading_part("Smith, John_1001_2025 W-2", "1001"));
-        assert!(id_is_a_leading_part("1001_2025 W-2", "1001"));
-        assert!(id_is_a_leading_part(
-            "Four State Barns_2614_FOUR_2025 K-1",
+        let part = id_is_a_part_of_its_own;
+        assert!(part("Smith, John_1001_2025 W-2", "1001"));
+        assert!(part("1001_2025 W-2", "1001"));
+        assert!(part("Four State Barns_2614_FOUR_2025 K-1", "2614_FOUR"));
+        assert!(part("2614_four_2025 K-1", "2614_FOUR"));
+        // As UltraTax prints it: the ID last, one part or two.
+        assert!(part("Smith, John_2025_1040_Tax_Return_1001", "1001"));
+        assert!(part(
+            "Four State Barns_2025_1065_K1_Package_2614_FOUR",
             "2614_FOUR"
         ));
-        assert!(id_is_a_leading_part("2614_four_2025 K-1", "2614_FOUR"));
-        assert!(!id_is_a_leading_part("1099-R Fidelity", "1099"));
-        assert!(!id_is_a_leading_part("Scan_of_form_1099", "1099"));
+        // A word inside a part, or a name that is nothing but the word.
+        assert!(!part("1099-R Fidelity", "1099"));
+        assert!(!part("Scan of form 1099", "1099"));
+        assert!(!part("Smith, John_2025 W-2 for 1001 only", "1001"));
+        assert!(!part("1001", "1001"));
     }
 
     #[test]

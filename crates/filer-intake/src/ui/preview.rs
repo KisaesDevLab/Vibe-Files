@@ -4077,6 +4077,18 @@ fn row_ui(
                 }
                 RowStatus::NeedsClient => {
                     let why = match &p.parsed.id {
+                        // Vibe Files (PA-89): the ID is a client's, and was not taken
+                        // because it stands in the name as a word.
+                        Some(id)
+                            if p.client.is_none()
+                                && p.suggestion
+                                    .as_ref()
+                                    .is_some_and(|(_, c)| c.id.eq_ignore_ascii_case(id)) =>
+                        {
+                            format!(
+                                "{id} is a client's ID, but in this name it may be part of something else (a form number, a date). Click the suggestion to confirm, or Choose client…"
+                            )
+                        }
                         Some(id) if p.client.is_none() => format!(
                             "ID {id} is not in the client list. Click the suggestion or Choose client…"
                         ),

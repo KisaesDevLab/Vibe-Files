@@ -223,6 +223,11 @@ pub struct FiledItem {
     /// For a file sent to the queue from a zip: the zip (P07b).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub from_zip: Option<PathBuf>,
+    /// Vibe Files (PA-89). For a combined PDF: its originals that could not be parked and
+    /// stayed where they were. Undo deletes the combined file only while each of them is
+    /// still there.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unparked: Vec<PathBuf>,
 }
 
 /// A copy the batch wrote; Undo removes it only if its hash still matches.
@@ -398,6 +403,11 @@ pub struct SplitCommit {
 pub struct PartialSplit {
     pub original: PathBuf,
     pub batch: Uuid,
+    /// Vibe Files (PA-89). The original's size when it was left in its inbox: Undo takes a
+    /// file at that path for the original only when it still has it (a new scan of the same
+    /// name is another file).
+    #[serde(default)]
+    pub size: Option<u64>,
 }
 
 pub fn load_partial(data_dir: &Path) -> Vec<PartialSplit> {
@@ -750,11 +760,13 @@ impl Ctx<'_> {
                         self.warnings.push(format!("{}: {e}", extra.display()));
                     }
                 }
+                let unparked_before = self.unparked.len();
                 let merged = if item.merged_from.is_empty() {
                     Vec::new()
                 } else {
                     self.park_originals(item)
                 };
+                let unparked = self.unparked[unparked_before..].to_vec();
                 let return_to = if !item.merged_from.is_empty() {
                     None
                 } else {
@@ -784,6 +796,7 @@ impl Ctx<'_> {
                         Source::Zip { zip, .. } => Some(zip.clone()),
                         _ => None,
                     },
+                    unparked,
                 });
                 if item.split_of.is_some() {
                     remove_tmp_dirs(&self.input.data_dir, &item.src);
@@ -1069,6 +1082,7 @@ fn finish_splits(ctx: &mut Ctx<'_>, outcomes: &[FileOutcome]) -> Vec<PathBuf> {
                 list.push(PartialSplit {
                     original: original.clone(),
                     batch: ctx.input.batch,
+                    size: std::fs::metadata(original).ok().map(|m| m.len()),
                 });
                 if let Err(e) = save_partial(&ctx.input.data_dir, &list) {
                     ctx.warnings
@@ -1312,6 +1326,42 @@ pub fn run_unpack(input: &UnpackInput, progress: &AtomicUsize) -> UnpackReport {
     // Vibe Files (PA-89): and only when every entry was unpacked. With one that failed (a path
     // too long, a damaged entry), the zip stays where it is: it was moved to the undo folder
     // and cleared away at the next commit, and that entry was lost.
+    if written > 0 && stopped.is_none() && !errors.is_empty() {
+        // Put aside beside where it was, in the folder Intake does not read (`_combined`):
+        // it is not unpacked a second time (the entries written would be filed twice, as
+        // " (2)"), not cleared at the next commit, and Undo puts it back.
+        let aside = input
+            .zip
+            .parent()
+            .map(|d| d.join(crate::intake::COMBINED_DIR))
+            .zip(input.zip.file_name())
+            .map(|(d, n)| (d.clone(), free_path(&d.join(n))));
+        let kept = aside.and_then(|(dir, kept)| {
+            std::fs::create_dir_all(&dir)
+                .map_err(|e| e.to_string())
+                .and_then(|()| transfer(&input.zip, &kept, false))
+                .map(|_| kept)
+                .ok()
+        });
+        match kept {
+            Some(kept) => {
+                zip_deleted = true;
+                ctx.warnings.push(format!(
+                    "{} of the zip's files could not be unpacked. The zip was put in {} so the rest is not unpacked twice: take the missing files out of it by hand.",
+                    errors.len(),
+                    kept.display()
+                ));
+                ctx.lb.zip = Some(ZipSource {
+                    original: input.zip.clone(),
+                    kept,
+                });
+            }
+            None => ctx.warnings.push(
+                "some of the zip's files could not be unpacked; the zip stays where it is: do not unpack it again, or the files already written are written twice"
+                    .into(),
+            ),
+        }
+    }
     if written > 0 && stopped.is_none() && errors.is_empty() {
         let dir = t.data_dir.join(UNDO_ZIPS_DIR);
         let kept = dir.join(format!("{batch}.zip"));

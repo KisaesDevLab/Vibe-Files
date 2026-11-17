@@ -375,6 +375,9 @@ impl Reconciled {
     }
 }
 
+/// Label of the transaction that brings back the rows of files Filer's Undo left filed (PA-89).
+const KEPT_LABEL: &str = "intake_undo_kept";
+
 /// The undo record of a recorded Filer batch: (tx id, already undone).
 fn recorded(conn: &Connection, batch: &str) -> Option<(String, bool)> {
     conn.query_row(
@@ -561,6 +564,44 @@ fn reconcile_dir(
                 .map_err(|e| e.to_string())?;
             // The client folders it emptied again, for the other servers (PA-36).
             let filed = from_last_batch(&lb);
+            // PA-89: Filer's Undo leaves a file filed when taking it back would lose pages (a
+            // piece whose original is gone, a combined PDF that is the only copy, a copy
+            // changed since). Those are still documents: their rows come back.
+            let kept: Vec<String> = filed
+                .iter()
+                .filter(|f| f.dst.is_file())
+                .map(|f| rel(root, &f.dst))
+                .collect();
+            if !kept.is_empty() {
+                let now = vf_core::now_rfc3339();
+                let mut tx = Transaction::new(KEPT_LABEL)
+                    .extra(json!({ "filer_batch": batch.clone() }))
+                    .audit(AuditEntry::new(
+                        KEPT_LABEL,
+                        None,
+                        json!({ "filer_batch": batch.clone(), "documents": kept.len() }),
+                    ));
+                for r in &kept {
+                    tx = tx
+                        .catalog(Stmt::new(
+                            "UPDATE document SET deleted_at = NULL, tombstone_reason = NULL,
+                                   device_id = ?3, updated_at = ?2, rev = rev + 1
+                             WHERE rel_path = ?1 AND tombstone_reason = 'intake undone'
+                               AND deleted_at IS NOT NULL
+                               AND NOT EXISTS (SELECT 1 FROM document d
+                                               WHERE d.rel_path = ?1 AND d.deleted_at IS NULL)",
+                            vec![r.clone().into(), now.clone().into(), device_id.into()],
+                        ))
+                        .catalog(Stmt::new(
+                            "INSERT INTO sync_pending (doc_id, op, since)
+                             SELECT id, 'put', ?2 FROM document
+                             WHERE rel_path = ?1 AND deleted_at IS NULL
+                             ON CONFLICT(doc_id, op) DO NOTHING",
+                            vec![r.clone().into(), now.clone().into()],
+                        ));
+                }
+                crate::fileops::commit(conn, root, tx, device_id)?;
+            }
             crate::changes::note_paths(filed.iter().map(|f| f.dst.as_path()));
             Ok(Reconciled {
                 undone: Some(batch),
@@ -1934,6 +1975,45 @@ mod tests {
             ),
             1
         );
+        assert!(!reconcile(&mut f.conn, &f.root, "dev").unwrap().changed());
+    }
+
+    /// PA-89 (code review): a file Filer's Undo left filed is still a document.
+    #[test]
+    fn a_file_undo_left_filed_keeps_its_document() {
+        let mut f = fx();
+        let acme = client("1001", "Acme LLC");
+        let rep = file(&f, &acme, &["w2.pdf", "k1.pdf"], false);
+        reconcile(&mut f.conn, &f.root, "dev").unwrap();
+        let kept = rep
+            .last_batch
+            .items
+            .iter()
+            .find(|i| i.dst.ends_with("k1.pdf"))
+            .unwrap()
+            .dst
+            .clone();
+        // What Undo did, as last_batch.json says it: undone, one file still where it was.
+        let undo = filer_intake::undo::run_undo(
+            &crate::clients::master_dir(&f.root),
+            rep.last_batch.clone(),
+            false,
+        );
+        assert!(undo.last_batch.undone);
+        // As when Undo leaves one file where it was filed.
+        std::fs::create_dir_all(kept.parent().unwrap()).unwrap();
+        std::fs::rename(f.inbox.join("k1.pdf"), &kept).unwrap();
+        reconcile(&mut f.conn, &f.root, "dev").unwrap();
+        let live: Vec<String> = f
+            .conn
+            .prepare("SELECT rel_path FROM document WHERE deleted_at IS NULL")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(live.len(), 1, "{live:?}");
+        assert!(live[0].ends_with("/k1.pdf"));
         assert!(!reconcile(&mut f.conn, &f.root, "dev").unwrap().changed());
     }
 
