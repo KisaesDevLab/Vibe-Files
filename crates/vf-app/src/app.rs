@@ -475,6 +475,7 @@ impl VibeFilesApp {
                 });
                 let chain = crate::ui::audit::ChainCheck::later();
                 // The rest of opening, behind the window (PA-82), on its own connection.
+                let folders_behind = opened.folders_behind;
                 let ready = {
                     let (catalog, root, device) = (
                         opened.catalog.clone(),
@@ -488,7 +489,7 @@ impl VibeFilesApp {
                             vf_core::db::open(&catalog, vf_core::db::Storage::Local)
                                 .map_err(|e| e.to_string())
                         })?;
-                        Ok(ready(&mut conn, &root, &device))
+                        Ok(ready(&mut conn, &root, &device, folders_behind))
                     })
                     .ok()
                 };
@@ -1652,7 +1653,12 @@ fn clear_check_out_leftovers(conn: &mut vf_core::db::Connection, root: &std::pat
 /// capture rules, this workstation's registration, legal holds, the old trash. Runs behind
 /// the window on its own connection (PA-82, owner 2026-11-16: it kept the opening screen up;
 /// before, on the opening thread, QA A6). How long each part took goes to the log.
-fn ready(conn: &mut vf_core::db::Connection, root: &Path, device_id: &str) -> Readied {
+fn ready(
+    conn: &mut vf_core::db::Connection,
+    root: &Path,
+    device_id: &str,
+    folders_behind: bool,
+) -> Readied {
     let mut at = std::time::Instant::now();
     let mut lap = |part: &'static str| {
         tracing::info!(
@@ -1664,6 +1670,23 @@ fn ready(conn: &mut vf_core::db::Connection, root: &Path, device_id: &str) -> Re
     };
     let root = root.to_path_buf();
     let before = conn.total_changes();
+    // Client folders Intake's folder index has and this catalog has not (PA-83): read now,
+    // those and no others. Not read: looked at again at the next open.
+    if folders_behind {
+        match patient(|| {
+            vf_fs::rebuild::take_folders_behind(conn, &root, device_id).map_err(|e| e.to_string())
+        }) {
+            Ok(n) => tracing::info!(folders = n, "client folders behind Intake's list read"),
+            Err(e) => {
+                tracing::warn!(
+                    kind = crate::logging::kind(&e),
+                    "client folders behind Intake's list not read"
+                );
+                vf_fs::rebuild::look_again_at_folder_index(conn);
+            }
+        }
+        lap("folders behind Intake's list");
+    }
     // Print captures are filed by their doc types' folders (Admin › Print capture): Filer's
     // rules are brought in line before Intake first loads them.
     let _ = vf_ingest::parsers::seed_if_missing(&root);

@@ -1326,6 +1326,153 @@ mod tests {
         assert_eq!(live(&conn), all);
     }
 
+    /// Owner 2026-11-18: after merges on one PC, another PC listed the whole cabinet (8,000
+    /// client folders) to take them. It reads the folders that changed, and no others: the
+    /// renamed folders under their new and old names, and those the cabinet no longer has.
+    #[test]
+    fn another_pc_takes_the_merges_by_reading_only_the_folders_that_changed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (root, mut conn) = cabinet(
+            tmp.path(),
+            &[
+                ("6 R Farms LLC", "6RFA1001"),
+                ("Baker Co", "3001"),
+                ("Baker Co.", "3002"),
+                ("Cole Trust", "5001"),
+                ("Cole Trust.", "5002"),
+                ("Untouched One", "8001"),
+                ("Untouched Two", "8002"),
+            ],
+            &[],
+        );
+        let listed = Uuid::new_v4();
+        let mut list = clients::load(&root).unwrap().list.unwrap();
+        list.uuids.insert("7974_6RFA".into(), listed);
+        list.clients.push(Client {
+            id: "7974_6RFA".into(),
+            uuid: listed,
+            name: "6 R Farms, LLC".into(),
+            extra: BTreeMap::new(),
+        });
+        clients::save_list(&root, &list).unwrap();
+        crate::rebuild::sync_clients(&mut conn, &root, "dev", "clients_import").unwrap();
+        let mut other = vf_core::db::open(&tmp.path().join("pc2.db"), Storage::Local).unwrap();
+        crate::rebuild::rebuild(&mut other, &root, "dev2").unwrap();
+        // Intake's folder index, as its scan of the root writes it.
+        let scan = |conn: &Connection, at: &str| {
+            let mut st = conn
+                .prepare(
+                    "SELECT ext_id, folder_rel FROM client
+                     WHERE deleted_at IS NULL AND folder_rel IS NOT NULL",
+                )
+                .unwrap();
+            let folders: Vec<serde_json::Value> = st
+                .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+                .unwrap()
+                .map(|r| {
+                    let (id, f) = r.unwrap();
+                    serde_json::json!({ "path": root.join(f), "client_id": id, "status": "bound" })
+                })
+                .collect();
+            let f = serde_json::json!({ "root": root, "scanned_at": at, "folders": folders });
+            std::fs::write(root.join("_Vibe/folders.json"), f.to_string()).unwrap();
+        };
+        scan(&conn, "2026-11-17T08:00:00Z");
+        assert!(!crate::rebuild::behind_folder_index(&other, &root));
+
+        let choices = [
+            Choice {
+                from: uuid_of(&conn, "6RFA1001"),
+                into: uuid_of(&conn, "7974_6RFA"),
+                new_id: None,
+            },
+            Choice {
+                from: uuid_of(&conn, "3002"),
+                into: uuid_of(&conn, "3001"),
+                new_id: Some("BAKE7".into()),
+            },
+            Choice {
+                from: uuid_of(&conn, "5002"),
+                into: uuid_of(&conn, "5001"),
+                new_id: None,
+            },
+        ];
+        let out = merge_many(
+            &mut conn,
+            &root,
+            "dev",
+            &choices,
+            &AtomicUsize::new(0),
+            &AtomicBool::new(false),
+        );
+        assert!(
+            out.iter().all(|(_, r)| matches!(r, Outcome::Merged(_))),
+            "{out:?}"
+        );
+        scan(&conn, "2026-11-18T08:00:00Z");
+
+        let rows = |c: &Connection| -> Vec<(String, Option<String>)> {
+            let mut st = c
+                .prepare(
+                    "SELECT ext_id, folder_rel FROM client WHERE deleted_at IS NULL ORDER BY ext_id",
+                )
+                .unwrap();
+            st.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap()
+        };
+        let docs = |c: &Connection| -> Vec<(String, String)> {
+            let mut st = c
+                .prepare(
+                    "SELECT d.rel_path, coalesce(c.ext_id, '') FROM document d
+                     LEFT JOIN client c ON c.id = d.client_id AND c.deleted_at IS NULL
+                     WHERE d.deleted_at IS NULL ORDER BY d.rel_path",
+                )
+                .unwrap();
+            st.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap()
+        };
+        assert!(crate::rebuild::behind_folder_index(&other, &root));
+        let behind = crate::rebuild::folders_behind(&other, &root);
+        assert_eq!(
+            behind,
+            [
+                "6 R Farms LLC (6RFA1001)",
+                "6 R Farms, LLC (7974_6RFA)",
+                "Baker Co (3001)",
+                "Baker Co (BAKE7)",
+                "Baker Co. (3002)",
+                "Cole Trust. (5002)",
+            ],
+            "the folders that changed, and neither untouched one"
+        );
+        assert_eq!(
+            crate::rebuild::take_folders_behind(&mut other, &root, "dev2").unwrap(),
+            behind.len()
+        );
+        assert_eq!(crate::rebuild::unfinished_label(&other), None);
+        assert_eq!(rows(&other), rows(&conn));
+        // The folder that was merged into kept its name and its ID: the file it gained is
+        // found as any file put in a folder is (when the client is opened, or the sweep).
+        let gained = "Cole Trust (5001)/Income Tax/2025/return (2).pdf";
+        let but_gained = |c: &Connection| -> Vec<(String, String)> {
+            docs(c).into_iter().filter(|(p, _)| p != gained).collect()
+        };
+        assert_eq!(docs(&other), but_gained(&conn));
+        crate::rebuild::reread_folders(&mut other, &root, "dev2", &["Cole Trust (5001)".into()])
+            .unwrap();
+        assert_eq!(docs(&other), docs(&conn));
+        assert_eq!(docs(&other).len(), 7, "{:?}", docs(&other));
+        assert!(docs(&other).iter().all(|(_, client)| !client.is_empty()));
+        // In line: nothing more to read, now or after Intake's next scan.
+        assert!(crate::rebuild::folders_behind(&other, &root).is_empty());
+        scan(&conn, "2026-11-19T08:00:00Z");
+        assert!(!crate::rebuild::behind_folder_index(&other, &root));
+    }
+
     /// Owner 2026-11-17: an ID neither has can be typed; the two are merged and the one
     /// that stays is given it, its folder renamed. The undo gives each its own again.
     #[test]

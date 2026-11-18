@@ -41,6 +41,9 @@ pub struct Opened {
     /// The other servers' changes were read while opening. `false` after [`open_staged`] on a
     /// server: they are read behind the window, at once (owner 2026-11-15, Q-112).
     pub caught_up: bool,
+    /// The catalog is behind Intake's folder index (PA-83): the folders it lacks are read
+    /// behind the window (`vf_fs::rebuild::take_folders_behind`), not the whole cabinet.
+    pub folders_behind: bool,
     /// The index this open was to make could not be started; the cabinet is open on the
     /// catalog as it was (owner 2026-11-18: a failure there kept the cabinet shut).
     pub problem: Option<String>,
@@ -161,6 +164,7 @@ pub fn create(data: &Path, device_id: &str, r: &CreateRequest) -> Result<Opened>
         writer: None,
         staged: None,
         caught_up: true,
+        folders_behind: false,
         problem: None,
     })
 }
@@ -323,21 +327,18 @@ fn open_how(data: &Path, device_id: &str, root: &Path, behind: bool) -> Result<O
     step("Listing the client folders");
     let label = vf_fs::rebuild::unfinished_label(&conn);
     // Or a catalog that is behind Intake's folder index (PA-83): folders bound to clients
-    // after it was made. Indexed the same way, behind the window.
+    // after it was made. Those folders are read behind the window, and no others (owner
+    // 2026-11-18: the whole cabinet was listed for them).
     let stale =
         behind && known > 0 && label.is_none() && vf_fs::rebuild::behind_folder_index(&conn, root);
-    let why = if stale {
+    if stale {
         // How many, not which (folder names are client names: not for the log).
-        let n = vf_fs::rebuild::folders_not_taken(&conn).len();
         tracing::info!(
-            folders = n,
-            "the catalog is behind Intake's folder index: indexing"
+            folders = vf_fs::rebuild::folders_not_taken(&conn).len(),
+            "the catalog is behind Intake's folder index: reading those folders"
         );
-        Some(format!(
-            "Intake's folder list had {n} client folder{} this catalog did not",
-            if n == 1 { "" } else { "s" }
-        ))
-    } else if let Some(l) = &label {
+    }
+    let why = if let Some(l) = &label {
         tracing::info!(label = %l, "the last index was not finished: indexing");
         Some("the index before it was not finished".to_string())
     } else if known == 0 {
@@ -354,7 +355,7 @@ fn open_how(data: &Path, device_id: &str, root: &Path, behind: bool) -> Result<O
             [format!("{}|{why}", vf_core::now_rfc3339())],
         );
     }
-    let in_parts = behind && (known == 0 || label.is_some() || stale);
+    let in_parts = behind && (known == 0 || label.is_some());
     let mut staged = None;
     let mut problem = None;
     // A catalog that knows the cabinet opens on what it has when the index cannot be made
@@ -429,6 +430,7 @@ fn open_how(data: &Path, device_id: &str, root: &Path, behind: bool) -> Result<O
         writer,
         staged,
         caught_up,
+        folders_behind: stale,
         problem,
     })
 }
@@ -521,9 +523,10 @@ pub(crate) mod tests {
     /// PA-83 (owner 2026-11-16): a catalog made before a folder was bound to its client
     /// (Intake's Setup binds folders without the catalog) showed the client with no folder
     /// and no documents for good. When Intake's folder index has a bound folder the catalog
-    /// has not, the cabinet is indexed behind the window, once for that scan.
+    /// has not, those folders are read behind the window, once for that scan (owner
+    /// 2026-11-18: and not the whole cabinet).
     #[test]
-    fn a_catalog_behind_intakes_folder_index_is_indexed() {
+    fn a_catalog_behind_intakes_folder_index_reads_those_folders() {
         let tmp = tempfile::tempdir().unwrap();
         let (pc1, pc2, root) = (
             tmp.path().join("pc1"),
@@ -564,9 +567,17 @@ pub(crate) mod tests {
         );
 
         let mut o = open_staged(&pc2, "dev-2", &root).unwrap();
-        let staged = o.staged.take().expect("indexed behind the window");
-        let shared = crate::indexer::Shared::new(&staged);
-        crate::indexer::run(&mut o.conn, &root, "dev-2", &staged, &shared, &|| {});
+        assert!(o.staged.is_none(), "no index of the whole cabinet");
+        assert!(o.folders_behind);
+        assert_eq!(
+            vf_fs::rebuild::folders_behind(&o.conn, &root),
+            ["01 Anderson"]
+        );
+        assert_eq!(
+            vf_fs::rebuild::take_folders_behind(&mut o.conn, &root, "dev-2").unwrap(),
+            1
+        );
+        assert_eq!(vf_fs::rebuild::unfinished_label(&o.conn), None);
         let (folder_rel, docs): (String, i64) = o
             .conn
             .query_row(
@@ -579,10 +590,10 @@ pub(crate) mod tests {
             .unwrap();
         assert_eq!((folder_rel.as_str(), docs), ("01 Anderson", 1));
         drop(o);
-        // In line now: no index at the next open, nor after another scan of the root.
-        assert!(open_staged(&pc2, "dev-2", &root).unwrap().staged.is_none());
+        // In line now: nothing to read at the next open, nor after another scan of the root.
+        assert!(!open_staged(&pc2, "dev-2", &root).unwrap().folders_behind);
         index("2026-11-16T11:07:00Z");
-        assert!(open_staged(&pc2, "dev-2", &root).unwrap().staged.is_none());
+        assert!(!open_staged(&pc2, "dev-2", &root).unwrap().folders_behind);
 
         // Owner 2026-11-17: a folder Intake's index binds that no index can take (here: its
         // own client file names another client) is indexed for once, not after every scan.
@@ -598,15 +609,14 @@ pub(crate) mod tests {
         };
         odd("2026-11-17T08:00:00Z");
         let mut o = open_staged(&pc2, "dev-2", &root).unwrap();
-        let staged = o.staged.take().expect("tried once");
-        let shared = crate::indexer::Shared::new(&staged);
-        crate::indexer::run(&mut o.conn, &root, "dev-2", &staged, &shared, &|| {});
+        assert!(o.folders_behind && o.staged.is_none(), "tried once");
+        vf_fs::rebuild::take_folders_behind(&mut o.conn, &root, "dev-2").unwrap();
         assert_eq!(vf_fs::rebuild::folders_not_taken(&o.conn).len(), 1);
         drop(o);
         odd("2026-11-18T08:00:00Z");
         assert!(
-            open_staged(&pc2, "dev-2", &root).unwrap().staged.is_none(),
-            "the same folder is not indexed for again after another scan"
+            !open_staged(&pc2, "dev-2", &root).unwrap().folders_behind,
+            "the same folder is not read for again after another scan"
         );
     }
     /// PA-86: Admin › Devices says what the catalog in use holds, and "Index the cabinet
