@@ -613,8 +613,12 @@ fn scan_scoped(
     let mut bound: Vec<Bound> = Vec::with_capacity(rows.len());
     let mut folders: Vec<(PathBuf, Option<String>)> = Vec::new();
     let mut looked: HashSet<String> = HashSet::new();
+    let mut fresh: HashSet<String> = HashSet::new();
     for (id, ext_id, name, folder_rel, hash) in rows {
         let in_scope = named(&folder_rel);
+        if !(hash.is_some() && !in_scope) {
+            fresh.insert(folder_rel.to_lowercase());
+        }
         if let (Some(sentinel_hash), false) = (hash, in_scope) {
             bound.push(Bound {
                 id,
@@ -667,6 +671,7 @@ fn scan_scoped(
                     rep.duplicate_folders.push(f.clone());
                     None
                 } else {
+                    fresh.insert(f.to_lowercase());
                     bound.push(Bound {
                         id: id.clone(),
                         ext_id: s.tax_software_id,
@@ -684,9 +689,70 @@ fn scan_scoped(
         };
         folders.push((folder, client_id));
     }
+    // A folder left out as a second one of an ID: its documents are no client's.
+    for f in settle_clashes(root, &mut bound, &fresh, rep) {
+        let path = root.join(&f);
+        for (folder, client) in folders.iter_mut() {
+            if *folder == path {
+                *client = None;
+            }
+        }
+    }
     bound.sort_by(|a, b| a.folder_rel.cmp(&b.folder_rel));
     rep.clients = bound.len();
     Ok((bound, folders))
+}
+
+/// Where some clients are taken as the catalog has them and others were read from their
+/// folders just now (`fresh`, lower-case folder names): a client taken from the catalog that
+/// says the ID a folder says now may be out of date (its ID was changed on another PC), so
+/// its own folder is read too. Two folders that still say one ID: the one the catalog had
+/// stays, the one read now is left out and said. Returns the folders left out.
+fn settle_clashes(
+    root: &Path,
+    bound: &mut Vec<Bound>,
+    fresh: &HashSet<String>,
+    rep: &mut RebuildReport,
+) -> Vec<String> {
+    let clashing = |bound: &[Bound]| -> HashSet<String> {
+        let mut seen: HashMap<&str, &str> = HashMap::new();
+        let mut twice = HashSet::new();
+        for b in bound {
+            if seen.insert(&b.ext_id, &b.id).is_some_and(|id| id != b.id) {
+                twice.insert(b.ext_id.clone());
+            }
+        }
+        twice
+    };
+    let twice = clashing(bound);
+    if twice.is_empty() {
+        return vec![];
+    }
+    for b in bound.iter_mut() {
+        if !twice.contains(&b.ext_id) || fresh.contains(&b.folder_rel.to_lowercase()) {
+            continue;
+        }
+        let folder = root.join(&b.folder_rel);
+        if let Ok(Some(s)) = read_sentinel_patient(&folder)
+            && let Ok(hash) = sha256_file(&sentinel::sentinel_path(&folder))
+        {
+            b.id = s.client_id.to_string();
+            b.ext_id = s.tax_software_id;
+            b.name = s.display_name_at_creation;
+            b.sentinel_hash = hash;
+        }
+    }
+    let twice = clashing(bound);
+    let mut out = vec![];
+    bound.retain(|b| {
+        let drop = twice.contains(&b.ext_id) && fresh.contains(&b.folder_rel.to_lowercase());
+        if drop {
+            out.push(b.folder_rel.clone());
+        }
+        !drop
+    });
+    rep.duplicate_folders.extend(out.iter().cloned());
+    out
 }
 
 /// Client and relationship rows from the bound folders merged with the client master
@@ -715,10 +781,16 @@ fn client_stmts(
 
     // Live catalog ext_id -> id, to keep the unique ext_id index intact.
     let mut catalog_ext: HashMap<String, String> = HashMap::new();
+    // And the folder each live client has in the catalog.
+    let mut catalog_folder: Vec<(String, String)> = Vec::new();
     {
-        let mut st = conn.prepare("SELECT ext_id, id FROM client WHERE deleted_at IS NULL")?;
-        for r in st.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))? {
-            let (e, i): (String, String) = r?;
+        let mut st =
+            conn.prepare("SELECT ext_id, id, folder_rel FROM client WHERE deleted_at IS NULL")?;
+        for r in st.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))? {
+            let (e, i, f): (String, String, Option<String>) = r?;
+            if let Some(f) = f.filter(|f| !f.is_empty()) {
+                catalog_folder.push((i.clone(), f));
+            }
             catalog_ext.insert(e, i);
         }
     }
@@ -791,6 +863,12 @@ fn client_stmts(
     let mut stmts = Vec::new();
     let mut ext_to_id: HashMap<String, String> = HashMap::new();
     for b in bound {
+        // Two folders saying one ID (a re-read beside clients taken as the catalog has
+        // them): the first has it; the other is said, and its row is left as it is.
+        if ext_to_id.get(&b.ext_id).is_some_and(|other| *other != b.id) {
+            rep.duplicate_folders.push(b.folder_rel.clone());
+            continue;
+        }
         let l = listed.get(b.ext_id.as_str()).copied();
         if let Some(c) = l
             && c.uuid.to_string() != b.id
@@ -821,7 +899,12 @@ fn client_stmts(
             rep.uuid_mismatches.push(c.id.clone());
             continue;
         }
-        if catalog_ext.get(&c.id).is_some_and(|other| *other != id) {
+        // The ID is another client's in the catalog. One with a folder that says another ID
+        // now gives it up (below); any other keeps it, and this entry is said.
+        if catalog_ext
+            .get(&c.id)
+            .is_some_and(|other| *other != id && !bound_ids.contains(other))
+        {
             rep.uuid_mismatches.push(c.id.clone());
             continue;
         }
@@ -837,6 +920,56 @@ fn client_stmts(
         ext_to_id.insert(c.id.clone(), id);
         rep.master_only += 1;
     }
+
+    // An ID written here for one client and held in the catalog by another: the unique
+    // index on the ID refused the whole change, and with it the cabinet's opening (owner
+    // 2026-11-18, after merges made on another PC: each PC has its own catalog, and this
+    // one still had the client that went). The holder is dealt with before any row is
+    // written. One that is given another ID here is moved out of the way until its own row
+    // comes; one that nothing here speaks for (no folder says it, the list does not have
+    // it: merged away, or the list's client whose ID the folder's client took) is no longer
+    // a client.
+    let written: HashSet<&String> = ext_to_id.values().collect();
+    let mut first: Vec<(String, bool)> = ext_to_id
+        .iter()
+        .filter_map(|(ext, id)| {
+            let holder = catalog_ext.get(ext).filter(|h| *h != id)?;
+            Some((holder.clone(), written.contains(holder)))
+        })
+        .collect();
+    // And a client whose folder the cabinet no longer has, that no folder and no list
+    // entry speaks for: merged into another on another PC (it stayed a client here for
+    // good, with a folder that is not there). Only when the folder is seen to be gone.
+    // (Asked only while the cabinet itself answers: a share that dropped says "not there"
+    // for every folder.)
+    let cabinet_answers = || crate::cabinet::read(root).is_ok();
+    for (id, folder) in &catalog_folder {
+        if !written.contains(id)
+            && !first.iter().any(|(h, _)| h == id)
+            && matches!(root.join(folder).try_exists(), Ok(false))
+            && cabinet_answers()
+        {
+            first.push((id.clone(), false));
+        }
+    }
+    first.sort();
+    first.dedup();
+    let first = first.into_iter().map(|(holder, moves)| {
+        if moves {
+            Stmt::new(
+                "UPDATE client SET ext_id = '~moving-' || id WHERE id = ?1",
+                vec![holder.into()],
+            )
+        } else {
+            Stmt::new(
+                "UPDATE client SET deleted_at = ?2, device_id = ?3, updated_at = ?2, rev = rev + 1
+                 WHERE id = ?1 AND deleted_at IS NULL",
+                vec![holder.into(), now.into(), device_id.into()],
+            )
+        }
+    });
+    let stmts: Vec<Stmt> = first.chain(stmts).collect();
+    let mut stmts = stmts;
 
     let Some(m) = master.as_ref() else {
         return Ok(stmts); // unreadable master: leave relationships as they are
@@ -936,8 +1069,12 @@ pub fn sync_clients_edited(
         .collect::<Result<_, _>>()?
     };
     let mut bound: Vec<Bound> = Vec::with_capacity(rows.len());
+    let mut fresh: HashSet<String> = HashSet::new();
     for (id, ext_id, name, folder_rel, hash) in rows {
         let again = reread.iter().any(|f| f.eq_ignore_ascii_case(&folder_rel));
+        if again || hash.is_none() {
+            fresh.insert(folder_rel.to_lowercase());
+        }
         match hash {
             Some(sentinel_hash) if !again => bound.push(Bound {
                 id,
@@ -980,6 +1117,7 @@ pub fn sync_clients_edited(
         if let Ok(Some(s)) = sentinel::read_sentinel(&folder) {
             let sentinel_hash = sha256_file(&sentinel::sentinel_path(&folder))
                 .map_err(|e| RebuildError::Io(e.to_string()))?;
+            fresh.insert(f.to_lowercase());
             bound.push(Bound {
                 id: s.client_id.to_string(),
                 ext_id: s.tax_software_id,
@@ -989,6 +1127,7 @@ pub fn sync_clients_edited(
             });
         }
     }
+    settle_clashes(root, &mut bound, &fresh, &mut rep);
     bound.sort_by(|a, b| a.folder_rel.cmp(&b.folder_rel));
     rep.clients = bound.len();
     commit_clients(conn, root, &bound, rep, device_id, action)
@@ -3642,6 +3781,120 @@ mod tests {
         );
         let snap = vf_core::browse::load(&conn).unwrap();
         assert_eq!(snap.partners(), ["JD", "KW"]);
+    }
+
+    /// The folder's client file with another ID, as a change made on another PC leaves it.
+    fn say_id(root: &Path, folder: &str, ext: &str) {
+        let f = root.join(folder);
+        let s = sentinel::read_sentinel(&f).unwrap().unwrap();
+        std::fs::remove_file(sentinel::sentinel_path(&f)).unwrap();
+        let c = Client {
+            id: ext.into(),
+            uuid: s.client_id,
+            name: s.display_name_at_creation.clone(),
+            extra: BTreeMap::new(),
+        };
+        sentinel::write_sentinel(root, &f, &c, s.firm_id).unwrap();
+    }
+
+    fn ids_by_folder(conn: &Connection) -> Vec<(String, String)> {
+        let mut st = conn
+            .prepare(
+                "SELECT folder_rel, ext_id FROM client
+                 WHERE deleted_at IS NULL AND folder_rel IS NOT NULL ORDER BY folder_rel",
+            )
+            .unwrap();
+        st.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    }
+
+    /// Owner 2026-11-18 ("UNIQUE constraint failed: client.ext_id", and the cabinet did not
+    /// open): IDs changed on another PC, so that a folder says an ID this catalog has on
+    /// another client. Whatever the folders say, the clients are written.
+    #[test]
+    fn ids_changed_on_another_pc_never_stop_the_clients_being_written() {
+        let c = cab();
+        let mut conn = open(&c);
+        rebuild(&mut conn, &c.root, "dev-1").unwrap();
+        let (smith, acme) = ("Smith, John (1001)", "Acme LLC (1002)");
+        let pairs = |a: &str, b: &str| {
+            vec![
+                (acme.to_string(), a.to_string()),
+                (smith.to_string(), b.to_string()),
+            ]
+        };
+        assert_eq!(ids_by_folder(&conn), pairs("1002", "1001"));
+
+        // The two exchanged IDs; only one of the folders is named for a re-read.
+        say_id(&c.root, smith, "1002");
+        say_id(&c.root, acme, "1001");
+        sync_clients_edited(
+            &mut conn,
+            &c.root,
+            "dev-1",
+            "clients_edit",
+            &[smith.to_string()],
+        )
+        .expect("the other folder is read too");
+        assert_eq!(ids_by_folder(&conn), pairs("1001", "1002"));
+        // And back, with every folder read.
+        say_id(&c.root, smith, "1001");
+        say_id(&c.root, acme, "1002");
+        sync_clients(&mut conn, &c.root, "dev-1", "clients_edit").expect("exchanged back");
+        assert_eq!(ids_by_folder(&conn), pairs("1002", "1001"));
+        // One takes the other's old ID, the other a new one.
+        say_id(&c.root, acme, "2000");
+        say_id(&c.root, smith, "1002");
+        index(&mut conn, &c.root, "dev-1").expect("a chain");
+        assert_eq!(ids_by_folder(&conn), pairs("2000", "1002"));
+        say_id(&c.root, smith, "1001");
+        say_id(&c.root, acme, "1002");
+        sync_clients(&mut conn, &c.root, "dev-1", "clients_edit").unwrap();
+
+        // A second folder that says an ID a client has: named for a re-read, it is left
+        // out and said; the client the catalog had stays, with its documents.
+        let firm = sentinel::read_sentinel(&c.root.join(acme))
+            .unwrap()
+            .unwrap()
+            .firm_id;
+        client_folder(&c.root, "AAA Copy", "1002", firm);
+        let named = ["AAA Copy (1002)".to_string()];
+        let rep = sync_clients_edited(&mut conn, &c.root, "dev-1", "clients_edit", &named)
+            .expect("a second folder of one ID");
+        assert_eq!(rep.duplicate_folders, named);
+        assert_eq!(ids_by_folder(&conn), pairs("1002", "1001"));
+        // With every folder read, the cabinet's own order decides, as in a new catalog.
+        let rep = index(&mut conn, &c.root, "dev-1").expect("indexed with a second folder");
+        assert_eq!(rep.duplicate_folders, [acme.to_string()]);
+        let mut fresh = vf_core::db::open(&c.data.join("other.db"), Storage::Local).unwrap();
+        index(&mut fresh, &c.root, "dev-2").unwrap();
+        assert_eq!(ids_by_folder(&conn), ids_by_folder(&fresh));
+        std::fs::remove_dir_all(c.root.join("AAA Copy (1002)")).unwrap();
+        index(&mut conn, &c.root, "dev-1").expect("the second folder gone again");
+        assert_eq!(ids_by_folder(&conn), pairs("1002", "1001"));
+
+        // A client not on the list whose folder is there and whose client file cannot be
+        // read stays a client: only a folder seen to be gone takes it away.
+        let unlisted = client_folder(&c.root, "Not Listed", "7000", firm);
+        sync_clients(&mut conn, &c.root, "dev-1", "clients_edit").unwrap();
+        assert!(ids_by_folder(&conn).iter().any(|(_, id)| id == "7000"));
+        std::fs::remove_file(sentinel::sentinel_path(&unlisted)).unwrap();
+        sync_clients(&mut conn, &c.root, "dev-1", "clients_edit").unwrap();
+        assert!(ids_by_folder(&conn).iter().any(|(_, id)| id == "7000"));
+        std::fs::remove_dir_all(&unlisted).unwrap();
+        sync_clients(&mut conn, &c.root, "dev-1", "clients_edit").unwrap();
+        assert!(!ids_by_folder(&conn).iter().any(|(_, id)| id == "7000"));
+
+        // Two folders with no ID.
+        client_folder(&c.root, "No Id One", "", firm);
+        client_folder(&c.root, "No Id Two", "", firm);
+        index(&mut conn, &c.root, "dev-1").expect("two folders with no ID");
+        let named = ["No Id Two ()".to_string()];
+        sync_clients_edited(&mut conn, &c.root, "dev-1", "clients_edit", &named)
+            .expect("the second one named");
+        sync_clients(&mut conn, &c.root, "dev-1", "clients_edit").unwrap();
     }
 
     /// PA-61: an edit made here syncs from the catalog; only the client folders named are read

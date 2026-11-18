@@ -41,6 +41,9 @@ pub struct Opened {
     /// The other servers' changes were read while opening. `false` after [`open_staged`] on a
     /// server: they are read behind the window, at once (owner 2026-11-15, Q-112).
     pub caught_up: bool,
+    /// The index this open was to make could not be started; the cabinet is open on the
+    /// catalog as it was (owner 2026-11-18: a failure there kept the cabinet shut).
+    pub problem: Option<String>,
 }
 
 /// What opening a cabinet is doing now and since when, said under the spinner of the opening
@@ -158,6 +161,7 @@ pub fn create(data: &Path, device_id: &str, r: &CreateRequest) -> Result<Opened>
         writer: None,
         staged: None,
         caught_up: true,
+        problem: None,
     })
 }
 
@@ -352,11 +356,36 @@ fn open_how(data: &Path, device_id: &str, root: &Path, behind: bool) -> Result<O
     }
     let in_parts = behind && (known == 0 || label.is_some() || stale);
     let mut staged = None;
+    let mut problem = None;
+    // A catalog that knows the cabinet opens on what it has when the index cannot be made
+    // (it is tried again at the next open); only a catalog with nothing in it cannot.
+    let mut or_as_it_is = |e: vf_fs::rebuild::RebuildError| -> Result<()> {
+        if known == 0 {
+            return Err(e.into());
+        }
+        tracing::error!(
+            kind = crate::logging::kind(&e.to_string()),
+            "the index could not be started: opened on the catalog as it was"
+        );
+        problem = Some(format!(
+            "The cabinet is open, but its list of clients and documents could not be brought up to date: {e}"
+        ));
+        Ok(())
+    };
     let rebuild = if in_parts {
-        staged = Some(vf_fs::rebuild::index_start(&mut conn, root, device_id)?);
+        match vf_fs::rebuild::index_start(&mut conn, root, device_id) {
+            Ok(s) => staged = Some(s),
+            Err(e) => or_as_it_is(e)?,
+        }
         None
     } else if known == 0 || label.is_some() {
-        Some(vf_fs::rebuild::index(&mut conn, root, device_id)?)
+        match vf_fs::rebuild::index(&mut conn, root, device_id) {
+            Ok(r) => Some(r),
+            Err(e) => {
+                or_as_it_is(e)?;
+                None
+            }
+        }
     } else {
         None
     };
@@ -400,6 +429,7 @@ fn open_how(data: &Path, device_id: &str, root: &Path, behind: bool) -> Result<O
         writer,
         staged,
         caught_up,
+        problem,
     })
 }
 
@@ -444,6 +474,48 @@ pub(crate) mod tests {
         drop(o);
         let again = open_staged(&data, "dev-1", &root).unwrap();
         assert!(again.staged.is_none() && again.rebuild.is_none());
+    }
+
+    /// Owner 2026-11-18: an index that could not be started ("UNIQUE constraint failed:
+    /// client.ext_id") kept the cabinet shut at every open. A catalog that knows the cabinet
+    /// opens on what it has, and says so.
+    #[test]
+    fn a_cabinet_opens_when_its_index_cannot_be_started() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (data, root) = (tmp.path().join("pc1"), tmp.path().join("cab"));
+        drop(create(&data, "dev-1", &req(&root)).unwrap());
+        {
+            let c = db::open(&data.join(CATALOG_FILE), Storage::Local).unwrap();
+            c.execute(
+                "INSERT INTO local_state (k, v) VALUES ('rebuild_unfinished', 'rebuild')",
+                [],
+            )
+            .unwrap();
+            // Whatever the index writes is refused.
+            c.execute_batch(
+                "CREATE TRIGGER refuse BEFORE INSERT ON undo_record
+                 BEGIN SELECT RAISE(ABORT, 'refused for the test'); END;",
+            )
+            .unwrap();
+        }
+        for staged in [true, false] {
+            let o = if staged {
+                open_staged(&data, "dev-1", &root)
+            } else {
+                open(&data, "dev-1", &root)
+            }
+            .expect("the cabinet opens");
+            assert!(o.staged.is_none() && o.rebuild.is_none());
+            let said = o.problem.clone().expect("and says what did not work");
+            assert!(said.contains("refused for the test"), "{said}");
+        }
+        // Tried again at the next open, and done once it can be.
+        {
+            let c = db::open(&data.join(CATALOG_FILE), Storage::Local).unwrap();
+            c.execute_batch("DROP TRIGGER refuse").unwrap();
+        }
+        let o = open(&data, "dev-1", &root).unwrap();
+        assert!(o.problem.is_none() && o.rebuild.is_some());
     }
 
     /// PA-83 (owner 2026-11-16): a catalog made before a folder was bound to its client

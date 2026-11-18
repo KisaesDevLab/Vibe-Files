@@ -1220,6 +1220,112 @@ mod tests {
         assert!(e.contains("cannot be undone by itself"), "{e}");
     }
 
+    /// Owner 2026-11-18: after merges made on one PC, the cabinet did not open ("UNIQUE
+    /// constraint failed: client.ext_id"). Each PC has its own catalog: the other one still
+    /// has the client that went, alive under the ID the folder's client has now. Its index
+    /// (what Open cabinet runs) takes the cabinet as it is.
+    #[test]
+    fn another_pcs_catalog_takes_the_merges_made_here() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (root, mut conn) = cabinet(
+            tmp.path(),
+            &[
+                ("6 R Farms LLC", "6RFA1001"),
+                ("Baker Co", "3001"),
+                ("Baker Co.", "3002"),
+                ("Cole Trust", "5001"),
+                ("Cole Trust.", "5002"),
+            ],
+            &[],
+        );
+        let listed = Uuid::new_v4();
+        let mut list = clients::load(&root).unwrap().list.unwrap();
+        list.uuids.insert("7974_6RFA".into(), listed);
+        list.clients.push(Client {
+            id: "7974_6RFA".into(),
+            uuid: listed,
+            name: "6 R Farms, LLC".into(),
+            extra: BTreeMap::new(),
+        });
+        clients::save_list(&root, &list).unwrap();
+        crate::rebuild::sync_clients(&mut conn, &root, "dev", "clients_import").unwrap();
+        // The second PC's catalog, in line with the first.
+        let mut other = vf_core::db::open(&tmp.path().join("pc2.db"), Storage::Local).unwrap();
+        crate::rebuild::rebuild(&mut other, &root, "dev2").unwrap();
+        assert_eq!(live(&other), live(&conn));
+
+        let choices = [
+            // The kept client has no folder: the folder's client takes its ID.
+            Choice {
+                from: uuid_of(&conn, "6RFA1001"),
+                into: uuid_of(&conn, "7974_6RFA"),
+                new_id: None,
+            },
+            // Merged under the ID of the one that goes.
+            Choice {
+                from: uuid_of(&conn, "3002"),
+                into: uuid_of(&conn, "3001"),
+                new_id: Some("3002".into()),
+            },
+            // A plain merge.
+            Choice {
+                from: uuid_of(&conn, "5002"),
+                into: uuid_of(&conn, "5001"),
+                new_id: None,
+            },
+        ];
+        let out = merge_many(
+            &mut conn,
+            &root,
+            "dev",
+            &choices,
+            &AtomicUsize::new(0),
+            &AtomicBool::new(false),
+        );
+        let ran: Vec<Ran> = out
+            .iter()
+            .map(|(_, r)| match r {
+                Outcome::Merged(ran) => (**ran).clone(),
+                r => panic!("{r:?}"),
+            })
+            .collect();
+        assert_eq!(live(&conn), ["3002", "5001", "7974_6RFA"]);
+
+        let folders = |c: &Connection| -> Vec<(String, Option<String>)> {
+            let mut st = c
+                .prepare(
+                    "SELECT ext_id, folder_rel FROM client WHERE deleted_at IS NULL ORDER BY ext_id",
+                )
+                .unwrap();
+            st.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap()
+        };
+        // What Open cabinet runs, on the other PC and on this one.
+        crate::rebuild::sync_clients(&mut other, &root, "dev2", "clients_import")
+            .expect("the other PC's catalog takes the clients");
+        assert_eq!(folders(&other), folders(&conn));
+        crate::rebuild::index(&mut other, &root, "dev2").expect("the other PC opens");
+        assert_eq!(folders(&other), folders(&conn));
+        crate::rebuild::index(&mut conn, &root, "dev").expect("this PC opens");
+        assert_eq!(live(&conn), ["3002", "5001", "7974_6RFA"]);
+        // A catalog made new sees the same.
+        let mut fresh = vf_core::db::open(&tmp.path().join("pc3.db"), Storage::Local).unwrap();
+        crate::rebuild::index(&mut fresh, &root, "dev3").expect("a new catalog opens");
+        assert_eq!(folders(&fresh), folders(&conn));
+
+        // Put back here; the other PC takes that too.
+        let back = undo_many(&mut conn, &root, "dev", &ran);
+        assert!(back.iter().all(|(_, r)| r.is_ok()), "{back:?}");
+        let all = ["3001", "3002", "5001", "5002", "6RFA1001", "7974_6RFA"];
+        assert_eq!(live(&conn), all);
+        crate::rebuild::index(&mut other, &root, "dev2").expect("the other PC opens again");
+        assert_eq!(folders(&other), folders(&conn));
+        crate::rebuild::index(&mut conn, &root, "dev").expect("this PC opens again");
+        assert_eq!(live(&conn), all);
+    }
+
     /// Owner 2026-11-17: an ID neither has can be typed; the two are merged and the one
     /// that stays is given it, its folder renamed. The undo gives each its own again.
     #[test]

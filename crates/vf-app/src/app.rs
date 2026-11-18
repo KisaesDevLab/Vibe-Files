@@ -463,6 +463,9 @@ impl VibeFilesApp {
                         "Your own inbox from firm.toml (my_inbox) is not used: {e}"
                     ));
                 }
+                if let Some(e) = &opened.problem {
+                    browse.error = Some(e.clone());
+                }
                 browse.notice = opened.rebuild.as_ref().map(|r| match &opened.set_aside {
                     Some(old) => format!(
                         "The catalog is no longer encrypted: the old one was kept as {} and the cabinet indexed again. {r}",
