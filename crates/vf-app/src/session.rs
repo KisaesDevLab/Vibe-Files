@@ -566,17 +566,20 @@ pub(crate) mod tests {
             Some("01 Anderson")
         );
 
+        // Code review: an open that never got to read the folders (closed first) left the
+        // scan marked as handled, and the folders were not read again until Intake's next scan.
+        let o = open_staged(&pc2, "dev-2", &root).unwrap();
+        assert!(o.folders_behind);
+        drop(o);
         let mut o = open_staged(&pc2, "dev-2", &root).unwrap();
         assert!(o.staged.is_none(), "no index of the whole cabinet");
-        assert!(o.folders_behind);
+        assert!(o.folders_behind, "looked at again: they were never read");
         assert_eq!(
             vf_fs::rebuild::folders_behind(&o.conn, &root),
             ["01 Anderson"]
         );
-        assert_eq!(
-            vf_fs::rebuild::take_folders_behind(&mut o.conn, &root, "dev-2").unwrap(),
-            1
-        );
+        let taken = vf_fs::rebuild::take_folders_behind(&mut o.conn, &root, "dev-2").unwrap();
+        assert_eq!(taken.docs_new, 1, "its document, from the listing");
         assert_eq!(vf_fs::rebuild::unfinished_label(&o.conn), None);
         let (folder_rel, docs): (String, i64) = o
             .conn
@@ -589,11 +592,54 @@ pub(crate) mod tests {
             )
             .unwrap();
         assert_eq!((folder_rel.as_str(), docs), ("01 Anderson", 1));
+        // From the listing: the cabinet's existing files, not files put there outside Vibe Files.
+        let (doc_id, filed_by): (String, String) = o
+            .conn
+            .query_row(
+                "SELECT id, filed_by FROM document WHERE rel_path = '01 Anderson/letter.pdf'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(filed_by, vf_fs::rebuild::FILED_BY_IMPORT);
         drop(o);
         // In line now: nothing to read at the next open, nor after another scan of the root.
         assert!(!open_staged(&pc2, "dev-2", &root).unwrap().folders_behind);
         index("2026-11-16T11:07:00Z");
         assert!(!open_staged(&pc2, "dev-2", &root).unwrap().folders_behind);
+
+        // Code review: a folder renamed on another PC, its ID kept, was never noticed.
+        let renamed = root.join("02 Anderson Farms");
+        std::fs::rename(&folder, &renamed).unwrap();
+        let f = serde_json::json!({
+            "root": root, "scanned_at": "2026-11-16T12:00:00Z",
+            "folders": [{ "path": renamed, "client_id": "1042", "status": "bound" }],
+        });
+        std::fs::write(root.join("_Vibe/folders.json"), f.to_string()).unwrap();
+        let mut o = open_staged(&pc2, "dev-2", &root).unwrap();
+        assert!(o.folders_behind, "a rename that keeps the ID is behind");
+        vf_fs::rebuild::take_folders_behind(&mut o.conn, &root, "dev-2").unwrap();
+        let (rel, same_id): (String, i64) = o
+            .conn
+            .query_row(
+                "SELECT c.folder_rel, (SELECT count(*) FROM document d WHERE d.id = ?1 AND d.deleted_at IS NULL
+                                        AND d.rel_path = '02 Anderson Farms/letter.pdf')
+                 FROM client c WHERE c.ext_id = '1042'",
+                [&doc_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            (rel.as_str(), same_id),
+            ("02 Anderson Farms", 1),
+            "the same document, at the new name"
+        );
+        drop(o);
+        std::fs::rename(&renamed, &folder).unwrap();
+        index("2026-11-16T13:00:00Z");
+        let mut o = open_staged(&pc2, "dev-2", &root).unwrap();
+        vf_fs::rebuild::take_folders_behind(&mut o.conn, &root, "dev-2").unwrap();
+        drop(o);
 
         // Owner 2026-11-17: a folder Intake's index binds that no index can take (here: its
         // own client file names another client) is indexed for once, not after every scan.

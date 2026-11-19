@@ -1449,10 +1449,7 @@ mod tests {
             ],
             "the folders that changed, and neither untouched one"
         );
-        assert_eq!(
-            crate::rebuild::take_folders_behind(&mut other, &root, "dev2").unwrap(),
-            behind.len()
-        );
+        crate::rebuild::take_folders_behind(&mut other, &root, "dev2").unwrap();
         assert_eq!(crate::rebuild::unfinished_label(&other), None);
         assert_eq!(rows(&other), rows(&conn));
         // The folder that was merged into kept its name and its ID: the file it gained is

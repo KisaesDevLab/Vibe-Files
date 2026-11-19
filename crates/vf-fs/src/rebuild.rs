@@ -17,6 +17,10 @@ use crate::cabinet::{self, VersionSidecar};
 /// `local_state` key present while a whole-cabinet rebuild has not finished (its value: the
 /// `filed_by` it files new documents with). See [`unfinished`].
 const UNFINISHED: &str = "rebuild_unfinished";
+/// `local_state`: the scan of Intake's folder index ([`behind_folder_index`]) last brought in.
+const INDEXED_FOR_SCAN: &str = "indexed_for_scan";
+/// `local_state`: the folders that scan bound and an index could not take, as `ID|folder` lines.
+const INDEXED_FOR_MISSING: &str = "indexed_for_missing";
 
 /// Whether a whole-cabinet rebuild was cut short (closed, crashed) and should run again.
 pub fn unfinished(conn: &Connection) -> bool {
@@ -582,10 +586,15 @@ pub(crate) fn scan_folders(
 /// again read and fingerprinted the sentinel of every client folder in the cabinet, some
 /// 16,000 small reads on a share). The clients outside `only` are taken as the catalog has
 /// them; only the folders named are looked at on disk.
+/// `drop_gone`: a folder in scope that is seen to be gone is not listed, so its documents are
+/// taken out ([`index_folders`], for folders merged or renamed on another PC). Otherwise (Browse
+/// re-reading a folder, a folder import) it is listed and counts as one that could not be read,
+/// and its documents stay: a folder can be gone for a moment while another PC renames it.
 fn scan_scoped(
     conn: &Connection,
     root: &Path,
     only: &[String],
+    drop_gone: bool,
     rep: &mut RebuildReport,
 ) -> Result<Scan, RebuildError> {
     type Row = (String, String, String, String, Option<String>);
@@ -614,6 +623,9 @@ fn scan_scoped(
     let mut folders: Vec<(PathBuf, Option<String>)> = Vec::new();
     let mut looked: HashSet<String> = HashSet::new();
     let mut fresh: HashSet<String> = HashSet::new();
+    // Whether the cabinet answers, asked once (the share read and parsed for the first folder
+    // seen gone, not for each).
+    let mut cabinet_answers: Option<bool> = None;
     for (id, ext_id, name, folder_rel, hash) in rows {
         let in_scope = named(&folder_rel);
         if !(hash.is_some() && !in_scope) {
@@ -650,11 +662,13 @@ fn scan_scoped(
         if in_scope {
             looked.insert(folder_rel.to_lowercase());
             // A folder seen to be gone (merged into another, renamed on another PC) is not
-            // listed: listed, it counted as one that could not be read, and its documents
-            // stayed documents at paths that are not there. Only while the cabinet answers.
-            let gone = client_id.is_none()
+            // listed on the listing path: listed, it counted as one that could not be read,
+            // and its documents stayed documents at paths that are not there. Only while the
+            // cabinet answers.
+            let gone = drop_gone
+                && client_id.is_none()
                 && matches!(folder.try_exists(), Ok(false))
-                && crate::cabinet::read(root).is_ok();
+                && *cabinet_answers.get_or_insert_with(|| crate::cabinet::read(root).is_ok());
             if !gone {
                 folders.push((folder, client_id));
             }
@@ -1225,20 +1239,18 @@ pub fn index(
 }
 
 /// Whether the catalog has no document at all.
-fn mark_is_all(conn: &Connection) -> bool {
-    conn.query_row("SELECT NOT EXISTS (SELECT 1 FROM document)", [], |r| {
-        r.get(0)
-    })
-    .unwrap_or(true)
+fn catalog_is_empty(conn: &Connection) -> Result<bool, RebuildError> {
+    Ok(
+        conn.query_row("SELECT NOT EXISTS (SELECT 1 FROM document)", [], |r| {
+            r.get(0)
+        })?,
+    )
 }
 
 /// A catalog with no documents, about to be made from the listing: what Intake filed before
 /// now is cataloged by it, not recorded batch by batch (`intake::mark_cataloged`).
 fn mark_fresh(conn: &Connection) -> Result<(), RebuildError> {
-    let empty: bool = conn.query_row("SELECT NOT EXISTS (SELECT 1 FROM document)", [], |r| {
-        r.get(0)
-    })?;
-    if empty {
+    if catalog_is_empty(conn)? {
         crate::intake::mark_cataloged(conn)?;
     }
     Ok(())
@@ -1281,75 +1293,97 @@ pub fn bound_folder_of(root: &Path, ext_id: &str) -> Option<String> {
         })
 }
 
-/// Whether the catalog is behind Intake's folder index (PA-83, owner 2026-11-16: folders
-/// bound to clients in Intake's Setup after the catalog was made stayed unknown to it for
-/// good, every client at 0 documents): a folder the index has bound to a client the catalog
-/// has no folder for. Asked once for each scan of the root, so an index that cannot bring
-/// the two in line does not run at every open.
-pub fn behind_folder_index(conn: &Connection, root: &Path) -> bool {
-    const KEY: &str = "indexed_for_scan";
-    let Some((scanned_at, bound)) = folder_index(root) else {
-        return false;
-    };
-    let seen: Option<String> = conn
-        .query_row("SELECT v FROM local_state WHERE k = ?1", [KEY], |r| {
-            r.get(0)
-        })
-        .ok();
-    if seen.as_deref() == Some(scanned_at.as_str()) {
-        return false;
-    }
-    let have: HashSet<String> = conn
+/// What Intake's folder index has that the catalog does not, as sorted `ID|folder` lines
+/// (folder in lower case): a folder bound to a client the catalog has no folder for; a folder
+/// bound to a client the catalog has under another name that is gone (renamed or merged on
+/// another PC, the ID kept); and a client of the catalog that the index no longer binds and
+/// whose folder is gone (merged away into another ID), as `ID|folder|gone`. Reads the share
+/// only for those: none at all once the two are in line. With the scan's time.
+fn folder_index_gap(conn: &Connection, root: &Path) -> Option<(String, Vec<String>)> {
+    let (scanned_at, bound) = folder_index(root)?;
+    // ID in capitals → folder, for the clients the catalog has a folder for.
+    let have: HashMap<String, String> = conn
         .prepare(
-            "SELECT upper(ext_id) FROM client
+            "SELECT upper(ext_id), folder_rel FROM client
              WHERE deleted_at IS NULL AND coalesce(folder_rel, '') <> ''",
         )
         .and_then(|mut st| {
-            st.query_map([], |r| r.get::<_, String>(0))?
+            st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
                 .collect::<Result<_, _>>()
         })
         .unwrap_or_default();
-    // (The folder's client file is asked for only for a folder the catalog has none for:
-    // none at all once the two are in line.)
-    let mut missing: Vec<String> = bound
-        .iter()
-        .filter(|(id, name)| {
-            !have.contains(&id.to_uppercase())
-                && sentinel::sentinel_path(&root.join(name)).is_file()
-        })
-        .map(|(id, name)| format!("{}|{}", id.to_uppercase(), name.to_lowercase()))
-        .collect();
-    missing.sort();
-    let missing = missing.join("\n");
+    let mut gap: Vec<String> = Vec::new();
+    for (id, name) in &bound {
+        let up = id.to_uppercase();
+        match have.get(&up) {
+            // The same folder: in line.
+            Some(f) if f.eq_ignore_ascii_case(name) => continue,
+            // Another name for the same ID: a rename, once the old name is gone.
+            Some(f) if root.join(f).is_dir() => continue,
+            _ => {}
+        }
+        if sentinel::sentinel_path(&root.join(name)).is_file() {
+            gap.push(format!("{up}|{}", name.to_lowercase()));
+        }
+    }
+    let bound_ids: HashSet<String> = bound.iter().map(|(id, _)| id.to_uppercase()).collect();
+    for (id, f) in &have {
+        if !bound_ids.contains(id) && !root.join(f).is_dir() {
+            gap.push(format!("{id}|{}|gone", f.to_lowercase()));
+        }
+    }
+    gap.sort();
+    Some((scanned_at, gap))
+}
+
+fn set_state(conn: &Connection, k: &str, v: &str) {
+    let _ = conn.execute(
+        "INSERT INTO local_state (k, v) VALUES (?1, ?2) ON CONFLICT(k) DO UPDATE SET v = excluded.v",
+        [k, v],
+    );
+}
+
+fn get_state(conn: &Connection, k: &str) -> Option<String> {
+    conn.query_row("SELECT v FROM local_state WHERE k = ?1", [k], |r| r.get(0))
+        .ok()
+}
+
+/// Whether the catalog is behind Intake's folder index (PA-83, owner 2026-11-16: folders
+/// bound to clients in Intake's Setup after the catalog was made stayed unknown to it for
+/// good, every client at 0 documents), by [`folder_index_gap`]. Asked once for each scan of
+/// the root, so an index that cannot bring the two in line does not run at every open.
+///
+/// Nothing is marked when it is behind: [`take_folders_behind`] marks the scan once the
+/// folders have been read, so an open that never got to read them (the app closed first, the
+/// job did not start) looks again at the next.
+pub fn behind_folder_index(conn: &Connection, root: &Path) -> bool {
+    let Some((scanned_at, gap)) = folder_index_gap(conn, root) else {
+        return false;
+    };
+    if get_state(conn, INDEXED_FOR_SCAN).as_deref() == Some(scanned_at.as_str()) {
+        return false;
+    }
+    let gap = gap.join("\n");
     // The same folders an index was already made for and could not take (owner 2026-11-17:
     // the whole cabinet was listed again every morning, after each new scan by Intake, for
     // folders no index brings in): not again until the list of them changes.
-    const TRIED: &str = "indexed_for_missing";
-    let tried: Option<String> = conn
-        .query_row("SELECT v FROM local_state WHERE k = ?1", [TRIED], |r| {
-            r.get(0)
-        })
-        .ok();
-    let behind = !missing.is_empty() && tried.as_deref() != Some(missing.as_str());
-    let set = |k: &str, v: &str| {
-        let _ = conn.execute(
-            "INSERT INTO local_state (k, v) VALUES (?1, ?2) ON CONFLICT(k) DO UPDATE SET v = excluded.v",
-            [k, v],
-        );
-    };
-    set(KEY, scanned_at.as_str());
-    if behind || missing.is_empty() {
-        set(TRIED, missing.as_str());
+    let behind =
+        !gap.is_empty() && get_state(conn, INDEXED_FOR_MISSING).as_deref() != Some(gap.as_str());
+    if !behind {
+        set_state(conn, INDEXED_FOR_SCAN, &scanned_at);
+        if gap.is_empty() {
+            set_state(conn, INDEXED_FOR_MISSING, "");
+        }
     }
     behind
 }
 
 /// The client folders to read again for a catalog that is behind Intake's folder index
 /// ([`behind_folder_index`]), by their names in the cabinet: each folder the index binds to a
-/// client the catalog has no folder for; the folder the catalog has for that same client
-/// under another name (it was renamed: a merge, an ID or a name changed on another PC); and
-/// the folders of clients that the cabinet no longer has at all. Reads the share: the client
-/// file of each folder not taken yet, and one listing of the cabinet's top folder.
+/// client the catalog has no folder for, or has under another name; the folder the catalog has
+/// for that same client under another name (renamed: a merge, an ID or a name changed on
+/// another PC); and the folders of clients the cabinet no longer has at all. Reads the share:
+/// the client file of each folder not taken yet, and one listing of the cabinet's top folder.
 pub fn folders_behind(conn: &Connection, root: &Path) -> Vec<String> {
     let Some((_, bound)) = folder_index(root) else {
         return vec![];
@@ -1365,10 +1399,14 @@ pub fn folders_behind(conn: &Connection, root: &Path) -> Vec<String> {
                 .collect::<Result<_, _>>()
         })
         .unwrap_or_default();
-    let have: HashSet<&str> = known.iter().map(|(_, ext, _)| ext.as_str()).collect();
     let mut out: Vec<String> = vec![];
     for (id, name) in &bound {
-        if have.contains(id.to_uppercase().as_str()) {
+        let up = id.to_uppercase();
+        // In line: the catalog has this ID at this folder.
+        if known
+            .iter()
+            .any(|(_, ext, f)| *ext == up && f.eq_ignore_ascii_case(name))
+        {
             continue;
         }
         let Ok(Some(s)) = sentinel::read_sentinel(&root.join(name)) else {
@@ -1376,16 +1414,16 @@ pub fn folders_behind(conn: &Connection, root: &Path) -> Vec<String> {
         };
         out.push(name.clone());
         let uuid = s.client_id.to_string();
+        // The folder the catalog has for this client (by uuid, or by the ID it keeps) under
+        // another name.
         out.extend(
             known
                 .iter()
-                .filter(|(u, _, f)| *u == uuid && !f.eq_ignore_ascii_case(name))
+                .filter(|(u, ext, f)| (*u == uuid || *ext == up) && !f.eq_ignore_ascii_case(name))
                 .map(|(_, _, f)| f.clone()),
         );
     }
-    if out.is_empty() {
-        return out;
-    }
+    // Clients the cabinet no longer has a folder for (merged away, removed on another PC).
     if let Ok(rd) = std::fs::read_dir(root) {
         let there: HashSet<String> = rd
             .flatten()
@@ -1406,41 +1444,69 @@ pub fn folders_behind(conn: &Connection, root: &Path) -> Vec<String> {
     out
 }
 
-/// Brings a catalog that is behind Intake's folder index in line by reading the folders of
-/// [`folders_behind`] again, and no others (owner 2026-11-18: the whole cabinet was listed
-/// for it, 8,000 client folders for the few that changed). Returns how many were read.
+/// Brings a catalog that is behind Intake's folder index in line by indexing the folders of
+/// [`folders_behind`] from their listing, and no others (owner 2026-11-18: the whole cabinet
+/// was listed for it, 8,000 client folders for the few that changed). As a first index, no
+/// file is read (PA-60) and what is found is the cabinet's existing files. Once read, the scan
+/// is marked done, with what it still could not take.
 pub fn take_folders_behind(
     conn: &mut Connection,
     root: &Path,
     device_id: &str,
-) -> Result<usize, RebuildError> {
+) -> Result<RebuildReport, RebuildError> {
     let folders = folders_behind(conn, root);
-    if folders.is_empty() {
-        return Ok(0);
+    let rep = if folders.is_empty() {
+        RebuildReport::default()
+    } else {
+        index_folders(conn, root, device_id, &folders)?
+    };
+    if let Some((scanned_at, gap)) = folder_index_gap(conn, root) {
+        set_state(conn, INDEXED_FOR_SCAN, &scanned_at);
+        set_state(conn, INDEXED_FOR_MISSING, &gap.join("\n"));
     }
-    reread_folders(conn, root, device_id, &folders)?;
-    Ok(folders.len())
+    Ok(rep)
 }
 
-/// Forgets what [`behind_folder_index`] last looked at, so the next open looks again (the
-/// folders could not be read just now).
+/// [`index`] of only these top-level folders: their documents cataloged from the listing (no
+/// file read), as the cabinet's existing files; a folder seen to be gone has its documents
+/// taken out. Under the index lock, as [`index_part`].
+pub fn index_folders(
+    conn: &mut Connection,
+    root: &Path,
+    device_id: &str,
+    folders: &[String],
+) -> Result<RebuildReport, RebuildError> {
+    let _one_at_a_time = IndexLock::take(root);
+    rebuild_scoped(
+        conn,
+        root,
+        device_id,
+        Some(folders),
+        Some(FILED_BY_IMPORT),
+        true,
+        None,
+    )
+}
+
+/// Forgets what [`behind_folder_index`] last looked at, so the next open looks again.
 pub fn look_again_at_folder_index(conn: &Connection) {
     let _ = conn.execute(
-        "DELETE FROM local_state WHERE k IN ('indexed_for_scan', 'indexed_for_missing')",
-        [],
+        "DELETE FROM local_state WHERE k IN (?1, ?2)",
+        [INDEXED_FOR_SCAN, INDEXED_FOR_MISSING],
     );
 }
 
-/// The folders Intake's folder index binds to a client that the catalog has no folder for,
-/// as `ID|folder` lines: what [`behind_folder_index`] last indexed for. For the log.
+/// What Intake's folder index has that the catalog could not take at the last look, as
+/// `ID|folder` lines ([`folder_index_gap`]). For the log (how many, not which).
 pub fn folders_not_taken(conn: &Connection) -> Vec<String> {
-    conn.query_row(
-        "SELECT v FROM local_state WHERE k = 'indexed_for_missing'",
-        [],
-        |r| r.get::<_, String>(0),
-    )
-    .map(|v| v.lines().map(str::to_string).collect())
-    .unwrap_or_default()
+    get_state(conn, INDEXED_FOR_MISSING)
+        .map(|v| {
+            v.lines()
+                .filter(|l| !l.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// A client folder's sentinel, read again a few times when the read itself fails (the share
@@ -1508,7 +1574,6 @@ pub fn index_start(
     let mut rep = RebuildReport::default();
     let scan = scan_folders(root, &mut rep)?;
     mark_fresh(conn)?;
-    let was_unfinished = unfinished_label(conn).is_some();
     conn.execute(
         "INSERT INTO local_state (k, v) VALUES (?1, ?2) ON CONFLICT(k) DO UPDATE SET v = excluded.v",
         [UNFINISHED, FILED_BY_IMPORT],
@@ -1538,7 +1603,9 @@ pub fn index_start(
         pending,
         folders,
     };
-    let started = rebuild_scoped(
+    // (Run only for a catalog with no documents, or one an index already left unfinished: the
+    // mark above changes nothing a failure here would need to undo.)
+    rebuild_scoped(
         conn,
         root,
         device_id,
@@ -1546,17 +1613,7 @@ pub fn index_start(
         None,
         true,
         Some((&staged, true)),
-    );
-    if let Err(e) = started {
-        // Nothing was written: a catalog that was whole is not marked as half indexed (each
-        // open that failed so had the next one list the whole cabinet, owner 2026-11-18).
-        // One with no documents yet stays marked: it is not whole.
-        let empty = mark_is_all(conn);
-        if !was_unfinished && !empty {
-            let _ = conn.execute("DELETE FROM local_state WHERE k = ?1", [UNFINISHED]);
-        }
-        return Err(e);
-    }
+    )?;
     Ok(staged)
 }
 
@@ -1839,7 +1896,7 @@ fn rebuild_scoped(
         Some((st, _)) => (&st.scan.0, st.scan.1.clone()),
         None => {
             scanned = match only {
-                Some(o) => scan_scoped(conn, root, o, &mut rep)?,
+                Some(o) => scan_scoped(conn, root, o, listing, &mut rep)?,
                 None => scan_folders(root, &mut rep)?,
             };
             (&scanned.0, scanned.1.clone())
@@ -3897,32 +3954,6 @@ mod tests {
         assert_eq!(snap.partners(), ["JD", "KW"]);
     }
 
-    /// Owner 2026-11-18: an index that could not be started left a whole catalog marked as
-    /// half indexed, and the next open listed the whole cabinet.
-    #[test]
-    fn an_index_that_cannot_start_leaves_a_whole_catalog_unmarked() {
-        let c = cab();
-        let mut conn = open(&c);
-        rebuild(&mut conn, &c.root, "dev-1").unwrap();
-        conn.execute_batch(
-            "CREATE TRIGGER refuse BEFORE INSERT ON undo_record
-             BEGIN SELECT RAISE(ABORT, 'refused for the test'); END;",
-        )
-        .unwrap();
-        assert!(index_start(&mut conn, &c.root, "dev-1").is_err());
-        assert_eq!(unfinished_label(&conn), None);
-        // A catalog with nothing in it stays marked: it is not whole.
-        let mut empty = vf_core::db::open(&c.data.join("empty.db"), Storage::Local).unwrap();
-        empty
-            .execute_batch(
-                "CREATE TRIGGER refuse BEFORE INSERT ON undo_record
-                 BEGIN SELECT RAISE(ABORT, 'refused for the test'); END;",
-            )
-            .unwrap();
-        assert!(index_start(&mut empty, &c.root, "dev-2").is_err());
-        assert!(unfinished_label(&empty).is_some());
-    }
-
     /// The folder's client file with another ID, as a change made on another PC leaves it.
     fn say_id(root: &Path, folder: &str, ext: &str) {
         let f = root.join(folder);
@@ -4284,6 +4315,36 @@ mod tests {
             reread_folders(&mut conn, &c.root, "dev", &["Smith, John (1001)".into()]).unwrap();
         assert_eq!(rep.held_missing, 1, "{rep}");
         assert_eq!(id_of(&conn, "Smith%ein letter.pdf"), Some(ein));
+    }
+
+    /// Code review: Browse re-reading a folder that is gone for a moment (another PC renaming
+    /// it) keeps its documents; only an index of folders behind Intake's list takes them out.
+    #[test]
+    fn a_folder_gone_for_a_moment_keeps_its_documents_on_a_reread() {
+        let c = cab();
+        let mut conn = open(&c);
+        rebuild(&mut conn, &c.root, "dev").unwrap();
+        let id_of = |conn: &Connection, like: &str| -> Option<String> {
+            conn.query_row(
+                "SELECT id FROM document WHERE rel_path LIKE ?1 AND deleted_at IS NULL",
+                [like],
+                |r| r.get(0),
+            )
+            .ok()
+        };
+        let before = id_of(&conn, "Smith%ein letter.pdf").unwrap();
+        let away = c.root.join("Smith renaming");
+        std::fs::rename(c.root.join("Smith, John (1001)"), &away).unwrap();
+        reread_folders(&mut conn, &c.root, "dev", &["Smith, John (1001)".into()]).unwrap();
+        assert_eq!(
+            id_of(&conn, "Smith%ein letter.pdf"),
+            Some(before.clone()),
+            "kept"
+        );
+        // The index of folders behind takes a folder that is gone out.
+        index_folders(&mut conn, &c.root, "dev", &["Smith, John (1001)".into()]).unwrap();
+        assert!(id_of(&conn, "Smith%ein letter.pdf").is_none(), "taken out");
+        std::fs::rename(&away, c.root.join("Smith, John (1001)")).unwrap();
     }
 
     /// Code review (PA-36): a scoped re-index takes a document's own docmeta record only; a

@@ -1670,13 +1670,21 @@ fn ready(
     };
     let root = root.to_path_buf();
     let before = conn.total_changes();
-    // Client folders Intake's folder index has and this catalog has not (PA-83): read now,
-    // those and no others. Not read: looked at again at the next open.
+    // Client folders Intake's folder index has and this catalog has not (PA-83): indexed now
+    // from their listing, those and no others. Not done (an error, or the app closed first):
+    // the scan is not marked, so the next open looks again.
     if folders_behind {
         match patient(|| {
             vf_fs::rebuild::take_folders_behind(conn, &root, device_id).map_err(|e| e.to_string())
         }) {
-            Ok(n) => tracing::info!(folders = n, "client folders behind Intake's list read"),
+            Ok(r) => tracing::info!(
+                clients = r.clients,
+                docs_new = r.docs_new,
+                docs_tombstoned = r.docs_tombstoned,
+                unread = r.unreadable.len(),
+                not_taken = vf_fs::rebuild::folders_not_taken(conn).len(),
+                "client folders behind Intake's list indexed"
+            ),
             Err(e) => {
                 tracing::warn!(
                     kind = crate::logging::kind(&e),
