@@ -329,12 +329,16 @@ fn open_how(data: &Path, device_id: &str, root: &Path, behind: bool) -> Result<O
     // Or a catalog that is behind Intake's folder index (PA-83): folders bound to clients
     // after it was made. Those folders are read behind the window, and no others (owner
     // 2026-11-18: the whole cabinet was listed for them).
-    let stale =
-        behind && known > 0 && label.is_none() && vf_fs::rebuild::behind_folder_index(&conn, root);
-    if stale {
+    let behind_by = if behind && known > 0 && label.is_none() {
+        vf_fs::rebuild::behind_folder_index(&conn, root)
+    } else {
+        None
+    };
+    let stale = behind_by.is_some();
+    if let Some(folders) = behind_by {
         // How many, not which (folder names are client names: not for the log).
         tracing::info!(
-            folders = vf_fs::rebuild::folders_not_taken(&conn).len(),
+            folders,
             "the catalog is behind Intake's folder index: reading those folders"
         );
     }
@@ -349,10 +353,10 @@ fn open_how(data: &Path, device_id: &str, root: &Path, behind: bool) -> Result<O
     };
     // Kept with the catalog: Admin › Devices says when and why the last index started.
     if let Some(why) = &why {
-        let _ = conn.execute(
-            "INSERT INTO local_state (k, v) VALUES ('index_started', ?1)
-             ON CONFLICT(k) DO UPDATE SET v = excluded.v",
-            [format!("{}|{why}", vf_core::now_rfc3339())],
+        let _ = vf_fs::rebuild::set_state(
+            &conn,
+            "index_started",
+            &format!("{}|{why}", vf_core::now_rfc3339()),
         );
     }
     let in_parts = behind && (known == 0 || label.is_some());

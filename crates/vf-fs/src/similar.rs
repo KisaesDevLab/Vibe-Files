@@ -1378,7 +1378,7 @@ mod tests {
             std::fs::write(root.join("_Vibe/folders.json"), f.to_string()).unwrap();
         };
         scan(&conn, "2026-11-17T08:00:00Z");
-        assert!(!crate::rebuild::behind_folder_index(&other, &root));
+        assert!(crate::rebuild::behind_folder_index(&other, &root).is_none());
 
         let choices = [
             Choice {
@@ -1435,8 +1435,10 @@ mod tests {
                 .collect::<Result<_, _>>()
                 .unwrap()
         };
-        assert!(crate::rebuild::behind_folder_index(&other, &root));
+        let behind_by = crate::rebuild::behind_folder_index(&other, &root);
         let behind = crate::rebuild::folders_behind(&other, &root);
+        // Code review: the log counted what an earlier take left, not what is to be read.
+        assert_eq!(behind_by, Some(behind.len()));
         assert_eq!(
             behind,
             [
@@ -1449,7 +1451,13 @@ mod tests {
             ],
             "the folders that changed, and neither untouched one"
         );
-        crate::rebuild::take_folders_behind(&mut other, &root, "dev2").unwrap();
+        let taken = crate::rebuild::take_folders_behind(&mut other, &root, "dev2").unwrap();
+        // Code review: the folders merged away were reported as folders with no client file.
+        assert!(
+            taken.unbound_folders.is_empty(),
+            "{:?}",
+            taken.unbound_folders
+        );
         assert_eq!(crate::rebuild::unfinished_label(&other), None);
         assert_eq!(rows(&other), rows(&conn));
         // The folder that was merged into kept its name and its ID: the file it gained is
@@ -1467,7 +1475,32 @@ mod tests {
         // In line: nothing more to read, now or after Intake's next scan.
         assert!(crate::rebuild::folders_behind(&other, &root).is_empty());
         scan(&conn, "2026-11-19T08:00:00Z");
-        assert!(!crate::rebuild::behind_folder_index(&other, &root));
+        assert!(crate::rebuild::behind_folder_index(&other, &root).is_none());
+
+        // Code review: Intake binds an ID to another folder while the catalog has that ID at
+        // a folder that is still there. The gap called it in line and the folders read did
+        // not; both call it in line now.
+        let kept = root.join("Cole Trust (5001)");
+        let copy = root.join("Cole Trust copy (5001)");
+        std::fs::create_dir_all(
+            filer_intake::sentinel::sentinel_path(&copy)
+                .parent()
+                .unwrap(),
+        )
+        .unwrap();
+        std::fs::copy(
+            filer_intake::sentinel::sentinel_path(&kept),
+            filer_intake::sentinel::sentinel_path(&copy),
+        )
+        .unwrap();
+        scan(&conn, "2026-11-20T08:00:00Z");
+        let index = root.join("_Vibe/folders.json");
+        let text = std::fs::read_to_string(&index)
+            .unwrap()
+            .replace("Cole Trust (5001)", "Cole Trust copy (5001)");
+        std::fs::write(&index, text).unwrap();
+        assert!(crate::rebuild::folders_behind(&other, &root).is_empty());
+        assert!(crate::rebuild::behind_folder_index(&other, &root).is_none());
     }
 
     /// Owner 2026-11-17: an ID neither has can be typed; the two are merged and the one

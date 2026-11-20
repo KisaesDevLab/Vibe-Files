@@ -1685,13 +1685,12 @@ fn ready(
                 not_taken = vf_fs::rebuild::folders_not_taken(conn).len(),
                 "client folders behind Intake's list indexed"
             ),
-            Err(e) => {
-                tracing::warn!(
-                    kind = crate::logging::kind(&e),
-                    "client folders behind Intake's list not read"
-                );
-                vf_fs::rebuild::look_again_at_folder_index(conn);
-            }
+            // (Nothing was marked: the next open looks again, and what was already tried and
+            // could not be taken is still remembered.)
+            Err(e) => tracing::warn!(
+                kind = crate::logging::kind(&e),
+                "client folders behind Intake's list not read"
+            ),
         }
         lap("folders behind Intake's list");
     }
