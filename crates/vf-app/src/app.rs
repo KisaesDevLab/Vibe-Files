@@ -626,6 +626,9 @@ impl VibeFilesApp {
 /// seconds go to the cabinet's copy now. On a session host the catalog is gone by morning.
 impl Drop for OpenCabinet {
     fn drop(&mut self) {
+        // The whole cabinet's sync goes to another server at once, not after the lease lapses
+        // (PA-99).
+        crate::lease::release();
         let dir = self.opened.root.join("_Vibe").join("audit");
         if vf_core::audit::mirror_due(&self.opened.conn) {
             let _ = vf_core::audit::mirror_pending(&self.opened.conn, &dir);

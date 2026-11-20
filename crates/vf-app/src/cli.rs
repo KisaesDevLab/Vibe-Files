@@ -410,13 +410,18 @@ fn sync(
         }
         return Ok(0);
     }
+    // The sync lease taken for this run is given back however it ends (PA-99).
+    struct GiveBack;
+    impl Drop for GiveBack {
+        fn drop(&mut self) {
+            crate::lease::release();
+        }
+    }
+    let _give_back = GiveBack;
     let (mut opened, _one_at_a_time) = match ready_to_sync(data, catalog, cabinet)? {
         Ready::Go(o, lock) => (o, lock),
         Ready::NotMain(main) => {
-            writeln!(
-                out,
-                "not sent: B2 sync runs on {main} for this cabinet (Admin › Devices)"
-            )?;
+            writeln!(out, "not sent: B2 sync for this cabinet runs on {main} now")?;
             return Ok(NOT_MAIN);
         }
         Ready::Busy(why) => {
@@ -450,13 +455,17 @@ fn ready_to_sync(data: &Path, catalog: &Path, cabinet: &Path) -> Result<Ready> {
             catalog.display()
         );
     }
-    // B2 sync runs on the cabinet's main computer only (PA-36, PA-39).
-    if !crate::server::runs_here(cabinet) {
-        return Ok(Ready::NotMain(
+    // B2 sync runs on the cabinet's main computer (one PC, a cloud cabinet: PA-36, PA-39), or
+    // on several servers on whichever holds the sync lease, taken now if free (PA-99). Held
+    // for the run: the lease's own heartbeat keeps it while the push runs.
+    if !crate::lease::hold(cabinet, &cab.cabinet_id) {
+        return Ok(Ready::NotMain(if crate::lease::applies(cabinet) {
+            crate::lease::where_it_syncs(cabinet)
+        } else {
             crate::server::main_server(cabinet)
                 .map(|m| m.computer)
-                .unwrap_or_else(|| "a main PC not chosen yet".into()),
-        ));
+                .unwrap_or_else(|| "a main PC not chosen yet".into())
+        }));
     }
     // Another session of this computer syncing now: nothing opened (its push takes these
     // changes too).
@@ -482,7 +491,13 @@ fn exchange(
 ) -> Result<i32> {
     match cmd {
         SyncCmd::Push => {
-            let r = vf_sync::push::push(conn, cabinet, s, None)?;
+            let r = vf_sync::push::push_in(
+                conn,
+                cabinet,
+                s,
+                None,
+                &crate::ui::sync::whole_folder(cabinet),
+            )?;
             if r.skipped == 0 {
                 crate::lastpush::record(cabinet);
             }
@@ -494,7 +509,8 @@ fn exchange(
             Ok(0)
         }
         SyncCmd::Pull => {
-            let r = vf_sync::pull::pull(conn, cabinet, s)?;
+            let r =
+                vf_sync::pull::pull_in(conn, cabinet, s, &crate::ui::sync::whole_folder(cabinet))?;
             writeln!(
                 out,
                 "pulled: {} new, {} updated, {} moved, {} re-typed, {} deleted, {} conflicts · rev {}",

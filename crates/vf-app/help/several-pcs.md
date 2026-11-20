@@ -58,5 +58,5 @@ When Vibe Files runs from a network folder (for example `\\server\share\APPS\Vib
 - **Your settings stay on the server you are on**, in `%LOCALAPPDATA%\Vibe Files\data`. Nothing is kept in the network folder. The first time, the settings from the old data folder beside the program are copied over for its owner.
 - **Each server keeps one catalog for everyone who logs into it.** The first server indexes the cabinet once and leaves a copy in the cabinet's `_Vibe\catalog-seed` folder (refreshed weekly). The others start from that copy (made again when a server finishes an index) and only check sizes and dates.
 - **Changes reach the other servers.** A move, a rename, or a doc type or year set on one server shows on another when that client is opened there, or within 15 minutes.
-- **B2 sync runs on one server.** **Admin** › **Devices** › **Servers** shows which server it is, and **Run them on this server** moves the job (from the next start of Vibe Files). Any server can still push one client (**Push this client now**).
+- **B2 sync of the whole cabinet runs on one open server at a time**, and moves to another when it closes; **Admin** › **Devices** › **Servers** shows which. The preferred server chosen there keeps text recognition and the weekly check. Any server can push one client.
 

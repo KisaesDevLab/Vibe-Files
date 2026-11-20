@@ -11,6 +11,7 @@ mod datalock;
 mod help;
 mod indexer;
 mod lastpush;
+mod lease;
 mod logging;
 mod perf;
 mod portal;

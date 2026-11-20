@@ -155,7 +155,7 @@ pub fn send_lists(root: &Path, catalog: &Path, device: &str) -> ListReport {
         }
         let _ = std::fs::remove_file(old_bucket_mark(root));
     }
-    if !crate::server::runs_here(root) {
+    if !crate::lease::sync_here(root) {
         return ListReport::default();
     }
     let mut local = match read_lists(catalog, device) {

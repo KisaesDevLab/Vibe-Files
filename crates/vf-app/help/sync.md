@@ -26,7 +26,7 @@ The status grid shows **Status**, **Bucket**, **Last push**, **Last pull**, **Ma
 
 While a push runs, the page shows the documents and GB sent so far, about how long is left, and **Stop**. Stopping keeps what is already in B2; the next push goes on from there.
 
-On several servers the whole cabinet syncs on the main server only. Anyone with sync unlocked on another server can still push one client: **Push this client now** in Browse, or **Push** beside it here. Vibe Files first reads what the other servers changed, then sends that client as it is in the shared folder; other clients wait for the main server. (In a OneDrive or Dropbox cabinet, only the main PC syncs.)
+On several servers the whole cabinet syncs on one open server at a time; when it closes, another open server takes over. **Admin** › **Devices** shows which. From any other server, push one client: **Push this client now** in Browse, or **Push** beside it here. (In a OneDrive or Dropbox cabinet, only the main PC syncs.)
 
 ## Automatic push and pause
 
@@ -36,15 +36,15 @@ Under **Settings** (admin password needed), **Push automatically every (minutes,
 
 ## Pushing while Vibe Files is closed
 
-Automatic pushes happen only while Vibe Files is open. On several servers, or a cabinet in OneDrive or Dropbox, only the main computer pushes (**Admin** › **Devices**). The cabinet is not lost while that computer's Vibe Files is closed, but B2 falls behind. The startup check of every other computer says so when the cabinet was last sent over 24 hours ago.
+Automatic pushes happen only while Vibe Files is open. On several servers, the server that has the whole-cabinet sync pushes; while no server has Vibe Files open, B2 falls behind. In a cabinet in OneDrive or Dropbox, only the main PC pushes (**Admin** › **Devices**). Nothing is lost meanwhile, but the startup check of every other computer says so when the cabinet was last sent over 24 hours ago.
 
-To push with nobody signed in, use Windows Task Scheduler on the main computer:
+To push with nobody signed in, use Windows Task Scheduler on one computer (on several servers, any of them):
 
 1. Use a Windows login that does not keep Vibe Files open (a login of its own for the task is best). Sign in there as it, open Vibe Files, unlock sync with **Remember on this PC for my Windows login** ticked, and close it. A key kept in the cabinet also works.
 2. Create a task that runs as that login, **whether the user is logged on or not**, with its password stored, repeating every hour.
 3. Its action: `vibe-files.exe sync "<cabinet folder>" push`.
 
-The task first reads what the other computers changed, then pushes. It exits with 0 when it sent the changes (or another session was already syncing), 7 when Vibe Files is open for that login (nothing sent), 8 on a computer that is not the main one, and 1 on any other problem (no sync key for that login, the bucket unreachable); the reason is in the task's output and the log.
+The task first reads what the other computers changed, then pushes. It exits with 0 when it sent the changes (or another session was already syncing), 7 when Vibe Files is open for that login (nothing sent), 8 when the whole cabinet syncs on another computer just now, and 1 on any other problem (no sync key for that login, the bucket unreachable); the reason is in the task's output and the log.
 
 ## A large cabinet's first upload
 

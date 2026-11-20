@@ -77,6 +77,44 @@ pub fn take(root: &Path, name: &str) -> Result<Held, Busy> {
     take_at(&path, Some(WAIT), BEAT, STALE)
 }
 
+/// The lock `name` if nobody holds it now, or its holder stopped ([`STALE`] by the file
+/// server's clock), without waiting: a lock held for as long as its holder runs (PA-99's sync
+/// lease), rather than for one change.
+pub fn try_take(root: &Path, name: &str) -> Result<Held, Busy> {
+    let path = root
+        .join(cabinet::VIBE_DIR)
+        .join(format!("lock-{name}.lock"));
+    take_at(&path, Some(Duration::ZERO), BEAT, STALE)
+}
+
+/// Who holds the lock `name` now, as its file says ("login on COMPUTER"); `None` when nobody
+/// does or the file cannot be read just now.
+pub fn holder(root: &Path, name: &str) -> Option<String> {
+    let path = root
+        .join(cabinet::VIBE_DIR)
+        .join(format!("lock-{name}.lock"));
+    let t = std::fs::read_to_string(path).ok()?;
+    t.splitn(3, ' ')
+        .nth(2)
+        .map(|w| w.trim().to_string())
+        .filter(|w| !w.is_empty())
+}
+
+impl Held {
+    /// Whether the lock is still this holder's: not taken over after a stall longer than
+    /// [`STALE`]. A read that fails for a moment (the share) counts as still held.
+    pub fn still_held(&self) -> bool {
+        let Some((p, token)) = &self.held else {
+            return true;
+        };
+        match std::fs::read_to_string(p) {
+            Ok(t) if t.trim().is_empty() => true,
+            Ok(t) => t.starts_with(token.as_str()),
+            Err(e) => e.kind() != std::io::ErrorKind::NotFound,
+        }
+    }
+}
+
 /// Runs `change` holding the lock `name`; `what` names the thing in the message when someone
 /// else holds it ("the legal holds").
 pub fn with<T>(

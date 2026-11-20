@@ -128,6 +128,9 @@ pub fn run_with(
                 ),
                 // Named, and it has never sent the cabinet: nothing is going to B2, whatever
                 // this catalog's own state.
+                Some(m) if last_push.is_none() && m.computer.is_empty() => Err(
+                    "the whole cabinet has not been sent to B2 yet: it goes from the first server with Vibe Files open and sync unlocked".into(),
+                ),
                 Some(m) if last_push.is_none() => Err(format!(
                     "set to run on {}, which has not sent the cabinet to B2 yet (Admin › Devices › Servers)",
                     m.computer
@@ -155,6 +158,19 @@ fn main_elsewhere(
     root: &Path,
     one_main: bool,
 ) -> Option<(crate::server::MainServer, Option<Result<String, String>>)> {
+    // Several servers (PA-99): the whole cabinet goes from whichever server holds the sync
+    // lease, so every server but the holder is told how old the last whole push is.
+    if one_main && crate::lease::applies(root) {
+        let who = crate::lease::holder_computer(root).unwrap_or_default();
+        if who.eq_ignore_ascii_case(&crate::server::computer()) {
+            return None;
+        }
+        let main = crate::server::MainServer {
+            computer: who,
+            since: String::new(),
+        };
+        return Some((main, crate::lastpush::check(root)));
+    }
     let main = one_main
         .then(|| crate::server::main_server(root))
         .flatten()
@@ -209,7 +225,11 @@ fn sync_state(conn: &Connection, runs_on: Option<&str>) -> Result<String, String
     }
     let Some(last) = last else {
         if let Some(c) = runs_on {
-            return Ok(format!("runs on {c}"));
+            return Ok(if c.is_empty() {
+                "runs on the server holding the sync lease".into()
+            } else {
+                format!("runs on {c}")
+            });
         }
         // (Not "unlock it": this is said when sync is unlocked too, owner 2026-11-16.)
         return Err(

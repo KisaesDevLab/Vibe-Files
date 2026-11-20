@@ -237,6 +237,8 @@ pub struct SyncTab {
     /// The counts and this PC's last push and pull have been read once.
     counted: bool,
     last_auto: Option<Instant>,
+    /// When this server last tried for the sync lease (PA-99).
+    lease_tried: Option<Instant>,
     /// When the remembered key was last tried.
     recall_at: Option<Instant>,
     /// Locked by the person: no automatic unlock until they unlock again.
@@ -400,9 +402,14 @@ impl SyncTab {
             return;
         }
         self.error = None;
-        // Several servers (PA-36): the whole cabinet syncs on the main computer only. Any
-        // other computer may push one client (PA-41), bringing in that client's changes only.
-        let main_here = crate::server::runs_here(root);
+        // Several servers: the whole cabinet syncs on the server holding the sync lease
+        // (PA-99), taken now if it is free. Any other server may push one client (PA-41),
+        // bringing in that client's changes only.
+        let main_here = if matches!(op, Op::Push(None) | Op::Pull) {
+            crate::lease::hold(root, &s.cabinet_id)
+        } else {
+            crate::lease::sync_here(root)
+        };
         // A cloud cabinet: each PC has its own copy of the folder, synced late perhaps, so a
         // client is not pushed from one that is not the main PC.
         let cloud = !crate::server::server_mode() && crate::cloudmode::is_cloud(root);
@@ -423,10 +430,8 @@ impl SyncTab {
         }
         if matches!(op, Op::Push(None) | Op::Pull) && !main_here {
             self.error = Some(format!(
-                "The whole cabinet syncs on {} (Admin › Devices). From here, push one client: Push this client now in Browse, or Push beside it below.",
-                crate::server::main_server(root)
-                    .map(|m| m.computer)
-                    .unwrap_or_else(|| "another computer".into())
+                "The whole cabinet is syncing on {} now; it goes back to any open server when that one closes. From here, push one client: Push this client now in Browse, or Push beside it below.",
+                crate::lease::where_it_syncs(root)
             ));
             return;
         }
@@ -515,6 +520,34 @@ impl SyncTab {
         {
             self.refresh(ctx, env, catalog);
         }
+        // Several servers (PA-99): with sync unlocked and the cabinet listed, this server takes
+        // the sync lease when nobody holds it (tried every 30 s); locked, it gives it back.
+        if crate::lease::applies(env.root) {
+            match &self.session {
+                Some(s)
+                    if !self.hold
+                        && self
+                            .lease_tried
+                            .is_none_or(|t| t.elapsed() >= Duration::from_secs(30)) =>
+                {
+                    self.lease_tried = Some(Instant::now());
+                    // Files on the share: off the window's thread.
+                    let (root, id) = (env.root.to_path_buf(), s.cabinet_id.clone());
+                    std::thread::Builder::new()
+                        .name("sync-lease-take".into())
+                        .spawn(move || {
+                            crate::lease::hold(&root, &id);
+                        })
+                        .ok();
+                }
+                Some(_) => {}
+                None => {
+                    if self.lease_tried.take().is_some() {
+                        crate::lease::release();
+                    }
+                }
+            }
+        }
         if self.session.is_some() && self.last_auto.is_none() {
             // The first automatic push comes one interval after unlocking.
             self.last_auto = Some(Instant::now());
@@ -530,8 +563,8 @@ impl SyncTab {
         {
             self.last_auto = Some(Instant::now());
             let hour = chrono::Timelike::hour(&chrono::Local::now()) as u8;
-            // Several servers: only the main server pushes (PA-36).
-            if cfg.in_window(hour) && crate::server::runs_here(env.root) {
+            // Several servers: only the server holding the sync lease pushes (PA-99).
+            if cfg.in_window(hour) && crate::lease::sync_here(env.root) {
                 self.start(ctx, catalog, env.root, Op::Push(None));
             }
         }
@@ -998,7 +1031,7 @@ impl SyncTab {
 /// Pushes these documents to B2 now, on the calling thread (a portal share runs it first:
 /// owner 2026-11-13, Q-103). The same push as Browse's "Push the selected documents now".
 pub fn push_docs_now(catalog: &Path, root: &Path, s: &Sync, ids: &[String]) -> Result<(), String> {
-    let main_here = crate::server::runs_here(root);
+    let main_here = crate::lease::sync_here(root);
     let cloud = !crate::server::server_mode() && crate::cloudmode::is_cloud(root);
     if !main_here && cloud {
         return Err(format!(
@@ -1127,7 +1160,7 @@ fn run(catalog: &Path, root: &Path, s: &Sync, op: Op, alone: bool) -> Result<Don
                 let r = if alone {
                     vf_sync::push::push_client(&mut conn, root, s, c, &same_folder)
                 } else {
-                    vf_sync::push::push(&mut conn, root, s, Some(c))
+                    vf_sync::push::push_in(&mut conn, root, s, Some(c), &whole_folder(root))
                 }
                 .map_err(e)?;
                 total.objects += r.objects;
@@ -1180,7 +1213,9 @@ fn run(catalog: &Path, root: &Path, s: &Sync, op: Op, alone: bool) -> Result<Don
         Op::Push(only) => {
             let mut conn = caught_up(catalog, root, s, alone)?;
             begin_push(&conn, root, s, only.as_ref().map(std::slice::from_ref));
-            let r = vf_sync::push::push(&mut conn, root, s, only.as_deref()).map_err(e)?;
+            let r =
+                vf_sync::push::push_in(&mut conn, root, s, only.as_deref(), &whole_folder(root))
+                    .map_err(e)?;
             // The whole cabinet went up: every computer's startup check sees when (PA-40). Not
             // when files were left (unreadable now): those are not in B2 yet.
             if only.is_none() && r.skipped == 0 && !r.stopped {
@@ -1190,11 +1225,26 @@ fn run(catalog: &Path, root: &Path, s: &Sync, op: Op, alone: bool) -> Result<Don
         }
         Op::Pull => {
             let mut conn = caught_up(catalog, root, s, alone)?;
-            vf_sync::pull::pull(&mut conn, root, s)
+            vf_sync::pull::pull_in(&mut conn, root, s, &whole_folder(root))
                 .map(Done::Pull)
                 .map_err(e)
         }
     }
+}
+
+/// The servers working in this cabinet folder, for a whole push or pull (PA-99): on several
+/// servers, what one of them sent is taken as it is and nothing is written into the folder
+/// for it. Empty on a PC with its own copy of the cabinet (a cloud cabinet's PCs included),
+/// where the three-way pull is as it was.
+pub(crate) fn whole_folder(root: &Path) -> Vec<String> {
+    if !crate::server::server_mode() {
+        return vec![];
+    }
+    vf_fs::safeguards::devices(root)
+        .into_iter()
+        .filter(|d| d.server)
+        .map(|d| d.name)
+        .collect()
 }
 
 /// The catalog, with the other computers' changes to the cabinet read first on several servers

@@ -72,8 +72,31 @@ fn servers_section(ui: &mut egui::Ui, p: &mut DevicesPage, env: &mut Env) {
         )));
         return;
     }
+    // Several servers (PA-99): the whole cabinet's B2 sync and the portal's timed fetch go to
+    // whichever server holds the sync lease; the server chosen here is the preferred one, and
+    // keeps text recognition, the weekly check and the catalog copy.
+    if crate::lease::applies(env.root) {
+        ui.label(match crate::lease::holder_computer(env.root) {
+            Some(c) if c.eq_ignore_ascii_case(&here) => {
+                format!("B2 sync of the whole cabinet runs on this server ({here}) now.")
+            }
+            Some(c) => format!("B2 sync of the whole cabinet runs on {c} now."),
+            None => "B2 sync of the whole cabinet runs on no server just now: the next server with Vibe Files open and sync unlocked takes it on.".into(),
+        });
+        ui.label(widgets::caption(
+            "It moves to another open server by itself when that one closes (within two minutes if it stopped without closing). The preferred server below takes it when it is free; it never takes it from a server that is syncing.",
+        ));
+    }
     ui.horizontal(|ui| {
         ui.label(match &main {
+            Some(m) if m.computer.eq_ignore_ascii_case(&here) && crate::lease::applies(env.root) => {
+                format!("Preferred server, with text recognition, the weekly check and the catalog copy: this server ({here}).")
+            }
+            Some(m) if crate::lease::applies(env.root) => format!(
+                "Preferred server, with text recognition, the weekly check and the catalog copy: {} (since {}).",
+                m.computer,
+                widgets::local_time(&m.since)
+            ),
             Some(m) if m.computer.eq_ignore_ascii_case(&here) => {
                 format!("Text recognition and B2 sync run on this {machine} ({here}).")
             }

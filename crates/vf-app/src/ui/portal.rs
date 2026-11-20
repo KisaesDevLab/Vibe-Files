@@ -335,8 +335,15 @@ impl PortalState {
             return audit;
         };
         let every = Duration::from_secs(u64::from(s.fetch_minutes) * 60);
-        let due = std::mem::take(&mut self.fetch_now)
-            || (s.fetch_minutes > 0 && self.fetched_at.is_none_or(|t| t.elapsed() >= every));
+        // The timer runs on the server holding the sync lease (owner 2026-11-20, Q-133);
+        // Fetch uploads now works anywhere.
+        let mut due = s.fetch_minutes > 0 && self.fetched_at.is_none_or(|t| t.elapsed() >= every);
+        if due && crate::lease::applies(root) && !crate::lease::sync_here(root) {
+            // Another server's turn: looked at again at the next interval, not every frame.
+            self.fetched_at = Some(Instant::now());
+            due = false;
+        }
+        let due = std::mem::take(&mut self.fetch_now) || due;
         if due && self.fetch.is_none() {
             self.fetched_at = Some(Instant::now());
             let root = root.to_path_buf();
