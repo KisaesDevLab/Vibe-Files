@@ -231,15 +231,28 @@ fn take_dropped_files(ctx: &egui::Context, b: &mut Browse, env: &mut Env) {
         );
         return;
     };
+    add_outside_files(b, env, &t, dropped, "dropped_into");
+}
+
+/// Copies files from outside Vibe Files (dropped, or pasted after a copy in Explorer) into the
+/// folder `t` and catalogs them; the originals stay where they were. A name already there is
+/// kept and the new file gets ` (2)`. Folders are not taken.
+fn add_outside_files(
+    b: &mut Browse,
+    env: &mut Env,
+    t: &ScanTarget,
+    paths: Vec<std::path::PathBuf>,
+    how: &str,
+) {
     let mut added: Vec<String> = Vec::new();
     let mut failed: Vec<String> = Vec::new();
-    for p in dropped {
+    for p in paths {
         let name = p
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
         if !p.is_file() {
-            failed.push(format!("{name}: only files can be dropped, not folders"));
+            failed.push(format!("{name}: only files are added, not folders"));
             continue;
         }
         let ext = p
@@ -263,7 +276,7 @@ fn take_dropped_files(ctx: &egui::Context, b: &mut Browse, env: &mut Env) {
                         source: None,
                         tags: vec![],
                         label: "add_file".into(),
-                        detail: serde_json::json!({ "dropped_into": t.folder }),
+                        detail: serde_json::json!({ how: t.folder }),
                     },
                 )
             });
@@ -287,6 +300,105 @@ fn take_dropped_files(ctx: &egui::Context, b: &mut Browse, env: &mut Env) {
     }
     if !failed.is_empty() {
         b.error = Some(format!("Not added: {}", failed.join("; ")));
+    }
+}
+
+/// Documents copied with Ctrl+C in Browse (PA-98).
+#[derive(Debug, Clone)]
+struct Copied {
+    ids: Vec<String>,
+    files: Vec<std::path::PathBuf>,
+    on_clipboard: bool,
+}
+
+/// The files on the Windows clipboard (Explorer's Copy, or Browse's), if any.
+#[cfg(not(test))]
+fn clipboard_files() -> Option<Vec<std::path::PathBuf>> {
+    arboard::Clipboard::new()
+        .ok()?
+        .get()
+        .file_list()
+        .ok()
+        .filter(|l| !l.is_empty())
+}
+
+/// Puts files on the Windows clipboard, as Explorer's Copy does (so they paste in Explorer).
+#[cfg(not(test))]
+fn set_clipboard_files(files: &[std::path::PathBuf]) -> bool {
+    arboard::Clipboard::new()
+        .and_then(|mut c| c.set().file_list(files))
+        .is_ok()
+}
+
+/// Whether Ctrl+V is down for this window's thread.
+#[cfg(all(windows, not(test)))]
+fn paste_key_down() -> bool {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyState, VK_CONTROL};
+    // SAFETY: GetKeyState reads this thread's keyboard state; no pointers.
+    unsafe { GetKeyState(VK_CONTROL.0 as i32) < 0 && GetKeyState(i32::from(b'V')) < 0 }
+}
+
+#[cfg(all(not(windows), not(test)))]
+fn paste_key_down() -> bool {
+    false
+}
+
+// Tests: a clipboard of their own, never the machine's.
+#[cfg(test)]
+thread_local! {
+    static TEST_CLIPBOARD: std::cell::RefCell<Option<Vec<std::path::PathBuf>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn clipboard_files() -> Option<Vec<std::path::PathBuf>> {
+    TEST_CLIPBOARD.with(|c| c.borrow().clone())
+}
+
+#[cfg(test)]
+fn set_clipboard_files(files: &[std::path::PathBuf]) -> bool {
+    TEST_CLIPBOARD.with(|c| *c.borrow_mut() = Some(files.to_vec()));
+    true
+}
+
+#[cfg(test)]
+fn paste_key_down() -> bool {
+    false
+}
+
+/// Ctrl+C and Ctrl+V in Browse (PA-98), when no text field has the keyboard and no dialog of
+/// Browse's is open.
+fn clipboard_keys(ctx: &egui::Context, b: &mut Browse, env: &mut Env) {
+    let down = paste_key_down();
+    let was_down = std::mem::replace(&mut b.paste_down, down);
+    if ctx.egui_wants_keyboard_input()
+        || b.move_ask.is_some()
+        || b.move_to.is_some()
+        || b.file_job.is_some()
+    {
+        return;
+    }
+    let pressed = |key: egui::Key| {
+        move |e: &egui::Event| {
+            matches!(e, egui::Event::Key { key: k, pressed: true, modifiers, .. }
+                if *k == key && modifiers.command)
+        }
+    };
+    let (copy, paste_key) = ctx.input(|i| {
+        (
+            i.events
+                .iter()
+                .any(|e| matches!(e, egui::Event::Copy) || pressed(egui::Key::C)(e)),
+            i.events.iter().any(pressed(egui::Key::V)),
+        )
+    });
+    if copy {
+        b.copy_selection(env.root);
+    }
+    // (egui's own paste event comes only with text on the clipboard, and again while the key
+    // is held: the key's press is what pastes, once.)
+    if paste_key || (down && !was_down) {
+        b.paste(env);
     }
 }
 
@@ -338,6 +450,16 @@ pub struct Browse {
     move_ask: Option<MoveAsk>,
     /// Right-click › Move to… / Copy to…: picking where (Q-74).
     move_to: Option<crate::ui::move_to::PickDest>,
+    /// Documents copied with Ctrl+C (PA-98): their ids and files, and whether the files were
+    /// put on the Windows clipboard (then a paste takes them only while they are still there).
+    copied: Option<Copied>,
+    /// The Paste button was clicked (taken next frame, with the catalog at hand).
+    paste_request: bool,
+    /// Right-click › Copy was chosen (taken next frame, with the cabinet at hand).
+    copy_request: bool,
+    /// Ctrl+V held at the last frame (PA-98: Explorer puts no text on the clipboard, so egui
+    /// sends no paste event; the key is read as Windows has it).
+    paste_down: bool,
     disk_listed: Option<std::time::Instant>,
     combining: Option<Combining>,
     /// For a repaint when a listing arrives.
@@ -565,6 +687,10 @@ impl Browse {
             portal: Default::default(),
             disk_dirs: Default::default(),
             new_files: vec![],
+            copied: None,
+            paste_down: false,
+            paste_request: false,
+            copy_request: false,
             online_waiting: 0,
             missing_in: None,
             missing_seen: None,
@@ -1346,6 +1472,90 @@ impl Browse {
             folder: base.to_string(),
             tax_year: None,
         })
+    }
+
+    /// Ctrl+C (PA-98): the selected documents are copied, as Explorer copies files: their files
+    /// go on the Windows clipboard too, so they can be pasted in Explorer as well.
+    fn copy_selection(&mut self, root: &Path) {
+        let docs = self.selected_docs();
+        if docs.is_empty() {
+            return;
+        }
+        let ids: Vec<String> = docs.iter().map(|d| d.id.clone()).collect();
+        let files: Vec<std::path::PathBuf> = docs.iter().map(|d| root.join(&d.rel_path)).collect();
+        let on_clipboard = set_clipboard_files(&files);
+        let n = ids.len();
+        self.copied = Some(Copied {
+            ids,
+            files,
+            on_clipboard,
+        });
+        self.notice = Some(format!(
+            "Copied {}. Open a folder and press Ctrl+V to paste a copy there{}.",
+            if n == 1 {
+                "1 document".to_string()
+            } else {
+                format!("{n} documents")
+            },
+            if on_clipboard {
+                " (or paste in Explorer)"
+            } else {
+                ""
+            }
+        ));
+    }
+
+    /// Ctrl+V (PA-98), into the client folder shown: documents copied in Browse are copied as
+    /// Copy to… copies them (asked first, with their details, undoable); files copied in
+    /// Explorer are added as a drop adds them.
+    fn paste(&mut self, env: &mut Env) {
+        let Some(t) = self.files_target() else {
+            self.error = Some(
+                "Not pasted: open a client's folder in the tree first, then press Ctrl+V.".into(),
+            );
+            return;
+        };
+        let on_clipboard = clipboard_files();
+        let same = |a: &[std::path::PathBuf], b: &[std::path::PathBuf]| {
+            let key = |v: &[std::path::PathBuf]| {
+                let mut k: Vec<String> = v
+                    .iter()
+                    .map(|p| p.to_string_lossy().to_lowercase())
+                    .collect();
+                k.sort();
+                k
+            };
+            key(a) == key(b)
+        };
+        let ours = self.copied.as_ref().and_then(|c| match &on_clipboard {
+            // Still what Browse put there.
+            Some(files) if same(files, &c.files) => Some(c.ids.clone()),
+            // Browse could not use the clipboard: its own copy.
+            None if !c.on_clipboard => Some(c.ids.clone()),
+            _ => None,
+        });
+        if let Some(ids) = ours {
+            self.ask_copy_move(
+                env.conn,
+                env.root,
+                ids,
+                vf_fs::copymove::Dest {
+                    root: env.root.to_path_buf(),
+                    folder: t.folder,
+                },
+                vf_fs::copymove::Mode::Copy,
+            );
+            return;
+        }
+        match on_clipboard {
+            Some(files) => add_outside_files(self, env, &t, files, "pasted_into"),
+            None => {
+                self.notice = Some(
+                    "Nothing to paste: copy documents here (Ctrl+C) or files in Explorer first."
+                        .into(),
+                );
+            }
+        }
     }
 
     /// Runs a move, copy or undo: on its thread with its own catalog connection when Browse
@@ -2557,6 +2767,13 @@ pub fn show(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env) {
     b.add_new_files(env);
     b.remove_missing(env);
     take_dropped_files(ui.ctx(), b, env);
+    clipboard_keys(ui.ctx(), b, env);
+    if std::mem::take(&mut b.copy_request) {
+        b.copy_selection(env.root);
+    }
+    if std::mem::take(&mut b.paste_request) {
+        b.paste(env);
+    }
     if std::mem::take(&mut b.print_request) {
         let docs: Vec<crate::ui::print_ui::PrintDoc> = b
             .visible
@@ -4026,6 +4243,17 @@ fn grid(ui: &mut egui::Ui, b: &mut Browse, conn: &Connection) {
             {
                 b.reload(conn);
             }
+            if ui
+                .add_enabled(b.files_target().is_some(), egui::Button::new("Paste"))
+                .on_hover_text(
+                    "Ctrl+V: a copy of the documents copied here, or of files copied in Explorer, \
+                     into this folder",
+                )
+                .on_disabled_hover_text("Open a client's folder in the tree first")
+                .clicked()
+            {
+                b.paste_request = true;
+            }
         });
     });
     ui.add_space(6.0);
@@ -4042,6 +4270,7 @@ fn grid(ui: &mut egui::Ui, b: &mut Browse, conn: &Connection) {
     let mut file_req: Option<(usize, FileAct)> = None;
     let mut trash_row: Option<usize> = None;
     let mut move_to_row: Option<(usize, vf_fs::copymove::Mode)> = None;
+    let mut copy_row: Option<usize> = None;
     let mut goto_client: Option<usize> = None;
     let mut toggled: Option<usize> = None;
     let mut sort: Option<SortCol> = None;
@@ -4240,6 +4469,16 @@ fn grid(ui: &mut egui::Ui, b: &mut Browse, conn: &Connection) {
                                 move_to_row = Some((di, vf_fs::copymove::Mode::Copy));
                                 ui.close();
                             }
+                            if ui
+                                .button("Copy")
+                                .on_hover_text(
+                                    "Ctrl+C: then Ctrl+V in another folder, or paste in Explorer",
+                                )
+                                .clicked()
+                            {
+                                copy_row = Some(di);
+                                ui.close();
+                            }
                             ui.separator();
                             if ui.button("Move to trash").clicked() {
                                 trash_row = Some(di);
@@ -4270,6 +4509,12 @@ fn grid(ui: &mut egui::Ui, b: &mut Browse, conn: &Connection) {
             b.selected = [di].into_iter().collect();
         }
         b.trash_requested = true;
+    }
+    if let Some(di) = copy_row {
+        if !b.selected.contains(&di) {
+            b.selected = [di].into_iter().collect();
+        }
+        b.copy_request = true;
     }
     if let Some((di, mode)) = move_to_row {
         if !b.selected.contains(&di) {
@@ -5675,6 +5920,44 @@ mod tests {
         harness_from(clients, per, LARGE)
     }
 
+    /// The harness's cabinet on disk: its cabinet file, each client's folder and client file,
+    /// and each document's file (its id as its content).
+    fn on_disk(s: &mut State) {
+        vf_fs::cabinet::create(
+            &s.root,
+            &vf_fs::cabinet::CabinetFile {
+                cabinet_id: vf_core::new_id(),
+                firm_id: uuid::Uuid::new_v4().to_string(),
+                schema_version: vf_core::db::SCHEMA_VERSION,
+                layout_version: 1,
+                created: vf_core::now_rfc3339(),
+                name: None,
+            },
+        )
+        .unwrap();
+        for c in &s.b.snap.clients {
+            let folder = s.root.join(c.folder_rel.as_deref().unwrap());
+            std::fs::create_dir_all(folder.join("Income Tax")).unwrap();
+            filer_intake::sentinel::write_sentinel(
+                &s.root,
+                &folder,
+                &filer_core::clients::Client {
+                    id: c.ext_id.clone(),
+                    uuid: uuid::Uuid::new_v4(),
+                    name: c.name.clone(),
+                    extra: Default::default(),
+                },
+                uuid::Uuid::new_v4(),
+            )
+            .unwrap();
+        }
+        for d in &s.b.snap.docs {
+            let p = s.root.join(&d.rel_path);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, &d.id).unwrap();
+        }
+    }
+
     /// [`harness`] with Browse reading windows above `large_above` documents (PA-34).
     fn harness_from(clients: usize, per: usize, large_above: usize) -> Harness<'static, State> {
         crate::ui::test_util::pdfium_first();
@@ -6510,6 +6793,127 @@ Petty cash,1234.50
         );
     }
 
+    /// PA-98: Ctrl+C on documents in Browse, then Ctrl+V in another client's folder, copies
+    /// them as Copy to… does (asked first); their files went on the clipboard for Explorer too.
+    #[test]
+    fn documents_copied_and_pasted_in_browse() {
+        let mut h = harness(2, 1);
+        let (first, other) = {
+            let s = h.state_mut();
+            on_disk(s);
+            let first = s.b.snap.docs[0].clone();
+            let mine =
+                s.b.snap
+                    .clients
+                    .iter()
+                    .position(|c| Some(&c.id) == first.client_id.as_ref())
+                    .unwrap();
+            let other = 1 - mine;
+            s.b.set_scope(Scope::Client(mine));
+            (first, other)
+        };
+        h.run();
+        let pick = h
+            .state()
+            .b
+            .snap
+            .docs
+            .iter()
+            .position(|d| d.id == first.id)
+            .unwrap();
+        h.state_mut().b.selected = [pick].into_iter().collect();
+        h.key_press_modifiers(egui::Modifiers::COMMAND, Key::C);
+        h.run();
+        let file = h.state().root.join(&first.rel_path);
+        assert_eq!(
+            clipboard_files(),
+            Some(vec![file]),
+            "on the clipboard, for Explorer"
+        );
+        assert!(
+            h.state()
+                .b
+                .notice
+                .as_deref()
+                .unwrap()
+                .starts_with("Copied 1 document."),
+            "{:?}",
+            h.state().b.notice
+        );
+        h.state_mut().b.set_scope(Scope::Folder {
+            client: other,
+            folder: "Income Tax".into(),
+        });
+        h.run();
+        h.key_press_modifiers(egui::Modifiers::COMMAND, Key::V);
+        h.run();
+        assert!(
+            h.query_by_label("Copy 1 document?").is_some(),
+            "{:?}",
+            h.state().b.error
+        );
+        click(&mut h, "Copy");
+        h.run();
+        let s = h.state();
+        assert!(s.b.error.is_none(), "{:?}", s.b.error);
+        let dest = s.b.snap.clients[other].folder_rel.clone().unwrap();
+        let name = first.rel_path.rsplit('/').next().unwrap();
+        assert!(
+            s.root.join(format!("{dest}/Income Tax/{name}")).is_file(),
+            "the copy"
+        );
+        assert!(s.root.join(&first.rel_path).is_file(), "the original stays");
+    }
+
+    /// PA-98: files copied in Explorer (on the clipboard as files, no text) are pasted with
+    /// Ctrl+V into the folder shown, as a drop adds them; with no client folder shown, nothing.
+    #[test]
+    fn files_copied_in_explorer_are_pasted_into_the_folder_shown() {
+        let mut h = harness(1, 0);
+        let outside = tempfile::tempdir().unwrap();
+        let src = outside.path().join("Invented engagement letter.pdf");
+        std::fs::write(&src, b"%PDF-1.4 invented").unwrap();
+        set_clipboard_files(std::slice::from_ref(&src));
+        h.key_press_modifiers(egui::Modifiers::COMMAND, Key::V);
+        h.run();
+        assert!(
+            h.state()
+                .b
+                .error
+                .as_deref()
+                .unwrap()
+                .contains("open a client's folder")
+        );
+        h.state_mut().b.error = None;
+        h.state_mut().b.set_scope(Scope::Folder {
+            client: 0,
+            folder: "Income Tax/2025".into(),
+        });
+        h.run();
+        h.key_press_modifiers(egui::Modifiers::COMMAND, Key::V);
+        h.run();
+        let s = h.state();
+        assert_eq!(s.b.error, None);
+        let rel = "Client 0000 (1000)/Income Tax/2025/Invented engagement letter.pdf";
+        assert!(s.root.join(rel).is_file(), "copied in");
+        assert!(src.is_file(), "the original stays");
+        assert!(s.b.snap.docs.iter().any(|d| d.rel_path == rel), "cataloged");
+        // An empty clipboard: said, nothing added.
+        TEST_CLIPBOARD.with(|c| *c.borrow_mut() = None);
+        let before = h.state().b.snap.docs.len();
+        h.key_press_modifiers(egui::Modifiers::COMMAND, Key::V);
+        h.run();
+        assert!(
+            h.state()
+                .b
+                .notice
+                .as_deref()
+                .unwrap()
+                .starts_with("Nothing to paste")
+        );
+        assert_eq!(h.state().b.snap.docs.len(), before);
+    }
+
     /// PA-60: a catalog listed behind the window starts with its clients only. Once its
     /// documents pass the limit, Browse reads it in windows; it is never loaded whole.
     #[test]
@@ -6842,39 +7246,7 @@ Petty cash,1234.50
         h.state_mut().b.catalog = Some(catalog);
         let (id, dest) = {
             let s = h.state_mut();
-            vf_fs::cabinet::create(
-                &s.root,
-                &vf_fs::cabinet::CabinetFile {
-                    cabinet_id: vf_core::new_id(),
-                    firm_id: uuid::Uuid::new_v4().to_string(),
-                    schema_version: vf_core::db::SCHEMA_VERSION,
-                    layout_version: 1,
-                    created: vf_core::now_rfc3339(),
-                    name: None,
-                },
-            )
-            .unwrap();
-            for c in &s.b.snap.clients {
-                let folder = s.root.join(c.folder_rel.as_deref().unwrap());
-                std::fs::create_dir_all(folder.join("Income Tax")).unwrap();
-                filer_intake::sentinel::write_sentinel(
-                    &s.root,
-                    &folder,
-                    &filer_core::clients::Client {
-                        id: c.ext_id.clone(),
-                        uuid: uuid::Uuid::new_v4(),
-                        name: c.name.clone(),
-                        extra: Default::default(),
-                    },
-                    uuid::Uuid::new_v4(),
-                )
-                .unwrap();
-            }
-            for d in &s.b.snap.docs {
-                let p = s.root.join(&d.rel_path);
-                std::fs::create_dir_all(p.parent().unwrap()).unwrap();
-                std::fs::write(&p, &d.id).unwrap();
-            }
+            on_disk(s);
             let first = s.b.snap.docs[0].clone();
             let other =
                 s.b.snap

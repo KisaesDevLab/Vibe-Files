@@ -11,6 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 regex.workspace = true
+arboard.workspace = true
 zeroize.workspace = true
 tracing.workspace = true
 tracing-appender.workspace = true

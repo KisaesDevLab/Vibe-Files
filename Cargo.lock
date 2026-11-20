@@ -5896,6 +5896,7 @@ name = "vf-app"
 version = "0.1.50"
 dependencies = [
  "anyhow",
+ "arboard",
  "chrono",
  "clap",
  "eframe",
