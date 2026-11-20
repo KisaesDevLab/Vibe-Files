@@ -14,6 +14,7 @@
 //! A segment with a document that could not be applied yet (it is in Intake's last batch) is
 //! applied again on the next pull.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde_json::json;
@@ -52,6 +53,20 @@ impl PullReport {
 
 /// Applies what the bucket has that this workstation has not applied.
 pub fn pull(conn: &mut Connection, root: &Path, s: &Sync) -> Result<PullReport> {
+    pull_in(conn, root, s, &[])
+}
+
+/// [`pull`] in a cabinet folder several computers work in (servers on one share, PA-99).
+/// `same_folder`: those computers. A segment one of them wrote, or one the folder already holds
+/// ([`crate::folder`]), is taken as the last exchange without writing a file; a newer one from
+/// a computer with its own copy is applied three ways against the rev the folder holds. Empty:
+/// a computer with its own copy of the cabinet, as before.
+pub fn pull_in(
+    conn: &mut Connection,
+    root: &Path,
+    s: &Sync,
+    same_folder: &[String],
+) -> Result<PullReport> {
     // A pull looks at the admin password file as it is now (deleted by hand, perhaps).
     vf_fs::trash::pin_changed();
     let mut rep = PullReport::default();
@@ -68,7 +83,7 @@ pub fn pull(conn: &mut Connection, root: &Path, s: &Sync) -> Result<PullReport> 
         )));
     }
     rep.head_rev = head.rev;
-    apply_head(conn, root, s, &head, &mut rep)?;
+    apply_head(conn, root, s, &head, &mut rep, same_folder)?;
     // With documents left for later, this PC has not applied HEAD: the next push pulls first,
     // and never sends a segment it has not applied (`push`).
     if rep.deferred == 0 {
@@ -93,28 +108,75 @@ pub(crate) fn apply_head(
     s: &Sync,
     head: &Head,
     rep: &mut PullReport,
+    same_folder: &[String],
 ) -> Result<()> {
-    if head.cabinet_segment_rev > 0
-        && head.cabinet_segment_rev != catalog::segment_rev(conn, CABINET)?
-    {
+    let shared = !same_folder.is_empty();
+    let held = if shared {
+        crate::folder::load(root)
+    } else {
+        Default::default()
+    };
+    // What the folder holds once this pull is done (PA-99).
+    let mut took: Vec<(String, u64, String)> = vec![];
+    let rev = head.cabinet_segment_rev;
+    if rev > 0 && rev != catalog::segment_rev(conn, CABINET)? {
         let key = head.cabinet_key();
         let seg: CabinetSegment = s
             .get_json(&key)?
             .ok_or_else(|| SyncError::Format(format!("{key} is missing")))?;
         seg.check()
             .map_err(|what| SyncError::Format(format!("{key}: refused {what}")))?;
-        let merged = apply_files(conn, root, s, &seg.files, &seg.written_by)?;
-        let deferred = apply_docs(conn, root, s, None, "", &seg.documents, rep)?;
-        if !deferred {
-            let fh = serde_json::to_string(&merged).expect("serializes");
-            catalog::set_segment(conn, CABINET, seg.segment_rev, None, None, Some(&fh))?;
+        let in_folder = held.get(CABINET).is_some_and(|h| h.rev == rev);
+        if shared && (in_folder || from_here(&seg.written_by, same_folder)) {
+            // Sent from this folder, or brought into it by another server: no file written.
+            adopt_cabinet_segment(conn, &seg, rev)?;
+            took.push((CABINET.into(), rev, key));
+        } else {
+            if let Some(h) = held.get(CABINET).filter(|h| h.rev < rev)
+                && h.rev != catalog::segment_rev(conn, CABINET)?
+                && let Some(old) = s.get_json::<CabinetSegment>(&h.key)?
+                && old.check().is_ok()
+            {
+                // The folder's own last exchange first: what changed here since is a change
+                // here, not a change in both places.
+                adopt_cabinet_segment(conn, &old, h.rev)?;
+            }
+            let merged = apply_files(conn, root, s, &seg.files, &seg.written_by)?;
+            let deferred = apply_docs(conn, root, s, None, "", &seg.documents, rep)?;
+            if !deferred {
+                let fh = serde_json::to_string(&merged).expect("serializes");
+                catalog::set_segment(conn, CABINET, rev, None, None, Some(&fh))?;
+                if shared {
+                    took.push((CABINET.into(), rev, key));
+                }
+            }
         }
         rep.segments += 1;
     }
     for (client, rev) in &head.segments {
-        apply_client_segment(conn, root, s, head, client, *rev, rep)?;
+        apply_client_segment(
+            conn,
+            root,
+            s,
+            head,
+            client,
+            *rev,
+            rep,
+            same_folder,
+            &held,
+            &mut took,
+        )?;
     }
+    crate::folder::record(root, &took);
     Ok(())
+}
+
+/// Whether a segment was written by one of the computers working in this same folder.
+fn from_here(written_by: &str, same_folder: &[String]) -> bool {
+    !written_by.is_empty()
+        && same_folder
+            .iter()
+            .any(|c| c.eq_ignore_ascii_case(written_by))
 }
 
 /// Brings in one client's segment of `head` for a push of that client from a computer that
@@ -131,6 +193,7 @@ pub(crate) fn apply_head(
 /// the main computer has brought it in.
 pub(crate) fn apply_client(
     conn: &mut Connection,
+    root: &Path,
     s: &Sync,
     head: &Head,
     client: &str,
@@ -152,13 +215,13 @@ pub(crate) fn apply_client(
     if rev == catalog::segment_rev(conn, client)? {
         return Ok(Some(seg));
     }
-    let here = !seg.written_by.is_empty()
-        && same_folder
-            .iter()
-            .any(|c| c.eq_ignore_ascii_case(&seg.written_by));
-    if !here {
+    let in_folder = !same_folder.is_empty()
+        && crate::folder::load(root)
+            .get(client)
+            .is_some_and(|h| h.rev == rev);
+    if !in_folder && !from_here(&seg.written_by, same_folder) {
         return Err(SyncError::Local(format!(
-            "this client's latest copy in B2 came from {}, which keeps its own copy of the cabinet; the main server brings it into the shared folder when it syncs. Push this client again after that.",
+            "this client's latest copy in B2 came from {}, which keeps its own copy of the cabinet; the server that syncs the whole cabinet brings it into the shared folder. Push this client again after that.",
             if seg.written_by.is_empty() {
                 "another computer"
             } else {
@@ -167,11 +230,13 @@ pub(crate) fn apply_client(
         )));
     }
     adopt_client_segment(conn, &seg)?;
+    crate::folder::record(root, &[(client.to_string(), rev, key)]);
     rep.segments += 1;
     audit_pull(conn, s, rep)?;
     Ok(Some(seg))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn apply_client_segment(
     conn: &mut Connection,
     root: &Path,
@@ -180,6 +245,9 @@ fn apply_client_segment(
     client: &str,
     rev: u64,
     rep: &mut PullReport,
+    same_folder: &[String],
+    held: &BTreeMap<String, crate::folder::Held>,
+    took: &mut Vec<(String, u64, String)>,
 ) -> Result<()> {
     if rev == catalog::segment_rev(conn, client)? {
         return Ok(());
@@ -193,6 +261,25 @@ fn apply_client_segment(
     }
     seg.check()
         .map_err(|what| SyncError::Format(format!("{key}: refused {what}")))?;
+    let shared = !same_folder.is_empty();
+    let in_folder = held.get(client).is_some_and(|h| h.rev == rev);
+    if shared && (in_folder || from_here(&seg.written_by, same_folder)) {
+        // Sent from this folder, or brought into it by another server: the files are here.
+        adopt_client_segment(conn, &seg)?;
+        took.push((client.to_string(), rev, key));
+        rep.segments += 1;
+        return Ok(());
+    }
+    if let Some(h) = held.get(client).filter(|h| h.rev < rev)
+        && h.rev != catalog::segment_rev(conn, client)?
+        && let Some(old) = s.get_json::<ClientSegment>(&h.key)?
+        && old.client_id == client
+        && old.check().is_ok()
+    {
+        // The folder's own last exchange first (PA-99): what changed here since is a change
+        // here, not a change in both places.
+        adopt_client_segment(conn, &old)?;
+    }
     let folder = ensure_folder(conn, root, s, &seg)?;
     prefetch(conn, s, root, &seg.documents);
     let deferred = apply_docs(conn, root, s, Some(client), &folder, &seg.documents, rep);
@@ -206,8 +293,47 @@ fn apply_client_segment(
         ))?
         .flatten();
         catalog::set_segment(conn, client, rev, Some(&folder), sh.as_deref(), None)?;
+        if shared {
+            took.push((client.to_string(), rev, key));
+        }
     }
     rep.segments += 1;
+    Ok(())
+}
+
+/// Takes the cabinet's segment `seg` (at `rev`), written from this same folder or held by it,
+/// as this catalog's last exchange (PA-99): the master files' base becomes the segment's (what
+/// differs here now is a change here, sent by the next push), and its documents are adopted as
+/// [`adopt_client_segment`] adopts a client's. No file is written.
+fn adopt_cabinet_segment(conn: &mut Connection, seg: &CabinetSegment, rev: u64) -> Result<()> {
+    for e in &seg.documents {
+        if catalog::doc(conn, &e.doc_id)?.is_none() {
+            let other: Option<String> = conn
+                .query_row(
+                    "SELECT id FROM document WHERE rel_path = ?1 AND deleted_at IS NULL",
+                    [&e.rel_path],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            match other {
+                Some(id) if e.deleted_at.is_none() && catalog::base(conn, &id)?.is_none() => {
+                    catalog::rekey(conn, &id, &e.doc_id)?
+                }
+                _ => continue,
+            }
+        }
+        catalog::set_base_values(
+            conn,
+            &e.doc_id,
+            None,
+            &e.rel_path,
+            &e.hash,
+            adopted_rev(conn, e)?,
+            e.deleted_at.is_some(),
+        )?;
+    }
+    let fh = serde_json::to_string(&crate::push::files_hashes(&seg.files)).expect("serializes");
+    catalog::set_segment(conn, CABINET, rev, None, None, Some(&fh))?;
     Ok(())
 }
 
@@ -245,7 +371,7 @@ fn adopt_client_segment(conn: &mut Connection, seg: &ClientSegment) -> Result<()
             Some(client),
             &want,
             &e.hash,
-            e.rev,
+            adopted_rev(conn, e)?,
             e.deleted_at.is_some(),
         )?;
     }
@@ -1056,7 +1182,12 @@ fn apply_one(
         return Ok(One::Done);
     }
     let mut took_remote = !changed_here;
-    if e.hash != l.hash {
+    // The bucket's content is the last exchanged one: a content changed here only, left for the
+    // next push (it was taken for a change in both places, and a conflict copy made; PA-99).
+    let unchanged_there = base.as_ref().is_some_and(|b| b.hash == e.hash);
+    if e.hash != l.hash && content_here && unchanged_there {
+        took_remote = false;
+    } else if e.hash != l.hash {
         // Nothing is touched while the file cannot be changed (Intake's last batch, a check-out,
         // edited outside Vibe Files): it waits for the next pull.
         if vf_fs::content::check(conn, root, &e.doc_id)?.is_err() {
@@ -1218,4 +1349,13 @@ fn record_conflict(
         ],
     )?;
     Ok(())
+}
+
+/// The rev a document's base takes when a segment is adopted (PA-41, PA-99): this catalog's
+/// own. Each catalog counts its documents' revs on its own, so the writer's rev compared with
+/// this catalog's row would take every document for changed here (and a later three-way pull
+/// for a change in both places). What the folder holds of its details (`docmeta.jsonl`) is
+/// the same for every catalog of it.
+fn adopted_rev(conn: &Connection, e: &DocEntry) -> Result<i64> {
+    Ok(catalog::doc(conn, &e.doc_id)?.map_or(e.rev, |d| d.rev))
 }

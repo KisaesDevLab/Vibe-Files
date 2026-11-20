@@ -13,6 +13,7 @@
 
 pub mod catalog;
 pub mod crypto;
+pub mod folder;
 pub mod layout;
 pub mod listed;
 pub mod pull;

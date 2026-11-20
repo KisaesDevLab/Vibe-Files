@@ -120,7 +120,7 @@ pub fn restore_session(conn: &mut Connection, root: &Path, s: &Sync) -> Result<R
     vf_fs::cabinet::write_replace(&crate::setup::key_file(root), &w.to_json())?;
 
     let mut rep = crate::pull::PullReport::default();
-    crate::pull::apply_head(conn, root, s, &head, &mut rep)?;
+    crate::pull::apply_head(conn, root, s, &head, &mut rep, &[])?;
     crate::catalog::set_state(conn, device_id, head.rev, "pull")?;
 
     let mut out = RestoreReport {

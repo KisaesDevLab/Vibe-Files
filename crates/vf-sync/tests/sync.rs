@@ -1367,6 +1367,284 @@ fn a_client_pushed_from_a_second_server_indexed_alone_leaves_the_shared_folder_a
     second_server_push(false);
 }
 
+/// The servers working in the shared folder in the PA-99 tests.
+const SERVERS: [&str; 2] = ["OFFICE-PC", "SERVER-2"];
+
+fn servers() -> Vec<String> {
+    SERVERS.iter().map(|s| s.to_string()).collect()
+}
+
+/// No conflict copy or ` (2)` in the folder.
+fn no_copies(root: &Path) {
+    let snap = snapshot(root);
+    assert!(
+        snap.keys()
+            .all(|k| !k.contains("(conflict from") && !k.contains(" (2)")),
+        "{:?}",
+        snap.keys().collect::<Vec<_>>()
+    );
+}
+
+/// The bucket restores to the folder as it is (versions aside).
+fn bucket_is_folder(t: &Path, store: Arc<dyn ObjectStore>, a: &Pc, name: &str) {
+    let c = restored(t, store, &a.sync.cabinet_id, name);
+    drop(c);
+    let bare = t.join(name).join("Clients");
+    let mut want = snapshot(&a.root);
+    want.retain(|k, _| !k.starts_with("versions/"));
+    let mut got = snapshot(&bare);
+    got.retain(|k, _| !k.starts_with("versions/"));
+    assert_eq!(got, want);
+}
+
+/// PA-99: the whole cabinet syncs on whichever server holds the lease. Two catalogs over ONE
+/// cabinet folder; the second started from an old copy of the first's (a seed) or was built
+/// from the folder on its own. Whole pushes and pulls take turns, A, then B, then A, then B,
+/// each after edits in the folder: nothing in the folder is written, no conflict copy or
+/// ` (2)`, and the bucket restores to the folder.
+fn whole_sync_moves_between_servers(seeded: bool) {
+    let t = tempfile::tempdir().unwrap();
+    let store = Remote::memory();
+    let mut a = pc_a(t.path(), store.clone());
+    let all = servers();
+    vf_sync::push::push_in(&mut a.conn, &a.root, &a.sync, None, &all).unwrap();
+    let b_dir = t.path().join("server-b");
+    std::fs::create_dir_all(&b_dir).unwrap();
+    if seeded {
+        a.conn
+            .execute(
+                "VACUUM INTO ?1",
+                [b_dir.join("catalog.db").display().to_string()],
+            )
+            .unwrap();
+    }
+    let mut b_conn = catalog(&b_dir);
+    if !seeded {
+        vf_fs::rebuild::rebuild(&mut b_conn, &a.root, "dev-s2").unwrap();
+    }
+    let b_sync = Sync::unlock(&a.root, store.clone(), PASS, "dev-s2", "SERVER-2").unwrap();
+    let w2 = "Anderson Farms LLC (1042)/Income Tax/2025/W-2 Northwind.pdf";
+    let ein = "Anderson Farms LLC (1042)/Permanent/Setup/EIN letter.pdf";
+
+    // 1. A, the server that held the lease, pushes once more; then edits in the folder.
+    put(&a.root, w2, "w2 v2");
+    vf_fs::rebuild::rebuild(&mut a.conn, &a.root, "dev-a").unwrap();
+    vf_sync::push::push_in(&mut a.conn, &a.root, &a.sync, None, &all).unwrap();
+    put(&a.root, w2, "w2 v3 three");
+    put(&a.root, ein, "ein v2 two");
+    put(
+        &a.root,
+        "Bell Ranch Inc (2002)/Income Tax/2025/K-1 new.pdf",
+        "k1 new",
+    );
+    // A doc type list changed on the share (a master file).
+    let dt = a.root.join("_Vibe").join("doc_types.json");
+    let mut types = std::fs::read_to_string(&dt).unwrap();
+    types.push('\n');
+    std::fs::write(&dt, types).unwrap();
+    let before = snapshot(&a.root);
+
+    // 2. B takes the lease: reads the folder (its change logs), pulls and pushes it whole.
+    vf_fs::rebuild::rebuild(&mut b_conn, &a.root, "dev-s2").unwrap();
+    let r = vf_sync::push::push_in(&mut b_conn, &a.root, &b_sync, None, &all).unwrap();
+    assert_eq!(
+        r.pulled.as_ref().map(|p| p.changed()).unwrap_or(0),
+        0,
+        "{r:?}"
+    );
+    assert_eq!(snapshot(&a.root), before, "B wrote nothing into the folder");
+    let p = vf_sync::pull::pull_in(&mut b_conn, &a.root, &b_sync, &all).unwrap();
+    assert_eq!(p.changed(), 0, "{p:?}");
+    bucket_is_folder(t.path(), store.clone(), &a, "bare1");
+
+    // 3. More edits; A has the lease again, its catalog's last exchange two pushes old.
+    put(&a.root, w2, "w2 v4 is four");
+    std::fs::remove_file(a.root.join(ein)).unwrap();
+    put(
+        &a.root,
+        "Anderson Farms LLC (1042)/Income Tax/2025/1099 B.pdf",
+        "1099 b",
+    );
+    let before = snapshot(&a.root);
+    vf_fs::rebuild::rebuild(&mut a.conn, &a.root, "dev-a").unwrap();
+    let p = vf_sync::pull::pull_in(&mut a.conn, &a.root, &a.sync, &all).unwrap();
+    assert_eq!(p.changed(), 0, "{p:?}");
+    let r = vf_sync::push::push_in(&mut a.conn, &a.root, &a.sync, None, &all).unwrap();
+    assert!(r.segments > 0, "{r:?}");
+    assert_eq!(snapshot(&a.root), before, "A wrote nothing into the folder");
+    no_copies(&a.root);
+
+    // 4. And B again.
+    put(&a.root, w2, "w2 v5 is the fifth");
+    let before = snapshot(&a.root);
+    vf_fs::rebuild::rebuild(&mut b_conn, &a.root, "dev-s2").unwrap();
+    let r = vf_sync::push::push_in(&mut b_conn, &a.root, &b_sync, None, &all).unwrap();
+    assert_eq!(
+        r.pulled.as_ref().map(|p| p.changed()).unwrap_or(0),
+        0,
+        "{r:?}"
+    );
+    assert_eq!(snapshot(&a.root), before);
+    no_copies(&a.root);
+    bucket_is_folder(t.path(), store, &a, "bare2");
+}
+
+#[test]
+fn whole_sync_moves_between_seeded_servers() {
+    whole_sync_moves_between_servers(true);
+}
+
+#[test]
+fn whole_sync_moves_between_servers_indexed_alone() {
+    whole_sync_moves_between_servers(false);
+}
+
+/// PA-99: a laptop with its own copy sends a change while the lease moves between servers. The
+/// server that brings it in applies it against what the folder holds (the other server's
+/// push), not against its own catalog's older exchange: a document edited in the folder after
+/// that push is a change here, not a change in both places.
+#[test]
+fn a_laptops_change_is_applied_against_what_the_folder_holds() {
+    let t = tempfile::tempdir().unwrap();
+    let store = Remote::memory();
+    let mut a = pc_a(t.path(), store.clone());
+    let all = servers();
+    vf_sync::push::push_in(&mut a.conn, &a.root, &a.sync, None, &all).unwrap();
+    let b_dir = t.path().join("server-b");
+    let mut b_conn = catalog(&b_dir);
+    vf_fs::rebuild::rebuild(&mut b_conn, &a.root, "dev-s2").unwrap();
+    let b_sync = Sync::unlock(&a.root, store.clone(), PASS, "dev-s2", "SERVER-2").unwrap();
+    let w2 = "Anderson Farms LLC (1042)/Income Tax/2025/W-2 Northwind.pdf";
+    let ein = "Anderson Farms LLC (1042)/Permanent/Setup/EIN letter.pdf";
+
+    // B holds the lease: the W-2 edited in the folder goes up from B (A's base is older).
+    put(&a.root, w2, "w2 v2 second");
+    vf_fs::rebuild::rebuild(&mut b_conn, &a.root, "dev-s2").unwrap();
+    vf_sync::push::push_in(&mut b_conn, &a.root, &b_sync, None, &all).unwrap();
+
+    // A laptop with its own copy edits the EIN letter and pushes.
+    let lroot = t.path().join("laptop").join("Clients");
+    let mut l_conn = catalog(&t.path().join("laptop").join("data"));
+    vf_sync::restore::restore(
+        &mut l_conn,
+        &lroot,
+        store.clone(),
+        &a.sync.cabinet_id,
+        PASS,
+        "dev-l",
+        "LAPTOP",
+    )
+    .unwrap();
+    let l_sync = Sync::unlock(&lroot, store.clone(), PASS, "dev-l", "LAPTOP").unwrap();
+    put(&lroot, ein, "ein from the laptop");
+    vf_fs::rebuild::rebuild(&mut l_conn, &lroot, "dev-l").unwrap();
+    vf_sync::push::push(&mut l_conn, &lroot, &l_sync, None).unwrap();
+
+    // The W-2 is edited again in the folder; then A takes the lease.
+    put(&a.root, w2, "w2 v3 three");
+    vf_fs::rebuild::rebuild(&mut a.conn, &a.root, "dev-a").unwrap();
+    let p = vf_sync::pull::pull_in(&mut a.conn, &a.root, &a.sync, &all).unwrap();
+    assert_eq!(p.conflicts, 0, "{p:?}");
+    assert_eq!(
+        std::fs::read_to_string(a.root.join(ein)).unwrap(),
+        "ein from the laptop"
+    );
+    assert_eq!(
+        std::fs::read_to_string(a.root.join(w2)).unwrap(),
+        "w2 v3 three"
+    );
+    no_copies(&a.root);
+    vf_sync::push::push_in(&mut a.conn, &a.root, &a.sync, None, &all).unwrap();
+    bucket_is_folder(t.path(), store, &a, "bare");
+}
+
+/// PA-99: a whole push from a server whose catalog has not read another server's filing yet
+/// sends the bucket's entry for it again as it is: the filing stays in B2.
+#[test]
+fn a_whole_push_keeps_a_filing_this_catalog_has_not_read() {
+    let t = tempfile::tempdir().unwrap();
+    let store = Remote::memory();
+    let mut a = pc_a(t.path(), store.clone());
+    let all = servers();
+    vf_sync::push::push_in(&mut a.conn, &a.root, &a.sync, None, &all).unwrap();
+    let b_dir = t.path().join("server-b");
+    let mut b_conn = catalog(&b_dir);
+    vf_fs::rebuild::rebuild(&mut b_conn, &a.root, "dev-s2").unwrap();
+    let b_sync = Sync::unlock(&a.root, store.clone(), PASS, "dev-s2", "SERVER-2").unwrap();
+    // A files a K-1 and pushes; B has not read it.
+    let k1 = "Anderson Farms LLC (1042)/Income Tax/2025/K-1 filed on A.pdf";
+    put(&a.root, k1, "k1 from a");
+    vf_fs::rebuild::rebuild(&mut a.conn, &a.root, "dev-a").unwrap();
+    vf_sync::push::push_in(&mut a.conn, &a.root, &a.sync, None, &all).unwrap();
+    b_conn
+        .execute("DELETE FROM document WHERE rel_path = ?1", [k1])
+        .unwrap();
+    // B edits the W-2 of the same client and pushes the whole cabinet.
+    let w2 = "Anderson Farms LLC (1042)/Income Tax/2025/W-2 Northwind.pdf";
+    put(&a.root, w2, "w2 edited on b, longer");
+    vf_fs::rebuild::rebuild_folders(
+        &mut b_conn,
+        &a.root,
+        "dev-s2",
+        &["Anderson Farms LLC (1042)".to_string()],
+    )
+    .ok();
+    b_conn
+        .execute("DELETE FROM document WHERE rel_path = ?1", [k1])
+        .unwrap();
+    let r = vf_sync::push::push_in(&mut b_conn, &a.root, &b_sync, None, &all).unwrap();
+    assert!(r.segments > 0, "{r:?}");
+    let c = restored(t.path(), store, &a.sync.cabinet_id, "bare");
+    drop(c);
+    let bare = t.path().join("bare").join("Clients");
+    assert_eq!(
+        std::fs::read_to_string(bare.join(k1)).unwrap(),
+        "k1 from a",
+        "A's filing is still in B2"
+    );
+    assert_eq!(
+        std::fs::read_to_string(bare.join(w2)).unwrap(),
+        "w2 edited on b, longer"
+    );
+}
+
+/// A document changed here only, in a client whose segment another PC changed: the pull
+/// leaves it for the next push. (It was taken for a change in both places, and a conflict
+/// copy made, whenever the bucket's segment of its client had moved on; found in PA-99.)
+#[test]
+fn a_change_here_only_is_not_a_conflict_when_its_client_changed_there() {
+    let t = tempfile::tempdir().unwrap();
+    let store = Remote::memory();
+    let mut a = pc_a(t.path(), store.clone());
+    vf_sync::push::push(&mut a.conn, &a.root, &a.sync, None).unwrap();
+    let mut b = pc_b(t.path(), store.clone(), &a);
+    let w2 = "Anderson Farms LLC (1042)/Income Tax/2025/W-2 Northwind.pdf";
+    let ein = "Anderson Farms LLC (1042)/Permanent/Setup/EIN letter.pdf";
+    put(&b.root, ein, "ein edited on the laptop");
+    vf_fs::rebuild::rebuild(&mut b.conn, &b.root, "dev-b").unwrap();
+    vf_sync::push::push(&mut b.conn, &b.root, &b.sync, None).unwrap();
+    put(&a.root, w2, "w2 edited here only, not sent");
+    vf_fs::rebuild::rebuild(&mut a.conn, &a.root, "dev-a").unwrap();
+    let p = vf_sync::pull::pull(&mut a.conn, &a.root, &a.sync).unwrap();
+    assert_eq!(p.conflicts, 0, "{p:?}");
+    assert_eq!(
+        std::fs::read_to_string(a.root.join(w2)).unwrap(),
+        "w2 edited here only, not sent"
+    );
+    assert_eq!(
+        std::fs::read_to_string(a.root.join(ein)).unwrap(),
+        "ein edited on the laptop"
+    );
+    no_copies(&a.root);
+    // And it goes up with the next push.
+    vf_sync::push::push(&mut a.conn, &a.root, &a.sync, None).unwrap();
+    vf_sync::pull::pull(&mut b.conn, &b.root, &b.sync).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(b.root.join(w2)).unwrap(),
+        "w2 edited here only, not sent"
+    );
+}
+
 /// What goes to B2 (owner 2026-11-12, PA-53): a document never sent outside the rule (an old
 /// tax year; no year outside a Permanent folder; a Never send client) is held back, not
 /// pending; widening the rule sends it; once in B2 it keeps syncing; a held document whose

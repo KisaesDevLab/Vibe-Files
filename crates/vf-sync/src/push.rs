@@ -215,7 +215,21 @@ pub fn push(
     s: &Sync,
     only: Option<&str>,
 ) -> Result<PushReport> {
-    push_in_rounds(conn, root, s, only, ROUND_CLIENTS)
+    rounds(conn, root, s, only, ROUND_CLIENTS, &[])
+}
+
+/// [`push`] in a cabinet folder several computers work in (servers on one share, PA-99): the
+/// pull before it takes what was sent from this folder as it is ([`crate::pull::pull_in`]), and
+/// the bucket's entries this catalog has no row for are sent again as they are, never dropped.
+/// `same_folder`: those computers.
+pub fn push_in(
+    conn: &mut Connection,
+    root: &Path,
+    s: &Sync,
+    only: Option<&str>,
+    same_folder: &[String],
+) -> Result<PushReport> {
+    rounds(conn, root, s, only, ROUND_CLIENTS, same_folder)
 }
 
 /// [`push`] with at most `round_clients` clients per round.
@@ -226,6 +240,17 @@ pub fn push_in_rounds(
     only: Option<&str>,
     round_clients: usize,
 ) -> Result<PushReport> {
+    rounds(conn, root, s, only, round_clients, &[])
+}
+
+fn rounds(
+    conn: &mut Connection,
+    root: &Path,
+    s: &Sync,
+    only: Option<&str>,
+    round_clients: usize,
+    same_folder: &[String],
+) -> Result<PushReport> {
     let mut rep = PushReport::default();
     let mut done: BTreeSet<String> = BTreeSet::new();
     let mut listed: Option<Mutex<HashSet<String>>> = None;
@@ -235,7 +260,7 @@ pub fn push_in_rounds(
             // Up to date with the bucket first: a push never hides another workstation's work.
             let head = s.head()?.unwrap_or_default();
             if head.rev > catalog::last_rev(conn, &s.device_id)? {
-                rep.pulled = Some(crate::pull::pull(conn, root, s)?);
+                rep.pulled = Some(crate::pull::pull_in(conn, root, s, same_folder)?);
             }
             match push_once(
                 conn,
@@ -248,6 +273,7 @@ pub fn push_in_rounds(
                 &mut listed,
                 None,
                 None,
+                same_folder,
             ) {
                 Err(SyncError::Raced) if attempt + 1 < TRIES => {
                     attempt += 1;
@@ -559,7 +585,8 @@ fn push_client_forced(
             head_rev: head.rev,
             ..Default::default()
         };
-        let latest = crate::pull::apply_client(conn, s, &head, client, same_folder, &mut pulled)?;
+        let latest =
+            crate::pull::apply_client(conn, root, s, &head, client, same_folder, &mut pulled)?;
         if pulled.segments > 0 {
             rep.pulled = Some(pulled);
         }
@@ -587,6 +614,7 @@ fn push_client_forced(
             &mut listed,
             Some(&carry),
             force,
+            same_folder,
         ) {
             Err(SyncError::Raced) if attempt + 1 < TRIES => {
                 attempt += 1;
@@ -648,7 +676,9 @@ fn hold_back(
 /// One round. `Ok(true)`: clients are left for another round. `carry`: [`push_client`]'s
 /// entries to send unchanged (and then only that one client is pushed). `force` (with `only`):
 /// the documents of that client to send whatever the B2 rules say ([`push_docs`]); nothing
-/// else never sent goes with them.
+/// else never sent goes with them. `same_folder` (several servers on one share, PA-99): each
+/// client's entries in the bucket this catalog has no row for go up again as they are, and the
+/// segments written are noted as held by the folder ([`crate::folder`]).
 #[allow(clippy::too_many_arguments)]
 fn push_once(
     conn: &mut Connection,
@@ -661,8 +691,10 @@ fn push_once(
     listed: &mut Option<Mutex<HashSet<String>>>,
     carry: Option<&[crate::layout::DocEntry]>,
     force: Option<&HashSet<String>>,
+    same_folder: &[String],
 ) -> Result<bool> {
     let client_only = carry.is_some();
+    let shared = !same_folder.is_empty();
     let head = s.head()?.unwrap_or_default();
     let seen_before = catalog::last_rev(conn, &s.device_id)?;
     let writer = vf_core::new_id();
@@ -948,9 +980,14 @@ fn push_once(
         }
         // Entries this catalog does not know go up as the bucket had them (their objects are
         // there already); they are not this catalog's to take as sent.
-        for c in carry.unwrap_or_default() {
+        let unknown = match carry {
+            Some(c) => c.to_vec(),
+            None if shared => unknown_entries(conn, s, &head, &p.client)?,
+            None => vec![],
+        };
+        for c in unknown {
             if !p.docs.iter().any(|d| d.doc_id == c.doc_id) && !rules.removed.contains(&c.doc_id) {
-                p.docs.push(c.clone());
+                p.docs.push(c);
             }
         }
         let rev = head.segments.get(&p.client).copied().unwrap_or(0) + 1;
@@ -984,6 +1021,15 @@ fn push_once(
             }
             for e in &docs {
                 sent_docs.push(SentDoc::of(e, None, ""));
+            }
+            if shared {
+                for c in unknown_entries(conn, s, &head, CABINET)? {
+                    if !docs.iter().any(|d| d.doc_id == c.doc_id)
+                        && !rules.removed.contains(&c.doc_id)
+                    {
+                        docs.push(c);
+                    }
+                }
             }
             let rev = head.cabinet_segment_rev + 1;
             let seg = CabinetSegment {
@@ -1096,6 +1142,21 @@ fn push_once(
     };
     catalog::set_state(&tx, &s.device_id, seen, "push")?;
     tx.commit()?;
+    // Sent from the shared folder: the folder holds these segments (PA-99).
+    if shared {
+        let held: Vec<(String, u64, String)> = sent_segments
+            .iter()
+            .map(|(c, rev, ..)| {
+                let key = if c == CABINET {
+                    layout::cabinet_segment_key_by(*rev, &new_head.writer)
+                } else {
+                    layout::segment_key_by(c, *rev, &new_head.writer)
+                };
+                (c.clone(), *rev, key)
+            })
+            .collect();
+        crate::folder::record(root, &held);
+    }
     mark_done(done);
     rep.segments += segments;
     rep.documents += sent_docs.len();
@@ -1120,6 +1181,44 @@ fn push_once(
         "sync push"
     );
     Ok(more)
+}
+
+/// The entries of the bucket's latest segment `segment` (a client's, or [`CABINET`]) that this
+/// catalog has no row for: a filing not read here yet, a tombstone from before this catalog
+/// (a seed copy). Sent again as they are, so a push never drops them from B2.
+fn unknown_entries(
+    conn: &Connection,
+    s: &Sync,
+    head: &Head,
+    segment: &str,
+) -> Result<Vec<crate::layout::DocEntry>> {
+    let docs = if segment == CABINET {
+        if head.cabinet_segment_rev == 0 {
+            return Ok(vec![]);
+        }
+        s.get_json::<CabinetSegment>(&head.cabinet_key())?
+            .ok_or_else(|| SyncError::Format("the cabinet segment is missing".into()))?
+            .documents
+    } else {
+        let Some(&rev) = head.segments.get(segment) else {
+            return Ok(vec![]);
+        };
+        s.get_json::<ClientSegment>(&head.client_key(segment, rev))?
+            .ok_or_else(|| SyncError::Format("a client segment is missing".into()))?
+            .documents
+    };
+    let mut out = vec![];
+    for e in docs {
+        let known: bool = conn.query_row(
+            "SELECT count(*) > 0 FROM document WHERE id = ?1",
+            [&e.doc_id],
+            |r| r.get(0),
+        )?;
+        if !known {
+            out.push(e);
+        }
+    }
+    Ok(out)
 }
 
 /// What [`upload_all`] did.
