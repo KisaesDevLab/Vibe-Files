@@ -30,8 +30,8 @@ param(
     [string]$Tesseract = 'C:\Program Files\Tesseract-OCR',
     # Parallel test jobs (-j 4 crashed rustc once on this PC: STATE.md PA-99).
     [int]$TestJobs = 2,
-    # Parallel build jobs: the default (one per core) ran this 16 GB PC out of memory.
-    [int]$BuildJobs = 4
+    # Parallel build jobs: the default (one per core), and 4 under load, ran this 16 GB PC out of memory.
+    [int]$BuildJobs = 2
 )
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $false
