@@ -29,7 +29,9 @@ param(
     [string]$PubDir = (Join-Path (Split-Path (Split-Path $PSScriptRoot)) 'vibe-files-releases'),
     [string]$Tesseract = 'C:\Program Files\Tesseract-OCR',
     # Parallel test jobs (-j 4 crashed rustc once on this PC: STATE.md PA-99).
-    [int]$TestJobs = 2
+    [int]$TestJobs = 2,
+    # Parallel build jobs: the default (one per core) ran this 16 GB PC out of memory.
+    [int]$BuildJobs = 4
 )
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $false
@@ -160,11 +162,11 @@ try {
     # One program per cargo run: two fat-LTO links at once ran this 16 GB PC out of memory
     # (rustc-LLVM "out of memory", PA-100).
     foreach ($pkg in 'vf-app', 'vf-move') {
-        cargo build --release --locked -p $pkg
+        cargo build --release --locked -j $BuildJobs -p $pkg
         if ($LASTEXITCODE) { Stop-Release "build of $pkg failed" }
     }
     # The 32-bit scanning helper: needs `rustup target add i686-pc-windows-msvc`.
-    cargo build --release --locked -p vf-scan32 --target i686-pc-windows-msvc
+    cargo build --release --locked -j $BuildJobs -p vf-scan32 --target i686-pc-windows-msvc
     if ($LASTEXITCODE) { Stop-Release '32-bit helper build failed' }
 }
 finally {
