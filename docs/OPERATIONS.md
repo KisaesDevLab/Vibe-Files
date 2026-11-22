@@ -11,10 +11,11 @@ Two ways; both give the same program.
   `winget upgrade Kisaes.VibeFiles`. Start it with `vibe-files` or from the Start menu search.
   Its data folder is `%LOCALAPPDATA%\Vibe Files\data` (winget replaces its own program folder on
   upgrade, so nothing of yours lives there).
-- **Portable copy**: unzip `vibe-files-<version>-win64.zip` from the GitHub release
-  (https://github.com/KisaesDevLab/Vibe-Files/releases) into a folder you choose, e.g.
-  `C:\Vibe Files`. Check the zip against the release's `SHA256SUMS.txt` first:
-  `Get-FileHash vibe-files-<version>-win64.zip` must show the same SHA-256. The data folder is
+- **Portable copy**: unzip `vibe-files-windows-x64.zip` from the latest release
+  (https://github.com/KisaesDevLab/vibe-files-releases/releases/latest) into a folder you
+  choose, e.g. `C:\Vibe Files`. Check the zip against the release's `SHA256SUMS.txt` first:
+  `Get-FileHash vibe-files-windows-x64.zip` must show the same SHA-256. (Releases up to 0.1.51
+  were named `vibe-files-<version>-win64.zip`.) The data folder is
   `data\` beside `vibe-files.exe`. To upgrade, replace everything but `data\`.
 
 **One data folder per Windows login.** On a server where several people run the app in their
@@ -32,7 +33,8 @@ Explorer context-menu entry is opt-in).
 text of every document, SSNs included), `config.toml`, caches and logs. Protect it like the
 cabinet share: only firm staff, on a disk with BitLocker.
 
-The app checks GitHub once per start for a newer release and says so on Browse; it never
+The app checks GitHub once per start for a newer release (on
+https://github.com/KisaesDevLab/vibe-files-releases) and says so on Browse; it never
 downloads or installs anything. `update_check = false` in `config.toml` turns that off.
 
 ## 2. A new office
@@ -171,21 +173,6 @@ or from Task Scheduler.
 
 Logs: `<data>\logs\vibe-files.<date>.log`, 30 days kept; actions, counts and error kinds only,
 no names, paths or document contents.
-
-## 7. Release (Kisaes)
-
-1. Bump `version` in `Cargo.toml`; record the release in the internal notes.
-2. Commit everything, then `pwsh scripts/release.ps1`: static-CRT build, the portable folder
-   with pdfium, TWAINDSM and Tesseract (only the DLLs it loads), `vibe-files-<ver>-win64.zip`
-   (no top folder: the exe is at its root), `SHA256SUMS.txt`, and the winget manifests under
-   `target/dist/winget/`. It refuses a tree with uncommitted changes (`-AllowDirty` makes a
-   trial build, never to publish) and prints the commit it was built from.
-3. Smoke test the zip on a clean PC (open a cabinet, view a PDF, OCR one scan, push).
-4. Tag `v<ver>`, create the GitHub release, attach the zip and `SHA256SUMS.txt`; put the SHA-256
-   lines in the release notes.
-5. winget: open a pull request to `microsoft/winget-pkgs` with the generated
-   `manifests/k/Kisaes/VibeFiles/<ver>/` files (`wingetcreate submit` or by hand). The first
-   submission is reviewed by Microsoft; later ones are routine.
 
 ## Admin password
 

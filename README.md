@@ -10,8 +10,10 @@ Its client folder tree and document-filing engine come from
 [Vibe Filer Desktop](https://github.com/KisaesDevLab/Vibe-Filer-Desktop), which runs inside
 Vibe Files as the **Intake** tab.
 
-> **Pre-release.** In use at Kisaes LLC for its live run. Releases are on the
-> [Releases page](https://github.com/KisaesDevLab/Vibe-Files/releases).
+> **This repository is private** (source, history and the build plan). Releases are built
+> with `tools/release.ps1` and published, binary only, to the public release repository
+> [KisaesDevLab/vibe-files-releases](https://github.com/KisaesDevLab/vibe-files-releases);
+> see [RELEASING.md](RELEASING.md).
 
 ## Install
 
@@ -32,10 +34,10 @@ Start it with `vibe-files` or from the Start menu. Its data folder is
 
 ### From the release zip (available now)
 
-1. Download `vibe-files-<version>-win64.zip` from the
-   [latest release](https://github.com/KisaesDevLab/Vibe-Files/releases).
+1. Download `vibe-files-windows-x64.zip` from the
+   [latest release](https://github.com/KisaesDevLab/vibe-files-releases/releases/latest).
 2. Check the download. In PowerShell:
-   `Get-FileHash vibe-files-<version>-win64.zip`
+   `Get-FileHash vibe-files-windows-x64.zip`
    must show the SHA-256 given in the release notes (and in `SHA256SUMS.txt`).
 3. Unzip it into a folder of your choice, for example `C:\Vibe Files`, and run
    `vibe-files.exe`.
@@ -132,14 +134,18 @@ folder is renamed to match.
 
 ## Privacy
 
-- No telemetry. The only network calls go to your own B2 bucket, when you turn sync on.
+- No telemetry. Network calls go only to your own B2 bucket (when sync is on), the firm's own
+  portal (when one is set), and one check per start for a newer release on the public release
+  page (`update_check = false` turns it off).
 - Files sent to B2 are encrypted on your PC first, with a key only your firm holds.
 - Full SSNs and EINs are never stored in the client list or the catalog; only the last four
   digits are kept.
 
 ## License
 
-[GNU Affero General Public License v3.0 or later](LICENSE) (`AGPL-3.0-or-later`).
+Proprietary: the Kisaes end user licence agreement in [LICENSE](LICENSE) (a draft for review),
+from 0.1.52. Versions 0.1.51 and earlier were published under the GNU AGPL v3.0 or later.
+The release zip carries `THIRD-PARTY-NOTICES.txt` (written by `tools/third-party-notices.ps1`).
 Third-party components keep their own licenses: pdfium (in `crates/filer-pdf/assets/`), the TWAIN
 Data Source Manager (LGPL-2.1-or-later, in `crates/vf-ingest/assets/`) and Tesseract
 (Apache-2.0, in the release's `tesseract\` folder).
