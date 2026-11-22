@@ -157,8 +157,12 @@ try {
     $env:CARGO_ENCODED_RUSTFLAGS = $flags -join [char]0x1f
     Remove-Item Env:RUSTFLAGS -ErrorAction SilentlyContinue
     $env:VF_COMMIT = $short
-    cargo build --release --locked -p vf-app -p vf-move
-    if ($LASTEXITCODE) { Stop-Release 'build failed' }
+    # One program per cargo run: two fat-LTO links at once ran this 16 GB PC out of memory
+    # (rustc-LLVM "out of memory", PA-100).
+    foreach ($pkg in 'vf-app', 'vf-move') {
+        cargo build --release --locked -p $pkg
+        if ($LASTEXITCODE) { Stop-Release "build of $pkg failed" }
+    }
     # The 32-bit scanning helper: needs `rustup target add i686-pc-windows-msvc`.
     cargo build --release --locked -p vf-scan32 --target i686-pc-windows-msvc
     if ($LASTEXITCODE) { Stop-Release '32-bit helper build failed' }
