@@ -104,7 +104,11 @@ pub fn init(data: &Path) -> Option<tracing_appender::non_blocking::WorkerGuard> 
         tracing::error!(at, "panic");
         default_hook(info);
     }));
-    tracing::info!(version = env!("CARGO_PKG_VERSION"), "started");
+    tracing::info!(
+        version = env!("CARGO_PKG_VERSION"),
+        build = env!("VF_COMMIT"),
+        "started"
+    );
     Some(guard)
 }
 

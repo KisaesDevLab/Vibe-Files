@@ -5,7 +5,9 @@ members = ["crates/*"]
 [workspace.package]
 version = "0.1.51"
 edition = "2024"
-license = "AGPL-3.0-or-later"
+# Proprietary from 0.1.52 (owner 2026-11-22, PA-100, Q-134); 0.1.51 and earlier were AGPL-3.0-or-later.
+license = "LicenseRef-Kisaes-Proprietary"
+homepage = "https://github.com/KisaesDevLab/vibe-files-releases"
 publish = false
 
 # Versions pinned to the vendored Vibe Filer Desktop (ea4e726, v0.2.4) so its code builds unchanged.
@@ -83,6 +85,8 @@ opt-level = 3
 opt-level = 3
 
 [profile.release]
+# PA-100 R2: no debug info, symbols stripped, whole-program LTO, one codegen unit.
+debug = false
 opt-level = "z"
 lto = true
 strip = true

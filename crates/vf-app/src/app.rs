@@ -1023,7 +1023,12 @@ impl eframe::App for VibeFilesApp {
                     });
             }
         }
-        let mut segments = vec![format!("vibe-files {}", env!("CARGO_PKG_VERSION"))];
+        // The version and the build's commit (a build identifier, not a link: PA-100).
+        let mut segments = vec![format!(
+            "vibe-files {} ({})",
+            env!("CARGO_PKG_VERSION"),
+            env!("VF_COMMIT")
+        )];
         // Work going on behind the window, said in the footer with a spinner on every tab
         // (owner 2026-11-15, Q-112).
         let mut working = None;
