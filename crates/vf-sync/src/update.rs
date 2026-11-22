@@ -1,13 +1,14 @@
-//! The update check (PHASES P13 step 6; QUESTIONS Q-30): the latest release of the public
-//! KisaesDevLab/Vibe-Files repository on GitHub. Nothing is downloaded or installed: the app says
-//! a newer version exists, where, and its published SHA-256 file. One GET, no data sent but the
-//! request itself (CLAUDE.md principle 7: B2 and this check are the only network calls).
+//! The update check (PHASES P13 step 6; QUESTIONS Q-30): the latest release of the public release
+//! repository KisaesDevLab/vibe-files-releases on GitHub (PA-100: the source repo is private).
+//! Nothing is downloaded or installed: the app says a newer version exists, where, and its
+//! published SHA-256 file. One GET, no data sent but the request itself (CLAUDE.md principle 7:
+//! B2 and this check are the only network calls). Turned off by `update_check = false`.
 
 use object_store::ObjectStore;
 use object_store::path::Path as ObjPath;
 
 pub const API: &str = "https://api.github.com";
-pub const LATEST: &str = "repos/KisaesDevLab/Vibe-Files/releases/latest";
+pub const LATEST: &str = "repos/KisaesDevLab/vibe-files-releases/releases/latest";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Release {
@@ -69,12 +70,13 @@ mod tests {
         assert!(newer("0.10.0", "0.9.3"));
         assert!(!newer("0.1.0", "0.1.0"));
         assert!(!newer("0.1.0", "0.2.0"));
-        let j = br#"{"tag_name":"v0.2.0","html_url":"https://github.com/KisaesDevLab/Vibe-Files/releases/tag/v0.2.0","draft":false,"prerelease":false}"#;
+        let j = br#"{"tag_name":"v0.2.0","html_url":"https://github.com/KisaesDevLab/vibe-files-releases/releases/tag/v0.2.0","draft":false,"prerelease":false}"#;
         assert_eq!(
             parse(j),
             Some(Release {
                 version: "0.2.0".into(),
-                url: "https://github.com/KisaesDevLab/Vibe-Files/releases/tag/v0.2.0".into()
+                url: "https://github.com/KisaesDevLab/vibe-files-releases/releases/tag/v0.2.0"
+                    .into()
             })
         );
         let pre = br#"{"tag_name":"v0.3.0","html_url":"x","draft":false,"prerelease":true}"#;
