@@ -355,6 +355,396 @@ mod tests {
         shot(&mut h, "vf-6-admin-todo-templates");
     }
 
+    /// PA-103 walkthrough against a real Vibe Portal (not a fake): the to-do window drives every
+    /// firm step, and `node client.mjs` the client's steps in a browser. Set `VF_WALK_URL`,
+    /// `VF_WALK_KEY`, `VF_WALK_LOG` (the portal's log, EMAIL_PROVIDER=console), `VF_WALK_CLIENT`
+    /// (client.mjs), `VF_WALK_PDF` (the file the client sends) and `VF_WALK_DIR` (output).
+    #[test]
+    #[ignore = "needs a running portal"]
+    fn todo_walkthrough() {
+        let (Ok(url), Ok(key), Ok(log), Ok(client_js), Ok(pdf), Ok(out)) = (
+            std::env::var("VF_WALK_URL"),
+            std::env::var("VF_WALK_KEY"),
+            std::env::var("VF_WALK_LOG"),
+            std::env::var("VF_WALK_CLIENT"),
+            std::env::var("VF_WALK_PDF"),
+            std::env::var("VF_WALK_DIR"),
+        ) else {
+            return;
+        };
+        let out = std::path::PathBuf::from(out);
+        std::fs::create_dir_all(&out).unwrap();
+        // A new address each run: the portal keeps the people of earlier runs.
+        let email = &format!(
+            "jordan.sample+{}@example.com",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs()
+        );
+        let staff_email = "pat.preparer@example.com";
+        let mut steps: Vec<String> = Vec::new();
+        // Only messages from this run count (the log may hold earlier runs').
+        let since_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+        let mut note = |s: String| {
+            eprintln!("{s}");
+            steps.push(s);
+        };
+        let client = |phase: &str| -> bool {
+            std::process::Command::new("node")
+                .args([
+                    &client_js,
+                    &url,
+                    &out.display().to_string(),
+                    &log,
+                    email,
+                    phase,
+                    &pdf,
+                ])
+                .status()
+                .is_ok_and(|s| s.success())
+        };
+        // Messages to `to` in the portal's log, newest last: (subject, text).
+        let mail = |to: &str| -> Vec<(String, String)> {
+            std::fs::read_to_string(&log)
+                .unwrap_or_default()
+                .lines()
+                .filter(|l| l.contains("\"msg\":\"notify ("))
+                .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+                .filter(|m| m["to"] == to && m["time"].as_i64().is_some_and(|t| t >= since_ms))
+                .map(|m| {
+                    (
+                        m["subject"].as_str().unwrap_or("").to_string(),
+                        m["body"].as_str().unwrap_or("").to_string(),
+                    )
+                })
+                .collect()
+        };
+
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path().join("Clients");
+        vf_fixtures::generate(&root, 5).unwrap();
+        crate::ui::test_util::pdfium_first();
+        for e in std::fs::read_dir(&root).unwrap().flatten() {
+            let name = e.file_name().to_string_lossy().into_owned();
+            if e.path().is_dir() && !name.starts_with('_') {
+                let dir = e.path().join("Income Tax").join("2025");
+                std::fs::create_dir_all(&dir).unwrap();
+                crate::ui::test_util::write_lines_pdf(
+                    &dir.join("2025 1040 Tax Return.pdf"),
+                    crate::ui::test_util::SAMPLE_RETURN,
+                );
+            }
+        }
+        let data = t.path().join("data");
+        drop(crate::session::open(&data, "dev", &root).unwrap());
+        let cab = vf_fs::cabinet::read(&root).unwrap().cabinet_id;
+        let s = vf_portal::PortalSettings::new(&cab, &url, &key, 0)
+            .unwrap()
+            .with_todo_lists(true);
+        vf_portal::settings::save(&root, &s).unwrap();
+        let d = data.clone();
+        let mut h = HarnessBuilder::default()
+            .with_max_steps(crate::ui::test_util::MAX_STEPS)
+            .with_theme(egui::Theme::Light)
+            .with_size([1440.0, 900.0])
+            .build_eframe(move |cc| VibeFilesApp::new(&cc.egui_ctx, d.clone()));
+        h.run_steps(8);
+        let shot = |h: &mut egui_kittest::Harness<'static, VibeFilesApp>, name: &str| {
+            for _ in 0..5 {
+                h.step();
+            }
+            match h.render() {
+                Ok(img) => img.save(out.join(format!("{name}.png"))).unwrap(),
+                Err(e) => eprintln!("{name}: {e}"),
+            }
+        };
+        let click_last = |h: &mut egui_kittest::Harness<'static, VibeFilesApp>, label: &str| {
+            let n = h.query_all_by_role_and_label(Role::Button, label).count();
+            assert!(n > 0, "no button {label:?}");
+            h.query_all_by_role_and_label(Role::Button, label)
+                .last()
+                .unwrap()
+                .scroll_to_me();
+            h.run_steps(2);
+            h.query_all_by_role_and_label(Role::Button, label)
+                .last()
+                .unwrap()
+                .click();
+            h.run_steps(4);
+        };
+        let said = |h: &egui_kittest::Harness<'static, VibeFilesApp>, text: &str| {
+            h.query_by_label_contains(text).is_some()
+        };
+        h.get_by_role_and_label(Role::Button, "Open existing")
+            .click();
+        h.run_steps(8);
+        h.get_by_label("Cabinet folder").click();
+        h.step();
+        h.get_by_label("Cabinet folder")
+            .type_text(&root.display().to_string());
+        h.step();
+        h.get_by_role_and_label(Role::Button, "Open cabinet")
+            .click();
+        assert!(wait_for(&mut h, |h| matches!(
+            h.state().screen,
+            crate::app::Screen::Open(_)
+        )));
+        h.run_steps(8);
+        let c = {
+            let o = open_mut(&mut h);
+            o.browse.set_scope(vf_core::browse::Scope::Client(0));
+            o.browse.portal.reread();
+            o.browse.snap.clients[0].clone()
+        };
+        h.run_steps(6);
+        // The client's person is invited to the portal (the call Portal users… makes), and
+        // accepts: a client already on the portal.
+        let p = crate::portal::client(&s);
+        p.put_client(&c.id, &c.ext_id, &c.name, None).unwrap();
+        p.invite(&c.id, Some(email), None, "Jordan Sample", "Owner")
+            .unwrap();
+        note(format!(
+            "Setup: {} ({}) invited {email} to the portal",
+            c.name, c.ext_id
+        ));
+        assert!(client("accept"), "the client accepts the invitation");
+
+        // ---- Step 1: create a to-do list (from last year's return, PA-104).
+        h.get_by_role_and_label(Role::Button, "To-do lists…")
+            .click();
+        assert!(wait_for(&mut h, |h| h
+            .query_by_label("+ New list")
+            .is_some()));
+        h.run_steps(6);
+        click_last(&mut h, "From last year's return…");
+        {
+            use egui_kittest::kittest::NodeT;
+            h.query_all_by_role(Role::RadioButton)
+                .find(|n| {
+                    n.accesskit_node()
+                        .label()
+                        .is_some_and(|l| l.ends_with("2025 1040 Tax Return.pdf"))
+                })
+                .expect("the return is offered")
+                .click();
+        }
+        h.run_steps(4);
+        click_last(&mut h, "Read it");
+        assert!(wait_for(&mut h, |h| h
+            .query_by_label("Items read from last year's return")
+            .is_some()));
+        h.run_steps(4);
+        shot(&mut h, "01-vf-items-read-from-return");
+        let use_label = h
+            .query_all_by_role(Role::Button)
+            .filter_map(|n| {
+                use egui_kittest::kittest::NodeT;
+                n.accesskit_node()
+                    .label()
+                    .filter(|l| l.starts_with("Use these "))
+            })
+            .next()
+            .unwrap();
+        click_last(&mut h, &use_label);
+        h.run_steps(6);
+        // Assigned to Pat Preparer: told by email when the client answers (step 8).
+        {
+            use egui_kittest::kittest::NodeT;
+            let combos: Vec<String> = h
+                .query_all_by_role(Role::ComboBox)
+                .map(|n| {
+                    let a = n.accesskit_node();
+                    format!("{:?}={:?}", a.label(), a.value())
+                })
+                .collect();
+            eprintln!("combo boxes: {combos:?}");
+            h.query_all_by_role(Role::ComboBox)
+                .find(|n| {
+                    let a = n.accesskit_node();
+                    a.value().as_deref() == Some("No one") || a.label().as_deref() == Some("No one")
+                })
+                .expect("the Assigned to picker")
+                .click();
+        }
+        h.run_steps(4);
+        h.get_by_label("Pat Preparer").click();
+        h.run_steps(4);
+        shot(&mut h, "02-vf-new-list-filled");
+        note(format!(
+            "Step 1: list made from the return: {use_label}, assigned to Pat Preparer"
+        ));
+
+        // ---- Step 2: send it.
+        click_last(&mut h, "Send the list");
+        assert!(wait_for(&mut h, |h| h
+            .query_by_label_contains("1. W-2 from")
+            .is_some()));
+        h.run_steps(6);
+        shot(&mut h, "03-vf-list-sent");
+        let sent = mail(email);
+        note(format!(
+            "Step 2: sent; the client was emailed: {:?}",
+            sent.last().map(|m| &m.0)
+        ));
+        assert!(
+            sent.iter()
+                .any(|m| m.1.contains("has sent you a to-do list"))
+        );
+
+        // ---- Step 3: edit it (remove the first item, save).
+        click_last(&mut h, "Edit");
+        assert!(wait_for(&mut h, |h| h
+            .query_by_role_and_label(Role::Button, "Save")
+            .is_some()));
+        h.query_all_by_role_and_label(Role::Button, "Remove")
+            .next()
+            .unwrap()
+            .click();
+        h.run_steps(4);
+        shot(&mut h, "03b-vf-editing");
+        click_last(&mut h, "Save");
+        assert!(wait_for(&mut h, |h| said(h, "Saved.")));
+        h.run_steps(4);
+        shot(&mut h, "03c-vf-edited");
+        note("Step 3: edited (first item removed) and saved".into());
+
+        // ---- Step 4: a reminder.
+        click_last(&mut h, "Remind now");
+        assert!(wait_for(&mut h, |h| said(h, "reminded") || said(h, "Nobody could")));
+        h.run_steps(4);
+        shot(&mut h, "04-vf-reminded");
+        note(format!(
+            "Step 4: reminder; the client was emailed: {:?}",
+            mail(email).last().map(|m| &m.0)
+        ));
+        assert!(mail(email).iter().any(|m| m.1.contains("still open on")));
+
+        // ---- Steps 5-7: the client signs in, uploads, answers (browser).
+        let answered_at = std::time::Instant::now();
+        assert!(client("answer"), "the client's browser steps");
+        note(
+            "Steps 5-7: client signed in, uploaded a W-2, answered, marked one not applicable"
+                .into(),
+        );
+
+        // ---- Step 8: Pat Preparer is emailed (the portal gathers answers for 5 minutes).
+        let mut told = None;
+        while answered_at.elapsed() < std::time::Duration::from_secs(8 * 60) {
+            if let Some(m) = mail(staff_email).last() {
+                told = Some(m.clone());
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_secs(5));
+            h.step();
+        }
+        let told = told.expect("the assigned staff member is told");
+        note(format!(
+            "Step 8: after {} s, {staff_email} was emailed: subject {:?} / text {:?}",
+            answered_at.elapsed().as_secs(),
+            told.0,
+            told.1
+        ));
+        // Read again: the open list shows the client's answers.
+        click_last(&mut h, "Read again");
+        assert!(wait_for(&mut h, |h| h
+            .query_by_label_contains("Sample W-2 2026.pdf")
+            .is_some()));
+        h.run_steps(6);
+        shot(&mut h, "10-vf-answers-with-who-when-ip");
+
+        // ---- Step 9: the client's document comes down to the Portal inbox; the report too.
+        open_mut(&mut h).browse.portal.fetch_now = true;
+        let inbox = vf_portal::inbox::inbox(&root);
+        let start = std::time::Instant::now();
+        let has = |part: &str| {
+            std::fs::read_dir(&inbox)
+                .map(|d| {
+                    d.flatten()
+                        .any(|e| e.file_name().to_string_lossy().contains(part))
+                })
+                .unwrap_or(false)
+        };
+        while !has("Sample W-2 2026") && start.elapsed().as_secs() < 60 {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            h.step();
+        }
+        assert!(
+            has("Sample W-2 2026"),
+            "the upload reaches the Portal inbox"
+        );
+        click_last(&mut h, "File report in the client folder");
+        assert!(wait_for(&mut h, |h| said(
+            h,
+            "The report is in the Portal inbox"
+        )));
+        h.run_steps(4);
+        shot(&mut h, "11-vf-report-filed");
+        let files: Vec<String> = std::fs::read_dir(&inbox)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        let hints = std::fs::read_to_string(root.join("_Vibe").join("ingest_hints.jsonl"))
+            .unwrap_or_default();
+        note(format!(
+            "Step 9: Portal inbox now holds {files:?}; Intake hint for the upload: {}",
+            hints.lines().last().unwrap_or("none")
+        ));
+
+        // ---- Step 10: cancel the answered list; a second, unanswered one is deleted.
+        click_last(&mut h, "Cancel list");
+        h.run_steps(4);
+        shot(&mut h, "12-vf-cancel-confirm");
+        click_last(&mut h, "Cancel list");
+        assert!(wait_for(&mut h, |h| said(h, "Cancelled.")));
+        h.run_steps(4);
+        shot(&mut h, "13-vf-cancelled");
+        click_last(&mut h, "Hide");
+        click_last(&mut h, "From last year's return…");
+        {
+            use egui_kittest::kittest::NodeT;
+            h.query_all_by_role(Role::RadioButton)
+                .find(|n| {
+                    n.accesskit_node()
+                        .label()
+                        .is_some_and(|l| l.ends_with("2025 1040 Tax Return.pdf"))
+                })
+                .unwrap()
+                .click();
+        }
+        h.run_steps(4);
+        click_last(&mut h, "Read it");
+        assert!(wait_for(&mut h, |h| h
+            .query_by_label("Items read from last year's return")
+            .is_some()));
+        click_last(&mut h, &use_label);
+        click_last(&mut h, "Send the list");
+        assert!(wait_for(&mut h, |h| h
+            .query_by_label_contains("1. W-2 from")
+            .is_some()));
+        h.run_steps(4);
+        click_last(&mut h, "Delete");
+        h.run_steps(4);
+        click_last(&mut h, "Delete");
+        assert!(wait_for(&mut h, |h| said(h, "The list was deleted.")));
+        h.run_steps(4);
+        shot(&mut h, "14-vf-deleted");
+        note(
+            "Step 10: the answered list cancelled; a second unanswered list sent and deleted"
+                .into(),
+        );
+        assert!(client("after"), "the client's view after");
+        std::fs::write(
+            out.join("vf-steps.json"),
+            serde_json::to_string_pretty(&steps).unwrap(),
+        )
+        .unwrap();
+    }
+
     /// A portal on this PC answering the to-do calls with invented data; its address.
     fn fake_todo_portal() -> String {
         use std::io::{BufRead, BufReader, Read, Write};

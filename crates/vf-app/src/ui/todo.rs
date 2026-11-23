@@ -22,6 +22,15 @@ use crate::ui::portal::{AuditOut, ClientRef, spawn};
 use crate::ui::widgets::UiExt as _;
 use crate::ui::{theme, widgets};
 
+/// What a change did ("The list was sent."), in the app's OK colour: the window's errors have
+/// their own red line (walkthrough 2026-11-23: success showed in red).
+fn done_line(ui: &mut egui::Ui, msg: Option<&str>) {
+    ui.add_sized(
+        [ui.available_width(), 36.0],
+        egui::Label::new(RichText::new(msg.unwrap_or("")).color(theme::health_ok())).wrap(),
+    );
+}
+
 /// The answer of a portal read run on a scoped thread (a panic there is a failed read).
 fn joined<T>(
     h: std::thread::ScopedJoinHandle<'_, vf_portal::api::Result<T>>,
@@ -417,8 +426,14 @@ fn staff_combo(
 // The window: one client's lists
 // ======================================================================================
 
-/// What a window read: the client's lists, who may be assigned, the templates.
-type Read = (Vec<TodoList>, Vec<StaffChoice>, Vec<Template>);
+/// What a window read: the client's lists, who may be assigned, the templates, and the list
+/// open in the window read again (`None`: none was open, or it is gone).
+type Read = (
+    Vec<TodoList>,
+    Vec<StaffChoice>,
+    Vec<Template>,
+    Option<Box<TodoList>>,
+);
 /// The portal out of reach: why, and the copies in the client folder.
 type Offline = (String, Option<Vec<CopyLine>>);
 
@@ -577,20 +592,42 @@ impl TodoWindow {
         let client = self.client.clone();
         let root = self.root.clone();
         let folder = self.folder.clone();
+        // Read again also reads the open list: its new answers show (walkthrough 2026-11-23:
+        // they did not until the list was hidden and opened again).
+        let open_id = self.open.as_ref().map(|l| l.id.clone());
+        let copies = self.copies.clone();
         self.job = Some(spawn(ctx, move || {
             let p = core::client(&s);
             // The client first (it must be on the portal), then its lists, its staff and the
             // templates together: they do not depend on each other.
-            let read = p
-                .put_client(&client.id, &client.code, &client.name, None)
-                .and_then(|()| {
-                    std::thread::scope(|sc| {
-                        let staff = sc.spawn(|| p.todo_staff(&client.id));
-                        let templates = sc.spawn(|| p.todo_templates());
-                        let lists = p.todo_lists(&client.id);
-                        Ok((lists?, joined(staff)?, joined(templates)?))
-                    })
-                });
+            let read =
+                p.put_client(&client.id, &client.code, &client.name, None)
+                    .and_then(|()| {
+                        std::thread::scope(|sc| {
+                            let staff = sc.spawn(|| p.todo_staff(&client.id));
+                            let templates = sc.spawn(|| p.todo_templates());
+                            let open = open_id.as_deref().map(|id| {
+                                let p = &p;
+                                sc.spawn(move || p.todo_list(id))
+                            });
+                            let lists = p.todo_lists(&client.id);
+                            let open = match open.map(joined) {
+                                Some(Ok(l)) => {
+                                    if let Some(c) =
+                                        copy_of(&root, folder.as_deref(), &l, &p.actor_name())
+                                    {
+                                        let _ = copies.0.send(c);
+                                    }
+                                    Some(Box::new(l))
+                                }
+                                // Deleted elsewhere since: shown no more.
+                                Some(Err(vf_portal::PortalError::Http { status: 404, .. }))
+                                | None => None,
+                                Some(Err(e)) => return Err(e),
+                            };
+                            Ok((lists?, joined(staff)?, joined(templates)?, open))
+                        })
+                    });
             Done::Loaded(read.map_err(|e| {
                 // Only when the portal cannot be reached: a refusal (to-do lists off, a bad
                 // key, an older portal) is said as it is (QA 2026-11-23).
@@ -688,7 +725,8 @@ impl TodoWindow {
         // window shows next, it is not carried over (QA 2026-11-23).
         self.confirm = None;
         match done {
-            Done::Loaded(Ok((lists, staff, templates))) => {
+            Done::Loaded(Ok((lists, staff, templates, open))) => {
+                self.open = open.map(|l| *l);
                 self.lists = Some(lists);
                 self.staff = staff;
                 self.templates = templates;
@@ -802,7 +840,7 @@ impl TodoWindow {
                 ui.label("Working…");
             });
         }
-        widgets::message_line(ui, self.msg.as_deref());
+        done_line(ui, self.msg.as_deref());
         if let Some(e) = &self.err {
             ui.label(RichText::new(e).color(theme::error()));
         }
@@ -1155,6 +1193,7 @@ impl TodoWindow {
                 self.confirm = None;
                 self.offline = None;
                 self.err = None;
+                self.msg = None;
                 self.load(ctx, s);
             }
             Act::NewBlank => self.mode = Mode::New(ListForm::blank()),
@@ -1776,7 +1815,7 @@ pub fn templates_page(
             ui.label("Working…");
         });
     }
-    widgets::message_line(ui, page.msg.as_deref());
+    done_line(ui, page.msg.as_deref());
     if let Some(e) = &page.err {
         ui.label(RichText::new(e).color(theme::error()));
     }
