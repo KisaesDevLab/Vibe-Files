@@ -8,7 +8,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use futures::TryStreamExt;
 use object_store::path::Path as ObjPath;
-use object_store::{ObjectStore, PutPayload, WriteMultipart};
+use object_store::{ObjectStore, ObjectStoreExt, PutPayload, WriteMultipart};
 
 /// Uploads at or above this go in parts (BUCKET_LAYOUT: multipart over 100 MB).
 pub const MULTIPART_AT: usize = 100 * 1024 * 1024;

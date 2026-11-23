@@ -4,7 +4,7 @@
 //! published SHA-256 file. One GET, no data sent but the request itself (CLAUDE.md principle 7:
 //! B2 and this check are the only network calls). Turned off by `update_check = false`.
 
-use object_store::ObjectStore;
+use object_store::ObjectStoreExt;
 use object_store::path::Path as ObjPath;
 
 pub const API: &str = "https://api.github.com";

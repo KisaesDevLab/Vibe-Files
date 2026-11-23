@@ -809,8 +809,11 @@ impl ObjectStore for Hooked {
     ) -> object_store::Result<GetResult> {
         self.inner.get_opts(location, options).await
     }
-    async fn delete(&self, location: &OPath) -> object_store::Result<()> {
-        self.inner.delete(location).await
+    fn delete_stream(
+        &self,
+        locations: BoxStream<'static, object_store::Result<OPath>>,
+    ) -> BoxStream<'static, object_store::Result<OPath>> {
+        self.inner.delete_stream(locations)
     }
     fn list(&self, prefix: Option<&OPath>) -> BoxStream<'static, object_store::Result<ObjectMeta>> {
         self.inner.list(prefix)
@@ -821,11 +824,13 @@ impl ObjectStore for Hooked {
     ) -> object_store::Result<ListResult> {
         self.inner.list_with_delimiter(prefix).await
     }
-    async fn copy(&self, from: &OPath, to: &OPath) -> object_store::Result<()> {
-        self.inner.copy(from, to).await
-    }
-    async fn copy_if_not_exists(&self, from: &OPath, to: &OPath) -> object_store::Result<()> {
-        self.inner.copy_if_not_exists(from, to).await
+    async fn copy_opts(
+        &self,
+        from: &OPath,
+        to: &OPath,
+        options: object_store::CopyOptions,
+    ) -> object_store::Result<()> {
+        self.inner.copy_opts(from, to, options).await
     }
 }
 
