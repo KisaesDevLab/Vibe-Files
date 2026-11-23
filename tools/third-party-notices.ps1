@@ -81,6 +81,27 @@ foreach ($k in ($crates.Keys | Sort-Object)) {
     if ($f -and (Get-Content $f.FullName -Raw) -match 'Apache License\s+Version 2\.0') { $standard['Apache-2.0'] = (Get-Content $f.FullName -Raw).Trim(); break }
 }
 $standardUsers = [ordered]@{}   # licence id -> crates that use its standard text
+
+# "(A OR B) AND C AND D" -> "(A OR B)", "C", "D" (AND outside brackets only).
+function Split-TopLevelAnd([string]$expr) {
+    $parts = @(); $depth = 0; $cur = ''
+    foreach ($tok in ($expr -split '(\(|\)|\s+)' | Where-Object { $_ -ne '' })) {
+        if ($tok -eq '(') { $depth++ } elseif ($tok -eq ')') { $depth-- }
+        if ($depth -eq 0 -and $tok -eq 'AND') { $parts += $cur.Trim(); $cur = ''; continue }
+        $cur += if ($tok -match '^\s+$') { ' ' } else { $tok }
+    }
+    if ($cur.Trim()) { $parts += $cur.Trim() }
+    $parts | ForEach-Object { $_ -replace '\(\s+', '(' -replace '\s+\)', ')' }
+}
+# Whether a text found in a crate's subfolder is the text of licence $id. Only font licences
+# count: an MIT text there belongs to a font (its authors' copyright), not to the crate's code.
+function Test-Covered([string]$id, [string]$found) {
+    $marks = @{
+        'OFL-1.1'         = 'SIL OPEN FONT LICEN[CS]E'
+        'Ubuntu-font-1.0' = 'UBUNTU FONT LICEN[CS]E'
+    }
+    $marks.Contains($id) -and $found -match "(?i)$($marks[$id])"
+}
 $entries = @()
 foreach ($k in ($crates.Keys | Sort-Object)) {
     $p = $crates[$k]
@@ -91,29 +112,41 @@ foreach ($k in ($crates.Keys | Sort-Object)) {
         # Some crates keep their texts one folder down (epaint_default_fonts: fonts\OFL.txt, UFL.txt,
         # and a .txt beside each font naming its licence).
         $files = @(Get-ChildItem $dir -Directory | Get-ChildItem -File | Where-Object {
-                $_.Name -match '(?i)licen[cs]e|^(OFL|UFL|COPYING)' -or
+                # Real licence file names only (not src\license.rs): LICENSE*, COPYING*, OFL.txt,
+                # UFL.txt, or <name>-license.txt.
+                ($_.Extension -in '', '.txt', '.md' -and
+                 $_.Name -match '(?i)^(licen[cs]e|copying|ofl|ufl)|[-_]licen[cs]e\.(txt|md)$') -or
                 ($_.Extension -eq '.txt' -and (Test-Path (Join-Path $_.DirectoryName "$($_.BaseName).ttf")))
             } | Sort-Object FullName)
     }
     $refs = @()
+    $found = ''   # the texts found, to tell which licences of the expression they cover
     foreach ($f in $files) {
         $t = (Get-Content $f.FullName -Raw).Trim()
         if (-not $t) { continue }
+        $found += "`n$t" 
         $h = (Get-FileHash -InputStream ([IO.MemoryStream]::new([Text.Encoding]::UTF8.GetBytes($t))) -Algorithm SHA256).Hash.Substring(0, 12)
         if (-not $texts.Contains($h)) { $texts[$h] = @{ text = $t; crates = @() } }
         $texts[$h].crates += "$($p.name) $($p.version) ($($f.Name))"
         $refs += "[$h]"
     }
     $lic = if ($p.license) { $p.license } elseif ($p.license_file) { "see $($p.license_file)" } else { 'not stated' }
-    if ($refs -and $fromSubfolder -and $lic -match '\(([^)]+)\)') {
-        # Its subfolder holds the font licences only; the "(A OR B)" for the code itself needs a
-        # standard text too.
-        $id = @($Matches[1] -split '\s+OR\s+' | ForEach-Object Trim | Where-Object { $standard.Contains($_) })[0]
-        if (-not $id) { throw "$($p.name) $($p.version) ($lic): no standard text for its code licence" }
-        if (-not $standardUsers.Contains($id)) { $standardUsers[$id] = @() }
-        $who = if ($p.authors) { $p.authors -join ', ' -replace '\s*<[^>]*>', '' } else { "the $($p.name) authors" }
-        $standardUsers[$id] += "$($p.name) $($p.version) (copyright $who)"
-        $entries += ("{0} {1}: {2}  texts {3}; code used under {4}, standard text at the end" -f $p.name, $p.version, $lic, ($refs -join ' '), $id)
+    if ($refs -and $fromSubfolder) {
+        # Its subfolder may hold only the fonts' licences. Every AND term of the expression that
+        # no text found covers (the code's own "A OR B", a plain "MIT") gets a standard text.
+        $added = @()
+        foreach ($term in (Split-TopLevelAnd $lic)) {
+            $alts = @($term -replace '^\(|\)$', '' -split '\s+OR\s+' | ForEach-Object Trim)
+            if ($alts | Where-Object { Test-Covered $_ $found }) { continue }
+            $id = @($alts | Where-Object { $standard.Contains($_) })[0]
+            if (-not $id) { throw "$($p.name) $($p.version) ($lic): no text found and no standard text for '$term'" }
+            if (-not $standardUsers.Contains($id)) { $standardUsers[$id] = @() }
+            $who = if ($p.authors) { $p.authors -join ', ' -replace '\s*<[^>]*>', '' } else { "the $($p.name) authors" }
+            $standardUsers[$id] += "$($p.name) $($p.version) (copyright $who)"
+            $added += $id
+        }
+        $extra = if ($added) { "; also under $($added -join ' AND '), standard text at the end" } else { '' }
+        $entries += ("{0} {1}: {2}  texts {3}{4}" -f $p.name, $p.version, $lic, ($refs -join ' '), $extra)
     } elseif ($refs) {
         $entries += ("{0} {1}: {2}  texts {3}" -f $p.name, $p.version, $lic, ($refs -join ' '))
     } else {
