@@ -35,7 +35,8 @@ use clap::Parser;
 #[command(name = "vibe-files", version, about = "Vibe Files document management")]
 struct Args {
     /// Data folder (catalog, config, caches, logs). Defaults to `data` next to the exe; for a
-    /// winget install, `%LOCALAPPDATA%\Vibe Files\data` (winget replaces its package folder).
+    /// winget or Setup install, `%LOCALAPPDATA%\Vibe Files\data` (the program folder is replaced
+    /// on upgrade).
     #[arg(long, global = true)]
     data: Option<PathBuf>,
     #[command(subcommand)]

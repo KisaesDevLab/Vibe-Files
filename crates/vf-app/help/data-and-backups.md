@@ -17,7 +17,7 @@ The cabinet's own `_Vibe` folder holds what the firm shares: the client list and
 Each PC keeps its own data folder, on its local disk:
 
 - beside `vibe-files.exe`, in `data\`, for a copy unzipped into a folder;
-- in `%LOCALAPPDATA%\Vibe Files\data` for a winget install, and for every Windows login other than the first on a shared PC.
+- in `%LOCALAPPDATA%\Vibe Files\data` for a copy installed with `vibe-files-setup-x64.exe` (for you only or for all users) or with winget, and for every Windows login other than the first on a shared PC. Uninstalling never removes it.
 
 It holds:
 

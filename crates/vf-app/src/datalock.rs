@@ -138,10 +138,16 @@ pub fn acquire_default(
     }
 }
 
+/// Setup (`installer/VibeFiles.iss`) puts this file beside the exe: the copy is installed, not
+/// portable.
+pub const INSTALLED_MARKER: &str = "installed.txt";
+
 /// The data folder of a portable copy (`data` beside the exe) belongs to the Windows login that
 /// first used it; another login (another person in a session on the same server) gets its own
 /// in `%LOCALAPPDATA%\Vibe Files\data`. A winget install always uses `%LOCALAPPDATA%` (winget
-/// replaces its package folder). An existing `data` folder with no owner yet is claimed.
+/// replaces its package folder), and so does a copy installed by Setup (PA-102: its folder holds
+/// [`INSTALLED_MARKER`]; Program Files is read-only, and an upgrade or uninstall must never touch
+/// the data). An existing `data` folder with no owner yet is claimed.
 pub fn default_data(exe: &Path, local_app_data: Option<PathBuf>, login: Option<&str>) -> PathBuf {
     let dir = exe.parent().unwrap_or(Path::new("."));
     let beside = dir.join("data");
@@ -149,8 +155,9 @@ pub fn default_data(exe: &Path, local_app_data: Option<PathBuf>, login: Option<&
         .to_string_lossy()
         .to_lowercase()
         .contains(r"\microsoft\winget\packages\");
+    let installed = dir.join(INSTALLED_MARKER).exists();
     let personal = local_app_data.map(|l| l.join("Vibe Files").join("data"));
-    if winget
+    if (winget || installed)
         && !beside.exists()
         && let Some(p) = personal
     {
@@ -494,6 +501,24 @@ mod tests {
                 Some("x")
             ),
             t.path().join("C").join("Vibe Files").join("data")
+        );
+        // Installed by Setup (for me or for all users): always the login's own folder.
+        let inst = t.path().join("Programs").join("Vibe Files");
+        std::fs::create_dir_all(&inst).unwrap();
+        std::fs::write(inst.join(INSTALLED_MARKER), "").unwrap();
+        for login in [r"KISAES\kim", r"KISAES\pat"] {
+            assert_eq!(
+                default_data(
+                    &inst.join("vibe-files.exe"),
+                    Some(t.path().join("D")),
+                    Some(login)
+                ),
+                t.path().join("D").join("Vibe Files").join("data")
+            );
+        }
+        assert!(
+            !inst.join("data").exists(),
+            "nothing written in the program folder"
         );
         // One copy per data folder.
         let first = acquire(&a, true).unwrap();

@@ -10,7 +10,8 @@
 # Output in <target>/dist/v<ver>/:
 #   stage/                      the portable folder: vibe-files.exe, vibe-move.exe, vibe-scan32.exe
 #                               (static CRT), pdfium.dll, TWAINDSM.dll, tesseract\ (English), licences
-#   vibe-files-windows-x64.zip  the release asset (fixed name, so the "latest" link never changes)
+#   vibe-files-windows-x64.zip  the portable asset (fixed name, so the "latest" link never changes)
+#   vibe-files-setup-x64.exe    the installer (installer/VibeFiles.iss): for me only, or all users
 #   SHA256SUMS.txt              SHA-256 of every asset (and of the exes inside the zip)
 #   latest.json                 { version, released_at, notes_url, assets: [{ name, sha256, size }] }
 #   notes.md                    this version's CHANGELOG.md section (the release notes)
@@ -40,6 +41,8 @@ $PSNativeCommandUseErrorActionPreference = $false
 $App = 'Vibe Files'
 $PubRepo = 'KisaesDevLab/vibe-files-releases'
 $ZipName = 'vibe-files-windows-x64.zip'
+# The installer (PA-102): Setup asks to install for this login only or for all users.
+$SetupName = 'vibe-files-setup-x64.exe'
 $DefaultBranch = 'main'
 
 $repo = Split-Path $PSScriptRoot
@@ -144,10 +147,18 @@ if ($ExtraAssets) {
     if (-not (Test-Path $ExtraAssets -PathType Container)) { Stop-Release "-ExtraAssets $ExtraAssets is not a folder" }
     $extra = @(Get-ChildItem $ExtraAssets -File)
     if (-not $extra) { Stop-Release "-ExtraAssets $ExtraAssets is empty" }
-    $clash = $extra | Where-Object { $_.Name -in $ZipName, 'SHA256SUMS.txt', 'latest.json' }
+    $clash = $extra | Where-Object { $_.Name -in $ZipName, $SetupName, 'SHA256SUMS.txt', 'latest.json' }
     if ($clash) { Stop-Release "extra asset name clashes with a built one: $($clash.Name -join ', ')" }
 }
 if (-not (Test-Path (Join-Path $Tesseract 'tesseract.exe'))) { Stop-Release "no Tesseract at $Tesseract (-Tesseract)" }
+# Inno Setup 6 compiles the installer (as ClientLedger Trial Balance's release does).
+$Iscc = @((Get-Command ISCC.exe -ErrorAction SilentlyContinue).Source, $env:INNO_ISCC,
+    (Join-Path $env:LOCALAPPDATA 'Programs\Inno Setup 6\ISCC.exe'),
+    (Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6\ISCC.exe'),
+    (Join-Path $env:ProgramFiles 'Inno Setup 6\ISCC.exe')) |
+    Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1
+if (-not $Iscc) { Stop-Release 'Inno Setup compiler (ISCC.exe) not found: winget install --id JRSoftware.InnoSetup -e' }
+"  Inno Setup at $Iscc"
 
 # ---------------------------------------------------------------- 2. test
 if ($SkipTests) { Step 'Tests skipped (-SkipTests)' }
@@ -290,12 +301,28 @@ if ($env:VF_SIGN_CERT_THUMBPRINT) {
 $zip = Join-Path $out $ZipName
 Compress-Archive -Path (Join-Path $stage '*') -DestinationPath $zip
 
+# The installer, from the same (signed) staged files.
+Step 'Installer (Inno Setup)'
+& $Iscc /Q "/DStageDir=$stage" "/DOutputDir=$out" "/DAppVersion=$Version" (Join-Path $repo 'installer\VibeFiles.iss')
+if ($LASTEXITCODE) { Stop-Release 'Inno Setup could not build the installer' }
+$setup = Join-Path $out $SetupName
+if (-not (Test-Path $setup)) { Stop-Release "no installer at $setup" }
+if ($signed) {
+    & $signtool sign /sha1 $env:VF_SIGN_CERT_THUMBPRINT /fd sha256 /tr $ts /td sha256 $setup
+    if ($LASTEXITCODE) { Stop-Release 'signing the installer failed' }
+    & $signtool verify /pa $setup
+    if ($LASTEXITCODE) { Stop-Release 'installer signature verification failed' }
+}
+"  $SetupName  $((Get-Item $setup).Length.ToString('N0')) bytes"
+
 # ---------------------------------------------------------------- 6. check
 Step 'Check artifacts (tools/check-binary.ps1)'
 pwsh -NoProfile -File (Join-Path $PSScriptRoot 'check-binary.ps1') $stage
 if ($LASTEXITCODE) { Stop-Release 'check-binary found something that must not ship (above)' }
 pwsh -NoProfile -File (Join-Path $PSScriptRoot 'check-binary.ps1') $zip
 if ($LASTEXITCODE) { Stop-Release 'check-binary found something that must not ship in the zip (above)' }
+pwsh -NoProfile -File (Join-Path $PSScriptRoot 'check-binary.ps1') $setup
+if ($LASTEXITCODE) { Stop-Release 'check-binary found something that must not ship in the installer (above)' }
 if ($extra) {
     foreach ($e in $extra) {
         pwsh -NoProfile -File (Join-Path $PSScriptRoot 'check-binary.ps1') $e.FullName
@@ -306,7 +333,7 @@ if ($extra) {
 # ---------------------------------------------------------------- 7. assets
 Step 'Assets'
 foreach ($e in $extra) { Copy-Item $e.FullName $out }
-$assetFiles = @(Get-Item $zip) + @($extra | ForEach-Object { Get-Item (Join-Path $out $_.Name) })
+$assetFiles = @(Get-Item $setup) + @(Get-Item $zip) + @($extra | ForEach-Object { Get-Item (Join-Path $out $_.Name) })
 function Hash([string]$p) { (Get-FileHash $p -Algorithm SHA256).Hash.ToLower() }
 $sums = @($assetFiles | ForEach-Object { "$(Hash $_.FullName)  $($_.Name)" })
 # The exes inside the zip too, so an unzipped copy can be checked.
@@ -429,6 +456,7 @@ Step 'Done'
 "  $App $Version from $short$(if ($signed) { ', signed' } else { ', unsigned' })$(if ($trial) { ', TRIAL (uncommitted changes)' })$(if ($DryRun) { ', DRY RUN: nothing published' })"
 "  Download (this version): https://github.com/$PubRepo/releases/download/$tag/$ZipName"
 "  Download (always latest): https://github.com/$PubRepo/releases/latest/download/$ZipName"
+"  Installer (always latest): https://github.com/$PubRepo/releases/latest/download/$SetupName"
 "  Update metadata:          https://github.com/$PubRepo/releases/latest/download/latest.json"
 "  Release page:             $notesUrl"
 foreach ($a in $assetFiles) { "  SHA-256 $(Hash $a.FullName)  $($a.Name)" }

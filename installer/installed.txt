@@ -1,0 +1,2 @@
+Vibe Files was installed by Setup. Each Windows login's data is in %LOCALAPPDATA%\Vibe Files\data.
+Uninstall from Settings > Apps; that removes the program only, never the data or the cabinet.

@@ -19,6 +19,8 @@ Stable links (the website, the README and the app use these):
 - `gh` signed in as an account that can create releases on `vibe-files-releases`
   (`gh auth status`).
 - Rust stable with `rustup target add i686-pc-windows-msvc` (the 32-bit scanning helper).
+- Inno Setup 6 (`winget install --id JRSoftware.InnoSetup -e`; `ISCC.exe` is found on PATH, in
+  `INNO_ISCC`, or in its default folders) for the installer.
 - Tesseract 5.4 at `C:\Program Files\Tesseract-OCR` (or pass `-Tesseract <dir>`), and Python
   (for `scripts/dll_closure.py`).
 - `C:\Projects\vibe-files-releases` checked out, clean, with `origin` set.
@@ -91,8 +93,9 @@ these, run it alone (`cargo test -p <crate> <name>`). If it passes, run the rest
 
 | Asset | Contents |
 |---|---|
+| `vibe-files-setup-x64.exe` | the installer (`installer/VibeFiles.iss`, PA-102) made from the same staged files: asks **for me only** (`%LOCALAPPDATA%\Programs\Vibe Files`, no administrator) or **for all users** (`%ProgramFiles%\Vibe Files`); silent `/VERYSILENT /CURRENTUSER` or `/ALLUSERS`. It adds `installed.txt` beside the exe, so every login's data is in `%LOCALAPPDATA%\Vibe Files\data`. Upgrade and uninstall never touch the data, the cabinet or a `firm.toml` put beside the exe. Never change its `AppId`. |
 | `vibe-files-windows-x64.zip` | the portable folder: `vibe-files.exe`, `vibe-move.exe`, `vibe-scan32.exe`, `pdfium.dll`, `TWAINDSM.dll`, `tesseract\`, `LICENSE.txt`, `NOTICE.txt`, `THIRD-PARTY-NOTICES.txt`, `OPERATIONS.md`, third-party licence files |
-| `SHA256SUMS.txt` | SHA-256 of each asset and of the three exes inside the zip |
+| `SHA256SUMS.txt` | SHA-256 of each asset (the installer too) and of the three exes inside the zip |
 | `latest.json` | `{ version, released_at, notes_url, assets: [{ name, sha256, size }] }` |
 | anything from `-ExtraAssets` | copied in as-is, hashed, listed in `latest.json` |
 
