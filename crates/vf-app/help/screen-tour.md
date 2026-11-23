@@ -31,7 +31,7 @@ When files are waiting to be processed or filed, the Intake tab shows a count, f
 The thin bar at the bottom shows, from left to right:
 
 - How many documents and clients the cabinet holds, for example `1204 documents · 86 clients`.
-- The program version, such as `vibe-files 0.1.2`.
+- The program version and build, such as `vibe-files 0.1.52 (1a2b3c4d5)`. Quote both when you report a problem.
 
 On the right is the cabinet name with a small dot.
 

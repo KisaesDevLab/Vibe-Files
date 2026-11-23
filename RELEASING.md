@@ -29,8 +29,12 @@ Stable links (the website, the README and the app use these):
 
 ## One-command release
 
-1. Bump `version` in `Cargo.toml` (`[workspace.package]`) and commit.
+1. Bump `version` in `Cargo.toml` (`[workspace.package]`), run `cargo build` once so `Cargo.lock`
+   picks up the new version, and commit **both** files (the script builds with `--locked` and
+   stops if `Cargo.lock` is out of date).
 2. Releases are cut from **`main`**. Merge or fast-forward the work onto `main` and check it out.
+   (First time: `main` is at 0.1.31; fast-forward it to `pa-100-release-repo`, which holds
+   `pa-60-index-from-listing` and PA-100.)
 3. In `C:\Projects\vibe-files-releases`, add a `## <version> (<date>)` section at the top of
    `CHANGELOG.md`, written for users, and commit it (don't push; the script does). That section
    becomes the release notes.
@@ -64,8 +68,22 @@ Stable links (the website, the README and the app use these):
 
 Other switches: `-SkipTests`; `-Version <x.y.z>` (must equal `Cargo.toml`); `-AllowDirty`
 (only with `-DryRun`: a trial build of uncommitted work, marked `TRIAL.txt`, never published);
-`-PubDir <path>`; `-Tesseract <dir>`; `-TestJobs <n>` (default 2: `-j 4` crashed rustc once
-on this PC).
+`-PubDir <path>`; `-Tesseract <dir>`; `-TestJobs <n>` and `-BuildJobs <n>` (both default 2).
+
+### Memory and flaky tests on the build PC
+
+A release build is heavy: the fat-LTO link of `vibe-move.exe` alone peaked at 7.1 GB, and rustc
+crashed with "out of memory" / `STATUS_STACK_BUFFER_OVERRUN` on this 16 GB PC at the default job
+count and at `-j 4` (WSL was holding about 8 GB). The script links one program per cargo run at
+`-BuildJobs 2`. Before a real release, close WSL (`wsl --shutdown`) and other builds. If it still
+crashes, rerun with `-BuildJobs 1`: finished crates are kept, so a rerun only redoes what failed.
+
+Two timing tests can fail under the full parallel test run and pass alone:
+`vf-app ui::browse::tests::tree_expands_fast_at_5000_documents` and
+`filer-intake app::combine_ui_tests::ticked_rows_commit_alone`. If the test step stops on one of
+these, run it alone (`cargo test -p <crate> <name>`). If it passes, run the rest with
+`cargo test --workspace --no-fail-fast -j 2`, and when only those flakes fail, release with
+`-SkipTests`. Any other failure stops the release.
 
 ### Assets (fixed names, so "latest" links never change)
 
@@ -123,6 +141,13 @@ ignores. Symbols are never shipped.
 
 Prepared in PA-100. Nothing below has been done yet. No repository visibility was changed.
 
+0. **Before anything goes public**, have the draft `LICENSE` (end user licence agreement)
+   reviewed: fill in the governing-law state, remove the DRAFT notice, commit it here, and copy
+   the final text into `C:\Projects\vibe-files-releases\LICENSE.md` (inside its code block) and
+   commit there. Step 1 publishes `LICENSE.md`. Also settle the third-party notices gap (end of
+   this file) before the first proprietary release, and date the `0.1.52 (unreleased)` heading
+   in the public `CHANGELOG.md`.
+
 1. On GitHub, create **`KisaesDevLab/vibe-files-releases`**, **public and empty** (no README,
    licence or .gitignore: the local checkout has them). In
    `C:\Projects\vibe-files-releases`: `git remote add origin https://github.com/KisaesDevLab/vibe-files-releases.git`
@@ -135,12 +160,12 @@ Prepared in PA-100. Nothing below has been done yet. No repository visibility wa
    `https://github.com/KisaesDevLab/vibe-files-releases/releases/latest/download/vibe-files-windows-x64.zip`
    and `SHA256SUMS.txt` from the same release, and check them:
    `Get-FileHash .\vibe-files-windows-x64.zip` must match.
-4. Move the existing releases off `KisaesDevLab/Vibe-Files` (0.1.x, all pre-releases): once the
-   repo is private they can't be downloaded by anyone outside. Either upload the ones still needed
-   to the public repo (`gh release download v0.1.51 --repo KisaesDevLab/Vibe-Files` then
-   `gh release create v0.1.51 --repo KisaesDevLab/vibe-files-releases --prerelease ...`; keep
-   them pre-release so "latest" stays on 0.1.52+, and note that their zips carry the AGPL licence
-   they were published under) or accept that they go away.
+4. Existing releases on `KisaesDevLab/Vibe-Files` (0.1.x, all pre-releases) stop being downloadable
+   once the repo is private. **Recommended: let them go.** Their exes were built before PA-100 and
+   contain this PC's Windows user name, local build paths and the dev repo's name (the PA-100
+   baseline `tools/check-binary.ps1` run on 0.1.51 found 10 hits), and they carry the AGPL licence.
+   If one is still needed, rebuild it from its tag with `tools/release.ps1` instead of re-uploading
+   the old zip.
 5. Builds 0.1.51 and earlier check `KisaesDevLab/Vibe-Files` for updates. Once that repo is
    private they will never report a newer version. Tell every office to download 0.1.52 or later
    by hand once; from then on the update check uses the public repo.
@@ -149,6 +174,12 @@ Prepared in PA-100. Nothing below has been done yet. No repository visibility wa
    watchers to be dropped and public forks to be detached.
 8. From the signed-out browser: `https://github.com/KisaesDevLab/Vibe-Files` must show 404, and
    the step 3 download must still work.
-9. Have the draft `LICENSE` (end user licence agreement) reviewed. Fill in the governing-law
-   state, remove the DRAFT notice, and copy the final text into the public repo's `LICENSE.md`.
-   Do this before step 2 if the first public release should carry the final text.
+
+## Known gap: third-party notices
+
+`tools/third-party-notices.ps1` copies each crate's own licence files. About 40 crates (the egui
+family, accesskit, clipboard-win and others) publish no licence file in their crate package, so for
+them the notices name the licence (MIT, Apache-2.0, BSL-1.0) but carry no text. MIT and BSL require
+the text to accompany the binary. Before the first proprietary release, either append the standard
+text of each licence named (with the crate's authors as the copyright line) or switch the generator
+to `cargo about` (QUESTIONS Q-143).
