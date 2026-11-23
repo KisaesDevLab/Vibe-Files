@@ -28,8 +28,9 @@ Select a client in Browse and press **To-do lists…** in its details. Press **+
 - the **Salaries & Wages Report**: a W-2 from each employer, marked for the taxpayer or the spouse;
 - the **IRA Distribution Report** and **Pension/Annuity Report**: a 1099-R from each payer;
 - the **Broker Capital Transactions Detail Summary Report**: a 1099-B (a consolidated 1099 when the same broker paid dividends);
+- **Schedule B**: each interest payer (1099-INT) and dividend payer (1099-DIV), by account;
 - **Federal Statements**: dividend and interest payers, mortgage lenders (Form 1098), K-1 entities (Schedule E, page 2), estimated tax payments, installment sales and personal property tax;
-- forms filed: the Social Security worksheet (SSA-1099), Schedules C, E (rentals) and F, and Forms 5695, 8863, 8962 and 2441;
+- forms filed: the Social Security worksheet (SSA-1099), Schedules C, E (rentals) and F, and Forms 5695, 8863, 8962 (for the 1095-A) and 2441;
 - and always: any changes in address, marital status, dependents or accounts.
 
 It offers the client's PDFs of doc type **Return copy — federal**, or named for a 1040 return, newest first; **Choose another PDF…** picks any file. Untick what you don't need and press **Use these items**: the usual New list form opens with them, titled for the next year, where you can change any wording before sending. Names are shown as the return prints them; amounts are never put in an item, and account numbers only by their last 4 digits. Nothing leaves this PC until you send the list. A scanned return has no text to read.

@@ -13,6 +13,9 @@
 //!   Line 28" (K-1 entities, P or S), "Form 1040, Line 26 - Estimated Tax Payments",
 //!   "Form 6252 - Installment Sale History" (the property is the line above), "Personal Property
 //!   Tax" (vehicles).
+//! - **Schedule B** (owner 2026-11-23: a return whose interest payers all fit on the form has no
+//!   interest statement): Part I's payers (1099-INT), Part II's (1099-DIV), each by account;
+//!   a seller-financed buyer and a K-1's interest are left to their own items.
 //! - Forms present: the Social Security Worksheet (SSA-1099), Schedule C, Schedule E Part I,
 //!   Schedule F, Form 5695, Form 8863 (1098-T), Form 8962 (1095-A), Form 2441.
 //!
@@ -197,6 +200,14 @@ fn key(name: &str) -> String {
 /// "(4321)" at the end of a name → ("NAME", Some("4321")).
 fn account_suffix(name: &str) -> (String, Option<String>) {
     let n = name.trim();
+    // Schedule B: "PAYER - ACCT 1234".
+    if let Some((payer, acct)) = n.rsplit_once(" - ACCT ") {
+        let digits: String = acct.chars().filter(char::is_ascii_digit).collect();
+        if digits.len() >= 3 {
+            let last = digits[digits.len().saturating_sub(4)..].to_string();
+            return (payer.trim().to_string(), Some(last));
+        }
+    }
     if let Some(open) = n.rfind('(')
         && n.ends_with(')')
     {
@@ -355,7 +366,117 @@ fn statement_names(entries: &[&str]) -> Vec<String> {
         .collect()
 }
 
+/// The payers filled in on Schedule B (Form 1040): (interest payers, dividend payers), names as
+/// printed with their account digits, amounts left off. Pdfium gives the filled-in rows after the
+/// form's printed text: Part I's payers, then its totals (lines 2 and 4: two numbers or more),
+/// then Part II's payers and its one total (line 6). A seller-financed mortgage's buyer (a name
+/// with an SSN, then an address) and a K-1's interest (a name with an EIN) are not payers to ask
+/// a 1099 from: the installment sale and the K-1 are items of their own.
+fn schedule_b(p: &str) -> Option<(Vec<String>, Vec<String>)> {
+    if !(p.contains("SCHEDULE B") && p.contains("Interest and Ordinary Dividends")) {
+        return None;
+    }
+    let ls: Vec<&str> = p.lines().collect();
+    let start = ls.iter().rposition(|l| l.contains("Financial Assets"))? + 1;
+    let mut groups: Vec<(Vec<String>, usize)> = vec![(Vec::new(), 0)];
+    let mut skip_next = false;
+    for l in &ls[start..] {
+        let t = l.trim();
+        if t.starts_with("Pg ") {
+            break;
+        }
+        // A TIN line (the taxpayer's, at the top of the filled-in part), an X box.
+        if t.is_empty() || t == "X" || t.starts_with("***-**-") || t.starts_with("###-##-") {
+            continue;
+        }
+        if t.split_whitespace().all(is_amount) {
+            if let Some(g) = groups.last_mut() {
+                g.1 += 1;
+            }
+            continue;
+        }
+        if groups.last().is_some_and(|g| g.1 > 0) {
+            groups.push((Vec::new(), 0));
+        }
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        if t.contains(" ***-**-") || t.contains(" ###-##-") {
+            // The buyer's name and SSN; the next row is their address.
+            skip_next = true;
+            continue;
+        }
+        if t.contains(" **-***") || t.contains(" ##-###") {
+            continue;
+        }
+        // One amount ends a row; the account digits before it ("- ACCT 1111") stay.
+        let mut toks: Vec<&str> = t.split_whitespace().collect();
+        if toks.len() > 1 && toks.last().is_some_and(|x| is_amount(x)) {
+            toks.pop();
+        }
+        let g = groups.last_mut().expect("a group");
+        g.0.push(toks.join(" "));
+    }
+    let mut interest = Vec::new();
+    let mut dividends = Vec::new();
+    let mut seen_part1 = false;
+    for (rows, totals) in groups {
+        if rows.is_empty() && totals == 0 {
+            continue;
+        }
+        // Part I has two totals or more (lines 2 and 4), Part II one (line 6).
+        if totals >= 2 && !seen_part1 {
+            seen_part1 = true;
+            interest.extend(rows);
+        } else {
+            dividends.extend(rows);
+        }
+    }
+    Some((interest, dividends))
+}
+
 // ---- The rules ------------------------------------------------------------------------------
+
+/// Interest and dividend payers found, one per payer and account.
+#[derive(Default)]
+struct Payers(Vec<Payer>);
+
+struct Payer {
+    name: String,
+    last4: Option<String>,
+    interest: bool,
+    dividends: bool,
+    source: String,
+}
+
+impl Payers {
+    fn add(&mut self, raw: &str, interest: bool, source: &str) {
+        let (name, last4) = account_suffix(raw);
+        if name.chars().filter(|c| c.is_alphabetic()).count() < 2 {
+            return;
+        }
+        let k = key(&name);
+        match self.0.iter_mut().find(|p| {
+            key(&p.name) == k && (p.last4 == last4 || p.last4.is_none() || last4.is_none())
+        }) {
+            Some(p) => {
+                p.interest |= interest;
+                p.dividends |= !interest;
+                if p.last4.is_none() {
+                    p.last4 = last4;
+                }
+            }
+            None => self.0.push(Payer {
+                name,
+                last4,
+                interest,
+                dividends: !interest,
+                source: source.into(),
+            }),
+        }
+    }
+}
 
 struct Out {
     items: Vec<Proposed>,
@@ -430,7 +551,18 @@ pub fn propose(pages: &[String]) -> Proposal {
             .unwrap_or_default()
     };
 
+    let mut payers = Payers::default();
     for p in pages {
+        // Interest and dividend payers filled in on Schedule B (owner 2026-11-23: a return with
+        // all its interest payers on the form has no interest statement).
+        if let Some((interest, dividends)) = schedule_b(p) {
+            for raw in &interest {
+                payers.add(raw, true, "Schedule B, Part I");
+            }
+            for raw in &dividends {
+                payers.add(raw, false, "Schedule B, Part II");
+            }
+        }
         // Wages.
         if page_has(p, "Salaries & Wages Report") {
             for (who, name) in ts_rows(p, false) {
@@ -463,26 +595,14 @@ pub fn propose(pages: &[String]) -> Proposal {
         if !page_has(p, "Federal Statements") {
             continue;
         }
-        // Dividends and interest (a broker's goes with its consolidated 1099 below).
-        for (heading, form) in [
-            ("Form 1040, Dividend Income", "1099-DIV"),
-            ("Form 1040, Interest Income", "1099-INT"),
-            ("Schedule B, Line 1", "1099-INT"),
-            ("Schedule B, Line 5", "1099-DIV"),
+        // Dividends and interest from the statements (with Schedule B's, below).
+        for (heading, interest) in [
+            ("Form 1040, Dividend Income", false),
+            ("Form 1040, Interest Income", true),
         ] {
             if let Some(entries) = section(p, heading) {
                 for raw in statement_names(&entries) {
-                    let (name, last4) = account_suffix(&raw);
-                    if broker_keys.contains(&key(&name)) {
-                        continue;
-                    }
-                    out.push(
-                        Group::Investments,
-                        Kind::Document,
-                        format!("{form} from {}{}", title_case(&name), acct(&last4)),
-                        form,
-                        heading,
-                    );
+                    payers.add(&raw, interest, heading);
                 }
             }
         }
@@ -574,16 +694,30 @@ pub fn propose(pages: &[String]) -> Proposal {
         }
     }
 
+    // Interest and dividend payers: one item each (a payer of both, one 1099 for both); a
+    // broker's go with its consolidated 1099 below.
+    for p in &payers.0 {
+        if broker_keys.contains(&key(&p.name)) {
+            continue;
+        }
+        let (form, doc) = match (p.interest, p.dividends) {
+            (true, true) => ("1099-INT and 1099-DIV", "1099-DIV"),
+            (true, false) => ("1099-INT", "1099-INT"),
+            _ => ("1099-DIV", "1099-DIV"),
+        };
+        out.push(
+            Group::Investments,
+            Kind::Document,
+            format!("{form} from {}{}", title_case(&p.name), acct(&p.last4)),
+            doc,
+            &p.source,
+        );
+    }
+
     // Brokers.
     for (name, last4) in &brokers {
         let k = key(name);
-        let paid = pages.iter().any(|p| {
-            section(p, "Form 1040, Dividend Income")
-                .into_iter()
-                .chain(section(p, "Form 1040, Interest Income"))
-                .flatten()
-                .any(|l| key(&account_suffix(&strip_amounts(l.trim())).0) == k)
-        });
+        let paid = payers.0.iter().any(|p| key(&p.name) == k);
         let what = if paid {
             "Consolidated 1099 (dividends, interest and sales)"
         } else {
@@ -647,11 +781,15 @@ pub fn propose(pages: &[String]) -> Proposal {
             "Form 8863",
         );
     }
-    if any("Premium Tax Credit (PTC)") {
+    // The 1095-A is reported on Form 8962 (owner 2026-11-23): its title, or its Part II heading
+    // when the title prints apart.
+    if any("Premium Tax Credit (PTC)")
+        || any("Premium Tax Credit Claim and Reconciliation of Advance Payment")
+    {
         out.push(
             Group::Home,
             Kind::Document,
-            "Form 1095-A (Marketplace health insurance)".into(),
+            "Form 1095-A (Marketplace health insurance), one for each policy".into(),
             "1095",
             "Form 8962",
         );
@@ -704,6 +842,7 @@ mod tests {
             "Federal Statements Page 1\nPersonal Property Tax\nDescription Amount\nFORD $ \nTOYOTA\n TOTAL $ 0\n",
             "Form 1040 Broker Capital Transactions Detail Summary Report 2025\nBroker Account Name Account No. T/S/J\nEXAMPLE BROKERAGE & CO INC 4400-1234 J\n1\n1\n",
             "2025 Social Security Worksheet\n1. Enter the total amount from box 5\n",
+            "SCHEDULE B\n(Form 1040) 2025 Interest and Ordinary Dividends\nList name of payer.\nFinancial Assets. . . . .\n***-**-0000\nPAT EXAMPLE ***-**-0001\n12 SAMPLE ROAD EXAMPLEVILLE MO 00000 1,000\nSAMPLE ACCOUNTING, P.C. 500\nFIRST SAMPLE BANK - ACCT 1111 75\nSECOND EXAMPLE BANK - ACCT 2222 40\nSECOND EXAMPLE BANK - ACCT 3333 12\nSAMPLE ACCOUNTING, P.C. **-***0001 200\n1,827\n1,827\nSAMPLE FUNDS - ACCT 4321 120\nEXAMPLE BROKERAGE & CO INC - ACCT 1234 90\n210\nX\nPg 9\nAvery & Morgan Sample\nName(s) shown on return\n",
             "Form 5695 Residential Energy Credits\n",
             "Schedule 3 line 5b Energy efficient home improvement credit from Form 5695\nEducation credits from Form 8863\nExcess advance premium tax credit repayment. Attach Form 8962\n",
         ]
@@ -753,10 +892,31 @@ mod tests {
         // under a K-1 entity is not an entity.
         assert!(
             !got.iter()
-                .any(|g| g.starts_with("1099-DIV from Example Brokerage"))
+                .any(|g| g.starts_with("1099-DIV from Example Brokerage")),
+            "{got:#?}"
         );
         assert!(!got.iter().any(|g| g.contains("Rental Real Estate")));
         assert_eq!(got.iter().filter(|g| g.starts_with("K-1")).count(), 2);
+        // Schedule B: each interest payer and account; the buyer of a seller-financed sale and a
+        // K-1's interest are not payers; a payer of dividends on Schedule B and in the statement
+        // is one item; the broker's stays with its consolidated 1099.
+        for want in [
+            "1099-INT from First Sample Bank, account ending 1111",
+            "1099-INT from Second Example Bank, account ending 2222",
+            "1099-INT from Second Example Bank, account ending 3333",
+            "1099-INT from Sample Accounting, P.C.",
+        ] {
+            assert!(got.contains(&want), "missing {want:?} in {got:#?}");
+        }
+        assert!(
+            !got.iter()
+                .any(|g| g.contains("Pat Example") || g.contains("Sample Road"))
+        );
+        assert_eq!(got.iter().filter(|g| g.contains("Sample Funds")).count(), 1);
+        assert!(
+            !got.iter()
+                .any(|g| g.starts_with("1099") && g.contains("Example Brokerage"))
+        );
         // Forms only named in another form's line text are not taken as filed.
         assert!(
             !got.iter()
@@ -779,6 +939,32 @@ mod tests {
         assert_eq!(ty("K-1 from Example"), Some("K-1 (1065)"));
         assert_eq!(ty("Consolidated 1099"), Some("1099-B"));
         assert!(!p.looks_empty());
+    }
+
+    /// The 1095-A from Form 8962 itself (owner 2026-11-23), not from the 1040's mention of it.
+    #[test]
+    fn the_1095_a_comes_from_form_8962() {
+        let with = propose(&[concat!(
+            "Form 8962\n",
+            "Premium Tax Credit (PTC)\n",
+            "Part II Premium Tax Credit Claim and Reconciliation of Advance Payment of Premium Tax Credit\n",
+        )
+        .to_string()]);
+        assert!(
+            with.items
+                .iter()
+                .any(|i| i.prompt.starts_with("Form 1095-A") && i.doc_type == "1095")
+        );
+        let mention = propose(&[
+            "Schedule 2 Excess advance premium tax credit repayment. Attach Form 8962\n"
+                .to_string(),
+        ]);
+        assert!(
+            !mention
+                .items
+                .iter()
+                .any(|i| i.prompt.starts_with("Form 1095-A"))
+        );
     }
 
     #[test]
