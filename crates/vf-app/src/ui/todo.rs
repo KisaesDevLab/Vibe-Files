@@ -100,6 +100,23 @@ fn copy_of(
     by: &str,
 ) -> Option<TodoCopy> {
     let folder = folder?;
+    // Only into the folder still bound to this client: a folder renamed or moved since the
+    // window opened is not made again as an unbound one (QA 2026-11-23).
+    let sentinel = root
+        .join(folder)
+        .join(vf_fs::cabinet::VIBE_DIR)
+        .join("client.json");
+    let bound = std::fs::read(&sentinel)
+        .ok()
+        .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+        .and_then(|v| {
+            v.get("client_id")
+                .and_then(|c| c.as_str())
+                .map(str::to_lowercase)
+        });
+    if bound.as_deref() != Some(l.client_id.to_lowercase().as_str()) {
+        return None;
+    }
     let path = todo::copy_path(root, folder, &l.id);
     let existing = std::fs::read_to_string(&path).unwrap_or_default();
     let line = todo::copy_line(&existing, l, &vf_core::now_rfc3339(), by)?;
@@ -180,14 +197,18 @@ fn items_editor(
                             ui.selectable_value(&mut it.kind, todo::KIND_TEXT.into(), "An answer");
                         });
                 });
-                ui.add_enabled(
-                    !fixed,
-                    egui::TextEdit::singleline(&mut it.prompt)
-                        .hint_text("W-2 from each employer")
-                        .desired_width(320.0)
-                        .char_limit(500),
-                )
-                .on_disabled_hover_text("The client has answered this item: its wording stays.");
+                // A fixed size: inside the grid a text box ignores its desired width.
+                ui.add_enabled_ui(!fixed, |ui| {
+                    ui.add_sized(
+                        [320.0, 22.0],
+                        egui::TextEdit::singleline(&mut it.prompt)
+                            .hint_text("W-2 from each employer")
+                            .char_limit(500),
+                    )
+                    .on_disabled_hover_text(
+                        "The client has answered this item: its wording stays.",
+                    );
+                });
                 ui.checkbox(&mut it.required, "");
                 egui::ComboBox::from_id_salt(format!("todo-type-{id}-{i}"))
                     .selected_text(if it.doc_type.is_empty() {
@@ -400,7 +421,7 @@ fn staff_combo(
 /// What a window read: the client's lists, who may be assigned, the templates.
 type Read = (Vec<TodoList>, Vec<StaffChoice>, Vec<Template>);
 /// The portal out of reach: why, and the copies in the client folder.
-type Offline = (String, Vec<CopyLine>);
+type Offline = (String, Option<Vec<CopyLine>>);
 
 enum Done {
     /// The lists, staff and templates (`Err`: the portal is out of reach; the copies instead).
@@ -496,10 +517,14 @@ impl TodoWindow {
                     ))
                 });
             Done::Loaded(read.map_err(|e| {
-                let copies = folder
-                    .as_deref()
-                    .map(|f| todo::read_copies(&root, f))
-                    .unwrap_or_default();
+                // Only when the portal cannot be reached: a refusal (to-do lists off, a bad
+                // key, an older portal) is said as it is (QA 2026-11-23).
+                let copies = matches!(e, vf_portal::PortalError::Network(_)).then(|| {
+                    folder
+                        .as_deref()
+                        .map(|f| todo::read_copies(&root, f))
+                        .unwrap_or_default()
+                });
                 (e.message(), copies)
             }))
         }));
@@ -557,6 +582,9 @@ impl TodoWindow {
         let Some(rx) = &self.job else { return };
         let Ok(done) = rx.try_recv() else { return };
         self.job = None;
+        // A pending Cancel/Delete question belongs to the list it was asked for: whatever the
+        // window shows next, it is not carried over (QA 2026-11-23).
+        self.confirm = None;
         match done {
             Done::Loaded(Ok((lists, staff, templates))) => {
                 self.lists = Some(lists);
@@ -566,11 +594,13 @@ impl TodoWindow {
             }
             Done::Loaded(Err((e, copies))) => {
                 self.err = Some(e);
-                self.offline = Some((
-                    "The portal cannot be reached: the copies kept in the client's folder are shown, as last read."
-                        .into(),
-                    copies,
-                ));
+                if let Some(copies) = copies {
+                    self.offline = Some((
+                        "The portal cannot be reached: the copies kept in the client's folder are shown, as last read."
+                            .into(),
+                        copies,
+                    ));
+                }
             }
             Done::List(l, msg) => {
                 let l = *l;
@@ -644,7 +674,7 @@ impl TodoWindow {
             .open(&mut open_win)
             .collapsible(false)
             .default_width(780.0)
-            .default_height(560.0)
+            .default_height(760.0)
             .show(ctx, |ui| {
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
@@ -733,7 +763,7 @@ impl TodoWindow {
                     {
                         act = Some(Act::NewBlank);
                     }
-                    if !self.templates.is_empty() {
+                    if !self.templates.is_empty() && !busy {
                         egui::ComboBox::from_id_salt("todo-from-template")
                             .selected_text("From a template…")
                             .show_ui(ui, |ui| {
@@ -875,7 +905,7 @@ impl TodoWindow {
                     self.confirm = Some((l.id.clone(), "delete"));
                 }
             });
-            if let Some((id, what)) = self.confirm.clone() {
+            if let Some((id, what)) = self.confirm.clone().filter(|(id, _)| *id == l.id) {
                 ui.horizontal(|ui| {
                     ui.label(
                         RichText::new(if what == "delete" {
@@ -912,6 +942,7 @@ impl TodoWindow {
     fn apply(&mut self, ctx: &egui::Context, s: &PortalSettings, a: Act) {
         match a {
             Act::Reload => {
+                self.confirm = None;
                 self.offline = None;
                 self.err = None;
                 self.load(ctx, s);
@@ -919,8 +950,14 @@ impl TodoWindow {
             Act::NewBlank => self.mode = Mode::New(ListForm::blank()),
             Act::NewFrom(t) => self.mode = Mode::New(ListForm::from_template(&t)),
             Act::Cancel => self.mode = Mode::View,
-            Act::Hide => self.open = None,
-            Act::Open(id) => self.run_list(ctx, s, None, String::new(), move |p| p.todo_list(&id)),
+            Act::Hide => {
+                self.confirm = None;
+                self.open = None;
+            }
+            Act::Open(id) => {
+                self.confirm = None;
+                self.run_list(ctx, s, None, String::new(), move |p| p.todo_list(&id));
+            }
             Act::Edit => {
                 if let Some(l) = &self.open {
                     self.mode = Mode::Edit(ListForm {
@@ -1029,8 +1066,10 @@ impl TodoWindow {
                         .and_then(|()| p.create_lists(&new))
                     {
                         Ok(made) => {
-                            audit.send(e);
                             for l in &made {
+                                let mut row = e.clone();
+                                row.detail["list_id"] = serde_json::json!(l.id);
+                                audit.send(row);
                                 if let Some(c) =
                                     copy_of(&root, folder.as_deref(), l, &p.actor_name())
                                 {
@@ -1092,54 +1131,81 @@ impl TodoWindow {
         to_inbox: bool,
     ) {
         let file = format!("To-do report - {}.pdf", file_part(&title));
-        let dest = if to_inbox {
+        // Downloaded first to a `.part` file; only a whole report replaces anything (QA
+        // 2026-11-23: a failed download had removed the file being saved over).
+        let (part, finish): (PathBuf, Finish) = if to_inbox {
             let name = vf_portal::inbox::inbox_name(&self.client.name, &self.client.code, &file);
-            let dir = vf_portal::inbox::inbox(&self.root);
-            if let Err(e) = std::fs::create_dir_all(&dir) {
+            let tmp = vf_portal::inbox::tmp_dir(&self.root);
+            if let Err(e) = std::fs::create_dir_all(&tmp) {
                 self.err = Some(format!("The Portal inbox cannot be written: {e}"));
                 return;
             }
-            free_path(&dir.join(name))
+            let stem: String = id
+                .chars()
+                .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
+                .collect();
+            (
+                tmp.join(format!("todo-report-{stem}-{}.part", vf_core::new_id())),
+                Finish::Inbox(vf_portal::inbox::inbox(&self.root), name),
+            )
         } else {
             let Some(p) = rfd::FileDialog::new()
                 .set_title("Save the to-do report")
-                .set_file_name(format!("{} - {file}", self.client.name))
+                .set_file_name(file_part(&format!("{} - {file}", self.client.name)))
                 .add_filter("PDF", &["pdf"])
                 .save_file()
             else {
                 return;
             };
-            // The dialog asked before replacing it.
-            if p.exists() && std::fs::remove_file(&p).is_err() {
-                self.err = Some(format!(
-                    "{} is open elsewhere: close it and try again.",
-                    p.display()
-                ));
+            if inside(&self.root, &p) {
+                self.err = Some(
+                    "Save the report outside the cabinet, or use File report in the client folder (Intake files it)."
+                        .into(),
+                );
                 return;
             }
-            p
+            let mut part = p.clone().into_os_string();
+            part.push(".part");
+            (PathBuf::from(part), Finish::Replace(p))
+        };
+        let s = s.clone();
+        let audit = self.audit.clone();
+        let saved = match &finish {
+            Finish::Replace(p) => p.display().to_string(),
+            Finish::Inbox(dir, name) => dir.join(name).display().to_string(),
         };
         let e = self.entry(
             "portal_todo_report",
             &id,
             &title,
-            serde_json::json!({ "saved_as": dest.display().to_string(), "to_inbox": to_inbox }),
+            serde_json::json!({ "saved_as": saved, "to_inbox": to_inbox }),
         );
-        let s = s.clone();
-        let audit = self.audit.clone();
         self.err = None;
         self.msg = None;
         self.job = Some(spawn(ctx, move || {
-            match core::client(&s).download_report(&id, &dest) {
-                Ok(()) => {
+            let _ = std::fs::remove_file(&part);
+            if let Err(err) = core::client(&s).download_report(&id, &part) {
+                return Done::Failed(err.message());
+            }
+            let placed = match &finish {
+                // Never over a file there: a free name, as every Portal inbox arrival.
+                Finish::Inbox(dir, name) => vf_portal::inbox::move_into(&part, dir, name),
+                Finish::Replace(dest) => std::fs::rename(&part, dest).map(|()| dest.clone()),
+            };
+            match placed {
+                Ok(at) => {
                     audit.send(e);
                     Done::Said(if to_inbox {
-                        "The report is in the Portal inbox: Intake files it into the client's folder.".into()
+                        "The report is in the Portal inbox: Intake files it into the client's folder."
+                            .into()
                     } else {
-                        format!("Saved {}.", dest.display())
+                        format!("Saved {}.", at.display())
                     })
                 }
-                Err(e) => Done::Failed(e.message()),
+                Err(err) => {
+                    let _ = std::fs::remove_file(&part);
+                    Done::Failed(format!("The report could not be saved: {err}"))
+                }
             }
         }));
     }
@@ -1162,27 +1228,20 @@ fn file_part(s: &str) -> String {
     if t.is_empty() { "list".into() } else { t }
 }
 
-/// `path`, or `name (2).pdf`, … when it is taken.
-fn free_path(path: &std::path::Path) -> PathBuf {
-    if !path.exists() {
-        return path.to_path_buf();
-    }
-    let stem = path
-        .file_stem()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    let ext = path
-        .extension()
-        .map(|e| format!(".{}", e.to_string_lossy()))
-        .unwrap_or_default();
-    let dir = path
-        .parent()
-        .map(std::path::Path::to_path_buf)
-        .unwrap_or_default();
-    (2..)
-        .map(|n| dir.join(format!("{stem} ({n}){ext}")))
-        .find(|p| !p.exists())
-        .expect("a free name")
+/// Where a downloaded report goes once whole.
+enum Finish {
+    /// Into the Portal inbox (folder, client-named file name), under a free name.
+    Inbox(PathBuf, String),
+    /// Over the file the person chose (they agreed to replace it in the dialog).
+    Replace(PathBuf),
+}
+
+/// `path` is inside the cabinet (where only Transactions write documents).
+fn inside(root: &std::path::Path, path: &std::path::Path) -> bool {
+    let canon = |p: &std::path::Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    let dir = path.parent().map(canon).unwrap_or_default();
+    let root = canon(root);
+    dir.starts_with(&root)
 }
 
 /// Each item, and every answer with when, who and from where.
@@ -1275,9 +1334,16 @@ pub struct TemplatesPage {
     msg: Option<String>,
     err: Option<String>,
     confirm_delete: Option<String>,
-    /// Audit rows of what the page's threads did, recorded by the page each frame.
+    /// Audit rows when the app's channel is not given (tests): recorded by the page.
     audit: AuditOut,
     audit_rx: Receiver<AuditEntry>,
+    /// The app's portal channel (recorded every frame, whatever page is shown: QA 2026-11-23).
+    pub app_audit: Option<AuditOut>,
+    /// The cabinet's portal settings, read at most every 30 s (often on a share).
+    settings: Option<PortalSettings>,
+    read_at: Option<std::time::Instant>,
+    /// Doc type names for the pickers (not archived), read with the templates.
+    doc_types: Vec<String>,
 }
 
 impl Default for TemplatesPage {
@@ -1295,8 +1361,24 @@ impl Default for TemplatesPage {
             confirm_delete: None,
             audit: AuditOut::new(tx),
             audit_rx: rx,
+            app_audit: None,
+            settings: None,
+            read_at: None,
+            doc_types: Vec::new(),
         }
     }
+}
+
+/// Doc type names offered in the item editor: not deleted, not archived (migration 011).
+pub fn doc_type_names(conn: &vf_core::db::Connection) -> Vec<String> {
+    conn.prepare(
+        "SELECT name FROM doc_type WHERE deleted_at IS NULL AND archived = 0 ORDER BY sort, name",
+    )
+    .and_then(|mut st| {
+        st.query_map([], |r| r.get(0))?
+            .collect::<Result<Vec<String>, _>>()
+    })
+    .unwrap_or_default()
 }
 
 /// The cabinet's portal settings (`None` until the firm sets a portal).
@@ -1306,6 +1388,12 @@ pub fn cabinet_settings(root: &std::path::Path) -> Option<PortalSettings> {
 }
 
 impl TemplatesPage {
+    /// Read the templates, clients and settings again (the page was entered, or Read again).
+    pub fn reread(&mut self) {
+        self.loaded = false;
+        self.read_at = None;
+    }
+
     fn take(&mut self) {
         let Some(rx) = &self.job else { return };
         let Ok(d) = rx.try_recv() else { return };
@@ -1342,9 +1430,16 @@ pub fn templates_page(
     ui: &mut egui::Ui,
     page: &mut TemplatesPage,
     env: &mut crate::ui::browse::Env,
-    settings: Option<PortalSettings>,
 ) {
     page.take();
+    if page
+        .read_at
+        .is_none_or(|t| t.elapsed() >= std::time::Duration::from_secs(30))
+    {
+        page.read_at = Some(std::time::Instant::now());
+        page.settings = cabinet_settings(env.root);
+    }
+    let settings = page.settings.clone();
     let rows: Vec<AuditEntry> = page.audit_rx.try_iter().collect();
     if !rows.is_empty() {
         let mut tx = vf_core::tx::Transaction::new("portal_todo_templates");
@@ -1359,7 +1454,7 @@ pub fn templates_page(
             page.err = Some(format!("This was NOT recorded in the audit trail: {e}"));
         }
     }
-    let audit = page.audit.clone();
+    let audit = page.app_audit.clone().unwrap_or_else(|| page.audit.clone());
     let ctx = ui.ctx().clone();
     ui.heading("To-do templates");
     let Some(s) = settings.filter(|s| s.todo_lists) else {
@@ -1385,16 +1480,17 @@ pub fn templates_page(
                     .collect::<Result<Vec<_>, _>>()
             })
             .unwrap_or_default();
+        page.doc_types = doc_type_names(env.conn);
     }
-    let doc_types: Vec<String> = env
-        .conn
-        .prepare("SELECT name FROM doc_type WHERE deleted_at IS NULL ORDER BY sort, name")
-        .and_then(|mut st| {
-            st.query_map([], |r| r.get(0))?
-                .collect::<Result<Vec<String>, _>>()
-        })
-        .unwrap_or_default();
+    let doc_types = page.doc_types.clone();
     let busy = page.job.is_some();
+    if ui
+        .add_enabled(!busy, egui::Button::new("Read again").small())
+        .clicked()
+    {
+        page.err = None;
+        page.reread();
+    }
     if busy {
         ui.horizontal(|ui| {
             ui.spinner();
@@ -1675,7 +1771,17 @@ mod tests {
     fn a_list_read_is_copied_into_the_client_folder_with_an_audit_row() {
         let t = tempfile::tempdir().unwrap();
         let root = t.path();
-        std::fs::create_dir_all(root.join("Smith, John (1001)")).unwrap();
+        let bind = |folder: &str, client: &str| {
+            let v = root.join(folder).join("_Vibe");
+            std::fs::create_dir_all(&v).unwrap();
+            std::fs::write(
+                v.join("client.json"),
+                format!(r#"{{"client_id":"{client}"}}"#),
+            )
+            .unwrap();
+        };
+        bind("Smith, John (1001)", "c-1");
+        bind("Smith Farms LLC (1002)", "c-2");
         let mut conn =
             vf_core::db::open(&t.path().join("catalog.db"), vf_core::db::Storage::Local).unwrap();
         let list: TodoList = serde_json::from_str(
@@ -1699,7 +1805,13 @@ mod tests {
             )
             .unwrap();
         assert_eq!(n, 1);
-        // A client with no folder has no copy.
+        // A client with no folder has no copy; nor does a folder renamed away (gone) or one bound
+        // to another client: no folder is made again unbound.
         assert!(copy_of(root, None, &list, "x").is_none());
+        assert!(copy_of(root, Some("Smith, John (old)"), &list, "x").is_none());
+        assert!(!root.join("Smith, John (old)").exists());
+        assert!(copy_of(root, Some("Smith Farms LLC (1002)"), &list, "x").is_none());
+        // A record only: not on the Ctrl+Z stack.
+        assert!(vf_fs::fileops::NOT_ON_UNDO_STACK.contains(&"portal_todo_copy"));
     }
 }

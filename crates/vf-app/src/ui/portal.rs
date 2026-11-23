@@ -1814,7 +1814,11 @@ pub fn admin_settings(ui: &mut egui::Ui, a: &mut AdminPortal, env: &mut Env) {
         "To-do lists: ask clients for documents and answers on the portal",
     );
     ui.label(widgets::caption(
-        "For every PC of this cabinet: a client's To-do lists… (in the client's details) and \n         Admin › To-do templates. Each answer a client gives on the portal is kept with its date, \n         time, internet address, browser and person, for a PDF report, and Vibe Files keeps a \n         copy of each list in the client's folder (_Vibe\todo). The portal must have them turned \n         on too (its Settings › To-do lists). Needs Vibe Portal 0.5 or later.",
+        "For every PC of this cabinet: a client's To-do lists… (in the client's details) and \
+         Admin › To-do templates. Each answer a client gives on the portal is kept with its date, \
+         time, internet address, browser and person, for a PDF report, and Vibe Files keeps a \
+         copy of each list in the client's folder (_Vibe\\todo). The portal must have them turned \
+         on too (its Settings › To-do lists). Needs Vibe Portal 0.5 or later.",
     ));
     ui.add_space(6.0);
     ui.label(RichText::new("Checking access requests").strong());

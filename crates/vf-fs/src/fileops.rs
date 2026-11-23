@@ -151,6 +151,10 @@ fn unreadable(p: &Path) -> Option<String> {
 /// (client master, doc types), records with nothing to undo, and emptying the trash (the
 /// bytes are gone).
 pub const NOT_ON_UNDO_STACK: &[&str] = &[
+    // Records only: a portal upload received, and the copy of a to-do list read (PA-103).
+    "portal_receive",
+    "portal_todo_copy",
+    "portal_todo_templates",
     crate::intake::LABEL,
     crate::intake::KEPT_LABEL,
     "intake batch",

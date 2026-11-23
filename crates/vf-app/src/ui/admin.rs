@@ -518,11 +518,10 @@ pub fn show(ui: &mut egui::Ui, a: &mut Admin, env: &mut Env, sweep: SweepEnv, lo
                 });
         }
         Page::TodoTemplates => {
-            let s = crate::ui::todo::cabinet_settings(env.root);
             egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
-                    crate::ui::todo::templates_page(ui, &mut a.todo_templates, env, s)
+                    crate::ui::todo::templates_page(ui, &mut a.todo_templates, env)
                 });
         }
         Page::Devices => crate::ui::devices::show(ui, &mut a.devices, env),
@@ -648,6 +647,7 @@ fn nav(ui: &mut egui::Ui, a: &mut Admin, has_password: bool, locked: bool) {
                     .clicked()
                 {
                     a.page = Page::TodoTemplates;
+                    a.todo_templates.reread();
                 }
             } else if *item == "Folder import" {
                 if ui.selectable_label(a.page == Page::Import, *item).clicked() {

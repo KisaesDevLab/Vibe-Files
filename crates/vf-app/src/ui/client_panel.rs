@@ -179,14 +179,7 @@ pub fn show(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env, ci: usize) {
                 .on_hover_text("Ask this client for documents and answers on the portal; see what they sent, and the report")
                 .clicked()
         {
-            let doc_types: Vec<String> = env
-                .conn
-                .prepare("SELECT name FROM doc_type WHERE deleted_at IS NULL ORDER BY sort, name")
-                .and_then(|mut st| {
-                    st.query_map([], |r| r.get(0))?
-                        .collect::<Result<Vec<String>, _>>()
-                })
-                .unwrap_or_default();
+            let doc_types = crate::ui::todo::doc_type_names(env.conn);
             b.portal.todo = Some(crate::ui::todo::TodoWindow::new(
                 ui.ctx(),
                 &s,

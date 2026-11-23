@@ -1042,9 +1042,20 @@ fn record(
                     if doc_types.contains_key(&t) {
                         Some(t)
                     } else {
+                        let t = t.trim();
                         doc_types
                             .iter()
-                            .find(|(_, name)| name.eq_ignore_ascii_case(t.trim()))
+                            .find(|(_, name)| name.as_str() == t)
+                            .or_else(|| {
+                                let mut same = doc_types
+                                    .iter()
+                                    .filter(|(_, name)| name.eq_ignore_ascii_case(t));
+                                // Only when one type has that name in any case.
+                                match (same.next(), same.next()) {
+                                    (Some(one), None) => Some(one),
+                                    _ => None,
+                                }
+                            })
                             .map(|(id, _)| id.clone())
                     }
                 });

@@ -7,7 +7,7 @@ How to ask a client for documents and answers through your firm's portal, see wh
 To-do lists have two switches, and both start off:
 
 - **On the portal:** an admin ticks **Turn on to-do lists** in the portal's staff page, **Settings › To-do lists**. While it is off, clients see no To do and no list can be sent.
-- **In Vibe Files:** tick **To-do lists** in **Admin › Portal** and press **Save**. It is kept with the cabinet's portal settings, so every PC follows it. While it is off, the client's **To-do lists…** button and **Admin › To-do templates** are not shown.
+- **In Vibe Files:** tick **To-do lists** in **Admin › Portal** and press **Save**. It is kept with the cabinet's portal settings, so every PC follows it. While it is off, the client's **To-do lists…** button is hidden and **Admin › To-do templates** says they are off.
 
 It needs Vibe Portal 0.5 or later.
 

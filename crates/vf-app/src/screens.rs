@@ -192,6 +192,184 @@ mod tests {
         shot(&mut h, "40-help");
     }
 
+    /// PA-103: the to-do lists window and Admin › To-do templates, against a portal stand-in on
+    /// this PC answering with invented data. `VF_SCREENS_DIR` set to the output folder:
+    /// `cargo test -p vf-app todo_screens -- --ignored`.
+    #[test]
+    #[ignore = "writes screenshots for a UI review"]
+    fn todo_screens() {
+        let Ok(out) = std::env::var("VF_SCREENS_DIR") else {
+            return;
+        };
+        let out = std::path::PathBuf::from(out);
+        std::fs::create_dir_all(&out).unwrap();
+        let url = fake_todo_portal();
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path().join("Clients");
+        vf_fixtures::generate(&root, 7).unwrap();
+        let data = t.path().join("data");
+        drop(crate::session::open(&data, "dev", &root).unwrap());
+        let cab = vf_fs::cabinet::read(&root).unwrap().cabinet_id;
+        let s = vf_portal::PortalSettings::new(&cab, &url, &format!("vpk_{}", "x".repeat(32)), 0)
+            .unwrap()
+            .with_todo_lists(true);
+        vf_portal::settings::save(&root, &s).unwrap();
+        let d = data.clone();
+        let mut h = HarnessBuilder::default()
+            .with_max_steps(crate::ui::test_util::MAX_STEPS)
+            .with_theme(egui::Theme::Light)
+            .with_size([1440.0, 900.0])
+            .build_eframe(move |cc| VibeFilesApp::new(&cc.egui_ctx, d.clone()));
+        h.run_steps(8);
+        let shot = |h: &mut egui_kittest::Harness<'static, VibeFilesApp>, name: &str| {
+            for _ in 0..5 {
+                h.step();
+            }
+            match h.render() {
+                Ok(img) => img.save(out.join(format!("{name}.png"))).unwrap(),
+                Err(e) => eprintln!("{name}: {e}"),
+            }
+        };
+        h.get_by_role_and_label(Role::Button, "Open existing")
+            .click();
+        h.run_steps(8);
+        h.get_by_label("Cabinet folder").click();
+        h.step();
+        h.get_by_label("Cabinet folder")
+            .type_text(&root.display().to_string());
+        h.step();
+        h.get_by_role_and_label(Role::Button, "Open cabinet")
+            .click();
+        assert!(wait_for(&mut h, |h| matches!(
+            h.state().screen,
+            crate::app::Screen::Open(_)
+        )));
+        h.run_steps(8);
+        {
+            let o = open_mut(&mut h);
+            o.browse.set_scope(vf_core::browse::Scope::Client(0));
+            o.browse.portal.reread();
+        }
+        h.run_steps(6);
+        h.get_by_role_and_label(Role::Button, "To-do lists…")
+            .click();
+        assert!(wait_for(&mut h, |h| h
+            .query_by_label("2026 tax documents")
+            .is_some()));
+        shot(&mut h, "vf-1-todo-lists");
+        h.query_all_by_role_and_label(Role::Button, "Open")
+            .next()
+            .unwrap()
+            .click();
+        assert!(wait_for(&mut h, |h| h
+            .query_by_label("1. W-2 from each employer")
+            .is_some()));
+        shot(&mut h, "vf-2-todo-list-open");
+        h.get_by_role_and_label(Role::Button, "Edit").scroll_to_me();
+        h.run_steps(2);
+        h.get_by_role_and_label(Role::Button, "Edit").click();
+        h.run_steps(6);
+        shot(&mut h, "vf-3-todo-edit");
+        h.get_by_role_and_label(Role::Button, "Cancel")
+            .scroll_to_me();
+        h.run_steps(2);
+        h.get_by_role_and_label(Role::Button, "Cancel").click();
+        h.run_steps(4);
+        h.get_by_role_and_label(Role::Button, "Hide").scroll_to_me();
+        h.run_steps(2);
+        h.get_by_role_and_label(Role::Button, "Hide").click();
+        h.run_steps(4);
+        h.get_by_role_and_label(Role::Button, "+ New list")
+            .scroll_to_me();
+        h.run_steps(2);
+        h.get_by_role_and_label(Role::Button, "+ New list").click();
+        h.run_steps(6);
+        shot(&mut h, "vf-4-todo-new-list");
+        open_mut(&mut h).browse.portal.todo = None;
+        h.run_steps(4);
+        h.get_by_role_and_label(Role::Button, "Admin").click();
+        h.run_steps(8);
+        h.get_by_role_and_label(Role::Button, "Portal").click();
+        h.run_steps(8);
+        shot(&mut h, "vf-5-admin-portal-switch");
+        h.get_by_role_and_label(Role::Button, "To-do templates")
+            .click();
+        assert!(wait_for(&mut h, |h| h
+            .query_by_label("1040 year-end documents")
+            .is_some()));
+        // The grid settles its column widths over a few frames.
+        h.run_steps(6);
+        h.query_all_by_role_and_label(Role::Button, "Send to clients…")
+            .next()
+            .unwrap()
+            .click();
+        h.run_steps(8);
+        shot(&mut h, "vf-6-admin-todo-templates");
+    }
+
+    /// A portal on this PC answering the to-do calls with invented data; its address.
+    fn fake_todo_portal() -> String {
+        use std::io::{BufRead, BufReader, Read, Write};
+        const ITEMS: &str = include_str!("../../vf-portal/tests/data/todo_items.json");
+        const LIST: &str = r#""id":"l1","clientId":"c","title":"2026 tax documents","note":"Please send these by March 15. Thank you!","dueDate":"2027-03-15","status":"open","complete":false,"done":3,"total":4,"createdAt":"2027-01-10T16:02:00Z","templateId":"t1","createdByKind":"firm_key","createdBy":"OFFICE-PC\\kim","closedAt":null,"closedBy":null,"remindedAt":"2027-01-24T15:00:00Z","remindEveryDays":7,"assignedStaffId":"s1""#;
+        const LOAN: &str = r#""id":"l2","clientId":"c","title":"Bank loan package","note":"","dueDate":"2027-02-01","status":"open","complete":false,"done":0,"total":2,"createdAt":"2027-01-20T16:00:00Z","createdByKind":"staff","createdBy":"kim@example-cpa.test","remindEveryDays":0,"assignedStaffId":null"#;
+        let template = |id: &str, name: &str| {
+            format!(
+                r#"{{"id":"{id}","name":"{name}","note":"Please send these by March 15.","items":{ITEMS}}}"#
+            )
+        };
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = l.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for s in l.incoming().flatten() {
+                let mut r = BufReader::new(s.try_clone().unwrap());
+                let mut first = String::new();
+                if r.read_line(&mut first).is_err() {
+                    continue;
+                }
+                let mut len = 0usize;
+                loop {
+                    let mut line = String::new();
+                    if r.read_line(&mut line).is_err() || line == "\r\n" || line.is_empty() {
+                        break;
+                    }
+                    if let Some(n) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                        len = n.trim().parse().unwrap_or(0);
+                    }
+                }
+                let mut sink = vec![0u8; len];
+                let _ = r.read_exact(&mut sink);
+                let path = first
+                    .split_whitespace()
+                    .nth(1)
+                    .unwrap_or("")
+                    .split('?')
+                    .next()
+                    .unwrap_or("")
+                    .to_string();
+                let body = match path.trim_start_matches("/api/firm/v1") {
+                    "/request-lists" => format!(r#"{{"lists":[{{{LIST}}},{{{LOAN}}}]}}"#),
+                    "/request-lists/l1" => format!(r#"{{"list":{{{LIST},"items":{ITEMS}}}}}"#),
+                    "/request-staff" => r#"{"staff":[{"id":"s1","name":"Kim Lee","email":"kim@example-cpa.test"},{"id":"s2","name":"Pat Ortiz","email":"pat@example-cpa.test"}]}"#.to_string(),
+                    "/request-templates" => format!(
+                        r#"{{"templates":[{},{}]}}"#,
+                        template("t1", "1040 year-end documents"),
+                        template("t2", "Bank loan package")
+                    ),
+                    "/status" => r#"{"version":"0.5.0","firmName":"Example CPA","portalUrl":"http://127.0.0.1","features":["requests"]}"#.to_string(),
+                    _ => r#"{"ok":true}"#.to_string(),
+                };
+                let mut w = s;
+                let _ = write!(
+                    w,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+            }
+        });
+        format!("http://127.0.0.1:{port}")
+    }
+
     /// Steps until `ok`, up to 30 s; false if it never came.
     fn wait_for(
         h: &mut egui_kittest::Harness<'static, VibeFilesApp>,

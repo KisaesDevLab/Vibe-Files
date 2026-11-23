@@ -1,0 +1,9 @@
+[
+  {"id":"i1","position":1,"kind":"document","prompt":"W-2 from each employer","help":"","required":true,"docType":"W-2","state":"answered","responses":[
+    {"id":41,"kind":"upload","text":"","uploadId":"u1","fileName":"W2-Acme.pdf","fileSize":212480,"fileSha256":"9f2c4b7e0d1a33c5e8f6a2b9c0d4e7f1a5b3c8d2e6f9a1b4c7d0e3f6a9b2c5e4","at":"2027-02-03T20:14:07Z","ip":"203.0.113.24","userAgent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) Edg/131.0","sessionRef":"3fa8c21d0b9e4c77","person":{"identityId":"p1","name":"Jordan Sample","email":"jordan@example.test","phone":null}}]},
+  {"id":"i2","position":2,"kind":"document","prompt":"1099-B or brokerage year-end statement","help":"","required":true,"docType":"1099","state":"open","responses":[]},
+  {"id":"i3","position":3,"kind":"text","prompt":"Did you sell or buy any property in 2026?","help":"","required":true,"docType":"","state":"answered","responses":[
+    {"id":42,"kind":"text","text":"Yes, we sold the rental on Oak St in June.","uploadId":null,"fileName":null,"fileSize":null,"fileSha256":null,"at":"2027-02-03T20:18:52Z","ip":"203.0.113.24","userAgent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) Edg/131.0","sessionRef":"3fa8c21d0b9e4c77","person":{"identityId":"p1","name":"Jordan Sample","email":"jordan@example.test","phone":null}}]},
+  {"id":"i4","position":4,"kind":"document","prompt":"Childcare receipts","help":"","required":false,"docType":"","state":"not_applicable","responses":[
+    {"id":43,"kind":"not_applicable","text":"No children in daycare this year.","uploadId":null,"fileName":null,"fileSize":null,"fileSha256":null,"at":"2027-02-03T20:20:11Z","ip":"203.0.113.24","userAgent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) Edg/131.0","sessionRef":"3fa8c21d0b9e4c77","person":{"identityId":"p1","name":"Jordan Sample","email":"jordan@example.test","phone":null}}]}
+]

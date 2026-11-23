@@ -107,7 +107,7 @@ pub fn mark_from_internet(path: &Path) {
 }
 
 /// Moves `src` into `dir` as `name`, or `name (2)`… — never replacing a file.
-pub(crate) fn move_into(src: &Path, dir: &Path, name: &str) -> std::io::Result<PathBuf> {
+pub fn move_into(src: &Path, dir: &Path, name: &str) -> std::io::Result<PathBuf> {
     let (stem, ext) = match name.rsplit_once('.') {
         Some((s, e)) => (s.to_string(), format!(".{e}")),
         None => (name.to_string(), String::new()),
@@ -251,7 +251,7 @@ fn finish(root: &Path, part: &Path, meta: &Path, u: &Upload, now: &str, report: 
             }
             // PA-103: a file sent for a to-do item tells Intake where it came from, and its
             // doc type when the item names one (by its name; Intake finds the type).
-            if let Some(r) = &u.request {
+            if let Some(r) = u.request.as_ref().filter(|r| !r.doc_type.trim().is_empty()) {
                 let name = dest
                     .file_name()
                     .map(|n| n.to_string_lossy().into_owned())
