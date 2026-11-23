@@ -105,7 +105,11 @@ fn cabinet_id(root: &Path) -> Option<String> {
 pub struct AuditOut(Sender<AuditEntry>);
 
 impl AuditOut {
-    fn send(&self, e: AuditEntry) {
+    pub(crate) fn new(tx: Sender<AuditEntry>) -> Self {
+        Self(tx)
+    }
+
+    pub(crate) fn send(&self, e: AuditEntry) {
         let _ = self.0.send(e);
     }
 }
@@ -163,6 +167,8 @@ pub struct PortalState {
     /// The document pane's Send secure link… (Vibe-Portal P68).
     pub send_link: Option<SendLinkWindow>,
     pub people: Option<PeopleWindow>,
+    /// A client's to-do lists (PA-103).
+    pub todo: Option<crate::ui::todo::TodoWindow>,
     /// "Fetch uploads now" (Admin › Portal, or Intake's strip).
     pub fetch_now: bool,
     /// The last fetch on this PC: (local time, what it did), for Intake's strip.
@@ -184,11 +190,15 @@ pub struct PortalState {
     last_list_problem: Option<String>,
     audit_tx: Sender<AuditEntry>,
     audit_rx: Receiver<AuditEntry>,
+    /// To-do lists read, to be copied into their client's folder (PA-103).
+    todo_tx: Sender<crate::ui::todo::TodoCopy>,
+    todo_rx: Receiver<crate::ui::todo::TodoCopy>,
 }
 
 impl Default for PortalState {
     fn default() -> Self {
         let (audit_tx, audit_rx) = mpsc::channel();
+        let (todo_tx, todo_rx) = mpsc::channel();
         Self {
             settings: None,
             read_at: None,
@@ -199,6 +209,7 @@ impl Default for PortalState {
             share: None,
             send_link: None,
             people: None,
+            todo: None,
             fetch_now: false,
             last_fetch: None,
             refresh_marks: false,
@@ -211,6 +222,8 @@ impl Default for PortalState {
             last_list_problem: None,
             audit_tx,
             audit_rx,
+            todo_tx,
+            todo_rx,
         }
     }
 }
@@ -254,6 +267,16 @@ impl PortalState {
 
     pub fn audit_out(&self) -> AuditOut {
         AuditOut(self.audit_tx.clone())
+    }
+
+    /// Where to-do windows send the lists they read, for the client folder's copy (PA-103).
+    pub fn todo_out(&self) -> crate::ui::todo::CopyOut {
+        crate::ui::todo::CopyOut(self.todo_tx.clone())
+    }
+
+    /// The to-do copies waiting to be written (the app writes them with an audit row).
+    pub fn take_todo_copies(&self) -> Vec<crate::ui::todo::TodoCopy> {
+        self.todo_rx.try_iter().collect()
     }
 
     /// The timed fetch of client uploads, and the audit rows of every portal change made
@@ -1530,6 +1553,8 @@ pub struct AdminPortal {
     confirm_stop: bool,
     /// "Show the documents in B2 on the portal's staff page", as ticked until Save (PA-80).
     b2_list: bool,
+    /// "To-do lists", as ticked until Save (PA-103).
+    todo_lists: bool,
     /// Audit rows of request decisions when there is no app channel (tests).
     local_audit: Option<Receiver<AuditEntry>>,
     msg: Option<String>,
@@ -1616,6 +1641,7 @@ impl AdminPortal {
             .to_string();
         self.columns = s.map(|s| s.record.clone()).unwrap_or_default();
         self.b2_list = s.is_some_and(|s| s.b2_list);
+        self.todo_lists = s.is_some_and(|s| s.todo_lists);
     }
 
     /// How `column` writes its dates, for the firm's choice `order`: worked out from the whole
@@ -1781,6 +1807,14 @@ pub fn admin_settings(ui: &mut egui::Ui, a: &mut AdminPortal, env: &mut Env) {
          behind, while Vibe Files is open on the computer B2 sync runs on. Unticking it removes \
          the lists from the portal. Needs Vibe Portal 0.3.15 or later, and this version of Vibe \
          Files on every PC.",
+    ));
+    ui.add_space(6.0);
+    ui.checkbox(
+        &mut a.todo_lists,
+        "To-do lists: ask clients for documents and answers on the portal",
+    );
+    ui.label(widgets::caption(
+        "For every PC of this cabinet: a client's To-do lists… (in the client's details) and \n         Admin › To-do templates. Each answer a client gives on the portal is kept with its date, \n         time, internet address, browser and person, for a PDF report, and Vibe Files keeps a \n         copy of each list in the client's folder (_Vibe\todo). The portal must have them turned \n         on too (its Settings › To-do lists). Needs Vibe Portal 0.5 or later.",
     ));
     ui.add_space(6.0);
     ui.label(RichText::new("Checking access requests").strong());
@@ -2208,7 +2242,10 @@ fn save(a: &mut AdminPortal, ctx: &egui::Context, env: &mut Env) {
         }
     };
     let s = match PortalSettings::new(&id, &a.url, &a.key, minutes) {
-        Ok(s) => s.with_record(a.columns.clone()).with_b2_list(a.b2_list),
+        Ok(s) => s
+            .with_record(a.columns.clone())
+            .with_b2_list(a.b2_list)
+            .with_todo_lists(a.todo_lists),
         Err(e) => {
             a.err = Some(e);
             return;
@@ -2260,6 +2297,7 @@ fn save(a: &mut AdminPortal, ctx: &egui::Context, env: &mut Env) {
                 "url": s.url,
                 "fetch_minutes": s.fetch_minutes,
                 "b2_list": s.b2_list,
+                "todo_lists": s.todo_lists,
                 "record_columns": {
                     "email": s.record.email,
                     "mobile": s.record.mobile,

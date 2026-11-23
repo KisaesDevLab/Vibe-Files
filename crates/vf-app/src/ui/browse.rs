@@ -5023,6 +5023,7 @@ fn portal_windows(ctx: &egui::Context, b: &mut Browse, env: &mut Env) {
     let Some(s) = b.portal.settings(env.root).cloned() else {
         b.portal.share = None;
         b.portal.people = None;
+        b.portal.todo = None;
         b.portal.send_link = None;
         return;
     };
@@ -5046,6 +5047,16 @@ fn portal_windows(ctx: &egui::Context, b: &mut Browse, env: &mut Env) {
         w.show(ctx, &s);
         if w.closed {
             b.portal.people = None;
+        }
+    }
+    // PA-103: a client's to-do lists, while they are on for the cabinet.
+    if !s.todo_lists {
+        b.portal.todo = None;
+    }
+    if let Some(w) = &mut b.portal.todo {
+        w.show(ctx, &s);
+        if w.closed {
+            b.portal.todo = None;
         }
     }
 }

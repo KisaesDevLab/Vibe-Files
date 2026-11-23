@@ -134,6 +134,12 @@ impl PortalSettings {
         self
     }
 
+    /// The same settings with to-do lists on or off for every PC (PA-103).
+    pub fn with_todo_lists(mut self, on: bool) -> Self {
+        self.todo_lists = on;
+        self
+    }
+
     /// The same settings with the client-record columns chosen in Admin › Portal.
     pub fn with_record(mut self, record: RecordColumns) -> Self {
         self.record = record;

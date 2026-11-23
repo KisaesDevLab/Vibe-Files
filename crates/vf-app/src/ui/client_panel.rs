@@ -171,6 +171,37 @@ pub fn show(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env, ci: usize) {
                 b.portal.audit_out(),
             ));
         }
+        // PA-103: what the firm asked this client for on the portal, and the answers.
+        if let Some(s) = b.portal.settings(env.root).cloned()
+            && s.todo_lists
+            && ui
+                .small_btn("To-do lists…")
+                .on_hover_text("Ask this client for documents and answers on the portal; see what they sent, and the report")
+                .clicked()
+        {
+            let doc_types: Vec<String> = env
+                .conn
+                .prepare("SELECT name FROM doc_type WHERE deleted_at IS NULL ORDER BY sort, name")
+                .and_then(|mut st| {
+                    st.query_map([], |r| r.get(0))?
+                        .collect::<Result<Vec<String>, _>>()
+                })
+                .unwrap_or_default();
+            b.portal.todo = Some(crate::ui::todo::TodoWindow::new(
+                ui.ctx(),
+                &s,
+                env.root.to_path_buf(),
+                crate::ui::portal::ClientRef {
+                    id: c.id.clone(),
+                    code: c.ext_id.clone(),
+                    name: c.name.clone(),
+                },
+                c.folder_rel.clone(),
+                doc_types,
+                b.portal.audit_out(),
+                b.portal.todo_out(),
+            ));
+        }
     });
     ui.label(
         RichText::new(format!("ID {}", c.ext_id))

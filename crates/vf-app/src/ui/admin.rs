@@ -39,6 +39,8 @@ pub enum Page {
     Portal,
     /// Admin › Portal requests (PA-37).
     PortalRequests,
+    /// Admin › To-do templates (PA-103).
+    TodoTemplates,
 }
 
 /// UI_SPEC §6 nav, grouped: the pages that are built. Version 2 pages (Users & roles, Client
@@ -59,7 +61,7 @@ const NAV: &[(&str, &[&str])] = &[
         ],
     ),
     ("INTAKE", &["Print capture & parsers"]),
-    ("PORTAL", &["Portal", "Portal requests"]),
+    ("PORTAL", &["Portal", "Portal requests", "To-do templates"]),
     (
         "COMPLIANCE",
         &[
@@ -95,6 +97,7 @@ fn page_of(item: &str) -> Option<Page> {
         "Print capture & parsers" => Page::PrintCapture,
         "Portal" => Page::Portal,
         "Portal requests" => Page::PortalRequests,
+        "To-do templates" => Page::TodoTemplates,
         "Audit trail" => Page::Audit,
         "Retention classes" => Page::Retention,
         "Disposition" => Page::Disposition,
@@ -201,6 +204,8 @@ pub struct Admin {
     pub templates: crate::ui::templates::TemplatesPage,
     /// Admin › Portal and Portal requests (PA-37).
     pub portal: crate::ui::portal::AdminPortal,
+    /// Admin › To-do templates (PA-103).
+    pub todo_templates: crate::ui::todo::TemplatesPage,
     /// Doc types: archived ones listed too.
     pub show_archived: bool,
 }
@@ -243,6 +248,7 @@ impl Admin {
             devices: Default::default(),
             templates: Default::default(),
             portal: Default::default(),
+            todo_templates: Default::default(),
             show_archived: false,
         };
         a.reload(env);
@@ -444,7 +450,13 @@ pub fn show(ui: &mut egui::Ui, a: &mut Admin, env: &mut Env, sweep: SweepEnv, lo
         .exact_size(248.0)
         .resizable(false)
         .frame(egui::Frame::new().fill(theme::pane()).inner_margin(10))
-        .show(ui, |ui| nav(ui, a, has_password, locked));
+        .show(ui, |ui| {
+            // A short window: the list scrolls (it outgrew 900 px with To-do templates, PA-103).
+            egui::ScrollArea::vertical()
+                .id_salt("admin-nav-scroll")
+                .auto_shrink([false, false])
+                .show(ui, |ui| nav(ui, a, has_password, locked));
+        });
     egui::CentralPanel::default().show(ui, |ui| match a.page {
         Page::DocTypes => doc_types(ui, a, env),
         Page::PrintCapture => {
@@ -503,6 +515,14 @@ pub fn show(ui: &mut egui::Ui, a: &mut Admin, env: &mut Env, sweep: SweepEnv, lo
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
                     crate::ui::portal::admin_requests(ui, &mut a.portal, env)
+                });
+        }
+        Page::TodoTemplates => {
+            let s = crate::ui::todo::cabinet_settings(env.root);
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    crate::ui::todo::templates_page(ui, &mut a.todo_templates, env, s)
                 });
         }
         Page::Devices => crate::ui::devices::show(ui, &mut a.devices, env),
@@ -621,6 +641,13 @@ fn nav(ui: &mut egui::Ui, a: &mut Admin, has_password: bool, locked: bool) {
                 {
                     a.page = Page::PortalRequests;
                     a.portal.refresh_requests();
+                }
+            } else if *item == "To-do templates" {
+                if ui
+                    .selectable_label(a.page == Page::TodoTemplates, *item)
+                    .clicked()
+                {
+                    a.page = Page::TodoTemplates;
                 }
             } else if *item == "Folder import" {
                 if ui.selectable_label(a.page == Page::Import, *item).clicked() {

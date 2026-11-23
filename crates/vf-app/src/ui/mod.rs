@@ -40,6 +40,7 @@ pub mod templates;
 #[cfg(test)]
 pub mod test_util;
 pub mod theme;
+pub mod todo;
 pub mod trash;
 pub mod viewer;
 pub mod widgets;

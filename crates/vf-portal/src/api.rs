@@ -1201,6 +1201,72 @@ mod tests {
         (Portal::new(&s, "PC1", "kurt"), seen)
     }
 
+    /// PA-103 (Vibe-Portal P109): to-do calls reach the right paths, with the right bodies.
+    #[test]
+    fn to_do_calls_use_the_firm_api() {
+        use crate::todo::{ItemIn, ListChange, NewList};
+        const LIST: &str = r#"{"list":{"id":"l1","clientId":"c1","title":"T","dueDate":null,
+            "status":"closed","complete":false,"done":0,"total":1,"createdAt":"2026-11-09T15:00:00Z",
+            "items":[]}}"#;
+        let (p, seen) = one_answer("200 OK", LIST);
+        let l = p
+            .change_list(
+                "l1",
+                &ListChange {
+                    status: Some("closed".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(l.status, "closed");
+        let flat = |s: String| s.chars().filter(|c| !c.is_whitespace()).collect::<String>();
+        assert_eq!(
+            flat(seen.join().unwrap()),
+            flat(r#"PATCH /api/firm/v1/request-lists/l1 HTTP/1.1 | authorization: Bearer vpk_test | {"status":"closed"}"#.into())
+        );
+        let (p, seen) = one_answer("201 Created", r#"{"lists":[]}"#);
+        p.create_lists(&NewList {
+            client_ids: vec!["c1".into()],
+            title: "T".into(),
+            note: String::new(),
+            due_date: None,
+            remind_every_days: 0,
+            template_id: None,
+            items: vec![ItemIn {
+                prompt: "W-2".into(),
+                ..ItemIn::blank()
+            }],
+            notify: true,
+            assigned_staff_id: Some("s1".into()),
+        })
+        .unwrap();
+        let sent = flat(seen.join().unwrap());
+        assert!(
+            sent.starts_with("POST/api/firm/v1/request-listsHTTP/1.1"),
+            "{sent}"
+        );
+        assert!(sent.contains(r#""clientIds":["c1"]"#), "{sent}");
+        assert!(sent.contains(r#""assignedStaffId":"s1""#), "{sent}");
+        assert!(!sent.contains("templateId"), "{sent}");
+        // A list with answers is not deleted: the portal's reason in words.
+        let (p, seen) = one_answer("409 Conflict", r#"{"error":"list_has_answers"}"#);
+        let err = p.delete_list("l1").unwrap_err();
+        assert!(
+            seen.join()
+                .unwrap()
+                .starts_with("DELETE /api/firm/v1/request-lists/l1 ")
+        );
+        assert!(err.message().contains("cancel it instead"));
+        // Turned off on the portal.
+        let (p, _) = one_answer("404 Not Found", r#"{"error":"requests_off"}"#);
+        assert!(
+            p.todo_lists("c1")
+                .unwrap_err()
+                .message()
+                .contains("turned off")
+        );
+    }
+
     /// Vibe-Portal P63: people already on the portal, searched by what was typed.
     #[test]
     fn people_are_searched_on_the_portal() {

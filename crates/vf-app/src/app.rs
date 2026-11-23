@@ -957,6 +957,20 @@ impl eframe::App for VibeFilesApp {
                     ));
                 }
             }
+            // PA-103: to-do lists read are copied into their client's folder.
+            let copies = o.browse.portal.take_todo_copies();
+            if !copies.is_empty()
+                && let Err(e) = crate::ui::todo::write_copies(
+                    &mut o.opened.conn,
+                    &o.opened.root,
+                    &self.config.device_id,
+                    copies,
+                )
+            {
+                o.browse.error = Some(format!(
+                    "A to-do list could not be copied into its client's folder: {e}"
+                ));
+            }
             if let Some(n) = o.browse.portal.notice.take() {
                 o.browse.notice = Some(n);
             }
@@ -4605,6 +4619,10 @@ mod tests {
         type_into(&mut h, "Admin password", "invented-pass-1");
         click(&mut h, "Unlock");
         h.run();
+        // The Admin list scrolls: its last pages are below a 900 px window (PA-103).
+        h.get_by_role_and_label(Role::Button, "Admin password")
+            .scroll_to_me();
+        h.run();
         click(&mut h, "Admin password");
         h.run();
         assert!(h.query_by_label("Open while Admin is locked").is_some());
@@ -4633,6 +4651,10 @@ mod tests {
             vf_fs::trash::open_pages(&root),
             ["Devices".to_string(), "Audit trail".to_string()]
         );
+        // Back to the top of the scrolled list.
+        h.get_by_role_and_label(Role::Button, "Lock Admin")
+            .scroll_to_me();
+        h.run();
         click(&mut h, "Lock Admin");
         h.run();
         assert!(h.query_by_label("Admin is locked").is_none());
