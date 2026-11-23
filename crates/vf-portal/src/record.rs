@@ -378,8 +378,13 @@ pub fn parse_date_in(s: &str, written: Written) -> Option<(u32, u32, u32)> {
             one[4..6].parse().ok()?,
             one[6..8].parse().ok()?,
         ),
-        // A spreadsheet's day number: days since 30 December 1899.
-        [one] if (4..=6).contains(&one.len()) && one.chars().all(|c| c.is_ascii_digit()) => {
+        // A spreadsheet's day number: days since 30 December 1899. A 4-digit number that could
+        // be a year (1800-2199: a cell holding only "1990") is a year, not a day in 1904-1905,
+        // and a year alone is no date of birth.
+        [one] if (4..=6).contains(&one.len())
+            && one.chars().all(|c| c.is_ascii_digit())
+            && !(one.len() == 4 && (1800..=2199).contains(&one.parse::<u32>().ok()?)) =>
+        {
             use chrono::Datelike;
             let day = chrono::NaiveDate::from_ymd_opt(1899, 12, 30)?
                 .checked_add_days(chrono::Days::new(one.parse().ok()?))?;
@@ -631,6 +636,8 @@ mod tests {
             "1990-13-01",
             "0000-01-01",
             "12",
+            "1990",
+            "2001",
         ] {
             assert_eq!(parse_date(s), None, "{s}");
         }
