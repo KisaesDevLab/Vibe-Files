@@ -14,17 +14,28 @@ fn git(args: &[&str]) -> Option<String> {
 
 fn main() {
     println!("cargo:rerun-if-env-changed=VF_COMMIT");
-    // Rebuild when HEAD moves (a new commit or a branch switch), in a worktree too. Only files
-    // that exist are named: a missing one (a ref kept only in packed-refs) would rerun every build.
-    let mut watch = vec!["HEAD".to_string()];
+    // Rebuild when HEAD moves (a new commit or a branch switch), in a worktree too. Only paths
+    // that exist are named (a missing one would rerun every build). A branch kept only in
+    // packed-refs (after `git gc`, or a fresh clone) has no loose ref file yet: its folder is
+    // watched instead, so the next commit, which writes the loose ref there, is seen.
+    let mut watch = vec!["HEAD".to_string(), "packed-refs".to_string()];
     if let Some(r) = git(&["symbolic-ref", "-q", "HEAD"]) {
         watch.push(r);
     }
     for p in watch {
-        if let Some(path) = git(&["rev-parse", "--git-path", &p])
-            && std::path::Path::new(&path).exists()
+        let Some(path) = git(&["rev-parse", "--git-path", &p]) else {
+            continue;
+        };
+        let mut path = std::path::PathBuf::from(path);
+        // Never above `refs` (the git folder itself changes on every `git add`).
+        while !path.exists()
+            && p.starts_with("refs/")
+            && path.file_name().is_some_and(|n| n != "refs")
         {
-            println!("cargo:rerun-if-changed={path}");
+            path.pop();
+        }
+        if path.exists() {
+            println!("cargo:rerun-if-changed={}", path.display());
         }
     }
     let commit = std::env::var("VF_COMMIT")
