@@ -10,7 +10,9 @@ use lopdf::{Dictionary, Document, Object, ObjectId, Stream};
 /// Flattens `src` into `out`. Returns how many annotations were burnt in.
 pub fn flatten(src: &Path, out: &Path) -> Result<usize, String> {
     let mut doc = Document::load(src).map_err(|e| format!("cannot read the PDF: {e}"))?;
-    if doc.is_encrypted() {
+    // lopdf 0.42+ decrypts an owner-password-only PDF on load and drops /Encrypt, so
+    // `is_encrypted()` alone no longer sees it; `was_encrypted()` keeps refusing it as before.
+    if doc.is_encrypted() || doc.was_encrypted() {
         return Err("the PDF is password protected".into());
     }
     let n = flatten_doc(&mut doc)?;

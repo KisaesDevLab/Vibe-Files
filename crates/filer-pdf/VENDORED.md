@@ -25,9 +25,14 @@ of its `src/` (QUESTIONS Q-16). Upstream `main.rs` is not vendored; `vf-app` is 
 3. Assets moved beside the module that reads them, so `include_bytes!`/`include_str!`/
    `CARGO_MANIFEST_DIR` paths are unchanged.
 4. Package versions kept at upstream's (`0.2.6`) so `CARGO_PKG_VERSION` text is unchanged.
+5. lopdf 0.38 → 0.47 for RUSTSEC-2026-0187 (2026-11-22, QUESTIONS Q-146). lopdf 0.42+ decrypts a
+   PDF with only an owner password on load and removes `/Encrypt`, so `is_encrypted()` alone no
+   longer sees it. `filer-pdf/src/pdf.rs` (merge, split) adds `|| was_encrypted()` to its two
+   "password-protected" refusals, each marked `Vibe Files (Q-146)`, to refuse those files as
+   upstream did. Tell upstream when it moves to lopdf 0.42+.
 
-No logic edits. Check with:
-`diff -r <upstream>/src crates/filer-*/src` (only the four attribute lines differ).
+The only logic edit is item 5. Check with:
+`diff -r <upstream>/src crates/filer-*/src` (the four attribute lines and item 5's two lines differ).
 
 ## File → crate
 

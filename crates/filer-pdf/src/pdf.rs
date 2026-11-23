@@ -202,7 +202,8 @@ pub fn merge_pdfs(inputs: &[(PathBuf, String)], out: &Path) -> Result<usize, Str
     for (index, (path, title)) in inputs.iter().enumerate() {
         let mut doc =
             Document::load(path).map_err(|e| format!("cannot open {}: {e}", path.display()))?;
-        if doc.is_encrypted() {
+        // Vibe Files (Q-146): lopdf 0.42+ decrypts owner-password-only files on load.
+        if doc.is_encrypted() || doc.was_encrypted() {
             return Err(format!("{} is password-protected", path.display()));
         }
         doc.renumber_objects_with(max_id);
@@ -449,7 +450,8 @@ pub fn split_pdf(
     }
     let source =
         lopdf::Document::load(path).map_err(|e| format!("cannot open {}: {e}", path.display()))?;
-    if source.is_encrypted() {
+    // Vibe Files (Q-146): lopdf 0.42+ decrypts owner-password-only files on load.
+    if source.is_encrypted() || source.was_encrypted() {
         return Err(format!("{} is password-protected", path.display()));
     }
     let page_ids: Vec<ObjectId> = source.get_pages().into_values().collect();

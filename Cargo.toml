@@ -26,7 +26,7 @@ serde_json = "1.0.154"
 csv = "1.4.0"
 regex = "1.13.1"
 strsim = "0.11.1"
-lopdf = "0.38.0"
+lopdf = "0.47.0"
 pdfium-render = "0.9.5"
 sha2 = "0.10.9"
 chrono = { version = "0.4.45", features = ["serde"] }

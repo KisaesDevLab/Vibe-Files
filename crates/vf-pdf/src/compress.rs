@@ -21,7 +21,9 @@ pub struct Report {
 pub fn compress(src: &Path, out: &Path, max_dpi: f32, quality: u8) -> Result<Report, String> {
     let before = std::fs::metadata(src).map(|m| m.len()).unwrap_or(0);
     let mut doc = Document::load(src).map_err(|e| format!("cannot read the PDF: {e}"))?;
-    if doc.is_encrypted() {
+    // lopdf 0.42+ decrypts an owner-password-only PDF on load and drops /Encrypt, so
+    // `is_encrypted()` alone no longer sees it; `was_encrypted()` keeps refusing it as before.
+    if doc.is_encrypted() || doc.was_encrypted() {
         return Err("the PDF is password protected".into());
     }
     // Largest pixel size each image may keep: its page's size at `max_dpi`.

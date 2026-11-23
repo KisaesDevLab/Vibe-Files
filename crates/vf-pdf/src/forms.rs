@@ -106,7 +106,8 @@ pub fn needs_password(doc: &Document) -> bool {
 /// A PDF with only an owner password, saved without its protection (owner 2026-11-04, Q-59:
 /// fill such forms and drop the restriction).
 fn drop_protection(doc: &mut Document) {
-    if !doc.is_encrypted() {
+    // lopdf 0.42+ has already removed /Encrypt on load; only its state is left.
+    if !doc.is_encrypted() && !doc.was_encrypted() {
         return;
     }
     if let Some(Object::Reference(id)) = doc.trailer.remove(b"Encrypt") {
@@ -1289,9 +1290,7 @@ mod tests {
         let d = Document::load(&flat).unwrap();
         assert!(d.catalog().unwrap().get(b"AcroForm").is_err());
         assert!(read_doc(&d).is_empty());
-        let bytes = d
-            .get_page_content(*d.get_pages().values().next().unwrap())
-            .unwrap();
+        let bytes = d.get_page_content(*d.get_pages().values().next().unwrap());
         assert!(String::from_utf8_lossy(&bytes).contains("Do"));
         // The appearance holding the text is still in the file, as a form XObject.
         let any = d.objects.values().any(|o| matches!(o, Object::Stream(s) if String::from_utf8_lossy(&s.content).contains("(Sample Client) Tj")));
@@ -1550,7 +1549,12 @@ mod tests {
         doc.encrypt(&owner_only).unwrap();
         doc.save(&locked).unwrap();
         let reread = Document::load(&locked).unwrap();
-        assert!(reread.is_encrypted() && !needs_password(&reread));
+        assert!((reread.is_encrypted() || reread.was_encrypted()) && !needs_password(&reread));
+        // The other PDF tools still refuse it, as before lopdf 0.42 (Q-146).
+        assert_eq!(
+            crate::flatten::flatten(&locked, &t.path().join("f.pdf")),
+            Err("the PDF is password protected".to_string())
+        );
 
         assert_eq!(read(&locked).unwrap().len(), 6);
         fill(&locked, &out, &[("client_name".into(), "Sample".into())]).unwrap();
