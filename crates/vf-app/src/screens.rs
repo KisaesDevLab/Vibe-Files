@@ -358,7 +358,7 @@ mod tests {
     /// PA-103 walkthrough against a real Vibe Portal (not a fake): the to-do window drives every
     /// firm step, and `node client.mjs` the client's steps in a browser. Set `VF_WALK_URL`,
     /// `VF_WALK_KEY`, `VF_WALK_LOG` (the portal's log, EMAIL_PROVIDER=console), `VF_WALK_CLIENT`
-    /// (client.mjs), `VF_WALK_PDF` (the file the client sends) and `VF_WALK_DIR` (output).
+    /// (`scripts/todo-walkthrough/client.mjs`), `VF_WALK_PDF` (the file the client sends) and `VF_WALK_DIR` (output).
     #[test]
     #[ignore = "needs a running portal"]
     fn todo_walkthrough() {
