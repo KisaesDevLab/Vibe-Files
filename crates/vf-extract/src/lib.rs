@@ -4,6 +4,7 @@
 
 pub mod forms;
 pub mod matching;
+pub mod prior_return;
 #[cfg(any(test, feature = "test-support"))]
 pub mod synthetic;
 

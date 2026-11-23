@@ -432,6 +432,8 @@ enum Done {
     Made(Vec<TodoList>),
     /// A list deleted.
     Deleted(String),
+    /// PA-104: what a return said (and the file read).
+    Proposal(Box<vf_extract::prior_return::Proposal>, String),
     Said(String),
     Failed(String),
 }
@@ -441,6 +443,57 @@ enum Mode {
     New(ListForm),
     /// Changing the open list: its details and items.
     Edit(ListForm),
+    /// PA-104: choosing last year's return to read (an index into `returns`, or another file).
+    FromReturn(Option<PathBuf>),
+    /// PA-104: the items read from it, each ticked to keep.
+    Review(Box<Review>),
+}
+
+/// What was read from a return, for the person to tick through.
+struct Review {
+    proposal: vf_extract::prior_return::Proposal,
+    keep: Vec<bool>,
+    /// The file read, as shown.
+    source: String,
+}
+
+impl Review {
+    /// The New list form, with the items kept.
+    fn form(&self) -> ListForm {
+        let mut f = ListForm::blank();
+        f.title = match self.proposal.ask_year() {
+            Some(y) => format!("{y} tax documents"),
+            None => "Tax documents".into(),
+        };
+        f.items = self
+            .proposal
+            .items
+            .iter()
+            .zip(&self.keep)
+            .filter(|(_, k)| **k)
+            .map(|(p, _)| ItemIn {
+                id: None,
+                kind: match p.kind {
+                    vf_extract::prior_return::Kind::Document => todo::KIND_DOCUMENT.into(),
+                    vf_extract::prior_return::Kind::Answer => todo::KIND_TEXT.into(),
+                },
+                prompt: p.prompt.chars().take(500).collect(),
+                help: String::new(),
+                required: true,
+                doc_type: p.doc_type.clone(),
+            })
+            .collect();
+        f
+    }
+}
+
+/// Reads a return PDF's text (pdfium) and proposes items. Runs on a thread.
+fn read_return(path: &std::path::Path) -> Result<vf_extract::prior_return::Proposal, String> {
+    let dir =
+        crate::ui::intake::pdfium_dir().ok_or("The PDF reader (pdfium.dll) was not found.")?;
+    let pdfium = filer_pdf::pdf::pdfium(&dir)?;
+    let pages = filer_pdf::pdf::page_texts(pdfium, path)?;
+    Ok(vf_extract::prior_return::propose(&pages))
 }
 
 pub struct TodoWindow {
@@ -448,6 +501,8 @@ pub struct TodoWindow {
     folder: Option<String>,
     root: PathBuf,
     doc_types: Vec<String>,
+    /// PA-104: the client's filed returns (PDF), newest first: (path, label).
+    returns: Vec<(PathBuf, String)>,
     lists: Option<Vec<TodoList>>,
     /// The portal could not be reached: the copies in the client folder.
     offline: Option<(String, Vec<CopyLine>)>,
@@ -474,6 +529,7 @@ impl TodoWindow {
         client: ClientRef,
         folder: Option<String>,
         doc_types: Vec<String>,
+        returns: Vec<(PathBuf, String)>,
         audit: AuditOut,
         copies: CopyOut,
     ) -> Self {
@@ -482,6 +538,7 @@ impl TodoWindow {
             folder,
             root,
             doc_types,
+            returns,
             lists: None,
             offline: None,
             staff: Vec::new(),
@@ -659,6 +716,21 @@ impl TodoWindow {
                 }
                 self.msg = Some("The list was deleted.".into());
             }
+            Done::Proposal(p, source) => {
+                if p.looks_empty() {
+                    self.err = Some(format!(
+                        "{source} does not read as an UltraTax return (no wage, 1099, K-1 or statement pages were found; a scanned return has no text to read). Choose another file."
+                    ));
+                    self.mode = Mode::FromReturn(None);
+                } else {
+                    let keep = vec![true; p.items.len()];
+                    self.mode = Mode::Review(Box::new(Review {
+                        proposal: *p,
+                        keep,
+                        source,
+                    }));
+                }
+            }
             Done::Said(m) => self.msg = Some(m),
             Done::Failed(e) => self.err = Some(e),
         }
@@ -755,6 +827,109 @@ impl TodoWindow {
                 });
                 ui.separator();
             }
+            Mode::FromReturn(chosen) => {
+                ui.label(RichText::new("New list from last year's return").strong());
+                ui.label(widgets::caption(
+                    "Vibe Files reads the return's supporting reports and statements (wages, 1099-R, \
+                     dividends, brokers, K-1s, 1098s, estimated payments) and proposes an item for \
+                     each. Nothing leaves this PC until you send the list.",
+                ));
+                if self.returns.is_empty() {
+                    ui.label("No filed return was found for this client (doc type \"Return copy — federal\", or a PDF named for a 1040 return).");
+                }
+                for (path, label) in &self.returns {
+                    ui.radio_value(chosen, Some(path.clone()), label);
+                }
+                if let Some(p) = chosen
+                    .as_ref()
+                    .filter(|p| !self.returns.iter().any(|(r, _)| r == *p))
+                {
+                    ui.label(format!("Chosen: {}", p.display()));
+                }
+                ui.horizontal(|ui| {
+                    if ui
+                        .add_enabled(!busy, egui::Button::new("Choose another PDF…"))
+                        .clicked()
+                    {
+                        let mut d = rfd::FileDialog::new()
+                            .set_title("Last year's return (PDF)")
+                            .add_filter("PDF", &["pdf"]);
+                        if let Some(f) = &self.folder {
+                            d = d.set_directory(self.root.join(f));
+                        }
+                        if let Some(p) = d.pick_file() {
+                            *chosen = Some(p);
+                        }
+                    }
+                    if ui
+                        .add_enabled(
+                            !busy && chosen.is_some(),
+                            widgets::primary_button("Read it"),
+                        )
+                        .clicked()
+                        && let Some(p) = chosen.clone()
+                    {
+                        act = Some(Act::ReadReturn(p));
+                    }
+                    if ui.button("Cancel").clicked() {
+                        act = Some(Act::Cancel);
+                    }
+                });
+                ui.separator();
+            }
+            Mode::Review(r) => {
+                ui.label(RichText::new("Items read from last year's return").strong());
+                ui.label(widgets::caption(format!(
+                    "From {}{}. Untick what you don't need; you can change any wording next.",
+                    r.source,
+                    r.proposal
+                        .year
+                        .map(|y| format!(" ({y} return)"))
+                        .unwrap_or_default()
+                )));
+                let mut group = None;
+                for (i, p) in r.proposal.items.iter().enumerate() {
+                    if group != Some(p.group) {
+                        group = Some(p.group);
+                        ui.add_space(4.0);
+                        ui.label(
+                            RichText::new(p.group.words().to_uppercase())
+                                .small()
+                                .color(theme::ink_muted()),
+                        );
+                    }
+                    ui.horizontal_wrapped(|ui| {
+                        ui.checkbox(&mut r.keep[i], &p.prompt);
+                        let what = match p.kind {
+                            vf_extract::prior_return::Kind::Document if p.doc_type.is_empty() => {
+                                "Documents".to_string()
+                            }
+                            vf_extract::prior_return::Kind::Document => {
+                                format!("Documents · {}", p.doc_type)
+                            }
+                            vf_extract::prior_return::Kind::Answer => "Answer".to_string(),
+                        };
+                        ui.label(widgets::caption(what))
+                            .on_hover_text(format!("Found in: {}", p.source));
+                    });
+                }
+                let n = r.keep.iter().filter(|k| **k).count();
+                ui.horizontal(|ui| {
+                    if ui
+                        .add_enabled(
+                            !busy && n > 0,
+                            widgets::primary_button(format!("Use these {n} items")),
+                        )
+                        .clicked()
+                    {
+                        act = Some(Act::UseProposal(r.form()));
+                    }
+                    if ui.button("Cancel").clicked() {
+                        act = Some(Act::Cancel);
+                    }
+                });
+                ui.separator();
+            }
             Mode::View | Mode::Edit(_) => {
                 ui.horizontal_wrapped(|ui| {
                     if ui
@@ -762,6 +937,13 @@ impl TodoWindow {
                         .clicked()
                     {
                         act = Some(Act::NewBlank);
+                    }
+                    if ui
+                        .add_enabled(!busy, egui::Button::new("From last year's return…"))
+                        .on_hover_text("Read the UltraTax return filed for this client and propose an item for each W-2, 1099, K-1 and more")
+                        .clicked()
+                    {
+                        act = Some(Act::FromReturn);
                     }
                     if !self.templates.is_empty() && !busy {
                         egui::ComboBox::from_id_salt("todo-from-template")
@@ -948,6 +1130,23 @@ impl TodoWindow {
                 self.load(ctx, s);
             }
             Act::NewBlank => self.mode = Mode::New(ListForm::blank()),
+            Act::FromReturn => {
+                self.err = None;
+                self.mode = Mode::FromReturn(self.returns.first().map(|(p, _)| p.clone()));
+            }
+            Act::ReadReturn(path) => {
+                self.err = None;
+                self.msg = None;
+                let shown = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| path.display().to_string());
+                self.job = Some(spawn(ctx, move || match read_return(&path) {
+                    Ok(p) => Done::Proposal(Box::new(p), shown),
+                    Err(e) => Done::Failed(format!("{shown} could not be read: {e}")),
+                }));
+            }
+            Act::UseProposal(f) => self.mode = Mode::New(f),
             Act::NewFrom(t) => self.mode = Mode::New(ListForm::from_template(&t)),
             Act::Cancel => self.mode = Mode::View,
             Act::Hide => {
@@ -1309,6 +1508,10 @@ enum Act {
     Delete(String),
     Remind(String, String),
     Report(String, String, bool),
+    /// PA-104.
+    FromReturn,
+    ReadReturn(PathBuf),
+    UseProposal(ListForm),
 }
 
 // ======================================================================================
@@ -1367,6 +1570,40 @@ impl Default for TemplatesPage {
             doc_types: Vec::new(),
         }
     }
+}
+
+/// PA-104: the client's filed returns (PDFs of doc type "Return copy — federal", or named for a
+/// 1040 / tax return), newest tax year first: (path, label).
+pub fn filed_returns(
+    conn: &vf_core::db::Connection,
+    root: &std::path::Path,
+    client_id: &str,
+) -> Vec<(PathBuf, String)> {
+    conn.prepare(
+        "SELECT d.rel_path, d.tax_year FROM document d LEFT JOIN doc_type t ON t.id = d.doc_type_id \
+         WHERE d.client_id = ?1 AND d.deleted_at IS NULL AND lower(d.rel_path) LIKE '%.pdf' \
+         AND (t.name = 'Return copy — federal' OR lower(d.rel_path) LIKE '%1040%' \
+              OR lower(d.rel_path) LIKE '%tax return%') \
+         ORDER BY d.tax_year DESC, d.updated_at DESC LIMIT 12",
+    )
+    .and_then(|mut st| {
+        st.query_map([client_id], |r| {
+            let rel: String = r.get(0)?;
+            let year: Option<i64> = r.get(1)?;
+            Ok((rel, year))
+        })?
+        .collect::<Result<Vec<_>, _>>()
+    })
+    .unwrap_or_default()
+    .into_iter()
+    .map(|(rel, year)| {
+        let label = match year {
+            Some(y) => format!("{y}: {rel}"),
+            None => rel.clone(),
+        };
+        (root.join(rel), label)
+    })
+    .collect()
 }
 
 /// Doc type names offered in the item editor: not deleted, not archived (migration 011).
@@ -1766,6 +2003,46 @@ pub fn templates_page(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// PA-104: an invented return PDF read through pdfium proposes its items, and the ones kept
+    /// become the New list form.
+    #[test]
+    fn last_years_return_becomes_a_new_list() {
+        crate::ui::test_util::pdfium_first();
+        let t = tempfile::tempdir().unwrap();
+        let pdf = t.path().join("2025 1040 Tax Return.pdf");
+        crate::ui::test_util::write_lines_pdf(&pdf, crate::ui::test_util::SAMPLE_RETURN);
+        let p = read_return(&pdf).unwrap();
+        assert_eq!(p.year, Some(2025));
+        let prompts: Vec<&str> = p.items.iter().map(|i| i.prompt.as_str()).collect();
+        for want in [
+            "W-2 from Sample Accounting, P.C. (Avery)",
+            "W-2 from Example R-I School District (Morgan)",
+            "1099-R (pension or annuity) from State Teachers Retirement Sys (Avery)",
+            "1099-DIV from Sample Funds, account ending 4321",
+            "Form 1098 (mortgage interest) from Sample Mortgage Loan",
+            "K-1 from Example Holdings, LLC (partnership)",
+        ] {
+            assert!(prompts.contains(&want), "missing {want:?} in {prompts:#?}");
+        }
+        let mut keep = vec![true; p.items.len()];
+        keep[0] = false;
+        let r = Review {
+            proposal: p,
+            keep,
+            source: "x".into(),
+        };
+        let f = r.form();
+        assert_eq!(f.title, "2026 tax documents");
+        assert_eq!(f.items.len(), r.proposal.items.len() - 1);
+        assert!(
+            f.items
+                .iter()
+                .any(|i| i.doc_type == "W-2" && i.kind == todo::KIND_DOCUMENT)
+        );
+        assert!(f.items.iter().any(|i| i.kind == todo::KIND_TEXT));
+        assert!(f.ready());
+    }
 
     #[test]
     fn a_list_read_is_copied_into_the_client_folder_with_an_audit_row() {

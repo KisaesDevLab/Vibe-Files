@@ -5845,6 +5845,7 @@ dependencies = [
  "tracing-subscriber",
  "uuid",
  "vf-core",
+ "vf-extract",
  "vf-fixtures",
  "vf-fs",
  "vf-index",

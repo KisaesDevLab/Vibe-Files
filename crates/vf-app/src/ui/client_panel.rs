@@ -180,6 +180,7 @@ pub fn show(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env, ci: usize) {
                 .clicked()
         {
             let doc_types = crate::ui::todo::doc_type_names(env.conn);
+            let returns = crate::ui::todo::filed_returns(env.conn, env.root, &c.id);
             b.portal.todo = Some(crate::ui::todo::TodoWindow::new(
                 ui.ctx(),
                 &s,
@@ -191,6 +192,7 @@ pub fn show(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env, ci: usize) {
                 },
                 c.folder_rel.clone(),
                 doc_types,
+                returns,
                 b.portal.audit_out(),
                 b.portal.todo_out(),
             ));

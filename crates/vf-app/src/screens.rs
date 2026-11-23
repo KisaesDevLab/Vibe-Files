@@ -207,6 +207,19 @@ mod tests {
         let t = tempfile::tempdir().unwrap();
         let root = t.path().join("Clients");
         vf_fixtures::generate(&root, 7).unwrap();
+        // PA-104: an invented 2025 return in each client folder, cataloged when the cabinet opens.
+        crate::ui::test_util::pdfium_first();
+        for e in std::fs::read_dir(&root).unwrap().flatten() {
+            let name = e.file_name().to_string_lossy().into_owned();
+            if e.path().is_dir() && !name.starts_with('_') {
+                let dir = e.path().join("Income Tax").join("2025");
+                std::fs::create_dir_all(&dir).unwrap();
+                crate::ui::test_util::write_lines_pdf(
+                    &dir.join("2025 1040 Tax Return.pdf"),
+                    crate::ui::test_util::SAMPLE_RETURN,
+                );
+            }
+        }
         let data = t.path().join("data");
         drop(crate::session::open(&data, "dev", &root).unwrap());
         let cab = vf_fs::cabinet::read(&root).unwrap().cabinet_id;
@@ -285,6 +298,41 @@ mod tests {
         h.get_by_role_and_label(Role::Button, "+ New list").click();
         h.run_steps(6);
         shot(&mut h, "vf-4-todo-new-list");
+        // PA-104: a new list from last year's return.
+        h.get_by_role_and_label(Role::Button, "Cancel")
+            .scroll_to_me();
+        h.run_steps(2);
+        h.get_by_role_and_label(Role::Button, "Cancel").click();
+        h.run_steps(4);
+        h.get_by_role_and_label(Role::Button, "From last year's return…")
+            .click();
+        h.run_steps(6);
+        shot(&mut h, "vf-7-from-return");
+        {
+            use egui_kittest::kittest::NodeT;
+            h.query_all_by_role(Role::RadioButton)
+                .find(|n| {
+                    n.accesskit_node()
+                        .label()
+                        .is_some_and(|l| l.ends_with("2025 1040 Tax Return.pdf"))
+                })
+                .expect("the invented return is offered")
+                .click();
+        }
+        h.run_steps(4);
+        h.get_by_role_and_label(Role::Button, "Read it").click();
+        assert!(wait_for(&mut h, |h| h
+            .query_by_label("Items read from last year's return")
+            .is_some()));
+        h.run_steps(4);
+        shot(&mut h, "vf-8-return-review");
+        let use_btn = h.get_by_role_and_label(Role::Button, "Use these 8 items");
+        use_btn.scroll_to_me();
+        h.run_steps(2);
+        h.get_by_role_and_label(Role::Button, "Use these 8 items")
+            .click();
+        h.run_steps(6);
+        shot(&mut h, "vf-9-return-new-list");
         open_mut(&mut h).browse.portal.todo = None;
         h.run_steps(4);
         h.get_by_role_and_label(Role::Button, "Admin").click();
