@@ -946,7 +946,7 @@ impl eframe::App for VibeFilesApp {
             let received = o.browse.portal.tick(ui.ctx(), &o.opened.root);
             o.intake.ingest.portal = o.browse.portal.intake_line(&o.opened.root);
             if !received.is_empty() {
-                let mut tx = vf_core::tx::Transaction::new("portal_receive");
+                let mut tx = vf_core::tx::Transaction::new("portal_receive").record_only();
                 for e in received {
                     tx = tx.audit(e);
                 }

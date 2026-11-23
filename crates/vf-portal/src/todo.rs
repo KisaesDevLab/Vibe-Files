@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::api::{ErrorBody, Portal, PortalError, Result};
+use crate::api::{Portal, PortalError, Result};
 
 /// Item kinds: documents (files) or an answer in words.
 pub const KIND_DOCUMENT: &str = "document";
@@ -191,8 +191,6 @@ pub struct Template {
 pub struct StaffChoice {
     pub id: String,
     pub name: String,
-    #[serde(default)]
-    pub email: String,
 }
 
 /// A new list, sent to one client or (from a template) to many.
@@ -213,55 +211,26 @@ pub struct NewList {
     pub assigned_staff_id: Option<String>,
 }
 
-/// A change to a list: only what is `Some` is sent. `due_date: Some(None)` clears the day;
-/// `assigned_staff_id: Some(None)` leaves nobody assigned.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+/// A change to a list: only what is `Some` is sent. `due_date: Some(None)` clears the day
+/// (sent as null); `assigned_staff_id: Some(None)` leaves nobody assigned.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ListChange {
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub due_date: Option<Option<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub remind_every_days: Option<u32>,
     /// `open`, `closed`, `cancelled`.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub assigned_staff_id: Option<Option<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub items: Option<Vec<ItemIn>>,
-}
-
-impl ListChange {
-    fn body(&self) -> serde_json::Value {
-        let mut b = serde_json::Map::new();
-        let mut put = |k: &str, v: serde_json::Value| {
-            b.insert(k.into(), v);
-        };
-        if let Some(v) = &self.title {
-            put("title", v.clone().into());
-        }
-        if let Some(v) = &self.note {
-            put("note", v.clone().into());
-        }
-        if let Some(v) = &self.due_date {
-            put(
-                "dueDate",
-                v.clone().map_or(serde_json::Value::Null, Into::into),
-            );
-        }
-        if let Some(v) = self.remind_every_days {
-            put("remindEveryDays", v.into());
-        }
-        if let Some(v) = &self.status {
-            put("status", v.clone().into());
-        }
-        if let Some(v) = &self.assigned_staff_id {
-            put(
-                "assignedStaffId",
-                v.clone().map_or(serde_json::Value::Null, Into::into),
-            );
-        }
-        if let Some(v) = &self.items {
-            put("items", serde_json::to_value(v).expect("serializes"));
-        }
-        serde_json::Value::Object(b)
-    }
 }
 
 /// Largest report read (a list with hundreds of answers is far smaller).
@@ -333,8 +302,12 @@ impl Portal {
         struct R {
             list: TodoList,
         }
-        self.send_json::<R>("PATCH", &format!("/request-lists/{id}"), &c.body())
-            .map(|r| r.list)
+        self.send_json::<R>(
+            "PATCH",
+            &format!("/request-lists/{id}"),
+            &serde_json::to_value(c).expect("a change serializes"),
+        )
+        .map(|r| r.list)
     }
 
     /// Deletes a list nobody has answered (else 409 `list_has_answers`: cancel it).
@@ -363,27 +336,51 @@ impl Portal {
             .map(|r| r.staff)
     }
 
-    /// The report PDF of a list, written to `dest` (a new file). Nothing is left there on failure.
-    pub fn download_report(&self, id: &str, dest: &Path) -> Result<()> {
-        let r = self.report_inner(id, dest);
-        if r.is_err() {
-            let _ = std::fs::remove_file(dest);
+    /// A list's report as one Portal inbox arrival for the client (`<Client>_<ID>_<file_name>`,
+    /// under a free name, never over a file there): Intake files it into the client's folder.
+    /// Written whole beside the cabinet's other portal downloads first; nothing is left on
+    /// failure. Where it landed.
+    pub fn file_report(
+        &self,
+        root: &Path,
+        client_name: &str,
+        client_code: &str,
+        file_name: &str,
+        id: &str,
+    ) -> Result<PathBuf> {
+        let bytes = self.report_pdf(id)?;
+        let local = |e: std::io::Error| PortalError::Local(e.to_string());
+        let tmp = crate::inbox::tmp_dir(root);
+        std::fs::create_dir_all(&tmp).map_err(local)?;
+        let part = tmp.join(format!(
+            "todo-report-{}-{}.part",
+            safe_id(id),
+            crate::inbox::random_tag()
+        ));
+        let written = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&part)
+            .and_then(|mut f| f.write_all(&bytes).and_then(|()| f.sync_all()))
+            .and_then(|()| {
+                let name = crate::inbox::inbox_name(client_name, client_code, file_name);
+                crate::inbox::move_into(&part, &crate::inbox::inbox(root), &name)
+            });
+        if written.is_err() {
+            let _ = std::fs::remove_file(&part);
         }
-        r
+        written.map_err(local)
     }
 
-    fn report_inner(&self, id: &str, dest: &Path) -> Result<()> {
+    /// The report PDF of a list.
+    pub fn report_pdf(&self, id: &str) -> Result<Vec<u8>> {
         let mut res = self
             .raw_get(&format!("/request-lists/{id}/report.pdf"))
             .map_err(|e| PortalError::Network(e.to_string()))?;
         let status = res.status().as_u16();
         if status != 200 {
             let text = res.body_mut().read_to_string().unwrap_or_default();
-            let code = serde_json::from_str::<ErrorBody>(&text)
-                .ok()
-                .and_then(|b| b.error)
-                .unwrap_or_else(|| "error".into());
-            return Err(PortalError::Http { status, code });
+            return Err(crate::api::http_error(status, &text));
         }
         let mut bytes = Vec::new();
         res.body_mut()
@@ -395,14 +392,7 @@ impl Portal {
         if !bytes.starts_with(b"%PDF") {
             return Err(PortalError::Format("the report is not a PDF".into()));
         }
-        let mut out = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(dest)
-            .map_err(|e| PortalError::Local(e.to_string()))?;
-        out.write_all(&bytes)
-            .and_then(|()| out.sync_all())
-            .map_err(|e| PortalError::Local(e.to_string()))
+        Ok(bytes)
     }
 }
 
@@ -411,16 +401,46 @@ impl Portal {
 /// Folder in a client folder's `_Vibe` holding one file per list.
 pub const COPY_DIR: &str = "todo";
 
-/// `<cabinet>/<client folder>/_Vibe/todo/<list id>.jsonl`.
-pub fn copy_path(root: &Path, folder_rel: &str, list_id: &str) -> PathBuf {
-    let safe: String = list_id
-        .chars()
-        .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
-        .collect();
+/// `<cabinet>/<client folder>/_Vibe/todo`.
+fn copy_dir(root: &Path, folder_rel: &str) -> PathBuf {
     root.join(folder_rel)
         .join(vf_fs::cabinet::VIBE_DIR)
         .join(COPY_DIR)
-        .join(format!("{safe}.jsonl"))
+}
+
+/// A list id as it may appear in a file name (letters, digits, `-`).
+pub fn safe_id(list_id: &str) -> String {
+    list_id
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
+        .collect()
+}
+
+/// `<cabinet>/<client folder>/_Vibe/todo/<list id>.jsonl`.
+pub fn copy_path(root: &Path, folder_rel: &str, list_id: &str) -> PathBuf {
+    copy_dir(root, folder_rel).join(format!("{}.jsonl", safe_id(list_id)))
+}
+
+/// The last line of a copy's text, read.
+fn last_copy(text: &str) -> Option<CopyLine> {
+    text.lines()
+        .rev()
+        .find(|l| !l.trim().is_empty())
+        .and_then(|l| serde_json::from_str::<CopyLine>(l).ok())
+}
+
+/// The newest line of the copy at `path`, reading only the end of the file (it grows with every
+/// change of the list; its newest line is far smaller than the tail read). `None` when there is
+/// no copy yet.
+pub fn newest_copy(path: &Path) -> Option<CopyLine> {
+    use std::io::{Read, Seek, SeekFrom};
+    const TAIL: u64 = 4 * 1024 * 1024;
+    let mut f = std::fs::File::open(path).ok()?;
+    let len = f.metadata().ok()?.len();
+    f.seek(SeekFrom::Start(len.saturating_sub(TAIL))).ok()?;
+    let mut bytes = Vec::new();
+    f.read_to_end(&mut bytes).ok()?;
+    last_copy(&String::from_utf8_lossy(&bytes))
 }
 
 /// One line of the copy: the list as read, and when and by whom.
@@ -433,13 +453,13 @@ pub struct CopyLine {
 }
 
 /// The line to append to the list's copy, or `None` when the copy already ends with this list
-/// (nothing changed since it was last read). `existing` is the copy's text (empty when none).
-pub fn copy_line(existing: &str, list: &TodoList, read_at: &str, read_by: &str) -> Option<String> {
-    let last = existing
-        .lines()
-        .rev()
-        .find(|l| !l.trim().is_empty())
-        .and_then(|l| serde_json::from_str::<CopyLine>(l).ok());
+/// (nothing changed since it was last read). `last` is the copy's newest line ([`newest_copy`]).
+pub fn copy_line(
+    last: Option<&CopyLine>,
+    list: &TodoList,
+    read_at: &str,
+    read_by: &str,
+) -> Option<String> {
     if last.is_some_and(|l| l.list == *list) {
         return None;
     }
@@ -456,23 +476,13 @@ pub fn copy_line(existing: &str, list: &TodoList, read_at: &str, read_by: &str) 
 
 /// The latest copy of each list in a client folder (for when the portal cannot be reached).
 pub fn read_copies(root: &Path, folder_rel: &str) -> Vec<CopyLine> {
-    let dir = root
-        .join(folder_rel)
-        .join(vf_fs::cabinet::VIBE_DIR)
-        .join(COPY_DIR);
-    let Ok(entries) = std::fs::read_dir(dir) else {
+    let Ok(entries) = std::fs::read_dir(copy_dir(root, folder_rel)) else {
         return Vec::new();
     };
     let mut out: Vec<CopyLine> = entries
         .filter_map(std::result::Result::ok)
         .filter(|e| e.path().extension().is_some_and(|x| x == "jsonl"))
-        .filter_map(|e| std::fs::read_to_string(e.path()).ok())
-        .filter_map(|t| {
-            t.lines()
-                .rev()
-                .find(|l| !l.trim().is_empty())
-                .and_then(|l| serde_json::from_str::<CopyLine>(l).ok())
-        })
+        .filter_map(|e| newest_copy(&e.path()))
         .collect();
     out.sort_by(|a, b| b.list.created_at.cmp(&a.list.created_at));
     out
@@ -528,7 +538,7 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            c.body(),
+            serde_json::to_value(&c).unwrap(),
             serde_json::json!({ "dueDate": null, "assignedStaffId": "s1", "status": "closed" })
         );
         let items = ListChange {
@@ -536,7 +546,11 @@ mod tests {
             ..Default::default()
         };
         // A new item has no id.
-        assert!(items.body()["items"][0].get("id").is_none());
+        assert!(
+            serde_json::to_value(&items).unwrap()["items"][0]
+                .get("id")
+                .is_none()
+        );
     }
 
     #[test]
@@ -547,11 +561,12 @@ mod tests {
         assert!(
             p.ends_with("Smith, John (1001)/_Vibe/todo/5d3c0f3e-1111-4111-8111-111111111111.jsonl")
         );
-        let first = copy_line("", &l, "2026-11-09T16:00:00Z", "PC1\\kurt").unwrap();
-        assert_eq!(copy_line(&first, &l, "later", "PC2\\ann"), None);
+        let first = copy_line(None, &l, "2026-11-09T16:00:00Z", "PC1\\kurt").unwrap();
+        let last = last_copy(&first);
+        assert_eq!(copy_line(last.as_ref(), &l, "later", "PC2\\ann"), None);
         let mut changed = l.clone();
         changed.status = "closed".into();
-        let second = copy_line(&first, &changed, "later", "PC2\\ann").unwrap();
+        let second = copy_line(last.as_ref(), &changed, "later", "PC2\\ann").unwrap();
         // The copy can be read back from the folder: the latest line of each list.
         std::fs::create_dir_all(p.parent().unwrap()).unwrap();
         std::fs::write(&p, format!("{first}\n{second}\n")).unwrap();

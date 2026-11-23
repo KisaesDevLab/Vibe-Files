@@ -272,6 +272,7 @@ pub fn undo_stack(conn: &Connection, actor: &Actor, except: &[&str]) -> Result<V
         "SELECT u.tx_id, u.ts, u.label FROM undo_record u
          WHERE u.undone = 0
            AND (u.user = ? OR (u.user IS NULL AND u.device_id = ?)){not_in}
+           AND json_extract(u.record, '$.record_only') IS NOT 1
          ORDER BY u.rowid DESC LIMIT {UNDO_DEPTH}"
     ))?;
     let mut params: Vec<&dyn rusqlite::ToSql> = vec![&actor.user, &actor.device_id];
@@ -350,11 +351,15 @@ pub struct UndoRecord {
     pub catalog_undo: Vec<Stmt>,
     /// Caller data (e.g. the Filer `LastBatch`) kept for later undo logic.
     pub extra: serde_json::Value,
+    /// A record with nothing to undo ([`Transaction::record_only`]): never on the undo stack.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub record_only: bool,
 }
 
 #[derive(Debug, Default)]
 pub struct Transaction {
     label: String,
+    record_only: bool,
     files: Vec<FileOp>,
     catalog: Vec<Stmt>,
     catalog_undo: Vec<Stmt>,
@@ -393,6 +398,12 @@ impl Transaction {
     }
     pub fn audit(mut self, entry: AuditEntry) -> Self {
         self.audit.push(entry);
+        self
+    }
+    /// Marks a transaction that only records something (audit rows, an append-only copy): the
+    /// undo stack leaves it out, whatever its label, so no list of labels has to know it.
+    pub fn record_only(mut self) -> Self {
+        self.record_only = true;
         self
     }
     pub fn extra(mut self, extra: serde_json::Value) -> Self {
@@ -559,6 +570,7 @@ impl Transaction {
             applied: applied.clone(),
             catalog_undo: self.catalog_undo.clone(),
             extra: self.extra.clone(),
+            record_only: self.record_only,
         };
         // The files have moved: a catalog another session is busy in is waited for (minutes
         // if need be), not a reason to move a thousand files back.
@@ -1069,6 +1081,13 @@ mod tests {
         assert_eq!(undo_stack(&c, &ann, &["intake"]).unwrap()[0].tx_id, ids[23]);
         let theirs = undo_stack(&c, &bob, &[]).unwrap();
         assert_eq!(theirs.len(), 1);
+        // A record-only transaction never lands on the stack, whatever its label.
+        Transaction::new("anything")
+            .record_only()
+            .audit(AuditEntry::new("noted", None, serde_json::json!({})))
+            .commit(&mut c, &mut NoFileOps, &bob)
+            .unwrap();
+        assert_eq!(undo_stack(&c, &bob, &[]).unwrap().len(), 1);
     }
 
     #[test]

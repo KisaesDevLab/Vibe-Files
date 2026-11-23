@@ -107,7 +107,7 @@ pub fn mark_from_internet(path: &Path) {
 }
 
 /// Moves `src` into `dir` as `name`, or `name (2)`… — never replacing a file.
-pub fn move_into(src: &Path, dir: &Path, name: &str) -> std::io::Result<PathBuf> {
+pub(crate) fn move_into(src: &Path, dir: &Path, name: &str) -> std::io::Result<PathBuf> {
     let (stem, ext) = match name.rsplit_once('.') {
         Some((s, e)) => (s.to_string(), format!(".{e}")),
         None => (name.to_string(), String::new()),
@@ -250,15 +250,24 @@ fn finish(root: &Path, part: &Path, meta: &Path, u: &Upload, now: &str, report: 
                 report.problems.push(format!("The received list could not be written: {e}"));
             }
             // PA-103: a file sent for a to-do item tells Intake where it came from, and its
-            // doc type when the item names one (by its name; Intake finds the type).
-            if let Some(r) = u.request.as_ref().filter(|r| !r.doc_type.trim().is_empty()) {
+            // doc type when the item names one the firm has (the name turned into its id here,
+            // where the portal's name comes in: Intake's hints name ids).
+            let doc_type = u
+                .request
+                .as_ref()
+                .filter(|r| !r.doc_type.trim().is_empty())
+                .and_then(|r| {
+                    let types = vf_fs::doctypes::load(root).ok().flatten()?;
+                    vf_fs::doctypes::id_by_name(&types, &r.doc_type)
+                });
+            if let Some(doc_type) = doc_type {
                 let name = dest
                     .file_name()
                     .map(|n| n.to_string_lossy().into_owned())
                     .unwrap_or_default();
                 let mut h = vf_fs::hints::Hint::new(&u.sha256, &name, "portal_request", "portal");
                 h.source = Some("client".into());
-                h.doc_type = Some(r.doc_type.trim().to_string()).filter(|t| !t.is_empty());
+                h.doc_type = Some(doc_type);
                 if let Err(e) = vf_fs::hints::append(root, &h) {
                     report
                         .problems

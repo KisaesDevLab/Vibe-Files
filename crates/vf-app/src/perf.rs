@@ -91,7 +91,7 @@ mod tests {
             tx.commit().unwrap();
             // An audit trail of a busy year: verified at every start.
             for _ in 0..50 {
-                let mut tx = vf_core::tx::Transaction::new("perf");
+                let mut tx = vf_core::tx::Transaction::new("perf").record_only();
                 for _ in 0..1000 {
                     tx = tx.audit(vf_core::audit::AuditEntry::new(
                         "perf",

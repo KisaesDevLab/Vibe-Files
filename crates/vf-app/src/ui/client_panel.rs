@@ -172,14 +172,21 @@ pub fn show(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env, ci: usize) {
             ));
         }
         // PA-103: what the firm asked this client for on the portal, and the answers.
-        if let Some(s) = b.portal.settings(env.root).cloned()
-            && s.todo_lists
+        // (Tested every frame without copying the settings; copied only on the click.)
+        if b.portal.settings(env.root).is_some_and(|s| s.todo_lists)
             && ui
                 .small_btn("To-do lists…")
                 .on_hover_text("Ask this client for documents and answers on the portal; see what they sent, and the report")
                 .clicked()
+            && let Some(s) = b.portal.settings(env.root).cloned()
         {
-            let doc_types = crate::ui::todo::doc_type_names(env.conn);
+            // The doc types Browse already holds (not archived), not read again.
+            let doc_types = b
+                .snap
+                .pickable_doc_types(None)
+                .into_iter()
+                .map(|(_, name)| name)
+                .collect();
             let returns = crate::ui::todo::filed_returns(env.conn, env.root, &c.id);
             b.portal.todo = Some(crate::ui::todo::TodoWindow::new(
                 ui.ctx(),

@@ -149,12 +149,9 @@ fn unreadable(p: &Path) -> Option<String> {
 /// Transactions the undo stack leaves out (P05 step 4): Intake batches (Filer's own Undo),
 /// work done in the background (OCR, rebuild), catalog rows that follow files edited elsewhere
 /// (client master, doc types), records with nothing to undo, and emptying the trash (the
-/// bytes are gone).
+/// bytes are gone). New records with nothing to undo use `Transaction::record_only` instead
+/// of a label here.
 pub const NOT_ON_UNDO_STACK: &[&str] = &[
-    // Records only: a portal upload received, and the copy of a to-do list read (PA-103).
-    "portal_receive",
-    "portal_todo_copy",
-    "portal_todo_templates",
     crate::intake::LABEL,
     crate::intake::KEPT_LABEL,
     "intake batch",

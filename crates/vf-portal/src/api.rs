@@ -133,18 +133,9 @@ pub struct Status {
     /// A move between the appliance and B2 is under way or not finished (P51).
     #[serde(default)]
     pub storage_moving: bool,
-    /// What this portal offers that older ones do not: "requests" while its to-do lists are on
-    /// (Vibe-Portal P109).
-    #[serde(default)]
-    pub features: Vec<String>,
 }
 
 impl Status {
-    /// The portal has to-do lists, and they are on (Vibe-Portal P109).
-    pub fn has_todo(&self) -> bool {
-        self.features.iter().any(|f| f == "requests")
-    }
-
     /// Where the portal's files are, in words for Admin › Portal.
     pub fn storage_words(&self) -> &'static str {
         match (self.storage.as_deref(), self.storage_moving) {
@@ -485,9 +476,25 @@ impl Added {
     }
 }
 
+/// The portal's answer `text` with a status that is not success, as an error: its error code,
+/// or for a redirect, that the address must change.
+pub(crate) fn http_error(status: u16, text: &str) -> PortalError {
+    if (300..400).contains(&status) {
+        return PortalError::Local(
+            "The portal address redirects elsewhere: use the address it redirects to (https://…)."
+                .into(),
+        );
+    }
+    let code = serde_json::from_str::<ErrorBody>(text)
+        .ok()
+        .and_then(|b| b.error)
+        .unwrap_or_else(|| "error".into());
+    PortalError::Http { status, code }
+}
+
 #[derive(Deserialize)]
-pub(crate) struct ErrorBody {
-    pub(crate) error: Option<String>,
+struct ErrorBody {
+    error: Option<String>,
     #[serde(rename = "fetchedBy")]
     fetched_by: Option<String>,
 }
@@ -608,10 +615,7 @@ impl Portal {
         let mut res = res.map_err(|e| PortalError::Network(e.to_string()))?;
         let status = res.status().as_u16();
         if (300..400).contains(&status) {
-            return Err(PortalError::Local(
-                "The portal address redirects elsewhere: use the address it redirects to (https://…)."
-                    .into(),
-            ));
+            return Err(http_error(status, ""));
         }
         let text = res
             .body_mut()
@@ -620,11 +624,7 @@ impl Portal {
             .read_to_string()
             .map_err(|e| PortalError::Network(e.to_string()))?;
         if !(200..300).contains(&status) {
-            let code = serde_json::from_str::<ErrorBody>(&text)
-                .ok()
-                .and_then(|b| b.error)
-                .unwrap_or_else(|| "error".into());
-            return Err(PortalError::Http { status, code });
+            return Err(http_error(status, &text));
         }
         serde_json::from_str(&text).map_err(|e| PortalError::Format(e.to_string()))
     }
@@ -967,11 +967,7 @@ impl Portal {
         let status = res.status().as_u16();
         if status != 200 {
             let text = res.body_mut().read_to_string().unwrap_or_default();
-            let code = serde_json::from_str::<ErrorBody>(&text)
-                .ok()
-                .and_then(|b| b.error)
-                .unwrap_or_else(|| "error".into());
-            return Err(PortalError::Http { status, code });
+            return Err(http_error(status, &text));
         }
         let mut out = std::fs::OpenOptions::new()
             .write(true)
@@ -1037,13 +1033,7 @@ impl Portal {
                     Claim::Other
                 })
             }
-            _ => {
-                let code = serde_json::from_str::<ErrorBody>(&text)
-                    .ok()
-                    .and_then(|b| b.error)
-                    .unwrap_or_else(|| "error".into());
-                Err(PortalError::Http { status, code })
-            }
+            _ => Err(http_error(status, &text)),
         }
     }
 

@@ -64,7 +64,7 @@ impl B2First {
 }
 
 /// Runs `f` on a thread; the window repaints when it is done.
-fn spawn<T: Send + 'static>(
+pub(crate) fn spawn<T: Send + 'static>(
     ctx: &egui::Context,
     f: impl FnOnce() -> T + Send + 'static,
 ) -> Receiver<T> {
@@ -78,13 +78,13 @@ fn spawn<T: Send + 'static>(
 }
 
 /// Records audit rows in one transaction; the message when it fails (never swallowed).
-fn record(env: &mut Env, label: &str, entries: Vec<AuditEntry>) -> Option<String> {
+pub(crate) fn record(env: &mut Env, label: &str, entries: Vec<AuditEntry>) -> Option<String> {
     if entries.is_empty() {
         return None;
     }
     // (One try: the connection itself waits ten seconds for another writer, and this is the
     // window's thread.)
-    let mut tx = vf_core::tx::Transaction::new(label);
+    let mut tx = vf_core::tx::Transaction::new(label).record_only();
     for e in entries {
         tx = tx.audit(e);
     }
@@ -2414,7 +2414,7 @@ fn clear_lists(
     }));
 }
 
-fn load_clients(env: &mut Env) -> Vec<ClientRef> {
+pub(crate) fn load_clients(env: &mut Env) -> Vec<ClientRef> {
     let mut stmt = match env
         .conn
         .prepare("SELECT id, ext_id, name FROM client WHERE deleted_at IS NULL ORDER BY name")

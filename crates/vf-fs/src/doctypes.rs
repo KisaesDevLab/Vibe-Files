@@ -104,6 +104,24 @@ struct FileV1 {
     types: Vec<DocType>,
 }
 
+/// The id of the doc type named `name` (a to-do item names its type, "W-2"): the type with
+/// exactly that name, else the only one with it in any case; `None` when there is no such
+/// type, or several differ only in case.
+pub fn id_by_name(types: &[DocType], name: &str) -> Option<String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return None;
+    }
+    if let Some(t) = types.iter().find(|t| t.name == name) {
+        return Some(t.id.clone());
+    }
+    let mut same = types.iter().filter(|t| t.name.eq_ignore_ascii_case(name));
+    match (same.next(), same.next()) {
+        (Some(one), None) => Some(one.id.clone()),
+        _ => None,
+    }
+}
+
 pub fn path(root: &Path) -> PathBuf {
     master_dir(root).join(FILE)
 }
