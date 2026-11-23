@@ -64,6 +64,7 @@ DefaultDirName={autopf}\{#AppName}
 UsePreviousAppDir=yes
 DisableProgramGroupPage=yes
 LicenseFile={#StageDir}\LICENSE.txt
+SetupIconFile={#SourcePath}..\crates\vf-app\assets\vibe-files.ico
 UninstallDisplayIcon={app}\{#AppExe}
 UninstallDisplayName={#AppName}
 OutputDir={#OutputDir}

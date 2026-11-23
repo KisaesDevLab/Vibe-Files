@@ -242,7 +242,12 @@ fn main() -> anyhow::Result<std::process::ExitCode> {
             .with_title("Vibe Files")
             .with_inner_size([1440.0, 900.0])
             .with_min_inner_size([1024.0, 700.0])
-            .with_drag_and_drop(true),
+            .with_drag_and_drop(true)
+            // The title bar and taskbar icon (the exe's own is the resource, PA-102).
+            .with_icon(
+                eframe::icon_data::from_png_bytes(include_bytes!("../assets/vibe-files-256.png"))
+                    .unwrap_or_default(),
+            ),
         ..Default::default()
     };
     eframe::run_native(

@@ -45,6 +45,10 @@ vf-pdf = { path = "../vf-pdf" }
 lopdf.workspace = true
 serde_json.workspace = true
 
+[build-dependencies]
+# The exe's icon resource (vibe-files.rc), PA-102.
+embed-resource = "3"
+
 [dev-dependencies]
 pdf-writer.workspace = true
 filer-pdf = { path = "../filer-pdf", features = ["test-support"] }

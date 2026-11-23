@@ -13,6 +13,14 @@ fn git(args: &[&str]) -> Option<String> {
 }
 
 fn main() {
+    // The exe's icon (PA-102). Only for a Windows target; tests and clippy elsewhere skip it.
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
+        println!("cargo:rerun-if-changed=vibe-files.rc");
+        println!("cargo:rerun-if-changed=assets/vibe-files.ico");
+        embed_resource::compile("vibe-files.rc", embed_resource::NONE)
+            .manifest_optional()
+            .expect("the icon resource (vibe-files.rc) did not compile");
+    }
     println!("cargo:rerun-if-env-changed=VF_COMMIT");
     // Rebuild when HEAD moves (a new commit or a branch switch), in a worktree too. Only paths
     // that exist are named (a missing one would rerun every build). A branch kept only in
