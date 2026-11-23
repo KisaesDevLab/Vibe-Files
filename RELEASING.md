@@ -58,9 +58,13 @@ Stable links (the website, the README and the app use these):
    pwsh tools/release.ps1
    ```
 
-   It repeats every check, then pushes the public repo's changelog commit, runs
-   `gh release create v<version> --repo KisaesDevLab/vibe-files-releases --latest` with the
-   assets, and tags `v<version>` here and pushes the tag. It prints the download URLs and every
+   It repeats every check (a remote it cannot reach stops it; it never counts as "no tag" or
+   "no release"; the public checkout must be on `main` and not behind origin). Then it tags
+   `v<version>` here and tries the tag's push with `--dry-run`, pushes the public repo's
+   changelog commit to `main`, runs
+   `gh release create v<version> --repo KisaesDevLab/vibe-files-releases --target <that commit> --latest`
+   with the assets, and pushes the tag. A failure before the release exists removes the local
+   tag; a failure after says to push the tag by hand. It prints the download URLs and every
    asset's SHA-256.
 7. winget (optional): open a pull request to `microsoft/winget-pkgs` with
    `target/dist/v<version>/winget/manifests/k/Kisaes/VibeFiles/<version>/`. The installer URL in

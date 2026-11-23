@@ -26,7 +26,8 @@ param(
     [string]$ExtraAssets,
     # Allow uncommitted changes. Only with -DryRun: a trial build, never published.
     [switch]$AllowDirty,
-    [string]$PubDir = (Join-Path (Split-Path (Split-Path $PSScriptRoot)) 'vibe-files-releases'),
+    # Defaults to vibe-files-releases beside the main checkout (also when run from a worktree).
+    [string]$PubDir,
     [string]$Tesseract = 'C:\Program Files\Tesseract-OCR',
     # Parallel test jobs (-j 4 crashed rustc once on this PC: STATE.md PA-99).
     [int]$TestJobs = 2,
@@ -43,6 +44,11 @@ $DefaultBranch = 'main'
 
 $repo = Split-Path $PSScriptRoot
 Set-Location $repo
+# The folder holding the main checkout (C:\Projects), found from git's common dir so a worktree
+# under C:\Projects\worktrees\<name> resolves to the same place.
+$mainCheckout = Split-Path (git rev-parse --path-format=absolute --git-common-dir).Trim()
+$projects = Split-Path $mainCheckout
+if (-not $PubDir) { $PubDir = Join-Path $projects 'vibe-files-releases' }
 
 function Stop-Release([string]$why) {
     Write-Host "release stopped: $why" -ForegroundColor Red
@@ -80,14 +86,19 @@ $branch = (git branch --show-current).Trim()
 
 Require-ForPublish ($branch -eq $DefaultBranch) "on branch '$branch', not $DefaultBranch"
 Require-ForPublish (-not (git tag -l $tag)) "tag $tag already exists in this repo"
-$remoteTag = git ls-remote --tags origin "refs/tags/$tag" 2>$null
-Require-ForPublish (-not $remoteTag) "tag $tag already exists on origin"
+# An unreachable remote is never read as "no tag" or "no release": only a clear answer passes.
+$remoteTag = git ls-remote --tags origin "refs/tags/$tag" 2>&1
+if ($LASTEXITCODE) { Require-ForPublish $false "could not reach origin to look for tag ${tag}: $($remoteTag -join ' ')" }
+else { Require-ForPublish (-not $remoteTag) "tag $tag already exists on origin" }
 $null = gh auth status 2>&1
 $ghOk = ($LASTEXITCODE -eq 0)
 Require-ForPublish $ghOk 'gh is not signed in (gh auth login)'
 if ($ghOk) {
-    $null = gh release view $tag --repo $PubRepo 2>&1
-    Require-ForPublish ($LASTEXITCODE -ne 0) "release $tag already exists on $PubRepo (or $PubRepo is unreachable)"
+    $view = gh release view $tag --repo $PubRepo 2>&1
+    if ($LASTEXITCODE -eq 0) { Require-ForPublish $false "release $tag already exists on $PubRepo" }
+    elseif (($view -join ' ') -notmatch '(?i)release not found') {
+        Require-ForPublish $false "could not check $PubRepo for release ${tag}: $($view -join ' ')"
+    }
 }
 
 if (-not (Test-Path (Join-Path $PubDir '.git'))) { Stop-Release "no public release repo checkout at $PubDir" }
@@ -97,6 +108,19 @@ $pubOrigin = git -C $PubDir remote get-url origin 2>$null
 Require-ForPublish ([bool]$pubOrigin) "$PubDir has no origin remote (RELEASING.md owner step 1)"
 $pubTag = git -C $PubDir tag -l $tag
 Require-ForPublish (-not $pubTag) "tag $tag already exists in $PubDir"
+# The changelog commit is pushed to main and the release is cut from it (--target), so the public
+# checkout must be on main and not behind origin.
+$pubBranch = (git -C $PubDir branch --show-current).Trim()
+Require-ForPublish ($pubBranch -eq $DefaultBranch) "$PubDir is on '$(if ($pubBranch) { $pubBranch } else { 'a detached HEAD' })', not $DefaultBranch"
+if ($pubOrigin) {
+    $fetch = git -C $PubDir fetch origin $DefaultBranch 2>&1
+    if ($LASTEXITCODE) { Require-ForPublish $false "could not fetch $DefaultBranch in ${PubDir}: $($fetch -join ' ')" }
+    else {
+        $behind = (git -C $PubDir rev-list --count "HEAD..origin/$DefaultBranch").Trim()
+        Require-ForPublish ($behind -eq '0') "$PubDir is $behind commit(s) behind origin/$DefaultBranch; pull first"
+    }
+}
+$pubHead = (git -C $PubDir rev-parse HEAD).Trim()
 
 # This version's CHANGELOG.md section: from "## 0.1.52" (or "## [0.1.52]", "## v0.1.52", with
 # anything after it on the line) up to the next "## ".
@@ -142,7 +166,7 @@ $cargoHome = if ($env:CARGO_HOME) { $env:CARGO_HOME } else { Join-Path $env:USER
 $rustupHome = if ($env:RUSTUP_HOME) { $env:RUSTUP_HOME } else { Join-Path $env:USERPROFILE '.rustup' }
 $maps = [ordered]@{}
 $maps[$env:USERPROFILE] = '/home'
-$maps[(Split-Path $repo)] = '/projects'
+$maps[$projects] = '/projects'
 $maps[$rustupHome] = '/rustup'
 $maps[$cargoHome] = '/cargo'
 $maps[$target] = '/target'
@@ -366,10 +390,13 @@ if ($trial) {
 
 # ---------------------------------------------------------------- 8. publish
 $assetArgs = $assetFiles | ForEach-Object { $_.FullName }
+# Order: the private tag is made (and its push tried with --dry-run) before anything is public,
+# so a shipped release always has a tag here naming the commit it was built from.
 $publish = @(
-    @('git', '-C', $PubDir, 'push', 'origin', 'HEAD'),
-    (@('gh', 'release', 'create', $tag, '--repo', $PubRepo, '--title', "$App $Version", '--notes-file', $notesPath, '--latest') + $assetArgs),
     @('git', 'tag', '-a', $tag, '-m', "$App $Version", $commit),
+    @('git', 'push', '--dry-run', 'origin', "refs/tags/$tag"),
+    @('git', '-C', $PubDir, 'push', 'origin', "HEAD:refs/heads/$DefaultBranch"),
+    (@('gh', 'release', 'create', $tag, '--repo', $PubRepo, '--target', $pubHead, '--title', "$App $Version", '--notes-file', $notesPath, '--latest') + $assetArgs),
     @('git', 'push', 'origin', "refs/tags/$tag")
 )
 function Show([string[]]$c) { ($c | ForEach-Object { if ($_ -match '\s') { "'$_'" } else { $_ } }) -join ' ' }
@@ -382,10 +409,18 @@ if ($DryRun) {
     }
 } else {
     Step 'Publish'
+    $released = $false
     foreach ($c in $publish) {
         "  $(Show $c)"
         & $c[0] $c[1..($c.Count - 1)]
-        if ($LASTEXITCODE) { Stop-Release "failed: $(Show $c)" }
+        if ($LASTEXITCODE) {
+            if ($released) {
+                Stop-Release "failed: $(Show $c)`n  The release is public. Tag $tag exists here; push it by hand: git push origin refs/tags/$tag"
+            }
+            if ($c[0] -ne 'git' -or $c[1] -ne 'tag') { git tag -d $tag | Out-Null }   # nothing is public yet
+            Stop-Release "failed: $(Show $c)"
+        }
+        if ($c[0] -eq 'gh') { $released = $true }
     }
 }
 
