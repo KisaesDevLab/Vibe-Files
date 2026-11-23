@@ -5,8 +5,9 @@ members = ["crates/*"]
 [workspace.package]
 version = "0.1.51"
 edition = "2024"
-# Proprietary from 0.1.52 (owner 2026-11-22, PA-100, Q-134); 0.1.51 and earlier were AGPL-3.0-or-later.
-license = "LicenseRef-Kisaes-Proprietary"
+# VibeMyFirm Community License 1.0 from 0.1.52 (owner 2026-11-22, PA-101, Q-144); NOTICE.md.
+# 0.1.51 and earlier were AGPL-3.0-or-later.
+license-file = "LICENSE.md"
 homepage = "https://github.com/KisaesDevLab/vibe-files-releases"
 publish = false
 

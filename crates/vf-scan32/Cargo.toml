@@ -2,7 +2,7 @@
 name = "vf-scan32"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license-file.workspace = true
 publish.workspace = true
 description = "vibe-scan32: the 32-bit scanning helper for scanners that reach 32-bit programs only (Citrix, Remote Desktop scanning utilities)"
 

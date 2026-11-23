@@ -201,7 +201,9 @@ if (Test-Path crates\filer-pdf\assets\pdfium-licenses) {
     Copy-Item -Recurse crates\filer-pdf\assets\pdfium-licenses (Join-Path $stage 'pdfium-licenses')
 }
 Copy-Item crates\vf-ingest\assets\TWAINDSM.dll, crates\vf-ingest\assets\TWAINDSM-LICENSE.txt $stage
-Copy-Item LICENSE $stage
+# Installed as .txt so Notepad opens them (as ClientLedger Trial Balance does).
+Copy-Item LICENSE.md (Join-Path $stage 'LICENSE.txt')
+Copy-Item NOTICE.md (Join-Path $stage 'NOTICE.txt')
 pwsh -NoProfile -File (Join-Path $PSScriptRoot 'third-party-notices.ps1') -Out (Join-Path $stage 'THIRD-PARTY-NOTICES.txt')
 if ($LASTEXITCODE) { Stop-Release 'could not write THIRD-PARTY-NOTICES.txt' }
 Copy-Item docs\OPERATIONS.md $stage
@@ -340,7 +342,7 @@ PublisherUrl: https://github.com/$PubRepo
 PublisherSupportUrl: https://github.com/$PubRepo/issues
 PackageName: $App
 PackageUrl: https://github.com/$PubRepo
-License: Proprietary
+License: VibeMyFirm Community License 1.0
 LicenseUrl: https://github.com/$PubRepo/blob/main/LICENSE.md
 ShortDescription: Document management for small CPA and tax firms over a plain client folder tree.
 ReleaseNotesUrl: $notesUrl

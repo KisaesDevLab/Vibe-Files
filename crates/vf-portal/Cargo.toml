@@ -2,7 +2,7 @@
 name = "vf-portal"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license-file.workspace = true
 publish.workspace = true
 
 # The firm's own Vibe Portal (PA-37): a client file portal on the firm's appliance. Network

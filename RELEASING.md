@@ -89,7 +89,7 @@ these, run it alone (`cargo test -p <crate> <name>`). If it passes, run the rest
 
 | Asset | Contents |
 |---|---|
-| `vibe-files-windows-x64.zip` | the portable folder: `vibe-files.exe`, `vibe-move.exe`, `vibe-scan32.exe`, `pdfium.dll`, `TWAINDSM.dll`, `tesseract\`, `LICENSE`, `THIRD-PARTY-NOTICES.txt`, `OPERATIONS.md`, third-party licence files |
+| `vibe-files-windows-x64.zip` | the portable folder: `vibe-files.exe`, `vibe-move.exe`, `vibe-scan32.exe`, `pdfium.dll`, `TWAINDSM.dll`, `tesseract\`, `LICENSE.txt`, `NOTICE.txt`, `THIRD-PARTY-NOTICES.txt`, `OPERATIONS.md`, third-party licence files |
 | `SHA256SUMS.txt` | SHA-256 of each asset and of the three exes inside the zip |
 | `latest.json` | `{ version, released_at, notes_url, assets: [{ name, sha256, size }] }` |
 | anything from `-ExtraAssets` | copied in as-is, hashed, listed in `latest.json` |
@@ -141,18 +141,19 @@ ignores. Symbols are never shipped.
 
 Prepared in PA-100. Nothing below has been done yet. No repository visibility was changed.
 
-0. **Before anything goes public**, have the draft `LICENSE` (end user licence agreement)
-   reviewed: fill in the governing-law state, remove the DRAFT notice, commit it here, and copy
-   the final text into `C:\Projects\vibe-files-releases\LICENSE.md` (inside its code block) and
-   commit there. Step 1 publishes `LICENSE.md`. Also settle the third-party notices gap (end of
-   this file) before the first proprietary release, and date the `0.1.52 (unreleased)` heading
+0. **Licence (PA-101).** `LICENSE.md` is the VibeMyFirm Community License 1.0, the Kisaes
+   licensing package's text byte for byte; the public repo's `LICENSE.md` carries the same text
+   under a short list of the program's parts. `NOTICE.md` (installed as `NOTICE.txt`) and the
+   keyless-Professional-Use permission were drafted here after ClientLedger Trial Balance's
+   (its Q145) and are **not counsel-reviewed**: have counsel read them with the licence before
+   1.0. If `LICENSE.md` ever changes, change both copies. Date the `0.1.52 (unreleased)` heading
    in the public `CHANGELOG.md`.
 
 1. On GitHub, create **`KisaesDevLab/vibe-files-releases`**, **public and empty** (no README,
    licence or .gitignore: the local checkout has them). In
    `C:\Projects\vibe-files-releases`: `git remote add origin https://github.com/KisaesDevLab/vibe-files-releases.git`
-   and `git push -u origin main`. In its settings, turn on **Issues** and **Private
-   vulnerability reporting** (Security › Advisories; `SECURITY.md` relies on it).
+   and `git push -u origin main`. In its settings, keep **Issues** on (the issue forms
+   turn blank issues off and send client data and security reports to support@kisaes.com).
 2. Fast-forward `main` in this repo to the release branch, and bump the version (0.1.52 is the
    first one under the new licence; its changelog section is drafted). Then run
    `pwsh tools/release.ps1 -DryRun`, read it, and run `pwsh tools/release.ps1`.
@@ -175,11 +176,11 @@ Prepared in PA-100. Nothing below has been done yet. No repository visibility wa
 8. From the signed-out browser: `https://github.com/KisaesDevLab/Vibe-Files` must show 404, and
    the step 3 download must still work.
 
-## Known gap: third-party notices
+## Third-party notices
 
-`tools/third-party-notices.ps1` copies each crate's own licence files. About 40 crates (the egui
-family, accesskit, clipboard-win and others) publish no licence file in their crate package, so for
-them the notices name the licence (MIT, Apache-2.0, BSL-1.0) but carry no text. MIT and BSL require
-the text to accompany the binary. Before the first proprietary release, either append the standard
-text of each licence named (with the crate's authors as the copyright line) or switch the generator
-to `cargo about` (QUESTIONS Q-143).
+`tools/third-party-notices.ps1` copies each crate's own licence files (from a subfolder when the
+crate keeps them there, as egui's font crate does). For the 18 crates that name a licence but
+publish no file of it (the egui family, accesskit, clipboard-win, enum-map, profiling, spirv), it
+appends the standard text of that licence (MIT, Apache-2.0 or BSL-1.0) with the crates' authors
+as the copyright line (Q-143, as ClientLedger Trial Balance does). A crate whose licence has no
+standard text in the script stops the release until one is added.

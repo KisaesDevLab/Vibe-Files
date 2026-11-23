@@ -143,9 +143,13 @@ folder is renamed to match.
 
 ## License
 
-Proprietary: the Kisaes end user licence agreement in [LICENSE](LICENSE) (a draft for review),
-from 0.1.52. Versions 0.1.51 and earlier were published under the GNU AGPL v3.0 or later.
-The release zip carries `THIRD-PARTY-NOTICES.txt` (written by `tools/third-party-notices.ps1`).
+The [VibeMyFirm Community License 1.0](LICENSE.md) from 0.1.52; see [NOTICE.md](NOTICE.md).
+In short (not part of the licence): free for the documents and records of entities you own,
+control or work for; working on the documents and records of clients who pay you is Professional
+Use and needs a Pro License Key; distributing the program needs a Developer License Key. Pro
+License Keys are not sold yet; until Kisaes announces them, Kisaes permits Professional Use of the
+0.x test versions without a key. Versions 0.1.51 and earlier were published under the GNU AGPL
+v3.0 or later. The release zip carries `LICENSE.txt`, `NOTICE.txt` and `THIRD-PARTY-NOTICES.txt` (written by `tools/third-party-notices.ps1`).
 Third-party components keep their own licenses: pdfium (in `crates/filer-pdf/assets/`), the TWAIN
 Data Source Manager (LGPL-2.1-or-later, in `crates/vf-ingest/assets/`) and Tesseract
 (Apache-2.0, in the release's `tesseract\` folder).
