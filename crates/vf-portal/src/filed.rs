@@ -341,6 +341,7 @@ mod tests {
                     email: None,
                     phone: None,
                 },
+                request: None,
             },
             fetched_at: "2026-11-10T10:05:00.000Z".into(),
             fetched_by: Some("PC1\\kurt".into()),
@@ -360,6 +361,7 @@ mod tests {
                 note: String::new(),
                 from: "Mary".into(),
                 size: 1,
+                request: None,
             }],
         )
         .unwrap();

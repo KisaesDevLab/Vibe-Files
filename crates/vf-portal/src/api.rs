@@ -83,6 +83,20 @@ impl PortalError {
             Some("check_note_required") => {
                 "Say who you spoke to, or how you know this person.".into()
             }
+            // To-do lists (Vibe-Portal P109).
+            Some("requests_off") => {
+                "To-do lists are turned off on the portal: an admin turns them on in the portal's Settings.".into()
+            }
+            Some("item_answered") => {
+                "The client has answered that item, so its wording and kind stay as they are.".into()
+            }
+            Some("list_closed") => "This list is closed or cancelled.".into(),
+            Some("list_has_answers") => {
+                "The client has answered this list, so it is kept: cancel it instead.".into()
+            }
+            Some("staff_cannot_see_client") => {
+                "That staff member cannot see this client on the portal: choose someone else.".into()
+            }
             Some("check_invalid") => {
                 "The portal did not accept that way of checking: update Vibe Portal, or approve on the portal's staff page.".into()
             }
@@ -119,9 +133,18 @@ pub struct Status {
     /// A move between the appliance and B2 is under way or not finished (P51).
     #[serde(default)]
     pub storage_moving: bool,
+    /// What this portal offers that older ones do not: "requests" while its to-do lists are on
+    /// (Vibe-Portal P109).
+    #[serde(default)]
+    pub features: Vec<String>,
 }
 
 impl Status {
+    /// The portal has to-do lists, and they are on (Vibe-Portal P109).
+    pub fn has_todo(&self) -> bool {
+        self.features.iter().any(|f| f == "requests")
+    }
+
     /// Where the portal's files are, in words for Admin › Portal.
     pub fn storage_words(&self) -> &'static str {
         match (self.storage.as_deref(), self.storage_moving) {
@@ -372,6 +395,21 @@ pub struct Upload {
     pub batch_id: Option<String>,
     pub uploaded_at: String,
     pub from: UploadFrom,
+    /// Sent for an item of a to-do list (Vibe-Portal P109); absent otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request: Option<UploadRequest>,
+}
+
+/// The to-do item an upload answers.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct UploadRequest {
+    pub list_id: String,
+    pub list_title: String,
+    pub item_id: String,
+    pub prompt: String,
+    #[serde(default)]
+    pub doc_type: String,
 }
 
 /// An upload Vibe Files fetched but has not filed or dismissed (Vibe-Portal P74).
@@ -448,8 +486,8 @@ impl Added {
 }
 
 #[derive(Deserialize)]
-struct ErrorBody {
-    error: Option<String>,
+pub(crate) struct ErrorBody {
+    pub(crate) error: Option<String>,
     #[serde(rename = "fetchedBy")]
     fetched_by: Option<String>,
 }
@@ -599,7 +637,7 @@ impl Portal {
         Self::read(r.call())
     }
 
-    fn send_json<T: DeserializeOwned>(
+    pub(crate) fn send_json<T: DeserializeOwned>(
         &self,
         method: &str,
         path: &str,
@@ -625,8 +663,16 @@ impl Portal {
         Self::read(self.auth(self.bulk.put(&self.url(path))).send_json(body))
     }
 
-    fn post_empty<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
+    pub(crate) fn post_empty<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
         Self::read(self.auth(self.quick.post(&self.url(path))).send_empty())
+    }
+
+    /// A GET whose answer is read by the caller (a file), on the agent with no overall limit.
+    pub(crate) fn raw_get(
+        &self,
+        path: &str,
+    ) -> std::result::Result<ureq::http::Response<ureq::Body>, ureq::Error> {
+        self.auth(self.bulk.get(&self.url(path))).call()
     }
 
     pub(crate) fn delete<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
@@ -1150,6 +1196,7 @@ mod tests {
             fetch_minutes: 0,
             record: Default::default(),
             b2_list: false,
+            todo_lists: false,
         };
         (Portal::new(&s, "PC1", "kurt"), seen)
     }

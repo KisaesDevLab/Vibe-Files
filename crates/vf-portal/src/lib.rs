@@ -12,6 +12,7 @@ pub mod inbox;
 pub mod listing;
 pub mod record;
 pub mod settings;
+pub mod todo;
 
 pub use api::{Portal, PortalError};
 pub use settings::PortalSettings;

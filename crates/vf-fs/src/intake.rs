@@ -1037,9 +1037,17 @@ fn record(
                     }),
                 };
                 let hint = by_hash.or(by_name.as_ref());
-                let doc_type = hint
-                    .and_then(|h| h.doc_type.clone())
-                    .filter(|t| doc_types.contains_key(t));
+                // A doc type's id; or (PA-103: a to-do item names it, "W-2") its name.
+                let doc_type = hint.and_then(|h| h.doc_type.clone()).and_then(|t| {
+                    if doc_types.contains_key(&t) {
+                        Some(t)
+                    } else {
+                        doc_types
+                            .iter()
+                            .find(|(_, name)| name.eq_ignore_ascii_case(t.trim()))
+                            .map(|(id, _)| id.clone())
+                    }
+                });
                 let tax_year = match hint {
                     Some(h) if h.permanent => None,
                     // Read from the form: the year the person filed it under (its folder)
@@ -2165,6 +2173,38 @@ mod tests {
             0
         );
         assert!(!reconcile(&mut f.conn, &f.root, "dev").unwrap().changed());
+    }
+
+    /// PA-103: a file sent for a to-do item names its doc type by name ("w-2"); Intake finds it.
+    #[test]
+    fn a_hint_may_name_the_doc_type() {
+        let mut f = fx();
+        crate::doctypes::seed_if_missing(&f.root).unwrap();
+        crate::doctypes::sync(&mut f.conn, &f.root, "dev", "seed").unwrap();
+        let w2_type = crate::doctypes::load(&f.root).unwrap().unwrap()[0].clone();
+        std::fs::write(f.inbox.join("w2.pdf"), "content of w2.pdf").unwrap();
+        std::fs::write(f.inbox.join("x.pdf"), "content of x.pdf").unwrap();
+        for (name, ty) in [("w2.pdf", " w-2 "), ("x.pdf", "No Such Type")] {
+            let hash = filer_intake::commit::sha256_file(&f.inbox.join(name)).unwrap();
+            let mut h = crate::hints::Hint::new(&hash, name, "portal_request", "portal");
+            h.doc_type = Some(ty.into());
+            h.source = Some("client".into());
+            crate::hints::append(&f.root, &h).unwrap();
+        }
+        let acme = client("1001", "Acme LLC");
+        file(&f, &acme, &["w2.pdf", "x.pdf"], false);
+        reconcile(&mut f.conn, &f.root, "dev").unwrap();
+        let ty = |name: &str| -> Option<String> {
+            f.conn
+                .query_row(
+                    "SELECT doc_type_id FROM document WHERE rel_path LIKE ?1",
+                    [format!("%/{name}")],
+                    |r| r.get(0),
+                )
+                .unwrap()
+        };
+        assert_eq!(ty("w2.pdf"), Some(w2_type.id));
+        assert_eq!(ty("x.pdf"), None, "an unknown name sets no type");
     }
 
     /// A hint from a Vibe intake processor (barcode cover sheet, print capture) sets the doc

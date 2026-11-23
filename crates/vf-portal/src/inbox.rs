@@ -144,6 +144,9 @@ pub struct Received {
     pub note: String,
     pub from: String,
     pub size: u64,
+    /// The to-do item it was sent for (PA-103), when it was.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request: Option<crate::api::UploadRequest>,
 }
 
 #[derive(Debug, Default)]
@@ -232,6 +235,7 @@ pub(crate) fn received_row(root: &Path, dest: &Path, u: &Upload, now: &str) -> R
         note: u.note.clone(),
         from: from_label(u),
         size: u.size,
+        request: u.request.clone(),
     }
 }
 
@@ -244,6 +248,22 @@ fn finish(root: &Path, part: &Path, meta: &Path, u: &Upload, now: &str, report: 
             let row = received_row(root, &dest, u, now);
             if let Err(e) = append_received(root, std::slice::from_ref(&row)) {
                 report.problems.push(format!("The received list could not be written: {e}"));
+            }
+            // PA-103: a file sent for a to-do item tells Intake where it came from, and its
+            // doc type when the item names one (by its name; Intake finds the type).
+            if let Some(r) = &u.request {
+                let name = dest
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                let mut h = vf_fs::hints::Hint::new(&u.sha256, &name, "portal_request", "portal");
+                h.source = Some("client".into());
+                h.doc_type = Some(r.doc_type.trim().to_string()).filter(|t| !t.is_empty());
+                if let Err(e) = vf_fs::hints::append(root, &h) {
+                    report
+                        .problems
+                        .push(format!("{}: its to-do item could not be noted for Intake ({e})", u.name));
+                }
             }
             report.received.push(row);
         }
@@ -519,6 +539,7 @@ mod tests {
             note: String::new(),
             from: "Mary".into(),
             size: 1,
+            request: None,
         };
         append_received(t.path(), &[r("1"), r("2")]).unwrap();
         append_received(t.path(), &[r("3")]).unwrap();

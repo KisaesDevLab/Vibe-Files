@@ -3339,6 +3339,7 @@ mod tests {
                     dates: DateOrder::Auto,
                 },
                 b2_list: false,
+                todo_lists: false,
             }),
             clients: vec![ClientRef {
                 id: "0199aaaa-0000-7000-8000-000000000001".into(),
@@ -3596,6 +3597,7 @@ mod tests {
             note: String::new(),
             from: "a".into(),
             size: 1,
+            request: None,
         };
         r.received = vec![one.clone()];
         assert_eq!(fetch_result(&r), "1 file received");
@@ -3734,6 +3736,7 @@ mod tests {
             fetch_minutes: 0,
             record: Default::default(),
             b2_list: false,
+            todo_lists: false,
         };
         let (tx, audit) = mpsc::channel();
         let w = PeopleWindow::new(
@@ -3831,6 +3834,7 @@ mod tests {
             fetch_minutes: 0,
             record: Default::default(),
             b2_list: false,
+            todo_lists: false,
         };
         let t = tempfile::tempdir().unwrap();
         let path = t.path().join("Return 2025.pdf");
@@ -3961,6 +3965,7 @@ mod tests {
                     fetch_minutes: 0,
                     record: Default::default(),
                     b2_list: on,
+                    todo_lists: false,
                 },
             )
             .unwrap();
@@ -4123,6 +4128,7 @@ mod tests {
                 fetch_minutes: 0,
                 record: Default::default(),
                 b2_list: true,
+                todo_lists: false,
             })
         };
         let (url, seen) = fake_portal(|method, path| match (method, path) {
@@ -4434,6 +4440,7 @@ mod tests {
                     fetch_minutes: 0,
                     record: Default::default(),
                     b2_list: on,
+                    todo_lists: false,
                 },
             )
             .unwrap();

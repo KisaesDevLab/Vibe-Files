@@ -37,6 +37,11 @@ pub struct PortalSettings {
     /// names, sizes and tax years, never content. Off unless the firm ticks it.
     #[serde(default)]
     pub b2_list: bool,
+    /// To-do lists in Vibe Files for every PC of the cabinet (PA-103, owner 2026-11-23): the
+    /// client panel's To-do lists… and Admin › Portal › To-do templates. Off unless the firm
+    /// ticks it; the portal has its own switch too.
+    #[serde(default)]
+    pub todo_lists: bool,
 }
 
 fn default_fetch() -> u32 {
@@ -119,6 +124,7 @@ impl PortalSettings {
             fetch_minutes: fetch_minutes.min(24 * 60),
             record: RecordColumns::default(),
             b2_list: false,
+            todo_lists: false,
         })
     }
 

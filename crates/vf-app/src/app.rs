@@ -2445,6 +2445,7 @@ mod tests {
                 fetch_minutes: 0,
                 record: Default::default(),
                 b2_list: false,
+                todo_lists: false,
             },
         )
         .unwrap();
