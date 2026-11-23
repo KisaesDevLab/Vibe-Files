@@ -33,8 +33,6 @@ Stable links (the website, the README and the app use these):
    picks up the new version, and commit **both** files (the script builds with `--locked` and
    stops if `Cargo.lock` is out of date).
 2. Releases are cut from **`main`**. Merge or fast-forward the work onto `main` and check it out.
-   (First time: `main` is at 0.1.31; fast-forward it to `pa-100-release-repo`, which holds
-   `pa-60-index-from-listing` and PA-100.)
 3. In `C:\Projects\vibe-files-releases`, add a `## <version> (<date>)` section at the top of
    `CHANGELOG.md`, written for users, and commit it (don't push; the script does). That section
    becomes the release notes.
@@ -143,7 +141,8 @@ ignores. Symbols are never shipped.
 
 ## Owner cutover checklist (one time; the owner does these, not the agent)
 
-Prepared in PA-100. Nothing below has been done yet. No repository visibility was changed.
+Prepared in PA-100. Done so far: step 0's changelog date and step 2's fast-forward and bump (0.1.52,
+2026-11-23). No repository visibility was changed and nothing was published.
 
 0. **Licence (PA-101).** `LICENSE.md` is the VibeMyFirm Community License 1.0, the Kisaes
    licensing package's text byte for byte; the public repo's `LICENSE.md` carries the same text
