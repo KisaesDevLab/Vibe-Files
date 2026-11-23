@@ -716,12 +716,13 @@ impl TodoWindow {
                 }
                 self.msg = Some("The list was deleted.".into());
             }
+            // Only while the window still waits for it.
+            Done::Proposal(..) if !matches!(self.mode, Mode::FromReturn(_)) => {}
             Done::Proposal(p, source) => {
                 if p.looks_empty() {
                     self.err = Some(format!(
                         "{source} does not read as an UltraTax return (no wage, 1099, K-1 or statement pages were found; a scanned return has no text to read). Choose another file."
                     ));
-                    self.mode = Mode::FromReturn(None);
                 } else {
                     let keep = vec![true; p.items.len()];
                     self.mode = Mode::Review(Box::new(Review {
@@ -871,7 +872,7 @@ impl TodoWindow {
                     {
                         act = Some(Act::ReadReturn(p));
                     }
-                    if ui.button("Cancel").clicked() {
+                    if ui.add_enabled(!busy, egui::Button::new("Cancel")).clicked() {
                         act = Some(Act::Cancel);
                     }
                 });
@@ -1574,29 +1575,65 @@ impl Default for TemplatesPage {
 
 /// PA-104: the client's filed returns (PDFs of doc type "Return copy — federal", or named for a
 /// 1040 / tax return), newest tax year first: (path, label).
+/// A PDF named for a filed 1040 return: the file's own name (not a folder's, a client code's),
+/// and not an estimate voucher, payment voucher, amended return or organizer.
+fn return_name(rel: &str) -> bool {
+    let name = rel.rsplit(['/', '\\']).next().unwrap_or(rel).to_lowercase();
+    let squeezed: String = name.chars().filter(|c| c.is_ascii_alphanumeric()).collect();
+    (name.contains("1040") || name.contains("tax return"))
+        && !["1040es", "1040x", "voucher", "organizer", "estimate"]
+            .iter()
+            .any(|w| squeezed.contains(w))
+}
+
+#[cfg(test)]
+mod return_name_tests {
+    #[test]
+    fn only_a_return_by_its_own_name() {
+        assert!(super::return_name(
+            "Sample (10401)/Income Tax/2025/2025 1040 Return.pdf"
+        ));
+        assert!(!super::return_name(
+            "Sample (10401)/Income Tax/2025/W-2.pdf"
+        ));
+        assert!(!super::return_name(
+            "Sample (1042)/Income Tax/2026/2026 1040-ES Vouchers.pdf"
+        ));
+        assert!(!super::return_name(
+            "Sample (1042)/Income Tax/2025/2025 1040 Organizer.pdf"
+        ));
+        assert!(!super::return_name(
+            "Sample (1042)/Income Tax/2024/2024 1040-X.pdf"
+        ));
+    }
+}
+
 pub fn filed_returns(
     conn: &vf_core::db::Connection,
     root: &std::path::Path,
     client_id: &str,
 ) -> Vec<(PathBuf, String)> {
     conn.prepare(
-        "SELECT d.rel_path, d.tax_year FROM document d LEFT JOIN doc_type t ON t.id = d.doc_type_id \
+        "SELECT d.rel_path, d.tax_year, t.name = 'Return copy — federal' FROM document d LEFT JOIN doc_type t ON t.id = d.doc_type_id \
          WHERE d.client_id = ?1 AND d.deleted_at IS NULL AND lower(d.rel_path) LIKE '%.pdf' \
          AND (t.name = 'Return copy — federal' OR lower(d.rel_path) LIKE '%1040%' \
               OR lower(d.rel_path) LIKE '%tax return%') \
-         ORDER BY d.tax_year DESC, d.updated_at DESC LIMIT 12",
+         ORDER BY (t.name = 'Return copy — federal') DESC, d.tax_year DESC, d.updated_at DESC LIMIT 40",
     )
     .and_then(|mut st| {
         st.query_map([client_id], |r| {
             let rel: String = r.get(0)?;
             let year: Option<i64> = r.get(1)?;
-            Ok((rel, year))
+            let typed: bool = r.get::<_, Option<bool>>(2)?.unwrap_or(false);
+            Ok((rel, year, typed))
         })?
         .collect::<Result<Vec<_>, _>>()
     })
     .unwrap_or_default()
     .into_iter()
-    .map(|(rel, year)| {
+    .filter(|(rel, _, typed)| *typed || return_name(rel))
+    .take(12)
+    .map(|(rel, year, _)| {
         let label = match year {
             Some(y) => format!("{y}: {rel}"),
             None => rel.clone(),

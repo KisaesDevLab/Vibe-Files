@@ -117,10 +117,26 @@ fn is_amount(t: &str) -> bool {
         && (t.chars().any(|c| c.is_ascii_digit()) || t == "$")
 }
 
-/// `name` without the amounts printed after it on the same row.
+/// `name` without the amounts printed after it on the same row. A bare number of 1-3 digits is
+/// an amount only when it is the last thing on the row; after a formatted amount (`21,500`,
+/// `$`, `9.770`) it belongs to the name ("LOCAL UNION 150 21,500" is Local Union 150).
 fn strip_amounts(name: &str) -> String {
     let mut toks: Vec<&str> = name.split_whitespace().collect();
-    while toks.last().is_some_and(|t| is_amount(t)) {
+    let mut formatted = false;
+    let mut bare = false;
+    while let Some(t) = toks.last().copied() {
+        if !is_amount(t) || toks.len() == 1 {
+            break;
+        }
+        let short_bare = t.len() <= 3 && t.chars().all(|c| c.is_ascii_digit());
+        if short_bare {
+            if formatted || bare {
+                break;
+            }
+            bare = true;
+        } else {
+            formatted = true;
+        }
         toks.pop();
     }
     toks.join(" ")
@@ -128,7 +144,15 @@ fn strip_amounts(name: &str) -> String {
 
 const UPPER_KEEP: &[&str] = &[
     "LLC", "LLP", "LP", "PC", "P.C.", "PA", "P.A.", "NA", "N.A.", "USA", "US", "IRA", "FSB",
-    "PLLC", "II", "III", "IV", "CPA", "HSA", "UBS", "TD", "SSA", "UMB", "BMO", "PNC",
+    "PLLC", "II", "III", "IV", "CPA", "HSA", "UBS", "TD", "SSA", "UMB", "BMO", "PNC", "IBM", "ADP",
+    "TIAA", "USAA", "AIG", "ING", "BNY", "HSBC", "RBC", "TCF", "PSE&G",
+];
+
+/// Names whose capitals are not just the first letter.
+const CASED: &[(&str, &str)] = &[
+    ("JPMORGAN", "JPMorgan"),
+    ("ETRADE", "E*Trade"),
+    ("E*TRADE", "E*Trade"),
 ];
 
 /// "EXAMPLE SECURITIES & CO INC" → "Example Securities & Co Inc"; a mixed-case name stays as printed.
@@ -142,7 +166,15 @@ pub fn title_case(s: &str) -> String {
             if i > 0 && matches!(w, "OF" | "AND" | "THE" | "FOR" | "IN" | "AT" | "ON") {
                 return w.to_lowercase();
             }
-            if UPPER_KEEP.contains(&w.trim_end_matches(',')) {
+            let bare = w.trim_end_matches(',');
+            if UPPER_KEEP.contains(&bare) {
+                return w.to_string();
+            }
+            if let Some((_, cased)) = CASED.iter().find(|(u, _)| *u == bare) {
+                return w.replacen(bare, cased, 1);
+            }
+            // AT&T, S&P: kept as printed.
+            if w.contains('&') && w.len() > 1 {
                 return w.to_string();
             }
             // Short words with no vowel are initials (GM, BMW, VW).
@@ -236,9 +268,14 @@ fn names(pages: &[String]) -> (Option<String>, Option<String>) {
         let ls = lines(p);
         for (i, l) in ls.iter().enumerate() {
             let t = l.trim();
-            if (t == "Name" || t == "Name(s) shown on return") && i > 0 {
+            // Only the page footer ("Pg 12" / "Avery & Morgan Sample" / "Name"): a statement's
+            // "Name" column heading has its heading above it, not the client's names.
+            if (t == "Name" || t == "Name(s) shown on return")
+                && i > 1
+                && ls[i - 2].trim().starts_with("Pg ")
+            {
                 let above = ls[i - 1].trim();
-                if above.is_empty() || above.starts_with("Pg ") {
+                if above.is_empty() || above.chars().any(|c| c.is_ascii_digit()) {
                     continue;
                 }
                 let mut parts = above.splitn(2, " & ");
@@ -337,7 +374,14 @@ fn section<'a>(p: &'a str, heading: &str) -> Option<Vec<&'a str>> {
     let start = ls.iter().position(|l| l.trim().starts_with(heading))?;
     let mut out = Vec::new();
     for l in &ls[start + 1..] {
-        if l.trim().starts_with("TOTAL") {
+        let t = l.trim();
+        if t.starts_with("TOTAL")
+            || t.starts_with("Pg ")
+            || t.starts_with("Form ")
+            || t.starts_with("Schedule ")
+            || t.starts_with("Statement ")
+            || t.contains("Federal Statements")
+        {
             break;
         }
         out.push(*l);
@@ -408,6 +452,31 @@ fn schedule_b(p: &str) -> Option<(Vec<String>, Vec<String>)> {
             continue;
         }
         if t.contains(" **-***") || t.contains(" ##-###") {
+            continue;
+        }
+        let upper = t.to_uppercase();
+        let negative = t
+            .split_whitespace()
+            .last()
+            .is_some_and(|x| x.starts_with('(') && x.ends_with(')') && x.contains(','))
+            || t.split_whitespace()
+                .last()
+                .is_some_and(|x| x.starts_with('-') && is_amount(x));
+        if negative
+            || upper.starts_with("SEE ")
+            || upper.contains("STATEMENT")
+            || [
+                "NOMINEE",
+                "ACCRUED INTEREST",
+                "OID",
+                "ABP",
+                "ADJUSTMENT",
+                "SUBTOTAL",
+                "BOND PREMIUM",
+            ]
+            .iter()
+            .any(|w| upper.contains(w))
+        {
             continue;
         }
         // One amount ends a row; the account digits before it ("- ACCT 1111") stay.
@@ -497,18 +566,29 @@ impl Out {
     }
 }
 
+/// "in 2026" → "for 2026"; "this year" stays.
+fn for_next(in_next: &str) -> String {
+    in_next
+        .strip_prefix("in ")
+        .map_or_else(|| in_next.to_string(), |y| format!("for {y}"))
+}
+
 /// Reads the pages of an UltraTax CS individual return and proposes a to-do list.
 pub fn propose(pages: &[String]) -> Proposal {
     let year = year(pages);
     let (taxpayer, spouse) = names(pages);
-    let next = year.map_or_else(|| "this year".to_string(), |y| (y + 1).to_string());
+    // "in 2026" and "your 2026 …", or without a year found, "this year" and "your …".
+    let (in_next, your_next) = match year {
+        Some(y) => (format!("in {}", y + 1), format!("your {} ", y + 1)),
+        None => ("this year".to_string(), "your ".to_string()),
+    };
     let whose = |who: char| -> String {
-        let n = if who == 'S' {
-            spouse.as_deref()
+        let (n, role) = if who == 'S' {
+            (spouse.as_deref(), "spouse")
         } else {
-            taxpayer.as_deref()
+            (taxpayer.as_deref(), "taxpayer")
         };
-        n.map(|n| format!(" ({n})")).unwrap_or_default()
+        format!(" ({})", n.unwrap_or(role))
     };
     let mut out = Out {
         items: Vec::new(),
@@ -529,7 +609,7 @@ pub fn propose(pages: &[String]) -> Proposal {
                 && toks[n - 2].chars().filter(char::is_ascii_digit).count() >= 4
                 && toks[n - 2]
                     .chars()
-                    .all(|c| c.is_ascii_digit() || "-*X".contains(c))
+                    .all(|c| c.is_ascii_alphanumeric() || "-*".contains(c))
             {
                 let acct: String = toks[n - 2].chars().filter(char::is_ascii_digit).collect();
                 let last4 = acct[acct.len().saturating_sub(4)..].to_string();
@@ -544,7 +624,12 @@ pub fn propose(pages: &[String]) -> Proposal {
             }
         }
     }
-    let broker_keys: BTreeSet<String> = brokers.iter().map(|(b, _)| key(b)).collect();
+    // A payer is the broker's when the firm matches and the account does (or is not printed).
+    let is_brokers = |name: &str, last4: &Option<String>| {
+        brokers
+            .iter()
+            .any(|(b, a)| key(b) == key(name) && (last4.is_none() || a.is_none() || a == last4))
+    };
     let acct = |a: &Option<String>| {
         a.as_ref()
             .map(|a| format!(", account ending {a}"))
@@ -652,7 +737,7 @@ pub fn propose(pages: &[String]) -> Proposal {
                 Group::Questions,
                 Kind::Answer,
                 format!(
-                    "The dates and amounts of your {next} federal and state estimated tax payments"
+                    "The dates and amounts of {your_next}federal and state estimated tax payments"
                 ),
                 "",
                 "Form 1040, Line 26",
@@ -662,11 +747,20 @@ pub fn propose(pages: &[String]) -> Proposal {
         for (i, l) in ls.iter().enumerate() {
             if l.trim().starts_with("Form 6252 - Installment Sale History") && i > 0 {
                 let property = ls[i - 1].trim();
-                if !property.is_empty() && !property.contains("Federal Statements") {
+                let a_name = !property.is_empty()
+                    && strip_amounts(property) == property
+                    && !property.starts_with("TOTAL")
+                    && !property.starts_with("Pg ")
+                    && !property.contains("Federal Statements")
+                    && !property.starts_with("Form ")
+                    && !property.starts_with("Schedule ")
+                    && !property.starts_with("Statement ")
+                    && !property.contains('$');
+                if a_name {
                     out.push(
                         Group::Other,
                         Kind::Answer,
-                        format!("Payments you received in {next} on the installment sale of {property} (principal and interest)"),
+                        format!("Payments you received {in_next} on the installment sale of {property} (principal and interest)"),
                         "",
                         "Form 6252",
                     );
@@ -697,7 +791,7 @@ pub fn propose(pages: &[String]) -> Proposal {
     // Interest and dividend payers: one item each (a payer of both, one 1099 for both); a
     // broker's go with its consolidated 1099 below.
     for p in &payers.0 {
-        if broker_keys.contains(&key(&p.name)) {
+        if is_brokers(&p.name, &p.last4) {
             continue;
         }
         let (form, doc) = match (p.interest, p.dividends) {
@@ -717,7 +811,9 @@ pub fn propose(pages: &[String]) -> Proposal {
     // Brokers.
     for (name, last4) in &brokers {
         let k = key(name);
-        let paid = payers.0.iter().any(|p| key(&p.name) == k);
+        let paid = payers.0.iter().any(|p| {
+            key(&p.name) == k && (p.last4.is_none() || last4.is_none() || p.last4 == *last4)
+        });
         let what = if paid {
             "Consolidated 1099 (dividends, interest and sales)"
         } else {
@@ -749,7 +845,10 @@ pub fn propose(pages: &[String]) -> Proposal {
         out.push(
             Group::Business,
             Kind::Document,
-            format!("Your business income and expenses for {next} (Schedule C)"),
+            format!(
+                "Your business income and expenses {} (Schedule C)",
+                for_next(&in_next)
+            ),
             "",
             "Schedule C",
         );
@@ -758,7 +857,10 @@ pub fn propose(pages: &[String]) -> Proposal {
         out.push(
             Group::Business,
             Kind::Document,
-            format!("Rental income and expenses for {next}, for each property"),
+            format!(
+                "Rental income and expenses {}, for each property",
+                for_next(&in_next)
+            ),
             "",
             "Schedule E, Part I",
         );
@@ -767,7 +869,10 @@ pub fn propose(pages: &[String]) -> Proposal {
         out.push(
             Group::Business,
             Kind::Document,
-            format!("Farm income and expenses for {next} (Schedule F)"),
+            format!(
+                "Farm income and expenses {} (Schedule F)",
+                for_next(&in_next)
+            ),
             "",
             "Schedule F",
         );
@@ -804,12 +909,12 @@ pub fn propose(pages: &[String]) -> Proposal {
         );
     }
     if any("Residential Energy Credits") {
-        out.push(Group::Questions, Kind::Answer, format!("Did you make energy-saving improvements to your home in {next}? If so, what and how much"), "", "Form 5695");
+        out.push(Group::Questions, Kind::Answer, format!("Did you make energy-saving improvements to your home {in_next}? If so, what and how much"), "", "Form 5695");
     }
     out.push(
         Group::Questions,
         Kind::Answer,
-        format!("Any changes in {next}: address, marital status, dependents, new bank or brokerage accounts?"),
+        format!("Any changes {in_next}: address, marital status, dependents, new bank or brokerage accounts?"),
         "",
         "Always asked",
     );
@@ -975,6 +1080,114 @@ mod tests {
         assert_eq!(p.year, None);
     }
 
+    /// QA 2026-11-23: each case found in review, with invented text.
+    #[test]
+    fn review_cases() {
+        let p = |pages: &[&str]| propose(&pages.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+        let prompts = |r: &Proposal| r.items.iter().map(|i| i.prompt.clone()).collect::<Vec<_>>();
+        // An installment sale after another statement's TOTAL: no amount becomes the property.
+        let r = p(&[
+            "Federal Statements Page 1\nForm 1040, Line 26 - Estimated Tax Payments\nQ1 4,000\n TOTAL $ 4,000\nForm 6252 - Installment Sale History\n",
+        ]);
+        assert!(
+            !prompts(&r)
+                .iter()
+                .any(|g| g.contains("TOTAL") || g.contains("4,000"))
+        );
+        // A statement's "Name" column is not the client's name; the footer is.
+        let r = p(&[
+            "Federal Statements Page 1\nStatement 1 - Schedule E, Page 2, Line 28\nName\nEXAMPLE HOLDINGS, LLC\nP **-***0002\n",
+            "Form Salaries & Wages Report\nT EXAMPLE CO 21,500\nS EXAMPLE CO 2,100\nPg 9\nAvery & Morgan Sample\nName\n",
+        ]);
+        assert_eq!(
+            (r.taxpayer.as_deref(), r.spouse.as_deref()),
+            (Some("Avery"), Some("Morgan"))
+        );
+        // Spouse unknown: still two W-2s.
+        let r = p(&["Form Salaries & Wages Report\nT EXAMPLE CO 21,500\nS EXAMPLE CO 2,100\n"]);
+        let g = prompts(&r);
+        assert!(
+            g.contains(&"W-2 from Example Co (taxpayer)".to_string()),
+            "{g:#?}"
+        );
+        assert!(
+            g.contains(&"W-2 from Example Co (spouse)".to_string()),
+            "{g:#?}"
+        );
+        // A name's own number stays ("Local Union 150"), the amounts go.
+        let r = p(&[
+            "Form Salaries & Wages Report\nT LOCAL UNION 150 21,500 2,100\nT CITY OF SAMPLE 272\n",
+        ]);
+        let g = prompts(&r);
+        assert!(
+            g.iter().any(|x| x.starts_with("W-2 from Local Union 150 ")),
+            "{g:#?}"
+        );
+        assert!(
+            g.iter().any(|x| x.starts_with("W-2 from City of Sample ")),
+            "{g:#?}"
+        );
+        // The same firm's other account keeps its own 1099; reference and adjustment rows are not payers.
+        let r = p(&[
+            "Form 1040 Broker Capital Transactions Detail Summary Report 2025\nEXAMPLE SECURITIES 4400-1234 J\n",
+            "SCHEDULE B\n(Form 1040) 2025 Interest and Ordinary Dividends\nFinancial Assets. . .\nEXAMPLE SECURITIES - ACCT 9999 50\nSEE STATEMENT 1 1,827\nNOMINEE DISTRIBUTION (1,500)\nACCRUED INTEREST (25)\n1,852\n1,852\n",
+        ]);
+        let g = prompts(&r);
+        assert!(
+            g.contains(&"1099-INT from Example Securities, account ending 9999".to_string()),
+            "{g:#?}"
+        );
+        assert!(
+            !g.iter()
+                .any(|x| x.contains("Statement") || x.contains("Nominee") || x.contains("Accrued")),
+            "{g:#?}"
+        );
+        assert!(
+            g.iter().any(|x| x.starts_with(
+                "1099-B (sales of investments) from Example Securities, account ending 1234"
+            )),
+            "{g:#?}"
+        );
+        // A continued statement (no TOTAL) stops at the page footer: the client is not a payer.
+        let r = p(&[
+            "Federal Statements Page 1\nForm 1040, Interest Income\nPayer\nFIRST SAMPLE BANK 75\nPg 10\nAvery & Morgan Sample\nName\n",
+        ]);
+        let g = prompts(&r);
+        assert!(
+            g.contains(&"1099-INT from First Sample Bank".to_string()),
+            "{g:#?}"
+        );
+        assert!(
+            !g.iter().any(|x| x.contains("Pg") || x.contains("Avery")),
+            "{g:#?}"
+        );
+        // No year found: plain wording.
+        let r = p(&[
+            "Federal Statements Page 1\nForm 1040, Line 26 - Estimated Tax Payments\nQ1 4,000\n TOTAL $ 4,000\n",
+        ]);
+        let g = prompts(&r);
+        assert!(
+            g.contains(
+                &"The dates and amounts of your federal and state estimated tax payments"
+                    .to_string()
+            ),
+            "{g:#?}"
+        );
+        assert!(
+            g.iter().any(|x| x.starts_with("Any changes this year:")),
+            "{g:#?}"
+        );
+        // A broker account with letters.
+        let r = p(&[
+            "Form 1040 Broker Capital Transactions Detail Summary Report 2025\nSAMPLE TRADING Z12-345678 T\n",
+        ]);
+        assert!(
+            prompts(&r)
+                .iter()
+                .any(|x| x.contains("Sample Trading, account ending 5678"))
+        );
+    }
+
     #[test]
     fn title_case_keeps_abbreviations() {
         assert_eq!(
@@ -987,6 +1200,12 @@ mod tests {
         );
         assert_eq!(title_case("SAMPLE BANK NA"), "Sample Bank NA");
         assert_eq!(title_case("GM"), "GM");
+        assert_eq!(title_case("AT&T MOBILITY"), "AT&T Mobility");
+        assert_eq!(title_case("IBM CREDIT UNION"), "IBM Credit Union");
+        assert_eq!(
+            title_case("JPMORGAN CHASE BANK NA"),
+            "JPMorgan Chase Bank NA"
+        );
         assert_eq!(
             title_case("The Sample Group, P.C."),
             "The Sample Group, P.C."
