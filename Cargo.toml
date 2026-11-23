@@ -48,7 +48,12 @@ hkdf = "0.12.4"
 zeroize = "1.9.1"
 hmac = "0.12.1"
 # B2 through its S3-compatible API (P11). tokio stays inside vf-sync (and vf-ocr's workers).
-object_store = { version = "0.14", default-features = false, features = ["aws", "http", "fs"] }
+# aws-base/http-base with ring, not aws/http: those pull aws-lc-rs, a C library whose error
+# strings carry this PC's build paths into the exe (check-binary caught it; Q-146). TLS is
+# reqwest's rustls on ring, set up in vf-sync.
+object_store = { version = "0.14", default-features = false, features = ["aws-base", "http-base", "fs", "reqwest", "ring"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "http2", "charset"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 tokio = { version = "1.54.1", features = ["rt-multi-thread", "time"] }
 futures = "0.3"
 bytes = "1"

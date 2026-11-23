@@ -42,6 +42,7 @@ pub fn parse(json: &[u8]) -> Option<Release> {
 
 /// The latest release when it is newer than `current`; `Ok(None)` when up to date.
 pub fn check(current: &str) -> Result<Option<Release>, String> {
+    crate::remote::tls_ready();
     let store = object_store::http::HttpBuilder::new()
         .with_url(API)
         .with_client_options(

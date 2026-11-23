@@ -12,6 +12,9 @@ vf-core = { path = "../vf-core" }
 vf-fs = { path = "../vf-fs" }
 vf-security = { path = "../vf-security" }
 object_store.workspace = true
+# TLS for object_store (B2, the update check): reqwest on rustls with ring (Q-146).
+reqwest.workspace = true
+rustls.workspace = true
 tokio.workspace = true
 futures.workspace = true
 bytes.workspace = true

@@ -93,6 +93,7 @@ impl Remote {
 
     /// B2 (or any S3 endpoint).
     pub fn s3(c: &S3Config, app_key: &str) -> Result<Arc<dyn ObjectStore>, RemoteError> {
+        tls_ready();
         let s = object_store::aws::AmazonS3Builder::new()
             .with_endpoint(&c.endpoint)
             .with_region(&c.region)
@@ -194,6 +195,16 @@ impl Remote {
                 .collect())
         })
     }
+}
+
+/// Installs rustls' ring provider as the process default, once, before reqwest builds a client
+/// (reqwest's `rustls-no-provider`, so no C crypto library and no build paths in the exe; Q-146).
+/// Another part of the app having installed one already is fine.
+pub(crate) fn tls_ready() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    });
 }
 
 #[cfg(test)]
