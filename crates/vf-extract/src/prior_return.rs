@@ -236,7 +236,7 @@ fn account_suffix(name: &str) -> (String, Option<String>) {
     if let Some((payer, acct)) = n.rsplit_once(" - ACCT ") {
         let digits: String = acct.chars().filter(char::is_ascii_digit).collect();
         if digits.len() >= 3 {
-            let last = digits[digits.len().saturating_sub(4)..].to_string();
+            let last = last4(&digits);
             return (payer.trim().to_string(), Some(last));
         }
     }
@@ -248,15 +248,7 @@ fn account_suffix(name: &str) -> (String, Option<String>) {
         if digits.len() >= 3
             && digits.len() == inner.chars().filter(|c| c.is_alphanumeric()).count()
         {
-            let last: String = digits
-                .chars()
-                .rev()
-                .take(4)
-                .collect::<Vec<_>>()
-                .into_iter()
-                .rev()
-                .collect();
-            return (n[..open].trim().to_string(), Some(last));
+            return (n[..open].trim().to_string(), Some(last4(&digits)));
         }
     }
     (n.to_string(), None)
@@ -318,9 +310,7 @@ fn year(pages: &[String]) -> Option<i32> {
     for p in pages {
         for l in p.lines() {
             let t = l.trim();
-            if (t.contains("Federal Return Summary")
-                || t.contains("Salaries & Wages Report")
-                || t.contains("Report"))
+            if (t.contains("Federal Return Summary") || t.contains("Report"))
                 && t.starts_with("1040")
                 && let Some(y) = t.split_whitespace().last().and_then(num)
             {
@@ -361,7 +351,7 @@ fn ts_rows(p: &str, code_column: bool) -> Vec<(char, String)> {
             name = toks.join(" ");
         }
         // A real name: letters, and not a column heading.
-        if name.chars().filter(|c| c.is_alphabetic()).count() >= 2 && !name.starts_with("/S") {
+        if has_name(&name) && !name.starts_with("/S") {
             out.push((who, name));
         }
     }
@@ -522,7 +512,7 @@ struct Payer {
 impl Payers {
     fn add(&mut self, raw: &str, interest: bool, source: &str) {
         let (name, last4) = account_suffix(raw);
-        if name.chars().filter(|c| c.is_alphabetic()).count() < 2 {
+        if !has_name(&name) {
             return;
         }
         let k = key(&name);
@@ -564,6 +554,100 @@ impl Out {
             });
         }
     }
+}
+
+/// A form whose printed title means it was filed, and what to ask for because of it.
+struct FormRule {
+    /// Any of these printed on a page.
+    titles: &'static [&'static str],
+    group: Group,
+    kind: Kind,
+    /// `{in_next}` ("in 2026") and `{for_next}` ("for 2026") are filled in.
+    prompt: &'static str,
+    doc_type: &'static str,
+    source: &'static str,
+}
+
+const FORMS: &[FormRule] = &[
+    FormRule {
+        titles: &["Social Security Worksheet"],
+        group: Group::Retirement,
+        kind: Kind::Document,
+        prompt: "SSA-1099 (Social Security benefits)",
+        doc_type: "SSA-1099",
+        source: "Social Security Worksheet",
+    },
+    FormRule {
+        titles: &["Profit or Loss From Business"],
+        group: Group::Business,
+        kind: Kind::Document,
+        prompt: "Your business income and expenses {for_next} (Schedule C)",
+        doc_type: "",
+        source: "Schedule C",
+    },
+    FormRule {
+        titles: &["Income or Loss From Rental Real Estate and Royalties"],
+        group: Group::Business,
+        kind: Kind::Document,
+        prompt: "Rental income and expenses {for_next}, for each property",
+        doc_type: "",
+        source: "Schedule E, Part I",
+    },
+    FormRule {
+        titles: &["Profit or Loss From Farming"],
+        group: Group::Business,
+        kind: Kind::Document,
+        prompt: "Farm income and expenses {for_next} (Schedule F)",
+        doc_type: "",
+        source: "Schedule F",
+    },
+    FormRule {
+        titles: &["Lifetime Learning Credits"],
+        group: Group::Other,
+        kind: Kind::Document,
+        prompt: "Form 1098-T for each student",
+        doc_type: "",
+        source: "Form 8863",
+    },
+    // The 1095-A is reported on Form 8962 (owner 2026-11-23): its title, or its Part II
+    // heading when the title prints apart.
+    FormRule {
+        titles: &[
+            "Premium Tax Credit (PTC)",
+            "Premium Tax Credit Claim and Reconciliation of Advance Payment",
+        ],
+        group: Group::Home,
+        kind: Kind::Document,
+        prompt: "Form 1095-A (Marketplace health insurance), one for each policy",
+        doc_type: "1095",
+        source: "Form 8962",
+    },
+    FormRule {
+        titles: &["Child and Dependent Care Expenses"],
+        group: Group::Other,
+        kind: Kind::Document,
+        prompt: "Child and dependent care statements (provider, amount paid)",
+        doc_type: "",
+        source: "Form 2441",
+    },
+    FormRule {
+        titles: &["Residential Energy Credits"],
+        group: Group::Questions,
+        kind: Kind::Answer,
+        prompt: "Did you make energy-saving improvements to your home {in_next}? If so, what and how much",
+        doc_type: "",
+        source: "Form 5695",
+    },
+];
+
+/// The last four of `digits` (all of them when fewer).
+fn last4(digits: &str) -> String {
+    digits[digits.len().saturating_sub(4)..].to_string()
+}
+
+/// Text with at least two letters: a name, not a stray number or code.
+fn has_name(s: &str) -> bool {
+    s.chars().filter(|c| c.is_alphabetic()).count() >= 2
 }
 
 /// "in 2026" → "for 2026"; "this year" stays.
@@ -612,9 +696,9 @@ pub fn propose(pages: &[String]) -> Proposal {
                     .all(|c| c.is_ascii_alphanumeric() || "-*".contains(c))
             {
                 let acct: String = toks[n - 2].chars().filter(char::is_ascii_digit).collect();
-                let last4 = acct[acct.len().saturating_sub(4)..].to_string();
+                let last4 = last4(&acct);
                 let name = toks[..n - 2].join(" ");
-                if name.chars().filter(|c| c.is_alphabetic()).count() >= 2
+                if has_name(&name)
                     && !brokers
                         .iter()
                         .any(|(b, a)| key(b) == key(&name) && a.as_deref() == Some(&last4))
@@ -828,88 +912,18 @@ pub fn propose(pages: &[String]) -> Proposal {
         );
     }
 
-    // Forms present.
+    // Forms present, each by its own printed title: the 1040 names the others in its line text
+    // ("from Form 5695"), which says nothing about whether they were filed.
     let any = |s: &str| pages.iter().any(|p| page_has(p, s));
-    if any("Social Security Worksheet") {
-        out.push(
-            Group::Retirement,
-            Kind::Document,
-            "SSA-1099 (Social Security benefits)".into(),
-            "SSA-1099",
-            "Social Security Worksheet",
-        );
-    }
-    // Each form by its own printed title: the 1040 names the others in its line text ("from
-    // Form 5695"), which says nothing about whether they were filed.
-    if any("Profit or Loss From Business") {
-        out.push(
-            Group::Business,
-            Kind::Document,
-            format!(
-                "Your business income and expenses {} (Schedule C)",
-                for_next(&in_next)
-            ),
-            "",
-            "Schedule C",
-        );
-    }
-    if any("Income or Loss From Rental Real Estate and Royalties") {
-        out.push(
-            Group::Business,
-            Kind::Document,
-            format!(
-                "Rental income and expenses {}, for each property",
-                for_next(&in_next)
-            ),
-            "",
-            "Schedule E, Part I",
-        );
-    }
-    if any("Profit or Loss From Farming") {
-        out.push(
-            Group::Business,
-            Kind::Document,
-            format!(
-                "Farm income and expenses {} (Schedule F)",
-                for_next(&in_next)
-            ),
-            "",
-            "Schedule F",
-        );
-    }
-    if any("Lifetime Learning Credits") {
-        out.push(
-            Group::Other,
-            Kind::Document,
-            "Form 1098-T for each student".into(),
-            "",
-            "Form 8863",
-        );
-    }
-    // The 1095-A is reported on Form 8962 (owner 2026-11-23): its title, or its Part II heading
-    // when the title prints apart.
-    if any("Premium Tax Credit (PTC)")
-        || any("Premium Tax Credit Claim and Reconciliation of Advance Payment")
-    {
-        out.push(
-            Group::Home,
-            Kind::Document,
-            "Form 1095-A (Marketplace health insurance), one for each policy".into(),
-            "1095",
-            "Form 8962",
-        );
-    }
-    if any("Child and Dependent Care Expenses") {
-        out.push(
-            Group::Other,
-            Kind::Document,
-            "Child and dependent care statements (provider, amount paid)".into(),
-            "",
-            "Form 2441",
-        );
-    }
-    if any("Residential Energy Credits") {
-        out.push(Group::Questions, Kind::Answer, format!("Did you make energy-saving improvements to your home {in_next}? If so, what and how much"), "", "Form 5695");
+    let for_year = for_next(&in_next);
+    for f in FORMS {
+        if f.titles.iter().any(|t| any(t)) {
+            let prompt = f
+                .prompt
+                .replace("{in_next}", &in_next)
+                .replace("{for_next}", &for_year);
+            out.push(f.group, f.kind, prompt, f.doc_type, f.source);
+        }
     }
     out.push(
         Group::Questions,

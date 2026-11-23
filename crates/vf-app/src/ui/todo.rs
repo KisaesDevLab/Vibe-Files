@@ -22,6 +22,14 @@ use crate::ui::portal::{AuditOut, ClientRef, spawn};
 use crate::ui::widgets::UiExt as _;
 use crate::ui::{theme, widgets};
 
+/// The answer of a portal read run on a scoped thread (a panic there is a failed read).
+fn joined<T>(
+    h: std::thread::ScopedJoinHandle<'_, vf_portal::api::Result<T>>,
+) -> vf_portal::api::Result<T> {
+    h.join()
+        .unwrap_or_else(|_| Err(vf_portal::PortalError::Local("a read stopped".into())))
+}
+
 /// A list as read, to be appended to its copy in the client folder (when it changed).
 #[derive(Debug, Clone)]
 pub struct TodoCopy {
@@ -188,19 +196,27 @@ fn items_editor(
                     );
                 });
                 ui.checkbox(&mut it.required, "");
-                egui::ComboBox::from_id_salt(format!("todo-type-{id}-{i}"))
-                    .selected_text(if it.doc_type.is_empty() {
-                        "—"
-                    } else {
-                        it.doc_type.as_str()
-                    })
-                    .width(120.0)
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(&mut it.doc_type, String::new(), "—");
-                        for t in doc_types {
-                            ui.selectable_value(&mut it.doc_type, t.clone(), t);
-                        }
-                    });
+                // Type to search, as every doc type picker (owner 2026-11-05: long lists).
+                let shown = if it.doc_type.is_empty() {
+                    "—".to_string()
+                } else {
+                    it.doc_type.clone()
+                };
+                let current = doc_types.iter().position(|t| *t == it.doc_type);
+                let (_, pick) = widgets::search_combo(
+                    ui,
+                    format!("todo-type-{id}-{i}"),
+                    120.0,
+                    shown,
+                    || doc_types.to_vec(),
+                    current,
+                    Some("—"),
+                );
+                match pick {
+                    Some(Some(n)) => it.doc_type = doc_types[n].clone(),
+                    Some(None) => it.doc_type.clear(),
+                    None => {}
+                }
                 ui.horizontal(|ui| {
                     if ui
                         .add_enabled(i > 0, egui::Button::new("↑").small())
@@ -291,12 +307,17 @@ impl ListForm {
         !self.title.trim().is_empty() && due_ok(&self.due) && items_ready(&self.items)
     }
 
+    /// The due day as sent: none when left empty.
+    fn due_date(&self) -> Option<String> {
+        Some(self.due.trim().to_string()).filter(|d| !d.is_empty())
+    }
+
     fn to_new(&self, client_ids: Vec<String>) -> NewList {
         NewList {
             client_ids,
             title: self.title.trim().into(),
             note: self.note.trim().into(),
-            due_date: Some(self.due.trim().to_string()).filter(|d| !d.is_empty()),
+            due_date: self.due_date(),
             remind_every_days: self.remind,
             template_id: self.template_id.clone(),
             items: self.items.clone(),
@@ -421,7 +442,7 @@ enum Mode {
     New(ListForm),
     /// Changing the open list: its details and items.
     Edit(ListForm),
-    /// PA-104: choosing last year's return to read (an index into `returns`, or another file).
+    /// PA-104: choosing last year's return to read (one of `returns`, or another file).
     FromReturn(Option<PathBuf>),
     /// PA-104: the items read from it, each ticked to keep.
     Review(Box<Review>),
@@ -499,7 +520,7 @@ pub struct TodoWindow {
     returns: Vec<(PathBuf, String)>,
     lists: Option<Vec<TodoList>>,
     /// The portal could not be reached: the copies in the client folder.
-    offline: Option<(String, Vec<CopyLine>)>,
+    offline: Option<Vec<CopyLine>>,
     staff: Vec<StaffChoice>,
     templates: Vec<Template>,
     /// The list opened (with its items and answers).
@@ -510,7 +531,7 @@ pub struct TodoWindow {
     copies: CopyOut,
     msg: Option<String>,
     err: Option<String>,
-    confirm: Option<(String, &'static str)>,
+    confirm: Option<Confirm>,
     pub closed: bool,
 }
 
@@ -558,14 +579,17 @@ impl TodoWindow {
         let folder = self.folder.clone();
         self.job = Some(spawn(ctx, move || {
             let p = core::client(&s);
+            // The client first (it must be on the portal), then its lists, its staff and the
+            // templates together: they do not depend on each other.
             let read = p
                 .put_client(&client.id, &client.code, &client.name, None)
                 .and_then(|()| {
-                    Ok((
-                        p.todo_lists(&client.id)?,
-                        p.todo_staff(&client.id)?,
-                        p.todo_templates()?,
-                    ))
+                    std::thread::scope(|sc| {
+                        let staff = sc.spawn(|| p.todo_staff(&client.id));
+                        let templates = sc.spawn(|| p.todo_templates());
+                        let lists = p.todo_lists(&client.id);
+                        Ok((lists?, joined(staff)?, joined(templates)?))
+                    })
                 });
             Done::Loaded(read.map_err(|e| {
                 // Only when the portal cannot be reached: a refusal (to-do lists off, a bad
@@ -590,28 +614,55 @@ impl TodoWindow {
         msg: String,
         call: impl FnOnce(&vf_portal::Portal) -> vf_portal::api::Result<TodoList> + Send + 'static,
     ) {
-        let s = s.clone();
         let root = self.root.clone();
         let folder = self.folder.clone();
-        let audit = self.audit.clone();
         let copies = self.copies.clone();
+        self.job(
+            ctx,
+            s,
+            entry,
+            move |p| {
+                let l = call(p)?;
+                if let Some(c) = copy_of(&root, folder.as_deref(), &l, &p.actor_name()) {
+                    let _ = copies.0.send(c);
+                }
+                Ok(l)
+            },
+            move |l| Done::List(Box::new(l), msg),
+        );
+    }
+
+    /// Runs one portal call on a thread: on success its audit row is sent and `ok` says what
+    /// the window shows; a failure shows the portal's message.
+    fn job<T: 'static>(
+        &mut self,
+        ctx: &egui::Context,
+        s: &PortalSettings,
+        entry: Option<AuditEntry>,
+        call: impl FnOnce(&vf_portal::Portal) -> vf_portal::api::Result<T> + Send + 'static,
+        ok: impl FnOnce(T) -> Done + Send + 'static,
+    ) {
+        let s = s.clone();
+        let audit = self.audit.clone();
         self.err = None;
         self.msg = None;
-        self.job = Some(spawn(ctx, move || {
-            let p = core::client(&s);
-            match call(&p) {
-                Ok(l) => {
-                    if let Some(e) = entry {
-                        audit.send(e);
-                    }
-                    if let Some(c) = copy_of(&root, folder.as_deref(), &l, &p.actor_name()) {
-                        let _ = copies.0.send(c);
-                    }
-                    Done::List(Box::new(l), msg)
+        self.job = Some(spawn(ctx, move || match call(&core::client(&s)) {
+            Ok(v) => {
+                if let Some(e) = entry {
+                    audit.send(e);
                 }
-                Err(e) => Done::Failed(e.message()),
+                ok(v)
             }
+            Err(e) => Done::Failed(e.message()),
         }));
+    }
+
+    /// The open list's title (for audit rows).
+    fn open_title(&self) -> String {
+        self.open
+            .as_ref()
+            .map(|l| l.title.clone())
+            .unwrap_or_default()
     }
 
     fn entry(&self, action: &str, list: &str, title: &str, more: serde_json::Value) -> AuditEntry {
@@ -645,31 +696,19 @@ impl TodoWindow {
             }
             Done::Loaded(Err((e, copies))) => {
                 self.err = Some(e);
-                if let Some(copies) = copies {
-                    self.offline = Some((
-                        "The portal cannot be reached: the copies kept in the client's folder are shown, as last read."
-                            .into(),
-                        copies,
-                    ));
-                }
+                self.offline = copies;
             }
             Done::List(l, msg) => {
                 let l = *l;
                 if let Some(ls) = &mut self.lists {
+                    // The list of lists holds summaries (no items).
+                    let summary = TodoList {
+                        items: Vec::new(),
+                        ..l.clone()
+                    };
                     match ls.iter_mut().find(|x| x.id == l.id) {
-                        Some(x) => {
-                            *x = TodoList {
-                                items: Vec::new(),
-                                ..l.clone()
-                            };
-                        }
-                        None => ls.insert(
-                            0,
-                            TodoList {
-                                items: Vec::new(),
-                                ..l.clone()
-                            },
-                        ),
+                        Some(x) => *x = summary,
+                        None => ls.insert(0, summary),
                     }
                 }
                 if matches!(self.mode, Mode::Edit(_)) {
@@ -767,8 +806,10 @@ impl TodoWindow {
         if let Some(e) = &self.err {
             ui.label(RichText::new(e).color(theme::error()));
         }
-        if let Some((why, copies)) = &self.offline {
-            ui.label(widgets::caption(why));
+        if let Some(copies) = &self.offline {
+            ui.label(widgets::caption(
+                "The portal cannot be reached: the copies kept in the client's folder are shown, as last read.",
+            ));
             if copies.is_empty() {
                 ui.label("No copy of a list is kept in this client's folder.");
             }
@@ -1065,13 +1106,13 @@ impl TodoWindow {
                         act = Some(Act::Edit);
                     }
                     if ui.add_enabled(!busy, egui::Button::new("Close")).clicked() {
-                        act = Some(Act::Status(l.id.clone(), "closed"));
+                        act = Some(Act::Status(l.id.clone(), ListStatus::Closed));
                     }
                     if ui.add_enabled(!busy, egui::Button::new("Cancel list")).clicked() {
-                        self.confirm = Some((l.id.clone(), "cancel"));
+                        self.confirm = Some(Confirm::Cancel(l.id.clone()));
                     }
                 } else if ui.add_enabled(!busy, egui::Button::new("Open again")).clicked() {
-                    act = Some(Act::Status(l.id.clone(), "open"));
+                    act = Some(Act::Status(l.id.clone(), ListStatus::Open));
                 }
                 if l.unanswered()
                     && ui
@@ -1079,31 +1120,23 @@ impl TodoWindow {
                         .on_hover_text("Only while nobody has answered; a list with answers is cancelled instead")
                         .clicked()
                 {
-                    self.confirm = Some((l.id.clone(), "delete"));
+                    self.confirm = Some(Confirm::Delete(l.id.clone()));
                 }
             });
-            if let Some((id, what)) = self.confirm.clone().filter(|(id, _)| *id == l.id) {
+            if let Some(c) = self.confirm.clone().filter(|c| c.list() == l.id) {
+                let (question, button) = match c {
+                    Confirm::Delete(_) => ("Delete this list? Nobody has answered it.", "Delete"),
+                    Confirm::Cancel(_) => (
+                        "Cancel this list? The client no longer sees it; its answers are kept.",
+                        "Cancel list",
+                    ),
+                };
                 ui.horizontal(|ui| {
-                    ui.label(
-                        RichText::new(if what == "delete" {
-                            "Delete this list? Nobody has answered it."
-                        } else {
-                            "Cancel this list? The client no longer sees it; its answers are kept."
-                        })
-                        .color(theme::error()),
-                    );
-                    if ui
-                        .button(if what == "delete" {
-                            "Delete"
-                        } else {
-                            "Cancel list"
-                        })
-                        .clicked()
-                    {
-                        act = Some(if what == "delete" {
-                            Act::Delete(id.clone())
-                        } else {
-                            Act::Status(id.clone(), "cancelled")
+                    ui.label(RichText::new(question).color(theme::error()));
+                    if ui.button(button).clicked() {
+                        act = Some(match c {
+                            Confirm::Delete(id) => Act::Delete(id),
+                            Confirm::Cancel(id) => Act::Status(id, ListStatus::Cancelled),
                         });
                         self.confirm = None;
                     }
@@ -1170,7 +1203,7 @@ impl TodoWindow {
                 let change = ListChange {
                     title: Some(f.title.trim().into()),
                     note: Some(f.note.trim().into()),
-                    due_date: Some(Some(f.due.trim().to_string()).filter(|d| !d.is_empty())),
+                    due_date: Some(f.due_date()),
                     remind_every_days: Some(f.remind),
                     assigned_staff_id: Some(f.assigned.clone()),
                     items: Some(f.items.clone()),
@@ -1191,15 +1224,10 @@ impl TodoWindow {
                     .as_ref()
                     .and_then(|w| self.staff.iter().find(|x| &x.id == w))
                     .map(|x| x.name.clone());
-                let title = self
-                    .open
-                    .as_ref()
-                    .map(|l| l.title.clone())
-                    .unwrap_or_default();
                 let e = self.entry(
                     "portal_todo_change",
                     &id,
-                    &title,
+                    &self.open_title(),
                     serde_json::json!({ "assigned_to": name }),
                 );
                 let msg = match &name {
@@ -1213,24 +1241,10 @@ impl TodoWindow {
                 self.run_list(ctx, s, Some(e), msg, move |p| p.change_list(&id, &change));
             }
             Act::Status(id, status) => {
-                let title = self
-                    .open
-                    .as_ref()
-                    .map(|l| l.title.clone())
-                    .unwrap_or_default();
-                let action = match status {
-                    "open" => "portal_todo_reopen",
-                    "closed" => "portal_todo_close",
-                    _ => "portal_todo_cancel",
-                };
-                let e = self.entry(action, &id, &title, serde_json::json!({}));
-                let msg = match status {
-                    "open" => "Opened again.",
-                    "closed" => "Closed: the client can no longer answer.",
-                    _ => "Cancelled.",
-                };
+                let (code, action, msg) = status.words();
+                let e = self.entry(action, &id, &self.open_title(), serde_json::json!({}));
                 let change = ListChange {
-                    status: Some(status.into()),
+                    status: Some(code.into()),
                     ..Default::default()
                 };
                 self.run_list(ctx, s, Some(e), msg.into(), move |p| {
@@ -1277,40 +1291,37 @@ impl TodoWindow {
                 }));
             }
             Act::Delete(id) => {
-                let title = self
-                    .open
-                    .as_ref()
-                    .map(|l| l.title.clone())
-                    .unwrap_or_default();
-                let e = self.entry("portal_todo_delete", &id, &title, serde_json::json!({}));
-                let s = s.clone();
-                let audit = self.audit.clone();
-                self.job = Some(spawn(ctx, move || {
-                    match core::client(&s).delete_list(&id) {
-                        Ok(()) => {
-                            audit.send(e);
-                            Done::Deleted(id)
-                        }
-                        Err(e) => Done::Failed(e.message()),
-                    }
-                }));
+                let e = self.entry(
+                    "portal_todo_delete",
+                    &id,
+                    &self.open_title(),
+                    serde_json::json!({}),
+                );
+                let gone = id.clone();
+                self.job(
+                    ctx,
+                    s,
+                    Some(e),
+                    move |p| p.delete_list(&id),
+                    move |()| Done::Deleted(gone),
+                );
             }
             Act::Remind(id, title) => {
                 let e = self.entry("portal_todo_remind", &id, &title, serde_json::json!({}));
-                let s = s.clone();
-                let audit = self.audit.clone();
-                self.job = Some(spawn(ctx, move || match core::client(&s).remind(&id) {
-                    Ok(n) => {
-                        audit.send(e);
+                self.job(
+                    ctx,
+                    s,
+                    Some(e),
+                    move |p| p.remind(&id),
+                    |n| {
                         Done::Said(match n {
                             0 => "Nobody could be told (no open items, or nobody with access)."
                                 .into(),
                             1 => "1 person was reminded.".into(),
                             n => format!("{n} people were reminded."),
                         })
-                    }
-                    Err(e) => Done::Failed(e.message()),
-                }));
+                    },
+                );
             }
             Act::Report(id, title, to_inbox) => self.report(ctx, s, id, title, to_inbox),
         }
@@ -1469,7 +1480,7 @@ enum Act {
     Edit,
     Save(String, ListForm),
     Assign(String, Option<String>),
-    Status(String, &'static str),
+    Status(String, ListStatus),
     Create(ListForm),
     Delete(String),
     Remind(String, String),
@@ -1478,6 +1489,44 @@ enum Act {
     FromReturn,
     ReadReturn(PathBuf),
     UseProposal(ListForm),
+}
+
+/// What a list is set to by Close, Cancel and Open again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ListStatus {
+    Open,
+    Closed,
+    Cancelled,
+}
+
+impl ListStatus {
+    /// (the portal's word, the audit action, what the window says).
+    fn words(self) -> (&'static str, &'static str, &'static str) {
+        match self {
+            Self::Open => ("open", "portal_todo_reopen", "Opened again."),
+            Self::Closed => (
+                "closed",
+                "portal_todo_close",
+                "Closed: the client can no longer answer.",
+            ),
+            Self::Cancelled => ("cancelled", "portal_todo_cancel", "Cancelled."),
+        }
+    }
+}
+
+/// A change asked to be confirmed first, for a list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Confirm {
+    Delete(String),
+    Cancel(String),
+}
+
+impl Confirm {
+    fn list(&self) -> &str {
+        match self {
+            Self::Delete(id) | Self::Cancel(id) => id,
+        }
+    }
 }
 
 // ======================================================================================
