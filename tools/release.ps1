@@ -271,8 +271,10 @@ if ($LASTEXITCODE) { Stop-Release 'check-binary found something that must not sh
 pwsh -NoProfile -File (Join-Path $PSScriptRoot 'check-binary.ps1') $zip
 if ($LASTEXITCODE) { Stop-Release 'check-binary found something that must not ship in the zip (above)' }
 if ($extra) {
-    pwsh -NoProfile -File (Join-Path $PSScriptRoot 'check-binary.ps1') ($extra.FullName)
-    if ($LASTEXITCODE) { Stop-Release 'check-binary found something that must not ship in -ExtraAssets (above)' }
+    foreach ($e in $extra) {
+        pwsh -NoProfile -File (Join-Path $PSScriptRoot 'check-binary.ps1') $e.FullName
+        if ($LASTEXITCODE) { Stop-Release "check-binary found something that must not ship in $($e.Name) (above)" }
+    }
 }
 
 # ---------------------------------------------------------------- 7. assets

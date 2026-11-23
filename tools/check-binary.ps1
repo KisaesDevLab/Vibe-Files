@@ -3,7 +3,7 @@
 # user name, C:\Projects paths, the private source repo or any other KisaesDevLab repo except the
 # public release repo, and common secret/token prefixes.
 #
-#   pwsh tools/check-binary.ps1 <file-or-folder-or-zip> [...]
+#   pwsh tools/check-binary.ps1 <file-or-folder-or-zip>[,<another>...]
 #
 # Every file is read as bytes and searched both as 8-bit text and as UTF-16LE text (Windows wide
 # strings). A folder is searched recursively; a .zip is unpacked to a temp folder first.
