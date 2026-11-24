@@ -1598,6 +1598,8 @@ mod tests {
         let sent_first = invitations_to(&john) + invitations_to(&morgan_typed);
         assert_eq!(sent_first, 1, "one sent before Stop");
         // Show every client: the one invited says so and is not ticked.
+        // (After Stop the page reads the portal again by itself; Read again once it has.)
+        wait_said(&mut h, "with contacts;", "G6-reread");
         h.get_by_role_and_label(Role::Button, "Read again").click();
         h.run_steps(2);
         // Read again: the list is read anew (the stopped run's words are gone).
