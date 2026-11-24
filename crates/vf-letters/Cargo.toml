@@ -1,0 +1,18 @@
+[package]
+name = "vf-letters"
+version.workspace = true
+edition.workspace = true
+license-file.workspace = true
+publish.workspace = true
+
+# Letter templates for tax return delivery (ADDENDUM-tax-return-delivery.md §12.2): the model,
+# merge fields, and layout to a letter-size PDF with the signature blocks' rectangles.
+# pdf-writer, as vf-pdf already links: no new native dependency.
+[dependencies]
+vf-fs = { path = "../vf-fs" }
+pdf-writer.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

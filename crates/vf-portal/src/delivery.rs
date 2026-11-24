@@ -79,6 +79,46 @@ pub struct DeliveryEvent {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+pub struct LetterSignature {
+    pub signer_id: String,
+    pub signed_at: String,
+    pub via: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DeliveryLetter {
+    pub id: String,
+    pub name: String,
+    pub pages: u32,
+    pub sha256: String,
+    #[serde(default)]
+    pub template_id: String,
+    #[serde(default)]
+    pub template_version: u32,
+    pub signed_sha256: Option<String>,
+    #[serde(default)]
+    pub signatures: Vec<LetterSignature>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DeliverySigner {
+    #[serde(default)]
+    pub id: String,
+    /// `taxpayer`, `spouse`, `officer`.
+    pub role: String,
+    pub name: String,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phone: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct ReturnFile {
     pub id: String,
     pub name: String,
@@ -104,6 +144,11 @@ pub struct Delivery {
     pub reminded_at: Option<String>,
     pub return_file: Option<ReturnFile>,
     pub esign_link: Option<String>,
+    /// Step 1's letters (Addendum D3).
+    #[serde(default)]
+    pub letters: Vec<DeliveryLetter>,
+    #[serde(default)]
+    pub signers: Vec<DeliverySigner>,
     #[serde(default)]
     pub created_by: String,
     pub created_at: String,
@@ -277,6 +322,57 @@ impl Portal {
         .map(|r| r.delivery)
     }
 
+    /// Step 1: one letter as laid out, with its signature blocks (`blocks` is vf-letters'
+    /// JSON). Refused once anyone signed (`letters_signed`).
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_letter(
+        &self,
+        id: &str,
+        name: &str,
+        doc_type: &str,
+        template_id: &str,
+        template_version: u32,
+        blocks_json: &str,
+        pdf: &[u8],
+    ) -> Result<Delivery> {
+        let blocks = crate::delivery::b64url(blocks_json.as_bytes());
+        let version = template_version.to_string();
+        let q = [
+            ("name", name),
+            ("docType", doc_type),
+            ("templateId", template_id),
+            ("templateVersion", version.as_str()),
+            ("step", "letters"),
+            ("blocks", blocks.as_str()),
+        ];
+        self.post_bytes::<One>(&format!("/deliveries/{id}/letters"), &q, pdf)
+            .map(|r| r.delivery)
+    }
+
+    pub fn remove_letter(&self, id: &str, letter_id: &str) -> Result<Delivery> {
+        self.delete::<One>(&format!("/deliveries/{id}/letters/{letter_id}"))
+            .map(|r| r.delivery)
+    }
+
+    /// Who signs step 1's letters (replacing the list).
+    pub fn set_signers(&self, id: &str, signers: &[DeliverySigner]) -> Result<Delivery> {
+        let list: Vec<serde_json::Value> = signers
+            .iter()
+            .map(|s| {
+                serde_json::json!({
+                    "role": s.role, "name": s.name, "title": s.title,
+                    "email": s.email, "phone": s.phone,
+                })
+            })
+            .collect();
+        self.send_json::<One>(
+            "PUT",
+            &format!("/deliveries/{id}/signers"),
+            &serde_json::json!({ "signers": list }),
+        )
+        .map(|r| r.delivery)
+    }
+
     pub fn confirm_8879(&self, id: &str) -> Result<Delivery> {
         self.post_empty::<One>(&format!("/deliveries/{id}/confirm-8879"))
             .map(|r| r.delivery)
@@ -320,6 +416,26 @@ impl Portal {
         }
         Ok(bytes)
     }
+}
+
+/// Base64url without padding (the letter blocks travel in the query string).
+pub fn b64url(bytes: &[u8]) -> String {
+    const A: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for c in bytes.chunks(3) {
+        let n = (u32::from(c[0]) << 16)
+            | (u32::from(*c.get(1).unwrap_or(&0)) << 8)
+            | u32::from(*c.get(2).unwrap_or(&0));
+        out.push(A[(n >> 18) as usize & 63] as char);
+        out.push(A[(n >> 12) as usize & 63] as char);
+        if c.len() > 1 {
+            out.push(A[(n >> 6) as usize & 63] as char);
+        }
+        if c.len() > 2 {
+            out.push(A[n as usize & 63] as char);
+        }
+    }
+    out
 }
 
 // ---- The copy in the client's folder ----------------------------------------------------------

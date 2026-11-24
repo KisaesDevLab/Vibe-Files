@@ -5850,6 +5850,7 @@ dependencies = [
  "vf-fs",
  "vf-index",
  "vf-ingest",
+ "vf-letters",
  "vf-ocr",
  "vf-pdf",
  "vf-portal",

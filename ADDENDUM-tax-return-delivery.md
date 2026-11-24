@@ -275,9 +275,9 @@ Number them from the next free P when accepted. Each ends with `pnpm gate` green
   files ` (2)`; Vibe Files' e2e files both in `Income Tax\{Year}\Delivery`
 
 ### D3 — Letters e-sign
-- [ ] Letter upload with blocks; sign page; signature pad; agreement; per-signer order
-- [ ] Second signer on the same device (codes, limits); entity signer with title
-- [ ] Signed PDF (placed, dated, flattened), shared to the client's users; step 1 PDF
+- [x] Letter upload with blocks; sign page; signature pad; agreement; per-signer order
+- [x] Second signer on the same device (codes, limits); entity signer with title
+- [x] Signed PDF (placed, dated, flattened), shared to the client's users; step 1 PDF
 - **Gate:** two letters, two signers on one device: wrong code refused, 6th try locked; signed
   PDF hashes match the events; a letter changed after one signature is refused
 
@@ -412,9 +412,9 @@ screenshots of the new windows.
   confirm; both step PDFs filed in the Delivery folder with their log pages
 
 ### F2 — Letter templates and signing (with portal D3)
-- [ ] `vf-letters` (model, merge, layout, block rectangles); Admin › Letter templates
-- [ ] "Only for" paragraphs; letterhead; seeded samples
-- [ ] Deliver window section 1; signers from Portal contacts; Preview letters
+- [x] `vf-letters` (model, merge, layout, block rectangles); Admin › Letter templates
+- [x] "Only for" paragraphs; letterhead; seeded samples
+- [x] Deliver window section 1; signers from Portal contacts; Preview letters
 - **Gate:** a 1040 joint letter and a 1065 letter laid out, their blocks land on the printed
   signature lines (checked on rendered pages); e2e: two signers, signed PDF filed
 
@@ -934,3 +934,45 @@ client sees nothing, ` (2)` on a repeat, append-only events), `Delivery.test.tsx
 | Q19 | The step PDFs' doc types: client visible? Retention class? | Not client visible (the log page holds addresses); no retention class (the firm sets one). | `ui/portal.rs` save |
 | Q20 | Step 2 completes on a View or Download from the card or the Files list. | Either; the event says which. | `portal/files.ts` |
 | Q21 | Who the step PDF upload is filed under on the portal. | The client who acted, else the first person with access. | `delivery/model.ts fileStepPdf` |
+
+### Slice 3 (portal D3, Vibe Files F2: PA-109)
+
+Portal (`0721247`, `a35bbe7`): migration 0039 (`delivery_letter`, `delivery_signer`,
+`delivery_signature`, `delivery_code`). Firm API: `POST /deliveries/:id/letters?name&docType&
+templateId&templateVersion&step&blocks=<base64url JSON>` (body: the PDF; blocks `[{ role, page,
+x, y, w, h, dateX, dateY, dateW, dateH }]` in PDF points), `DELETE /deliveries/:id/letters/:lid`,
+`PUT /deliveries/:id/signers { signers: [{ role, name, title?, email?, phone? }] }`; 409
+`letters_signed` once anyone signed. A delivery's JSON gains `letters: [{ id, name, pages,
+sha256, templateId, templateVersion, signedSha256, signatures: [{ signerId, signedAt, via }] }]`
+and `signers: [{ id, role, name, title }]`. Client API: `GET /deliveries/:id/letters`, `GET
+…/letters/:lid/pdf`, `POST …/signers/:sid/send-code`, `POST …/signers/:sid/verify { code }`,
+`POST …/letters/:lid/sign?signerId&sha256&agree=1` (body: the PNG). The Sign page
+(`/delivery/:id/sign`) shows the letter in the portal's PDF viewer.
+
+Vibe Files: crate `vf-letters` (template model with `**bold**`, `*italic*`, `{Field}` and
+"only for"; layout on Letter pages in Helvetica with letterhead and each signature's and
+date's rectangle; cabinet store `_Vibe/letters` with a version history and six seeded samples
+marked "Sample — review before use"); Admin › Portal › Letter templates (blocks editor, Insert
+field, Preview per return type, Save as a new version, Delete); the Deliver window's Letters to
+sign (templates for the return type, who signs from Portal contacts, Preview letters…); help
+`letter-templates`.
+
+Gate: met. `signature_blocks_land_on_the_printed_lines` renders a joint 1040 letter and a 1065
+letter with pdfium and finds each block's line under it, nothing printed inside it, and the
+date line; `letters_walkthrough` (real portal, headless Edge) sends a joint 1040's engagement
+letter, the taxpayer signs, the spouse signs on the same device after a code read from their
+email, and Intake commits `2025 Delivery 1 - Letters.pdf` into `Income Tax\2025\Delivery`;
+the signed copy shows both signatures on their lines and the dates. Portal tests: the D3 gate
+(wrong code, sixth try locked, signed PDFs matching the events, a late letter refused).
+
+### Questions logged, slice 3 (defaults taken)
+
+| # | Question | Default taken | Where to change it |
+|---|---|---|---|
+| Q22 | Changing letters or signers after some have signed. | Refused (409 `letters_signed`); cancel and send a new delivery. | `delivery/letters.ts` |
+| Q23 | Which signer is the signed-in person? | The signer whose email or mobile is the person's; anyone else needs a code, even the first signer (staff typed contacts that differ). | `ownSigner` |
+| Q24 | The letter editor: a rich editor (toolbar, chips, dashed boxes, §15.6)? | A block editor with markup (`**bold**`, `*italic*`, `{Field}`, `|` tables); the rich editor is left for review. | `ui/letter_templates.rs` |
+| Q25 | `{Preparer}` and `{Client address}` have no source in Vibe Files yet; `{Fee}` and the package fields come with slice 4. | Shown as written (`{Preparer}`), so the letter shows what is missing. | `DeliverWindow::fields` |
+| Q26 | Must the client open each letter before Sign works? | No: the letter is shown on the same page beside the pad; the addendum (package) rule is slice 4's. | `pages/Sign.tsx` |
+| Q27 | Letter previews are written to the system temp folder. | `%TEMP%\vibe-files-letters` (holds a client's name and letter text). | `ui/delivery.rs`, `ui/letter_templates.rs` |
+| Q28 | The signed copies' names on the portal. | `<year> <letter name> - signed.pdf`, shared with every active person of the client. | `finishLetters` |

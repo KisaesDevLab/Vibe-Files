@@ -28,6 +28,7 @@ vf-fs = { path = "../vf-fs" }
 vf-ocr = { path = "../vf-ocr" }
 vf-sync = { path = "../vf-sync" }
 vf-portal = { path = "../vf-portal" }
+vf-letters = { path = "../vf-letters" }
 vf-ingest = { path = "../vf-ingest" }
 rfd.workspace = true
 serde.workspace = true

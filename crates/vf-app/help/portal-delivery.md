@@ -2,7 +2,7 @@
 
 Send a client their return as a card on the portal's home page, "Your 2025 tax return", that walks them through its steps. The portal logs everything the client does, and files a PDF of each finished step back into the client's folder.
 
-This version runs two steps: **Review your tax return** and **Sign your e-file authorization (Form 8879)**. Letters to sign, a package choice and the fee come in later versions.
+This version runs three steps: **Sign your letters**, **Review your tax return** and **Sign your e-file authorization (Form 8879)**. A package choice and the fee come in a later version. For the letters, see [Letter templates](help:letter-templates).
 
 ## Turning it on
 

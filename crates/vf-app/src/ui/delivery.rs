@@ -13,7 +13,7 @@ use egui::RichText;
 use vf_core::audit::AuditEntry;
 use vf_portal::PortalSettings;
 use vf_portal::api::PortalFile;
-use vf_portal::delivery::{self, Delivery, DeliveryChange, NewDelivery, StepsIn};
+use vf_portal::delivery::{self, Delivery, DeliveryChange, DeliverySigner, NewDelivery, StepsIn};
 
 use crate::portal as core;
 use crate::ui::portal::{AuditOut, ClientRef, spawn};
@@ -102,7 +102,7 @@ pub fn record_reads(
 // ---- The Deliver tax return window -------------------------------------------------------------
 
 enum Done {
-    Loaded(Result<(Vec<Delivery>, Vec<PortalFile>), vf_portal::PortalError>),
+    Loaded(Result<(Vec<Delivery>, Vec<PortalFile>, String), vf_portal::PortalError>),
     Saved(Result<Box<Delivery>, String>, &'static str),
     Said(Result<String, String>),
 }
@@ -130,6 +130,12 @@ pub struct DeliverWindow {
     title: String,
     with_return: bool,
     with_8879: bool,
+    /// Step 1 (Addendum D3): the letters offered for the return type, ticked or not.
+    with_letters: bool,
+    letters: Vec<(vf_letters::Template, bool)>,
+    signers: Vec<DeliverySigner>,
+    /// The firm's name as the portal has it (the letters' {Firm name}).
+    firm_name: String,
     return_file: Option<String>,
     link: String,
     notify: bool,
@@ -172,6 +178,10 @@ impl DeliverWindow {
             title: format!("Your {year} tax return"),
             with_return: true,
             with_8879: true,
+            with_letters: false,
+            letters: Vec::new(),
+            signers: Vec::new(),
+            firm_name: String::new(),
             return_file: None,
             link: String::new(),
             notify: true,
@@ -182,8 +192,123 @@ impl DeliverWindow {
             audit,
             reads,
         };
+        w.offer_letters();
         w.load(ctx, s);
         w
+    }
+
+    /// The letters offered for the return type (ticked as the template says) and who signs,
+    /// from the client's Portal contacts (PA-105): taxpayer and spouse on a 1040, one person
+    /// with a title for an entity (T22).
+    fn offer_letters(&mut self) {
+        let _ = vf_letters::store::seed_if_missing(&self.root);
+        self.letters = vf_letters::store::load_all(&self.root)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|t| t.kind == "letter" && t.offered_for(&self.return_type))
+            .map(|t| {
+                let on = t.default_ticked;
+                (t, on)
+            })
+            .collect();
+        let row = vf_fs::contacts::record(&self.root, &self.client.id)
+            .map(|r| r.effective())
+            .unwrap_or_default();
+        let name = |a: &str, b: &str| format!("{} {}", a.trim(), b.trim()).trim().to_string();
+        let opt = |s: &str| Some(s.trim().to_string()).filter(|s| !s.is_empty());
+        self.signers = if self.return_type == "1040" {
+            let mut v = vec![DeliverySigner {
+                id: String::new(),
+                role: "taxpayer".into(),
+                name: name(&row.first, &row.last),
+                title: String::new(),
+                email: opt(&row.email),
+                phone: opt(&row.cell),
+            }];
+            if !row.spouse_first.trim().is_empty() {
+                v.push(DeliverySigner {
+                    id: String::new(),
+                    role: "spouse".into(),
+                    name: name(&row.spouse_first, &row.spouse_last),
+                    title: String::new(),
+                    email: opt(&row.spouse_email),
+                    phone: opt(&row.spouse_cell),
+                });
+            }
+            v
+        } else {
+            vec![DeliverySigner {
+                id: String::new(),
+                role: "officer".into(),
+                name: name(&row.first, &row.last),
+                title: String::new(),
+                email: opt(&row.email),
+                phone: opt(&row.cell),
+            }]
+        };
+    }
+
+    /// The merge fields for this client and delivery.
+    fn fields(&self) -> vf_letters::Fields {
+        let mut f = vf_letters::Fields::new();
+        let firm = Some(self.firm_name.clone())
+            .filter(|f| !f.trim().is_empty())
+            .or_else(|| vf_fs::cabinet::read(&self.root).ok().and_then(|c| c.name))
+            .unwrap_or_default();
+        let firsts: Vec<String> = self
+            .signers
+            .iter()
+            .filter_map(|s| s.name.split_whitespace().next().map(String::from))
+            .collect();
+        let get = |role: &str| {
+            self.signers
+                .iter()
+                .find(|s| s.role == role)
+                .map(|s| s.name.clone())
+                .unwrap_or_default()
+        };
+        let officer = self.signers.iter().find(|s| s.role == "officer");
+        for (k, v) in [
+            ("Client name", self.client.name.clone()),
+            ("Client ID", self.client.code.clone()),
+            ("Signer first names", firsts.join(" and ")),
+            ("Taxpayer name", get("taxpayer")),
+            ("Spouse name", get("spouse")),
+            (
+                "Signer name",
+                officer.map(|s| s.name.clone()).unwrap_or_default(),
+            ),
+            (
+                "Signer title",
+                officer.map(|s| s.title.clone()).unwrap_or_default(),
+            ),
+            ("Tax year", self.year.to_string()),
+            ("Next year", (self.year + 1).to_string()),
+            ("Return type", self.return_type.clone()),
+            ("Firm name", firm),
+            (
+                "Date",
+                chrono::Local::now().format("%B %-d, %Y").to_string(),
+            ),
+        ] {
+            f.insert(k.into(), v);
+        }
+        f
+    }
+
+    /// The ticked letters laid out for this client: (template, laid).
+    fn laid_letters(&self) -> Vec<(vf_letters::Template, vf_letters::Laid)> {
+        let f = self.fields();
+        self.letters
+            .iter()
+            .filter(|(_, on)| *on)
+            .map(|(t, _)| {
+                (
+                    t.clone(),
+                    vf_letters::layout(t, &f, &self.return_type, None),
+                )
+            })
+            .collect()
     }
 
     fn load(&mut self, ctx: &egui::Context, s: &PortalSettings) {
@@ -198,7 +323,8 @@ impl DeliverWindow {
                     ds.push(p.delivery(&d.id)?);
                 }
                 let files = p.files_for_client(&id)?;
-                Ok((ds, files))
+                let firm = p.status().map(|s| s.firm_name).unwrap_or_default();
+                Ok((ds, files, firm))
             })())
         }));
     }
@@ -216,6 +342,10 @@ impl DeliverWindow {
             self.title = d.title.clone();
             self.with_return = d.step(delivery::RETURN).is_some_and(|s| s.present);
             self.with_8879 = d.step(delivery::ESIGN).is_some_and(|s| s.present);
+            self.with_letters = d.step(delivery::LETTERS).is_some_and(|s| s.present);
+            if !d.signers.is_empty() {
+                self.signers = d.signers.clone();
+            }
             self.return_file = d.return_file.as_ref().map(|f| f.id.clone());
             self.link = d.esign_link.clone().unwrap_or_default();
             self.notify = d.notify;
@@ -239,7 +369,8 @@ impl DeliverWindow {
         let Ok(done) = rx.try_recv() else { return };
         self.job = None;
         match done {
-            Done::Loaded(Ok((ds, files))) => {
+            Done::Loaded(Ok((ds, files, firm))) => {
+                self.firm_name = firm;
                 self.reads.send(ds.clone());
                 self.deliveries = ds;
                 let mut files = files;
@@ -358,6 +489,9 @@ impl DeliverWindow {
                     });
             });
             if before != (self.year, self.return_type.clone()) {
+                if before.1 != self.return_type {
+                    self.offer_letters();
+                }
                 if self.current().is_none() {
                     self.title = format!("Your {} tax return", self.year);
                     self.return_file = None;
@@ -390,6 +524,107 @@ impl DeliverWindow {
                 .map(|s| delivery::state_words(&s.state).to_string())
                 .unwrap_or_default()
         };
+        // Section: letters to sign (Addendum D3).
+        ui.group(|ui| {
+            let letters_done = current
+                .as_ref()
+                .and_then(|d| d.step(delivery::LETTERS))
+                .is_some_and(|s| s.state == "done");
+            let sent_letters: Vec<delivery::DeliveryLetter> =
+                current.as_ref().map(|d| d.letters.clone()).unwrap_or_default();
+            ui.horizontal(|ui| {
+                ui.add_enabled(
+                    can && sent_letters.is_empty() && !letters_done,
+                    egui::Checkbox::new(&mut self.with_letters, RichText::new("Letters to sign").strong()),
+                );
+                ui.label(RichText::new(step_state(delivery::LETTERS)).color(theme::ink_muted()));
+            });
+            if !self.with_letters {
+                return;
+            }
+            if !sent_letters.is_empty() {
+                let signers = current.as_ref().map(|d| d.signers.clone()).unwrap_or_default();
+                for l in &sent_letters {
+                    let by: Vec<String> = l
+                        .signatures
+                        .iter()
+                        .map(|g| {
+                            let who = signers
+                                .iter()
+                                .find(|s| s.id == g.signer_id)
+                                .map(|s| s.name.clone())
+                                .unwrap_or_default();
+                            format!("{who} {}", widgets::local_time(&g.signed_at))
+                        })
+                        .collect();
+                    ui.label(format!(
+                        "{} ({} page{}): {}",
+                        l.name,
+                        l.pages,
+                        if l.pages == 1 { "" } else { "s" },
+                        if by.is_empty() { "not signed yet".to_string() } else { format!("signed by {}", by.join(", ")) }
+                    ));
+                }
+                return;
+            }
+            if self.letters.is_empty() {
+                ui.label(widgets::caption("No letter templates for this return type: add them in Admin › Letter templates."));
+            }
+            for (tpl, on) in &mut self.letters {
+                ui.add_enabled(can, egui::Checkbox::new(on, format!("{}{}", tpl.name, if tpl.sample { " (sample text)" } else { "" })));
+            }
+            ui.label(RichText::new("Who signs").small().color(theme::ink_muted()));
+            for s in &mut self.signers {
+                ui.horizontal(|ui| {
+                    ui.label(vf_letters::role_words(&s.role));
+                    widgets::named(
+                        ui.add_enabled(can, egui::TextEdit::singleline(&mut s.name).desired_width(170.0)),
+                        &format!("{} name", vf_letters::role_words(&s.role)),
+                    );
+                    if s.role == "officer" {
+                        ui.add_enabled(
+                            can,
+                            egui::TextEdit::singleline(&mut s.title).desired_width(110.0).hint_text("Title"),
+                        );
+                    }
+                    let mut email = s.email.clone().unwrap_or_default();
+                    if ui
+                        .add_enabled(can, egui::TextEdit::singleline(&mut email).desired_width(190.0).hint_text("Email"))
+                        .changed()
+                    {
+                        s.email = Some(email.trim().to_string()).filter(|e| !e.is_empty());
+                    }
+                    let mut phone = s.phone.clone().unwrap_or_default();
+                    if ui
+                        .add_enabled(can, egui::TextEdit::singleline(&mut phone).desired_width(120.0).hint_text("Mobile"))
+                        .changed()
+                    {
+                        s.phone = Some(phone.trim().to_string()).filter(|e| !e.is_empty());
+                    }
+                });
+            }
+            if self.signers.iter().skip(1).any(|s| s.email.is_none() && s.phone.is_none()) {
+                ui.colored_label(
+                    theme::warn(),
+                    "A second signer needs their own email or mobile (their code goes there): add it here or in the client's Portal contacts.",
+                );
+            }
+            if ui.add_enabled(!busy, egui::Button::new("Preview letters…")).clicked() {
+                for (t, laid) in self.laid_letters() {
+                    let dir = std::env::temp_dir().join("vibe-files-letters");
+                    let _ = std::fs::create_dir_all(&dir);
+                    let p = dir.join(format!("{} - {}.pdf", self.client.code, vf_letters::store::safe_id(&t.id)));
+                    match std::fs::write(&p, &laid.pdf) {
+                        Ok(()) => {
+                            if let Err(e) = crate::shell::run(&crate::shell::ShellAction::Open(p)) {
+                                self.err = Some(e);
+                            }
+                        }
+                        Err(e) => self.err = Some(e.to_string()),
+                    }
+                }
+            }
+        });
         // Section: the tax return PDF.
         ui.group(|ui| {
             ui.horizontal(|ui| {
@@ -503,7 +738,7 @@ impl DeliverWindow {
                 };
                 if ui
                     .add_enabled(
-                        can && link_ok && (self.with_return || self.with_8879),
+                        can && link_ok && (self.with_return || self.with_8879 || self.with_letters),
                         widgets::primary_button(label),
                     )
                     .clicked()
@@ -601,10 +836,20 @@ impl DeliverWindow {
             Act::Reload => self.load(ctx, s),
             Act::Send => {
                 let steps = StepsIn {
+                    letters: self.with_letters,
                     return_: self.with_return,
                     esign8879: self.with_8879,
                     ..Default::default()
                 };
+                // The letters, laid out now (sent once, while the delivery has none).
+                let letters: Vec<(vf_letters::Template, vf_letters::Laid)> =
+                    if self.with_letters && current.as_ref().is_none_or(|d| d.letters.is_empty()) {
+                        self.laid_letters()
+                    } else {
+                        Vec::new()
+                    };
+                let signers = self.signers.clone();
+                let with_letters = self.with_letters;
                 let title = self.title.trim().to_string();
                 let file = self.return_file.clone().filter(|_| self.with_return);
                 let link = self.link.trim().to_string();
@@ -654,6 +899,22 @@ impl DeliverWindow {
                             && d.esign_link.as_deref() != Some(l.as_str())
                         {
                             d = p.set_esign_link(&d.id, &l)?;
+                        }
+                        if with_letters && d.letters.is_empty() {
+                            for (t, laid) in &letters {
+                                let blocks =
+                                    serde_json::to_string(&laid.blocks).expect("serializes");
+                                d = p.add_letter(
+                                    &d.id,
+                                    &t.name,
+                                    &t.doc_type,
+                                    &t.id,
+                                    t.version,
+                                    &blocks,
+                                    &laid.pdf,
+                                )?;
+                            }
+                            d = p.set_signers(&d.id, &signers)?;
                         }
                         p.delivery(&d.id)
                     })();

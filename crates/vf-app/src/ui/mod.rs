@@ -25,6 +25,7 @@ pub mod ingest;
 pub mod intake;
 pub mod invite_list;
 pub mod job;
+pub mod letter_templates;
 pub mod listupdate;
 pub mod merge_page;
 pub mod meta_editor;

@@ -791,6 +791,22 @@ impl Portal {
         Self::read(self.auth(self.bulk.put(&self.url(path))).send_json(body))
     }
 
+    /// A POST of raw bytes (a letter PDF, Addendum D3), on the agent with no overall limit.
+    pub(crate) fn post_bytes<T: DeserializeOwned>(
+        &self,
+        path: &str,
+        query: &[(&str, &str)],
+        bytes: &[u8],
+    ) -> Result<T> {
+        let mut r = self
+            .auth(self.bulk.post(&self.url(path)))
+            .header("Content-Type", "application/octet-stream");
+        for (k, v) in query {
+            r = r.query(k, v);
+        }
+        Self::read(r.send(bytes))
+    }
+
     pub(crate) fn post_empty<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
         Self::read(self.auth(self.quick.post(&self.url(path))).send_empty())
     }

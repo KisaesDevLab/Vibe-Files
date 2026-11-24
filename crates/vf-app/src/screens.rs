@@ -640,6 +640,260 @@ mod tests {
         std::fs::write(out.join("steps.txt"), steps.join("\n")).unwrap();
     }
 
+    /// Addendum §12 slice 3 (letters) walkthrough against a real Vibe Portal: the Deliver window
+    /// sends the engagement letter for a joint 1040 with both spouses as signers (from Portal
+    /// contacts); in headless Edge the taxpayer signs, then the spouse on the same device after
+    /// a code; the step 1 PDF (the signed letter, then its log) is committed by Intake into
+    /// `Income Tax\2025\Delivery`. Same variables as `delivery_walkthrough`.
+    #[test]
+    #[ignore = "needs a running portal"]
+    fn letters_walkthrough() {
+        let (Ok(url), Ok(key), Ok(log), Ok(client_js), Ok(out)) = (
+            std::env::var("VF_WALK_URL"),
+            std::env::var("VF_WALK_KEY"),
+            std::env::var("VF_WALK_LOG"),
+            std::env::var("VF_WALK_CLIENT"),
+            std::env::var("VF_WALK_DIR"),
+        ) else {
+            return;
+        };
+        let out = std::path::PathBuf::from(out);
+        std::fs::create_dir_all(&out).unwrap();
+        let mut steps: Vec<String> = Vec::new();
+        let mut note = |s: String| {
+            eprintln!("{s}");
+            steps.push(s);
+        };
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path().join("Clients");
+        vf_fixtures::generate(&root, 3).unwrap();
+        crate::ui::test_util::pdfium_first();
+        let data = t.path().join("data");
+        drop(crate::session::open(&data, "dev", &root).unwrap());
+        let cab = vf_fs::cabinet::read(&root).unwrap().cabinet_id;
+        let s = vf_portal::PortalSettings::new(&cab, &url, &key, 0)
+            .unwrap()
+            .with_deliveries(true);
+        vf_portal::settings::save(&root, &s).unwrap();
+        crate::portal::register_inbox(&root).unwrap();
+        for (_, name) in vf_portal::delivery::STEP_DOC_TYPES {
+            vf_fs::doctypes::ensure(&root, name, vf_portal::delivery::DELIVERY_FOLDER, false)
+                .unwrap();
+        }
+        let d = data.clone();
+        let mut h = HarnessBuilder::default()
+            .with_max_steps(crate::ui::test_util::MAX_STEPS)
+            .with_theme(egui::Theme::Light)
+            .with_size([1440.0, 900.0])
+            .build_eframe(move |cc| VibeFilesApp::new(&cc.egui_ctx, d.clone()));
+        h.run_steps(8);
+        let shot = |h: &mut egui_kittest::Harness<'static, VibeFilesApp>, name: &str| {
+            for _ in 0..5 {
+                h.step();
+            }
+            match h.render() {
+                Ok(img) => img.save(out.join(format!("{name}.png"))).unwrap(),
+                Err(e) => eprintln!("{name}: {e}"),
+            }
+        };
+        let said = |h: &egui_kittest::Harness<'static, VibeFilesApp>, text: &str| {
+            h.query_all_by_label_contains(text).next().is_some()
+        };
+        let wait_long =
+            |h: &mut egui_kittest::Harness<'static, VibeFilesApp>,
+             what: &str,
+             ok: &dyn Fn(&egui_kittest::Harness<'static, VibeFilesApp>) -> bool| {
+                let start = std::time::Instant::now();
+                while !ok(h) {
+                    assert!(start.elapsed().as_secs() < 90, "{what}: never");
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                    h.step();
+                }
+            };
+        h.get_by_role_and_label(Role::Button, "Open existing")
+            .click();
+        h.run_steps(8);
+        h.get_by_label("Cabinet folder").click();
+        h.step();
+        h.get_by_label("Cabinet folder")
+            .type_text(&root.display().to_string());
+        h.step();
+        h.get_by_role_and_label(Role::Button, "Open cabinet")
+            .click();
+        assert!(wait_for(&mut h, |h| matches!(
+            h.state().screen,
+            crate::app::Screen::Open(_)
+        )));
+        h.run_steps(8);
+        {
+            let o = open_mut(&mut h);
+            vf_fs::doctypes::sync(&mut o.opened.conn, &root, "dev", "doc_types_edit").unwrap();
+        }
+        let c = {
+            let o = open_mut(&mut h);
+            o.browse.set_scope(vf_core::browse::Scope::Client(0));
+            o.browse.portal.reread();
+            o.browse.snap.clients[0].clone()
+        };
+        let folder = c.folder_rel.clone().unwrap();
+        // The couple's Portal contacts (PA-105), as typed in the client panel.
+        vf_fs::contacts::set_by_hand(
+            &root,
+            &c.id,
+            &vf_fs::contacts::Row {
+                first: "Jordan".into(),
+                last: "Sample".into(),
+                email: "jordan.sample@example.com".into(),
+                spouse_first: "Casey".into(),
+                spouse_last: "Sample".into(),
+                spouse_email: "casey.sample@example.com".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let p = crate::portal::client(&s);
+        p.put_client(&c.id, &c.ext_id, &c.name, None).unwrap();
+        p.invite(
+            &c.id,
+            Some("jordan.sample@example.com"),
+            None,
+            "Jordan Sample",
+            "Taxpayer",
+        )
+        .unwrap();
+        note(format!(
+            "Setup: {} ({}) on the portal; Jordan invited; Jordan and Casey in Portal contacts",
+            c.name, c.ext_id
+        ));
+
+        // ---- Step 1: Deliver tax return… with the engagement letter, both spouses signing.
+        h.run_steps(4);
+        h.get_by_role_and_label(Role::Button, "Deliver tax return…")
+            .click();
+        wait_long(&mut h, "the window read", &|h| said(h, "WHAT HAS HAPPENED"));
+        h.run_steps(6);
+        for label in ["Tax return PDF", "Form 8879", "Letters to sign"] {
+            h.get_by_label(label).click();
+            h.run_steps(3);
+        }
+        wait_long(&mut h, "the signers", &|h| said(h, "Who signs"));
+        shot(&mut h, "01-deliver-letters");
+        h.get_by_role_and_label(Role::Button, "Send to client")
+            .click();
+        wait_long(&mut h, "sent", &|h| said(h, "Sent to the client."));
+        let sent = p.deliveries(Some(&c.id)).unwrap();
+        let did = sent[0].id.clone();
+        let full = p.delivery(&did).unwrap();
+        assert_eq!(
+            full.letters.len(),
+            1,
+            "the engagement letter (the consents start unticked)"
+        );
+        assert_eq!(
+            full.signers
+                .iter()
+                .map(|s| s.role.as_str())
+                .collect::<Vec<_>>(),
+            ["taxpayer", "spouse"]
+        );
+        note(format!(
+            "Step 1: sent with \"{}\" ({} page(s)), signers {:?}",
+            full.letters[0].name,
+            full.letters[0].pages,
+            full.signers
+                .iter()
+                .map(|s| s.name.clone())
+                .collect::<Vec<_>>()
+        ));
+
+        // ---- Step 2: Jordan signs, then Casey on the same device after a code.
+        let ok = std::process::Command::new("node")
+            .args([
+                &client_js,
+                &url,
+                &out.display().to_string(),
+                &log,
+                "jordan.sample@example.com",
+                "letters",
+                "casey.sample@example.com",
+            ])
+            .status()
+            .is_ok_and(|s| s.success());
+        assert!(ok, "the client's signing (see client-letters.json)");
+        let now = p.delivery(&did).unwrap();
+        assert_eq!(
+            now.step(vf_portal::delivery::LETTERS)
+                .map(|s| s.state.as_str()),
+            Some("done")
+        );
+        let vias: Vec<String> = now.letters[0]
+            .signatures
+            .iter()
+            .map(|g| g.via.clone())
+            .collect();
+        assert_eq!(vias.len(), 2);
+        assert!(
+            vias.contains(&"own_login".to_string()) && vias.contains(&"same_device".to_string())
+        );
+        assert!(now.letters[0].signed_sha256.is_some());
+        note("Step 2: Jordan signed (own login), Casey signed after a code (same device); step 1 done".into());
+        {
+            let o = open_mut(&mut h);
+            o.browse.portal.delivery = None;
+        }
+
+        // ---- Step 3: the step 1 PDF is fetched and filed.
+        open_mut(&mut h).browse.portal.fetch_now = true;
+        let inbox = crate::portal::inbox(&root);
+        let found = |inbox: &std::path::Path| {
+            std::fs::read_dir(inbox)
+                .ok()
+                .into_iter()
+                .flatten()
+                .flatten()
+                .any(|e| {
+                    e.file_name()
+                        .to_string_lossy()
+                        .contains("2025 Delivery 1 - Letters")
+                })
+        };
+        wait_long(&mut h, "the letters PDF fetched", &|_| found(&inbox));
+        h.state_mut().tab = crate::app::Tab::Intake;
+        h.run_steps(10);
+        if let Some(b) = h.query_by_label("Preview") {
+            b.click();
+        }
+        wait_long(&mut h, "the row ready", &|h| said(h, "Commit 1 file"));
+        shot(&mut h, "02-intake-letters-pdf");
+        h.query_all_by_role_and_label(Role::Button, "Commit 1 file")
+            .last()
+            .unwrap()
+            .click();
+        h.run_steps(6);
+        wait_long(&mut h, "the commit summary", &|h| {
+            h.query_all_by_label("Confirm commit").next().is_some()
+        });
+        h.query_all_by_label("Confirm commit")
+            .next()
+            .unwrap()
+            .click();
+        h.run_steps(6);
+        let filed = root
+            .join(&folder)
+            .join("Income Tax")
+            .join("2025")
+            .join("Delivery")
+            .join("2025 Delivery 1 - Letters.pdf");
+        wait_long(&mut h, "filed", &|_| filed.exists());
+        let bytes = std::fs::read(&filed).unwrap();
+        assert!(bytes.starts_with(b"%PDF"));
+        note(format!(
+            "Step 3: committed {folder}\\Income Tax\\2025\\Delivery\\2025 Delivery 1 - Letters.pdf ({} bytes: the signed letter, then the log page)",
+            bytes.len()
+        ));
+        std::fs::write(out.join("steps.txt"), steps.join("\n")).unwrap();
+    }
+
     /// Presses the open window's Read again.
     fn click_read_again(h: &mut egui_kittest::Harness<'static, VibeFilesApp>) {
         h.query_all_by_role_and_label(Role::Button, "Read again")

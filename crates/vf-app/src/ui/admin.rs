@@ -45,6 +45,8 @@ pub enum Page {
     Balances,
     /// Admin › Portal › Deliveries (Addendum §12.6).
     Deliveries,
+    /// Admin › Portal › Letter templates (Addendum §12.2).
+    LetterTemplates,
     InviteList,
 }
 
@@ -74,6 +76,7 @@ const NAV: &[(&str, &[&str])] = &[
             "Portal requests",
             "To-do templates",
             "Deliveries",
+            "Letter templates",
             "Balances",
         ],
     ),
@@ -115,6 +118,7 @@ fn page_of(item: &str) -> Option<Page> {
         "To-do templates" => Page::TodoTemplates,
         "Balances" => Page::Balances,
         "Deliveries" => Page::Deliveries,
+        "Letter templates" => Page::LetterTemplates,
         "Invite from client list" => Page::InviteList,
         "Audit trail" => Page::Audit,
         "Retention classes" => Page::Retention,
@@ -226,6 +230,7 @@ pub struct Admin {
     pub todo_templates: crate::ui::todo::TemplatesPage,
     pub balances: crate::ui::balance::BalancesPage,
     pub deliveries: crate::ui::delivery::DeliveriesPage,
+    pub letter_templates: crate::ui::letter_templates::LetterTemplatesPage,
     /// PA-105: Admin › Portal › Invite from client list.
     pub invite_list: crate::ui::invite_list::InvitePage,
     /// Doc types: archived ones listed too.
@@ -273,6 +278,7 @@ impl Admin {
             todo_templates: Default::default(),
             balances: Default::default(),
             deliveries: Default::default(),
+            letter_templates: Default::default(),
             invite_list: Default::default(),
             show_archived: false,
         };
@@ -556,6 +562,13 @@ pub fn show(ui: &mut egui::Ui, a: &mut Admin, env: &mut Env, sweep: SweepEnv, lo
                     crate::ui::todo::templates_page(ui, &mut a.todo_templates, env)
                 });
         }
+        Page::LetterTemplates => {
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    crate::ui::letter_templates::page(ui, &mut a.letter_templates, env)
+                });
+        }
         Page::Deliveries => {
             egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
@@ -701,6 +714,14 @@ fn nav(ui: &mut egui::Ui, a: &mut Admin, has_password: bool, locked: bool) {
                 {
                     a.page = Page::TodoTemplates;
                     a.todo_templates.reread();
+                }
+            } else if *item == "Letter templates" {
+                if ui
+                    .selectable_label(a.page == Page::LetterTemplates, *item)
+                    .clicked()
+                {
+                    a.page = Page::LetterTemplates;
+                    a.letter_templates.reread();
                 }
             } else if *item == "Deliveries" {
                 if ui

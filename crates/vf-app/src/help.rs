@@ -87,7 +87,7 @@ articles! {
     Intake: "intake", "intake-asks", "intake-rules", "just-filed", "scanning", "cover-sheets", "print-capture",
         "several-pcs", "cloud-folders", "ocr";
     Viewer: "viewer", "annotations", "forms", "ten-key", "page-tools", "printing";
-    Sync: "sync", "sync-rules", "sync-key", "sync-conflicts", "portal", "portal-invite-list", "portal-requests", "portal-inbox", "portal-secure-links", "portal-b2-list", "portal-todo", "portal-balance", "portal-delivery";
+    Sync: "sync", "sync-rules", "sync-key", "sync-conflicts", "portal", "portal-invite-list", "portal-requests", "portal-inbox", "portal-secure-links", "portal-b2-list", "portal-todo", "portal-balance", "portal-delivery", "letter-templates";
     Admin: "admin", "admin-password", "doc-types", "folder-templates", "clients", "folder-import", "folder-import-matches", "merge-cabinets", "similar-clients", "clients-from-a-list", "bulk-changes", "retention",
         "trash", "audit", "devices", "catalog-place", "maintenance";
     Trouble: "troubleshooting", "data-and-backups";
