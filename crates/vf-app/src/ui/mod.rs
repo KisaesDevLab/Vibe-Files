@@ -5,6 +5,7 @@ pub mod browse;
 pub mod bulk;
 pub mod capture;
 pub mod chrome;
+pub mod client_delete;
 pub mod client_merge;
 pub mod client_notes;
 pub mod client_panel;

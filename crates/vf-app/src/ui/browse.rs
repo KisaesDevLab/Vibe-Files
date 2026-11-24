@@ -531,6 +531,13 @@ pub struct Browse {
     pub folder_dialog: Option<FolderDialog>,
     /// Merge the client shown into another (Q-107).
     pub client_merge: Option<crate::ui::client_merge::MergeDialog>,
+    /// "Delete client…" (owner 2026-11-24), and the last delete, offered for Undo in the notice.
+    pub client_delete: Option<crate::ui::client_delete::DeleteDialog>,
+    pub undo_delete: Option<vf_fs::clientdelete::Deleted>,
+    /// Asked for where the cabinet is not at hand (the tree's menu; the notice's Undo):
+    /// acted on by `show`.
+    pub delete_asked: Option<(String, String)>,
+    undo_delete_asked: bool,
     /// The "Import clients CSV…" dialog, while open.
     pub import: Option<ImportDialog>,
     /// The client inspector's add-relationship form.
@@ -749,6 +756,10 @@ impl Browse {
             new_client: None,
             folder_dialog: None,
             client_merge: None,
+            client_delete: None,
+            undo_delete: None,
+            delete_asked: None,
+            undo_delete_asked: false,
             b2_remove: None,
             others_changed: false,
             reloads: 0,
@@ -2965,6 +2976,38 @@ pub fn show(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env) {
             b.b2_remove = None;
         }
     }
+    if let Some(asked) = b.delete_asked.take() {
+        let portal = b.portal.settings(env.root).is_some();
+        b.client_delete = Some(crate::ui::client_delete::DeleteDialog::new(asked, portal));
+    }
+    if std::mem::take(&mut b.undo_delete_asked)
+        && let Some(d) = b.undo_delete.take()
+    {
+        let said = crate::ui::client_delete::undo(env, &d);
+        b.reload(env.conn);
+        match said {
+            Ok(m) => {
+                b.notice = Some(m);
+                if let Some(ci) = b.snap.clients.iter().position(|c| c.id == d.id) {
+                    b.go_to_client(ci);
+                }
+            }
+            Err(e) => b.notice = Some(format!("Not undone: {e}")),
+        }
+    }
+    if let Some(d) = &mut b.client_delete {
+        match crate::ui::client_delete::show(ui.ctx(), d, env) {
+            DialogOutcome::Open => {}
+            DialogOutcome::Cancelled => b.client_delete = None,
+            DialogOutcome::Done(x) => {
+                b.client_delete = None;
+                b.reload(env.conn);
+                b.set_scope(Scope::Cabinet);
+                b.notice = Some(crate::ui::client_delete::said(&x));
+                b.undo_delete = Some(x);
+            }
+        }
+    }
     if let Some(d) = &mut b.client_merge {
         match crate::ui::client_merge::show(ui.ctx(), d, env) {
             DialogOutcome::Open => {}
@@ -3452,6 +3495,16 @@ fn tree(ui: &mut egui::Ui, b: &mut Browse) {
                         name: c.name.clone(),
                     },
                 )];
+                // Owner 2026-11-24: a client with no documents can be deleted, folder and all.
+                if node.count == 0 {
+                    asks.push((
+                        "Delete client…",
+                        FolderAsk::DeleteClient {
+                            client_id: c.id.clone(),
+                            label: format!("{}  {}", c.name, c.ext_id),
+                        },
+                    ));
+                }
                 if let Some(cf) = &c.folder_rel {
                     asks.push(("New folder…", FolderAsk::NewFolder { parent: cf.clone() }));
                     asks.push((
@@ -3628,7 +3681,11 @@ fn tree(ui: &mut egui::Ui, b: &mut Browse) {
         b.prefs_changed();
     }
     if let Some(a) = ask {
-        b.folder_dialog = Some(FolderDialog::new(a));
+        if let FolderAsk::DeleteClient { client_id, label } = a {
+            b.delete_asked = Some((client_id, label));
+        } else {
+            b.folder_dialog = Some(FolderDialog::new(a));
+        }
     }
     if let Some(s) = pick {
         b.set_scope(s);
@@ -3943,6 +4000,7 @@ fn grid(ui: &mut egui::Ui, b: &mut Browse, conn: &Connection) {
         });
     }
     let mut dismiss = false;
+    let mut undo_delete = false;
     if let Some(n) = &b.notice {
         egui::Frame::new()
             .fill(crate::ui::theme::soft(widgets::rgb(0xE6EEF9)))
@@ -3953,6 +4011,10 @@ fn grid(ui: &mut egui::Ui, b: &mut Browse, conn: &Connection) {
                     ui.label(RichText::new(n).color(theme::ink_secondary()));
                     ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
                         dismiss = ui.button("Dismiss").clicked();
+                        // The client just deleted can be put back (owner 2026-11-24).
+                        if b.undo_delete.is_some() {
+                            undo_delete = ui.button("Undo delete").clicked();
+                        }
                     });
                 });
             });
@@ -3960,6 +4022,10 @@ fn grid(ui: &mut egui::Ui, b: &mut Browse, conn: &Connection) {
     }
     if dismiss {
         b.notice = None;
+        b.undo_delete = None;
+    }
+    if undo_delete {
+        b.undo_delete_asked = true;
     }
     if b.online_waiting > 0 {
         ui.label(widgets::caption(format!(
@@ -8212,6 +8278,59 @@ Petty cash,1234.50
         let rec = vf_fs::contacts::record(&root, &id).unwrap();
         assert_eq!(rec.effective().email, "john.new@example.test");
         assert_eq!(rec.effective().spouse_email, "jane@example.test");
+    }
+
+    /// Owner 2026-11-24: a client with no documents is deleted from its panel (the dialog
+    /// says what goes), leaves the client list and the CSV, and Undo delete puts it back.
+    #[test]
+    fn a_client_with_no_documents_is_deleted_and_put_back() {
+        let mut h = cabinet_harness();
+        let csv = write_csv(&h, "ClientID,Name\n1001,Acme LLC\n1002,Baker Trust\n");
+        click(&mut h, "Import clients CSV…");
+        type_into(&mut h, "CSV file", &csv);
+        click(&mut h, "Read");
+        click(&mut h, "Import 2 rows (one transaction)");
+        click(&mut h, "Acme LLC  1001");
+        click(&mut h, "Delete client…");
+        let start = std::time::Instant::now();
+        while h.query_by_label("Delete Acme LLC (1001)?").is_none() {
+            assert!(
+                start.elapsed() < crate::ui::test_util::PATIENCE,
+                "no question"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            h.step();
+        }
+        assert!(h.query_by_label("• It has no folder.").is_some());
+        click(&mut h, "Delete client");
+        let start = std::time::Instant::now();
+        while h.state().b.undo_delete.is_none() {
+            assert!(
+                start.elapsed() < crate::ui::test_util::PATIENCE,
+                "not deleted"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            h.step();
+        }
+        h.run();
+        assert!(
+            h.query_by_label_contains("Deleted Acme LLC (1001).")
+                .is_some()
+        );
+        assert!(h.state().b.snap.clients.iter().all(|c| c.ext_id != "1001"));
+        assert!(!std::fs::read_to_string(&csv).unwrap().contains("1001"));
+        click(&mut h, "Undo delete");
+        h.run();
+        assert!(
+            h.query_by_label_contains("Acme LLC (1001) is back")
+                .is_some()
+        );
+        assert!(h.state().b.snap.clients.iter().any(|c| c.ext_id == "1001"));
+        assert!(
+            std::fs::read_to_string(&csv)
+                .unwrap()
+                .contains("1001,Acme LLC")
+        );
     }
 
     /// P01 step 3: entity type and relationships from the client inspector.

@@ -4,6 +4,7 @@
 pub mod aliases;
 pub mod cabinet;
 pub mod changes;
+pub mod clientdelete;
 pub mod clientmerge;
 pub mod clients;
 pub mod cloud;

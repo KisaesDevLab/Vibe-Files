@@ -35,9 +35,11 @@ When a client was made twice, open the one to remove in Browse and press **Merge
 - Legal holds and relationships become the kept client's.
 - The merged client's folder, list entry and client CSV row are removed.
 
-A file later named with the merged client's ID matches no client. The merge is refused while a file in the folder is not in the catalog (press **Refresh** first) or a document is checked out.
+The merge is refused while a file in the folder is not in the catalog (press **Refresh** first) or a document is checked out. **Undo last merge** in **Merge into…** puts the latest merge back; documents moved since stay.
 
-To put the client back, open **Merge into…** on any client and press **Undo last merge** (the most recent merge only, from any PC). Documents moved or renamed since stay with the kept client.
+## Deleting a client
+
+A client with no documents shows **Delete client…** in its panel and on right-click in the tree. Its folder goes with the empty folders in it, and it leaves the client list, the client CSV and its relationships; the portal is not changed. A file other than Vibe Files' own records in the folder, a document in the trash, or a legal hold stops it. **Undo delete** in Browse's notice puts it back.
 
 ## How a folder knows its client
 
@@ -45,15 +47,15 @@ Every client folder holds `_Vibe\client.json`. This small file ties the folder t
 
 ## Partner
 
-A client may have a **PARTNER**: who at the firm looks after it. Type it in the client panel and press Enter, or **Pick…** one other clients have; empty means none. If your client export has a column with each client's partner, whatever it is called (Preparer, for example), choose it as the **Partner column** when you import the client list (Browse's **Import clients CSV…**, or **Partner** under Optional in Intake Setup's **Re-map columns…**): clients get that partner unless you set another here. In Browse, **Partner** above the Views shows one partner's clients and documents (or those with **No partner**).
+A client may have a **PARTNER**: who at the firm looks after it. Type it in the client panel and press Enter, or **Pick…** one other clients have; empty means none. A client export's partner column (Preparer, for example) can be chosen as the **Partner column** when you import the client list: clients get that partner unless you set another here. In Browse, **Partner** above the Views shows one partner's clients and documents (or those with **No partner**).
 
 ## Relationships
 
-Select a client in Browse to see its panel: **ID**, **FOLDER**, **ENTITY TYPE**, **PARTNER** and **RELATIONSHIPS**. A relationship links an entity to an owner, for example `Baker Farms (1004)` and a partner who owns 40%.
+A relationship links an entity to an owner, for example `Baker Farms (1004)` and a partner who owns 40%.
 
 1. Open **New relationship…**.
 2. Choose **This client is the entity** or **This client is the owner**.
-3. In **Owner client ID** or **Entity client ID**, type part of the other client's name or ID and click the client in the list that appears (its ID is filled in). Then fill in the **Role** (shareholder, partner, beneficiary…), the **Share %** and a **Note** if you like.
+3. In **Owner client ID** or **Entity client ID**, type part of the other client's name or ID and click the client in the list that appears (its ID is filled in). Then fill in the **Role**, **Share %** and **Note**.
 4. Press **Add relationship**.
 
 Intake uses relationships to file copies, for example a K-1 filed to the entity and copied to each owner (see [Intake rules](help:intake-rules)). **Remove** beside a relationship takes it off.

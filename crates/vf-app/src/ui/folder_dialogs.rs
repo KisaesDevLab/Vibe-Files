@@ -38,6 +38,12 @@ pub enum FolderAsk {
     ApplyTemplate {
         folder: String,
     },
+    /// "Delete client…" (owner 2026-11-24): opens its own dialog (`client_delete`), never a
+    /// folder dialog. Client uuid and "Name  ID".
+    DeleteClient {
+        client_id: String,
+        label: String,
+    },
 }
 
 pub struct FolderDialog {
@@ -108,6 +114,7 @@ pub fn show(ctx: &egui::Context, d: &mut FolderDialog, env: &mut Env) -> DialogO
         FolderAsk::RenameFolder { .. } => "Rename folder",
         FolderAsk::DeleteFolder { .. } => "Delete folder",
         FolderAsk::ApplyTemplate { .. } => "Apply folder template",
+        FolderAsk::DeleteClient { .. } => "Delete client",
     };
     // The folders the template would add, read once on a thread.
     if let FolderAsk::ApplyTemplate { folder } = &d.ask {
@@ -302,6 +309,7 @@ pub fn show(ctx: &egui::Context, d: &mut FolderDialog, env: &mut Env) -> DialogO
                 FolderAsk::NewFolder { .. } => ("Create folder", !d.name.trim().is_empty()),
                 FolderAsk::RenameFolder { .. } => ("Rename", !d.name.trim().is_empty()),
                 FolderAsk::DeleteFolder { .. } => ("Delete folder", true),
+                FolderAsk::DeleteClient { .. } => ("Delete client", false),
                 FolderAsk::ApplyTemplate { .. } => (
                     "Create folders",
                     matches!(&d.tpl, Some(Ok(p)) if !p.dirs.is_empty()),
@@ -359,6 +367,7 @@ fn start(ctx: &egui::Context, d: &mut FolderDialog, env: &mut Env) -> Option<Don
         FolderAsk::RenameFolder { .. } => "Renaming the folder…",
         FolderAsk::DeleteFolder { .. } => "Deleting the folder…",
         FolderAsk::ApplyTemplate { .. } => "Creating the folders…",
+        FolderAsk::DeleteClient { .. } => "Deleting the client…",
     };
     let (root, device) = (env.root.to_path_buf(), env.device_id.to_string());
     match Job::start(ctx, what, move || {
@@ -379,6 +388,8 @@ fn run(
     device_id: &str,
 ) -> Result<String, String> {
     match &d.ask {
+        // Its own dialog (client_delete): never run here.
+        FolderAsk::DeleteClient { .. } => Err("Delete client has a dialog of its own.".into()),
         FolderAsk::RenameClient { .. } => {
             let Some(p) = &d.plan else {
                 return Err("Nothing to rename.".into());

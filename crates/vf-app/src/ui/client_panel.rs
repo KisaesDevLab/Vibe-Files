@@ -153,6 +153,32 @@ pub fn show(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env, ci: usize) {
                 others,
             ));
         }
+        // Owner 2026-11-24: a client with no documents can be deleted, folder and all. (The
+        // catalog says whether it has any; the dialog checks the folder itself.)
+        let no_docs = env
+            .conn
+            .query_row(
+                "SELECT NOT EXISTS (SELECT 1 FROM document WHERE client_id = ?1 AND deleted_at IS NULL)",
+                [&c.id],
+                |r| r.get::<_, bool>(0),
+            )
+            .unwrap_or(false);
+        if no_docs
+            && ui
+                .add_enabled(
+                    !listing,
+                    egui::Button::new("Delete client…")
+                        .small()
+                        .min_size(crate::ui::widgets::MIN_TARGET),
+                )
+                .on_hover_text(
+                    "This client has no documents: delete it and its empty folder (Undo is offered after)",
+                )
+                .on_disabled_hover_text("Wait until the cabinet’s folders are listed.")
+                .clicked()
+        {
+            b.delete_asked = Some((c.id.clone(), format!("{}  {}", c.name, c.ext_id)));
+        }
         // The firm's Vibe Portal (PA-37): who can sign in for this client.
         if let Some(s) = b.portal.settings(env.root).cloned()
             && ui
