@@ -115,6 +115,65 @@ pub struct TodoList {
     pub assigned_staff_id: Option<String>,
     #[serde(default)]
     pub items: Vec<TodoItem>,
+    /// How many people were told, on a list just sent (`POST /request-lists`; owner
+    /// 2026-11-23). Not kept in the client-folder copy.
+    #[serde(default, skip_serializing)]
+    pub told: Option<u32>,
+}
+
+impl TodoList {
+    /// What staff are told once lists are sent: (words, a warning). `notify`: the client's
+    /// people were to be told. A portal that does not say how many were told: just "sent".
+    pub fn sent_words(
+        made: &[TodoList],
+        notify: bool,
+        name_of: impl Fn(&str) -> String,
+    ) -> (String, bool) {
+        let told: u32 = made.iter().filter_map(|l| l.told).sum();
+        let nobody: Vec<String> = made
+            .iter()
+            .filter(|l| l.told == Some(0))
+            .map(|l| name_of(&l.client_id))
+            .collect();
+        let people = |n: u32| {
+            if n == 1 {
+                "1 person was".to_string()
+            } else {
+                format!("{n} people were")
+            }
+        };
+        if made.len() == 1 {
+            return match made[0].told {
+                None => ("The list was sent.".into(), false),
+                Some(_) if !notify => (
+                    "The list was sent. Nobody was told (Tell the client's people now was unticked).".into(),
+                    false,
+                ),
+                Some(0) => (
+                    "The list was sent, but nobody could be told: invite someone to the portal first (Portal users…).".into(),
+                    true,
+                ),
+                Some(n) => (format!("The list was sent; {} told.", people(n)), false),
+            };
+        }
+        let sent = format!("Sent to {} clients", made.len());
+        if !notify || made.iter().all(|l| l.told.is_none()) {
+            return (format!("{sent}."), false);
+        }
+        if nobody.is_empty() {
+            (format!("{sent}; {} told.", people(told)), false)
+        } else {
+            (
+                format!(
+                    "{sent}; {} told. Nobody could be told at {}: {} (invite someone to the portal first).",
+                    people(told),
+                    nobody.len(),
+                    nobody.join(", ")
+                ),
+                true,
+            )
+        }
+    }
 }
 
 impl TodoList {
@@ -589,5 +648,46 @@ mod tests {
         std::fs::write(&p, format!("{first}\n{second}\n{third}\n")).unwrap();
         assert!(read_copies(t.path(), "Smith, John (1001)").is_empty());
         assert_eq!(gone.status_words(), "Deleted");
+    }
+
+    /// Owner 2026-11-23: staff are told who was told when lists are sent.
+    #[test]
+    fn sent_words_say_who_was_told() {
+        let l: TodoList = serde_json::from_str(LIST_JSON).unwrap();
+        let told = |n: Option<u32>, client: &str| TodoList {
+            told: n,
+            client_id: client.into(),
+            ..l.clone()
+        };
+        let name = |id: &str| format!("Client {id}");
+        let w = |made: &[TodoList], notify| TodoList::sent_words(made, notify, name);
+        assert_eq!(
+            w(&[told(None, "a")], true),
+            ("The list was sent.".into(), false)
+        );
+        assert_eq!(
+            w(&[told(Some(2), "a")], true).0,
+            "The list was sent; 2 people were told."
+        );
+        assert!(
+            w(&[told(Some(0), "a")], true).1,
+            "nobody could be told: a warning"
+        );
+        assert!(
+            !w(&[told(Some(0), "a")], false).1,
+            "unticked: not a warning"
+        );
+        let (words, warn) = w(&[told(Some(1), "a"), told(Some(0), "b")], true);
+        assert_eq!(
+            words,
+            "Sent to 2 clients; 1 person was told. Nobody could be told at 1: Client b (invite someone to the portal first)."
+        );
+        assert!(warn);
+        // The copy in the client folder does not keep the count.
+        assert!(
+            !serde_json::to_string(&told(Some(3), "a"))
+                .unwrap()
+                .contains("told")
+        );
     }
 }

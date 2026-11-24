@@ -701,6 +701,11 @@ mod tests {
         shot(&mut h, "12-vf-cancel-confirm");
         click_last(&mut h, "Cancel list");
         assert!(wait_for(&mut h, |h| said(h, "Cancelled.")));
+        // Cancelled is final (owner 2026-11-23): not opened again.
+        assert!(
+            h.query_by_role_and_label(Role::Button, "Open again")
+                .is_none()
+        );
         h.run_steps(4);
         shot(&mut h, "13-vf-cancelled");
         click_last(&mut h, "Hide");
@@ -1024,7 +1029,10 @@ mod tests {
         type_in(&mut h, due, "2027-02-01");
         shot(&mut h, "o02-template-send");
         click_last(&mut h, "Send to 2 clients");
-        assert!(wait_for(&mut h, |h| said(h, "Sent to 2 clients.")));
+        assert!(wait_for(&mut h, |h| said(
+            h,
+            "Sent to 2 clients; 2 people were told."
+        )));
         shot(&mut h, "o03-template-sent");
         for (c, email) in clients.iter().zip(&emails) {
             let lists = p.todo_lists(&c.id).unwrap();
@@ -1104,7 +1112,10 @@ mod tests {
         h.run_steps(4);
         shot(&mut h, "o05-from-template-filled");
         click_last(&mut h, "Send the list");
-        assert!(wait_for(&mut h, |h| said(h, "The list was sent.")));
+        assert!(wait_for(&mut h, |h| said(
+            h,
+            "The list was sent. Nobody was told (Tell the client"
+        )));
         h.run_steps(6);
         shot(&mut h, "o06-from-template-sent");
         let lists = p.todo_lists(&clients[0].id).unwrap();
@@ -1159,7 +1170,10 @@ mod tests {
         h.run_steps(4);
         shot(&mut h, "o07-blank-list");
         click_last(&mut h, "Send the list");
-        assert!(wait_for(&mut h, |h| said(h, "The list was sent.")));
+        assert!(wait_for(&mut h, |h| said(
+            h,
+            "The list was sent; 1 person was told."
+        )));
         h.run_steps(6);
         let lists = p.todo_lists(&clients[0].id).unwrap();
         let q = lists

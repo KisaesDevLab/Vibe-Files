@@ -24,10 +24,15 @@ use crate::ui::{theme, widgets};
 
 /// What a change did ("The list was sent."), in the app's OK colour: the window's errors have
 /// their own red line (walkthrough 2026-11-23: success showed in red).
-fn done_line(ui: &mut egui::Ui, msg: Option<&str>) {
+fn done_line(ui: &mut egui::Ui, msg: Option<&str>, warn: bool) {
+    let colour = if warn {
+        theme::warn()
+    } else {
+        theme::health_ok()
+    };
     ui.add_sized(
         [ui.available_width(), 36.0],
-        egui::Label::new(RichText::new(msg.unwrap_or("")).color(theme::health_ok())).wrap(),
+        egui::Label::new(RichText::new(msg.unwrap_or("")).color(colour)).wrap(),
     );
 }
 
@@ -204,7 +209,8 @@ fn items_editor(
                         "The client has answered this item: its wording stays.",
                     );
                 });
-                ui.checkbox(&mut it.required, "");
+                // Answered: Required stays as the client saw it (owner 2026-11-23).
+                ui.add_enabled_ui(!fixed, |ui| ui.checkbox(&mut it.required, ""));
                 // Type to search, as every doc type picker (owner 2026-11-05: long lists).
                 let shown = if it.doc_type.is_empty() {
                     "—".to_string()
@@ -442,8 +448,8 @@ enum Done {
     Loaded(Result<Read, Offline>),
     /// A list read or changed: shown, and its summary replaced.
     List(Box<TodoList>, String),
-    /// New lists made.
-    Made(Vec<TodoList>),
+    /// New lists made (and whether the client's people were to be told).
+    Made(Vec<TodoList>, bool),
     /// A list deleted.
     Deleted(String),
     /// PA-104: what a return said (and the file read).
@@ -545,6 +551,8 @@ pub struct TodoWindow {
     audit: AuditOut,
     copies: CopyOut,
     msg: Option<String>,
+    /// `msg` is a warning (sent, but nobody could be told).
+    warn: bool,
     err: Option<String>,
     confirm: Option<Confirm>,
     /// The question was just asked: scrolled into view once (walkthrough 2026-11-23: below a
@@ -582,6 +590,7 @@ impl TodoWindow {
             audit,
             copies,
             msg: None,
+            warn: false,
             err: None,
             confirm: None,
             confirm_shown: false,
@@ -725,6 +734,7 @@ impl TodoWindow {
         let Some(rx) = &self.job else { return };
         let Ok(done) = rx.try_recv() else { return };
         self.job = None;
+        self.warn = false;
         // A pending Cancel/Delete question belongs to the list it was asked for: whatever the
         // window shows next, it is not carried over (QA 2026-11-23).
         self.confirm = None;
@@ -761,8 +771,10 @@ impl TodoWindow {
                     self.msg = Some(msg);
                 }
             }
-            Done::Made(made) => {
-                let n = made.len();
+            Done::Made(made, notify) => {
+                let (words, warn) =
+                    TodoList::sent_words(&made, notify, |_| self.client.name.clone());
+                self.warn = warn;
                 if let Some(ls) = &mut self.lists {
                     for l in made.iter().filter(|l| l.client_id == self.client.id) {
                         ls.insert(
@@ -776,11 +788,7 @@ impl TodoWindow {
                 }
                 self.open = made.into_iter().find(|l| l.client_id == self.client.id);
                 self.mode = Mode::View;
-                self.msg = Some(if n == 1 {
-                    "The list was sent.".into()
-                } else {
-                    format!("Sent to {n} clients.")
-                });
+                self.msg = Some(words);
             }
             Done::Deleted(id) => {
                 if let Some(ls) = &mut self.lists {
@@ -844,7 +852,7 @@ impl TodoWindow {
                 ui.label("Working…");
             });
         }
-        done_line(ui, self.msg.as_deref());
+        done_line(ui, self.msg.as_deref(), self.warn);
         if let Some(e) = &self.err {
             ui.label(RichText::new(e).color(theme::error()));
         }
@@ -1164,7 +1172,9 @@ impl TodoWindow {
                         self.confirm = Some(Confirm::Cancel(l.id.clone()));
                         self.confirm_shown = false;
                     }
-                } else if ui.add_enabled(!busy, egui::Button::new("Open again")).clicked() {
+                } else if l.status == "closed"
+                    && ui.add_enabled(!busy, egui::Button::new("Open again")).clicked()
+                {
                     act = Some(Act::Status(l.id.clone(), ListStatus::Open));
                 }
                 if l.unanswered()
@@ -1311,6 +1321,7 @@ impl TodoWindow {
                 });
             }
             Act::Create(f) => {
+                let notify = f.notify;
                 let new = f.to_new(vec![self.client.id.clone()]);
                 let e = self.entry(
                     "portal_todo_create",
@@ -1343,7 +1354,7 @@ impl TodoWindow {
                                     let _ = copies.0.send(c);
                                 }
                             }
-                            Done::Made(made)
+                            Done::Made(made, notify)
                         }
                         Err(e) => Done::Failed(e.message()),
                     }
@@ -1625,7 +1636,8 @@ enum TDone {
     Loaded(Result<Vec<Template>, String>),
     Saved(Template),
     Deleted(String),
-    Sent(usize),
+    /// What staff are told, and whether it is a warning.
+    Sent(String, bool),
     Failed(String),
 }
 
@@ -1639,6 +1651,7 @@ pub struct TemplatesPage {
     sending: Option<(Template, ListForm, HashSet<String>, String)>,
     job: Option<Receiver<TDone>>,
     msg: Option<String>,
+    warn: bool,
     err: Option<String>,
     confirm_delete: Option<String>,
     /// Audit rows when the app's channel is not given (tests): recorded by the page.
@@ -1670,6 +1683,7 @@ impl Default for TemplatesPage {
             sending: None,
             job: None,
             msg: None,
+            warn: false,
             err: None,
             confirm_delete: None,
             audit: AuditOut::new(tx),
@@ -1795,6 +1809,7 @@ impl TemplatesPage {
         let Some(rx) = &self.job else { return };
         let Ok(d) = rx.try_recv() else { return };
         self.job = None;
+        self.warn = false;
         match d {
             TDone::Loaded(Ok(t)) => self.templates = t,
             TDone::Loaded(Err(e)) | TDone::Failed(e) => self.err = Some(e),
@@ -1811,12 +1826,10 @@ impl TemplatesPage {
                 self.templates.retain(|t| t.id != id);
                 self.msg = Some("Template deleted; lists already sent are kept.".into());
             }
-            TDone::Sent(n) => {
+            TDone::Sent(words, warn) => {
                 self.sending = None;
-                self.msg = Some(format!(
-                    "Sent to {n} client{}.",
-                    if n == 1 { "" } else { "s" }
-                ));
+                self.msg = Some(words);
+                self.warn = warn;
             }
         }
     }
@@ -1884,7 +1897,7 @@ pub fn templates_page(
             ui.label("Working…");
         });
     }
-    done_line(ui, page.msg.as_deref());
+    done_line(ui, page.msg.as_deref(), page.warn);
     if let Some(e) = &page.err {
         ui.label(RichText::new(e).color(theme::error()));
     }
@@ -2136,6 +2149,7 @@ pub fn templates_page(
             .collect();
         let copies = page.app_copies.clone();
         let folders = page.folders.clone();
+        let notify = new.notify;
         let root = env.root.to_path_buf();
         page.job = Some(spawn(&ctx, move || {
             let p = core::client(&s2);
@@ -2180,7 +2194,13 @@ pub fn templates_page(
                             let _ = out.0.send(c);
                         }
                     }
-                    TDone::Sent(made.len())
+                    let (words, warn) = TodoList::sent_words(&made, notify, |id| {
+                        clients
+                            .iter()
+                            .find(|c| c.id == id)
+                            .map_or_else(|| id.to_string(), |c| c.name.clone())
+                    });
+                    TDone::Sent(words, warn)
                 }
                 Err(e) => TDone::Failed(e.message()),
             }

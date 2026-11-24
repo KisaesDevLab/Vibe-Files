@@ -91,6 +91,9 @@ impl PortalError {
                 "The client has answered that item, so its wording and kind stay as they are.".into()
             }
             Some("list_closed") => "This list is closed or cancelled.".into(),
+            Some("list_cancelled") => {
+                "A cancelled list stays cancelled: send a new list instead.".into()
+            }
             Some("list_has_answers") => {
                 "The client has answered this list, so it is kept: cancel it instead.".into()
             }
