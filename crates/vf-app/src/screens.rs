@@ -1066,6 +1066,653 @@ mod tests {
         assert_eq!(her["roleLabel"], "Spouse");
     }
 
+    /// PA-105/PA-106 options walkthrough against a real Vibe Portal (owner 2026-11-24: "testing
+    /// various actions to ensure no process gaps or code errors"). Synthetic people only.
+    /// A. Import a client CSV with contacts (Jane is the spouse at one client and the contact of
+    ///    an LLC; Alex Lead is on file by name only). B. The footer's waiting request opens
+    ///    Portal requests although Admin was never opened. C. Jane's request: both clients, a
+    ///    role at each, a document shared on Approve. D. Alex's request: a name lead, How did
+    ///    you check?, the confirmed email kept. E. A stranger's request: Deny. F. A contact typed
+    ///    in the client panel, then a CSV that changes it: the preview says it is kept. G. Invite
+    ///    from client list: Search, Stop during the pause, Read again, the rest sent, nobody
+    ///    twice. H. Share on portal: someone with a login added at once. I. To-do notices by
+    ///    text too. Set `VF_WALK_URL`, `VF_WALK_KEY`, `VF_WALK_LOG`, `VF_WALK_IDPNG`,
+    ///    `VF_WALK_PG` (the portal's Postgres container) and `VF_WALK_DIR`.
+    #[test]
+    #[ignore = "needs a running portal"]
+    fn contacts_options_walkthrough() {
+        let (Ok(url), Ok(key), Ok(log), Ok(png), Ok(pg), Ok(out)) = (
+            std::env::var("VF_WALK_URL"),
+            std::env::var("VF_WALK_KEY"),
+            std::env::var("VF_WALK_LOG"),
+            std::env::var("VF_WALK_IDPNG"),
+            std::env::var("VF_WALK_PG"),
+            std::env::var("VF_WALK_DIR"),
+        ) else {
+            return;
+        };
+        let out = std::path::PathBuf::from(out);
+        std::fs::create_dir_all(&out).unwrap();
+        let run = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let addr = |who: &str| format!("{who}+{run}@example.com");
+        let since_ms = (run as i64) * 1000;
+        let mail = |to: &str| -> Vec<(i64, String, String)> {
+            std::fs::read_to_string(&log)
+                .unwrap_or_default()
+                .lines()
+                .filter(|l| l.contains("\"msg\":\"notify ("))
+                .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+                .filter(|m| m["to"] == to && m["time"].as_i64().is_some_and(|t| t >= since_ms))
+                .map(|m| {
+                    (
+                        m["time"].as_i64().unwrap_or(0),
+                        m["subject"].as_str().unwrap_or("").to_string(),
+                        m["body"].as_str().unwrap_or("").to_string(),
+                    )
+                })
+                .collect()
+        };
+        // (The portal logs a message just after it answers: looked at for a few seconds.)
+        let invitations_to = |to: &str| {
+            let n = || {
+                mail(to)
+                    .iter()
+                    .filter(|m| m.1.contains("invites you to its client portal"))
+                    .count()
+            };
+            let start = std::time::Instant::now();
+            while n() == 0 && start.elapsed().as_secs() < 3 {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            n()
+        };
+        let curl = |args: &[&str]| -> serde_json::Value {
+            let o = std::process::Command::new("curl")
+                .arg("-s")
+                .args(args)
+                .output()
+                .unwrap();
+            serde_json::from_slice(&o.stdout).unwrap_or(serde_json::Value::Null)
+        };
+        let firm = |method: &str, path: &str, body: Option<serde_json::Value>| {
+            let auth = format!("Authorization: Bearer {key}");
+            let u = format!("{url}/api/firm/v1{path}");
+            let b = body.map(|b| b.to_string());
+            let mut args = vec![
+                "-X",
+                method,
+                "-H",
+                &auth,
+                "-H",
+                "Content-Type: application/json",
+            ];
+            if let Some(b) = &b {
+                args.push("-d");
+                args.push(b);
+            }
+            args.push(&u);
+            curl(&args)
+        };
+        let psql = |sql: &str| {
+            let ok = std::process::Command::new("docker")
+                .args(["exec", &pg, "psql", "-U", "vibe", "-d", "walk", "-c", sql])
+                .output()
+                .is_ok_and(|o| o.status.success());
+            assert!(ok, "psql {sql}");
+        };
+        // A person asks for access on the portal and confirms their email.
+        let ask = |name: &str, email: &str| {
+            let made = curl(&[
+                "-X",
+                "POST",
+                "-H",
+                "Content-Type: application/json",
+                "-d",
+                &serde_json::json!({ "name": name, "email": email, "clientAs": "Walkthrough" })
+                    .to_string(),
+                &format!("{url}/api/portal/access-requests"),
+            ]);
+            let rid = made["requestId"]
+                .as_str()
+                .expect("request made")
+                .to_string();
+            curl(&[
+                "-X",
+                "POST",
+                "-H",
+                "Content-Type: application/octet-stream",
+                "--data-binary",
+                &format!("@{png}"),
+                &format!("{url}/api/portal/access-requests/{rid}/id-photo?side=front"),
+            ]);
+            let code = mail(email)
+                .iter()
+                .rev()
+                .find_map(|m| {
+                    m.2.split(|c: char| !c.is_ascii_digit())
+                        .find(|w| w.len() == 6)
+                        .map(String::from)
+                })
+                .expect("a code");
+            let ok = curl(&[
+                "-X",
+                "POST",
+                "-H",
+                "Content-Type: application/json",
+                "-d",
+                &serde_json::json!({ "code": code, "noBarcode": true }).to_string(),
+                &format!("{url}/api/portal/access-requests/{rid}/confirm"),
+            ]);
+            assert!(ok.get("error").is_none(), "confirmed: {ok}");
+            rid
+        };
+
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path().join("Clients");
+        vf_fixtures::generate(&root, 5).unwrap();
+        let data = t.path().join("data");
+        drop(crate::session::open(&data, "dev", &root).unwrap());
+        let cab = vf_fs::cabinet::read(&root).unwrap().cabinet_id;
+        let s = vf_portal::PortalSettings::new(&cab, &url, &key, 0).unwrap();
+        vf_portal::settings::save(&root, &s).unwrap();
+        let d = data.clone();
+        let mut h = HarnessBuilder::default()
+            .with_max_steps(crate::ui::test_util::MAX_STEPS)
+            .with_theme(egui::Theme::Light)
+            .with_size([1440.0, 1000.0])
+            .build_eframe(move |cc| VibeFilesApp::new(&cc.egui_ctx, d.clone()));
+        h.run_steps(8);
+        let shot = |h: &mut egui_kittest::Harness<'static, VibeFilesApp>, name: &str| {
+            for _ in 0..5 {
+                h.step();
+            }
+            match h.render() {
+                Ok(img) => img.save(out.join(format!("{name}.png"))).unwrap(),
+                Err(e) => eprintln!("{name}: {e}"),
+            }
+        };
+        let said = |h: &egui_kittest::Harness<'static, VibeFilesApp>, text: &str| {
+            h.query_by_label_contains(text).is_some()
+        };
+        let type_in =
+            |h: &mut egui_kittest::Harness<'static, VibeFilesApp>, label: &str, text: &str| {
+                h.get_by_label(label).click();
+                h.step();
+                h.get_by_label(label).type_text(text);
+                h.step();
+            };
+        let wait_said =
+            |h: &mut egui_kittest::Harness<'static, VibeFilesApp>, text: &str, name: &str| {
+                if !wait_for(h, |h| h.query_by_label_contains(text).is_some()) {
+                    for _ in 0..5 {
+                        h.step();
+                    }
+                    if let Ok(img) = h.render() {
+                        img.save(out.join(format!("{name}-failed.png"))).unwrap();
+                    }
+                    panic!("{name}: never showed {text:?}");
+                }
+            };
+        let button_starting = |h: &egui_kittest::Harness<'static, VibeFilesApp>, start: &str| {
+            h.query_all_by_role(Role::Button)
+                .filter_map(|n| {
+                    use egui_kittest::kittest::NodeT;
+                    n.accesskit_node()
+                        .label()
+                        .filter(|l| l.starts_with(start) && l.contains(" at "))
+                })
+                .next()
+                .unwrap_or_else(|| panic!("no button starting {start:?}"))
+        };
+        let checkbox_starting = |h: &egui_kittest::Harness<'static, VibeFilesApp>, start: &str| {
+            h.query_all_by_role(Role::CheckBox)
+                .filter_map(|n| {
+                    use egui_kittest::kittest::NodeT;
+                    n.accesskit_node().label().filter(|l| l.starts_with(start))
+                })
+                .next()
+                .unwrap_or_else(|| panic!("no checkbox starting {start:?}"))
+        };
+        h.get_by_role_and_label(Role::Button, "Open existing")
+            .click();
+        h.run_steps(8);
+        type_in(&mut h, "Cabinet folder", &root.display().to_string());
+        h.get_by_role_and_label(Role::Button, "Open cabinet")
+            .click();
+        assert!(wait_for(&mut h, |h| matches!(
+            h.state().screen,
+            crate::app::Screen::Open(_)
+        )));
+        h.run_steps(8);
+        let clients: Vec<(String, String, String)> = open_mut(&mut h)
+            .browse
+            .snap
+            .clients
+            .iter()
+            .map(|c| (c.id.clone(), c.ext_id.clone(), c.name.clone()))
+            .collect();
+        assert_eq!(clients.len(), 5);
+        let (c0, c1, c2, c3) = (&clients[0], &clients[1], &clients[2], &clients[3]);
+        // The second client is an LLC.
+        vf_fs::clients::set_entity_type(&root, &c1.0, Some("llc")).unwrap();
+
+        // ---- A. The client CSV with Portal contacts.
+        let csv = t.path().join("clients.csv");
+        let q = |s: &str| format!("\"{}\"", s.replace('"', "\"\""));
+        let write_csv = |morgan: &str| {
+            let mut text = String::from(
+                "Client ID,Client Name,TP First Name,TP Last Name,TP Email,TP Cell,SP First Name,SP Email\n",
+            );
+            text.push_str(&format!(
+                "{},{},John,Sample,{},555-201-0001,Jane,{}\n",
+                c0.1,
+                q(&c0.2),
+                addr("john"),
+                addr("jane")
+            ));
+            text.push_str(&format!(
+                "{},{},Jane,Sample,{},,,\n",
+                c1.1,
+                q(&c1.2),
+                addr("jane")
+            ));
+            text.push_str(&format!(
+                "{},{},Morgan,Taylor,{morgan},,,\n",
+                c2.1,
+                q(&c2.2)
+            ));
+            text.push_str(&format!("{},{},Alex,Lead,,,,\n", c3.1, q(&c3.2)));
+            std::fs::write(&csv, text).unwrap();
+        };
+        write_csv(&addr("morgan"));
+        let import =
+            |h: &mut egui_kittest::Harness<'static, VibeFilesApp>, check: &str, name: &str| {
+                h.get_by_role_and_label(Role::Button, "Browse").click();
+                h.run_steps(4);
+                h.get_by_role_and_label(Role::Button, "Import clients CSV…")
+                    .click();
+                h.run_steps(4);
+                h.get_by_label("CSV file").click();
+                h.step();
+                h.get_by_label("CSV file")
+                    .type_text(&csv.display().to_string());
+                h.step();
+                h.get_by_role_and_label(Role::Button, "Read").click();
+                if !wait_for(h, |h| h.query_by_label_contains(check).is_some()) {
+                    for _ in 0..5 {
+                        h.step();
+                    }
+                    if let Ok(img) = h.render() {
+                        img.save(out.join(format!("{name}-failed.png"))).unwrap();
+                    }
+                    panic!("{name}: never showed {check:?}");
+                }
+                for _ in 0..5 {
+                    h.step();
+                }
+                if let Ok(img) = h.render() {
+                    img.save(out.join(format!("{name}.png"))).unwrap();
+                }
+                let label = h
+                    .query_all_by_role(Role::Button)
+                    .filter_map(|n| {
+                        use egui_kittest::kittest::NodeT;
+                        n.accesskit_node().label().filter(|l| {
+                            l.starts_with("Import ") && l.ends_with("(one transaction)")
+                        })
+                    })
+                    .next()
+                    .expect("the Import button");
+                h.get_by_role_and_label(Role::Button, &label).click();
+                assert!(wait_for(h, |h| h
+                    .query_by_label_contains("Portal contacts changed for")
+                    .is_some()));
+                h.run_steps(4);
+            };
+        import(&mut h, "Import changes:", "A1-import-preview");
+
+        // What Approve offers to share: a document of the first client, of a doc type.
+        let (doc_id, doc_type): (String, String) = {
+            let o = open_mut(&mut h);
+            let dt: String = o
+                .opened
+                .conn
+                .query_row(
+                    "SELECT id FROM doc_type WHERE deleted_at IS NULL ORDER BY sort, name LIMIT 1",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            let doc: String = o
+                .opened
+                .conn
+                .query_row(
+                    "SELECT id FROM document WHERE client_id = ?1 AND deleted_at IS NULL ORDER BY rel_path LIMIT 1",
+                    [&c0.0],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            o.opened
+                .conn
+                .execute(
+                    "UPDATE document SET doc_type_id = ?1, tax_year = 2025 WHERE id = ?2",
+                    [&dt, &doc],
+                )
+                .unwrap();
+            (doc, dt)
+        };
+        let mut s2 = vf_portal::settings::load(&root, &cab).unwrap();
+        s2.approve_share = vf_portal::settings::ApproveShare {
+            doc_types: vec![doc_type.clone()],
+            years: 1,
+        };
+        vf_portal::settings::save(&root, &s2).unwrap();
+        // ---- B. Jane asks; the footer says so; Admin was never opened.
+        let jane = addr("jane");
+        ask("Jane Sample", &jane);
+        open_mut(&mut h).browse.portal.look_at_requests_now();
+        wait_said(&mut h, "1 portal access request waiting", "B1-footer");
+        assert!(open_mut(&mut h).admin.is_none(), "Admin not opened yet");
+        h.get_by_label("1 portal access request waiting").click();
+        wait_said(
+            &mut h,
+            "The email they confirmed is on file for:",
+            "B2-requests-page",
+        );
+        shot(&mut h, "B2-requests-page");
+
+        // ---- C. Both clients, a role at each, a document shared on Approve.
+        wait_said(&mut h, "Also share with them:", "C1-share-offered");
+        assert!(said(&h, &format!("{} ({}) as Spouse", c0.2, c0.1)));
+        assert!(said(&h, &format!("{} ({}) as Owner", c1.2, c1.1)));
+        shot(&mut h, "C1-two-clients");
+        h.get_by_role_and_label(Role::Button, "Approve for 2 clients")
+            .click();
+        wait_said(&mut h, "Approved for 2 clients.", "C2-approved");
+        wait_said(&mut h, "1 document shared with them.", "C2-shared");
+        shot(&mut h, "C2-approved");
+        let role_of = |client: &str, email: &str| -> String {
+            let u = firm("GET", &format!("/clients/{client}/users"), None);
+            u["users"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|x| x["email"] == email)
+                .map(|x| x["roleLabel"].as_str().unwrap_or("").to_string())
+                .unwrap_or_default()
+        };
+        assert_eq!(role_of(&c0.0, &jane), "Spouse");
+        assert_eq!(role_of(&c1.0, &jane), "Owner");
+        let files = firm("GET", &format!("/files?clientId={}", c0.0), None);
+        let shared = files["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f["vfDocumentId"] == doc_id.as_str())
+            .expect("the document is on the portal");
+        assert!(
+            shared["users"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|u| u["visible"] == true)
+        );
+
+        // ---- D. A name lead: How did you check?, and the email kept.
+        let alex = addr("alex");
+        ask("Alex Lead", &alex);
+        h.get_by_role_and_label(Role::Button, "Refresh").click();
+        wait_said(
+            &mut h,
+            "Not a match: the email they confirmed is not on file.",
+            "D1-lead",
+        );
+        assert!(said(
+            &h,
+            &format!("{} ({}) as Taxpayer: Alex Lead", c3.2, c3.1)
+        ));
+        shot(&mut h, "D1-lead");
+        h.get_by_role_and_label(Role::Button, "Approve as Taxpayer…")
+            .click();
+        wait_said(&mut h, "How did you check Alex Lead?", "D2-ask");
+        h.get_by_label("Called the number in our records").click();
+        h.run_steps(2);
+        type_in(&mut h, "Who you spoke to", "Alex Lead");
+        h.get_by_role_and_label(Role::Button, "Approve with this check")
+            .click();
+        wait_said(
+            &mut h,
+            "Their contact is kept in the client's Portal contacts.",
+            "D3-approved",
+        );
+        assert_eq!(role_of(&c3.0, &alex), "Taxpayer");
+        let rec = vf_fs::contacts::record(&root, &c3.0).unwrap();
+        assert_eq!(
+            rec.hand.get("email").map(String::as_str),
+            Some(alex.as_str())
+        );
+
+        // ---- E. Nobody's request: Deny.
+        let stranger = addr("stranger");
+        ask("Chris Nobody", &stranger);
+        h.get_by_role_and_label(Role::Button, "Refresh").click();
+        wait_said(&mut h, "Chris Nobody", "E1-stranger");
+        shot(&mut h, "E1-stranger");
+        h.get_by_role_and_label(Role::Button, "Deny").click();
+        wait_said(&mut h, "No requests waiting.", "E2-denied");
+        let left = firm("GET", "/access-requests", None);
+        assert_eq!(left["requests"].as_array().map(Vec::len), Some(0));
+
+        // ---- F. A contact typed in the panel; a CSV that changes it keeps the typed one.
+        h.get_by_role_and_label(Role::Button, "Browse").click();
+        h.run_steps(4);
+        {
+            let o = open_mut(&mut h);
+            let i = o
+                .browse
+                .snap
+                .clients
+                .iter()
+                .position(|c| c.id == c2.0)
+                .unwrap();
+            o.browse.set_scope(vf_core::browse::Scope::Client(i));
+        }
+        h.run_steps(6);
+        h.get_by_label("PORTAL CONTACTS").click();
+        h.run_steps(4);
+        wait_said(
+            &mut h,
+            &format!("Taxpayer: Morgan Taylor · {}", addr("morgan")),
+            "F1-panel",
+        );
+        h.get_by_role_and_label(Role::Button, "Edit contacts…")
+            .click();
+        h.run_steps(4);
+        // The email field holds the CSV's: replaced by the typed one.
+        let typed = addr("morgan.typed");
+        {
+            let o = open_mut(&mut h);
+            // (Typed through the field's state: select-all is not reliable in the harness.)
+            if let Some(bx) = o.browse.contacts_box.as_mut() {
+                bx.set_editing_email(&typed);
+            }
+        }
+        h.run_steps(2);
+        h.get_by_role_and_label(Role::Button, "Save contacts")
+            .click();
+        wait_said(&mut h, &format!("{typed} (typed)"), "F2-typed");
+        shot(&mut h, "F2-typed");
+        write_csv(&addr("morgan.csv"));
+        import(
+            &mut h,
+            "(set by hand: the typed value is kept)",
+            "F3-preview-kept",
+        );
+        let rec = vf_fs::contacts::record(&root, &c2.0).unwrap();
+        assert_eq!(rec.effective().email, typed);
+        assert_eq!(rec.csv.email, addr("morgan.csv"));
+
+        // ---- G. Invite from client list: Search, Stop, Read again, the rest.
+        h.get_by_role_and_label(Role::Button, "Admin").click();
+        h.run_steps(6);
+        h.get_by_role_and_label(Role::Button, "Invite from client list")
+            .click();
+        wait_said(&mut h, "with contacts;", "G1-list");
+        {
+            let a = open_mut(&mut h).admin.as_mut().unwrap();
+            a.invite_list.group = 1;
+            a.invite_list.pause_secs = 4;
+        }
+        // Jane and Alex are on the portal: their clients are listed under Every client only.
+        h.get_by_label("Show").click();
+        h.run_steps(2);
+        h.get_by_label("Every client").click();
+        h.run_steps(4);
+        type_in(&mut h, "Search", "morgan");
+        wait_said(&mut h, "Invite 1 person at 1 client", "G2-search");
+        shot(&mut h, "G2-search");
+        h.get_by_role_and_label(Role::Button, "Clear").click();
+        h.run_steps(4);
+        // John's client has Jane on the portal: John is not ticked until staff say he is new.
+        wait_said(
+            &mut h,
+            "tick only if John Sample is someone new",
+            "G3-check",
+        );
+        let john_box = checkbox_starting(&h, "John Sample");
+        h.get_by_label(&john_box).click();
+        h.run_steps(4);
+        let first = button_starting(&h, "Invite ");
+        shot(&mut h, "G3-list");
+        assert_eq!(first, "Invite 2 people at 2 clients", "John and Morgan");
+        h.get_by_role_and_label(Role::Button, &first).click();
+        wait_said(&mut h, "next group in", "G4-pausing");
+        h.get_by_role_and_label(Role::Button, "Stop").click();
+        wait_said(&mut h, "left when stopped", "G5-stopped");
+        shot(&mut h, "G5-stopped");
+        let john = addr("john");
+        let morgan_typed = typed.clone();
+        let sent_first = invitations_to(&john) + invitations_to(&morgan_typed);
+        assert_eq!(sent_first, 1, "one sent before Stop");
+        // Show every client: the one invited says so and is not ticked.
+        h.get_by_role_and_label(Role::Button, "Read again").click();
+        h.run_steps(2);
+        // Read again: the list is read anew (the stopped run's words are gone).
+        wait_said(&mut h, "with contacts;", "G6-read");
+        wait_said(&mut h, "invited, not accepted yet", "G6-waiting");
+        shot(&mut h, "G6-waiting");
+        let rest = button_starting(&h, "Invite ");
+        assert_eq!(rest, "Invite 1 person at 1 client");
+        h.get_by_role_and_label(Role::Button, &rest).click();
+        wait_said(&mut h, "1 invited (1 by email, 0 by text)", "G7-rest");
+        shot(&mut h, "G7-rest");
+        assert_eq!(invitations_to(&john), 1, "John once");
+        assert_eq!(
+            invitations_to(&morgan_typed),
+            1,
+            "Morgan once, at the typed address"
+        );
+        assert_eq!(invitations_to(&addr("morgan.csv")), 0, "never the CSV's");
+        shot(&mut h, "G7-rest");
+
+        // ---- H. John accepts; then Share on portal adds him to Morgan's client at once.
+        let token = mail(&john)
+            .iter()
+            .find_map(|m| {
+                m.2.split("#t=")
+                    .nth(1)
+                    .map(|t| t.split_whitespace().next().unwrap_or("").to_string())
+            })
+            .expect("John's link");
+        let acc = curl(&[
+            "-X",
+            "POST",
+            "-H",
+            "Content-Type: application/json",
+            "-d",
+            &serde_json::json!({ "token": token }).to_string(),
+            &format!("{url}/api/portal/invitations/accept"),
+        ]);
+        assert!(acc.get("error").is_none(), "accepted: {acc}");
+        h.get_by_role_and_label(Role::Button, "Browse").click();
+        h.run_steps(4);
+        {
+            let o = open_mut(&mut h);
+            let i = o
+                .browse
+                .snap
+                .clients
+                .iter()
+                .position(|c| c.id == c2.0)
+                .unwrap();
+            o.browse.set_scope(vf_core::browse::Scope::Client(i));
+        }
+        h.run_steps(6);
+        {
+            let o = open_mut(&mut h);
+            o.browse.selected.clear();
+            let first = o.browse.visible.first().copied().expect("a document");
+            o.browse.selected.insert(first);
+        }
+        h.run_steps(6);
+        h.query_all_by_role_and_label(Role::Button, "Share…")
+            .next()
+            .expect("Share…")
+            .click();
+        wait_said(&mut h, "Invite someone…", "H1-share");
+        h.get_by_label("Invite someone…").click();
+        h.run_steps(2);
+        type_in(&mut h, "Email", &john);
+        wait_said(&mut h, "John Sample already has a portal login", "H2-known");
+        shot(&mut h, "H2-known");
+        type_in(&mut h, "Role (e.g. Spouse)", "Bookkeeper");
+        h.get_by_role_and_label(Role::Button, "Add to this client and share")
+            .click();
+        wait_said(&mut h, "John Sample was added to this client", "H3-added");
+        shot(&mut h, "H3-added");
+        assert_eq!(role_of(&c2.0, &john), "Bookkeeper");
+        assert_eq!(invitations_to(&john), 1, "no second invitation");
+        assert!(
+            mail(&john)
+                .iter()
+                .any(|m| m.2.contains(&format!("has given you access to {}", c2.2))),
+            "John was told"
+        );
+
+        // ---- I. To-do notices by text too (P114).
+        psql("UPDATE firm SET requests_enabled = true, requests_text = true");
+        psql(&format!(
+            "UPDATE portal_identity SET phone = '+15552010077' WHERE email = '{john}'"
+        ));
+        let made = firm(
+            "POST",
+            "/request-lists",
+            Some(serde_json::json!({
+                "clientIds": [c0.0],
+                "title": "2026 tax documents",
+                "items": [{ "kind": "text", "prompt": "Any new dependents?", "help": "", "required": true }],
+                "notify": true
+            })),
+        );
+        assert!(made.get("lists").is_some(), "list sent: {made}");
+        let texts = mail("+15552010077");
+        assert!(
+            texts
+                .iter()
+                .any(|m| m.2.contains("2026 tax documents") && !m.2.contains("dependents")),
+            "John was texted: {texts:?}"
+        );
+        assert!(
+            mail(&john)
+                .iter()
+                .any(|m| m.2.contains("2026 tax documents")),
+            "and emailed"
+        );
+    }
+
     /// Same variables as `todo_walkthrough`, plus `VF_WALK_PG` (the portal's Postgres container,
     /// for the portal's own switch).
     #[test]

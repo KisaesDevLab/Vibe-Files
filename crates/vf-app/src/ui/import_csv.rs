@@ -335,10 +335,10 @@ pub fn show(ctx: &egui::Context, d: &mut ImportDialog, env: &mut Env) -> DialogO
             };
             ui.label(
                 RichText::new(format!(
-                    "Import changes: {} new · {} renamed · {} contacts{leave}",
+                    "Import changes: {} new · {} renamed · {}{leave}",
                     p.new.len(),
                     p.renamed.len(),
-                    p.contacts.len()
+                    contact_changes(p.contacts.len())
                 ))
                 .color(if p.missing.is_empty() {
                     theme::ink_muted()
@@ -422,6 +422,11 @@ pub fn show(ctx: &egui::Context, d: &mut ImportDialog, env: &mut Env) -> DialogO
     out
 }
 
+/// "1 contact change", "3 contact changes".
+fn contact_changes(n: usize) -> String {
+    format!("{n} contact change{}", if n == 1 { "" } else { "s" })
+}
+
 /// "Changes in this CSV": worked out again when the columns change.
 fn show_preview(
     ui: &mut egui::Ui,
@@ -473,11 +478,11 @@ fn show_preview(
         }
     };
     egui::CollapsingHeader::new(RichText::new(format!(
-        "Changes in this CSV: {} new · {} leave the list · {} renamed · {} contacts",
+        "Changes in this CSV: {} new · {} leave the list · {} renamed · {}",
         p.new.len(),
         p.missing.len(),
         p.renamed.len(),
-        p.contacts.len()
+        contact_changes(p.contacts.len())
     )).strong())
     .id_salt("import-preview")
     .default_open(true)
@@ -511,7 +516,7 @@ fn show_preview(
             more(ui, p.renamed.len());
         }
         if !p.contacts.is_empty() {
-            ui.label(RichText::new(format!("@ {} contacts changed", p.contacts.len())).strong());
+            ui.label(RichText::new(contact_changes(p.contacts.len())).strong());
             for c in p.contacts.iter().take(SHOWN) {
                 let who = if c.client.is_empty() {
                     c.id.clone()

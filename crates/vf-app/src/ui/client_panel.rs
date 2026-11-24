@@ -638,6 +638,17 @@ fn contact_line(
         .join(" · ")
 }
 
+impl ContactsBox {
+    /// The walkthrough types a new email over the one shown (select-all is not reliable in the
+    /// test harness).
+    #[cfg(test)]
+    pub fn set_editing_email(&mut self, email: &str) {
+        if let Some(r) = self.editing.as_mut() {
+            r.email = email.to_string();
+        }
+    }
+}
+
 fn portal_contacts(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env, client: &str) {
     use crate::ui::widgets::caption;
     use vf_fs::contacts::{self, FIELDS};

@@ -839,10 +839,14 @@ pub fn page(ui: &mut egui::Ui, page: &mut InvitePage, env: &mut crate::ui::brows
     if people > page.group {
         let groups = people.div_ceil(page.group);
         let wait = (groups - 1) as u64 * page.pause_secs as u64;
+        let pauses = if wait < 60 {
+            format!("{wait} s")
+        } else {
+            format!("about {} min", wait.div_ceil(60))
+        };
         ui.label(widgets::caption(format!(
-            "{groups} groups of up to {}; about {} min of pauses.",
-            page.group,
-            wait.div_ceil(60)
+            "{groups} groups of up to {}; {pauses} of pauses.",
+            page.group
         )));
     }
     if go.clicked() {
