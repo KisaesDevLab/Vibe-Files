@@ -772,6 +772,18 @@ impl Portal {
         self.get::<R>("/contacts", &[]).map(|r| r.clients)
     }
 
+    /// Gives someone who already has a portal login (found with [`Self::people`]) this client at
+    /// once, without an invitation (Vibe-Portal P113); the portal tells them. A portal older
+    /// than 0.5.2 answers 404 `not_found`.
+    pub fn add_person(&self, client_id: &str, identity_id: &str, role: &str) -> Result<()> {
+        self.send_json::<serde_json::Value>(
+            "POST",
+            &format!("/clients/{client_id}/people"),
+            &serde_json::json!({ "identityId": identity_id, "roleLabel": role }),
+        )
+        .map(|_| ())
+    }
+
     /// Invites someone; the portal sends the link to the email when given, else by text.
     pub fn invite(
         &self,

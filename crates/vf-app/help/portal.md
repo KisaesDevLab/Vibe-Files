@@ -6,7 +6,7 @@ How Vibe Files works with your firm's Vibe Portal: sending documents to clients,
 
 Vibe Portal is your firm's own client portal, installed on your Vibe appliance at its own address (for example `https://files.yourfirm.com`). Clients sign in there with a link sent to their email or a code sent by text. The portal keeps an encrypted copy of what you share, and your cabinet keeps the original. An admin can move the portal's files to a B2 bucket of the portal's own (staff page, **Settings › Storage**), encrypted first; **Test** in **Admin › Portal** says where they are.
 
-Vibe Files talks to the portal only when it is set up, and only at the address you give it.
+Vibe Files talks only to the portal address you give it.
 
 ## Setting it up
 
@@ -17,9 +17,9 @@ In **Admin › Portal** (admin password needed):
 3. **Fetch client uploads every**: how often Vibe Files collects what clients sent (5 minutes unless you change it; 0 means only when you press **Fetch uploads now**).
 4. Press **Test**, then **Save**.
 
-The address and key are kept in the cabinet (`_Vibe\keys\portal.json`, never sent to B2), so every PC that opens the cabinet uses them. **Stop using the portal** removes them for every PC; the portal keeps its files.
+The address and key are kept in the cabinet (`_Vibe\keys\portal.json`, never sent to B2) for every PC. **Stop using the portal** removes them for every PC; the portal keeps its files.
 
-Saving also adds the **`_Portal inbox`** folder to Intake's shared inboxes. Press **Reload Intake** when Intake asks.
+Saving also adds the **`_Portal inbox`** folder to Intake's shared inboxes (**Reload Intake** when asked).
 
 Anyone can collect client uploads without the admin password: the **Intake** tab's **Portal uploads** line has its own **Fetch uploads now** button, and says when this PC last fetched and what came of it (files received, nothing new, or a problem).
 
@@ -27,7 +27,7 @@ Anyone can collect client uploads without the admin password: the **Intake** tab
 
 Select a client in Browse and press **Portal users…** in the client panel. **Invite someone…** takes an email, a mobile number, or both; the invitation goes to the email when there is one, else by text, and works for 7 days. A mobile number given with an email is not used until the person confirms it: when they accept, the portal offers to text them a code, and once they type it back they can sign in by text too. People invited by email can also add a mobile number on the portal's home page (**Sign in by text**) when the portal sends texts. **Resend** sends a new link (the old one stops working); **Withdraw** cancels it.
 
-A client can have several people (a spouse, a bookkeeper), and one person can have several clients; they switch between them on the portal. **Turn off** ends a person's access to that client at once.
+A client can have several people, and one person several clients; they switch between them on the portal. **Turn off** ends a person's access to that client at once.
 
 For someone already on the portal, use **Someone who already uses the portal…**: search part of their name, email or mobile, then press **Invite** beside them. They keep one login. To invite many clients at once from the client CSV, see [inviting from the client list](help:portal-invite-list).
 
@@ -43,7 +43,7 @@ Select one or more documents of the same client in Browse and press **Share…**
 
 Tick or untick people and press **Save**. A document is sent to the portal the first time someone is chosen to see it. When the cabinet's copy changed since it was shared, **Update on portal** sends the newer version: the client sees the same file, marked Updated and new again.
 
-**Send invitation and share** at the bottom invites someone new and shares these documents with them.
+**Send invitation and share** invites someone new and shares these documents with them. An email or cell that already has a portal login is recognised: **Add to this client and share** adds that person at once, with no invitation.
 
 **Remove from portal** takes the documents off the portal for everyone. The cabinet keeps them.
 

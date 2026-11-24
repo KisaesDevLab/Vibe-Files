@@ -683,12 +683,21 @@ fn contact(email: &str, cell: &str) -> (Option<String>, Option<String>, Option<S
 pub fn people_of(row: &Row, client_name: &str, entity: Option<&str>) -> Planned {
     let mut out = Planned::default();
     let business = is_business(entity);
+    // Without name columns, a person's client name gives the names ("Sample, John & Jane" is
+    // John Sample and Jane Sample); a business keeps its own name.
+    let from_client = if business {
+        Vec::new()
+    } else {
+        names_in(client_name)
+    };
     let tp_name = {
         let n = join(&row.first, &row.last);
-        if n.is_empty() {
-            client_name.trim().to_string()
-        } else {
+        if !n.is_empty() {
             n
+        } else if let Some(n) = from_client.first() {
+            n.clone()
+        } else {
+            client_name.trim().to_string()
         }
     };
     let (te, tp, tbad) = contact(&row.email, &row.cell);
@@ -718,7 +727,10 @@ pub fn people_of(row: &Row, client_name: &str, entity: Option<&str>) -> Planned 
         };
         let first = row.spouse_first.trim();
         let name = if first.is_empty() {
-            "Spouse".to_string()
+            from_client
+                .get(1)
+                .cloned()
+                .unwrap_or_else(|| "Spouse".to_string())
         } else {
             join(first, last)
         };
@@ -777,11 +789,19 @@ pub fn people_of(row: &Row, client_name: &str, entity: Option<&str>) -> Planned 
                 out.people.push(t.clone());
             } else {
                 if t.phone.is_some() && t.phone == s.phone {
-                    // Both have an email: the cell stays with the taxpayer.
+                    // The cell stays with the taxpayer (a phone signs in to one account).
                     s.phone = None;
                 }
                 out.people.push(t.clone());
-                out.people.push(s);
+                if s.email.is_some() || s.phone.is_some() {
+                    out.people.push(s);
+                } else {
+                    // Only the taxpayer's own cell was given for them (review 2026-11-24).
+                    out.problems.push(format!(
+                        "{}: only the taxpayer's cell, which signs in to the taxpayer's login",
+                        s.name
+                    ));
+                }
             }
         }
         (Some(t), None) => out.people.push(t.clone()),
@@ -1151,6 +1171,27 @@ mod tests {
         assert_eq!(p.people[1].phone, None);
     }
 
+    /// The taxpayer has an email and a cell; the spouse only that same cell: the spouse is
+    /// not listed with nothing to invite with (review 2026-11-24).
+    #[test]
+    fn a_spouse_with_only_the_taxpayers_cell_is_left_out() {
+        let p = people_of(
+            &row(&[
+                ("first", "John"),
+                ("last", "Sample"),
+                ("email", "john@example.test"),
+                ("cell", "555-201-0001"),
+                ("sfirst", "Jane"),
+                ("scell", "555-201-0001"),
+            ]),
+            "Sample, John & Jane",
+            None,
+        );
+        assert_eq!(p.people.len(), 1);
+        assert_eq!(p.people[0].phone.as_deref(), Some("+15552010001"));
+        assert!(p.problems[0].starts_with("Jane Sample: only the taxpayer's cell"));
+    }
+
     #[test]
     fn a_cell_only_person_is_invited_by_text_and_a_bad_email_is_said() {
         let p = people_of(
@@ -1161,7 +1202,7 @@ mod tests {
         assert_eq!(
             who(&p),
             vec![(
-                "Doe, Alex".into(),
+                "Alex Doe".into(),
                 "text +15552010003".into(),
                 Some("+15552010003".into()),
                 "Taxpayer".into()
@@ -1178,7 +1219,7 @@ mod tests {
         assert!(none.people.is_empty());
         assert_eq!(
             none.problems,
-            vec!["Doe, Alex: email \"nope\" is not an email address".to_string()]
+            vec!["Alex Doe: email \"nope\" is not an email address".to_string()]
         );
     }
 

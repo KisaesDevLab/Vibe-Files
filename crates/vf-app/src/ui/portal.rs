@@ -588,7 +588,14 @@ struct InviteForm {
 
 impl InviteForm {
     /// Draws the form (opened when `open`); `true` when "Send invitation" was pressed.
-    fn show(&mut self, ui: &mut egui::Ui, busy: bool, open: bool, button: &str) -> bool {
+    fn show(
+        &mut self,
+        ui: &mut egui::Ui,
+        busy: bool,
+        open: bool,
+        button: &str,
+        note: Option<&str>,
+    ) -> bool {
         let mut send = false;
         egui::CollapsingHeader::new("Invite someone…")
             .open(open.then_some(true))
@@ -607,9 +614,16 @@ impl InviteForm {
                         ui.end_row();
                     }
                 });
-            ui.label(widgets::caption(
-                "The invitation goes to the email when there is one, else by text. It works for 7 days. A mobile number given with an email is used only once the person confirms it.",
-            ));
+            match note {
+                Some(n) => {
+                    ui.label(RichText::new(n).color(theme::health_ok()));
+                }
+                None => {
+                    ui.label(widgets::caption(
+                        "The invitation goes to the email when there is one, else by text. It works for 7 days. A mobile number given with an email is used only once the person confirms it.",
+                    ));
+                }
+            }
             let ok = !busy && !(self.email.trim().is_empty() && self.phone.trim().is_empty());
             if ui
                 .add_enabled(ok, egui::Button::new(button))
@@ -628,6 +642,18 @@ impl InviteForm {
     fn phone(&self) -> Option<String> {
         Some(self.phone.trim().to_string()).filter(|x| !x.is_empty())
     }
+}
+
+/// The contact typed in an invitation form, as the portal keeps it (the email when it is one,
+/// else the mobile number), for finding someone already on the portal.
+fn typed_contact(f: &InviteForm) -> Option<String> {
+    vf_fs::contacts::normal_email(&f.email).or_else(|| {
+        if f.email.trim().is_empty() {
+            vf_fs::contacts::normal_phone(&f.phone)
+        } else {
+            None
+        }
+    })
 }
 
 /// Who an invitation is for: the name, else the email, else the mobile number.
@@ -845,6 +871,10 @@ pub struct ShareWindow {
     /// Send the cabinet's newer content for documents changed since they were shared.
     update: bool,
     invite: InviteForm,
+    /// The contact typed in Invite someone…, and the portal login it belongs to, if any
+    /// (owner 2026-11-24: someone already on the portal is added at once, P113).
+    known: Option<(String, Option<Person>)>,
+    looking: Option<Receiver<(String, Option<Person>)>>,
     confirm_remove: bool,
     job: Option<Receiver<Result<Outcome, String>>>,
     audit: AuditOut,
@@ -893,6 +923,8 @@ impl ShareWindow {
             resend: Default::default(),
             update: true,
             invite: InviteForm::default(),
+            known: None,
+            looking: None,
             confirm_remove: false,
             job,
             audit,
@@ -1022,10 +1054,50 @@ impl ShareWindow {
         }));
     }
 
+    /// The portal login the contact typed in Invite someone… belongs to, as last looked up.
+    fn known_login(&self) -> Option<&Person> {
+        let key = typed_contact(&self.invite)?;
+        match &self.known {
+            Some((k, p)) if *k == key => p.as_ref(),
+            _ => None,
+        }
+    }
+
+    /// Looks up the contact typed (once per contact, on a thread) among the portal's people.
+    fn look_up_typed(&mut self, ctx: &egui::Context, s: &PortalSettings) {
+        if let Some(rx) = &self.looking
+            && let Ok(found) = rx.try_recv()
+        {
+            self.looking = None;
+            self.known = Some(found);
+        }
+        let Some(key) = typed_contact(&self.invite) else {
+            return;
+        };
+        if self.looking.is_some() || self.known.as_ref().is_some_and(|(k, _)| *k == key) {
+            return;
+        }
+        let s = s.clone();
+        self.looking = Some(spawn(ctx, move || {
+            let found = core::client(&s).people(&key).ok().and_then(|people| {
+                people.into_iter().find(|p| {
+                    p.email.as_deref() == Some(key.as_str())
+                        || p.phone.as_deref() == Some(key.as_str())
+                })
+            });
+            (key, found)
+        }));
+    }
+
     /// Invites someone and, in the same step, holds these documents for them: they see them
-    /// when they accept (owner 2026-11-24).
+    /// when they accept (owner 2026-11-24). Someone who already has a portal login is added
+    /// to the client at once instead, and the documents are shown to them (P113).
     fn send_invite(&mut self, ctx: &egui::Context, s: &PortalSettings) {
         let Some(l) = &self.loaded else { return };
+        let login = self
+            .known_login()
+            .filter(|p| !p.sees(&self.client.id))
+            .cloned();
         let f = std::mem::take(&mut self.invite);
         let client = self.client.clone();
         let work: Vec<(DocRef, Option<PortalFile>)> = self
@@ -1042,6 +1114,50 @@ impl ShareWindow {
         self.err = None;
         self.job = Some(spawn(ctx, move || {
             let p = core::client(&s);
+            if let Some(person) = login {
+                p.put_client(&client.id, &client.code, &client.name, None)
+                    .map_err(|e| e.message())?;
+                p.add_person(&client.id, &person.identity_id, f.role.trim())
+                    .map_err(|e| {
+                        if e.status() == Some(404) && e.code() == Some("not_found") {
+                            "This portal cannot add someone at once yet: update it to 0.5.2, or send an invitation.".to_string()
+                        } else {
+                            e.message()
+                        }
+                    })?;
+                audit.send(AuditEntry::new(
+                    "portal_user_added",
+                    None,
+                    serde_json::json!({
+                        "client_id": client.id,
+                        "identity_id": person.identity_id,
+                        "role": f.role.trim(),
+                    }),
+                ));
+                let shown = BTreeMap::from([(person.identity_id.clone(), true)]);
+                let n = work.len();
+                let (_, sent) = share_docs(
+                    &p,
+                    &b2,
+                    &client,
+                    work,
+                    &shown,
+                    &BTreeMap::new(),
+                    update,
+                    &audit,
+                )
+                .map_err(|e| format!("{} was added, but sharing failed: {e}", person.label()))?;
+                return Ok(Outcome::Done(format!(
+                    "{} was added to this client{} and sees {} now; the portal told them.",
+                    person.label(),
+                    files_sent(sent),
+                    if n == 1 {
+                        "this document"
+                    } else {
+                        "these documents"
+                    }
+                )));
+            }
             let id = p
                 .invite(
                     &client.id,
@@ -1101,6 +1217,7 @@ impl ShareWindow {
                 }
             }
         }
+        self.look_up_typed(ctx, s);
         let busy = self.job.is_some();
         let mut open = true;
         // A button pressed while the window is drawn, acted on after.
@@ -1289,7 +1406,37 @@ impl ShareWindow {
                     });
                 }
                 ui.separator();
-                if self.invite.show(ui, busy, false, "Send invitation and share") {
+                // Someone who already has a portal login is shown, and added at once.
+                let here = self.client.id.clone();
+                let login = self.known_login();
+                let (button, note) = match login {
+                    Some(p) if p.sees(&here) => (
+                        "Send invitation and share".to_string(),
+                        Some(format!(
+                            "{} already sees this client: tick them above and press Save.",
+                            p.label()
+                        )),
+                    ),
+                    Some(p) => {
+                        let others: Vec<&str> =
+                            p.clients.iter().map(|c| c.name.as_str()).collect();
+                        let sees = if others.is_empty() {
+                            String::new()
+                        } else {
+                            format!(" (sees: {})", others.join(", "))
+                        };
+                        (
+                            "Add to this client and share".to_string(),
+                            Some(format!(
+                                "{} already has a portal login{sees}: they are added at once, with no invitation to accept, and told by the portal.",
+                                p.label()
+                            )),
+                        )
+                    }
+                    None => ("Send invitation and share".to_string(), None),
+                };
+                let seen_here = login.is_some_and(|p| p.sees(&here));
+                if self.invite.show(ui, busy || seen_here, false, &button, note.as_deref()) {
                     pending = Some("invite");
                 }
                 if let Some(m) = &self.msg {
@@ -1623,7 +1770,7 @@ impl PeopleWindow {
                         p.label()
                     ));
                 }
-                if self.invite.show(ui, busy, open_invite, "Send invitation") {
+                if self.invite.show(ui, busy, open_invite, "Send invitation", None) {
                     let f = std::mem::take(&mut self.invite);
                     resend = Some((
                         f.email(),
@@ -2908,8 +3055,11 @@ struct Suggest {
     found: Vec<vf_fs::contacts::Found>,
     /// Client ids ticked.
     ticked: BTreeSet<String>,
-    /// Keep the confirmed contact in the clients' Portal contacts (name leads, other client).
+    /// Keep the confirmed contact in the clients' Portal contacts (name leads; ticked to start).
     save: bool,
+    /// The same for a client picked by hand under Other client…: unticked to start, since it
+    /// may replace the contact on file (review 2026-11-24: a bookkeeper approved by hand).
+    save_other: bool,
     /// The documents offered, for the clients they were worked out for.
     offer: Option<(Vec<String>, Offer)>,
     /// Documents ticked (doc ids).
@@ -3342,6 +3492,13 @@ pub fn admin_requests(ui: &mut egui::Ui, a: &mut AdminPortal, env: &mut Env) {
                         });
                     }
 
+                    if !sug.found.is_empty()
+                        && ticked.is_empty()
+                        && ui.add_enabled(!busy, egui::Button::new("Deny")).clicked()
+                    {
+                        decision = Some((r.id.clone(), None));
+                    }
+
                     // ---- Any other client, picked by hand.
                     let other = egui::CollapsingHeader::new(if sug.found.is_empty() {
                         "Choose the client"
@@ -3426,10 +3583,28 @@ pub fn admin_requests(ui: &mut egui::Ui, a: &mut AdminPortal, env: &mut Env) {
                                     ));
                                 }
                                 if !legacy {
+                                    let spouse = role.to_lowercase().contains("spouse");
+                                    let whose = if spouse { "spouse's" } else { "taxpayer's" };
+                                    // What is on file there now, which the box would replace.
+                                    let now = a
+                                        .dir
+                                        .iter()
+                                        .find(|d| d.client_id == c.id)
+                                        .and_then(|d| {
+                                            d.planned.people.iter().find(|p| {
+                                                (p.role == "Spouse") == spouse
+                                            })
+                                        })
+                                        .and_then(|p| {
+                                            if by_email { p.email.clone() } else { p.phone.clone() }
+                                        });
+                                    let replaces = now
+                                        .map(|n| format!(" (replaces {n})"))
+                                        .unwrap_or_default();
                                     ui.checkbox(
-                                        &mut sug.save,
+                                        &mut sug.save_other,
                                         format!(
-                                            "Keep {confirmed} in {}'s Portal contacts (as the spouse's when the role says Spouse)",
+                                            "Also keep {confirmed} as the {whose} {contact_word} in {}'s Portal contacts{replaces}",
                                             c.name
                                         ),
                                     );
@@ -3482,7 +3657,7 @@ pub fn admin_requests(ui: &mut egui::Ui, a: &mut AdminPortal, env: &mut Env) {
                                 && let Some(c) = &chosen_client
                             {
                                 let matched = cmp.as_ref().map(record::Comparison::matched).unwrap_or_default();
-                                let save = if !legacy && matched.is_empty() && sug.save {
+                                let save = if !legacy && matched.is_empty() && sug.save_other {
                                     let spouse = role.to_lowercase().contains("spouse");
                                     contact_to_save(&confirmed, spouse)
                                         .map(|(k, v)| vec![(c.id.clone(), k, v)])
@@ -4873,6 +5048,123 @@ mod tests {
         );
     }
 
+    /// PA-106 (review 2026-11-24): a cabinet whose settings still name the old email column
+    /// has it moved to Portal contacts when the page opens; the request is then found by the
+    /// contact and approved in one click; the settings keep the date of birth column only.
+    /// Under Other client…, keeping the contact is unticked and saves nothing.
+    #[test]
+    fn the_old_email_column_moves_over_and_finds_the_request() {
+        let root = tempfile::tempdir().unwrap();
+        vf_fs::cabinet::create(
+            root.path(),
+            &vf_fs::cabinet::CabinetFile {
+                cabinet_id: "cab-1".into(),
+                firm_id: "firm-1".into(),
+                schema_version: 1,
+                layout_version: 1,
+                created: "2026-11-24T00:00:00Z".into(),
+                name: None,
+            },
+        )
+        .unwrap();
+        let csv = root.path().join("clients.csv");
+        std::fs::write(
+            &csv,
+            "ID,Name,E Mail\n1001,\"Sample, Alex\",alex@example.test\n1002,\"Other, Pat\",\n",
+        )
+        .unwrap();
+        let map = filer_core::config::ColumnMap {
+            id: Some("ID".into()),
+            name: Some("Name".into()),
+            partner: None,
+            extras: vec!["E Mail".into()],
+        };
+        let list =
+            vf_fs::clients::import_csv_tin(root.path(), &csv, &map, &Default::default(), None)
+                .unwrap();
+        vf_fs::clients::use_csv_in_intake(root.path(), &csv, &map).unwrap();
+        let alex = list.match_by_id("1001").unwrap().uuid.to_string();
+        let pat = list.match_by_id("1002").unwrap().uuid.to_string();
+        let catalog = root.path().join("catalog.db");
+        let conn = vf_core::db::open(&catalog, vf_core::db::Storage::Local).unwrap();
+        conn.execute_batch(&format!(
+            "INSERT INTO client (id, ext_id, name, device_id, updated_at)
+               VALUES ('{alex}', '1001', 'Sample, Alex', 'd', 't'), ('{pat}', '1002', 'Other, Pat', 'd', 't');"
+        ))
+        .unwrap();
+        let (url, seen) = fake_portal(|method, path| match (method, path) {
+            ("GET", "/api/firm/v1/access-requests") => (
+                200,
+                r#"{"requestCheck":"off","requests":[{"id":"r1","name":"Alex Sample",
+                    "email":"alex@example.test","phone":null,
+                    "confirmedContact":"alex@example.test","clientAs":"Sample","note":"",
+                    "createdAt":"2026-11-24T10:00:00Z"}]}"#
+                    .into(),
+            ),
+            ("POST", p) if p.ends_with("/approve") => {
+                (200, r#"{"ok":true,"identityId":"p1"}"#.into())
+            }
+            _ => (200, r#"{"ok":true}"#.into()),
+        });
+        let mut s =
+            PortalSettings::new("cab-1", &url, "vpk_abcdefghijklmnopqrstuvwxyz0123456789", 0)
+                .unwrap();
+        s.record.email = Some("E_Mail".into());
+        settings::save(root.path(), &s).unwrap();
+        let st = RequestsPage {
+            a: AdminPortal {
+                audit: Some(AuditOut(mpsc::channel().0)),
+                ..AdminPortal::default()
+            },
+            conn,
+            root,
+        };
+        let mut h = egui_kittest::Harness::builder()
+            .with_max_steps(crate::ui::test_util::MAX_STEPS)
+            .with_size([900.0, 900.0])
+            .build_ui_state(
+                |ui, st: &mut RequestsPage| {
+                    let mut env = Env {
+                        conn: &mut st.conn,
+                        root: st.root.path(),
+                        device_id: "dev-1",
+                    };
+                    admin_requests(ui, &mut st.a, &mut env);
+                },
+                st,
+            );
+        wait_for(&mut h, "were moved over (1 clients)");
+        let root = h.state().root.path().to_path_buf();
+        let kept = settings::load(&root, "cab-1").unwrap();
+        assert_eq!(kept.record.email, None);
+        assert_eq!(
+            vf_fs::contacts::columns(&root).unwrap().email.as_deref(),
+            Some("E Mail")
+        );
+        wait_for(
+            &mut h,
+            "Sample, Alex (1001) as Taxpayer: Alex Sample's email on file",
+        );
+        // Other client…: picking Pat, the box to keep the contact is there, unticked.
+        h.get_by_label("Other client…").click();
+        h.run();
+        h.get_by_label("Client").click();
+        h.run();
+        h.get_by_label("Other, Pat (1002)").click();
+        h.run();
+        wait_for(
+            &mut h,
+            "Also keep alex@example.test as the taxpayer's email in Other, Pat's Portal contacts",
+        );
+        h.get_by_label("Approve").click();
+        approval(&mut h, &seen);
+        wait_for(&mut h, "Approved.");
+        assert!(
+            vf_fs::contacts::record(&root, &pat).unwrap().is_empty(),
+            "nothing kept unless ticked"
+        );
+    }
+
     /// Q-110: a date of birth that is the client's, with a contact that is not, is not a
     /// match. Approve asks how staff checked, and sends that.
     #[test]
@@ -5150,12 +5442,67 @@ mod tests {
         );
     }
 
+    /// Owner 2026-11-24 (P113): the email of someone who already has a portal login is
+    /// recognised in the Share window; one click adds them to the client at once and shows
+    /// them the document, with no invitation.
+    #[test]
+    fn someone_with_a_login_is_added_at_once_from_the_share_window() {
+        let (url, seen) = fake_portal(|method, path| match (method, path) {
+            ("GET", p) if p.starts_with("/api/firm/v1/people") => (
+                200,
+                r#"{"people":[{"identityId":"pat-1","name":"Pat Sample","email":"pat@example.test",
+                    "phone":null,"clients":[{"id":"other","name":"Sample Farms LLC"}]}]}"#
+                    .into(),
+            ),
+            ("POST", p) if p.ends_with("/people") => (201, r#"{"identityId":"pat-1"}"#.into()),
+            (m, p) => share_portal(m, p),
+        });
+        let mut h = share_window(url);
+        wait_for(&mut h, "Jane Sample (jane@example.test)");
+        h.get_by_label("Invite someone…").click();
+        h.run();
+        crate::ui::test_util::type_into(&mut h, "Email", "Pat@Example.test");
+        wait_for(
+            &mut h,
+            "Pat Sample already has a portal login (sees: Sample Farms LLC)",
+        );
+        crate::ui::test_util::type_into(&mut h, "Role (e.g. Spouse)", "Owner");
+        h.get_by_label("Add to this client and share").click();
+        wait_for(&mut h, "Pat Sample was added to this client");
+        let w = writes(&seen);
+        assert!(
+            w.iter().any(|r| r
+                .starts_with(&format!("POST /api/firm/v1/clients/{SHARE_CLIENT}/people "))
+                && r.contains(r#""identityId":"pat-1""#)
+                && r.contains(r#""roleLabel":"Owner""#)),
+            "{w:?}"
+        );
+        assert!(
+            w.iter()
+                .any(|r| r.starts_with("PUT /api/firm/v1/files/f1/visibility")
+                    && r.contains(r#""users":{"pat-1":true}"#)),
+            "{w:?}"
+        );
+        assert!(
+            !w.iter().any(|r| r.contains("/invites")),
+            "no invitation: {w:?}"
+        );
+    }
+
     /// PA-105 (owner 2026-11-24): invitations go out in groups with a pause between them,
     /// each client put on the portal once first; a refusal is kept and the rest go on.
     #[test]
     fn invitations_from_the_client_list_go_in_groups_with_a_pause() {
         use crate::ui::invite_list::{Item, Progress, send_all, summary};
         let (url, seen) = fake_portal(|method, path| match (method, path) {
+            // Read just before sending: f was invited by another PC meanwhile.
+            ("GET", "/api/firm/v1/contacts") => (
+                200,
+                r#"{"clients":[{"id":"c4","active":true,"people":[],"invitations":[
+                    {"invitationId":"x","name":"f","email":"f@example.test","phone":null,
+                     "roleLabel":"","status":"invited"}]}]}"#
+                    .into(),
+            ),
             ("POST", p) if p.contains("/clients/c2/") => {
                 (400, r#"{"error":"invalid_email"}"#.into())
             }
@@ -5191,6 +5538,7 @@ mod tests {
             item("c2", "c"),
             item("c3", "d"),
             item("c3", "e"),
+            item("c4", "f"),
         ];
         let progress = std::sync::Mutex::new(Progress {
             total: items.len(),
@@ -5221,9 +5569,12 @@ mod tests {
         assert_eq!(posts, 5);
         let p = progress.lock().unwrap();
         assert!(p.finished);
-        assert_eq!(p.sent.len(), 5);
+        assert_eq!(p.sent.len(), 6);
+        // f is said first, and not sent again.
+        assert_eq!(p.sent[0].who, "f");
+        assert_eq!(p.sent.iter().filter(|s| s.result.is_ok()).count(), 4);
         assert_eq!(
-            p.sent[2].result,
+            p.sent[3].result,
             Err((
                 "invalid_email".into(),
                 "That email address does not look right.".into()
@@ -5231,7 +5582,7 @@ mod tests {
         );
         assert_eq!(
             summary(&p),
-            "4 invited (4 by email, 0 by text) · 1 not sent"
+            "4 invited (4 by email, 0 by text) · 1 on the portal or invited already · 1 not sent"
         );
         let rows: Vec<_> = audit.try_iter().collect();
         assert_eq!(rows.len(), 4);

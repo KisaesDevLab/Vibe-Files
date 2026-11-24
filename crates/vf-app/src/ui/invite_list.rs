@@ -28,6 +28,8 @@ use crate::ui::{theme, widgets};
 pub const GROUP: usize = 20;
 /// The pause between groups, in seconds (changeable on the page).
 pub const PAUSE_SECS: u32 = 60;
+/// Clients drawn at most; the rest are found by Search.
+const DRAWN: usize = 300;
 
 /// Where one person of the CSV stands on the portal.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -217,8 +219,28 @@ pub fn send_all(
     repaint: &dyn Fn(),
 ) {
     let group = group.max(1);
+    // Read again just before sending: the page may be old, or another PC may have invited some
+    // of them meanwhile; an invitation sent again would replace theirs (review 2026-11-24).
+    let mut send: Vec<&Item> = Vec::new();
+    match p.contacts() {
+        Ok(fresh) => {
+            for it in items {
+                match already(&fresh, it) {
+                    Some((code, words)) => progress.lock().unwrap().sent.push(Sent {
+                        client: it.client.clone(),
+                        who: it.invitee.name.clone(),
+                        result: Err((code.into(), words.into())),
+                    }),
+                    None => send.push(it),
+                }
+            }
+        }
+        // Not read: sent as the page saw them (the portal still refuses someone with access).
+        Err(_) => send.extend(items.iter()),
+    }
+    repaint();
     let mut put = BTreeSet::new();
-    for (i, it) in items.iter().enumerate() {
+    for (i, it) in send.into_iter().enumerate() {
         if i > 0 && i % group == 0 && !pause.is_zero() {
             let until = Instant::now() + pause;
             progress.lock().unwrap().next_group_at = Some(until);
@@ -271,6 +293,30 @@ pub fn send_all(
     repaint();
 }
 
+/// Why someone ticked is not invited after all, by the portal as read just before sending:
+/// on it already (by email or cell), or invited and not accepted yet (an expired invitation is
+/// sent again).
+fn already(fresh: &[PortalContacts], it: &Item) -> Option<(&'static str, &'static str)> {
+    let c = fresh
+        .iter()
+        .find(|c| c.id.eq_ignore_ascii_case(&it.client_id))?;
+    let inv = &it.invitee;
+    if c.people
+        .iter()
+        .any(|x| same(&inv.email, &x.email) || same(&inv.phone, &x.phone))
+    {
+        return Some(("already_has_access", "already on the portal"));
+    }
+    let waiting = c.invitations.iter().any(|i| {
+        i.status == "invited"
+            && match &inv.email {
+                Some(_) => same(&inv.email, &i.email),
+                None => i.email.is_none() && same(&inv.phone, &i.phone),
+            }
+    });
+    waiting.then_some(("already_invited", "invited already, not accepted yet"))
+}
+
 /// The end of a run in a few words: "52 invited (47 by email, 5 by text) · 3 already on the
 /// portal · 2 not sent".
 pub fn summary(p: &Progress) -> String {
@@ -279,7 +325,9 @@ pub fn summary(p: &Progress) -> String {
     let already = p
         .sent
         .iter()
-        .filter(|s| matches!(&s.result, Err((c, _)) if c == "already_has_access"))
+        .filter(|s| {
+            matches!(&s.result, Err((c, _)) if c == "already_has_access" || c == "already_invited")
+        })
         .count();
     let failed = p.sent.iter().filter(|s| s.result.is_err()).count() - already;
     let mut parts = vec![format!(
@@ -287,7 +335,7 @@ pub fn summary(p: &Progress) -> String {
         email + text
     )];
     if already > 0 {
-        parts.push(format!("{already} already on the portal"));
+        parts.push(format!("{already} on the portal or invited already"));
     }
     if failed > 0 {
         parts.push(format!("{failed} not sent"));
@@ -302,6 +350,13 @@ pub fn summary(p: &Progress) -> String {
 struct Run {
     progress: Arc<Mutex<Progress>>,
     stop: Arc<AtomicBool>,
+}
+
+/// The page or the cabinet closed while sending: the rest are not sent (review 2026-11-24).
+impl Drop for Run {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+    }
 }
 
 /// The clients with contacts, and how many have none.
@@ -419,6 +474,28 @@ impl InvitePage {
             })
     }
 
+    /// How many people are ticked, at how many clients, of those shown (counted, not copied:
+    /// every frame).
+    fn counts(&self) -> (usize, usize) {
+        let Some(rows) = &self.rows else {
+            return (0, 0);
+        };
+        let (mut people, mut clients) = (0, 0);
+        for r in rows.iter().filter(|r| self.shown(r)) {
+            let n = r
+                .lines
+                .iter()
+                .enumerate()
+                .filter(|(i, l)| {
+                    l.status.sendable() && self.ticked.contains(&(r.c.client_id.clone(), *i))
+                })
+                .count();
+            people += n;
+            clients += usize::from(n > 0);
+        }
+        (people, clients)
+    }
+
     /// The ticked people of the clients shown, in list order.
     fn items(&self) -> Vec<Item> {
         let Some(rows) = &self.rows else {
@@ -533,6 +610,7 @@ pub fn page(ui: &mut egui::Ui, page: &mut InvitePage, env: &mut crate::ui::brows
         for x in sent {
             if let Err((code, w)) = &x.result
                 && code != "already_has_access"
+                && code != "already_invited"
             {
                 ui.label(
                     RichText::new(format!("{} · {}: {w}", x.client, x.who)).color(theme::warn()),
@@ -691,7 +769,16 @@ pub fn page(ui: &mut egui::Ui, page: &mut InvitePage, env: &mut crate::ui::brows
         });
     }
     ui.separator();
-    for r in &shown {
+    // A long list is drawn in part (review 2026-11-24: 2,000 clients every frame); Search
+    // narrows it, and Tick all shown and Invite take every client the filters show.
+    if shown.len() > DRAWN {
+        ui.label(widgets::caption(format!(
+            "The first {DRAWN} of {} clients are listed: search to find others. Tick all shown and Invite take all {}.",
+            shown.len(),
+            shown.len()
+        )));
+    }
+    for r in shown.iter().take(DRAWN) {
         if r.lines.is_empty() {
             continue;
         }
@@ -739,23 +826,18 @@ pub fn page(ui: &mut egui::Ui, page: &mut InvitePage, env: &mut crate::ui::brows
     // from an empty list: walkthrough 2026-11-24).
     drop(shown);
     page.rows = Some(rows);
-    let items = page.items();
-    let clients: BTreeSet<&String> = items.iter().map(|i| &i.client_id).collect();
+    let (people, clients) = page.counts();
     ui.separator();
     let label = format!(
         "Invite {} {} at {} {}",
-        items.len(),
-        if items.len() == 1 { "person" } else { "people" },
-        clients.len(),
-        if clients.len() == 1 {
-            "client"
-        } else {
-            "clients"
-        }
+        people,
+        if people == 1 { "person" } else { "people" },
+        clients,
+        if clients == 1 { "client" } else { "clients" }
     );
-    let go = ui.add_enabled(!items.is_empty(), widgets::primary_button(label));
-    if items.len() > page.group {
-        let groups = items.len().div_ceil(page.group);
+    let go = ui.add_enabled(people > 0, widgets::primary_button(label));
+    if people > page.group {
+        let groups = people.div_ceil(page.group);
         let wait = (groups - 1) as u64 * page.pause_secs as u64;
         ui.label(widgets::caption(format!(
             "{groups} groups of up to {}; about {} min of pauses.",
@@ -940,7 +1022,7 @@ mod tests {
         };
         assert_eq!(
             summary(&p),
-            "3 invited (2 by email, 1 by text) · 1 already on the portal · 1 not sent · 1 left when stopped"
+            "3 invited (2 by email, 1 by text) · 1 on the portal or invited already · 1 not sent · 1 left when stopped"
         );
     }
 }

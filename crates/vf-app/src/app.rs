@@ -117,6 +117,25 @@ pub struct OpenCabinet {
     ready: Option<crate::ui::job::Job<Result<Readied, String>>>,
 }
 
+/// Whether a document shared through the portal goes to B2 first (Q-103), as B2 is now.
+fn b2_first(
+    sync: &crate::ui::sync::SyncTab,
+    catalog: &std::path::Path,
+    root: &std::path::Path,
+    cabinet_id: &str,
+    config: &Config,
+) -> crate::ui::portal::B2First {
+    match &sync.session {
+        Some(s) => crate::ui::portal::B2First::Ready {
+            sync: Box::new(s.clone()),
+            catalog: catalog.to_path_buf(),
+            root: root.to_path_buf(),
+        },
+        None if config.sync.configured_for(cabinet_id) => crate::ui::portal::B2First::Locked,
+        None => crate::ui::portal::B2First::NotSetUp,
+    }
+}
+
 pub struct VibeFilesApp {
     pub tab: Tab,
     pub data: PathBuf,
@@ -128,6 +147,9 @@ pub struct VibeFilesApp {
     update_notice: Option<String>,
     /// This PC's text size has been applied to the window.
     zoom_applied: bool,
+    /// The footer's access requests were clicked before Admin was opened: it opens on Portal
+    /// requests (review 2026-11-24).
+    open_requests: bool,
     /// The Help window (PA-25).
     pub help: crate::ui::help::HelpState,
     /// The window is closing after the Viewer's question was answered (not asked again).
@@ -262,6 +284,7 @@ impl VibeFilesApp {
             update,
             update_notice: None,
             zoom_applied: false,
+            open_requests: false,
             help: Default::default(),
             closing: false,
             tip_clicked: false,
@@ -930,7 +953,6 @@ impl eframe::App for VibeFilesApp {
                 if a.portal.catalog.is_none() {
                     a.portal.catalog = Some(o.opened.catalog.clone());
                 }
-                a.portal.b2 = o.browse.b2_first.clone();
                 if let Some(n) = a.portal.waiting.take() {
                     o.browse.portal.requests_read(n);
                 }
@@ -1095,11 +1117,14 @@ impl eframe::App for VibeFilesApp {
             name.as_deref().unwrap_or("No cabinet open"),
         ) {
             self.tab = Tab::Admin;
-            if let Screen::Open(o) = &mut self.screen
-                && let Some(a) = &mut o.admin
-            {
-                a.page = crate::ui::admin::Page::PortalRequests;
-                a.portal.refresh_requests();
+            match &mut self.screen {
+                Screen::Open(o) if o.admin.is_some() => {
+                    if let Some(a) = &mut o.admin {
+                        a.page = crate::ui::admin::Page::PortalRequests;
+                        a.portal.refresh_requests();
+                    }
+                }
+                _ => self.open_requests = true,
             }
         }
         let ctx = ui.ctx().clone();
@@ -1285,6 +1310,20 @@ impl eframe::App for VibeFilesApp {
                     }
                 } else if self.tab == Tab::Admin {
                     let a = tab_admin.get_or_insert_with(|| Admin::load(&env));
+                    if std::mem::take(&mut self.open_requests) {
+                        a.page = crate::ui::admin::Page::PortalRequests;
+                        a.portal.refresh_requests();
+                    }
+                    // Documents shared on Approve go to B2 first too (PA-106), as B2 is now.
+                    if a.page == crate::ui::admin::Page::PortalRequests {
+                        a.portal.b2 = b2_first(
+                            o_sync,
+                            &opened.catalog,
+                            &opened.root,
+                            &opened.cabinet.cabinet_id,
+                            &self.config,
+                        );
+                    }
                     a.capture = self.config.ingest.print_capture.clone();
                     a.chain = Some(o_chain.clone());
                     admin::show(
@@ -1338,17 +1377,13 @@ impl eframe::App for VibeFilesApp {
                         running_for: o_sync.running_for.clone(),
                     });
                     // A portal share goes to B2 first when B2 is set up (Q-103).
-                    tab_browse.b2_first = match &o_sync.session {
-                        Some(s) => crate::ui::portal::B2First::Ready {
-                            sync: Box::new(s.clone()),
-                            catalog: opened.catalog.clone(),
-                            root: opened.root.clone(),
-                        },
-                        None if self.config.sync.configured_for(&opened.cabinet.cabinet_id) => {
-                            crate::ui::portal::B2First::Locked
-                        }
-                        None => crate::ui::portal::B2First::NotSetUp,
-                    };
+                    tab_browse.b2_first = b2_first(
+                        o_sync,
+                        &opened.catalog,
+                        &opened.root,
+                        &opened.cabinet.cabinet_id,
+                        &self.config,
+                    );
                     tab_browse.admin_unlocked = *admin_unlocked;
                     browse::show(ui, tab_browse, &mut env);
                     // Browse's Scan: Intake's scanner, profile and Scans folder (owner

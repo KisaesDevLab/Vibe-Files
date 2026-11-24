@@ -748,6 +748,18 @@ fn lists(root: &Path, m: &mut Merged) -> Result<(), String> {
             m.details.insert(key.into(), v);
         }
     }
+    // Its Portal contacts (PA-105): kept with the merge record, and given to the kept client
+    // when it has none (review 2026-11-24).
+    if let Some(rec) = meta.contacts.remove(&m.from.id) {
+        m.details.insert(
+            "contacts".into(),
+            serde_json::to_string(&rec).unwrap_or_default(),
+        );
+        if !meta.contacts.contains_key(&m.into.id) {
+            meta.contacts.insert(m.into.id.clone(), rec);
+            m.details.insert("contacts_to_kept".into(), "1".into());
+        }
+    }
     if meta != master.meta {
         clients::save_meta(root, &meta)?;
     }
@@ -948,7 +960,22 @@ pub fn undo_noted(
                     meta.shares.push(r.clone());
                 }
             }
+            if let Some(rec) = m
+                .details
+                .get("contacts")
+                .and_then(|j| serde_json::from_str::<crate::contacts::ContactRecord>(j).ok())
+            {
+                if m.details.contains_key("contacts_to_kept")
+                    && meta.contacts.get(&m.into.id) == Some(&rec)
+                {
+                    meta.contacts.remove(&m.into.id);
+                }
+                meta.contacts.entry(m.from.id.clone()).or_insert(rec);
+            }
             for (key, v) in &m.details {
+                if key.starts_with("contacts") {
+                    continue;
+                }
                 let map = match key.as_str() {
                     "entity_type" => &mut meta.entity_types,
                     "tin_last4" => &mut meta.tin_last4,
@@ -1170,6 +1197,38 @@ mod tests {
             "[Memo]\r\ncall in March\r\n"
         );
         assert!(!root.join(KEPT).join("!fcinfo (2).ini").exists());
+    }
+
+    /// PA-105 (review 2026-11-24): the merged client's Portal contacts go to the kept client
+    /// when it has none, and back on undo.
+    #[test]
+    fn portal_contacts_go_with_a_merge_and_back() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (root, _csv, mut conn, kept, dup) = cabinet(tmp.path());
+        let row = crate::contacts::Row {
+            email: "pat@example.test".into(),
+            ..Default::default()
+        };
+        crate::contacts::set_by_hand(&root, &dup, &row).unwrap();
+        let p = plan(&conn, &root, &dup, &kept).unwrap();
+        let m = apply(&mut conn, &root, &p, "dev").unwrap();
+        assert_eq!(
+            crate::contacts::record(&root, &kept)
+                .unwrap()
+                .effective()
+                .email,
+            "pat@example.test"
+        );
+        assert!(crate::contacts::record(&root, &dup).unwrap().is_empty());
+        undo(&mut conn, &root, &m, "dev").unwrap();
+        assert!(crate::contacts::record(&root, &kept).unwrap().is_empty());
+        assert_eq!(
+            crate::contacts::record(&root, &dup)
+                .unwrap()
+                .effective()
+                .email,
+            "pat@example.test"
+        );
     }
 
     /// The newest record decides what the last merge is: an older one that cannot be read
