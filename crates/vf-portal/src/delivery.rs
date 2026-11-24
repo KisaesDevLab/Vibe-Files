@@ -119,6 +119,97 @@ pub struct DeliverySigner {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+pub struct FeeLineOut {
+    pub key: String,
+    pub kind: String,
+    pub name: String,
+    pub cents: u64,
+    #[serde(default)]
+    pub recommended: bool,
+    #[serde(default)]
+    pub selected: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct FeePayment {
+    pub provider: String,
+    pub method: Option<String>,
+    /// `open`, `started`, `paid`, `failed`, `expired`.
+    pub state: String,
+    pub amount_cents: u64,
+    #[serde(default)]
+    pub card_fee_cents: u64,
+    #[serde(default)]
+    pub note: String,
+    pub paid_at: Option<String>,
+    pub started_at: Option<String>,
+    pub failed_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DeliveryFee {
+    /// `amount`, `addons`, `packages`, or none yet.
+    pub mode: Option<String>,
+    #[serde(default)]
+    pub lines: Vec<FeeLineOut>,
+    #[serde(default)]
+    pub total_cents: u64,
+    pub selection_signed_at: Option<String>,
+    pub selection_signed_by: Option<String>,
+    #[serde(default)]
+    pub payments: Vec<FeePayment>,
+}
+
+impl DeliveryFee {
+    /// "Paid $1,642.68 by card", "Bank payment started", "Bank payment failed", "Not paid".
+    pub fn payment_words(&self) -> String {
+        match self
+            .payments
+            .iter()
+            .rev()
+            .find(|p| p.state != "open" && p.state != "expired")
+        {
+            Some(p) if p.state == "paid" => format!(
+                "Paid {} {}",
+                crate::balance::money(p.amount_cents + p.card_fee_cents),
+                match (p.provider.as_str(), p.method.as_deref()) {
+                    ("manual", _) => format!(
+                        "(marked paid{})",
+                        if p.note.is_empty() {
+                            String::new()
+                        } else {
+                            format!(": {}", p.note)
+                        }
+                    ),
+                    (_, Some("bank")) => "by bank account".into(),
+                    _ => "by card".into(),
+                }
+            ),
+            Some(p) if p.state == "started" => "Bank payment started".into(),
+            Some(p) if p.state == "failed" => "Bank payment failed: not paid".into(),
+            _ => "Not paid".into(),
+        }
+    }
+}
+
+/// A line of the priced snapshot Vibe Files sends.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct FeeLineIn {
+    pub key: String,
+    /// `base`, `package`, `addon`.
+    pub kind: String,
+    pub name: String,
+    pub text: String,
+    pub cents: u64,
+    pub recommended: bool,
+    pub services: Vec<crate::pricing::Service>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct ReturnFile {
     pub id: String,
     pub name: String,
@@ -149,6 +240,9 @@ pub struct Delivery {
     pub letters: Vec<DeliveryLetter>,
     #[serde(default)]
     pub signers: Vec<DeliverySigner>,
+    /// Steps 3 and 4 (Addendum D4/D5).
+    #[serde(default)]
+    pub fee: Option<DeliveryFee>,
     #[serde(default)]
     pub created_by: String,
     pub created_at: String,
@@ -335,18 +429,69 @@ impl Portal {
         blocks_json: &str,
         pdf: &[u8],
     ) -> Result<Delivery> {
+        self.add_letter_to(
+            id,
+            "letters",
+            None,
+            name,
+            doc_type,
+            template_id,
+            template_version,
+            blocks_json,
+            pdf,
+        )
+    }
+
+    /// A letter for step 1 (`letters`) or a package's addendum for step 3 (`package`, tied to
+    /// its fee line's key; T20).
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_letter_to(
+        &self,
+        id: &str,
+        step: &str,
+        package_line: Option<&str>,
+        name: &str,
+        doc_type: &str,
+        template_id: &str,
+        template_version: u32,
+        blocks_json: &str,
+        pdf: &[u8],
+    ) -> Result<Delivery> {
         let blocks = crate::delivery::b64url(blocks_json.as_bytes());
         let version = template_version.to_string();
-        let q = [
+        let mut q = vec![
             ("name", name),
             ("docType", doc_type),
             ("templateId", template_id),
             ("templateVersion", version.as_str()),
-            ("step", "letters"),
+            ("step", step),
             ("blocks", blocks.as_str()),
         ];
+        if let Some(k) = package_line {
+            q.push(("packageLineId", k));
+        }
         self.post_bytes::<One>(&format!("/deliveries/{id}/letters"), &q, pdf)
             .map(|r| r.delivery)
+    }
+
+    /// Steps 3 and 4: the priced snapshot (T29). Refused once the selection is signed.
+    pub fn set_fee(&self, id: &str, mode: &str, lines: &[FeeLineIn]) -> Result<Delivery> {
+        self.send_json::<One>(
+            "PUT",
+            &format!("/deliveries/{id}/fee"),
+            &serde_json::json!({ "mode": mode, "lines": lines }),
+        )
+        .map(|r| r.delivery)
+    }
+
+    /// Step 4 paid outside Stripe, with a note (a check number).
+    pub fn mark_paid(&self, id: &str, note: &str) -> Result<Delivery> {
+        self.send_json::<One>(
+            "POST",
+            &format!("/deliveries/{id}/mark-paid"),
+            &serde_json::json!({ "note": note }),
+        )
+        .map(|r| r.delivery)
     }
 
     pub fn remove_letter(&self, id: &str, letter_id: &str) -> Result<Delivery> {

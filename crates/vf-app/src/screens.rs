@@ -894,6 +894,249 @@ mod tests {
         std::fs::write(out.join("steps.txt"), steps.join("\n")).unwrap();
     }
 
+    /// Addendum §12 slice 4 (packages and the fee) walkthrough against a real Vibe Portal and the
+    /// stand-in Stripe: the sample plan priced for a $1,265.68 return fee with Concierge
+    /// overridden, sent with the addenda; the client chooses Advantage and an add-on, reads the
+    /// addendum, signs, pays by card; steps 3 and 4's PDFs are committed into
+    /// `Income Tax\2025\Delivery`; the sent prices stand when the plan is edited. Set
+    /// `VF_WALK_URL`, `VF_WALK_KEY`, `VF_WALK_LOG`, `VF_WALK_CLIENT`, `VF_WALK_STRIPE` and
+    /// `VF_WALK_DIR`.
+    #[test]
+    #[ignore = "needs a running portal"]
+    fn fee_walkthrough() {
+        let (Ok(url), Ok(key), Ok(log), Ok(client_js), Ok(stripe), Ok(out)) = (
+            std::env::var("VF_WALK_URL"),
+            std::env::var("VF_WALK_KEY"),
+            std::env::var("VF_WALK_LOG"),
+            std::env::var("VF_WALK_CLIENT"),
+            std::env::var("VF_WALK_STRIPE"),
+            std::env::var("VF_WALK_DIR"),
+        ) else {
+            return;
+        };
+        let out = std::path::PathBuf::from(out);
+        std::fs::create_dir_all(&out).unwrap();
+        let mut steps: Vec<String> = Vec::new();
+        let mut note = |s: String| {
+            eprintln!("{s}");
+            steps.push(s);
+        };
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path().join("Clients");
+        vf_fixtures::generate(&root, 3).unwrap();
+        crate::ui::test_util::pdfium_first();
+        let data = t.path().join("data");
+        drop(crate::session::open(&data, "dev", &root).unwrap());
+        let cab = vf_fs::cabinet::read(&root).unwrap().cabinet_id;
+        let s = vf_portal::PortalSettings::new(&cab, &url, &key, 0)
+            .unwrap()
+            .with_deliveries(true);
+        vf_portal::settings::save(&root, &s).unwrap();
+        crate::portal::register_inbox(&root).unwrap();
+        for (_, name) in vf_portal::delivery::STEP_DOC_TYPES {
+            vf_fs::doctypes::ensure(&root, name, vf_portal::delivery::DELIVERY_FOLDER, false)
+                .unwrap();
+        }
+        vf_portal::pricing::save(&root, &vf_portal::pricing::sample("1040", 2025)).unwrap();
+        vf_letters::store::seed_if_missing(&root).unwrap();
+        let d = data.clone();
+        let mut h = HarnessBuilder::default()
+            .with_max_steps(crate::ui::test_util::MAX_STEPS)
+            .with_theme(egui::Theme::Light)
+            .with_size([1440.0, 900.0])
+            .build_eframe(move |cc| VibeFilesApp::new(&cc.egui_ctx, d.clone()));
+        h.run_steps(8);
+        let shot = |h: &mut egui_kittest::Harness<'static, VibeFilesApp>, name: &str| {
+            for _ in 0..5 {
+                h.step();
+            }
+            match h.render() {
+                Ok(img) => img.save(out.join(format!("{name}.png"))).unwrap(),
+                Err(e) => eprintln!("{name}: {e}"),
+            }
+        };
+        let said = |h: &egui_kittest::Harness<'static, VibeFilesApp>, text: &str| {
+            h.query_all_by_label_contains(text).next().is_some()
+        };
+        let wait_long =
+            |h: &mut egui_kittest::Harness<'static, VibeFilesApp>,
+             what: &str,
+             ok: &dyn Fn(&egui_kittest::Harness<'static, VibeFilesApp>) -> bool| {
+                let start = std::time::Instant::now();
+                while !ok(h) {
+                    assert!(start.elapsed().as_secs() < 90, "{what}: never");
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                    h.step();
+                }
+            };
+        h.get_by_role_and_label(Role::Button, "Open existing")
+            .click();
+        h.run_steps(8);
+        h.get_by_label("Cabinet folder").click();
+        h.step();
+        h.get_by_label("Cabinet folder")
+            .type_text(&root.display().to_string());
+        h.step();
+        h.get_by_role_and_label(Role::Button, "Open cabinet")
+            .click();
+        assert!(wait_for(&mut h, |h| matches!(
+            h.state().screen,
+            crate::app::Screen::Open(_)
+        )));
+        h.run_steps(8);
+        {
+            let o = open_mut(&mut h);
+            vf_fs::doctypes::sync(&mut o.opened.conn, &root, "dev", "doc_types_edit").unwrap();
+        }
+        let c = {
+            let o = open_mut(&mut h);
+            o.browse.set_scope(vf_core::browse::Scope::Client(0));
+            o.browse.portal.reread();
+            o.browse.snap.clients[0].clone()
+        };
+        let folder = c.folder_rel.clone().unwrap();
+        let p = crate::portal::client(&s);
+        p.put_client(&c.id, &c.ext_id, &c.name, None).unwrap();
+        p.invite(
+            &c.id,
+            Some("jordan.sample@example.com"),
+            None,
+            "Jordan Sample",
+            "Taxpayer",
+        )
+        .unwrap();
+        note(format!(
+            "Setup: {} ({}) on the portal; the sample 2025 1040 plan; the addendum samples",
+            c.name, c.ext_id
+        ));
+
+        // ---- Step 1: Deliver tax return… with packages priced for the client.
+        h.run_steps(4);
+        h.get_by_role_and_label(Role::Button, "Deliver tax return…")
+            .click();
+        wait_long(&mut h, "the window read", &|h| said(h, "WHAT HAS HAPPENED"));
+        h.run_steps(6);
+        for label in ["Tax return PDF", "Form 8879", "Package and fee"] {
+            h.get_by_label(label).click();
+            h.run_steps(3);
+        }
+        h.get_by_label("Return fee").click();
+        h.step();
+        h.get_by_label("Return fee").type_text("1265.68");
+        h.run_steps(3);
+        // An override for this client: Concierge at $1,700.00.
+        h.get_by_label("Concierge price").click();
+        h.step();
+        // The worked-out price is erased from its end (the box has focus), then the override
+        // typed.
+        h.key_press(egui::Key::End);
+        h.step();
+        for _ in 0..12 {
+            h.key_press(egui::Key::Backspace);
+            h.step();
+        }
+        h.get_by_label("Concierge price").type_text("1700.00");
+        h.run_steps(4);
+        shot(&mut h, "01-deliver-fee");
+        h.get_by_role_and_label(Role::Button, "Send to client")
+            .click();
+        wait_long(&mut h, "sent", &|h| said(h, "Sent to the client."));
+        let did = p.deliveries(Some(&c.id)).unwrap()[0].id.clone();
+        let sent = p.delivery(&did).unwrap();
+        let fee = sent.fee.clone().unwrap();
+        let price = |name: &str| fee.lines.iter().find(|l| l.name == name).map(|l| l.cents);
+        assert_eq!(price("Tax Return Only"), Some(126_568));
+        assert_eq!(price("Advantage"), Some(139_268));
+        assert_eq!(price("Concierge"), Some(170_000), "the override is kept");
+        note("Step 1: sent with Tax Return Only $1,265.68, Advantage $1,392.68 (from the plan), Concierge $1,700.00 (overridden), two add-ons, and the addenda".into());
+
+        // ---- Step 2: the client chooses, signs and pays.
+        let ok = std::process::Command::new("node")
+            .args([
+                &client_js,
+                &url,
+                &out.display().to_string(),
+                &log,
+                "jordan.sample@example.com",
+                "fee",
+                &stripe,
+            ])
+            .status()
+            .is_ok_and(|s| s.success());
+        assert!(ok, "the client's choice and payment (see client-fee.json)");
+        let now = p.delivery(&did).unwrap();
+        let f = now.fee.clone().unwrap();
+        assert_eq!(f.total_cents, 139_268 + 25_000);
+        assert!(f.selection_signed_at.is_some());
+        assert_eq!(f.payment_words(), "Paid $1,642.68 by card");
+        note(format!(
+            "Step 2: Advantage and the planning meeting signed; {}",
+            f.payment_words()
+        ));
+
+        // ---- Step 3: a plan edit leaves the sent delivery's prices as they were.
+        let mut plan = vf_portal::pricing::load(&root, "1040", 2025).unwrap();
+        plan.packages[1].minimum_cents = 50_000;
+        vf_portal::pricing::save(&root, &plan).unwrap();
+        let again = p.delivery(&did).unwrap().fee.unwrap();
+        assert_eq!(again.lines, f.lines);
+        note(
+            "Step 3: the plan's Advantage minimum raised to $500; the delivery's prices stand"
+                .into(),
+        );
+
+        // ---- Step 4: the step 3 and 4 PDFs are fetched and filed.
+        open_mut(&mut h).browse.portal.delivery = None;
+        open_mut(&mut h).browse.portal.fetch_now = true;
+        let inbox = crate::portal::inbox(&root);
+        let count = |inbox: &std::path::Path| {
+            std::fs::read_dir(inbox)
+                .ok()
+                .into_iter()
+                .flatten()
+                .flatten()
+                .filter(|e| e.file_name().to_string_lossy().contains(" Delivery "))
+                .count()
+        };
+        wait_long(&mut h, "both PDFs fetched", &|_| count(&inbox) == 2);
+        h.state_mut().tab = crate::app::Tab::Intake;
+        h.run_steps(10);
+        if let Some(b) = h.query_by_label("Preview") {
+            b.click();
+        }
+        wait_long(&mut h, "both rows ready", &|h| said(h, "Commit 2 files"));
+        shot(&mut h, "02-intake-fee-pdfs");
+        h.query_all_by_role_and_label(Role::Button, "Commit 2 files")
+            .last()
+            .unwrap()
+            .click();
+        h.run_steps(6);
+        wait_long(&mut h, "the commit summary", &|h| {
+            h.query_all_by_label("Confirm commit").next().is_some()
+        });
+        h.query_all_by_label("Confirm commit")
+            .next()
+            .unwrap()
+            .click();
+        h.run_steps(6);
+        let dir = root
+            .join(&folder)
+            .join("Income Tax")
+            .join("2025")
+            .join("Delivery");
+        for want in [
+            "2025 Delivery 3 - Package selection.pdf",
+            "2025 Delivery 4 - Fee.pdf",
+        ] {
+            let path = dir.join(want);
+            wait_long(&mut h, want, &|_| path.exists());
+        }
+        note(format!(
+            "Step 4: committed into {folder}\\Income Tax\\2025\\Delivery: the package selection (with the signed Advantage addendum) and the fee receipt"
+        ));
+        std::fs::write(out.join("steps.txt"), steps.join("\n")).unwrap();
+    }
+
     /// Presses the open window's Read again.
     fn click_read_again(h: &mut egui_kittest::Harness<'static, VibeFilesApp>) {
         h.query_all_by_role_and_label(Role::Button, "Read again")

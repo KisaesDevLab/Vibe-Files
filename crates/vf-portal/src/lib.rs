@@ -12,6 +12,7 @@ pub mod delivery;
 pub mod filed;
 pub mod inbox;
 pub mod listing;
+pub mod pricing;
 pub mod record;
 pub mod settings;
 pub mod todo;

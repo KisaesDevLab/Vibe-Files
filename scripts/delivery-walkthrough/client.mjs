@@ -1,6 +1,6 @@
 // Tax return delivery walkthrough (Addendum §12, slice 2), client side: drives the real portal
 // pages in headless Edge (DevTools protocol).
-//   node client.mjs <base> <outDir> <apiLog> <email> <phase: deliver|letters> [second signer's email]
+//   node client.mjs <base> <outDir> <apiLog> <email> <phase: deliver|letters|fee> [second signer's email | stripe stand-in]
 // The invitation link is read from the portal's log (EMAIL_PROVIDER=console), as a client reads
 // their email. Writes PNGs and a JSON step log to outDir. Synthetic data only.
 import { spawn } from 'node:child_process';
@@ -205,6 +205,56 @@ try {
       await sleep(3000);
       await shot('23-signed-copy');
     }
+  } else if (PHASE === 'fee') {
+    // The client chooses a package and an add-on, reads the addendum, signs, and pays by card.
+    const STRIPE = SECOND;
+    const inv = await mailWith('/invite', 0);
+    await go(linkIn(inv.body, '/invite'));
+    await until(`!!__byText('button', 'Accept and sign in')`, 'invitation page');
+    await click('Accept and sign in');
+    await until(`location.pathname === '/'`, 'home after accepting');
+    await until(`!!__byText('a', 'Choose')`, 'the package step');
+    await shot('30-client-card-package');
+    await js(`__byText('a', 'Choose').click()`);
+    await until(`location.pathname.endsWith('/package')`, 'the package page');
+    await until(`document.body.innerText.includes('Advantage')`, 'packages listed');
+    const none = await js(`[...document.querySelectorAll('input[type=radio]')].every((r) => !r.checked)`);
+    note(`Nothing chosen at first: ${none}`);
+    await js(`(() => { const l = [...document.querySelectorAll('label')].find((x) => x.textContent.includes('Advantage') && x.querySelector('input[type=radio]')); l.querySelector('input').click(); return true; })()`);
+    await sleep(400);
+    await js(`(() => { const l = [...document.querySelectorAll('label')].find((x) => x.textContent.includes('Mid-year planning meeting') && x.querySelector('input[type=checkbox]')); l.querySelector('input').click(); return true; })()`);
+    await sleep(600);
+    const total = await js(`(document.body.innerText.match(/Total due in the next step\\s*\\$([\\d,.]+)/) || [])[1] || ''`);
+    note(`Advantage and the planning meeting: total $${total}`);
+    // Reading the addendum (it opens in a new tab; the click marks it read).
+    await js(`(() => { const a = [...document.querySelectorAll('a')].find((x) => x.textContent.startsWith('Read the')); a.removeAttribute('target'); a.addEventListener('click', (e) => e.preventDefault()); a.click(); return true; })()`);
+    await draw();
+    await js(`(() => { const c = [...document.querySelectorAll('input[type=checkbox]')].find((i) => i.parentElement.textContent.includes('I choose this selection')); c.click(); return true; })()`);
+    await sleep(400);
+    await shot('31-package-signed-ready');
+    await click('Sign and continue to payment');
+    await until(`location.pathname === '/'`, 'back to the card');
+    await until(`[...document.querySelectorAll('button')].some((b) => b.textContent.trim().startsWith('Pay by card'))`, 'the fee step');
+    await shot('32-card-fee');
+    await js(`[...document.querySelectorAll('button')].find((b) => b.textContent.trim().startsWith('Pay by card')).click()`);
+    let session = null;
+    for (let i = 0; i < 40 && !session; i++) {
+      await sleep(250);
+      session = await (await fetch(`${STRIPE}/_last`)).json();
+    }
+    if (!session) throw new Error('no Checkout Session');
+    const paid = await (
+      await fetch(`${STRIPE}/_pay`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sessionId: session.id, paid: true }),
+      })
+    ).json();
+    note(`Paid by card on Stripe's page (the stand-in); webhook ${paid.webhook}`);
+    await go(`${BASE}/?delivery=${session.metadata.delivery_id}&session_id=${session.id}`);
+    await until(`!!__byText('a', 'Receipt')`, 'the receipt link');
+    await shot('33-card-paid');
+    note('The fee step shows its Receipt');
   }
 } catch (e) {
   note(`ERROR: ${e.message}`);

@@ -34,6 +34,7 @@ pub mod new_client;
 pub mod pages;
 pub mod portal;
 pub mod preview;
+pub mod pricing_plans;
 pub mod print_ui;
 pub mod rename;
 pub mod retention;

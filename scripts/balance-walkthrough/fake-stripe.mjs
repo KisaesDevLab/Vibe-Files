@@ -32,7 +32,8 @@ createServer((req, res) => {
         id: sessionId,
         status: 'complete',
         payment_status: paid ? 'paid' : 'unpaid',
-        metadata: { balance_id: balanceId, method: 'card' },
+        // The session's own metadata when the portal made it (a delivery's), else a balance's.
+        metadata: sessions.get(sessionId)?.metadata ?? { balance_id: balanceId, method: 'card' },
       };
       sessions.set(sessionId, s);
       const body = JSON.stringify({

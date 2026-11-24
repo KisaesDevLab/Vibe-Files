@@ -109,6 +109,7 @@ enum Done {
 
 enum Act {
     Send,
+    MarkPaid,
     Confirm,
     Remind,
     Cancel,
@@ -136,6 +137,17 @@ pub struct DeliverWindow {
     signers: Vec<DeliverySigner>,
     /// The firm's name as the portal has it (the letters' {Firm name}).
     firm_name: String,
+    /// Steps 3 and 4 (Addendum D4/D5): the mode, the client's return fee, the plan's packages
+    /// with the price the client sees (an override kept), the add-ons offered.
+    with_fee: bool,
+    fee_mode: String,
+    return_fee: String,
+    amount: String,
+    plan: Option<vf_portal::pricing::Plan>,
+    prices: Vec<(vf_portal::pricing::PlanPackage, String, bool)>,
+    addon_ticks: Vec<(vf_portal::pricing::PlanAddon, bool, String)>,
+    mark_note: String,
+    confirm_mark: bool,
     return_file: Option<String>,
     link: String,
     notify: bool,
@@ -182,6 +194,15 @@ impl DeliverWindow {
             letters: Vec::new(),
             signers: Vec::new(),
             firm_name: String::new(),
+            with_fee: false,
+            fee_mode: "packages".into(),
+            return_fee: String::new(),
+            amount: String::new(),
+            plan: None,
+            prices: Vec::new(),
+            addon_ticks: Vec::new(),
+            mark_note: String::new(),
+            confirm_mark: false,
             return_file: None,
             link: String::new(),
             notify: true,
@@ -193,6 +214,7 @@ impl DeliverWindow {
             reads,
         };
         w.offer_letters();
+        w.offer_fee();
         w.load(ctx, s);
         w
     }
@@ -248,6 +270,134 @@ impl DeliverWindow {
         };
     }
 
+    /// The pricing plan for the return type and year, its packages priced for the return fee.
+    fn offer_fee(&mut self) {
+        self.plan = vf_portal::pricing::load(&self.root, &self.return_type, self.year);
+        self.prices = self
+            .plan
+            .as_ref()
+            .map(|p| {
+                p.packages
+                    .iter()
+                    .map(|k| (k.clone(), String::new(), true))
+                    .collect()
+            })
+            .unwrap_or_default();
+        self.addon_ticks = self
+            .plan
+            .as_ref()
+            .map(|p| {
+                p.addons
+                    .iter()
+                    .map(|a| {
+                        (
+                            a.clone(),
+                            a.offered,
+                            vf_portal::balance::money(a.cents)
+                                .trim_start_matches('$')
+                                .to_string(),
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        self.reprice();
+    }
+
+    /// Each package's price worked out from the return fee (an override typed stays).
+    fn reprice(&mut self) {
+        let Some(fee) = vf_portal::balance::parse_money(&self.return_fee) else {
+            return;
+        };
+        for (k, shown, _) in &mut self.prices {
+            *shown = vf_portal::balance::money(vf_portal::pricing::package_price(fee, k))
+                .trim_start_matches('$')
+                .to_string();
+        }
+    }
+
+    /// The priced snapshot to send (T29), or why it cannot be sent.
+    fn fee_lines(&self) -> Result<Vec<delivery::FeeLineIn>, String> {
+        let cents = |s: &str, what: &str| {
+            vf_portal::balance::parse_money(s).ok_or_else(|| format!("{what}: dollars and cents"))
+        };
+        let line = |key: &str,
+                    kind: &str,
+                    name: &str,
+                    text: &str,
+                    c: u64,
+                    rec: bool,
+                    svc: Vec<vf_portal::pricing::Service>| delivery::FeeLineIn {
+            key: key.into(),
+            kind: kind.into(),
+            name: name.into(),
+            text: text.into(),
+            cents: c,
+            recommended: rec,
+            services: svc,
+        };
+        let mut out = Vec::new();
+        match self.fee_mode.as_str() {
+            "amount" => out.push(line(
+                "fee",
+                "base",
+                &format!("{} Form {}", self.year, self.return_type),
+                "",
+                cents(&self.amount, "The fee")?,
+                false,
+                vec![],
+            )),
+            mode => {
+                if mode == "addons" {
+                    let base = self
+                        .plan
+                        .as_ref()
+                        .map(|p| p.base_name.clone())
+                        .unwrap_or_else(|| "Tax return preparation".into());
+                    out.push(line(
+                        "base",
+                        "base",
+                        &base,
+                        "",
+                        cents(&self.return_fee, "The return fee")?,
+                        false,
+                        vec![],
+                    ));
+                } else {
+                    for (k, shown, offered) in self.prices.iter().filter(|x| x.2) {
+                        let _ = offered;
+                        out.push(line(
+                            &k.key,
+                            "package",
+                            &k.name,
+                            "",
+                            cents(shown, &k.name)?,
+                            k.recommended,
+                            k.services.clone(),
+                        ));
+                    }
+                    if out.is_empty() {
+                        return Err("Offer at least one package.".into());
+                    }
+                }
+                for (a, on, price) in &self.addon_ticks {
+                    if *on {
+                        out.push(line(
+                            &a.key,
+                            "addon",
+                            &a.name,
+                            &a.text,
+                            cents(price, &a.name)?,
+                            false,
+                            vec![],
+                        ));
+                    }
+                }
+            }
+        }
+        Ok(out)
+    }
+
     /// The merge fields for this client and delivery.
     fn fields(&self) -> vf_letters::Fields {
         let mut f = vf_letters::Fields::new();
@@ -292,6 +442,25 @@ impl DeliverWindow {
             ),
         ] {
             f.insert(k.into(), v);
+        }
+        if self.with_fee {
+            let fee = if self.fee_mode == "amount" {
+                &self.amount
+            } else {
+                &self.return_fee
+            };
+            if let Some(c) = vf_portal::balance::parse_money(fee) {
+                f.insert("Fee".into(), vf_portal::balance::money(c));
+            }
+            let options: Vec<String> = self
+                .prices
+                .iter()
+                .filter(|x| x.2)
+                .map(|(k, shown, _)| format!("{} ${shown}", k.name))
+                .collect();
+            if !options.is_empty() {
+                f.insert("Fee options".into(), options.join("; "));
+            }
         }
         f
     }
@@ -343,6 +512,10 @@ impl DeliverWindow {
             self.with_return = d.step(delivery::RETURN).is_some_and(|s| s.present);
             self.with_8879 = d.step(delivery::ESIGN).is_some_and(|s| s.present);
             self.with_letters = d.step(delivery::LETTERS).is_some_and(|s| s.present);
+            self.with_fee = d.step(delivery::FEE).is_some_and(|s| s.present);
+            if let Some(m) = d.fee.as_ref().and_then(|f| f.mode.clone()) {
+                self.fee_mode = m;
+            }
             if !d.signers.is_empty() {
                 self.signers = d.signers.clone();
             }
@@ -492,6 +665,7 @@ impl DeliverWindow {
                 if before.1 != self.return_type {
                     self.offer_letters();
                 }
+                self.offer_fee();
                 if self.current().is_none() {
                     self.title = format!("Your {} tax return", self.year);
                     self.return_file = None;
@@ -669,6 +843,189 @@ impl DeliverWindow {
                 ));
             }
         });
+        // Section: package and fee (Addendum D4/D5).
+        ui.group(|ui| {
+            let sent_fee = current
+                .as_ref()
+                .and_then(|d| d.fee.clone())
+                .filter(|f| f.mode.is_some());
+            let signed = sent_fee
+                .as_ref()
+                .is_some_and(|f| f.selection_signed_at.is_some());
+            let paid = current
+                .as_ref()
+                .and_then(|d| d.step(delivery::FEE))
+                .is_some_and(|s| s.state == "done");
+            ui.horizontal(|ui| {
+                ui.add_enabled(
+                    can && sent_fee.is_none(),
+                    egui::Checkbox::new(
+                        &mut self.with_fee,
+                        RichText::new("Package and fee").strong(),
+                    ),
+                );
+                ui.label(RichText::new(step_state(delivery::FEE)).color(theme::ink_muted()));
+            });
+            if !self.with_fee {
+                return;
+            }
+            if let Some(f) = &sent_fee {
+                for l in f.lines.iter().filter(|l| {
+                    f.mode.as_deref() != Some("packages")
+                        || l.kind != "package"
+                        || l.selected
+                        || f.selection_signed_at.is_none()
+                }) {
+                    ui.label(format!(
+                        "{}{}: {}",
+                        l.name,
+                        if l.selected { " (chosen)" } else { "" },
+                        vf_portal::balance::money(l.cents)
+                    ));
+                }
+                if signed {
+                    ui.label(format!(
+                        "Signed by {} · total {}",
+                        f.selection_signed_by.clone().unwrap_or_default(),
+                        vf_portal::balance::money(f.total_cents)
+                    ));
+                }
+                let words = f.payment_words();
+                ui.colored_label(
+                    if words.starts_with("Bank payment failed") {
+                        theme::error()
+                    } else {
+                        theme::ink_secondary()
+                    },
+                    words,
+                );
+                if !paid {
+                    if ui
+                        .add_enabled(can, egui::Button::new("Mark paid…"))
+                        .clicked()
+                    {
+                        self.confirm_mark = true;
+                    }
+                    if self.confirm_mark {
+                        ui.horizontal(|ui| {
+                            ui.label("Note");
+                            widgets::named(
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut self.mark_note)
+                                        .desired_width(200.0)
+                                        .hint_text("Check 1042"),
+                                ),
+                                "Mark paid note",
+                            );
+                            if ui.button("Mark paid").clicked() {
+                                self.confirm_mark = false;
+                                act = Some(Act::MarkPaid);
+                            }
+                            if ui.button("Keep it").clicked() {
+                                self.confirm_mark = false;
+                            }
+                        });
+                    }
+                }
+                return;
+            }
+            ui.horizontal(|ui| {
+                ui.radio_value(&mut self.fee_mode, "amount".to_string(), "One amount");
+                ui.radio_value(
+                    &mut self.fee_mode,
+                    "addons".to_string(),
+                    "Base fee and add-ons",
+                );
+                ui.radio_value(
+                    &mut self.fee_mode,
+                    "packages".to_string(),
+                    "Packages and add-ons",
+                );
+            });
+            if self.fee_mode == "amount" {
+                ui.horizontal(|ui| {
+                    ui.label("The fee $");
+                    widgets::named(
+                        ui.add(egui::TextEdit::singleline(&mut self.amount).desired_width(100.0)),
+                        "Delivery fee",
+                    );
+                });
+                return;
+            }
+            match &self.plan {
+                Some(p) => {
+                    ui.label(widgets::caption(format!(
+                        "Pricing plan: {} {}",
+                        p.tax_year, p.return_type
+                    )));
+                }
+                None => {
+                    ui.colored_label(
+                        theme::warn(),
+                        format!(
+                            "No pricing plan for {} {}: add one in Admin › Portal › Pricing plans.",
+                            self.year, self.return_type
+                        ),
+                    );
+                }
+            }
+            ui.horizontal(|ui| {
+                ui.label("This client's return fee $");
+                if widgets::named(
+                    ui.add(egui::TextEdit::singleline(&mut self.return_fee).desired_width(100.0)),
+                    "Return fee",
+                )
+                .changed()
+                {
+                    self.reprice();
+                }
+            });
+            if self.fee_mode == "packages" {
+                let fee = vf_portal::balance::parse_money(&self.return_fee);
+                for (k, shown, offered) in &mut self.prices {
+                    ui.horizontal(|ui| {
+                        ui.checkbox(offered, &k.name);
+                        ui.label(widgets::caption(vf_portal::pricing::rule_words(k)));
+                        ui.label("client sees $");
+                        let worked = fee.map(|f| {
+                            vf_portal::balance::money(vf_portal::pricing::package_price(f, k))
+                        });
+                        let differs = worked
+                            .as_deref()
+                            .is_some_and(|w| w.trim_start_matches('$') != shown.as_str());
+                        let r = widgets::named(
+                            ui.add(egui::TextEdit::singleline(shown).desired_width(90.0)),
+                            &format!("{} price", k.name),
+                        );
+                        if differs {
+                            ui.painter().rect_stroke(
+                                r.rect.expand(2.0),
+                                3.0,
+                                egui::Stroke::new(1.5, theme::accent()),
+                                egui::StrokeKind::Outside,
+                            );
+                            ui.label(widgets::caption(format!(
+                                "plan: {}",
+                                worked.unwrap_or_default()
+                            )));
+                        }
+                        if k.recommended {
+                            ui.label(widgets::caption("Recommended"));
+                        }
+                    });
+                }
+            }
+            for (a, on, price) in &mut self.addon_ticks {
+                ui.horizontal(|ui| {
+                    ui.checkbox(on, &a.name);
+                    ui.label("$");
+                    ui.add(egui::TextEdit::singleline(price).desired_width(80.0));
+                });
+            }
+            if let Err(e) = self.fee_lines() {
+                ui.colored_label(theme::warn(), e);
+            }
+        });
         // Section: Form 8879.
         ui.group(|ui| {
             ui.horizontal(|ui| {
@@ -738,7 +1095,11 @@ impl DeliverWindow {
                 };
                 if ui
                     .add_enabled(
-                        can && link_ok && (self.with_return || self.with_8879 || self.with_letters),
+                        can && link_ok
+                            && (self.with_return
+                                || self.with_8879
+                                || self.with_letters
+                                || self.with_fee),
                         widgets::primary_button(label),
                     )
                     .clicked()
@@ -838,8 +1199,52 @@ impl DeliverWindow {
                 let steps = StepsIn {
                     letters: self.with_letters,
                     return_: self.with_return,
+                    package: self.with_fee && self.fee_mode != "amount",
+                    fee: self.with_fee,
                     esign8879: self.with_8879,
-                    ..Default::default()
+                };
+                // The priced snapshot and each offered package's addendum (T20), while the
+                // selection is not signed.
+                let fee = if self.with_fee
+                    && current.as_ref().is_none_or(|d| {
+                        d.fee
+                            .as_ref()
+                            .is_none_or(|f| f.selection_signed_at.is_none())
+                    }) {
+                    match self.fee_lines() {
+                        Ok(lines) => Some((self.fee_mode.clone(), lines)),
+                        Err(e) => {
+                            self.err = Some(e);
+                            return;
+                        }
+                    }
+                } else {
+                    None
+                };
+                let addenda: Vec<(String, vf_letters::Template, vf_letters::Laid)> = match &fee {
+                    Some((mode, lines)) if mode == "packages" && current.is_none() => {
+                        let templates = vf_letters::store::load_all(&self.root).unwrap_or_default();
+                        let base = self.fields();
+                        lines
+                            .iter()
+                            .filter(|l| l.kind == "package")
+                            .filter_map(|l| {
+                                let t = templates.iter().find(|t| {
+                                    t.kind == "addendum"
+                                        && t.package
+                                            .as_deref()
+                                            .is_some_and(|p| p.eq_ignore_ascii_case(&l.name))
+                                })?;
+                                let mut f = base.clone();
+                                f.insert("Package name".into(), l.name.clone());
+                                f.insert("Package fee".into(), vf_portal::balance::money(l.cents));
+                                let laid =
+                                    vf_letters::layout(t, &f, &self.return_type, Some(&l.name));
+                                Some((l.key.clone(), t.clone(), laid))
+                            })
+                            .collect()
+                    }
+                    _ => Vec::new(),
                 };
                 // The letters, laid out now (sent once, while the delivery has none).
                 let letters: Vec<(vf_letters::Template, vf_letters::Laid)> =
@@ -900,6 +1305,24 @@ impl DeliverWindow {
                         {
                             d = p.set_esign_link(&d.id, &l)?;
                         }
+                        if let Some((mode, lines)) = &fee {
+                            d = p.set_fee(&d.id, mode, lines)?;
+                            for (key, t, laid) in &addenda {
+                                let blocks =
+                                    serde_json::to_string(&laid.blocks).expect("serializes");
+                                d = p.add_letter_to(
+                                    &d.id,
+                                    "package",
+                                    Some(key),
+                                    &t.name,
+                                    &t.doc_type,
+                                    &t.id,
+                                    t.version,
+                                    &blocks,
+                                    &laid.pdf,
+                                )?;
+                            }
+                        }
                         if with_letters && d.letters.is_empty() {
                             for (t, laid) in &letters {
                                 let blocks =
@@ -919,6 +1342,18 @@ impl DeliverWindow {
                         p.delivery(&d.id)
                     })();
                     Done::Saved(r.map(Box::new).map_err(|e| e.message()), what)
+                }));
+            }
+            Act::MarkPaid => {
+                let Some(d) = current else { return };
+                let note = self.mark_note.trim().to_string();
+                self.job = Some(spawn(ctx, move || {
+                    let p = core::client(&s2);
+                    let r = p.mark_paid(&d.id, &note).and_then(|x| p.delivery(&x.id));
+                    Done::Saved(
+                        r.map(Box::new).map_err(|e| e.message()),
+                        "portal_delivery_mark_paid",
+                    )
                 }));
             }
             Act::Confirm => {

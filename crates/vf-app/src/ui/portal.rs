@@ -218,6 +218,8 @@ pub struct PortalState {
     deliveries_at: Option<Instant>,
     delivery_tx: Sender<Vec<vf_portal::delivery::Delivery>>,
     delivery_rx: Receiver<Vec<vf_portal::delivery::Delivery>>,
+    /// Failed bank payments of delivery fees already seen on this PC (F3: each said once).
+    failed_seen: Option<HashSet<String>>,
 }
 
 /// Minutes between reads of the balances (every PC; Addendum §16).
@@ -273,6 +275,7 @@ impl Default for PortalState {
             deliveries_at: None,
             delivery_tx,
             delivery_rx,
+            failed_seen: None,
         }
     }
 }
@@ -484,6 +487,37 @@ impl PortalState {
         {
             self.deliveries_job = None;
             if let Some(read) = read {
+                // F3: a delivery fee's bank payment that failed is said once on every PC.
+                let failed: Vec<(String, String)> = read
+                    .iter()
+                    .flat_map(|d| {
+                        d.fee.iter().flat_map(move |f| {
+                            f.payments
+                                .iter()
+                                .filter(|p| p.state == "failed")
+                                .map(move |p| {
+                                    (
+                                        format!(
+                                            "{}:{}",
+                                            d.id,
+                                            p.failed_at.clone().unwrap_or_default()
+                                        ),
+                                        d.title.clone(),
+                                    )
+                                })
+                        })
+                    })
+                    .collect();
+                match &mut self.failed_seen {
+                    None => self.failed_seen = Some(failed.iter().map(|f| f.0.clone()).collect()),
+                    Some(seen) => {
+                        if let Some((_, title)) = failed.iter().find(|f| seen.insert(f.0.clone())) {
+                            self.notice = Some(format!(
+                                "Portal: a bank payment for \"{title}\" failed: the fee shows unpaid again. See Admin › Portal › Deliveries."
+                            ));
+                        }
+                    }
+                }
                 let _ = self.delivery_tx.send(read.clone());
                 self.deliveries = Some(read);
             }

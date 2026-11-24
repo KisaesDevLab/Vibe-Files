@@ -282,14 +282,14 @@ Number them from the next free P when accepted. Each ends with `pnpm gate` green
   PDF hashes match the events; a letter changed after one signature is refused
 
 ### D4 — Packages and add-ons
-- [ ] Fee snapshot; package page (desktop and phone); add-ons; selection sheet
-- [ ] Package addendum signed with the selection (T20); step 3 PDF
+- [x] Fee snapshot; package page (desktop and phone); add-ons; selection sheet
+- [x] Package addendum signed with the selection (T20); step 3 PDF
 - **Gate:** the three modes; total equals the selected lines; `PUT /fee` refused after signing;
   nothing preselected (T28)
 
 ### D5 — Payment
-- [ ] On D0's settings and webhook: the delivery's Checkout Session and receipt
-- [ ] Bank started/failed/cleared (T26); mark paid; step 4 PDF
+- [x] On D0's settings and webhook: the delivery's Checkout Session and receipt
+- [x] Bank started/failed/cleared (T26); mark paid; step 4 PDF
 - **Gate:** against Stripe test mode: card paid; bank started opens step 5, then a failed event
   shows unpaid and tells staff; a replayed webhook changes nothing; a forged one is refused
 
@@ -419,10 +419,10 @@ screenshots of the new windows.
   signature lines (checked on rendered pages); e2e: two signers, signed PDF filed
 
 ### F3 — Pricing plans, packages and add-ons (with portal D4, D5)
-- [ ] Admin › Pricing plans (grid, percent with minimum, add-ons, copy to next year)
-- [ ] Deliver window section 3: three modes, return fee, worked-out prices, overrides, snapshot
-- [ ] Fee options field; package addendum templates sent per offered package
-- [ ] Mark paid; payment states shown; failed bank payment notice on every PC's footer
+- [x] Admin › Pricing plans (grid, percent with minimum, add-ons, copy to next year)
+- [x] Deliver window section 3: three modes, return fee, worked-out prices, overrides, snapshot
+- [x] Fee options field; package addendum templates sent per offered package
+- [x] Mark paid; payment states shown; failed bank payment notice on every PC's footer
 - **Gate:** the sample plan gives $1,392.68 and $1,708.68 on $1,265.68; an override is kept; a
   plan edit leaves a sent delivery unchanged; e2e in Stripe test mode through step 4's PDF
 
@@ -976,3 +976,44 @@ the signed copy shows both signatures on their lines and the dates. Portal tests
 | Q26 | Must the client open each letter before Sign works? | No: the letter is shown on the same page beside the pad; the addendum (package) rule is slice 4's. | `pages/Sign.tsx` |
 | Q27 | Letter previews are written to the system temp folder. | `%TEMP%\vibe-files-letters` (holds a client's name and letter text). | `ui/delivery.rs`, `ui/letter_templates.rs` |
 | Q28 | The signed copies' names on the portal. | `<year> <letter name> - signed.pdf`, shared with every active person of the client. | `finishLetters` |
+
+### Slice 4 (portal D4/D5, Vibe Files F3: PA-110)
+
+Portal (`e8c06c7`, `cbb7fd6`): migration 0040 (`delivery_fee_line`, `delivery_payment`; the
+delivery's `fee_mode` and signed selection). Firm API: `PUT /deliveries/:id/fee { mode: amount
+| addons | packages, lines: [{ key, kind: base | package | addon, name, text?, cents,
+recommended?, services?: [{ group, bullets }] }] }` (409 `selection_signed` / `fee_paid`), `POST
+/deliveries/:id/mark-paid { note }`; a package's addendum is a letter with `step=package&
+packageLineId=<line key>`. The delivery's JSON gains `fee: { mode, lines: [{ key, kind, name,
+cents, recommended, selected }], totalCents, selectionSignedAt, selectionSignedBy, payments:
+[{ provider, method, state, amountCents, cardFeeCents, note, paidAt, startedAt, failedAt }] }`.
+Client API: `GET /deliveries/:id/fee`, `GET …/addenda/:lid/pdf`, `POST …/selection { packageKey,
+addonKeys }`, `POST …/selection/sign?signerName&agree=1` (body: the PNG), `POST …/checkout {
+method }`, `POST …/return { sessionId }`, `GET …/receipt.pdf`. The webhook routes by
+`metadata.delivery_id` as well as `balance_id`.
+
+Vibe Files: `vf-portal::pricing` (plans in `_Vibe/pricing/<type> <year>.json`, the price rule,
+the sample plan), Admin › Portal › Pricing plans, the Deliver window's Package and fee (three
+modes, the return fee, each package's worked-out price with an override outlined beside the
+plan's, add-ons, the addenda sent per offered package, Mark paid…, payment words), a failed
+bank payment said once on every PC, help `pricing-plans`.
+
+Gate: the sample plan gives $1,392.68 and $1,708.68 on $1,265.68 (unit test); the live
+`fee_walkthrough` keeps an override ($1,700.00), the client chooses with nothing preselected,
+reads the addendum, signs, pays $1,642.68 by card through the stand-in Stripe, a plan edit
+leaves the sent prices, and both step PDFs are committed into `Income Tax\2025\Delivery`.
+Portal tests: the three modes, totals, `PUT /fee` refused after signing, card paid, bank started
+opening Form 8879 then failed (staff told), Mark paid. Not met yet: Stripe test mode (owner).
+
+### Questions logged, slice 4 (defaults taken)
+
+| # | Question | Default taken | Where to change it |
+|---|---|---|---|
+| Q29 | Who signs the selection? | Whoever chooses, typing their name (pre-filled), for everyone on the return (T19); one signature placed in every block of the addendum. | `pages/Package.tsx`, `signSelection` |
+| Q30 | When is step 4 done for a bank payment? | Waiting when started (it opens what is locked behind the fee, T26); done when paid. Step 4's PDF is filed when paid. | `stepStates`, `applyDeliverySession` |
+| Q31 | The card fee on the delivery fee. | The same Settings › Payments card fee as balances (B20), card payments only, its own line. | `delivery/fee.ts checkout` |
+| Q32 | A missed webhook for a delivery payment. | Caught up when the client comes back to the card (`/return`); no timer yet (balances have one). | `delivery/fee.ts` |
+| Q33 | Changing the fee after it was sent. | Save changes sends the snapshot again until the selection is signed or a payment started. | `DeliverWindow::apply` |
+| Q34 | Addenda for a package whose name has no addendum template. | None sent; the package is chosen without one. | `DeliverWindow::apply` |
+| Q35 | Pricing plans: the grid with a column per package (§15.6). | A row per package with its rule and service lines (`Group: a; b`). | `ui/pricing_plans.rs` |
+| Q36 | Test runs under load: the portal suite's setup hook (40 migrations) can pass 10 s. | Re-run alone; consider a longer `hookTimeout`. | `apps/api` vitest config |
