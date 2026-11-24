@@ -336,6 +336,95 @@ pub fn set_by_hand(root: &Path, client_id: &str, row: &Row) -> Result<ContactRec
     })
 }
 
+/// Saves one field as typed by hand (Admin › Portal requests: the contact a person confirmed,
+/// when approving them; PA-106). The other fields are left as they are.
+pub fn set_one_by_hand(root: &Path, client_id: &str, key: &str, value: &str) -> Result<(), String> {
+    if !FIELDS.iter().any(|(k, _)| *k == key) {
+        return Err(format!("no contact field {key}"));
+    }
+    crate::lock::with(root, "clients", "the client list", || {
+        let mut m = load(root)?;
+        let rec = m.meta.contacts.entry(client_id.to_string()).or_default();
+        if rec.csv.get(key).trim() == value.trim() {
+            rec.hand.remove(key);
+        } else {
+            rec.hand.insert(key.to_string(), value.trim().to_string());
+        }
+        save_meta(root, &m.meta)
+    })
+}
+
+/// Moves Admin › Portal's old email and mobile column choices (client-list token columns kept
+/// in `clients.json`, PA-59) over to the Portal contacts, once (owner 2026-11-24: one place for
+/// contact columns): each listed client's value becomes its CSV email or cell where it has
+/// none, and the Portal contacts columns are set to those CSV columns when not chosen yet.
+/// Answers how many clients got a contact.
+pub fn adopt_record_columns(
+    root: &Path,
+    email_token: Option<&str>,
+    mobile_token: Option<&str>,
+) -> Result<usize, String> {
+    crate::lock::with(root, "clients", "the client list", || {
+        let mut m = load(root)?;
+        let (settings, _) =
+            filer_core::config::Settings::load_or_default(&crate::clients::master_dir(root));
+        let header = |token: Option<&str>| -> Option<String> {
+            let t = token?;
+            settings
+                .column_map
+                .extras
+                .iter()
+                .find(|h| filer_core::clients::token_name(h) == t)
+                .cloned()
+        };
+        let mut cols = m.meta.contact_columns.clone().unwrap_or_default();
+        if cols.email.is_none() {
+            cols.email = header(email_token);
+        }
+        if cols.cell.is_none() {
+            cols.cell = header(mobile_token);
+        }
+        if cols != ContactColumns::default() {
+            m.meta.contact_columns = Some(cols);
+        }
+        // The first address or number of a cell that may hold several.
+        let first = |v: &str| {
+            v.split([';', ',', '/', '|'])
+                .map(str::trim)
+                .find(|x| !x.is_empty())
+                .unwrap_or("")
+                .to_string()
+        };
+        let mut n = 0;
+        if let Some(list) = &m.list {
+            for c in &list.clients {
+                let key = c.uuid.to_string();
+                let mut got = false;
+                for (token, field) in [(email_token, "email"), (mobile_token, "cell")] {
+                    let Some(v) = token.and_then(|t| c.extra.get(t)).map(|v| first(v)) else {
+                        continue;
+                    };
+                    if v.is_empty() {
+                        continue;
+                    }
+                    let rec = m.meta.contacts.entry(key.clone()).or_default();
+                    if let Some(f) = rec.csv.get_mut(field)
+                        && f.trim().is_empty()
+                    {
+                        *f = v;
+                        got = true;
+                    }
+                }
+                if got {
+                    n += 1;
+                }
+            }
+        }
+        save_meta(root, &m.meta)?;
+        Ok(n)
+    })
+}
+
 /// Drops a client's hand edits: its contacts follow the CSV again.
 pub fn clear_hand(root: &Path, client_id: &str) -> Result<ContactRecord, String> {
     crate::lock::with(root, "clients", "the client list", || {
@@ -719,18 +808,44 @@ pub struct ClientContacts {
     pub name: String,
     pub partner: Option<String>,
     pub planned: Planned,
+    /// The people the client is, by name, for finding an access request by name (PA-106):
+    /// (name, role, is the spouse). From the contacts' names, else the client's name
+    /// ("Sample, John & Jane"); empty for a business with no names.
+    pub names: Vec<(String, String, bool)>,
 }
 
-/// Every client of the list with stored contacts (CSV or typed), in list order, and how many
-/// clients have none. Errors in plain words.
-pub fn read(root: &Path) -> Result<(Vec<ClientContacts>, usize), String> {
+/// The people a client's name stands for: "Sample, John & Jane" is John Sample and Jane
+/// Sample; "Chen, Wei & Lin Park" is Wei Chen and Lin Park. A name without a comma (a
+/// business) stands for nobody.
+fn names_in(client_name: &str) -> Vec<String> {
+    let Some((last, firsts)) = client_name.split_once(',') else {
+        return Vec::new();
+    };
+    let last = last.trim();
+    firsts
+        .split('&')
+        .flat_map(|p| p.split(" and "))
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .map(|p| {
+            if p.split_whitespace().count() > 1 {
+                p.to_string()
+            } else {
+                format!("{p} {last}")
+            }
+        })
+        .collect()
+}
+
+/// Every client of the list with what is known of its people: its contacts (CSV or typed;
+/// none: nobody to invite) and its names. In list order.
+pub fn directory(root: &Path) -> Result<Vec<ClientContacts>, String> {
     let master = load(root)?;
     let list = master
         .list
         .as_ref()
         .ok_or("No client list is imported yet: use Import clients CSV… first.")?;
     let mut out = Vec::new();
-    let mut none = 0;
     for client in &list.clients {
         let id = client.uuid.to_string();
         let row = master
@@ -739,19 +854,58 @@ pub fn read(root: &Path) -> Result<(Vec<ClientContacts>, usize), String> {
             .get(&id)
             .map(ContactRecord::effective)
             .unwrap_or_default();
-        if !row.has_contact() {
-            none += 1;
-            continue;
-        }
         let entity = master.meta.entity_types.get(&id).map(String::as_str);
+        let business = is_business(entity);
+        let planned = if row.has_contact() {
+            people_of(&row, &client.name, entity)
+        } else {
+            Planned::default()
+        };
+        let mut names = Vec::new();
+        let tp = join(&row.first, &row.last);
+        if !tp.is_empty() {
+            names.push((
+                tp,
+                if business { "Owner" } else { "Taxpayer" }.to_string(),
+                false,
+            ));
+        }
+        if !business && !row.spouse_first.trim().is_empty() {
+            let last = if row.spouse_last.trim().is_empty() {
+                &row.last
+            } else {
+                &row.spouse_last
+            };
+            names.push((join(&row.spouse_first, last), "Spouse".into(), true));
+        }
+        if names.is_empty() && !business {
+            for (i, n) in names_in(&client.name).into_iter().enumerate() {
+                let spouse = i > 0;
+                names.push((n, if spouse { "Spouse" } else { "Taxpayer" }.into(), spouse));
+            }
+        }
         out.push(ClientContacts {
-            planned: people_of(&row, &client.name, entity),
+            planned,
+            names,
             partner: partner_of(&master.meta, &id, Some(client)),
             client_id: id,
             code: client.id.clone(),
             name: client.name.clone(),
         });
     }
+    Ok(out)
+}
+
+/// Every client of the list with an email or cell (CSV or typed), in list order, and how many
+/// clients have none. Errors in plain words.
+pub fn read(root: &Path) -> Result<(Vec<ClientContacts>, usize), String> {
+    let all = directory(root)?;
+    let n = all.len();
+    let out: Vec<ClientContacts> = all
+        .into_iter()
+        .filter(|c| !c.planned.people.is_empty() || !c.planned.problems.is_empty())
+        .collect();
+    let none = n - out.len();
     if out.is_empty() {
         return Err(
             "No client has an email or cell yet: choose the Portal contacts columns in Import clients CSV…, or type them in a client's panel (Portal contacts)."
@@ -759,6 +913,106 @@ pub fn read(root: &Path) -> Result<(Vec<ClientContacts>, usize), String> {
         );
     }
     Ok((out, none))
+}
+
+/// How an access request was found to be a client's person.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FoundBy {
+    /// The email the person confirmed with a code is on file for them.
+    Email,
+    /// The cell they confirmed is on file for them.
+    Cell,
+    /// Only the name they typed is the name on file: not a match, a lead.
+    Name,
+}
+
+/// A client an access request may be for (PA-106).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Found {
+    pub client_id: String,
+    pub code: String,
+    pub client: String,
+    /// The person's role at the client (Taxpayer, Spouse, Owner, Taxpayer & Spouse).
+    pub role: String,
+    /// The name on file for them.
+    pub person: String,
+    pub by: FoundBy,
+    /// They are the spouse on file (where their contact would be saved).
+    pub spouse: bool,
+}
+
+/// First and last word of a name, in lower case, letters only: "Jane Q. Sample" is
+/// ("jane", "sample").
+fn first_last(name: &str) -> Option<(String, String)> {
+    let words: Vec<String> = name
+        .split(|c: char| !c.is_alphabetic() && c != '\'' && c != '-')
+        .map(|w| w.trim_matches(['\'', '-']).to_lowercase())
+        .filter(|w| w.chars().count() > 1)
+        .collect();
+    match words.as_slice() {
+        [first, .., last] => Some((first.clone(), last.clone())),
+        _ => None,
+    }
+}
+
+/// The clients an access request is for: every client where the contact the person confirmed
+/// (email or cell) is a person's on file. Only when none is, the clients where the name typed
+/// is a person's on file (first and last name; middle names aside), as leads to check.
+pub fn find(confirmed: &str, name: &str, dir: &[ClientContacts]) -> Vec<Found> {
+    let email = normal_email(confirmed);
+    let phone = if email.is_none() {
+        normal_phone(confirmed)
+    } else {
+        None
+    };
+    let mut out = Vec::new();
+    if email.is_some() || phone.is_some() {
+        for c in dir {
+            for p in &c.planned.people {
+                let by = if email.is_some() && p.email == email {
+                    FoundBy::Email
+                } else if phone.is_some() && p.phone == phone {
+                    FoundBy::Cell
+                } else {
+                    continue;
+                };
+                out.push(Found {
+                    client_id: c.client_id.clone(),
+                    code: c.code.clone(),
+                    client: c.name.clone(),
+                    role: p.role.clone(),
+                    person: p.name.clone(),
+                    by,
+                    spouse: p.role == "Spouse",
+                });
+                break;
+            }
+        }
+    }
+    if !out.is_empty() {
+        return out;
+    }
+    let Some(asked) = first_last(name) else {
+        return out;
+    };
+    for c in dir {
+        if let Some((n, role, spouse)) = c
+            .names
+            .iter()
+            .find(|(n, _, _)| first_last(n).as_ref() == Some(&asked))
+        {
+            out.push(Found {
+                client_id: c.client_id.clone(),
+                code: c.code.clone(),
+                client: c.name.clone(),
+                role: role.clone(),
+                person: n.clone(),
+                by: FoundBy::Name,
+                spouse: *spouse,
+            });
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -948,6 +1202,129 @@ mod tests {
                 None,
                 "Owner".into()
             )]
+        );
+    }
+
+    fn dir_entry(id: &str, name: &str, row: Row, entity: Option<&str>) -> ClientContacts {
+        let planned = if row.has_contact() {
+            people_of(&row, name, entity)
+        } else {
+            Planned::default()
+        };
+        let mut names: Vec<(String, String, bool)> = Vec::new();
+        if !row.first.is_empty() {
+            names.push((join(&row.first, &row.last), "Taxpayer".into(), false));
+        }
+        if !row.spouse_first.is_empty() {
+            names.push((join(&row.spouse_first, &row.last), "Spouse".into(), true));
+        }
+        if names.is_empty() {
+            for (i, n) in names_in(name).into_iter().enumerate() {
+                names.push((n, if i > 0 { "Spouse" } else { "Taxpayer" }.into(), i > 0));
+            }
+        }
+        ClientContacts {
+            client_id: format!("u{id}"),
+            code: id.into(),
+            name: name.into(),
+            partner: None,
+            planned,
+            names,
+        }
+    }
+
+    /// PA-106: a request is found by the contact the person confirmed, on every client that
+    /// has it, each with the person's role there; by name only when no contact is on file.
+    #[test]
+    fn requests_are_found_by_confirmed_contact_then_by_name() {
+        let dir = vec![
+            dir_entry(
+                "1042",
+                "Sample, John & Jane",
+                row(&[
+                    ("first", "John"),
+                    ("last", "Sample"),
+                    ("email", "john@example.test"),
+                    ("sfirst", "Jane"),
+                    ("semail", "jane@example.test"),
+                    ("scell", "555-201-0002"),
+                ]),
+                None,
+            ),
+            dir_entry(
+                "1077",
+                "Sample Farms LLC",
+                row(&[
+                    ("first", "Jane"),
+                    ("last", "Sample"),
+                    ("email", "Jane@Example.test"),
+                ]),
+                Some("llc"),
+            ),
+            dir_entry("1090", "Doe, Alex & Sam Roe", Row::default(), None),
+        ];
+        let f = find("jane@example.test", "Janie", &dir);
+        assert_eq!(
+            f.iter()
+                .map(|x| (x.code.as_str(), x.role.as_str(), x.by, x.spouse))
+                .collect::<Vec<_>>(),
+            vec![
+                ("1042", "Spouse", FoundBy::Email, true),
+                ("1077", "Owner", FoundBy::Email, false),
+            ]
+        );
+        let f = find("+15552010002", "", &dir);
+        assert_eq!((f.len(), f[0].by), (1, FoundBy::Cell));
+        // No contact on file: the name is a lead, from the client's name when no names are on
+        // file ("Doe, Alex & Sam Roe" is Alex Doe and Sam Roe).
+        let f = find("sam@example.test", "Sam J. Roe", &dir);
+        assert_eq!(
+            f.iter()
+                .map(|x| (x.code.as_str(), x.role.as_str(), x.by))
+                .collect::<Vec<_>>(),
+            vec![("1090", "Spouse", FoundBy::Name)]
+        );
+        assert!(find("x@example.test", "Nobody Here", &dir).is_empty());
+        // One word is not a name to go by.
+        assert!(find("x@example.test", "Sample", &dir).is_empty());
+    }
+
+    /// The old Admin › Portal email and mobile columns move over to the Portal contacts once.
+    #[test]
+    fn the_old_record_columns_are_adopted() {
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path();
+        std::fs::create_dir_all(crate::clients::master_dir(root)).unwrap();
+        let csv = root.join("clients.csv");
+        std::fs::write(
+            &csv,
+            "ID,Name,E Mail,Mobile\n1001,\"Sample, John\",john@example.test; old@example.test,555-201-0001\n1002,Other,,\n",
+        )
+        .unwrap();
+        let map = ColumnMap {
+            id: Some("ID".into()),
+            name: Some("Name".into()),
+            partner: None,
+            extras: vec!["E Mail".into(), "Mobile".into()],
+        };
+        let list =
+            crate::clients::import_csv_tin(root, &csv, &map, &Default::default(), None).unwrap();
+        crate::clients::use_csv_in_intake(root, &csv, &map).unwrap();
+        assert_eq!(
+            adopt_record_columns(root, Some("E_Mail"), Some("Mobile")).unwrap(),
+            1
+        );
+        let cols = columns(root).unwrap();
+        assert_eq!(cols.email.as_deref(), Some("E Mail"));
+        assert_eq!(cols.cell.as_deref(), Some("Mobile"));
+        let john = list.match_by_id("1001").unwrap().uuid.to_string();
+        let rec = record(root, &john).unwrap();
+        assert_eq!(rec.csv.email, "john@example.test");
+        assert_eq!(rec.csv.cell, "555-201-0001");
+        set_one_by_hand(root, &john, "spouse_email", "jane@example.test").unwrap();
+        assert_eq!(
+            record(root, &john).unwrap().effective().spouse_email,
+            "jane@example.test"
         );
     }
 

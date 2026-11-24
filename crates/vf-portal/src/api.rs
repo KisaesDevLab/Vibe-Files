@@ -871,6 +871,35 @@ impl Portal {
         .map(|_| ())
     }
 
+    /// Approves a request for one or more clients, each with its role (Vibe-Portal P112; an
+    /// older portal gives every client the first role). Answers the person's identity id.
+    pub fn approve_for(
+        &self,
+        request_id: &str,
+        clients: &[(String, String)],
+        check: Option<&Check>,
+    ) -> Result<String> {
+        let ids: Vec<&String> = clients.iter().map(|(id, _)| id).collect();
+        let roles: BTreeMap<&String, &String> = clients.iter().map(|(id, r)| (id, r)).collect();
+        let first = clients.first().map(|(_, r)| r.as_str()).unwrap_or("");
+        let mut body = serde_json::json!({ "clientIds": ids, "roleLabel": first, "roles": roles });
+        if let Some(c) = check {
+            body["check"] = serde_json::json!(c);
+        }
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct R {
+            #[serde(default)]
+            identity_id: String,
+        }
+        self.send_json::<R>(
+            "POST",
+            &format!("/access-requests/{request_id}/approve"),
+            &body,
+        )
+        .map(|r| r.identity_id)
+    }
+
     pub fn deny(&self, request_id: &str) -> Result<()> {
         self.post_empty::<serde_json::Value>(&format!("/access-requests/{request_id}/deny"))
             .map(|_| ())
@@ -1258,6 +1287,7 @@ mod tests {
             record: Default::default(),
             b2_list: false,
             todo_lists: false,
+            approve_share: Default::default(),
         };
         (Portal::new(&s, "PC1", "kurt"), seen)
     }

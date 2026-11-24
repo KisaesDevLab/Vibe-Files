@@ -160,8 +160,16 @@ pub fn tab_bar(ui: &mut egui::Ui, current: &mut Tab, intake_badge: usize) {
 }
 
 /// The footer: `segments` on the left, then `working` with a spinner when something goes on
-/// behind the window (the index of the cabinet's files), and the cabinet on the right.
-pub fn footer(ui: &mut egui::Ui, segments: &[String], working: Option<&str>, health: &str) {
+/// behind the window (the index of the cabinet's files), `link` (a word to click, such as the
+/// access requests waiting), and the cabinet on the right. `true` when `link` was clicked.
+pub fn footer(
+    ui: &mut egui::Ui,
+    segments: &[String],
+    working: Option<&str>,
+    link: Option<&str>,
+    health: &str,
+) -> bool {
+    let mut clicked = false;
     egui::Panel::bottom("vf-footer")
         .exact_size(28.0)
         .resizable(false)
@@ -180,6 +188,13 @@ pub fn footer(ui: &mut egui::Ui, segments: &[String], working: Option<&str>, hea
                     ui.add(egui::Spinner::new().size(12.0));
                     ui.label(RichText::new(w).small().color(theme::ink_muted()));
                 }
+                if let Some(l) = link {
+                    ui.add_space(8.0);
+                    clicked = ui
+                        .link(RichText::new(l).small().color(theme::warn()))
+                        .on_hover_text("Open Admin › Portal requests")
+                        .clicked();
+                }
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     ui.label(RichText::new(health).small().color(theme::ink_muted()));
                     let (r, _) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), Sense::hover());
@@ -188,4 +203,5 @@ pub fn footer(ui: &mut egui::Ui, segments: &[String], working: Option<&str>, hea
                 });
             });
         });
+    clicked
 }

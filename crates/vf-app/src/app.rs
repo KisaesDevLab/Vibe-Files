@@ -925,6 +925,15 @@ impl eframe::App for VibeFilesApp {
                 if a.portal.audit.is_none() {
                     a.portal.audit = Some(o.browse.portal.audit_out());
                 }
+                // PA-106: documents shared on Approve come from the catalog, through B2 first
+                // as a Browse share does (Browse's view of B2 is kept each frame).
+                if a.portal.catalog.is_none() {
+                    a.portal.catalog = Some(o.opened.catalog.clone());
+                }
+                a.portal.b2 = o.browse.b2_first.clone();
+                if let Some(n) = a.portal.waiting.take() {
+                    o.browse.portal.requests_read(n);
+                }
                 if a.invite_list.app_audit.is_none() {
                     a.invite_list.app_audit = Some(o.browse.portal.audit_out());
                 }
@@ -1055,6 +1064,8 @@ impl eframe::App for VibeFilesApp {
         // Work going on behind the window, said in the footer with a spinner on every tab
         // (owner 2026-11-15, Q-112).
         let mut working = None;
+        // PA-106: access requests waiting on the portal, on every PC.
+        let mut link = None;
         if let Screen::Open(o) = &mut self.screen {
             let o = &mut **o;
             segments.insert(
@@ -1070,13 +1081,27 @@ impl eframe::App for VibeFilesApp {
                 o.servers.busy(),
                 o.servers.leaving_copy(),
             );
+            link = match o.browse.portal.requests_waiting {
+                Some(1) => Some("1 portal access request waiting".to_string()),
+                Some(n) if n > 1 => Some(format!("{n} portal access requests waiting")),
+                _ => None,
+            };
         }
-        chrome::footer(
+        if chrome::footer(
             ui,
             &segments,
             working.as_deref(),
+            link.as_deref(),
             name.as_deref().unwrap_or("No cabinet open"),
-        );
+        ) {
+            self.tab = Tab::Admin;
+            if let Screen::Open(o) = &mut self.screen
+                && let Some(a) = &mut o.admin
+            {
+                a.page = crate::ui::admin::Page::PortalRequests;
+                a.portal.refresh_requests();
+            }
+        }
         let ctx = ui.ctx().clone();
         let mut submit = None;
         let mut to_wizard = false;
@@ -2469,6 +2494,7 @@ mod tests {
                 record: Default::default(),
                 b2_list: false,
                 todo_lists: false,
+                approve_share: Default::default(),
             },
         )
         .unwrap();

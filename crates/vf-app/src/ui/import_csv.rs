@@ -323,6 +323,30 @@ pub fn show(ctx: &egui::Context, d: &mut ImportDialog, env: &mut Env) -> DialogO
             j.show(ui);
             return;
         }
+        // What Import changes, beside the button (the list itself is in the scrolling part).
+        if ready
+            && let Some((_, _, Ok(p))) = &d.preview
+            && !p.is_empty()
+        {
+            let leave = if p.missing.is_empty() {
+                String::new()
+            } else {
+                format!(" · {} leave the client list", p.missing.len())
+            };
+            ui.label(
+                RichText::new(format!(
+                    "Import changes: {} new · {} renamed · {} contacts{leave}",
+                    p.new.len(),
+                    p.renamed.len(),
+                    p.contacts.len()
+                ))
+                .color(if p.missing.is_empty() {
+                    theme::ink_muted()
+                } else {
+                    theme::warn()
+                }),
+            );
+        }
         ui.horizontal(|ui| {
             let n = d.table.as_ref().map(|t| t.rows.len()).unwrap_or(0);
             let go = ui.add_enabled(

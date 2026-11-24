@@ -42,6 +42,40 @@ pub struct PortalSettings {
     /// ticks it; the portal has its own switch too.
     #[serde(default)]
     pub todo_lists: bool,
+    /// What Approve offers to share with someone given access (PA-106, owner 2026-11-24).
+    #[serde(default, skip_serializing_if = "ApproveShare::is_empty")]
+    pub approve_share: ApproveShare,
+}
+
+/// The documents Admin › Portal requests offers to share on Approve: those of these doc types
+/// from the client's most recent `years` tax years (and those with no tax year), ticked; older
+/// ones of the same doc types listed unticked. No doc types: nothing is offered.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApproveShare {
+    /// Doc type ids.
+    #[serde(default)]
+    pub doc_types: Vec<String>,
+    #[serde(default = "one")]
+    pub years: u16,
+}
+
+fn one() -> u16 {
+    1
+}
+
+impl Default for ApproveShare {
+    fn default() -> Self {
+        Self {
+            doc_types: Vec::new(),
+            years: 1,
+        }
+    }
+}
+
+impl ApproveShare {
+    pub fn is_empty(&self) -> bool {
+        self.doc_types.is_empty() && self.years == 1
+    }
 }
 
 fn default_fetch() -> u32 {
@@ -125,12 +159,19 @@ impl PortalSettings {
             record: RecordColumns::default(),
             b2_list: false,
             todo_lists: false,
+            approve_share: Default::default(),
         })
     }
 
     /// The same settings with the list of documents in B2 sent to the portal, or not.
     pub fn with_b2_list(mut self, on: bool) -> Self {
         self.b2_list = on;
+        self
+    }
+
+    /// The same settings with what Approve offers to share (PA-106).
+    pub fn with_approve_share(mut self, share: ApproveShare) -> Self {
+        self.approve_share = share;
         self
     }
 

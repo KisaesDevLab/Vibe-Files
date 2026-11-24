@@ -406,9 +406,17 @@ impl InvitePage {
         f.is_empty()
             || r.c.name.to_lowercase().contains(&f)
             || r.c.code.to_lowercase().contains(&f)
-            || r.lines
-                .iter()
-                .any(|l| l.invitee.name.to_lowercase().contains(&f) || l.invitee.by().contains(&f))
+            || r.lines.iter().any(|l| {
+                // A cell is found by its digits however it is typed ("201-0002").
+                let digits: String = f.chars().filter(char::is_ascii_digit).collect();
+                l.invitee.name.to_lowercase().contains(&f)
+                    || l.invitee.by().contains(&f)
+                    || (digits.len() >= 3
+                        && l.invitee
+                            .phone
+                            .as_deref()
+                            .is_some_and(|p| p.contains(&digits)))
+            })
     }
 
     /// The ticked people of the clients shown, in list order.
@@ -573,6 +581,24 @@ pub fn page(ui: &mut egui::Ui, page: &mut InvitePage, env: &mut crate::ui::brows
         return;
     }
     ui.add_space(6.0);
+    // Owner 2026-11-24: a search box for the list.
+    ui.horizontal(|ui| {
+        let l = ui.label("Search");
+        ui.add(
+            egui::TextEdit::singleline(&mut page.find)
+                .hint_text("Client, ID, person, email or cell")
+                .desired_width(320.0),
+        )
+        .labelled_by(l.id);
+        if !page.find.is_empty()
+            && ui
+                .small_button("Clear")
+                .on_hover_text("Clear the search")
+                .clicked()
+        {
+            page.find.clear();
+        }
+    });
     ui.horizontal_wrapped(|ui| {
         let l = ui.label("Show");
         egui::ComboBox::from_id_salt("invite-show")
@@ -606,9 +632,6 @@ pub fn page(ui: &mut egui::Ui, page: &mut InvitePage, env: &mut crate::ui::brows
                 .response
                 .labelled_by(l.id);
         }
-        let l = ui.label("Find");
-        ui.add(egui::TextEdit::singleline(&mut page.find).desired_width(160.0))
-            .labelled_by(l.id);
         if ui.button("Read again").clicked() {
             page.report = None;
             page.reread();
@@ -712,6 +735,10 @@ pub fn page(ui: &mut egui::Ui, page: &mut InvitePage, env: &mut crate::ui::brows
             });
         }
     }
+    // The list goes back before the ticked people are gathered from it (they were gathered
+    // from an empty list: walkthrough 2026-11-24).
+    drop(shown);
+    page.rows = Some(rows);
     let items = page.items();
     let clients: BTreeSet<&String> = items.iter().map(|i| &i.client_id).collect();
     ui.separator();
@@ -736,7 +763,6 @@ pub fn page(ui: &mut egui::Ui, page: &mut InvitePage, env: &mut crate::ui::brows
             wait.div_ceil(60)
         )));
     }
-    page.rows = Some(rows);
     if go.clicked() {
         page.start(&ctx, &s);
     }
@@ -768,6 +794,7 @@ mod tests {
                 people,
                 problems: vec![],
             },
+            names: vec![],
         }
     }
 

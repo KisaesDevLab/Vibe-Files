@@ -755,6 +755,317 @@ mod tests {
     /// then good due day, reminders and nobody told, a blank list with items reordered, assigning,
     /// editing every detail, close and open again, Delete then Keep it, the client-folder copies,
     /// the portal out of reach, and to-do lists switched off on the portal and in Vibe Files.
+    /// PA-105 and PA-106 walkthrough against a real Vibe Portal: a client CSV with Portal
+    /// contacts imported through the dialog (preview, then Import), Invite from client list in
+    /// groups of 2 with a pause, a contact typed in the client panel, then an access request
+    /// made on the portal by the spouse who was not invited: the footer says it is waiting, and
+    /// the request page finds her by the email on file and approves her as Spouse in one click.
+    /// Set `VF_WALK_URL`, `VF_WALK_KEY`, `VF_WALK_LOG` (the portal's log, EMAIL_PROVIDER=console),
+    /// `VF_WALK_IDPNG` (a small PNG for the photo ID) and `VF_WALK_DIR` (output).
+    #[test]
+    #[ignore = "needs a running portal"]
+    fn contacts_walkthrough() {
+        let (Ok(url), Ok(key), Ok(log), Ok(png), Ok(out)) = (
+            std::env::var("VF_WALK_URL"),
+            std::env::var("VF_WALK_KEY"),
+            std::env::var("VF_WALK_LOG"),
+            std::env::var("VF_WALK_IDPNG"),
+            std::env::var("VF_WALK_DIR"),
+        ) else {
+            return;
+        };
+        let out = std::path::PathBuf::from(out);
+        std::fs::create_dir_all(&out).unwrap();
+        let run = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        // New addresses each run: the portal keeps the people of earlier runs.
+        let addr = |who: &str| format!("{who}+{run}@example.com");
+        let since_ms = (run as i64) * 1000;
+        let mail = |to: &str| -> Vec<(i64, String, String)> {
+            std::fs::read_to_string(&log)
+                .unwrap_or_default()
+                .lines()
+                .filter(|l| l.contains("\"msg\":\"notify ("))
+                .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+                .filter(|m| m["to"] == to && m["time"].as_i64().is_some_and(|t| t >= since_ms))
+                .map(|m| {
+                    (
+                        m["time"].as_i64().unwrap_or(0),
+                        m["subject"].as_str().unwrap_or("").to_string(),
+                        m["body"].as_str().unwrap_or("").to_string(),
+                    )
+                })
+                .collect()
+        };
+        let curl = |args: &[&str]| -> serde_json::Value {
+            let o = std::process::Command::new("curl")
+                .arg("-s")
+                .args(args)
+                .output()
+                .unwrap();
+            serde_json::from_slice(&o.stdout).unwrap_or(serde_json::Value::Null)
+        };
+        let firm_get = |path: &str| -> serde_json::Value {
+            curl(&[
+                "-H",
+                &format!("Authorization: Bearer {key}"),
+                &format!("{url}/api/firm/v1{path}"),
+            ])
+        };
+
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path().join("Clients");
+        vf_fixtures::generate(&root, 4).unwrap();
+        let data = t.path().join("data");
+        drop(crate::session::open(&data, "dev", &root).unwrap());
+        let cab = vf_fs::cabinet::read(&root).unwrap().cabinet_id;
+        let s = vf_portal::PortalSettings::new(&cab, &url, &key, 0).unwrap();
+        vf_portal::settings::save(&root, &s).unwrap();
+        let d = data.clone();
+        let mut h = HarnessBuilder::default()
+            .with_max_steps(crate::ui::test_util::MAX_STEPS)
+            .with_theme(egui::Theme::Light)
+            .with_size([1440.0, 1000.0])
+            .build_eframe(move |cc| VibeFilesApp::new(&cc.egui_ctx, d.clone()));
+        h.run_steps(8);
+        let shot = |h: &mut egui_kittest::Harness<'static, VibeFilesApp>, name: &str| {
+            for _ in 0..5 {
+                h.step();
+            }
+            match h.render() {
+                Ok(img) => img.save(out.join(format!("{name}.png"))).unwrap(),
+                Err(e) => eprintln!("{name}: {e}"),
+            }
+        };
+        let said = |h: &egui_kittest::Harness<'static, VibeFilesApp>, text: &str| {
+            h.query_by_label_contains(text).is_some()
+        };
+        let type_in =
+            |h: &mut egui_kittest::Harness<'static, VibeFilesApp>, label: &str, text: &str| {
+                h.get_by_label(label).click();
+                h.step();
+                h.get_by_label(label).type_text(text);
+                h.step();
+            };
+        h.get_by_role_and_label(Role::Button, "Open existing")
+            .click();
+        h.run_steps(8);
+        type_in(&mut h, "Cabinet folder", &root.display().to_string());
+        h.get_by_role_and_label(Role::Button, "Open cabinet")
+            .click();
+        assert!(wait_for(&mut h, |h| matches!(
+            h.state().screen,
+            crate::app::Screen::Open(_)
+        )));
+        h.run_steps(8);
+        let clients: Vec<(String, String, String)> = open_mut(&mut h)
+            .browse
+            .snap
+            .clients
+            .iter()
+            .take(3)
+            .map(|c| (c.id.clone(), c.ext_id.clone(), c.name.clone()))
+            .collect();
+        assert_eq!(clients.len(), 3);
+
+        // ---- 1. The client CSV with Portal contacts, through Import clients CSV….
+        let csv = t.path().join("clients.csv");
+        let q = |s: &str| format!("\"{}\"", s.replace('"', "\"\""));
+        let mut text = String::from(
+            "Client ID,Client Name,TP First Name,TP Last Name,TP Email,TP Cell,SP First Name,SP Email\n",
+        );
+        text.push_str(&format!(
+            "{},{},John,Sample,{},555-201-0001,Jane,{}\n",
+            clients[0].1,
+            q(&clients[0].2),
+            addr("john"),
+            addr("jane")
+        ));
+        text.push_str(&format!(
+            "{},{},Luis,Rivera,{},,Ana,{}\n",
+            clients[1].1,
+            q(&clients[1].2),
+            addr("rivera"),
+            addr("rivera")
+        ));
+        text.push_str(&format!(
+            "{},{},Morgan,Taylor,{},,,\n",
+            clients[2].1,
+            q(&clients[2].2),
+            addr("morgan")
+        ));
+        std::fs::write(&csv, text).unwrap();
+        h.get_by_role_and_label(Role::Button, "Import clients CSV…")
+            .click();
+        h.run_steps(4);
+        type_in(&mut h, "CSV file", &csv.display().to_string());
+        h.get_by_role_and_label(Role::Button, "Read").click();
+        assert!(wait_for(&mut h, |h| said(h, "Changes in this CSV")));
+        shot(&mut h, "01-import-preview");
+        let import = h
+            .query_all_by_role(Role::Button)
+            .filter_map(|n| {
+                use egui_kittest::kittest::NodeT;
+                n.accesskit_node()
+                    .label()
+                    .filter(|l| l.starts_with("Import ") && l.ends_with("(one transaction)"))
+            })
+            .next()
+            .expect("the Import button");
+        h.get_by_role_and_label(Role::Button, &import).click();
+        assert!(wait_for(&mut h, |h| said(
+            h,
+            "Portal contacts changed for 3 clients"
+        )));
+        let (dir, none) = vf_fs::contacts::read(&root).unwrap();
+        assert_eq!(dir.len(), 3, "{none} without");
+
+        // ---- 2. Admin › Portal › Invite from client list, groups of 2, a 3 s pause.
+        h.get_by_role_and_label(Role::Button, "Admin").click();
+        h.run_steps(6);
+        h.get_by_role_and_label(Role::Button, "Invite from client list")
+            .click();
+        if !wait_for(&mut h, |h| said(h, "Invite 4 people at 3 clients")) {
+            shot(&mut h, "02-invite-list-failed");
+            panic!("the invite list did not offer 4 people at 3 clients");
+        }
+        {
+            let a = open_mut(&mut h).admin.as_mut().unwrap();
+            a.invite_list.group = 2;
+            a.invite_list.pause_secs = 3;
+        }
+        h.run_steps(4);
+        shot(&mut h, "02-invite-list");
+        // Jane is left for her own request (step 3).
+        let jane_row = h
+            .query_all_by_role(Role::CheckBox)
+            .filter_map(|n| {
+                use egui_kittest::kittest::NodeT;
+                n.accesskit_node()
+                    .label()
+                    .filter(|l| l.starts_with("Jane Sample"))
+            })
+            .next()
+            .expect("Jane's row");
+        h.get_by_label(&jane_row).click();
+        h.run_steps(4);
+        assert!(said(&h, "Invite 3 people at 3 clients"));
+        h.get_by_role_and_label(Role::Button, "Invite 3 people at 3 clients")
+            .click();
+        assert!(wait_for(&mut h, |h| said(h, "next group in")));
+        shot(&mut h, "03-invite-pausing");
+        assert!(wait_for(&mut h, |h| said(
+            h,
+            "3 invited (3 by email, 0 by text)"
+        )));
+        shot(&mut h, "04-invite-done");
+        let at = |to: &str| -> i64 {
+            mail(to)
+                .iter()
+                .find(|m| m.1.contains("invites you to its client portal"))
+                .map(|m| m.0)
+                .unwrap_or_else(|| panic!("no invitation to {to}"))
+        };
+        let (j, r, m) = (at(&addr("john")), at(&addr("rivera")), at(&addr("morgan")));
+        assert!(
+            m - r.max(j) >= 2500,
+            "the third waited for the pause: {j} {r} {m}"
+        );
+        assert!(mail(&addr("jane")).is_empty(), "Jane was not invited");
+        // The shared email is one invitation in both names.
+        let c = firm_get("/contacts");
+        let inv = c["clients"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|x| x["id"] == clients[1].0.as_str())
+            .unwrap()["invitations"]
+            .clone();
+        assert_eq!(inv[0]["name"], "Luis & Ana Rivera");
+        assert_eq!(inv[0]["roleLabel"], "Taxpayer & Spouse");
+
+        // ---- 3. Jane asks for access on the portal (her email is on file as the spouse's).
+        let jane = addr("jane");
+        let made = curl(&[
+            "-X",
+            "POST",
+            "-H",
+            "Content-Type: application/json",
+            "-d",
+            &serde_json::json!({ "name": "Jane Sample", "email": jane, "clientAs": "Sample" })
+                .to_string(),
+            &format!("{url}/api/portal/access-requests"),
+        ]);
+        let rid = made["requestId"]
+            .as_str()
+            .expect("request made")
+            .to_string();
+        curl(&[
+            "-X",
+            "POST",
+            "-H",
+            "Content-Type: application/octet-stream",
+            "--data-binary",
+            &format!("@{png}"),
+            &format!("{url}/api/portal/access-requests/{rid}/id-photo?side=front"),
+        ]);
+        let code = mail(&jane)
+            .iter()
+            .rev()
+            .find_map(|m| {
+                m.2.split(|c: char| !c.is_ascii_digit())
+                    .find(|w| w.len() == 6)
+                    .map(String::from)
+            })
+            .expect("a code to Jane");
+        let ok = curl(&[
+            "-X",
+            "POST",
+            "-H",
+            "Content-Type: application/json",
+            "-d",
+            &serde_json::json!({ "code": code, "noBarcode": true }).to_string(),
+            &format!("{url}/api/portal/access-requests/{rid}/confirm"),
+        ]);
+        assert!(ok.get("error").is_none(), "confirmed: {ok}");
+
+        // ---- 4. The footer says it is waiting; a click opens Portal requests.
+        h.get_by_role_and_label(Role::Button, "Browse").click();
+        open_mut(&mut h).browse.portal.look_at_requests_now();
+        assert!(wait_for(&mut h, |h| said(
+            h,
+            "1 portal access request waiting"
+        )));
+        shot(&mut h, "05-footer-request-waiting");
+        h.get_by_label("1 portal access request waiting").click();
+        assert!(wait_for(&mut h, |h| said(
+            h,
+            "The email they confirmed is on file for:"
+        )));
+        assert!(said(
+            &h,
+            &format!(
+                "{} ({}) as Spouse: Jane Sample's email on file",
+                clients[0].2, clients[0].1
+            )
+        ));
+        shot(&mut h, "06-request-matched");
+        h.get_by_role_and_label(Role::Button, "Approve as Spouse")
+            .click();
+        assert!(wait_for(&mut h, |h| said(h, "Approved.")));
+        shot(&mut h, "07-request-approved");
+        let users = firm_get(&format!("/clients/{}/users", clients[0].0));
+        let her = users["users"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|u| u["email"] == jane.as_str())
+            .expect("Jane can sign in");
+        assert_eq!(her["roleLabel"], "Spouse");
+    }
+
     /// Same variables as `todo_walkthrough`, plus `VF_WALK_PG` (the portal's Postgres container,
     /// for the portal's own switch).
     #[test]

@@ -34,7 +34,7 @@ The page shows each client with the people the CSV names and where each stands o
 - **invited, not accepted yet** or **on the portal**: not sent again;
 - in orange, **the portal already has …**: the client has other people on the portal, perhaps this person with another address. Vibe Files never changes anyone's login: tick them only if they are someone new, or tell the client.
 
-**Show** picks clients not on the portal yet (nobody can sign in) or every client; **Partner** and **Find** narrow the list. **Tick all shown** and **Untick all** help with long lists. People in the CSV who can't be invited (no email or cell) are listed at the top.
+**Search** finds a client by its name or ID, or a person by name, email or cell (**Clear** empties it). **Show** picks clients not on the portal yet (nobody can sign in) or every client; **Partner** narrows the list too. **Tick all shown** and **Untick all** help with long lists. People in the CSV who can't be invited (no email or cell) are listed at the top.
 
 Press **Invite N people at M clients**. Each client is put on the portal, then its people are invited.
 
