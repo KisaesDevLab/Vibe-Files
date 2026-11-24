@@ -43,6 +43,8 @@ pub enum Page {
     TodoTemplates,
     /// Admin › Portal › Balances (Addendum §16).
     Balances,
+    /// Admin › Portal › Deliveries (Addendum §12.6).
+    Deliveries,
     InviteList,
 }
 
@@ -71,6 +73,7 @@ const NAV: &[(&str, &[&str])] = &[
             "Invite from client list",
             "Portal requests",
             "To-do templates",
+            "Deliveries",
             "Balances",
         ],
     ),
@@ -111,6 +114,7 @@ fn page_of(item: &str) -> Option<Page> {
         "Portal requests" => Page::PortalRequests,
         "To-do templates" => Page::TodoTemplates,
         "Balances" => Page::Balances,
+        "Deliveries" => Page::Deliveries,
         "Invite from client list" => Page::InviteList,
         "Audit trail" => Page::Audit,
         "Retention classes" => Page::Retention,
@@ -221,6 +225,7 @@ pub struct Admin {
     /// Admin › To-do templates (PA-103).
     pub todo_templates: crate::ui::todo::TemplatesPage,
     pub balances: crate::ui::balance::BalancesPage,
+    pub deliveries: crate::ui::delivery::DeliveriesPage,
     /// PA-105: Admin › Portal › Invite from client list.
     pub invite_list: crate::ui::invite_list::InvitePage,
     /// Doc types: archived ones listed too.
@@ -267,6 +272,7 @@ impl Admin {
             portal: Default::default(),
             todo_templates: Default::default(),
             balances: Default::default(),
+            deliveries: Default::default(),
             invite_list: Default::default(),
             show_archived: false,
         };
@@ -550,6 +556,13 @@ pub fn show(ui: &mut egui::Ui, a: &mut Admin, env: &mut Env, sweep: SweepEnv, lo
                     crate::ui::todo::templates_page(ui, &mut a.todo_templates, env)
                 });
         }
+        Page::Deliveries => {
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    crate::ui::delivery::page(ui, &mut a.deliveries, env)
+                });
+        }
         Page::Balances => {
             egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
@@ -688,6 +701,14 @@ fn nav(ui: &mut egui::Ui, a: &mut Admin, has_password: bool, locked: bool) {
                 {
                     a.page = Page::TodoTemplates;
                     a.todo_templates.reread();
+                }
+            } else if *item == "Deliveries" {
+                if ui
+                    .selectable_label(a.page == Page::Deliveries, *item)
+                    .clicked()
+                {
+                    a.page = Page::Deliveries;
+                    a.deliveries.reread();
                 }
             } else if *item == "Balances" {
                 if ui
@@ -1180,7 +1201,8 @@ mod tests {
         };
         let mut h = HarnessBuilder::default()
             .with_max_steps(crate::ui::test_util::MAX_STEPS)
-            .with_size([1440.0, 1000.0])
+            // Tall: Admin › Portal's switches push its lists down (2026-11-24).
+            .with_size([1440.0, 1400.0])
             .build_ui_state(
                 |ui, s: &mut State| {
                     let mut env = Env {
@@ -1429,6 +1451,9 @@ ANDE1042,Anderson Farms LLC
         h.run_steps(3);
         assert!(h.query_by_label("Fetched, not filed yet").is_some());
         assert!(h.query_by_label("lost.pdf").is_some());
+        // (Below the page's switches: scrolled into view.)
+        h.get_by_label("lost.pdf").scroll_to_me();
+        h.run_steps(3);
         assert!(
             h.query_by_label("not in the Portal inbox, and Intake has not filed it")
                 .is_some()
@@ -1436,7 +1461,16 @@ ANDE1042,Anderson Farms LLC
         // Only the missing one can be fetched again.
         assert_eq!(h.query_all_by_label("Fetch again").count(), 1);
         assert_eq!(h.query_all_by_label("Dismiss…").count(), 2);
+        h.query_all_by_label("Dismiss…")
+            .next()
+            .unwrap()
+            .scroll_to_me();
+        h.run_steps(3);
         h.query_all_by_label("Dismiss…").next().unwrap().click();
+        h.run_steps(3);
+        if let Some(k) = h.query_by_label("Keep it") {
+            k.scroll_to_me();
+        }
         h.run_steps(3);
         assert!(
             h.query_by_label("Dismiss it? The portal deletes its copy 30 days later.")

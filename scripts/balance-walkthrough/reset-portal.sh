@@ -24,7 +24,7 @@ cd "$W" || exit 1
 export DATABASE_URL=postgres://vibe:vibe@127.0.0.1:5547/walk
 pnpm --filter @vibe-portal/db migrate >/dev/null 2>&1 || { echo migrate failed; exit 1; }
 pnpm --filter @vibe-portal/api firm-key create "Walkthrough PC" 2>/dev/null | tail -1 > "$S/walk4-key.txt"
-docker exec vf-walk4-pg psql -U vibe -d walk -q -c "update firm set name='Sample CPA Firm'" -c "insert into staff_users(email,name,admin,all_clients) values ('pat.preparer@example.com','Pat Preparer',true,true)"
+docker exec vf-walk4-pg psql -U vibe -d walk -q -c "update firm set name='Sample CPA Firm', deliveries_enabled=true" -c "insert into staff_users(email,name,admin,all_clients) values ('pat.preparer@example.com','Pat Preparer',true,true)"
 D="$S/walk4-data-$(date +%s)"; mkdir -p "$D"; : > "$S/walk4-api.log"
 # The Stripe test keys are sealed with the portal's own key (as Settings › Payments does).
 cp "$HERE/walk-seal.ts" apps/api/walk-seal.ts

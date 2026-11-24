@@ -262,15 +262,15 @@ Number them from the next free P when accepted. Each ends with `pnpm gate` green
   is refused; a replayed one changes nothing; keys never appear in logs, History or any response
 
 ### D1 — Deliveries, the card, return and 8879 steps
-- [ ] Migration; `firm.deliveries_enabled`; firm API create/read/change/cancel; `/status` feature
-- [ ] Card on Home; states; locks enforced on files routes; `said-signed`, `confirm-8879`
-- [ ] `delivery_event` append-only trigger; events for every action
+- [x] Migration; `firm.deliveries_enabled`; firm API create/read/change/cancel; `/status` feature
+- [x] Card on Home; states; locks enforced on files routes; `said-signed`, `confirm-8879`
+- [x] `delivery_event` append-only trigger; events for every action
 - **Gate:** a delivery with steps 2 and 5: the return is 404 while locked and listed once
   unlocked; said-signed shows Waiting; confirm completes; a second client's user sees nothing
 
 ### D2 — Step PDFs with log pages
-- [ ] PDF builder (document pages + separate log page), names, ` (2)` on repeat
-- [ ] Queued to `/uploads` with the `delivery` tag; whole-delivery report
+- [x] PDF builder (document pages + separate log page), names, ` (2)` on repeat
+- [x] Queued to `/uploads` with the `delivery` tag; whole-delivery report
 - **Gate:** steps 2 and 5 each produce their PDF with the right log lines; a reopened step 5
   files ` (2)`; Vibe Files' e2e files both in `Income Tax\{Year}\Delivery`
 
@@ -405,9 +405,9 @@ Number them from the next free PA when accepted. Each ends with the workspace te
 screenshots of the new windows.
 
 ### F1 — Deliveries: return and 8879 (with portal D1, D2)
-- [ ] `vf-portal::delivery`; `PortalSettings.deliveries`; Deliver window with sections 2 and 4
-- [ ] Hints and Intake filing into `Income Tax\{Year}\Delivery`; the five doc types
-- [ ] Local copies; audit rows; client panel line; Deliveries list
+- [x] `vf-portal::delivery`; `PortalSettings.deliveries`; Deliver window with sections 2 and 4
+- [x] Hints and Intake filing into `Income Tax\{Year}\Delivery`; the five doc types
+- [x] Local copies; audit rows; client panel line; Deliveries list
 - **Gate:** `scripts/portal-e2e.sh`: create, client opens the return, says signed, staff
   confirm; both step PDFs filed in the Delivery folder with their log pages
 
@@ -876,3 +876,61 @@ catalog documents and named cabinet files only). The stand-in Stripe accepts any
 so the owner's run with Stripe test-mode keys is the only check of the parameter names sent.
 Walkthrough tooling is in `Vibe-Files/scripts/balance-walkthrough/` (stand-in, client, reset;
 send the reset script's output to a file, not a pipe).
+
+### Slice 2 (portal D1/D2, Vibe Files F1: PA-108)
+
+Portal (`9243b16` and the card fix after it): migration 0038 (`delivery`, `delivery_step`,
+`delivery_event` append-only, firm switch and lock defaults, uploads tagged `delivery_id` /
+`delivery_step`); Settings › Tax return delivery (admins).
+
+Firm API (firm key or staff; each route checks the delivery's client, P48; 404
+`deliveries_off` while off):
+
+| Call | Body / answer |
+|---|---|
+| `GET /deliveries?clientId=&status=` | `{ deliveries: [Delivery without events] }` |
+| `POST /deliveries` | `{ clientId, taxYear, returnType (1040, 1120, 1120-S, 1065), title?, steps: { letters, return, package, fee, esign8879 }, locks?: { returnAfterLetters, esignAfterLetters, esignAfterFee }, assignedStaffId?, notify, remindDays }` → 201 `{ delivery }`; 409 `delivery_exists` (one open per client, year, type) |
+| `GET /deliveries/:id` | `{ delivery }` with `events: [{at, step, kind, words, by}]` |
+| `PATCH /deliveries/:id` | `{ title?, steps?, locks?, assignedStaffId?, notify?, remindDays? }`; 409 `step_done` to take away a done step |
+| `PUT /deliveries/:id/return` | `{ fileId }` a file on the portal for the client; 409 `return_seen` once the client opened it (T27 is slice 5) |
+| `PUT /deliveries/:id/esign-link` | `{ url }` https only; 400 `invalid_url` |
+| `POST /deliveries/:id/confirm-8879`, `/remind` (3 a day), `/cancel` | `{ delivery }` / `{ told }` |
+| `GET /deliveries/:id/report.pdf` | the whole delivery |
+| `GET /uploads` | step PDFs carry `delivery: { id, step, year }` |
+
+`Delivery` = `{ id, clientId, taxYear, returnType, title, status (open, complete, cancelled),
+locks, assignedStaffId, notify, remindDays, remindedAt, returnFile: {id, name, sha256}|null,
+esignLink, createdBy, createdAt, completedAt, cancelledAt, steps: [{ kind, n, name, present,
+state (absent, coming, locked, open, waiting, done), after: [step numbers], saidAt,
+completedAt, completedBy, rounds }] }`.
+
+Client API: `GET /api/portal/deliveries`, `POST /:id/esign-opened`, `POST /:id/said-signed`;
+the return is an ordinary file (`/api/portal/files`), and opening or downloading it completes
+step 2. A locked return is left out of the client's files, download, outside links (made and
+used) and the new-files count.
+
+Vibe Files: `vf-portal::delivery`, `PortalSettings.deliveries`, the Deliver tax return window
+(return and Form 8879 sections, Send / Save changes, Confirm signed, Remind now, Download
+report…, Cancel delivery…, what has happened), Admin › Portal › Deliveries, the client panel
+line, the copy `_Vibe/delivery/<id>.jsonl`, audit rows (`portal_delivery_create`, `_change`,
+`_confirm_8879`, `_remind`, `_cancel`, `_report`, `_copy`), the five doc types (added on
+Admin › Portal's Save), a managed Filer rule (`<year> Delivery <n> - …` → `{Client}/Income
+Tax/{Year}/Delivery`), Intake hints (step doc type, tax year), help `portal-delivery`.
+
+Gate: met against a real portal by `delivery_walkthrough` (create in the window, the client
+opens the return and says signed in headless Edge, staff confirm, both step PDFs with their log
+pages committed by Intake into `Income Tax\2025\Delivery` with their doc types). Portal tests:
+`deliveries.test.ts` (locks 404 then listed, said-signed waits, confirm completes, another
+client sees nothing, ` (2)` on a repeat, append-only events), `Delivery.test.tsx`.
+
+### Questions logged, slice 2 (defaults taken)
+
+| # | Question | Default taken | Where to change it |
+|---|---|---|---|
+| Q15 | Does the Deliver window share the return itself? | No: staff share it with Share on portal… first and pick it from the portal's files (the Share window's B2-first rules stay in one place). | `ui/delivery.rs` |
+| Q16 | Which file is picked by default? | The newest on the portal for the year whose name has the return type or "return" (no "Return copy — federal" doc type exists yet). | `DeliverWindow::fill` |
+| Q17 | Assigned staff and remind-every in the window. | Not in slice 2's window (nobody assigned: the admins are told; no automatic reminders); slice 5 adds them. | `DeliverWindow` |
+| Q18 | Lock switches in the window. | Not shown while letters and fee cannot be added; a delivery takes the portal's defaults. | `DeliverWindow::apply` |
+| Q19 | The step PDFs' doc types: client visible? Retention class? | Not client visible (the log page holds addresses); no retention class (the firm sets one). | `ui/portal.rs` save |
+| Q20 | Step 2 completes on a View or Download from the card or the Files list. | Either; the event says which. | `portal/files.ts` |
+| Q21 | Who the step PDF upload is filed under on the portal. | The client who acted, else the first person with access. | `delivery/model.ts fileStepPdf` |

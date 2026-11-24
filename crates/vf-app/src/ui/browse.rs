@@ -5094,6 +5094,7 @@ fn portal_windows(ctx: &egui::Context, b: &mut Browse, env: &mut Env) {
         b.portal.people = None;
         b.portal.todo = None;
         b.portal.balance = None;
+        b.portal.delivery = None;
         b.portal.send_link = None;
         return;
     };
@@ -5127,6 +5128,17 @@ fn portal_windows(ctx: &egui::Context, b: &mut Browse, env: &mut Env) {
         w.show(ctx, &s);
         if w.closed {
             b.portal.todo = None;
+        }
+    }
+    // Addendum §12: a client's tax return delivery, while it is on for the cabinet.
+    if !s.deliveries {
+        b.portal.delivery = None;
+    }
+    if let Some(w) = &mut b.portal.delivery {
+        w.show(ctx, &s);
+        if w.closed {
+            b.portal.delivery = None;
+            b.portal.look_at_deliveries_now();
         }
     }
     // Addendum §16: a client's balance owed, while it is on for the cabinet.

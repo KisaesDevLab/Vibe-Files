@@ -210,6 +210,14 @@ pub struct PortalState {
     /// Balances read (the poll and the windows), to be copied into their client folders.
     balance_tx: Sender<Vec<vf_portal::balance::Balance>>,
     balance_rx: Receiver<Vec<vf_portal::balance::Balance>>,
+    /// A client's Deliver tax return window (Addendum §12).
+    pub delivery: Option<crate::ui::delivery::DeliverWindow>,
+    /// Every open delivery, as last read on this PC (the client panel's line).
+    pub deliveries: Option<Vec<vf_portal::delivery::Delivery>>,
+    deliveries_job: Option<Receiver<Option<Vec<vf_portal::delivery::Delivery>>>>,
+    deliveries_at: Option<Instant>,
+    delivery_tx: Sender<Vec<vf_portal::delivery::Delivery>>,
+    delivery_rx: Receiver<Vec<vf_portal::delivery::Delivery>>,
 }
 
 /// Minutes between reads of the balances (every PC; Addendum §16).
@@ -223,6 +231,7 @@ impl Default for PortalState {
         let (audit_tx, audit_rx) = mpsc::channel();
         let (todo_tx, todo_rx) = mpsc::channel();
         let (balance_tx, balance_rx) = mpsc::channel();
+        let (delivery_tx, delivery_rx) = mpsc::channel();
         Self {
             settings: None,
             read_at: None,
@@ -258,6 +267,12 @@ impl Default for PortalState {
             expired_seen: None,
             balance_tx,
             balance_rx,
+            delivery: None,
+            deliveries: None,
+            deliveries_job: None,
+            deliveries_at: None,
+            delivery_tx,
+            delivery_rx,
         }
     }
 }
@@ -316,6 +331,21 @@ impl PortalState {
     /// The balances read since the last frame (the app copies them with audit rows).
     pub fn take_balance_reads(&self) -> Vec<Vec<vf_portal::balance::Balance>> {
         self.balance_rx.try_iter().collect()
+    }
+
+    /// Where delivery windows send what they read, for the client folders' copies (§12.6).
+    pub fn delivery_out(&self) -> crate::ui::delivery::ReadOut {
+        crate::ui::delivery::ReadOut(self.delivery_tx.clone())
+    }
+
+    /// The deliveries read since the last frame (the app copies them with audit rows).
+    pub fn take_delivery_reads(&self) -> Vec<Vec<vf_portal::delivery::Delivery>> {
+        self.delivery_rx.try_iter().collect()
+    }
+
+    /// Read the deliveries at the next frame.
+    pub fn look_at_deliveries_now(&mut self) {
+        self.deliveries_at = None;
     }
 
     /// Read the balances at the next frame (after a change, and the walkthrough).
@@ -437,7 +467,34 @@ impl PortalState {
         self.tick_lists(ctx, root, &s);
         self.tick_requests(ctx, &s);
         self.tick_balances(ctx, &s);
+        self.tick_deliveries(ctx, &s);
         audit
+    }
+
+    /// Reads the open deliveries every few minutes on every PC (Addendum §12.6): the client
+    /// panel's line follows them, and what was read is copied into the client folders.
+    fn tick_deliveries(&mut self, ctx: &egui::Context, s: &PortalSettings) {
+        if !s.deliveries {
+            self.deliveries = None;
+            self.delivery = None;
+            return;
+        }
+        if let Some(rx) = &self.deliveries_job
+            && let Ok(read) = rx.try_recv()
+        {
+            self.deliveries_job = None;
+            if let Some(read) = read {
+                let _ = self.delivery_tx.send(read.clone());
+                self.deliveries = Some(read);
+            }
+        }
+        let every = Duration::from_secs(BALANCES_MINUTES * 60);
+        if self.deliveries_job.is_none() && self.deliveries_at.is_none_or(|t| t.elapsed() >= every)
+        {
+            self.deliveries_at = Some(Instant::now());
+            let s2 = s.clone();
+            self.deliveries_job = Some(spawn(ctx, move || core::client(&s2).deliveries(None).ok()));
+        }
     }
 
     /// Reads every client's balances every few minutes, on every PC (Addendum §16): the
@@ -2081,6 +2138,8 @@ pub struct AdminPortal {
     todo_lists: bool,
     /// "Balance owed", as ticked until Save (Addendum §16).
     balances: bool,
+    /// "Tax return delivery", as ticked until Save (Addendum §12).
+    deliveries: bool,
     /// Audit rows of request decisions when there is no app channel (tests).
     local_audit: Option<Receiver<AuditEntry>>,
     msg: Option<String>,
@@ -2176,6 +2235,7 @@ impl AdminPortal {
         self.b2_list = s.is_some_and(|s| s.b2_list);
         self.todo_lists = s.is_some_and(|s| s.todo_lists);
         self.balances = s.is_some_and(|s| s.balances);
+        self.deliveries = s.is_some_and(|s| s.deliveries);
         self.approve_share = s.map(|s| s.approve_share.clone()).unwrap_or_default();
         self.adopt_old_columns(root);
     }
@@ -2482,6 +2542,19 @@ pub fn admin_settings(ui: &mut egui::Ui, a: &mut AdminPortal, env: &mut Env) {
          time, internet address, browser and person, for a PDF report, and Vibe Files keeps a \
          copy of each list in the client's folder (_Vibe\\todo). The portal must have them turned \
          on too (its Settings › To-do lists). Needs Vibe Portal 0.5 or later.",
+    ));
+    ui.add_space(6.0);
+    ui.checkbox(
+        &mut a.deliveries,
+        "Tax return delivery: send a return to the client as a card of steps",
+    );
+    ui.label(widgets::caption(
+        "For every PC of this cabinet: a client's Deliver tax return… (in the client's details) \
+         and Admin › Portal › Deliveries. The client opens the return and signs Form 8879 on \
+         UltraTax eSignature from a card on the portal; each finished step's PDF, with its log, \
+         is filed in the client's Income Tax\\<year>\\Delivery folder (doc types Delivery — …, \
+         added when this is saved). The portal must have it turned on too (its Settings › Tax \
+         return delivery). Needs Vibe Portal 0.6 or later.",
     ));
     ui.add_space(6.0);
     ui.checkbox(
@@ -2930,6 +3003,7 @@ fn save(a: &mut AdminPortal, ctx: &egui::Context, env: &mut Env) {
             .with_b2_list(a.b2_list)
             .with_todo_lists(a.todo_lists)
             .with_balances(a.balances)
+            .with_deliveries(a.deliveries)
             .with_approve_share(a.approve_share.clone()),
         Err(e) => {
             a.err = Some(e);
@@ -3006,6 +3080,7 @@ fn save(a: &mut AdminPortal, ctx: &egui::Context, env: &mut Env) {
                 "b2_list": s.b2_list,
                 "todo_lists": s.todo_lists,
                 "balances": s.balances,
+                "deliveries": s.deliveries,
                 "record_columns": {
                     "email": s.record.email,
                     "mobile": s.record.mobile,
@@ -3019,7 +3094,33 @@ fn save(a: &mut AdminPortal, ctx: &egui::Context, env: &mut Env) {
     a.url = s.url.clone();
     a.changed = true;
     a.read_at = None;
-    let said = format!("Saved for every PC.{inbox}{receipt_type}{unrecorded}");
+    // Addendum §12.5: the step PDFs' doc types (Income Tax/{Year}/Delivery).
+    let mut delivery_types = String::new();
+    if s.deliveries {
+        let mut added = 0;
+        for (_, name) in vf_portal::delivery::STEP_DOC_TYPES {
+            match vf_fs::doctypes::ensure(
+                env.root,
+                name,
+                vf_portal::delivery::DELIVERY_FOLDER,
+                false,
+            ) {
+                Ok(true) => added += 1,
+                Ok(false) => {}
+                Err(e) => delivery_types = format!(" A delivery doc type could not be added: {e}"),
+            }
+        }
+        if added > 0 {
+            delivery_types =
+                match vf_fs::doctypes::sync(env.conn, env.root, env.device_id, "doc_types_edit") {
+                    Ok(_) => format!(" {added} delivery doc types were added."),
+                    Err(e) => format!(
+                        " The delivery doc types were added but not yet in the catalog: {e}"
+                    ),
+                };
+        }
+    }
+    let said = format!("Saved for every PC.{inbox}{receipt_type}{delivery_types}{unrecorded}");
     match old_listing {
         // Unticked, or another portal now: the lists leave the portal they were sent to, now,
         // not when someone remembers them. (A new key for the same portal: they stay.)
@@ -4700,6 +4801,7 @@ mod tests {
                 b2_list: false,
                 todo_lists: false,
                 balances: false,
+                deliveries: false,
                 approve_share: Default::default(),
             }),
             clients: vec![ClientRef {
@@ -4977,6 +5079,7 @@ mod tests {
                 b2_list: false,
                 todo_lists: false,
                 balances: false,
+                deliveries: false,
                 approve_share: share,
             }),
             clients: dir
@@ -5583,6 +5686,7 @@ mod tests {
             b2_list: false,
             todo_lists: false,
             balances: false,
+            deliveries: false,
             approve_share: Default::default(),
         };
         let (tx, _audit) = mpsc::channel();
@@ -5755,6 +5859,7 @@ mod tests {
             b2_list: false,
             todo_lists: false,
             balances: false,
+            deliveries: false,
             approve_share: Default::default(),
         };
         let item = |client: &str, name: &str| Item {
@@ -5961,6 +6066,7 @@ mod tests {
             b2_list: false,
             todo_lists: false,
             balances: false,
+            deliveries: false,
             approve_share: Default::default(),
         };
         let items: Vec<Item> = (0..4)
@@ -6081,6 +6187,7 @@ mod tests {
             b2_list: false,
             todo_lists: false,
             balances: false,
+            deliveries: false,
             approve_share: Default::default(),
         };
         let (tx, audit) = mpsc::channel();
@@ -6181,6 +6288,7 @@ mod tests {
             b2_list: false,
             todo_lists: false,
             balances: false,
+            deliveries: false,
             approve_share: Default::default(),
         };
         let t = tempfile::tempdir().unwrap();
@@ -6314,6 +6422,7 @@ mod tests {
                     b2_list: on,
                     todo_lists: false,
                     balances: false,
+                    deliveries: false,
                     approve_share: Default::default(),
                 },
             )
@@ -6479,6 +6588,7 @@ mod tests {
                 b2_list: true,
                 todo_lists: false,
                 balances: false,
+                deliveries: false,
                 approve_share: Default::default(),
             })
         };
@@ -6793,6 +6903,7 @@ mod tests {
                     b2_list: on,
                     todo_lists: false,
                     balances: false,
+                    deliveries: false,
                     approve_share: Default::default(),
                 },
             )

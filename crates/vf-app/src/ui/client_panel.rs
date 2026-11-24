@@ -230,6 +230,28 @@ pub fn show(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env, ci: usize) {
                 b.portal.todo_out(),
             ));
         }
+        // Addendum §12: the tax return delivered to this client as a card on the portal.
+        if b.portal.settings(env.root).is_some_and(|s| s.deliveries)
+            && ui
+                .small_btn("Deliver tax return…")
+                .on_hover_text("Send this client's return and Form 8879 link as a card on the portal")
+                .clicked()
+            && let Some(s) = b.portal.settings(env.root).cloned()
+        {
+            b.portal.delivery = Some(crate::ui::delivery::DeliverWindow::new(
+                ui.ctx(),
+                &s,
+                env.root.to_path_buf(),
+                crate::ui::portal::ClientRef {
+                    id: c.id.clone(),
+                    code: c.ext_id.clone(),
+                    name: c.name.clone(),
+                },
+                c.folder_rel.clone(),
+                b.portal.audit_out(),
+                b.portal.delivery_out(),
+            ));
+        }
         // Addendum §16: a balance the client pays on the portal.
         if b.portal.settings(env.root).is_some_and(|s| s.balances)
             && ui
@@ -258,6 +280,11 @@ pub fn show(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env, ci: usize) {
             .monospace()
             .color(theme::ink_muted()),
     );
+    if b.portal.settings(env.root).is_some_and(|s| s.deliveries)
+        && let Some(line) = crate::ui::delivery::panel_line(b.portal.deliveries.as_ref(), &c.id)
+    {
+        ui.label(RichText::new(line).color(theme::ink_secondary()));
+    }
     if b.portal.settings(env.root).is_some_and(|s| s.balances) {
         ui.label(
             RichText::new(crate::ui::balance::panel_line(

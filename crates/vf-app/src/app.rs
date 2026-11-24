@@ -965,6 +965,10 @@ impl eframe::App for VibeFilesApp {
                 if a.todo_templates.app_copies.is_none() {
                     a.todo_templates.app_copies = Some(o.browse.portal.todo_out());
                 }
+                if !a.deliveries.connected() {
+                    a.deliveries
+                        .connect(o.browse.portal.audit_out(), o.browse.portal.delivery_out());
+                }
                 if !a.balances.connected() {
                     a.balances
                         .connect(o.browse.portal.audit_out(), o.browse.portal.balance_out());
@@ -1013,6 +1017,20 @@ impl eframe::App for VibeFilesApp {
             {
                 o.browse.error = Some(format!(
                     "A to-do list could not be copied into its client's folder: {e}"
+                ));
+            }
+            // Addendum §12.6: deliveries read are copied into their client's folder.
+            let reads = o.browse.portal.take_delivery_reads();
+            if !reads.is_empty()
+                && let Err(e) = crate::ui::delivery::record_reads(
+                    &mut o.opened.conn,
+                    &o.opened.root,
+                    &self.config.device_id,
+                    reads,
+                )
+            {
+                o.browse.error = Some(format!(
+                    "A delivery could not be copied into its client's folder: {e}"
                 ));
             }
             // Addendum §16: balances read are copied into their client's folder.
@@ -2548,6 +2566,7 @@ mod tests {
                 b2_list: false,
                 todo_lists: false,
                 balances: false,
+                deliveries: false,
                 approve_share: Default::default(),
             },
         )

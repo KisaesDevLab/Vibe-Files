@@ -617,6 +617,20 @@ pub fn payment_receipt_rule() -> filer_core::rules::Rule {
     r
 }
 
+/// The rule that files a tax return delivery's step PDF from the portal (Addendum §12.5):
+/// `<tax year> Delivery <n> - <step>.pdf` into the client's `Income Tax/{Year}/Delivery`.
+pub fn delivery_step_rule() -> filer_core::rules::Rule {
+    let mut r = filer_core::rules::Rule::new(
+        "Delivery step",
+        r"^\d{4} delivery [1-5] - ",
+        "{Client}/Income Tax/{Year}/Delivery",
+        "{Rest}.{Ext}",
+        true,
+    );
+    r.id = format!("{MANAGED_PREFIX}portal-delivery-step");
+    r
+}
+
 /// What a rules sync did.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Synced {
@@ -725,6 +739,8 @@ fn plan_rules(
     // A paid balance's receipt from the portal (Addendum §16): first of all, so no rule that
     // reads "receipt" or "invoice" takes it. It matches only the name the portal gives one.
     active.insert(0, payment_receipt_rule());
+    // A delivery's step PDF (Addendum §12.5): into the client's Income Tax\{Year}\Delivery.
+    active.insert(1, delivery_step_rule());
     // One of Intake's own rules that says exactly what a print capture rule above it says
     // (same pattern, exception and folder) is a duplicate: said, for its owner to delete.
     {

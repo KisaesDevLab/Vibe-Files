@@ -11,6 +11,7 @@ pub mod client_merge;
 pub mod client_notes;
 pub mod client_panel;
 pub mod cover_sheet;
+pub mod delivery;
 pub mod devices;
 pub mod disposition;
 pub mod doc_render;

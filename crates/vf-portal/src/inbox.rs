@@ -258,6 +258,16 @@ fn finish(root: &Path, part: &Path, meta: &Path, u: &Upload, now: &str, report: 
             // "Payment receipt"; Intake's managed rule files it in Billing\{Year paid}.
             let (wanted, origin, source) = match (&u.balance, &u.request) {
                 (Some(_), _) => (RECEIPT_DOC_TYPE, "portal_balance", "firm"),
+                // A delivery's step PDF (Addendum §12.5): its step's doc type; filed in
+                // Income Tax\{Year}\Delivery by Intake's managed rule.
+                (None, _) if u.delivery.is_some() => (
+                    u.delivery
+                        .as_ref()
+                        .and_then(|d| crate::delivery::doc_type_of_step(&d.step))
+                        .unwrap_or(""),
+                    "portal_delivery",
+                    "firm",
+                ),
                 (None, Some(r)) => (r.doc_type.as_str(), "portal_request", "client"),
                 (None, None) => ("", "", ""),
             };
@@ -277,6 +287,10 @@ fn finish(root: &Path, part: &Path, meta: &Path, u: &Upload, now: &str, report: 
                 // A receipt is the year it was paid: its name starts with the date paid.
                 if u.balance.is_some() {
                     h.tax_year = u.name.get(..4).and_then(|y| y.parse().ok());
+                }
+                // A step PDF is the delivery's tax year.
+                if let Some(d) = &u.delivery {
+                    h.tax_year = d.year;
                 }
                 h.doc_type = Some(doc_type);
                 if let Err(e) = vf_fs::hints::append(root, &h) {

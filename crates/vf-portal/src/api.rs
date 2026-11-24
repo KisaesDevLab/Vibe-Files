@@ -498,6 +498,18 @@ pub struct Upload {
     /// A paid balance's receipt, made by the portal (Addendum D7); absent otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub balance: Option<UploadBalance>,
+    /// A delivery's step PDF, made by the portal (Addendum D2); absent otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery: Option<UploadDelivery>,
+}
+
+/// The delivery step a step PDF records.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct UploadDelivery {
+    pub id: String,
+    pub step: String,
+    pub year: Option<i32>,
 }
 
 /// The balance a receipt upload is for.
@@ -1366,6 +1378,7 @@ mod tests {
             b2_list: false,
             todo_lists: false,
             balances: false,
+            deliveries: false,
             approve_share: Default::default(),
         };
         (Portal::new(&s, "PC1", "kurt"), seen)

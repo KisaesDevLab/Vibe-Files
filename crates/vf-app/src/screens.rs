@@ -355,6 +355,300 @@ mod tests {
         shot(&mut h, "vf-6-admin-todo-templates");
     }
 
+    /// Addendum §12 slice 2 (tax return delivery) walkthrough against a real Vibe Portal: the
+    /// Deliver window sends the return and the 8879 link, the client (headless Edge) opens the
+    /// return and says they signed, staff confirm, and both step PDFs with their log pages are
+    /// fetched and committed by Intake into `Income Tax\2025\Delivery`. Set `VF_WALK_URL`,
+    /// `VF_WALK_KEY`, `VF_WALK_LOG`, `VF_WALK_CLIENT` (`scripts/delivery-walkthrough/client.mjs`)
+    /// and `VF_WALK_DIR`; the portal must have deliveries on.
+    #[test]
+    #[ignore = "needs a running portal"]
+    fn delivery_walkthrough() {
+        let (Ok(url), Ok(key), Ok(log), Ok(client_js), Ok(out)) = (
+            std::env::var("VF_WALK_URL"),
+            std::env::var("VF_WALK_KEY"),
+            std::env::var("VF_WALK_LOG"),
+            std::env::var("VF_WALK_CLIENT"),
+            std::env::var("VF_WALK_DIR"),
+        ) else {
+            return;
+        };
+        let out = std::path::PathBuf::from(out);
+        std::fs::create_dir_all(&out).unwrap();
+        let mut steps: Vec<String> = Vec::new();
+        let mut note = |s: String| {
+            eprintln!("{s}");
+            steps.push(s);
+        };
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path().join("Clients");
+        vf_fixtures::generate(&root, 3).unwrap();
+        crate::ui::test_util::pdfium_first();
+        let data = t.path().join("data");
+        drop(crate::session::open(&data, "dev", &root).unwrap());
+        let cab = vf_fs::cabinet::read(&root).unwrap().cabinet_id;
+        let s = vf_portal::PortalSettings::new(&cab, &url, &key, 0)
+            .unwrap()
+            .with_deliveries(true);
+        vf_portal::settings::save(&root, &s).unwrap();
+        crate::portal::register_inbox(&root).unwrap();
+        // What Admin › Portal's Save does when Tax return delivery is ticked.
+        for (_, name) in vf_portal::delivery::STEP_DOC_TYPES {
+            vf_fs::doctypes::ensure(&root, name, vf_portal::delivery::DELIVERY_FOLDER, false)
+                .unwrap();
+        }
+        let d = data.clone();
+        let mut h = HarnessBuilder::default()
+            .with_max_steps(crate::ui::test_util::MAX_STEPS)
+            .with_theme(egui::Theme::Light)
+            .with_size([1440.0, 900.0])
+            .build_eframe(move |cc| VibeFilesApp::new(&cc.egui_ctx, d.clone()));
+        h.run_steps(8);
+        let shot = |h: &mut egui_kittest::Harness<'static, VibeFilesApp>, name: &str| {
+            for _ in 0..5 {
+                h.step();
+            }
+            match h.render() {
+                Ok(img) => img.save(out.join(format!("{name}.png"))).unwrap(),
+                Err(e) => eprintln!("{name}: {e}"),
+            }
+        };
+        let said = |h: &egui_kittest::Harness<'static, VibeFilesApp>, text: &str| {
+            h.query_all_by_label_contains(text).next().is_some()
+        };
+        let wait_long =
+            |h: &mut egui_kittest::Harness<'static, VibeFilesApp>,
+             what: &str,
+             ok: &dyn Fn(&egui_kittest::Harness<'static, VibeFilesApp>) -> bool| {
+                let start = std::time::Instant::now();
+                while !ok(h) {
+                    assert!(start.elapsed().as_secs() < 90, "{what}: never");
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                    h.step();
+                }
+            };
+        h.get_by_role_and_label(Role::Button, "Open existing")
+            .click();
+        h.run_steps(8);
+        h.get_by_label("Cabinet folder").click();
+        h.step();
+        h.get_by_label("Cabinet folder")
+            .type_text(&root.display().to_string());
+        h.step();
+        h.get_by_role_and_label(Role::Button, "Open cabinet")
+            .click();
+        assert!(wait_for(&mut h, |h| matches!(
+            h.state().screen,
+            crate::app::Screen::Open(_)
+        )));
+        h.run_steps(8);
+        {
+            let o = open_mut(&mut h);
+            vf_fs::doctypes::sync(&mut o.opened.conn, &root, "dev", "doc_types_edit").unwrap();
+        }
+        let c = {
+            let o = open_mut(&mut h);
+            o.browse.set_scope(vf_core::browse::Scope::Client(0));
+            o.browse.portal.reread();
+            o.browse.snap.clients[0].clone()
+        };
+        let folder = c.folder_rel.clone().unwrap();
+        let p = crate::portal::client(&s);
+        p.put_client(&c.id, &c.ext_id, &c.name, None).unwrap();
+        // The return, shared on the portal and held for the person invited (P98).
+        let ret = root.join(&folder).join("Income Tax").join("2025");
+        std::fs::create_dir_all(&ret).unwrap();
+        let ret = ret.join("2025 Form 1040 Return - Sample.pdf");
+        crate::ui::test_util::write_lines_pdf(&ret, crate::ui::test_util::SAMPLE_RETURN);
+        p.invite(
+            &c.id,
+            Some("jordan.sample@example.com"),
+            None,
+            "Jordan Sample",
+            "Owner",
+        )
+        .unwrap();
+        let added = p
+            .add(
+                &c.id,
+                "doc-return-walk",
+                "2025 Form 1040 Return - Sample.pdf",
+                Some(2025),
+                &ret,
+            )
+            .unwrap();
+        let inv = p.users(&c.id).unwrap().invitations[0].invitation_id.clone();
+        p.set_visibility_with(
+            added.file_id(),
+            &std::collections::BTreeMap::new(),
+            &std::collections::BTreeMap::from([(inv, true)]),
+        )
+        .unwrap();
+        note(format!(
+            "Setup: {} ({}) on the portal; the return shared, held for Jordan Sample's invitation",
+            c.name, c.ext_id
+        ));
+
+        // ---- Step 1: Deliver tax return… sends the return and the 8879 link.
+        h.run_steps(4);
+        h.get_by_role_and_label(Role::Button, "Deliver tax return…")
+            .click();
+        wait_long(&mut h, "the window read", &|h| {
+            said(h, "2025 Form 1040 Return - Sample.pdf")
+        });
+        shot(&mut h, "00-deliver-read");
+        h.get_by_label("eSignature link").click();
+        h.step();
+        h.get_by_label("eSignature link")
+            .type_text("https://esign.example-tax.test/s/walkthrough");
+        h.run_steps(3);
+        shot(&mut h, "01-deliver-window");
+        h.get_by_role_and_label(Role::Button, "Send to client")
+            .click();
+        wait_long(&mut h, "sent", &|h| said(h, "Sent to the client."));
+        shot(&mut h, "02-deliver-sent");
+        let sent = p.deliveries(Some(&c.id)).unwrap();
+        assert_eq!(sent.len(), 1);
+        let did = sent[0].id.clone();
+        note(format!(
+            "Step 1: sent {} with the return and the Form 8879 link; the portal says {}",
+            sent[0].title,
+            sent[0].line()
+        ));
+
+        // ---- Step 2: the client opens the return and says they signed Form 8879.
+        let ok = std::process::Command::new("node")
+            .args([
+                &client_js,
+                &url,
+                &out.display().to_string(),
+                &log,
+                "jordan.sample@example.com",
+                "deliver",
+            ])
+            .status()
+            .is_ok_and(|s| s.success());
+        assert!(ok, "the client's steps (see client-deliver.json)");
+        let now = p.delivery(&did).unwrap();
+        assert_eq!(
+            now.step(vf_portal::delivery::RETURN)
+                .map(|s| s.state.as_str()),
+            Some("done")
+        );
+        assert_eq!(
+            now.step(vf_portal::delivery::ESIGN)
+                .map(|s| s.state.as_str()),
+            Some("waiting")
+        );
+        note("Step 2: the client opened the return (step done) and said they signed Form 8879 (waiting)".into());
+
+        // ---- Step 3: staff confirm in the window.
+        click_read_again(&mut h);
+        wait_long(&mut h, "the window says signed", &|h| {
+            said(h, "The client says they signed it.")
+        });
+        shot(&mut h, "03-deliver-waiting");
+        h.get_by_role_and_label(Role::Button, "Confirm signed")
+            .click();
+        wait_long(&mut h, "confirmed", &|h| said(h, "Form 8879 confirmed."));
+        assert_eq!(p.delivery(&did).unwrap().status, "complete");
+        note("Step 3: Confirm signed: the delivery is complete".into());
+        {
+            let o = open_mut(&mut h);
+            o.browse.portal.delivery = None;
+        }
+
+        // ---- Step 4: both step PDFs reach the Portal inbox and Intake files them.
+        open_mut(&mut h).browse.portal.fetch_now = true;
+        let inbox = crate::portal::inbox(&root);
+        let names = |inbox: &std::path::Path| -> Vec<String> {
+            std::fs::read_dir(inbox)
+                .ok()
+                .into_iter()
+                .flatten()
+                .flatten()
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .filter(|n| n.contains(" Delivery "))
+                .collect()
+        };
+        wait_long(&mut h, "both step PDFs fetched", &|_| {
+            names(&inbox).len() == 2
+        });
+        note(format!("Step 4: in the Portal inbox: {:?}", names(&inbox)));
+        h.state_mut().tab = crate::app::Tab::Intake;
+        h.run_steps(10);
+        if let Some(b) = h.query_by_label("Preview") {
+            b.click();
+        }
+        wait_long(&mut h, "both rows ready", &|h| said(h, "Commit 2 files"));
+        shot(&mut h, "04-intake-step-pdfs");
+        h.query_all_by_role_and_label(Role::Button, "Commit 2 files")
+            .last()
+            .unwrap()
+            .click();
+        h.run_steps(6);
+        wait_long(&mut h, "the commit summary", &|h| {
+            h.query_all_by_label("Confirm commit").next().is_some()
+        });
+        h.query_all_by_label("Confirm commit")
+            .next()
+            .unwrap()
+            .click();
+        h.run_steps(6);
+        let dir = root
+            .join(&folder)
+            .join("Income Tax")
+            .join("2025")
+            .join("Delivery");
+        for want in [
+            "2025 Delivery 2 - Tax return.pdf",
+            "2025 Delivery 5 - Form 8879.pdf",
+        ] {
+            let path = dir.join(want);
+            wait_long(&mut h, want, &|_| path.exists());
+        }
+        let start = std::time::Instant::now();
+        let types: Vec<String> = loop {
+            let got: Vec<String> = {
+                let o = open_mut(&mut h);
+                let mut st = o
+                    .opened
+                    .conn
+                    .prepare(
+                        "SELECT t.name FROM document d JOIN doc_type t ON t.id = d.doc_type_id
+                         WHERE d.rel_path LIKE '%Income Tax/2025/Delivery/%' AND d.deleted_at IS NULL
+                         ORDER BY t.name",
+                    )
+                    .unwrap();
+                st.query_map([], |r| r.get(0)).unwrap().flatten().collect()
+            };
+            if got.len() == 2 || start.elapsed().as_secs() > 60 {
+                break got;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            h.step();
+        };
+        assert_eq!(
+            types,
+            ["Delivery — 8879 record", "Delivery — return record"]
+        );
+        note(format!(
+            "Step 4: committed into {folder}\\Income Tax\\2025\\Delivery with doc types {types:?}"
+        ));
+        // The copy in the client folder.
+        assert!(!vf_portal::delivery::read_copies(&root, &folder).is_empty());
+        std::fs::write(out.join("steps.txt"), steps.join("\n")).unwrap();
+    }
+
+    /// Presses the open window's Read again.
+    fn click_read_again(h: &mut egui_kittest::Harness<'static, VibeFilesApp>) {
+        h.query_all_by_role_and_label(Role::Button, "Read again")
+            .last()
+            .unwrap()
+            .click();
+        h.run_steps(4);
+    }
+
     /// Addendum §16 (balance owed) walkthrough against a real Vibe Portal with a stand-in for
     /// Stripe: post from the Balance owed window, the payment completed by a signed webhook,
     /// the receipt fetched into the Portal inbox with its hint, the panel's line, the copy in

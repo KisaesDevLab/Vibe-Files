@@ -5970,6 +5970,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "vf-letters"
+version = "0.1.55"
+dependencies = [
+ "pdf-writer",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "vf-fs",
+]
+
+[[package]]
 name = "vf-move"
 version = "0.1.55"
 dependencies = [

@@ -8,6 +8,7 @@
 
 pub mod api;
 pub mod balance;
+pub mod delivery;
 pub mod filed;
 pub mod inbox;
 pub mod listing;

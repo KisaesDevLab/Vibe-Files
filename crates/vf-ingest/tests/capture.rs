@@ -360,13 +360,12 @@ fn ultratax_prints_go_to_their_doc_types_folder() {
     assert!(vf_ingest::parsers::sync_filer_rules(&root).unwrap());
     let (rules, _, _) = filer_core::rules::load_or_seed(&master);
     let receipt = vf_ingest::parsers::payment_receipt_rule().id;
-    assert!(
-        rules
-            .active_rules()
-            .iter()
-            .all(|r| !r.id.starts_with(vf_ingest::parsers::MANAGED_PREFIX) || r.id == receipt)
-    );
+    let step = vf_ingest::parsers::delivery_step_rule().id;
+    assert!(rules.active_rules().iter().all(|r| {
+        !r.id.starts_with(vf_ingest::parsers::MANAGED_PREFIX) || r.id == receipt || r.id == step
+    }));
     assert_eq!(rules.active_rules()[0].id, receipt);
+    assert_eq!(rules.active_rules()[1].id, step);
     // Filer's own rules stay (Filer 0.2.5 took its "UltraTax" rule out of the firm set).
     assert!(
         rules

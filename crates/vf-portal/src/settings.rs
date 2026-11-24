@@ -47,6 +47,11 @@ pub struct PortalSettings {
     /// portal has its own switch, and needs Stripe set up.
     #[serde(default)]
     pub balances: bool,
+    /// Tax return delivery in Vibe Files for every PC (ADDENDUM-tax-return-delivery.md §12):
+    /// the client panel's Deliver tax return… and Admin › Portal › Deliveries. Off unless the
+    /// firm ticks it; the portal has its own switch.
+    #[serde(default)]
+    pub deliveries: bool,
     /// What Approve offers to share with someone given access (PA-106, owner 2026-11-24).
     #[serde(default, skip_serializing_if = "ApproveShare::is_empty")]
     pub approve_share: ApproveShare,
@@ -165,6 +170,7 @@ impl PortalSettings {
             b2_list: false,
             todo_lists: false,
             balances: false,
+            deliveries: false,
             approve_share: Default::default(),
         })
     }
@@ -184,6 +190,12 @@ impl PortalSettings {
     /// The same settings with to-do lists on or off for every PC (PA-103).
     pub fn with_todo_lists(mut self, on: bool) -> Self {
         self.todo_lists = on;
+        self
+    }
+
+    /// The same settings with tax return delivery on or off for every PC (Addendum §12).
+    pub fn with_deliveries(mut self, on: bool) -> Self {
+        self.deliveries = on;
         self
     }
 
