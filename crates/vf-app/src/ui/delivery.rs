@@ -102,7 +102,18 @@ pub fn record_reads(
 // ---- The Deliver tax return window -------------------------------------------------------------
 
 enum Done {
-    Loaded(Result<(Vec<Delivery>, Vec<PortalFile>, String), vf_portal::PortalError>),
+    #[allow(clippy::type_complexity)]
+    Loaded(
+        Result<
+            (
+                Vec<Delivery>,
+                Vec<PortalFile>,
+                String,
+                Vec<vf_portal::balance::BalanceStaff>,
+            ),
+            vf_portal::PortalError,
+        >,
+    ),
     Saved(Result<Box<Delivery>, String>, &'static str),
     Said(Result<String, String>),
 }
@@ -148,6 +159,12 @@ pub struct DeliverWindow {
     addon_ticks: Vec<(vf_portal::pricing::PlanAddon, bool, String)>,
     mark_note: String,
     confirm_mark: bool,
+    /// F4: who hears of the delivery's events, and reminders while a step waits on the client.
+    staff: Vec<vf_portal::balance::BalanceStaff>,
+    assigned: Option<String>,
+    remind_days: u32,
+    /// T27: a different return chosen after the client saw the first.
+    confirm_revise: bool,
     return_file: Option<String>,
     link: String,
     notify: bool,
@@ -203,6 +220,10 @@ impl DeliverWindow {
             addon_ticks: Vec::new(),
             mark_note: String::new(),
             confirm_mark: false,
+            staff: Vec::new(),
+            assigned: None,
+            remind_days: 7,
+            confirm_revise: false,
             return_file: None,
             link: String::new(),
             notify: true,
@@ -493,7 +514,8 @@ impl DeliverWindow {
                 }
                 let files = p.files_for_client(&id)?;
                 let firm = p.status().map(|s| s.firm_name).unwrap_or_default();
-                Ok((ds, files, firm))
+                let staff = p.delivery_staff(&id).unwrap_or_default();
+                Ok((ds, files, firm, staff))
             })())
         }));
     }
@@ -513,6 +535,8 @@ impl DeliverWindow {
             self.with_8879 = d.step(delivery::ESIGN).is_some_and(|s| s.present);
             self.with_letters = d.step(delivery::LETTERS).is_some_and(|s| s.present);
             self.with_fee = d.step(delivery::FEE).is_some_and(|s| s.present);
+            self.assigned = d.assigned_staff_id.clone();
+            self.remind_days = d.remind_days;
             if let Some(m) = d.fee.as_ref().and_then(|f| f.mode.clone()) {
                 self.fee_mode = m;
             }
@@ -542,8 +566,9 @@ impl DeliverWindow {
         let Ok(done) = rx.try_recv() else { return };
         self.job = None;
         match done {
-            Done::Loaded(Ok((ds, files, firm))) => {
+            Done::Loaded(Ok((ds, files, firm, staff))) => {
                 self.firm_name = firm;
+                self.staff = staff;
                 self.reads.send(ds.clone());
                 self.deliveries = ds;
                 let mut files = files;
@@ -1071,6 +1096,39 @@ impl DeliverWindow {
             &mut self.notify,
             "Tell the client by email and text when it is sent",
         );
+        ui.horizontal(|ui| {
+            ui.label("Remind the client");
+            egui::ComboBox::from_id_salt("delivery-remind")
+                .selected_text(match self.remind_days {
+                    0 => "never".to_string(),
+                    n => format!("every {n} days while a step waits"),
+                })
+                .show_ui(ui, |ui| {
+                    for n in [0u32, 3, 7, 14] {
+                        let words = if n == 0 {
+                            "never".to_string()
+                        } else {
+                            format!("every {n} days while a step waits")
+                        };
+                        ui.selectable_value(&mut self.remind_days, n, words);
+                    }
+                });
+            ui.label("Assigned to");
+            let shown = self
+                .assigned
+                .as_deref()
+                .and_then(|id| self.staff.iter().find(|s| s.id == id))
+                .map(|s| s.name.clone())
+                .unwrap_or_else(|| "Nobody (the admins)".into());
+            egui::ComboBox::from_id_salt("delivery-assigned")
+                .selected_text(shown)
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut self.assigned, None, "Nobody (the admins)");
+                    for s in &self.staff {
+                        ui.selectable_value(&mut self.assigned, Some(s.id.clone()), &s.name);
+                    }
+                });
+        });
         let link_ok = !self.with_8879
             || self.link.trim().is_empty()
             || self.link.trim().to_lowercase().starts_with("https://");
@@ -1126,6 +1184,19 @@ impl DeliverWindow {
                 }
             });
         });
+        if self.confirm_revise {
+            ui.group(|ui| {
+                ui.label("Tell the client the return was updated and reopen the Form 8879 step? The letters, package and fee stand; paste a new eSignature link if UltraTax made one.");
+                ui.horizontal(|ui| {
+                    if ui.button("Send the revised return").clicked() {
+                        act = Some(Act::Send);
+                    }
+                    if ui.button("Keep the first").clicked() {
+                        self.confirm_revise = false;
+                    }
+                });
+            });
+        }
         if self.confirm_cancel {
             ui.group(|ui| {
                 ui.label("Cancel this delivery? The card leaves the client's portal. What was done stays in its log.");
@@ -1255,6 +1326,19 @@ impl DeliverWindow {
                     };
                 let signers = self.signers.clone();
                 let with_letters = self.with_letters;
+                let assigned = self.assigned.clone();
+                let remind_days = self.remind_days;
+                // T27: a return the client saw, replaced: asked first in the window.
+                let seen = current.as_ref().is_some_and(|d| {
+                    d.step(delivery::RETURN).is_some_and(|s| s.state == "done")
+                        && d.return_file.as_ref().map(|r| r.id.as_str())
+                            != self.return_file.as_deref()
+                });
+                if seen && !self.confirm_revise {
+                    self.confirm_revise = true;
+                    return;
+                }
+                self.confirm_revise = false;
                 let title = self.title.trim().to_string();
                 let file = self.return_file.clone().filter(|_| self.with_return);
                 let link = self.link.trim().to_string();
@@ -1271,9 +1355,9 @@ impl DeliverWindow {
                         esign_after_letters: true,
                         esign_after_fee: true,
                     },
-                    assigned_staff_id: None,
+                    assigned_staff_id: self.assigned.clone(),
                     notify,
-                    remind_days: 0,
+                    remind_days: self.remind_days,
                 };
                 let what = if current.is_none() {
                     "portal_delivery_create"
@@ -1291,6 +1375,8 @@ impl DeliverWindow {
                                     title: Some(title),
                                     steps: Some(steps),
                                     notify: Some(notify),
+                                    assigned_staff_id: Some(assigned),
+                                    remind_days: Some(remind_days),
                                     ..Default::default()
                                 },
                             )?,
@@ -1298,7 +1384,11 @@ impl DeliverWindow {
                         if let Some(f) = file
                             && d.return_file.as_ref().map(|r| r.id.as_str()) != Some(f.as_str())
                         {
-                            d = p.set_delivery_return(&d.id, &f)?;
+                            d = if seen {
+                                p.revise_return(&d.id, &f)?
+                            } else {
+                                p.set_delivery_return(&d.id, &f)?
+                            };
                         }
                         if let Some(l) = link
                             && d.esign_link.as_deref() != Some(l.as_str())

@@ -294,8 +294,8 @@ Number them from the next free P when accepted. Each ends with `pnpm gate` green
   shows unpaid and tells staff; a replayed webhook changes nothing; a forged one is refused
 
 ### D6 — Reminders, staff page, revised return, review
-- [ ] Notices and reminders; assigned staff; staff page views and actions
-- [ ] T27 (Updated, step 5 reopens, new link needed); finished cards and "Past tax returns"
+- [x] Notices and reminders; assigned staff; staff page views and actions
+- [x] T27 (Updated, step 5 reopens, new link needed); finished cards and "Past tax returns"
 - [ ] Security review; load test with 500 clients each with a delivery; `docs/firm-setup.md`
 - **Gate:** the owner's end-to-end walk with Vibe Files on a real phone over the tunnel
 
@@ -427,7 +427,7 @@ screenshots of the new windows.
   plan edit leaves a sent delivery unchanged; e2e in Stripe test mode through step 4's PDF
 
 ### F4 — Finish
-- [ ] Revised return (T27); cancel; reminders; help pages
+- [x] Revised return (T27); cancel; reminders; help pages
 - [ ] Owner's walk: a real 1040 joint client and one entity client, phone and desktop
 - **Gate:** every step's PDF and log page in `Income Tax\{Year}\Delivery`; the whole-delivery
   report matches them
@@ -1017,3 +1017,40 @@ opening Form 8879 then failed (staff told), Mark paid. Not met yet: Stripe test 
 | Q34 | Addenda for a package whose name has no addendum template. | None sent; the package is chosen without one. | `DeliverWindow::apply` |
 | Q35 | Pricing plans: the grid with a column per package (§15.6). | A row per package with its rule and service lines (`Group: a; b`). | `ui/pricing_plans.rs` |
 | Q36 | Test runs under load: the portal suite's setup hook (40 migrations) can pass 10 s. | Re-run alone; consider a longer `hookTimeout`. | `apps/api` vitest config |
+
+### Slice 5 (portal D6, Vibe Files F4: PA-111)
+
+Portal (`f3d5bd0`, `8072251`): reminders every N days while a step waits on the client (hourly,
+claimed); the assigned staff member (else the admins) told of each step done; `PUT
+/deliveries/:id/return { fileId, revised: true }` for a revised return (T27: the card shows
+Updated, steps 2 and 5 reopen; without `revised` a seen return answers 409 `return_seen`);
+`GET /delivery-staff?clientId`; the client's `GET /deliveries` gains `past` (finished cards
+past the keep days, "Past tax returns") and `returnUpdated`; the staff page's client view lists
+its deliveries with Remind, Confirm Form 8879 signed, Mark paid, Cancel and the report.
+
+Vibe Files: the Deliver window's Remind the client (every 3, 7, 14 days) and Assigned to; a
+revised return asks first ("Send the revised return"); help updated.
+
+Security review (subagent, 2026-11-24) of every new portal route: one finding, fixed in
+`8072251`: a client could check out for a cheaper package, pay, then choose and sign a dearer
+one with the fee marked paid. Now checkout needs step 4 open (the selection signed), the
+selection is frozen once a payment exists, a fee change expires open sessions, and a payment for
+another amount is recorded and told to staff instead of completing the step. Found sound:
+client and staff scoping on every balance and delivery route, the webhook (signature, replay,
+metadata tied to the stored session, amounts from server rows), Stripe keys never answered,
+second-signer codes, letters frozen after a signature, the locked return everywhere, SQL and
+header building.
+
+Not done (owner): the Stripe test-mode run; the owner's walk on a real phone over the tunnel;
+the attorney's review of the e-signature record and the package addenda; a load test with 500
+deliveries; `docs/firm-setup.md` for payments and delivery; pushing and releasing (no push or
+release was made: commits are local on `delivery` in both repos).
+
+### Questions logged, slice 5 (defaults taken)
+
+| # | Question | Default taken | Where to change it |
+|---|---|---|---|
+| Q37 | What reopens on a revised return? | Steps 2 and 5 (the client reviews the new return and signs a new Form 8879); the 8879 link stays until staff paste a new one. | `reviseReturn` |
+| Q38 | Reminders: which steps count as waiting on the client? | Any step open to the client (letters, return, package, fee, 8879 open); none while only the firm is waited on. | `waitsOnClient` |
+| Q39 | Staff told of every step done, or only some? | Every step (§9), the assigned member else the admins. | `completeStep` |
+| Q40 | The staff page: a portal-wide Deliveries worklist too? | Only per client on the staff page; the worklist is Vibe Files' Admin › Portal › Deliveries. | `staff/Deliveries.tsx` |

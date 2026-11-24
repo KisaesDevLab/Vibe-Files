@@ -406,6 +406,27 @@ impl Portal {
         .map(|r| r.delivery)
     }
 
+    /// T27: a revised return replaces the one the client saw: the card shows Updated, steps 2
+    /// and 5 reopen (a new Form 8879 is signed); letters, package and fee stand.
+    pub fn revise_return(&self, id: &str, file_id: &str) -> Result<Delivery> {
+        self.send_json::<One>(
+            "PUT",
+            &format!("/deliveries/{id}/return"),
+            &serde_json::json!({ "fileId": file_id, "revised": true }),
+        )
+        .map(|r| r.delivery)
+    }
+
+    /// Staff a delivery of this client may be assigned to.
+    pub fn delivery_staff(&self, client_id: &str) -> Result<Vec<crate::balance::BalanceStaff>> {
+        #[derive(Deserialize)]
+        struct R {
+            staff: Vec<crate::balance::BalanceStaff>,
+        }
+        self.get::<R>("/delivery-staff", &[("clientId", client_id)])
+            .map(|r| r.staff)
+    }
+
     /// Step 5: the client's UltraTax eSignature link (https only).
     pub fn set_esign_link(&self, id: &str, url: &str) -> Result<Delivery> {
         self.send_json::<One>(

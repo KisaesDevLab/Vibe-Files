@@ -22,6 +22,12 @@ Two switches, both off until the firm ticks them:
 
 One delivery is open per client, tax year and return type. Opening the window again shows it; change it and press **Save changes**.
 
+**Remind the client** every few days while a step waits on them, and **Assigned to**: the staff member told when the client says they signed, when each step is done, and of every payment. Nobody assigned: the admins.
+
+## A revised return
+
+Choose another return for a delivery whose client already opened the first, and press **Save changes**: the window asks first. **Send the revised return** shows the card as Updated and reopens the return and Form 8879 steps; paste a new eSignature link if UltraTax made one. The letters, package and fee stand.
+
 ## What the client does
 
 - **Review your tax return**: **View** or **Download**. The first time they do, the step is done.
