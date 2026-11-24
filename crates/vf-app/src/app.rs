@@ -925,6 +925,9 @@ impl eframe::App for VibeFilesApp {
                 if a.portal.audit.is_none() {
                     a.portal.audit = Some(o.browse.portal.audit_out());
                 }
+                if a.invite_list.app_audit.is_none() {
+                    a.invite_list.app_audit = Some(o.browse.portal.audit_out());
+                }
                 if a.todo_templates.app_audit.is_none() {
                     a.todo_templates.app_audit = Some(o.browse.portal.audit_out());
                 }

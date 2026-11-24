@@ -20,6 +20,7 @@ pub mod import_csv;
 pub mod import_tree;
 pub mod ingest;
 pub mod intake;
+pub mod invite_list;
 pub mod job;
 pub mod listupdate;
 pub mod merge_page;

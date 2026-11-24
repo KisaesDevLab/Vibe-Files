@@ -7,6 +7,7 @@ pub mod changes;
 pub mod clientmerge;
 pub mod clients;
 pub mod cloud;
+pub mod contacts;
 pub mod content;
 pub mod copymove;
 pub mod disposition;

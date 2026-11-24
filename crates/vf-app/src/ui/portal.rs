@@ -592,7 +592,7 @@ fn invitee(i: &vf_portal::api::Invitation) -> String {
     }
 }
 
-fn invite_audit(client_id: &str, by_email: bool, role: &str) -> AuditEntry {
+pub(crate) fn invite_audit(client_id: &str, by_email: bool, role: &str) -> AuditEntry {
     AuditEntry::new(
         "portal_invite",
         None,
@@ -4039,6 +4039,164 @@ mod tests {
                 && w[1].contains("+15552010002")
                 && w[1].contains(r#""roleLabel":"Spouse""#),
             "{w:?}"
+        );
+    }
+
+    /// PA-105 (owner 2026-11-24): invitations go out in groups with a pause between them,
+    /// each client put on the portal once first; a refusal is kept and the rest go on.
+    #[test]
+    fn invitations_from_the_client_list_go_in_groups_with_a_pause() {
+        use crate::ui::invite_list::{Item, Progress, send_all, summary};
+        let (url, seen) = fake_portal(|method, path| match (method, path) {
+            ("POST", p) if p.contains("/clients/c2/") => {
+                (400, r#"{"error":"invalid_email"}"#.into())
+            }
+            ("POST", _) => (201, r#"{"invitationId":"i"}"#.into()),
+            _ => (200, r#"{"ok":true}"#.into()),
+        });
+        let s = PortalSettings {
+            version: 1,
+            cabinet_id: "c".into(),
+            url,
+            key: "vpk_test".into(),
+            fetch_minutes: 0,
+            record: Default::default(),
+            b2_list: false,
+            todo_lists: false,
+        };
+        let item = |client: &str, name: &str| Item {
+            client_id: client.into(),
+            code: "1001".into(),
+            client: format!("Client {client}"),
+            invitee: vf_fs::contacts::Invitee {
+                name: name.into(),
+                email: Some(format!("{name}@example.test")),
+                phone: None,
+                role: "Taxpayer".into(),
+                note: None,
+            },
+        };
+        let items = vec![
+            item("c1", "a"),
+            item("c1", "b"),
+            item("c2", "c"),
+            item("c3", "d"),
+            item("c3", "e"),
+        ];
+        let progress = std::sync::Mutex::new(Progress {
+            total: items.len(),
+            ..Default::default()
+        });
+        let stop = std::sync::atomic::AtomicBool::new(false);
+        let (tx, audit) = mpsc::channel();
+        let pause = Duration::from_millis(150);
+        let t0 = Instant::now();
+        send_all(
+            &core::client(&s),
+            &items,
+            2,
+            pause,
+            &progress,
+            &stop,
+            &AuditOut(tx),
+            &|| {},
+        );
+        // 5 invitations in groups of 2: two pauses, none after the last group.
+        let took = t0.elapsed();
+        assert!(took >= pause * 2, "{took:?}");
+        assert!(took < pause * 3 + Duration::from_secs(2), "{took:?}");
+        let log = seen.lock().unwrap().clone();
+        let puts: Vec<_> = log.iter().filter(|r| r.starts_with("PUT ")).collect();
+        assert_eq!(puts.len(), 3, "each client put once: {log:?}");
+        let posts = log.iter().filter(|r| r.starts_with("POST ")).count();
+        assert_eq!(posts, 5);
+        let p = progress.lock().unwrap();
+        assert!(p.finished);
+        assert_eq!(p.sent.len(), 5);
+        assert_eq!(
+            p.sent[2].result,
+            Err((
+                "invalid_email".into(),
+                "That email address does not look right.".into()
+            ))
+        );
+        assert_eq!(
+            summary(&p),
+            "4 invited (4 by email, 0 by text) · 1 not sent"
+        );
+        let rows: Vec<_> = audit.try_iter().collect();
+        assert_eq!(rows.len(), 4);
+        assert_eq!(rows[0].detail["from_client_list"], true);
+        // No email or phone in the audit rows.
+        assert!(!rows[0].detail.to_string().contains("example.test"));
+    }
+
+    /// Stop during the pause sends nothing more.
+    #[test]
+    fn stopping_between_groups_sends_no_more() {
+        use crate::ui::invite_list::{Item, Progress, send_all};
+        let (url, seen) = fake_portal(|method, _| match method {
+            "POST" => (201, r#"{"invitationId":"i"}"#.into()),
+            _ => (200, r#"{"ok":true}"#.into()),
+        });
+        let s = PortalSettings {
+            version: 1,
+            cabinet_id: "c".into(),
+            url,
+            key: "vpk_test".into(),
+            fetch_minutes: 0,
+            record: Default::default(),
+            b2_list: false,
+            todo_lists: false,
+        };
+        let items: Vec<Item> = (0..4)
+            .map(|i| Item {
+                client_id: format!("c{i}"),
+                code: "1".into(),
+                client: "x".into(),
+                invitee: vf_fs::contacts::Invitee {
+                    name: "n".into(),
+                    email: Some(format!("p{i}@example.test")),
+                    phone: None,
+                    role: String::new(),
+                    note: None,
+                },
+            })
+            .collect();
+        let progress = std::sync::Arc::new(std::sync::Mutex::new(Progress::default()));
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (p2, s2) = (progress.clone(), stop.clone());
+        let (tx, _audit) = mpsc::channel();
+        let p = core::client(&s);
+        let h = std::thread::spawn(move || {
+            send_all(
+                &p,
+                &items,
+                2,
+                Duration::from_secs(30),
+                &p2,
+                &s2,
+                &AuditOut(tx),
+                &|| {},
+            )
+        });
+        let start = Instant::now();
+        while progress.lock().unwrap().next_group_at.is_none() {
+            assert!(start.elapsed() < Duration::from_secs(10));
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        h.join().unwrap();
+        let p = progress.lock().unwrap();
+        assert!(p.stopped && p.finished);
+        assert_eq!(p.sent.len(), 2);
+        assert_eq!(
+            seen.lock()
+                .unwrap()
+                .iter()
+                .filter(|r| r.starts_with("POST "))
+                .count(),
+            2
         );
     }
 

@@ -41,6 +41,7 @@ pub enum Page {
     PortalRequests,
     /// Admin › To-do templates (PA-103).
     TodoTemplates,
+    InviteList,
 }
 
 /// UI_SPEC §6 nav, grouped: the pages that are built. Version 2 pages (Users & roles, Client
@@ -61,7 +62,15 @@ const NAV: &[(&str, &[&str])] = &[
         ],
     ),
     ("INTAKE", &["Print capture & parsers"]),
-    ("PORTAL", &["Portal", "Portal requests", "To-do templates"]),
+    (
+        "PORTAL",
+        &[
+            "Portal",
+            "Invite from client list",
+            "Portal requests",
+            "To-do templates",
+        ],
+    ),
     (
         "COMPLIANCE",
         &[
@@ -98,6 +107,7 @@ fn page_of(item: &str) -> Option<Page> {
         "Portal" => Page::Portal,
         "Portal requests" => Page::PortalRequests,
         "To-do templates" => Page::TodoTemplates,
+        "Invite from client list" => Page::InviteList,
         "Audit trail" => Page::Audit,
         "Retention classes" => Page::Retention,
         "Disposition" => Page::Disposition,
@@ -206,6 +216,8 @@ pub struct Admin {
     pub portal: crate::ui::portal::AdminPortal,
     /// Admin › To-do templates (PA-103).
     pub todo_templates: crate::ui::todo::TemplatesPage,
+    /// PA-105: Admin › Portal › Invite from client list.
+    pub invite_list: crate::ui::invite_list::InvitePage,
     /// Doc types: archived ones listed too.
     pub show_archived: bool,
 }
@@ -249,6 +261,7 @@ impl Admin {
             templates: Default::default(),
             portal: Default::default(),
             todo_templates: Default::default(),
+            invite_list: Default::default(),
             show_archived: false,
         };
         a.reload(env);
@@ -517,6 +530,13 @@ pub fn show(ui: &mut egui::Ui, a: &mut Admin, env: &mut Env, sweep: SweepEnv, lo
                     crate::ui::portal::admin_requests(ui, &mut a.portal, env)
                 });
         }
+        Page::InviteList => {
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    crate::ui::invite_list::page(ui, &mut a.invite_list, env)
+                });
+        }
         Page::TodoTemplates => {
             egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
@@ -640,6 +660,14 @@ fn nav(ui: &mut egui::Ui, a: &mut Admin, has_password: bool, locked: bool) {
                 {
                     a.page = Page::PortalRequests;
                     a.portal.refresh_requests();
+                }
+            } else if *item == "Invite from client list" {
+                if ui
+                    .selectable_label(a.page == Page::InviteList, *item)
+                    .clicked()
+                {
+                    a.page = Page::InviteList;
+                    a.invite_list.reread();
                 }
             } else if *item == "To-do templates" {
                 if ui
@@ -1132,7 +1160,7 @@ mod tests {
         };
         let mut h = HarnessBuilder::default()
             .with_max_steps(crate::ui::test_util::MAX_STEPS)
-            .with_size([1440.0, 900.0])
+            .with_size([1440.0, 1000.0])
             .build_ui_state(
                 |ui, s: &mut State| {
                     let mut env = Env {

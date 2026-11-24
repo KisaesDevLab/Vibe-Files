@@ -10,6 +10,7 @@ use egui::{RichText, TextEdit};
 use filer_core::clients::{CsvTable, read_csv};
 use filer_core::config::ColumnMap;
 use vf_fs::clients;
+use vf_fs::contacts::ContactColumns;
 
 use crate::ui::browse::Env;
 use crate::ui::theme;
@@ -24,6 +25,9 @@ pub struct ImportDialog {
     known: BTreeMap<String, uuid::Uuid>,
     /// A taxpayer ID column whose last 4 digits are kept (Q-27, P08).
     pub tin: Option<String>,
+    /// The columns holding portal contacts (PA-105): saved by name only, never copied into
+    /// the client list; Admin › Portal › Invite from client list reads them from the CSV.
+    pub contacts: ContactColumns,
     /// The catalog file: the import runs on a thread with its own connection (it reads every
     /// client folder); without it (tests), on this one.
     pub catalog: Option<PathBuf>,
@@ -46,6 +50,7 @@ impl ImportDialog {
             error: None,
             known,
             tin: None,
+            contacts: ContactColumns::default(),
             catalog: None,
             job: None,
             needs_password: None,
@@ -129,6 +134,27 @@ pub fn show(ctx: &egui::Context, d: &mut ImportDialog, env: &mut Env) -> DialogO
                 match read_csv(&PathBuf::from(d.path.trim())) {
                     Ok(t) => {
                         d.map = guess(&t.headers);
+                        // The columns chosen at the last import, where this CSV has them; else
+                        // usual names.
+                        let saved = vf_fs::contacts::columns(env.root).unwrap_or_default();
+                        let keep = |c: &Option<String>| c.clone().filter(|h| t.headers.contains(h));
+                        let saved = ContactColumns {
+                            first: keep(&saved.first),
+                            last: keep(&saved.last),
+                            email: keep(&saved.email),
+                            cell: keep(&saved.cell),
+                            spouse_first: keep(&saved.spouse_first),
+                            spouse_last: keep(&saved.spouse_last),
+                            spouse_email: keep(&saved.spouse_email),
+                            spouse_cell: keep(&saved.spouse_cell),
+                        };
+                        d.contacts = if saved.chosen().is_empty() {
+                            let taken: Vec<&str> =
+                                d.map.id.iter().chain(d.map.name.iter()).map(String::as_str).collect();
+                            ContactColumns::guess(&t.headers, &taken)
+                        } else {
+                            saved
+                        };
                         d.table = Some(t);
                         d.error = None;
                     }
@@ -177,6 +203,51 @@ pub fn show(ctx: &egui::Context, d: &mut ImportDialog, env: &mut Env) -> DialogO
                         .labelled_by(l.id)
                         .on_hover_text("Browse's Partner filter and the {Partner} token read it");
                     ui.end_row();
+                });
+            ui.add_space(6.0);
+            // PA-105 (owner 2026-11-24): the email and cell the portal invites with.
+            egui::CollapsingHeader::new("Portal contacts (email and cell, for inviting clients to the portal)")
+                .id_salt("import-contacts")
+                .default_open(d.contacts.any())
+                .show(ui, |ui| {
+                    ui.label(widgets::caption(
+                        "Only the column names are saved: Admin › Portal › Invite from client list reads the emails and cells from this CSV each time, so an updated CSV is what it uses.",
+                    ));
+                    let headers: Vec<&String> = t
+                        .headers
+                        .iter()
+                        .filter(|h| Some(*h) != d.map.id.as_ref() && Some(*h) != d.map.name.as_ref() && !clients::looks_like_tin(h))
+                        .collect();
+                    egui::Grid::new("import-contacts-grid")
+                        .num_columns(2)
+                        .spacing([12.0, 4.0])
+                        .show(ui, |ui| {
+                            let c = &mut d.contacts;
+                            for (label, salt, v) in [
+                                ("Taxpayer first name", "ic-first", &mut c.first),
+                                ("Taxpayer last name", "ic-last", &mut c.last),
+                                ("Email", "ic-email", &mut c.email),
+                                ("Cell phone", "ic-cell", &mut c.cell),
+                                ("Spouse first name", "ic-sfirst", &mut c.spouse_first),
+                                ("Spouse last name", "ic-slast", &mut c.spouse_last),
+                                ("Spouse email", "ic-semail", &mut c.spouse_email),
+                                ("Spouse cell", "ic-scell", &mut c.spouse_cell),
+                            ] {
+                                let l = ui.label(label);
+                                let none = if salt == "ic-slast" { "(same as taxpayer)" } else { "None" };
+                                egui::ComboBox::from_id_salt(salt)
+                                    .selected_text(v.clone().unwrap_or_else(|| none.into()))
+                                    .show_ui(ui, |ui| {
+                                        ui.selectable_value(v, None, none);
+                                        for h in &headers {
+                                            ui.selectable_value(v, Some((*h).clone()), h.as_str());
+                                        }
+                                    })
+                                    .response
+                                    .labelled_by(l.id);
+                                ui.end_row();
+                            }
+                        });
                 });
             ui.add_space(6.0);
             ui.label(widgets::caption(
@@ -273,6 +344,7 @@ pub fn show(ctx: &egui::Context, d: &mut ImportDialog, env: &mut Env) -> DialogO
                     map: d.map.clone(),
                     known: d.known.clone(),
                     tin: d.tin.clone(),
+                    contacts: d.contacts.clone(),
                 };
                 match d.catalog.clone() {
                     Some(catalog) => {
@@ -311,6 +383,7 @@ struct Input {
     map: ColumnMap,
     known: BTreeMap<String, uuid::Uuid>,
     tin: Option<String>,
+    contacts: ContactColumns,
 }
 
 fn run(
@@ -320,6 +393,7 @@ fn run(
     device_id: &str,
 ) -> Result<String, String> {
     let list = clients::import_csv_tin(root, &d.path, &d.map, &d.known, d.tin.as_deref())?;
+    let contacts = vf_fs::contacts::set_columns(root, &d.contacts).err();
     // The same CSV for Intake: its re-imports read this file with these columns.
     let intake = clients::use_csv_in_intake(root, &d.path, &d.map).err();
     let rep = vf_fs::rebuild::sync_clients(conn, root, device_id, "clients_import")
@@ -346,6 +420,13 @@ fn run(
         Some(e) => msg.push_str(&format!(
             " Intake › Setup still names its own CSV ({e}): choose this one there too."
         )),
+    }
+    if let Some(e) = contacts {
+        msg.push_str(&format!(" The portal contact columns were not saved: {e}"));
+    } else if d.contacts.any() {
+        msg.push_str(
+            " Portal contacts: Admin › Portal › Invite from client list reads them from this CSV.",
+        );
     }
     match clients::unbound_matches(root, &list) {
         Ok(m) if !m.is_empty() => {

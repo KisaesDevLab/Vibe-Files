@@ -49,6 +49,7 @@ impl PortalError {
             Some("already_has_access") => "That person already has access to this client.".into(),
             Some("invalid_email") => "That email address does not look right.".into(),
             Some("invalid_phone") => "That phone number does not look right.".into(),
+            Some("account_off") => "Their portal account is turned off.".into(),
             Some("contact_required") => "Enter an email address or a mobile number.".into(),
             Some("too_large") => "The file is larger than the portal allows.".into(),
             Some("not_a_user_of_this_client") => {
@@ -193,6 +194,48 @@ pub struct Invitation {
 pub struct PersonClient {
     pub id: String,
     pub name: String,
+}
+
+/// One client's people and waiting invitations (Vibe-Portal P111 `GET /contacts`); emails and
+/// phones as the portal stores them (lowercase, E.164).
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PortalContacts {
+    pub id: String,
+    pub active: bool,
+    #[serde(default)]
+    pub people: Vec<ContactPerson>,
+    #[serde(default)]
+    pub invitations: Vec<WaitingInvite>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ContactPerson {
+    pub identity_id: String,
+    pub name: String,
+    pub email: Option<String>,
+    pub phone: Option<String>,
+    #[serde(default)]
+    pub role_label: String,
+    /// Their access to this client is on.
+    pub active: bool,
+    /// Their whole account is turned off.
+    #[serde(default)]
+    pub account_off: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WaitingInvite {
+    pub invitation_id: String,
+    pub name: String,
+    pub email: Option<String>,
+    pub phone: Option<String>,
+    #[serde(default)]
+    pub role_label: String,
+    /// `invited` or `expired`.
+    pub status: String,
 }
 
 /// Someone already on the portal (Vibe-Portal P63 `GET /people`).
@@ -717,6 +760,16 @@ impl Portal {
         }
         self.get::<R>("/people", &[("q", q.trim())])
             .map(|r| r.people)
+    }
+
+    /// Every client on the portal with its people and invitations not accepted yet, in one
+    /// read (Vibe-Portal P111). A portal older than 0.5.2 answers 404.
+    pub fn contacts(&self) -> Result<Vec<PortalContacts>> {
+        #[derive(Deserialize)]
+        struct R {
+            clients: Vec<PortalContacts>,
+        }
+        self.get::<R>("/contacts", &[]).map(|r| r.clients)
     }
 
     /// Invites someone; the portal sends the link to the email when given, else by text.
