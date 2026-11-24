@@ -39,9 +39,11 @@ Select one or more documents of the same client in Browse and press **Share…**
 
 - each document's state: not on the portal, on the portal since a date, or **changed since it was shared**;
 - the client's portal people, each with a tick: ticked people see the documents; for one document, when each person last opened it;
-- invitations not yet accepted.
+- people invited who have not accepted yet, each with a tick: ticked, they get the documents when they accept. **Resend invitation** beside them sends a new link on the same **Save**, and what was chosen for them goes with it. Ticking someone whose invitation expired ticks **Resend invitation** too.
 
 Tick or untick people and press **Save**. A document is sent to the portal the first time someone is chosen to see it. When the cabinet's copy changed since it was shared, **Update on portal** sends the newer version: the client sees the same file, marked Updated and new again.
+
+**Invite someone…** at the bottom invites a new person and shares these documents with them in the same step (**Send invitation and share**).
 
 **Remove from portal** takes the documents off the portal for everyone. The cabinet keeps them.
 

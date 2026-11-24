@@ -363,6 +363,10 @@ pub struct PortalFile {
     pub content_updated_at: Option<String>,
     #[serde(default)]
     pub users: Vec<FileUser>,
+    /// Invitations not accepted yet that the file is held for (Vibe-Portal P98): the person
+    /// sees it when they accept. An older portal sends none.
+    #[serde(default)]
+    pub invites: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -925,12 +929,23 @@ impl Portal {
 
     /// Shows or hides a portal file for each person (D8).
     pub fn set_visibility(&self, file_id: &str, users: &BTreeMap<String, bool>) -> Result<()> {
-        self.send_json::<serde_json::Value>(
-            "PUT",
-            &format!("/files/{file_id}/visibility"),
-            &serde_json::json!({ "users": users }),
-        )
-        .map(|_| ())
+        self.set_visibility_with(file_id, users, &BTreeMap::new())
+    }
+
+    /// [`Self::set_visibility`], also holding the file for invitations not accepted yet
+    /// (`invites`: invitation id → held; Vibe-Portal P98). A resent invitation keeps them.
+    pub fn set_visibility_with(
+        &self,
+        file_id: &str,
+        users: &BTreeMap<String, bool>,
+        invites: &BTreeMap<String, bool>,
+    ) -> Result<()> {
+        let mut body = serde_json::json!({ "users": users });
+        if !invites.is_empty() {
+            body["invites"] = serde_json::json!(invites);
+        }
+        self.send_json::<serde_json::Value>("PUT", &format!("/files/{file_id}/visibility"), &body)
+            .map(|_| ())
     }
 
     /// Removes the file from the portal (the cabinet keeps the original).

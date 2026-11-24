@@ -541,7 +541,7 @@ struct InviteForm {
 
 impl InviteForm {
     /// Draws the form (opened when `open`); `true` when "Send invitation" was pressed.
-    fn show(&mut self, ui: &mut egui::Ui, busy: bool, open: bool) -> bool {
+    fn show(&mut self, ui: &mut egui::Ui, busy: bool, open: bool, button: &str) -> bool {
         let mut send = false;
         egui::CollapsingHeader::new("Invite someone…")
             .open(open.then_some(true))
@@ -565,7 +565,7 @@ impl InviteForm {
             ));
             let ok = !busy && !(self.email.trim().is_empty() && self.phone.trim().is_empty());
             if ui
-                .add_enabled(ok, egui::Button::new("Send invitation"))
+                .add_enabled(ok, egui::Button::new(button))
                 .clicked()
             {
                 send = true;
@@ -580,6 +580,15 @@ impl InviteForm {
 
     fn phone(&self) -> Option<String> {
         Some(self.phone.trim().to_string()).filter(|x| !x.is_empty())
+    }
+}
+
+/// Who an invitation is for: the name, else the email, else the mobile number.
+fn invitee(i: &vf_portal::api::Invitation) -> String {
+    if !i.name.trim().is_empty() {
+        i.name.trim().to_string()
+    } else {
+        i.email.clone().or(i.phone.clone()).unwrap_or_default()
     }
 }
 
@@ -653,6 +662,127 @@ pub fn visibility_changes(
         .collect()
 }
 
+/// What Save sends for one document about invitations not accepted yet: those whose tick was
+/// changed in this window and differ from what the file is held for now.
+pub fn invite_changes(
+    file: &Option<PortalFile>,
+    chosen: &BTreeMap<String, bool>,
+) -> BTreeMap<String, bool> {
+    let held = |id: &str| {
+        file.as_ref()
+            .is_some_and(|f| f.invites.iter().any(|i| i == id))
+    };
+    chosen
+        .iter()
+        .filter(|(id, w)| held(id) != **w)
+        .map(|(id, w)| (id.clone(), *w))
+        .collect()
+}
+
+/// Sends the documents to the portal as needed and sets who sees them: people on the portal
+/// (`chosen`) and invitations not accepted yet (`chosen_inv`, shown when they accept). Returns
+/// how many documents changed and how many files were sent.
+#[allow(clippy::too_many_arguments)]
+fn share_docs(
+    p: &vf_portal::api::Portal,
+    b2: &B2First,
+    client: &ClientRef,
+    work: Vec<(DocRef, Option<PortalFile>)>,
+    chosen: &BTreeMap<String, bool>,
+    chosen_inv: &BTreeMap<String, bool>,
+    update: bool,
+    audit: &AuditOut,
+) -> Result<(usize, usize), String> {
+    // To B2 first (Q-103): what is on the portal already, and what someone is newly chosen
+    // to see.
+    let to_b2: Vec<String> = work
+        .iter()
+        .filter(|(_, file)| {
+            file.is_some()
+                || visibility_changes(file, chosen).values().any(|&v| v)
+                || invite_changes(file, chosen_inv).values().any(|&v| v)
+        })
+        .map(|(d, _)| d.id.clone())
+        .collect();
+    b2.push(&to_b2)?;
+    let mut changed = 0usize;
+    let mut sent = 0usize;
+    for (d, file) in work {
+        let vis = visibility_changes(&file, chosen);
+        let inv = invite_changes(&file, chosen_inv);
+        let wants_it = vis.values().any(|&v| v) || inv.values().any(|&v| v);
+        let (file_id, added, updated) = match &file {
+            // Nobody newly chosen: a document not on the portal stays off it.
+            None if !wants_it => continue,
+            None => {
+                let a = p
+                    .add(&client.id, &d.id, &d.name, d.tax_year, &d.path)
+                    .map_err(|e| format!("{}: {}", d.name, e.message()))?;
+                let mut updated = false;
+                if let vf_portal::api::Added::Changed(f) = &a
+                    && update
+                {
+                    p.replace(f, &d.name, &d.path)
+                        .map_err(|e| format!("{}: {}", d.name, e.message()))?;
+                    updated = true;
+                }
+                sent += 1;
+                (a.file_id().to_string(), true, updated)
+            }
+            Some(f) => {
+                let mut updated = false;
+                if update && f.sha256 != d.hash {
+                    p.replace(&f.file_id, &d.name, &d.path)
+                        .map_err(|e| format!("{}: {}", d.name, e.message()))?;
+                    updated = true;
+                    sent += 1;
+                }
+                (f.file_id.clone(), false, updated)
+            }
+        };
+        if added || updated {
+            audit.send(AuditEntry::new(
+                "portal_share",
+                Some(&d.id),
+                serde_json::json!({ "client_id": client.id, "sent": added, "updated": updated }),
+            ));
+        }
+        if !vis.is_empty() || !inv.is_empty() {
+            p.set_visibility_with(&file_id, &vis, &inv)
+                .map_err(|e| format!("{}: {}", d.name, e.message()))?;
+            let on = |m: &BTreeMap<String, bool>, v: bool| -> Vec<String> {
+                m.iter()
+                    .filter(|x| *x.1 == v)
+                    .map(|x| x.0.clone())
+                    .collect()
+            };
+            let mut detail = serde_json::json!({
+                "client_id": client.id,
+                "shown_to": on(&vis, true),
+                "hidden_from": on(&vis, false),
+            });
+            if !inv.is_empty() {
+                detail["held_for_invitations"] = serde_json::json!(on(&inv, true));
+                detail["taken_from_invitations"] = serde_json::json!(on(&inv, false));
+            }
+            audit.send(AuditEntry::new("portal_share", Some(&d.id), detail));
+        }
+        if added || updated || !vis.is_empty() || !inv.is_empty() {
+            changed += 1;
+        }
+    }
+    Ok((changed, sent))
+}
+
+/// " (N files sent)" for the end of a message, or nothing.
+fn files_sent(sent: usize) -> String {
+    match sent {
+        0 => String::new(),
+        1 => " (1 file sent)".into(),
+        n => format!(" ({n} files sent)"),
+    }
+}
+
 pub struct ShareWindow {
     /// Whether the documents go to B2 before they are shared (Q-103).
     b2: B2First,
@@ -661,6 +791,10 @@ pub struct ShareWindow {
     loaded: Option<Loaded>,
     /// The ticks changed in this window (identity → shown).
     chosen: BTreeMap<String, bool>,
+    /// The same for invitations not accepted yet (invitation id → held for them).
+    chosen_inv: BTreeMap<String, bool>,
+    /// Invitations to send again on Save (owner 2026-11-24: resend and share in one step).
+    resend: std::collections::BTreeSet<String>,
     /// Send the cabinet's newer content for documents changed since they were shared.
     update: bool,
     invite: InviteForm,
@@ -708,6 +842,8 @@ impl ShareWindow {
             docs,
             loaded: None,
             chosen: BTreeMap::new(),
+            chosen_inv: BTreeMap::new(),
+            resend: Default::default(),
             update: true,
             invite: InviteForm::default(),
             confirm_remove: false,
@@ -750,6 +886,7 @@ impl ShareWindow {
     fn apply(&mut self, ctx: &egui::Context, s: &PortalSettings) {
         let Some(l) = &self.loaded else { return };
         let chosen = self.chosen.clone();
+        let chosen_inv = self.chosen_inv.clone();
         let update = self.update;
         let client = self.client.clone();
         let work: Vec<(DocRef, Option<PortalFile>)> = self
@@ -758,93 +895,56 @@ impl ShareWindow {
             .cloned()
             .zip(l.files.iter().cloned())
             .collect();
+        // Sent again after the files are held for them: the portal moves what was held for the
+        // old invitation to the new one (P98).
+        let resend: Vec<vf_portal::api::Invitation> = l
+            .users
+            .invitations
+            .iter()
+            .filter(|i| self.resend.contains(&i.invitation_id))
+            .cloned()
+            .collect();
         let s = s.clone();
         let audit = self.audit.clone();
         let b2 = self.b2.clone();
         self.msg = None;
         self.err = None;
         self.job = Some(spawn(ctx, move || {
-            // To B2 first (Q-103): what is on the portal already, and what someone is newly
-            // chosen to see.
-            let to_b2: Vec<String> = work
-                .iter()
-                .filter(|(_, file)| {
-                    file.is_some() || visibility_changes(file, &chosen).values().any(|&v| v)
-                })
-                .map(|(d, _)| d.id.clone())
-                .collect();
-            b2.push(&to_b2)?;
             let p = core::client(&s);
-            let mut changed = 0usize;
-            let mut sent = 0usize;
-            for (d, file) in work {
-                let vis = visibility_changes(&file, &chosen);
-                let wants_it = vis.values().any(|&v| v);
-                let (file_id, added, updated) = match &file {
-                    // Nobody newly chosen: a document not on the portal stays off it.
-                    None if !wants_it => continue,
-                    None => {
-                        let a = p
-                            .add(&client.id, &d.id, &d.name, d.tax_year, &d.path)
-                            .map_err(|e| format!("{}: {}", d.name, e.message()))?;
-                        let mut updated = false;
-                        if let vf_portal::api::Added::Changed(f) = &a
-                            && update
-                        {
-                            p.replace(f, &d.name, &d.path)
-                                .map_err(|e| format!("{}: {}", d.name, e.message()))?;
-                            updated = true;
-                        }
-                        sent += 1;
-                        (a.file_id().to_string(), true, updated)
-                    }
-                    Some(f) => {
-                        let mut updated = false;
-                        if update && f.sha256 != d.hash {
-                            p.replace(&f.file_id, &d.name, &d.path)
-                                .map_err(|e| format!("{}: {}", d.name, e.message()))?;
-                            updated = true;
-                            sent += 1;
-                        }
-                        (f.file_id.clone(), false, updated)
-                    }
-                };
-                if added || updated {
-                    audit.send(AuditEntry::new(
-                        "portal_share",
-                        Some(&d.id),
-                        serde_json::json!({ "client_id": client.id, "sent": added, "updated": updated }),
-                    ));
-                }
-                if !vis.is_empty() {
-                    p.set_visibility(&file_id, &vis)
-                        .map_err(|e| format!("{}: {}", d.name, e.message()))?;
-                    let shown: Vec<&String> = vis.iter().filter(|v| *v.1).map(|v| v.0).collect();
-                    let hidden: Vec<&String> = vis.iter().filter(|v| !*v.1).map(|v| v.0).collect();
-                    audit.send(AuditEntry::new(
-                        "portal_share",
-                        Some(&d.id),
-                        serde_json::json!({
-                            "client_id": client.id,
-                            "shown_to": shown,
-                            "hidden_from": hidden,
-                        }),
-                    ));
-                }
-                if added || updated || !vis.is_empty() {
-                    changed += 1;
-                }
-            }
-            Ok(Outcome::Done(if changed == 0 {
-                "Nothing to change.".to_string()
-            } else if sent > 0 {
-                format!(
-                    "Saved on the portal ({sent} file{} sent).",
-                    if sent == 1 { "" } else { "s" }
+            let (changed, sent) =
+                share_docs(&p, &b2, &client, work, &chosen, &chosen_inv, update, &audit)?;
+            let mut again = Vec::new();
+            for i in &resend {
+                p.invite(
+                    &client.id,
+                    i.email.as_deref(),
+                    i.phone.as_deref(),
+                    &i.name,
+                    &i.role_label,
                 )
+                .map_err(|e| format!("Resending to {}: {}", invitee(i), e.message()))?;
+                let mut entry = invite_audit(&client.id, i.email.is_some(), &i.role_label);
+                entry.detail["resent"] = serde_json::json!(true);
+                audit.send(entry);
+                again.push(invitee(i));
+            }
+            let mut msg = if changed == 0 && again.is_empty() {
+                "Nothing to change.".to_string()
+            } else if changed == 0 {
+                String::new()
             } else {
-                "Saved on the portal.".to_string()
-            }))
+                format!("Saved on the portal{}.", files_sent(sent))
+            };
+            if !again.is_empty() {
+                if !msg.is_empty() {
+                    msg.push(' ');
+                }
+                msg.push_str(&format!(
+                    "Invitation sent again to {}; what was chosen for them is theirs when they accept.",
+                    again.join(", ")
+                ));
+            }
+            Ok(Outcome::Done(msg))
         }));
     }
 
@@ -875,25 +975,58 @@ impl ShareWindow {
         }));
     }
 
+    /// Invites someone and, in the same step, holds these documents for them: they see them
+    /// when they accept (owner 2026-11-24).
     fn send_invite(&mut self, ctx: &egui::Context, s: &PortalSettings) {
+        let Some(l) = &self.loaded else { return };
         let f = std::mem::take(&mut self.invite);
-        let client = self.client.id.clone();
+        let client = self.client.clone();
+        let work: Vec<(DocRef, Option<PortalFile>)> = self
+            .docs
+            .iter()
+            .cloned()
+            .zip(l.files.iter().cloned())
+            .collect();
+        let update = self.update;
         let s = s.clone();
         let audit = self.audit.clone();
+        let b2 = self.b2.clone();
+        self.msg = None;
+        self.err = None;
         self.job = Some(spawn(ctx, move || {
-            core::client(&s)
+            let p = core::client(&s);
+            let id = p
                 .invite(
-                    &client,
+                    &client.id,
                     f.email().as_deref(),
                     f.phone().as_deref(),
                     f.name.trim(),
                     f.role.trim(),
                 )
                 .map_err(|e| e.message())?;
-            audit.send(invite_audit(&client, f.email().is_some(), f.role.trim()));
-            Ok(Outcome::Done(
-                "Invitation sent. They appear here once they accept.".into(),
-            ))
+            audit.send(invite_audit(&client.id, f.email().is_some(), f.role.trim()));
+            let held = BTreeMap::from([(id, true)]);
+            let n = work.len();
+            let (_, sent) = share_docs(
+                &p,
+                &b2,
+                &client,
+                work,
+                &BTreeMap::new(),
+                &held,
+                update,
+                &audit,
+            )
+            .map_err(|e| format!("The invitation was sent, but sharing failed: {e}"))?;
+            Ok(Outcome::Done(format!(
+                "Invitation sent{}. {} theirs when they accept.",
+                files_sent(sent),
+                if n == 1 {
+                    "This document is"
+                } else {
+                    "These documents are"
+                }
+            )))
         }));
     }
 
@@ -906,6 +1039,8 @@ impl ShareWindow {
             match r {
                 Ok(Outcome::Loaded(l)) => {
                     self.chosen.clear();
+                    self.chosen_inv.clear();
+                    self.resend.clear();
                     self.loaded = Some(l);
                 }
                 Ok(Outcome::Done(msg)) => {
@@ -1004,16 +1139,62 @@ impl ShareWindow {
                         });
                     }
                 }
+                if !l.users.invitations.is_empty() {
+                    ui.add_space(4.0);
+                    ui.label(RichText::new("Invited, not accepted yet").strong());
+                }
+                // Owner 2026-11-24: share with them and resend the invitation in one Save.
                 for inv in &l.users.invitations {
-                    let who = inv.email.clone().or(inv.phone.clone()).unwrap_or_default();
-                    ui.label(widgets::caption(format!(
-                        "{who}: {}",
-                        if inv.status == "expired" {
-                            "invitation expired"
-                        } else {
-                            "invited, not accepted yet"
+                    let id = &inv.invitation_id;
+                    let held = l
+                        .files
+                        .iter()
+                        .filter(|f| f.as_ref().is_some_and(|f| f.invites.contains(id)))
+                        .count();
+                    let mut on = self
+                        .chosen_inv
+                        .get(id)
+                        .copied()
+                        .unwrap_or(held == l.files.len());
+                    let expired = inv.status == "expired";
+                    let contact = inv.email.clone().or(inv.phone.clone()).unwrap_or_default();
+                    let who = if inv.name.trim().is_empty() || inv.name.trim() == contact {
+                        contact
+                    } else {
+                        format!("{} ({contact})", inv.name.trim())
+                    };
+                    ui.horizontal_wrapped(|ui| {
+                        let r = ui.add_enabled(!busy, egui::Checkbox::new(&mut on, who));
+                        if r.changed() {
+                            self.chosen_inv.insert(id.clone(), on);
+                            // An expired invitation can't be accepted: sharing with them sends
+                            // it again.
+                            if expired && on {
+                                self.resend.insert(id.clone());
+                            }
                         }
-                    )));
+                        ui.label(widgets::caption(if expired {
+                            "invitation expired"
+                        } else if held > 0 && held < l.files.len() && !self.chosen_inv.contains_key(id) {
+                            "gets some of these when they accept"
+                        } else if on {
+                            "gets these when they accept"
+                        } else {
+                            "invited"
+                        }));
+                        let mut again = self.resend.contains(id);
+                        if ui
+                            .add_enabled(!busy, egui::Checkbox::new(&mut again, "Resend invitation"))
+                            .on_hover_text("Sends a new link (the old one stops working); what is chosen for them goes with it")
+                            .changed()
+                        {
+                            if again {
+                                self.resend.insert(id.clone());
+                            } else {
+                                self.resend.remove(id);
+                            }
+                        }
+                    });
                 }
                 let changed = self.changed_docs(l);
                 if changed > 0 {
@@ -1061,7 +1242,7 @@ impl ShareWindow {
                     });
                 }
                 ui.separator();
-                if self.invite.show(ui, busy, false) {
+                if self.invite.show(ui, busy, false, "Send invitation and share") {
                     pending = Some("invite");
                 }
                 if let Some(m) = &self.msg {
@@ -1395,7 +1576,7 @@ impl PeopleWindow {
                         p.label()
                     ));
                 }
-                if self.invite.show(ui, busy, open_invite) {
+                if self.invite.show(ui, busy, open_invite, "Send invitation") {
                     let f = std::mem::take(&mut self.invite);
                     resend = Some((
                         f.email(),
@@ -3675,6 +3856,7 @@ mod tests {
             shared_at: "2026-11-09T00:00:00Z".into(),
             shared_by: "x".into(),
             content_updated_at: None,
+            invites: vec![],
             users: seen_by
                 .iter()
                 .map(|id| FileUser {
@@ -3745,6 +3927,145 @@ mod tests {
             std::thread::sleep(Duration::from_millis(20));
             h.step();
         }
+    }
+
+    const SHARE_CLIENT: &str = "0199aaaa-0000-7000-8000-000000000002";
+
+    /// A portal with one document on it (`f1`, held for nobody) and one invitation to Jane
+    /// Sample, expired, not accepted.
+    fn share_portal(method: &str, path: &str) -> (u16, String) {
+        match (method, path) {
+            ("GET", p) if p.contains("/users") => (
+                200,
+                r#"{"users":[],"invitations":[{"invitationId":"i1","name":"Jane Sample",
+                  "email":"jane@example.test","phone":"+15552010002","roleLabel":"Spouse",
+                  "expiresAt":"2026-11-01T00:00:00Z","status":"expired"}]}"#
+                    .into(),
+            ),
+            ("GET", p) if p.starts_with("/api/firm/v1/files") => (
+                200,
+                r#"{"files":[{"fileId":"f1","clientId":"c","vfDocumentId":"d1","name":"W-2.pdf",
+                  "size":1,"sha256":"h1","taxYear":2026,"sharedAt":"2026-11-20T00:00:00Z",
+                  "sharedBy":"x","contentUpdatedAt":null,"users":[],"invites":[]}]}"#
+                    .into(),
+            ),
+            ("POST", p) if p.ends_with("/invites") => (201, r#"{"invitationId":"i9"}"#.into()),
+            _ => (200, r#"{"ok":true}"#.into()),
+        }
+    }
+
+    fn share_window(url: String) -> egui_kittest::Harness<'static, ShareWindow> {
+        let s = PortalSettings {
+            version: 1,
+            cabinet_id: "c".into(),
+            url,
+            key: "vpk_test".into(),
+            fetch_minutes: 0,
+            record: Default::default(),
+            b2_list: false,
+            todo_lists: false,
+        };
+        let (tx, _audit) = mpsc::channel();
+        let w = ShareWindow::new(
+            &egui::Context::default(),
+            &s,
+            ClientRef {
+                id: SHARE_CLIENT.into(),
+                code: "SAMP1001".into(),
+                name: "Sample, John & Jane".into(),
+            },
+            vec![DocRef {
+                id: "d1".into(),
+                name: "W-2.pdf".into(),
+                path: "W-2.pdf".into(),
+                hash: "h1".into(),
+                tax_year: Some(2026),
+            }],
+            AuditOut(tx),
+            B2First::NotSetUp,
+        );
+        egui_kittest::Harness::builder()
+            .with_max_steps(crate::ui::test_util::MAX_STEPS)
+            .with_size([700.0, 700.0])
+            .build_ui_state(move |ui, w: &mut ShareWindow| w.show(ui.ctx(), &s), w)
+    }
+
+    /// The requests after the window's first reads, as "METHOD path body".
+    fn writes(seen: &std::sync::Arc<std::sync::Mutex<Vec<String>>>) -> Vec<String> {
+        seen.lock()
+            .unwrap()
+            .iter()
+            .filter(|r| !r.starts_with("GET ") && !r.starts_with("PUT /api/firm/v1/clients/"))
+            // The bodies are pretty-printed: compared without their spaces and line breaks.
+            .map(|r| {
+                let (head, body) = r
+                    .split_once(' ')
+                    .map(|(m, rest)| {
+                        let (path, body) = rest.split_once(' ').unwrap_or((rest, ""));
+                        (format!("{m} {path}"), body.to_string())
+                    })
+                    .unwrap_or_default();
+                let body: String = body.chars().filter(|c| !c.is_whitespace()).collect();
+                format!("{head} {body}")
+            })
+            .collect()
+    }
+
+    /// Owner 2026-11-24: someone invited who has not accepted is given the document and sent
+    /// the invitation again with one Save; the document is held first, so the new invitation
+    /// takes it over (Vibe-Portal P98).
+    #[test]
+    fn share_with_someone_not_accepted_resends_in_one_step() {
+        let (url, seen) = fake_portal(share_portal);
+        let mut h = share_window(url);
+        wait_for(&mut h, "Jane Sample (jane@example.test)");
+        assert!(h.query_by_label_contains("invitation expired").is_some());
+        h.get_by_label("Jane Sample (jane@example.test)").click();
+        h.run();
+        // An expired invitation can't be accepted: ticking them ticks Resend too.
+        h.get_by_label("Save").click();
+        wait_for(&mut h, "Invitation sent again to Jane Sample");
+        let w = writes(&seen);
+        assert_eq!(w.len(), 2, "{w:?}");
+        assert!(
+            w[0].starts_with("PUT /api/firm/v1/files/f1/visibility ")
+                && w[0].contains(r#""invites":{"i1":true}"#),
+            "{w:?}"
+        );
+        assert!(
+            w[1].starts_with(&format!(
+                "POST /api/firm/v1/clients/{SHARE_CLIENT}/invites "
+            )) && w[1].contains("jane@example.test")
+                && w[1].contains("+15552010002")
+                && w[1].contains(r#""roleLabel":"Spouse""#),
+            "{w:?}"
+        );
+    }
+
+    /// Owner 2026-11-24: inviting someone from the Share window shares the documents with
+    /// them in the same step.
+    #[test]
+    fn invite_from_share_window_shares_too() {
+        let (url, seen) = fake_portal(share_portal);
+        let mut h = share_window(url);
+        wait_for(&mut h, "Jane Sample (jane@example.test)");
+        h.get_by_label("Invite someone…").click();
+        h.run();
+        crate::ui::test_util::type_into(&mut h, "Email", "pat@example.test");
+        crate::ui::test_util::type_into(&mut h, "Name", "Pat Sample");
+        h.get_by_label("Send invitation and share").click();
+        wait_for(&mut h, "This document is theirs when they accept");
+        let w = writes(&seen);
+        assert_eq!(w.len(), 2, "{w:?}");
+        assert!(
+            w[0].starts_with("POST ") && w[0].contains("pat@example.test"),
+            "{w:?}"
+        );
+        assert!(
+            w[1].starts_with("PUT /api/firm/v1/files/f1/visibility ")
+                && w[1].contains(r#""invites":{"i9":true}"#),
+            "{w:?}"
+        );
     }
 
     /// Vibe-Portal P63 (owner 2026-11-11): someone who already uses the portal for another
