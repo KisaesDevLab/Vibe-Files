@@ -19,6 +19,8 @@ use crate::api::{Claim, Portal, Upload};
 
 /// The Portal inbox at the cabinet root (a `_` folder: never taken for a client folder).
 pub const INBOX: &str = "_Portal inbox";
+/// The doc type a paid balance's receipt is given (seeded when balances are turned on).
+pub const RECEIPT_DOC_TYPE: &str = "Payment receipt";
 /// A fetch lock older than this was left by a PC that stopped.
 pub const LOCK_STALE: Duration = Duration::from_secs(15 * 60);
 const LOCK: &str = "fetch.lock";
@@ -252,21 +254,30 @@ fn finish(root: &Path, part: &Path, meta: &Path, u: &Upload, now: &str, report: 
             // PA-103: a file sent for a to-do item tells Intake where it came from, and its
             // doc type when the item names one the firm has (the name turned into its id here,
             // where the portal's name comes in: Intake's hints name ids).
-            let doc_type = u
-                .request
-                .as_ref()
-                .filter(|r| !r.doc_type.trim().is_empty())
-                .and_then(|r| {
+            // A paid balance's receipt (Addendum §16) is the firm's own record: doc type
+            // "Payment receipt"; Intake's managed rule files it in Billing\{Year paid}.
+            let (wanted, origin, source) = match (&u.balance, &u.request) {
+                (Some(_), _) => (RECEIPT_DOC_TYPE, "portal_balance", "firm"),
+                (None, Some(r)) => (r.doc_type.as_str(), "portal_request", "client"),
+                (None, None) => ("", "", ""),
+            };
+            let doc_type = Some(wanted)
+                .filter(|d| !d.trim().is_empty())
+                .and_then(|d| {
                     let types = vf_fs::doctypes::load(root).ok().flatten()?;
-                    vf_fs::doctypes::id_by_name(&types, &r.doc_type)
+                    vf_fs::doctypes::id_by_name(&types, d)
                 });
             if let Some(doc_type) = doc_type {
                 let name = dest
                     .file_name()
                     .map(|n| n.to_string_lossy().into_owned())
                     .unwrap_or_default();
-                let mut h = vf_fs::hints::Hint::new(&u.sha256, &name, "portal_request", "portal");
-                h.source = Some("client".into());
+                let mut h = vf_fs::hints::Hint::new(&u.sha256, &name, origin, "portal");
+                h.source = Some(source.into());
+                // A receipt is the year it was paid: its name starts with the date paid.
+                if u.balance.is_some() {
+                    h.tax_year = u.name.get(..4).and_then(|y| y.parse().ok());
+                }
                 h.doc_type = Some(doc_type);
                 if let Err(e) = vf_fs::hints::append(root, &h) {
                     report

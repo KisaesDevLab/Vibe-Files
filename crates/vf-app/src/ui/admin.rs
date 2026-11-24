@@ -41,6 +41,8 @@ pub enum Page {
     PortalRequests,
     /// Admin › To-do templates (PA-103).
     TodoTemplates,
+    /// Admin › Portal › Balances (Addendum §16).
+    Balances,
     InviteList,
 }
 
@@ -69,6 +71,7 @@ const NAV: &[(&str, &[&str])] = &[
             "Invite from client list",
             "Portal requests",
             "To-do templates",
+            "Balances",
         ],
     ),
     (
@@ -107,6 +110,7 @@ fn page_of(item: &str) -> Option<Page> {
         "Portal" => Page::Portal,
         "Portal requests" => Page::PortalRequests,
         "To-do templates" => Page::TodoTemplates,
+        "Balances" => Page::Balances,
         "Invite from client list" => Page::InviteList,
         "Audit trail" => Page::Audit,
         "Retention classes" => Page::Retention,
@@ -216,6 +220,7 @@ pub struct Admin {
     pub portal: crate::ui::portal::AdminPortal,
     /// Admin › To-do templates (PA-103).
     pub todo_templates: crate::ui::todo::TemplatesPage,
+    pub balances: crate::ui::balance::BalancesPage,
     /// PA-105: Admin › Portal › Invite from client list.
     pub invite_list: crate::ui::invite_list::InvitePage,
     /// Doc types: archived ones listed too.
@@ -261,6 +266,7 @@ impl Admin {
             templates: Default::default(),
             portal: Default::default(),
             todo_templates: Default::default(),
+            balances: Default::default(),
             invite_list: Default::default(),
             show_archived: false,
         };
@@ -544,6 +550,11 @@ pub fn show(ui: &mut egui::Ui, a: &mut Admin, env: &mut Env, sweep: SweepEnv, lo
                     crate::ui::todo::templates_page(ui, &mut a.todo_templates, env)
                 });
         }
+        Page::Balances => {
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show(ui, |ui| crate::ui::balance::page(ui, &mut a.balances, env));
+        }
         Page::Devices => crate::ui::devices::show(ui, &mut a.devices, env),
         Page::Templates => {
             crate::ui::templates::show(ui, &mut a.templates, env);
@@ -677,6 +688,14 @@ fn nav(ui: &mut egui::Ui, a: &mut Admin, has_password: bool, locked: bool) {
                 {
                     a.page = Page::TodoTemplates;
                     a.todo_templates.reread();
+                }
+            } else if *item == "Balances" {
+                if ui
+                    .selectable_label(a.page == Page::Balances, *item)
+                    .clicked()
+                {
+                    a.page = Page::Balances;
+                    a.balances.reread();
                 }
             } else if *item == "Folder import" {
                 if ui.selectable_label(a.page == Page::Import, *item).clicked() {

@@ -230,12 +230,43 @@ pub fn show(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env, ci: usize) {
                 b.portal.todo_out(),
             ));
         }
+        // Addendum §16: a balance the client pays on the portal.
+        if b.portal.settings(env.root).is_some_and(|s| s.balances)
+            && ui
+                .small_btn("Balance owed…")
+                .on_hover_text("Post a balance this client pays on the portal, or see what happened to one")
+                .clicked()
+            && let Some(s) = b.portal.settings(env.root).cloned()
+        {
+            b.portal.balance = Some(crate::ui::balance::BalanceWindow::new(
+                ui.ctx(),
+                &s,
+                env.root.to_path_buf(),
+                crate::ui::portal::ClientRef {
+                    id: c.id.clone(),
+                    code: c.ext_id.clone(),
+                    name: c.name.clone(),
+                },
+                c.folder_rel.clone(),
+                b.portal.audit_out(),
+                b.portal.balance_out(),
+            ));
+        }
     });
     ui.label(
         RichText::new(format!("ID {}", c.ext_id))
             .monospace()
             .color(theme::ink_muted()),
     );
+    if b.portal.settings(env.root).is_some_and(|s| s.balances) {
+        ui.label(
+            RichText::new(crate::ui::balance::panel_line(
+                b.portal.balances.as_ref(),
+                &c.id,
+            ))
+            .color(theme::ink_secondary()),
+        );
+    }
     ui.add_space(8.0);
     match &c.folder_rel {
         Some(f) => {

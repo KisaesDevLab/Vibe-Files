@@ -355,6 +355,363 @@ mod tests {
         shot(&mut h, "vf-6-admin-todo-templates");
     }
 
+    /// Addendum §16 (balance owed) walkthrough against a real Vibe Portal with a stand-in for
+    /// Stripe: post from the Balance owed window, the payment completed by a signed webhook,
+    /// the receipt fetched into the Portal inbox with its hint, the panel's line, the copy in
+    /// the client folder, the audit row, and where Intake's rules file the receipt. Set
+    /// `VF_WALK_URL`, `VF_WALK_KEY`, `VF_WALK_STRIPE` (the stand-in, with `/_pay` and `/_last`),
+    /// `VF_WALK_LOG` (the portal's log), `VF_WALK_CLIENT` (`scripts/balance-walkthrough/client.mjs`)
+    /// and `VF_WALK_DIR` (output).
+    #[test]
+    #[ignore = "needs a running portal"]
+    fn balance_walkthrough() {
+        let (Ok(url), Ok(key), Ok(stripe), Ok(log), Ok(client_js), Ok(out)) = (
+            std::env::var("VF_WALK_URL"),
+            std::env::var("VF_WALK_KEY"),
+            std::env::var("VF_WALK_STRIPE"),
+            std::env::var("VF_WALK_LOG"),
+            std::env::var("VF_WALK_CLIENT"),
+            std::env::var("VF_WALK_DIR"),
+        ) else {
+            return;
+        };
+        let out = std::path::PathBuf::from(out);
+        std::fs::create_dir_all(&out).unwrap();
+        let mut steps: Vec<String> = Vec::new();
+        let mut note = |s: String| {
+            eprintln!("{s}");
+            steps.push(s);
+        };
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path().join("Clients");
+        vf_fixtures::generate(&root, 3).unwrap();
+        crate::ui::test_util::pdfium_first();
+        let data = t.path().join("data");
+        drop(crate::session::open(&data, "dev", &root).unwrap());
+        let cab = vf_fs::cabinet::read(&root).unwrap().cabinet_id;
+        let s = vf_portal::PortalSettings::new(&cab, &url, &key, 0)
+            .unwrap()
+            .with_balances(true);
+        vf_portal::settings::save(&root, &s).unwrap();
+        crate::portal::register_inbox(&root).unwrap();
+        // What Admin › Portal's Save does when Balance owed is ticked.
+        assert!(
+            vf_fs::doctypes::ensure(
+                &root,
+                vf_portal::inbox::RECEIPT_DOC_TYPE,
+                "Billing/{Year}",
+                true
+            )
+            .unwrap()
+        );
+        let d = data.clone();
+        let mut h = HarnessBuilder::default()
+            .with_max_steps(crate::ui::test_util::MAX_STEPS)
+            .with_theme(egui::Theme::Light)
+            .with_size([1440.0, 900.0])
+            .build_eframe(move |cc| VibeFilesApp::new(&cc.egui_ctx, d.clone()));
+        h.run_steps(8);
+        let shot = |h: &mut egui_kittest::Harness<'static, VibeFilesApp>, name: &str| {
+            for _ in 0..5 {
+                h.step();
+            }
+            match h.render() {
+                Ok(img) => img.save(out.join(format!("{name}.png"))).unwrap(),
+                Err(e) => eprintln!("{name}: {e}"),
+            }
+        };
+        let said = |h: &egui_kittest::Harness<'static, VibeFilesApp>, text: &str| {
+            h.query_all_by_label_contains(text).next().is_some()
+        };
+        let wait_long =
+            |h: &mut egui_kittest::Harness<'static, VibeFilesApp>,
+             what: &str,
+             ok: &dyn Fn(&egui_kittest::Harness<'static, VibeFilesApp>) -> bool| {
+                let start = std::time::Instant::now();
+                while !ok(h) {
+                    assert!(start.elapsed().as_secs() < 90, "{what}: never");
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                    h.step();
+                }
+            };
+        h.get_by_role_and_label(Role::Button, "Open existing")
+            .click();
+        h.run_steps(8);
+        h.get_by_label("Cabinet folder").click();
+        h.step();
+        h.get_by_label("Cabinet folder")
+            .type_text(&root.display().to_string());
+        h.step();
+        h.get_by_role_and_label(Role::Button, "Open cabinet")
+            .click();
+        assert!(wait_for(&mut h, |h| matches!(
+            h.state().screen,
+            crate::app::Screen::Open(_)
+        )));
+        h.run_steps(8);
+        // The doc type reaches the catalog as Admin's Save syncs it.
+        {
+            let o = open_mut(&mut h);
+            vf_fs::doctypes::sync(&mut o.opened.conn, &root, "dev", "doc_types_edit").unwrap();
+        }
+        let c = {
+            let o = open_mut(&mut h);
+            o.browse.set_scope(vf_core::browse::Scope::Client(0));
+            o.browse.portal.reread();
+            o.browse.snap.clients[0].clone()
+        };
+        let p = crate::portal::client(&s);
+        p.put_client(&c.id, &c.ext_id, &c.name, None).unwrap();
+        // Someone of the client on the portal (a payment is always made by one, signed in).
+        p.invite(
+            &c.id,
+            Some("jordan.sample@example.com"),
+            None,
+            "Jordan Sample",
+            "Owner",
+        )
+        .unwrap();
+        h.run_steps(6);
+        {
+            let start = std::time::Instant::now();
+            while start.elapsed().as_secs() < 60 && !said(&h, "Balance owed: none") {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                h.step();
+            }
+            if !said(&h, "Balance owed: none") {
+                shot(&mut h, "00-panel-line-missing");
+                use egui_kittest::kittest::NodeT;
+                let seen: Vec<String> = h
+                    .query_all_by_label_contains("Balance owed")
+                    .filter_map(|n| n.accesskit_node().label())
+                    .collect();
+                panic!("the panel's line: {seen:?}");
+            }
+        }
+        note(format!(
+            "Setup: {} ({}) on the portal; the panel says Balance owed: none",
+            c.name, c.ext_id
+        ));
+
+        // ---- Step 1: post a balance from the client panel.
+        h.get_by_role_and_label(Role::Button, "Balance owed…")
+            .click();
+        wait_long(&mut h, "the window read", &|h| {
+            said(h, "No balance on the portal.")
+        });
+        h.get_by_label("Balance amount").click();
+        h.step();
+        h.get_by_label("Balance amount").type_text("240");
+        h.step();
+        h.get_by_label("Balance memo").click();
+        h.step();
+        h.get_by_label("Balance memo")
+            .type_text("2025 bookkeeping, Oct–Dec");
+        h.run_steps(3);
+        shot(&mut h, "01-balance-window-filled");
+        h.get_by_role_and_label(Role::Button, "Post to portal")
+            .click();
+        wait_long(&mut h, "posted", &|h| said(h, "Posted to the portal."));
+        shot(&mut h, "02-balance-posted");
+        let posted = p.client_balances(&c.id).unwrap();
+        assert_eq!(posted.len(), 1);
+        assert_eq!(posted[0].amount_cents, 24_000);
+        assert_eq!(posted[0].state, "due");
+        // The firm's default (Settings › Payments): leaves after 14 days.
+        assert!(posted[0].expires_at.is_some(), "the box started ticked");
+        note(format!(
+            "Step 1: posted $240.00 \"2025 bookkeeping, Oct–Dec\"; the portal has it due, leaving {}",
+            posted[0].expires_at.clone().unwrap_or_default()
+        ));
+        let bid = posted[0].id.clone();
+        // Closed: the panel's line follows.
+        h.query_all_by_label("Close window").for_each(|_| ());
+        {
+            let o = open_mut(&mut h);
+            o.browse.portal.balance = None;
+            o.browse.portal.look_at_balances_now();
+        }
+        wait_long(&mut h, "panel line due", &|h| {
+            said(h, "$240.00 on the portal")
+        });
+        shot(&mut h, "03-panel-line-due");
+        note(
+            "Step 2: the client panel says Balance owed: $240.00 on the portal, N days left".into(),
+        );
+
+        // ---- Step 3: the client pays by card on the portal: accepts the invitation, presses
+        // Pay on the Balance due card, pays on Stripe's page (the stand-in completes the session
+        // and signs the webhook as Stripe does), and comes back to the card.
+        let ok = std::process::Command::new("node")
+            .args([
+                &client_js,
+                &url,
+                &out.display().to_string(),
+                &log,
+                "jordan.sample@example.com",
+                "pay",
+                &stripe,
+            ])
+            .status()
+            .is_ok_and(|s| s.success());
+        assert!(ok, "the client pays (see client-pay.json)");
+        let paid = p.client_balances(&c.id).unwrap();
+        assert_eq!(paid[0].id, bid);
+        assert_eq!(paid[0].state, "paid");
+        assert_eq!(paid[0].method.as_deref(), Some("card"));
+        assert!(paid[0].receipt_upload_id.is_some(), "a receipt was filed");
+        note("Step 3: the client paid by card (Pay, Stripe's page, back to the card: Paid with a Receipt); the portal filed the receipt".into());
+
+        // ---- Step 4: the receipt is fetched into the Portal inbox, with its hint.
+        open_mut(&mut h).browse.portal.fetch_now = true;
+        let inbox = crate::portal::inbox(&root);
+        let found = |inbox: &std::path::Path| {
+            std::fs::read_dir(inbox)
+                .ok()
+                .into_iter()
+                .flatten()
+                .flatten()
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .find(|n| n.contains("Payment receipt"))
+        };
+        wait_long(&mut h, "the receipt fetched", &|_| found(&inbox).is_some());
+        let name = found(&inbox).unwrap();
+        assert!(
+            name.ends_with("Payment receipt - 2025 bookkeeping, Oct–Dec.pdf"),
+            "{name}"
+        );
+        let bytes = std::fs::read(inbox.join(&name)).unwrap();
+        assert!(bytes.starts_with(b"%PDF"));
+        let sha = filer_intake::commit::sha256_file(&inbox.join(&name)).unwrap();
+        let hint = vf_fs::hints::load(&root)
+            .get(&sha)
+            .cloned()
+            .expect("a hint for Intake");
+        let types = vf_fs::doctypes::load(&root).unwrap().unwrap();
+        let receipt_type = vf_fs::doctypes::id_by_name(&types, "Payment receipt").unwrap();
+        assert_eq!(hint.doc_type.as_deref(), Some(receipt_type.as_str()));
+        assert_eq!(hint.origin, "portal_balance");
+        note(format!(
+            "Step 4: {name} reached the Portal inbox; Intake's hint gives it the doc type Payment receipt"
+        ));
+
+        // ---- Step 5: the panel says paid; the copy and the audit row.
+        open_mut(&mut h).browse.portal.look_at_balances_now();
+        wait_long(&mut h, "panel line paid", &|h| {
+            said(h, "Balance owed: none")
+        });
+        let folder = c.folder_rel.clone().unwrap();
+        let copy = vf_portal::balance::read_copy(&root, &folder);
+        assert_eq!(copy.len(), 1);
+        assert_eq!(copy[0].balance.state, "paid");
+        let n: i64 = open_mut(&mut h)
+            .opened
+            .conn
+            .query_row(
+                "SELECT count(*) FROM audit WHERE action = 'portal_balance_paid'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 1);
+        let posts: i64 = open_mut(&mut h)
+            .opened
+            .conn
+            .query_row(
+                "SELECT count(*) FROM audit WHERE action = 'portal_balance_post'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(posts, 1);
+        note("Step 5: the panel says Balance owed: none; _Vibe/balance.jsonl has the paid balance; audit has portal_balance_post and portal_balance_paid".into());
+
+        // ---- Step 6: Intake's rules file it in Billing/<year paid>.
+        let master = vf_fs::clients::master_dir(&root);
+        let (rules, _, _) = filer_core::rules::load_or_seed(&master);
+        let compiled = filer_core::rules::CompiledRules::new(rules.active_rules()).unwrap();
+        let rest = name
+            .trim_end_matches(".pdf")
+            .rsplit_once(&format!("_{}_", c.ext_id))
+            .map(|(_, r)| r.to_string())
+            .unwrap_or_else(|| name.clone());
+        let hit = compiled
+            .first_specific_match(&rest, false)
+            .expect("a rule takes it");
+        assert_eq!(hit.dest_template, "{Client}/Billing/{Year}");
+        let year = filer_core::parse::detect_year(&rest, 2026).unwrap();
+        note(format!(
+            "Step 6: Intake's rule \"{}\" files it in {}/Billing/{year}",
+            hit.name, folder
+        ));
+        h.state_mut().tab = crate::app::Tab::Intake;
+        h.run_steps(10);
+        if let Some(b) = h.query_by_label("Preview") {
+            b.click();
+        }
+        let start = std::time::Instant::now();
+        while start.elapsed().as_secs() < 30 && !said(&h, "Commit 1 file") {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            h.step();
+        }
+        shot(&mut h, "04-intake-receipt-row");
+        // The row is ready (rule, client and the year paid); its destination, painted text,
+        // is in the screenshot: …\Billing\<year>\<date> Payment receipt - <memo>.pdf.
+        assert!(
+            said(&h, "Commit 1 file"),
+            "Intake's receipt row is ready (see 04-intake-receipt-row.png)"
+        );
+        note(format!(
+            "Step 6: Intake's preview row: rule Payment receipt, year {year} (the year paid, from its hint), into Billing; ready to commit"
+        ));
+
+        // ---- Step 7: committed: the receipt is in Billing\<year paid>, a Payment receipt.
+        h.query_all_by_role_and_label(Role::Button, "Commit 1 file")
+            .last()
+            .unwrap()
+            .click();
+        h.run_steps(6);
+        // Intake's commit summary, then Confirm commit.
+        wait_long(&mut h, "the commit summary", &|h| {
+            h.query_all_by_label("Confirm commit").next().is_some()
+        });
+        shot(&mut h, "05-commit-summary");
+        h.query_all_by_label("Confirm commit")
+            .next()
+            .unwrap()
+            .click();
+        h.run_steps(6);
+        let filed_dir = root.join(&folder).join("Billing").join(year.to_string());
+        let want = rest.clone() + ".pdf";
+        wait_long(&mut h, "the receipt filed in Billing", &|_| {
+            filed_dir.join(&want).exists()
+        });
+        // Recorded by Intake's catalog step (with the hint's doc type) on a later frame.
+        let start = std::time::Instant::now();
+        let doc_type_name = loop {
+            let got: Option<String> = open_mut(&mut h)
+                .opened
+                .conn
+                .query_row(
+                    "SELECT t.name FROM document d JOIN doc_type t ON t.id = d.doc_type_id
+                     WHERE d.rel_path LIKE ?1 AND d.deleted_at IS NULL",
+                    [format!("%Billing/{year}/%Payment receipt%")],
+                    |r| r.get(0),
+                )
+                .ok();
+            if got.is_some() || start.elapsed().as_secs() > 60 {
+                break got;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            h.step();
+        };
+        assert_eq!(doc_type_name.as_deref(), Some("Payment receipt"));
+        note(format!(
+            "Step 7: committed: {folder}\\Billing\\{year}\\{want}, doc type Payment receipt in the catalog"
+        ));
+        std::fs::write(out.join("steps.txt"), steps.join("\n")).unwrap();
+    }
+
     /// PA-103 walkthrough against a real Vibe Portal (not a fake): the to-do window drives every
     /// firm step, and `node client.mjs` the client's steps in a browser. Set `VF_WALK_URL`,
     /// `VF_WALK_KEY`, `VF_WALK_LOG` (the portal's log, EMAIL_PROVIDER=console), `VF_WALK_CLIENT`

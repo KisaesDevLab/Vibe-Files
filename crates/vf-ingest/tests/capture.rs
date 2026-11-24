@@ -353,17 +353,20 @@ fn ultratax_prints_go_to_their_doc_types_folder() {
     );
     std::fs::remove_file(vf_ingest::parsers::dir(&root).join("broken.toml")).unwrap();
 
-    // A disabled profile takes its rules out again; Filer's own rules stay.
+    // A disabled profile takes its rules out again; Filer's own rules stay, and so does the
+    // portal's payment receipt rule (Addendum §16), which no profile makes.
     prof.enabled = false;
     vf_ingest::parsers::save_profile(&path, &prof).unwrap();
     assert!(vf_ingest::parsers::sync_filer_rules(&root).unwrap());
     let (rules, _, _) = filer_core::rules::load_or_seed(&master);
+    let receipt = vf_ingest::parsers::payment_receipt_rule().id;
     assert!(
         rules
             .active_rules()
             .iter()
-            .all(|r| !r.id.starts_with(vf_ingest::parsers::MANAGED_PREFIX))
+            .all(|r| !r.id.starts_with(vf_ingest::parsers::MANAGED_PREFIX) || r.id == receipt)
     );
+    assert_eq!(rules.active_rules()[0].id, receipt);
     // Filer's own rules stay (Filer 0.2.5 took its "UltraTax" rule out of the firm set).
     assert!(
         rules

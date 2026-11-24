@@ -602,6 +602,21 @@ fn stable_id(profile: &str, doc_type: &str) -> String {
     h[..8].iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// The rule that files a paid balance's receipt from the portal (Addendum §16, owner
+/// 2026-11-24): `<yyyy-mm-dd paid> Payment receipt - <memo>.pdf` into the client's
+/// `Billing/{Year}`, the year read from the date paid (the first year in the name).
+pub fn payment_receipt_rule() -> filer_core::rules::Rule {
+    let mut r = filer_core::rules::Rule::new(
+        "Payment receipt",
+        r"^\d{4}-\d\d-\d\d payment receipt\b",
+        "{Client}/Billing/{Year}",
+        "{Rest}.{Ext}",
+        true,
+    );
+    r.id = format!("{MANAGED_PREFIX}portal-payment-receipt");
+    r
+}
+
 /// What a rules sync did.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Synced {
@@ -707,6 +722,9 @@ fn plan_rules(
     for (k, r) in table.into_iter().enumerate() {
         active.insert(k, r);
     }
+    // A paid balance's receipt from the portal (Addendum §16): first of all, so no rule that
+    // reads "receipt" or "invoice" takes it. It matches only the name the portal gives one.
+    active.insert(0, payment_receipt_rule());
     // One of Intake's own rules that says exactly what a print capture rule above it says
     // (same pattern, exception and folder) is a duplicate: said, for its owner to delete.
     {
@@ -1267,6 +1285,30 @@ pub fn parse(profiles: &[Compiled], file_name: &str) -> Option<Parsed> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Addendum §16: the portal's receipt name is filed by its rule, in the year paid (the
+    /// first year in the name, though the memo names another); other names are not taken.
+    #[test]
+    fn payment_receipts_go_to_billing_in_the_year_paid() {
+        let r = payment_receipt_rule();
+        let c = filer_core::rules::CompiledRules::new(std::slice::from_ref(&r)).unwrap();
+        let rest = "2027-01-04 Payment receipt - 2025 bookkeeping, Oct–Dec";
+        assert_eq!(
+            c.first_specific_match(rest, false).map(|m| m.id.clone()),
+            Some(r.id.clone())
+        );
+        assert_eq!(filer_core::parse::detect_year(rest, 2027), Some(2027));
+        assert_eq!(r.dest_template, "{Client}/Billing/{Year}");
+        assert!(
+            c.first_specific_match("Receipt for payment 2026", false)
+                .is_none()
+        );
+        assert!(
+            c.first_specific_match("2026 Payment receipts.xlsx", false)
+                .is_none()
+        );
+        assert!(filer_core::rules::validate_rule(&r, &[]).is_empty());
+    }
 
     /// The shapes of the office's UltraTax names (owner, 2026-11-03), with invented names.
     #[test]

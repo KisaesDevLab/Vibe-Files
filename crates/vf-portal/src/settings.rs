@@ -42,6 +42,11 @@ pub struct PortalSettings {
     /// ticks it; the portal has its own switch too.
     #[serde(default)]
     pub todo_lists: bool,
+    /// Balance owed in Vibe Files for every PC (Addendum §16, owner 2026-11-24): the client
+    /// panel's Balance owed… and Admin › Portal › Balances. Off unless the firm ticks it; the
+    /// portal has its own switch, and needs Stripe set up.
+    #[serde(default)]
+    pub balances: bool,
     /// What Approve offers to share with someone given access (PA-106, owner 2026-11-24).
     #[serde(default, skip_serializing_if = "ApproveShare::is_empty")]
     pub approve_share: ApproveShare,
@@ -159,6 +164,7 @@ impl PortalSettings {
             record: RecordColumns::default(),
             b2_list: false,
             todo_lists: false,
+            balances: false,
             approve_share: Default::default(),
         })
     }
@@ -178,6 +184,12 @@ impl PortalSettings {
     /// The same settings with to-do lists on or off for every PC (PA-103).
     pub fn with_todo_lists(mut self, on: bool) -> Self {
         self.todo_lists = on;
+        self
+    }
+
+    /// The same settings with balance owed on or off for every PC (Addendum §16).
+    pub fn with_balances(mut self, on: bool) -> Self {
+        self.balances = on;
         self
     }
 

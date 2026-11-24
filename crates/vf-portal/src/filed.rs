@@ -342,6 +342,7 @@ mod tests {
                     phone: None,
                 },
                 request: None,
+                balance: None,
             },
             fetched_at: "2026-11-10T10:05:00.000Z".into(),
             fetched_by: Some("PC1\\kurt".into()),

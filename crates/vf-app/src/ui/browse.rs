@@ -5093,6 +5093,7 @@ fn portal_windows(ctx: &egui::Context, b: &mut Browse, env: &mut Env) {
         b.portal.share = None;
         b.portal.people = None;
         b.portal.todo = None;
+        b.portal.balance = None;
         b.portal.send_link = None;
         return;
     };
@@ -5126,6 +5127,18 @@ fn portal_windows(ctx: &egui::Context, b: &mut Browse, env: &mut Env) {
         w.show(ctx, &s);
         if w.closed {
             b.portal.todo = None;
+        }
+    }
+    // Addendum §16: a client's balance owed, while it is on for the cabinet.
+    if !s.balances {
+        b.portal.balance = None;
+    }
+    if let Some(w) = &mut b.portal.balance {
+        w.show(ctx, &s);
+        if w.closed {
+            b.portal.balance = None;
+            // The panel's line follows what was just changed.
+            b.portal.look_at_balances_now();
         }
     }
 }

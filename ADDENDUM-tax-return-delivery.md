@@ -253,11 +253,11 @@ person (Settings › Payments).
 Number them from the next free P when accepted. Each ends with `pnpm gate` green.
 
 ### D0 — Payments foundation (built first, with D7)
-- [ ] Settings › Payments: the firm's Stripe keys sealed with the firm key, methods, card fee,
+- [x] Settings › Payments: the firm's Stripe keys sealed with the firm key, methods, card fee,
   **Test**; `firm` columns
-- [ ] `POST /api/stripe/webhook`: raw body, signature checked, events de-duplicated by id,
+- [x] `POST /api/stripe/webhook`: raw body, signature checked, events de-duplicated by id,
   routed by metadata to a balance (D7) or, later, a delivery (D5)
-- [ ] CSP and redirect handling for Stripe's hosted page; no Stripe script on the portal
+- [x] CSP and redirect handling for Stripe's hosted page; no Stripe script on the portal
 - **Gate:** Test succeeds with test keys and says what is wrong with bad ones; a forged webhook
   is refused; a replayed one changes nothing; keys never appear in logs, History or any response
 
@@ -702,11 +702,11 @@ here nothing waits on the payment, so the card simply tells the truth about it.
 ### 16.5 Phases
 
 **Portal D7 — Balance owed card** (after D0, which brings Stripe)
-- [ ] Migration; switch; firm API; card and its states; checkout and webhook states
-- [ ] Expiry timer (counts through a pending payment, never removes one); pending-payment
+- [x] Migration; switch; firm API; card and its states; checkout and webhook states
+- [x] Expiry timer (counts through a pending payment, never removes one); pending-payment
   rules for clear and change; paid-card days; notices and reminders
-- [ ] Receipt PDF with log page, queued for Vibe Files
-- [ ] Assigned staff and the fallback; staff notices for paid, started, failed, expired
+- [x] Receipt PDF with log page, queued for Vibe Files
+- [x] Assigned staff and the fallback; staff notices for paid, started, failed, expired
 - **Gate:** the assigned staff member gets exactly one email per event, a staff member who
   cannot see the client cannot be assigned, and an unassigned balance tells the fallback; and
   in Stripe test mode: card payment → Paid → gone after the set days; bank payment →
@@ -715,10 +715,10 @@ here nothing waits on the payment, so the card simply tells the truth about it.
   unpaid card past its date is gone and `/balances` says expired; a card with no limit stays
 
 **Vibe Files F5 — Balance owed** (with D7)
-- [ ] `vf-portal::balance`; client panel line and window with Assigned to; Balances list;
+- [x] `vf-portal::balance`; client panel line and window with Assigned to; Balances list;
   settings switch
-- [ ] States from the portal; clear on paid and on expiry; footer notice; local copy; audit
-- [ ] Receipt filed in `Billing\{Year paid}`; doc type; help page
+- [x] States from the portal; clear on paid and on expiry; footer notice; local copy; audit
+- [x] Receipt filed in `Billing\{Year paid}`; doc type; help page
 - **Gate:** e2e: post, pay, receipt with its log page filed in Billing; post with 1 day, let it
   expire, the balance is cleared in the client panel and listed as expired
 
@@ -746,3 +746,133 @@ Read for gaps and contradictions before building slice 1. Decisions:
 Build: slice 1 first (D0, D7, F5), against a stand-in Stripe (a local fake for Checkout Sessions and signed webhooks); the owner runs the check with Stripe test-mode keys later. Mockups of the balance card, the Balance owed window and the Balances list are shown for the owner's OK before they are built.
 
 Raised for slice 2, not decided yet: when the fee step opens in `amount` mode (no step 3); a letter template changed after one of two signers signed; the tax year of step PDFs for a return filed late.
+
+## 19. Build log and questions (full auto build, owner 2026-11-24)
+
+The owner asked for the whole addendum built without stopping: "log questions and we will
+address them later". Each question below records the default taken and where to change it.
+
+### Slice 1, portal (P115: D0 payments, D7 balance card)
+
+Firm API contract (firm key or staff; staff scoped by `inScope`/`mustSee`; all 404
+`balances_off` while Stripe is not set up or the switch is off):
+
+| Call | Body / answer |
+|---|---|
+| `GET /api/firm/v1/balances` | `{ balances: [Balance], defaults: { expireDays, expireOn }, staff: [{id, name}] }` open ones and those ended in 45 days |
+| `GET /api/firm/v1/clients/:id/balance` | `{ balances: [Balance & { events: [{at, kind, words, by}] }] }` last 20 |
+| `PUT /api/firm/v1/clients/:id/balance` | `{ amountCents ≥ 50, memo ≤ 120, expireDays 1–365 or null, notify, remindDays 0–60, assignedStaffId or null }` → `{ balance, pending }` |
+| `DELETE /api/firm/v1/clients/:id/balance` | → `{ cleared, pending }`; 404 `no_balance` |
+| `POST /api/firm/v1/clients/:id/balance/remind` | → `{ told }`; 429 after 3 a day |
+| `GET /api/firm/v1/balance-staff?clientId=` | `{ staff: [{id, name}] }` |
+| `GET /api/firm/v1/status` | `features` gains `balances` while on |
+
+`Balance` = `{ id, clientId, amountCents, memo, state (due|started|paid|expired|cleared|replaced),
+expiresAt, daysLeft, notify, remindDays, remindedAt, assignedStaffId, postedBy, postedAt,
+startedAt, paidAt, method (card|bank|null), cardFeeCents, endedAt, endedBy, clearedPending,
+receiptUploadId }`. The receipt is an ordinary upload (`GET /uploads`) named
+`<yyyy-mm-dd> Payment receipt - <memo>.pdf`, with the log page, tagged `balanceId`.
+
+Client API: `GET /api/portal/balance`, `POST /balance/checkout {balanceId, method}` → `{url}`
+(409 `balance_not_due`, 409 `balance_waits`), `POST /balance/return {sessionId}`,
+`GET /balance/:id/receipt.pdf` (no log page). Webhook `POST /api/stripe/webhook` (raw body,
+signature within 300 s, events de-duplicated in `stripe_event`). Settings › Payments:
+`GET/PUT /api/staff/v1/settings/payments`, `POST …/test`, `DELETE …/keys` (admins; keys sealed,
+never answered; History says only "saved").
+
+Timers: hourly reminders; every 10 min expiry of due balances and a check with Stripe of open
+checkouts (B18).
+
+Tests: `apps/api/src/__tests__/balances.test.ts` against a stand-in Stripe server made from
+Stripe's documented calls; `apps/portal/src/__tests__/Balance.test.tsx`. Not done: the owner's
+check with Stripe test-mode keys (Gate stays unticked).
+
+### Questions logged (defaults taken)
+
+| # | Question | Default taken | Where to change it |
+|---|---|---|---|
+| Q1 | A bank payment fails while a newer amount was posted during it (B17). | The newer amount stands; the failed one is marked `replaced`. | `markFailed` in `payments/balance.ts` |
+| Q2 | A balance cleared while its bank payment was pending, and the payment then clears. | Stays `cleared` with `paidAt` and a receipt (note on the receipt); staff are told it was paid. | `markPaid` |
+| Q3 | Who is the receipt's upload filed under when the payer is unknown (paid by a webhook only)? | The first person with access to the client. | `fileReceipt` |
+| Q4 | Card fee with both methods on: one Pay button or two? | Two buttons (bank account first, then card with the fee shown) so the fee is known before Stripe's page; one button when the fee is off. | `pages/Balance.tsx` |
+| Q5 | Which earlier Checkout Sessions count? | Only the one last made for the balance; an older one left open is ignored. | `applySession` |
+| Q6 | Reminder text says the amount and memo (B13) by email and text. | As B13; no link to pay directly, only the portal address. | `tellClient` |
+| Q7 | Turning balances on with no saved key. | Refused (409 `stripe_not_set_up`); removing the keys turns balances off. | `payments/settings.ts` |
+| Q8 | A Stripe restricted key (`rk_`) is accepted as well as `sk_`. | Accepted; Test checks it can list Checkout Sessions. | `payments/settings.ts` |
+
+### Slice 1, Vibe Files (F5: balance owed; PA-107, Q-152)
+
+Built 2026-11-24 on branch `delivery`:
+
+- `vf-portal::balance`: the firm API calls (`balances`, `client_balances`, `post_balance`,
+  `clear_balance`, `remind_balance`, `balance_staff`), `Status::has_balances`, money in and
+  out, and the copy `<client>/_Vibe/balance.jsonl` (one line per change as read; days left
+  are not a change). `PortalSettings.balances` (Admin › Portal, every PC, off by default).
+- Client panel: "Balance owed: …" line and **Balance owed…**; the window (Amount, Memo,
+  Assigned to, Remove after N days from the firm's default, Tell the client, Remind, Post /
+  Save changes, Remind now, Read again, Clear balance with a confirm, what has happened; the
+  copy shown "as last read" when the portal is out of reach). Admin › Portal › **Balances**
+  (filters Due / Payment started / Paid this month / Expired this month / All; a client opens
+  the window).
+- Every PC reads `/balances` every 5 minutes; reads (and the window's) are copied with audit
+  rows `portal_balance_copy`, and the first PC to see one paid or expired writes
+  `portal_balance_paid` / `portal_balance_expired` (field names only). Window actions audit
+  `portal_balance_post`, `_change`, `_clear`, `_remind`.
+- Receipt: the portal's upload carries `balance.balanceId`; the Portal inbox writes an Intake
+  hint (doc type **Payment receipt**, origin `portal_balance`, year paid); a managed Filer
+  rule (`vf-capture-portal-payment-receipt`, first in the active profile) files
+  `<yyyy-mm-dd> Payment receipt …` into `{Client}/Billing/{Year}`; Intake offers the year
+  paid to the row (the memo may name another year: PA-89 would ask). The doc type is added
+  (folder `Billing/{Year}`, client visible) when Admin › Portal saves Balance owed ticked.
+- Help `portal-balance`. Live walkthrough `balance_walkthrough` (ignored test; portal on a
+  real Postgres, a stand-in Stripe, the client in headless Edge via
+  `scripts/balance-walkthrough/client.mjs`): post → client card → Pay → Stripe's webhook →
+  Paid with Receipt → receipt in the Portal inbox with its hint → panel "none", copy and
+  audit → Intake row Ready in `Billing\2026`. It found one portal bug (dates in raw SQL,
+  fixed).
+
+Gate: the e2e part is met against the stand-in (post, pay by card in the client's browser,
+receipt with its log page committed by Intake into `Billing\2026` as a Payment receipt). Not
+met yet: the owner's check with Stripe test-mode keys (both gates), and the expiry half run
+live (covered by the portal's test of
+expiry and by Vibe Files' test of the copy; a live run needs a day to pass or a database
+edit).
+
+### Questions logged, Vibe Files (defaults taken)
+
+| # | Question | Default taken | Where to change it |
+|---|---|---|---|
+| Q9 | "Assigned to" starts as whoever is posting (§16.3), but a Windows login is not a portal staff account. | Starts as Nobody (the Settings › Payments person, else admins). | `BalanceWindow::new` |
+| Q10 | The expiry notice: footer or notice bar? | Browse's notice bar, once per PC per session, for balances that expire while the app is open; the Balances list shows them for the month. | `PortalState::tick_balances` |
+| Q11 | The Filer rule for receipts is added to every cabinet's active profile (it matches only the portal's receipt names). | Always present, first. | `vf_ingest::parsers::payment_receipt_rule` |
+| Q12 | Which year is a receipt filed in? | The year paid (the date at the start of its name, and its hint). | inbox hint; `ui/intake.rs receipt_years` |
+| Q13 | The unpaid delivery fee line in the window (B9). | Not shown until deliveries exist (slice 2/4). | `BalanceWindow::body` |
+| Q14 | Payment receipt doc type client visible? | Yes (a receipt is the client's own record). | `ui/portal.rs` save |
+
+### Slice 1 review (advisor, 2026-11-24) and what changed
+
+A review of slice 1 at its gate found defects neither the tests nor the walkthrough saw. Fixed:
+
+- **A payment was dropped** when it came on a session other than the balance's newest (a
+  second Pay, or a new amount or Clear while the client was on Stripe's page). Now a superseded
+  session is expired on Stripe (`POST /v1/checkout/sessions/{id}/expire`, docs read
+  2026-11-24; only an `open` session can be), a payment on any of the balance's sessions is
+  recorded whatever its state (staff told; a second payment is `paid_again`, refund one in
+  Stripe), and a bank payment started on a changed or cleared balance tells staff.
+- **Bank payments were unreachable** with both methods on and no card fee (one Pay button sent
+  `card`). Now the card shows a button per method whenever both are on.
+- **Save changes shortened the date**: `expireDays` now counts from now for a change too (the
+  window sends the days left).
+- **Staff scope**: the balance routes were mounted before the per-client guard; now after it.
+- **The receipt reached the client**: it was listed in "Your uploads" and could be taken back;
+  receipts are now left out of both (and out of the waiting-files quota).
+- New tests for each; the walkthrough now commits in Intake and checks the file in
+  `Billing\2026` and its catalog doc type.
+
+Checked, not changed: the CSP needs nothing for Stripe (Pay navigates the whole page with
+`location.assign`, which `form-action`/`connect-src` do not govern; checkout is a same-origin
+call; no Stripe script). `<client>/_Vibe/balance.jsonl` is never sent to B2 (B2 push sends
+catalog documents and named cabinet files only). The stand-in Stripe accepts any form field,
+so the owner's run with Stripe test-mode keys is the only check of the parameter names sent.
+Walkthrough tooling is in `Vibe-Files/scripts/balance-walkthrough/` (stand-in, client, reset;
+send the reset script's output to a file, not a pipe).

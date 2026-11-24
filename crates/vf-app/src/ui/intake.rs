@@ -108,6 +108,10 @@ pub struct IntakeTab {
     dupe_action: Option<(usize, vf_fs::dupes::Choice)>,
     /// Inbox files no rule names that were handed to the form reading (Q-61), once each.
     read_asked: std::collections::HashSet<PathBuf>,
+    /// Payment receipts in the Portal inbox and the year paid their hint gives (Addendum §16),
+    /// read once each; looked at every few seconds.
+    receipt_years: std::collections::HashMap<PathBuf, Option<u16>>,
+    receipts_at: Option<std::time::Instant>,
     /// What the form reading found, from its thread.
     reads: Option<Reads>,
     /// Tells the reading threads to stop (the cabinet closed).
@@ -883,6 +887,23 @@ impl IntakeTab {
                     Err(e) => self.message = Some(format!("Not moved to the trash: {e}")),
                 }
             }
+            // Addendum §16: a paid balance's receipt is named with the date paid and its memo,
+            // which may name another year (PA-89 then asks for one): the year paid, from its
+            // hint, is offered to its row. Nothing a person chose is changed.
+            if self
+                .receipts_at
+                .is_none_or(|t| t.elapsed() >= std::time::Duration::from_secs(3))
+            {
+                self.receipts_at = Some(std::time::Instant::now());
+                for (path, year) in receipt_years(root, &mut self.receipt_years) {
+                    f.suggest(
+                        &path,
+                        None,
+                        Some(year),
+                        "Payment receipt from the portal: filed in the year paid",
+                    );
+                }
+            }
             // Form reading for files whose name no rule names (Q-61): on a thread, once each.
             let unnamed = f.unnamed_files();
             // A file that left the list (filed, trashed) is forgotten: a later file of the same
@@ -965,6 +986,45 @@ impl IntakeTab {
             (None, None) => {}
         }
     }
+}
+
+/// The payment receipts waiting in the Portal inbox, each with the year paid its hint gives
+/// (Addendum §16). `known` keeps what was read (a file is hashed once); files gone are dropped.
+fn receipt_years(
+    root: &std::path::Path,
+    known: &mut std::collections::HashMap<PathBuf, Option<u16>>,
+) -> Vec<(PathBuf, u16)> {
+    let dir = vf_portal::inbox::inbox(root);
+    let now: Vec<PathBuf> = std::fs::read_dir(&dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.file_name().is_some_and(|n| {
+                n.to_string_lossy()
+                    .contains(vf_portal::inbox::RECEIPT_DOC_TYPE)
+            })
+        })
+        .collect();
+    known.retain(|p, _| now.contains(p));
+    let fresh: Vec<&PathBuf> = now.iter().filter(|p| !known.contains_key(*p)).collect();
+    if !fresh.is_empty() {
+        let hints = vf_fs::hints::load(root);
+        for p in fresh {
+            let year = filer_intake::commit::sha256_file(p)
+                .ok()
+                .and_then(|sha| hints.get(&sha).cloned())
+                .filter(|h| h.origin == "portal_balance")
+                .and_then(|h| h.tax_year)
+                .and_then(|y| u16::try_from(y).ok());
+            known.insert(p.clone(), year);
+        }
+    }
+    known
+        .iter()
+        .filter_map(|(p, y)| y.map(|y| (p.clone(), y)))
+        .collect()
 }
 
 #[cfg(test)]

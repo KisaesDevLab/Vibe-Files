@@ -7,6 +7,7 @@
 //! to that address; nothing here runs until the firm sets one.
 
 pub mod api;
+pub mod balance;
 pub mod filed;
 pub mod inbox;
 pub mod listing;

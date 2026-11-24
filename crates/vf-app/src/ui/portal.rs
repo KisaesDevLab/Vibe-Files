@@ -198,7 +198,22 @@ pub struct PortalState {
     pub requests_waiting: Option<usize>,
     requests_job: Option<Receiver<Option<usize>>>,
     requests_at: Option<Instant>,
+    /// A client's Balance owed window (Addendum §16).
+    pub balance: Option<crate::ui::balance::BalanceWindow>,
+    /// Every client's balances, as last read on this PC (every few minutes on every PC, for
+    /// the client panel's line and the notice of one left unpaid).
+    pub balances: Option<vf_portal::balance::Balances>,
+    balances_job: Option<Receiver<Option<vf_portal::balance::Balances>>>,
+    balances_at: Option<Instant>,
+    /// Balances already seen expired on this PC: a newly expired one is said once.
+    expired_seen: Option<HashSet<String>>,
+    /// Balances read (the poll and the windows), to be copied into their client folders.
+    balance_tx: Sender<Vec<vf_portal::balance::Balance>>,
+    balance_rx: Receiver<Vec<vf_portal::balance::Balance>>,
 }
+
+/// Minutes between reads of the balances (every PC; Addendum §16).
+pub const BALANCES_MINUTES: u64 = 5;
 
 /// Minutes between looks at the access requests waiting (every PC; PA-106).
 pub const REQUESTS_MINUTES: u64 = 5;
@@ -207,6 +222,7 @@ impl Default for PortalState {
     fn default() -> Self {
         let (audit_tx, audit_rx) = mpsc::channel();
         let (todo_tx, todo_rx) = mpsc::channel();
+        let (balance_tx, balance_rx) = mpsc::channel();
         Self {
             settings: None,
             read_at: None,
@@ -235,6 +251,13 @@ impl Default for PortalState {
             requests_waiting: None,
             requests_job: None,
             requests_at: None,
+            balance: None,
+            balances: None,
+            balances_job: None,
+            balances_at: None,
+            expired_seen: None,
+            balance_tx,
+            balance_rx,
         }
     }
 }
@@ -283,6 +306,21 @@ impl PortalState {
     /// Where to-do windows send the lists they read, for the client folder's copy (PA-103).
     pub fn todo_out(&self) -> crate::ui::todo::CopyOut {
         crate::ui::todo::CopyOut(self.todo_tx.clone())
+    }
+
+    /// Where balance windows send what they read, for the client folders' copies (§16).
+    pub fn balance_out(&self) -> crate::ui::balance::ReadOut {
+        crate::ui::balance::ReadOut(self.balance_tx.clone())
+    }
+
+    /// The balances read since the last frame (the app copies them with audit rows).
+    pub fn take_balance_reads(&self) -> Vec<Vec<vf_portal::balance::Balance>> {
+        self.balance_rx.try_iter().collect()
+    }
+
+    /// Read the balances at the next frame (after a change, and the walkthrough).
+    pub fn look_at_balances_now(&mut self) {
+        self.balances_at = None;
     }
 
     /// The to-do copies waiting to be written (the app writes them with an audit row).
@@ -398,7 +436,62 @@ impl PortalState {
         }
         self.tick_lists(ctx, root, &s);
         self.tick_requests(ctx, &s);
+        self.tick_balances(ctx, &s);
         audit
+    }
+
+    /// Reads every client's balances every few minutes, on every PC (Addendum §16): the
+    /// client panel's line follows them, what was read is copied into the client folders, and
+    /// a balance newly left unpaid past its date is said once on this PC.
+    fn tick_balances(&mut self, ctx: &egui::Context, s: &PortalSettings) {
+        if !s.balances {
+            self.balances = None;
+            self.balance = None;
+            return;
+        }
+        if let Some(rx) = &self.balances_job
+            && let Ok(read) = rx.try_recv()
+        {
+            self.balances_job = None;
+            if let Some(read) = read {
+                let expired: Vec<&vf_portal::balance::Balance> = read
+                    .balances
+                    .iter()
+                    .filter(|b| b.state == vf_portal::balance::EXPIRED)
+                    .collect();
+                match &mut self.expired_seen {
+                    // The first read on this PC: what had expired before is not news.
+                    None => {
+                        self.expired_seen = Some(expired.iter().map(|b| b.id.clone()).collect());
+                    }
+                    Some(seen) => {
+                        let new: Vec<&&vf_portal::balance::Balance> = expired
+                            .iter()
+                            .filter(|b| seen.insert(b.id.clone()))
+                            .collect();
+                        if let Some(b) = new.first() {
+                            let more = if new.len() > 1 {
+                                format!(" (and {} more)", new.len() - 1)
+                            } else {
+                                String::new()
+                            };
+                            self.notice = Some(format!(
+                                "Portal: a balance of {} left the portal unpaid{more}. See Admin › Portal › Balances.",
+                                vf_portal::balance::money(b.amount_cents),
+                            ));
+                        }
+                    }
+                }
+                let _ = self.balance_tx.send(read.balances.clone());
+                self.balances = Some(read);
+            }
+        }
+        let every = Duration::from_secs(BALANCES_MINUTES * 60);
+        if self.balances_job.is_none() && self.balances_at.is_none_or(|t| t.elapsed() >= every) {
+            self.balances_at = Some(Instant::now());
+            let s2 = s.clone();
+            self.balances_job = Some(spawn(ctx, move || core::client(&s2).balances().ok()));
+        }
     }
 
     /// Looks at the access requests waiting every few minutes, on every PC (PA-106): the
@@ -1986,6 +2079,8 @@ pub struct AdminPortal {
     b2_list: bool,
     /// "To-do lists", as ticked until Save (PA-103).
     todo_lists: bool,
+    /// "Balance owed", as ticked until Save (Addendum §16).
+    balances: bool,
     /// Audit rows of request decisions when there is no app channel (tests).
     local_audit: Option<Receiver<AuditEntry>>,
     msg: Option<String>,
@@ -2080,6 +2175,7 @@ impl AdminPortal {
         self.columns = s.map(|s| s.record.clone()).unwrap_or_default();
         self.b2_list = s.is_some_and(|s| s.b2_list);
         self.todo_lists = s.is_some_and(|s| s.todo_lists);
+        self.balances = s.is_some_and(|s| s.balances);
         self.approve_share = s.map(|s| s.approve_share.clone()).unwrap_or_default();
         self.adopt_old_columns(root);
     }
@@ -2386,6 +2482,20 @@ pub fn admin_settings(ui: &mut egui::Ui, a: &mut AdminPortal, env: &mut Env) {
          time, internet address, browser and person, for a PDF report, and Vibe Files keeps a \
          copy of each list in the client's folder (_Vibe\\todo). The portal must have them turned \
          on too (its Settings › To-do lists). Needs Vibe Portal 0.5 or later.",
+    ));
+    ui.add_space(6.0);
+    ui.checkbox(
+        &mut a.balances,
+        "Balance owed: post a balance a client pays on the portal",
+    );
+    ui.label(widgets::caption(
+        "For every PC of this cabinet: a client's Balance owed… (in the client's details) and \
+         Admin › Portal › Balances. The client pays by card or bank account on Stripe's page, \
+         into the firm's own Stripe account; a paid balance's receipt, with its log, is filed in \
+         the client's Billing folder with the doc type Payment receipt (added when this is \
+         saved). Vibe Files keeps a copy of each balance in the client's folder \
+         (_Vibe\\balance.jsonl), never sent to B2. The portal must have Stripe set up and \
+         balance cards turned on (its Settings › Payments). Needs Vibe Portal 0.6 or later.",
     ));
     ui.add_space(6.0);
     ui.label(RichText::new("Checking access requests").strong());
@@ -2819,6 +2929,7 @@ fn save(a: &mut AdminPortal, ctx: &egui::Context, env: &mut Env) {
             })
             .with_b2_list(a.b2_list)
             .with_todo_lists(a.todo_lists)
+            .with_balances(a.balances)
             .with_approve_share(a.approve_share.clone()),
         Err(e) => {
             a.err = Some(e);
@@ -2853,6 +2964,28 @@ fn save(a: &mut AdminPortal, ctx: &egui::Context, env: &mut Env) {
     }
     a.shown = Some(s.clone());
     a.read_record_again();
+    // Addendum §16: a receipt needs its doc type (Billing/{Year}) in the list and the catalog.
+    let receipt_type = if s.balances {
+        match vf_fs::doctypes::ensure(
+            env.root,
+            vf_portal::inbox::RECEIPT_DOC_TYPE,
+            "Billing/{Year}",
+            true,
+        ) {
+            Ok(true) => {
+                match vf_fs::doctypes::sync(env.conn, env.root, env.device_id, "doc_types_edit") {
+                    Ok(_) => " The doc type Payment receipt was added.".to_string(),
+                    Err(e) => format!(
+                        " The doc type Payment receipt was added but not yet in the catalog: {e}"
+                    ),
+                }
+            }
+            Ok(false) => String::new(),
+            Err(e) => format!(" The doc type Payment receipt could not be added: {e}"),
+        }
+    } else {
+        String::new()
+    };
     let inbox = match core::register_inbox(env.root) {
         Ok(true) => format!(
             " {} was added to Intake's inboxes (Reload Intake to see it).",
@@ -2872,6 +3005,7 @@ fn save(a: &mut AdminPortal, ctx: &egui::Context, env: &mut Env) {
                 "fetch_minutes": s.fetch_minutes,
                 "b2_list": s.b2_list,
                 "todo_lists": s.todo_lists,
+                "balances": s.balances,
                 "record_columns": {
                     "email": s.record.email,
                     "mobile": s.record.mobile,
@@ -2885,7 +3019,7 @@ fn save(a: &mut AdminPortal, ctx: &egui::Context, env: &mut Env) {
     a.url = s.url.clone();
     a.changed = true;
     a.read_at = None;
-    let said = format!("Saved for every PC.{inbox}{unrecorded}");
+    let said = format!("Saved for every PC.{inbox}{receipt_type}{unrecorded}");
     match old_listing {
         // Unticked, or another portal now: the lists leave the portal they were sent to, now,
         // not when someone remembers them. (A new key for the same portal: they stay.)
@@ -4565,6 +4699,7 @@ mod tests {
                 },
                 b2_list: false,
                 todo_lists: false,
+                balances: false,
                 approve_share: Default::default(),
             }),
             clients: vec![ClientRef {
@@ -4841,6 +4976,7 @@ mod tests {
                 },
                 b2_list: false,
                 todo_lists: false,
+                balances: false,
                 approve_share: share,
             }),
             clients: dir
@@ -5446,6 +5582,7 @@ mod tests {
             record: Default::default(),
             b2_list: false,
             todo_lists: false,
+            balances: false,
             approve_share: Default::default(),
         };
         let (tx, _audit) = mpsc::channel();
@@ -5617,6 +5754,7 @@ mod tests {
             record: Default::default(),
             b2_list: false,
             todo_lists: false,
+            balances: false,
             approve_share: Default::default(),
         };
         let item = |client: &str, name: &str| Item {
@@ -5822,6 +5960,7 @@ mod tests {
             record: Default::default(),
             b2_list: false,
             todo_lists: false,
+            balances: false,
             approve_share: Default::default(),
         };
         let items: Vec<Item> = (0..4)
@@ -5941,6 +6080,7 @@ mod tests {
             record: Default::default(),
             b2_list: false,
             todo_lists: false,
+            balances: false,
             approve_share: Default::default(),
         };
         let (tx, audit) = mpsc::channel();
@@ -6040,6 +6180,7 @@ mod tests {
             record: Default::default(),
             b2_list: false,
             todo_lists: false,
+            balances: false,
             approve_share: Default::default(),
         };
         let t = tempfile::tempdir().unwrap();
@@ -6172,6 +6313,7 @@ mod tests {
                     record: Default::default(),
                     b2_list: on,
                     todo_lists: false,
+                    balances: false,
                     approve_share: Default::default(),
                 },
             )
@@ -6336,6 +6478,7 @@ mod tests {
                 record: Default::default(),
                 b2_list: true,
                 todo_lists: false,
+                balances: false,
                 approve_share: Default::default(),
             })
         };
@@ -6649,6 +6792,7 @@ mod tests {
                     record: Default::default(),
                     b2_list: on,
                     todo_lists: false,
+                    balances: false,
                     approve_share: Default::default(),
                 },
             )

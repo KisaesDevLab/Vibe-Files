@@ -965,6 +965,10 @@ impl eframe::App for VibeFilesApp {
                 if a.todo_templates.app_copies.is_none() {
                     a.todo_templates.app_copies = Some(o.browse.portal.todo_out());
                 }
+                if !a.balances.connected() {
+                    a.balances
+                        .connect(o.browse.portal.audit_out(), o.browse.portal.balance_out());
+                }
                 if std::mem::take(&mut a.portal.changed) {
                     o.browse.portal.reread();
                 }
@@ -1009,6 +1013,20 @@ impl eframe::App for VibeFilesApp {
             {
                 o.browse.error = Some(format!(
                     "A to-do list could not be copied into its client's folder: {e}"
+                ));
+            }
+            // Addendum §16: balances read are copied into their client's folder.
+            let reads = o.browse.portal.take_balance_reads();
+            if !reads.is_empty()
+                && let Err(e) = crate::ui::balance::record_reads(
+                    &mut o.opened.conn,
+                    &o.opened.root,
+                    &self.config.device_id,
+                    reads,
+                )
+            {
+                o.browse.error = Some(format!(
+                    "A balance could not be copied into its client's folder: {e}"
                 ));
             }
             if let Some(n) = o.browse.portal.notice.take() {
@@ -2529,6 +2547,7 @@ mod tests {
                 record: Default::default(),
                 b2_list: false,
                 todo_lists: false,
+                balances: false,
                 approve_share: Default::default(),
             },
         )

@@ -181,6 +181,37 @@ pub fn seed_if_missing(root: &Path) -> Result<bool, String> {
     Ok(true)
 }
 
+/// Adds a doc type of this name when the list has none by that name (in any case), with its
+/// default folder and visible to the client or not; call [`sync`] after when it did. A type of
+/// that name kept by the firm (renamed folder, archived) is left as it is. Whether it added one.
+pub fn ensure(
+    root: &Path,
+    name: &str,
+    default_folder: &str,
+    client_visible: bool,
+) -> Result<bool, String> {
+    crate::lock::with(root, "doc-types", "the doc types", || {
+        let mut types = load(root)?.unwrap_or_default();
+        if types
+            .iter()
+            .any(|t| t.name.eq_ignore_ascii_case(name.trim()))
+        {
+            return Ok(false);
+        }
+        types.push(DocType {
+            id: vf_core::new_id(),
+            name: name.trim().into(),
+            default_folder: default_folder.trim().into(),
+            client_visible,
+            retention: None,
+            cover_default: false,
+            archived: false,
+        });
+        save(root, &types)?;
+        Ok(true)
+    })
+}
+
 /// Problems with one doc type's fields (the editor shows them).
 pub fn check_fields(name: &str, default_folder: &str) -> Result<(), String> {
     if name.trim().is_empty() {
@@ -409,6 +440,27 @@ mod tests {
 
     fn n(conn: &Connection, sql: &str) -> i64 {
         conn.query_row(sql, [], |r| r.get(0)).unwrap()
+    }
+
+    /// Addendum §16: balances add "Payment receipt" once; a type of that name is kept as is.
+    #[test]
+    fn ensure_adds_a_doc_type_once() {
+        let (_t, root, mut conn) = setup();
+        seed_if_missing(&root).unwrap();
+        assert!(ensure(&root, "Payment receipt", "Billing/{Year}", true).unwrap());
+        assert!(!ensure(&root, "payment RECEIPT", "Other", false).unwrap());
+        let t = load(&root).unwrap().unwrap();
+        let r: Vec<_> = t.iter().filter(|t| t.name == "Payment receipt").collect();
+        assert_eq!(r.len(), 1);
+        assert_eq!(r[0].default_folder, "Billing/{Year}");
+        sync(&mut conn, &root, "dev", "doc_types_sync").unwrap();
+        assert_eq!(
+            n(
+                &conn,
+                "SELECT count(*) FROM doc_type WHERE name = 'Payment receipt'"
+            ),
+            1
+        );
     }
 
     /// Archived doc types reach the catalog (pick lists leave them out); archiving takes the
