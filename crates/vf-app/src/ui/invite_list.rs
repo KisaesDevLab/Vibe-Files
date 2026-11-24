@@ -360,7 +360,7 @@ impl Drop for Run {
 }
 
 /// The clients with contacts, and how many have none.
-type Loaded = Result<(Vec<ClientLine>, usize), String>;
+type Loaded = Result<(Vec<ClientLine>, usize, String), String>;
 
 pub struct InvitePage {
     settings: Option<PortalSettings>,
@@ -369,6 +369,8 @@ pub struct InvitePage {
     rows: Option<Vec<ClientLine>>,
     /// Clients of the list with no email or cell.
     without: usize,
+    /// The firm's name on the portal (What they receive).
+    firm: String,
     /// Ticked people: (client id, index in its lines).
     ticked: BTreeSet<(String, usize)>,
     show_all: bool,
@@ -397,6 +399,7 @@ impl Default for InvitePage {
             loading: None,
             rows: None,
             without: 0,
+            firm: String::new(),
             ticked: BTreeSet::new(),
             show_all: false,
             partner: None,
@@ -434,7 +437,12 @@ fn load_job(ctx: &egui::Context, s: PortalSettings, root: PathBuf) -> Receiver<L
                 compare(c, p)
             })
             .collect();
-        Ok((rows, none))
+        // The firm's name as the portal writes it in invitations (for What they receive).
+        let firm = core::client(&s)
+            .status()
+            .map(|st| st.firm_name)
+            .unwrap_or_default();
+        Ok((rows, none, firm))
     })
 }
 
@@ -496,6 +504,23 @@ impl InvitePage {
         (people, clients)
     }
 
+    /// The first ticked person of the clients shown (found, not the whole list copied).
+    fn first_item(&self) -> Option<Item> {
+        let rows = self.rows.as_ref()?;
+        rows.iter().filter(|r| self.shown(r)).find_map(|r| {
+            r.lines.iter().enumerate().find_map(|(i, l)| {
+                (l.status.sendable() && self.ticked.contains(&(r.c.client_id.clone(), i))).then(
+                    || Item {
+                        client_id: r.c.client_id.clone(),
+                        code: r.c.code.clone(),
+                        client: r.c.name.clone(),
+                        invitee: l.invitee.clone(),
+                    },
+                )
+            })
+        })
+    }
+
     /// The ticked people of the clients shown, in list order.
     fn items(&self) -> Vec<Item> {
         let Some(rows) = &self.rows else {
@@ -545,6 +570,31 @@ impl InvitePage {
         self.err = None;
         self.run = Some(Run { progress, stop });
     }
+}
+
+/// "What they receive": the invitation `it` gets, as the portal sends it.
+fn what_they_receive(ui: &mut egui::Ui, firm: &str, url: &str, it: &Item) {
+    let firm = if firm.trim().is_empty() {
+        "Your accounting firm"
+    } else {
+        firm
+    };
+    let link = format!("{}/invite#t=…", url.trim_end_matches('/'));
+    let (subject, body) = vf_portal::api::invitation_words(firm, &it.client, &link);
+    egui::CollapsingHeader::new(format!("What they receive (for {})", it.invitee.name))
+        .id_salt("invite-what-they-receive")
+        .show(ui, |ui| {
+            if it.invitee.email.is_some() {
+                ui.label(RichText::new(format!("Email · {subject}")).strong());
+                ui.label(body);
+                ui.label(widgets::caption(
+                    "A cell given with the email is kept for them to confirm when they accept; the invitation itself goes by email.",
+                ));
+            } else {
+                ui.label(RichText::new("Text message").strong());
+                ui.label(vf_portal::api::text_message(&body));
+            }
+        });
 }
 
 /// Draws the page.
@@ -631,8 +681,9 @@ pub fn page(ui: &mut egui::Ui, page: &mut InvitePage, env: &mut crate::ui::brows
     {
         page.loading = None;
         match r {
-            Ok((rows, without)) => {
+            Ok((rows, without, firm)) => {
                 page.without = without;
+                page.firm = firm;
                 page.ticked = rows
                     .iter()
                     .flat_map(|r| {
@@ -826,6 +877,10 @@ pub fn page(ui: &mut egui::Ui, page: &mut InvitePage, env: &mut crate::ui::brows
     // from an empty list: walkthrough 2026-11-24).
     drop(shown);
     page.rows = Some(rows);
+    // What the first person ticked would receive (owner 2026-11-24: read only).
+    if let Some(it) = page.first_item() {
+        what_they_receive(ui, &page.firm, &s.url, &it);
+    }
     let (people, clients) = page.counts();
     ui.separator();
     let label = format!(

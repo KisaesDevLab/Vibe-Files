@@ -652,6 +652,7 @@ fn nav(ui: &mut egui::Ui, a: &mut Admin, has_password: bool, locked: bool) {
             } else if *item == "Portal" {
                 if ui.selectable_label(a.page == Page::Portal, *item).clicked() {
                     a.page = Page::Portal;
+                    a.portal.look_at_version_again();
                 }
             } else if *item == "Portal requests" {
                 if ui

@@ -36,7 +36,7 @@ The page shows each client with the people the CSV names and where each stands o
 
 **Search** finds a client by its name or ID, or a person by name, email or cell (**Clear** empties it). **Show** picks clients not on the portal yet (nobody can sign in) or every client; **Partner** narrows the list too. **Tick all shown** and **Untick all** help with long lists. People in the CSV who can't be invited (no email or cell) are listed at the top.
 
-Press **Invite N people at M clients**. Each client is put on the portal, then its people are invited.
+**What they receive** shows the invitation the first person ticked gets, as the portal sends it: by email, or by text for someone with only a cell. Press **Invite N people at M clients**. Each client is put on the portal, then its people are invited.
 
 ## Groups and pauses
 

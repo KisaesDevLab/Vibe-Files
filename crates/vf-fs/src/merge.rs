@@ -11,7 +11,8 @@
 //! the same content already there: the source file is left and counted. Source folders left
 //! empty are removed afterwards. The source's audit trail is copied as a read-only history into
 //! `_Vibe/audit/merged/<source cabinet id>/`. Versions and the source's client details are not
-//! brought over.
+//! brought over, but for its Portal contacts, given to a client here that has none (owner
+//! 2026-11-24).
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -76,6 +77,10 @@ pub struct Merged {
     /// Source folders removed once empty: made again by [`undo`] so the files can go back.
     #[serde(default)]
     pub removed_dirs: Vec<PathBuf>,
+    /// Portal contacts brought over (owner 2026-11-24): this cabinet's client id and what it
+    /// was given (it had none), taken back by [`undo`] while unchanged.
+    #[serde(default)]
+    pub contacts: Vec<(String, crate::contacts::ContactRecord)>,
 }
 
 fn rel_of(base: &Path, p: &Path) -> String {
@@ -229,6 +234,10 @@ pub fn apply(
         .collect();
     let folders: Vec<String> = plan.clients.iter().map(|c| c.src_folder.clone()).collect();
     let src_meta = docmeta::Index::load(src_root, &folders);
+    // The source's Portal contacts, by its client ids (owner 2026-11-24: brought over).
+    let src_contacts = clients::load(src_root)
+        .map(|m| m.meta.contacts)
+        .unwrap_or_default();
 
     for c in plan.clients.iter().filter(|c| c.include) {
         // This cabinet's client and folder (made when needed, as + New client does).
@@ -445,6 +454,29 @@ pub fn apply(
         out.txs.push(committed.tx_id);
         out.moved += moved;
         out.clients += 1;
+        // Its Portal contacts, when this cabinet's client has none (owner 2026-11-24).
+        if let Some(rec) = filer_intake::sentinel::read_sentinel(&src_root.join(&c.src_folder))
+            .ok()
+            .flatten()
+            .and_then(|s| src_contacts.get(&s.client_id.to_string()))
+            .filter(|r| !r.is_empty())
+        {
+            let given = crate::lock::with(root, "clients", "the client list", || {
+                let mut m = clients::load(root)?;
+                if m.meta
+                    .contacts
+                    .get(&client_id)
+                    .is_some_and(|r| !r.is_empty())
+                {
+                    return Ok(false);
+                }
+                m.meta.contacts.insert(client_id.clone(), rec.clone());
+                clients::save_meta(root, &m.meta).map(|_| true)
+            });
+            if let Ok(true) = given {
+                out.contacts.push((client_id.clone(), rec.clone()));
+            }
+        }
         // Source folders left empty go (never one holding anything; never remove_dir_all).
         out.removed_dirs
             .extend(remove_empty_dirs(&src_root.join(&c.src_folder)));
@@ -555,6 +587,18 @@ pub fn undo(conn: &mut Connection, root: &Path, m: &Merged, device_id: &str) -> 
     }
     for tx in m.txs.iter().rev() {
         crate::fileops::undo(conn, root, tx, device_id)?;
+    }
+    // The contacts it brought, unless changed since.
+    if !m.contacts.is_empty() {
+        crate::lock::with(root, "clients", "the client list", || {
+            let mut meta = clients::load(root)?.meta;
+            for (id, rec) in &m.contacts {
+                if meta.contacts.get(id) == Some(rec) {
+                    meta.contacts.remove(id);
+                }
+            }
+            clients::save_meta(root, &meta)
+        })?;
     }
     let _ = std::fs::remove_file(last_path(root));
     Ok(())
@@ -917,6 +961,83 @@ mod tests {
             )
             .unwrap();
         assert_eq!(n, 0);
+    }
+
+    /// Owner 2026-11-24: a client's Portal contacts come over when this cabinet's client has
+    /// none, and Undo takes them back; contacts here are never replaced.
+    #[test]
+    fn portal_contacts_come_over_and_go_back() {
+        let mut here = cab("here");
+        let mut there = cab("there");
+        client(&mut here, "SMIT1001", "Smith, Pat");
+        let smith_there = client(&mut there, "SMIT1001", "Smith, Pat");
+        let acme_there = client(&mut there, "ACME1002", "Acme LLC");
+        put(
+            &there.root,
+            &format!("{smith_there}/Correspondence/a.pdf"),
+            "invented a",
+        );
+        put(
+            &there.root,
+            &format!("{acme_there}/Correspondence/b.pdf"),
+            "invented b",
+        );
+        let id_of = |conn: &Connection, ext: &str| -> String {
+            conn.query_row("SELECT id FROM client WHERE ext_id = ?1", [ext], |r| {
+                r.get(0)
+            })
+            .unwrap()
+        };
+        let row = |email: &str| crate::contacts::Row {
+            email: email.into(),
+            ..Default::default()
+        };
+        crate::contacts::set_by_hand(
+            &there.root,
+            &id_of(&there.conn, "SMIT1001"),
+            &row("theirs@example.test"),
+        )
+        .unwrap();
+        crate::contacts::set_by_hand(
+            &there.root,
+            &id_of(&there.conn, "ACME1002"),
+            &row("acme@example.test"),
+        )
+        .unwrap();
+        let smith_here = id_of(&here.conn, "SMIT1001");
+        crate::contacts::set_by_hand(&here.root, &smith_here, &row("ours@example.test")).unwrap();
+        let p = plan(&here.conn, &here.root, &there.root).unwrap();
+        let m = apply(&mut here.conn, &here.root, &p, "dev", &Default::default()).unwrap();
+        let acme_here = id_of(&here.conn, "ACME1002");
+        assert_eq!(
+            crate::contacts::record(&here.root, &acme_here)
+                .unwrap()
+                .effective()
+                .email,
+            "acme@example.test"
+        );
+        assert_eq!(
+            crate::contacts::record(&here.root, &smith_here)
+                .unwrap()
+                .effective()
+                .email,
+            "ours@example.test",
+            "contacts here are kept"
+        );
+        assert_eq!(m.contacts.len(), 1);
+        undo(&mut here.conn, &here.root, &m, "dev").unwrap();
+        assert!(
+            crate::contacts::record(&here.root, &acme_here)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            crate::contacts::record(&here.root, &smith_here)
+                .unwrap()
+                .effective()
+                .email,
+            "ours@example.test"
+        );
     }
 
     #[test]

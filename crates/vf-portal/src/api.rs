@@ -137,9 +137,65 @@ pub struct Status {
     /// A move between the appliance and B2 is under way or not finished (P51).
     #[serde(default)]
     pub storage_moving: bool,
+    /// What this portal offers that older ones do not (P109 `requests`, P111 `contacts`).
+    #[serde(default)]
+    pub features: Vec<String>,
+}
+
+/// The portal version Invite from client list, request matching by contacts and adding a
+/// login at once need (Vibe-Portal P111–P113).
+pub const CONTACTS_VERSION: &str = "0.5.2";
+
+/// What the portal sends someone invited (Vibe-Portal `POST /clients/:id/invites`, its
+/// `firm/routes.ts`; kept in step by hand): the email's subject and text. A text message is
+/// the same words, shortened by [`text_message`].
+pub fn invitation_words(firm: &str, client: &str, link: &str) -> (String, String) {
+    (
+        format!("{firm} invites you to its client portal"),
+        format!(
+            "{firm} has invited you to its client portal for {client}, where you can get files from the firm and send files to it.\n\nAccept the invitation (within 7 days): {link}"
+        ),
+    )
+}
+
+/// What the portal sends someone with a login given a client at once (P113).
+pub fn added_words(firm: &str, client: &str, portal: &str) -> (String, String) {
+    (
+        format!("Your access to {firm}'s client portal"),
+        format!(
+            "{firm} has given you access to {client} on its client portal. Sign in at {portal}"
+        ),
+    )
+}
+
+/// A text message as the portal sends it (its `shortText`): at most 300 characters, the words
+/// before a link cut short so the link stays whole.
+pub fn text_message(body: &str) -> String {
+    const MAX: usize = 300;
+    if body.chars().count() <= MAX {
+        return body.to_string();
+    }
+    match body.find("http") {
+        None => format!("{}...", body.chars().take(MAX - 3).collect::<String>()),
+        Some(at) => {
+            let url = body[at..].split_whitespace().next().unwrap_or("");
+            let room = MAX.saturating_sub(url.chars().count() + 4);
+            let before = body[..at].trim_end();
+            if before.chars().count() > room {
+                format!("{}... {url}", before.chars().take(room).collect::<String>())
+            } else {
+                format!("{before} {url}")
+            }
+        }
+    }
 }
 
 impl Status {
+    /// The portal has what Invite from client list and request matching need (P111).
+    pub fn has_contacts(&self) -> bool {
+        self.features.iter().any(|f| f == "contacts")
+    }
+
     /// Where the portal's files are, in words for Admin › Portal.
     pub fn storage_words(&self) -> &'static str {
         match (self.storage.as_deref(), self.storage_moving) {
@@ -1371,6 +1427,29 @@ mod tests {
     }
 
     /// Vibe-Portal P63: people already on the portal, searched by what was typed.
+    #[test]
+    fn the_invitation_words_are_the_portals() {
+        let (subject, body) = invitation_words(
+            "Sample CPA Firm",
+            "Sample, John",
+            "https://p.example.test/invite#t=x",
+        );
+        assert_eq!(subject, "Sample CPA Firm invites you to its client portal");
+        assert!(body.ends_with("(within 7 days): https://p.example.test/invite#t=x"));
+        // Short enough: the text is the email's words as they are.
+        assert_eq!(text_message(&body), body);
+        // A long client name: the words are cut, the link kept whole.
+        let long = invitation_words(
+            "Firm",
+            &"Long Name ".repeat(40),
+            "https://p.example.test/invite#t=x",
+        )
+        .1;
+        let t = text_message(&long);
+        assert!(t.chars().count() <= 300, "{}", t.len());
+        assert!(t.ends_with("... https://p.example.test/invite#t=x"));
+    }
+
     #[test]
     fn people_are_searched_on_the_portal() {
         let (p, seen) = one_answer(

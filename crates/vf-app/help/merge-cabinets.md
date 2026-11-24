@@ -25,7 +25,7 @@ Press **Merge N clients**, then **Yes, merge**. For each client:
 - The same file already here: the other cabinet's copy is left where it is, and counted.
 - Folders left empty in the other cabinet are removed.
 
-The other cabinet's audit trail is copied into this cabinet's `_Vibe\audit\merged\` folder as history. Earlier versions and the other cabinet's client details (entity types, relationships, partners) are not brought over.
+The other cabinet's audit trail is copied into this cabinet's `_Vibe\audit\merged\` folder as history. Earlier versions and the other cabinet's client details (entity types, relationships, partners) are not brought over. A client's Portal contacts are, when the client here has none; **Undo** takes them back.
 
 ## Undo
 

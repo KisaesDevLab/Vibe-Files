@@ -702,6 +702,8 @@ struct Loaded {
     users: Users,
     /// The portal copy of each document, in `docs` order.
     files: Vec<Option<PortalFile>>,
+    /// The firm's name on the portal, for What they receive.
+    firm: String,
 }
 
 enum Outcome {
@@ -899,7 +901,8 @@ fn load_job(
             .iter()
             .map(|d| files.iter().find(|f| f.vf_document_id == d.id).cloned())
             .collect();
-        Ok(Outcome::Loaded(Loaded { users, files }))
+        let firm = p.status().map(|st| st.firm_name).unwrap_or_default();
+        Ok(Outcome::Loaded(Loaded { users, files, firm }))
     })
 }
 
@@ -1436,6 +1439,40 @@ impl ShareWindow {
                     None => ("Send invitation and share".to_string(), None),
                 };
                 let seen_here = login.is_some_and(|p| p.sees(&here));
+                // What they receive (owner 2026-11-24: read only).
+                if typed_contact(&self.invite).is_some() && !seen_here {
+                    let firm = if l.firm.trim().is_empty() {
+                        "Your accounting firm".to_string()
+                    } else {
+                        l.firm.clone()
+                    };
+                    let url = s.url.trim_end_matches('/');
+                    let (subject, body) = match login {
+                        Some(_) => vf_portal::api::added_words(&firm, &self.client.name, url),
+                        None => vf_portal::api::invitation_words(
+                            &firm,
+                            &self.client.name,
+                            &format!("{url}/invite#t=…"),
+                        ),
+                    };
+                    egui::CollapsingHeader::new("What they receive")
+                        .id_salt("share-what-they-receive")
+                        .show(ui, |ui| {
+                            if login.is_some() {
+                                ui.label(widgets::caption(
+                                    "By their own choice of email or text:",
+                                ));
+                                ui.label(RichText::new(&subject).strong());
+                                ui.label(body.as_str());
+                            } else if self.invite.email().is_some() {
+                                ui.label(RichText::new(format!("Email · {subject}")).strong());
+                                ui.label(body.as_str());
+                            } else {
+                                ui.label(RichText::new("Text message").strong());
+                                ui.label(vf_portal::api::text_message(&body));
+                            }
+                        });
+                }
                 if self.invite.show(ui, busy || seen_here, false, &button, note.as_deref()) {
                     pending = Some("invite");
                 }
@@ -1929,6 +1966,10 @@ pub struct AdminPortal {
     pub catalog: Option<std::path::PathBuf>,
     /// How many requests the page last read, for the footer (taken by the app).
     pub waiting: Option<usize>,
+    /// The portal's version and features, looked at once per visit of Admin › Portal (owner
+    /// 2026-11-24: an older portal is said there, once).
+    version_job: Option<Receiver<Option<vf_portal::api::Status>>>,
+    version_seen: Option<Option<vf_portal::api::Status>>,
     /// Whether shared documents go to B2 first (set by the app).
     pub b2: B2First,
     /// What Approve offers to share, as chosen until Save; and the doc types to choose from.
@@ -2007,6 +2048,13 @@ impl AdminPortal {
         self.how = (None, String::new());
         self.err = None;
         self.read_at = None;
+    }
+
+    /// Admin › Portal was entered: the portal's version is looked at again.
+    pub fn look_at_version_again(&mut self) {
+        if self.version_job.is_none() {
+            self.version_seen = None;
+        }
     }
 
     fn load(&mut self, root: &Path) {
@@ -2235,6 +2283,18 @@ fn column_choice(ui: &mut egui::Ui, label: &str, extras: &[String], chosen: &mut
     ui.end_row();
 }
 
+/// What Admin › Portal says of a portal older than Invite from client list, request matching
+/// and adding a login at once need; nothing for one that has them.
+fn old_portal_words(st: &vf_portal::api::Status) -> Option<String> {
+    (!st.has_contacts()).then(|| {
+        format!(
+            "This portal is {}: update it to {} or later for Invite from client list, matching access requests by Portal contacts, and adding someone with a login at once from Share.",
+            st.version,
+            vf_portal::api::CONTACTS_VERSION
+        )
+    })
+}
+
 /// Admin › Portal: the address, the key, Test, and what clients sent lately.
 pub fn admin_settings(ui: &mut egui::Ui, a: &mut AdminPortal, env: &mut Env) {
     a.load(env.root);
@@ -2252,6 +2312,24 @@ pub fn admin_settings(ui: &mut egui::Ui, a: &mut AdminPortal, env: &mut Env) {
         }
     }
     ui.heading("Portal");
+    // An older portal, said once here (owner 2026-11-24).
+    if let Some(rx) = &a.version_job
+        && let Ok(st) = rx.try_recv()
+    {
+        a.version_job = None;
+        a.version_seen = Some(st);
+    }
+    if a.version_seen.is_none()
+        && a.version_job.is_none()
+        && let Some(s) = a.cached_settings.clone()
+    {
+        a.version_job = Some(spawn(ui.ctx(), move || core::client(&s).status().ok()));
+    }
+    if let Some(Some(st)) = &a.version_seen
+        && let Some(w) = old_portal_words(st)
+    {
+        ui.label(RichText::new(w).color(theme::warn()));
+    }
     ui.label(widgets::caption(
         "Your firm's Vibe Portal: share files with clients and receive theirs. The address and key \
          are kept in the cabinet for every PC; make the key on the portal's staff page \
@@ -2396,12 +2474,17 @@ pub fn admin_settings(ui: &mut egui::Ui, a: &mut AdminPortal, env: &mut Env) {
                         core::client(&s)
                             .status()
                             .map(|st| {
-                                format!(
+                                let mut m = format!(
                                     "Connected to {}'s portal (version {}). {}",
                                     st.firm_name,
                                     st.version,
                                     st.storage_words()
-                                )
+                                );
+                                if let Some(w) = old_portal_words(&st) {
+                                    m.push(' ');
+                                    m.push_str(&w);
+                                }
+                                m
                             })
                             .map_err(|e| e.message())
                     }));
@@ -5489,6 +5572,22 @@ mod tests {
         );
     }
 
+    /// Owner 2026-11-24: an older portal is said once in Admin › Portal.
+    #[test]
+    fn an_older_portal_is_said() {
+        let st = |features: &[&str]| vf_portal::api::Status {
+            version: "0.5.1".into(),
+            firm_name: "Sample CPA Firm".into(),
+            portal_url: "https://p.example.test".into(),
+            storage: None,
+            storage_moving: false,
+            features: features.iter().map(|f| f.to_string()).collect(),
+        };
+        let w = old_portal_words(&st(&["requests"])).unwrap();
+        assert!(w.starts_with("This portal is 0.5.1: update it to 0.5.2 or later"));
+        assert_eq!(old_portal_words(&st(&["contacts"])), None);
+    }
+
     /// PA-105 (owner 2026-11-24): invitations go out in groups with a pause between them,
     /// each client put on the portal once first; a refusal is kept and the rest go on.
     #[test]
@@ -5673,6 +5772,16 @@ mod tests {
                 st,
             );
         wait_for(&mut h, "Invite 2 people at 1 client");
+        // What the first person ticked receives, as the portal sends it (owner 2026-11-24).
+        h.get_by_label("What they receive (for John Sample)")
+            .click();
+        h.run();
+        assert!(
+            h.query_by_label_contains(
+                "has invited you to its client portal for Sample, John & Jane"
+            )
+            .is_some()
+        );
         // The search box (owner 2026-11-24) narrows the list, and Clear empties it.
         crate::ui::test_util::type_into(&mut h, "Search", "nobody");
         wait_for(&mut h, "Invite 0 people at 0 clients");
@@ -5777,6 +5886,14 @@ mod tests {
         h.run();
         crate::ui::test_util::type_into(&mut h, "Email", "pat@example.test");
         crate::ui::test_util::type_into(&mut h, "Name", "Pat Sample");
+        h.get_by_label("What they receive").click();
+        h.run();
+        assert!(
+            h.query_by_label_contains(
+                "Email · Your accounting firm invites you to its client portal"
+            )
+            .is_some()
+        );
         h.get_by_label("Send invitation and share").click();
         wait_for(&mut h, "This document is theirs when they accept");
         let w = writes(&seen);
