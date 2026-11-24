@@ -547,6 +547,9 @@ pub struct TodoWindow {
     msg: Option<String>,
     err: Option<String>,
     confirm: Option<Confirm>,
+    /// The question was just asked: scrolled into view once (walkthrough 2026-11-23: below a
+    /// long list it appeared out of sight).
+    confirm_shown: bool,
     pub closed: bool,
 }
 
@@ -581,6 +584,7 @@ impl TodoWindow {
             msg: None,
             err: None,
             confirm: None,
+            confirm_shown: false,
             closed: false,
         };
         w.load(ctx, s);
@@ -872,10 +876,20 @@ impl TodoWindow {
             return act;
         }
         let Some(lists) = &self.lists else {
-            if !busy {
+            // Refused (to-do lists off on the portal, a bad key): said above, with a way to
+            // try again once fixed (walkthrough 2026-11-23: it read "Reading the portal…" for
+            // good).
+            if self.err.is_some() {
+                if ui
+                    .add_enabled(!busy, egui::Button::new("Try again"))
+                    .clicked()
+                {
+                    act = Some(Act::Reload);
+                }
+            } else if !busy {
                 ui.label(widgets::caption("Reading the portal…"));
             }
-            return None;
+            return act;
         };
         // ---- New list
         match &mut self.mode {
@@ -1148,6 +1162,7 @@ impl TodoWindow {
                     }
                     if ui.add_enabled(!busy, egui::Button::new("Cancel list")).clicked() {
                         self.confirm = Some(Confirm::Cancel(l.id.clone()));
+                        self.confirm_shown = false;
                     }
                 } else if ui.add_enabled(!busy, egui::Button::new("Open again")).clicked() {
                     act = Some(Act::Status(l.id.clone(), ListStatus::Open));
@@ -1159,6 +1174,7 @@ impl TodoWindow {
                         .clicked()
                 {
                     self.confirm = Some(Confirm::Delete(l.id.clone()));
+                    self.confirm_shown = false;
                 }
             });
             if let Some(c) = self.confirm.clone().filter(|c| c.list() == l.id) {
@@ -1169,7 +1185,7 @@ impl TodoWindow {
                         "Cancel list",
                     ),
                 };
-                ui.horizontal(|ui| {
+                let row = ui.horizontal(|ui| {
                     ui.label(RichText::new(question).color(theme::error()));
                     if ui.button(button).clicked() {
                         act = Some(match c {
@@ -1182,6 +1198,10 @@ impl TodoWindow {
                         self.confirm = None;
                     }
                 });
+                if !self.confirm_shown {
+                    self.confirm_shown = true;
+                    row.response.scroll_to_me(Some(egui::Align::Center));
+                }
             }
         }
         act
@@ -1337,11 +1357,30 @@ impl TodoWindow {
                     serde_json::json!({}),
                 );
                 let gone = id.clone();
+                // The copy in the client folder says it is gone, so it is not shown later as
+                // still sent (walkthrough 2026-11-23).
+                let last = self.open.clone().filter(|l| l.id == id);
+                let root = self.root.clone();
+                let folder = self.folder.clone();
+                let copies = self.copies.clone();
                 self.job(
                     ctx,
                     s,
                     Some(e),
-                    move |p| p.delete_list(&id),
+                    move |p| {
+                        p.delete_list(&id)?;
+                        if let Some(l) = last {
+                            let l = TodoList {
+                                status: todo::STATUS_DELETED.into(),
+                                ..l
+                            };
+                            if let Some(c) = copy_of(&root, folder.as_deref(), &l, &p.actor_name())
+                            {
+                                let _ = copies.0.send(c);
+                            }
+                        }
+                        Ok(())
+                    },
                     move |()| Done::Deleted(gone),
                 );
             }
@@ -1351,7 +1390,17 @@ impl TodoWindow {
                     ctx,
                     s,
                     Some(e),
-                    move |p| p.remind(&id),
+                    move |p| {
+                        // The portal's limit on reminders is per list per day, not a wait of a
+                        // few minutes (walkthrough 2026-11-23).
+                        p.remind(&id).map_err(|e| match e.code() {
+                            Some("too_many_requests") => vf_portal::PortalError::Local(
+                                "This list was reminded 3 times today already. Try again tomorrow."
+                                    .into(),
+                            ),
+                            _ => e,
+                        })
+                    },
                     |n| {
                         Done::Said(match n {
                             0 => "Nobody could be told (no open items, or nobody with access)."
@@ -1597,6 +1646,11 @@ pub struct TemplatesPage {
     audit_rx: Receiver<AuditEntry>,
     /// The app's portal channel (recorded every frame, whatever page is shown: QA 2026-11-23).
     pub app_audit: Option<AuditOut>,
+    /// The app's channel for the copies of lists in client folders: a list sent from here is
+    /// copied like one sent from the client's window (walkthrough 2026-11-23).
+    pub app_copies: Option<CopyOut>,
+    /// Each client's folder (by client id), read with the clients.
+    folders: std::collections::HashMap<String, String>,
     /// The cabinet's portal settings, read at most every 30 s (often on a share).
     settings: Option<PortalSettings>,
     read_at: Option<std::time::Instant>,
@@ -1621,6 +1675,8 @@ impl Default for TemplatesPage {
             audit: AuditOut::new(tx),
             audit_rx: rx,
             app_audit: None,
+            app_copies: None,
+            folders: std::collections::HashMap::new(),
             settings: None,
             read_at: None,
             doc_types: std::rc::Rc::from([]),
@@ -1696,6 +1752,18 @@ pub fn filed_returns(
         (root.join(rel), label)
     })
     .collect()
+}
+
+/// Each client's folder, by client id (clients without one are left out).
+fn client_folders(conn: &vf_core::db::Connection) -> std::collections::HashMap<String, String> {
+    conn.prepare(
+        "SELECT id, folder_rel FROM client WHERE deleted_at IS NULL AND folder_rel IS NOT NULL",
+    )
+    .and_then(|mut st| {
+        st.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<Result<_, _>>()
+    })
+    .unwrap_or_default()
 }
 
 /// Doc type names offered in the item editor: not deleted, not archived (migration 011).
@@ -1799,6 +1867,7 @@ pub fn templates_page(
             })
             .collect();
         page.doc_types = doc_type_names(env.conn).into();
+        page.folders = client_folders(env.conn);
     }
     let doc_types = std::rc::Rc::clone(&page.doc_types);
     let busy = page.job.is_some();
@@ -2065,6 +2134,9 @@ pub fn templates_page(
             .filter(|(c, _)| new.client_ids.contains(&c.id))
             .map(|(c, _)| c.clone())
             .collect();
+        let copies = page.app_copies.clone();
+        let folders = page.folders.clone();
+        let root = env.root.to_path_buf();
         page.job = Some(spawn(&ctx, move || {
             let p = core::client(&s2);
             // Each client must be on the portal before a list can be sent to it: a few at a
@@ -2097,6 +2169,16 @@ pub fn templates_page(
                             None,
                             serde_json::json!({ "client_id": l.client_id, "list_id": l.id, "title": l.title, "items": l.total }),
                         ));
+                        if let Some(out) = &copies
+                            && let Some(c) = copy_of(
+                                &root,
+                                folders.get(&l.client_id).map(String::as_str),
+                                l,
+                                &p.actor_name(),
+                            )
+                        {
+                            let _ = out.0.send(c);
+                        }
                     }
                     TDone::Sent(made.len())
                 }

@@ -122,6 +122,7 @@ impl TodoList {
         match (self.status.as_str(), self.complete) {
             ("closed", _) => "Closed",
             ("cancelled", _) => "Cancelled",
+            (STATUS_DELETED, _) => "Deleted",
             (_, true) => "Open, every required item answered",
             _ => "Open",
         }
@@ -474,6 +475,10 @@ pub fn copy_line(
     )
 }
 
+/// The status a list's last copy line is given when the list is deleted from the portal (the
+/// portal keeps no deleted list; the copy says it is gone).
+pub const STATUS_DELETED: &str = "deleted";
+
 /// The latest copy of each list in a client folder (for when the portal cannot be reached).
 pub fn read_copies(root: &Path, folder_rel: &str) -> Vec<CopyLine> {
     let Ok(entries) = std::fs::read_dir(copy_dir(root, folder_rel)) else {
@@ -483,6 +488,9 @@ pub fn read_copies(root: &Path, folder_rel: &str) -> Vec<CopyLine> {
         .filter_map(std::result::Result::ok)
         .filter(|e| e.path().extension().is_some_and(|x| x == "jsonl"))
         .filter_map(|e| newest_copy(&e.path()))
+        // A list deleted from the portal (nobody had answered it) is not shown as if it were
+        // still sent; its file keeps the record (walkthrough 2026-11-23).
+        .filter(|c| c.list.status != STATUS_DELETED)
         .collect();
     out.sort_by(|a, b| b.list.created_at.cmp(&a.list.created_at));
     out
@@ -574,5 +582,12 @@ mod tests {
         assert_eq!(back.len(), 1);
         assert_eq!(back[0].list.status, "closed");
         assert_eq!(back[0].read_by, "PC2\\ann");
+        // Deleted from the portal: the last line says so, and the list is no longer shown.
+        let mut gone = changed.clone();
+        gone.status = STATUS_DELETED.into();
+        let third = copy_line(last_copy(&second).as_ref(), &gone, "later", "PC2\\ann").unwrap();
+        std::fs::write(&p, format!("{first}\n{second}\n{third}\n")).unwrap();
+        assert!(read_copies(t.path(), "Smith, John (1001)").is_empty());
+        assert_eq!(gone.status_words(), "Deleted");
     }
 }

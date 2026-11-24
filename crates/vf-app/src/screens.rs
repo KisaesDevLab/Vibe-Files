@@ -745,6 +745,671 @@ mod tests {
         .unwrap();
     }
 
+    /// PA-103 walkthrough of the other options, against a real Vibe Portal: Admin › To-do
+    /// templates (new, edit, send to several clients, delete), a list from a template with a bad
+    /// then good due day, reminders and nobody told, a blank list with items reordered, assigning,
+    /// editing every detail, close and open again, Delete then Keep it, the client-folder copies,
+    /// the portal out of reach, and to-do lists switched off on the portal and in Vibe Files.
+    /// Same variables as `todo_walkthrough`, plus `VF_WALK_PG` (the portal's Postgres container,
+    /// for the portal's own switch).
+    #[test]
+    #[ignore = "needs a running portal"]
+    fn todo_options_walkthrough() {
+        use egui_kittest::kittest::NodeT;
+        let (Ok(url), Ok(key), Ok(log), Ok(client_js), Ok(pdf), Ok(out), Ok(pg)) = (
+            std::env::var("VF_WALK_URL"),
+            std::env::var("VF_WALK_KEY"),
+            std::env::var("VF_WALK_LOG"),
+            std::env::var("VF_WALK_CLIENT"),
+            std::env::var("VF_WALK_PDF"),
+            std::env::var("VF_WALK_DIR"),
+            std::env::var("VF_WALK_PG"),
+        ) else {
+            return;
+        };
+        let out = std::path::PathBuf::from(out);
+        std::fs::create_dir_all(&out).unwrap();
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let emails = [
+            format!("jordan.sample+{stamp}@example.com"),
+            format!("casey.example+{stamp}@example.com"),
+        ];
+        let since_ms = stamp as i64 * 1000;
+        let mut steps: Vec<String> = Vec::new();
+        let mut note = |s: String| {
+            eprintln!("{s}");
+            steps.push(s);
+        };
+        let accept = |email: &str| -> bool {
+            std::process::Command::new("node")
+                .args([
+                    &client_js,
+                    &url,
+                    &out.display().to_string(),
+                    &log,
+                    email,
+                    "accept",
+                    &pdf,
+                ])
+                .status()
+                .is_ok_and(|s| s.success())
+        };
+        let mail = |to: &str| -> Vec<(String, String)> {
+            std::fs::read_to_string(&log)
+                .unwrap_or_default()
+                .lines()
+                .filter(|l| l.contains("\"msg\":\"notify ("))
+                .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+                .filter(|m| m["to"] == to && m["time"].as_i64().is_some_and(|t| t >= since_ms))
+                .map(|m| {
+                    (
+                        m["subject"].as_str().unwrap_or("").to_string(),
+                        m["body"].as_str().unwrap_or("").to_string(),
+                    )
+                })
+                .collect()
+        };
+        let psql = |sql: &str| {
+            let ok = std::process::Command::new("docker")
+                .args(["exec", &pg, "psql", "-U", "vibe", "-d", "walk", "-c", sql])
+                .output()
+                .is_ok_and(|o| o.status.success());
+            assert!(ok, "psql {sql}");
+        };
+
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path().join("Clients");
+        vf_fixtures::generate(&root, 5).unwrap();
+        crate::ui::test_util::pdfium_first();
+        let data = t.path().join("data");
+        drop(crate::session::open(&data, "dev", &root).unwrap());
+        let cab = vf_fs::cabinet::read(&root).unwrap().cabinet_id;
+        let s = vf_portal::PortalSettings::new(&cab, &url, &key, 0)
+            .unwrap()
+            .with_todo_lists(true);
+        vf_portal::settings::save(&root, &s).unwrap();
+        let d = data.clone();
+        let mut h = HarnessBuilder::default()
+            .with_max_steps(crate::ui::test_util::MAX_STEPS)
+            .with_theme(egui::Theme::Light)
+            .with_size([1440.0, 1000.0])
+            .build_eframe(move |cc| VibeFilesApp::new(&cc.egui_ctx, d.clone()));
+        h.run_steps(8);
+        let shot = |h: &mut egui_kittest::Harness<'static, VibeFilesApp>, name: &str| {
+            for _ in 0..5 {
+                h.step();
+            }
+            match h.render() {
+                Ok(img) => img.save(out.join(format!("{name}.png"))).unwrap(),
+                Err(e) => eprintln!("{name}: {e}"),
+            }
+        };
+        let click_last = |h: &mut egui_kittest::Harness<'static, VibeFilesApp>, label: &str| {
+            let n = h.query_all_by_role_and_label(Role::Button, label).count();
+            assert!(n > 0, "no button {label:?}");
+            h.query_all_by_role_and_label(Role::Button, label)
+                .last()
+                .unwrap()
+                .scroll_to_me();
+            h.run_steps(2);
+            h.query_all_by_role_and_label(Role::Button, label)
+                .last()
+                .unwrap()
+                .click();
+            h.run_steps(4);
+        };
+        let said = |h: &egui_kittest::Harness<'static, VibeFilesApp>, text: &str| {
+            h.query_all_by_label_contains(text).next().is_some()
+        };
+        // The text boxes shown, in order: (value, top y).
+        let inputs = |h: &egui_kittest::Harness<'static, VibeFilesApp>| -> Vec<(String, f32)> {
+            h.query_all_by_role(Role::TextInput)
+                .map(|n| (n.value().unwrap_or_default(), n.rect().top()))
+                .collect()
+        };
+        // Types `text` into the `n`th text box, replacing what it held.
+        let type_in =
+            |h: &mut egui_kittest::Harness<'static, VibeFilesApp>, n: usize, text: &str| {
+                h.query_all_by_role(Role::TextInput)
+                    .nth(n)
+                    .expect("the text box")
+                    .focus();
+                h.run_steps(2);
+                h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+                h.run_steps(1);
+                h.query_all_by_role(Role::TextInput)
+                    .nth(n)
+                    .unwrap()
+                    .type_text(text);
+                h.run_steps(3);
+            };
+        // Opens the combo box showing `now` (the `nth` such, from the last) and picks `pick`.
+        let pick = |h: &mut egui_kittest::Harness<'static, VibeFilesApp>, now: &str, pick: &str| {
+            // The choice is what the popup adds (a list row may carry the same words).
+            let before: Vec<_> = h
+                .query_all_by_label(pick)
+                .map(|n| n.accesskit_node().id())
+                .collect();
+            h.query_all_by_role(Role::ComboBox)
+                .rfind(|n| {
+                    let a = n.accesskit_node();
+                    a.value().as_deref() == Some(now) || a.label().as_deref() == Some(now)
+                })
+                .unwrap_or_else(|| panic!("no combo showing {now:?}"))
+                .click();
+            h.run_steps(4);
+            h.query_all_by_label(pick)
+                .rfind(|n| !before.contains(&n.accesskit_node().id()))
+                .unwrap_or_else(|| panic!("no choice {pick:?}"))
+                .click();
+            h.run_steps(4);
+        };
+        let p = crate::portal::client(&s);
+
+        h.get_by_role_and_label(Role::Button, "Open existing")
+            .click();
+        h.run_steps(8);
+        h.get_by_label("Cabinet folder").click();
+        h.step();
+        h.get_by_label("Cabinet folder")
+            .type_text(&root.display().to_string());
+        h.step();
+        h.get_by_role_and_label(Role::Button, "Open cabinet")
+            .click();
+        assert!(wait_for(&mut h, |h| matches!(
+            h.state().screen,
+            crate::app::Screen::Open(_)
+        )));
+        h.run_steps(8);
+        let clients: Vec<_> = open_mut(&mut h).browse.snap.clients[..2].to_vec();
+        for (c, email) in clients.iter().zip(&emails) {
+            p.put_client(&c.id, &c.ext_id, &c.name, None).unwrap();
+            p.invite(&c.id, Some(email), None, "Sample Person", "Owner")
+                .unwrap();
+            assert!(accept(email), "{email} accepts the invitation");
+        }
+        // The lists of an earlier run go first (none has answers).
+        for c in &clients {
+            for l in p.todo_lists(&c.id).unwrap() {
+                p.delete_list(&l.id).unwrap();
+            }
+        }
+        note(format!(
+            "Setup: {} and {} each have a person on the portal",
+            clients[0].name, clients[1].name
+        ));
+
+        // Templates are firm-wide: those of an earlier run go first.
+        for t in p.todo_templates().unwrap() {
+            p.delete_template(&t.id).unwrap();
+        }
+
+        // ---- A. Admin › To-do templates: a new template.
+        h.get_by_role_and_label(Role::Button, "Admin").click();
+        h.run_steps(8);
+        h.get_by_role_and_label(Role::Button, "Portal").click();
+        h.run_steps(8);
+        h.get_by_role_and_label(Role::Button, "To-do templates")
+            .click();
+        assert!(wait_for(&mut h, |h| said(h, "No templates yet.")));
+        click_last(&mut h, "+ New template");
+        let before = inputs(&h).len();
+        // Name, note, the first item's wording.
+        type_in(&mut h, before - 3, "Bank loan package");
+        type_in(&mut h, before - 2, "For the bank, by the 1st please.");
+        type_in(
+            &mut h,
+            before - 1,
+            "Last two years of business bank statements",
+        );
+        h.get_by_role_and_label(Role::Button, "+ Add item").click();
+        h.run_steps(4);
+        type_in(&mut h, before, "What is the loan for?");
+        pick(&mut h, "Documents", "An answer");
+        // The second item is optional.
+        h.query_all_by_role(Role::CheckBox).last().unwrap().click();
+        h.run_steps(4);
+        shot(&mut h, "o01-template-new");
+        click_last(&mut h, "Save template");
+        assert!(wait_for(&mut h, |h| said(h, "Template saved.")));
+        let saved = p.todo_templates().unwrap();
+        note(format!(
+            "A. Template saved: {:?}",
+            saved
+                .iter()
+                .map(|t| (
+                    &t.name,
+                    t.items
+                        .iter()
+                        .map(|i| (&i.kind, &i.prompt, i.required))
+                        .collect::<Vec<_>>()
+                ))
+                .collect::<Vec<_>>()
+        ));
+        assert_eq!(saved.len(), 1);
+        assert_eq!(saved[0].items.len(), 2);
+        assert_eq!(saved[0].items[1].kind, "text");
+        assert!(!saved[0].items[1].required);
+
+        // ---- B. Edit it: renamed.
+        click_last(&mut h, "Edit");
+        h.run_steps(4);
+        let n = inputs(&h)
+            .iter()
+            .position(|(v, _)| v == "Bank loan package")
+            .expect("the name box");
+        type_in(&mut h, n, "Bank loan package 2027");
+        click_last(&mut h, "Save template");
+        assert!(wait_for(&mut h, |h| said(h, "Template saved.")
+            && said(h, "Bank loan package 2027")));
+        let saved = p.todo_templates().unwrap();
+        assert_eq!(saved[0].name, "Bank loan package 2027");
+        assert_eq!(saved.len(), 1, "edited, not added");
+        note("B. Template renamed (one template, same items)".into());
+
+        // ---- C. Send it to two clients.
+        click_last(&mut h, "Send to clients…");
+        h.run_steps(4);
+        for c in &clients {
+            h.get_by_label(&format!("{}  {}", c.name, c.ext_id)).click();
+            h.run_steps(2);
+        }
+        let due = inputs(&h)
+            .iter()
+            .rposition(|(v, _)| v.is_empty())
+            .expect("the due box");
+        type_in(&mut h, due, "2027-02-01");
+        shot(&mut h, "o02-template-send");
+        click_last(&mut h, "Send to 2 clients");
+        assert!(wait_for(&mut h, |h| said(h, "Sent to 2 clients.")));
+        shot(&mut h, "o03-template-sent");
+        for (c, email) in clients.iter().zip(&emails) {
+            let lists = p.todo_lists(&c.id).unwrap();
+            assert!(
+                lists.iter().any(|l| l.title == "Bank loan package 2027"
+                    && l.due_date.as_deref() == Some("2027-02-01")),
+                "{} has the list",
+                c.name
+            );
+            assert!(
+                mail(email)
+                    .iter()
+                    .any(|m| m.1.contains("has sent you a to-do list")),
+                "{email} is told"
+            );
+        }
+        // Each client's folder gets its copy, as from the client's own window.
+        let copies_of = |h: &mut egui_kittest::Harness<'static, VibeFilesApp>, i: usize| {
+            let rel = open_mut(h).browse.snap.clients[i]
+                .folder_rel
+                .clone()
+                .expect("a client folder");
+            std::fs::read_dir(root.join(rel).join("_Vibe").join("todo"))
+                .map(|d| d.flatten().count())
+                .unwrap_or(0)
+        };
+        h.run_steps(10);
+        assert_eq!(
+            copies_of(&mut h, 0),
+            1,
+            "a copy in the first client's folder"
+        );
+        assert_eq!(
+            copies_of(&mut h, 1),
+            1,
+            "a copy in the second client's folder"
+        );
+        note("C. Sent to both clients: each has the list (due 2027-02-01), was emailed, and has its copy in its folder".into());
+
+        // ---- E. The client's window: the list sent from Admin shows; a list from the template.
+        h.get_by_role_and_label(Role::Button, "Browse").click();
+        h.run_steps(6);
+        {
+            let o = open_mut(&mut h);
+            o.browse.set_scope(vf_core::browse::Scope::Client(0));
+            o.browse.portal.reread();
+        }
+        h.run_steps(6);
+        h.get_by_role_and_label(Role::Button, "To-do lists…")
+            .click();
+        assert!(wait_for(&mut h, |h| said(h, "Bank loan package 2027")));
+        h.run_steps(4);
+        pick(&mut h, "From a template…", "Bank loan package 2027");
+        assert!(
+            h.query_by_role_and_label(Role::Button, "Send the list")
+                .is_some()
+        );
+        let mails_before = mail(&emails[0]).len();
+        let due = inputs(&h)
+            .iter()
+            .rposition(|(v, _)| v.is_empty())
+            .expect("the due box");
+        type_in(&mut h, due, "3/15/2027");
+        assert!(said(&h, "Write the day as 2027-03-15"));
+        assert!(
+            h.get_by_role_and_label(Role::Button, "Send the list")
+                .accesskit_node()
+                .is_disabled(),
+            "a bad day cannot be sent"
+        );
+        shot(&mut h, "o04-bad-due-day");
+        type_in(&mut h, due, "2027-03-15");
+        assert!(!said(&h, "Write the day as 2027-03-15"));
+        pick(&mut h, "Never", "Every 7 days while items are open");
+        h.get_by_label("Tell the client's people now (email or text, as each chose)")
+            .click();
+        h.run_steps(4);
+        shot(&mut h, "o05-from-template-filled");
+        click_last(&mut h, "Send the list");
+        assert!(wait_for(&mut h, |h| said(h, "The list was sent.")));
+        h.run_steps(6);
+        shot(&mut h, "o06-from-template-sent");
+        let lists = p.todo_lists(&clients[0].id).unwrap();
+        let made = lists
+            .iter()
+            .find(|l| l.due_date.as_deref() == Some("2027-03-15"))
+            .expect("the list from the template");
+        assert_eq!(made.remind_every_days, 7);
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        assert_eq!(
+            mail(&emails[0]).len(),
+            mails_before,
+            "nobody is told when unticked"
+        );
+        note("E. From a template: a bad due day is refused; sent with reminders every 7 days and nobody told (no email)".into());
+
+        // ---- E2. Remind now, past the portal's limit of 3 a day for one list.
+        for n in 1..=4 {
+            click_last(&mut h, "Remind now");
+            assert!(wait_for(&mut h, |h| h
+                .query_by_role_and_label(Role::Button, "Remind now")
+                .is_some_and(|b| !b.accesskit_node().is_disabled())
+                && (said(h, "reminded") || said(h, "Try again tomorrow"))));
+            if n < 4 {
+                assert!(said(&h, "1 person was reminded."), "reminder {n}");
+            }
+        }
+        assert!(said(
+            &h,
+            "This list was reminded 3 times today already. Try again tomorrow."
+        ));
+        shot(&mut h, "o06b-remind-limit");
+        note("E2. Remind now three times: each told 1 person; the fourth says \"reminded 3 times today already. Try again tomorrow.\"".into());
+
+        // ---- F. A blank list: two answers, reordered.
+        click_last(&mut h, "Hide");
+        click_last(&mut h, "+ New list");
+        let n = inputs(&h).len();
+        // Title, note, due, the first item.
+        type_in(&mut h, n - 4, "Questions for 2026");
+        type_in(&mut h, n - 1, "Did you buy or sell a home in 2026?");
+        pick(&mut h, "Documents", "An answer");
+        h.get_by_role_and_label(Role::Button, "+ Add item").click();
+        h.run_steps(4);
+        type_in(&mut h, n, "Any new dependents?");
+        pick(&mut h, "Documents", "An answer");
+        // The second goes first.
+        h.query_all_by_role_and_label(Role::Button, "↑")
+            .last()
+            .unwrap()
+            .click();
+        h.run_steps(4);
+        shot(&mut h, "o07-blank-list");
+        click_last(&mut h, "Send the list");
+        assert!(wait_for(&mut h, |h| said(h, "The list was sent.")));
+        h.run_steps(6);
+        let lists = p.todo_lists(&clients[0].id).unwrap();
+        let q = lists
+            .iter()
+            .find(|l| l.title == "Questions for 2026")
+            .expect("the blank list");
+        let q = p.todo_list(&q.id).unwrap();
+        assert_eq!(
+            q.items
+                .iter()
+                .map(|i| i.prompt.as_str())
+                .collect::<Vec<_>>(),
+            ["Any new dependents?", "Did you buy or sell a home in 2026?"]
+        );
+        assert!(q.items.iter().all(|i| i.kind == "text"));
+        assert!(
+            mail(&emails[0])
+                .iter()
+                .any(|m| m.1.contains("has sent you a to-do list") && m.0.contains("2 items")),
+            "told of the 2 items: {:?}",
+            mail(&emails[0])
+        );
+        note("F. Blank list of two answers, reordered, sent and emailed".into());
+
+        // ---- G. Assign it from the open list, then no one.
+        pick(&mut h, "No one", "Pat Preparer");
+        assert!(wait_for(&mut h, |h| said(
+            h,
+            "Pat Preparer is told when the client answers."
+        )));
+        assert!(p.todo_list(&q.id).unwrap().assigned_staff_id.is_some());
+        pick(&mut h, "Pat Preparer", "No one");
+        assert!(wait_for(&mut h, |h| said(h, "No one is assigned now.")));
+        assert!(p.todo_list(&q.id).unwrap().assigned_staff_id.is_none());
+        note("G. Assigned to Pat Preparer from the open list, then to no one".into());
+
+        // ---- H. Edit every detail: title, note, due day, reminders, an item added.
+        click_last(&mut h, "Edit");
+        assert!(wait_for(&mut h, |h| h
+            .query_by_role_and_label(Role::Button, "Save")
+            .is_some()));
+        let at = |h: &egui_kittest::Harness<'static, VibeFilesApp>, v: &str| {
+            inputs(h).iter().position(|(x, _)| x == v).unwrap()
+        };
+        let title = at(&h, "Questions for 2026");
+        type_in(&mut h, title, "Questions for your 2026 return");
+        type_in(&mut h, title + 1, "Short answers are fine.");
+        type_in(&mut h, title + 2, "2027-04-01");
+        pick(&mut h, "Never", "Every 3 days while items are open");
+        h.query_all_by_role_and_label(Role::Button, "+ Add item")
+            .last()
+            .unwrap()
+            .click();
+        h.run_steps(4);
+        let n = inputs(&h).len();
+        type_in(&mut h, n - 1, "Your bank's routing number for the refund");
+        shot(&mut h, "o08-editing-details");
+        click_last(&mut h, "Save");
+        assert!(wait_for(&mut h, |h| said(h, "Saved.")));
+        h.run_steps(4);
+        let e = p.todo_list(&q.id).unwrap();
+        note(format!(
+            "H. Edited: title {:?}, note {:?}, due {:?}, reminders every {} days, {} items",
+            e.title,
+            e.note,
+            e.due_date,
+            e.remind_every_days,
+            e.items.len()
+        ));
+        assert_eq!(e.title, "Questions for your 2026 return");
+        assert_eq!(e.note, "Short answers are fine.");
+        assert_eq!(e.due_date.as_deref(), Some("2027-04-01"));
+        assert_eq!(e.remind_every_days, 3);
+        assert_eq!(e.items.len(), 3);
+        shot(&mut h, "o09-edited");
+
+        // ---- I. Close, then open again.
+        click_last(&mut h, "Close");
+        assert!(wait_for(&mut h, |h| h
+            .query_by_role_and_label(Role::Button, "Open again")
+            .is_some()));
+        h.run_steps(4);
+        shot(&mut h, "o10-closed");
+        assert_eq!(p.todo_list(&q.id).unwrap().status, "closed");
+        assert!(
+            h.query_by_role_and_label(Role::Button, "Remind now")
+                .is_none()
+        );
+        click_last(&mut h, "Open again");
+        assert!(wait_for(&mut h, |h| h
+            .query_by_role_and_label(Role::Button, "Remind now")
+            .is_some()));
+        assert_eq!(p.todo_list(&q.id).unwrap().status, "open");
+        note("I. Closed (no Remind/Edit offered), then opened again".into());
+
+        // ---- J. Delete, Keep it; then Delete.
+        click_last(&mut h, "Delete");
+        assert!(said(&h, "Delete this list? Nobody has answered it."));
+        click_last(&mut h, "Keep it");
+        assert!(!said(&h, "Delete this list?"));
+        assert!(p.todo_list(&q.id).is_ok(), "kept");
+        click_last(&mut h, "Delete");
+        click_last(&mut h, "Delete");
+        assert!(wait_for(&mut h, |h| said(h, "The list was deleted.")));
+        assert!(p.todo_list(&q.id).is_err(), "gone from the portal");
+        note("J. Delete → Keep it kept the list; Delete → Delete removed it".into());
+
+        // ---- K. The copies in the client folder; the audit rows.
+        h.run_steps(10);
+        let folder = root.join(
+            open_mut(&mut h).browse.snap.clients[0]
+                .folder_rel
+                .clone()
+                .expect("a client folder"),
+        );
+        let copies: Vec<String> = std::fs::read_dir(folder.join("_Vibe").join("todo"))
+            .map(|d| {
+                d.flatten()
+                    .map(|e| e.file_name().to_string_lossy().into_owned())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let audit: Vec<String> = {
+            let conn = &open_mut(&mut h).opened.conn;
+            let mut st = conn
+                .prepare("SELECT action FROM audit WHERE action LIKE 'portal_todo%' ORDER BY seq")
+                .unwrap();
+            st.query_map([], |r| r.get(0)).unwrap().flatten().collect()
+        };
+        note(format!(
+            "K. Copies in the client folder: {copies:?}; audit rows: {audit:?}"
+        ));
+        assert!(!copies.is_empty(), "a copy of each list read");
+
+        // ---- L. The portal out of reach: the copies are shown.
+        open_mut(&mut h).browse.portal.todo = None;
+        h.run_steps(4);
+        let dead = vf_portal::PortalSettings::new(&cab, "http://127.0.0.1:9", &key, 0)
+            .unwrap()
+            .with_todo_lists(true);
+        vf_portal::settings::save(&root, &dead).unwrap();
+        open_mut(&mut h).browse.portal.reread();
+        h.run_steps(6);
+        h.get_by_role_and_label(Role::Button, "To-do lists…")
+            .click();
+        assert!(wait_for(&mut h, |h| said(
+            h,
+            "The portal cannot be reached"
+        )));
+        h.run_steps(6);
+        shot(&mut h, "o11-offline-copies");
+        note(format!(
+            "L. Portal out of reach: copies shown: {}",
+            said(&h, "Bank loan package 2027")
+        ));
+        assert!(
+            said(&h, "As read "),
+            "a copy is shown with when it was read"
+        );
+        assert!(
+            !said(&h, "Questions for your 2026 return"),
+            "the deleted list is not shown"
+        );
+        vf_portal::settings::save(&root, &s).unwrap();
+        open_mut(&mut h).browse.portal.todo = None;
+        open_mut(&mut h).browse.portal.reread();
+        h.run_steps(6);
+
+        // ---- M. Switched off on the portal: Vibe Files says so.
+        psql("update firm set requests_enabled=false");
+        h.get_by_role_and_label(Role::Button, "To-do lists…")
+            .click();
+        h.run_steps(4);
+        assert!(wait_for(&mut h, |h| said(
+            h,
+            "To-do lists are turned off on the portal"
+        )));
+        h.run_steps(6);
+        shot(&mut h, "o12-portal-switched-off");
+        note("M. Portal switch off: Vibe Files says \"To-do lists are turned off on the portal: an admin turns them on in the portal's Settings.\"".into());
+        psql("update firm set requests_enabled=true");
+        click_last(&mut h, "Try again");
+        assert!(wait_for(&mut h, |h| h
+            .query_by_role_and_label(Role::Button, "+ New list")
+            .is_some()));
+        note("M. Once on again, Try again reads the lists".into());
+        open_mut(&mut h).browse.portal.todo = None;
+        h.run_steps(4);
+
+        // ---- N. Switched off in Vibe Files: no button, the templates page says so.
+        vf_portal::settings::save(&root, &s.clone().with_todo_lists(false)).unwrap();
+        open_mut(&mut h).browse.portal.reread();
+        h.run_steps(8);
+        assert!(
+            h.query_by_role_and_label(Role::Button, "To-do lists…")
+                .is_none(),
+            "no To-do lists… button when off"
+        );
+        h.get_by_role_and_label(Role::Button, "Admin").click();
+        h.run_steps(6);
+        if let Some(a) = &mut open_mut(&mut h).admin {
+            a.todo_templates.reread();
+        }
+        h.get_by_role_and_label(Role::Button, "To-do templates")
+            .click();
+        h.run_steps(8);
+        assert!(said(&h, "To-do lists are off for this cabinet."));
+        shot(&mut h, "o13-vf-switched-off");
+        note(
+            "N. Off in Vibe Files: no To-do lists… button; the templates page says they are off"
+                .into(),
+        );
+
+        // ---- D. Back on: the template deleted (Keep, then Delete); lists sent stay.
+        vf_portal::settings::save(&root, &s).unwrap();
+        if let Some(a) = &mut open_mut(&mut h).admin {
+            a.todo_templates.reread();
+        }
+        h.run_steps(40);
+        assert!(wait_for(&mut h, |h| said(h, "Bank loan package 2027")));
+        click_last(&mut h, "Delete");
+        assert!(said(&h, "Delete it?"));
+        click_last(&mut h, "Keep");
+        assert!(!said(&h, "Delete it?"));
+        click_last(&mut h, "Delete");
+        h.query_all_by_role_and_label(Role::Button, "Delete")
+            .last()
+            .unwrap()
+            .click();
+        assert!(wait_for(&mut h, |h| said(
+            h,
+            "Template deleted; lists already sent are kept."
+        )));
+        shot(&mut h, "o14-template-deleted");
+        assert!(p.todo_templates().unwrap().is_empty());
+        assert!(
+            p.todo_lists(&clients[1].id)
+                .unwrap()
+                .iter()
+                .any(|l| l.title == "Bank loan package 2027")
+        );
+        note("D. Template deleted after Keep; the lists sent from it stay".into());
+
+        std::fs::write(
+            out.join("vf-options.json"),
+            serde_json::to_string_pretty(&steps).unwrap(),
+        )
+        .unwrap();
+    }
+
     /// A portal on this PC answering the to-do calls with invented data; its address.
     fn fake_todo_portal() -> String {
         use std::io::{BufRead, BufReader, Read, Write};

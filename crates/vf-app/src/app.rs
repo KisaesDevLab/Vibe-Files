@@ -928,6 +928,9 @@ impl eframe::App for VibeFilesApp {
                 if a.todo_templates.app_audit.is_none() {
                     a.todo_templates.app_audit = Some(o.browse.portal.audit_out());
                 }
+                if a.todo_templates.app_copies.is_none() {
+                    a.todo_templates.app_copies = Some(o.browse.portal.todo_out());
+                }
                 if std::mem::take(&mut a.portal.changed) {
                     o.browse.portal.reread();
                 }
