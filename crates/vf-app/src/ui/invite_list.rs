@@ -1,6 +1,6 @@
 //! Admin › Portal › Invite from client list (PA-105, owner 2026-11-24).
 //!
-//! The client CSV's emails and cells (`vf_fs::contacts`, read fresh from the CSV) beside who is
+//! The clients' stored emails and cells (`vf_fs::contacts`: the CSV's, or typed) beside who is
 //! on the portal already (Vibe-Portal P111 `GET /contacts`, one read): staff tick the people to
 //! invite and press one button. Invitations go out in groups (20 by default) with a pause
 //! between them, so the firm's email provider does not take them for spam (owner 2026-11-24).
@@ -304,13 +304,16 @@ struct Run {
     stop: Arc<AtomicBool>,
 }
 
-type Loaded = Result<Vec<ClientLine>, String>;
+/// The clients with contacts, and how many have none.
+type Loaded = Result<(Vec<ClientLine>, usize), String>;
 
 pub struct InvitePage {
     settings: Option<PortalSettings>,
     read_at: Option<Instant>,
     loading: Option<Receiver<Loaded>>,
     rows: Option<Vec<ClientLine>>,
+    /// Clients of the list with no email or cell.
+    without: usize,
     /// Ticked people: (client id, index in its lines).
     ticked: BTreeSet<(String, usize)>,
     show_all: bool,
@@ -338,6 +341,7 @@ impl Default for InvitePage {
             read_at: None,
             loading: None,
             rows: None,
+            without: 0,
             ticked: BTreeSet::new(),
             show_all: false,
             partner: None,
@@ -357,7 +361,7 @@ impl Default for InvitePage {
 
 fn load_job(ctx: &egui::Context, s: PortalSettings, root: PathBuf) -> Receiver<Loaded> {
     spawn(ctx, move || {
-        let csv = vf_fs::contacts::read(&root)?;
+        let (csv, none) = vf_fs::contacts::read(&root)?;
         let portal = core::client(&s).contacts().map_err(|e| {
             if e.status() == Some(404) {
                 "This portal is too old to invite from the client list: update it to 0.5.2 or later."
@@ -366,7 +370,7 @@ fn load_job(ctx: &egui::Context, s: PortalSettings, root: PathBuf) -> Receiver<L
                 e.message()
             }
         })?;
-        Ok(csv
+        let rows = csv
             .into_iter()
             .map(|c| {
                 let p = portal
@@ -374,12 +378,13 @@ fn load_job(ctx: &egui::Context, s: PortalSettings, root: PathBuf) -> Receiver<L
                     .find(|p| p.id.eq_ignore_ascii_case(&c.client_id));
                 compare(c, p)
             })
-            .collect())
+            .collect();
+        Ok((rows, none))
     })
 }
 
 impl InvitePage {
-    /// Read the CSV and the portal again (the page was entered, or Read again).
+    /// Read the contacts and the portal again (the page was entered, or Read again).
     pub fn reread(&mut self) {
         if self.run.is_none() {
             self.rows = None;
@@ -473,7 +478,7 @@ pub fn page(ui: &mut egui::Ui, page: &mut InvitePage, env: &mut crate::ui::brows
     let ctx = ui.ctx().clone();
     ui.heading("Invite from client list");
     ui.label(widgets::caption(
-        "The emails and cells come from the client CSV (choose its columns under Portal contacts in Import clients CSV…). \
+        "The emails and cells are the clients' Portal contacts: from the client CSV at its last Import, or typed in a client's panel. \
          Tick who to invite and press Invite: each client is put on the portal and its people are sent an invitation. \
          A joint couple gets two logins, or one in both names when they share an email.",
     ));
@@ -540,7 +545,8 @@ pub fn page(ui: &mut egui::Ui, page: &mut InvitePage, env: &mut crate::ui::brows
     {
         page.loading = None;
         match r {
-            Ok(rows) => {
+            Ok((rows, without)) => {
+                page.without = without;
                 page.ticked = rows
                     .iter()
                     .flat_map(|r| {
@@ -562,7 +568,7 @@ pub fn page(ui: &mut egui::Ui, page: &mut InvitePage, env: &mut crate::ui::brows
     if page.loading.is_some() {
         ui.horizontal(|ui| {
             ui.spinner();
-            ui.label(widgets::caption("Reading the client CSV and the portal…"));
+            ui.label(widgets::caption("Reading the contacts and the portal…"));
         });
         return;
     }
@@ -640,9 +646,10 @@ pub fn page(ui: &mut egui::Ui, page: &mut InvitePage, env: &mut crate::ui::brows
             page.ticked.clear();
         }
         ui.label(widgets::caption(format!(
-            "{} clients shown of {}",
+            "{} clients shown of {} with contacts; {} without an email or cell",
             shown.len(),
-            rows.len()
+            rows.len(),
+            page.without
         )));
     });
     if !problems.is_empty() {

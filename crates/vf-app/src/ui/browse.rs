@@ -476,6 +476,8 @@ pub struct Browse {
     reveal: Option<String>,
     /// The client panel's Partner box while typing: (client uuid, text).
     pub partner_draft: Option<(String, String)>,
+    /// PA-105: the shown client's Portal contacts, read when the box is opened.
+    pub contacts_box: Option<crate::ui::client_panel::ContactsBox>,
     /// The client panel's B2 sync choice, as read for this client: (client uuid, choice).
     pub b2_choice: Option<(String, Option<String>, std::time::Instant)>,
     /// A client edit's catalog update running (it reads every client folder), and whether
@@ -713,6 +715,7 @@ impl Browse {
             reveal: None,
             width_drag: (None, None),
             partner_draft: None,
+            contacts_box: None,
             b2_choice: None,
             client_sync: None,
             client_sync_again: false,
@@ -8141,6 +8144,74 @@ Petty cash,1234.50
 2002,Baker Trust
 "
         );
+    }
+
+    /// PA-105 (owner 2026-11-24): the CSV's contact columns are kept at Import, a re-import
+    /// shows what changes first, and contacts typed in the panel win over the CSV.
+    #[test]
+    fn portal_contacts_from_the_csv_and_typed_in_the_panel() {
+        let mut h = cabinet_harness();
+        let csv = write_csv(
+            &h,
+            "ClientID,Name,TP Email,TP Cell\n1001,\"Sample, John\",john@example.test,555-201-0001\n",
+        );
+        click(&mut h, "Import clients CSV…");
+        type_into(&mut h, "CSV file", &csv);
+        click(&mut h, "Read");
+        // The usual header names are chosen for you.
+        assert!(h.query_by_label("TP Email").is_some());
+        assert!(
+            h.query_by_label_contains("Changes in this CSV: 1 new")
+                .is_some()
+        );
+        click(&mut h, "Import 1 rows (one transaction)");
+        let root = h.state().root.clone();
+        std::fs::remove_file(&csv).unwrap();
+        let (got, _) = vf_fs::contacts::read(&root).unwrap();
+        assert_eq!(got[0].planned.people[0].by(), "john@example.test");
+
+        click(&mut h, "Sample, John  1001");
+        h.get_by_label("PORTAL CONTACTS").click();
+        h.run();
+        assert!(
+            h.query_by_label_contains("Taxpayer: john@example.test")
+                .is_some()
+        );
+        click(&mut h, "Edit contacts…");
+        type_into(&mut h, "Spouse first name", "Jane");
+        type_into(&mut h, "Spouse email", "jane@example.test");
+        click(&mut h, "Save contacts");
+        assert!(
+            h.query_by_label_contains("Spouse: Jane (typed) · jane@example.test (typed)")
+                .is_some()
+        );
+        assert!(
+            h.query_by_label_contains("Typed here, kept over the CSV")
+                .is_some()
+        );
+
+        // A re-import that changes the email: shown first, applied on Import; typed ones stay.
+        let csv = write_csv(
+            &h,
+            "ClientID,Name,TP Email,TP Cell\n1001,\"Sample, John\",john.new@example.test,555-201-0001\n",
+        );
+        click(&mut h, "Import clients CSV…");
+        type_into(&mut h, "CSV file", &csv);
+        click(&mut h, "Read");
+        assert!(
+            h.query_by_label_contains("Email: john@example.test → john.new@example.test")
+                .is_some()
+        );
+        let id = got[0].client_id.clone();
+        assert_eq!(
+            vf_fs::contacts::record(&root, &id).unwrap().csv.email,
+            "john@example.test",
+            "nothing changes before Import"
+        );
+        click(&mut h, "Import 1 rows (one transaction)");
+        let rec = vf_fs::contacts::record(&root, &id).unwrap();
+        assert_eq!(rec.effective().email, "john.new@example.test");
+        assert_eq!(rec.effective().spouse_email, "jane@example.test");
     }
 
     /// P01 step 3: entity type and relationships from the client inspector.

@@ -1,18 +1,23 @@
-//! Portal contacts from the client CSV (PA-105, owner 2026-11-24).
+//! Portal contacts of each client (PA-105, owner 2026-11-24).
 //!
-//! The firm's client CSV (the one Intake › Setup and Admin's import read) may carry each
-//! client's email and cell, and the spouse's. Which columns hold them is saved in
-//! `clients.vf.json` ([`ContactColumns`]); the values are read from the CSV each time they are
-//! needed, never copied into the cabinet, so a CSV updated by the tax software is what counts.
+//! The taxpayer's and spouse's name, email and cell, kept in `clients.vf.json` by client uuid
+//! ([`ContactRecord`]): what the client CSV said at the last **Import** (its columns chosen
+//! under Portal contacts, [`ContactColumns`]) and what staff typed in the client panel, which
+//! wins over the CSV until cleared (owner 2026-11-24: "Stored in _Vibe", "hand edits win").
+//! The CSV is not needed after the import. Intake's own re-reads of the CSV never change them:
+//! only Import does, after showing what changes ([`preview`]).
+//!
 //! Nothing here talks to the portal: [`people_of`] says who would be invited, and Admin ›
 //! Portal › Invite from client list compares that with the portal.
 
+use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 
-use filer_core::clients::read_csv;
+use filer_core::clients::{ClientList, CsvTable};
+use filer_core::config::ColumnMap;
 use serde::{Deserialize, Serialize};
 
-use crate::clients::{load, master_dir, partner_of, save_meta};
+use crate::clients::{load, partner_of, save_meta};
 
 /// The client CSV's columns holding portal contacts; `None`: not in this CSV.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -196,17 +201,353 @@ impl Invitee {
     }
 }
 
-/// One client's row of the CSV, as far as contacts go.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+/// One client's contacts: as the CSV gave them, or as they are after hand edits.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Row {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub first: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub last: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub email: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub cell: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub spouse_first: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub spouse_last: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub spouse_email: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub spouse_cell: String,
+}
+
+/// The fields of a [`Row`]: key (as kept in `hand`) and the words for it.
+pub const FIELDS: [(&str, &str); 8] = [
+    ("first", "Taxpayer first name"),
+    ("last", "Taxpayer last name"),
+    ("email", "Email"),
+    ("cell", "Cell phone"),
+    ("spouse_first", "Spouse first name"),
+    ("spouse_last", "Spouse last name"),
+    ("spouse_email", "Spouse email"),
+    ("spouse_cell", "Spouse cell"),
+];
+
+impl Row {
+    pub fn get(&self, key: &str) -> &str {
+        match key {
+            "first" => &self.first,
+            "last" => &self.last,
+            "email" => &self.email,
+            "cell" => &self.cell,
+            "spouse_first" => &self.spouse_first,
+            "spouse_last" => &self.spouse_last,
+            "spouse_email" => &self.spouse_email,
+            "spouse_cell" => &self.spouse_cell,
+            _ => "",
+        }
+    }
+
+    pub fn get_mut(&mut self, key: &str) -> Option<&mut String> {
+        Some(match key {
+            "first" => &mut self.first,
+            "last" => &mut self.last,
+            "email" => &mut self.email,
+            "cell" => &mut self.cell,
+            "spouse_first" => &mut self.spouse_first,
+            "spouse_last" => &mut self.spouse_last,
+            "spouse_email" => &mut self.spouse_email,
+            "spouse_cell" => &mut self.spouse_cell,
+            _ => return None,
+        })
+    }
+
+    pub fn is_empty(&self) -> bool {
+        FIELDS.iter().all(|(k, _)| self.get(k).trim().is_empty())
+    }
+
+    /// An email or cell for anyone.
+    pub fn has_contact(&self) -> bool {
+        ["email", "cell", "spouse_email", "spouse_cell"]
+            .iter()
+            .any(|k| !self.get(k).trim().is_empty())
+    }
+}
+
+/// A client's contacts in `clients.vf.json`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContactRecord {
+    /// What the client CSV said at the last Import.
+    #[serde(default, skip_serializing_if = "Row::is_empty")]
+    pub csv: Row,
+    /// Fields staff typed (key from [`FIELDS`] → value; an empty value: cleared by hand). They
+    /// win over `csv` until cleared.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub hand: BTreeMap<String, String>,
+}
+
+impl ContactRecord {
+    /// The contacts in use: each field typed by hand, else the CSV's.
+    pub fn effective(&self) -> Row {
+        let mut r = self.csv.clone();
+        for (k, v) in &self.hand {
+            if let Some(f) = r.get_mut(k) {
+                *f = v.clone();
+            }
+        }
+        r
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.csv.is_empty() && self.hand.is_empty()
+    }
+}
+
+/// A client's stored contacts (none: empty).
+pub fn record(root: &Path, client_id: &str) -> Result<ContactRecord, String> {
+    Ok(load(root)?
+        .meta
+        .contacts
+        .get(client_id)
+        .cloned()
+        .unwrap_or_default())
+}
+
+/// Saves what staff typed for a client: each field of `row` that differs from the CSV's is kept
+/// as typed by hand; a field equal to the CSV's goes back to following the CSV.
+pub fn set_by_hand(root: &Path, client_id: &str, row: &Row) -> Result<ContactRecord, String> {
+    crate::lock::with(root, "clients", "the client list", || {
+        let mut m = load(root)?;
+        let rec = m.meta.contacts.entry(client_id.to_string()).or_default();
+        rec.hand.clear();
+        for (k, _) in FIELDS {
+            let v = row.get(k).trim();
+            if v != rec.csv.get(k).trim() {
+                rec.hand.insert(k.to_string(), v.to_string());
+            }
+        }
+        let out = rec.clone();
+        if out.is_empty() {
+            m.meta.contacts.remove(client_id);
+        }
+        save_meta(root, &m.meta)?;
+        Ok(out)
+    })
+}
+
+/// Drops a client's hand edits: its contacts follow the CSV again.
+pub fn clear_hand(root: &Path, client_id: &str) -> Result<ContactRecord, String> {
+    crate::lock::with(root, "clients", "the client list", || {
+        let mut m = load(root)?;
+        let mut out = ContactRecord::default();
+        if let Some(rec) = m.meta.contacts.get_mut(client_id) {
+            rec.hand.clear();
+            out = rec.clone();
+            if rec.is_empty() {
+                m.meta.contacts.remove(client_id);
+            }
+        }
+        save_meta(root, &m.meta)?;
+        Ok(out)
+    })
+}
+
+/// Each CSV row's contacts by its client ID (as written in the ID column), with `cols`.
+pub fn csv_rows(
+    table: &CsvTable,
+    map: &ColumnMap,
+    cols: &ContactColumns,
+) -> Result<HashMap<String, Row>, String> {
+    let col = |h: &Option<String>| -> Result<Option<usize>, String> {
+        match h {
+            None => Ok(None),
+            Some(h) => table
+                .headers
+                .iter()
+                .position(|x| x == h)
+                .map(Some)
+                .ok_or_else(|| format!("The client CSV has no column \"{h}\"")),
+        }
+    };
+    let id_col = col(&map.id)?.ok_or("Choose the ID column.")?;
+    let c = [
+        col(&cols.first)?,
+        col(&cols.last)?,
+        col(&cols.email)?,
+        col(&cols.cell)?,
+        col(&cols.spouse_first)?,
+        col(&cols.spouse_last)?,
+        col(&cols.spouse_email)?,
+        col(&cols.spouse_cell)?,
+    ];
+    let mut out = HashMap::new();
+    for r in &table.rows {
+        let Some(id) = r.get(id_col).map(|x| x.trim()).filter(|x| !x.is_empty()) else {
+            continue;
+        };
+        let v = |i: Option<usize>| {
+            i.and_then(|i| r.get(i))
+                .map(|x| x.trim().to_string())
+                .unwrap_or_default()
+        };
+        out.insert(
+            id.to_string(),
+            Row {
+                first: v(c[0]),
+                last: v(c[1]),
+                email: v(c[2]),
+                cell: v(c[3]),
+                spouse_first: v(c[4]),
+                spouse_last: v(c[5]),
+                spouse_email: v(c[6]),
+                spouse_cell: v(c[7]),
+            },
+        );
+    }
+    Ok(out)
+}
+
+/// Import: keeps each listed client's contacts as the CSV gives them (`rows` by CSV ID; a
+/// client the CSV has no row for keeps what it had, should it come back). Hand edits stay. With no
+/// contact columns chosen, nothing changes.
+pub fn store_from_csv(
+    root: &Path,
+    list: &ClientList,
+    rows: &HashMap<String, Row>,
+) -> Result<usize, String> {
+    crate::lock::with(root, "clients", "the client list", || {
+        let mut m = load(root)?;
+        let mut changed = 0;
+        for c in &list.clients {
+            let Some(row) = rows.get(c.id.trim()) else {
+                continue;
+            };
+            let key = c.uuid.to_string();
+            let rec = m.meta.contacts.entry(key.clone()).or_default();
+            if rec.csv != *row {
+                rec.csv = row.clone();
+                changed += 1;
+            }
+            if rec.is_empty() {
+                m.meta.contacts.remove(&key);
+            }
+        }
+        save_meta(root, &m.meta)?;
+        Ok(changed)
+    })
+}
+
+/// What an Import would change, shown before it is applied (owner 2026-11-24).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Preview {
+    /// (ID, name) of clients the list does not have yet.
+    pub new: Vec<(String, String)>,
+    /// (ID, name) of listed clients this CSV has no row for: they leave the client list (their
+    /// folders, documents and contacts stay).
+    pub missing: Vec<(String, String)>,
+    /// (ID, old name, new name).
+    pub renamed: Vec<(String, String, String)>,
+    pub contacts: Vec<ContactChange>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContactChange {
+    pub id: String,
+    pub client: String,
+    /// The field's words ([`FIELDS`]).
+    pub field: &'static str,
+    pub old: String,
+    pub new: String,
+    /// Typed by hand: the hand value is kept, the CSV's is only recorded.
+    pub kept_by_hand: bool,
+}
+
+impl Preview {
+    pub fn is_empty(&self) -> bool {
+        self.new.is_empty()
+            && self.missing.is_empty()
+            && self.renamed.is_empty()
+            && self.contacts.is_empty()
+    }
+}
+
+/// What importing `table` with `map` (and contact columns `cols`, when any) would change in the
+/// cabinet's client list and contacts. `list` and `stored` are the cabinet's now.
+pub fn preview(
+    table: &CsvTable,
+    map: &ColumnMap,
+    cols: &ContactColumns,
+    list: Option<&ClientList>,
+    stored: &BTreeMap<String, ContactRecord>,
+) -> Result<Preview, String> {
+    let id_col = map
+        .id
+        .as_ref()
+        .and_then(|h| table.headers.iter().position(|x| x == h))
+        .ok_or("Choose the ID column.")?;
+    let name_col = map
+        .name
+        .as_ref()
+        .and_then(|h| table.headers.iter().position(|x| x == h))
+        .ok_or("Choose the name column.")?;
+    let mut out = Preview::default();
+    let mut seen = std::collections::HashSet::new();
+    for r in &table.rows {
+        let (Some(id), Some(name)) = (r.get(id_col), r.get(name_col)) else {
+            continue;
+        };
+        let (id, name) = (id.trim(), name.trim());
+        if id.is_empty() || name.is_empty() {
+            continue;
+        }
+        seen.insert(id.to_string());
+        match list.and_then(|l| l.match_by_id(id)) {
+            None => out.new.push((id.into(), name.into())),
+            Some(c) if c.name.trim() != name => {
+                out.renamed
+                    .push((id.into(), c.name.trim().into(), name.into()))
+            }
+            Some(_) => {}
+        }
+    }
+    if let Some(l) = list {
+        for c in &l.clients {
+            if !seen.contains(c.id.trim()) {
+                out.missing.push((c.id.clone(), c.name.clone()));
+            }
+        }
+    }
+    if cols.any() || !cols.chosen().is_empty() {
+        let rows = csv_rows(table, map, cols)?;
+        let mut ids: Vec<&String> = rows.keys().collect();
+        ids.sort();
+        for id in ids {
+            let row = &rows[id];
+            let (client, rec) = match list.and_then(|l| l.match_by_id(id)) {
+                Some(c) => (
+                    c.name.clone(),
+                    stored.get(&c.uuid.to_string()).cloned().unwrap_or_default(),
+                ),
+                // A new client: its contacts are all new.
+                None => (String::new(), ContactRecord::default()),
+            };
+            for (k, words) in FIELDS {
+                let (old, new) = (rec.csv.get(k).trim(), row.get(k).trim());
+                if old != new {
+                    out.contacts.push(ContactChange {
+                        id: id.clone(),
+                        client: client.clone(),
+                        field: words,
+                        old: old.into(),
+                        new: new.into(),
+                        kept_by_hand: rec.hand.contains_key(k),
+                    });
+                }
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// Entity types invited as one contact with the role Owner (no spouse).
@@ -380,71 +721,28 @@ pub struct ClientContacts {
     pub planned: Planned,
 }
 
-/// Reads the client CSV Intake › Setup names, with the saved contact columns: every client of
-/// the client list the CSV has a row for, in CSV order. Errors in plain words (no CSV, no
-/// contact columns, the CSV unreadable).
-pub fn read(root: &Path) -> Result<Vec<ClientContacts>, String> {
+/// Every client of the list with stored contacts (CSV or typed), in list order, and how many
+/// clients have none. Errors in plain words.
+pub fn read(root: &Path) -> Result<(Vec<ClientContacts>, usize), String> {
     let master = load(root)?;
-    let cols = master.meta.contact_columns.clone().unwrap_or_default();
-    if !cols.any() {
-        return Err(
-            "No email or cell column is chosen yet: choose them under Portal contacts in Import clients CSV…"
-                .into(),
-        );
-    }
     let list = master
         .list
         .as_ref()
         .ok_or("No client list is imported yet: use Import clients CSV… first.")?;
-    let (settings, _) = filer_core::config::Settings::load_or_default(&master_dir(root));
-    let csv = settings
-        .csv_path
-        .clone()
-        .ok_or("No client CSV is set: use Import clients CSV… first.")?;
-    let table = read_csv(&csv).map_err(|e| format!("{}: {e}", csv.display()))?;
-    let col = |h: &Option<String>| -> Result<Option<usize>, String> {
-        match h {
-            None => Ok(None),
-            Some(h) => table
-                .headers
-                .iter()
-                .position(|x| x == h)
-                .map(Some)
-                .ok_or_else(|| {
-                    format!(
-                        "The client CSV has no column \"{h}\" any more: choose the portal contact columns again in Import clients CSV…"
-                    )
-                }),
-        }
-    };
-    let id_col = col(&settings.column_map.id)?.ok_or("The client CSV has no ID column set.")?;
-    let c = [
-        col(&cols.first)?,
-        col(&cols.last)?,
-        col(&cols.email)?,
-        col(&cols.cell)?,
-        col(&cols.spouse_first)?,
-        col(&cols.spouse_last)?,
-        col(&cols.spouse_email)?,
-        col(&cols.spouse_cell)?,
-    ];
     let mut out = Vec::new();
-    for r in &table.rows {
-        let Some(client) = r.get(id_col).and_then(|id| list.match_by_id(id.trim())) else {
-            continue;
-        };
-        let v = |i: Option<usize>| i.and_then(|i| r.get(i)).cloned().unwrap_or_default();
-        let row = Row {
-            first: v(c[0]),
-            last: v(c[1]),
-            email: v(c[2]),
-            cell: v(c[3]),
-            spouse_first: v(c[4]),
-            spouse_last: v(c[5]),
-            spouse_email: v(c[6]),
-            spouse_cell: v(c[7]),
-        };
+    let mut none = 0;
+    for client in &list.clients {
         let id = client.uuid.to_string();
+        let row = master
+            .meta
+            .contacts
+            .get(&id)
+            .map(ContactRecord::effective)
+            .unwrap_or_default();
+        if !row.has_contact() {
+            none += 1;
+            continue;
+        }
         let entity = master.meta.entity_types.get(&id).map(String::as_str);
         out.push(ClientContacts {
             planned: people_of(&row, &client.name, entity),
@@ -454,7 +752,13 @@ pub fn read(root: &Path) -> Result<Vec<ClientContacts>, String> {
             name: client.name.clone(),
         });
     }
-    Ok(out)
+    if out.is_empty() {
+        return Err(
+            "No client has an email or cell yet: choose the Portal contacts columns in Import clients CSV…, or type them in a client's panel (Portal contacts)."
+                .into(),
+        );
+    }
+    Ok((out, none))
 }
 
 #[cfg(test)]
@@ -673,48 +977,129 @@ mod tests {
         assert_eq!(g.spouse_cell.as_deref(), Some("SP Cell"));
     }
 
-    /// The CSV is read each time: a changed email in it is what the list shows.
-    #[test]
-    fn read_follows_the_csv() {
-        let t = tempfile::tempdir().unwrap();
-        let root = t.path();
-        std::fs::create_dir_all(master_dir(root)).unwrap();
+    fn import(root: &Path, csv_text: &str, cols: &ContactColumns) -> ClientList {
         let csv = root.join("clients.csv");
-        std::fs::write(
-            &csv,
-            "ID,Name,Email,Cell\n1001,\"Sample, John\",john@example.test,\n1002,Sample Farms LLC,,555-201-0003\n",
-        )
-        .unwrap();
-        let map = filer_core::config::ColumnMap {
+        std::fs::write(&csv, csv_text).unwrap();
+        let map = ColumnMap {
             id: Some("ID".into()),
             name: Some("Name".into()),
             partner: None,
             extras: vec![],
         };
-        crate::clients::import_csv_tin(root, &csv, &map, &Default::default(), None).unwrap();
-        crate::clients::use_csv_in_intake(root, &csv, &map).unwrap();
-        assert!(read(root).unwrap_err().contains("No email or cell column"));
-        set_columns(
+        let list =
+            crate::clients::import_csv_tin(root, &csv, &map, &Default::default(), None).unwrap();
+        let table = filer_core::clients::read_csv(&csv).unwrap();
+        store_from_csv(root, &list, &csv_rows(&table, &map, cols).unwrap()).unwrap();
+        list
+    }
+
+    /// Contacts are kept in the cabinet at Import (the CSV is not needed after), hand edits
+    /// win over a later CSV, and Clear goes back to the CSV.
+    #[test]
+    fn contacts_are_stored_and_hand_edits_win() {
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path();
+        std::fs::create_dir_all(crate::clients::master_dir(root)).unwrap();
+        let cols = ContactColumns {
+            email: Some("Email".into()),
+            cell: Some("Cell".into()),
+            ..Default::default()
+        };
+        let list = import(
             root,
-            &ContactColumns {
-                email: Some("Email".into()),
-                cell: Some("Cell".into()),
+            "ID,Name,Email,Cell\n1001,\"Sample, John\",john@example.test,\n1002,Sample Farms LLC,,555-201-0003\n1003,Nobody,,\n",
+            &cols,
+        );
+        std::fs::remove_file(root.join("clients.csv")).unwrap();
+        let (got, none) = read(root).unwrap();
+        assert_eq!(none, 1);
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0].planned.people[0].by(), "john@example.test");
+        assert_eq!(got[1].planned.people[0].by(), "text +15552010003");
+
+        let john = list.match_by_id("1001").unwrap().uuid.to_string();
+        let farms = list.match_by_id("1002").unwrap().uuid.to_string();
+        let mut row = record(root, &john).unwrap().effective();
+        row.email = "john.typed@example.test".into();
+        row.spouse_first = "Jane".into();
+        row.spouse_email = "jane@example.test".into();
+        let rec = set_by_hand(root, &john, &row).unwrap();
+        assert_eq!(rec.hand.len(), 3);
+        // A later CSV changes the email: the typed one stays; the CSV's is recorded.
+        import(
+            root,
+            "ID,Name,Email,Cell\n1001,\"Sample, John\",john.csv@example.test,555-201-0001\n",
+            &cols,
+        );
+        let rec = record(root, &john).unwrap();
+        assert_eq!(rec.csv.email, "john.csv@example.test");
+        assert_eq!(rec.effective().email, "john.typed@example.test");
+        assert_eq!(rec.effective().cell, "555-201-0001");
+        assert_eq!(rec.effective().spouse_email, "jane@example.test");
+        // A client the CSV left out leaves the list but keeps its contacts, should it come back.
+        assert_eq!(record(root, &farms).unwrap().csv.cell, "555-201-0003");
+        let rec = clear_hand(root, &john).unwrap();
+        assert_eq!(rec.effective().email, "john.csv@example.test");
+        assert_eq!(rec.effective().spouse_email, "");
+    }
+
+    #[test]
+    fn the_preview_says_what_an_import_changes() {
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path();
+        std::fs::create_dir_all(crate::clients::master_dir(root)).unwrap();
+        let cols = ContactColumns {
+            email: Some("Email".into()),
+            ..Default::default()
+        };
+        let list = import(
+            root,
+            "ID,Name,Email\n1001,\"Sample, John\",john@example.test\n1002,\"Taylor, M.\",\n1003,\"Doe, Alex\",\n",
+            &cols,
+        );
+        let john = list.match_by_id("1001").unwrap().uuid.to_string();
+        set_by_hand(
+            root,
+            &john,
+            &Row {
+                email: "typed@example.test".into(),
                 ..Default::default()
             },
         )
         .unwrap();
-        let got = read(root).unwrap();
-        assert_eq!(got.len(), 2);
-        assert_eq!(got[0].code, "1001");
-        assert_eq!(got[0].planned.people[0].by(), "john@example.test");
-        assert_eq!(got[1].planned.people[0].by(), "text +15552010003");
+        let csv = root.join("new.csv");
         std::fs::write(
             &csv,
-            "ID,Name,Email,Cell\n1001,\"Sample, John\",john.new@example.test,\n",
+            "ID,Name,Email\n1001,\"Sample, John\",john.new@example.test\n1002,\"Taylor, Morgan\",morgan@example.test\n1004,New Client,\n",
         )
         .unwrap();
-        let got = read(root).unwrap();
-        assert_eq!(got.len(), 1);
-        assert_eq!(got[0].planned.people[0].by(), "john.new@example.test");
+        let table = filer_core::clients::read_csv(&csv).unwrap();
+        let map = ColumnMap {
+            id: Some("ID".into()),
+            name: Some("Name".into()),
+            partner: None,
+            extras: vec![],
+        };
+        let m = load(root).unwrap();
+        let p = preview(&table, &map, &cols, m.list.as_ref(), &m.meta.contacts).unwrap();
+        assert_eq!(p.new, vec![("1004".to_string(), "New Client".to_string())]);
+        assert_eq!(
+            p.missing,
+            vec![("1003".to_string(), "Doe, Alex".to_string())]
+        );
+        assert_eq!(
+            p.renamed,
+            vec![(
+                "1002".to_string(),
+                "Taylor, M.".to_string(),
+                "Taylor, Morgan".to_string()
+            )]
+        );
+        assert_eq!(p.contacts.len(), 2);
+        assert_eq!(p.contacts[0].id, "1001");
+        assert_eq!(p.contacts[0].old, "john@example.test");
+        assert!(p.contacts[0].kept_by_hand);
+        assert_eq!(p.contacts[1].new, "morgan@example.test");
+        assert!(!p.contacts[1].kept_by_hand);
     }
 }

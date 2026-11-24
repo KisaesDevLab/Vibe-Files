@@ -80,10 +80,14 @@ pub struct ClientMeta {
     /// (`b2_years_back` and the Permanent folders). Empty: nothing goes up by itself.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub b2_rules: Option<Vec<B2Rule>>,
-    /// The client CSV's columns holding portal contacts (PA-105). Only the column names are
-    /// kept here; the emails and cells are read from the CSV when needed (`crate::contacts`).
+    /// The client CSV's columns holding portal contacts (PA-105). Chosen again at the next
+    /// Import.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub contact_columns: Option<crate::contacts::ContactColumns>,
+    /// Client uuid → its portal contacts (PA-105): the CSV's at the last Import and what staff
+    /// typed. Kept here so every PC has them and the CSV is not needed after the import.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub contacts: BTreeMap<String, crate::contacts::ContactRecord>,
     /// Fields a later version wrote: kept as they are when this version saves the file (QA
     /// 2026-11-12: an older build saving it dropped the B2 settings).
     #[serde(flatten)]

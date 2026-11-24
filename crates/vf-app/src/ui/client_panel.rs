@@ -300,6 +300,8 @@ pub fn show(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env, ci: usize) {
         }
     }
     ui.add_space(10.0);
+    portal_contacts(ui, b, env, &c.id);
+    ui.add_space(10.0);
 
     // B2 sync (owner 2026-11-12, PA-53): the firm's rule, or this client's own choice. Read
     // once per client shown (the file is on the share).
@@ -601,5 +603,173 @@ fn add_form(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env, c: &vf_core::brows
             synced(b, env, "client_edit");
         }
         Err(e) => b.rel_form.error = Some(e),
+    }
+}
+
+/// The Portal contacts box of the client panel (PA-105, owner 2026-11-24): the taxpayer's and
+/// spouse's name, email and cell, from the client CSV or typed here. Typed values win over the
+/// CSV until cleared.
+pub struct ContactsBox {
+    client: String,
+    rec: Result<vf_fs::contacts::ContactRecord, String>,
+    editing: Option<vf_fs::contacts::Row>,
+}
+
+/// "Taxpayer: John Sample (typed) · john@example.com · 555-201-0001" for one person, or empty.
+fn contact_line(
+    row: &vf_fs::contacts::Row,
+    hand: &std::collections::BTreeMap<String, String>,
+    keys: [&str; 4],
+) -> String {
+    let mark = |k: &str| if hand.contains_key(k) { " (typed)" } else { "" };
+    let v = |k: &str| {
+        let x = row.get(k).trim();
+        if x.is_empty() {
+            String::new()
+        } else {
+            format!("{x}{}", mark(k))
+        }
+    };
+    let name = format!("{} {}", v(keys[0]), v(keys[1])).trim().to_string();
+    [name, v(keys[2]), v(keys[3])]
+        .into_iter()
+        .filter(|x| !x.is_empty())
+        .collect::<Vec<_>>()
+        .join(" · ")
+}
+
+fn portal_contacts(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env, client: &str) {
+    use crate::ui::widgets::caption;
+    use vf_fs::contacts::{self, FIELDS};
+    let r = egui::CollapsingHeader::new(
+        RichText::new("PORTAL CONTACTS")
+            .small()
+            .color(theme::ink_muted()),
+    )
+    .id_salt("client-portal-contacts")
+    .show(ui, |ui| {
+        // Read when opened, once per client shown (the file is on the share).
+        if b.contacts_box.as_ref().is_none_or(|x| x.client != client) {
+            b.contacts_box = Some(ContactsBox {
+                client: client.to_string(),
+                rec: contacts::record(env.root, client),
+                editing: None,
+            });
+        }
+        let Some(bx) = b.contacts_box.as_mut() else {
+            return;
+        };
+        let rec = match &bx.rec {
+            Ok(r) => r.clone(),
+            Err(e) => {
+                ui.label(RichText::new(e.as_str()).color(theme::error()));
+                return;
+            }
+        };
+        let mut done: Option<Result<contacts::ContactRecord, String>> = None;
+        let mut changed: Vec<String> = Vec::new();
+        if let Some(row) = bx.editing.as_mut() {
+            egui::Grid::new("client-contacts-edit")
+                .num_columns(2)
+                .spacing([8.0, 4.0])
+                .show(ui, |ui| {
+                    for (k, words) in FIELDS {
+                        let l = ui.label(caption(words));
+                        if let Some(v) = row.get_mut(k) {
+                            ui.add(TextEdit::singleline(v).desired_width(170.0))
+                                .labelled_by(l.id);
+                        }
+                        ui.end_row();
+                    }
+                });
+            let mut cancel = false;
+            ui.horizontal(|ui| {
+                if ui.button("Save contacts").clicked() {
+                    let eff = rec.effective();
+                    changed = FIELDS
+                        .iter()
+                        .filter(|(k, _)| eff.get(k).trim() != row.get(k).trim())
+                        .map(|(k, _)| k.to_string())
+                        .collect();
+                    done = Some(contacts::set_by_hand(env.root, client, row));
+                }
+                cancel = ui.button("Cancel").clicked();
+            });
+            if cancel {
+                bx.editing = None;
+            }
+        } else {
+            let mut eff = rec.effective();
+            if eff.spouse_last.trim().is_empty() && !eff.spouse_first.trim().is_empty() {
+                eff.spouse_last = eff.last.clone();
+            }
+            let tp = contact_line(&eff, &rec.hand, ["first", "last", "email", "cell"]);
+            let sp = contact_line(
+                &eff,
+                &rec.hand,
+                ["spouse_first", "spouse_last", "spouse_email", "spouse_cell"],
+            );
+            if tp.is_empty() && sp.is_empty() {
+                ui.label(caption(
+                    "None yet: they come from the client CSV's Portal contacts columns, or type them here.",
+                ));
+            }
+            if !tp.is_empty() {
+                ui.label(format!("Taxpayer: {tp}"));
+            }
+            if !sp.is_empty() {
+                ui.label(format!("Spouse: {sp}"));
+            }
+            if !rec.hand.is_empty() {
+                let csv: Vec<String> = FIELDS
+                    .iter()
+                    .filter(|(k, _)| rec.hand.contains_key(*k))
+                    .map(|(k, w)| {
+                        let v = rec.csv.get(k);
+                        format!("{w} {}", if v.is_empty() { "(none)" } else { v })
+                    })
+                    .collect();
+                ui.label(caption(format!(
+                    "Typed here, kept over the CSV. The CSV says: {}",
+                    csv.join("; ")
+                )));
+            }
+            ui.horizontal(|ui| {
+                if ui.small_btn("Edit contacts…").clicked() {
+                    bx.editing = Some(rec.effective());
+                }
+                if !rec.hand.is_empty()
+                    && ui
+                        .small_btn("Use the CSV values")
+                        .on_hover_text(
+                            "Drop what was typed here: the contacts follow the client CSV again",
+                        )
+                        .clicked()
+                {
+                    changed = rec.hand.keys().cloned().collect();
+                    done = Some(contacts::clear_hand(env.root, client));
+                }
+            });
+        }
+        if let Some(r) = done {
+            if r.is_ok() && !changed.is_empty() {
+                // Which fields, never their values.
+                b.portal.audit_out().send(vf_core::audit::AuditEntry::new(
+                    "client_contacts_edit",
+                    None,
+                    serde_json::json!({ "client_id": client, "fields": changed }),
+                ));
+            }
+            if let Some(bx) = b.contacts_box.as_mut() {
+                if r.is_ok() {
+                    bx.editing = None;
+                }
+                bx.rec = r;
+            }
+        }
+    });
+    if r.header_response.clicked() {
+        // Read again each time it is opened: another PC may have changed them.
+        b.contacts_box = None;
     }
 }

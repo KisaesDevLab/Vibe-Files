@@ -10,7 +10,11 @@ Add the contacts to the client CSV you already import, one row per client:
 - **Email** and **Cell phone**;
 - for a joint return, **Spouse first name**, **Spouse last name** (blank: the taxpayer's), **Spouse email** and **Spouse cell**.
 
-In **Import clients CSV…**, press **Read**, open **Portal contacts** and choose the column for each. Usual header names (TP Email, Cell, Mobile, Spouse Email, SP Cell) are chosen for you. Only the column names are saved: the emails and cells are read from the CSV each time, so when the tax software writes an updated CSV, the next list shows the new contacts. Phone numbers may be written any way.
+In **Import clients CSV…**, press **Read**, open **Portal contacts** and choose the column for each. Usual header names (TP Email, Cell, Mobile, Spouse Email, SP Cell) are chosen for you. Phone numbers may be written any way. **Import** keeps the contacts in the cabinet, so the CSV is not needed after; each later Import updates them, after showing what changes (see [clients](help:clients)). Intake's own re-reads of the CSV never change them.
+
+## Typing contacts on a client
+
+In Browse, open a client's **PORTAL CONTACTS** in the client panel and press **Edit contacts…**. What you type is marked **(typed)** and kept even when a later CSV says otherwise; the panel shows what the CSV says. **Use the CSV values** drops what was typed. A client added in Vibe Files can have contacts this way too.
 
 ## Who is invited
 

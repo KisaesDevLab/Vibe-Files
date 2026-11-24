@@ -28,6 +28,18 @@ pub struct ImportDialog {
     /// The columns holding portal contacts (PA-105): saved by name only, never copied into
     /// the client list; Admin › Portal › Invite from client list reads them from the CSV.
     pub contacts: ContactColumns,
+    /// The cabinet's client list and stored contacts when the CSV was read, for the preview.
+    before: Option<(
+        Option<filer_core::clients::ClientList>,
+        BTreeMap<String, vf_fs::contacts::ContactRecord>,
+    )>,
+    /// What the import would change, for the columns it was worked out with (owner 2026-11-24:
+    /// shown before anything changes).
+    preview: Option<(
+        ColumnMap,
+        ContactColumns,
+        Result<vf_fs::contacts::Preview, String>,
+    )>,
     /// The catalog file: the import runs on a thread with its own connection (it reads every
     /// client folder); without it (tests), on this one.
     pub catalog: Option<PathBuf>,
@@ -51,6 +63,8 @@ impl ImportDialog {
             known,
             tin: None,
             contacts: ContactColumns::default(),
+            before: None,
+            preview: None,
             catalog: None,
             job: None,
             needs_password: None,
@@ -155,6 +169,10 @@ pub fn show(ctx: &egui::Context, d: &mut ImportDialog, env: &mut Env) -> DialogO
                         } else {
                             saved
                         };
+                        d.before = vf_fs::clients::load(env.root)
+                            .ok()
+                            .map(|m| (m.list, m.meta.contacts));
+                        d.preview = None;
                         d.table = Some(t);
                         d.error = None;
                     }
@@ -211,7 +229,7 @@ pub fn show(ctx: &egui::Context, d: &mut ImportDialog, env: &mut Env) -> DialogO
                 .default_open(d.contacts.any())
                 .show(ui, |ui| {
                     ui.label(widgets::caption(
-                        "Only the column names are saved: Admin › Portal › Invite from client list reads the emails and cells from this CSV each time, so an updated CSV is what it uses.",
+                        "They are kept in the cabinet at Import (the CSV is not needed after) and updated by each Import; contacts typed in a client's panel are kept.",
                     ));
                     let headers: Vec<&String> = t
                         .headers
@@ -283,6 +301,9 @@ pub fn show(ctx: &egui::Context, d: &mut ImportDialog, env: &mut Env) -> DialogO
             ready = d.map.id.is_some()
                 && d.map.name.is_some()
                 && d.map.partner.as_ref().is_none_or(|p| Some(p) != d.map.id.as_ref() && Some(p) != d.map.name.as_ref());
+            if ready {
+                show_preview(ui, t, &d.map, &d.contacts, &d.before, &mut d.preview);
+            }
         });
         ui.add_space(6.0);
         if needs_password {
@@ -377,6 +398,114 @@ pub fn show(ctx: &egui::Context, d: &mut ImportDialog, env: &mut Env) -> DialogO
     out
 }
 
+/// "Changes in this CSV": worked out again when the columns change.
+fn show_preview(
+    ui: &mut egui::Ui,
+    t: &CsvTable,
+    map: &ColumnMap,
+    cols: &ContactColumns,
+    before: &Option<(
+        Option<filer_core::clients::ClientList>,
+        BTreeMap<String, vf_fs::contacts::ContactRecord>,
+    )>,
+    preview: &mut Option<(
+        ColumnMap,
+        ContactColumns,
+        Result<vf_fs::contacts::Preview, String>,
+    )>,
+) {
+    if preview
+        .as_ref()
+        .is_none_or(|(m, c, _)| m != map || c != cols)
+    {
+        let empty = BTreeMap::new();
+        let (list, stored) = match before {
+            Some((l, s)) => (l.as_ref(), s),
+            None => (None, &empty),
+        };
+        *preview = Some((
+            map.clone(),
+            cols.clone(),
+            vf_fs::contacts::preview(t, map, cols, list, stored),
+        ));
+    }
+    let Some((_, _, p)) = preview else { return };
+    ui.add_space(6.0);
+    let p = match p {
+        Ok(p) => p,
+        Err(e) => {
+            ui.label(RichText::new(e.as_str()).color(theme::warn()));
+            return;
+        }
+    };
+    if p.is_empty() {
+        ui.label(widgets::caption("Changes in this CSV: none."));
+        return;
+    }
+    const SHOWN: usize = 25;
+    let more = |ui: &mut egui::Ui, n: usize| {
+        if n > SHOWN {
+            ui.label(widgets::caption(format!("… and {} more", n - SHOWN)));
+        }
+    };
+    egui::CollapsingHeader::new(RichText::new(format!(
+        "Changes in this CSV: {} new · {} leave the list · {} renamed · {} contacts",
+        p.new.len(),
+        p.missing.len(),
+        p.renamed.len(),
+        p.contacts.len()
+    )).strong())
+    .id_salt("import-preview")
+    .default_open(true)
+    .show(ui, |ui| {
+        if !p.new.is_empty() {
+            ui.label(RichText::new(format!("+ {} new clients", p.new.len())).strong());
+            for (id, name) in p.new.iter().take(SHOWN) {
+                ui.label(widgets::caption(format!("{name} ({id})")));
+            }
+            more(ui, p.new.len());
+        }
+        if !p.missing.is_empty() {
+            ui.label(
+                RichText::new(format!(
+                    "− {} clients not in this CSV leave the client list (their folders, documents and contacts stay)",
+                    p.missing.len()
+                ))
+                .strong()
+                .color(theme::warn()),
+            );
+            for (id, name) in p.missing.iter().take(SHOWN) {
+                ui.label(widgets::caption(format!("{name} ({id})")));
+            }
+            more(ui, p.missing.len());
+        }
+        if !p.renamed.is_empty() {
+            ui.label(RichText::new(format!("{} renamed", p.renamed.len())).strong());
+            for (id, old, new) in p.renamed.iter().take(SHOWN) {
+                ui.label(widgets::caption(format!("{id}: {old} → {new}")));
+            }
+            more(ui, p.renamed.len());
+        }
+        if !p.contacts.is_empty() {
+            ui.label(RichText::new(format!("@ {} contacts changed", p.contacts.len())).strong());
+            for c in p.contacts.iter().take(SHOWN) {
+                let who = if c.client.is_empty() {
+                    c.id.clone()
+                } else {
+                    format!("{} {}", c.id, c.client)
+                };
+                let blank = |v: &str| if v.is_empty() { "(none)".to_string() } else { v.to_string() };
+                let mut line = format!("{who} · {}: {} → {}", c.field, blank(&c.old), blank(&c.new));
+                if c.kept_by_hand {
+                    line.push_str(" (set by hand: the typed value is kept)");
+                }
+                ui.label(widgets::caption(line));
+            }
+            more(ui, p.contacts.len());
+        }
+    });
+}
+
 /// What the import needs, taken from the dialog.
 struct Input {
     path: PathBuf,
@@ -393,7 +522,14 @@ fn run(
     device_id: &str,
 ) -> Result<String, String> {
     let list = clients::import_csv_tin(root, &d.path, &d.map, &d.known, d.tin.as_deref())?;
-    let contacts = vf_fs::contacts::set_columns(root, &d.contacts).err();
+    let contacts = vf_fs::contacts::set_columns(root, &d.contacts).and_then(|_| {
+        if d.contacts.chosen().is_empty() {
+            return Ok(None);
+        }
+        let table = read_csv(&d.path).map_err(|e| e.to_string())?;
+        let rows = vf_fs::contacts::csv_rows(&table, &d.map, &d.contacts)?;
+        vf_fs::contacts::store_from_csv(root, &list, &rows).map(Some)
+    });
     // The same CSV for Intake: its re-imports read this file with these columns.
     let intake = clients::use_csv_in_intake(root, &d.path, &d.map).err();
     let rep = vf_fs::rebuild::sync_clients(conn, root, device_id, "clients_import")
@@ -421,12 +557,12 @@ fn run(
             " Intake › Setup still names its own CSV ({e}): choose this one there too."
         )),
     }
-    if let Some(e) = contacts {
-        msg.push_str(&format!(" The portal contact columns were not saved: {e}"));
-    } else if d.contacts.any() {
-        msg.push_str(
-            " Portal contacts: Admin › Portal › Invite from client list reads them from this CSV.",
-        );
+    match contacts {
+        Err(e) => msg.push_str(&format!(" The portal contacts were not saved: {e}")),
+        Ok(Some(n)) => msg.push_str(&format!(
+            " Portal contacts changed for {n} clients (typed ones kept): invite them from Admin › Portal › Invite from client list."
+        )),
+        Ok(None) => {}
     }
     match clients::unbound_matches(root, &list) {
         Ok(m) if !m.is_empty() => {
