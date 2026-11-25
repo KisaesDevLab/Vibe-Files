@@ -647,9 +647,14 @@ impl AgreementWindow {
         .default_width(860.0)
         .default_height(760.0)
         .show(ctx, |ui| {
+            act = self.actions(ui, busy);
             egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
-                .show(ui, |ui| act = self.body(ui, busy));
+                .show(ui, |ui| {
+                    if let Some(a) = self.body(ui, busy) {
+                        act = Some(a);
+                    }
+                });
         });
         if !open_win {
             self.closed = true;
@@ -657,6 +662,89 @@ impl AgreementWindow {
         if let Some(a) = act {
             self.apply(ctx, s, a);
         }
+    }
+
+    /// The window's buttons and messages, above the form (always in view).
+    fn actions(&mut self, ui: &mut egui::Ui, busy: bool) -> Option<&'static str> {
+        let mut act = None;
+        let current = self.current().cloned();
+        let sent = current.is_some();
+        let can = !busy;
+        let plan = self.plan();
+        if let Some(e) = &self.err {
+            ui.colored_label(theme::error(), e);
+        }
+        if let Some(s) = &self.said {
+            ui.colored_label(theme::health_ok(), s);
+        }
+        let problem = plan
+            .as_ref()
+            .err()
+            .cloned()
+            .or_else(|| plan.as_ref().ok().and_then(Plan::problem));
+        if !sent && let Some(p) = &problem {
+            ui.label(RichText::new(p).color(theme::ink_muted()));
+        }
+        ui.separator();
+        ui.horizontal_wrapped(|ui| {
+            if ui
+                .add_enabled(can, egui::Button::new("Read again"))
+                .clicked()
+            {
+                act = Some("reload");
+            }
+            if ui
+                .add_enabled(can && !sent, egui::Button::new("Fill from last year"))
+                .clicked()
+            {
+                self.fill_from_last();
+            }
+            if ui
+                .add_enabled(can && plan.is_ok(), egui::Button::new("Preview letters…"))
+                .clicked()
+            {
+                act = Some("preview");
+            }
+            let open = current.as_ref().is_some_and(|d| d.status == "open");
+            if ui
+                .add_enabled(can && open, egui::Button::new("Remind now"))
+                .clicked()
+            {
+                act = Some("remind");
+            }
+            if ui
+                .add_enabled(
+                    can && open,
+                    egui::Button::new(RichText::new("Cancel agreement…").color(theme::error())),
+                )
+                .clicked()
+            {
+                self.confirm_cancel = true;
+            }
+            if ui
+                .add_enabled(
+                    can && !sent && problem.is_none(),
+                    widgets::primary_button("Send to client"),
+                )
+                .clicked()
+            {
+                act = Some("send");
+            }
+        });
+        if self.confirm_cancel {
+            ui.horizontal_wrapped(|ui| {
+                ui.label("Cancel this agreement? The card leaves the client's portal; a monthly charge already running is not stopped.");
+                if ui.button("Cancel agreement").clicked() {
+                    self.confirm_cancel = false;
+                    act = Some("cancel");
+                }
+                if ui.button("Keep it").clicked() {
+                    self.confirm_cancel = false;
+                }
+            });
+        }
+        ui.separator();
+        act
     }
 
     fn body(&mut self, ui: &mut egui::Ui, busy: bool) -> Option<&'static str> {
@@ -813,36 +901,50 @@ impl AgreementWindow {
                 .color(theme::ink_muted()),
         );
         let mut changed = false;
-        egui::Grid::new("agreement-services")
-            .num_columns(3)
-            .striped(true)
-            .min_col_width(80.0)
-            .show(ui, |ui| {
-                ui.label("");
-                ui.label(RichText::new("One-time $").small());
-                ui.label(RichText::new("Monthly $").small());
-                ui.end_row();
-                for r in &mut self.rows {
-                    if ui
-                        .add_enabled(
-                            can && !sent,
-                            egui::Checkbox::new(&mut r.on, r.service.as_str()),
-                        )
-                        .changed()
-                    {
-                        changed = true;
-                    }
-                    ui.add_enabled(
-                        can && !sent && r.on,
-                        egui::TextEdit::singleline(&mut r.once).desired_width(90.0),
-                    );
-                    ui.add_enabled(
-                        can && !sent && r.on,
-                        egui::TextEdit::singleline(&mut r.month).desired_width(90.0),
-                    );
-                    ui.end_row();
+        // Every return and service as a tick; the fees for those ticked below.
+        ui.horizontal_wrapped(|ui| {
+            for r in &mut self.rows {
+                if ui
+                    .add_enabled(
+                        can && !sent,
+                        egui::Checkbox::new(&mut r.on, r.service.as_str()),
+                    )
+                    .changed()
+                {
+                    changed = true;
                 }
-            });
+            }
+        });
+        if self.rows.iter().any(|r| r.on) {
+            egui::Grid::new("agreement-services")
+                .num_columns(3)
+                .striped(true)
+                .min_col_width(80.0)
+                .show(ui, |ui| {
+                    ui.label("");
+                    ui.label(RichText::new("One-time $").small());
+                    ui.label(RichText::new("Monthly $").small());
+                    ui.end_row();
+                    for r in self.rows.iter_mut().filter(|r| r.on) {
+                        ui.label(r.service.as_str());
+                        widgets::named(
+                            ui.add_enabled(
+                                can && !sent,
+                                egui::TextEdit::singleline(&mut r.once).desired_width(90.0),
+                            ),
+                            &format!("{} one-time fee", r.service),
+                        );
+                        widgets::named(
+                            ui.add_enabled(
+                                can && !sent,
+                                egui::TextEdit::singleline(&mut r.month).desired_width(90.0),
+                            ),
+                            &format!("{} monthly fee", r.service),
+                        );
+                        ui.end_row();
+                    }
+                });
+        }
         if changed {
             self.offer_letters();
         }
@@ -924,78 +1026,6 @@ impl AgreementWindow {
             );
             ui.label("days");
         });
-        if let Some(e) = &self.err {
-            ui.colored_label(theme::error(), e);
-        }
-        if let Some(s) = &self.said {
-            ui.colored_label(theme::health_ok(), s);
-        }
-        let problem = plan
-            .as_ref()
-            .err()
-            .cloned()
-            .or_else(|| plan.as_ref().ok().and_then(Plan::problem));
-        if !sent && let Some(p) = &problem {
-            ui.label(RichText::new(p).color(theme::ink_muted()));
-        }
-        ui.separator();
-        ui.horizontal_wrapped(|ui| {
-            if ui
-                .add_enabled(can, egui::Button::new("Read again"))
-                .clicked()
-            {
-                act = Some("reload");
-            }
-            if ui
-                .add_enabled(can && !sent, egui::Button::new("Fill from last year"))
-                .clicked()
-            {
-                self.fill_from_last();
-            }
-            if ui
-                .add_enabled(can && plan.is_ok(), egui::Button::new("Preview letters…"))
-                .clicked()
-            {
-                act = Some("preview");
-            }
-            let open = current.as_ref().is_some_and(|d| d.status == "open");
-            if ui
-                .add_enabled(can && open, egui::Button::new("Remind now"))
-                .clicked()
-            {
-                act = Some("remind");
-            }
-            if ui
-                .add_enabled(
-                    can && open,
-                    egui::Button::new(RichText::new("Cancel agreement…").color(theme::error())),
-                )
-                .clicked()
-            {
-                self.confirm_cancel = true;
-            }
-            if ui
-                .add_enabled(
-                    can && !sent && problem.is_none(),
-                    widgets::primary_button("Send to client"),
-                )
-                .clicked()
-            {
-                act = Some("send");
-            }
-        });
-        if self.confirm_cancel {
-            ui.horizontal_wrapped(|ui| {
-                ui.label("Cancel this agreement? The card leaves the client's portal; a monthly charge already running is not stopped.");
-                if ui.button("Cancel agreement").clicked() {
-                    self.confirm_cancel = false;
-                    act = Some("cancel");
-                }
-                if ui.button("Keep it").clicked() {
-                    self.confirm_cancel = false;
-                }
-            });
-        }
         act
     }
 
@@ -1300,7 +1330,10 @@ impl EndEngagementWindow {
                 egui::Grid::new("closure-blanks").num_columns(2).show(ui, |ui| {
                     for (k, v) in &mut self.blanks {
                         ui.label(k.as_str());
-                        ui.add_enabled(!busy, egui::TextEdit::singleline(v).desired_width(320.0));
+                        widgets::named(
+                            ui.add_enabled(!busy, egui::TextEdit::singleline(v).desired_width(320.0)),
+                            k,
+                        );
                         ui.end_row();
                     }
                 });
@@ -2065,13 +2098,20 @@ mod tests {
         let e = p.laid(&all).unwrap_err();
         assert!(e.contains("[Portal Name]"), "{e}");
         // The firm fills them in (Admin › Portal › Letter templates).
-        let mut terms = all.iter().find(|t| t.kind == vf_letters::TERMS).unwrap().clone();
+        let mut terms = all
+            .iter()
+            .find(|t| t.kind == vf_letters::TERMS)
+            .unwrap()
+            .clone();
         let mut json = serde_json::to_string(&terms.blocks).unwrap();
         for (k, v) in [
             ("[X]", "30"),
             ("[Portal Name]", "Example Portal"),
             ("[State Name]", "Ohio"),
-            ("[Name of State or Federal Court Desired]", "Franklin County, Ohio"),
+            (
+                "[Name of State or Federal Court Desired]",
+                "Franklin County, Ohio",
+            ),
         ] {
             json = json.replace(k, v);
         }

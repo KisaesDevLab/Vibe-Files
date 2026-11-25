@@ -255,6 +255,81 @@ try {
     await until(`!!__byText('a', 'Receipt')`, 'the receipt link');
     await shot('33-card-paid');
     note('The fee step shows its Receipt');
+  } else if (PHASE === 'agreement') {
+    // Annual agreement (2026-11-25): the client signs the bookkeeping letter, then sets up
+    // payment by card (the first month and the one-time fee); a month later a payment fails
+    // and the card offers Update payment method.
+    const STRIPE = SECOND;
+    const inv = await mailWith('/invite', 0);
+    await go(linkIn(inv.body, '/invite'));
+    await until(`!!__byText('button', 'Accept and sign in')`, 'invitation page');
+    await click('Accept and sign in');
+    await until(`location.pathname === '/'`, 'home after accepting');
+    await until(`document.body.innerText.includes('service agreement')`, 'the agreement card');
+    await sleep(800);
+    await shot('40-client-agreement-card');
+    note(`Card: ${(await js(`document.body.innerText`)).includes('Set up payment') ? 'letters, then Set up payment' : '?'}`);
+    await js(`__byText('a', 'Sign').click()`);
+    await until(`location.pathname.endsWith('/sign')`, 'the sign page');
+    for (let round = 0; round < 8; round++) {
+      await until(`document.body.innerText.includes('All letters signed') || !!document.querySelector('canvas')`, 'a letter to sign', 20000);
+      if (await js(`document.body.innerText.includes('All letters signed')`)) break;
+      await draw();
+      await js(`(() => { const c = [...document.querySelectorAll('input[type=checkbox]')].find((i) => i.parentElement.textContent.includes('agree to sign')); c.click(); return true; })()`);
+      await sleep(300);
+      if (round === 0) await shot('41-agreement-sign');
+      const btn = await js(`[...document.querySelectorAll('button')].map((b) => b.textContent.trim()).find((t) => t.startsWith('Sign as'))`);
+      await click(btn);
+      note(`Letter ${round + 1}: ${btn}`);
+      await sleep(1500);
+    }
+    await until(`document.body.innerText.includes('All letters signed')`, 'all letters signed', 20000);
+    note('All letters signed');
+    await go(`${BASE}/`);
+    await until(`[...document.querySelectorAll('button')].some((b) => b.textContent.trim().startsWith('Set up payment by card'))`, 'the payment step');
+    await shot('42-agreement-set-up-payment');
+    const today = await js(`(document.body.innerText.split(String.fromCharCode(10)).find((l) => l.startsWith('Today ')) || '')`);
+    note(`The card says: ${today}`);
+    await js(`[...document.querySelectorAll('button')].find((b) => b.textContent.trim().startsWith('Set up payment by card')).click()`);
+    let session = null;
+    for (let i = 0; i < 40 && !session; i++) {
+      await sleep(250);
+      session = await (await fetch(`${STRIPE}/_last`)).json();
+    }
+    if (!session || session.mode !== 'subscription') throw new Error('no subscription Checkout Session');
+    const paid = await (
+      await fetch(`${STRIPE}/_pay`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sessionId: session.id, paid: true }),
+      })
+    ).json();
+    note(`Set up on Stripe's page (the stand-in, subscription mode, monthly ${session.monthly} cents); webhook ${paid.webhook}`);
+    await go(`${BASE}/?delivery=${session.metadata.delivery_id}&session_id=${session.id}`);
+    await until(`document.body.innerText.includes('Your monthly payment')`, 'the monthly payment');
+    await shot('43-monthly-active');
+    note(`Monthly payment: ${(await js(`document.body.innerText`)).includes('Active') ? 'Active' : '?'}`);
+    const last = await (await fetch(`${STRIPE}/_last`)).json();
+    const month = await (
+      await fetch(`${STRIPE}/_month`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ subscription: last.subscription, paid: true }),
+      })
+    ).json();
+    note(`A month paid: webhook ${month.webhook}`);
+    const failed = await (
+      await fetch(`${STRIPE}/_month`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ subscription: last.subscription, paid: false }),
+      })
+    ).json();
+    note(`The next month failed: webhook ${failed.webhook}`);
+    await go(`${BASE}/`);
+    await until(`document.body.innerText.includes('did not go through')`, 'the failed month');
+    await shot('44-monthly-failed');
+    note('The card says the last payment did not go through, with Update payment method');
   }
 } catch (e) {
   note(`ERROR: ${e.message}`);

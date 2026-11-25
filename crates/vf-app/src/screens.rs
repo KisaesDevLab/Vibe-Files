@@ -1292,6 +1292,358 @@ mod tests {
         std::fs::write(out.join("steps.txt"), steps.join("\n")).unwrap();
     }
 
+    /// Annual agreements (ADDENDUM-annual-agreements.md, owner 2026-11-25) walkthrough against a
+    /// real Vibe Portal and the stand-in Stripe: Service agreement… for a business with the
+    /// bookkeeping, payroll and advisory letters (the Terms and Conditions filled in once), one
+    /// one-time and two monthly fees; the client signs each letter and sets up payment by card
+    /// (Checkout in subscription mode); a month is paid and the next fails; every step's PDF and
+    /// the month's receipt are fetched and committed by Intake; the window shows the failed
+    /// month; End engagement… sends the closure letter and stops the charge. Set `VF_WALK_URL`,
+    /// `VF_WALK_KEY`, `VF_WALK_LOG`, `VF_WALK_CLIENT`, `VF_WALK_STRIPE` and `VF_WALK_DIR`.
+    #[test]
+    #[ignore = "needs a running portal"]
+    fn agreement_walkthrough() {
+        let (Ok(url), Ok(key), Ok(log), Ok(client_js), Ok(stripe), Ok(out)) = (
+            std::env::var("VF_WALK_URL"),
+            std::env::var("VF_WALK_KEY"),
+            std::env::var("VF_WALK_LOG"),
+            std::env::var("VF_WALK_CLIENT"),
+            std::env::var("VF_WALK_STRIPE"),
+            std::env::var("VF_WALK_DIR"),
+        ) else {
+            return;
+        };
+        let out = std::path::PathBuf::from(out);
+        std::fs::create_dir_all(&out).unwrap();
+        let mut steps: Vec<String> = Vec::new();
+        let mut note = |s: String| {
+            eprintln!("{s}");
+            steps.push(s);
+        };
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path().join("Clients");
+        vf_fixtures::generate(&root, 3).unwrap();
+        crate::ui::test_util::pdfium_first();
+        let data = t.path().join("data");
+        drop(crate::session::open(&data, "dev", &root).unwrap());
+        let cab = vf_fs::cabinet::read(&root).unwrap().cabinet_id;
+        let s = vf_portal::PortalSettings::new(&cab, &url, &key, 0)
+            .unwrap()
+            .with_deliveries(true);
+        vf_portal::settings::save(&root, &s).unwrap();
+        crate::portal::register_inbox(&root).unwrap();
+        for (_, name) in vf_portal::delivery::AGREEMENT_STEP_DOC_TYPES {
+            vf_fs::doctypes::ensure(&root, name, vf_portal::delivery::AGREEMENT_FOLDER, true)
+                .unwrap();
+        }
+        vf_fs::doctypes::ensure(
+            &root,
+            vf_portal::inbox::RECEIPT_DOC_TYPE,
+            "Billing/{Year}",
+            true,
+        )
+        .unwrap();
+        vf_ingest::parsers::sync_filer_rules_report(&root).unwrap();
+        vf_letters::store::seed_if_missing(&root).unwrap();
+        // The firm fills in its Terms and Conditions once (A17).
+        let mut terms = vf_letters::store::load_all(&root)
+            .unwrap()
+            .into_iter()
+            .find(|t| t.kind == vf_letters::TERMS)
+            .unwrap();
+        let mut json = serde_json::to_string(&terms.blocks).unwrap();
+        for (k, v) in [
+            ("[X]", "30"),
+            ("[Portal Name]", "Sample Portal"),
+            ("[State Name]", "Ohio"),
+            (
+                "[Name of State or Federal Court Desired]",
+                "Franklin County, Ohio",
+            ),
+        ] {
+            json = json.replace(k, v);
+        }
+        terms.blocks = serde_json::from_str(&json).unwrap();
+        terms.sample = false;
+        vf_letters::store::save(&root, &terms).unwrap();
+        vf_letters::partners::save(
+            &root,
+            &[vf_letters::partners::Partner {
+                name: "Morgan Example".into(),
+                title: "Partner".into(),
+                code: "ME".into(),
+            }],
+        )
+        .unwrap();
+        let d = data.clone();
+        let mut h = HarnessBuilder::default()
+            .with_max_steps(crate::ui::test_util::MAX_STEPS)
+            .with_theme(egui::Theme::Light)
+            .with_size([1440.0, 900.0])
+            .build_eframe(move |cc| VibeFilesApp::new(&cc.egui_ctx, d.clone()));
+        h.run_steps(8);
+        let shot = |h: &mut egui_kittest::Harness<'static, VibeFilesApp>, name: &str| {
+            for _ in 0..5 {
+                h.step();
+            }
+            match h.render() {
+                Ok(img) => img.save(out.join(format!("{name}.png"))).unwrap(),
+                Err(e) => eprintln!("{name}: {e}"),
+            }
+        };
+        let said = |h: &egui_kittest::Harness<'static, VibeFilesApp>, text: &str| {
+            h.query_all_by_label_contains(text).next().is_some()
+        };
+        let wait_long =
+            |h: &mut egui_kittest::Harness<'static, VibeFilesApp>,
+             what: &str,
+             ok: &dyn Fn(&egui_kittest::Harness<'static, VibeFilesApp>) -> bool| {
+                let start = std::time::Instant::now();
+                while !ok(h) {
+                    assert!(start.elapsed().as_secs() < 120, "{what}: never");
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                    h.step();
+                }
+            };
+        h.get_by_role_and_label(Role::Button, "Open existing")
+            .click();
+        h.run_steps(8);
+        h.get_by_label("Cabinet folder").click();
+        h.step();
+        h.get_by_label("Cabinet folder")
+            .type_text(&root.display().to_string());
+        h.step();
+        h.get_by_role_and_label(Role::Button, "Open cabinet")
+            .click();
+        assert!(wait_for(&mut h, |h| matches!(
+            h.state().screen,
+            crate::app::Screen::Open(_)
+        )));
+        h.run_steps(8);
+        {
+            let o = open_mut(&mut h);
+            vf_fs::doctypes::sync(&mut o.opened.conn, &root, "dev", "doc_types_edit").unwrap();
+        }
+        let c = {
+            let o = open_mut(&mut h);
+            o.browse.set_scope(vf_core::browse::Scope::Client(0));
+            o.browse.portal.reread();
+            o.browse.snap.clients[0].clone()
+        };
+        let folder = c.folder_rel.clone().unwrap();
+        // A business, its contact the person who signs for it.
+        vf_fs::clients::set_entity_type(&root, &c.id, Some("llc")).unwrap();
+        for (k, v) in [
+            ("first", "Pat"),
+            ("last", "Sample"),
+            ("email", "pat.sample@example.com"),
+        ] {
+            vf_fs::contacts::set_one_by_hand(&root, &c.id, k, v).unwrap();
+        }
+        let p = crate::portal::client(&s);
+        p.put_client(&c.id, &c.ext_id, &c.name, None).unwrap();
+        p.invite(
+            &c.id,
+            Some("pat.sample@example.com"),
+            None,
+            "Pat Sample",
+            "Owner",
+        )
+        .unwrap();
+        note(format!(
+            "Setup: {} ({}) a business on the portal, Pat Sample its contact; the Terms and Conditions filled in; Morgan Example the partner",
+            c.name, c.ext_id
+        ));
+
+        // ---- Step 1: Service agreement… with three services.
+        h.run_steps(4);
+        h.get_by_role_and_label(Role::Button, "Service agreement…")
+            .click();
+        wait_long(&mut h, "the window read", &|h| {
+            said(h, "SERVICES AND FEES") && !said(h, "Working…")
+        });
+        h.run_steps(4);
+        for (service, once, month) in [
+            ("Bookkeeping", "", "450.00"),
+            ("Payroll", "", "125.00"),
+            ("Advisory", "500.00", ""),
+        ] {
+            h.get_by_label(service).click();
+            h.run_steps(3);
+            for (label, v) in [("one-time", once), ("monthly", month)] {
+                if v.is_empty() {
+                    continue;
+                }
+                let name = format!("{service} {label} fee");
+                h.get_by_label(&name).click();
+                h.step();
+                h.get_by_label(&name).type_text(v);
+                h.run_steps(2);
+            }
+        }
+        h.run_steps(4);
+        assert!(said(&h, "Total $500.00 one-time · $575.00 a month"));
+        shot(&mut h, "01-service-agreement");
+        h.get_by_role_and_label(Role::Button, "Send to client")
+            .click();
+        h.run_steps(4);
+        shot(&mut h, "01b-after-send");
+        wait_long(&mut h, "sent", &|h| said(h, "Sent to the client."));
+        let a = p.agreements(&c.id).unwrap();
+        assert_eq!(a.len(), 1);
+        let sent = p.delivery(&a[0].id).unwrap();
+        assert_eq!(sent.covers, ["Bookkeeping", "Payroll", "Advisory"]);
+        assert_eq!(sent.letters.len(), 3);
+        assert_eq!(sent.signers[0].role, "officer");
+        note(format!(
+            "Step 1: sent {}: {} letters (bookkeeping, payroll, advisory, each with the Terms), Advisory $500.00 once, Bookkeeping $450.00 and Payroll $125.00 a month",
+            sent.title,
+            sent.letters.len()
+        ));
+
+        // ---- Step 2: the client signs, sets up payment, a month is paid, the next fails.
+        let ok = std::process::Command::new("node")
+            .args([
+                &client_js,
+                &url,
+                &out.display().to_string(),
+                &log,
+                "pat.sample@example.com",
+                "agreement",
+                &stripe,
+            ])
+            .status()
+            .is_ok_and(|s| s.success());
+        assert!(ok, "the client's side (see client-agreement.json)");
+        let now = p.delivery(&a[0].id).unwrap();
+        assert_eq!(now.status, "complete");
+        let subs = p.subscriptions(&c.id).unwrap();
+        assert_eq!(subs.len(), 1);
+        assert_eq!(subs[0].monthly_cents, 57_500);
+        assert!(subs[0].failed_at.is_some());
+        note(format!(
+            "Step 2: signed and set up; the monthly charge: {}",
+            subs[0].words()
+        ));
+        click_read_again(&mut h);
+        h.run_steps(20);
+        shot(&mut h, "02a-after-read-again");
+        wait_long(&mut h, "the failed month shown", &|h| {
+            said(h, "the last payment failed")
+        });
+        shot(&mut h, "02-agreement-monthly-failed");
+
+        // ---- Step 3: the step PDFs and the month's receipt are fetched and committed.
+        open_mut(&mut h).browse.portal.agreement = None;
+        open_mut(&mut h).browse.portal.fetch_now = true;
+        let inbox = crate::portal::inbox(&root);
+        let count = |inbox: &std::path::Path| {
+            std::fs::read_dir(inbox)
+                .ok()
+                .into_iter()
+                .flatten()
+                .flatten()
+                .filter(|e| {
+                    let n = e.file_name().to_string_lossy().into_owned();
+                    n.contains(" Agreement ") || n.contains("Payment receipt")
+                })
+                .count()
+        };
+        wait_long(&mut h, "the PDFs fetched", &|_| count(&inbox) == 3);
+        h.state_mut().tab = crate::app::Tab::Intake;
+        h.run_steps(10);
+        if let Some(b) = h.query_by_label("Preview") {
+            b.click();
+        }
+        wait_long(&mut h, "the rows ready", &|h| said(h, "Commit 3 files"));
+        shot(&mut h, "03-intake-agreement-pdfs");
+        h.query_all_by_role_and_label(Role::Button, "Commit 3 files")
+            .last()
+            .unwrap()
+            .click();
+        h.run_steps(6);
+        wait_long(&mut h, "the commit summary", &|h| {
+            h.query_all_by_label("Confirm commit").next().is_some()
+        });
+        h.query_all_by_label("Confirm commit")
+            .next()
+            .unwrap()
+            .click();
+        h.run_steps(6);
+        let year = now.tax_year;
+        let eng = root
+            .join(&folder)
+            .join("Correspondence")
+            .join(year.to_string())
+            .join("Engagement");
+        for want in [
+            format!("{year} Agreement 1 - Letters.pdf"),
+            format!("{year} Agreement 4 - Fee.pdf"),
+        ] {
+            let path = eng.join(&want);
+            wait_long(&mut h, &want, &|_| path.exists());
+        }
+        let billing = root.join(&folder).join("Billing");
+        let receipt = std::fs::read_dir(&billing)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .flat_map(|y| std::fs::read_dir(y.path()).into_iter().flatten().flatten())
+            .find(|f| f.file_name().to_string_lossy().contains("Monthly services"))
+            .map(|f| f.path());
+        assert!(receipt.is_some(), "the monthly receipt in Billing");
+        note(format!(
+            "Step 3: committed into {folder}\\Correspondence\\{year}\\Engagement (the signed letters, the payment record) and the month's receipt into {}",
+            receipt.unwrap().strip_prefix(&root).unwrap().display()
+        ));
+
+        // ---- Step 4: End engagement… sends the closure letter and stops the charge.
+        h.state_mut().tab = crate::app::Tab::Browse;
+        h.run_steps(6);
+        h.get_by_role_and_label(Role::Button, "End engagement…")
+            .click();
+        h.run_steps(6);
+        for (k, v) in [
+            ("[Date of Closure Letter]", "November 25, 2026"),
+            ("[Date]", "November 25, 2026"),
+            ("[Name of Engagement]", "Bookkeeping, payroll and advisory"),
+            ("[Telephone Number]", "555-0100"),
+            (
+                "[and Specified Parties, optional if applicable]",
+                "and its lender",
+            ),
+        ] {
+            // The box (named as its label beside it).
+            let Some(field) = h.query_all_by_label(k).last() else {
+                continue;
+            };
+            field.click();
+            h.step();
+            h.query_all_by_label(k).last().unwrap().type_text(v);
+            h.run_steps(2);
+        }
+        shot(&mut h, "04-end-engagement");
+        h.get_by_role_and_label(Role::Button, "Send and end engagement…")
+            .click();
+        h.run_steps(3);
+        h.get_by_role_and_label(Role::Button, "End engagement")
+            .click();
+        wait_long(&mut h, "ended", &|h| {
+            said(h, "closure letter is on the client's portal")
+        });
+        shot(&mut h, "05-engagement-ended");
+        let subs = p.subscriptions(&c.id).unwrap();
+        assert!(subs[0].canceled_at.is_some());
+        let files = p.files_for_client(&c.id).unwrap();
+        assert!(
+            files
+                .iter()
+                .any(|f| f.name.contains("Engagement closure letter"))
+        );
+        note("Step 4: the closure letter shared on the portal and in the Portal inbox; the monthly charge stopped".into());
+        std::fs::write(out.join("steps.txt"), steps.join("\n")).unwrap();
+    }
+
     /// Presses the open window's Read again.
     fn click_read_again(h: &mut egui_kittest::Harness<'static, VibeFilesApp>) {
         h.query_all_by_role_and_label(Role::Button, "Read again")
