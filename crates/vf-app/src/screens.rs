@@ -1948,23 +1948,17 @@ mod tests {
             a.agreements.reread();
         }
         let tick = format!("{} ({})", c.name, c.ext_id);
+        // Settled: the portal's agreements and monthly charges are both in (the row shows the
+        // changed amount), so the rows no longer move under the click.
         wait_long(&mut h, "the bulk list", &|h| {
-            h.query_by_label(&tick).is_some() && !said(h, "Reading the portal")
+            h.query_by_label(&tick).is_some()
+                && !said(h, "Reading the portal")
+                && said(h, "$120.00")
         });
-        // The list can still move as the portal's answer lands: tick until it says so.
-        for _ in 0..5 {
-            h.run_steps(4);
-            if said(&h, "1 ticked") {
-                break;
-            }
-            h.get_by_label(&tick).click();
-        }
+        h.run_steps(4);
+        h.get_by_label(&tick).click();
         h.run_steps(3);
         assert!(said(&h, "1 ticked"), "the client ticked");
-        assert!(
-            said(&h, "$120.00"),
-            "the changed monthly amount carried over"
-        );
         shot(&mut h, "12-bulk-agreements");
         h.get_by_role_and_label(Role::Button, "Send 1 agreement")
             .click();

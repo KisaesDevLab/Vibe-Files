@@ -266,12 +266,11 @@ fn hint_for(root: &Path, u: &Upload, name: &str) -> Option<vf_fs::hints::Hint> {
         (None, Some(r)) => (r.doc_type.as_str(), "portal_request", "client"),
         (None, None) => ("", "", ""),
     };
-    let doc_type = Some(wanted)
-        .filter(|d| !d.trim().is_empty())
-        .and_then(|d| {
-            let types = vf_fs::doctypes::load(root).ok().flatten()?;
-            vf_fs::doctypes::id_by_name(&types, d)
-        })?;
+    if wanted.trim().is_empty() {
+        return None;
+    }
+    let types = vf_fs::doctypes::load(root).ok().flatten()?;
+    let doc_type = vf_fs::doctypes::id_by_name(&types, wanted)?;
     let mut h = vf_fs::hints::Hint::new(&u.sha256, name, origin, "portal");
     h.source = Some(source.into());
     // A receipt is the year it was paid: its name starts with the date paid.
@@ -286,20 +285,29 @@ fn hint_for(root: &Path, u: &Upload, name: &str) -> Option<vf_fs::hints::Hint> {
     Some(h)
 }
 
+/// Notes `u`'s doc type for Intake, before the file named `name` lands in the inbox. Every
+/// writer of a portal upload into the inbox calls this first: Intake watches the inbox and
+/// could read the file before a later hint (mobile walkthrough 2026-11-25 caught a receipt
+/// without its hint). Hints are found by SHA-256, so a " (2)" name or a move tried again
+/// changes nothing.
+pub(crate) fn note_for_intake(root: &Path, u: &Upload, name: &str) -> Result<(), String> {
+    match hint_for(root, u, name) {
+        Some(h) => vf_fs::hints::append(root, &h).map_err(|e| {
+            format!(
+                "{}: its doc type could not be noted for Intake ({e})",
+                u.name
+            )
+        }),
+        None => Ok(()),
+    }
+}
+
 /// Moves a claimed download into the inbox and logs it.
 fn finish(root: &Path, part: &Path, meta: &Path, u: &Upload, now: &str, report: &mut FetchReport) {
     let dir = inbox(root);
     let name = inbox_name(&u.client_name, &u.client_code, &u.name);
-    // The hint is written before the file lands: Intake watches the inbox and could read the
-    // file first (mobile walkthrough 2026-11-25 caught a receipt without its hint). Hints are
-    // found by SHA-256, so a later " (2)" name or a move tried again changes nothing.
-    if let Some(h) = hint_for(root, u, &name)
-        && let Err(e) = vf_fs::hints::append(root, &h)
-    {
-        report.problems.push(format!(
-            "{}: its doc type could not be noted for Intake ({e})",
-            u.name
-        ));
+    if let Err(e) = note_for_intake(root, u, &name) {
+        report.problems.push(e);
     }
     match move_into(part, &dir, &name) {
         Ok(dest) => {

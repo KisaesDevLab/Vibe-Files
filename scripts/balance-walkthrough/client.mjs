@@ -7,13 +7,10 @@ import { spawn } from 'node:child_process';
 import { readFile, writeFile, mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { W, H, emulate, layoutLog } from '../walkthrough/mobile.mjs';
 
 const [BASE, OUT, LOG, EMAIL, PHASE, STRIPE] = process.argv.slice(2);
 const EDGE = 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe';
-// VF_MOBILE=1: a phone (390x844, touch), and every screenshot also records what is wider than the screen.
-const MOBILE = process.env.VF_MOBILE === '1';
-const W = MOBILE ? 390 : 1280;
-const H = MOBILE ? 844 : 900;
 const DPORT = 9345;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const steps = [];
@@ -59,9 +56,8 @@ const js = async (expr) => {
 };
 await send('Page.enable');
 await send('DOM.enable');
-await send('Emulation.setDeviceMetricsOverride', { width: W, height: H, deviceScaleFactor: MOBILE ? 2 : 1, mobile: MOBILE });
-if (MOBILE) await send('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 5 });
-const overflow = [];
+await emulate(send);
+const layout = layoutLog(js, writeFile);
 
 // Helpers that run in the page.
 await send('Page.addScriptToEvaluateOnNewDocument', {
@@ -90,30 +86,7 @@ const until = async (expr, what, ms = 15000) => {
   throw new Error(`timed out: ${what}`);
 };
 const shot = async (name) => {
-  if (MOBILE) {
-    const wide = await js(`(() => {
-      if (!location.port || location.port === '3398') return null;
-      const vw = document.documentElement.clientWidth;
-      const out = [];
-      if (document.documentElement.scrollWidth > vw + 1) out.push('page scrolls sideways: ' + document.documentElement.scrollWidth + 'px');
-      for (const e of document.querySelectorAll('body *')) {
-        const r = e.getBoundingClientRect();
-        if (r.width === 0 || getComputedStyle(e).visibility === 'hidden') continue;
-        let clipped = false;
-        for (let p = e.parentElement; p && p !== document.body; p = p.parentElement) {
-          const o = getComputedStyle(p).overflowX;
-          if (o === 'auto' || o === 'scroll' || o === 'hidden') { clipped = true; break; }
-        }
-        const label = (e.innerText || e.value || e.getAttribute('aria-label') || '').trim().slice(0, 40).split(String.fromCharCode(10)).join(' ');
-        if (!clipped && (r.right > vw + 1 || r.left < -1))
-          out.push('wide ' + e.tagName.toLowerCase() + ' ' + Math.round(r.left) + '..' + Math.round(r.right) + ' "' + label + '"');
-        if (['BUTTON', 'A', 'INPUT', 'SELECT'].includes(e.tagName) && r.height > 0 && r.height < 32 && !['checkbox', 'radio', 'hidden'].includes(e.type))
-          out.push('small target ' + Math.round(r.width) + 'x' + Math.round(r.height) + ' ' + e.tagName.toLowerCase() + ' "' + label + '"');
-      }
-      return out.slice(0, 40);
-    })()`);
-    if (wide && wide.length) overflow.push({ shot: name, url: await js('location.pathname'), issues: wide });
-  }
+  await layout.check(name);
   const { result } = await send('Page.captureScreenshot', { format: 'png', captureBeyondViewport: true });
   await writeFile(join(OUT, `${name}.png`), Buffer.from(result.data, 'base64'));
 };
@@ -187,7 +160,7 @@ try {
   process.exitCode = 1;
 } finally {
   await writeFile(join(OUT, `client-${PHASE}.json`), JSON.stringify(steps, null, 2));
-  if (MOBILE) await writeFile(join(OUT, `mobile-${PHASE}.json`), JSON.stringify(overflow, null, 2));
+  await layout.save(join(OUT, `mobile-${PHASE}.json`));
   ws.close();
   edge.kill();
 }

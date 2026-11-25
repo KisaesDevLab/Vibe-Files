@@ -1987,7 +1987,7 @@ pub fn show_page(
             .add_enabled(!ticked.is_empty(), widgets::primary_button(format!(
                     "Send {} agreement{}",
                     ticked.len(),
-                    if ticked.len() == 1 { "" } else { "s" }
+                    filer_intake::ui::theme::plural(ticked.len())
                 )))
             .on_hover_text("Each from the client's last agreement: the same services and fees, its letters as the templates now say, signed by the client's partner.")
             .clicked()

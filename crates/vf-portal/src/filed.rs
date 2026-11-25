@@ -306,6 +306,10 @@ pub fn fetch_again(
         .download_upload(&u.upload, &part)
         .map_err(|e| e.message())?;
     let name = inbox::inbox_name(&u.upload.client_name, &u.upload.client_code, &u.upload.name);
+    if let Err(e) = inbox::note_for_intake(root, &u.upload, &name) {
+        let _ = std::fs::remove_file(&part);
+        return Err(e);
+    }
     let dest = inbox::move_into(&part, &inbox::inbox(root), &name).map_err(|e| {
         let _ = std::fs::remove_file(&part);
         format!("It could not be put in the Portal inbox: {e}")
