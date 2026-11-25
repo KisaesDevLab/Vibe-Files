@@ -127,6 +127,7 @@ pub fn parse_export(bytes: &[u8]) -> std::result::Result<Vec<ExportRow>, String>
             client: get(Some(client)),
             emails: get(emails)
                 .split([',', ';', ' '])
+                .map(|e| e.trim_matches(|c: char| matches!(c, '<' | '>' | '"' | '\'' | '(' | ')')))
                 .filter_map(normal_email)
                 .collect(),
             tax_year: get(year).parse().ok(),
@@ -279,12 +280,12 @@ fn match_one(
                 by: By::Check,
                 client: Some(Candidate::of(c)),
                 note: format!(
-                    "ID {} is {}; the email is on {}",
+                    "ID {} is {}; the email is {}'s",
                     row.source_id,
-                    c.code,
+                    c.name,
                     elsewhere
                         .iter()
-                        .map(|o| o.code.as_str())
+                        .map(|o| format!("{} ({})", o.name, o.code))
                         .collect::<Vec<_>>()
                         .join(", ")
                 ),
@@ -297,7 +298,7 @@ fn match_one(
                 by: By::Check,
                 client: Some(Candidate::of(c)),
                 candidates: vec![Candidate::of(c)],
-                note: format!("ID {} is {}, a different name", row.source_id, c.name),
+                note: format!("ID {} is {}: a different name", row.source_id, c.name),
                 ..base
             };
         }
@@ -584,6 +585,10 @@ x2,,Demo LLC,s@firm.test,,Demo LLC,2025,1120s,Submitted,https://clients.stanford
             (Status::Submitted, true, 3)
         );
         assert!(parse_export(b"Name,Email\nx,y\n").is_err());
+        let named = "Client,Emails,Questionnaire link\n\
+\"Doe, Chris\",\"Chris Doe <Chris@Example.test>; (pat@example.test)\",https://clients.stanfordtax.com/x\n";
+        let rows = parse_export(named.as_bytes()).unwrap();
+        assert_eq!(rows[0].emails, ["chris@example.test", "pat@example.test"]);
     }
 
     #[test]
@@ -620,7 +625,10 @@ x2,,Demo LLC,s@firm.test,,Demo LLC,2025,1120s,Submitted,https://clients.stanford
             ]
         );
         assert_eq!(m[3].candidates.len(), 2);
-        assert!(m[2].note.contains("1043"));
+        assert_eq!(
+            m[2].note,
+            "ID 1042 is Sample, Jordan & Alex; the email is Sample Farms LLC (1043)'s"
+        );
     }
 
     #[test]

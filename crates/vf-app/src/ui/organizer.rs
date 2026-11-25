@@ -74,17 +74,38 @@ impl OrganizersPage {
     }
 
     /// Opens the import preview of the export at `path` (Import CSV…'s file, or a test's).
-    pub(crate) fn start_import(&mut self, ctx: &egui::Context, root: PathBuf, path: PathBuf) {
-        self.import = Some(ImportWindow::new(ctx, root, path));
+    pub(crate) fn start_import(
+        &mut self,
+        ctx: &egui::Context,
+        root: PathBuf,
+        path: PathBuf,
+        known: Vec<ClientRef>,
+    ) {
+        self.import = Some(ImportWindow::new(ctx, root, path, known));
     }
 
-    /// Ticks the preview's row for the export's client `name` (a test stands in for the click).
+    /// Ticks or unticks the preview's row of the export's `line` (a test stands in for the click).
     #[cfg(test)]
-    pub(crate) fn tick_import_row(&mut self, name: &str) {
+    pub(crate) fn set_import_row(&mut self, line: usize, ticked: bool) {
         if let Some(w) = &mut self.import
-            && let Some(m) = w.rows.iter_mut().find(|m| m.row.client == name)
+            && let Some(m) = w.rows.iter_mut().find(|m| m.row.line == line)
         {
-            m.ticked = true;
+            m.ticked = ticked;
+        }
+    }
+
+    /// Ticks every row shown (a test stands in for the clicks).
+    #[cfg(test)]
+    pub(crate) fn tick_shown(&mut self) {
+        for o in self.data.iter().flatten() {
+            let shown = match self.show {
+                Show::All => true,
+                Show::Showing => o.off.is_none(),
+                Show::Off => o.off.is_some(),
+            };
+            if shown {
+                self.ticked.insert(o.id.clone());
+            }
         }
     }
 }
@@ -176,9 +197,14 @@ pub fn page(
         page.clients = client_rows(env);
         let (s2, year) = (s.clone(), page.year);
         page.job = Some(spawn(&ctx, move || {
-            core::client(&s2)
-                .organizers(Some(year), None)
-                .map_err(|e| e.message())
+            core::client(&s2).organizers(Some(year), None).map_err(|e| {
+                if e.status() == Some(404) {
+                    "This portal has no organizer links yet: update the portal (0.5.5 or later)."
+                        .to_string()
+                } else {
+                    e.message()
+                }
+            })
         }));
     }
     ui.horizontal_wrapped(|ui| {
@@ -210,7 +236,8 @@ pub fn page(
                     .set_title("The organizer app's export")
                     .pick_file()
             {
-                page.start_import(&ctx, env.root.to_path_buf(), path);
+                let known = page.clients.values().map(|(c, _)| c.clone()).collect();
+                page.start_import(&ctx, env.root.to_path_buf(), path, known);
             }
             if page.job.is_some() || page.act.is_some() {
                 ui.spinner();
@@ -307,11 +334,20 @@ pub fn page(
                             },
                             serde_json::json!({ "taxYear": year, "count": changed }),
                         );
-                        Ok(format!(
+                        let mut m = format!(
                             "{changed} card{} turned {}.",
                             filer_intake::ui::theme::plural(changed as usize),
                             if off { "off" } else { "on" }
-                        ))
+                        );
+                        if (changed as usize) < ids.len() {
+                            m.push_str(if off {
+                                " The others were off already."
+                            } else {
+                                " The others were not turned off by hand: a card off because the \
+                                 delivery started, or delivered, stays off."
+                            });
+                        }
+                        Ok(m)
                     }));
                 }
             }
@@ -349,7 +385,7 @@ pub struct ImportWindow {
 }
 
 impl ImportWindow {
-    fn new(ctx: &egui::Context, root: PathBuf, path: PathBuf) -> Self {
+    fn new(ctx: &egui::Context, root: PathBuf, path: PathBuf, known: Vec<ClientRef>) -> Self {
         let p = path.clone();
         Self {
             path,
@@ -359,7 +395,20 @@ impl ImportWindow {
             find: Vec::new(),
             job: Some(spawn(ctx, move || {
                 let rows = organizer::read_export(&p)?;
-                let dir = vf_fs::contacts::directory(&root)?;
+                // No client CSV imported yet: the catalog's clients, by ID and name only.
+                let dir = vf_fs::contacts::directory(&root).unwrap_or_else(|_| {
+                    known
+                        .into_iter()
+                        .map(|c| vf_fs::contacts::ClientContacts {
+                            client_id: c.id,
+                            code: c.code,
+                            name: c.name,
+                            partner: None,
+                            planned: Default::default(),
+                            names: Vec::new(),
+                        })
+                        .collect()
+                });
                 Ok((rows, dir))
             })),
             dir: Vec::new(),
@@ -493,11 +542,35 @@ impl ImportWindow {
                     .filter(|(m, c)| m.ticked && !m.refused && c.is_some())
                     .map(|(m, c)| (c.clone().unwrap_or_default(), m.row.clone()))
                     .collect();
+                // One link per client and year: two rows going to one client are refused.
+                let mut seen: HashMap<&str, usize> = HashMap::new();
+                for (c, _) in &ready {
+                    *seen.entry(c.as_str()).or_default() += 1;
+                }
+                let twice: Vec<String> = seen
+                    .iter()
+                    .filter(|(_, n)| **n > 1)
+                    .map(|(id, _)| {
+                        clients
+                            .get(*id)
+                            .map(|(c, _)| format!("{} ({})", c.name, c.code))
+                            .unwrap_or_else(|| (*id).to_string())
+                    })
+                    .collect();
+                if !twice.is_empty() {
+                    ui.colored_label(
+                        theme::error(),
+                        format!(
+                            "Two ticked rows go to {}: a client has one organizer link a year. Untick one.",
+                            twice.join(", ")
+                        ),
+                    );
+                }
                 ui.horizontal(|ui| {
                     let n = ready.len();
                     if ui
                         .add_enabled(
-                            n > 0 && self.send.is_none() && !self.sent,
+                            n > 0 && twice.is_empty() && self.send.is_none() && !self.sent,
                             egui::Button::new(format!(
                                 "Send {n} link{}",
                                 filer_intake::ui::theme::plural(n)

@@ -2830,13 +2830,16 @@ mod tests {
     /// export (made up here) imported in Admin › Portal › Organizers, matched by UltraTax ID, by
     /// email and name, and by name alone (ticked by hand), a link on another site refused; sent;
     /// the client panel's line; Turn off from the panel; the card gone once the tax return
-    /// delivery for that year is created. Set `VF_WALK_URL`, `VF_WALK_KEY` and `VF_WALK_DIR`.
+    /// delivery for that year is created. Set `VF_WALK_URL`, `VF_WALK_KEY`, `VF_WALK_LOG`, `VF_WALK_CLIENT`
+    /// (scripts/organizer-walkthrough/client.mjs) and `VF_WALK_DIR`.
     #[test]
     #[ignore = "needs a running portal"]
     fn organizer_walkthrough() {
-        let (Ok(url), Ok(key), Ok(out)) = (
+        let (Ok(url), Ok(key), Ok(log), Ok(client_js), Ok(out)) = (
             std::env::var("VF_WALK_URL"),
             std::env::var("VF_WALK_KEY"),
+            std::env::var("VF_WALK_LOG"),
+            std::env::var("VF_WALK_CLIENT"),
             std::env::var("VF_WALK_DIR"),
         ) else {
             return;
@@ -2887,7 +2890,10 @@ mod tests {
              ok: &dyn Fn(&egui_kittest::Harness<'static, VibeFilesApp>) -> bool| {
                 let start = std::time::Instant::now();
                 while !ok(h) {
-                    assert!(start.elapsed().as_secs() < 60, "{what}: never");
+                    if start.elapsed().as_secs() >= 60 {
+                        let _ = h.render().map(|i| i.save(format!("{what}-FAILED.png")));
+                        panic!("{what}: never");
+                    }
                     std::thread::sleep(std::time::Duration::from_millis(50));
                     h.step();
                 }
@@ -2899,6 +2905,41 @@ mod tests {
                 h.get_by_label(label).type_text(text);
                 h.step();
             };
+        // The client's side, in Edge: `expect` is [(client name, card, link)].
+        let client = |phase: &str, email: &str, mobile: bool, expect: &[(&str, &str, &str)]| {
+            let file = t.path().join(format!("expect-{phase}.json"));
+            let list: Vec<serde_json::Value> = expect
+                .iter()
+                .map(|(c, card, link)| {
+                    let mut v = serde_json::json!({ "client": c, "card": card });
+                    if !link.is_empty() {
+                        v["link"] = serde_json::json!(link);
+                    }
+                    v
+                })
+                .collect();
+            std::fs::write(&file, serde_json::to_string(&list).unwrap()).unwrap();
+            let o = std::process::Command::new("node")
+                .arg(&client_js)
+                .args([
+                    url.as_str(),
+                    &out.display().to_string(),
+                    log.as_str(),
+                    email,
+                    phase,
+                ])
+                .arg(&file)
+                .env("VF_MOBILE", if mobile { "1" } else { "0" })
+                .output()
+                .unwrap();
+            let text = String::from_utf8_lossy(&o.stdout).to_string();
+            assert!(
+                o.status.success(),
+                "client {phase}: {text}{}",
+                String::from_utf8_lossy(&o.stderr)
+            );
+            text.trim().to_string()
+        };
         h.get_by_role_and_label(Role::Button, "Open existing")
             .click();
         h.run_steps(8);
@@ -2920,6 +2961,7 @@ mod tests {
             .collect();
         assert_eq!(clients.len(), 4);
         let email = format!("organizer+{run}@example.com");
+        let person = |who: &str| format!("{who}+{run}@example.com");
 
         // ---- 0. The client CSV with one email (Portal contacts), through Import clients CSV….
         let q = |s: &str| format!("\"{}\"", s.replace('"', "\"\""));
@@ -2949,76 +2991,153 @@ mod tests {
         h.get_by_role_and_label(Role::Button, &import).click();
         assert!(wait_for(&mut h, |h| said(h, "Portal contacts changed")));
 
-        // ---- 1. The organizer app's export (synthetic): by ID, by email, by name, a bad link.
+        // ---- 1. The organizer app's export (synthetic), with what goes wrong in real ones.
         let link = |n: &str| format!("https://clients.stanfordtax.com/walk-{run}/organizer/{n}");
         let export = t.path().join("organizer-links.csv");
         let mut x = String::from(
             "ID,Emails,Client,Tax year,Return type,Questionnaire status,Questionnaire link,Source,Source id,Tax return delivery status\n",
         );
+        // Line 2: by UltraTax ID.
         x.push_str(&format!(
             "a1,,{},2025,1040,In progress,{},ultratax,{},Not delivered\n",
             q(&clients[0].2),
             link("a1"),
             clients[0].1
         ));
+        // Line 3: by email (written "Name <email>") and name.
         x.push_str(&format!(
-            "a2,{email},{},2025,1120s,Not seen yet,{},,,Not delivered\n",
+            "a2,\"Pat <{}>\",{},2025,1120s,Not seen yet,{},,,Not delivered\n",
+            email.to_uppercase(),
             q(&clients[1].2),
             link("a2")
         ));
+        // Line 4: name only.
         x.push_str(&format!(
             "a3,,{},2025,1065,Submitted,{},,,Not delivered\n",
             q(&clients[2].2),
             link("a3")
         ));
+        // Line 5: a link on another site.
         x.push_str(
             "a4,,\"Nobody, Here\",2025,1040,In progress,https://example.com/organizer/a4,,,Not delivered\n",
         );
+        // Line 6: the ID is client 3, the email client 1's: asks.
+        x.push_str(&format!(
+            "a5,{email},{},2025,1040,In progress,{},ultratax,{},Not delivered\n",
+            q(&clients[3].2),
+            link("a5"),
+            clients[3].1
+        ));
+        // Line 7: client 0 a second time.
+        x.push_str(&format!(
+            "a6,,{},2025,1040,Not seen yet,{},ultratax,{},Not delivered\n",
+            q(&clients[0].2),
+            link("a6"),
+            clients[0].1
+        ));
+        // Line 8: last year's.
+        x.push_str(&format!(
+            "a7,,{},2024,1040,Submitted,{},ultratax,{},Delivered\n",
+            q(&clients[0].2),
+            link("a7"),
+            clients[0].1
+        ));
         std::fs::write(&export, x).unwrap();
         h.get_by_role_and_label(Role::Button, "Admin").click();
         h.run_steps(6);
         h.get_by_role_and_label(Role::Button, "Organizers").click();
         h.run_steps(6);
-        {
+        assert!(
+            said(&h, "None for this tax year"),
+            "the empty page says what to do"
+        );
+        let start_import = |h: &mut egui_kittest::Harness<'static, VibeFilesApp>| {
             let ctx = h.ctx.clone();
-            let a = open_mut(&mut h).admin.as_mut().unwrap();
-            a.organizers
-                .start_import(&ctx, root.clone(), export.clone());
-        }
-        wait_long(&mut h, "the import preview", &|h| said(h, "4 rows"));
+            open_mut(h).admin.as_mut().unwrap().organizers.start_import(
+                &ctx,
+                root.clone(),
+                export.clone(),
+                Vec::new(),
+            );
+        };
+        start_import(&mut h);
+        wait_long(&mut h, "the import preview", &|h| said(h, "7 rows"));
         assert!(
             said(
                 &h,
-                "by ID 1 · by email and name 1 · check 0 · name only 1 · no match 0 · not taken 1"
+                "by ID 2 · by email and name 1 · check 1 · name only 1 · no match 0 · not taken 2"
             ),
             "the preview's counts"
         );
-        shot(&mut h, "01-organizer-import-preview");
-        note("Step 1: the export read: 1 by UltraTax ID, 1 by email and name, 1 by name only (unticked), 1 link on another site not taken".into());
-        // The name-only row is ticked by hand (owner Q&A: it starts unticked).
-        assert!(said(&h, "Send 2 links"));
-        open_mut(&mut h)
-            .admin
-            .as_mut()
-            .unwrap()
-            .organizers
-            .tick_import_row(&clients[2].2);
-        h.run_steps(4);
-        h.get_by_role_and_label(Role::Button, "Send 3 links")
-            .click();
-        wait_long(&mut h, "sent", &|h| said(h, "Sent: 3 new"));
-        shot(&mut h, "02-organizer-sent");
-        note(
-            "Step 2: Send 3 links: 3 new on the portal (clients not on the portal yet were added)"
-                .into(),
+        assert!(
+            said(&h, "Two ticked rows go to"),
+            "client 0 twice is caught"
         );
+        assert!(said(&h, "For 2024, not 2025") && said(&h, "Not an organizer link"));
+        assert!(said(&h, "the email is "), "the check row says why");
+        shot(&mut h, "01-organizer-import-preview");
+        note("Step 1: 7 rows read: 2 by UltraTax ID (one client twice: Send is held until one is unticked), 1 by email written \"Name <EMAIL>\" and name, 1 that asks (ID and email disagree), 1 name only (unticked), a link on another site and last year's row not taken".into());
+        {
+            let a = open_mut(&mut h).admin.as_mut().unwrap();
+            a.organizers.set_import_row(7, false);
+            a.organizers.set_import_row(4, true);
+            a.organizers.set_import_row(6, true);
+        }
+        h.run_steps(4);
+        assert!(!said(&h, "Two ticked rows go to"));
+        h.get_by_role_and_label(Role::Button, "Send 4 links")
+            .click();
+        wait_long(&mut h, "sent", &|h| said(h, "Sent: 4 new"));
+        shot(&mut h, "02-organizer-sent");
+        note("Step 2: the second row for client 0 unticked, the name-only and the asking rows ticked: Send 4 links, 4 new (clients not on the portal yet added)".into());
         h.get_by_role_and_label(Role::Button, "Close").click();
         h.run_steps(6);
-        wait_long(&mut h, "the list", &|h| said(h, "3 listed · 3 showing"));
+        wait_long(&mut h, "the list", &|h| said(h, "4 listed · 4 showing"));
         shot(&mut h, "03-organizers-page");
-        note("Step 3: Admin › Portal › Organizers lists 3, all showing".into());
+        // The same export again changes nothing.
+        start_import(&mut h);
+        wait_long(&mut h, "the preview again", &|h| said(h, "7 rows"));
+        {
+            let a = open_mut(&mut h).admin.as_mut().unwrap();
+            a.organizers.set_import_row(7, false);
+            a.organizers.set_import_row(4, true);
+            a.organizers.set_import_row(6, true);
+        }
+        h.run_steps(4);
+        h.get_by_role_and_label(Role::Button, "Send 4 links")
+            .click();
+        wait_long(&mut h, "sent again", &|h| {
+            said(h, "Sent: 0 new, 0 changed, 4 the same.")
+        });
+        h.get_by_role_and_label(Role::Button, "Close").click();
+        h.run_steps(4);
+        note("Step 3: the list shows 4, all showing; the same export again: 0 new, 0 changed, 4 the same".into());
 
-        // ---- 4. The client panel's line, and Turn off from it.
+        // ---- 4. The clients see their cards (desktop and phone).
+        let p = crate::portal::client(&s);
+        let (pa, pb) = (person("pat"), person("pat.phone"));
+        for e in [&pa, &pb] {
+            p.invite(&clients[0].0, Some(e), None, "Pat Sample", "Owner")
+                .unwrap();
+            p.invite(&clients[2].0, Some(e), None, "Pat Sample", "Owner")
+                .unwrap();
+        }
+        let seen = [
+            (clients[0].2.as_str(), "in_progress", link("a1")),
+            (clients[2].2.as_str(), "submitted", link("a3")),
+        ];
+        let want: Vec<(&str, &str, &str)> =
+            seen.iter().map(|(c, k, l)| (*c, *k, l.as_str())).collect();
+        note(format!(
+            "Step 4 (desktop): {}",
+            client("see", &pa, false, &want)
+        ));
+        note(format!(
+            "Step 4 (phone): {}",
+            client("see", &pb, true, &want)
+        ));
+
+        // ---- 5. The client panel's line, and Turn off from it.
         h.get_by_role_and_label(Role::Button, "Browse").click();
         h.run_steps(6);
         {
@@ -3035,63 +3154,97 @@ mod tests {
             said(h, "Organizer 2025: In progress · card turned off")
         });
         shot(&mut h, "05-panel-turned-off");
-        note("Step 4: the client panel's line; Turn off: \"card turned off\"".into());
-        let p = crate::portal::client(&s);
+        note("Step 5: the client panel's line; Turn off: \"card turned off\"".into());
         let year = |p: &vf_portal::Portal| p.organizers(Some(2025), None).unwrap();
         let of = |list: &[vf_portal::organizer::Organizer], id: &str| {
             list.iter().find(|o| o.client_id == id).cloned().unwrap()
         };
         assert_eq!(of(&year(&p), &clients[0].0).off.as_deref(), Some("off"));
-        // A new import keeps it off.
-        let rows = vf_portal::organizer::read_export(&export).unwrap();
-        let r = p
-            .put_organizers(2025, &[(clients[0].0.clone(), &rows[0])])
-            .unwrap();
-        assert_eq!(r.same, 1);
-        assert_eq!(of(&year(&p), &clients[0].0).off.as_deref(), Some("off"));
 
-        // ---- 5. The tax return delivery for 2025 turns client 1's card off.
-        let mut steps_on = std::collections::BTreeMap::new();
-        steps_on.insert("return".to_string(), true);
-        let made = std::process::Command::new("curl")
-            .args([
-                "-s",
-                "-X",
-                "POST",
-                "-H",
-                &format!("Authorization: Bearer {key}"),
-                "-H",
-                "Content-Type: application/json",
-                "-d",
-                &serde_json::json!({
-                    "clientId": clients[1].0, "taxYear": 2025, "returnType": "1120-S",
-                    "steps": steps_on,
-                })
-                .to_string(),
-                &format!("{url}/api/firm/v1/deliveries"),
-            ])
-            .output()
-            .unwrap();
-        assert!(
-            String::from_utf8_lossy(&made.stdout).contains("\"delivery\""),
-            "{}",
-            String::from_utf8_lossy(&made.stdout)
-        );
-        assert_eq!(
-            of(&year(&p), &clients[1].0).off.as_deref(),
-            Some("delivery")
-        );
+        // ---- 6. The tax return deliveries for 2025 of clients 1 and 2.
+        for i in [1usize, 2] {
+            let made = std::process::Command::new("curl")
+                .args([
+                    "-s",
+                    "-X",
+                    "POST",
+                    "-H",
+                    &format!("Authorization: Bearer {key}"),
+                    "-H",
+                    "Content-Type: application/json",
+                    "-d",
+                    &serde_json::json!({
+                        "clientId": clients[i].0, "taxYear": 2025, "returnType": "1040",
+                        "steps": { "return": true },
+                    })
+                    .to_string(),
+                    &format!("{url}/api/firm/v1/deliveries"),
+                ])
+                .output()
+                .unwrap();
+            assert!(
+                String::from_utf8_lossy(&made.stdout).contains("\"delivery\""),
+                "{}",
+                String::from_utf8_lossy(&made.stdout)
+            );
+        }
+        let gone = [
+            (clients[0].2.as_str(), "none", ""),
+            (clients[2].2.as_str(), "none", ""),
+        ];
+        note(format!(
+            "Step 6: deliveries created for clients 1 and 2; a new person at clients 0 and 2 sees: {}",
+            {
+                let e = person("sam");
+                p.invite(&clients[0].0, Some(&e), None, "Sam Sample", "Owner")
+                    .unwrap();
+                p.invite(&clients[2].0, Some(&e), None, "Sam Sample", "Owner")
+                    .unwrap();
+                client("gone", &e, false, &gone)
+            }
+        ));
+
+        // ---- 7. Admin › Portal › Organizers: what is off and why; Turn on ticked.
         h.get_by_role_and_label(Role::Button, "Admin").click();
         h.run_steps(6);
         h.get_by_role_and_label(Role::Button, "Organizers").click();
         h.run_steps(4);
         click_read_again(&mut h);
         wait_long(&mut h, "off by delivery", &|h| {
-            said(h, "3 listed · 1 showing · 1 off by delivery · 1 turned off")
+            said(h, "4 listed · 1 showing · 2 off by delivery · 1 turned off")
         });
-        assert!(said(&h, "Off: delivery started") && said(&h, "Showing (thanks)"));
         shot(&mut h, "06-organizers-after-delivery");
-        note("Step 5: the 2025 tax return delivery created: that card is off by itself; the submitted one shows its thanks".into());
+        h.get_by_label("Off").click();
+        h.run_steps(4);
+        open_mut(&mut h)
+            .admin
+            .as_mut()
+            .unwrap()
+            .organizers
+            .tick_shown();
+        h.run_steps(4);
+        h.get_by_role_and_label(Role::Button, "Turn on ticked")
+            .click();
+        wait_long(&mut h, "turned on", &|h| {
+            said(
+                h,
+                "1 card turned on. The others were not turned off by hand",
+            )
+        });
+        shot(&mut h, "07-organizers-turned-on");
+        note("Step 7: the page says 1 showing, 2 off by delivery, 1 turned off; Show Off, tick all, Turn on ticked: 1 turned on, and why the other 2 stay off".into());
+        let e = person("robin");
+        p.invite(&clients[0].0, Some(&e), None, "Robin Sample", "Owner")
+            .unwrap();
+        note(format!(
+            "Step 8: client 0's card is back: {}",
+            client(
+                "back",
+                &e,
+                false,
+                &[(clients[0].2.as_str(), "in_progress", &link("a1"))]
+            )
+        ));
         std::fs::write(out.join("organizer-steps.txt"), steps.join("\n")).unwrap();
     }
 
