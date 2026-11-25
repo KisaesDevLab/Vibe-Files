@@ -46,7 +46,12 @@ Each finished step makes a PDF: a record page (for the return, its file name, si
 
 ## Deliveries list
 
-**Admin › Portal › Deliveries** lists every open delivery with the step it waits on and how many days it has been open. Filter by step; click a client to open its window. **Read again** reads the portal now.
+**Admin › Portal › Deliveries** lists every open delivery and agreement with the step it waits on and how many days it has been open; click a client to open its window. **Read again** reads the portal now.
+
+- **Show** narrows the list by the step waiting (Tax return, Form 8879, Letters to sign, Package to choose, Payment due), by kind (Tax returns, Agreements), or to **Monthly charge failed**.
+- **Show finished** adds those finished in the season you pick: that tax year's returns and the agreements covering them, with the day they were done.
+- **Waiting too long after** sets the days after which an open item's count turns amber; the number is kept for every PC. The line above the list counts them.
+- **Monthly charge** shows an agreement's monthly amount, or the day its last charge failed.
 
 ## Where the record is kept
 

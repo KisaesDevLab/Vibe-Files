@@ -57,4 +57,4 @@ When the year's agreement covering a return is signed, **Deliver tax return…**
 
 ## Filed for you
 
-Each finished step's PDF, with its log, arrives in the Portal inbox and Intake files it in `Correspondence\<year>\Engagement`. Each paid month's receipt is filed in `Billing\<year paid>`. The Deliveries page lists agreements with a **Kind** column; clicking one opens the client's agreement.
+Each finished step's PDF, with its log, arrives in the Portal inbox and Intake files it in `Correspondence\<year>\Engagement`. Each paid month's receipt is filed in `Billing\<year paid>`. The Deliveries page lists agreements with a **Kind** and a **Monthly charge** column; **Monthly charge failed** lists the clients whose last month did not go through. Clicking one opens the client's agreement.

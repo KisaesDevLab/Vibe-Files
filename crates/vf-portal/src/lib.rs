@@ -17,6 +17,7 @@ pub mod pricing;
 pub mod record;
 pub mod settings;
 pub mod todo;
+pub mod worklist;
 
 pub use api::{Portal, PortalError};
 pub use settings::PortalSettings;

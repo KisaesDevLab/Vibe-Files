@@ -1533,6 +1533,23 @@ mod tests {
         });
         shot(&mut h, "02-agreement-monthly-failed");
 
+        // ---- Step 2b: Admin › Portal › Deliveries shows the failed month (owner 2026-11-25).
+        open_mut(&mut h).browse.portal.agreement = None;
+        h.get_by_role_and_label(Role::Button, "Admin").click();
+        h.run_steps(6);
+        h.get_by_role_and_label(Role::Button, "Deliveries").click();
+        h.run_steps(4);
+        // Signed and set up, the agreement is finished: listed under its failed month, not open.
+        h.get_by_label("Monthly charge failed").click();
+        wait_long(&mut h, "the failed month on the Deliveries page", &|h| {
+            said(h, &c.name) && said(h, "Failed ")
+        });
+        assert!(said(&h, "Done "), "the agreement shows the day it was done");
+        shot(&mut h, "02b-deliveries-monthly-failed");
+        note("Step 2b: Admin › Portal › Deliveries, Monthly charge failed: the client's agreement, Done, its charge Failed".into());
+        h.get_by_role_and_label(Role::Button, "Browse").click();
+        h.run_steps(6);
+
         // ---- Step 3: the step PDFs and the month's receipt are fetched and committed.
         open_mut(&mut h).browse.portal.agreement = None;
         open_mut(&mut h).browse.portal.fetch_now = true;

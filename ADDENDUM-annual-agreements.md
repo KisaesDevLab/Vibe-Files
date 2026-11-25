@@ -224,3 +224,19 @@ no plain words for the portal's delivery and agreement errors; no check for a sp
 their own contact; the bulk list's small tick boxes; narrow partner boxes; agreements missing
 from the portal's staff page; an agreement's fee record and receipt worded as a tax return's;
 the portal's own step PDFs listed (and removable) in the client's uploads.
+
+## 12. Phone review and the Deliveries page (owner 2026-11-25)
+
+**Phone review.** The six walkthroughs run again at phone size (`VF_MOBILE=1`, 390×844, touch; `scripts/walkthrough/mobile.mjs` records anything wider than the screen and any tap target under 32 px). No page scrolls sideways. Fixed:
+- The Sign page gains **Go to signing ↓** on a phone, since the letter, Terms and all, comes before the pad.
+- An action link (`.p-link`) is 44 px tall on a narrow screen (`html[data-narrow='1']`).
+- After signing an agreement the link says "Back to your agreement".
+- Vibe Files writes Intake's hint before a portal file lands in the Portal inbox. Both writers now do this (`inbox::note_for_intake`); Fetch again wrote none before.
+
+**Deliveries page (Q&A 2026-11-25).** Admin › Portal › Deliveries becomes "Deliveries and agreements":
+- **Show** filters by the step waiting (Tax return, Form 8879, Letters to sign, Package to choose, Payment due), by kind (Tax returns, Agreements), and **Monthly charge failed**. The failed filter lists the agreement that set the charge, open or finished, whatever the season.
+- **Show finished** adds those finished in the season picked: a tax return by its tax year, an agreement by the tax year of the returns it covers (its `return_year`, else its year − 1).
+- **Waiting too long after N days** is set by the firm, default 14. It is kept in `_Vibe/deliveries.json` for every PC, not in the portal settings, which Admin › Portal rebuilds on each save. Its audit row is `deliveries_overdue_days`.
+- A **Monthly charge** column shows the amount, or "Failed <day>" in red. ⚠ is not used, because the fonts may lack it.
+- A count line: listed, open, and how many are waiting too long.
+- The rules are in `vf_portal::worklist`, with unit tests. The live agreement walkthrough's Step 2b checks the failed month on this page.

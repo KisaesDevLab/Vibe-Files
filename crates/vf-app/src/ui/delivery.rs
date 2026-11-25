@@ -12,8 +12,10 @@ use std::sync::mpsc::{Receiver, Sender};
 use egui::RichText;
 use vf_core::audit::AuditEntry;
 use vf_portal::PortalSettings;
+use vf_portal::agreement::Subscription;
 use vf_portal::api::PortalFile;
 use vf_portal::delivery::{self, Delivery, DeliveryChange, DeliverySigner, NewDelivery, StepsIn};
+use vf_portal::worklist::{self, Show};
 
 use crate::portal as core;
 use crate::ui::portal::{AuditOut, ClientRef, spawn};
@@ -1851,12 +1853,21 @@ pub fn client_pdfs(
 
 // ---- Admin › Portal › Deliveries ---------------------------------------------------------------
 
+/// The deliveries and agreements as read, and the live monthly charges.
+type Worklist = (Vec<Delivery>, Vec<Subscription>);
+
 #[derive(Default)]
 pub struct DeliveriesPage {
-    filter: Option<&'static str>,
-    data: Option<Vec<Delivery>>,
+    show: Show,
+    /// Also list those finished in `season` (a tax year).
+    finished: bool,
+    season: i32,
+    /// The firm's "waiting too long" mark, in days (`_Vibe/deliveries.json`).
+    overdue: u32,
+    overdue_dirty: bool,
+    data: Option<Worklist>,
     clients: HashMap<String, (ClientRef, Option<String>)>,
-    job: Option<Receiver<Result<Vec<Delivery>, String>>>,
+    job: Option<Receiver<Result<Worklist, String>>>,
     loaded: bool,
     err: Option<String>,
     window: Option<DeliverWindow>,
@@ -1915,8 +1926,28 @@ fn days_since(at: &str) -> i64 {
         .unwrap_or(0)
 }
 
+/// "Nov 20", local time, from an RFC 3339 time.
+fn short_day(at: &str) -> String {
+    chrono::DateTime::parse_from_rfc3339(at)
+        .map(|t| t.with_timezone(&chrono::Local).format("%b %-d").to_string())
+        .unwrap_or_default()
+}
+
+/// The filters above the list (owner 2026-11-25: by step waiting, by kind, a failed month).
+const SHOWS: [(Show, &str); 9] = [
+    (Show::Open, "All open"),
+    (Show::Step(delivery::RETURN), "Tax return"),
+    (Show::Step(delivery::ESIGN), "Form 8879"),
+    (Show::Step(delivery::LETTERS), "Letters to sign"),
+    (Show::Step(delivery::PACKAGE), "Package to choose"),
+    (Show::Step(delivery::FEE), "Payment due"),
+    (Show::Returns, "Tax returns"),
+    (Show::Agreements, "Agreements"),
+    (Show::Failed, "Monthly charge failed"),
+];
+
 pub fn page(ui: &mut egui::Ui, page: &mut DeliveriesPage, env: &mut crate::ui::browse::Env) {
-    ui.heading("Deliveries");
+    ui.heading("Deliveries and agreements");
     if page
         .settings
         .as_ref()
@@ -1926,6 +1957,7 @@ pub fn page(ui: &mut egui::Ui, page: &mut DeliveriesPage, env: &mut crate::ui::b
             .ok()
             .and_then(|c| vf_portal::settings::load(env.root, &c.cabinet_id));
         page.settings = Some((std::time::Instant::now(), s));
+        page.overdue = worklist::overdue_days(env.root);
     }
     let settings = page.settings.as_ref().and_then(|(_, s)| s.clone());
     let Some(s) = settings.filter(|s| s.deliveries) else {
@@ -1933,8 +1965,8 @@ pub fn page(ui: &mut egui::Ui, page: &mut DeliveriesPage, env: &mut crate::ui::b
         return;
     };
     ui.label(widgets::caption(
-        "Every open tax return delivery and the step it waits on: the season's worklist. Click a \
-         client to open its Deliver tax return window.",
+        "Every open tax return delivery and annual agreement, and the step each waits on: the \
+         season's worklist. Click a client to open its window.",
     ));
     let ctx = ui.ctx().clone();
     if let Some(rx) = &page.job
@@ -1942,11 +1974,11 @@ pub fn page(ui: &mut egui::Ui, page: &mut DeliveriesPage, env: &mut crate::ui::b
     {
         page.job = None;
         match r {
-            Ok(d) => {
+            Ok((d, subs)) => {
                 if let Some(o) = &page.reads {
                     o.send(d.clone());
                 }
-                page.data = Some(d);
+                page.data = Some((d, subs));
                 page.err = None;
             }
             Err(e) => page.err = Some(e),
@@ -1957,18 +1989,52 @@ pub fn page(ui: &mut egui::Ui, page: &mut DeliveriesPage, env: &mut crate::ui::b
         page.clients = client_rows(env);
         let s2 = s.clone();
         page.job = Some(spawn(&ctx, move || {
-            core::client(&s2)
-                .deliveries_all(None)
-                .map_err(|e| e.message())
+            let p = core::client(&s2);
+            let d = p.deliveries_all(None).map_err(|e| e.message())?;
+            // A portal without agreements has no monthly charges.
+            let subs = p.live_subscriptions().unwrap_or_default();
+            Ok((d, subs))
         }));
     }
+    if page.season == 0 {
+        page.season = chrono::Datelike::year(&chrono::Local::now()) - 1;
+    }
+    ui.horizontal_wrapped(|ui| {
+        ui.label("Show:");
+        for (k, name) in SHOWS {
+            ui.selectable_value(&mut page.show, k, name);
+        }
+    });
     ui.horizontal(|ui| {
-        ui.selectable_value(&mut page.filter, None, "All open");
-        for (k, name) in [
-            (delivery::RETURN, "Tax return"),
-            (delivery::ESIGN, "Form 8879"),
-        ] {
-            ui.selectable_value(&mut page.filter, Some(k), name);
+        ui.checkbox(&mut page.finished, "Show finished")
+            .on_hover_text("Also list those finished this season: tax returns of that tax year, and the agreements covering them.");
+        if page.finished {
+            ui.label("Season (tax year)");
+            ui.add(egui::DragValue::new(&mut page.season).range(2000..=2100));
+        }
+        ui.separator();
+        ui.label("Waiting too long after");
+        let r = ui.add(egui::DragValue::new(&mut page.overdue).range(1..=365));
+        ui.label("days");
+        // Saved for every PC once the number is settled (not on each step of a drag).
+        if r.changed() {
+            page.overdue_dirty = true;
+        }
+        if page.overdue_dirty && !r.dragged() && !r.has_focus() {
+            page.overdue_dirty = false;
+            match worklist::set_overdue_days(env.root, page.overdue) {
+                Ok(n) => {
+                    page.overdue = n;
+                    if let Some(a) = &page.audit {
+                        a.send(AuditEntry::new(
+                            "deliveries_overdue_days",
+                            None,
+                            serde_json::json!({ "days": n }),
+                        ));
+                    }
+                }
+                Err(e) => page.err = Some(format!("Not saved: {e}")),
+            }
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if ui
@@ -1986,17 +2052,24 @@ pub fn page(ui: &mut egui::Ui, page: &mut DeliveriesPage, env: &mut crate::ui::b
         ui.colored_label(theme::error(), e);
     }
     let mut open: Option<(String, bool)> = None;
-    if let Some(list) = &page.data {
-        let rows: Vec<&Delivery> = list
-            .iter()
-            .filter(|d| d.status == "open")
-            .filter(|d| {
-                page.filter
-                    .is_none_or(|f| d.waiting().is_some_and(|s| s.kind == f))
-            })
-            .collect();
+    if let Some((list, subs)) = &page.data {
+        let season = page.finished.then_some(page.season);
+        let rows = worklist::rows(list, subs, page.show, season);
+        let days: Vec<i64> = rows.iter().map(|r| days_since(&r.d.created_at)).collect();
         if rows.is_empty() {
             ui.label(widgets::caption("None."));
+        } else {
+            let open_n = rows.iter().filter(|r| r.open()).count();
+            let late = rows
+                .iter()
+                .zip(&days)
+                .filter(|(r, n)| r.overdue(**n, page.overdue))
+                .count();
+            ui.label(widgets::caption(format!(
+                "{} listed · {open_n} open · {late} waiting over {} days",
+                rows.len(),
+                page.overdue
+            )));
         }
         // Only the rows on screen are drawn (500 open deliveries in a season: load test
         // 2026-11-24).
@@ -2005,18 +2078,26 @@ pub fn page(ui: &mut egui::Ui, page: &mut DeliveriesPage, env: &mut crate::ui::b
             .striped(true)
             .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
             .column(
-                Column::initial(320.0)
+                Column::initial(300.0)
                     .at_least(160.0)
                     .clip(true)
                     .resizable(true),
             )
             .column(Column::exact(50.0))
-            .column(Column::exact(70.0))
+            .column(Column::exact(80.0))
             .column(Column::initial(260.0).at_least(140.0).clip(true))
-            .column(Column::remainder().at_least(50.0))
+            .column(Column::exact(50.0))
+            .column(Column::remainder().at_least(120.0).clip(true))
             .max_scroll_height(f32::INFINITY)
             .header(22.0, |mut h| {
-                for name in ["Client", "Year", "Kind", "Step waiting", "Days"] {
+                for name in [
+                    "Client",
+                    "Year",
+                    "Kind",
+                    "Step waiting",
+                    "Days",
+                    "Monthly charge",
+                ] {
                     h.col(|ui| {
                         ui.label(RichText::new(name).small().color(theme::ink_muted()));
                     });
@@ -2024,7 +2105,9 @@ pub fn page(ui: &mut egui::Ui, page: &mut DeliveriesPage, env: &mut crate::ui::b
             })
             .body(|body| {
                 body.rows(24.0, rows.len(), |mut row| {
-                    let d = rows[row.index()];
+                    let r = rows[row.index()];
+                    let n = days[row.index()];
+                    let d = r.d;
                     row.col(|ui| {
                         let name = page
                             .clients
@@ -2042,16 +2125,50 @@ pub fn page(ui: &mut egui::Ui, page: &mut DeliveriesPage, env: &mut crate::ui::b
                         ui.label(d.what());
                     });
                     row.col(|ui| {
-                        ui.label(
-                            d.waiting()
-                                .map(|s| {
-                                    format!("{} · {}", s.name, delivery::state_words(&s.state))
-                                })
-                                .unwrap_or_default(),
-                        );
+                        if r.open() {
+                            ui.label(
+                                d.waiting()
+                                    .map(|s| {
+                                        format!("{} · {}", s.name, delivery::state_words(&s.state))
+                                    })
+                                    .unwrap_or_default(),
+                            );
+                        } else {
+                            ui.label(
+                                d.completed_at
+                                    .as_deref()
+                                    .map(|at| format!("Done {}", short_day(at)))
+                                    .unwrap_or_else(|| "Done".into()),
+                            );
+                        }
                     });
                     row.col(|ui| {
-                        ui.label(days_since(&d.created_at).to_string());
+                        if !r.open() {
+                            ui.label("—");
+                        } else if r.overdue(n, page.overdue) {
+                            ui.colored_label(theme::warn(), n.to_string())
+                                .on_hover_text(format!("Waiting over {} days", page.overdue));
+                        } else {
+                            ui.label(n.to_string());
+                        }
+                    });
+                    row.col(|ui| match r.monthly {
+                        Some(m) if m.failed_at.is_some() => {
+                            ui.colored_label(
+                                theme::error(),
+                                format!(
+                                    "Failed {}",
+                                    m.failed_at.as_deref().map(short_day).unwrap_or_default()
+                                ),
+                            )
+                            .on_hover_text(m.words());
+                        }
+                        Some(m) => {
+                            ui.label(m.words());
+                        }
+                        None => {
+                            ui.label("—");
+                        }
                     });
                 });
             });
