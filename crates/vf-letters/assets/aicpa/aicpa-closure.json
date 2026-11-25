@@ -1,0 +1,83 @@
+{
+ "id": "aicpa-closure",
+ "version": 0,
+ "name": "Engagement closure letter",
+ "return_types": [],
+ "kind": "closure",
+ "doc_type": "Correspondence",
+ "letterhead": true,
+ "default_ticked": false,
+ "sample": true,
+ "blocks": [
+  {
+   "kind": "paragraph",
+   "text": "{Date}"
+  },
+  {
+   "kind": "paragraph",
+   "text": "{Signer name}, {Signer title}"
+  },
+  {
+   "kind": "paragraph",
+   "text": "{Client name}"
+  },
+  {
+   "kind": "heading",
+   "text": "RE: [Name of Engagement]"
+  },
+  {
+   "kind": "paragraph",
+   "text": "Dear {Signer first names}:"
+  },
+  {
+   "kind": "paragraph",
+   "text": "{Firm name} (“firm,” we,” “us,” or “our”) appreciates the opportunity to have rendered [describe scope of service] to {Client name} (“you” or “your”). As of [Date of Closure Letter], we have completed all services as described in our engagement agreement dated [Date] (“Agreement”) and consider this engagement closed."
+  },
+  {
+   "kind": "paragraph",
+   "text": "Enclosed is our final invoice due and payable to our firm for the services rendered. This amount reflects the application of any remaining unapplied retainer. In accordance with the Agreement, payment is due [incorporate description of payment terms outlined in engagement letter and/or terms & conditions addendum]."
+  },
+  {
+   "kind": "paragraph",
+   "text": "We have issued and provided to you [describe deliverable(s) using bullets or a table if it results in a clearer presentation – this should mirror what was included in the engagement letter or other agreement with the client]. Information and other relevant support utilized to create the deliverable(s) was provided by you on or before [date of deliverable(s)]. We have no obligation to update our deliverables or to revise the information contained therein to reflect regulatory, legislative, administrative, or judicial actions, events and transactions occurring subsequent to [date of deliverable(s)]."
+  },
+  {
+   "kind": "paragraph",
+   "text": "Any advice, recommendations or information included in the deliverables were prepared for the sole benefit of {Client name}, based upon specific facts and circumstances existing at the time the service was delivered. Any advice, recommendations or information included in the deliverable(s) is to be used solely for the objectives noted in the Agreement."
+  },
+  {
+   "kind": "paragraph",
+   "text": "Deliverables are for your sole use [and Specified Parties, optional if applicable] and are not to be distributed to third parties, in whole or in part, or used for any other purpose unless previously agreed to by us or provided for in the Agreement. You agree to indemnify and hold us harmless with respect to any and all claims arising from the use of the deliverables for any other purpose."
+  },
+  {
+   "kind": "paragraph",
+   "text": "As we previously discussed, you are responsible for taking the following actions:"
+  },
+  {
+   "kind": "list",
+   "items": [
+    "List as necessary"
+   ]
+  },
+  {
+   "kind": "paragraph",
+   "text": "Please contact {Partner name} at [Telephone Number] if you have any questions, comments or would like to discuss additional services. We have enjoyed working with you."
+  },
+  {
+   "kind": "paragraph",
+   "text": "Very truly yours,"
+  },
+  {
+   "kind": "paragraph",
+   "text": "{Firm name}"
+  },
+  {
+   "kind": "paragraph",
+   "text": "/s/ {Partner name}"
+  },
+  {
+   "kind": "paragraph",
+   "text": "{Partner title}"
+  }
+ ]
+}

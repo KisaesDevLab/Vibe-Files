@@ -9,6 +9,7 @@
 //! rectangle of each signature and date, which the portal draws the signatures into.
 
 pub mod layout;
+pub mod partners;
 pub mod store;
 
 use std::collections::BTreeMap;
@@ -18,7 +19,10 @@ use serde::{Deserialize, Serialize};
 pub use layout::{Laid, SignBlock, layout};
 
 /// The merge fields a template can use (§12.2), in the order Insert field lists them.
-pub const FIELDS: [&str; 17] = [
+/// Annual agreements (ADDENDUM-annual-agreements.md §3.6) add the partner, the agreement's year,
+/// its services and fee lines, and `{Terms and Conditions}`: a paragraph of only that field is
+/// replaced by the Terms and Conditions template's text ([`with_terms`]).
+pub const FIELDS: &[&str] = &[
     "Client name",
     "Client ID",
     "Signer first names",
@@ -36,7 +40,27 @@ pub const FIELDS: [&str; 17] = [
     "Package fee",
     "Date",
     "Firm name",
+    "Partner name",
+    "Partner title",
+    "Agreement year",
+    "Services",
+    "Fee lines",
+    "One-time fee",
+    "Monthly fee",
+    TERMS_FIELD,
 ];
+
+/// The field that stands for the Terms and Conditions (A5: appended to each letter, covered by
+/// its signature).
+pub const TERMS_FIELD: &str = "Terms and Conditions";
+
+/// Template kinds: a letter, a package's addendum, the Terms and Conditions (one per firm,
+/// appended where a letter says `{Terms and Conditions}`), an engagement closure letter (read,
+/// not signed).
+pub const LETTER: &str = "letter";
+pub const ADDENDUM: &str = "addendum";
+pub const TERMS: &str = "terms";
+pub const CLOSURE: &str = "closure";
 
 /// Who signs at a signature block (§4).
 pub const ROLES: [&str; 3] = ["taxpayer", "spouse", "officer"];
@@ -93,13 +117,27 @@ impl Block {
     }
 
     /// Kept for a letter of this return type and package (an empty "only for" is for all).
+    /// `return_type` may name several tags joined by `|`, as `"1040|Individual"` or, for an
+    /// agreement, `"Individual|Bookkeeping|Payroll"`: a block for any of them is kept.
     pub fn applies(&self, return_type: &str, package: Option<&str>) -> bool {
         let o = self.only_for();
         o.is_empty()
             || o.iter().any(|x| {
-                x.eq_ignore_ascii_case(return_type)
+                return_type
+                    .split('|')
+                    .any(|r| !r.trim().is_empty() && x.eq_ignore_ascii_case(r.trim()))
                     || package.is_some_and(|p| x.eq_ignore_ascii_case(p))
             })
+    }
+
+    /// The texts a block holds (for searching it).
+    pub fn texts(&self) -> Vec<&str> {
+        match self {
+            Block::Heading { text, .. } | Block::Paragraph { text, .. } => vec![text.as_str()],
+            Block::List { items, .. } => items.iter().map(String::as_str).collect(),
+            Block::Table { rows, .. } => rows.iter().flatten().map(String::as_str).collect(),
+            Block::Signature { .. } => vec![],
+        }
     }
 }
 
@@ -148,6 +186,32 @@ impl Template {
                 .any(|r| r.eq_ignore_ascii_case(return_type))
     }
 
+    /// A letter a client signs (not the Terms and Conditions, not a closure letter).
+    pub fn signed(&self) -> bool {
+        self.kind != TERMS && self.kind != CLOSURE
+    }
+
+    /// The fill-ins still in the letter as laid out for this return type and package (A17):
+    /// `[X]`, `[State]`, `[Month & Date, 20XX]`… A bracket holding no capital letter or digit,
+    /// as in "widow[er]", is ordinary text.
+    pub fn fill_ins(&self, return_type: &str, package: Option<&str>) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for b in self
+            .blocks
+            .iter()
+            .filter(|b| b.applies(return_type, package))
+        {
+            for s in b.texts() {
+                for f in fill_ins_in(s) {
+                    if !out.contains(&f) {
+                        out.push(f);
+                    }
+                }
+            }
+        }
+        out
+    }
+
     /// The signer roles this letter asks for, for a return with or without a spouse.
     pub fn roles(&self, return_type: &str, package: Option<&str>, has_spouse: bool) -> Vec<String> {
         let mut out: Vec<String> = Vec::new();
@@ -162,6 +226,55 @@ impl Template {
         }
         out
     }
+}
+
+/// The `[…]` fill-ins in a text (see [`Template::fill_ins`]).
+pub fn fill_ins_in(s: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut rest = s;
+    while let Some(i) = rest.find('[') {
+        let after = &rest[i + 1..];
+        match after.find(['[', ']']) {
+            Some(j) if after.as_bytes()[j] == b']' => {
+                let inner = &after[..j];
+                if inner
+                    .chars()
+                    .any(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
+                {
+                    out.push(format!("[{inner}]"));
+                }
+                rest = &after[j + 1..];
+            }
+            Some(j) => rest = &after[j..],
+            None => break,
+        }
+    }
+    out
+}
+
+/// The letter with its `{Terms and Conditions}` paragraph replaced by the Terms and Conditions
+/// template's blocks (its signature blocks left out), or removed when there is none.
+pub fn with_terms(t: &Template, terms: Option<&Template>) -> Template {
+    let marker = format!("{{{TERMS_FIELD}}}");
+    let mut out = t.clone();
+    out.blocks = Vec::with_capacity(t.blocks.len());
+    for b in &t.blocks {
+        match b {
+            Block::Paragraph { text, .. } if text.trim() == marker => {
+                if let Some(terms) = terms {
+                    out.blocks.extend(
+                        terms
+                            .blocks
+                            .iter()
+                            .filter(|x| !matches!(x, Block::Signature { .. }))
+                            .cloned(),
+                    );
+                }
+            }
+            other => out.blocks.push(other.clone()),
+        }
+    }
+    out
 }
 
 /// A run of text in one style.
@@ -304,5 +417,57 @@ mod tests {
         assert_eq!(t.roles("1040", None, false), ["taxpayer"]);
         assert_eq!(t.roles("1065", None, false), ["officer"]);
         assert!(!t.blocks[0].applies("1120-S", None));
+        assert!(t.blocks[0].applies("Individual|1040", None));
+        assert!(!t.blocks[0].applies("Entity|Bookkeeping", None));
+    }
+
+    #[test]
+    fn fill_ins_and_terms() {
+        assert_eq!(
+            fill_ins_in("widow[er], [X]% by [Month & Date, 20XX] in [State]; [a [B]"),
+            ["[X]", "[Month & Date, 20XX]", "[State]", "[B]"]
+        );
+        assert!(fill_ins_in("no [lowercase] here").is_empty());
+        let mut t = Template {
+            id: "x".into(),
+            version: 1,
+            name: "Letter".into(),
+            return_types: vec![],
+            kind: LETTER.into(),
+            package: None,
+            doc_type: String::new(),
+            letterhead: true,
+            default_ticked: true,
+            sample: false,
+            blocks: vec![
+                Block::Paragraph {
+                    text: "Fee [X]%.".into(),
+                    only_for: vec!["Entity".into()],
+                },
+                Block::Paragraph {
+                    text: "{Terms and Conditions}".into(),
+                    only_for: vec![],
+                },
+                Block::Signature {
+                    role: "officer".into(),
+                    only_for: vec![],
+                },
+            ],
+        };
+        assert_eq!(t.fill_ins("1120|Entity", None), ["[X]"]);
+        assert!(t.fill_ins("1040|Individual", None).is_empty());
+        let mut terms = t.clone();
+        terms.kind = TERMS.into();
+        terms.blocks = vec![Block::Heading {
+            text: "Billing and payment terms".into(),
+            only_for: vec![],
+        }];
+        let laid = with_terms(&t, Some(&terms));
+        assert_eq!(laid.blocks.len(), 3);
+        assert!(
+            matches!(&laid.blocks[1], Block::Heading { text, .. } if text.starts_with("Billing"))
+        );
+        t.blocks.remove(0);
+        assert_eq!(with_terms(&t, None).blocks.len(), 1);
     }
 }

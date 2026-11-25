@@ -11,7 +11,24 @@ use serde::{Deserialize, Serialize};
 
 use crate::api::{Portal, PortalError, Result, Status};
 
-pub const RETURN_TYPES: [&str; 4] = ["1040", "1120", "1120-S", "1065"];
+pub const RETURN_TYPES: [&str; 10] = [
+    "1040", "1120", "1120-S", "1065", "1041", "990", "990-PF", "709", "706", "5500",
+];
+/// Built in: signed by the taxpayer (and spouse).
+const INDIVIDUAL_TYPES: [&str; 2] = ["1040", "709"];
+
+/// Services an annual agreement can cover besides returns (ADDENDUM-annual-agreements.md §3.2,
+/// owner 2026-11-25): not offered by Deliver tax return…, signed by whoever the client is.
+pub const SERVICES: [&str; 8] = [
+    "Bookkeeping",
+    "Payroll",
+    "Advisory",
+    "Tax projections",
+    "Tax consulting",
+    "Audit representation",
+    "FBAR",
+    "Amended return",
+];
 
 /// The firm's own return types (owner 2026-11-24, Q41), beside the four built in:
 /// `_Vibe/return_types.json`.
@@ -24,6 +41,9 @@ pub struct ReturnType {
     pub name: String,
     #[serde(default)]
     pub individual: bool,
+    /// A service (bookkeeping, payroll…) rather than a return: agreements only.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub service: bool,
 }
 
 fn return_types_path(root: &Path) -> PathBuf {
@@ -37,14 +57,20 @@ fn own_return_types(root: &Path) -> Vec<ReturnType> {
         .unwrap_or_default()
 }
 
-/// The four built in, then the firm's own in the order added.
+/// The returns built in, the services built in, then the firm's own in the order added.
 pub fn return_types(root: &Path) -> Vec<ReturnType> {
     let mut out: Vec<ReturnType> = RETURN_TYPES
         .iter()
         .map(|n| ReturnType {
             name: n.to_string(),
-            individual: *n == "1040",
+            individual: INDIVIDUAL_TYPES.contains(n),
+            service: false,
         })
+        .chain(SERVICES.iter().map(|n| ReturnType {
+            name: n.to_string(),
+            individual: false,
+            service: true,
+        }))
         .collect();
     for t in own_return_types(root) {
         if !out.iter().any(|x| x.name.eq_ignore_ascii_case(&t.name)) {
@@ -54,8 +80,33 @@ pub fn return_types(root: &Path) -> Vec<ReturnType> {
     out
 }
 
+/// The returns (not the services): what Deliver tax return… and pricing plans offer.
 pub fn return_type_names(root: &Path) -> Vec<String> {
+    return_types(root)
+        .into_iter()
+        .filter(|t| !t.service)
+        .map(|t| t.name)
+        .collect()
+}
+
+/// Returns and services: what an agreement and the letter templates offer.
+pub fn service_names(root: &Path) -> Vec<String> {
     return_types(root).into_iter().map(|t| t.name).collect()
+}
+
+/// Which signature blocks a letter keeps: `"Individual"` (taxpayer and spouse) or `"Entity"`
+/// (an officer or partner). Joined to the return type as `"1040|Individual"` for
+/// `vf_letters::layout` (a block "only for" either matches).
+pub fn signer_class(individual: bool) -> &'static str {
+    if individual { "Individual" } else { "Entity" }
+}
+
+/// `"<return type>|<class>"` for laying a letter out for a return of this type.
+pub fn letter_context(root: &Path, return_type: &str) -> String {
+    format!(
+        "{return_type}|{}",
+        signer_class(is_individual(root, return_type))
+    )
 }
 
 /// Signed by the taxpayer and spouse (1040, and the firm's own marked so).
@@ -97,7 +148,11 @@ pub fn add_return_type(
     }
     vf_fs::lock::with(root, "return_types", "the return types", || {
         let mut own = own_return_types(root);
-        let t = ReturnType { name, individual };
+        let t = ReturnType {
+            name,
+            individual,
+            service: false,
+        };
         own.push(t.clone());
         let bytes = serde_json::to_vec_pretty(&own).expect("serializes");
         vf_fs::cabinet::write_replace(&return_types_path(root), &bytes)?;

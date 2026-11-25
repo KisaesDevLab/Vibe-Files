@@ -1,0 +1,446 @@
+{
+ "id": "aicpa-5500",
+ "version": 0,
+ "name": "Engagement letter: employee benefit plan return (Form 5500)",
+ "return_types": [
+  "5500"
+ ],
+ "kind": "letter",
+ "doc_type": "Engagement letter",
+ "letterhead": true,
+ "default_ticked": true,
+ "sample": true,
+ "blocks": [
+  {
+   "kind": "paragraph",
+   "text": "{Date}"
+  },
+  {
+   "kind": "paragraph",
+   "text": "{Signer name}"
+  },
+  {
+   "kind": "paragraph",
+   "text": "{Client name}"
+  },
+  {
+   "kind": "paragraph",
+   "text": "Dear {Signer first names}:"
+  },
+  {
+   "kind": "paragraph",
+   "text": "{Firm name} (“firm,” “we,” “us,” or “our”) is pleased to provide {Client name} (“Plan,” “you” or “your”) with the professional services described below. Please read this letter, the attached Terms and Conditions Addendum and any other attachments incorporated herein (collectively, “Agreement”). This Agreement details the nature and limitations of the services we will provide, the terms of our engagement and each party’s responsibilities."
+  },
+  {
+   "kind": "heading",
+   "text": "Engagement Objective and Scope"
+  },
+  {
+   "kind": "paragraph",
+   "text": "Our services are limited to the following returns for the year ended [Date]:"
+  },
+  {
+   "kind": "list",
+   "items": [
+    "Form 5500 – Annual Return/Report of Employee Benefit Plan",
+    "Form 8955-SSA – Annual Registration Statement Identifying Separated Participants with Deferred Vested Benefits"
+   ]
+  },
+  {
+   "kind": "paragraph",
+   "text": "The objective of our services is to assist you with your Employee Retirement Income Security Act (“ERISA”) filing requirements, and provide you with forms and schedules we believe are suitable for you to file with the Internal Revenue Service (“IRS”) and Employee Benefits Security Administration (“EBSA”), a division of the Department of Labor (“DOL”) and sufficient to comply with your filing obligations. You have the final responsibility for the filing and content of your Form(s). To the extent a return can be e-filed, we will provide assistance with the e-filing of such return as further discussed in this Agreement. We will not assist you with any return other than those identified above, without your written request, and our written agreement to do so."
+  },
+  {
+   "kind": "paragraph",
+   "text": "Our engagement does not include any procedures designed to detect errors, fraud, theft, or other wrongdoing, nor does it include a review of any amendments to the Plan or transactions which may cause the Plan to be disqualified. Therefore, our engagement cannot be relied upon to disclose such matters. If we identify or suspect that an instance of noncompliance with laws and regulations has occurred or is likely to occur, we will discuss the matter with the appropriate level of management and, when appropriate, those charged with governance. In addition, we are not responsible for identifying or communicating deficiencies in your internal controls, unless otherwise specified in the scope of this Agreement. You are responsible for developing and implementing internal controls applicable to your operations."
+  },
+  {
+   "kind": "paragraph",
+   "text": "Requests for additional services may necessitate that we amend the Agreement or issue a separate written agreement to reflect the obligations of all parties. In the absence of any other written communications from us documenting additional services, our services will be limited to and governed by the terms of this Agreement."
+  },
+  {
+   "kind": "heading",
+   "text": "CPA Firm Responsibilities"
+  },
+  {
+   "kind": "paragraph",
+   "text": "It is our duty to prepare your Form(s) 5500 based on the same standard that a reasonable professional service provider who routinely prepares and submits Form 5500 to the IRS and the DOL would exercise. Unless otherwise noted, the applicable standard of care for this engagement shall be consistent with guidance and pronouncements issued by the DOL, the U.S. Department of the Treasury, and the IRS as relates to ERISA compliance."
+  },
+  {
+   "kind": "paragraph",
+   "text": "Once our services have concluded, we shall have no obligation to notify you of future law developments affecting your return(s) except as may be required by U.S. Treasury Department Circular 230 (“Circular 230”) or the Statements on Standards for Tax Services (“SSTS”) related to errors we identify. We will not update your return after the conclusion of the engagement for any reason unless further engaged."
+  },
+  {
+   "kind": "paragraph",
+   "text": "{Firm name} will not make any management decisions or perform management functions on your behalf."
+  },
+  {
+   "kind": "heading",
+   "text": "Arguable positions"
+  },
+  {
+   "kind": "paragraph",
+   "text": "If there are conflicting interpretations of tax law or DOL regulations, or if tax law or DOL regulations are unclear, we will explain the possible positions that may be taken in order for us to sign your return. We will follow the position you request, provided it is consistent with our understanding of tax reference materials, DOL regulations, and our professional standards. Tax reference materials include, but are not limited to, the Internal Revenue Code, Treasury Regulations, Revenue Rulings, Revenue Procedures, court cases, and similar state and local guidance. Regulations promulgated by the DOL and ERISA will be considered. If the IRS or EBSA later contest the position you select, additional tax, penalties, and interest may be assessed."
+  },
+  {
+   "kind": "paragraph",
+   "text": "We shall not be liable for any tax, penalties, interest, related professional fees, or other expenses you may incur to respond to the tax authority or EBSA."
+  },
+  {
+   "kind": "heading",
+   "text": "Bookkeeping assistance"
+  },
+  {
+   "kind": "paragraph",
+   "text": "We may deem it necessary to provide you with limited accounting and bookkeeping assistance solely for the purpose of helping you organize your information. This assistance is intended to be nominal and is not a separate accounting or bookkeeping service. In the event we conclude that bookkeeping or accounting assistance is necessary to prepare your returns, we will advise you in writing before proceeding. Any assistance will be billed at our standard hourly rates and will be subject to the terms of this Agreement."
+  },
+  {
+   "kind": "heading",
+   "text": "Prior year review"
+  },
+  {
+   "kind": "paragraph",
+   "text": "Our review of the prior year’s returns will necessarily be limited and may not find errors. We will, however, bring to your attention errors that we do find. Similarly, if you become aware of any information affecting prior year returns, please contact us. If an error or information affecting prior year returns is discovered by you or us, we will discuss your options with you. If you ask us to prepare amended returns, and we agree, we will confirm this engagement in a separate written agreement."
+  },
+  {
+   "kind": "heading",
+   "text": "Government inquiries"
+  },
+  {
+   "kind": "paragraph",
+   "text": "This engagement does not include responding to inquiries by any governmental agency or tax authority. If you are contacted by a tax authority or the DOL, either for an examination or other inquiry, you may request our assistance in responding."
+  },
+  {
+   "kind": "heading",
+   "text": "Third party requests"
+  },
+  {
+   "kind": "paragraph",
+   "text": "Our services are not intended to benefit or influence any third party, including any entity or investment which may seek to evaluate your creditworthiness or financial strength. We will not respond to any request from banks, mortgage brokers or others for verification of any information reported on these returns. Except where compelled by court order or subpoena, we do not communicate with third parties or provide them with copies of returns."
+  },
+  {
+   "kind": "heading",
+   "text": "Reliance on others"
+  },
+  {
+   "kind": "paragraph",
+   "text": "If you wish to take a position based upon the advice of another advisor or the Plan’s third-party administrator, before we are able to sign your return, we must comply with the applicable provisions of ERISA, and where applicable Circular 230 and the Statements on Standards for Tax Services issued by the American Institute of Certified Public Accountants."
+  },
+  {
+   "kind": "paragraph",
+   "text": "We will review the other advisor’s work and may require a written statement from the advisor describing the statutory basis for their conclusions or advice. If we believe additional research is required, we will discuss the matter with you and obtain your written consent to perform such research. You agree to pay for the additional charges necessary to complete the research as this is not included in the scope of this Agreement."
+  },
+  {
+   "kind": "paragraph",
+   "text": "Moreover, you understand that the EBSA, IRS, state or local tax authority may disagree with the position taken on the return. If this occurs, we shall not be liable for any tax, penalties, interest, related professional fees, or other expenses you may incur."
+  },
+  {
+   "kind": "paragraph",
+   "text": "If, after review of the work prepared by your other advisor, we determine that we are unable to sign the return, we will be unable to proceed."
+  },
+  {
+   "kind": "heading",
+   "text": "Client Responsibilities"
+  },
+  {
+   "kind": "paragraph",
+   "text": "If you fail to comply with the responsibilities as described in this Agreement, your actions or your inactions may result in economic or other loss to you, such as penalties or interest assessed against you, loss of administrative rights, or criminal punishment. You will be responsible for any loss suffered by you, including any professional fees required to defend or correct changes made to your returns, prepare previously unfiled returns, or amend previously filed returns. The responsibilities detailed in this section are not exhaustive, and our services to you may require additional responsibilities not listed."
+  },
+  {
+   "kind": "heading",
+   "text": "Required Information"
+  },
+  {
+   "kind": "paragraph",
+   "text": "**Due to the high volume of returns prepared by our firm, you must provide** **your** **information to** **us** **no later than [Date]. Failure to do so may result in your inability to file your returns by the original filing due dates.**"
+  },
+  {
+   "kind": "paragraph",
+   "text": "You agree to provide us with all information we may request to prepare your returns. You are responsible for providing us with accurate and complete information. In addition, you will provide us with a copy of any Plan amendments adopted since the date the last Form 5500 was filed with the IRS and EBSA. You agree to inform us of any other qualified benefit plans maintained by the Plan sponsor."
+  },
+  {
+   "kind": "paragraph",
+   "text": "We will rely upon the completeness and accuracy of the information and representations you provide to us. Our responsibility is limited to the information of which we have knowledge. We will not audit or otherwise verify the data you submit to us, although we may ask you to clarify certain information."
+  },
+  {
+   "kind": "heading",
+   "text": "Communication of authority of others"
+  },
+  {
+   "kind": "paragraph",
+   "text": "You hereby authorize the following individuals from {Client name} to communicate directly with us on your behalf, and to request services and exchange information necessary to provide the services described in this Agreement:"
+  },
+  {
+   "kind": "heading",
+   "text": "Name     Title    Contact Information"
+  },
+  {
+   "kind": "paragraph",
+   "text": "You agree that this limited authority conveyed above shall continue in full force and effect until either this Agreement is concluded, or you inform us of any modifications in writing, whichever occurs first."
+  },
+  {
+   "kind": "heading",
+   "text": "Online access to information"
+  },
+  {
+   "kind": "paragraph",
+   "text": "To the extent you provide our firm with access to electronic data via a local or online database including that of your third-party administrator from which we will download your trial balance or other information, you agree that the data is accurate as of the date and time you make it available to be downloaded by us."
+  },
+  {
+   "kind": "heading",
+   "text": "Documentation"
+  },
+  {
+   "kind": "paragraph",
+   "text": "You are responsible for maintaining adequate documentation to substantiate the accuracy and completeness of your returns. Our workpapers do not satisfy your documentation responsibility. You should retain all documents that provide evidence and support for reported income, credits, deductions, and other information on your returns, as required under ERISA and applicable tax laws and regulations. The IRS recommends that you maintain this documentation for as long as it may be relevant to your taxes."
+  },
+  {
+   "kind": "paragraph",
+   "text": "You represent that you have such documentation and can produce it, if necessary, to respond to any examination or inquiry by tax or other regulatory authorities."
+  },
+  {
+   "kind": "paragraph",
+   "text": "We shall not be liable for any tax, penalties, interest, related professional fees, or other expenses you may incur as a result of inadequate documentation."
+  },
+  {
+   "kind": "heading",
+   "text": "Non-plan expenses"
+  },
+  {
+   "kind": "paragraph",
+   "text": "You are responsible for ensuring that non-plan expenses, if any, are separated from plan expenses and that expenses such as meals, travel, vehicle use, gifts, and related expenses are supported by documentation and records required by the DOL, IRS and other tax authorities."
+  },
+  {
+   "kind": "paragraph",
+   "text": "U.S. filing obligations related to foreign investments and activities"
+  },
+  {
+   "kind": "paragraph",
+   "text": "U.S. persons generally must report income and activities related to both domestic and foreign assets (worldwide income)."
+  },
+  {
+   "kind": "paragraph",
+   "text": "You are responsible for fulfilling your filing obligations related to foreign activity where required."
+  },
+  {
+   "kind": "paragraph",
+   "text": "U.S. reporting requirements related to foreign activity are very complex. **Contact us immediately** if you have:"
+  },
+  {
+   "kind": "list",
+   "items": [
+    "Ownership of, investment in, or officer responsibilities for a corporation, partnership, or other business entity formed under the laws of another country;",
+    "Fiduciary, grantor, or beneficiary relationships in connection with an entity formed under the laws of another country;",
+    "Ownership of, signature authority over, or control over any financial account held in a financial institution located in another country;",
+    "Citizenship or government-approved employment/visa status with a country other than the U.S. (including anyone in your immediate household, or your parents who live outside the U.S.);",
+    "Transferred property, including cash, offshore either directly or through the purchase of or investment in an entity formed under the laws of another country;",
+    "Received or have legally-recognizable rights to receive property, including cash, from a trust, business, or investment formed under the laws of another country or individual residing in another country;",
+    "Conducted business with any entity or person physically located in another country, regardless of whether such business is for-profit, not for-profit, or informal/irregular;",
+    "Received property, including cash, or income from a source outside of the U.S. which is not reported on a brokerage statement (such as a 1099-B or similar report); or",
+    "Any other activity or economic arrangement which takes place outside of the U.S."
+   ]
+  },
+  {
+   "kind": "paragraph",
+   "text": "Failure to timely file the required forms may result in substantial civil and/or criminal penalties. You agree to provide us with complete and accurate information regarding any foreign activity in which you have a direct or indirect interest, or over which you have signature authority, during the above referenced tax year."
+  },
+  {
+   "kind": "paragraph",
+   "text": "If you are unsure if you have any other filing obligation related to foreign activity, you are responsible for alerting us and requesting assistance. If you do not alert us or request assistance, we will infer that you do not have foreign activity absent information you provide to us. We shall not be liable for any tax, penalties, interest, related professional fees, or other expenses you may incur as a result of the failure to file or untimely filing of any form for which we were not engaged to prepare."
+  },
+  {
+   "kind": "heading",
+   "text": "Foreign filing obligations"
+  },
+  {
+   "kind": "paragraph",
+   "text": "You are responsible for complying with the filing requirements of any non-U.S. country. You acknowledge and agree that we have no responsibility to raise these issues with you and that any foreign filing obligation is not within the scope of this Agreement."
+  },
+  {
+   "kind": "heading",
+   "text": "Digital assets"
+  },
+  {
+   "kind": "paragraph",
+   "text": "There are specific tax implications of investing in digital assets (e.g., virtual currencies, non-fungible tokens, virtual real estate and similar assets). The IRS considers these to be property for U.S. federal income tax purposes. As such, any transactions in, or transactions that use, digital assets are subject to the same general tax principles that apply to other property transactions."
+  },
+  {
+   "kind": "paragraph",
+   "text": "If you transacted in digital assets during the tax year, you may have tax consequences and/or additional reporting obligations associated with such transactions. Depending on the nature or volume of these transactions, a change to the scope of our services may be required. You are responsible for providing us with complete and accurate information, including basis, regarding any transactions in, or transactions that have used, digital assets during the applicable tax year."
+  },
+  {
+   "kind": "heading",
+   "text": "Financial statement audit"
+  },
+  {
+   "kind": "paragraph",
+   "text": "You acknowledge that you are responsible for: (1) determining if a financial statement audit is necessary for the Plan; (2) engaging a qualified independent third party to audit the Plan; and (3) timely providing us with a final audited financial statement to be attached to the return. In preparing the Form 5500, we will not conduct an audit. We will not be responsible for any damages that result where authorities reject the Form 5500 and such damages are based upon financial statements audited by a third party. These damages include, but are not limited to, any tax, penalties, interest, related professional fees, or other expenses."
+  },
+  {
+   "kind": "heading",
+   "text": "Appraisals and valuations"
+  },
+  {
+   "kind": "paragraph",
+   "text": "Determining the value of the Plan may require an actuarial valuation. You acknowledge that you are responsible for both engaging a qualified independent third party to determine the value of the Plan, and timely providing us with a final, formal actuarial valuation report. In preparing the Form 5500, we will not determine values nor will we review or investigate the values provided to us. We will not be responsible for any damages that result where authorities reject the values determined by third party actuaries or other valuation professionals. These damages include, but are not limited to, any tax, penalties, interest, related professional fees, or other expenses."
+  },
+  {
+   "kind": "paragraph",
+   "text": "In preparing the Form 5500, we will rely on the valuation you provide. However, our reliance shall not be unreasonable. If you do not provide a valuation where we believe DOL or ERISA rules require, or if we, in our professional judgment, determine that the actuary used is not professionally qualified to perform a valuation which can be relied upon for filing the Form 5500, we may be unable to proceed and may terminate this Agreement."
+  },
+  {
+   "kind": "heading",
+   "text": "Plan documents"
+  },
+  {
+   "kind": "paragraph",
+   "text": "You are responsible for retaining a copy of the Plan’s IRS opinion or determination letter. You are also responsible for retaining a copy of the current Plan document, summary Plan description, if applicable, and amendments. In addition, you must ensure that each of the aforementioned documents is signed and approved by the appropriate individuals."
+  },
+  {
+   "kind": "paragraph",
+   "text": "You should consult with ERISA counsel regarding any advice or interpretation of Plan documents. You acknowledge that we are not providing such advice."
+  },
+  {
+   "kind": "heading",
+   "text": "Other Plan Administrator duties"
+  },
+  {
+   "kind": "paragraph",
+   "text": "You are responsible for the following:"
+  },
+  {
+   "kind": "list",
+   "items": [
+    "Distributing a copy of the Plan’s summary annual report to each participant (defined contribution and welfare benefit plans only),",
+    "Retaining a signed paper copy of the Plan’s Form 5500 for your records,",
+    "Providing a copy of the Annual Funding Notice to the Pension Benefit Guarantee Corporation, Plan participants, each labor organization representing Plan participants and each employee in a multiemployer plan with an obligation to contribute to the Plan (defined benefit plans only),",
+    "Informing participants that the current Summary Plan Description and any applicable Summary of Material Modifications are available for review on a timely basis, and",
+    "Any other duties required to be performed by a Plan Administrator as required by law."
+   ]
+  },
+  {
+   "kind": "heading",
+   "text": "Ultimate responsibility"
+  },
+  {
+   "kind": "paragraph",
+   "text": "You are ultimately responsible for complying with any substantive or procedural law which applies to you, and for ensuring your returns and any required payments are timely received by the appropriate authority. Notwithstanding any term of this Agreement, this responsibility cannot be delegated to us."
+  },
+  {
+   "kind": "paragraph",
+   "text": "Our assistance related to your return is based upon tax reference materials, facts, assumptions, and representations that are subject to change. To the extent we provide written advice concerning federal tax matters, we will follow the applicable guidance contained in our professional standards."
+  },
+  {
+   "kind": "paragraph",
+   "text": "You have final responsibility for the accuracy of your returns. We will provide you with a copy of your draft returns and accompanying schedules and statements for review. You agree to review and examine them carefully for accuracy and completeness. Federal authorities impose various penalties and interest charges for non-compliance with laws and regulations, including failure to file or incomplete or late filing of returns, and underpayment of taxes. We shall not be liable for any tax, penalties, interest, related professional fees, or other expenses you may incur as a result of your non-compliance with laws and regulations."
+  },
+  {
+   "kind": "paragraph",
+   "text": "Where the audited financial statement of the Plan is required to be filed with the Form 5500, professional standards require that the auditors read the Form 5500 prior to its filing. The purpose of this procedure is to consider whether such information, or the manner of its presentation in the Form 5500, is materially inconsistent with the information, or the manner of its presentation, appearing in the financial statements. These procedures are not sufficient, nor are they intended, to ensure that the Form 5500 is completely and accurately prepared. You agree that you will not submit the financial statements with the Form 5500 filing until the auditor has informed you, preferably in writing, that they have completed this procedure."
+  },
+  {
+   "kind": "heading",
+   "text": "Timing of the Engagement"
+  },
+  {
+   "kind": "paragraph",
+   "text": "We expect to begin our services upon receipt of this executed Agreement and signed IRC §7216 consent and retainer, and substantially all relevant information needed to prepare your returns."
+  },
+  {
+   "kind": "paragraph",
+   "text": "Our services under this Agreement will conclude upon the earliest of the following:"
+  },
+  {
+   "kind": "list",
+   "items": [
+    "the filing and acceptance of your returns by the IRS and EBSA;",
+    "upon written notification by either party that the Agreement is terminated; or",
+    "one (1) year from the execution date of this Agreement."
+   ]
+  },
+  {
+   "kind": "heading",
+   "text": "Filing Your Returns"
+  },
+  {
+   "kind": "paragraph",
+   "text": "The original filing due dates for your returns are [Month & Date, 20XX]. The obligation to file a return and/or extension is solely that of the taxpayer. Although we will make every reasonably prudent effort to assist you with this obligation, this Agreement is not intended to and does not create an agent/principal relationship. By signing this Agreement, you understand that actual and timely receipt of your filings by the appropriate authority is the duty and responsibility of the Plan and the Plan alone."
+  },
+  {
+   "kind": "heading",
+   "text": "Return Extensions"
+  },
+  {
+   "kind": "paragraph",
+   "text": "It may become necessary to apply for an extension of the filing due dates if there are unresolved issues or delays in processing or if we do not receive all of the necessary information from you on a timely basis. Applying for an extension of time to file may limit your ability to make certain elections, extend the time available for a government agency to undertake an examination of your return and/or extend the statute of limitations to file a legal action. Additionally, extensions may affect your liability for penalties and interest or compliance with governmental or other deadlines."
+  },
+  {
+   "kind": "paragraph",
+   "text": "Although we may assist you in the preparation of an extension to file your return(s), you have sole responsibility for the filing of any extension, and you agree to hold our firm harmless from any consequences, including waived elections, where the extension is not timely filed. All taxes owed are due by the original filing due date."
+  },
+  {
+   "kind": "paragraph",
+   "text": "**If** **you wish to engage our firm to apply for extensions** **of time to file returns on your behalf,** **we** **will not file these** **applications** **unless** **and until** **we receive** **both** **an executed copy of this Agreement and your express written authorization to file for** **an** **extension. In some cases, your signature may be** **required** **on such applications** **prior to filing. Failure to timely request an extension of time to file can result in penalties for failure to file returns, which accrue from the original due dates** **of the returns, and can be substantial.** **We shall not be liable for** **any** **penalties, interest, related professional fees, or other expenses you may incur as a result of your failure to** **apply for** **an extension** **for which we were not engaged to prepare**."
+  },
+  {
+   "kind": "heading",
+   "text": "E-filing"
+  },
+  {
+   "kind": "paragraph",
+   "text": "You will be required to provide us with specific written authorization to submit the Plan’s electronic filing. As required by Form 5500 instructions, your filing must be signed by the Plan Administrator prior to submission. Any Form 5500 that is not electronically signed by the Plan Administrator will be subject to rejection and civil penalties under Title I of ERISA. If the Plan Administrator is an entity, an individual authorized to sign on behalf of the Plan Administrator must sign."
+  },
+  {
+   "kind": "paragraph",
+   "text": "The IRS and DOL require you to sign and return to us the appropriate governmental form(s) before your return(s) can be filed electronically. **If you fail to timely sign and return e-file authorizations, we cannot and will not e-file** **any** **form** **on your behalf.** In those situations, we shall not be liable for any tax, penalties, interest, related professional fees, or other expenses you may incur."
+  },
+  {
+   "kind": "heading",
+   "text": "Professional Fee"
+  },
+  {
+   "kind": "paragraph",
+   "text": "Our professional fee for the services outlined above is estimated to be {Fee}, of which [X]% is due upon execution of this Agreement as a retainer. This fee is based upon the complexity of the expected work to be performed, regulatory or government deadline sensitivity, our professional time and out-of-pocket expenses, and overall value of the services provided."
+  },
+  {
+   "kind": "paragraph",
+   "text": "Circumstances may arise that impact our estimated fee such as, but not limited to, (1) the timeliness, accuracy, or completeness of information you provide to us; (2) changes in your personnel, use of other advisors, or operations that impact our services; (3) mutually agreed changes in the scope of this engagement; or (4) other unanticipated items that arise during our engagement and that require additional time in order to complete the agreed-upon services."
+  },
+  {
+   "kind": "paragraph",
+   "text": "You agree to pay all fees and expenses incurred whether or not we complete the engagement."
+  },
+  {
+   "kind": "paragraph",
+   "text": "We appreciate the opportunity to be of service to you. This Agreement, including the Terms and Conditions Addendum, represents the entire agreement of the parties relating to the services that are the subject of this Agreement. This Agreement supersedes all previous agreements, negotiations, representations, or other understandings, whether oral or written, between the parties. Any modification to the terms of this Agreement must be made in writing and signed by both parties. Please date and execute this Agreement and return it to us to acknowledge your acceptance. We will not initiate services until we receive the executed Agreement and retainer."
+  },
+  {
+   "kind": "paragraph",
+   "text": "{Terms and Conditions}"
+  },
+  {
+   "kind": "paragraph",
+   "text": "Very truly yours,"
+  },
+  {
+   "kind": "paragraph",
+   "text": "{Firm name}"
+  },
+  {
+   "kind": "paragraph",
+   "text": "/s/ {Partner name}"
+  },
+  {
+   "kind": "paragraph",
+   "text": "{Partner title}"
+  },
+  {
+   "kind": "paragraph",
+   "text": "ACCEPTED:"
+  },
+  {
+   "kind": "signature",
+   "role": "officer"
+  }
+ ]
+}

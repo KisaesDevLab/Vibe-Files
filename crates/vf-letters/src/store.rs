@@ -2,7 +2,11 @@
 //! and `_Vibe/letters/history/<id>.v<N>.json` (each version saved), so a delivery that records
 //! the version it used can be read back. Seeded once with samples marked "Sample — review
 //! before use" (§12.2): engagement letters with headings for the firm's own text, §7216
-//! consents, and the Advantage and Concierge package addenda.
+//! consents, and the Advantage and Concierge package addenda. Annual agreements
+//! (ADDENDUM-annual-agreements.md, owner 2026-11-25) add the AICPA Annual Tax Compliance Kit's
+//! letters, its Terms and Conditions and closure letter (`assets/aicpa`, made by
+//! `tools/aicpa/convert.py`), and bookkeeping, payroll and advisory letters (`assets/services`).
+//! `.seeded` lists the ids seeded, so a cabinet seeded before gets each new sample once.
 
 use std::path::{Path, PathBuf};
 
@@ -87,34 +91,103 @@ pub fn delete(root: &Path, id: &str) -> Result<(), String> {
     std::fs::remove_file(&p).map_err(|e| format!("{}: {e}", p.display()))
 }
 
-/// Writes the samples once (a firm that deletes them does not get them back). Whether it did.
+/// The samples of the first release (an empty `.seeded` from then means these).
+const FIRST_SAMPLES: [&str; 6] = [
+    "engagement-1040",
+    "engagement-entity",
+    "consent-disclose",
+    "consent-use",
+    "addendum-advantage",
+    "addendum-concierge",
+];
+
+/// Writes each sample once (a firm that deletes one does not get it back). Whether it wrote any.
 pub fn seed_if_missing(root: &Path) -> Result<bool, String> {
     let marker = dir(root).join(SEEDED);
-    if marker.exists() || !load_all(root)?.is_empty() {
+    let existing = load_all(root)?;
+    let mut seeded: Vec<String> = match std::fs::read_to_string(&marker) {
+        Ok(s) if s.trim().is_empty() => FIRST_SAMPLES.iter().map(|s| s.to_string()).collect(),
+        Ok(s) => s.lines().map(|l| l.trim().to_string()).collect(),
+        // Templates but no marker (from before the marker): the first samples were seeded.
+        Err(_) if !existing.is_empty() => FIRST_SAMPLES.iter().map(|s| s.to_string()).collect(),
+        Err(_) => Vec::new(),
+    };
+    if !existing.is_empty() {
         refresh_samples(root)?;
-        return Ok(false);
     }
     std::fs::create_dir_all(dir(root)).map_err(|e| e.to_string())?;
+    let mut any = false;
     for t in samples() {
-        save(root, &t)?;
+        if seeded.contains(&t.id) {
+            continue;
+        }
+        if !existing.iter().any(|x| x.id == t.id) {
+            save(root, &t)?;
+            any = true;
+        }
+        seeded.push(t.id.clone());
     }
-    std::fs::write(&marker, b"").map_err(|e| e.to_string())?;
-    Ok(true)
+    if any || !marker.exists() {
+        let mut text = seeded.join("\n");
+        text.push('\n');
+        vf_fs::cabinet::write_replace(&marker, text.as_bytes())?;
+    }
+    Ok(any)
 }
+
+/// The firm's Terms and Conditions (the first template of that kind), appended where a letter
+/// says `{Terms and Conditions}`.
+pub fn terms(all: &[Template]) -> Option<&Template> {
+    all.iter().find(|t| t.kind == crate::TERMS)
+}
+
+/// The letter as sent: its `{Terms and Conditions}` replaced by the firm's Terms and Conditions.
+pub fn as_sent(t: &Template, all: &[Template]) -> Template {
+    crate::with_terms(t, terms(all))
+}
+
+/// The built-in letters kept as files: the AICPA kit's (converted) and the service letters.
+const ASSETS: [&str; 20] = [
+    include_str!("../assets/aicpa/aicpa-1040.json"),
+    include_str!("../assets/aicpa/aicpa-1120.json"),
+    include_str!("../assets/aicpa/aicpa-1120s.json"),
+    include_str!("../assets/aicpa/aicpa-1065.json"),
+    include_str!("../assets/aicpa/aicpa-1041.json"),
+    include_str!("../assets/aicpa/aicpa-990.json"),
+    include_str!("../assets/aicpa/aicpa-990pf.json"),
+    include_str!("../assets/aicpa/aicpa-709.json"),
+    include_str!("../assets/aicpa/aicpa-706.json"),
+    include_str!("../assets/aicpa/aicpa-5500.json"),
+    include_str!("../assets/aicpa/aicpa-fbar.json"),
+    include_str!("../assets/aicpa/aicpa-amended.json"),
+    include_str!("../assets/aicpa/aicpa-projections.json"),
+    include_str!("../assets/aicpa/aicpa-consulting.json"),
+    include_str!("../assets/aicpa/aicpa-audit-rep.json"),
+    include_str!("../assets/aicpa/aicpa-terms.json"),
+    include_str!("../assets/aicpa/aicpa-closure.json"),
+    include_str!("../assets/services/service-bookkeeping.json"),
+    include_str!("../assets/services/service-payroll.json"),
+    include_str!("../assets/services/service-advisory.json"),
+];
 
 /// Fields no longer offered (owner 2026-11-24, Q25).
 const DROPPED: [&str; 2] = ["{Preparer}", "{Client address}"];
 
-/// Seeded letters still marked sample (the firm never saved its own text) that use a field no
-/// longer offered are replaced by today's sample, as a new version. A letter the firm saved is
-/// never touched. Returns how many were replaced.
+/// Seeded letters still marked sample (the firm never saved its own text) whose text differs
+/// from today's sample (a field no longer offered, Q25; signers for agreements, 2026-11-25) are
+/// replaced by today's sample, as a new version. A letter the firm saved is never touched.
+/// Returns how many were replaced.
 pub fn refresh_samples(root: &Path) -> Result<usize, String> {
     let fresh = samples();
     let mut n = 0;
     for t in load_all(root)?.into_iter().filter(|t| t.sample) {
         let uses =
             serde_json::to_string(&t.blocks).is_ok_and(|s| DROPPED.iter().any(|f| s.contains(f)));
-        if let Some(s) = fresh.iter().find(|s| s.id == t.id).filter(|_| uses) {
+        if let Some(s) = fresh
+            .iter()
+            .find(|s| s.id == t.id)
+            .filter(|s| uses || s.blocks != t.blocks)
+        {
             save(
                 root,
                 &Template {
@@ -148,13 +221,14 @@ fn sig(role: &str, only_for: &[&str]) -> Block {
 }
 const ENTITIES: [&str; 3] = ["1120", "1120-S", "1065"];
 
-/// Signature blocks for any return type: taxpayer and spouse on a 1040, an officer or partner
-/// with their title on an entity's.
+/// Signature blocks for any return type or agreement: taxpayer and spouse for an individual
+/// (`Individual`, from `vf_portal::delivery::letter_context`), an officer or partner with their
+/// title for an entity.
 fn signatures() -> Vec<Block> {
     vec![
-        sig("taxpayer", &["1040"]),
-        sig("spouse", &["1040"]),
-        sig("officer", &ENTITIES),
+        sig("taxpayer", &["1040", "Individual"]),
+        sig("spouse", &["1040", "Individual"]),
+        sig("officer", &["1120", "1120-S", "1065", "Entity"]),
     ]
 }
 
@@ -272,6 +346,9 @@ pub fn samples() -> Vec<Template> {
         a.blocks.extend(signatures());
         out.push(a);
     }
+    for s in ASSETS {
+        out.push(serde_json::from_str(s).expect("a built-in letter reads"));
+    }
     out
 }
 
@@ -310,7 +387,8 @@ mod tests {
         let root = t.path();
         assert!(seed_if_missing(root).unwrap());
         let all = load_all(root).unwrap();
-        assert_eq!(all.len(), 6);
+        assert_eq!(all.len(), samples().len());
+        assert_eq!(all.len(), 26);
         assert!(all.iter().all(|t| t.sample && t.version == 1));
         let mut e = all
             .iter()
@@ -338,17 +416,129 @@ mod tests {
     }
 
     #[test]
+    fn a_cabinet_seeded_before_gets_the_new_samples_once() {
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path();
+        std::fs::create_dir_all(dir(root)).unwrap();
+        // Seeded by the first release: its six samples and an empty marker; one was deleted.
+        for s in samples()
+            .into_iter()
+            .filter(|s| FIRST_SAMPLES.contains(&s.id.as_str()) && s.id != "consent-use")
+        {
+            save(root, &s).unwrap();
+        }
+        std::fs::write(dir(root).join(SEEDED), b"").unwrap();
+        assert!(seed_if_missing(root).unwrap());
+        let all = load_all(root).unwrap();
+        assert_eq!(all.len(), 25, "the new 20, not the deleted consent");
+        assert!(all.iter().any(|t| t.id == "aicpa-terms"));
+        assert!(!all.iter().any(|t| t.id == "consent-use"));
+        // A new sample the firm deleted is not seeded again either.
+        delete(root, "service-payroll").unwrap();
+        assert!(!seed_if_missing(root).unwrap());
+        assert_eq!(load_all(root).unwrap().len(), 24);
+    }
+
+    /// The kit's letters as converted: each named fill-in left for the firm, nothing of the
+    /// kit's cover, notes or disclaimer (A16), and the Terms and Conditions where they go (A5).
+    #[test]
+    fn the_kit_letters_match_the_converters_manifest() {
+        #[derive(serde::Deserialize)]
+        struct M {
+            id: String,
+            blocks: usize,
+            fill_ins: Vec<String>,
+        }
+        let manifest: Vec<M> =
+            serde_json::from_str(include_str!("../../../tools/aicpa/manifest.json")).unwrap();
+        assert_eq!(manifest.len(), 17);
+        let all = samples();
+        let terms = all.iter().find(|t| t.kind == crate::TERMS).unwrap();
+        for m in &manifest {
+            let t = all.iter().find(|t| t.id == m.id).expect("in the samples");
+            assert_eq!(t.blocks.len(), m.blocks, "{}", m.id);
+            let mut f: Vec<String> = Vec::new();
+            for b in &t.blocks {
+                for s in b.texts() {
+                    f.extend(crate::fill_ins_in(s));
+                }
+            }
+            f.sort();
+            f.dedup();
+            assert_eq!(f, m.fill_ins, "{}", m.id);
+            let text = serde_json::to_string(&t.blocks).unwrap();
+            for gone in [
+                "CNA",
+                "How to use this document",
+                "INITIAL HERE",
+                "On the rare occasion",
+            ] {
+                assert!(!text.contains(gone), "{} still has {gone}", m.id);
+            }
+            if t.kind == crate::LETTER {
+                let sent = as_sent(t, &all);
+                assert!(sent.blocks.len() > t.blocks.len(), "{}: no Terms", m.id);
+                assert!(
+                    !serde_json::to_string(&sent.blocks)
+                        .unwrap()
+                        .contains("{Terms and")
+                );
+                assert!(
+                    t.blocks
+                        .iter()
+                        .any(|b| matches!(b, crate::Block::Signature { .. })),
+                    "{}: no signature",
+                    m.id
+                );
+            }
+        }
+        assert!(terms.blocks.len() > 50);
+    }
+
+    /// The longest kit letter with the Terms and Conditions (about 11,000 words) lays out in
+    /// well under the portal's 15 MB letter limit, quickly, with its signatures on the last page.
+    #[test]
+    fn the_longest_letter_with_terms_lays_out() {
+        let all = samples();
+        let t = all.iter().find(|t| t.id == "aicpa-1065").unwrap();
+        let mut f = crate::Fields::new();
+        f.insert("Signer name".into(), "Pat Sample".into());
+        let start = std::time::Instant::now();
+        let laid = crate::layout(&as_sent(t, &all), &f, "1065|Entity", None);
+        let took = start.elapsed();
+        let pages = laid.blocks.iter().map(|b| b.page).max().unwrap();
+        eprintln!(
+            "{} bytes, signature on page {pages}, {took:?}",
+            laid.pdf.len()
+        );
+        assert!(laid.pdf.len() < 2_000_000);
+        assert!(pages > 10 && pages < 60);
+        assert!(took < std::time::Duration::from_secs(5));
+    }
+
+    #[test]
     fn every_sample_lays_out_for_every_return_type() {
         let mut f = crate::Fields::new();
         f.insert("Taxpayer name".into(), "Jordan Sample".into());
         f.insert("Spouse name".into(), "Casey Sample".into());
         f.insert("Signer name".into(), "Jordan Sample".into());
-        for t in samples() {
-            for rt in ["1040", "1120", "1120-S", "1065"] {
-                if !t.offered_for(rt) {
+        let all = samples();
+        for t in all.iter().filter(|t| t.signed()) {
+            for rt in [
+                "1040|Individual",
+                "1120|Entity",
+                "1120-S|Entity",
+                "1065|Entity",
+                "Individual|Bookkeeping|Payroll|Advisory|FBAR",
+                "Entity|Bookkeeping|Payroll|Advisory|FBAR",
+            ] {
+                let first = rt.split('|').find(|r| *r != "Individual" && *r != "Entity");
+                if !rt.split('|').any(|r| t.offered_for(r))
+                    && first.is_some_and(|r| !t.offered_for(r))
+                {
                     continue;
                 }
-                let laid = crate::layout(&t, &f, rt, t.package.as_deref());
+                let laid = crate::layout(&as_sent(t, &all), &f, rt, t.package.as_deref());
                 assert!(
                     !laid.blocks.is_empty(),
                     "{} for {rt} has no signature",

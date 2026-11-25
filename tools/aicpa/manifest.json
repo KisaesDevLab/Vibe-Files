@@ -1,0 +1,1934 @@
+[
+ {
+  "id": "aicpa-amended",
+  "file": "2026-amended-return-engagement-letter.docx",
+  "blocks": 118,
+  "words": 5062,
+  "fill_ins": [
+   "[Date]",
+   "[Frequency]",
+   "[Identify all of the reasons amended returns are being filed.]",
+   "[Local]",
+   "[Number]",
+   "[State]",
+   "[X]"
+  ],
+  "dropped": [
+   {
+    "why": "cover and notes before the letter",
+    "paragraphs": 19
+   },
+   {
+    "why": "CNA disclaimer after the letter",
+    "paragraphs": 6
+   },
+   {
+    "why": "client address (A14)",
+    "text": "[Client Address]"
+   },
+   {
+    "why": "note to the firm (A16)",
+    "text": "(On the rare occasion that the firm will initiate tax payments on behalf of clients, include the following provision. Read Risk Alert: Modernizing payments to and from America’s bank account and risks to CPA firms to understand the risks of providing such services.)"
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "note to the firm (A16)",
+    "text": "(If the firm will not initiate tax payment(s) on the client’s behalf, include the following paragraph)"
+   },
+   {
+    "why": "note to the firm (A16)",
+    "text": "(In the rare occasion the firm will initiate tax payment(s) on the client’s behalf, include the following paragraph)"
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "initials: the Terms and Conditions are part of the letter (A5)",
+    "text": "By initialing below, I acknowledge that I received a copy of [CPA Firm]’s Terms and Conditions Addendum which are incorporated into and made part of this Agreement."
+   },
+   {
+    "why": "initials: the Terms and Conditions are part of the letter (A5)",
+    "text": "INITIAL HERE: [ ] (Optional)"
+   },
+   {
+    "why": "signature lines (replaced by signature blocks)",
+    "text": "[CPA Firm] | ___________________ | [Accountant Name] | [Accountant Title] | ACCEPTED: | ___________________ | [Client Name] | [Client Officer or Authorized Client Representative Name] | [Title of Client Officer or Authorized Client Representative Name] | ___________________ | [Date]"
+   }
+  ]
+ },
+ {
+  "id": "aicpa-audit-rep",
+  "file": "2026-audit-representation-engagement-letter.docx",
+  "blocks": 75,
+  "words": 3154,
+  "fill_ins": [
+   "[Federal or Name of Other Taxing Body]",
+   "[For correspondence examinations: We will contact the agent about the list of documents requested for the exam.]",
+   "[Internal Revenue Service or Name of Other Taxing Body]",
+   "[partnership/S corporation]"
+  ],
+  "dropped": [
+   {
+    "why": "cover and notes before the letter",
+    "paragraphs": 18
+   },
+   {
+    "why": "CNA disclaimer after the letter",
+    "paragraphs": 6
+   },
+   {
+    "why": "client address (A14)",
+    "text": "[Client Address]"
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "initials: the Terms and Conditions are part of the letter (A5)",
+    "text": "By initialing below, I acknowledge that I received a copy of [CPA Firm]’s Terms and Conditions Addendum which are incorporated into and made part of this Agreement."
+   },
+   {
+    "why": "initials: the Terms and Conditions are part of the letter (A5)",
+    "text": "INITIAL HERE: [ ] (Optional)"
+   },
+   {
+    "why": "signature lines (replaced by signature blocks)",
+    "text": "[CPA Firm] | ___________________ | [Accountant Name] | [Accountant Title] | ACCEPTED: | ___________________ | [Client Name] | [Client Representative] | [Title of Representative] | ___________________ | [Date]"
+   }
+  ]
+ },
+ {
+  "id": "aicpa-1120",
+  "file": "2026-c-corporation-engagement-letter-form-1120.docx",
+  "blocks": 136,
+  "words": 5992,
+  "fill_ins": [
+   "[Date]",
+   "[Frequency]",
+   "[If a large number of returns are included, consider listing the due dates in an appendix]",
+   "[Local]",
+   "[Month & Date, 20XX]",
+   "[Number]",
+   "[State]",
+   "[X]"
+  ],
+  "dropped": [
+   {
+    "why": "cover and notes before the letter",
+    "paragraphs": 17
+   },
+   {
+    "why": "CNA disclaimer after the letter",
+    "paragraphs": 6
+   },
+   {
+    "why": "client address (A14)",
+    "text": "[Client Address]"
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional – select the applicable method)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "note to the firm (A16)",
+    "text": "(On the rare occasion that the firm will initiate tax payments on behalf of clients, include the following provision. Read Risk Alert: Modernizing payments to and from America’s bank account and risks to CPA firms to understand the risks of providing such services.)"
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional if prior year returns were not prepared by the CPA firm)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "note to the firm (A16)",
+    "text": "(If the firm will not initiate tax payment(s) on the client’s behalf, include the following paragraph)"
+   },
+   {
+    "why": "note to the firm (A16)",
+    "text": "(In the rare occasion the firm will initiate tax payment(s) on the client’s behalf, include the following paragraph)"
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "initials: the Terms and Conditions are part of the letter (A5)",
+    "text": "By initialing below, I acknowledge that I received a copy of [CPA Firm]’s Terms and Conditions Addendum which are incorporated into and made part of this Agreement."
+   },
+   {
+    "why": "initials: the Terms and Conditions are part of the letter (A5)",
+    "text": "INITIAL HERE: [ ] (Optional)"
+   },
+   {
+    "why": "signature lines (replaced by signature blocks)",
+    "text": "[CPA Firm] | ___________________ | [Accountant Name] | [Accountant Title] | ACCEPTED: | ___________________ | [Client Name] | [Client Representative] | [Title of Representative] | ___________________ | [Date]"
+   }
+  ]
+ },
+ {
+  "id": "aicpa-5500",
+  "file": "2026-employee-benefit-plan-engagement-letter-form-5500.docx",
+  "blocks": 102,
+  "words": 4325,
+  "fill_ins": [
+   "[Date]",
+   "[Month & Date, 20XX]",
+   "[X]"
+  ],
+  "dropped": [
+   {
+    "why": "cover and notes before the letter",
+    "paragraphs": 17
+   },
+   {
+    "why": "CNA disclaimer after the letter",
+    "paragraphs": 7
+   },
+   {
+    "why": "client address (A14)",
+    "text": "[Employee Benefit Plan Address]"
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional if prior year returns were not prepared by the CPA firm)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "initials: the Terms and Conditions are part of the letter (A5)",
+    "text": "By initialing below, I acknowledge that I received a copy of [CPA Firm]’s Terms and Conditions Addendum which are incorporated into and made part of this Agreement."
+   },
+   {
+    "why": "initials: the Terms and Conditions are part of the letter (A5)",
+    "text": "INITIAL HERE: [ ] (Optional)"
+   },
+   {
+    "why": "signature lines (replaced by signature blocks)",
+    "text": "[CPA Firm] | ___________________ | [Accountant Name] | [Accountant Title] | ACCEPTED: | ___________________ | [Employee Benefit Plan Name] | [Employee Benefit Plan Administrator] | ___________________ | [Date]"
+   }
+  ]
+ },
+ {
+  "id": "aicpa-closure",
+  "file": "2026-engagement-closure-letter.docx",
+  "blocks": 17,
+  "words": 425,
+  "fill_ins": [
+   "[Date of Closure Letter]",
+   "[Date]",
+   "[Name of Engagement]",
+   "[Telephone Number]",
+   "[and Specified Parties, optional if applicable]"
+  ],
+  "dropped": [
+   {
+    "why": "cover and notes before the letter",
+    "paragraphs": 18
+   },
+   {
+    "why": "CNA disclaimer after the letter",
+    "paragraphs": 7
+   },
+   {
+    "why": "client address (A14)",
+    "text": "[Client Address]"
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional if the client has paid a retainer)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "signature lines (replaced by signature blocks)",
+    "text": "[CPA Firm] | ___________________ | [Accountant Name] | [Accountant Title]"
+   }
+  ]
+ },
+ {
+  "id": "aicpa-706",
+  "file": "2026-estate-and-inheritance-engagement-letter-forms-706-8971.docx",
+  "blocks": 117,
+  "words": 5032,
+  "fill_ins": [
+   "[Month XX, 20XX]",
+   "[Number]",
+   "[State]",
+   "[X]"
+  ],
+  "dropped": [
+   {
+    "why": "cover and notes before the letter",
+    "paragraphs": 17
+   },
+   {
+    "why": "CNA disclaimer after the letter",
+    "paragraphs": 6
+   },
+   {
+    "why": "client address (A14)",
+    "text": "[Executor Address]"
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     "(Optional)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "initials: the Terms and Conditions are part of the letter (A5)",
+    "text": "By initialing below, I represent that I am the duly appointed individual solely responsible for actions which may be taken on behalf of the Estate, and that I am vested with the requisite authority to execute this Agreement on behalf of the Estate for the services contemplated herein."
+   },
+   {
+    "why": "initials: the Terms and Conditions are part of the letter (A5)",
+    "text": "INITIAL HERE: [ ]"
+   },
+   {
+    "why": "initials: the Terms and Conditions are part of the letter (A5)",
+    "text": "By initialing below, I acknowledge that I received a copy of [CPA Firm]’s Terms and Conditions Addendum which are incorporated into and made part of this Agreement."
+   },
+   {
+    "why": "initials: the Terms and Conditions are part of the letter (A5)",
+    "text": "INITIAL HERE: [ ] (Optional)"
+   },
+   {
+    "why": "signature lines (replaced by signature blocks)",
+    "text": "[CPA Firm] | ___________________ | [Accountant Name] | [Accountant Title] | ACCEPTED: | ___________________ | [Executor Name] | [Estate Name] | ___________________ | [Date]"
+   }
+  ]
+ },
+ {
+  "id": "aicpa-1041",
+  "file": "2026-estate-and-trust-engagement-letter-form-1041.docx",
+  "blocks": 149,
+  "words": 6496,
+  "fill_ins": [
+   "[Date]",
+   "[Frequency]",
+   "[If a large number of returns are included, consider listing the due dates in an appendix]",
+   "[Local]",
+   "[Month & Date, 20XX]",
+   "[Number]",
+   "[State]",
+   "[X]"
+  ],
+  "dropped": [
+   {
+    "why": "cover and notes before the letter",
+    "paragraphs": 17
+   },
+   {
+    "why": "CNA disclaimer after the letter",
+    "paragraphs": 6
+   },
+   {
+    "why": "client address (A14)",
+    "text": "[Client Address]"
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional – select the applicable method)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "note to the firm (A16)",
+    "text": "(On the rare occasion that the firm will initiate tax payments on behalf of clients, include the following provision. Read Risk Alert: Modernizing payments to and from America’s bank account and risks to CPA firms to understand the risks of providing such services.)"
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional if prior year returns were not prepared by the CPA firm)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "note to the firm (A16)",
+    "text": "(If the firm will not initiate tax payment(s) on the client’s behalf, include the following paragraph)"
+   },
+   {
+    "why": "note to the firm (A16)",
+    "text": "(In the rare occasion the firm will initiate tax payment(s) on the client’s behalf, include the following paragraph)"
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "initials: the Terms and Conditions are part of the letter (A5)",
+    "text": "By initialing below, I acknowledge that I received a copy of [CPA Firm]’s Terms and Conditions Addendum which are incorporated into and made part of this Agreement."
+   },
+   {
+    "why": "initials: the Terms and Conditions are part of the letter (A5)",
+    "text": "INITIAL HERE: [ ] (Optional)"
+   },
+   {
+    "why": "signature lines (replaced by signature blocks)",
+    "text": "[CPA Firm] | ___________________ | [Accountant Name] | [Accountant Title] | ACCEPTED: | ___________________ | [Executor or Trustee Name] | [Name of Estate or Trust] | ___________________ | [Date]"
+   }
+  ]
+ },
+ {
+  "id": "aicpa-990",
+  "file": "2026-exempt-organization-engagement-letter-form-990.docx",
+  "blocks": 141,
+  "words": 6269,
+  "fill_ins": [
+   "[Date]",
+   "[Frequency]",
+   "[If a large number of returns are included, consider listing the due dates in an appendix]",
+   "[Local]",
+   "[Month & Date, 20XX]",
+   "[Number]",
+   "[State]",
+   "[X]"
+  ],
+  "dropped": [
+   {
+    "why": "cover and notes before the letter",
+    "paragraphs": 17
+   },
+   {
+    "why": "CNA disclaimer after the letter",
+    "paragraphs": 7
+   },
+   {
+    "why": "client address (A14)",
+    "text": "[Client Address]"
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional – select the applicable method)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "note to the firm (A16)",
+    "text": "(On the rare occasion that the firm will initiate tax payments on behalf of clients, include the following provision. Read Risk Alert: Modernizing payments to and from America’s bank account and risks to CPA firms to understand the risks of providing such services.)"
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional if prior year returns were not prepared by the CPA firm)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "note to the firm (A16)",
+    "text": "(If the firm will not initiate tax payment(s) on the client’s behalf, include the following paragraph)"
+   },
+   {
+    "why": "note to the firm (A16)",
+    "text": "(In the rare occasion the firm will initiate tax payment(s) on the client’s behalf, include the following paragraph)"
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "initials: the Terms and Conditions are part of the letter (A5)",
+    "text": "By initialing below, I acknowledge that I received a copy of [CPA Firm]’s Terms and Conditions Addendum which are incorporated into and made part of this Agreement."
+   },
+   {
+    "why": "initials: the Terms and Conditions are part of the letter (A5)",
+    "text": "INITIAL HERE: [ ] (Optional)"
+   },
+   {
+    "why": "signature lines (replaced by signature blocks)",
+    "text": "[CPA Firm] | ___________________ | [Accountant Name] | [Accountant Title] | ACCEPTED: | ___________________ | [Client Name] | [Client Representative] | [Title of Representative] | ___________________ | [Date]"
+   }
+  ]
+ },
+ {
+  "id": "aicpa-709",
+  "file": "2026-gift-tax-return-engagement-letter-form-709.docx",
+  "blocks": 124,
+  "words": 5546,
+  "fill_ins": [
+   "[Date]",
+   "[Frequency]",
+   "[Local]",
+   "[Month & Date, 20XX]",
+   "[Number]",
+   "[State]",
+   "[X]"
+  ],
+  "dropped": [
+   {
+    "why": "cover and notes before the letter",
+    "paragraphs": 17
+   },
+   {
+    "why": "CNA disclaimer after the letter",
+    "paragraphs": 6
+   },
+   {
+    "why": "client address (A14)",
+    "text": "[Client Address]"
+   },
+   {
+    "why": "note to the firm (A16)",
+    "text": "(On the rare occasion that the firm will initiate tax payments on behalf of clients, include the following provision. Read Risk Alert: Modernizing payments to and from America’s bank account and risks to CPA firms to understand the risks of providing such services.)"
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "note to the firm (A16)",
+    "text": "(If the firm will not initiate tax payment(s) on the client’s behalf, include the following paragraph)"
+   },
+   {
+    "why": "note to the firm (A16)",
+    "text": "(In the rare occasion the firm will initiate tax payment(s) on the client’s behalf, include the following paragraph)"
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "initials: the Terms and Conditions are part of the letter (A5)",
+    "text": "By initialing below, I acknowledge that I received a copy of [CPA Firm]’s Terms and Conditions Addendum which are incorporated into and made part of this Agreement."
+   },
+   {
+    "why": "initials: the Terms and Conditions are part of the letter (A5)",
+    "text": "INITIAL HERE: [ ] (Optional)"
+   },
+   {
+    "why": "signature lines (replaced by signature blocks)",
+    "text": "[CPA Firm] | ___________________ | [Accountant Name] | [Accountant Title] | ACCEPTED: | ___________________ | [Client Name] | ___________________ | [Date]"
+   }
+  ]
+ },
+ {
+  "id": "aicpa-1040",
+  "file": "2026-individual-income-tax-return-engagement-letter-form-1040.docx",
+  "blocks": 140,
+  "words": 6559,
+  "fill_ins": [
+   "[Date]",
+   "[Frequency]",
+   "[If a large number of returns are included, consider listing the due dates in an appendix]",
+   "[Local]",
+   "[Number]",
+   "[State]",
+   "[X]"
+  ],
+  "dropped": [
+   {
+    "why": "cover and notes before the letter",
+    "paragraphs": 17
+   },
+   {
+    "why": "CNA disclaimer after the letter",
+    "paragraphs": 6
+   },
+   {
+    "why": "client address (A14)",
+    "text": "[Client Address]"
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional – select the applicable method)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "note to the firm (A16)",
+    "text": "(On the rare occasion that the firm will initiate tax payments on behalf of clients, include the following provision. Read Risk Alert: Modernizing payments to and from America’s bank account and risks to CPA firms to understand the risks of providing such services.)"
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional if prior year returns were not prepared by the CPA firm)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "note to the firm (A16)",
+    "text": "(If the firm will not initiate tax payment(s) on the client’s behalf, include the following paragraph)"
+   },
+   {
+    "why": "note to the firm (A16)",
+    "text": "(In the rare occasion the firm will initiate tax payment(s) on the client’s behalf, include the following paragraph)"
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "initials: the Terms and Conditions are part of the letter (A5)",
+    "text": "By initialing below, I acknowledge that I received a copy of [CPA Firm]’s Terms and Conditions Addendum which are incorporated into and made part of this Agreement."
+   },
+   {
+    "why": "initials: the Terms and Conditions are part of the letter (A5)",
+    "text": "INITIAL HERE: [ ] (Optional)"
+   },
+   {
+    "why": "signature lines (replaced by signature blocks)",
+    "text": "[CPA Firm] | ___________________ | [Accountant Name] | [Accountant Title] | ACCEPTED: | ___________________  ___________________ | [Client Name]    [Client Spouse’s Name] | ___________________ | [Date]"
+   }
+  ]
+ },
+ {
+  "id": "aicpa-1065",
+  "file": "2026-partnership-engagement-letter-form-1065.docx",
+  "blocks": 155,
+  "words": 6960,
+  "fill_ins": [
+   "[Date]",
+   "[Frequency]",
+   "[If a large number of returns are included, consider listing the due dates in an appendix]",
+   "[Local]",
+   "[Month & Date, 20XX]",
+   "[Number]",
+   "[State]",
+   "[X]"
+  ],
+  "dropped": [
+   {
+    "why": "cover and notes before the letter",
+    "paragraphs": 17
+   },
+   {
+    "why": "CNA disclaimer after the letter",
+    "paragraphs": 6
+   },
+   {
+    "why": "client address (A14)",
+    "text": "[Client Address]"
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional – select the applicable method)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "note to the firm (A16)",
+    "text": "(On the rare occasion that the firm will initiate tax payments on behalf of clients, include the following provision. Read Risk Alert: Modernizing payments to and from America’s bank account and risks to CPA firms to understand the risks of providing such services.)"
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional if prior year returns were not prepared by the CPA firm)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "note to the firm (A16)",
+    "text": "(If the firm will not initiate tax payment(s) on the client’s behalf, include the following paragraph)"
+   },
+   {
+    "why": "note to the firm (A16)",
+    "text": "(In the rare occasion the firm will initiate tax payment(s) on the client’s behalf, include the following paragraph)"
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "initials: the Terms and Conditions are part of the letter (A5)",
+    "text": "By initialing below, I acknowledge that I received a copy of [CPA Firm]’s Terms and Conditions Addendum which are incorporated into and made part of this Agreement."
+   },
+   {
+    "why": "initials: the Terms and Conditions are part of the letter (A5)",
+    "text": "INITIAL HERE: [ ] (Optional)"
+   },
+   {
+    "why": "signature lines (replaced by signature blocks)",
+    "text": "[CPA Firm] | ___________________ | [Accountant Name] | [Accountant Title] | ACCEPTED: | ___________________ | [Client Name] | [Client Representative] | [Title of Representative] | ___________________ | [Date]"
+   }
+  ]
+ },
+ {
+  "id": "aicpa-990pf",
+  "file": "2026-private-foundation-engagement-letter-form-990pf.docx",
+  "blocks": 142,
+  "words": 6318,
+  "fill_ins": [
+   "[Date]",
+   "[Frequency]",
+   "[If a large number of returns are included, consider listing the due dates in an appendix]",
+   "[Local]",
+   "[Month & Date, 20XX]",
+   "[Number]",
+   "[State]",
+   "[X]"
+  ],
+  "dropped": [
+   {
+    "why": "cover and notes before the letter",
+    "paragraphs": 17
+   },
+   {
+    "why": "CNA disclaimer after the letter",
+    "paragraphs": 6
+   },
+   {
+    "why": "client address (A14)",
+    "text": "[Client Address]"
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional – select the applicable method)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "note to the firm (A16)",
+    "text": "(On the rare occasion that the firm will initiate tax payments on behalf of clients, include the following provision. Read Risk Alert: Modernizing payments to and from America’s bank account and risks to CPA firms to understand the risks of providing such services.)"
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional if prior year returns were not prepared by the CPA firm)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "note to the firm (A16)",
+    "text": "(If the firm will not initiate tax payment(s) on the client’s behalf, include the following paragraph)"
+   },
+   {
+    "why": "note to the firm (A16)",
+    "text": "(In the rare occasion the firm will initiate tax payment(s) on the client’s behalf, include the following paragraph)"
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "initials: the Terms and Conditions are part of the letter (A5)",
+    "text": "By initialing below, I acknowledge that I received a copy of [CPA Firm]’s Terms and Conditions Addendum which are incorporated into and made part of this Agreement."
+   },
+   {
+    "why": "initials: the Terms and Conditions are part of the letter (A5)",
+    "text": "INITIAL HERE: [ ] (Optional)"
+   },
+   {
+    "why": "signature lines (replaced by signature blocks)",
+    "text": "[CPA Firm] | ___________________ | [Accountant Name] | [Accountant Title] | ACCEPTED: | ___________________ | [Client Name] | [Client Representative] | [Title of Representative] | ___________________ | [Date]"
+   }
+  ]
+ },
+ {
+  "id": "aicpa-fbar",
+  "file": "2026-report-of-foreign-bank-and-financial-accounts-engagement-letter-fincen-form-114.docx",
+  "blocks": 80,
+  "words": 2953,
+  "fill_ins": [
+   "[Date]",
+   "[X]"
+  ],
+  "dropped": [
+   {
+    "why": "cover and notes before the letter",
+    "paragraphs": 18
+   },
+   {
+    "why": "CNA disclaimer after the letter",
+    "paragraphs": 6
+   },
+   {
+    "why": "client address (A14)",
+    "text": "[Client Address]"
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional if prior year reports were not prepared by the CPA firm)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "initials: the Terms and Conditions are part of the letter (A5)",
+    "text": "By initialing below, I acknowledge that I received a copy of [CPA Firm]’s Terms and Conditions Addendum which are incorporated into and made part of this Agreement."
+   },
+   {
+    "why": "initials: the Terms and Conditions are part of the letter (A5)",
+    "text": "INITIAL HERE: [ ] (Optional)"
+   },
+   {
+    "why": "signature lines (replaced by signature blocks)",
+    "text": "[CPA Firm] | ___________________ | [Accountant Name] | [Accountant Title] | ACCEPTED: | ___________________ | [Client Name] | ___________________ | [Date]"
+   }
+  ]
+ },
+ {
+  "id": "aicpa-1120s",
+  "file": "2026-s-corporation-tax-return-engagement-letter-form-1120s.docx",
+  "blocks": 152,
+  "words": 6684,
+  "fill_ins": [
+   "[Date]",
+   "[Frequency]",
+   "[If a large number of returns are included, consider listing the due dates in an appendix]",
+   "[Local]",
+   "[Month & Date, 20XX]",
+   "[Number]",
+   "[State]",
+   "[X]"
+  ],
+  "dropped": [
+   {
+    "why": "cover and notes before the letter",
+    "paragraphs": 17
+   },
+   {
+    "why": "CNA disclaimer after the letter",
+    "paragraphs": 6
+   },
+   {
+    "why": "client address (A14)",
+    "text": "[Client Address]"
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional – select the applicable method)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "note to the firm (A16)",
+    "text": "(On the rare occasion that the firm will initiate tax payments on behalf of clients, include the following provision. Read Risk Alert: Modernizing payments to and from America’s bank account and risks to CPA firms to understand the risks of providing such services.)"
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional if prior year returns were not prepared by the CPA firm)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "note to the firm (A16)",
+    "text": "(If the firm will not initiate tax payment(s) on the client’s behalf, include the following paragraph)"
+   },
+   {
+    "why": "note to the firm (A16)",
+    "text": "(In the rare occasion the firm will initiate tax payment(s) on the client’s behalf, include the following paragraph)"
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "initials: the Terms and Conditions are part of the letter (A5)",
+    "text": "By initialing below, I acknowledge that I received a copy of [CPA Firm]’s Terms and Conditions Addendum which are incorporated into and made part of this Agreement."
+   },
+   {
+    "why": "initials: the Terms and Conditions are part of the letter (A5)",
+    "text": "INITIAL HERE: [ ] (Optional)"
+   },
+   {
+    "why": "signature lines (replaced by signature blocks)",
+    "text": "[CPA Firm] | ___________________ | [Accountant Name] | [Accountant Title] | ACCEPTED: | ___________________ | [Client Name] | [Client Representative] | [Title of Representative] | ___________________ | [Date]"
+   }
+  ]
+ },
+ {
+  "id": "aicpa-terms",
+  "file": "2026-sample-terms-and-conditions-addendum.docx",
+  "blocks": 94,
+  "words": 4138,
+  "fill_ins": [
+   "[Name of State or Federal Court Desired]",
+   "[Portal Name]",
+   "[State Name]",
+   "[X]"
+  ],
+  "dropped": [
+   {
+    "why": "cover and notes before the letter",
+    "paragraphs": 22
+   },
+   {
+    "why": "CNA disclaimer after the letter",
+    "paragraphs": 7
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     "(Optional)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (optional)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (optional)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     "(Optional)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     "(Optional)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     "(Optional)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (optional – if pro bono engagement)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     "(Optional)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional - and cyber liability)"
+    ]
+   }
+  ]
+ },
+ {
+  "id": "aicpa-consulting",
+  "file": "2026-tax-consulting-engagement-letter.docx",
+  "blocks": 86,
+  "words": 3241,
+  "fill_ins": [
+   "[X]"
+  ],
+  "dropped": [
+   {
+    "why": "cover and notes before the letter",
+    "paragraphs": 17
+   },
+   {
+    "why": "CNA disclaimer after the letter",
+    "paragraphs": 6
+   },
+   {
+    "why": "client address (A14)",
+    "text": "[Client Address]"
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)",
+     " (Optional)",
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional if prior year returns were not prepared by the CPA firm)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "initials: the Terms and Conditions are part of the letter (A5)",
+    "text": "By initialing below, I acknowledge that I received a copy of [CPA Firm]’s Terms and Conditions Addendum which are incorporated into and made part of this Agreement."
+   },
+   {
+    "why": "initials: the Terms and Conditions are part of the letter (A5)",
+    "text": "INITIAL HERE: [ ] (Optional)"
+   },
+   {
+    "why": "signature lines (replaced by signature blocks)",
+    "text": "[CPA Firm] | ___________________ | [Accountant Name] | [Accountant Title] | ACCEPTED: | ___________________ | [Client Name] | [Client Representative] | [Title of Representative] | ___________________ | [Date]"
+   }
+  ]
+ },
+ {
+  "id": "aicpa-projections",
+  "file": "2026-tax-projections-engagement-letter.docx",
+  "blocks": 107,
+  "words": 4405,
+  "fill_ins": [
+   "[Name of State(s)]",
+   "[X]"
+  ],
+  "dropped": [
+   {
+    "why": "cover and notes before the letter",
+    "paragraphs": 18
+   },
+   {
+    "why": "CNA disclaimer after the letter",
+    "paragraphs": 6
+   },
+   {
+    "why": "client address (A14)",
+    "text": "[Client Address]"
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional, if provided to third parties)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)",
+     " (Optional)",
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional if prior year returns were not prepared by the CPA firm)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "inline note to the firm (A16)",
+    "text": [
+     " (Optional)"
+    ]
+   },
+   {
+    "why": "initials: the Terms and Conditions are part of the letter (A5)",
+    "text": "By initialing below, I acknowledge that I received a copy of [CPA Firm]’s Terms and Conditions Addendum which are incorporated into and made part of this Agreement."
+   },
+   {
+    "why": "initials: the Terms and Conditions are part of the letter (A5)",
+    "text": "INITIAL HERE: [ ] (Optional)"
+   },
+   {
+    "why": "signature lines (replaced by signature blocks)",
+    "text": "[CPA Firm] | ___________________ | [Accountant Name] | [Accountant Title] | ACCEPTED: | ___________________ | [Client Name] | [Client Representative] | [Title of Representative] | ___________________ | [Date]"
+   }
+  ]
+ }
+]

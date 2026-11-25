@@ -1,0 +1,673 @@
+{
+ "id": "aicpa-1065",
+ "version": 0,
+ "name": "Engagement letter: partnership return (Form 1065)",
+ "return_types": [
+  "1065"
+ ],
+ "kind": "letter",
+ "doc_type": "Engagement letter",
+ "letterhead": true,
+ "default_ticked": true,
+ "sample": true,
+ "blocks": [
+  {
+   "kind": "paragraph",
+   "text": "{Date}"
+  },
+  {
+   "kind": "paragraph",
+   "text": "{Signer name}"
+  },
+  {
+   "kind": "paragraph",
+   "text": "{Client name}"
+  },
+  {
+   "kind": "paragraph",
+   "text": "Dear {Signer first names}:"
+  },
+  {
+   "kind": "paragraph",
+   "text": "{Firm name} (“firm,” “we,” “us,” or “our”) is pleased to provide {Client name} (“you” or “your”) with the professional services described below. Please read this letter, the attached Terms and Conditions Addendum and any other attachments incorporated herein (collectively, “Agreement”). This Agreement details the nature and limitations of the services we will provide, the terms of our engagement and each party’s responsibilities."
+  },
+  {
+   "kind": "heading",
+   "text": "Engagement Objective and Scope"
+  },
+  {
+   "kind": "paragraph",
+   "text": "Our services are limited to the following federal and state tax returns for the year ended [Date]:"
+  },
+  {
+   "kind": "paragraph",
+   "text": "Form 1065   U.S. Return of Partnership Income"
+  },
+  {
+   "kind": "paragraph",
+   "text": "Form [Number] Name of each state or local tax form (including non-income and other taxes)"
+  },
+  {
+   "kind": "paragraph",
+   "text": "Form [Number] State quarterly estimated tax vouchers computed using the safe harbor or actual method"
+  },
+  {
+   "kind": "paragraph",
+   "text": "Form [Number] Name of each foreign activity form (for example Form 5471, 8858, 926, etc.) including name of reporting entity"
+  },
+  {
+   "kind": "paragraph",
+   "text": "Form [Number] Name of each state Pass-through Entity Tax form"
+  },
+  {
+   "kind": "paragraph",
+   "text": "In addition, we will initiate [Frequency] estimated tax payments on your behalf for the following taxing jurisdictions:"
+  },
+  {
+   "kind": "list",
+   "items": [
+    "Internal Revenue Service",
+    "[State] taxing authority",
+    "[Local] taxing authority"
+   ]
+  },
+  {
+   "kind": "paragraph",
+   "text": "The objective of our services is to assist you with the calculation of your tax due and provide you with forms and schedules we believe are suitable for you to file with the Internal Revenue Service (“IRS”) and applicable state and local tax authorities and sufficient to comply with your tax filing obligations. You have the final responsibility for the filing and content of your tax return(s). To the extent a return can be e-filed, we will provide assistance with the e-filing of such return as further discussed in this Agreement. We will not assist you with any tax return other than those identified above, without your written request, and our written agreement to do so."
+  },
+  {
+   "kind": "paragraph",
+   "text": "Our engagement does not include any procedures designed to detect errors, fraud, theft, or other wrongdoing. Therefore, our engagement cannot be relied upon to disclose such matters. If we identify or suspect that an instance of noncompliance with laws and regulations has occurred or is likely to occur, we will discuss the matter with the appropriate level of management and, when appropriate, those charged with governance. In addition, we are not responsible for identifying or communicating deficiencies in your internal controls, unless otherwise specified in the scope of this Agreement. You are responsible for developing and implementing internal controls applicable to your operations."
+  },
+  {
+   "kind": "paragraph",
+   "text": "Requests for additional services may necessitate that we amend the Agreement or issue a separate written agreement to reflect the obligations of all parties. In the absence of any other written communications from us documenting additional services, our services will be limited to and governed by the terms of this Agreement."
+  },
+  {
+   "kind": "heading",
+   "text": "CPA Firm Responsibilities"
+  },
+  {
+   "kind": "paragraph",
+   "text": "It is our duty to prepare your returns based on the same standard of care that a reasonable tax return preparer would exercise in this type of engagement. Unless otherwise noted, the applicable standard of care for a “reasonable tax return preparer” shall be based upon the following pronouncements:"
+  },
+  {
+   "kind": "list",
+   "items": [
+    "the Statements on Standards for Tax Services (“SSTS”) issued by the American Institute of Certified Public Accountants (“AICPA”);",
+    "U.S. Treasury Department Circular 230 (“Circular 230”); and",
+    "the Internal Revenue Code, Treasury Regulations, and any applicable state/local corollaries (collectively, “the Code”)."
+   ]
+  },
+  {
+   "kind": "paragraph",
+   "text": "As tax return preparers, these pronouncements restrict our ability to sign a tax return when the tax positions you report do not comply with tax law. We will be unable to sign your return and may terminate this Agreement if you:"
+  },
+  {
+   "kind": "list",
+   "items": [
+    "request that we report a tax position on your return which we feel is contrary to published guidance, frivolous, or a willful attempt to evade tax;",
+    "request that we include a deduction, credit or refund on your return that we believe you do not qualify for; or",
+    "decline to disclose a position where in our professional judgment tax law requires disclosure."
+   ]
+  },
+  {
+   "kind": "paragraph",
+   "text": "Once our services have concluded, we shall have no obligation to notify you of future tax law developments affecting your return(s) except as may be required by Circular 230 or the SSTS related to errors we identify. We will not update your return after the conclusion of the engagement for any reason unless further engaged."
+  },
+  {
+   "kind": "paragraph",
+   "text": "{Firm name} will not make any management decisions or perform management functions on your behalf."
+  },
+  {
+   "kind": "heading",
+   "text": "Arguable positions"
+  },
+  {
+   "kind": "paragraph",
+   "text": "If there are conflicting interpretations of tax law, or if tax law is unclear, we will explain the possible positions that may be taken in order for us to sign your return. We will follow the position you request, provided it is consistent with our understanding of tax reference materials and our professional standards. Tax reference materials include, but are not limited to, the Code, Revenue Rulings, Revenue Procedures, court cases, and similar state and local guidance. If the IRS, state or local tax authorities later contest the position you select, additional tax, penalties, and interest may be assessed."
+  },
+  {
+   "kind": "paragraph",
+   "text": "We shall not be liable for any tax, penalties, interest, related professional fees, or other expenses you may incur to respond to the tax authority."
+  },
+  {
+   "kind": "heading",
+   "text": "Bookkeeping assistance"
+  },
+  {
+   "kind": "paragraph",
+   "text": "We may deem it necessary to provide you with limited accounting and bookkeeping assistance solely for the purpose of helping you organize your information. This assistance is intended to be nominal and is not a separate accounting or bookkeeping service. In the event we conclude that bookkeeping or accounting assistance is necessary to prepare your tax returns, we will advise you in writing before proceeding. Any assistance will be billed at our standard hourly rates and will be subject to the terms of this Agreement."
+  },
+  {
+   "kind": "heading",
+   "text": "Prior year review"
+  },
+  {
+   "kind": "paragraph",
+   "text": "Our review of the prior year’s tax returns will necessarily be limited and may not find errors. We will, however, bring to your attention errors that we do find. Similarly, if you become aware of any information affecting prior year tax returns, please contact us. If an error or information affecting prior year tax returns is discovered by you or us, we will discuss your options with you. If you ask us to prepare amended tax returns or an Administrative Adjustment Request, and we agree, we will confirm this engagement in a separate written agreement."
+  },
+  {
+   "kind": "heading",
+   "text": "Pass-through Entity Tax election"
+  },
+  {
+   "kind": "paragraph",
+   "text": "Several states permit eligible entities to elect to pay income tax on passed through income for the benefit of their owners (“pass-through entity tax” or “PTET”). A PTET election may be beneficial for entity owners whose maximum amount of deductible state taxes for federal income tax purposes is limited. The timing and requirements for each state’s PTET regime varies and may be fact-specific. Analysis related to making a PTET election is not within the scope of this engagement. You are responsible for requesting our assistance to determine if these elections would be beneficial for you and for deciding whether to opt in or out of any PTET which may apply to you."
+  },
+  {
+   "kind": "heading",
+   "text": "Tax planning services"
+  },
+  {
+   "kind": "paragraph",
+   "text": "Our engagement does not include tax advice which affects the calculation of tax due or the filing of tax forms and schedules for previous or future tax years. However, we may communicate potential tax planning opportunities to you, and you may ask high-level questions of us. It is your responsibility to communicate to us, in writing, any interest in pursuing a tax planning opportunity identified, or if you require more than a cursory response to your question. If you do not request our assistance in writing, we will infer that you do not wish to pursue any suggestion made to you. If you do request our assistance and we agree, we will confirm our understanding with you in a separate written agreement prior to proceeding."
+  },
+  {
+   "kind": "paragraph",
+   "text": "We shall not be liable for any tax, penalties, interest, related professional fees, or other expenses you may incur if you fail to advise us of your desire to investigate or pursue any tax planning opportunity communicated to or by us. Any tax advice described in this paragraph and provided to you shall be governed by this Agreement and billed at our standard hourly rates."
+  },
+  {
+   "kind": "heading",
+   "text": "Government inquiries"
+  },
+  {
+   "kind": "paragraph",
+   "text": "This engagement does not include responding to inquiries by any governmental agency or tax authority. If you are contacted by a tax authority, either for an examination or other inquiry, you may request our assistance in responding."
+  },
+  {
+   "kind": "heading",
+   "text": "Third party requests"
+  },
+  {
+   "kind": "paragraph",
+   "text": "Our services are not intended to benefit or influence any third party, including any entity or investment which may seek to evaluate your creditworthiness or financial strength. We will not respond to any request from banks, mortgage brokers or others for verification of any information reported on these tax returns. Except where compelled by court order or subpoena, we do not communicate with third parties or provide them with copies of tax returns."
+  },
+  {
+   "kind": "heading",
+   "text": "Reliance on others"
+  },
+  {
+   "kind": "paragraph",
+   "text": "If you wish to take a tax position based upon the advice of another advisor, before we are able to sign your tax return, we must comply with the applicable provisions of the Code and the SSTS."
+  },
+  {
+   "kind": "paragraph",
+   "text": "We will review the other advisor’s work and may require a written statement from the advisor describing the statutory basis for the position and the suggested disclosure needed to appropriately report the position. If we believe additional research is required, we will discuss the matter with you and obtain your written consent to perform such research. You agree to pay for the additional charges necessary to complete the disclosure or research as this is not included in the scope of this Agreement."
+  },
+  {
+   "kind": "paragraph",
+   "text": "Moreover, you understand that the IRS, state or local tax authority may disagree with the position taken on the return. If this occurs, we shall not be liable for any tax, penalties, interest, related professional fees, or other expenses you may incur."
+  },
+  {
+   "kind": "paragraph",
+   "text": "If, after review of the work prepared by your other advisor, we determine that we are unable to sign the tax return, we will be unable to proceed."
+  },
+  {
+   "kind": "heading",
+   "text": "Substantial understatement penalties"
+  },
+  {
+   "kind": "paragraph",
+   "text": "The IRS and many states impose harsher accuracy-related penalties (20% for federal) for substantial understatement of tax. Substantial understatement of tax may be found where the tax that should be reported on your return is more than what is actually reported on your return, based on a statutory formula which defines when an understatement is “substantial”. In some cases, avoiding substantial understatement penalties can be achieved if the tax position is adequately disclosed in a method approved by the IRS. Similar rules may apply at the state level."
+  },
+  {
+   "kind": "paragraph",
+   "text": "While the decision to disclose or not disclose is yours, if we conclude that your return contains a tax position which we believe you are required to disclose, we will ask that you consent to include a disclosure in a method approved by the IRS. If you decline to disclose the tax position, we will be unable to proceed."
+  },
+  {
+   "kind": "heading",
+   "text": "Abusive tax strategies"
+  },
+  {
+   "kind": "paragraph",
+   "text": "Certain tax positions or strategies, while not currently identified as “abusive” by the IRS, may ultimately be determined to be so in the future. Consequently, you agree to advise us of any transaction you have entered into that entitles you to disproportionate tax benefits (deductions, credits, or refunds), that generates significant income deferral or non-recognition, or that generates significant tax losses without corresponding cash impacts (collectively “abusive tax strategy”). It is your responsibility to timely notify us, in writing, of any abusive tax strategy you have entered into. We shall not be liable for any tax, penalties, interest, related professional fees, or other expenses you may incur if the anticipated benefits of the strategy are not realized."
+  },
+  {
+   "kind": "heading",
+   "text": "Reportable transactions"
+  },
+  {
+   "kind": "paragraph",
+   "text": "The law imposes substantial penalties on taxpayers and tax advisors for failure to disclose listed and other reportable transactions on Form 8886, Reportable Transaction Disclosure Statement and, in some cases, extends the statute of limitations tax authorities have to contest any tax return claiming those tax positions. In general, reportable transactions are potentially abusive transactions identified by the IRS that have a primary purpose of tax avoidance, including but not limited to listed transactions, confidential transactions, transactions with contractual protection, loss transactions, and transactions of interest (a definition of “reportable transactions” is located at https://www.irs.gov/instructions/i8886 and includes a link to a summary of listed transactions)."
+  },
+  {
+   "kind": "paragraph",
+   "text": "If we conclude that your return contains a reportable transaction that we believe you are required to disclose, we will ask that you consent to include a disclosure, either on Form 8886 or other method approved by the IRS. If you decline to disclose the reportable transaction, we will be unable to proceed."
+  },
+  {
+   "kind": "heading",
+   "text": "Client Responsibilities"
+  },
+  {
+   "kind": "paragraph",
+   "text": "If you fail to comply with the responsibilities as described in this Agreement, your actions or your inactions may result in economic or other loss to you, such as disallowance of tax deductions or credits claimed, additional tax, penalties or interest assessed against you, loss of administrative rights, or criminal punishment. You will be responsible for any loss suffered by you, including any professional fees required to defend or correct changes made to your tax returns, prepare previously unfiled tax returns, or amend previously filed tax returns. The responsibilities detailed in this section are not exhaustive, and our services to you may require additional responsibilities not listed."
+  },
+  {
+   "kind": "heading",
+   "text": "Tax information"
+  },
+  {
+   "kind": "paragraph",
+   "text": "**Due to the high volume of tax returns prepared by our firm, you** **must** **provide** **your tax return** **information** **to us** **no later than [Date]. Failure to do so may result in** **your** **inability to** **file** **your returns** **or pay your tax due** **by the original filing due dates.**"
+  },
+  {
+   "kind": "paragraph",
+   "text": "You agree to provide us with a trial balance and other supporting data we may request to prepare your tax returns. You are responsible for providing us with accurate and complete information."
+  },
+  {
+   "kind": "paragraph",
+   "text": "We will rely upon the completeness and accuracy of the information and representations you provide to us. Our responsibility is limited to the information of which we have knowledge. We will not audit or otherwise verify the data you submit to us, although we may ask you to clarify certain information."
+  },
+  {
+   "kind": "heading",
+   "text": "Electronic payments"
+  },
+  {
+   "kind": "paragraph",
+   "text": "The Modernizing Payments To and From America’s Bank Account Executive Order, signed on March 25, 2025, mandated that all payments from the U.S. government after September 30, 2025, must be made electronically. All payments to the U.S. government, including quarterly estimated tax payments, should be made electronically as soon as practicable."
+  },
+  {
+   "kind": "paragraph",
+   "text": "Assisting you with electronic payments is not part of the scope of our services. You are responsible for transmitting any electronic payments."
+  },
+  {
+   "kind": "paragraph",
+   "text": "You have requested that we initiate [Frequency] estimated tax payments on your behalf for the taxing jurisdictions identified in the Engagement Objective and Scope section of this Agreement. Before a payment or payments is/are initiated, we require that you:"
+  },
+  {
+   "kind": "list",
+   "items": [
+    "Confirm the accuracy of the bank routing and account numbers from which the payment will be drafted;",
+    "Approve the payment amount(s) and date(s); and",
+    "Ensure the availability of funds when the payment is drafted."
+   ]
+  },
+  {
+   "kind": "paragraph",
+   "text": "We shall not be liable for any tax, penalties, interest, related professional fees, or other expenses you may incur if you fail to provide accurate bank information, timely approve payment amounts and dates, or ensure the sufficiency of funds at the time of payment."
+  },
+  {
+   "kind": "heading",
+   "text": "Communication of authority of others"
+  },
+  {
+   "kind": "paragraph",
+   "text": "You hereby authorize the following individuals from {Client name} to communicate directly with us on your behalf, and to request services and exchange information necessary to provide the services described in this Agreement:"
+  },
+  {
+   "kind": "heading",
+   "text": "Name     Title    Contact Information"
+  },
+  {
+   "kind": "paragraph",
+   "text": "You agree that this limited authority conveyed above shall continue in full force and effect until either this Agreement is concluded, or you inform us of any modifications in writing, whichever occurs first."
+  },
+  {
+   "kind": "heading",
+   "text": "Online access to information"
+  },
+  {
+   "kind": "paragraph",
+   "text": "To the extent you provide our firm with access to electronic data via a local or online database from which we will download your trial balance or other information, you agree that the data is accurate as of the date and time you make it available to be downloaded by us."
+  },
+  {
+   "kind": "heading",
+   "text": "Transfer pricing"
+  },
+  {
+   "kind": "paragraph",
+   "text": "IRC §482 permits Treasury to reallocate income and expense (“transfer pricing”) if it determines taxable income of commonly-owned or commonly-controlled businesses is not “clearly reflected”, or intercompany transactions between those businesses are not conducted at arm’s length. In transfer pricing, “arm’s length” is understood to infer a price at which unrelated parties would buy or sell, assuming no compulsion to transact. Treasury Regulations require documentation of inter-company transactions and payments (including intercompany debt/interest), and failure to substantiate those transactions may result in significant understatement and accuracy-related penalties. Analysis of transfer pricing is not within the scope of this Agreement. Although we may inquire as to your documentation of intercompany transactions, it is your responsibility to assess your transfer pricing and complete/maintain any necessary documentation."
+  },
+  {
+   "kind": "heading",
+   "text": "Changes in ownership"
+  },
+  {
+   "kind": "paragraph",
+   "text": "You are responsible for advising us of any changes in ownership, including the death of a partner, so that it may be accurately reflected on the tax returns. A change in ownership of a partnership interest needs to be reported on your return and also may have unanticipated tax consequences."
+  },
+  {
+   "kind": "paragraph",
+   "text": "Assistance with analysis of any change in ownership transaction is not within the scope of this Agreement."
+  },
+  {
+   "kind": "heading",
+   "text": "Partnership or Limited Liability Company (LLC) agreement"
+  },
+  {
+   "kind": "paragraph",
+   "text": "You should review your partnership or LLC agreement to ensure that it meets your goals for the transfer of ownership and distribution of income. Often, partnership agreements fail to address the transfer of ownership or may require updating as circumstances change. A review of your partnership or LLC agreement or analysis of proposed transactions under any existing or draft language is not within the scope of this Agreement."
+  },
+  {
+   "kind": "paragraph",
+   "text": "Partnerships subject to the Bipartisan Budget Act of 2015 (BBA)"
+  },
+  {
+   "kind": "paragraph",
+   "text": "The Bipartisan Budget Act of 2015 changed how the IRS addresses corrections to Form 1065 filed by partnerships that either cannot opt out of BBA, or can but have not opted out of BBA. As part of this change, “eligible partnerships” must annually consider whether they will elect to opt out of these BBA rules."
+  },
+  {
+   "kind": "paragraph",
+   "text": "Analysis of BBA rules, including determining whether you are an “eligible partnership” and/or whether you should opt out of BBA, is complex. We will provide you with an overview of how BBA may apply and any election you may need to make on your tax return. If we, in our professional judgment, believe a more detailed analysis is required, we will ask you to sign a separate consulting Agreement with an expanded scope of service."
+  },
+  {
+   "kind": "paragraph",
+   "text": "Although we may assist you with understanding the impact of opting out of BBA, you are responsible for choosing whether to make the election, and we will not make any BBA election on your behalf. If you choose to remain subject to BBA, we will ask that you provide us the name of your partnership representative, and, where necessary, your designated individual. The issues, procedures, and notice requirements involved in the examination of a partnership subject to BBA are very specific and nuanced, and require analyses not anticipated by this Agreement."
+  },
+  {
+   "kind": "paragraph",
+   "text": "Any partnership subject to BBA should review its partnership (or LLC) agreement with its attorney to ensure that it addresses the significant changes to the partnership examination regime that apply to affected partnerships. These changes include, but are not limited to the following:"
+  },
+  {
+   "kind": "list",
+   "items": [
+    "Replacement of a “tax matters partner” with a “partnership representative,”",
+    "Current partners being held responsible for tax liabilities of prior partners,",
+    "The partnership being held responsible for remittance of additional tax, rather than individual partners being taxed, and",
+    "Numerous elections or opt-outs that the “partnership representative” may direct us to make."
+   ]
+  },
+  {
+   "kind": "heading",
+   "text": "Tax basis schedules"
+  },
+  {
+   "kind": "paragraph",
+   "text": "The partnership return discloses partner capital accounts and partner’s share of partnership debt on Schedule K-1. However, Schedule K-1 does not disclose each partner’s share of allocable loss which may be deducted at the individual level or track partner tax/at-risk basis. Differences between a partner’s capital account and tax basis in their partnership interest may exist which also affect allocations to the partners as presented on Schedule K-1. The IRS may examine any or all of these tax attributes to determine whether a partner is allocated the proper amount of partnership items, entitled to reduce taxable income by some or all of the tax losses allocated from the partnership, or avoid tax on certain distributions of cash from the partnership."
+  },
+  {
+   "kind": "paragraph",
+   "text": "Properly understanding and calculating these attributes is necessary for preparation of both partnership and partner tax returns. We will rely upon the historical balances disclosed on last year’s Schedule K-1, as well as the most recent executed partnership/operating agreement you provide to us."
+  },
+  {
+   "kind": "paragraph",
+   "text": "You are responsible for providing any necessary documentation to support transactions between the partnership and its partners, including sale/redemption of partnership interests and loans between the partnership and its partners. You are also responsible for providing any necessary documentation to support transactions between partners involving partnership interests, as these may impact your partnership return. Additional analysis, such as recreating historical balances or analyzing proposed partner transactions is not within the scope of this Agreement."
+  },
+  {
+   "kind": "heading",
+   "text": "Allocation of partnership income and expenses"
+  },
+  {
+   "kind": "paragraph",
+   "text": "You are responsible for reviewing partner Schedules K-1 and K-3 prior to filing, including verifying recipient identifying information, and agreeing to the accuracy of both the allocation of partnership income in accordance with the terms of the partnership agreement for capital account purposes, and the allocation of partnership taxable income, deduction, credit, and other allocable items presented on partner Schedules K-1 and K-3 for tax purposes."
+  },
+  {
+   "kind": "heading",
+   "text": "Partner salaries"
+  },
+  {
+   "kind": "paragraph",
+   "text": "The payment of wages or compensation by a partnership or LLC to individuals who are limited partners or LLC members raises reporting issues if those limited partners or LLC members receive a Schedule K-1 instead of a Form W-2 or Form 1099. You are responsible for providing us detail of the total compensation paid to any partner or LLC member expected to receive a Schedule K-1, including fringe benefits, retirement benefits, or other in-kind value paid or provided."
+  },
+  {
+   "kind": "heading",
+   "text": "Schedule K-1 distribution"
+  },
+  {
+   "kind": "paragraph",
+   "text": "You are responsible for distributing a copy of the Schedule K-1s and K-3s, including any attachments, to each partner or member."
+  },
+  {
+   "kind": "heading",
+   "text": "Administrative Adjustments and Compliance with BBA"
+  },
+  {
+   "kind": "paragraph",
+   "text": "If you are or were a partner at any time in a partnership and receive(d) Schedule K-1 (1065), you may receive a Form 8986, Partner’s Share of Adjustments to Partnership-Related Items. Form 8986 is used by partnerships to report changes due to an administrative adjustment request on previously filed partnership returns and to provide the IRS and partners with each partner’s share of those tax corrections."
+  },
+  {
+   "kind": "paragraph",
+   "text": "Pass-through recipients of Form 8986 must, within a specified timeframe, either: (1) report changes to the IRS and pass the allocable share through to affected K-1 recipients on the required forms; or (2) compute and pay any tax due because of the changes at the entity level."
+  },
+  {
+   "kind": "paragraph",
+   "text": "Our services do not include assisting you with anything pertaining to Form 8986 unless specifically identified in the Engagement Objective and Scope section. If you receive a Form 8986 prior to the filing of your tax return, you are responsible for alerting us and requesting assistance. Additionally, the impact an adjustment from Form 8986 may have on any state return you have previously filed may only be determined with additional research. If you do not alert us or request our assistance, we will infer that you have not received Form 8986 absent other information you provide to us."
+  },
+  {
+   "kind": "heading",
+   "text": "Documentation"
+  },
+  {
+   "kind": "paragraph",
+   "text": "You are responsible for maintaining adequate documentation to substantiate the accuracy and completeness of your tax returns. Our workpapers do not satisfy your documentation responsibility. You should retain all documents that provide evidence and support for reported income, credits, deductions, and other information on your returns, as required under applicable tax laws and regulations. The IRS recommends that you maintain this documentation for as long as it may be relevant to your taxes."
+  },
+  {
+   "kind": "paragraph",
+   "text": "You represent that you have such documentation and can produce it, if necessary, to respond to any examination or inquiry by tax authorities."
+  },
+  {
+   "kind": "paragraph",
+   "text": "We shall not be liable for any tax, penalties, interest, related professional fees, or other expenses you may incur as a result of inadequate documentation."
+  },
+  {
+   "kind": "heading",
+   "text": "Personal expenses"
+  },
+  {
+   "kind": "paragraph",
+   "text": "In general, personal expenses are not deductible for income tax purposes. You are responsible for ensuring that personal expenses, if any, are separated from business expenses and that expenses such as meals, travel, vehicle use, gifts, and related expenses are supported by documentation and records required by the IRS and other tax authorities."
+  },
+  {
+   "kind": "heading",
+   "text": "State and local filing obligations"
+  },
+  {
+   "kind": "paragraph",
+   "text": "The preparation of any state or local tax return not listed in Engagement Objective and Scope above is not within the scope of this Agreement. You are responsible for fulfilling your filing obligations with any state or local tax authorities, including but not limited to, income, franchise, sales, use, and property taxes or abandoned and unclaimed property. However, we will notify you if we believe that you may have additional filing obligations upon review of the information you have provided to us, including information that comes to our attention."
+  },
+  {
+   "kind": "paragraph",
+   "text": "If you are unsure if you have any other filing obligation with other state or local tax authorities, you are responsible for alerting us and requesting assistance. If you do not alert us or request assistance, we will infer that you do not have other state or local filing obligations. We shall not be liable for any tax, penalties, interest, related professional fees, or other expenses you may incur as a result of your failure to file or untimely filing of any form for which we were not engaged to prepare."
+  },
+  {
+   "kind": "paragraph",
+   "text": "U.S. filing obligations related to foreign investments and activities"
+  },
+  {
+   "kind": "paragraph",
+   "text": "U.S. persons generally must report income and activities related to both domestic and foreign assets (worldwide income)."
+  },
+  {
+   "kind": "paragraph",
+   "text": "The partnership is responsible for fulfilling its filing obligations related to foreign activity where required. The partnership also is required to provide to its partners their share of items with international tax relevance (Schedule K-3) so that those partners may fulfill their filing obligations related to foreign activity where required."
+  },
+  {
+   "kind": "paragraph",
+   "text": "U.S. reporting requirements related to foreign activity are very complex. **Contact us immediately** if you have:"
+  },
+  {
+   "kind": "list",
+   "items": [
+    "Ownership of, investment in, or officer responsibilities for a corporation, partnership, or other business entity formed under the laws of another country;",
+    "Fiduciary, grantor, or beneficiary relationships in connection with an entity formed under the laws of another country;",
+    "Ownership of, signature authority over, or control over any financial account held in a financial institution located in another country;",
+    "Citizenship or government-approved employment/visa status with a country other than the U.S. (including anyone in your immediate household, or your parents who live outside the U.S.);",
+    "Transferred property, including cash, offshore either directly or through the purchase of or investment in an entity formed under the laws of another country;",
+    "Received or have legally-recognizable rights to receive property, including cash, from a trust, business, or investment formed under the laws of another country or individual residing in another country;",
+    "Conducted business with any entity or person physically located in another country, regardless of whether such business is for-profit, not for-profit, or informal/irregular;",
+    "Received property, including cash, or income from a source outside of the U.S. which is not reported on a brokerage statement (such as a 1099-B or similar report); or",
+    "Any other activity or economic arrangement which takes place outside of the U.S."
+   ]
+  },
+  {
+   "kind": "paragraph",
+   "text": "Failure to timely file the required forms may result in substantial civil and/or criminal penalties. You agree to provide us with complete and accurate information regarding any foreign activity in which you have a direct or indirect interest, or over which you have signature authority, during the above referenced tax year."
+  },
+  {
+   "kind": "paragraph",
+   "text": "If you are unsure if you have any other filing obligation related to foreign activity, you are responsible for alerting us and requesting assistance. If you do not alert us or request assistance, we will infer that you do not have foreign activity absent information you provide to us. We shall not be liable for any tax, penalties, interest, related professional fees, or other expenses you may incur as a result of the failure to file or untimely filing of any form for which we were not engaged to prepare."
+  },
+  {
+   "kind": "heading",
+   "text": "Foreign filing obligations"
+  },
+  {
+   "kind": "paragraph",
+   "text": "You are responsible for complying with the tax filing requirements of any non-U.S. country. You acknowledge and agree that we have no responsibility to raise these issues with you and that any foreign filing obligation is not within the scope of this Agreement."
+  },
+  {
+   "kind": "heading",
+   "text": "Digital assets"
+  },
+  {
+   "kind": "paragraph",
+   "text": "There are specific tax implications of investing in digital assets (e.g., virtual currencies, non-fungible tokens, virtual real estate and similar assets). The IRS considers these to be property for U.S. federal income tax purposes. As such, any transactions in, or transactions that use, digital assets are subject to the same general tax principles that apply to other property transactions."
+  },
+  {
+   "kind": "paragraph",
+   "text": "If you transacted in digital assets during the tax year, you may have tax consequences and/or additional reporting obligations associated with such transactions. Depending on the nature or volume of those transactions, a change to the scope of our services may be required. You are responsible for providing us with complete and accurate information, including basis, regarding any transactions in, or transactions that have used, digital assets during the applicable tax year."
+  },
+  {
+   "kind": "heading",
+   "text": "Compensation and withholding compliance"
+  },
+  {
+   "kind": "paragraph",
+   "text": "If you or your business compensates individuals for services performed, there are various federal, state, and/or local payroll and income tax obligations affecting both payor and payee. We will not provide employment, labor, or immigration law advice to you as part of our engagement, including the classification of workers as employees or independent contractors. You should seek the advice of an appropriate professional, such as an employment attorney, to address any classification or employment eligibility questions. You agree to indemnify and hold us harmless for any and all claims related to misclassification or improper eligibility of individuals whom you compensate for services, excepting claims arising from our gross negligence or intentional wrongful acts as finally determined by a trier of fact."
+  },
+  {
+   "kind": "paragraph",
+   "text": "Further, you acknowledge it is your responsibility to both timely comply with all payroll and income tax filing and remittance obligations that apply to you, and to maintain all necessary documentation to support those filings and remittances. Such forms are due as early as January 31, {Next year}, and significant penalties may be assessed for late filing, non-filing, or filing of incorrect information. In some cases, penalties may also be assessed against responsible individuals, such as owners and officers, in their personal capacity."
+  },
+  {
+   "kind": "paragraph",
+   "text": "Preparation of these forms and calculation of any withholding amount due is not within the scope of this Agreement."
+  },
+  {
+   "kind": "heading",
+   "text": "Ultimate responsibility"
+  },
+  {
+   "kind": "paragraph",
+   "text": "You are ultimately responsible for complying with any substantive or procedural tax law which applies to you, and for ensuring your tax returns and any required tax payments are timely received by the appropriate tax authority. Notwithstanding any term of this Agreement, this responsibility cannot be delegated to us."
+  },
+  {
+   "kind": "paragraph",
+   "text": "Our assistance related to your tax return is based upon tax reference materials, facts, assumptions, and representations that are subject to change. To the extent we provide written advice concerning federal tax matters, we will follow the applicable guidance contained in our professional standards."
+  },
+  {
+   "kind": "paragraph",
+   "text": "You have final responsibility for the accuracy of your tax returns, which includes Schedules K-1 and K-3. We will provide you with a copy of your draft tax returns and accompanying schedules and statements for review. You agree to review and examine them carefully for accuracy and completeness. Tax authorities impose various penalties and interest charges for non-compliance with tax laws and regulations, including failure to file or late filing of returns, and underpayment of taxes."
+  },
+  {
+   "kind": "paragraph",
+   "text": "You have final responsibility for the payment of your taxes in whatever amount ultimately determined. You may choose or be required to have funds automatically withdrawn from a designated account and transmitted when your tax return is electronically filed. We will not transmit partial payments. Likewise, you may be required or choose to have any overpayment electronically deposited into a designated account. It is your responsibility to provide us with correct account and routing numbers, to review this information for accuracy prior to submission of your return, and, as applicable, to ensure that sufficient funds are available at the time of payment. We shall not be liable for any tax, penalties, interest, related professional fees, or other expenses you may incur as a result of your failure to provide an accurate routing or account number or to ensure sufficient funds are available at the time of payment."
+  },
+  {
+   "kind": "heading",
+   "text": "Timing of the Engagement"
+  },
+  {
+   "kind": "paragraph",
+   "text": "We expect to begin our services upon receipt of this executed Agreement and signed IRC §7216 consent and retainer, your [Month & Date, 20XX] trial balance, and other supporting data."
+  },
+  {
+   "kind": "paragraph",
+   "text": "Our services under this Agreement will conclude:"
+  },
+  {
+   "kind": "list",
+   "items": [
+    "on the later of:",
+    "the latest date of electronic acceptance of your {Tax year} tax returns by the relevant tax authority;",
+    "the date we deliver the paper copy of your returns to you; or",
+    "December 31, {Next year} if, and only if, the actual method is used to calculate estimated tax vouchers for tax year ended December 31, {Next year} as noted in the Engagement Objective and Scope section of this Agreement,",
+    "upon written notification by either party that the Agreement is terminated, or",
+    "one (1) year from the execution date of this Agreement, whichever comes first."
+   ]
+  },
+  {
+   "kind": "heading",
+   "text": "Filing Your Tax Returns"
+  },
+  {
+   "kind": "paragraph",
+   "text": "The original filing due dates for your tax returns are [Month & Date, 20XX] for federal and [Month & Date, 20XX] for [State]. [If a large number of returns are included, consider listing the due dates in an appendix]. The obligation to file a tax return and/or extension is solely that of the taxpayer. Although we will make every reasonably prudent effort to assist you with this obligation, this Agreement is not intended to and does not create an agent/principal relationship. By signing this Agreement, you understand that actual and timely receipt of your filings by the appropriate tax authority is the duty and responsibility of the taxpayer and the taxpayer alone."
+  },
+  {
+   "kind": "heading",
+   "text": "Tax Return Extensions"
+  },
+  {
+   "kind": "paragraph",
+   "text": "It may become necessary to apply for an extension of the filing due dates if there are unresolved issues or delays in processing or if we do not receive all of the necessary information from you on a timely basis. Applying for an extension of time to file may limit your ability to make certain elections, extend the time available for a government agency to undertake an examination of your return and/or extend the statute of limitations to file a legal action. Additionally, extensions may affect your liability for penalties and interest or compliance with governmental or other deadlines."
+  },
+  {
+   "kind": "paragraph",
+   "text": "Although we may assist you in the preparation of an extension to file your return(s), you have sole responsibility for the filing of any extension. You are responsible for confirming the amount you wish to pay and you agree to hold our firm harmless from any consequences, including underpayment penalties, interest, and waived elections, where the extension is not timely filed or the amount paid is insufficient. All taxes owed are due by the original filing due date."
+  },
+  {
+   "kind": "paragraph",
+   "text": "**If** **you wish to engage our firm to apply for extensions of time to file tax returns on your behalf,** **we will not file these applications unless and until we receive both** **an** **executed** **copy of this** **Agreement** **and** **your express written authorization to** **file for** **an** **extension. In some cases, your signature may be** **required** **on such applications prior to filing. Failure to timely** **request** **an extension of time to file can result in penalties for failure to file tax returns, which accrue from the original due dates** **of the returns and can be substantial.** **We shall not be liable for any tax, penalties, interest, related professional fees, or other expenses you may incur as a result of your failure to** **apply for** **an extension** **for which we were not engaged to prepare**."
+  },
+  {
+   "kind": "heading",
+   "text": "E-filing"
+  },
+  {
+   "kind": "paragraph",
+   "text": "In addition to being a return preparer, we are an Electronic Return Originator (ERO) and will prepare your return(s) and/or extension(s) in a format that permits us to electronically transmit (“e-file”) those forms to the appropriate tax authority on your behalf. The e-filing of any form is a separate service from the preparation of that form."
+  },
+  {
+   "kind": "paragraph",
+   "text": "If the return(s) is/(are) e-filed, including requests for extensions of time to file, the IRS and states require you to sign and return to us the appropriate governmental form(s) before your return(s) can be filed electronically. **If you fail to timely sign and return e-file authorizations, we cannot and will not e-file** **any** **form on your behalf.** In those situations, we shall not be liable for any tax, penalties, interest, related professional fees, or other expenses you may incur."
+  },
+  {
+   "kind": "paragraph",
+   "text": "If the return(s) or extension(s) is/(are) not required to be e-filed and you elect not to do so, or cannot be e-filed, we will deliver to you a paper copy suitable for mailing to the taxing authorities. Once delivered to you, you bear full responsibility for reviewing the paper returns for accuracy, and either signing and timely filing them, along with any payments due, or notifying us of any issue which may need to be addressed prior to filing. To be considered timely filed, tax returns must be postmarked by the due date of the tax return. The United States Postal Service typically applies postmarks when the mail reaches a regional processing facility, which may be several days after the mail piece is deposited at a local post office or placed in a collection box."
+  },
+  {
+   "kind": "heading",
+   "text": "Professional Fee"
+  },
+  {
+   "kind": "paragraph",
+   "text": "Our professional fee for the services outlined above is estimated to be {Fee}, of which [X]% is due upon execution of this Agreement as a retainer. This fee is based upon the complexity of the expected work to be performed, regulatory or government deadline sensitivity, our professional time and out-of-pocket expenses, and overall value of the services provided."
+  },
+  {
+   "kind": "paragraph",
+   "text": "Circumstances may arise that impact our estimated fee such as, but not limited to, (1) the timeliness, accuracy, or completeness of information you provide to us; (2) changes in your personnel, use of other advisors, or operations that impact our services; (3) mutually agreed changes in the scope of this engagement; or (4) other unanticipated items that arise during our engagement and that require additional time in order to complete the agreed-upon services."
+  },
+  {
+   "kind": "paragraph",
+   "text": "You agree to pay all fees and expenses incurred whether or not we complete the engagement."
+  },
+  {
+   "kind": "paragraph",
+   "text": "We appreciate the opportunity to be of service to you. This Agreement, including the Terms and Conditions Addendum, represents the entire agreement of the parties relating to the services that are the subject of this Agreement. This Agreement supersedes all previous agreements, negotiations, representations, or other understandings, whether oral or written, between the parties."
+  },
+  {
+   "kind": "paragraph",
+   "text": "Any modification to the terms of this Agreement must be made in writing and signed by both parties. Please date and execute this Agreement and return it to us to acknowledge your acceptance. We will not initiate services until we receive the executed Agreement and retainer."
+  },
+  {
+   "kind": "paragraph",
+   "text": "{Terms and Conditions}"
+  },
+  {
+   "kind": "paragraph",
+   "text": "Very truly yours,"
+  },
+  {
+   "kind": "paragraph",
+   "text": "{Firm name}"
+  },
+  {
+   "kind": "paragraph",
+   "text": "/s/ {Partner name}"
+  },
+  {
+   "kind": "paragraph",
+   "text": "{Partner title}"
+  },
+  {
+   "kind": "paragraph",
+   "text": "ACCEPTED:"
+  },
+  {
+   "kind": "signature",
+   "role": "officer"
+  }
+ ]
+}

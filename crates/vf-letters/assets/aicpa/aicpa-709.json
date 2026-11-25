@@ -1,0 +1,533 @@
+{
+ "id": "aicpa-709",
+ "version": 0,
+ "name": "Engagement letter: gift tax return (Form 709)",
+ "return_types": [
+  "709"
+ ],
+ "kind": "letter",
+ "doc_type": "Engagement letter",
+ "letterhead": true,
+ "default_ticked": true,
+ "sample": true,
+ "blocks": [
+  {
+   "kind": "paragraph",
+   "text": "{Date}"
+  },
+  {
+   "kind": "paragraph",
+   "text": "{Client name}"
+  },
+  {
+   "kind": "paragraph",
+   "text": "Dear {Signer first names}:"
+  },
+  {
+   "kind": "paragraph",
+   "text": "{Firm name} (“firm,” “we,” “us,” or “our”) is pleased to provide {Client name} (“you” or “your”) with the professional services described below. Please read this letter, the attached Terms and Conditions Addendum and any other attachments incorporated herein (collectively, “Agreement”). This Agreement details the nature and limitations of the services we will provide, the terms of our engagement and each party’s responsibilities."
+  },
+  {
+   "kind": "heading",
+   "text": "Engagement Objective and Scope"
+  },
+  {
+   "kind": "paragraph",
+   "text": "Our services are limited to the following federal and state gift tax returns for the year ended [Date]:"
+  },
+  {
+   "kind": "paragraph",
+   "text": "Form 709: United States Gift (and Generation-Skipping Transfer) Tax Return"
+  },
+  {
+   "kind": "paragraph",
+   "text": "Form [Number]: (Name of State) Gift Tax Return"
+  },
+  {
+   "kind": "paragraph",
+   "text": "In addition, we will initiate [Frequency] estimated tax payments on your behalf for the following taxing jurisdictions:"
+  },
+  {
+   "kind": "list",
+   "items": [
+    "Internal Revenue Service",
+    "[State] taxing authority",
+    "[Local] taxing authority"
+   ]
+  },
+  {
+   "kind": "paragraph",
+   "text": "The objective of our services is to assist you with the calculation of your tax due and provide you with forms and schedules we believe are suitable for you to file with the Internal Revenue Service (“IRS”) and applicable state and local tax authorities and sufficient to comply with your tax filing obligations. The scope also includes tax advice provided to you, as donor, regarding elections that can be made on gift tax returns. You have the final responsibility for the filing and content of your return(s). To the extent a return can be e-filed, we will provide assistance with the e-filing of such return as further discussed in this Agreement. We will not assist you with any tax returns other than those identified above, without your written request, and our written agreement to do so."
+  },
+  {
+   "kind": "paragraph",
+   "text": "The IRS considers a gift to be any transfer to an individual, either directly or indirectly, where full consideration (measured in money or money’s worth) is not received in return. Under federal tax law, certain gifts are taxable and subject to an annual exclusion amount. For {Tax year}, this amount is $[X] per taxpayer. In addition, a lifetime gift exclusion amount applies which for {Tax year} is $[X]. State law governing gift taxes may vary."
+  },
+  {
+   "kind": "paragraph",
+   "text": "Our engagement does not include any procedures designed to detect errors, fraud, theft, or other wrongdoing. Therefore, our engagement cannot be relied upon to disclose such matters. If we identify or suspect that an instance of noncompliance with laws and regulations has occurred or is likely to occur, we will discuss the matter with the appropriate level of management and, when appropriate, those charged with governance. In addition, we are not responsible for identifying or communicating deficiencies in your internal controls, unless otherwise specified in the scope of this Agreement. You are responsible for developing and implementing internal controls applicable to your operations."
+  },
+  {
+   "kind": "paragraph",
+   "text": "Requests for additional services may necessitate that we amend the Agreement or issue a separate written agreement to reflect the obligations of all parties. In the absence of any other written communications from us documenting additional services, our services will be limited to and governed by the terms of this Agreement."
+  },
+  {
+   "kind": "heading",
+   "text": "CPA Firm Responsibilities"
+  },
+  {
+   "kind": "paragraph",
+   "text": "It is our duty to prepare your returns based on the same standard of care that a reasonable tax return preparer would exercise in this type of engagement. Unless otherwise noted, the applicable standard of care for a “reasonable tax return preparer” shall be based upon the following pronouncements:"
+  },
+  {
+   "kind": "list",
+   "items": [
+    "the Statements on Standards for Tax Services (“SSTS”) issued by the American Institute of Certified Public Accountants (“AICPA”);",
+    "U.S. Treasury Department Circular 230 (“Circular 230”), and",
+    "the Internal Revenue Code, Treasury Regulations, and any applicable state/local corollaries (collectively, “the Code”)."
+   ]
+  },
+  {
+   "kind": "paragraph",
+   "text": "As tax return preparers, these pronouncements restrict our ability to sign a tax return when the tax positions you report do not comply with tax law. We will be unable to sign your return and may terminate this Agreement if you:"
+  },
+  {
+   "kind": "list",
+   "items": [
+    "request that we report a tax position on your return which we feel is contrary to published guidance, frivolous, or a willful attempt to evade tax, or provide to us a copy of a previously-filed gift tax return prepared by another preparer to be included in your gift tax return which takes a similarly questionable position;",
+    "request that we include a deduction, credit or refund on your return that we believe you do not qualify for; or",
+    "decline to disclose a position where in our professional judgment tax law requires disclosure."
+   ]
+  },
+  {
+   "kind": "paragraph",
+   "text": "We will prepare the gift tax returns based upon the information and representations that you provide to us. We may ask your attorneys or advisors about issues related to the gift tax returns. By signing this Agreement, you agree to authorize us to discuss the returns with your attorneys or advisors in order to assist you. You should discuss the returns with your attorneys or advisors before filing the returns with the IRS, state and local tax authorities, as applicable."
+  },
+  {
+   "kind": "paragraph",
+   "text": "Once our services have concluded, we shall have no obligation to notify you of future tax law developments affecting your return(s) except as may be required by Circular 230 or the SSTS related to errors we identify. We will not update your return after the conclusion of the engagement for any reason unless further engaged."
+  },
+  {
+   "kind": "paragraph",
+   "text": "{Firm name} will not make any management decisions or perform management functions on your behalf."
+  },
+  {
+   "kind": "heading",
+   "text": "Arguable positions"
+  },
+  {
+   "kind": "paragraph",
+   "text": "If there are conflicting interpretations of tax law, or if tax law is unclear, we will explain the possible positions that may be taken in order for us to sign your return. We will follow the position you request, provided it is consistent with our understanding of tax reference materials and our professional standards. Tax reference materials include, but are not limited to, the Code, Revenue Rulings, Revenue Procedures, court cases, and similar state and local guidance. If the IRS, state or local tax authorities later contest the position you select, additional tax, penalties, and interest may be assessed."
+  },
+  {
+   "kind": "paragraph",
+   "text": "We shall not be liable for any tax, penalties, interest, related professional fees, or other expenses you may incur to respond to the tax authority."
+  },
+  {
+   "kind": "heading",
+   "text": "Prior year review"
+  },
+  {
+   "kind": "paragraph",
+   "text": "Although your gift tax return requires that you include copies of any previously-filed gift tax return(s), our review of those returns will necessarily be limited and may not find errors. We will, however, bring to your attention errors that we do find. Similarly, if you become aware of any information affecting prior year tax returns, please contact us. If an error or information affecting prior year tax returns is discovered by you or us, we will discuss your options with you. If you ask us to prepare amended tax returns, and we agree, we will confirm this engagement in a separate written agreement."
+  },
+  {
+   "kind": "heading",
+   "text": "Tax planning services"
+  },
+  {
+   "kind": "paragraph",
+   "text": "Our engagement does not include tax advice which affects the calculation of tax due or the filing of tax forms and schedules for previous or future tax years. However, we may communicate potential tax planning opportunities to you, and you may ask high-level questions of us. It is your responsibility to communicate to us, in writing, any interest in pursuing a tax planning opportunity identified, or if you require more than a cursory response to your question. If you do not request our assistance in writing, we will infer that you do not wish to pursue any suggestion made to you. If you do request our assistance and we agree, we will confirm our understanding with you in a separate written agreement prior to proceeding."
+  },
+  {
+   "kind": "paragraph",
+   "text": "We shall not be liable for any tax, penalties, interest, related professional fees, or other expenses you may incur if you fail to advise us of your desire to investigate or pursue any tax planning opportunity communicated to or by us. Any tax advice described in this paragraph and provided to you shall be governed by this Agreement and billed at our standard hourly rates."
+  },
+  {
+   "kind": "heading",
+   "text": "Government inquiries"
+  },
+  {
+   "kind": "paragraph",
+   "text": "This engagement does not include responding to inquiries by any governmental agency or tax authority. If you are contacted by a tax authority, either for an examination or other inquiry, you may request our assistance in responding."
+  },
+  {
+   "kind": "heading",
+   "text": "Third party requests"
+  },
+  {
+   "kind": "paragraph",
+   "text": "Our services are not intended to benefit or influence any third party, including any entity or investment which may seek to evaluate your creditworthiness or financial strength. We will not respond to any request from banks, mortgage brokers or others for verification of any information reported on these tax returns. Except where compelled by court order or subpoena, we do not communicate with third parties or provide them with copies of tax returns."
+  },
+  {
+   "kind": "heading",
+   "text": "Reliance on others"
+  },
+  {
+   "kind": "paragraph",
+   "text": "If you wish to take a tax position based upon the advice of another advisor, before we are able to sign your tax return, we must comply with the applicable provisions of the Code and the SSTS."
+  },
+  {
+   "kind": "paragraph",
+   "text": "We will review the other advisor’s work and may require a written statement from the advisor describing the statutory basis for the position and the suggested disclosure needed to appropriately report the position. If we believe additional research is required, we will discuss the matter with you and obtain your written consent to perform such research. You agree to pay for the additional charges necessary to complete the disclosure or research as this is not included in the scope of this Agreement."
+  },
+  {
+   "kind": "paragraph",
+   "text": "Moreover, you understand that the IRS, state or local tax authority may disagree with the position taken on the return. If this occurs, we shall not be liable for any tax, penalties, interest, related professional fees, or other expenses you may incur."
+  },
+  {
+   "kind": "paragraph",
+   "text": "If, after review of the work prepared by your other advisor, we determine that we are unable to sign the tax return, we will be unable to proceed."
+  },
+  {
+   "kind": "heading",
+   "text": "Abusive tax strategies"
+  },
+  {
+   "kind": "paragraph",
+   "text": "Certain tax positions or strategies, while not currently identified as “abusive” by the IRS, may ultimately be determined to be so in the future. Consequently, you agree to advise us of any transaction you have entered into that entitles you to disproportionate tax benefits (deductions, credits, or refunds), that generates significant income deferral or non-recognition, or that generates significant tax losses without corresponding cash impacts (collectively “abusive tax strategy”). It is your responsibility to timely notify us, in writing, of any abusive tax strategy you have entered into. We shall not be liable for any tax, penalties, interest, related professional fees, or other expenses you may incur if the anticipated benefits of the strategy are not realized."
+  },
+  {
+   "kind": "heading",
+   "text": "Reportable transactions"
+  },
+  {
+   "kind": "paragraph",
+   "text": "The law imposes substantial penalties on taxpayers and tax advisors for failure to disclose listed and other reportable transactions on Form 8886, Reportable Transaction Disclosure Statement and, in some cases, extends the statute of limitations tax authorities have to contest any tax return claiming those tax positions. In general, reportable transactions are potentially abusive transactions identified by the IRS that have a primary purpose of tax avoidance, including but not limited to listed transactions, confidential transactions, transactions with contractual protection, loss transactions, and transactions of interest (a definition of “reportable transactions” is located at https://www.irs.gov/instructions/i8886 and includes a link to a summary of listed transactions)."
+  },
+  {
+   "kind": "paragraph",
+   "text": "If we conclude that your return contains a reportable transaction that we believe you are required to disclose, we will ask that you consent to include a disclosure, either on Form 8886 or other method approved by the IRS. If you decline to disclose the reportable transaction, we will be unable to proceed."
+  },
+  {
+   "kind": "heading",
+   "text": "Client Responsibilities"
+  },
+  {
+   "kind": "paragraph",
+   "text": "If you fail to comply with the responsibilities as described in this Agreement, your actions or your inactions may result in economic or other loss to you, such as disallowance of tax deductions or credits claimed, additional tax, penalties or interest assessed against you, loss of administrative rights, or criminal punishment. You will be responsible for any loss suffered by you, including any professional fees required to defend or correct changes made to your tax returns, prepare previously unfiled tax returns, or amend previously filed tax returns. The responsibilities detailed in this section are not exhaustive, and our services to you may require additional responsibilities not listed."
+  },
+  {
+   "kind": "heading",
+   "text": "Tax information"
+  },
+  {
+   "kind": "paragraph",
+   "text": "**Due to the high volume of tax returns prepared by our firm, you** **must** **provide your tax return information to us no later than [Date]. Failure to do so may result in your inability to file your returns or pay your tax due by the original filing due dates.**"
+  },
+  {
+   "kind": "paragraph",
+   "text": "You agree to provide us with full and accurate information and documentation we may request to prepare your tax return. This information and documentation is necessary to prepare the gift tax returns."
+  },
+  {
+   "kind": "paragraph",
+   "text": "In addition, you must complete the attached tax organizer, which we utilize to compile information needed to prepare the returns."
+  },
+  {
+   "kind": "paragraph",
+   "text": "We will rely upon the completeness and accuracy of the information and representations you provide to us. Our responsibility is limited to the information of which we have knowledge. We will not audit or otherwise verify the data you submit to us, although we may ask you to clarify certain information."
+  },
+  {
+   "kind": "heading",
+   "text": "Electronic payments"
+  },
+  {
+   "kind": "paragraph",
+   "text": "The Modernizing Payments To and From America’s Bank Account Executive Order, signed on March 25, 2025, mandated that all payments from the U.S. government after September 30, 2025, must be made electronically. All payments to the U.S. government, including quarterly estimated tax payments, should be made electronically as soon as practicable."
+  },
+  {
+   "kind": "paragraph",
+   "text": "Assisting you with electronic payments is not part of the scope of our services. You are responsible for transmitting any electronic payments."
+  },
+  {
+   "kind": "paragraph",
+   "text": "You have requested that we initiate [Frequency] estimated tax payments on your behalf for the taxing jurisdictions identified in the Engagement Objective and Scope section of this Agreement. Before a payment or payments is/are initiated, we require that you:"
+  },
+  {
+   "kind": "list",
+   "items": [
+    "Confirm the accuracy of the bank routing and account numbers from which the payment will be drafted;",
+    "Approve the payment amount(s) and date(s); and",
+    "Ensure the availability of funds when the payment is drafted."
+   ]
+  },
+  {
+   "kind": "paragraph",
+   "text": "We shall not be liable for any tax, penalties, interest, related professional fees, or other expenses you may incur if you fail to provide accurate bank information, timely approve payment amounts and dates, or ensure the sufficiency of funds at the time of payment."
+  },
+  {
+   "kind": "heading",
+   "text": "Communication of authority of others"
+  },
+  {
+   "kind": "paragraph",
+   "text": "You hereby authorize the following individuals from {Client name} to communicate directly with us on your behalf, and to request services and exchange information necessary to provide the services described in this Agreement:"
+  },
+  {
+   "kind": "heading",
+   "text": "Name     Title    Contact Information"
+  },
+  {
+   "kind": "paragraph",
+   "text": "You agree that this limited authority conveyed above shall continue in full force and effect until either this Agreement is concluded, or you inform us of any modifications in writing, whichever occurs first."
+  },
+  {
+   "kind": "heading",
+   "text": "Online access to information"
+  },
+  {
+   "kind": "paragraph",
+   "text": "To the extent you provide our firm with access to electronic data via a local or online database from which we will download your trial balance or other information, you agree that the data is accurate as of the date and time you make it available to be downloaded by us."
+  },
+  {
+   "kind": "heading",
+   "text": "Crummey notices"
+  },
+  {
+   "kind": "paragraph",
+   "text": "A Crummey trust is created for the purpose of making a gift to a “skip person” without tax implications. A “skip person” is generally someone two or more generations younger than the transferor, whereby the gift skips the first generation and is made directly to a subsequent generation (i.e., grandparents “skipping” their children and gifting directly to the grandchildren)."
+  },
+  {
+   "kind": "paragraph",
+   "text": "The beneficiary recipient must be notified of the temporary right to withdraw from the trust all or a portion of the gift (a Crummey notice) at the time the gift is made. The notification letter is sent by the trustee to the beneficiary of the trust. You acknowledge that you are responsible for ensuring that the trustee sends the Crummey notices and retains such notices."
+  },
+  {
+   "kind": "heading",
+   "text": "Elections"
+  },
+  {
+   "kind": "paragraph",
+   "text": "Gift tax returns include elections that may affect the taxes you may owe now or in the future."
+  },
+  {
+   "kind": "paragraph",
+   "text": "We will explain tax return elections that you may make and provide recommendations based upon the information you provide. However, you remain responsible for consulting with any necessary attorney, as needed, regarding the advisability of making such elections. After all discussions are completed, the decision of whether or not to make an election is yours."
+  },
+  {
+   "kind": "paragraph",
+   "text": "You agree to instruct us in writing regarding the tax return elections to be made or declined by you. You agree that any elections reflected on the completed return are made at your instruction following consultation with your attorney."
+  },
+  {
+   "kind": "heading",
+   "text": "Documentation"
+  },
+  {
+   "kind": "paragraph",
+   "text": "You are responsible for maintaining adequate documentation to substantiate the accuracy and completeness of your tax returns. Our workpapers do not satisfy your documentation responsibility. You should retain all documents that provide evidence and support for gifts, deductions, and other information on your returns, as required under applicable tax laws and regulations. The IRS recommends that you maintain this documentation for as long as it may be relevant to your taxes."
+  },
+  {
+   "kind": "paragraph",
+   "text": "You represent that you have such documentation and can produce it, if necessary, to respond to any examination or inquiry by tax authorities."
+  },
+  {
+   "kind": "paragraph",
+   "text": "We shall not be liable for any tax, penalties, interest, related professional fees, or other expenses you may incur as a result of inadequate documentation."
+  },
+  {
+   "kind": "heading",
+   "text": "Gifts received from foreign persons"
+  },
+  {
+   "kind": "paragraph",
+   "text": "The preparation of IRS Form 3520 or Form 3520-A is not within the scope of this engagement. If you transferred property to or received property from a foreign person or trust, or are a U.S. person who “owns” assets in a foreign trust, you may be required to file a separate IRS Form 3520, Annual Return To Report Transactions With Foreign Trusts and Receipt of Certain Foreign Gifts or Form 3520-A, Annual Information Return of Foreign Trust with a U.S. Owner. Please note that the definition of foreign trust for these purposes is broad and may include certain foreign accounts that you may not otherwise consider to be foreign trusts."
+  },
+  {
+   "kind": "paragraph",
+   "text": "If you have a filing obligation or are unsure if you have any such filing obligation, you are responsible for alerting us and requesting assistance. If you do not alert us or request assistance, we will infer that you do not have a filing obligation absent information you provide to us. We shall not be liable for any tax, penalties, interest, related professional fees, or other expenses you may incur as a result of the failure to file or untimely filing of any form for which we were not engaged to prepare."
+  },
+  {
+   "kind": "heading",
+   "text": "Foreign filing obligations"
+  },
+  {
+   "kind": "paragraph",
+   "text": "You are responsible for complying with the gift reporting and tax filing requirements of any non-U.S. country. You acknowledge and agree that we have no responsibility to raise these issues with you and that any foreign filing obligation is not within the scope of this Agreement."
+  },
+  {
+   "kind": "heading",
+   "text": "Digital assets"
+  },
+  {
+   "kind": "paragraph",
+   "text": "There are specific tax implications of investing in digital assets (e.g., virtual currencies, non-fungible tokens, virtual real estate and similar assets). The IRS considers these to be property for U.S. federal income tax purposes. As such, any transactions in, or transactions that use, digital assets are subject to the same general tax principles that apply to other property transactions."
+  },
+  {
+   "kind": "paragraph",
+   "text": "If you transacted in digital assets during the tax year, you may have tax consequences and/or additional reporting obligations associated with such transactions. Depending on the nature or volume of those transactions, a change to the scope of our services may be required. You are responsible for providing us with complete and accurate information, including basis, regarding any transactions in, or transactions that have used, digital assets during the applicable tax year."
+  },
+  {
+   "kind": "heading",
+   "text": "Appraisals and valuations"
+  },
+  {
+   "kind": "paragraph",
+   "text": "Determining the value of property to be reported on your gift tax return, other than cash or publicly traded securities, may require an appraisal or valuation. You acknowledge that you are responsible for both engaging a qualified independent third party to determine values of assets other than cash or publicly traded securities, and timely providing us with a final, formal appraisal or valuation report to be included in your gift tax return. Appraisals and valuations may take a significant amount of time. If a required appraisal or valuation is not timely received, the gift tax returns may require an extension of the filing due date."
+  },
+  {
+   "kind": "paragraph",
+   "text": "The IRS describes fair market value as the price for which property would sell on the open market. Taxing authorities closely scrutinize fair market valuations which appear to be excessively discounted or reduced. IRC §6662, Imposition of Accuracy-Related Penalty on Underpayments, imposes significant penalties (40%) on gross valuation misstatements. We shall not be liable for any tax, penalties, interest, related professional fees, or other expenses resulting from any change to an appraisal or valuation determined by taxing authorities."
+  },
+  {
+   "kind": "paragraph",
+   "text": "In preparing the tax returns, we will rely on the appraisal you provide. However, our reliance shall not be unreasonable. If you do not provide a formal appraisal where we believe IRS rules require, or if we, in our professional judgment, determine that the appraiser used is not professionally qualified to perform an appraisal which can be relied upon for filing with the gift tax return, we will be unable to proceed and may terminate this Agreement."
+  },
+  {
+   "kind": "heading",
+   "text": "Consultations"
+  },
+  {
+   "kind": "paragraph",
+   "text": "It is your responsibility to consult with your attorneys and estate planning professionals, as needed, prior to filing the returns with taxing authorities. Positions taken on gift tax returns may affect your estate taxes and the future income and estate taxes owed by the beneficiaries of your estate."
+  },
+  {
+   "kind": "heading",
+   "text": "Ultimate responsibility"
+  },
+  {
+   "kind": "paragraph",
+   "text": "You are ultimately responsible for complying with any substantive or procedural tax law which applies to you, and for ensuring your tax returns and any required tax payments are timely received by the appropriate tax authority. Notwithstanding any term of this Agreement, this responsibility cannot be delegated to us."
+  },
+  {
+   "kind": "paragraph",
+   "text": "Our assistance related to your tax return is based upon tax reference materials, facts, assumptions, and representations that are subject to change. To the extent we provide written advice concerning federal tax matters, we will follow the applicable guidance contained in our professional standards."
+  },
+  {
+   "kind": "paragraph",
+   "text": "You have final responsibility for the accuracy of your tax returns. In addition, you should retain copies of all previously filed gift tax returns until the date of your death to substantiate the usage of your lifetime exclusion. Your failure to file a gift tax return and/or adequately disclose gifts made during your lifetime may affect any gift and/or estate tax return your estate may need to file to report unreported gifts in the future."
+  },
+  {
+   "kind": "paragraph",
+   "text": "We will provide you with a draft copy of your tax returns and accompanying schedules and statements for review. You agree to review and examine them carefully for accuracy and completeness. Tax authorities impose various penalties and interest charges for non-compliance with tax laws and regulations, including failure to file or late filing of returns, and underpayment of taxes."
+  },
+  {
+   "kind": "paragraph",
+   "text": "The IRS can assess a gift tax liability within three (3) years after the due date of the return, or three (3) years after the return is actually filed, whichever is later. If a gift is determined not to have been adequately disclosed per Treasury Regulations, the three (3) year statute of limitations for assessment may be deemed not to have started. Adequate disclosure of non-liquid assets may require the attachment of a formal valuation to the gift tax return. Failure to disclose all asset transfers or inadequate disclosure of gifts, as required by Treasury Regulations, may result in the IRS challenging the reported value of the gift at any time, as well as imposition of penalties and interest."
+  },
+  {
+   "kind": "paragraph",
+   "text": "You have final responsibility for the payment of your taxes in whatever amount ultimately determined. You may be required or choose to have funds automatically withdrawn from a designated account and transmitted when your tax return is electronically filed. We will not transmit partial payments. Likewise, you may be required or choose to have any overpayment electronically deposited into a designated account. It is your responsibility to provide us with correct account and routing numbers, to review this information for accuracy prior to submission of your return, and, as applicable, to ensure that sufficient funds are available at the time of payment. We shall not be liable for any tax, penalties, interest, related professional fees, or other expenses you may incur as a result of your failure to provide an accurate routing or account number or to ensure sufficient funds are available at the time of payment."
+  },
+  {
+   "kind": "heading",
+   "text": "Timing of the Engagement"
+  },
+  {
+   "kind": "paragraph",
+   "text": "We expect to begin our services upon receipt of this executed Agreement and signed IRC §7216 consent and retainer, and substantially all information and documentation requested by our office."
+  },
+  {
+   "kind": "paragraph",
+   "text": "Our services under this Agreement will conclude:"
+  },
+  {
+   "kind": "list",
+   "items": [
+    "on the later of:",
+    "the latest date of electronic acceptance of your {Tax year} tax returns by the relevant tax authority; or",
+    "the date we deliver the paper copy of your returns to you,",
+    "upon written notification by either party that the Agreement is terminated; or",
+    "one (1) year from the execution date of this Agreement, whichever comes first."
+   ]
+  },
+  {
+   "kind": "heading",
+   "text": "Filing Your Tax Returns"
+  },
+  {
+   "kind": "paragraph",
+   "text": "The original filing due dates for your tax returns are April 15, {Tax year}, for federal and [Month & Date, 20XX] for [State]. The obligation to file a tax return and/or extension is solely that of the taxpayer. Although we will make every reasonably prudent effort to assist you with this obligation, this Agreement is not intended to and does not create an agent/principal relationship. By signing this Agreement, you understand that actual and timely receipt of your filings by the appropriate tax authority is the duty and responsibility of the taxpayer and the taxpayer alone."
+  },
+  {
+   "kind": "heading",
+   "text": "Tax Return Extensions"
+  },
+  {
+   "kind": "paragraph",
+   "text": "**A gift tax return may be extended in two ways.** If we are engaged to prepare your Form 1040, U.S. Individual Income Tax Return, and that return is extended using the appropriate form, your gift tax return is automatically extended for six (6) months. If your individual income tax return is not extended, you must file a separate Form 8892, Application for Automatic Extension of Time to File Form 709, to request an automatic extension of six (6) months to file your gift tax return."
+  },
+  {
+   "kind": "paragraph",
+   "text": "It may become necessary to apply for an extension of the filing due date if there are unresolved issues or delays in processing, or if we do not receive all of the necessary information from you on a timely basis. Applying for an extension of time to file may limit your ability to make certain elections, extend the time available for a government agency to undertake an examination of your return and/or extend the statute of limitations to file a legal action. Additionally, extensions may affect your liability for penalties and interest or compliance with governmental or other deadlines."
+  },
+  {
+   "kind": "paragraph",
+   "text": "Although we may assist you in the preparation of an extension to file your return(s), you have sole responsibility for the filing of any extension. You are responsible for confirming the amount you wish to pay and you agree to hold our firm harmless from any consequences, including underpayment penalties, interest, and waived elections, where the extension is not timely filed or the amount paid is insufficient. All taxes owed are due by the original filing due date."
+  },
+  {
+   "kind": "paragraph",
+   "text": "**If** **you wish to engage our firm to apply for extensions of time to file tax returns on your behalf,** **we** **will not file these applications unless** **and until** **we receive** **both** **an executed** **copy of this** **Agreement** **and** **your express written authorization to** **file for** **an** **extension. In some cases, your signature may be** **required** **on such applications prior to filing. Failure to timely** **request** **an extension of time to file can result in penalties for failure to file tax returns, which accrue from the original due dates** **of the returns, and can be substantial.** **We shall not be liable for any tax, penalties, interest, related professional fees, or other expenses you may incur as a result of your failure to** **apply for** **an extension** **for which we were not engaged to prepare**."
+  },
+  {
+   "kind": "heading",
+   "text": "E-filing"
+  },
+  {
+   "kind": "paragraph",
+   "text": "In addition to being a return preparer, we are an Electronic Return Originator (ERO) and will prepare your return(s) and/or extension(s) in a format that permits us to electronically transmit (“e-file”) those forms to the appropriate tax authority on your behalf. The e-filing of any form is a separate service from the preparation of that form."
+  },
+  {
+   "kind": "paragraph",
+   "text": "If the return(s) is/(are) e-filed, including requests for extensions of time to file, the IRS and states require you to sign and return to us the appropriate governmental form(s) before your return(s) can be filed electronically. **If you fail to timely sign and return e-file authorizations, we cannot and will not e-file** **any** **form on your behalf.** In those situations, we shall not be liable for any tax, penalties, interest, related professional fees, or other expenses you may incur."
+  },
+  {
+   "kind": "paragraph",
+   "text": "If the return(s) or extension(s) is/(are) not required to be e-filed and you elect not to do so, or cannot be e-filed, we will deliver to you a paper copy suitable for mailing to the taxing authorities. Once delivered to you, you bear full responsibility for reviewing the paper returns for accuracy, and either signing and timely filing them, along with any payments due, or notifying us of any issue which may need to be addressed prior to filing. To be considered timely filed, tax returns must be postmarked by the due date of the tax return. The United States Postal Service typically applies postmarks when the mail reaches a regional processing facility, which may be several days after the mail piece is deposited at a local post office or placed in a collection box."
+  },
+  {
+   "kind": "heading",
+   "text": "Professional Fee"
+  },
+  {
+   "kind": "paragraph",
+   "text": "Our professional fee for the services outlined above is estimated to be {Fee}, of which [X]% is due upon execution of this Agreement as a retainer. This fee is based upon the complexity of the expected work to be performed, regulatory or government deadline sensitivity, our professional time and out-of-pocket expenses, and overall value of the services provided."
+  },
+  {
+   "kind": "paragraph",
+   "text": "Circumstances may arise that impact our estimated fee such as, but not limited to, (1) the timeliness, accuracy, or completeness of information you provide to us; (2) changes in your personnel, use of other advisors, or operations that impact our services; (3) mutually agreed changes in the scope of this engagement; or (4) other unanticipated items that arise during our engagement and that require additional time in order to complete the agreed-upon services."
+  },
+  {
+   "kind": "paragraph",
+   "text": "You agree to pay all fees and expenses incurred whether or not we complete the engagement."
+  },
+  {
+   "kind": "paragraph",
+   "text": "If you have questions regarding your gift tax return filing obligations, please contact our office."
+  },
+  {
+   "kind": "paragraph",
+   "text": "We appreciate the opportunity to be of service to you. This Agreement, including the Terms and Conditions Addendum, represents the entire agreement of the parties relating to the services that are the subject of this Agreement. This Agreement supersedes all previous agreements, negotiations, representations, or other understandings, whether oral or written, between the parties."
+  },
+  {
+   "kind": "paragraph",
+   "text": "Any modification to the terms of this Agreement must be made in writing and signed by both parties. Please date and execute this Agreement and return it to us to acknowledge your acceptance. We will not initiate services until we receive the executed Agreement and retainer."
+  },
+  {
+   "kind": "paragraph",
+   "text": "{Terms and Conditions}"
+  },
+  {
+   "kind": "paragraph",
+   "text": "Very truly yours,"
+  },
+  {
+   "kind": "paragraph",
+   "text": "{Firm name}"
+  },
+  {
+   "kind": "paragraph",
+   "text": "/s/ {Partner name}"
+  },
+  {
+   "kind": "paragraph",
+   "text": "{Partner title}"
+  },
+  {
+   "kind": "paragraph",
+   "text": "ACCEPTED:"
+  },
+  {
+   "kind": "signature",
+   "role": "taxpayer"
+  }
+ ]
+}

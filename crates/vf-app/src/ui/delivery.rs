@@ -554,19 +554,43 @@ impl DeliverWindow {
         f
     }
 
-    /// The ticked letters laid out for this client: (template, laid).
+    /// The ticked letters laid out for this client: (template, laid), each with the firm's
+    /// Terms and Conditions where it says (ADDENDUM-annual-agreements.md A5).
     fn laid_letters(&self) -> Vec<(vf_letters::Template, vf_letters::Laid)> {
         let f = self.fields();
+        let all = vf_letters::store::load_all(&self.root).unwrap_or_default();
+        let ctx = delivery::letter_context(&self.root, &self.return_type);
         self.letters
             .iter()
             .filter(|(_, on)| *on)
             .map(|(t, _)| {
                 (
                     t.clone(),
-                    vf_letters::layout(t, &f, &self.return_type, None),
+                    vf_letters::layout(&vf_letters::store::as_sent(t, &all), &f, &ctx, None),
                 )
             })
             .collect()
+    }
+
+    /// The fill-ins left in the ticked letters, as "letter: [X], [State]" (A17: Send refuses).
+    fn fill_ins_left(&self) -> Option<String> {
+        let all = vf_letters::store::load_all(&self.root).unwrap_or_default();
+        let ctx = delivery::letter_context(&self.root, &self.return_type);
+        let left: Vec<String> = self
+            .letters
+            .iter()
+            .filter(|(_, on)| *on)
+            .filter_map(|(t, _)| {
+                let f = vf_letters::store::as_sent(t, &all).fill_ins(&ctx, None);
+                (!f.is_empty()).then(|| format!("{}: {}", t.name, f.join(", ")))
+            })
+            .collect();
+        (!left.is_empty()).then(|| {
+            format!(
+                "Fill in the letter template before sending (Admin › Portal › Letter templates). {}",
+                left.join("; ")
+            )
+        })
     }
 
     fn load(&mut self, ctx: &egui::Context, s: &PortalSettings) {
@@ -1357,6 +1381,13 @@ impl DeliverWindow {
         match act {
             Act::Reload => self.load(ctx, s),
             Act::Send => {
+                if self.with_letters
+                    && current.as_ref().is_none_or(|d| d.letters.is_empty())
+                    && let Some(e) = self.fill_ins_left()
+                {
+                    self.err = Some(e);
+                    return;
+                }
                 let steps = StepsIn {
                     letters: self.with_letters,
                     return_: self.with_return,
@@ -1399,8 +1430,12 @@ impl DeliverWindow {
                                 let mut f = base.clone();
                                 f.insert("Package name".into(), l.name.clone());
                                 f.insert("Package fee".into(), vf_portal::balance::money(l.cents));
-                                let laid =
-                                    vf_letters::layout(t, &f, &self.return_type, Some(&l.name));
+                                let laid = vf_letters::layout(
+                                    t,
+                                    &f,
+                                    &delivery::letter_context(&self.root, &self.return_type),
+                                    Some(&l.name),
+                                );
                                 Some((l.key.clone(), t.clone(), laid))
                             })
                             .collect()

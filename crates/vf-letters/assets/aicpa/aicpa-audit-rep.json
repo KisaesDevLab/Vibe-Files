@@ -1,0 +1,338 @@
+{
+ "id": "aicpa-audit-rep",
+ "version": 0,
+ "name": "Engagement letter: tax examination representation",
+ "return_types": [
+  "Audit representation"
+ ],
+ "kind": "letter",
+ "doc_type": "Engagement letter",
+ "letterhead": true,
+ "default_ticked": true,
+ "sample": true,
+ "blocks": [
+  {
+   "kind": "paragraph",
+   "text": "{Date}"
+  },
+  {
+   "kind": "paragraph",
+   "text": "{Signer name}"
+  },
+  {
+   "kind": "paragraph",
+   "text": "{Client name}"
+  },
+  {
+   "kind": "paragraph",
+   "text": "Dear {Signer first names}:"
+  },
+  {
+   "kind": "paragraph",
+   "text": "{Firm name} (“firm,” “we,” “us,” or “our”) is pleased to provide {Client name} (“you” or “your”) with the professional services described below. Please read this letter, the attached Terms and Conditions Addendum and any other attachments incorporated herein (collectively, “Agreement”). This Agreement details the nature and limitations of the services we will provide, the terms of our engagement and each party’s responsibilities."
+  },
+  {
+   "kind": "heading",
+   "text": "Engagement Objective and Scope"
+  },
+  {
+   "kind": "paragraph",
+   "text": "The objective of our service is to represent you before the [Internal Revenue Service or Name of Other Taxing Body] (“Tax Agency”) in connection with the examination of your [Federal or Name of Other Taxing Body] tax return(s) for the tax years, {Tax year} through {Tax year}. Our engagement does not include any other periods, jurisdictions or matters."
+  },
+  {
+   "kind": "paragraph",
+   "text": "Our engagement does not include the representation of any Schedule K-1 recipient from the [partnership/S corporation]. If any of those recipients are selected for examination and requests that we represent them before the Tax Agency, we must first determine if a conflict of interest exists. If we, in our sole professional judgement, determine a conflict exists, and we are able to represent all parties before the Tax Agency, we will confirm this engagement in a separate written agreement to be signed by that taxpayer. All parties will be required to sign a conflict of interest disclosure and consent before we are able to represent the parties."
+  },
+  {
+   "kind": "paragraph",
+   "text": "Our review of the prior year’s tax returns being examined will necessarily be limited and may not find errors. We will, however, bring to your attention errors that we do find. Before we communicate with the examining agent, we will discuss with you any errors we find, including an estimate of any change in tax, penalties, and interest that may apply related to the errors. You are responsible for determining if the errors will be disclosed to the examining agent. If you decline to disclose the errors and we conclude that your failure to disclose does not permit us to represent you before the Tax Agency, we may be unable to proceed."
+  },
+  {
+   "kind": "paragraph",
+   "text": "Unless specifically noted above, the preparation or amending of prior year tax returns or schedules, or the calculation, creation, or re-creation of tax attributes which may be questioned in your examination, such as carrybacks, basis, or depreciation, is not within the scope of our engagement."
+  },
+  {
+   "kind": "paragraph",
+   "text": "Our engagement does not include any procedures designed to detect errors, fraud, theft, or other wrongdoing. Therefore, our engagement cannot be relied upon to disclose such matters. If we identify or suspect that an instance of noncompliance with laws and regulations has occurred or is likely to occur, we will discuss the matter with the appropriate level of management and, when appropriate, those charged with governance. In addition, we are not responsible for identifying or communicating deficiencies in your internal controls, unless otherwise specified in the scope of this Agreement. You are responsible for developing and implementing internal controls applicable to your operations."
+  },
+  {
+   "kind": "paragraph",
+   "text": "Requests for additional services may necessitate that we amend the Agreement or issue a separate written agreement to reflect the obligations of all parties. In the absence of any other written communications from us documenting additional services, our services will be limited to and governed by the terms of this Agreement."
+  },
+  {
+   "kind": "heading",
+   "text": "Statute of limitations and waivers"
+  },
+  {
+   "kind": "paragraph",
+   "text": "Each Tax Agency may prescribe a statute of limitations which defines the period when it must initiate and complete the examination of your tax return(s) and propose changes, if any. The Tax Agency may also request an extension of the statute of limitations in situations where it may be unable to timely complete its examination of your return(s). If this occurs, we will discuss your options with you. The decision to agree or disagree with the Tax Agency’s request is yours, however, you may wish to consult with a tax attorney prior to deciding."
+  },
+  {
+   "kind": "heading",
+   "text": "Proposed adjustments and appeals rights"
+  },
+  {
+   "kind": "paragraph",
+   "text": "During the examination, the agent may propose adjustments. If you agree to the proposed adjustments, the agent will ask you to consent to an assessment whereby you waive your right to appeal or file a tax court petition. If you disagree with the proposed adjustments, you may receive a “30-day letter” which states that you have the right to file an appeal with the IRS Independent Office of Appeals (“Appeals”) within 30 days of the date of the letter. If you appeal and disagree with Appeals’ decision or fail to appeal within the initial 30 day period, you will receive a “Notice of Deficiency,” which explains that you have 90 days within which to pay the tax assessed or file a petition with the U.S. Tax Court to seek a re-determination of your tax. Similar procedures are generally available with respect to state and local examinations. A final decision in a federal tax examination is likely to affect your state tax obligations."
+  },
+  {
+   "kind": "paragraph",
+   "text": "If you ask us to assist you with an appeal of adverse findings, either in a forum that permits a CPA to represent you or by assisting your attorney, these services are not within the scope of this Agreement."
+  },
+  {
+   "kind": "heading",
+   "text": "Examination results"
+  },
+  {
+   "kind": "paragraph",
+   "text": "While we will exercise due professional care during this engagement, we cannot guarantee any result. Please note the outcome of your examination is based upon the facts presented, supporting schedules, and other supporting records as well as the Tax Agency’s evaluation of this information."
+  },
+  {
+   "kind": "heading",
+   "text": "CPA Firm Responsibilities"
+  },
+  {
+   "kind": "paragraph",
+   "text": "It is our duty to perform services with the same standard of care that a reasonable “practitioner”, as that term is defined in Treasury Department Circular 230, 10.2(a)(5), who is engaged in “practice before the Internal Revenue Service”, as that term is defined in Treasury Department Circular 230, 10.2(a)(4), would exercise in this type of engagement. Unless otherwise noted, the applicable standard of care for this engagement shall be based upon the following pronouncements:"
+  },
+  {
+   "kind": "list",
+   "items": [
+    "the Statements on Standards for Tax Services (“SSTS”) issued by the American Institute of Certified Public Accountants (“AICPA”);",
+    "U.S. Treasury Department Circular 230 (“Circular 230”); and",
+    "the Internal Revenue Code, Treasury Regulations, and any applicable state/local corollaries (collectively, “the Code”)."
+   ]
+  },
+  {
+   "kind": "paragraph",
+   "text": "If, as part of your representation, you request that we:"
+  },
+  {
+   "kind": "list",
+   "items": [
+    "withhold information from the Tax Agency which we believe we are ethically and/or legally obligated to provide;",
+    "provide information to the Tax Agency which we believe is inaccurate, misleading or fraudulent; or",
+    "advocate a tax position which we feel is contrary to published guidance, frivolous, or a willful attempt to evade tax,"
+   ]
+  },
+  {
+   "kind": "paragraph",
+   "text": "we will be unable to proceed."
+  },
+  {
+   "kind": "paragraph",
+   "text": "{Firm name} will not make any management decisions or perform management functions on your behalf."
+  },
+  {
+   "kind": "heading",
+   "text": "Tax planning services"
+  },
+  {
+   "kind": "paragraph",
+   "text": "Our engagement does not include tax advice which affects the calculation of tax due or the filing of tax forms and schedules for previous or future tax years. However, we may communicate potential tax planning opportunities to you, and you may ask high-level questions of us. It is your responsibility to communicate to us, in writing, any interest in pursuing a tax planning opportunity identified, or if you require more than a cursory response to your question. If you do not request our assistance in writing, we will infer that you do not wish to pursue any suggestion made to you. If you do request our assistance and we agree, we will confirm our understanding with you in a separate written agreement prior to proceeding."
+  },
+  {
+   "kind": "paragraph",
+   "text": "We shall not be liable for any tax, penalties, interest, related professional fees, or other expenses you may incur if you fail to advise us of your desire to investigate or pursue any tax planning opportunity communicated to or by us. Any tax advice described in this paragraph and provided to you shall be governed by this Agreement and billed at our standard hourly rates."
+  },
+  {
+   "kind": "heading",
+   "text": "Divorce"
+  },
+  {
+   "kind": "paragraph",
+   "text": "Because our services involve a tax return claiming the Married Filing Jointly filing status, you are responsible for notifying us if you are in the process of filing for, have filed for, or have been granted a divorce **before you sign this Agreement**. If so, prior to proceeding, we will advise each of you to seek independent tax advice and will evaluate whether a conflict of interest exists which may limit our service."
+  },
+  {
+   "kind": "paragraph",
+   "text": "If we, in our sole professional judgment, determine a conflict exists and we are able to proceed, you will both be required to sign a conflict of interest disclosure and consent before we are able to assist you. Depending upon your circumstances, as well as any legal advice you receive from your independent advisor, we may be unable to advise either of you until your divorce is finalized. In addition, we will require written instruction from you or your respective divorce attorneys [or, if the spouse(s) is/are unrepresented, the unrepresented spouse(s)] in regards to any decisions we require in order to assist you. If we do not receive written instruction required on a timely basis, we will be unable to proceed, and we shall not be liable for any adverse consequences."
+  },
+  {
+   "kind": "paragraph",
+   "text": "If either or both spouses fail to cooperate with us or with each other or any other dispute between the parties arises, and we determine that we can no longer provide services to you, we will be unable to proceed."
+  },
+  {
+   "kind": "heading",
+   "text": "Reliance on others"
+  },
+  {
+   "kind": "paragraph",
+   "text": "If you wish to argue a tax position based upon the advice of another advisor, we must comply with the applicable provisions of the Code and the SSTS."
+  },
+  {
+   "kind": "paragraph",
+   "text": "We will review the other advisor’s work and may require a written statement from the advisor describing the statutory basis for the position and the suggested disclosure needed to appropriately report the position. If we believe additional research is required, we will discuss the matter with you and obtain your written consent to perform such research. You agree to pay for the additional charges necessary to complete the disclosure or research as this is not included in the scope of this Agreement."
+  },
+  {
+   "kind": "paragraph",
+   "text": "Moreover, you understand that the IRS, state or local tax authority may disagree with the position taken. If this occurs, we shall not be liable for any tax, penalties, interest, related professional fees, or other expenses you may incur."
+  },
+  {
+   "kind": "paragraph",
+   "text": "If, after review of the work prepared by your other advisor, we determine that we are unable to advocate the position with the Tax Agency, we will be unable to proceed."
+  },
+  {
+   "kind": "heading",
+   "text": "Client Responsibilities"
+  },
+  {
+   "kind": "paragraph",
+   "text": "If you fail to comply with the responsibilities as described in this Agreement, your actions or your inactions may result in economic or other loss to you, such as disallowance of tax deductions or credits claimed, additional tax, penalties or interest assessed against you, loss of administrative rights, or criminal punishment. You will be responsible for any loss suffered by you, including any professional fees required to defend or correct changes made to your tax returns, prepare previously unfiled tax returns, or amend previously filed tax returns. The responsibilities detailed in this section are not exhaustive, and our services to you may require additional responsibilities not listed."
+  },
+  {
+   "kind": "paragraph",
+   "text": "Upon receipt of an executed copy of this Agreement, we will provide you with a completed Power of Attorney and Declaration of Representative form (“POA”) for your signature, and we will request a time to discuss the authority being granted under the POA, including how it will be utilized during the examination process. The POA will set forth the year(s) or period(s) and tax forms for which authorization is needed to best represent you. If the examination is of an individual return filed on a Married Filing Joint basis, we require the signature of both spouses for the POA to be valid.. {Firm name} is not responsible for any damages or other adverse results you may suffer as a result of delays in providing us with these signed documents."
+  },
+  {
+   "kind": "heading",
+   "text": "Tax information"
+  },
+  {
+   "kind": "paragraph",
+   "text": "In connection with the examination, we will communicate with the Tax Agency to arrange a time and place for the exam and obtain the list of documents requested, if it has not been previously provided by the Tax Agency. [For correspondence examinations: We will contact the agent about the list of documents requested for the exam.]"
+  },
+  {
+   "kind": "paragraph",
+   "text": "You agree to provide requested information to us **at least two (2) weeks** in advance of deadlines set by the Tax Agency to allow us adequate time to review the materials. This procedure permits us to determine whether the documents are complete, relevant and adequate prior to submission to the Tax Agency. The completion of our services is dependent upon your timely provision of complete copies of previously filed tax returns, supporting schedules and other supporting records that we or the Tax Agency may request, either at inception or during the examination."
+  },
+  {
+   "kind": "paragraph",
+   "text": "We will rely upon the completeness and accuracy of the information and representations you provide to us. Our responsibility is limited to the information of which we have knowledge. We will not audit or otherwise verify the data you submit to us, although we may ask you to clarify certain information."
+  },
+  {
+   "kind": "paragraph",
+   "text": "We may deem it necessary to provide you with limited accounting or bookkeeping assistance solely for the purpose of helping you organize your information. This assistance is intended to be nominal and is not a separate accounting or bookkeeping service. In the event we conclude that bookkeeping or accounting assistance is necessary to assist you, we will advise you in writing before proceeding. Any assistance will be billed at our standard hourly rates and will be subject to the terms of this Agreement."
+  },
+  {
+   "kind": "paragraph",
+   "text": "In the event that you communicate directly with, or provide information to the Tax Agency, either against our advice or without our involvement, you agree that you are responsible for any and all outcomes related to such communications you make or information that you provide."
+  },
+  {
+   "kind": "heading",
+   "text": "Electronic payments"
+  },
+  {
+   "kind": "paragraph",
+   "text": "The Modernizing Payments To and From America’s Bank Account Executive Order, signed on March 25, 2025, mandated that all payments from the U.S. government after September 30, 2025, must be made electronically. All payments to the U.S. government, including quarterly estimated tax payments, should be made electronically as soon as practicable."
+  },
+  {
+   "kind": "paragraph",
+   "text": "Assisting you with electronic payments is not part of the scope of our services. You are responsible for transmitting any electronic payments."
+  },
+  {
+   "kind": "heading",
+   "text": "Communication of authority of others"
+  },
+  {
+   "kind": "paragraph",
+   "text": "You hereby authorize the following individuals from {Client name} to communicate directly with us on your behalf, and to request services and exchange information necessary to provide the services described in this Agreement:"
+  },
+  {
+   "kind": "heading",
+   "text": "Name     Title    Contact Information"
+  },
+  {
+   "kind": "paragraph",
+   "text": "You agree that this limited authority conveyed above shall continue in full force and effect until either this Agreement is concluded, or you inform us of any modifications in writing, whichever occurs first."
+  },
+  {
+   "kind": "heading",
+   "text": "Online access to information"
+  },
+  {
+   "kind": "paragraph",
+   "text": "To the extent you provide our firm with access to electronic data via a local or online database from which we will download your trial balance or other information, you agree that the data is accurate as of the date and time you make it available to be downloaded by us."
+  },
+  {
+   "kind": "heading",
+   "text": "Timing of the Engagement"
+  },
+  {
+   "kind": "paragraph",
+   "text": "We expect to begin our services upon receipt of this executed Agreement and retainer, and a signed copy of the POA, as applicable."
+  },
+  {
+   "kind": "paragraph",
+   "text": "Our services under this Agreement will conclude:"
+  },
+  {
+   "kind": "list",
+   "items": [
+    "upon your acceptance of all adjustments included in the Tax Agency’s final Report and your consent to assessment of any tax, if applicable;",
+    "upon your rejection of some or all adjustments contained in the Tax Agency’s final Report and your filing of a protest with the Tax Agency in a court or other forum that requires an appearance by a licensed attorney;",
+    "upon notification by the Tax Agency that your examination is being referred to a criminal, fraud, or similar investigatory body within the Tax Agency;",
+    "upon written notification by either party that the Agreement is terminated; or",
+    "when we provide you with a closure letter, whichever comes first."
+   ]
+  },
+  {
+   "kind": "heading",
+   "text": "Professional Fee"
+  },
+  {
+   "kind": "paragraph",
+   "text": "Our professional fee for the services outlined will be based upon our hourly billing rates. Payment of all outstanding invoices due to our firm and a retainer of {Fee} is required upon execution of this Agreement. This fee is based upon the complexity of the expected work to be performed, regulatory or government deadline sensitivity, our professional time and out-of-pocket expenses, and overall value of the services provided."
+  },
+  {
+   "kind": "paragraph",
+   "text": "Circumstances may arise that impact our estimated fee such as, but not limited to, (1) the timeliness, accuracy, or completeness of information you provide to us; (2) changes in your personnel, use of other advisors, or operations that impact our services; (3) mutually agreed changes in the scope of this engagement; or (4) other unanticipated items that arise during our engagement and that require additional time in order to complete the agreed-upon services."
+  },
+  {
+   "kind": "paragraph",
+   "text": "You agree to pay all fees and expenses incurred whether or not we complete the engagement, or regardless of the result of your examination."
+  },
+  {
+   "kind": "paragraph",
+   "text": "We appreciate the opportunity to be of service to you. This Agreement, including the Terms and Conditions Addendum, represents the entire agreement of the parties relating to the services that are the subject of this Agreement. This Agreement supersedes all previous agreements, negotiations, representations, or other understandings, whether oral or written, between the parties."
+  },
+  {
+   "kind": "paragraph",
+   "text": "Any modification to the terms of this Agreement must be made in writing and signed by both parties. Please date and execute this Agreement and return it to us to acknowledge your acceptance. **We will not** **initiate services** **until** **we receive the** **executed** **POA and** **Agreement** **and retainer**."
+  },
+  {
+   "kind": "paragraph",
+   "text": "{Terms and Conditions}"
+  },
+  {
+   "kind": "paragraph",
+   "text": "Very truly yours,"
+  },
+  {
+   "kind": "paragraph",
+   "text": "{Firm name}"
+  },
+  {
+   "kind": "paragraph",
+   "text": "/s/ {Partner name}"
+  },
+  {
+   "kind": "paragraph",
+   "text": "{Partner title}"
+  },
+  {
+   "kind": "paragraph",
+   "text": "ACCEPTED:"
+  },
+  {
+   "kind": "signature",
+   "role": "taxpayer",
+   "only_for": [
+    "Individual"
+   ]
+  },
+  {
+   "kind": "signature",
+   "role": "spouse",
+   "only_for": [
+    "Individual"
+   ]
+  },
+  {
+   "kind": "signature",
+   "role": "officer",
+   "only_for": [
+    "Entity"
+   ]
+  }
+ ]
+}

@@ -151,9 +151,14 @@ fn wrap_text(text: &str, a: usize, b: usize, mark: &str) -> (String, usize) {
 /// How a run of a block's text is drawn in the editor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Look {
-    Text { bold: bool, italic: bool },
+    Text {
+        bold: bool,
+        italic: bool,
+    },
     Mark,
     Field,
+    /// A `[…]` fill-in the firm must replace before sending (A17).
+    FillIn,
 }
 
 fn push_text(
@@ -198,6 +203,18 @@ fn runs(text: &str) -> Vec<(std::ops::Range<usize>, Look)> {
             out.push((i..i + j + 2, Look::Field));
             i += j + 2;
             start = i;
+        } else if let Some(after) = rest.strip_prefix('[')
+            && let Some(j) = after.find(['[', ']']).filter(|&j| {
+                after.as_bytes()[j] == b']'
+                    && after[..j]
+                        .chars()
+                        .any(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
+            })
+        {
+            push_text(&mut out, start, i, bold, italic);
+            out.push((i..i + j + 2, Look::FillIn));
+            i += j + 2;
+            start = i;
         } else {
             i += rest.chars().next().map_or(1, char::len_utf8);
         }
@@ -211,6 +228,7 @@ const INK: Color32 = Color32::from_rgb(28, 30, 34);
 const FAINT: Color32 = Color32::from_rgb(160, 163, 170);
 const CHIP_BG: Color32 = Color32::from_rgb(222, 233, 250);
 const CHIP_INK: Color32 = Color32::from_rgb(28, 78, 150);
+const FILL_BG: Color32 = Color32::from_rgb(255, 236, 150);
 const BODY: f32 = 13.5;
 
 /// Filer's semibold face, or the plain face where the fonts are not installed (a bare test
@@ -254,6 +272,10 @@ fn rich_job(ui: &egui::Ui, text: &str, size: f32, all_bold: bool, wrap: f32) -> 
                 color: CHIP_INK,
                 background: CHIP_BG,
                 ..Default::default()
+            },
+            Look::FillIn => TextFormat {
+                background: FILL_BG,
+                ..plain(false, false)
             },
         };
         job.append(&text[r], 0.0, f);
@@ -601,12 +623,23 @@ pub fn sample_fields(firm: &str, year: i32, return_type: &str) -> Fields {
         ("Fee options", "Tax Return Only, Advantage, Concierge"),
         ("Package name", "Advantage"),
         ("Package fee", "$1,392.68"),
+        ("Partner name", "Morgan Example"),
+        ("Partner title", "Partner"),
+        ("Services", "Form 1040, Bookkeeping"),
+        (
+            "Fee lines",
+            "Form 1040: $1,265.68
+Bookkeeping: $450.00 a month",
+        ),
+        ("One-time fee", "$1,265.68"),
+        ("Monthly fee", "$450.00"),
     ] {
         f.insert(k.into(), v.into());
     }
     f.insert("Firm name".into(), firm.into());
     f.insert("Tax year".into(), year.to_string());
     f.insert("Next year".into(), (year + 1).to_string());
+    f.insert("Agreement year".into(), (year + 1).to_string());
     f.insert("Return type".into(), return_type.into());
     f.insert(
         "Date".into(),
@@ -727,9 +760,11 @@ pub fn clear_previews() {
     }
 }
 
-/// Lays a template out for `fields` into a temporary PDF and opens it in the PDF viewer.
-pub fn preview(t: &Template, fields: &Fields, return_type: &str) -> Result<(), String> {
-    let laid = vf_letters::layout(t, fields, return_type, t.package.as_deref());
+/// Lays a template out for `fields` into a temporary PDF and opens it in the PDF viewer:
+/// `context` is the return type with the signer class (`"1040|Individual"`).
+pub fn preview(t: &Template, fields: &Fields, context: &str) -> Result<(), String> {
+    let return_type = context.split('|').next().unwrap_or(context);
+    let laid = vf_letters::layout(t, fields, context, t.package.as_deref());
     let dir = preview_dir();
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let p = dir.join(format!(
@@ -746,7 +781,7 @@ pub fn page(ui: &mut egui::Ui, page: &mut LetterTemplatesPage, env: &mut crate::
     if !page.loaded {
         page.loaded = true;
         page.err = store::seed_if_missing(env.root).err();
-        page.types = vf_portal::delivery::return_type_names(env.root);
+        page.types = vf_portal::delivery::service_names(env.root);
         match store::load_all(env.root) {
             Ok(t) => page.templates = t,
             Err(e) => page.err = Some(e),
@@ -922,7 +957,7 @@ fn new_return_type(
                     )],
                 )
                 .unwrap_or_default();
-                page.types = vf_portal::delivery::return_type_names(env.root);
+                page.types = vf_portal::delivery::service_names(env.root);
                 page.msg = Some(format!(
                     "Added the {} return type: tick it on a letter to offer the letter for it.{unrecorded}",
                     t.name
@@ -980,7 +1015,7 @@ fn toolbar(ui: &mut egui::Ui, page: &mut LetterTemplatesPage, d: &mut Template) 
             );
         }
         ui.menu_button("Insert field", |ui| {
-            for f in FIELDS {
+            for &f in FIELDS {
                 if ui.button(f).clicked() {
                     insert_field(page, d, f);
                     ui.close();
@@ -1297,6 +1332,19 @@ fn side(
         ui.radio_value(&mut d.kind, "letter".to_string(), "Letter");
         ui.radio_value(&mut d.kind, "addendum".to_string(), "Package addendum");
     });
+    ui.horizontal(|ui| {
+        ui.radio_value(&mut d.kind, vf_letters::TERMS.to_string(), "Terms and Conditions")
+            .on_hover_text("Its text goes where a letter says {Terms and Conditions}, covered by the letter's signature.");
+        ui.radio_value(&mut d.kind, vf_letters::CLOSURE.to_string(), "Closure letter")
+            .on_hover_text("Sent by End engagement…: read on the portal, not signed.");
+    });
+    let left = d.fill_ins("", None);
+    if !left.is_empty() {
+        ui.colored_label(
+            theme::warn(),
+            format!("Fill in before sending: {}", left.join(", ")),
+        );
+    }
     if d.kind == "addendum" {
         ui.horizontal(|ui| {
             ui.label("for the package");
@@ -1405,7 +1453,7 @@ fn side(
     ui.label(RichText::new("Fields").strong());
     ui.label(widgets::caption("Click one to put it where the cursor is."));
     ui.horizontal_wrapped(|ui| {
-        for f in FIELDS {
+        for &f in FIELDS {
             if ui.small_button(f).clicked() {
                 insert_field(page, d, f);
             }
@@ -1445,7 +1493,9 @@ fn side(
                 Some(c) => client_fields(env.root, c, year, &rt),
                 None => sample_fields(&firm, year, &rt),
             };
-            if let Err(e) = preview(d, &fields, &rt) {
+            let all = vf_letters::store::load_all(env.root).unwrap_or_default();
+            let ctx = vf_portal::delivery::letter_context(env.root, &rt);
+            if let Err(e) = preview(&vf_letters::store::as_sent(d, &all), &fields, &ctx) {
                 page.err = Some(e);
             }
         }

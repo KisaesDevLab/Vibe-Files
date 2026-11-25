@@ -1,0 +1,389 @@
+{
+ "id": "aicpa-terms",
+ "version": 0,
+ "name": "Terms and Conditions",
+ "return_types": [],
+ "kind": "terms",
+ "doc_type": "",
+ "letterhead": true,
+ "default_ticked": false,
+ "sample": true,
+ "blocks": [
+  {
+   "kind": "paragraph",
+   "text": "**{Firm name}’s Terms and Conditions Addendum**"
+  },
+  {
+   "kind": "paragraph",
+   "text": "This addendum to the engagement letter describes our standard terms and conditions (“Terms and Conditions Addendum”) related to our provision of services to you. This addendum, and the accompanying engagement letter, comprise your agreement with us (“Agreement”). If there is any inconsistency between the engagement letter and this Terms and Conditions Addendum, the engagement letter will prevail."
+  },
+  {
+   "kind": "paragraph",
+   "text": "For the purposes of this Terms and Conditions Addendum, any reference to “firm,” “we,” “us,” or “our” is a reference to {Firm name}, and any reference to “you,” or “your” is a reference to the party or parties that have engaged us to provide services."
+  },
+  {
+   "kind": "heading",
+   "text": "Billing and Payment Terms"
+  },
+  {
+   "kind": "paragraph",
+   "text": "If our Agreement requires a retainer upon execution, you agree that the retainer will be earned as our professional time to complete the engagement is incurred. The retainer will be applied to the final billing, and any unused balance will be refunded at the end of the engagement."
+  },
+  {
+   "kind": "paragraph",
+   "text": "We will bill you for our professional fees and out-of-pocket costs. Payment is due within [X] days of the date on the billing statement. If payment is not received by the due date, you will be assessed interest charges of [X]% per month on the unpaid balance. You have thirty (30) days from the invoice date to review the invoice and to communicate to us, in writing, any disagreement with the charges, after which you waive the right to contest the invoice."
+  },
+  {
+   "kind": "paragraph",
+   "text": "All outstanding invoices must be paid prior to the release of the work-product(s) specified in the Agreement."
+  },
+  {
+   "kind": "paragraph",
+   "text": "We reserve the right to suspend or terminate our work for non-payment of fees. In the event that work is discontinued, either temporarily or permanently, as a result of delinquent or non-payment, we shall not be liable for any loss you may incur as a result of the work stoppage, including penalties, interest, fines or fees assessed against you. In such cases, you assume all risk associated with your failure to meet any governmental or other deadlines."
+  },
+  {
+   "kind": "heading",
+   "text": "Termination and Withdrawal"
+  },
+  {
+   "kind": "paragraph",
+   "text": "Either party may terminate this Agreement at any time and for any reason. Our reasons for termination may include, but are not limited to, non-payment of fees, your failure to comply with the terms of this Agreement, or as we determine our professional standards require. If our services are terminated, you agree that we will not be responsible for any liability resulting from your failure to meet governmental or other deadlines."
+  },
+  {
+   "kind": "paragraph",
+   "text": "If this Agreement is terminated before services are completed, you agree to pay all fees and expenses we incur through the effective date of termination."
+  },
+  {
+   "kind": "heading",
+   "text": "Proprietary Information"
+  },
+  {
+   "kind": "paragraph",
+   "text": "You acknowledge that proprietary information, documents, materials, management techniques and other intellectual property are a material source of the services we perform and were developed prior to our association with you. Any new forms, software, documents or intellectual property we develop during this engagement for your use shall belong to us, and you shall have the limited right to use them solely within your business. All reports, templates, manuals, forms, checklists, questionnaires, letters, agreements and other documents which we make available to you are confidential and proprietary to us. Neither you, nor any of your agents, will copy, electronically store, reproduce or make available to anyone other than your personnel, any such documents. This provision will apply to all materials whether in digital, “hard copy” format or other medium."
+  },
+  {
+   "kind": "heading",
+   "text": "Conflicts of Interest"
+  },
+  {
+   "kind": "paragraph",
+   "text": "If we, in our sole discretion, believe a conflict of interest has arisen affecting our ability to deliver services to you in accordance with either the ethical standards of our firm or the ethical standards of our profession, we may be required to terminate our services without issuing our work product."
+  },
+  {
+   "kind": "heading",
+   "text": "Portals"
+  },
+  {
+   "kind": "paragraph",
+   "text": "We will utilize [Portal Name], a collaborative, virtual workspace in a protected, online environment. [Portal Name] permits real-time collaboration across geographic boundaries and time zones and allows us and you to share data, engagement information, and deliverables in a protected environment. In order to use [Portal Name], you may be required by the provider of [Portal Name] to execute a portal agreement and agree to be bound by the terms, conditions and limitations of such agreement."
+  },
+  {
+   "kind": "paragraph",
+   "text": "We are not a host for any of your information. You are responsible for maintaining your own copy of this information. We do not provide back-up services for any of your data or records, including information we provide to you. Portals are utilized solely as a method of transferring data and are not intended for the storage of your information. Information on a portal may be deleted by us with or without notice to you."
+  },
+  {
+   "kind": "paragraph",
+   "text": "If you decide to transmit your confidential information to us in a manner other than [Portal Name], you accept responsibility for any and all unauthorized access to your confidential information. If you request that we transmit confidential information to you in a manner other than [Portal Name], you agree that we are not responsible for any liability, including but not limited to, (a) any loss or damage of any nature, whether direct or indirect, that may arise as a result of our sending confidential information in a manner other than a secure portal, and (b) any loss arising as a result of any virus being passed on or with, or arising from any alteration of, any email message."
+  },
+  {
+   "kind": "heading",
+   "text": "Third-Party Service Providers or Subcontractors"
+  },
+  {
+   "kind": "paragraph",
+   "text": "We may use third-party service providers, subcontractors, or software tools (collectively, “external party” or “external parties”) to assist us where necessary to help provide professional services to you or support the needs of our firm. You consent to our use of external parties. Our firm remains responsible for exercising reasonable care in providing our services, and our services and work product will be subjected to our firm's customary quality procedures."
+  },
+  {
+   "kind": "paragraph",
+   "text": "We may provide your confidential information to external parties in support of our services. You consent to the disclosure of your confidential information to those external parties. We take reasonably prudent business care consistent with our professional standards to prevent the unauthorized release of your confidential information."
+  },
+  {
+   "kind": "paragraph",
+   "text": "In certain circumstances, we may require a separate, written consent from you before your information is transmitted to an external party or parties."
+  },
+  {
+   "kind": "heading",
+   "text": "Artificial Intelligence (“AI”) Disclosure"
+  },
+  {
+   "kind": "paragraph",
+   "text": "We may use artificial intelligence tools, including generative AI (collectively, “AI”), in the provision of professional services to you which may involve your confidential information. AI may be used to assist our professionals with tasks such as research, document preparation, analysis, and/or other support functions; however, AI does not replace our professional judgment or decision-making."
+  },
+  {
+   "kind": "paragraph",
+   "text": "Our firm remains responsible for exercising reasonable care in providing services and issuing deliverable(s) in accordance with applicable professional standards. If AI-generated outputs are used by us, such outputs are subject to review in accordance with our firm’s customary quality procedures."
+  },
+  {
+   "kind": "paragraph",
+   "text": "You consent to the disclosure of your confidential information for AI support of our professional services. No client information will be entered into a public or unsecured AI tool or program that does not meet our security and data requirements. We take reasonably prudent business care consistent with our professional standards to prevent the unauthorized release of your confidential information."
+  },
+  {
+   "kind": "heading",
+   "text": "Records Management"
+  },
+  {
+   "kind": "heading",
+   "text": "Record Retention and Ownership"
+  },
+  {
+   "kind": "paragraph",
+   "text": "We will return any original records and documents you provide to us. Our copies of your records and documents are solely for our documentation purposes and are not a substitute for your own record-keeping obligations under any applicable laws or regulations. You are responsible for maintaining complete and accurate books and records, which may include financial statements, schedules, tax returns and other deliverables provided to you by us. If we provide deliverables or other records to you via an information portal, you must download this information within [X] days. Professional standards may preclude us from being the sole repository of your original data, records, or information."
+  },
+  {
+   "kind": "paragraph",
+   "text": "Workpapers and other items created by us to support the delivery of our services are our property and will remain in our control. We will consider requests for copies of workpapers and other items created by us in accordance with the AICPA Code of Professional Conduct. Our workpapers will be maintained by us in accordance with our firm’s record retention policy and any applicable legal and regulatory requirements. A copy of our record retention policy is [attached for your reference or available upon request]."
+  },
+  {
+   "kind": "paragraph",
+   "text": "Our firm destroys workpaper files after a period of [X] years. Catastrophic events or physical deterioration may result in damage to or destruction of our firm’s records, causing the records to be unavailable before the expiration of the retention period, as stated in our record retention policy."
+  },
+  {
+   "kind": "heading",
+   "text": "Working Paper Access Requests by Regulators and Others"
+  },
+  {
+   "kind": "paragraph",
+   "text": "State, federal and foreign regulators may request access to or copies of certain workpapers pursuant to applicable legal or regulatory requirements. Requests also may arise with respect to peer review, an ethics investigation, the sale of your organization, or the sale of our accounting practice. If requested, access to such workpapers will only be provided under the supervision of firm personnel. Regulators may request copies of selected workpapers to distribute the copies or information contained therein to others, including other governmental agencies."
+  },
+  {
+   "kind": "paragraph",
+   "text": "If we receive a state, federal or foreign regulatory request, we agree to inform you of it as soon as practicable unless we are prohibited from doing so by applicable laws or regulations. You may, within the time permitted for our firm to respond to any request, initiate such legal action as you deem appropriate, at your sole expense, to attempt to limit the disclosure of information. If you take no action within the time permitted for us to respond, or if your action does not result in a judicial order protecting us from supplying requested information, we may construe your inaction or failure as consent to comply with the request."
+  },
+  {
+   "kind": "paragraph",
+   "text": "If we are not a party to the proceeding in which the information is sought, you agree to reimburse us for our professional time and expenses, as well as the fees and expenses of our legal counsel, incurred in responding to such requests."
+  },
+  {
+   "kind": "heading",
+   "text": "Summons or Subpoenas"
+  },
+  {
+   "kind": "paragraph",
+   "text": "All information you provide to us in connection with this engagement will be maintained by us on a confidential basis."
+  },
+  {
+   "kind": "paragraph",
+   "text": "If we receive a summons or subpoena which our legal counsel determines requires us to produce documents from this engagement or testify about this engagement, provided that we are not prohibited from doing so by applicable laws or regulations, we agree to inform you of such summons or subpoena as soon as practicable. You may, within the time permitted for our firm to respond to any request, initiate such legal action as you deem appropriate, at your sole expense, to attempt to limit discovery. If you take no action within the time permitted for us to respond, or if your action does not result in a judicial order protecting us from supplying requested information, we may construe your inaction or failure as consent to comply with the request."
+  },
+  {
+   "kind": "paragraph",
+   "text": "If we are not a party to the proceeding in which the information is sought, you agree to reimburse us for our professional time and expenses, as well as the fees and expenses of our legal counsel, incurred in responding to such requests."
+  },
+  {
+   "kind": "heading",
+   "text": "Confidentiality"
+  },
+  {
+   "kind": "paragraph",
+   "text": "In providing services to you, we may require information that is considered confidential and may include Personally Identifiable Information (PII), i.e. information that can be used to distinguish or trace an individual’s’ identity such as address, bank account and social security information. We will maintain all client information, including PII, on a confidential basis and have a duty to do so based on the standards promulgated by the American Institute of Certified Public Accountants as well as applicable laws and regulations. You assume the risk of loss if you provide us with information, including PII, which differs from the information we request in order to provide services to you in accordance with the Agreement."
+  },
+  {
+   "kind": "heading",
+   "text": "Referrals"
+  },
+  {
+   "kind": "paragraph",
+   "text": "In the course of providing services to you, you may request referrals to products or professionals such as attorneys, brokers, or investment advisors. As a courtesy, we may identify professional(s) or product(s) for your consideration. However, you are responsible for evaluating, selecting, and retaining any professional or product and determining if the professional or product meets your needs. You agree that we will not oversee the activities of and have no responsibility for the work product of any professional or suitability of any product we refer to you or that you separately retain."
+  },
+  {
+   "kind": "heading",
+   "text": "Limitations on Oral and Email Communications"
+  },
+  {
+   "kind": "paragraph",
+   "text": "We may discuss with you our views regarding the treatment of certain items or decisions you may encounter. We may also provide you with information in an email. Any advice or information delivered orally or in an email (rather than, for example, through a memorandum delivered as an email attachment that is a deliverable of a separate engagement) will be based upon limited research and a limited discussion and analysis of the underlying facts. Additional research or a more complete review of the facts may affect our analysis and conclusions."
+  },
+  {
+   "kind": "paragraph",
+   "text": "Due to these limitations and the related risks, it may not be appropriate to proceed with a decision solely on the basis of any oral or email communication from us. You accept all responsibility for any liability, including but not limited to additional tax, penalties or interest resulting from your decision (i) not to have us perform the research and analysis necessary to reach a more definitive conclusion and (ii) to instead rely on an oral or email communication. The limitation in this paragraph will not apply to an item of written advice that is a deliverable of a separate engagement. If you wish to engage us to provide formal advice on a matter on which we have communicated orally or by email, we will confirm this service in a separate agreement."
+  },
+  {
+   "kind": "paragraph",
+   "text": "**Brokerage** **or** **Investment Advisory** **Statements** **or** **Digital Asset** **Tax Return Information** ****"
+  },
+  {
+   "kind": "paragraph",
+   "text": "If you provide our firm with copies of brokerage or investment advisor statements, or digital asset tax return information, we will use the information solely for the purpose described in the Engagement Objective and Scope section of this Agreement. We will not monitor transactions, investment activity, provide investment advice, or supervise the actions of the entity or individuals entering into transactions or investment activities on your behalf."
+  },
+  {
+   "kind": "heading",
+   "text": "Disclaimer of Legal and Investment Advice"
+  },
+  {
+   "kind": "paragraph",
+   "text": "Our services under this Agreement do not constitute investment advice unless specifically engaged in the Engagement Objective and Scope section of this Agreement. Our services under this Agreement do not constitute legal advice."
+  },
+  {
+   "kind": "heading",
+   "text": "Electronic Data Communication and Storage"
+  },
+  {
+   "kind": "paragraph",
+   "text": "In the interest of facilitating our services to you, we may send data over the Internet, temporarily store electronic data via computer software applications hosted remotely on the Internet, or utilize cloud-based storage. In using these data communication and storage methods, our firm employs measures designed to maintain data security. We use reasonable efforts to keep such communications and electronic data secure in accordance with our obligations under applicable laws, regulations, and professional standards."
+  },
+  {
+   "kind": "paragraph",
+   "text": "You recognize and accept that we have no control over the unauthorized interception or breach of any communications or electronic data once it has been transmitted or if it has been subject to unauthorized access while stored, notwithstanding all reasonable security measures employed by us. You consent to our use of these electronic devices and applications during this engagement."
+  },
+  {
+   "kind": "heading",
+   "text": "Marketing and Educational Communications"
+  },
+  {
+   "kind": "paragraph",
+   "text": "If we send you newsletters, updates, explanations of technical developments or similar communications, it is strictly for marketing or general educational purposes and should not be construed as professional advice on which you may rely. These communications, by themselves, do not create a contractual relationship between us and you, a binding obligation for us to provide services to you, nor a requirement on our part to monitor issues for you."
+  },
+  {
+   "kind": "heading",
+   "text": "Federally Authorized Practitioner – Client Privilege"
+  },
+  {
+   "kind": "paragraph",
+   "text": "Internal Revenue Code §7525, Confidentiality Privileges Related to Taxpayer Communication, provides a limited confidentiality privilege applying to tax advice in taxpayer communications with federally authorized tax practitioners in certain limited situations."
+  },
+  {
+   "kind": "paragraph",
+   "text": "While we will cooperate with you with respect to the privilege, asserting the privilege is your responsibility."
+  },
+  {
+   "kind": "heading",
+   "text": "Mediation"
+  },
+  {
+   "kind": "paragraph",
+   "text": "If a dispute arises out of or relates to this Agreement, including the scope of services contained herein, or the breach thereof, and it cannot be settled through negotiation, the parties agree first to try to settle the dispute by mediation administered by the American Arbitration Association (“AAA”) under the AAA Accounting and Related Services Arbitration Rules and Mediation Procedures before resorting to arbitration, litigation, or any other dispute resolution procedure. The mediator will be selected by mutual agreement of the parties. If the parties cannot agree on a mediator, a mediator shall be designated by the AAA. The mediation will be conducted in [State Name]."
+  },
+  {
+   "kind": "paragraph",
+   "text": "The mediation will be treated as a settlement discussion and, therefore, all discussions during the mediation will be confidential. The mediator may not testify for either party in any later proceeding related to the dispute. No recording or transcript shall be made of the mediation proceedings. The costs of any mediation proceedings shall be shared equally by all parties. Any costs of legal representation shall be borne by the hiring party."
+  },
+  {
+   "kind": "paragraph",
+   "text": "This provision shall not apply to any dispute of fees owed, billed or due."
+  },
+  {
+   "kind": "heading",
+   "text": "Limitation of Liability"
+  },
+  {
+   "kind": "paragraph",
+   "text": "**OUR** **Firm** **AND** **OUR** **FIRM’S OWNERS, OFFICERS, DIRECTORS, EMPLOYEES, AGENTS OR ASSIGNS (COLLECTIVELY “STAKEHOLDERS”)** **liability for all claims, damages, and costs arising from** **NEGLIGENT ACTS, ERRORS, OR OMISSIONS COMMITTED BY US in the PERFORMANCE OF** **this engagement is limited to [X] times the total amount of fees paid by you to** **US** **for THE service GIVING RISE TO THIS LIABILITY.** **IF THERE ARE NO FEES CHARGED TO YOU BY** **US**, **OUR** **LIABILITY FOR ALL CLAIMS, DAMAGES, AND COSTS ARISING FROM THIS ENGAGEMENT IS LIMITED TO {Fee}.**"
+  },
+  {
+   "kind": "heading",
+   "text": "Limitation of Damages"
+  },
+  {
+   "kind": "paragraph",
+   "text": "**Notwithstanding anything to the contrary in this Agreement,** **We** **AND** **STAKEHOLDERS** **shall not be liable for any lost profits, indirect, special, incidental, punitive**, **consequential, OR SIMILAR** **damages, TO THE EXTENT SUCH DAMAGES MAY BE LAWFULLY LIMITED** **OR EXCLUDED,** **of any nature even if we have been advised by you of the possibility of such damages.**"
+  },
+  {
+   "kind": "heading",
+   "text": "Indemnification of {Firm name}"
+  },
+  {
+   "kind": "paragraph",
+   "text": "The following is applicable to audit and attest clients only:"
+  },
+  {
+   "kind": "paragraph",
+   "text": "You agree to hold us harmless from any and all claims which arise from knowing misrepresentations to us, or the intentional withholding or concealment of information from us by your management. You also agree to indemnify us for any claims made against us by third parties, which arise from any of these actions by your management. The provisions of this paragraph shall apply regardless of the nature of the claim."
+  },
+  {
+   "kind": "paragraph",
+   "text": "The following applies to non-attest clients only:"
+  },
+  {
+   "kind": "paragraph",
+   "text": "You agree to indemnify, defend, and hold harmless our firm and Stakeholders with respect to any and all claims made by third parties arising from this engagement, regardless of the nature of the claim, and including the negligence of any party, excepting claims found to have arisen from the gross negligence or intentional acts of our firm."
+  },
+  {
+   "kind": "heading",
+   "text": "Designation of Venue and Jurisdiction"
+  },
+  {
+   "kind": "paragraph",
+   "text": "In the event of a dispute, the courts of the state of [State Name] shall have exclusive jurisdiction, and all disputes will be submitted to the [Name of State or Federal Court Desired]. We also agree that the law of the state of [State Name], except for laws governing the choice of law, shall govern all such disputes."
+  },
+  {
+   "kind": "heading",
+   "text": "Timing for Disputes"
+  },
+  {
+   "kind": "paragraph",
+   "text": "You agree that any claim arising out of this Agreement shall be commenced within [X] year(s) from the date our services conclude as outlined in the Timing of the Engagement section of the Agreement, regardless of any longer period of time for commencing such claim as may be set by law. A claim is understood to be a demand for money or services, the service of a suit, or the institution of arbitration proceedings against us."
+  },
+  {
+   "kind": "heading",
+   "text": "Insurance"
+  },
+  {
+   "kind": "paragraph",
+   "text": "We shall, during the term of the engagement and for [X] years after termination of same by either you or us, maintain in full force and effect, accountants professional liability insurance coverage from an insurer or insurers licensed to conduct business in the state of [State Name]."
+  },
+  {
+   "kind": "paragraph",
+   "text": "Upon your written request, we shall furnish certificates of insurance for the required insurance coverage. Such certificate of insurance shall indicate the minimum limits of liability per claim and in the aggregate, as required by you."
+  },
+  {
+   "kind": "heading",
+   "text": "Independent Contractor"
+  },
+  {
+   "kind": "paragraph",
+   "text": "When providing services to your company, we will function as an independent contractor and in no event will we or any of our employees be an officer of you, nor will our relationship be that of joint venturers, partners, employer and employee, principal and agent, or any similar relationship giving rise to a fiduciary duty to you."
+  },
+  {
+   "kind": "paragraph",
+   "text": "Our obligations under this Agreement are solely obligations of our firm, and no current or former partner, principal, shareholder, member, director, officer, employee, agent, or representative of our firm shall be subjected to any personal liability whatsoever to you or any person or entity."
+  },
+  {
+   "kind": "heading",
+   "text": "Severability"
+  },
+  {
+   "kind": "paragraph",
+   "text": "If any portion of this Agreement is deemed invalid or unenforceable, said finding shall not operate to invalidate the remainder of the terms set forth in this Agreement."
+  },
+  {
+   "kind": "heading",
+   "text": "Survivability"
+  },
+  {
+   "kind": "paragraph",
+   "text": "The following sections of this Terms and Conditions Addendum shall survive termination of the Agreement: Limitation of Liability, Limitation of Damages, Indemnification, and Timing for Disputes."
+  },
+  {
+   "kind": "heading",
+   "text": "Assignment, No Third-Party Beneficiaries"
+  },
+  {
+   "kind": "paragraph",
+   "text": "All parties acknowledge and agree that the obligations and responsibilities of this Agreement cannot be assigned to any third party except as agreed to in writing. This Agreement has been entered into solely between you and us, and no third-party beneficiaries are created hereby."
+  },
+  {
+   "kind": "heading",
+   "text": "Force Majeure"
+  },
+  {
+   "kind": "paragraph",
+   "text": "Neither party shall be held liable for any delays resulting from circumstances or causes beyond our reasonable control, including, without limitation, fire or other casualty, act of God, strike or labor dispute, war or other violence, epidemics or pandemics as defined by The Centers for Disease Control and Prevention, or any law, order or requirement of any governmental agency or authority. However, no Force Majeure event shall excuse you of any obligation to pay any outstanding invoice or fee or from any indemnification obligation under this Agreement."
+  },
+  {
+   "kind": "heading",
+   "text": "Electronic Signatures and Counterparts"
+  },
+  {
+   "kind": "paragraph",
+   "text": "Each party hereto agrees that any electronic signature intended to replicate a written signature shall be presumed valid, and we may reasonably rely upon it. For purposes hereof, “electronic signature” includes, but is not limited to, a scanned copy of a manual signature, an electronic copy of a manual signature affixed to a document, a signature incorporated into a document utilizing touchscreen capabilities, or a digital signature. Documents may be executed in one or more counterparts, each of which shall be considered an original instrument, but all of which shall be considered one and the same agreement."
+  },
+  {
+   "kind": "heading",
+   "text": "Entire Agreement"
+  },
+  {
+   "kind": "paragraph",
+   "text": "This Agreement, including this Terms and Conditions Addendum, represents the entire agreement of the parties and supersedes all previous oral, written or other understandings and agreements between the parties. Any modification to the terms of this Agreement must be made in writing and signed by both parties."
+  }
+ ]
+}
