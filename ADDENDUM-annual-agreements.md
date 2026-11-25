@@ -240,3 +240,7 @@ the portal's own step PDFs listed (and removable) in the client's uploads.
 - A **Monthly charge** column shows the amount, or "Failed <day>" in red. ⚠ is not used, because the fonts may lack it.
 - A count line: listed, open, and how many are waiting too long.
 - The rules are in `vf_portal::worklist`, with unit tests. The live agreement walkthrough's Step 2b checks the failed month on this page.
+
+## 13. A receipt printed at the office (owner 2026-11-25)
+
+When a client pays online (a balance, a tax return fee, an agreement payment, a monthly charge), the portal prints a receipt through Vibe Print: a slip or the letter receipt, the firm's choice. It is set up on the portal's staff page (Settings › Printing), and recorded in the portal's QUESTIONS P116. Vibe Files changes only its help (Balance owed › The receipt).

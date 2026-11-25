@@ -37,6 +37,10 @@ Vibe Files reads the balances every few minutes on every PC: the client's detail
 
 When a balance is paid the portal makes a **Payment receipt** PDF: what was paid, how, the card fee if any, and a log page of everything that happened to the balance (posted, the client seeing it, checkout, paid), with times, internet addresses and browsers. It arrives in the Portal inbox like a client's upload, named `<date paid> Payment receipt - <memo>.pdf`, and Intake files it in the client's `Billing/<year paid>` folder with the doc type Payment receipt (Intake's rule for it is there only while **Balance owed** is on). The client's own receipt has no log page.
 
+### A receipt printed at the office
+
+The portal can also print a receipt at the office when a client pays online, through Vibe Print, the appliance's print gateway: a receipt slip, or the letter receipt on an office printer. This covers balances, tax return fees, agreement payments and monthly charges. It is set up on the portal's staff page, **Settings › Printing**, not in Vibe Files, and prints even when no Vibe Files is open. A payment you mark paid in Vibe Files does not print.
+
 ## Balances list
 
 **Admin › Portal › Balances** lists every client's balances: those due, with a payment started, paid this month and expired this month. Click a client to open its window. **Read again** reads the portal now.
