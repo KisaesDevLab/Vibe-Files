@@ -241,68 +241,72 @@ pub(crate) fn received_row(root: &Path, dest: &Path, u: &Upload, now: &str) -> R
     }
 }
 
+/// Intake's hint for a received file (keyed by its SHA-256), when it has a doc type to give.
+fn hint_for(root: &Path, u: &Upload, name: &str) -> Option<vf_fs::hints::Hint> {
+    // PA-103: a file sent for a to-do item tells Intake where it came from, and its
+    // doc type when the item names one the firm has (the name turned into its id here,
+    // where the portal's name comes in: Intake's hints name ids).
+    // A paid balance's receipt (Addendum §16) is the firm's own record: doc type
+    // "Payment receipt"; Intake's managed rule files it in Billing\{Year paid}.
+    let (wanted, origin, source) = match (&u.balance, &u.request) {
+        (Some(_), _) => (RECEIPT_DOC_TYPE, "portal_balance", "firm"),
+        // An annual agreement's monthly charge: its receipt, the same doc type.
+        (None, _) if u.subscription.is_some() => (RECEIPT_DOC_TYPE, "portal_subscription", "firm"),
+        // A delivery's step PDF (Addendum §12.5): its step's doc type; filed in
+        // Income Tax\{Year}\Delivery by Intake's managed rule (an agreement's in
+        // Correspondence\{Year}\Engagement).
+        (None, _) if u.delivery.is_some() => (
+            u.delivery
+                .as_ref()
+                .and_then(|d| crate::delivery::doc_type_of(d.kind.as_deref(), &d.step))
+                .unwrap_or(""),
+            "portal_delivery",
+            "firm",
+        ),
+        (None, Some(r)) => (r.doc_type.as_str(), "portal_request", "client"),
+        (None, None) => ("", "", ""),
+    };
+    let doc_type = Some(wanted)
+        .filter(|d| !d.trim().is_empty())
+        .and_then(|d| {
+            let types = vf_fs::doctypes::load(root).ok().flatten()?;
+            vf_fs::doctypes::id_by_name(&types, d)
+        })?;
+    let mut h = vf_fs::hints::Hint::new(&u.sha256, name, origin, "portal");
+    h.source = Some(source.into());
+    // A receipt is the year it was paid: its name starts with the date paid.
+    if u.balance.is_some() || u.subscription.is_some() {
+        h.tax_year = u.name.get(..4).and_then(|y| y.parse().ok());
+    }
+    // A step PDF is the delivery's tax year.
+    if let Some(d) = &u.delivery {
+        h.tax_year = d.year;
+    }
+    h.doc_type = Some(doc_type);
+    Some(h)
+}
+
 /// Moves a claimed download into the inbox and logs it.
 fn finish(root: &Path, part: &Path, meta: &Path, u: &Upload, now: &str, report: &mut FetchReport) {
     let dir = inbox(root);
-    match move_into(part, &dir, &inbox_name(&u.client_name, &u.client_code, &u.name)) {
+    let name = inbox_name(&u.client_name, &u.client_code, &u.name);
+    // The hint is written before the file lands: Intake watches the inbox and could read the
+    // file first (mobile walkthrough 2026-11-25 caught a receipt without its hint). Hints are
+    // found by SHA-256, so a later " (2)" name or a move tried again changes nothing.
+    if let Some(h) = hint_for(root, u, &name)
+        && let Err(e) = vf_fs::hints::append(root, &h)
+    {
+        report.problems.push(format!(
+            "{}: its doc type could not be noted for Intake ({e})",
+            u.name
+        ));
+    }
+    match move_into(part, &dir, &name) {
         Ok(dest) => {
             let _ = std::fs::remove_file(meta);
             let row = received_row(root, &dest, u, now);
             if let Err(e) = append_received(root, std::slice::from_ref(&row)) {
                 report.problems.push(format!("The received list could not be written: {e}"));
-            }
-            // PA-103: a file sent for a to-do item tells Intake where it came from, and its
-            // doc type when the item names one the firm has (the name turned into its id here,
-            // where the portal's name comes in: Intake's hints name ids).
-            // A paid balance's receipt (Addendum §16) is the firm's own record: doc type
-            // "Payment receipt"; Intake's managed rule files it in Billing\{Year paid}.
-            let (wanted, origin, source) = match (&u.balance, &u.request) {
-                (Some(_), _) => (RECEIPT_DOC_TYPE, "portal_balance", "firm"),
-                // An annual agreement's monthly charge: its receipt, the same doc type.
-                (None, _) if u.subscription.is_some() => {
-                    (RECEIPT_DOC_TYPE, "portal_subscription", "firm")
-                }
-                // A delivery's step PDF (Addendum §12.5): its step's doc type; filed in
-                // Income Tax\{Year}\Delivery by Intake's managed rule (an agreement's in
-                // Correspondence\{Year}\Engagement).
-                (None, _) if u.delivery.is_some() => (
-                    u.delivery
-                        .as_ref()
-                        .and_then(|d| crate::delivery::doc_type_of(d.kind.as_deref(), &d.step))
-                        .unwrap_or(""),
-                    "portal_delivery",
-                    "firm",
-                ),
-                (None, Some(r)) => (r.doc_type.as_str(), "portal_request", "client"),
-                (None, None) => ("", "", ""),
-            };
-            let doc_type = Some(wanted)
-                .filter(|d| !d.trim().is_empty())
-                .and_then(|d| {
-                    let types = vf_fs::doctypes::load(root).ok().flatten()?;
-                    vf_fs::doctypes::id_by_name(&types, d)
-                });
-            if let Some(doc_type) = doc_type {
-                let name = dest
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_default();
-                let mut h = vf_fs::hints::Hint::new(&u.sha256, &name, origin, "portal");
-                h.source = Some(source.into());
-                // A receipt is the year it was paid: its name starts with the date paid.
-                if u.balance.is_some() || u.subscription.is_some() {
-                    h.tax_year = u.name.get(..4).and_then(|y| y.parse().ok());
-                }
-                // A step PDF is the delivery's tax year.
-                if let Some(d) = &u.delivery {
-                    h.tax_year = d.year;
-                }
-                h.doc_type = Some(doc_type);
-                if let Err(e) = vf_fs::hints::append(root, &h) {
-                    report
-                        .problems
-                        .push(format!("{}: its to-do item could not be noted for Intake ({e})", u.name));
-                }
             }
             report.received.push(row);
         }

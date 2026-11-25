@@ -1951,15 +1951,22 @@ mod tests {
         wait_long(&mut h, "the bulk list", &|h| {
             h.query_by_label(&tick).is_some() && !said(h, "Reading the portal")
         });
-        h.run_steps(4);
-        h.get_by_label(&tick).click();
+        // The list can still move as the portal's answer lands: tick until it says so.
+        for _ in 0..5 {
+            h.run_steps(4);
+            if said(&h, "1 ticked") {
+                break;
+            }
+            h.get_by_label(&tick).click();
+        }
         h.run_steps(3);
+        assert!(said(&h, "1 ticked"), "the client ticked");
         assert!(
             said(&h, "$120.00"),
             "the changed monthly amount carried over"
         );
         shot(&mut h, "12-bulk-agreements");
-        h.get_by_role_and_label(Role::Button, "Send 1 agreements")
+        h.get_by_role_and_label(Role::Button, "Send 1 agreement")
             .click();
         wait_long(&mut h, "bulk sent", &|h| said(h, "Sent 1 of 1 agreements."));
         let second = p
