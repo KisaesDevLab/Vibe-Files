@@ -216,12 +216,19 @@ mod tests {
             .with_size([1440.0, 1000.0])
             .build_eframe(move |cc| VibeFilesApp::new(&cc.egui_ctx, d.clone()));
         h.run_steps(8);
+        let dark = std::env::var("VF_SCREENS_DARK").is_ok_and(|v| v == "1");
+        if dark {
+            h.get_by_role_and_label(Role::Button, "Dark").click();
+            h.run_steps(4);
+        }
         let shot = |h: &mut egui_kittest::Harness<'static, VibeFilesApp>, name: &str| {
             for _ in 0..5 {
                 h.step();
             }
             match h.render() {
-                Ok(img) => img.save(out.join(format!("{name}.png"))).unwrap(),
+                Ok(img) => img
+                    .save(out.join(format!("{}{name}.png", if dark { "dark-" } else { "" })))
+                    .unwrap(),
                 Err(e) => eprintln!("{name}: {e}"),
             }
         };

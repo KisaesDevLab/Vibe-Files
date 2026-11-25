@@ -1455,9 +1455,18 @@ impl DeliverWindow {
                                 d.return_file.as_ref().is_some_and(|r| r.id == id)
                             };
                             let done = d.step(delivery::RETURN).is_some_and(|s| s.state == "done");
+                            // A file no one sees yet (a Send that stopped before it was shown)
+                            // is shown to everyone; one staff limited stays as it is.
+                            let unseen = |f: &vf_portal::api::PortalFile| {
+                                f.invites.is_empty() && f.users.iter().all(|u| !u.visible)
+                            };
                             let (file_id, added, replaced) = match p.file_for_doc(&doc.id)? {
-                                Some(f) if f.sha256 == doc.hash => (f.file_id, false, false),
+                                Some(f) if f.sha256 == doc.hash => {
+                                    let nobody = unseen(&f);
+                                    (f.file_id, nobody, false)
+                                }
                                 Some(f) => {
+                                    let nobody = unseen(&f);
                                     // New content for a return the client opened: only as a
                                     // revised return, asked for in the window.
                                     if done && is_return(&d, &f.file_id) && !seen {
@@ -1477,7 +1486,7 @@ impl DeliverWindow {
                                         &share_audit,
                                     )
                                     .map_err(vf_portal::PortalError::Local)?;
-                                    (id, false, true)
+                                    (id, nobody, true)
                                 }
                                 None => {
                                     b2.push(std::slice::from_ref(&doc.id))
@@ -1508,6 +1517,8 @@ impl DeliverWindow {
                                     p.set_delivery_return(&d.id, &file_id)?
                                 };
                             }
+                            // Shown to everyone of the client once it is the delivery's
+                            // return (locked), for a file new on the portal or seen by no one.
                             if added {
                                 let people = p.users(&client.id)?;
                                 let all: std::collections::BTreeMap<String, bool> = people
@@ -1907,4 +1918,30 @@ pub fn panel_line(read: Option<&Vec<Delivery>>, client_id: &str) -> Option<Strin
         .filter(|d| d.client_id == client_id && d.status == "open")
         .max_by(|a, b| a.created_at.cmp(&b.created_at))?;
     Some(format!("Tax return delivery: {}", d.line()))
+}
+
+#[cfg(test)]
+mod tests {
+    /// Intake's receipt and step rules follow the switches as Admin › Portal saves them (Q11):
+    /// the settings file Vibe Files writes is the one Intake reads.
+    #[test]
+    fn intake_reads_the_switches_as_saved() {
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path();
+        std::fs::create_dir_all(root.join("_Vibe")).unwrap();
+        assert_eq!(vf_ingest::parsers::portal_features(root), (false, false));
+        for (b, d) in [(true, true), (true, false), (false, true)] {
+            let s = vf_portal::PortalSettings::new(
+                "cab",
+                "https://portal.example.test",
+                "vpk_abcdefghijklmnopqrstuvwxyz0123456789",
+                0,
+            )
+            .unwrap()
+            .with_balances(b)
+            .with_deliveries(d);
+            vf_portal::settings::save(root, &s).unwrap();
+            assert_eq!(vf_ingest::parsers::portal_features(root), (b, d));
+        }
+    }
 }
