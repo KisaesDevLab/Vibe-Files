@@ -18,6 +18,8 @@ The preview shows each row of the export and the client it goes to, and how it w
 
 A wrong match would show one family's organizer to another, so nothing is sent until you press Send. A client has one organizer link a year: if two ticked rows go to the same client, Send waits until you untick one. Only https links on the organizer's site (`clients.stanfordtax.com`) are taken; a row for another tax year is left out. A client that is not on the portal yet is added, so the card is waiting when someone from that client signs in.
 
+**Tell the clients' people… (once)** is ticked to start: for each new link whose card shows, everyone with portal access at that client gets one email or text (the way they chose) saying their organizer is ready, with the portal's address and not the organizer link. Nobody is told again when you import the export again or a link or status changes. A client with nobody on the portal yet is counted, not told; the card waits for them.
+
 Importing a newer export later updates each client's status (Not seen yet, In progress, Submitted). Rows that are the same are left alone.
 
 ## On the client's portal
@@ -29,6 +31,8 @@ The card goes away when:
 - you create the client's tax return delivery for that tax year (**Deliver tax return…**);
 - the export says the return was delivered through the organizer app; or
 - you turn it off.
+
+Staff can see the card as the client does from the portal's staff page: **See this client's portal as they do** shows the organizer, tax return and balance cards, read only.
 
 ## Turning a card off or on
 

@@ -3047,10 +3047,9 @@ mod tests {
         h.run_steps(6);
         h.get_by_role_and_label(Role::Button, "Organizers").click();
         h.run_steps(6);
-        assert!(
-            said(&h, "None for this tax year"),
-            "the empty page says what to do"
-        );
+        wait_long(&mut h, "the empty page says what to do", &|h| {
+            said(h, "None for this tax year")
+        });
         let start_import = |h: &mut egui_kittest::Harness<'static, VibeFilesApp>| {
             let ctx = h.ctx.clone();
             open_mut(h).admin.as_mut().unwrap().organizers.start_import(
@@ -3088,6 +3087,14 @@ mod tests {
         h.get_by_role_and_label(Role::Button, "Send 4 links")
             .click();
         wait_long(&mut h, "sent", &|h| said(h, "Sent: 4 new"));
+        // Told is ticked to start; nobody has a portal login yet.
+        assert!(
+            said(
+                &h,
+                "0 people told their organizer is ready; 4 clients have nobody on the portal yet"
+            ),
+            "the message says who was told"
+        );
         shot(&mut h, "02-organizer-sent");
         note("Step 2: the second row for client 0 unticked, the name-only and the asking rows ticked: Send 4 links, 4 new (clients not on the portal yet added)".into());
         h.get_by_role_and_label(Role::Button, "Close").click();
@@ -3244,6 +3251,41 @@ mod tests {
                 false,
                 &[(clients[0].2.as_str(), "in_progress", &link("a1"))]
             )
+        ));
+        // ---- 9. A new link where people have access: they are told once, without the link.
+        let rows = vf_portal::organizer::read_export(&export).unwrap();
+        let r = p
+            .put_organizers(2026, &[(clients[2].0.clone(), &rows[2])], true)
+            .unwrap();
+        let mails: Vec<serde_json::Value> = std::fs::read_to_string(&log)
+            .unwrap_or_default()
+            .lines()
+            .filter(|l| l.contains("\"msg\":\"notify ("))
+            .filter_map(|l| serde_json::from_str(l).ok())
+            .filter(|m: &serde_json::Value| {
+                m["subject"]
+                    .as_str()
+                    .is_some_and(|s| s.contains("2026 tax organizer is ready"))
+            })
+            .collect();
+        let to: std::collections::BTreeSet<String> = mails
+            .iter()
+            .filter_map(|m| m["to"].as_str().map(str::to_string))
+            .collect();
+        assert_eq!(r.told as usize, to.len(), "{to:?}");
+        assert!(to.contains(&pa) && to.contains(&pb) && to.contains(&person("sam")));
+        assert!(
+            mails
+                .iter()
+                .all(|m| !m["body"].as_str().unwrap_or("").contains("stanfordtax"))
+        );
+        let again = p
+            .put_organizers(2026, &[(clients[2].0.clone(), &rows[2])], true)
+            .unwrap();
+        assert_eq!((again.same, again.told), (1, 0));
+        note(format!(
+            "Step 9: a 2026 link for client 2: {} people told once, by email, with the portal's address and no organizer link; sent again: nobody told",
+            r.told
         ));
         std::fs::write(out.join("organizer-steps.txt"), steps.join("\n")).unwrap();
     }

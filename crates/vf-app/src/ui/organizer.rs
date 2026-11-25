@@ -380,6 +380,8 @@ pub struct ImportWindow {
     send: Option<Receiver<Result<String, String>>>,
     msg: Option<String>,
     err: Option<String>,
+    /// Tell the clients' people their organizer is ready (owner Q&A 2026-11-25: once).
+    tell: bool,
     pub closed: bool,
     pub sent: bool,
 }
@@ -416,6 +418,7 @@ impl ImportWindow {
             send: None,
             msg: None,
             err: None,
+            tell: true,
             closed: false,
             sent: false,
         }
@@ -566,6 +569,14 @@ impl ImportWindow {
                         ),
                     );
                 }
+                ui.checkbox(
+                    &mut self.tell,
+                    "Tell the clients' people by email or text that their organizer is ready (once)",
+                )
+                .on_hover_text(
+                    "Each new link: everyone with portal access at the client, the way they chose; \
+                     the message has the portal's address, not the organizer link",
+                );
                 ui.horizontal(|ui| {
                     let n = ready.len();
                     if ui
@@ -579,10 +590,11 @@ impl ImportWindow {
                         .clicked()
                     {
                         self.err = None;
-                        let (s2, year, a) = (s.clone(), self.year, audit.clone());
+                        let (s2, year, a, tell) = (s.clone(), self.year, audit.clone(), self.tell);
                         let names: HashMap<String, ClientRef> =
                             clients.iter().map(|(k, (c, _))| (k.clone(), c.clone())).collect();
-                        self.send = Some(spawn(ctx, move || send(&s2, year, ready, &names, &a)));
+                        self.send =
+                            Some(spawn(ctx, move || send(&s2, year, ready, &names, &a, tell)));
                     }
                     if self.send.is_some() {
                         ui.spinner();
@@ -696,11 +708,14 @@ fn send(
     rows: Vec<(String, organizer::ExportRow)>,
     names: &HashMap<String, ClientRef>,
     audit: &Option<AuditOut>,
+    tell: bool,
 ) -> Result<String, String> {
     let p = core::client(s);
     let refs: Vec<(String, &organizer::ExportRow)> =
         rows.iter().map(|(c, r)| (c.clone(), r)).collect();
-    let mut r = p.put_organizers(year, &refs).map_err(|e| e.message())?;
+    let mut r = p
+        .put_organizers(year, &refs, tell)
+        .map_err(|e| e.message())?;
     let missing: Vec<&String> = r
         .refused
         .iter()
@@ -722,8 +737,12 @@ fn send(
             .cloned()
             .collect();
         if !again.is_empty() {
-            let r2 = p.put_organizers(year, &again).map_err(|e| e.message())?;
+            let r2 = p
+                .put_organizers(year, &again, tell)
+                .map_err(|e| e.message())?;
             r.added += r2.added;
+            r.told += r2.told;
+            r.nobody += r2.nobody;
             r.changed += r2.changed;
             r.same += r2.same;
             r.refused.retain(|x| !added.contains(&x.client_id));
@@ -739,6 +758,7 @@ fn send(
             "added": r.added,
             "changed": r.changed,
             "same": r.same,
+            "told": r.told,
             "refused": r.refused.len(),
         }),
     );
@@ -746,6 +766,21 @@ fn send(
         "Sent: {} new, {} changed, {} the same.",
         r.added, r.changed, r.same
     );
+    if tell && r.added > 0 {
+        m.push_str(&format!(
+            " {} {} told their organizer is ready",
+            r.told,
+            if r.told == 1 { "person" } else { "people" }
+        ));
+        if r.nobody > 0 {
+            m.push_str(&format!(
+                "; {} client{} nobody on the portal yet (the card waits for them)",
+                r.nobody,
+                if r.nobody == 1 { " has" } else { "s have" }
+            ));
+        }
+        m.push('.');
+    }
     if !r.refused.is_empty() {
         m.push_str(&format!(" {} not taken by the portal.", r.refused.len()));
     }

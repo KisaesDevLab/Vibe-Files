@@ -426,6 +426,12 @@ pub struct PutResult {
     pub added: u32,
     pub changed: u32,
     pub same: u32,
+    /// People told their organizer is ready (owner Q&A 2026-11-25: once, a new link).
+    #[serde(default)]
+    pub told: u32,
+    /// New links' clients with nobody on the portal yet (their card waits).
+    #[serde(default)]
+    pub nobody: u32,
     #[serde(default)]
     pub refused: Vec<Refused>,
 }
@@ -459,11 +465,13 @@ impl Portal {
         self.get::<R>("/organizers", &q).map(|r| r.organizers)
     }
 
-    /// Sends the matched rows of an export (a card turned off stays off).
+    /// Sends the matched rows of an export (a card turned off stays off); with `notify`, each
+    /// new link whose card shows is told to the client's people once.
     pub fn put_organizers(
         &self,
         tax_year: i32,
         rows: &[(String, &ExportRow)],
+        notify: bool,
     ) -> Result<PutResult> {
         let items: Vec<serde_json::Value> = rows
             .iter()
@@ -479,7 +487,7 @@ impl Portal {
             .collect();
         self.put_json_large(
             "/organizers",
-            &serde_json::json!({ "taxYear": tax_year, "items": items }),
+            &serde_json::json!({ "taxYear": tax_year, "items": items, "notify": notify }),
         )
     }
 
