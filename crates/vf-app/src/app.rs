@@ -1030,17 +1030,21 @@ impl eframe::App for VibeFilesApp {
             }
             // Addendum §12.6: deliveries read are copied into their client's folder.
             let reads = o.browse.portal.take_delivery_reads();
-            if !reads.is_empty()
-                && let Err(e) = crate::ui::delivery::record_reads(
+            if !reads.is_empty() || o.browse.portal.delivery_copies.busy() {
+                if let Err(e) = crate::ui::delivery::record_reads(
                     &mut o.opened.conn,
                     &o.opened.root,
                     &self.config.device_id,
+                    &mut o.browse.portal.delivery_copies,
                     reads,
-                )
-            {
-                o.browse.error = Some(format!(
-                    "A delivery could not be copied into its client's folder: {e}"
-                ));
+                ) {
+                    o.browse.error = Some(format!(
+                        "A delivery could not be copied into its client's folder: {e}"
+                    ));
+                }
+                if o.browse.portal.delivery_copies.busy() {
+                    ui.ctx().request_repaint();
+                }
             }
             // Addendum §16: balances read are copied into their client's folder.
             let reads = o.browse.portal.take_balance_reads();

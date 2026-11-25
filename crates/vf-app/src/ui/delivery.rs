@@ -33,21 +33,70 @@ impl ReadOut {
     }
 }
 
+/// The copies on this PC (load test 2026-11-24: 500 deliveries took 2.3 s to copy at once, and
+/// 0.1 s to read again unchanged, on the UI thread): what each delivery was last checked
+/// against, so an unchanged one costs no disk read, and those still to copy, a slice a frame.
+#[derive(Default)]
+pub struct Copies {
+    seen: HashMap<String, u64>,
+    pending: std::collections::VecDeque<Delivery>,
+}
+
+impl Copies {
+    /// Deliveries still to copy (the app calls again next frame).
+    pub fn busy(&self) -> bool {
+        !self.pending.is_empty()
+    }
+}
+
+/// The time a frame gives to looking at deliveries, and the copies it writes at most (a copy
+/// with its audit row costs about 10 ms to commit: 5 keep a frame near 50 ms; load test
+/// 2026-11-24).
+const COPY_SLICE: std::time::Duration = std::time::Duration::from_millis(60);
+const COPY_WRITES: usize = 5;
+
+fn fingerprint(d: &Delivery) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    serde_json::to_string(d).unwrap_or_default().hash(&mut h);
+    h.finish()
+}
+
 /// Writes the copies of deliveries read (only into a folder still bound to the client, only
-/// when changed), in one Transaction with an audit row each (`portal_delivery_copy`).
+/// when changed), in one Transaction with an audit row each (`portal_delivery_copy`). A
+/// delivery unchanged since this PC last checked it is skipped; what does not fit in one slice
+/// waits for the next frame.
 pub fn record_reads(
     conn: &mut vf_core::db::Connection,
     root: &Path,
     device_id: &str,
+    copies: &mut Copies,
     reads: Vec<Vec<Delivery>>,
 ) -> Result<(), String> {
+    for d in reads.into_iter().flatten() {
+        if copies.seen.get(&d.id) != Some(&fingerprint(&d)) {
+            copies.pending.retain(|x| x.id != d.id);
+            copies.pending.push_back(d);
+        }
+    }
+    if copies.pending.is_empty() {
+        return Ok(());
+    }
+    let start = std::time::Instant::now();
+    let mut done: Vec<(String, u64)> = Vec::new();
+    let mut writes = 0usize;
     let (pc, user) = core::who();
     let by = format!("{pc}\\{user}");
     let now = vf_core::now_rfc3339();
     let mut tx = vf_core::tx::Transaction::new("portal_delivery_copy").record_only();
     let mut any = false;
     let mut folders: HashMap<String, Option<String>> = HashMap::new();
-    for d in reads.into_iter().flatten() {
+    while let Some(d) = copies.pending.pop_front() {
+        if start.elapsed() > COPY_SLICE || writes >= COPY_WRITES {
+            copies.pending.push_front(d);
+            break;
+        }
+        done.push((d.id.clone(), fingerprint(&d)));
         let folder = folders
             .entry(d.client_id.clone())
             .or_insert_with(|| {
@@ -74,6 +123,7 @@ pub fn record_reads(
             continue;
         };
         any = true;
+        writes += 1;
         tx = tx
             .file(vf_core::tx::FileOp::AppendLines {
                 path,
@@ -90,13 +140,13 @@ pub fn record_reads(
                 }),
             ));
     }
-    if !any {
-        return Ok(());
+    if any {
+        let mut fs = vf_fs::fileops::FilerFileOps::new(&[root]).map_err(|e| e.to_string())?;
+        tx.commit(conn, &mut fs, &vf_core::tx::Actor::device(device_id))
+            .map_err(|e| e.to_string())?;
     }
-    let mut fs = vf_fs::fileops::FilerFileOps::new(&[root]).map_err(|e| e.to_string())?;
-    tx.commit(conn, &mut fs, &vf_core::tx::Actor::device(device_id))
-        .map(|_| ())
-        .map_err(|e| e.to_string())
+    copies.seen.extend(done);
+    Ok(())
 }
 
 // ---- The Deliver tax return window -------------------------------------------------------------
@@ -1740,11 +1790,14 @@ pub struct DeliveriesPage {
     reads: Option<ReadOut>,
     /// Browse's B2-first state (the return is shared through B2 first).
     pub b2: crate::ui::portal::B2First,
+    /// The portal settings, read again every 30 s (not every frame; load test 2026-11-24).
+    settings: Option<(std::time::Instant, Option<vf_portal::PortalSettings>)>,
 }
 
 impl DeliveriesPage {
     pub fn reread(&mut self) {
         self.loaded = false;
+        self.settings = None;
     }
     pub fn connected(&self) -> bool {
         self.audit.is_some()
@@ -1788,9 +1841,17 @@ fn days_since(at: &str) -> i64 {
 
 pub fn page(ui: &mut egui::Ui, page: &mut DeliveriesPage, env: &mut crate::ui::browse::Env) {
     ui.heading("Deliveries");
-    let settings = vf_fs::cabinet::read(env.root)
-        .ok()
-        .and_then(|c| vf_portal::settings::load(env.root, &c.cabinet_id));
+    if page
+        .settings
+        .as_ref()
+        .is_none_or(|(at, _)| at.elapsed() >= std::time::Duration::from_secs(30))
+    {
+        let s = vf_fs::cabinet::read(env.root)
+            .ok()
+            .and_then(|c| vf_portal::settings::load(env.root, &c.cabinet_id));
+        page.settings = Some((std::time::Instant::now(), s));
+    }
+    let settings = page.settings.as_ref().and_then(|(_, s)| s.clone());
     let Some(s) = settings.filter(|s| s.deliveries) else {
         ui.label("Tax return delivery is off for this cabinet. Turn it on in Admin › Portal.");
         return;
@@ -1859,34 +1920,62 @@ pub fn page(ui: &mut egui::Ui, page: &mut DeliveriesPage, env: &mut crate::ui::b
         if rows.is_empty() {
             ui.label(widgets::caption("None."));
         }
-        egui::Grid::new("deliveries-list")
-            .num_columns(5)
+        // Only the rows on screen are drawn (500 open deliveries in a season: load test
+        // 2026-11-24).
+        use egui_extras::{Column, TableBuilder};
+        TableBuilder::new(ui)
             .striped(true)
-            .spacing([14.0, 6.0])
-            .show(ui, |ui| {
-                for h in ["Client", "Year", "Type", "Step waiting", "Days"] {
-                    ui.label(RichText::new(h).small().color(theme::ink_muted()));
+            .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
+            .column(
+                Column::initial(320.0)
+                    .at_least(160.0)
+                    .clip(true)
+                    .resizable(true),
+            )
+            .column(Column::exact(50.0))
+            .column(Column::exact(70.0))
+            .column(Column::initial(260.0).at_least(140.0).clip(true))
+            .column(Column::remainder().at_least(50.0))
+            .max_scroll_height(f32::INFINITY)
+            .header(22.0, |mut h| {
+                for name in ["Client", "Year", "Type", "Step waiting", "Days"] {
+                    h.col(|ui| {
+                        ui.label(RichText::new(name).small().color(theme::ink_muted()));
+                    });
                 }
-                ui.end_row();
-                for d in rows {
-                    let name = page
-                        .clients
-                        .get(&d.client_id)
-                        .map(|(c, _)| format!("{} ({})", c.name, c.code))
-                        .unwrap_or_else(|| "(not in this cabinet)".into());
-                    if ui.link(&name).clicked() {
-                        open = Some(d.client_id.clone());
-                    }
-                    ui.label(d.tax_year.to_string());
-                    ui.label(&d.return_type);
-                    ui.label(
-                        d.waiting()
-                            .map(|s| format!("{} · {}", s.name, delivery::state_words(&s.state)))
-                            .unwrap_or_default(),
-                    );
-                    ui.label(days_since(&d.created_at).to_string());
-                    ui.end_row();
-                }
+            })
+            .body(|body| {
+                body.rows(24.0, rows.len(), |mut row| {
+                    let d = rows[row.index()];
+                    row.col(|ui| {
+                        let name = page
+                            .clients
+                            .get(&d.client_id)
+                            .map(|(c, _)| format!("{} ({})", c.name, c.code))
+                            .unwrap_or_else(|| "(not in this cabinet)".into());
+                        if ui.link(name).clicked() {
+                            open = Some(d.client_id.clone());
+                        }
+                    });
+                    row.col(|ui| {
+                        ui.label(d.tax_year.to_string());
+                    });
+                    row.col(|ui| {
+                        ui.label(&d.return_type);
+                    });
+                    row.col(|ui| {
+                        ui.label(
+                            d.waiting()
+                                .map(|s| {
+                                    format!("{} · {}", s.name, delivery::state_words(&s.state))
+                                })
+                                .unwrap_or_default(),
+                        );
+                    });
+                    row.col(|ui| {
+                        ui.label(days_since(&d.created_at).to_string());
+                    });
+                });
             });
     }
     if let Some(id) = open

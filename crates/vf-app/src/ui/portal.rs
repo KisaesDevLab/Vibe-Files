@@ -218,6 +218,8 @@ pub struct PortalState {
     deliveries_at: Option<Instant>,
     delivery_tx: Sender<Vec<vf_portal::delivery::Delivery>>,
     delivery_rx: Receiver<Vec<vf_portal::delivery::Delivery>>,
+    /// The deliveries' copies in their client folders, on this PC.
+    pub delivery_copies: crate::ui::delivery::Copies,
     /// Failed bank payments of delivery fees already seen on this PC (F3: each said once).
     failed_seen: Option<HashSet<String>>,
 }
@@ -275,6 +277,7 @@ impl Default for PortalState {
             deliveries_at: None,
             delivery_tx,
             delivery_rx,
+            delivery_copies: Default::default(),
             failed_seen: None,
         }
     }

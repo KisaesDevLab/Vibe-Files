@@ -1110,7 +1110,34 @@ Not built from §15.6 (logged):
 
 | # | Question | Default taken |
 |---|---|---|
-| Q41 | "New return type…" on Letter templates | Not built: the return types are the portal's four (1040, 1120, 1120-S, 1065). |
-| Q42 | "Preview with a client…" (a real client's values) | Preview uses invented people; a real client's letters are previewed in the Deliver window (Preview letters…). |
-| Q43 | Drag handles on add-ons | An up arrow moves an add-on. |
-| Q44 | "Where the plan is used" on Pricing plans | Not shown: deliveries keep their own priced snapshot. |
+| Q41 | "New return type…" on Letter templates | Not built: the return types are the portal's four (1040, 1120, 1120-S, 1065).  Built later the same day (below). |
+| Q42 | "Preview with a client…" (a real client's values) | Preview uses invented people; a real client's letters are previewed in the Deliver window (Preview letters…).  Built later the same day (below). |
+| Q43 | Drag handles on add-ons | An up arrow moves an add-on.  Built later the same day (below). |
+| Q44 | "Where the plan is used" on Pricing plans | Not shown: deliveries keep their own priced snapshot.  Built later the same day (below). |
+
+### Extras, setup guide and load test (owner 2026-11-24)
+
+The owner asked for Q41-Q44 to be built, the setup guide and the load test.
+
+- Q41: **New return type…** on Letter templates adds one of the firm's own (990, 1041, CA 540),
+  signed by the taxpayer and spouse or by an officer, kept in `_Vibe/return_types.json` and
+  offered by letters, pricing plans and the Deliver window. The portal takes any short name
+  (migration 0041; letters, digits, space, dot, dash, slash, up to 24).
+- Q42: Preview **with** a client of the cabinet (name, ID, signers from Portal contacts) or
+  invented people.
+- Q43: add-ons moved by a drag handle (checked with real pointer events in the screens test).
+- Q44: Pricing plans' **Used by**: the deliveries of the plan's year and return type with a fee
+  priced from a plan (`GET /deliveries?taxYear&returnType`), read on a thread.
+- `docs/firm-setup.md` (portal): Payments and tax return delivery: Stripe in test mode first,
+  the webhook and its four events, methods, card fee, the switches, letters and prices, a
+  test-mode try, going live, a payment that is wrong.
+
+Load test, 500 synthetic deliveries (`scripts/delivery-walkthrough/load.mjs`, Postgres):
+
+| What | Before | After |
+|---|---|---|
+| `GET /deliveries` (500, 756 KB) | 4.0 s (eight queries a delivery) | 70 ms (`loadMany`: seven queries in all) |
+| Hourly reminder sweep, 500 due (pglite, notices sent) | 5.9 s | (background; 12 ms with none due) |
+| Vibe Files: copies into 500 client folders, first read | 2.3 s on the UI thread | 5 copies a frame: 100 frames, the longest 43 ms |
+| Vibe Files: the same read again, nothing changed | 0.1 s on the UI thread (more on a share) | 4 ms, no disk read (remembered on this PC) |
+| Deliveries page | 500 rows laid out a frame; settings files read a frame | only the rows on screen; settings every 30 s |

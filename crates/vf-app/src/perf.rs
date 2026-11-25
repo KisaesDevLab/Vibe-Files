@@ -537,4 +537,101 @@ mod scale {
         eprintln!("documents {total}");
         assert!(failed.is_empty(), "over budget: {failed:#?}");
     }
+
+    /// Load test (Addendum 02, owner 2026-11-24): the deliveries a test portal holds (seeded by
+    /// `scripts/delivery-walkthrough/load.mjs`, 500) copied into 500 client folders, as the
+    /// Deliveries page's read does on the UI thread: the first read (every copy written) and a
+    /// read again (nothing changed). `VF_LOAD_URL` and `VF_LOAD_KEY` name the portal.
+    #[test]
+    #[ignore = "load test: run in release with --ignored against a seeded test portal"]
+    fn deliveries_500() {
+        use std::collections::BTreeMap;
+
+        use filer_core::clients::Client;
+        let (Ok(url), Ok(key)) = (std::env::var("VF_LOAD_URL"), std::env::var("VF_LOAD_KEY"))
+        else {
+            return;
+        };
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path().join("Clients");
+        let data = t.path().join("data");
+        std::fs::create_dir_all(&data).unwrap();
+        let firm = uuid::Uuid::new_v4();
+        vf_fs::cabinet::create(
+            &root,
+            &CabinetFile {
+                cabinet_id: vf_core::new_id(),
+                firm_id: firm.to_string(),
+                schema_version: vf_core::db::SCHEMA_VERSION,
+                layout_version: 1,
+                created: vf_core::now_rfc3339(),
+                name: Some("Load".into()),
+            },
+        )
+        .unwrap();
+        let s = vf_portal::PortalSettings::new("load", &url, &key, 0).unwrap();
+        let t0 = Instant::now();
+        let list = crate::portal::client(&s).deliveries(None).unwrap();
+        eprintln!("read {} deliveries in {:?}", list.len(), t0.elapsed());
+        let mut conn =
+            vf_core::db::open(&data.join(crate::session::CATALOG_FILE), Storage::Local).unwrap();
+        // A client folder for each delivery's client, bound by its sentinel.
+        let tx = conn.transaction().unwrap();
+        for (c, d) in list.iter().enumerate() {
+            let folder = format!("Load Client {c:04} (L{c:04})");
+            std::fs::create_dir_all(root.join(&folder)).unwrap();
+            let cl = Client {
+                id: format!("L{c:04}"),
+                uuid: uuid::Uuid::parse_str(&d.client_id).unwrap(),
+                name: format!("Load Client {c:04}"),
+                extra: BTreeMap::new(),
+            };
+            filer_intake::sentinel::write_sentinel(&root, &root.join(&folder), &cl, firm).unwrap();
+            tx.execute(
+                "INSERT INTO client (id, ext_id, name, folder_rel, extra, device_id, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, '{}', 'dev', 't')",
+                params![
+                    d.client_id,
+                    format!("L{c:04}"),
+                    format!("Load Client {c:04}"),
+                    folder
+                ],
+            )
+            .unwrap();
+        }
+        tx.commit().unwrap();
+        let mut copies = crate::ui::delivery::Copies::default();
+        for pass in ["first read (all written)", "read again (none changed)"] {
+            let t0 = Instant::now();
+            let mut reads = vec![list.clone()];
+            let (mut slices, mut longest) = (0, Duration::ZERO);
+            loop {
+                let s = Instant::now();
+                crate::ui::delivery::record_reads(
+                    &mut conn,
+                    &root,
+                    "dev",
+                    &mut copies,
+                    std::mem::take(&mut reads),
+                )
+                .unwrap();
+                slices += 1;
+                longest = longest.max(s.elapsed());
+                if !copies.busy() {
+                    break;
+                }
+            }
+            eprintln!(
+                "{pass}: {:?} in {slices} frames, the longest {:?}",
+                t0.elapsed(),
+                longest
+            );
+        }
+        let copied = std::fs::read_dir(&root)
+            .unwrap()
+            .flatten()
+            .filter(|e| e.path().join("_Vibe").join("delivery").is_dir())
+            .count();
+        assert_eq!(copied, list.len());
+    }
 }
