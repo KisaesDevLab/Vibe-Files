@@ -16,7 +16,7 @@ The preview shows each row of the export and the client it goes to, and how it w
 - **Name only**: only the name matches. A suggestion, not ticked: tick it if it is right.
 - **No match**: pick the client yourself with **Find a client** in the list.
 
-A wrong match would show one family's organizer to another, so nothing is sent until you press Send. Only https links on the organizer's site (`clients.stanfordtax.com`) are taken; a row for another tax year is left out. A client that is not on the portal yet is added, so the card is waiting when someone from that client signs in.
+A wrong match would show one family's organizer to another, so nothing is sent until you press Send. A client has one organizer link a year: if two ticked rows go to the same client, Send waits until you untick one. Only https links on the organizer's site (`clients.stanfordtax.com`) are taken; a row for another tax year is left out. A client that is not on the portal yet is added, so the card is waiting when someone from that client signs in.
 
 Importing a newer export later updates each client's status (Not seen yet, In progress, Submitted). Rows that are the same are left alone.
 
