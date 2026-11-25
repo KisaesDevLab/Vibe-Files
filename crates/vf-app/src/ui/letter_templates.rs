@@ -49,6 +49,13 @@ pub struct LetterTemplatesPage {
     focus_next: Option<(At, usize)>,
     preview_type: String,
     copy_to: String,
+    /// The return types: the four built in and the firm's own (Q41).
+    types: Vec<String>,
+    /// Preview with a client (Q42): the client chosen (id, code, name) and the search text.
+    preview_client: Option<(String, String, String)>,
+    client_q: String,
+    /// New return type…: open, its name, and whether the taxpayer and spouse sign.
+    new_type: Option<(String, bool)>,
     confirm_delete: bool,
     msg: Option<String>,
     err: Option<String>,
@@ -608,6 +615,84 @@ pub fn sample_fields(firm: &str, year: i32, return_type: &str) -> Fields {
     f
 }
 
+/// A client's own values for Preview (Q42): their name and ID, the signers from their Portal
+/// contacts (the taxpayer and spouse for a return signed so, else the contact as the signer),
+/// the tax year, the return type, the firm and the date. The fee fields have no value outside a
+/// delivery, so they show as written.
+pub fn client_fields(
+    root: &std::path::Path,
+    client: &(String, String, String),
+    year: i32,
+    return_type: &str,
+) -> Fields {
+    let (id, code, name) = client;
+    let row = vf_fs::contacts::record(root, id)
+        .map(|r| r.effective())
+        .unwrap_or_default();
+    let full = |a: &str, b: &str| format!("{} {}", a.trim(), b.trim()).trim().to_string();
+    let taxpayer = full(&row.first, &row.last);
+    let spouse = full(&row.spouse_first, &row.spouse_last);
+    let individual = vf_portal::delivery::is_individual(root, return_type);
+    let firsts: Vec<&str> = [row.first.trim(), row.spouse_first.trim()]
+        .into_iter()
+        .filter(|s| !s.is_empty())
+        .take(if individual { 2 } else { 1 })
+        .collect();
+    let firm = vf_fs::cabinet::read(root)
+        .ok()
+        .and_then(|c| c.name)
+        .unwrap_or_default();
+    let mut f = Fields::new();
+    for (k, v) in [
+        ("Client name", name.clone()),
+        ("Client ID", code.clone()),
+        ("Signer first names", firsts.join(" and ")),
+        (
+            "Taxpayer name",
+            if individual {
+                taxpayer.clone()
+            } else {
+                String::new()
+            },
+        ),
+        (
+            "Spouse name",
+            if individual { spouse } else { String::new() },
+        ),
+        (
+            "Signer name",
+            if individual { String::new() } else { taxpayer },
+        ),
+        ("Tax year", year.to_string()),
+        ("Next year", (year + 1).to_string()),
+        ("Return type", return_type.to_string()),
+        ("Firm name", firm),
+        (
+            "Date",
+            chrono::Local::now().format("%B %-d, %Y").to_string(),
+        ),
+    ] {
+        if !v.is_empty() {
+            f.insert(k.into(), v);
+        }
+    }
+    f
+}
+
+/// Clients whose name or ID holds `q` (at most 8), for Preview with a client.
+fn find_clients(conn: &vf_core::db::Connection, q: &str) -> Vec<(String, String, String)> {
+    let like = format!("%{}%", q.trim().replace(['%', '_'], ""));
+    let Ok(mut st) = conn.prepare(
+        "SELECT id, ext_id, name FROM client WHERE deleted_at IS NULL
+         AND (name LIKE ?1 OR ext_id LIKE ?1) ORDER BY name LIMIT 8",
+    ) else {
+        return Vec::new();
+    };
+    st.query_map([like], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+        .map(|rows| rows.filter_map(Result::ok).collect())
+        .unwrap_or_default()
+}
+
 /// Where letter previews are written: `<data>\cache\letters` (owner 2026-11-24, Q27), set
 /// when the app starts; emptied then and when the app closes (they hold client names).
 static PREVIEW_DIR: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
@@ -661,6 +746,7 @@ pub fn page(ui: &mut egui::Ui, page: &mut LetterTemplatesPage, env: &mut crate::
     if !page.loaded {
         page.loaded = true;
         page.err = store::seed_if_missing(env.root).err();
+        page.types = vf_portal::delivery::return_type_names(env.root);
         match store::load_all(env.root) {
             Ok(t) => page.templates = t,
             Err(e) => page.err = Some(e),
@@ -690,6 +776,7 @@ pub fn page(ui: &mut egui::Ui, page: &mut LetterTemplatesPage, env: &mut crate::
                 page.msg = None;
                 next = Some(Some(t));
             }
+            new_return_type(ui, page, env);
         });
         ui.separator();
         let Some(d) = d.as_mut() else {
@@ -748,7 +835,7 @@ fn letter_list(
         });
     }
     ui.add_space(6.0);
-    let groups = std::iter::once(None).chain(vf_portal::delivery::RETURN_TYPES.map(Some));
+    let groups = std::iter::once(None).chain(page.types.iter().map(|t| Some(t.as_str())));
     for rt in groups {
         let these: Vec<&Template> = page
             .templates
@@ -787,6 +874,65 @@ fn letter_list(
         ui.add_space(4.0);
     }
     pick
+}
+
+/// New return type… (Q41): a return type of the firm's own (990, 1041, CA 540…), for every
+/// PC; letters, pricing plans and deliveries then offer it.
+fn new_return_type(
+    ui: &mut egui::Ui,
+    page: &mut LetterTemplatesPage,
+    env: &mut crate::ui::browse::Env,
+) {
+    ui.add_space(6.0);
+    let Some((name, individual)) = &mut page.new_type else {
+        if ui.button("New return type…").clicked() {
+            page.new_type = Some((String::new(), false));
+        }
+        return;
+    };
+    ui.label(RichText::new("New return type").strong());
+    widgets::named(
+        ui.add(
+            egui::TextEdit::singleline(name)
+                .desired_width(180.0)
+                .hint_text("e.g. 990 or CA 540"),
+        ),
+        "Return type name",
+    );
+    ui.radio_value(individual, true, "Signed by the taxpayer and spouse");
+    ui.radio_value(individual, false, "Signed by an officer or partner");
+    let (mut add, mut cancel) = (false, false);
+    ui.horizontal(|ui| {
+        add = ui.add(widgets::primary_button("Add")).clicked();
+        cancel = ui.button("Cancel").clicked();
+    });
+    if cancel {
+        page.new_type = None;
+    } else if add {
+        let (n, ind) = (name.clone(), *individual);
+        match vf_portal::delivery::add_return_type(env.root, &n, ind) {
+            Ok(t) => {
+                let unrecorded = crate::ui::portal::record(
+                    env,
+                    "return_type_add",
+                    vec![AuditEntry::new(
+                        "return_type_add",
+                        None,
+                        serde_json::json!({ "name": t.name, "individual": t.individual }),
+                    )],
+                )
+                .unwrap_or_default();
+                page.types = vf_portal::delivery::return_type_names(env.root);
+                page.msg = Some(format!(
+                    "Added the {} return type: tick it on a letter to offer the letter for it.{unrecorded}",
+                    t.name
+                ));
+                page.err = None;
+                page.new_type = None;
+            }
+            Err(e) => page.err = Some(e),
+        }
+    }
 }
 
 fn toolbar(ui: &mut egui::Ui, page: &mut LetterTemplatesPage, d: &mut Template) {
@@ -1127,6 +1273,8 @@ fn side(
     d: &mut Template,
     env: &mut crate::ui::browse::Env,
 ) -> Option<Option<Template>> {
+    let types = page.types.clone();
+    let is_type = |x: &str| types.iter().any(|t| t == x);
     ui.label(RichText::new("This letter").strong());
     ui.label("Name the client sees");
     widgets::named(
@@ -1135,9 +1283,9 @@ fn side(
     );
     ui.label("Return types (none ticked: every return)");
     ui.horizontal_wrapped(|ui| {
-        for rt in vf_portal::delivery::RETURN_TYPES {
+        for rt in &types {
             let mut on = d.return_types.iter().any(|x| x == rt);
-            if ui.checkbox(&mut on, rt).changed() {
+            if ui.checkbox(&mut on, rt.as_str()).changed() {
                 d.return_types.retain(|x| x != rt);
                 if on {
                     d.return_types.push(rt.to_string());
@@ -1189,9 +1337,9 @@ fn side(
         ui.label("Only for (none ticked: every return)");
         let only = only_for_mut(&mut d.blocks[i]);
         ui.horizontal_wrapped(|ui| {
-            for rt in vf_portal::delivery::RETURN_TYPES {
+            for rt in &types {
                 let mut on = only.iter().any(|x| x == rt);
-                if ui.checkbox(&mut on, rt).changed() {
+                if ui.checkbox(&mut on, rt.as_str()).changed() {
                     only.retain(|x| x != rt);
                     if on {
                         only.push(rt.to_string());
@@ -1201,7 +1349,7 @@ fn side(
         });
         let mut pkgs = only
             .iter()
-            .filter(|x| !vf_portal::delivery::RETURN_TYPES.contains(&x.as_str()))
+            .filter(|x| !is_type(x))
             .cloned()
             .collect::<Vec<_>>()
             .join(", ");
@@ -1215,7 +1363,7 @@ fn side(
                 )
                 .changed()
             {
-                only.retain(|x| vf_portal::delivery::RETURN_TYPES.contains(&x.as_str()));
+                only.retain(|x| is_type(x));
                 only.extend(
                     pkgs.split(',')
                         .map(str::trim)
@@ -1265,8 +1413,9 @@ fn side(
     });
     ui.separator();
     // Preview, Copy, Save, Delete.
-    let offered: Vec<&str> = vf_portal::delivery::RETURN_TYPES
-        .into_iter()
+    let offered: Vec<&str> = types
+        .iter()
+        .map(String::as_str)
         .filter(|rt| d.offered_for(rt))
         .collect();
     if !offered.contains(&page.preview_type.as_str()) {
@@ -1292,11 +1441,47 @@ fn side(
                 .unwrap_or(2026)
                 - 1;
             let rt = page.preview_type.clone();
-            if let Err(e) = preview(d, &sample_fields(&firm, year, &rt), &rt) {
+            let fields = match &page.preview_client {
+                Some(c) => client_fields(env.root, c, year, &rt),
+                None => sample_fields(&firm, year, &rt),
+            };
+            if let Err(e) = preview(d, &fields, &rt) {
                 page.err = Some(e);
             }
         }
     });
+    // With: invented people, or a client of the cabinet (Q42).
+    ui.horizontal(|ui| {
+        ui.label("with");
+        let shown = page
+            .preview_client
+            .as_ref()
+            .map(|c| format!("{} ({})", c.2, c.1))
+            .unwrap_or_else(|| "invented people".into());
+        ui.label(RichText::new(shown).strong());
+        if page.preview_client.is_some() && ui.small_button("Invented people").clicked() {
+            page.preview_client = None;
+        }
+    });
+    widgets::named(
+        ui.add(
+            egui::TextEdit::singleline(&mut page.client_q)
+                .desired_width(f32::INFINITY)
+                .hint_text("Find a client to preview with"),
+        ),
+        "Preview client",
+    );
+    if page.client_q.trim().chars().count() >= 2 {
+        for c in find_clients(env.conn, &page.client_q) {
+            if ui
+                .selectable_label(false, format!("{} ({})", c.2, c.1))
+                .clicked()
+            {
+                page.preview_client = Some(c);
+                page.client_q.clear();
+            }
+        }
+    }
     let mut open: Option<Option<Template>> = None;
     ui.horizontal(|ui| {
         if page.copy_to.is_empty() {
@@ -1305,8 +1490,8 @@ fn side(
         egui::ComboBox::from_id_salt("letter-copy-to")
             .selected_text(&page.copy_to)
             .show_ui(ui, |ui| {
-                for rt in vf_portal::delivery::RETURN_TYPES {
-                    ui.selectable_value(&mut page.copy_to, rt.to_string(), rt);
+                for rt in &types {
+                    ui.selectable_value(&mut page.copy_to, rt.clone(), rt.as_str());
                 }
             });
         if ui

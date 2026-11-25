@@ -10,7 +10,7 @@ The first time, Vibe Files adds samples: an engagement letter for a 1040, one fo
 
 ## Editing a letter
 
-The letters are listed on the left by the return types they are for. Choose one, or press **New letter…**. The middle shows the letter on a page as it prints; click in it and type.
+The letters are listed on the left by the return types they are for. Choose one, or press **New letter…**. **New return type…** under the list adds one of your own (990, 1041, a state return such as CA 540), signed by the taxpayer and spouse or by an officer or partner; letters, pricing plans and **Deliver tax return…** then offer it. Tick it on a letter to offer the letter for it. The middle shows the letter on a page as it prints; click in it and type.
 
 - **Enter** starts a new paragraph (in a list, a new item); **Shift+Enter** breaks the line. Backspace in an empty list item removes it.
 - The toolbar: **Heading** turns the paragraph the cursor is in into a heading (or back); **B** and **I** make the selected words bold or italic (with nothing selected, what you type next); **List** turns the paragraph into a list, a line an item (or back); **Table** adds a table of cells, with **Add row**, **Add column**, **Remove row** and **Remove column** under it, the first row bold; **Insert field** puts a field such as `{Client name}`, `{Tax year}` or `{Fee}` where the cursor is; **Insert signature** adds a signature block (Taxpayer, Spouse, or Officer or partner). Right of the toolbar: **Saved** or **Not saved**.
@@ -22,7 +22,7 @@ On the right:
 - **This letter**: **Name the client sees**, the **Return types** it is offered for (none ticked: every return), **Letter** or **Package addendum** and its package, **Filed as** (the doc type), **On the firm's letterhead** and **Ticked in a new delivery**.
 - **This block** (the one the cursor is in, marked on the page's left edge): **Only for** some return types or packages (`Advantage`), so one letter serves several returns; **Move up**, **Move down**, **Remove**; for a signature block, who signs.
 - **Fields**: click one to put it where the cursor is.
-- **Preview…** lays the letter out for invented people as the return type chosen beside it and opens it. **Copy to this return type** makes a new letter with this text for the return type chosen (Save keeps it). **Save** keeps the letter as the next version; empty list items and table rows are left out. **Delete…** removes it; deliveries already sent keep their copy.
+- **Preview…** lays the letter out as the return type chosen beside it and opens it, **with** invented people, or with a client you find in the box below (their name, ID and signers from their Portal contacts; the fee fields show as written outside a delivery). **Copy to this return type** makes a new letter with this text for the return type chosen (Save keeps it). **Save** keeps the letter as the next version; empty list items and table rows are left out. **Delete…** removes it; deliveries already sent keep their copy.
 
 Previews are written in the `cache\letters` folder of Vibe Files' data and emptied when Vibe Files closes.
 

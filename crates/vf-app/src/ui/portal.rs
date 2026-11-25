@@ -96,7 +96,7 @@ pub(crate) fn record(env: &mut Env, label: &str, entries: Vec<AuditEntry>) -> Op
     .err()
     .map(|e| format!(" This was NOT recorded in the audit trail: {e}"))
 }
-fn cabinet_id(root: &Path) -> Option<String> {
+pub(crate) fn cabinet_id(root: &Path) -> Option<String> {
     vf_fs::cabinet::read(root).ok().map(|c| c.cabinet_id)
 }
 

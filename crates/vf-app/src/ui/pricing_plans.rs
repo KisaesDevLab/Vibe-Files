@@ -26,6 +26,10 @@ pub struct PricingPlansPage {
     /// bullets yet, stays until Save.
     rows: Vec<String>,
     tab: Tab,
+    /// "Used by" (Q44): the deliveries sent with this plan's year and return type and a fee
+    /// priced from a plan, read from the portal on a thread when the plan opens.
+    used: Option<Result<Vec<UsedBy>, String>>,
+    used_job: Option<std::sync::mpsc::Receiver<Result<Vec<UsedBy>, String>>>,
     /// A sample return fee for "As the client sees it".
     sample_fee: String,
     msg: Option<String>,
@@ -37,11 +41,78 @@ impl PricingPlansPage {
         self.loaded = false;
     }
 
+    /// The add-ons' names in their order (screens).
+    #[cfg(test)]
+    pub fn addon_names(&self) -> Vec<String> {
+        self.draft
+            .as_ref()
+            .map(|d| d.addons.iter().map(|a| a.name.clone()).collect())
+            .unwrap_or_default()
+    }
+
     fn open(&mut self, plan: Plan) {
+        self.used = None;
+        self.used_job = None;
         self.rows = grid_rows(&plan.packages);
         self.draft = Some(plan);
         self.msg = None;
     }
+}
+
+/// A delivery a plan was used for: its client, title, status and fee total.
+#[derive(Debug, Clone)]
+pub struct UsedBy {
+    pub client_id: String,
+    pub title: String,
+    pub status: String,
+    pub total_cents: u64,
+}
+
+/// Asks the portal (on a thread) for the deliveries of a plan's year and return type whose
+/// fee was priced from a plan (packages, or base fee and add-ons).
+fn read_used(
+    ctx: &egui::Context,
+    used: &mut Option<Result<Vec<UsedBy>, String>>,
+    job: &mut Option<std::sync::mpsc::Receiver<Result<Vec<UsedBy>, String>>>,
+    root: &std::path::Path,
+    plan: &Plan,
+) {
+    let Some(s) = crate::ui::portal::cabinet_id(root)
+        .and_then(|id| vf_portal::settings::load(root, &id))
+        .filter(|s| s.deliveries)
+    else {
+        *used = Some(Ok(Vec::new()));
+        return;
+    };
+    let (year, rt) = (plan.tax_year, plan.return_type.clone());
+    *job = Some(crate::ui::portal::spawn(ctx, move || {
+        crate::portal::client(&s)
+            .deliveries_for(year, &rt)
+            .map(|ds| {
+                ds.into_iter()
+                    .filter_map(|d| {
+                        let f = d.fee?;
+                        matches!(f.mode.as_deref(), Some("packages" | "addons")).then(|| UsedBy {
+                            client_id: d.client_id,
+                            title: d.title,
+                            status: d.status,
+                            total_cents: f.total_cents,
+                        })
+                    })
+                    .collect()
+            })
+            .map_err(|e| e.message())
+    }));
+}
+
+/// Client names for "Used by", from the catalog.
+fn client_name(conn: &vf_core::db::Connection, id: &str) -> String {
+    conn.query_row(
+        "SELECT name || ' (' || ext_id || ')' FROM client WHERE id = ?1",
+        [id],
+        |r| r.get::<_, String>(0),
+    )
+    .unwrap_or_else(|_| "A client no longer in the list".into())
 }
 
 // ---- The packages grid: a column per package, a row per service (§15.6). A view over each
@@ -172,8 +243,8 @@ fn editor(ui: &mut egui::Ui, page: &mut PricingPlansPage, env: &mut crate::ui::b
         egui::ComboBox::from_id_salt("plan-type")
             .selected_text(&d.return_type)
             .show_ui(ui, |ui| {
-                for rt in vf_portal::delivery::RETURN_TYPES {
-                    ui.selectable_value(&mut d.return_type, rt.to_string(), rt);
+                for rt in vf_portal::delivery::return_type_names(env.root) {
+                    ui.selectable_value(&mut d.return_type, rt.clone(), rt);
                 }
             });
         ui.label("Tax year");
@@ -231,6 +302,60 @@ fn editor(ui: &mut egui::Ui, page: &mut PricingPlansPage, env: &mut crate::ui::b
                 }
             } else {
                 ui.label(widgets::caption("Type an amount, e.g. 1,265.68."));
+            }
+            ui.separator();
+            ui.label(RichText::new("Used by").strong());
+            if let Some(rx) = &page.used_job
+                && let Ok(r) = rx.try_recv()
+            {
+                page.used = Some(r);
+                page.used_job = None;
+            }
+            if page.used.is_none() && page.used_job.is_none() {
+                read_used(ui.ctx(), &mut page.used, &mut page.used_job, env.root, d);
+            }
+            match &page.used {
+                None => {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.label(widgets::caption("Reading the portal…"));
+                    });
+                }
+                Some(Err(e)) => {
+                    ui.colored_label(theme::error(), format!("Not read: {e}"));
+                }
+                Some(Ok(v)) if v.is_empty() => {
+                    ui.label(widgets::caption(
+                        "No delivery has been sent with this plan's prices.",
+                    ));
+                }
+                Some(Ok(v)) => {
+                    ui.label(widgets::caption(format!(
+                        "{} {} sent with this plan's prices. They keep the prices they were \
+                         sent with: a change here is for new deliveries only.",
+                        v.len(),
+                        if v.len() == 1 {
+                            "delivery was"
+                        } else {
+                            "deliveries were"
+                        }
+                    )));
+                    for u in v.iter().take(12) {
+                        ui.label(format!(
+                            "{}: {}, {}",
+                            client_name(env.conn, &u.client_id),
+                            money(u.total_cents),
+                            u.status
+                        ))
+                        .on_hover_text(&u.title);
+                    }
+                    if v.len() > 12 {
+                        ui.label(widgets::caption(format!("and {} more", v.len() - 12)));
+                    }
+                }
+            }
+            if ui.small_button("Read again").clicked() {
+                page.used = None;
             }
         });
     });
@@ -473,11 +598,18 @@ fn packages_grid(ui: &mut egui::Ui, d: &mut Plan, rows: &mut Vec<String>) {
     ));
 }
 
-/// Add-ons: Name, What the client reads, Price, Offered unless unticked.
+/// An item moved from one place in a list to another.
+fn move_item<T>(v: &mut Vec<T>, from: usize, to: usize) {
+    if from < v.len() && to < v.len() && from != to {
+        let x = v.remove(from);
+        v.insert(to, x);
+    }
+}
+
+/// Add-ons: a drag handle (Q43), Name, What the client reads, Price, Offered unless unticked.
 fn addons_table(ui: &mut egui::Ui, d: &mut Plan) {
     let mut remove_add = None;
-    let mut up = None;
-    let n = d.addons.len();
+    let mut row_y: Vec<f32> = Vec::new();
     egui::Grid::new("plan-addons")
         .num_columns(6)
         .striped(true)
@@ -491,12 +623,26 @@ fn addons_table(ui: &mut egui::Ui, d: &mut Plan) {
             ui.label("");
             ui.end_row();
             for (i, a) in d.addons.iter_mut().enumerate() {
-                if ui
-                    .add_enabled(i > 0, egui::Button::new("↑").small())
-                    .clicked()
-                {
-                    up = Some(i);
-                }
+                // The handle: three short lines, dragged to move the add-on.
+                let r = ui
+                    .dnd_drag_source(egui::Id::unique(("plan-addon-drag", i)), i, |ui| {
+                        let (rect, _) =
+                            ui.allocate_exact_size(egui::vec2(16.0, 18.0), egui::Sense::hover());
+                        let c = theme::ink_muted();
+                        for k in 0..3 {
+                            let y = rect.top() + 5.0 + k as f32 * 4.0;
+                            ui.painter().line_segment(
+                                [
+                                    egui::pos2(rect.left() + 2.0, y),
+                                    egui::pos2(rect.right() - 2.0, y),
+                                ],
+                                egui::Stroke::new(1.5, c),
+                            );
+                        }
+                    })
+                    .response;
+                row_y.push(r.rect.center().y);
+                widgets::named(r.on_hover_text("Drag to move"), "Move add-on");
                 ui.add(egui::TextEdit::singleline(&mut a.name).desired_width(160.0));
                 ui.add(
                     egui::TextEdit::singleline(&mut a.text)
@@ -521,8 +667,20 @@ fn addons_table(ui: &mut egui::Ui, d: &mut Plan) {
                 ui.end_row();
             }
         });
-    if let Some(i) = up.filter(|&i| i > 0 && i < n) {
-        d.addons.swap(i - 1, i);
+    // Dropped: the add-on goes to the row nearest the pointer.
+    if let Some(from) = egui::DragAndDrop::payload::<usize>(ui.ctx())
+        && ui.input(|i| i.pointer.any_released())
+    {
+        if let Some(p) = ui.input(|i| i.pointer.interact_pos())
+            && let Some(to) = row_y
+                .iter()
+                .enumerate()
+                .min_by(|a, b| (a.1 - p.y).abs().total_cmp(&(b.1 - p.y).abs()))
+                .map(|x| x.0)
+        {
+            move_item(&mut d.addons, *from, to);
+        }
+        egui::DragAndDrop::clear_payload(ui.ctx());
     }
     if let Some(i) = remove_add {
         d.addons.remove(i);
@@ -579,6 +737,17 @@ mod tests {
         }
         assert_eq!(plan.packages, before);
         assert_eq!(cell(&plan.packages[0], "Notices: IRS; state"), "");
+    }
+
+    #[test]
+    fn add_ons_move_where_dropped() {
+        let mut v = vec!['a', 'b', 'c', 'd'];
+        move_item(&mut v, 0, 2);
+        assert_eq!(v, ['b', 'c', 'a', 'd']);
+        move_item(&mut v, 3, 0);
+        assert_eq!(v, ['d', 'b', 'c', 'a']);
+        move_item(&mut v, 1, 9);
+        assert_eq!(v, ['d', 'b', 'c', 'a']);
     }
 
     #[test]

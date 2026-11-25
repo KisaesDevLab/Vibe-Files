@@ -12,9 +12,9 @@ Press **New plan…** to start from the sample, or choose a plan on the left. Se
 - Then a row per service (Return, Notices, Planning…): its name on the left, and in each package's cell the lines the client compares, one a line. An empty cell is not shown for that package. Rename a service on the left; **Remove** takes the row out of every package.
 - **Add package** and **Add service** add a column or a row; **Remove package** under a column takes it out.
 
-**Add-ons** (the second tab) is a table: name, what the client reads, price, and **Offered unless unticked**; the arrow moves an add-on up.
+**Add-ons** (the second tab) is a table: name, what the client reads, price, and **Offered unless unticked**; drag an add-on by its handle (the three lines on the left) to move it.
 
-**As the client sees it**, on the right, works the prices out for a return fee you type. **Save** keeps the plan; **Copy to next year…** makes next year's plan from this one; **Delete** removes it.
+**As the client sees it**, on the right, works the prices out for a return fee you type. **Used by** below it lists the deliveries sent with this plan's tax year and return type and a fee priced from a plan, read from the portal: they keep the prices they were sent with. **Save** keeps the plan; **Copy to next year…** makes next year's plan from this one; **Delete** removes it.
 
 ## In a delivery
 

@@ -170,6 +170,8 @@ pub struct DeliverWindow {
     /// itself) and the one chosen as the return.
     docs: Vec<crate::ui::portal::DocRef>,
     return_doc: Option<String>,
+    /// The return types offered: the four built in and the firm's own (Q41).
+    types: Vec<String>,
     /// The return's content changed since the client opened it (found when sending).
     force_revise: bool,
     /// Documents go to B2 before they are shared (Q-103).
@@ -204,7 +206,9 @@ impl DeliverWindow {
         b2: crate::ui::portal::B2First,
     ) -> Self {
         let year = default_year();
+        let types = vf_portal::delivery::return_type_names(&root);
         let mut w = Self {
+            types,
             closed: false,
             client,
             root,
@@ -273,7 +277,7 @@ impl DeliverWindow {
             .unwrap_or_default();
         let name = |a: &str, b: &str| format!("{} {}", a.trim(), b.trim()).trim().to_string();
         let opt = |s: &str| Some(s.trim().to_string()).filter(|s| !s.is_empty());
-        self.signers = if self.return_type == "1040" {
+        self.signers = if vf_portal::delivery::is_individual(&self.root, &self.return_type) {
             let mut v = vec![DeliverySigner {
                 id: String::new(),
                 role: "taxpayer".into(),
@@ -716,8 +720,8 @@ impl DeliverWindow {
                 egui::ComboBox::from_id_salt("delivery-type")
                     .selected_text(&self.return_type)
                     .show_ui(ui, |ui| {
-                        for t in delivery::RETURN_TYPES {
-                            ui.selectable_value(&mut self.return_type, t.to_string(), t);
+                        for t in self.types.clone() {
+                            ui.selectable_value(&mut self.return_type, t.clone(), t);
                         }
                     });
             });

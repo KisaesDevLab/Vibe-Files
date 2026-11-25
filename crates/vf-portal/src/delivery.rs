@@ -13,6 +13,98 @@ use crate::api::{Portal, PortalError, Result, Status};
 
 pub const RETURN_TYPES: [&str; 4] = ["1040", "1120", "1120-S", "1065"];
 
+/// The firm's own return types (owner 2026-11-24, Q41), beside the four built in:
+/// `_Vibe/return_types.json`.
+pub const RETURN_TYPES_FILE: &str = "return_types.json";
+
+/// A return type and who signs for it: the taxpayer and spouse (as a 1040), or an officer or
+/// partner with a title (as an entity).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReturnType {
+    pub name: String,
+    #[serde(default)]
+    pub individual: bool,
+}
+
+fn return_types_path(root: &Path) -> PathBuf {
+    root.join(vf_fs::cabinet::VIBE_DIR).join(RETURN_TYPES_FILE)
+}
+
+fn own_return_types(root: &Path) -> Vec<ReturnType> {
+    std::fs::read(return_types_path(root))
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default()
+}
+
+/// The four built in, then the firm's own in the order added.
+pub fn return_types(root: &Path) -> Vec<ReturnType> {
+    let mut out: Vec<ReturnType> = RETURN_TYPES
+        .iter()
+        .map(|n| ReturnType {
+            name: n.to_string(),
+            individual: *n == "1040",
+        })
+        .collect();
+    for t in own_return_types(root) {
+        if !out.iter().any(|x| x.name.eq_ignore_ascii_case(&t.name)) {
+            out.push(t);
+        }
+    }
+    out
+}
+
+pub fn return_type_names(root: &Path) -> Vec<String> {
+    return_types(root).into_iter().map(|t| t.name).collect()
+}
+
+/// Signed by the taxpayer and spouse (1040, and the firm's own marked so).
+pub fn is_individual(root: &Path, name: &str) -> bool {
+    return_types(root)
+        .iter()
+        .find(|t| t.name.eq_ignore_ascii_case(name))
+        .is_some_and(|t| t.individual)
+}
+
+/// A return type's name as the portal takes it: letters, digits, space, dot, dash and slash,
+/// up to 24, starting with a letter or digit.
+pub fn valid_return_type(name: &str) -> std::result::Result<String, String> {
+    let n = name.trim();
+    let ok = !n.is_empty()
+        && n.chars().count() <= 24
+        && n.chars().next().is_some_and(|c| c.is_ascii_alphanumeric())
+        && n.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, ' ' | '.' | '-' | '/'));
+    if ok {
+        Ok(n.to_string())
+    } else {
+        Err("A return type is up to 24 letters, digits, spaces, dots, dashes or slashes, e.g. 990 or CA 540.".into())
+    }
+}
+
+/// Adds one of the firm's own return types (for every PC).
+pub fn add_return_type(
+    root: &Path,
+    name: &str,
+    individual: bool,
+) -> std::result::Result<ReturnType, String> {
+    let name = valid_return_type(name)?;
+    if return_types(root)
+        .iter()
+        .any(|t| t.name.eq_ignore_ascii_case(&name))
+    {
+        return Err(format!("{name} is a return type already."));
+    }
+    vf_fs::lock::with(root, "return_types", "the return types", || {
+        let mut own = own_return_types(root);
+        let t = ReturnType { name, individual };
+        own.push(t.clone());
+        let bytes = serde_json::to_vec_pretty(&own).expect("serializes");
+        vf_fs::cabinet::write_replace(&return_types_path(root), &bytes)?;
+        Ok(t)
+    })
+}
+
 /// Step kinds, in their order on the card (§1).
 pub const LETTERS: &str = "letters";
 pub const RETURN: &str = "return";
@@ -373,6 +465,20 @@ impl Portal {
         self.get::<R>("/deliveries", &q).map(|r| r.deliveries)
     }
 
+    /// The deliveries of a tax year and return type (a pricing plan's, Q44).
+    pub fn deliveries_for(&self, tax_year: i32, return_type: &str) -> Result<Vec<Delivery>> {
+        #[derive(Deserialize)]
+        struct R {
+            deliveries: Vec<Delivery>,
+        }
+        let y = tax_year.to_string();
+        self.get::<R>(
+            "/deliveries",
+            &[("taxYear", y.as_str()), ("returnType", return_type)],
+        )
+        .map(|r| r.deliveries)
+    }
+
     pub fn delivery(&self, id: &str) -> Result<Delivery> {
         self.get::<One>(&format!("/deliveries/{id}"), &[])
             .map(|r| r.delivery)
@@ -675,6 +781,25 @@ pub fn read_copies(root: &Path, folder_rel: &str) -> Vec<CopyLine> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_firms_own_return_types() {
+        let d = tempfile::tempdir().unwrap();
+        let root = d.path();
+        std::fs::create_dir_all(root.join("_Vibe")).unwrap();
+        assert_eq!(return_type_names(root), RETURN_TYPES);
+        assert!(is_individual(root, "1040") && !is_individual(root, "1065"));
+        add_return_type(root, " CA 540 ", true).unwrap();
+        add_return_type(root, "990", false).unwrap();
+        assert!(add_return_type(root, "ca 540", false).is_err());
+        assert!(add_return_type(root, "<b>", false).is_err());
+        assert!(add_return_type(root, &"9".repeat(25), false).is_err());
+        assert_eq!(
+            return_type_names(root),
+            ["1040", "1120", "1120-S", "1065", "CA 540", "990"]
+        );
+        assert!(is_individual(root, "CA 540") && !is_individual(root, "990"));
+    }
 
     /// A delivery as the portal's tests answer it (Vibe-Portal deliveries.test.ts).
     pub(crate) const DELIVERY_JSON: &str = r#"{

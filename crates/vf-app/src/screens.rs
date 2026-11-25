@@ -309,6 +309,51 @@ mod tests {
         h.get_all_by_label("Add-ons").next().unwrap().click();
         h.run_steps(6);
         shot(&mut h, "plans-2-addons");
+        // Q43: the first add-on dragged by its handle below the second.
+        let names = |h: &egui_kittest::Harness<'static, VibeFilesApp>| {
+            let o = match &h.state().screen {
+                crate::app::Screen::Open(o) => o,
+                _ => panic!("not open"),
+            };
+            o.admin.as_ref().unwrap().pricing_plans.addon_names()
+        };
+        let before = names(&h);
+        let handles: Vec<egui::Rect> = h
+            .get_all_by_label("Move add-on")
+            .map(|n| n.rect())
+            .collect();
+        let (from, to) = (
+            handles[0].center(),
+            handles[1].center() + egui::vec2(0.0, 4.0),
+        );
+        h.event(egui::Event::PointerMoved(from));
+        h.step();
+        h.event(egui::Event::PointerButton {
+            pos: from,
+            button: egui::PointerButton::Primary,
+            pressed: true,
+            modifiers: Default::default(),
+        });
+        h.step();
+        for k in 1..=6 {
+            h.event(egui::Event::PointerMoved(
+                from + (to - from) * (k as f32 / 6.0),
+            ));
+            h.step();
+        }
+        h.event(egui::Event::PointerButton {
+            pos: to,
+            button: egui::PointerButton::Primary,
+            pressed: false,
+            modifiers: Default::default(),
+        });
+        h.run_steps(3);
+        let after = names(&h);
+        assert_eq!(
+            after,
+            [before[1].clone(), before[0].clone()],
+            "{before:?} then {after:?}"
+        );
     }
 
     /// PA-103: the to-do lists window and Admin › To-do templates, against a portal stand-in on
