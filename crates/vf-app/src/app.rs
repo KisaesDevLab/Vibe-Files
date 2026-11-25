@@ -997,6 +997,29 @@ impl eframe::App for VibeFilesApp {
                 o.browse.portal.lists_from =
                     Some((o.opened.catalog.clone(), o.opened.sync_device.clone()));
             }
+            // Once a session: the doc types and Intake rules the portal's files need, for a
+            // cabinet whose switches were turned on before an update added some (review
+            // 2026-11-25).
+            if !o.browse.portal.doc_types_checked {
+                o.browse.portal.doc_types_checked = true;
+                if let Some(s) = o.browse.portal.settings(&o.opened.root).cloned()
+                    && (s.deliveries || s.balances)
+                {
+                    let (receipt, delivery) = crate::ui::portal::ensure_doc_types(
+                        &mut o.opened.conn,
+                        &o.opened.root,
+                        &self.config.device_id,
+                        &s,
+                    );
+                    if let Err(e) = vf_ingest::parsers::sync_filer_rules_report(&o.opened.root) {
+                        tracing::warn!("intake rules not updated: {e}");
+                    }
+                    let said = format!("{receipt}{delivery}");
+                    if said.contains("could not") || said.contains("not yet in the catalog") {
+                        tracing::warn!("portal doc types:{said}");
+                    }
+                }
+            }
             let received = o.browse.portal.tick(ui.ctx(), &o.opened.root);
             o.intake.ingest.portal = o.browse.portal.intake_line(&o.opened.root);
             if !received.is_empty() {

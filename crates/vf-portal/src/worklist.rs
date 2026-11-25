@@ -132,7 +132,7 @@ pub fn rows<'a>(
             if d.status == "open" {
                 d.waiting().is_some_and(|s| s.kind == k)
             } else {
-                d.step(k).is_some()
+                d.step(k).is_some_and(|s| s.present)
             }
         }
     };
@@ -226,6 +226,19 @@ mod tests {
         // The monthly charge shows on agreements only.
         let all = rows(&list, &subs, Show::Open, None);
         assert!(all[0].monthly.is_none() && all[1].monthly.is_some());
+    }
+
+    #[test]
+    fn a_finished_delivery_without_a_step_is_not_listed_under_it() {
+        let mut no_fee = d("r9", "c9", "return", 2025, "complete", "");
+        for s in no_fee.steps.iter_mut().filter(|s| s.kind == "fee") {
+            s.present = false;
+        }
+        let list = vec![no_fee, d("r8", "c8", "return", 2025, "complete", "")];
+        assert_eq!(
+            ids(&rows(&list, &[], Show::Step("fee"), Some(2025))),
+            ["r8"]
+        );
     }
 
     #[test]

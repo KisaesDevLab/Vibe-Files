@@ -602,7 +602,9 @@ impl Portal {
         self.get::<R>("/deliveries", &q).map(|r| r.deliveries)
     }
 
-    /// A client's annual agreements, newest first.
+    /// A client's annual agreements, newest first (as listed: without their events). An older
+    /// portal ignores `kind` and lists every delivery: only agreements are kept (review
+    /// 2026-11-25: the return deliveries came back twice).
     pub fn agreements(&self, client_id: &str) -> Result<Vec<Delivery>> {
         #[derive(Deserialize)]
         struct R {
@@ -612,7 +614,12 @@ impl Portal {
             "/deliveries",
             &[("kind", "agreement"), ("clientId", client_id)],
         )
-        .map(|r| r.deliveries)
+        .map(|r| {
+            r.deliveries
+                .into_iter()
+                .filter(Delivery::is_agreement)
+                .collect()
+        })
     }
 
     /// The deliveries of a tax year and return type (a pricing plan's, Q44).

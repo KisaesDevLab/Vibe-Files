@@ -212,6 +212,22 @@ impl Template {
         out
     }
 
+    /// Every fill-in in the template, whatever return type, signer or package a block is only
+    /// for (the editor's warning; review 2026-11-25: blocks "only for" one were missed).
+    pub fn all_fill_ins(&self) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for b in &self.blocks {
+            for s in b.texts() {
+                for f in fill_ins_in(s) {
+                    if !out.contains(&f) {
+                        out.push(f);
+                    }
+                }
+            }
+        }
+        out
+    }
+
     /// The signer roles this letter asks for, for a return with or without a spouse.
     pub fn roles(&self, return_type: &str, package: Option<&str>, has_spouse: bool) -> Vec<String> {
         let mut out: Vec<String> = Vec::new();
@@ -456,6 +472,8 @@ mod tests {
         };
         assert_eq!(t.fill_ins("1120|Entity", None), ["[X]"]);
         assert!(t.fill_ins("1040|Individual", None).is_empty());
+        // The editor sees it whatever the block is only for.
+        assert_eq!(t.all_fill_ins(), ["[X]"]);
         let mut terms = t.clone();
         terms.kind = TERMS.into();
         terms.blocks = vec![Block::Heading {

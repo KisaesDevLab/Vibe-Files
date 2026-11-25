@@ -607,11 +607,16 @@ impl DeliverWindow {
                     // With its events (the list read leaves them out).
                     ds.push(p.delivery(&d.id)?);
                 }
-                // The client's annual agreements: one signed for this return skips its
-                // letters (A11). None on a portal without agreements.
-                ds.extend(p.agreements(&id).unwrap_or_default());
+                // The client's annual agreements, with their events: one signed for this
+                // return skips its letters (A11). None on a portal without agreements.
+                let status = p.status().ok();
+                if status.as_ref().is_some_and(|s| s.has_agreements()) {
+                    for a in p.agreements(&id).unwrap_or_default() {
+                        ds.push(p.delivery(&a.id)?);
+                    }
+                }
                 let files = p.files_for_client(&id)?;
-                let firm = p.status().map(|s| s.firm_name).unwrap_or_default();
+                let firm = status.map(|s| s.firm_name).unwrap_or_default();
                 let staff = p.delivery_staff(&id).unwrap_or_default();
                 Ok((ds, files, firm, staff))
             })())
@@ -1451,10 +1456,14 @@ impl DeliverWindow {
                 } else {
                     None
                 };
+                // Each addendum as sent (with the firm's Terms where the template asks), and
+                // never with a fill-in left (A17; review 2026-11-25: addenda skipped both).
+                let mut addenda_left: Vec<String> = Vec::new();
                 let addenda: Vec<(String, vf_letters::Template, vf_letters::Laid)> = match &fee {
                     Some((mode, lines)) if mode == "packages" && current.is_none() => {
                         let templates = vf_letters::store::load_all(&self.root).unwrap_or_default();
                         let base = self.fields();
+                        let ctx = delivery::letter_context(&self.root, &self.return_type);
                         lines
                             .iter()
                             .filter(|l| l.kind == "package")
@@ -1465,21 +1474,28 @@ impl DeliverWindow {
                                             .as_deref()
                                             .is_some_and(|p| p.eq_ignore_ascii_case(&l.name))
                                 })?;
+                                let sent = vf_letters::store::as_sent(t, &templates);
+                                let left = sent.fill_ins(&ctx, Some(&l.name));
+                                if !left.is_empty() {
+                                    addenda_left.push(format!("{}: {}", t.name, left.join(", ")));
+                                }
                                 let mut f = base.clone();
                                 f.insert("Package name".into(), l.name.clone());
                                 f.insert("Package fee".into(), vf_portal::balance::money(l.cents));
-                                let laid = vf_letters::layout(
-                                    t,
-                                    &f,
-                                    &delivery::letter_context(&self.root, &self.return_type),
-                                    Some(&l.name),
-                                );
+                                let laid = vf_letters::layout(&sent, &f, &ctx, Some(&l.name));
                                 Some((l.key.clone(), t.clone(), laid))
                             })
                             .collect()
                     }
                     _ => Vec::new(),
                 };
+                if !addenda_left.is_empty() {
+                    self.err = Some(format!(
+                        "Fill in the package addendum before sending (Admin › Portal › Letter templates). {}",
+                        addenda_left.join("; ")
+                    ));
+                    return;
+                }
                 // The letters, laid out now (sent once, while the delivery has none).
                 let letters: Vec<(vf_letters::Template, vf_letters::Laid)> =
                     if self.with_letters && current.as_ref().is_none_or(|d| d.letters.is_empty()) {

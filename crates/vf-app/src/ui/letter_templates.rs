@@ -1338,7 +1338,7 @@ fn side(
         ui.radio_value(&mut d.kind, vf_letters::CLOSURE.to_string(), "Closure letter")
             .on_hover_text("Sent by End engagement…: read on the portal, not signed.");
     });
-    let left = d.fill_ins("", None);
+    let left = d.all_fill_ins();
     if !left.is_empty() {
         ui.colored_label(
             theme::warn(),

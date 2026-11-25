@@ -441,6 +441,11 @@ pub struct AgreementWindow {
     individual: bool,
     agreements: Vec<Delivery>,
     subscriptions: Vec<Subscription>,
+    /// A change to the monthly charge is in progress: read the charge back when it is done
+    /// (review 2026-11-25: cleared at once, it vanished even when the portal refused).
+    monthly_changing: bool,
+    /// Read the client's agreements and charge again (after a change that went through).
+    reload: bool,
     year: i32,
     title: String,
     rows: Vec<Row>,
@@ -498,6 +503,8 @@ impl AgreementWindow {
             individual,
             agreements: Vec::new(),
             subscriptions: Vec::new(),
+            monthly_changing: false,
+            reload: false,
             year,
             title: format!("Your {year} service agreement"),
             rows,
@@ -711,13 +718,24 @@ impl AgreementWindow {
                 });
             }
             Done::Saved(Err(e), _) => self.err = Some(e),
-            Done::Said(Ok(s)) => self.said = Some(s),
-            Done::Said(Err(e)) => self.err = Some(e),
+            Done::Said(Ok(s)) => {
+                self.said = Some(s);
+                self.reload = std::mem::take(&mut self.monthly_changing);
+            }
+            Done::Said(Err(e)) => {
+                self.err = Some(e);
+                self.monthly_changing = false;
+            }
         }
     }
 
     pub fn show(&mut self, ctx: &egui::Context, s: &PortalSettings) {
         self.take_done();
+        if std::mem::take(&mut self.reload) && self.job.is_none() {
+            let said = self.said.clone();
+            self.load(ctx, s);
+            self.said = said;
+        }
         let busy = self.job.is_some();
         let mut open_win = true;
         let mut act: Option<&'static str> = None;
@@ -1144,7 +1162,14 @@ impl AgreementWindow {
         match act {
             "reload" => self.load(ctx, s),
             "preview" => {
-                let Ok(plan) = self.plan() else { return };
+                // Said as Send says it (review 2026-11-25: Preview did nothing, silently).
+                let plan = match self.plan() {
+                    Ok(p) => p,
+                    Err(e) => {
+                        self.err = Some(e);
+                        return;
+                    }
+                };
                 let all = vf_letters::store::load_all(&self.root).unwrap_or_default();
                 let ctxs = plan.context();
                 let dir = crate::ui::letter_templates::preview_dir();
@@ -1288,9 +1313,9 @@ impl AgreementWindow {
             }
             _ => {}
         }
-        // A change to the charge is read back.
-        if matches!(act, "change_monthly" | "stop_monthly") {
-            self.subscriptions.clear();
+        // A change to the charge is read back once the portal has answered.
+        if matches!(act, "change_monthly" | "stop_monthly") && self.job.is_some() {
+            self.monthly_changing = true;
         }
     }
 }
@@ -1537,13 +1562,44 @@ fn end_engagement(
     audit: &AuditOut,
 ) -> Result<String, String> {
     let p = core::client(s);
+    // The engagement ends on the portal first (review 2026-11-25): a letter is never shared or
+    // filed for an engagement still running. Ending it again ends nothing more, so a letter
+    // that failed to go out is sent by pressing End engagement… again.
+    let (n, stopped) = p.end_engagement(&client.id).map_err(|e| e.message())?;
+    let ended = format!(
+        "{n} open agreement{} cancelled{}",
+        if n == 1 { "" } else { "s" },
+        if stopped {
+            "; the monthly charge was stopped"
+        } else {
+            ""
+        }
+    );
     let day = chrono::Local::now().format("%Y-%m-%d").to_string();
     let name = format!("{day} Engagement closure letter.pdf");
     // The copy the portal shares, written beside the inbox first.
+    let record = |file_id: Option<&str>| {
+        audit.send(AuditEntry::new(
+            "portal_engagement_end",
+            None,
+            serde_json::json!({
+                "client_id": client.id,
+                "closure_file_id": file_id,
+                "agreements_cancelled": n,
+                "monthly_stopped": stopped,
+            }),
+        ));
+    };
+    let not_sent = |e: String| {
+        record(None);
+        format!(
+            "The engagement was ended on the portal ({ended}), but the closure letter was not              shared: {e}. Press End engagement… again to share it (nothing more is ended)."
+        )
+    };
     let tmp = vf_portal::inbox::tmp_dir(root);
-    std::fs::create_dir_all(&tmp).map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(&tmp).map_err(|e| not_sent(e.to_string()))?;
     let local = tmp.join(format!("closure-{}.pdf", uuid::Uuid::now_v7()));
-    std::fs::write(&local, pdf).map_err(|e| e.to_string())?;
+    std::fs::write(&local, pdf).map_err(|e| not_sent(e.to_string()))?;
     let shared = (|| -> Result<String, vf_portal::PortalError> {
         let doc_id = format!("closure-{}", uuid::Uuid::now_v7());
         let year = chrono::Datelike::year(&chrono::Local::now());
@@ -1566,28 +1622,10 @@ fn end_engagement(
         Ok(a.file_id().to_string())
     })();
     let _ = std::fs::remove_file(&local);
-    let file_id = shared.map_err(|e| e.message())?;
+    let file_id = shared.map_err(|e| not_sent(e.message()))?;
     let filed = vf_portal::agreement::file_in_inbox(root, &client.name, &client.code, &name, pdf);
-    let (n, stopped) = p.end_engagement(&client.id).map_err(|e| e.message())?;
-    audit.send(AuditEntry::new(
-        "portal_engagement_end",
-        None,
-        serde_json::json!({
-            "client_id": client.id,
-            "closure_file_id": file_id,
-            "agreements_cancelled": n,
-            "monthly_stopped": stopped,
-        }),
-    ));
-    let mut said = format!(
-        "The closure letter is on the client's portal. {n} open agreement{} cancelled{}.",
-        if n == 1 { "" } else { "s" },
-        if stopped {
-            "; the monthly charge was stopped"
-        } else {
-            ""
-        }
-    );
+    record(Some(&file_id));
+    let mut said = format!("The closure letter is on the client's portal. {ended}.");
     match filed {
         Ok(_) => said.push_str(" Intake will file the letter in the client's folder."),
         Err(e) => said.push_str(&format!(

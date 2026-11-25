@@ -244,6 +244,8 @@ pub struct PortalState {
     organizers_at: Option<Instant>,
     /// The client panel's Turn off / Turn on of a card: the message when it is done.
     pub organizer_act: Option<Receiver<Result<(), String>>>,
+    /// The portal's doc types and Intake rules were checked since this cabinet was opened.
+    pub doc_types_checked: bool,
 }
 
 /// Minutes between reads of the balances (every PC; Addendum §16).
@@ -309,6 +311,7 @@ impl Default for PortalState {
             organizers_job: None,
             organizers_at: None,
             organizer_act: None,
+            doc_types_checked: false,
         }
     }
 }
@@ -2690,7 +2693,11 @@ pub fn admin_settings(ui: &mut egui::Ui, a: &mut AdminPortal, env: &mut Env) {
          return delivery). Needs Vibe Portal 0.5.4 or later.",
     ));
     ui.label(widgets::caption(
-        "With it, annual service agreements: a client's Service agreement… and End engagement…,          and Admin › Portal › Agreements. The client signs the letters for the services they          take and sets up payment, once or monthly; the signed letters are filed in the client's          Correspondence folder for the year (Engagement) and each month's receipt in Billing.          Needs Vibe Portal 0.5.5 or later.",
+        "With it, annual service agreements: a client's Service agreement… and End engagement…, \
+         and Admin › Portal › Agreements. The client signs the letters for the services they take \
+         and sets up payment, once or monthly; the signed letters are filed in the client's \
+         Correspondence folder for the year (Engagement) and each month's receipt in Billing. \
+         Needs Vibe Portal 0.5.5 or later.",
     ));
     ui.add_space(6.0);
     ui.checkbox(
@@ -3174,29 +3181,7 @@ fn save(a: &mut AdminPortal, ctx: &egui::Context, env: &mut Env) {
     }
     a.shown = Some(s.clone());
     a.read_record_again();
-    // Addendum §16: a receipt needs its doc type (Billing/{Year}) in the list and the catalog
-    // (annual agreements' monthly receipts too, which come with deliveries).
-    let receipt_type = if s.balances || s.deliveries {
-        match vf_fs::doctypes::ensure(
-            env.root,
-            vf_portal::inbox::RECEIPT_DOC_TYPE,
-            "Billing/{Year}",
-            true,
-        ) {
-            Ok(true) => {
-                match vf_fs::doctypes::sync(env.conn, env.root, env.device_id, "doc_types_edit") {
-                    Ok(_) => " The doc type Payment receipt was added.".to_string(),
-                    Err(e) => format!(
-                        " The doc type Payment receipt was added but not yet in the catalog: {e}"
-                    ),
-                }
-            }
-            Ok(false) => String::new(),
-            Err(e) => format!(" The doc type Payment receipt could not be added: {e}"),
-        }
-    } else {
-        String::new()
-    };
+    let (receipt_type, delivery_types) = ensure_doc_types(env.conn, env.root, env.device_id, &s);
     let inbox = match core::register_inbox(env.root) {
         Ok(true) => format!(
             " {} was added to Intake's inboxes (Reload Intake to see it).",
@@ -3231,36 +3216,6 @@ fn save(a: &mut AdminPortal, ctx: &egui::Context, env: &mut Env) {
     a.url = s.url.clone();
     a.changed = true;
     a.read_at = None;
-    // Addendum §12.5: the step PDFs' doc types (Income Tax/{Year}/Delivery).
-    let mut delivery_types = String::new();
-    if s.deliveries {
-        let mut added = 0;
-        // Annual agreements' step PDFs: Correspondence/{Year}/Engagement.
-        let all = vf_portal::delivery::STEP_DOC_TYPES
-            .iter()
-            .map(|(_, n)| (*n, vf_portal::delivery::DELIVERY_FOLDER))
-            .chain(
-                vf_portal::delivery::AGREEMENT_STEP_DOC_TYPES
-                    .iter()
-                    .map(|(_, n)| (*n, vf_portal::delivery::AGREEMENT_FOLDER)),
-            );
-        for (name, folder) in all {
-            match vf_fs::doctypes::ensure(env.root, name, folder, true) {
-                Ok(true) => added += 1,
-                Ok(false) => {}
-                Err(e) => delivery_types = format!(" A delivery doc type could not be added: {e}"),
-            }
-        }
-        if added > 0 {
-            delivery_types =
-                match vf_fs::doctypes::sync(env.conn, env.root, env.device_id, "doc_types_edit") {
-                    Ok(_) => format!(" {added} delivery doc types were added."),
-                    Err(e) => format!(
-                        " The delivery doc types were added but not yet in the catalog: {e}"
-                    ),
-                };
-        }
-    }
     // Q11: the receipt and delivery Intake rules follow the switches.
     let rules = match vf_ingest::parsers::sync_filer_rules_report(env.root) {
         Ok(r) if r.changed => {
@@ -4857,6 +4812,70 @@ impl SendLinkWindow {
             self.closed = true;
         }
     }
+}
+
+/// The doc types the portal's own files need (Addendum §16's Payment receipt, §12.5's step
+/// PDFs and the annual agreements' ones), added to the cabinet's list and the catalog when the
+/// switches are on: by Admin › Portal's Save, and once each time a cabinet is opened (review
+/// 2026-11-25: a cabinet that turned deliveries on before an update never got the agreements'
+/// doc types, so their PDFs reached Intake with none). What was done, for Save's message.
+pub fn ensure_doc_types(
+    conn: &mut vf_core::db::Connection,
+    root: &Path,
+    device_id: &str,
+    s: &PortalSettings,
+) -> (String, String) {
+    // Addendum §16: a receipt needs its doc type (Billing/{Year}) in the list and the catalog
+    // (annual agreements' monthly receipts too, which come with deliveries).
+    let receipt_type = if s.balances || s.deliveries {
+        match vf_fs::doctypes::ensure(
+            root,
+            vf_portal::inbox::RECEIPT_DOC_TYPE,
+            "Billing/{Year}",
+            true,
+        ) {
+            Ok(true) => match vf_fs::doctypes::sync(conn, root, device_id, "doc_types_edit") {
+                Ok(_) => " The doc type Payment receipt was added.".to_string(),
+                Err(e) => format!(
+                    " The doc type Payment receipt was added but not yet in the catalog: {e}"
+                ),
+            },
+            Ok(false) => String::new(),
+            Err(e) => format!(" The doc type Payment receipt could not be added: {e}"),
+        }
+    } else {
+        String::new()
+    };
+    // Addendum §12.5: the step PDFs' doc types (Income Tax/{Year}/Delivery).
+    let mut delivery_types = String::new();
+    if s.deliveries {
+        let mut added = 0;
+        // Annual agreements' step PDFs: Correspondence/{Year}/Engagement.
+        let all = vf_portal::delivery::STEP_DOC_TYPES
+            .iter()
+            .map(|(_, n)| (*n, vf_portal::delivery::DELIVERY_FOLDER))
+            .chain(
+                vf_portal::delivery::AGREEMENT_STEP_DOC_TYPES
+                    .iter()
+                    .map(|(_, n)| (*n, vf_portal::delivery::AGREEMENT_FOLDER)),
+            );
+        for (name, folder) in all {
+            match vf_fs::doctypes::ensure(root, name, folder, true) {
+                Ok(true) => added += 1,
+                Ok(false) => {}
+                Err(e) => delivery_types = format!(" A delivery doc type could not be added: {e}"),
+            }
+        }
+        if added > 0 {
+            delivery_types = match vf_fs::doctypes::sync(conn, root, device_id, "doc_types_edit") {
+                Ok(_) => format!(" {added} delivery doc types were added."),
+                Err(e) => {
+                    format!(" The delivery doc types were added but not yet in the catalog: {e}")
+                }
+            };
+        }
+    }
+    (receipt_type, delivery_types)
 }
 
 #[cfg(test)]

@@ -332,7 +332,7 @@ pub fn page(
                             } else {
                                 "portal_organizer_on"
                             },
-                            serde_json::json!({ "taxYear": year, "count": changed }),
+                            serde_json::json!({ "taxYear": year, "count": changed, "organizer_ids": ids }),
                         );
                         let mut m = format!(
                             "{changed} card{} turned {}.",

@@ -362,7 +362,7 @@ pub fn show(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env, ci: usize) {
                 && let Some(s) = b.portal.settings(env.root).cloned()
             {
                 let audit = b.portal.audit_out();
-                let (id, year) = (o.id.clone(), o.tax_year);
+                let (id, year, client) = (o.id.clone(), o.tax_year, c.id.clone());
                 b.portal.organizer_act = Some(crate::ui::portal::spawn(ui.ctx(), move || {
                     crate::portal::client(&s)
                         .set_organizers_off(std::slice::from_ref(&id), off)
@@ -370,7 +370,12 @@ pub fn show(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env, ci: usize) {
                     audit.send(vf_core::audit::AuditEntry::new(
                         if off { "portal_organizer_off" } else { "portal_organizer_on" },
                         None,
-                        serde_json::json!({ "taxYear": year, "count": 1 }),
+                        serde_json::json!({
+                            "client_id": client,
+                            "organizer_id": id,
+                            "taxYear": year,
+                            "count": 1,
+                        }),
                     ));
                     Ok(())
                 }));
