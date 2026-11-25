@@ -219,6 +219,7 @@ fn check_for_update(enabled: bool) -> Option<mpsc::Receiver<Option<vf_sync::upda
 
 impl VibeFilesApp {
     pub fn new(ctx: &egui::Context, data: PathBuf) -> Self {
+        crate::ui::letter_templates::set_preview_dir(&data);
         let exe_dir = std::env::current_exe()
             .ok()
             .and_then(|e| e.parent().map(Path::to_path_buf));
@@ -660,6 +661,11 @@ impl Drop for OpenCabinet {
 }
 
 impl eframe::App for VibeFilesApp {
+    fn on_exit(&mut self) {
+        // Q27: letter previews hold client names; none outlive the session.
+        crate::ui::letter_templates::clear_previews();
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         self.poll(ui.ctx());
         self.guard_close(ui.ctx());
@@ -964,6 +970,9 @@ impl eframe::App for VibeFilesApp {
                 }
                 if a.todo_templates.app_copies.is_none() {
                     a.todo_templates.app_copies = Some(o.browse.portal.todo_out());
+                }
+                if matches!(a.deliveries.b2, crate::ui::portal::B2First::NotSetUp) {
+                    a.deliveries.b2 = o.browse.b2_first.clone();
                 }
                 if !a.deliveries.connected() {
                     a.deliveries

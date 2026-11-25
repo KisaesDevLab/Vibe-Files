@@ -166,6 +166,12 @@ pub struct DeliverWindow {
     /// T27: a different return chosen after the client saw the first.
     confirm_revise: bool,
     return_file: Option<String>,
+    /// The client's PDFs in the catalog (owner 2026-11-24, Q15: the window shares the return
+    /// itself) and the one chosen as the return.
+    docs: Vec<crate::ui::portal::DocRef>,
+    return_doc: Option<String>,
+    /// Documents go to B2 before they are shared (Q-103).
+    b2: crate::ui::portal::B2First,
     link: String,
     notify: bool,
     confirm_cancel: bool,
@@ -192,6 +198,8 @@ impl DeliverWindow {
         folder: Option<String>,
         audit: AuditOut,
         reads: ReadOut,
+        docs: Vec<crate::ui::portal::DocRef>,
+        b2: crate::ui::portal::B2First,
     ) -> Self {
         let year = default_year();
         let mut w = Self {
@@ -225,6 +233,9 @@ impl DeliverWindow {
             remind_days: 7,
             confirm_revise: false,
             return_file: None,
+            docs,
+            return_doc: None,
+            b2,
             link: String::new(),
             notify: true,
             confirm_cancel: false,
@@ -544,20 +555,36 @@ impl DeliverWindow {
                 self.signers = d.signers.clone();
             }
             self.return_file = d.return_file.as_ref().map(|f| f.id.clone());
+            // The cabinet document the portal's return file was shared from.
+            self.return_doc = self
+                .return_file
+                .as_deref()
+                .and_then(|id| self.files.iter().find(|f| f.file_id == id))
+                .map(|f| f.vf_document_id.clone())
+                .or(self.return_doc.clone());
             self.link = d.esign_link.clone().unwrap_or_default();
             self.notify = d.notify;
-        } else if self.return_file.is_none() {
-            // The newest file on the portal for the year whose name says it is the return.
-            let ty = self.return_type.clone();
-            self.return_file = self
-                .files
+        } else if self.return_doc.is_none() {
+            // The client's PDF for the year whose name says it is the return, those under
+            // Income Tax first.
+            let ty = self.return_type.to_lowercase();
+            let year = self.year;
+            let mut fits: Vec<&crate::ui::portal::DocRef> = self
+                .docs
                 .iter()
-                .filter(|f| f.tax_year == Some(self.year))
-                .find(|f| {
-                    let n = f.name.to_lowercase();
-                    n.contains(&ty.to_lowercase()) || n.contains("return")
+                .filter(|d| d.tax_year == Some(year))
+                .filter(|d| {
+                    let n = d.name.to_lowercase();
+                    n.contains(&ty) || n.contains("return")
                 })
-                .map(|f| f.file_id.clone());
+                .collect();
+            fits.sort_by_key(|d| {
+                !d.path
+                    .to_string_lossy()
+                    .to_lowercase()
+                    .contains("income tax")
+            });
+            self.return_doc = fits.first().map(|d| d.id.clone());
         }
     }
 
@@ -694,6 +721,7 @@ impl DeliverWindow {
                 if self.current().is_none() {
                     self.title = format!("Your {} tax return", self.year);
                     self.return_file = None;
+                    self.return_doc = None;
                 }
                 self.fill();
             }
@@ -810,7 +838,7 @@ impl DeliverWindow {
             }
             if ui.add_enabled(!busy, egui::Button::new("Preview letters…")).clicked() {
                 for (t, laid) in self.laid_letters() {
-                    let dir = std::env::temp_dir().join("vibe-files-letters");
+                    let dir = crate::ui::letter_templates::preview_dir();
                     let _ = std::fs::create_dir_all(&dir);
                     let p = dir.join(format!("{} - {}.pdf", self.client.code, vf_letters::store::safe_id(&t.id)));
                     match std::fs::write(&p, &laid.pdf) {
@@ -838,33 +866,33 @@ impl DeliverWindow {
             });
             if self.with_return {
                 let shown = self
-                    .return_file
+                    .return_doc
                     .as_deref()
-                    .and_then(|id| self.files.iter().find(|f| f.file_id == id))
-                    .map(|f| f.name.clone())
+                    .and_then(|id| self.docs.iter().find(|d| d.id == id))
+                    .map(|d| d.name.clone())
                     .unwrap_or_else(|| "Choose the return…".into());
                 ui.add_enabled_ui(can, |ui| {
                     egui::ComboBox::from_id_salt("delivery-return")
                         .selected_text(shown)
                         .width(420.0)
                         .show_ui(ui, |ui| {
-                            for f in &self.files {
+                            for d in &self.docs {
                                 ui.selectable_value(
-                                    &mut self.return_file,
-                                    Some(f.file_id.clone()),
+                                    &mut self.return_doc,
+                                    Some(d.id.clone()),
                                     format!(
                                         "{}{}",
-                                        f.name,
-                                        f.tax_year.map(|y| format!(" ({y})")).unwrap_or_default()
+                                        d.name,
+                                        d.tax_year.map(|y| format!(" ({y})")).unwrap_or_default()
                                     ),
                                 );
                             }
                         });
                 });
                 ui.label(widgets::caption(
-                    "Files on the portal for this client. Share the return first (right-click the \
-                     document › Share on portal…), then choose it here. The client can open it when \
-                     the card's earlier steps allow.",
+                    "The client's PDFs in the cabinet. Sending shares the return on the portal with \
+                     everyone of the client (B2 first, as Share on portal does); the client opens \
+                     it when the card's earlier steps allow.",
                 ));
             }
         });
@@ -1329,10 +1357,14 @@ impl DeliverWindow {
                 let assigned = self.assigned.clone();
                 let remind_days = self.remind_days;
                 // T27: a return the client saw, replaced: asked first in the window.
+                let shown_doc = current
+                    .as_ref()
+                    .and_then(|d| d.return_file.as_ref())
+                    .and_then(|r| self.files.iter().find(|f| f.file_id == r.id))
+                    .map(|f| f.vf_document_id.clone());
                 let seen = current.as_ref().is_some_and(|d| {
                     d.step(delivery::RETURN).is_some_and(|s| s.state == "done")
-                        && d.return_file.as_ref().map(|r| r.id.as_str())
-                            != self.return_file.as_deref()
+                        && shown_doc.as_deref() != self.return_doc.as_deref()
                 });
                 if seen && !self.confirm_revise {
                     self.confirm_revise = true;
@@ -1340,7 +1372,15 @@ impl DeliverWindow {
                 }
                 self.confirm_revise = false;
                 let title = self.title.trim().to_string();
-                let file = self.return_file.clone().filter(|_| self.with_return);
+                let doc = self
+                    .return_doc
+                    .as_deref()
+                    .and_then(|id| self.docs.iter().find(|d| d.id == id))
+                    .cloned()
+                    .filter(|_| self.with_return);
+                let b2 = self.b2.clone();
+                let client = self.client.clone();
+                let share_audit = self.audit.clone();
                 let link = self.link.trim().to_string();
                 let link = (self.with_8879 && !link.is_empty()).then_some(link);
                 let notify = self.notify;
@@ -1380,6 +1420,42 @@ impl DeliverWindow {
                                     ..Default::default()
                                 },
                             )?,
+                        };
+                        // The return shared with everyone of the client (B2 first), then set.
+                        let file = match doc {
+                            Some(mut doc) => {
+                                doc.hash =
+                                    filer_intake::commit::sha256_file(&doc.path).map_err(|e| {
+                                        vf_portal::PortalError::Local(format!("{}: {e}", doc.name))
+                                    })?;
+                                let on = p.file_for_doc(&doc.id)?;
+                                let people = p.users(&client.id)?;
+                                let chosen: std::collections::BTreeMap<String, bool> = people
+                                    .users
+                                    .iter()
+                                    .filter(|u| u.active)
+                                    .map(|u| (u.identity_id.clone(), true))
+                                    .collect();
+                                let held: std::collections::BTreeMap<String, bool> = people
+                                    .invitations
+                                    .iter()
+                                    .map(|i| (i.invitation_id.clone(), true))
+                                    .collect();
+                                let id = doc.id.clone();
+                                crate::ui::portal::share_docs(
+                                    &p,
+                                    &b2,
+                                    &client,
+                                    vec![(doc, on)],
+                                    &chosen,
+                                    &held,
+                                    true,
+                                    &share_audit,
+                                )
+                                .map_err(vf_portal::PortalError::Local)?;
+                                p.file_for_doc(&id)?.map(|f| f.file_id)
+                            }
+                            None => None,
                         };
                         if let Some(f) = file
                             && d.return_file.as_ref().map(|r| r.id.as_str()) != Some(f.as_str())
@@ -1533,6 +1609,33 @@ impl DeliverWindow {
     }
 }
 
+/// The client's PDFs in the catalog, newest year first (the Deliver window's return).
+pub fn client_pdfs(
+    conn: &vf_core::db::Connection,
+    root: &Path,
+    client_id: &str,
+) -> Vec<crate::ui::portal::DocRef> {
+    let Ok(mut st) = conn.prepare(
+        "SELECT id, rel_path, tax_year FROM document
+         WHERE client_id = ?1 AND deleted_at IS NULL AND lower(rel_path) LIKE '%.pdf'
+         ORDER BY tax_year DESC, rel_path",
+    ) else {
+        return Vec::new();
+    };
+    st.query_map([client_id], |r| {
+        let rel: String = r.get(1)?;
+        Ok(crate::ui::portal::DocRef {
+            id: r.get(0)?,
+            name: widgets::file_name(&rel).to_string(),
+            path: root.join(&rel),
+            hash: String::new(),
+            tax_year: r.get(2)?,
+        })
+    })
+    .map(|rows| rows.filter_map(Result::ok).collect())
+    .unwrap_or_default()
+}
+
 // ---- Admin › Portal › Deliveries ---------------------------------------------------------------
 
 #[derive(Default)]
@@ -1546,6 +1649,8 @@ pub struct DeliveriesPage {
     window: Option<DeliverWindow>,
     audit: Option<AuditOut>,
     reads: Option<ReadOut>,
+    /// Browse's B2-first state (the return is shared through B2 first).
+    pub b2: crate::ui::portal::B2First,
 }
 
 impl DeliveriesPage {
@@ -1699,6 +1804,7 @@ pub fn page(ui: &mut egui::Ui, page: &mut DeliveriesPage, env: &mut crate::ui::b
         && let Some((c, folder)) = page.clients.get(&id).cloned()
         && let (Some(audit), Some(reads)) = (page.audit.clone(), page.reads.clone())
     {
+        let docs = client_pdfs(env.conn, env.root, &c.id);
         page.window = Some(DeliverWindow::new(
             &ctx,
             &s,
@@ -1707,6 +1813,8 @@ pub fn page(ui: &mut egui::Ui, page: &mut DeliveriesPage, env: &mut crate::ui::b
             folder,
             audit,
             reads,
+            docs,
+            page.b2.clone(),
         ));
     }
     if let Some(w) = &mut page.window {

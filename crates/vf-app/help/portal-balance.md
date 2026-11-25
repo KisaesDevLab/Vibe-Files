@@ -35,7 +35,7 @@ Vibe Files reads the balances every few minutes on every PC: the client's detail
 
 ## The receipt
 
-When a balance is paid the portal makes a **Payment receipt** PDF: what was paid, how, the card fee if any, and a log page of everything that happened to the balance (posted, the client seeing it, checkout, paid), with times, internet addresses and browsers. It arrives in the Portal inbox like a client's upload, named `<date paid> Payment receipt - <memo>.pdf`, and Intake files it in the client's `Billing/<year paid>` folder with the doc type Payment receipt. The client's own receipt has no log page.
+When a balance is paid the portal makes a **Payment receipt** PDF: what was paid, how, the card fee if any, and a log page of everything that happened to the balance (posted, the client seeing it, checkout, paid), with times, internet addresses and browsers. It arrives in the Portal inbox like a client's upload, named `<date paid> Payment receipt - <memo>.pdf`, and Intake files it in the client's `Billing/<year paid>` folder with the doc type Payment receipt (Intake's rule for it is there only while **Balance owed** is on). The client's own receipt has no log page.
 
 ## Balances list
 

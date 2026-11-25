@@ -942,7 +942,7 @@ pub fn invite_changes(
 /// (`chosen`) and invitations not accepted yet (`chosen_inv`, shown when they accept). Returns
 /// how many documents changed and how many files were sent.
 #[allow(clippy::too_many_arguments)]
-fn share_docs(
+pub(crate) fn share_docs(
     p: &vf_portal::api::Portal,
     b2: &B2First,
     client: &ClientRef,
@@ -3137,11 +3137,25 @@ fn save(a: &mut AdminPortal, ctx: &egui::Context, env: &mut Env) {
                 env.root,
                 name,
                 vf_portal::delivery::DELIVERY_FOLDER,
-                false,
+                true,
             ) {
                 Ok(true) => added += 1,
                 Ok(false) => {}
                 Err(e) => delivery_types = format!(" A delivery doc type could not be added: {e}"),
+            }
+        }
+        // Owner 2026-11-24 (Q19): client visible, also when added by an earlier version.
+        if let Ok(Some(types)) = vf_fs::doctypes::load(env.root) {
+            for mut ty in types.into_iter().filter(|ty| {
+                !ty.client_visible
+                    && vf_portal::delivery::STEP_DOC_TYPES
+                        .iter()
+                        .any(|(_, n)| *n == ty.name)
+            }) {
+                ty.client_visible = true;
+                if vf_fs::doctypes::apply(env.root, vf_fs::doctypes::Edit::Update(ty)).is_ok() {
+                    added += 1;
+                }
             }
         }
         if added > 0 {
@@ -3154,7 +3168,16 @@ fn save(a: &mut AdminPortal, ctx: &egui::Context, env: &mut Env) {
                 };
         }
     }
-    let said = format!("Saved for every PC.{inbox}{receipt_type}{delivery_types}{unrecorded}");
+    // Q11: the receipt and delivery Intake rules follow the switches.
+    let rules = match vf_ingest::parsers::sync_filer_rules_report(env.root) {
+        Ok(r) if r.changed => {
+            " Intake's rules were updated (Reload Intake to see them).".to_string()
+        }
+        Ok(_) => String::new(),
+        Err(e) => format!(" Intake's rules could not be updated: {e}"),
+    };
+    let said =
+        format!("Saved for every PC.{inbox}{receipt_type}{delivery_types}{rules}{unrecorded}");
     match old_listing {
         // Unticked, or another portal now: the lists leave the portal they were sent to, now,
         // not when someone remembers them. (A new key for the same portal: they stay.)

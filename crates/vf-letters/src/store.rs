@@ -166,7 +166,7 @@ pub fn samples() -> Vec<Template> {
         p("Our fee for preparing your {Tax year} returns is {Fee}."),
         h("Agreement"),
         p("By signing below you agree to the terms of this letter."),
-        p("{Firm name}, {Preparer}"),
+        p("{Firm name}"),
         sig("taxpayer", &[]),
         sig("spouse", &[]),
     ];
@@ -190,7 +190,7 @@ pub fn samples() -> Vec<Template> {
         p("Our fee for preparing the {Tax year} return is {Fee}."),
         h("Agreement"),
         p("By signing below you confirm you may agree to this letter for {Client name}."),
-        p("{Firm name}, {Preparer}"),
+        p("{Firm name}"),
         sig("officer", &[]),
     ];
     out.push(e);

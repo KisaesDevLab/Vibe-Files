@@ -353,19 +353,42 @@ fn ultratax_prints_go_to_their_doc_types_folder() {
     );
     std::fs::remove_file(vf_ingest::parsers::dir(&root).join("broken.toml")).unwrap();
 
-    // A disabled profile takes its rules out again; Filer's own rules stay, and so does the
-    // portal's payment receipt rule (Addendum §16), which no profile makes.
+    // A disabled profile takes its rules out again; Filer's own rules stay. (The portal's
+    // receipt and delivery rules are there only while those features are on: off here.)
     prof.enabled = false;
     vf_ingest::parsers::save_profile(&path, &prof).unwrap();
     assert!(vf_ingest::parsers::sync_filer_rules(&root).unwrap());
     let (rules, _, _) = filer_core::rules::load_or_seed(&master);
-    let receipt = vf_ingest::parsers::payment_receipt_rule().id;
-    let step = vf_ingest::parsers::delivery_step_rule().id;
-    assert!(rules.active_rules().iter().all(|r| {
-        !r.id.starts_with(vf_ingest::parsers::MANAGED_PREFIX) || r.id == receipt || r.id == step
-    }));
-    assert_eq!(rules.active_rules()[0].id, receipt);
-    assert_eq!(rules.active_rules()[1].id, step);
+    assert!(
+        rules
+            .active_rules()
+            .iter()
+            .all(|r| !r.id.starts_with(vf_ingest::parsers::MANAGED_PREFIX))
+    );
+    // Turned on in Admin › Portal: the two rules come first.
+    let keys = root.join("_Vibe").join("keys");
+    std::fs::create_dir_all(&keys).unwrap();
+    std::fs::write(
+        keys.join("portal.json"),
+        r#"{"balances":true,"deliveries":true}"#,
+    )
+    .unwrap();
+    assert!(vf_ingest::parsers::sync_filer_rules(&root).unwrap());
+    let (rules, _, _) = filer_core::rules::load_or_seed(&master);
+    assert_eq!(
+        rules.active_rules()[0].id,
+        vf_ingest::parsers::payment_receipt_rule().id
+    );
+    assert_eq!(
+        rules.active_rules()[1].id,
+        vf_ingest::parsers::delivery_step_rule().id
+    );
+    std::fs::write(
+        keys.join("portal.json"),
+        r#"{"balances":false,"deliveries":false}"#,
+    )
+    .unwrap();
+    assert!(vf_ingest::parsers::sync_filer_rules(&root).unwrap());
     // Filer's own rules stay (Filer 0.2.5 took its "UltraTax" rule out of the firm set).
     assert!(
         rules

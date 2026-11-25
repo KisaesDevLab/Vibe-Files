@@ -602,6 +602,28 @@ fn stable_id(profile: &str, doc_type: &str) -> String {
     h[..8].iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// Whether Admin › Portal has balance owed and tax return delivery on for this cabinet (read
+/// from its portal settings, `_Vibe/keys/portal.json`; only these two switches are read).
+/// Not readable or not set: both off.
+pub fn portal_features(root: &Path) -> (bool, bool) {
+    let p = root
+        .join(vf_fs::cabinet::VIBE_DIR)
+        .join(vf_fs::cabinet::KEYS_DIR)
+        .join("portal.json");
+    let v: serde_json::Value = std::fs::read(&p)
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default();
+    (
+        v.get("balances")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
+        v.get("deliveries")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
+    )
+}
+
 /// The rule that files a paid balance's receipt from the portal (Addendum §16, owner
 /// 2026-11-24): `<yyyy-mm-dd paid> Payment receipt - <memo>.pdf` into the client's
 /// `Billing/{Year}`, the year read from the date paid (the first year in the name).
@@ -738,9 +760,17 @@ fn plan_rules(
     }
     // A paid balance's receipt from the portal (Addendum §16): first of all, so no rule that
     // reads "receipt" or "invoice" takes it. It matches only the name the portal gives one.
-    active.insert(0, payment_receipt_rule());
+    // Owner 2026-11-24 (Q11): only while Admin › Portal has the feature on.
+    let (balances, deliveries) = portal_features(root);
+    let mut at = 0;
+    if balances {
+        active.insert(at, payment_receipt_rule());
+        at += 1;
+    }
     // A delivery's step PDF (Addendum §12.5): into the client's Income Tax\{Year}\Delivery.
-    active.insert(1, delivery_step_rule());
+    if deliveries {
+        active.insert(at, delivery_step_rule());
+    }
     // One of Intake's own rules that says exactly what a print capture rule above it says
     // (same pattern, exception and folder) is a duplicate: said, for its owner to delete.
     {

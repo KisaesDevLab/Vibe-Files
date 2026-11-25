@@ -13,12 +13,11 @@ Two switches, both off until the firm ticks them:
 
 ## Sending a delivery
 
-1. Share the return on the portal first: right-click the document › **Share on portal…**, ticking the people who should see it.
-2. Select the client in Browse and press **Deliver tax return…** in the client's details.
-3. Check the **Tax year**, **Return type** and **Card title**.
-4. Tick **Tax return PDF** and choose the return from the files on the portal for this client. The newest one for the year whose name names the return is chosen for you.
-5. Tick **Form 8879** and paste the client's **UltraTax eSignature link** (it starts with `https://`).
-6. Press **Send to client**. With **Tell the client** ticked, the client's people get an email and text naming the card, never its content.
+1. Select the client in Browse and press **Deliver tax return…** in the client's details.
+2. Check the **Tax year**, **Return type** and **Card title**.
+3. Tick **Tax return PDF** and choose the return from the client's PDFs in the cabinet; the one for the year whose name names the return is chosen for you. Sending shares it on the portal with everyone of the client (B2 first, as **Share on portal…** does).
+4. Tick **Form 8879** and paste the client's **UltraTax eSignature link** (it starts with `https://`).
+5. Press **Send to client**. With **Tell the client** ticked, the client's people get an email and text naming the card, never its content.
 
 One delivery is open per client, tax year and return type. Opening the window again shows it; change it and press **Save changes**.
 
@@ -41,7 +40,7 @@ When the client says they signed, the assigned staff member (or the admins) gets
 
 ## The step PDFs
 
-Each finished step makes a PDF: a record page (for the return, its file name, size and SHA-256, not a second copy; for Form 8879, the e-signature service it was signed on) and a separate log page of everything that happened in that step, with times, internet addresses and browsers. They arrive in the Portal inbox like a client's upload, named `2025 Delivery 2 - Tax return.pdf` and `2025 Delivery 5 - Form 8879.pdf`, and Intake files them in the client's `Income Tax/2025/Delivery` folder with their doc types. A step done again files ` (2)`.
+Each finished step makes a PDF: a record page (for the return, its file name, size and SHA-256, not a second copy; for Form 8879, the e-signature service it was signed on) and a separate log page of everything that happened in that step, with times, internet addresses and browsers. They arrive in the Portal inbox like a client's upload, named `2025 Delivery 2 - Tax return.pdf` and `2025 Delivery 5 - Form 8879.pdf`, and Intake files them in the client's `Income Tax/2025/Delivery` folder with their doc types (client visible). Intake's rule for these files is there only while **Tax return delivery** is on in Admin › Portal. A step done again files ` (2)`.
 
 **Download report…** saves the whole delivery, every step and event, as one PDF outside the cabinet.
 

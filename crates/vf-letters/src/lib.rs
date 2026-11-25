@@ -18,10 +18,9 @@ use serde::{Deserialize, Serialize};
 pub use layout::{Laid, SignBlock, layout};
 
 /// The merge fields a template can use (§12.2), in the order Insert field lists them.
-pub const FIELDS: [&str; 19] = [
+pub const FIELDS: [&str; 17] = [
     "Client name",
     "Client ID",
-    "Client address",
     "Signer first names",
     "Taxpayer name",
     "Spouse name",
@@ -37,7 +36,6 @@ pub const FIELDS: [&str; 19] = [
     "Package fee",
     "Date",
     "Firm name",
-    "Preparer",
 ];
 
 /// Who signs at a signature block (§4).

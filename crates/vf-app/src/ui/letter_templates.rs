@@ -92,7 +92,6 @@ pub fn sample_fields(firm: &str, year: i32, return_type: &str) -> Fields {
     for (k, v) in [
         ("Client name", "Jordan and Casey Sample"),
         ("Client ID", "1001"),
-        ("Client address", "100 Main Street, Springfield"),
         ("Signer first names", "Jordan and Casey"),
         ("Taxpayer name", "Jordan Sample"),
         ("Spouse name", "Casey Sample"),
@@ -103,7 +102,6 @@ pub fn sample_fields(firm: &str, year: i32, return_type: &str) -> Fields {
         ("Fee options", "Tax Return Only, Advantage, Concierge"),
         ("Package name", "Advantage"),
         ("Package fee", "$1,392.68"),
-        ("Preparer", "Pat Preparer"),
     ] {
         f.insert(k.into(), v.into());
     }
@@ -118,10 +116,44 @@ pub fn sample_fields(firm: &str, year: i32, return_type: &str) -> Fields {
     f
 }
 
+/// Where letter previews are written: `<data>\cache\letters` (owner 2026-11-24, Q27), set
+/// when the app starts; emptied then and when the app closes (they hold client names).
+static PREVIEW_DIR: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+
+pub fn set_preview_dir(data: &std::path::Path) {
+    let dir = data.join("cache").join("letters");
+    clear_previews_in(&dir);
+    let _ = PREVIEW_DIR.set(dir);
+}
+
+pub fn preview_dir() -> std::path::PathBuf {
+    PREVIEW_DIR
+        .get()
+        .cloned()
+        .unwrap_or_else(|| std::env::temp_dir().join("vibe-files-letters"))
+}
+
+fn clear_previews_in(dir: &std::path::Path) {
+    if let Ok(rd) = std::fs::read_dir(dir) {
+        for e in rd.flatten() {
+            if e.path().extension().is_some_and(|x| x == "pdf") {
+                let _ = std::fs::remove_file(e.path());
+            }
+        }
+    }
+}
+
+/// Empties the previews folder (the app is closing).
+pub fn clear_previews() {
+    if let Some(d) = PREVIEW_DIR.get() {
+        clear_previews_in(d);
+    }
+}
+
 /// Lays a template out for `fields` into a temporary PDF and opens it in the PDF viewer.
 pub fn preview(t: &Template, fields: &Fields, return_type: &str) -> Result<(), String> {
     let laid = vf_letters::layout(t, fields, return_type, t.package.as_deref());
-    let dir = std::env::temp_dir().join("vibe-files-letters");
+    let dir = preview_dir();
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let p = dir.join(format!(
         "{} ({}).pdf",

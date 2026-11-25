@@ -385,6 +385,17 @@ mod tests {
         vf_fixtures::generate(&root, 3).unwrap();
         crate::ui::test_util::pdfium_first();
         let data = t.path().join("data");
+        for e in std::fs::read_dir(&root).unwrap().flatten() {
+            let name = e.file_name().to_string_lossy().into_owned();
+            if e.path().is_dir() && !name.starts_with('_') {
+                let dir = e.path().join("Income Tax").join("2025");
+                std::fs::create_dir_all(&dir).unwrap();
+                crate::ui::test_util::write_lines_pdf(
+                    &dir.join("2025 Form 1040 Return - Sample.pdf"),
+                    crate::ui::test_util::SAMPLE_RETURN,
+                );
+            }
+        }
         drop(crate::session::open(&data, "dev", &root).unwrap());
         let cab = vf_fs::cabinet::read(&root).unwrap().cabinet_id;
         let s = vf_portal::PortalSettings::new(&cab, &url, &key, 0)
@@ -394,7 +405,7 @@ mod tests {
         crate::portal::register_inbox(&root).unwrap();
         // What Admin › Portal's Save does when Tax return delivery is ticked.
         for (_, name) in vf_portal::delivery::STEP_DOC_TYPES {
-            vf_fs::doctypes::ensure(&root, name, vf_portal::delivery::DELIVERY_FOLDER, false)
+            vf_fs::doctypes::ensure(&root, name, vf_portal::delivery::DELIVERY_FOLDER, true)
                 .unwrap();
         }
         let d = data.clone();
@@ -455,11 +466,7 @@ mod tests {
         let folder = c.folder_rel.clone().unwrap();
         let p = crate::portal::client(&s);
         p.put_client(&c.id, &c.ext_id, &c.name, None).unwrap();
-        // The return, shared on the portal and held for the person invited (P98).
-        let ret = root.join(&folder).join("Income Tax").join("2025");
-        std::fs::create_dir_all(&ret).unwrap();
-        let ret = ret.join("2025 Form 1040 Return - Sample.pdf");
-        crate::ui::test_util::write_lines_pdf(&ret, crate::ui::test_util::SAMPLE_RETURN);
+        // Jordan is invited; the window shares the return (held for the invitation, P98).
         p.invite(
             &c.id,
             Some("jordan.sample@example.com"),
@@ -468,24 +475,8 @@ mod tests {
             "Owner",
         )
         .unwrap();
-        let added = p
-            .add(
-                &c.id,
-                "doc-return-walk",
-                "2025 Form 1040 Return - Sample.pdf",
-                Some(2025),
-                &ret,
-            )
-            .unwrap();
-        let inv = p.users(&c.id).unwrap().invitations[0].invitation_id.clone();
-        p.set_visibility_with(
-            added.file_id(),
-            &std::collections::BTreeMap::new(),
-            &std::collections::BTreeMap::from([(inv, true)]),
-        )
-        .unwrap();
         note(format!(
-            "Setup: {} ({}) on the portal; the return shared, held for Jordan Sample's invitation",
+            "Setup: {} ({}) on the portal; Jordan invited; the return in the client folder",
             c.name, c.ext_id
         ));
 
@@ -677,7 +668,7 @@ mod tests {
         vf_portal::settings::save(&root, &s).unwrap();
         crate::portal::register_inbox(&root).unwrap();
         for (_, name) in vf_portal::delivery::STEP_DOC_TYPES {
-            vf_fs::doctypes::ensure(&root, name, vf_portal::delivery::DELIVERY_FOLDER, false)
+            vf_fs::doctypes::ensure(&root, name, vf_portal::delivery::DELIVERY_FOLDER, true)
                 .unwrap();
         }
         let d = data.clone();
@@ -934,7 +925,7 @@ mod tests {
         vf_portal::settings::save(&root, &s).unwrap();
         crate::portal::register_inbox(&root).unwrap();
         for (_, name) in vf_portal::delivery::STEP_DOC_TYPES {
-            vf_fs::doctypes::ensure(&root, name, vf_portal::delivery::DELIVERY_FOLDER, false)
+            vf_fs::doctypes::ensure(&root, name, vf_portal::delivery::DELIVERY_FOLDER, true)
                 .unwrap();
         }
         vf_portal::pricing::save(&root, &vf_portal::pricing::sample("1040", 2025)).unwrap();

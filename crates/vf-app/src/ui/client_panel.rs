@@ -250,6 +250,8 @@ pub fn show(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env, ci: usize) {
                 c.folder_rel.clone(),
                 b.portal.audit_out(),
                 b.portal.delivery_out(),
+                crate::ui::delivery::client_pdfs(env.conn, env.root, &c.id),
+                b.b2_first.clone(),
             ));
         }
         // Addendum §16: a balance the client pays on the portal.
