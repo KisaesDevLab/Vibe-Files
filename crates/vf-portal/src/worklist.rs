@@ -140,7 +140,10 @@ pub fn rows<'a>(
     let finished = list
         .iter()
         .filter(|d| d.status == "complete" && season.is_some_and(|y| season_of(d) == y));
-    open.chain(finished).filter(|d| wanted(d)).map(row).collect()
+    open.chain(finished)
+        .filter(|d| wanted(d))
+        .map(row)
+        .collect()
 }
 
 #[cfg(test)]
@@ -157,7 +160,11 @@ mod tests {
         let steps: Vec<_> = ["letters", "return", "fee"]
             .iter()
             .map(|k| {
-                let state = if status == "open" && *k == waiting { "open" } else { "done" };
+                let state = if status == "open" && *k == waiting {
+                    "open"
+                } else {
+                    "done"
+                };
                 step(k, state)
             })
             .collect();
@@ -203,8 +210,14 @@ mod tests {
             ["r1", "a1", "r2", "a2"]
         );
         assert_eq!(ids(&rows(&list, &subs, Show::Step("fee"), None)), ["r1"]);
-        assert_eq!(ids(&rows(&list, &subs, Show::Step("letters"), None)), ["a1"]);
-        assert_eq!(ids(&rows(&list, &subs, Show::Returns, Some(2025))), ["r1", "r2"]);
+        assert_eq!(
+            ids(&rows(&list, &subs, Show::Step("letters"), None)),
+            ["a1"]
+        );
+        assert_eq!(
+            ids(&rows(&list, &subs, Show::Returns, Some(2025))),
+            ["r1", "r2"]
+        );
         assert_eq!(ids(&rows(&list, &subs, Show::Agreements, None)), ["a1"]);
         // A failed month: the finished agreement that set the charge, season or not.
         let failed = rows(&list, &subs, Show::Failed, None);

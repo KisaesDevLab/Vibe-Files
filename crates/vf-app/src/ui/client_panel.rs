@@ -333,6 +333,58 @@ pub fn show(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env, ci: usize) {
             ui.label(RichText::new(line).color(theme::ink_secondary()));
         }
     }
+    // PA-113: the client's organizer link and its card on the portal.
+    if let Some(o) =
+        crate::ui::organizer::panel_organizer(b.portal.organizers.as_ref(), &c.id).cloned()
+    {
+        ui.horizontal_wrapped(|ui| {
+            ui.label(
+                RichText::new(crate::ui::organizer::panel_words(&o)).color(theme::ink_secondary()),
+            );
+            let busy = b.portal.organizer_act.is_some();
+            let off = match o.off.as_deref() {
+                None => Some(true),
+                Some("off") => Some(false),
+                _ => None,
+            };
+            if let Some(off) = off
+                && ui
+                    .add_enabled(
+                        !busy,
+                        egui::Button::new(if off { "Turn off" } else { "Turn on" }).small(),
+                    )
+                    .on_hover_text(if off {
+                        "Hide the Organizer card on this client's portal (kept off by later imports)"
+                    } else {
+                        "Show the Organizer card on this client's portal again"
+                    })
+                    .clicked()
+                && let Some(s) = b.portal.settings(env.root).cloned()
+            {
+                let audit = b.portal.audit_out();
+                let (id, year) = (o.id.clone(), o.tax_year);
+                b.portal.organizer_act = Some(crate::ui::portal::spawn(ui.ctx(), move || {
+                    crate::portal::client(&s)
+                        .set_organizers_off(std::slice::from_ref(&id), off)
+                        .map_err(|e| e.message())?;
+                    audit.send(vf_core::audit::AuditEntry::new(
+                        if off { "portal_organizer_off" } else { "portal_organizer_on" },
+                        None,
+                        serde_json::json!({ "taxYear": year, "count": 1 }),
+                    ));
+                    Ok(())
+                }));
+            }
+            if ui
+                .small_btn("Open link ↗")
+                .on_hover_text("The client's organizer, in your browser")
+                .clicked()
+                && let Err(e) = crate::shell::open_url(&o.url)
+            {
+                b.portal.notice = Some(format!("The organizer link did not open: {e}"));
+            }
+        });
+    }
     if b.portal.settings(env.root).is_some_and(|s| s.balances) {
         ui.label(
             RichText::new(crate::ui::balance::panel_line(

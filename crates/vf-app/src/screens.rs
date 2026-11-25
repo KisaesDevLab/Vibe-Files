@@ -2826,6 +2826,275 @@ mod tests {
         .unwrap();
     }
 
+    /// PA-113 (owner 2026-11-25) walkthrough against a real Vibe Portal: the organizer app's
+    /// export (made up here) imported in Admin › Portal › Organizers, matched by UltraTax ID, by
+    /// email and name, and by name alone (ticked by hand), a link on another site refused; sent;
+    /// the client panel's line; Turn off from the panel; the card gone once the tax return
+    /// delivery for that year is created. Set `VF_WALK_URL`, `VF_WALK_KEY` and `VF_WALK_DIR`.
+    #[test]
+    #[ignore = "needs a running portal"]
+    fn organizer_walkthrough() {
+        let (Ok(url), Ok(key), Ok(out)) = (
+            std::env::var("VF_WALK_URL"),
+            std::env::var("VF_WALK_KEY"),
+            std::env::var("VF_WALK_DIR"),
+        ) else {
+            return;
+        };
+        let out = std::path::PathBuf::from(out);
+        std::fs::create_dir_all(&out).unwrap();
+        let run = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path().join("Clients");
+        vf_fixtures::generate(&root, 4).unwrap();
+        let data = t.path().join("data");
+        drop(crate::session::open(&data, "dev", &root).unwrap());
+        let cab = vf_fs::cabinet::read(&root).unwrap().cabinet_id;
+        let s = vf_portal::PortalSettings::new(&cab, &url, &key, 0)
+            .unwrap()
+            .with_deliveries(true);
+        vf_portal::settings::save(&root, &s).unwrap();
+        let d = data.clone();
+        let mut h = HarnessBuilder::default()
+            .with_max_steps(crate::ui::test_util::MAX_STEPS)
+            .with_theme(egui::Theme::Light)
+            .with_size([1440.0, 1000.0])
+            .build_eframe(move |cc| VibeFilesApp::new(&cc.egui_ctx, d.clone()));
+        h.run_steps(8);
+        let mut steps: Vec<String> = Vec::new();
+        let mut note = |s: String| {
+            eprintln!("{s}");
+            steps.push(s);
+        };
+        let shot = |h: &mut egui_kittest::Harness<'static, VibeFilesApp>, name: &str| {
+            for _ in 0..5 {
+                h.step();
+            }
+            match h.render() {
+                Ok(img) => img.save(out.join(format!("{name}.png"))).unwrap(),
+                Err(e) => eprintln!("{name}: {e}"),
+            }
+        };
+        let said = |h: &egui_kittest::Harness<'static, VibeFilesApp>, text: &str| {
+            h.query_by_label_contains(text).is_some()
+        };
+        let wait_long =
+            |h: &mut egui_kittest::Harness<'static, VibeFilesApp>,
+             what: &str,
+             ok: &dyn Fn(&egui_kittest::Harness<'static, VibeFilesApp>) -> bool| {
+                let start = std::time::Instant::now();
+                while !ok(h) {
+                    assert!(start.elapsed().as_secs() < 60, "{what}: never");
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                    h.step();
+                }
+            };
+        let type_in =
+            |h: &mut egui_kittest::Harness<'static, VibeFilesApp>, label: &str, text: &str| {
+                h.get_by_label(label).click();
+                h.step();
+                h.get_by_label(label).type_text(text);
+                h.step();
+            };
+        h.get_by_role_and_label(Role::Button, "Open existing")
+            .click();
+        h.run_steps(8);
+        type_in(&mut h, "Cabinet folder", &root.display().to_string());
+        h.get_by_role_and_label(Role::Button, "Open cabinet")
+            .click();
+        assert!(wait_for(&mut h, |h| matches!(
+            h.state().screen,
+            crate::app::Screen::Open(_)
+        )));
+        h.run_steps(8);
+        let clients: Vec<(String, String, String)> = open_mut(&mut h)
+            .browse
+            .snap
+            .clients
+            .iter()
+            .take(4)
+            .map(|c| (c.id.clone(), c.ext_id.clone(), c.name.clone()))
+            .collect();
+        assert_eq!(clients.len(), 4);
+        let email = format!("organizer+{run}@example.com");
+
+        // ---- 0. The client CSV with one email (Portal contacts), through Import clients CSV….
+        let q = |s: &str| format!("\"{}\"", s.replace('"', "\"\""));
+        let csv = t.path().join("clients.csv");
+        let mut text = String::from("Client ID,Client Name,TP First Name,TP Last Name,TP Email\n");
+        for (i, c) in clients.iter().enumerate() {
+            let e = if i == 1 { email.as_str() } else { "" };
+            text.push_str(&format!("{},{},,,{e}\n", c.1, q(&c.2)));
+        }
+        std::fs::write(&csv, text).unwrap();
+        h.get_by_role_and_label(Role::Button, "Import clients CSV…")
+            .click();
+        h.run_steps(4);
+        type_in(&mut h, "CSV file", &csv.display().to_string());
+        h.get_by_role_and_label(Role::Button, "Read").click();
+        assert!(wait_for(&mut h, |h| said(h, "Changes in this CSV")));
+        let import = h
+            .query_all_by_role(Role::Button)
+            .filter_map(|n| {
+                use egui_kittest::kittest::NodeT;
+                n.accesskit_node()
+                    .label()
+                    .filter(|l| l.starts_with("Import ") && l.ends_with("(one transaction)"))
+            })
+            .next()
+            .expect("the Import button");
+        h.get_by_role_and_label(Role::Button, &import).click();
+        assert!(wait_for(&mut h, |h| said(h, "Portal contacts changed")));
+
+        // ---- 1. The organizer app's export (synthetic): by ID, by email, by name, a bad link.
+        let link = |n: &str| format!("https://clients.stanfordtax.com/walk-{run}/organizer/{n}");
+        let export = t.path().join("organizer-links.csv");
+        let mut x = String::from(
+            "ID,Emails,Client,Tax year,Return type,Questionnaire status,Questionnaire link,Source,Source id,Tax return delivery status\n",
+        );
+        x.push_str(&format!(
+            "a1,,{},2025,1040,In progress,{},ultratax,{},Not delivered\n",
+            q(&clients[0].2),
+            link("a1"),
+            clients[0].1
+        ));
+        x.push_str(&format!(
+            "a2,{email},{},2025,1120s,Not seen yet,{},,,Not delivered\n",
+            q(&clients[1].2),
+            link("a2")
+        ));
+        x.push_str(&format!(
+            "a3,,{},2025,1065,Submitted,{},,,Not delivered\n",
+            q(&clients[2].2),
+            link("a3")
+        ));
+        x.push_str(
+            "a4,,\"Nobody, Here\",2025,1040,In progress,https://example.com/organizer/a4,,,Not delivered\n",
+        );
+        std::fs::write(&export, x).unwrap();
+        h.get_by_role_and_label(Role::Button, "Admin").click();
+        h.run_steps(6);
+        h.get_by_role_and_label(Role::Button, "Organizers").click();
+        h.run_steps(6);
+        {
+            let ctx = h.ctx.clone();
+            let a = open_mut(&mut h).admin.as_mut().unwrap();
+            a.organizers
+                .start_import(&ctx, root.clone(), export.clone());
+        }
+        wait_long(&mut h, "the import preview", &|h| said(h, "4 rows"));
+        assert!(
+            said(
+                &h,
+                "by ID 1 · by email and name 1 · check 0 · name only 1 · no match 0 · not taken 1"
+            ),
+            "the preview's counts"
+        );
+        shot(&mut h, "01-organizer-import-preview");
+        note("Step 1: the export read: 1 by UltraTax ID, 1 by email and name, 1 by name only (unticked), 1 link on another site not taken".into());
+        // The name-only row is ticked by hand (owner Q&A: it starts unticked).
+        assert!(said(&h, "Send 2 links"));
+        open_mut(&mut h)
+            .admin
+            .as_mut()
+            .unwrap()
+            .organizers
+            .tick_import_row(&clients[2].2);
+        h.run_steps(4);
+        h.get_by_role_and_label(Role::Button, "Send 3 links")
+            .click();
+        wait_long(&mut h, "sent", &|h| said(h, "Sent: 3 new"));
+        shot(&mut h, "02-organizer-sent");
+        note(
+            "Step 2: Send 3 links: 3 new on the portal (clients not on the portal yet were added)"
+                .into(),
+        );
+        h.get_by_role_and_label(Role::Button, "Close").click();
+        h.run_steps(6);
+        wait_long(&mut h, "the list", &|h| said(h, "3 listed · 3 showing"));
+        shot(&mut h, "03-organizers-page");
+        note("Step 3: Admin › Portal › Organizers lists 3, all showing".into());
+
+        // ---- 4. The client panel's line, and Turn off from it.
+        h.get_by_role_and_label(Role::Button, "Browse").click();
+        h.run_steps(6);
+        {
+            let o = open_mut(&mut h);
+            o.browse.set_scope(vf_core::browse::Scope::Client(0));
+            o.browse.portal.reread();
+        }
+        wait_long(&mut h, "the panel's line", &|h| {
+            said(h, "Organizer 2025: In progress · card showing")
+        });
+        shot(&mut h, "04-panel-organizer");
+        h.get_by_role_and_label(Role::Button, "Turn off").click();
+        wait_long(&mut h, "turned off", &|h| {
+            said(h, "Organizer 2025: In progress · card turned off")
+        });
+        shot(&mut h, "05-panel-turned-off");
+        note("Step 4: the client panel's line; Turn off: \"card turned off\"".into());
+        let p = crate::portal::client(&s);
+        let year = |p: &vf_portal::Portal| p.organizers(Some(2025), None).unwrap();
+        let of = |list: &[vf_portal::organizer::Organizer], id: &str| {
+            list.iter().find(|o| o.client_id == id).cloned().unwrap()
+        };
+        assert_eq!(of(&year(&p), &clients[0].0).off.as_deref(), Some("off"));
+        // A new import keeps it off.
+        let rows = vf_portal::organizer::read_export(&export).unwrap();
+        let r = p
+            .put_organizers(2025, &[(clients[0].0.clone(), &rows[0])])
+            .unwrap();
+        assert_eq!(r.same, 1);
+        assert_eq!(of(&year(&p), &clients[0].0).off.as_deref(), Some("off"));
+
+        // ---- 5. The tax return delivery for 2025 turns client 1's card off.
+        let mut steps_on = std::collections::BTreeMap::new();
+        steps_on.insert("return".to_string(), true);
+        let made = std::process::Command::new("curl")
+            .args([
+                "-s",
+                "-X",
+                "POST",
+                "-H",
+                &format!("Authorization: Bearer {key}"),
+                "-H",
+                "Content-Type: application/json",
+                "-d",
+                &serde_json::json!({
+                    "clientId": clients[1].0, "taxYear": 2025, "returnType": "1120-S",
+                    "steps": steps_on,
+                })
+                .to_string(),
+                &format!("{url}/api/firm/v1/deliveries"),
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            String::from_utf8_lossy(&made.stdout).contains("\"delivery\""),
+            "{}",
+            String::from_utf8_lossy(&made.stdout)
+        );
+        assert_eq!(
+            of(&year(&p), &clients[1].0).off.as_deref(),
+            Some("delivery")
+        );
+        h.get_by_role_and_label(Role::Button, "Admin").click();
+        h.run_steps(6);
+        h.get_by_role_and_label(Role::Button, "Organizers").click();
+        h.run_steps(4);
+        click_read_again(&mut h);
+        wait_long(&mut h, "off by delivery", &|h| {
+            said(h, "3 listed · 1 showing · 1 off by delivery · 1 turned off")
+        });
+        assert!(said(&h, "Off: delivery started") && said(&h, "Showing (thanks)"));
+        shot(&mut h, "06-organizers-after-delivery");
+        note("Step 5: the 2025 tax return delivery created: that card is off by itself; the submitted one shows its thanks".into());
+        std::fs::write(out.join("organizer-steps.txt"), steps.join("\n")).unwrap();
+    }
+
     /// PA-103 walkthrough of the other options, against a real Vibe Portal: Admin › To-do
     /// templates (new, edit, send to several clients, delete), a list from a template with a bad
     /// then good due day, reminders and nobody told, a blank list with items reordered, assigning,

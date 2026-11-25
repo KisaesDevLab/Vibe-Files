@@ -9,6 +9,7 @@ publish.workspace = true
 # calls go only to the portal address the firm sets in Admin > Portal.
 [dependencies]
 vf-fs = { path = "../vf-fs" }
+csv.workspace = true
 filer-intake = { path = "../filer-intake" }
 chrono.workspace = true
 getrandom.workspace = true

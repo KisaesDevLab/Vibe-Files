@@ -45,6 +45,8 @@ pub enum Page {
     Balances,
     /// Admin › Portal › Deliveries (Addendum §12.6).
     Deliveries,
+    /// Admin › Portal › Organizers (PA-113).
+    Organizers,
     /// Admin › Portal › Agreements (annual agreements, 2026-11-25).
     Agreements,
     /// Admin › Portal › Letter templates (Addendum §12.2).
@@ -79,6 +81,7 @@ const NAV: &[(&str, &[&str])] = &[
             "Invite from client list",
             "Portal requests",
             "To-do templates",
+            "Organizers",
             "Deliveries",
             "Agreements",
             "Letter templates",
@@ -124,6 +127,7 @@ fn page_of(item: &str) -> Option<Page> {
         "To-do templates" => Page::TodoTemplates,
         "Balances" => Page::Balances,
         "Deliveries" => Page::Deliveries,
+        "Organizers" => Page::Organizers,
         "Agreements" => Page::Agreements,
         "Letter templates" => Page::LetterTemplates,
         "Pricing plans" => Page::PricingPlans,
@@ -238,6 +242,8 @@ pub struct Admin {
     pub todo_templates: crate::ui::todo::TemplatesPage,
     pub balances: crate::ui::balance::BalancesPage,
     pub deliveries: crate::ui::delivery::DeliveriesPage,
+    /// PA-113: Admin › Portal › Organizers.
+    pub organizers: crate::ui::organizer::OrganizersPage,
     pub agreements: crate::ui::agreement::AgreementsPage,
     pub letter_templates: crate::ui::letter_templates::LetterTemplatesPage,
     pub pricing_plans: crate::ui::pricing_plans::PricingPlansPage,
@@ -288,6 +294,7 @@ impl Admin {
             todo_templates: Default::default(),
             balances: Default::default(),
             deliveries: Default::default(),
+            organizers: Default::default(),
             agreements: Default::default(),
             letter_templates: Default::default(),
             pricing_plans: Default::default(),
@@ -603,6 +610,14 @@ pub fn show(ui: &mut egui::Ui, a: &mut Admin, env: &mut Env, sweep: SweepEnv, lo
                     crate::ui::agreement::page(ui, &mut a.agreements, env, audit)
                 });
         }
+        Page::Organizers => {
+            let audit = a.portal.audit.clone();
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    crate::ui::organizer::page(ui, &mut a.organizers, env, audit)
+                });
+        }
         Page::Balances => {
             egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
@@ -765,6 +780,14 @@ fn nav(ui: &mut egui::Ui, a: &mut Admin, has_password: bool, locked: bool) {
                 {
                     a.page = Page::Deliveries;
                     a.deliveries.reread();
+                }
+            } else if *item == "Organizers" {
+                if ui
+                    .selectable_label(a.page == Page::Organizers, *item)
+                    .clicked()
+                {
+                    a.page = Page::Organizers;
+                    a.organizers.reread();
                 }
             } else if *item == "Agreements" {
                 if ui

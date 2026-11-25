@@ -237,6 +237,13 @@ pub struct PortalState {
     /// month said once on every PC).
     pub subscriptions: Option<Vec<vf_portal::agreement::Subscription>>,
     monthly_failed_seen: Option<HashSet<String>>,
+    /// Every client's organizer links (PA-113), as last read on this PC: the client panel's line.
+    /// `None` until read, or on a portal without organizers.
+    pub organizers: Option<Vec<vf_portal::organizer::Organizer>>,
+    organizers_job: Option<Receiver<Option<Vec<vf_portal::organizer::Organizer>>>>,
+    organizers_at: Option<Instant>,
+    /// The client panel's Turn off / Turn on of a card: the message when it is done.
+    pub organizer_act: Option<Receiver<Result<(), String>>>,
 }
 
 /// Minutes between reads of the balances (every PC; Addendum §16).
@@ -298,6 +305,10 @@ impl Default for PortalState {
             end_engagement: None,
             subscriptions: None,
             monthly_failed_seen: None,
+            organizers: None,
+            organizers_job: None,
+            organizers_at: None,
+            organizer_act: None,
         }
     }
 }
@@ -324,6 +335,7 @@ impl PortalState {
         self.read_at = None;
         self.fetched_at = None;
         self.lists_at = None;
+        self.organizers_at = None;
     }
 
     pub fn is_set(&mut self, root: &Path) -> bool {
@@ -493,7 +505,37 @@ impl PortalState {
         self.tick_requests(ctx, &s);
         self.tick_balances(ctx, &s);
         self.tick_deliveries(ctx, &s);
+        self.tick_organizers(ctx, &s);
         audit
+    }
+
+    /// Reads every client's organizer links every few minutes (PA-113), for the client panel's
+    /// line; a card turned off or on from the panel is read again at once.
+    fn tick_organizers(&mut self, ctx: &egui::Context, s: &PortalSettings) {
+        if let Some(rx) = &self.organizer_act
+            && let Ok(r) = rx.try_recv()
+        {
+            self.organizer_act = None;
+            if let Err(e) = r {
+                self.notice = Some(format!("Portal: the organizer card was not changed: {e}"));
+            }
+            self.organizers_at = None;
+        }
+        if let Some(rx) = &self.organizers_job
+            && let Ok(read) = rx.try_recv()
+        {
+            self.organizers_job = None;
+            self.organizers = read;
+        }
+        let every = Duration::from_secs(BALANCES_MINUTES * 60);
+        if self.organizers_job.is_none() && self.organizers_at.is_none_or(|t| t.elapsed() >= every)
+        {
+            self.organizers_at = Some(Instant::now());
+            let s2 = s.clone();
+            self.organizers_job = Some(spawn(ctx, move || {
+                core::client(&s2).organizers(None, None).ok()
+            }));
+        }
     }
 
     /// Reads the open deliveries every few minutes on every PC (Addendum §12.6): the client
