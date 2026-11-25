@@ -1054,3 +1054,25 @@ release was made: commits are local on `delivery` in both repos).
 | Q38 | Reminders: which steps count as waiting on the client? | Any step open to the client (letters, return, package, fee, 8879 open); none while only the firm is waited on. | `waitsOnClient` |
 | Q39 | Staff told of every step done, or only some? | Every step (§9), the assigned member else the admins. | `completeStep` |
 | Q40 | The staff page: a portal-wide Deliveries worklist too? | Only per client on the staff page; the worklist is Vibe Files' Admin › Portal › Deliveries. | `staff/Deliveries.tsx` |
+
+### Owner's answers to the logged questions (2026-11-24)
+
+| # | Answer | Change to make |
+|---|---|---|
+| Q24 | Build the rich letter editor (toolbar, field chips, dashed signature boxes, §15.6) | to build |
+| Q15 | The Deliver window shares the return itself (chosen from the client folder) | to build |
+| Q25 | Drop `{Preparer}` and `{Client address}` from the fields and samples | to build |
+| Q11 | The Payment receipt and Delivery step Filer rules only while balances / deliveries are on | to build |
+| Q1 | The newer amount stands (as built) | none |
+| Q9 | Assigned to: portal staff who can see the client, default Nobody (as built) | none |
+| Q32 | Add the 10-minute Stripe check for open and started delivery payments | to build |
+| Q37 | A revised return reopens the return and Form 8879 steps (as built) | none |
+| Q35 | Build the pricing grid (a column per package, a row per service) | to build |
+| Q29 | Whoever chooses signs the selection for everyone (as built) | none |
+| Q26 | Letters need not be opened before Sign (as built) | none |
+| Q27 | Previews in `<data>\cache\letters`, emptied when Vibe Files closes | to build |
+| Q40 | The deliveries worklist stays in Vibe Files only (as built) | none |
+| Q14, Q19 | Payment receipt and the five Delivery doc types are client visible | to build (Delivery types) |
+| Q6 | Notices carry the portal address, no direct pay link (as built) | none |
+
+Still open: the others in this section (defaults stand until the owner says otherwise).
