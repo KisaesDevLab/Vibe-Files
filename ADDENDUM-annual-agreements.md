@@ -211,3 +211,16 @@ Defaults taken while building (say if any is wrong):
 - **Monthly receipts** have no log page; the first invoice files no monthly receipt (the payment record covers it).
 
 Tests: portal api 413 (+5 skipped), portal app 159; Vibe Files vf-letters 13, vf-portal 62, vf-app agreement tests, `agreement_walkthrough` passes (screens in the walk folder).
+
+## 11. Walkthrough of deliveries and agreements (owner 2026-11-25)
+
+Six live walkthroughs against a fresh portal and the stand-in Stripe pass: balance, delivery,
+letters, fee, agreement (a business: card, a failed month, Intake filing, End engagement) and
+agreement_joint (a couple: two signers, bank payment started then cleared, the Deliver window's
+link, a changed monthly amount, bulk renewal, signing in again, the one-time fee only, Stop,
+Sign only and Cancel). Found and fixed: the AICPA 1040 letter ticked in Deliver tax return…
+beside the firm's own (Send refused for its fill-ins); a changed monthly amount lost at renewal;
+no plain words for the portal's delivery and agreement errors; no check for a spouse without
+their own contact; the bulk list's small tick boxes; narrow partner boxes; agreements missing
+from the portal's staff page; an agreement's fee record and receipt worded as a tax return's;
+the portal's own step PDFs listed (and removable) in the client's uploads.
