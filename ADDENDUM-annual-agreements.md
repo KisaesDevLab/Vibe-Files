@@ -191,3 +191,23 @@ The kit's letters are © 2026 CNA, all rights reserved, made available to the fi
 AICPA Tax Section. Built into the app, their text ships in every public binary on
 `vibe-files-releases` and in the repo. The owner accepted that exposure (2026-11-25). Before
 selling to other firms (v2), switch to an import of each firm's own copy of the kit.
+
+## 10. Built (2026-11-25)
+
+Local commits only. Vibe Files (branch `agreements`): `40a5867` addendum, `0985d6f` S1, `358d78a` S3, `fda3a41` walkthrough and window fixes, then docs. Portal (worktree `C:\Projects\worktrees\portal-agreements`, branch `agreements`): `363eda6` S2, `1281004` step PDFs tagged, `a703f4e` the portal's records left out of the client's uploads (also a fix for tax return deliveries' step PDFs, found in the walkthrough).
+
+Defaults taken while building (say if any is wrong):
+
+- **Year**: the agreement's year is the service year; `{Tax year}` in its letters is the year before (the returns it covers); a delivery for that return year and type finds the agreement (A11).
+- **Signers**: by the client's entity type in the cabinet (none set: an individual).
+- **Letters ticked**: those for the ticked services; the §7216 consents offered unticked.
+- **`{Fee}` in a letter**: that letter's services' fees ("$450.00 a month").
+- **The fee waits for the letters** on the card (Locked until they are signed).
+- **Card fee on monthly charges**: on the first charge's one-time part and on each month, by card only; the payment method is changed only to one of the same kind.
+- **A renewal with no monthly lines** leaves a running charge alone (staff stop it).
+- **Cancelling an agreement** does not stop a running charge (End engagement… or Stop does).
+- **The closure letter** is shared with every person of the client on the portal (as a file to read), put in the Portal inbox for Intake, and its fill-ins are typed per client in the window.
+- **Bulk send** builds each client's agreement from their last one (services, fees, assigned, reminders), the letters as the templates now say, the client's partner; clients with none are sent from their own window.
+- **Monthly receipts** have no log page; the first invoice files no monthly receipt (the payment record covers it).
+
+Tests: portal api 413 (+5 skipped), portal app 159; Vibe Files vf-letters 13, vf-portal 62, vf-app agreement tests, `agreement_walkthrough` passes (screens in the walk folder).
