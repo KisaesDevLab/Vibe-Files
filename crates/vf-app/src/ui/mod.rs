@@ -1,5 +1,6 @@
 pub mod admin;
 pub mod admin_password;
+pub mod agreement;
 pub mod audit;
 pub mod balance;
 pub mod browse;

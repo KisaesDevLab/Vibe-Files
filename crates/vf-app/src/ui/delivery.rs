@@ -424,6 +424,7 @@ impl DeliverWindow {
             cents: c,
             recommended: rec,
             services: svc,
+            every: None,
         };
         let mut out = Vec::new();
         match self.fee_mode.as_str() {
@@ -604,6 +605,9 @@ impl DeliverWindow {
                     // With its events (the list read leaves them out).
                     ds.push(p.delivery(&d.id)?);
                 }
+                // The client's annual agreements: one signed for this return skips its
+                // letters (A11). None on a portal without agreements.
+                ds.extend(p.agreements(&id).unwrap_or_default());
                 let files = p.files_for_client(&id)?;
                 let firm = p.status().map(|s| s.firm_name).unwrap_or_default();
                 let staff = p.delivery_staff(&id).unwrap_or_default();
@@ -667,6 +671,24 @@ impl DeliverWindow {
             });
             self.return_doc = fits.first().map(|d| d.id.clone());
         }
+        // A11: the engagement for this return was signed in the year's agreement.
+        if self.current().is_none() && self.signed_agreement().is_some() {
+            self.with_letters = false;
+        }
+    }
+
+    /// The client's agreement covering this return (its returns' year and type) whose letters
+    /// are signed (ADDENDUM-annual-agreements.md A11).
+    fn signed_agreement(&self) -> Option<&Delivery> {
+        self.deliveries.iter().find(|d| {
+            d.is_agreement()
+                && d.status != "cancelled"
+                && d.return_year == Some(self.year)
+                && d.covers
+                    .iter()
+                    .any(|c| c.eq_ignore_ascii_case(&self.return_type))
+                && d.step(delivery::LETTERS).is_some_and(|s| s.state == "done")
+        })
     }
 
     fn take_done(&mut self) {
@@ -852,6 +874,20 @@ impl DeliverWindow {
                 );
                 ui.label(RichText::new(step_state(delivery::LETTERS)).color(theme::ink_muted()));
             });
+            if let Some(a) = self.signed_agreement() {
+                let when = a
+                    .step(delivery::LETTERS)
+                    .and_then(|s| s.completed_at.clone())
+                    .map(|t| widgets::local_time(&t))
+                    .unwrap_or_default();
+                ui.label(
+                    RichText::new(format!(
+                        "Engagement signed in the {} service agreement {when}: no letters needed (tick them to send some anyway).",
+                        a.tax_year
+                    ))
+                    .color(theme::ink_secondary()),
+                );
+            }
             if !self.with_letters {
                 return;
             }
@@ -1508,6 +1544,9 @@ impl DeliverWindow {
                     assigned_staff_id: self.assigned.clone(),
                     notify,
                     remind_days: self.remind_days,
+                    kind: None,
+                    covers: Vec::new(),
+                    return_year: None,
                 };
                 let what = if current.is_none() {
                     "portal_delivery_create"
@@ -1821,6 +1860,8 @@ pub struct DeliveriesPage {
     loaded: bool,
     err: Option<String>,
     window: Option<DeliverWindow>,
+    /// An agreement's row opens the client's Service agreement… window.
+    agreement: Option<crate::ui::agreement::AgreementWindow>,
     audit: Option<AuditOut>,
     reads: Option<ReadOut>,
     /// Browse's B2-first state (the return is shared through B2 first).
@@ -1916,7 +1957,9 @@ pub fn page(ui: &mut egui::Ui, page: &mut DeliveriesPage, env: &mut crate::ui::b
         page.clients = client_rows(env);
         let s2 = s.clone();
         page.job = Some(spawn(&ctx, move || {
-            core::client(&s2).deliveries(None).map_err(|e| e.message())
+            core::client(&s2)
+                .deliveries_all(None)
+                .map_err(|e| e.message())
         }));
     }
     ui.horizontal(|ui| {
@@ -1942,7 +1985,7 @@ pub fn page(ui: &mut egui::Ui, page: &mut DeliveriesPage, env: &mut crate::ui::b
     if let Some(e) = &page.err {
         ui.colored_label(theme::error(), e);
     }
-    let mut open: Option<String> = None;
+    let mut open: Option<(String, bool)> = None;
     if let Some(list) = &page.data {
         let rows: Vec<&Delivery> = list
             .iter()
@@ -1973,7 +2016,7 @@ pub fn page(ui: &mut egui::Ui, page: &mut DeliveriesPage, env: &mut crate::ui::b
             .column(Column::remainder().at_least(50.0))
             .max_scroll_height(f32::INFINITY)
             .header(22.0, |mut h| {
-                for name in ["Client", "Year", "Type", "Step waiting", "Days"] {
+                for name in ["Client", "Year", "Kind", "Step waiting", "Days"] {
                     h.col(|ui| {
                         ui.label(RichText::new(name).small().color(theme::ink_muted()));
                     });
@@ -1989,14 +2032,14 @@ pub fn page(ui: &mut egui::Ui, page: &mut DeliveriesPage, env: &mut crate::ui::b
                             .map(|(c, _)| format!("{} ({})", c.name, c.code))
                             .unwrap_or_else(|| "(not in this cabinet)".into());
                         if ui.link(name).clicked() {
-                            open = Some(d.client_id.clone());
+                            open = Some((d.client_id.clone(), d.is_agreement()));
                         }
                     });
                     row.col(|ui| {
                         ui.label(d.tax_year.to_string());
                     });
                     row.col(|ui| {
-                        ui.label(&d.return_type);
+                        ui.label(d.what());
                     });
                     row.col(|ui| {
                         ui.label(
@@ -2013,7 +2056,19 @@ pub fn page(ui: &mut egui::Ui, page: &mut DeliveriesPage, env: &mut crate::ui::b
                 });
             });
     }
-    if let Some(id) = open
+    if let Some((id, true)) = &open
+        && let Some((c, _)) = page.clients.get(id).cloned()
+        && let (Some(audit), Some(reads)) = (page.audit.clone(), page.reads.clone())
+    {
+        page.agreement = Some(crate::ui::agreement::AgreementWindow::new(
+            &ctx,
+            &s,
+            env.root.to_path_buf(),
+            c,
+            audit,
+            reads,
+        ));
+    } else if let Some((id, false)) = open
         && let Some((c, folder)) = page.clients.get(&id).cloned()
         && let (Some(audit), Some(reads)) = (page.audit.clone(), page.reads.clone())
     {
@@ -2037,15 +2092,43 @@ pub fn page(ui: &mut egui::Ui, page: &mut DeliveriesPage, env: &mut crate::ui::b
             page.loaded = false;
         }
     }
+    if let Some(w) = &mut page.agreement {
+        w.show(&ctx, &s);
+        if w.closed {
+            page.agreement = None;
+            page.loaded = false;
+        }
+    }
 }
 
 /// The client panel's line for one client, from the deliveries last read on this PC.
 pub fn panel_line(read: Option<&Vec<Delivery>>, client_id: &str) -> Option<String> {
     let d = read?
         .iter()
-        .filter(|d| d.client_id == client_id && d.status == "open")
+        .filter(|d| d.client_id == client_id && d.status == "open" && !d.is_agreement())
         .max_by(|a, b| a.created_at.cmp(&b.created_at))?;
     Some(format!("Tax return delivery: {}", d.line()))
+}
+
+/// The client panel's lines for annual agreements: the newest agreement, and the monthly
+/// charge.
+pub fn agreement_lines(
+    read: Option<&Vec<Delivery>>,
+    subs: Option<&Vec<vf_portal::agreement::Subscription>>,
+    client_id: &str,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    if let Some(d) = read.and_then(|r| {
+        r.iter()
+            .filter(|d| d.client_id == client_id && d.is_agreement() && d.status != "cancelled")
+            .max_by_key(|d| d.tax_year)
+    }) {
+        out.push(format!("Service agreement: {}", d.line()));
+    }
+    if let Some(s) = subs.and_then(|s| s.iter().find(|s| s.client_id == client_id && s.live())) {
+        out.push(format!("Monthly charge: {}", s.words()));
+    }
+    out
 }
 
 #[cfg(test)]

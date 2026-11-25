@@ -639,6 +639,21 @@ pub fn preview(
     Ok(out)
 }
 
+/// A business (signed for by an officer or partner), by the client's entity type in the
+/// cabinet (annual agreements, 2026-11-25); a client with none set is an individual.
+pub fn client_is_business(root: &Path, client_id: &str) -> bool {
+    crate::clients::load(root)
+        .ok()
+        .is_some_and(|m| is_business(m.meta.entity_types.get(client_id).map(String::as_str)))
+}
+
+/// A client's partner (set in Vibe Files, else the client CSV's Partner column).
+pub fn client_partner(root: &Path, client_id: &str) -> Option<String> {
+    let m = crate::clients::load(root).ok()?;
+    let listed = m.clients().iter().find(|c| c.uuid.to_string() == client_id);
+    partner_of(&m.meta, client_id, listed)
+}
+
 /// Entity types invited as one contact with the role Owner (no spouse).
 fn is_business(entity: Option<&str>) -> bool {
     matches!(

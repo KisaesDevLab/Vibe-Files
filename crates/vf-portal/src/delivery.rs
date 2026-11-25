@@ -185,6 +185,27 @@ pub fn doc_type_of_step(step: &str) -> Option<&'static str> {
         .map(|(_, n)| *n)
 }
 
+/// An annual agreement's step PDFs (ADDENDUM-annual-agreements.md §3.4): its own doc types,
+/// filed in the client's Correspondence for the agreement's year.
+pub const AGREEMENT_STEP_DOC_TYPES: [(&str, &str); 3] = [
+    (LETTERS, "Agreement — signed letters"),
+    (PACKAGE, "Agreement — package selection"),
+    (FEE, "Agreement — payment record"),
+];
+pub const AGREEMENT_FOLDER: &str = "Correspondence/{Year}/Engagement";
+
+/// The doc type of a step PDF of a delivery of this kind.
+pub fn doc_type_of(kind: Option<&str>, step: &str) -> Option<&'static str> {
+    if kind == Some("agreement") {
+        AGREEMENT_STEP_DOC_TYPES
+            .iter()
+            .find(|(k, _)| *k == step)
+            .map(|(_, n)| *n)
+    } else {
+        doc_type_of_step(step)
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct Locks {
@@ -275,6 +296,13 @@ pub struct FeeLineOut {
     pub recommended: bool,
     #[serde(default)]
     pub selected: bool,
+    /// An agreement's line: `once` or `month`.
+    #[serde(default = "once")]
+    pub every: String,
+}
+
+fn once() -> String {
+    "once".into()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -346,13 +374,16 @@ impl DeliveryFee {
 #[serde(rename_all = "camelCase")]
 pub struct FeeLineIn {
     pub key: String,
-    /// `base`, `package`, `addon`.
+    /// `base`, `package`, `addon`, or `service` (an agreement's line).
     pub kind: String,
     pub name: String,
     pub text: String,
     pub cents: u64,
     pub recommended: bool,
     pub services: Vec<crate::pricing::Service>,
+    /// An agreement's line: `once` or `month` (none: once).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub every: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -370,6 +401,14 @@ pub struct Delivery {
     pub client_id: String,
     pub tax_year: i32,
     pub return_type: String,
+    /// `return`, or `agreement` (an annual service agreement: letters, package, fee).
+    #[serde(default = "return_kind")]
+    pub kind: String,
+    /// An agreement's returns and services, and the tax year of the returns it covers.
+    #[serde(default)]
+    pub covers: Vec<String>,
+    #[serde(default)]
+    pub return_year: Option<i32>,
     pub title: String,
     /// `open`, `complete`, `cancelled`.
     pub status: String,
@@ -401,7 +440,15 @@ pub struct Delivery {
     pub events: Vec<DeliveryEvent>,
 }
 
+fn return_kind() -> String {
+    "return".into()
+}
+
 impl Delivery {
+    pub fn is_agreement(&self) -> bool {
+        self.kind == "agreement"
+    }
+
     pub fn step(&self, kind: &str) -> Option<&DeliveryStep> {
         self.steps.iter().find(|s| s.kind == kind)
     }
@@ -420,16 +467,25 @@ impl Delivery {
         self.steps.iter().find(|s| s.present && s.state != "done")
     }
 
+    /// What it is, in a list: "1040" or "Agreement".
+    pub fn what(&self) -> &str {
+        if self.is_agreement() {
+            "Agreement"
+        } else {
+            &self.return_type
+        }
+    }
+
     /// "Tax return delivery: 3 of 5 done", for the client panel.
     pub fn line(&self) -> String {
         let (done, all) = self.progress();
         match self.status.as_str() {
-            "complete" => format!("{} {}: complete", self.tax_year, self.return_type),
-            "cancelled" => format!("{} {}: cancelled", self.tax_year, self.return_type),
+            "complete" => format!("{} {}: complete", self.tax_year, self.what()),
+            "cancelled" => format!("{} {}: cancelled", self.tax_year, self.what()),
             _ => format!(
                 "{} {}: {done} of {all} done{}",
                 self.tax_year,
-                self.return_type,
+                self.what(),
                 self.waiting()
                     .map(|s| format!(" · {} {}", s.name, state_words(&s.state)))
                     .unwrap_or_default()
@@ -463,6 +519,13 @@ pub struct NewDelivery {
     pub assigned_staff_id: Option<String>,
     pub notify: bool,
     pub remind_days: u32,
+    /// An annual agreement (none: a tax return delivery).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub covers: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub return_year: Option<i32>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
@@ -499,6 +562,11 @@ impl Status {
     pub fn has_deliveries(&self) -> bool {
         self.features.iter().any(|f| f == "deliveries")
     }
+
+    /// The portal has annual agreements (Vibe Portal 0.5.5), with deliveries on.
+    pub fn has_agreements(&self) -> bool {
+        self.features.iter().any(|f| f == "agreements")
+    }
 }
 
 #[derive(Deserialize)]
@@ -518,6 +586,33 @@ impl Portal {
         }
         let q: Vec<(&str, &str)> = client_id.map(|c| vec![("clientId", c)]).unwrap_or_default();
         self.get::<R>("/deliveries", &q).map(|r| r.deliveries)
+    }
+
+    /// Deliveries and agreements both (the Deliveries page, the copies in client folders): a
+    /// portal without agreements lists its deliveries.
+    pub fn deliveries_all(&self, client_id: Option<&str>) -> Result<Vec<Delivery>> {
+        #[derive(Deserialize)]
+        struct R {
+            deliveries: Vec<Delivery>,
+        }
+        let mut q: Vec<(&str, &str)> = vec![("kind", "all")];
+        if let Some(c) = client_id {
+            q.push(("clientId", c));
+        }
+        self.get::<R>("/deliveries", &q).map(|r| r.deliveries)
+    }
+
+    /// A client's annual agreements, newest first.
+    pub fn agreements(&self, client_id: &str) -> Result<Vec<Delivery>> {
+        #[derive(Deserialize)]
+        struct R {
+            deliveries: Vec<Delivery>,
+        }
+        self.get::<R>(
+            "/deliveries",
+            &[("kind", "agreement"), ("clientId", client_id)],
+        )
+        .map(|r| r.deliveries)
     }
 
     /// The deliveries of a tax year and return type (a pricing plan's, Q44).
@@ -845,15 +940,23 @@ mod tests {
         assert_eq!(return_type_names(root), RETURN_TYPES);
         assert!(is_individual(root, "1040") && !is_individual(root, "1065"));
         add_return_type(root, " CA 540 ", true).unwrap();
-        add_return_type(root, "990", false).unwrap();
+        add_return_type(root, "CA 100", false).unwrap();
         assert!(add_return_type(root, "ca 540", false).is_err());
+        // Built in since annual agreements (2026-11-25).
+        assert!(add_return_type(root, "990", false).is_err());
+        assert!(add_return_type(root, "Bookkeeping", false).is_err());
         assert!(add_return_type(root, "<b>", false).is_err());
         assert!(add_return_type(root, &"9".repeat(25), false).is_err());
-        assert_eq!(
-            return_type_names(root),
-            ["1040", "1120", "1120-S", "1065", "CA 540", "990"]
-        );
-        assert!(is_individual(root, "CA 540") && !is_individual(root, "990"));
+        let mut want: Vec<&str> = RETURN_TYPES.to_vec();
+        want.extend(["CA 540", "CA 100"]);
+        assert_eq!(return_type_names(root), want);
+        assert!(is_individual(root, "CA 540") && !is_individual(root, "CA 100"));
+        assert!(is_individual(root, "709") && !is_individual(root, "990"));
+        // Services are offered to agreements and letters, not to Deliver tax return….
+        assert!(service_names(root).contains(&"Payroll".to_string()));
+        assert!(!return_type_names(root).contains(&"Payroll".to_string()));
+        assert_eq!(letter_context(root, "1040"), "1040|Individual");
+        assert_eq!(letter_context(root, "1065"), "1065|Entity");
     }
 
     /// A delivery as the portal's tests answer it (Vibe-Portal deliveries.test.ts).

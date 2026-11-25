@@ -6,6 +6,7 @@
 //! so every PC that opens the cabinet uses them, as the shared sync settings are. Calls go only
 //! to that address; nothing here runs until the firm sets one.
 
+pub mod agreement;
 pub mod api;
 pub mod balance;
 pub mod delivery;

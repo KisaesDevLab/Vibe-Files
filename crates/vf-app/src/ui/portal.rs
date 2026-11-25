@@ -214,7 +214,15 @@ pub struct PortalState {
     pub delivery: Option<crate::ui::delivery::DeliverWindow>,
     /// Every open delivery, as last read on this PC (the client panel's line).
     pub deliveries: Option<Vec<vf_portal::delivery::Delivery>>,
-    deliveries_job: Option<Receiver<Option<Vec<vf_portal::delivery::Delivery>>>>,
+    #[allow(clippy::type_complexity)]
+    deliveries_job: Option<
+        Receiver<
+            Option<(
+                Vec<vf_portal::delivery::Delivery>,
+                Option<Vec<vf_portal::agreement::Subscription>>,
+            )>,
+        >,
+    >,
     deliveries_at: Option<Instant>,
     delivery_tx: Sender<Vec<vf_portal::delivery::Delivery>>,
     delivery_rx: Receiver<Vec<vf_portal::delivery::Delivery>>,
@@ -222,6 +230,13 @@ pub struct PortalState {
     pub delivery_copies: crate::ui::delivery::Copies,
     /// Failed bank payments of delivery fees already seen on this PC (F3: each said once).
     failed_seen: Option<HashSet<String>>,
+    /// A client's Service agreement… and End engagement… windows (annual agreements).
+    pub agreement: Option<crate::ui::agreement::AgreementWindow>,
+    pub end_engagement: Option<crate::ui::agreement::EndEngagementWindow>,
+    /// Every live monthly charge, as last read on this PC (the client panel's line; a failed
+    /// month said once on every PC).
+    pub subscriptions: Option<Vec<vf_portal::agreement::Subscription>>,
+    monthly_failed_seen: Option<HashSet<String>>,
 }
 
 /// Minutes between reads of the balances (every PC; Addendum §16).
@@ -279,6 +294,10 @@ impl Default for PortalState {
             delivery_rx,
             delivery_copies: Default::default(),
             failed_seen: None,
+            agreement: None,
+            end_engagement: None,
+            subscriptions: None,
+            monthly_failed_seen: None,
         }
     }
 }
@@ -483,13 +502,42 @@ impl PortalState {
         if !s.deliveries {
             self.deliveries = None;
             self.delivery = None;
+            self.agreement = None;
+            self.end_engagement = None;
+            self.subscriptions = None;
             return;
         }
         if let Some(rx) = &self.deliveries_job
             && let Ok(read) = rx.try_recv()
         {
             self.deliveries_job = None;
-            if let Some(read) = read {
+            if let Some((read, subs)) = read {
+                // Annual agreements: a monthly charge that failed is said once on every PC.
+                if let Some(subs) = subs {
+                    let failed: Vec<(String, String)> = subs
+                        .iter()
+                        .filter_map(|s| {
+                            Some((
+                                format!("{}:{}", s.id, s.failed_at.clone()?),
+                                s.client_id.clone(),
+                            ))
+                        })
+                        .collect();
+                    match &mut self.monthly_failed_seen {
+                        None => {
+                            self.monthly_failed_seen =
+                                Some(failed.iter().map(|f| f.0.clone()).collect())
+                        }
+                        Some(seen) => {
+                            if failed.iter().any(|f| seen.insert(f.0.clone())) {
+                                self.notice = Some(
+                                    "Portal: a client's monthly payment failed; the client's portal offers Update payment method. See the client's Service agreement…".into(),
+                                );
+                            }
+                        }
+                    }
+                    self.subscriptions = Some(subs);
+                }
                 // F3: a delivery fee's bank payment that failed is said once on every PC.
                 let failed: Vec<(String, String)> = read
                     .iter()
@@ -530,7 +578,13 @@ impl PortalState {
         {
             self.deliveries_at = Some(Instant::now());
             let s2 = s.clone();
-            self.deliveries_job = Some(spawn(ctx, move || core::client(&s2).deliveries(None).ok()));
+            self.deliveries_job = Some(spawn(ctx, move || {
+                let p = core::client(&s2);
+                // Agreements too (an older portal lists its deliveries), and the monthly charges
+                // (none on an older portal).
+                let read = p.deliveries_all(None).ok()?;
+                Some((read, p.live_subscriptions().ok()))
+            }));
         }
     }
 
@@ -2583,7 +2637,7 @@ pub fn admin_settings(ui: &mut egui::Ui, a: &mut AdminPortal, env: &mut Env) {
     ui.add_space(6.0);
     ui.checkbox(
         &mut a.deliveries,
-        "Tax return delivery: send a return to the client as a card of steps",
+        "Tax return delivery and annual agreements: cards of steps on the client's portal",
     );
     ui.label(widgets::caption(
         "For every PC of this cabinet: a client's Deliver tax return… (in the client's details) \
@@ -2591,7 +2645,10 @@ pub fn admin_settings(ui: &mut egui::Ui, a: &mut AdminPortal, env: &mut Env) {
          UltraTax eSignature from a card on the portal; each finished step's PDF, with its log, \
          is filed in the client's Income Tax\\<year>\\Delivery folder (doc types Delivery — …, \
          added when this is saved). The portal must have it turned on too (its Settings › Tax \
-         return delivery). Needs Vibe Portal 0.6 or later.",
+         return delivery). Needs Vibe Portal 0.5.4 or later.",
+    ));
+    ui.label(widgets::caption(
+        "With it, annual service agreements: a client's Service agreement… and End engagement…,          and Admin › Portal › Agreements. The client signs the letters for the services they          take and sets up payment, once or monthly; the signed letters are filed in the client's          Correspondence folder for the year (Engagement) and each month's receipt in Billing.          Needs Vibe Portal 0.5.5 or later.",
     ));
     ui.add_space(6.0);
     ui.checkbox(
@@ -3075,8 +3132,9 @@ fn save(a: &mut AdminPortal, ctx: &egui::Context, env: &mut Env) {
     }
     a.shown = Some(s.clone());
     a.read_record_again();
-    // Addendum §16: a receipt needs its doc type (Billing/{Year}) in the list and the catalog.
-    let receipt_type = if s.balances {
+    // Addendum §16: a receipt needs its doc type (Billing/{Year}) in the list and the catalog
+    // (annual agreements' monthly receipts too, which come with deliveries).
+    let receipt_type = if s.balances || s.deliveries {
         match vf_fs::doctypes::ensure(
             env.root,
             vf_portal::inbox::RECEIPT_DOC_TYPE,
@@ -3135,13 +3193,17 @@ fn save(a: &mut AdminPortal, ctx: &egui::Context, env: &mut Env) {
     let mut delivery_types = String::new();
     if s.deliveries {
         let mut added = 0;
-        for (_, name) in vf_portal::delivery::STEP_DOC_TYPES {
-            match vf_fs::doctypes::ensure(
-                env.root,
-                name,
-                vf_portal::delivery::DELIVERY_FOLDER,
-                true,
-            ) {
+        // Annual agreements' step PDFs: Correspondence/{Year}/Engagement.
+        let all = vf_portal::delivery::STEP_DOC_TYPES
+            .iter()
+            .map(|(_, n)| (*n, vf_portal::delivery::DELIVERY_FOLDER))
+            .chain(
+                vf_portal::delivery::AGREEMENT_STEP_DOC_TYPES
+                    .iter()
+                    .map(|(_, n)| (*n, vf_portal::delivery::AGREEMENT_FOLDER)),
+            );
+        for (name, folder) in all {
+            match vf_fs::doctypes::ensure(env.root, name, folder, true) {
                 Ok(true) => added += 1,
                 Ok(false) => {}
                 Err(e) => delivery_types = format!(" A delivery doc type could not be added: {e}"),

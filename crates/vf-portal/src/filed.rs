@@ -343,6 +343,7 @@ mod tests {
                 },
                 request: None,
                 balance: None,
+                subscription: None,
                 delivery: None,
             },
             fetched_at: "2026-11-10T10:05:00.000Z".into(),

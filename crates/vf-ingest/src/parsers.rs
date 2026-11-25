@@ -653,6 +653,21 @@ pub fn delivery_step_rule() -> filer_core::rules::Rule {
     r
 }
 
+/// The rule that files an annual agreement's step PDF from the portal
+/// (ADDENDUM-annual-agreements.md §3.4): `<year> Agreement <n> - <step>.pdf` into the client's
+/// `Correspondence/{Year}/Engagement`.
+pub fn agreement_step_rule() -> filer_core::rules::Rule {
+    let mut r = filer_core::rules::Rule::new(
+        "Agreement step",
+        r"^\d{4} agreement [1-5] - ",
+        "{Client}/Correspondence/{Year}/Engagement",
+        "{Rest}.{Ext}",
+        true,
+    );
+    r.id = format!("{MANAGED_PREFIX}portal-agreement-step");
+    r
+}
+
 /// What a rules sync did.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Synced {
@@ -763,13 +778,16 @@ fn plan_rules(
     // Owner 2026-11-24 (Q11): only while Admin › Portal has the feature on.
     let (balances, deliveries) = portal_features(root);
     let mut at = 0;
-    if balances {
+    // Annual agreements' monthly receipts have the same name (they come with deliveries).
+    if balances || deliveries {
         active.insert(at, payment_receipt_rule());
         at += 1;
     }
-    // A delivery's step PDF (Addendum §12.5): into the client's Income Tax\{Year}\Delivery.
+    // A delivery's step PDF (Addendum §12.5): into the client's Income Tax\{Year}\Delivery;
+    // an annual agreement's into Correspondence\{Year}\Engagement.
     if deliveries {
         active.insert(at, delivery_step_rule());
+        active.insert(at + 1, agreement_step_rule());
     }
     // One of Intake's own rules that says exactly what a print capture rule above it says
     // (same pattern, exception and folder) is a duplicate: said, for its owner to delete.

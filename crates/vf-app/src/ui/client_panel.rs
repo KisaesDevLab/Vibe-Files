@@ -254,6 +254,43 @@ pub fn show(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env, ci: usize) {
                 b.b2_first.clone(),
             ));
         }
+        // Annual agreements (owner 2026-11-25): letters signed and fees set up on the portal.
+        if b.portal.settings(env.root).is_some_and(|s| s.deliveries)
+            && ui
+                .small_btn("Service agreement…")
+                .on_hover_text("Send this client's annual agreement (letters to sign, fees once or monthly) as a card on the portal")
+                .clicked()
+            && let Some(s) = b.portal.settings(env.root).cloned()
+        {
+            b.portal.agreement = Some(crate::ui::agreement::AgreementWindow::new(
+                ui.ctx(),
+                &s,
+                env.root.to_path_buf(),
+                crate::ui::portal::ClientRef {
+                    id: c.id.clone(),
+                    code: c.ext_id.clone(),
+                    name: c.name.clone(),
+                },
+                b.portal.audit_out(),
+                b.portal.delivery_out(),
+            ));
+        }
+        if b.portal.settings(env.root).is_some_and(|s| s.deliveries)
+            && ui
+                .small_btn("End engagement…")
+                .on_hover_text("Send the engagement closure letter, cancel open agreements and stop the monthly charge")
+                .clicked()
+        {
+            b.portal.end_engagement = Some(crate::ui::agreement::EndEngagementWindow::new(
+                env.root.to_path_buf(),
+                crate::ui::portal::ClientRef {
+                    id: c.id.clone(),
+                    code: c.ext_id.clone(),
+                    name: c.name.clone(),
+                },
+                b.portal.audit_out(),
+            ));
+        }
         // Addendum §16: a balance the client pays on the portal.
         if b.portal.settings(env.root).is_some_and(|s| s.balances)
             && ui
@@ -286,6 +323,15 @@ pub fn show(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env, ci: usize) {
         && let Some(line) = crate::ui::delivery::panel_line(b.portal.deliveries.as_ref(), &c.id)
     {
         ui.label(RichText::new(line).color(theme::ink_secondary()));
+    }
+    if b.portal.settings(env.root).is_some_and(|s| s.deliveries) {
+        for line in crate::ui::delivery::agreement_lines(
+            b.portal.deliveries.as_ref(),
+            b.portal.subscriptions.as_ref(),
+            &c.id,
+        ) {
+            ui.label(RichText::new(line).color(theme::ink_secondary()));
+        }
     }
     if b.portal.settings(env.root).is_some_and(|s| s.balances) {
         ui.label(

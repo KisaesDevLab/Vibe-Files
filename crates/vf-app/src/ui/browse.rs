@@ -5095,6 +5095,8 @@ fn portal_windows(ctx: &egui::Context, b: &mut Browse, env: &mut Env) {
         b.portal.todo = None;
         b.portal.balance = None;
         b.portal.delivery = None;
+        b.portal.agreement = None;
+        b.portal.end_engagement = None;
         b.portal.send_link = None;
         return;
     };
@@ -5138,6 +5140,25 @@ fn portal_windows(ctx: &egui::Context, b: &mut Browse, env: &mut Env) {
         w.show(ctx, &s);
         if w.closed {
             b.portal.delivery = None;
+            b.portal.look_at_deliveries_now();
+        }
+    }
+    // Annual agreements: a client's Service agreement… and End engagement… windows.
+    if !s.deliveries {
+        b.portal.agreement = None;
+        b.portal.end_engagement = None;
+    }
+    if let Some(w) = &mut b.portal.agreement {
+        w.show(ctx, &s);
+        if w.closed {
+            b.portal.agreement = None;
+            b.portal.look_at_deliveries_now();
+        }
+    }
+    if let Some(w) = &mut b.portal.end_engagement {
+        w.show(ctx, &s);
+        if w.closed {
+            b.portal.end_engagement = None;
             b.portal.look_at_deliveries_now();
         }
     }

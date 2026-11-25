@@ -501,6 +501,9 @@ pub struct Upload {
     /// A delivery's step PDF, made by the portal (Addendum D2); absent otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delivery: Option<UploadDelivery>,
+    /// A monthly charge's receipt, made by the portal (annual agreements); absent otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subscription: Option<UploadSubscription>,
 }
 
 /// The delivery step a step PDF records.
@@ -510,6 +513,16 @@ pub struct UploadDelivery {
     pub id: String,
     pub step: String,
     pub year: Option<i32>,
+    /// `return` (a tax return delivery) or `agreement` (an annual agreement's step PDF).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+}
+
+/// The monthly charge a receipt upload is for.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct UploadSubscription {
+    pub subscription_id: String,
 }
 
 /// The balance a receipt upload is for.
