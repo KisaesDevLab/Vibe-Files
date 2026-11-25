@@ -91,6 +91,7 @@ pub fn delete(root: &Path, id: &str) -> Result<(), String> {
 pub fn seed_if_missing(root: &Path) -> Result<bool, String> {
     let marker = dir(root).join(SEEDED);
     if marker.exists() || !load_all(root)?.is_empty() {
+        refresh_samples(root)?;
         return Ok(false);
     }
     std::fs::create_dir_all(dir(root)).map_err(|e| e.to_string())?;
@@ -99,6 +100,32 @@ pub fn seed_if_missing(root: &Path) -> Result<bool, String> {
     }
     std::fs::write(&marker, b"").map_err(|e| e.to_string())?;
     Ok(true)
+}
+
+/// Fields no longer offered (owner 2026-11-24, Q25).
+const DROPPED: [&str; 2] = ["{Preparer}", "{Client address}"];
+
+/// Seeded letters still marked sample (the firm never saved its own text) that use a field no
+/// longer offered are replaced by today's sample, as a new version. A letter the firm saved is
+/// never touched. Returns how many were replaced.
+pub fn refresh_samples(root: &Path) -> Result<usize, String> {
+    let fresh = samples();
+    let mut n = 0;
+    for t in load_all(root)?.into_iter().filter(|t| t.sample) {
+        let uses =
+            serde_json::to_string(&t.blocks).is_ok_and(|s| DROPPED.iter().any(|f| s.contains(f)));
+        if let Some(s) = fresh.iter().find(|s| s.id == t.id).filter(|_| uses) {
+            save(
+                root,
+                &Template {
+                    version: t.version,
+                    ..s.clone()
+                },
+            )?;
+            n += 1;
+        }
+    }
+    Ok(n)
 }
 
 fn p(text: &str) -> Block {
@@ -251,6 +278,31 @@ pub fn samples() -> Vec<Template> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn samples_with_a_dropped_field_are_refreshed() {
+        let d = tempfile::tempdir().unwrap();
+        let root = d.path();
+        std::fs::create_dir_all(root.join("_Vibe")).unwrap();
+        assert!(seed_if_missing(root).unwrap());
+        // A sample from before Q25, and one the firm saved with the same field.
+        let mut old = samples().into_iter().find(|t| t.sample).unwrap();
+        old.blocks.push(p("{Firm name}, {Preparer}"));
+        save(root, &old).unwrap();
+        let mut own = samples().into_iter().rfind(|t| t.sample).unwrap();
+        assert_ne!(own.id, old.id);
+        own.sample = false;
+        own.blocks.push(p("{Preparer}"));
+        save(root, &own).unwrap();
+        assert_eq!(refresh_samples(root).unwrap(), 1);
+        let all = load_all(root).unwrap();
+        let s = |id: &str| {
+            serde_json::to_string(&all.iter().find(|t| t.id == id).unwrap().blocks).unwrap()
+        };
+        assert!(!s(&old.id).contains("{Preparer}"));
+        assert!(s(&own.id).contains("{Preparer}"));
+        assert_eq!(refresh_samples(root).unwrap(), 0);
+    }
 
     #[test]
     fn seeds_once_saves_versions_and_keeps_history() {

@@ -170,6 +170,8 @@ pub struct DeliverWindow {
     /// itself) and the one chosen as the return.
     docs: Vec<crate::ui::portal::DocRef>,
     return_doc: Option<String>,
+    /// The return's content changed since the client opened it (found when sending).
+    force_revise: bool,
     /// Documents go to B2 before they are shared (Q-103).
     b2: crate::ui::portal::B2First,
     link: String,
@@ -235,6 +237,7 @@ impl DeliverWindow {
             return_file: None,
             docs,
             return_doc: None,
+            force_revise: false,
             b2,
             link: String::new(),
             notify: true,
@@ -652,6 +655,11 @@ impl DeliverWindow {
             Done::Said(Ok(m)) => {
                 self.said = Some((m, false));
                 self.err = None;
+            }
+            Done::Saved(Err(e), _) if e == REVISED_ASK => {
+                // Asked in the window, as for another document (T27).
+                self.force_revise = true;
+                self.confirm_revise = true;
             }
             Done::Saved(Err(e), _) | Done::Said(Err(e)) => self.err = Some(e),
         }
@@ -1357,20 +1365,33 @@ impl DeliverWindow {
                 let assigned = self.assigned.clone();
                 let remind_days = self.remind_days;
                 // T27: a return the client saw, replaced: asked first in the window.
-                let shown_doc = current
+                let shown = current
                     .as_ref()
                     .and_then(|d| d.return_file.as_ref())
-                    .and_then(|r| self.files.iter().find(|f| f.file_id == r.id))
-                    .map(|f| f.vf_document_id.clone());
-                let seen = current.as_ref().is_some_and(|d| {
-                    d.step(delivery::RETURN).is_some_and(|s| s.state == "done")
-                        && shown_doc.as_deref() != self.return_doc.as_deref()
-                });
+                    .and_then(|r| self.files.iter().find(|f| f.file_id == r.id));
+                let chosen_doc = self
+                    .return_doc
+                    .as_deref()
+                    .and_then(|id| self.docs.iter().find(|d| d.id == id));
+                let other_content = match (shown, chosen_doc) {
+                    (Some(f), Some(d)) => {
+                        f.vf_document_id != d.id || (!d.hash.is_empty() && f.sha256 != d.hash)
+                    }
+                    (None, Some(_)) => true,
+                    _ => false,
+                };
+                let seen = self.force_revise
+                    || current.as_ref().is_some_and(|d| {
+                        d.step(delivery::RETURN).is_some_and(|s| s.state == "done")
+                            && other_content
+                            && self.with_return
+                    });
                 if seen && !self.confirm_revise {
                     self.confirm_revise = true;
                     return;
                 }
                 self.confirm_revise = false;
+                self.force_revise = false;
                 let title = self.title.trim().to_string();
                 let doc = self
                     .return_doc
@@ -1421,16 +1442,75 @@ impl DeliverWindow {
                                 },
                             )?,
                         };
-                        // The return shared with everyone of the client (B2 first), then set.
-                        let file = match doc {
-                            Some(mut doc) => {
-                                doc.hash =
-                                    filer_intake::commit::sha256_file(&doc.path).map_err(|e| {
-                                        vf_portal::PortalError::Local(format!("{}: {e}", doc.name))
-                                    })?;
-                                let on = p.file_for_doc(&doc.id)?;
+                        // The return (Q15): put on the portal for nobody yet, set as the
+                        // delivery's return (so it is locked), then shown to everyone of the
+                        // client. A return already there with the same content is left as it
+                        // is (staff may have limited who sees it).
+                        if let Some(mut doc) = doc {
+                            doc.hash =
+                                filer_intake::commit::sha256_file(&doc.path).map_err(|e| {
+                                    vf_portal::PortalError::Local(format!("{}: {e}", doc.name))
+                                })?;
+                            let is_return = |d: &Delivery, id: &str| {
+                                d.return_file.as_ref().is_some_and(|r| r.id == id)
+                            };
+                            let done = d.step(delivery::RETURN).is_some_and(|s| s.state == "done");
+                            let (file_id, added, replaced) = match p.file_for_doc(&doc.id)? {
+                                Some(f) if f.sha256 == doc.hash => (f.file_id, false, false),
+                                Some(f) => {
+                                    // New content for a return the client opened: only as a
+                                    // revised return, asked for in the window.
+                                    if done && is_return(&d, &f.file_id) && !seen {
+                                        return Err(vf_portal::PortalError::Local(
+                                            REVISED_ASK.into(),
+                                        ));
+                                    }
+                                    let id = f.file_id.clone();
+                                    crate::ui::portal::share_docs(
+                                        &p,
+                                        &b2,
+                                        &client,
+                                        vec![(doc.clone(), Some(f))],
+                                        &Default::default(),
+                                        &Default::default(),
+                                        true,
+                                        &share_audit,
+                                    )
+                                    .map_err(vf_portal::PortalError::Local)?;
+                                    (id, false, true)
+                                }
+                                None => {
+                                    b2.push(std::slice::from_ref(&doc.id))
+                                        .map_err(vf_portal::PortalError::Local)?;
+                                    let a = p.add(
+                                        &client.id,
+                                        &doc.id,
+                                        &doc.name,
+                                        doc.tax_year,
+                                        &doc.path,
+                                    )?;
+                                    share_audit.send(AuditEntry::new(
+                                        "portal_share",
+                                        Some(&doc.id),
+                                        serde_json::json!({
+                                            "client_id": client.id,
+                                            "sent": true,
+                                            "updated": false,
+                                        }),
+                                    ));
+                                    (a.file_id().to_string(), true, false)
+                                }
+                            };
+                            if !is_return(&d, &file_id) || (replaced && done) {
+                                d = if seen {
+                                    p.revise_return(&d.id, &file_id)?
+                                } else {
+                                    p.set_delivery_return(&d.id, &file_id)?
+                                };
+                            }
+                            if added {
                                 let people = p.users(&client.id)?;
-                                let chosen: std::collections::BTreeMap<String, bool> = people
+                                let all: std::collections::BTreeMap<String, bool> = people
                                     .users
                                     .iter()
                                     .filter(|u| u.active)
@@ -1441,30 +1521,20 @@ impl DeliverWindow {
                                     .iter()
                                     .map(|i| (i.invitation_id.clone(), true))
                                     .collect();
-                                let id = doc.id.clone();
-                                crate::ui::portal::share_docs(
-                                    &p,
-                                    &b2,
-                                    &client,
-                                    vec![(doc, on)],
-                                    &chosen,
-                                    &held,
-                                    true,
-                                    &share_audit,
-                                )
-                                .map_err(vf_portal::PortalError::Local)?;
-                                p.file_for_doc(&id)?.map(|f| f.file_id)
+                                if !all.is_empty() || !held.is_empty() {
+                                    p.set_visibility_with(&file_id, &all, &held)?;
+                                    share_audit.send(AuditEntry::new(
+                                        "portal_share",
+                                        Some(&doc.id),
+                                        serde_json::json!({
+                                            "client_id": client.id,
+                                            "shown_to": all.keys().collect::<Vec<_>>(),
+                                            "hidden_from": [],
+                                            "held_for_invitations": held.keys().collect::<Vec<_>>(),
+                                        }),
+                                    ));
+                                }
                             }
-                            None => None,
-                        };
-                        if let Some(f) = file
-                            && d.return_file.as_ref().map(|r| r.id.as_str()) != Some(f.as_str())
-                        {
-                            d = if seen {
-                                p.revise_return(&d.id, &f)?
-                            } else {
-                                p.set_delivery_return(&d.id, &f)?
-                            };
                         }
                         if let Some(l) = link
                             && d.esign_link.as_deref() != Some(l.as_str())
@@ -1609,6 +1679,10 @@ impl DeliverWindow {
     }
 }
 
+/// Said by the Send job when the return's content changed since the client opened it: the
+/// window then asks, as for another document.
+const REVISED_ASK: &str = "The return changed since the client opened it.";
+
 /// The client's PDFs in the catalog, newest year first (the Deliver window's return).
 pub fn client_pdfs(
     conn: &vf_core::db::Connection,
@@ -1616,7 +1690,7 @@ pub fn client_pdfs(
     client_id: &str,
 ) -> Vec<crate::ui::portal::DocRef> {
     let Ok(mut st) = conn.prepare(
-        "SELECT id, rel_path, tax_year FROM document
+        "SELECT id, rel_path, tax_year, hash FROM document
          WHERE client_id = ?1 AND deleted_at IS NULL AND lower(rel_path) LIKE '%.pdf'
          ORDER BY tax_year DESC, rel_path",
     ) else {
@@ -1628,7 +1702,7 @@ pub fn client_pdfs(
             id: r.get(0)?,
             name: widgets::file_name(&rel).to_string(),
             path: root.join(&rel),
-            hash: String::new(),
+            hash: r.get::<_, Option<String>>(3)?.unwrap_or_default(),
             tax_year: r.get(2)?,
         })
     })

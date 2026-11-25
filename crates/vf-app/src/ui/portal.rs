@@ -44,7 +44,7 @@ pub enum B2First {
 impl B2First {
     /// Sends these documents (catalog ids) to B2 before they are shared. An error stops the
     /// share: nothing reaches the portal that is not in B2.
-    fn push(&self, ids: &[String]) -> Result<(), String> {
+    pub(crate) fn push(&self, ids: &[String]) -> Result<(), String> {
         if ids.is_empty() {
             return Ok(());
         }
@@ -3142,20 +3142,6 @@ fn save(a: &mut AdminPortal, ctx: &egui::Context, env: &mut Env) {
                 Ok(true) => added += 1,
                 Ok(false) => {}
                 Err(e) => delivery_types = format!(" A delivery doc type could not be added: {e}"),
-            }
-        }
-        // Owner 2026-11-24 (Q19): client visible, also when added by an earlier version.
-        if let Ok(Some(types)) = vf_fs::doctypes::load(env.root) {
-            for mut ty in types.into_iter().filter(|ty| {
-                !ty.client_visible
-                    && vf_portal::delivery::STEP_DOC_TYPES
-                        .iter()
-                        .any(|(_, n)| *n == ty.name)
-            }) {
-                ty.client_visible = true;
-                if vf_fs::doctypes::apply(env.root, vf_fs::doctypes::Edit::Update(ty)).is_ok() {
-                    added += 1;
-                }
             }
         }
         if added > 0 {
