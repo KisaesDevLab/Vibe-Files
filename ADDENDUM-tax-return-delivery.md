@@ -1059,20 +1059,58 @@ release was made: commits are local on `delivery` in both repos).
 
 | # | Answer | Change to make |
 |---|---|---|
-| Q24 | Build the rich letter editor (toolbar, field chips, dashed signature boxes, §15.6) | to build |
-| Q15 | The Deliver window shares the return itself (chosen from the client folder) | to build |
-| Q25 | Drop `{Preparer}` and `{Client address}` from the fields and samples | to build |
-| Q11 | The Payment receipt and Delivery step Filer rules only while balances / deliveries are on | to build |
+| Q24 | Build the rich letter editor (toolbar, field chips, dashed signature boxes, §15.6) | built |
+| Q15 | The Deliver window shares the return itself (chosen from the client folder) | built |
+| Q25 | Drop `{Preparer}` and `{Client address}` from the fields and samples | built |
+| Q11 | The Payment receipt and Delivery step Filer rules only while balances / deliveries are on | built |
 | Q1 | The newer amount stands (as built) | none |
 | Q9 | Assigned to: portal staff who can see the client, default Nobody (as built) | none |
-| Q32 | Add the 10-minute Stripe check for open and started delivery payments | to build |
+| Q32 | Add the 10-minute Stripe check for open and started delivery payments | built |
 | Q37 | A revised return reopens the return and Form 8879 steps (as built) | none |
-| Q35 | Build the pricing grid (a column per package, a row per service) | to build |
+| Q35 | Build the pricing grid (a column per package, a row per service) | built |
 | Q29 | Whoever chooses signs the selection for everyone (as built) | none |
 | Q26 | Letters need not be opened before Sign (as built) | none |
-| Q27 | Previews in `<data>\cache\letters`, emptied when Vibe Files closes | to build |
+| Q27 | Previews in `<data>\cache\letters`, emptied when Vibe Files closes | built |
 | Q40 | The deliveries worklist stays in Vibe Files only (as built) | none |
-| Q14, Q19 | Payment receipt and the five Delivery doc types are client visible | to build (Delivery types) |
+| Q14, Q19 | Payment receipt and the five Delivery doc types are client visible | built |
 | Q6 | Notices carry the portal address, no direct pay link (as built) | none |
 
 Still open: the others in this section (defaults stand until the owner says otherwise).
+
+### The owner's answers, built (2026-11-24)
+
+Vibe Files `75d5913`, `793c3d7` and the editors commit; portal `fa3ba49`, `e37d724`.
+
+- Q15: the Deliver window lists the client's PDFs in the cabinet. A new return goes on the
+  portal for nobody, is set as the delivery's return (locked), then is shown to everyone of the
+  client (B2 first). A return already there with the same content is left as it is. New content
+  for a return the client opened asks first and is sent as revised (the portal now treats
+  `revised: true` with the same file as a revised return).
+- Q25: `{Preparer}` and `{Client address}` dropped; seeded letters still marked sample that use
+  them are replaced by today's sample (a letter the firm saved is never changed).
+- Q11: the receipt and step rules are in Intake only while the switch is on; Admin › Portal's
+  Save brings them in line.
+- Q27: previews in `<data>\cache\letters`, emptied at start and on exit.
+- Q19: the Delivery doc types are added client visible. No backfill: no released build added
+  them hidden, and a backfill would re-tick a type the firm unticked.
+- Q32: delivery payments open (2 days) or started are asked about every 10 minutes.
+- Q24: the rich letter editor. The page is drawn as it prints, with a toolbar (Heading, B, I,
+  List, Table, Insert field, Insert signature, saved state), fields as chips, tables as a cell
+  grid and signature blocks as dashed boxes; Enter makes a new paragraph or list item and
+  Shift+Enter a line break (the PDF layout now breaks lines there). Bold and italic are kept in
+  the text as `**` and `*`, shown faint on the page: it is not a true WYSIWYG editor, and the
+  stored letter is the same block list as before. The right pane has This letter, This block
+  (Only for, move, remove, who signs), Fields, Preview, Copy to this return type, Save.
+- Q35: the pricing grid: a column per package, a row per service, cells edited in place; a view
+  over each package's services (nothing in the stored plan or the delivery snapshot changed
+  shape; a round-trip test covers a service one package lacks and names with `:` and `;`).
+  Add-ons are a table on their own tab.
+
+Not built from §15.6 (logged):
+
+| # | Question | Default taken |
+|---|---|---|
+| Q41 | "New return type…" on Letter templates | Not built: the return types are the portal's four (1040, 1120, 1120-S, 1065). |
+| Q42 | "Preview with a client…" (a real client's values) | Preview uses invented people; a real client's letters are previewed in the Deliver window (Preview letters…). |
+| Q43 | Drag handles on add-ons | An up arrow moves an add-on. |
+| Q44 | "Where the plan is used" on Pricing plans | Not shown: deliveries keep their own priced snapshot. |

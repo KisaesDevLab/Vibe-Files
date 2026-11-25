@@ -192,6 +192,118 @@ mod tests {
         shot(&mut h, "40-help");
     }
 
+    /// Owner 2026-11-24 (Q24, Q35): Admin › Letter templates (the rich editor) and Admin ›
+    /// Pricing plans (the packages grid), for a look: `VF_SCREENS_DIR` set to the output folder.
+    #[test]
+    #[ignore = "writes screenshots for a UI review"]
+    fn letter_and_plan_screens() {
+        let Ok(out) = std::env::var("VF_SCREENS_DIR") else {
+            return;
+        };
+        let out = std::path::PathBuf::from(out);
+        std::fs::create_dir_all(&out).unwrap();
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path().join("Clients");
+        vf_fixtures::generate(&root, 3).unwrap();
+        let data = t.path().join("data");
+        drop(crate::session::open(&data, "dev", &root).unwrap());
+        vf_letters::store::seed_if_missing(&root).unwrap();
+        vf_portal::pricing::save(&root, &vf_portal::pricing::sample("1040", 2025)).unwrap();
+        let d = data.clone();
+        let mut h = HarnessBuilder::default()
+            .with_max_steps(crate::ui::test_util::MAX_STEPS)
+            .with_theme(egui::Theme::Light)
+            .with_size([1440.0, 1000.0])
+            .build_eframe(move |cc| VibeFilesApp::new(&cc.egui_ctx, d.clone()));
+        h.run_steps(8);
+        let shot = |h: &mut egui_kittest::Harness<'static, VibeFilesApp>, name: &str| {
+            for _ in 0..5 {
+                h.step();
+            }
+            match h.render() {
+                Ok(img) => img.save(out.join(format!("{name}.png"))).unwrap(),
+                Err(e) => eprintln!("{name}: {e}"),
+            }
+        };
+        h.get_by_role_and_label(Role::Button, "Open existing")
+            .click();
+        h.run_steps(8);
+        h.get_by_label("Cabinet folder").click();
+        h.step();
+        h.get_by_label("Cabinet folder")
+            .type_text(&root.display().to_string());
+        h.step();
+        h.get_by_role_and_label(Role::Button, "Open cabinet")
+            .click();
+        let start = std::time::Instant::now();
+        while !matches!(h.state().screen, crate::app::Screen::Open(_)) {
+            h.step();
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            assert!(start.elapsed().as_secs() < 30);
+        }
+        h.run_steps(4);
+        h.get_by_role_and_label(Role::Button, "Admin").click();
+        h.run_steps(6);
+        h.get_all_by_label("Letter templates")
+            .next()
+            .unwrap()
+            .click();
+        h.run_steps(6);
+        h.query_all_by_label_contains("Engagement letter")
+            .next()
+            .unwrap()
+            .click();
+        h.run_steps(6);
+        shot(&mut h, "letters-1-editor");
+        // In the first paragraph: B wraps a word; a field goes in at the cursor.
+        h.get_all_by_label("Letter paragraph")
+            .nth(1)
+            .unwrap()
+            .click();
+        h.run_steps(3);
+        h.get_by_role_and_label(Role::Button, "Table").click();
+        h.run_steps(3);
+        h.get_by_role_and_label(Role::Button, "Insert signature")
+            .click();
+        h.run_steps(3);
+        h.get_by_role_and_label(Role::Button, "Spouse").click();
+        h.run_steps(6);
+        shot(&mut h, "letters-2-table-and-signature");
+        // B with the cursor in a paragraph: typing goes on inside the bold marks.
+        h.get_all_by_label("Letter paragraph")
+            .nth(3)
+            .unwrap()
+            .click();
+        h.run_steps(3);
+        h.get_by_role_and_label(Role::Button, "B").click();
+        h.run_steps(4);
+        h.event(egui::Event::Text("NOTE".into()));
+        h.run_steps(4);
+        let typed = {
+            let o = match &h.state().screen {
+                crate::app::Screen::Open(o) => o,
+                _ => panic!("not open"),
+            };
+            serde_json::to_string(&o.admin.as_ref().unwrap().letter_templates.draft_blocks())
+                .unwrap()
+        };
+        assert!(typed.contains("**NOTE**"), "{typed}");
+        shot(&mut h, "letters-3-bold");
+        h.get_all_by_label("Pricing plans").next().unwrap().click();
+        h.run_steps(6);
+        h.query_all_by_label_contains("2025 1040")
+            .next()
+            .unwrap()
+            .click();
+        h.run_steps(6);
+        shot(&mut h, "plans-1-packages");
+        h.get_by_role_and_label(Role::Button, "Add service").click();
+        h.run_steps(4);
+        h.get_all_by_label("Add-ons").next().unwrap().click();
+        h.run_steps(6);
+        shot(&mut h, "plans-2-addons");
+    }
+
     /// PA-103: the to-do lists window and Admin › To-do templates, against a portal stand-in on
     /// this PC answering with invented data. `VF_SCREENS_DIR` set to the output folder:
     /// `cargo test -p vf-app todo_screens -- --ignored`.

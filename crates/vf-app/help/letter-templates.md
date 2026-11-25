@@ -10,15 +10,21 @@ The first time, Vibe Files adds samples: an engagement letter for a 1040, one fo
 
 ## Editing a letter
 
-Choose a letter on the left, or press **New letter…**.
+The letters are listed on the left by the return types they are for. Choose one, or press **New letter…**. The middle shows the letter on a page as it prints; click in it and type.
 
-- **Name the client sees**, the **Return types** it is offered for (none ticked: every return), **Kind** (a letter, or a package addendum and its package), **Filed as** (the doc type), **On the firm's letterhead** and **Ticked in a new delivery**.
-- The letter is a list of blocks: **Heading**, **Paragraph**, **List** (one item a line), **Table** (a row a line, cells split by `|`, the first row bold) and **Signature**.
-- In the text, `**bold**` and `*italic*`; **Insert field** puts a field such as `{Client name}`, `{Tax year}` or `{Fee}` into the block you last edited. A field with no value shows as written, so Preview shows what is missing.
-- **only for**: a block can be kept only for some return types or packages (`1040`, `1065`, `Advantage`), so one letter serves several returns.
-- A **Signature** block is a line with the signer's name under it and a date line: Taxpayer, Spouse (left out when the return has none), or Officer or partner with their title.
+- **Enter** starts a new paragraph (in a list, a new item); **Shift+Enter** breaks the line. Backspace in an empty list item removes it.
+- The toolbar: **Heading** turns the paragraph the cursor is in into a heading (or back); **B** and **I** make the selected words bold or italic (with nothing selected, what you type next); **List** turns the paragraph into a list, a line an item (or back); **Table** adds a table of cells, with **Add row**, **Add column**, **Remove row** and **Remove column** under it, the first row bold; **Insert field** puts a field such as `{Client name}`, `{Tax year}` or `{Fee}` where the cursor is; **Insert signature** adds a signature block (Taxpayer, Spouse, or Officer or partner). Right of the toolbar: **Saved** or **Not saved**.
+- Bold and italic text keeps faint `**` and `*` marks around it on the page; they are not printed. Fields show as blue chips; a field with no value prints as written, so Preview shows what is missing.
+- Signature blocks show as dashed boxes. On the printed letter each is a line with the signer's name under it and a date line; a spouse's is left out when the return has none.
 
-**Preview for a 1040…** (and the other return types the letter is offered for) lays it out for invented people and opens it. **Save** keeps it as the next version. **Delete…** removes it; deliveries already sent keep their copy.
+On the right:
+
+- **This letter**: **Name the client sees**, the **Return types** it is offered for (none ticked: every return), **Letter** or **Package addendum** and its package, **Filed as** (the doc type), **On the firm's letterhead** and **Ticked in a new delivery**.
+- **This block** (the one the cursor is in, marked on the page's left edge): **Only for** some return types or packages (`Advantage`), so one letter serves several returns; **Move up**, **Move down**, **Remove**; for a signature block, who signs.
+- **Fields**: click one to put it where the cursor is.
+- **Preview…** lays the letter out for invented people as the return type chosen beside it and opens it. **Copy to this return type** makes a new letter with this text for the return type chosen (Save keeps it). **Save** keeps the letter as the next version; empty list items and table rows are left out. **Delete…** removes it; deliveries already sent keep their copy.
+
+Previews are written in the `cache\letters` folder of Vibe Files' data and emptied when Vibe Files closes.
 
 ## In a delivery
 

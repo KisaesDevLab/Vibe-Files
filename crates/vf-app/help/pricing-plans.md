@@ -6,15 +6,15 @@ The packages and add-ons a tax return delivery offers the client, per return typ
 
 Press **New plan…** to start from the sample, or choose a plan on the left. Set the **Return type**, the **Tax year**, and the **Base fee name** (used when a delivery offers a base fee and add-ons).
 
-**Packages**: one row per package, the first being the return fee itself (Tax Return Only). For each:
+**Packages** is a grid: a column per package, the first being the return fee itself (Tax Return Only), and a row per service.
 
-- its name, and **Recommended** for at most one (a tag the client sees; nothing is chosen for them);
-- **over the return fee**: a percent, and **at least** an amount. A package costs the client's return fee plus that percent of it, but at least the minimum. The sample: Advantage 10 % (at least $127), Concierge 35 % (at least $443). On a $1,265.68 return fee both minimums apply: $1,392.68 and $1,708.68;
-- its services, a group a line: `Notices: IRS and state letters answered; Audit representation`. The client compares the packages by these lines.
+- The first rows: the package's name; **Price over the return fee**, a percent and **at least** an amount; and **Recommended** for at most one (a tag the client sees; nothing is chosen for them). A package costs the client's return fee plus that percent of it, but at least the minimum. The sample: Advantage 10 % (at least $127), Concierge 35 % (at least $443). On a $1,265.68 return fee both minimums apply: $1,392.68 and $1,708.68.
+- Then a row per service (Return, Notices, Planning…): its name on the left, and in each package's cell the lines the client compares, one a line. An empty cell is not shown for that package. Rename a service on the left; **Remove** takes the row out of every package.
+- **Add package** and **Add service** add a column or a row; **Remove package** under a column takes it out.
 
-**Add-ons**: name, what the client reads, price, and **Offered unless unticked**.
+**Add-ons** (the second tab) is a table: name, what the client reads, price, and **Offered unless unticked**; the arrow moves an add-on up.
 
-**As the client sees it** works the prices out for a return fee you type. **Save** keeps the plan; **Copy to next year…** makes next year's plan from this one; **Delete** removes it.
+**As the client sees it**, on the right, works the prices out for a return fee you type. **Save** keeps the plan; **Copy to next year…** makes next year's plan from this one; **Delete** removes it.
 
 ## In a delivery
 

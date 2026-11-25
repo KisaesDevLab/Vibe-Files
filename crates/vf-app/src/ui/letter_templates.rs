@@ -1,14 +1,39 @@
 //! Admin › Letter templates (ADDENDUM-tax-return-delivery.md §12.2, §15.6; T4, T5): the letters
 //! a delivery sends to be signed, per return type. Each letter is a list of blocks: headings,
-//! paragraphs (with `**bold**`, `*italic*` and `{Field}`), lists, simple tables and signature
-//! blocks; any block can be "only for" some return types or packages. Saved in the cabinet
-//! (`_Vibe/letters`), each save a new version; Preview lays it out for a sample client.
+//! paragraphs, lists, simple tables and signature blocks; any block can be "only for" some
+//! return types or packages. Saved in the cabinet (`_Vibe/letters`), each save a new version;
+//! Preview lays it out for a sample client.
+//!
+//! The editor (owner 2026-11-24, Q24) draws the letter on a white page as it prints: headings
+//! large, bold and italic shown as such, `{Field}`s as chips, lists with bullets, tables as a
+//! grid of cells and signature blocks as dashed boxes, with a toolbar (Heading, B, I, List,
+//! Table, Insert field, Insert signature). Bold and italic are kept in the text as `**` and `*`
+//! (shown faint); the stored letter is the same block list as before.
 
-use egui::RichText;
+use egui::text::{CCursor, CCursorRange, LayoutJob};
+use egui::{Color32, FontFamily, FontId, Key, Modifiers, RichText, Stroke, TextFormat};
 use vf_core::audit::AuditEntry;
 use vf_letters::{Block, FIELDS, Fields, ROLES, Template, role_words, store};
 
 use crate::ui::{theme, widgets};
+
+/// Where the cursor is: a block, and in a list its item, in a table its row and cell.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+struct At {
+    block: usize,
+    row: usize,
+    col: usize,
+}
+
+impl At {
+    fn block(block: usize) -> Self {
+        At {
+            block,
+            row: 0,
+            col: 0,
+        }
+    }
+}
 
 #[derive(Default)]
 pub struct LetterTemplatesPage {
@@ -16,8 +41,14 @@ pub struct LetterTemplatesPage {
     templates: Vec<Template>,
     /// The template being edited (a copy until Save).
     draft: Option<Template>,
-    /// The block whose text Insert field adds to.
-    last_block: usize,
+    /// The text the cursor was last in, and its selection (char indices): kept while a toolbar
+    /// button has the focus, so B, I and Insert field act where the cursor was.
+    at: Option<At>,
+    sel: (usize, usize),
+    /// A text to give the focus next frame, with the cursor at this char.
+    focus_next: Option<(At, usize)>,
+    preview_type: String,
+    copy_to: String,
     confirm_delete: bool,
     msg: Option<String>,
     err: Option<String>,
@@ -27,42 +58,22 @@ impl LetterTemplatesPage {
     pub fn reread(&mut self) {
         self.loaded = false;
     }
-}
 
-/// The text a block's editor shows: a list's items one per line, a table's rows one per line
-/// with ` | ` between cells.
-fn block_text(b: &Block) -> String {
-    match b {
-        Block::Heading { text, .. } | Block::Paragraph { text, .. } => text.clone(),
-        Block::List { items, .. } => items.join("\n"),
-        Block::Table { rows, .. } => rows
-            .iter()
-            .map(|r| r.join(" | "))
-            .collect::<Vec<_>>()
-            .join("\n"),
-        Block::Signature { .. } => String::new(),
+    /// The blocks being edited (screens).
+    #[cfg(test)]
+    pub fn draft_blocks(&self) -> Vec<Block> {
+        self.draft
+            .as_ref()
+            .map(|d| d.blocks.clone())
+            .unwrap_or_default()
     }
-}
 
-fn set_block_text(b: &mut Block, text: &str) {
-    match b {
-        Block::Heading { text: t, .. } | Block::Paragraph { text: t, .. } => *t = text.to_string(),
-        Block::List { items, .. } => {
-            *items = text
-                .lines()
-                .map(str::trim)
-                .filter(|l| !l.is_empty())
-                .map(String::from)
-                .collect()
-        }
-        Block::Table { rows, .. } => {
-            *rows = text
-                .lines()
-                .filter(|l| !l.trim().is_empty())
-                .map(|l| l.split('|').map(|c| c.trim().to_string()).collect())
-                .collect()
-        }
-        Block::Signature { .. } => {}
+    fn open(&mut self, t: Template) {
+        self.draft = Some(t);
+        self.at = None;
+        self.sel = (0, 0);
+        self.focus_next = None;
+        self.confirm_delete = false;
     }
 }
 
@@ -70,9 +81,9 @@ fn kind_words(b: &Block) -> &'static str {
     match b {
         Block::Heading { .. } => "Heading",
         Block::Paragraph { .. } => "Paragraph",
-        Block::List { .. } => "List (one item a line)",
-        Block::Table { .. } => "Table (a row a line, cells split by |)",
-        Block::Signature { .. } => "Signature",
+        Block::List { .. } => "List",
+        Block::Table { .. } => "Table",
+        Block::Signature { .. } => "Signature block",
     }
 }
 
@@ -84,6 +95,487 @@ fn only_for_mut(b: &mut Block) -> &mut Vec<String> {
         | Block::Table { only_for, .. }
         | Block::Signature { only_for, .. } => only_for,
     }
+}
+
+/// The text at a place in a block (none in a signature block).
+fn text_mut(b: &mut Block, at: At) -> Option<&mut String> {
+    match b {
+        Block::Heading { text, .. } | Block::Paragraph { text, .. } => Some(text),
+        Block::List { items, .. } => items.get_mut(at.row),
+        Block::Table { rows, .. } => rows.get_mut(at.row).and_then(|r| r.get_mut(at.col)),
+        Block::Signature { .. } => None,
+    }
+}
+
+/// The byte offset of a char index (the end when past it).
+fn byte_at(s: &str, ci: usize) -> usize {
+    s.char_indices().nth(ci).map_or(s.len(), |(b, _)| b)
+}
+
+/// `ins` put in place of the selection `a..b` (char indices); the cursor after it.
+fn insert_text(text: &str, a: usize, b: usize, ins: &str) -> (String, usize) {
+    let n = text.chars().count();
+    let (a, b) = (a.min(b).min(n), a.max(b).min(n));
+    let (ba, bb) = (byte_at(text, a), byte_at(text, b));
+    (
+        format!("{}{ins}{}", &text[..ba], &text[bb..]),
+        a + ins.chars().count(),
+    )
+}
+
+/// The selection `a..b` wrapped in `mark` (`**` bold, `*` italic). With nothing selected the
+/// cursor lands between the two marks, ready to type.
+fn wrap_text(text: &str, a: usize, b: usize, mark: &str) -> (String, usize) {
+    let n = text.chars().count();
+    let (a, b) = (a.min(b).min(n), a.max(b).min(n));
+    let (ba, bb) = (byte_at(text, a), byte_at(text, b));
+    let m = mark.chars().count();
+    (
+        format!(
+            "{}{mark}{}{mark}{}",
+            &text[..ba],
+            &text[ba..bb],
+            &text[bb..]
+        ),
+        if a == b { a + m } else { b + 2 * m },
+    )
+}
+
+/// How a run of a block's text is drawn in the editor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Look {
+    Text { bold: bool, italic: bool },
+    Mark,
+    Field,
+}
+
+fn push_text(
+    out: &mut Vec<(std::ops::Range<usize>, Look)>,
+    s: usize,
+    e: usize,
+    bold: bool,
+    italic: bool,
+) {
+    if e > s {
+        out.push((s..e, Look::Text { bold, italic }));
+    }
+}
+
+/// The text cut into runs: `**` and `*` marks (drawn faint), `{Field}`s (drawn as chips) and
+/// text in its style, read as `vf_letters::spans` reads it. Every byte is in one run, so the
+/// editor's cursor maps one to one onto the text.
+fn runs(text: &str) -> Vec<(std::ops::Range<usize>, Look)> {
+    let mut out = Vec::new();
+    let (mut bold, mut italic) = (false, false);
+    let (mut i, mut start) = (0, 0);
+    while i < text.len() {
+        let rest = &text[i..];
+        if rest.starts_with("**") {
+            push_text(&mut out, start, i, bold, italic);
+            out.push((i..i + 2, Look::Mark));
+            bold = !bold;
+            i += 2;
+            start = i;
+        } else if rest.starts_with('*') {
+            push_text(&mut out, start, i, bold, italic);
+            out.push((i..i + 1, Look::Mark));
+            italic = !italic;
+            i += 1;
+            start = i;
+        } else if let Some(after) = rest.strip_prefix('{')
+            && let Some(j) = after
+                .find('}')
+                .filter(|&j| j > 0 && !after[..j].contains('{'))
+        {
+            push_text(&mut out, start, i, bold, italic);
+            out.push((i..i + j + 2, Look::Field));
+            i += j + 2;
+            start = i;
+        } else {
+            i += rest.chars().next().map_or(1, char::len_utf8);
+        }
+    }
+    push_text(&mut out, start, text.len(), bold, italic);
+    out
+}
+
+// The page is white in both themes, like the printed letter.
+const INK: Color32 = Color32::from_rgb(28, 30, 34);
+const FAINT: Color32 = Color32::from_rgb(160, 163, 170);
+const CHIP_BG: Color32 = Color32::from_rgb(222, 233, 250);
+const CHIP_INK: Color32 = Color32::from_rgb(28, 78, 150);
+const BODY: f32 = 13.5;
+
+/// Filer's semibold face, or the plain face where the fonts are not installed (a bare test
+/// context).
+fn semibold(ui: &egui::Ui) -> FontFamily {
+    let f = FontFamily::Name(filer_intake::ui::theme::SEMIBOLD.into());
+    if ui.fonts(|x| x.families().contains(&f)) {
+        f
+    } else {
+        FontFamily::Proportional
+    }
+}
+
+fn rich_job(ui: &egui::Ui, text: &str, size: f32, all_bold: bool, wrap: f32) -> LayoutJob {
+    let bold_face = semibold(ui);
+    let plain = |bold: bool, italic: bool| TextFormat {
+        font_id: FontId::new(
+            size,
+            if bold || all_bold {
+                bold_face.clone()
+            } else {
+                FontFamily::Proportional
+            },
+        ),
+        color: INK,
+        italics: italic,
+        ..Default::default()
+    };
+    let mut job = LayoutJob::default();
+    job.wrap.max_width = wrap;
+    for (r, look) in runs(text) {
+        let f = match look {
+            Look::Text { bold, italic } => plain(bold, italic),
+            Look::Mark => TextFormat {
+                font_id: FontId::proportional(size * 0.8),
+                color: FAINT,
+                ..Default::default()
+            },
+            Look::Field => TextFormat {
+                font_id: FontId::proportional(size - 1.0),
+                color: CHIP_INK,
+                background: CHIP_BG,
+                ..Default::default()
+            },
+        };
+        job.append(&text[r], 0.0, f);
+    }
+    if text.is_empty() {
+        // An empty line keeps its height.
+        job.append("", 0.0, plain(false, false));
+    }
+    job
+}
+
+/// One text on the page, drawn as it prints. Returns whether Enter (without Shift) was pressed
+/// in it; Enter is then the caller's (a new paragraph or list item), not a line break.
+#[allow(clippy::too_many_arguments)]
+fn rich_edit(
+    ui: &mut egui::Ui,
+    page: &mut LetterTemplatesPage,
+    id: egui::Id,
+    at: At,
+    text: &mut String,
+    size: f32,
+    bold: bool,
+    width: f32,
+    multiline: bool,
+    hint: &str,
+    label: &str,
+) -> bool {
+    // Given back a frame after the click on the toolbar (that click is "elsewhere" for the
+    // text, which lets the focus go in the frame it happens).
+    let clicking = ui.input(|i| i.pointer.any_pressed() || i.pointer.any_released());
+    if clicking && page.focus_next.is_some_and(|(want, _)| want == at) {
+        ui.ctx().request_repaint();
+    } else if let Some((want, pos)) = page.focus_next
+        && want == at
+    {
+        let mut st = egui::TextEdit::load_state(ui.ctx(), id).unwrap_or_default();
+        st.cursor
+            .set_char_range(Some(CCursorRange::one(CCursor::new(pos))));
+        st.store(ui.ctx(), id);
+        ui.memory_mut(|m| m.request_focus(id));
+        page.focus_next = None;
+    }
+    let enter = ui.memory(|m| m.has_focus(id))
+        && ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter));
+    let mut layouter = |ui: &egui::Ui, buf: &dyn egui::TextBuffer, wrap: f32| {
+        ui.painter()
+            .layout_job(rich_job(ui, buf.as_str(), size, bold, wrap))
+    };
+    let edit = if multiline {
+        egui::TextEdit::multiline(text).desired_rows(1)
+    } else {
+        egui::TextEdit::singleline(text)
+    };
+    let out = edit
+        .id(id)
+        .frame(egui::Frame::NONE)
+        .desired_width(width)
+        .hint_text(RichText::new(hint).color(FAINT))
+        .layouter(&mut layouter)
+        .show(ui);
+    let resp = out.response.response;
+    if resp.has_focus() {
+        page.at = Some(at);
+        if let Some(c) = out.cursor_range {
+            page.sel = (c.primary.index.into(), c.secondary.index.into());
+        }
+    }
+    widgets::named(resp, label);
+    enter
+}
+
+/// What a key or button on the page asks for, done after the page is drawn.
+enum Op {
+    /// A new empty paragraph at this index.
+    Paragraph(usize),
+    /// The paragraph split at the cursor (Enter).
+    Split(usize),
+    /// A new list item after this one, split at the cursor.
+    Item(usize, usize),
+    /// An empty list item removed (Backspace).
+    DropItem(usize, usize),
+    AddRow(usize),
+    AddCol(usize),
+    DelRow(usize),
+    DelCol(usize),
+}
+
+fn apply(page: &mut LetterTemplatesPage, d: &mut Template, op: Op) {
+    match op {
+        Op::Paragraph(k) => {
+            let k = k.min(d.blocks.len());
+            d.blocks.insert(
+                k,
+                Block::Paragraph {
+                    text: String::new(),
+                    only_for: vec![],
+                },
+            );
+            page.focus_next = Some((At::block(k), 0));
+        }
+        Op::Split(i) => {
+            if let Some(Block::Paragraph { text, only_for }) = d.blocks.get_mut(i) {
+                let b = byte_at(text, page.sel.0.max(page.sel.1));
+                let tail = text[b..].to_string();
+                text.truncate(b);
+                let only_for = only_for.clone();
+                d.blocks.insert(
+                    i + 1,
+                    Block::Paragraph {
+                        text: tail,
+                        only_for,
+                    },
+                );
+                page.focus_next = Some((At::block(i + 1), 0));
+            }
+        }
+        Op::Item(i, j) => {
+            if let Some(Block::List { items, .. }) = d.blocks.get_mut(i)
+                && j < items.len()
+            {
+                let b = byte_at(&items[j], page.sel.0.max(page.sel.1));
+                let tail = items[j][b..].to_string();
+                items[j].truncate(b);
+                items.insert(j + 1, tail);
+                page.focus_next = Some((
+                    At {
+                        block: i,
+                        row: j + 1,
+                        col: 0,
+                    },
+                    0,
+                ));
+            }
+        }
+        Op::DropItem(i, j) => {
+            if let Some(Block::List { items, only_for }) = d.blocks.get_mut(i) {
+                if items.len() > 1 {
+                    items.remove(j);
+                    let r = j.saturating_sub(1);
+                    let end = items[r].chars().count();
+                    page.focus_next = Some((
+                        At {
+                            block: i,
+                            row: r,
+                            col: 0,
+                        },
+                        if j == 0 { 0 } else { end },
+                    ));
+                } else {
+                    // The last item gone: the list becomes a paragraph.
+                    let only_for = std::mem::take(only_for);
+                    d.blocks[i] = Block::Paragraph {
+                        text: String::new(),
+                        only_for,
+                    };
+                    page.focus_next = Some((At::block(i), 0));
+                }
+            }
+        }
+        Op::AddRow(i) | Op::AddCol(i) | Op::DelRow(i) | Op::DelCol(i) => {
+            let at = page.at.filter(|a| a.block == i).unwrap_or(At::block(i));
+            if let Some(Block::Table { rows, .. }) = d.blocks.get_mut(i) {
+                let cols = rows.iter().map(Vec::len).max().unwrap_or(1).max(1);
+                match op {
+                    Op::AddRow(_) => {
+                        rows.insert((at.row + 1).min(rows.len()), vec![String::new(); cols])
+                    }
+                    Op::AddCol(_) => {
+                        for r in rows.iter_mut() {
+                            r.insert((at.col + 1).min(r.len()), String::new());
+                        }
+                    }
+                    Op::DelRow(_) if rows.len() > 1 => {
+                        rows.remove(at.row.min(rows.len() - 1));
+                    }
+                    Op::DelCol(_) if cols > 1 => {
+                        for r in rows.iter_mut() {
+                            if at.col < r.len() {
+                                r.remove(at.col);
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+                page.at = Some(At::block(i));
+                page.sel = (0, 0);
+            }
+        }
+    }
+}
+
+/// Where a new block goes: after the one the cursor is in, else at the end.
+fn after_cursor(page: &LetterTemplatesPage, d: &Template) -> usize {
+    page.at
+        .map_or(d.blocks.len(), |a| (a.block + 1).min(d.blocks.len()))
+}
+
+fn insert_block(page: &mut LetterTemplatesPage, d: &mut Template, b: Block) {
+    let k = after_cursor(page, d);
+    let has_text = !matches!(b, Block::Signature { .. });
+    d.blocks.insert(k, b);
+    page.at = Some(At::block(k));
+    page.sel = (0, 0);
+    if has_text {
+        page.focus_next = Some((At::block(k), 0));
+    }
+}
+
+/// B and I: the selection wrapped in `**` or `*`.
+fn mark(page: &mut LetterTemplatesPage, d: &mut Template, m: &str) {
+    let Some(at) = page.at else {
+        page.err = Some("Click in the text first, then press B or I.".into());
+        return;
+    };
+    let Some(text) = d.blocks.get_mut(at.block).and_then(|b| text_mut(b, at)) else {
+        return;
+    };
+    let (t, cur) = wrap_text(text, page.sel.0, page.sel.1, m);
+    *text = t;
+    page.sel = (cur, cur);
+    page.focus_next = Some((at, cur));
+}
+
+/// Insert field: `{Field}` at the cursor (in place of a selection); with no text chosen, into
+/// a new paragraph at the end.
+fn insert_field(page: &mut LetterTemplatesPage, d: &mut Template, field: &str) {
+    let at = match page.at.filter(|a| {
+        d.blocks
+            .get(a.block)
+            .is_some_and(|b| !matches!(b, Block::Signature { .. }))
+    }) {
+        Some(a) => a,
+        None => {
+            d.blocks.push(Block::Paragraph {
+                text: String::new(),
+                only_for: vec![],
+            });
+            page.sel = (0, 0);
+            At::block(d.blocks.len() - 1)
+        }
+    };
+    if let Some(text) = text_mut(&mut d.blocks[at.block], at) {
+        let (t, cur) = insert_text(text, page.sel.0, page.sel.1, &format!("{{{field}}}"));
+        *text = t;
+        page.at = Some(at);
+        page.sel = (cur, cur);
+        page.focus_next = Some((at, cur));
+    }
+}
+
+/// Heading: the paragraph the cursor is in becomes a heading, a heading a paragraph; elsewhere
+/// a new heading.
+fn toggle_heading(page: &mut LetterTemplatesPage, d: &mut Template) {
+    if let Some(at) = page.at
+        && let Some(b) = d.blocks.get_mut(at.block)
+    {
+        match b {
+            Block::Paragraph { text, only_for } => {
+                *b = Block::Heading {
+                    text: std::mem::take(text),
+                    only_for: std::mem::take(only_for),
+                };
+                page.focus_next = Some((At::block(at.block), page.sel.0));
+                return;
+            }
+            Block::Heading { text, only_for } => {
+                *b = Block::Paragraph {
+                    text: std::mem::take(text),
+                    only_for: std::mem::take(only_for),
+                };
+                page.focus_next = Some((At::block(at.block), page.sel.0));
+                return;
+            }
+            _ => {}
+        }
+    }
+    insert_block(
+        page,
+        d,
+        Block::Heading {
+            text: String::new(),
+            only_for: vec![],
+        },
+    );
+}
+
+/// List: the paragraph becomes a list (a line an item), a list a paragraph; elsewhere a new
+/// list.
+fn toggle_list(page: &mut LetterTemplatesPage, d: &mut Template) {
+    if let Some(at) = page.at
+        && let Some(b) = d.blocks.get_mut(at.block)
+    {
+        match b {
+            Block::Paragraph { text, only_for } => {
+                let mut items: Vec<String> = text
+                    .lines()
+                    .map(str::trim)
+                    .filter(|l| !l.is_empty())
+                    .map(String::from)
+                    .collect();
+                if items.is_empty() {
+                    items.push(String::new());
+                }
+                *b = Block::List {
+                    items,
+                    only_for: std::mem::take(only_for),
+                };
+                page.focus_next = Some((At::block(at.block), 0));
+                return;
+            }
+            Block::List { items, only_for } => {
+                *b = Block::Paragraph {
+                    text: items.join(" "),
+                    only_for: std::mem::take(only_for),
+                };
+                page.focus_next = Some((At::block(at.block), 0));
+                return;
+            }
+            _ => {}
+        }
+    }
+    insert_block(
+        page,
+        d,
+        Block::List {
+            items: vec![String::new()],
+            only_for: vec![],
+        },
+    );
 }
 
 /// Fields for Preview: a joint 1040 for invented people.
@@ -176,9 +668,9 @@ pub fn page(ui: &mut egui::Ui, page: &mut LetterTemplatesPage, env: &mut crate::
     }
     ui.label(widgets::caption(
         "The letters a tax return delivery sends to be signed on the portal: engagement letters, \
-         consents and package addenda. Write **bold**, *italic* and {Field} in the text; mark a \
-         block \"only for\" return types (1040, 1120, 1120-S, 1065) or packages. The seeded \
-         samples say \"Sample — review before use\" until you save your own text.",
+         consents and package addenda. Click in the page to write; the toolbar adds headings, \
+         bold, italic, lists, tables, fields and signature blocks. The seeded samples say \
+         \"Sample — review before use\" until you save your own text.",
     ));
     if let Some(e) = &page.err {
         ui.colored_label(theme::error(), e);
@@ -186,295 +678,671 @@ pub fn page(ui: &mut egui::Ui, page: &mut LetterTemplatesPage, env: &mut crate::
     if let Some(m) = &page.msg {
         ui.colored_label(theme::health_ok(), m);
     }
+    let draft = page.draft.take();
+    let (left, right) = (210.0, 290.0);
+    let centre = (ui.available_width() - left - right - 64.0).max(420.0);
+    let mut next: Option<Option<Template>> = None;
+    let mut d = draft;
     ui.horizontal_top(|ui| {
-        // The list.
         ui.vertical(|ui| {
-            ui.set_width(260.0);
-            if ui.button("New letter…").clicked() {
-                page.draft = Some(Template {
-                    id: format!("letter-{}", &vf_core::new_id()[..8]),
-                    version: 0,
-                    name: "New letter".into(),
-                    return_types: vec![],
-                    kind: "letter".into(),
-                    package: None,
-                    doc_type: String::new(),
-                    letterhead: true,
-                    default_ticked: false,
-                    sample: false,
-                    blocks: vec![Block::Paragraph {
-                        text: String::new(),
-                        only_for: vec![],
-                    }],
-                });
+            ui.set_width(left);
+            if let Some(t) = letter_list(ui, page, d.as_ref().map(|d| d.id.as_str())) {
                 page.msg = None;
-            }
-            ui.add_space(6.0);
-            for t in &page.templates {
-                let types = if t.return_types.is_empty() {
-                    "every return".to_string()
-                } else {
-                    t.return_types.join(", ")
-                };
-                let label = format!(
-                    "{}{}\n{types}{}",
-                    t.name,
-                    t.package
-                        .as_ref()
-                        .map(|p| format!(" ({p})"))
-                        .unwrap_or_default(),
-                    if t.sample { " · sample" } else { "" }
-                );
-                let chosen = page.draft.as_ref().is_some_and(|d| d.id == t.id);
-                if ui.selectable_label(chosen, label).clicked() {
-                    page.draft = Some(t.clone());
-                    page.last_block = 0;
-                    page.msg = None;
-                    page.confirm_delete = false;
-                }
+                next = Some(Some(t));
             }
         });
         ui.separator();
-        // The editor.
-        ui.vertical(|ui| editor(ui, page, env));
+        let Some(d) = d.as_mut() else {
+            ui.label(widgets::caption(
+                "Choose a letter on the left, or New letter….",
+            ));
+            return;
+        };
+        ui.vertical(|ui| {
+            ui.set_width(centre);
+            toolbar(ui, page, d);
+            egui::ScrollArea::vertical()
+                .id_salt("letter-page")
+                .max_height(640.0)
+                .show(ui, |ui| paper(ui, page, d));
+        });
+        ui.separator();
+        ui.vertical(|ui| {
+            ui.set_width(right);
+            if let Some(x) = side(ui, page, d, env) {
+                next = Some(x);
+            }
+        });
+    });
+    match next {
+        Some(Some(t)) => page.open(t),
+        Some(None) => page.draft = None,
+        None => page.draft = d,
+    }
+}
+
+/// The letters, grouped by the return types they are for. Returns a letter chosen (or a new
+/// one).
+fn letter_list(
+    ui: &mut egui::Ui,
+    page: &LetterTemplatesPage,
+    open: Option<&str>,
+) -> Option<Template> {
+    let mut pick = None;
+    if ui.button("New letter…").clicked() {
+        pick = Some(Template {
+            id: format!("letter-{}", &vf_core::new_id()[..8]),
+            version: 0,
+            name: "New letter".into(),
+            return_types: vec![],
+            kind: "letter".into(),
+            package: None,
+            doc_type: String::new(),
+            letterhead: true,
+            default_ticked: false,
+            sample: false,
+            blocks: vec![Block::Paragraph {
+                text: String::new(),
+                only_for: vec![],
+            }],
+        });
+    }
+    ui.add_space(6.0);
+    let groups = std::iter::once(None).chain(vf_portal::delivery::RETURN_TYPES.map(Some));
+    for rt in groups {
+        let these: Vec<&Template> = page
+            .templates
+            .iter()
+            .filter(|t| match rt {
+                None => t.return_types.is_empty(),
+                Some(rt) => t.return_types.iter().any(|x| x == rt),
+            })
+            .collect();
+        if these.is_empty() {
+            continue;
+        }
+        ui.label(
+            RichText::new(rt.unwrap_or("Every return"))
+                .small()
+                .strong()
+                .color(theme::ink_muted()),
+        );
+        for t in these {
+            let label = format!(
+                "{}{}{}",
+                t.name,
+                t.package
+                    .as_ref()
+                    .map(|p| format!(" ({p})"))
+                    .unwrap_or_default(),
+                if t.sample { " · sample" } else { "" }
+            );
+            if ui
+                .selectable_label(open == Some(t.id.as_str()), label)
+                .clicked()
+            {
+                pick = Some(t.clone());
+            }
+        }
+        ui.add_space(4.0);
+    }
+    pick
+}
+
+fn toolbar(ui: &mut egui::Ui, page: &mut LetterTemplatesPage, d: &mut Template) {
+    ui.horizontal(|ui| {
+        if ui
+            .button("Heading")
+            .on_hover_text("The paragraph the cursor is in becomes a heading, or back")
+            .clicked()
+        {
+            toggle_heading(page, d);
+        }
+        if ui
+            .button(RichText::new("B").strong())
+            .on_hover_text("Bold")
+            .clicked()
+        {
+            mark(page, d, "**");
+        }
+        if ui
+            .button(RichText::new("I").italics())
+            .on_hover_text("Italic")
+            .clicked()
+        {
+            mark(page, d, "*");
+        }
+        if ui
+            .button("List")
+            .on_hover_text("The paragraph becomes a list (a line an item), or back")
+            .clicked()
+        {
+            toggle_list(page, d);
+        }
+        if ui
+            .button("Table")
+            .on_hover_text("A table after the cursor")
+            .clicked()
+        {
+            insert_block(
+                page,
+                d,
+                Block::Table {
+                    rows: vec![vec![String::new(); 2]; 2],
+                    only_for: vec![],
+                },
+            );
+        }
+        ui.menu_button("Insert field", |ui| {
+            for f in FIELDS {
+                if ui.button(f).clicked() {
+                    insert_field(page, d, f);
+                    ui.close();
+                }
+            }
+        });
+        ui.menu_button("Insert signature", |ui| {
+            for r in ROLES {
+                if ui.button(role_words(r)).clicked() {
+                    insert_block(
+                        page,
+                        d,
+                        Block::Signature {
+                            role: r.to_string(),
+                            only_for: vec![],
+                        },
+                    );
+                    ui.close();
+                }
+            }
+        });
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let stored = page.templates.iter().find(|t| t.id == d.id);
+            let (words, color) = match stored {
+                Some(s) if s == d => (format!("Saved · version {}", s.version), theme::ink_muted()),
+                Some(_) => ("Not saved".to_string(), theme::error()),
+                None => ("Not saved yet".to_string(), theme::error()),
+            };
+            ui.label(RichText::new(words).small().color(color));
+        });
     });
 }
 
-fn editor(ui: &mut egui::Ui, page: &mut LetterTemplatesPage, env: &mut crate::ui::browse::Env) {
-    let Some(d) = &mut page.draft else {
-        ui.label(widgets::caption(
-            "Choose a letter on the left, or New letter….",
-        ));
-        return;
-    };
-    egui::Grid::new("letter-head")
-        .num_columns(2)
-        .spacing([12.0, 6.0])
+/// The letter on a white page, each block drawn as it prints and edited in place.
+fn paper(ui: &mut egui::Ui, page: &mut LetterTemplatesPage, d: &mut Template) {
+    let inner = (ui.available_width() - 84.0).max(300.0);
+    let mut op: Option<Op> = None;
+    let tid = d.id.clone();
+    let id = |at: At| egui::Id::unique(("letter-text", tid.as_str(), at.block, at.row, at.col));
+    egui::Frame::new()
+        .fill(Color32::WHITE)
+        .stroke(Stroke::new(1.0, Color32::from_gray(205)))
+        .inner_margin(egui::Margin::symmetric(40, 30))
         .show(ui, |ui| {
-            ui.label("Name the client sees");
-            widgets::named(
-                ui.add(egui::TextEdit::singleline(&mut d.name).desired_width(360.0)),
-                "Letter name",
-            );
-            ui.end_row();
-            ui.label("Return types");
-            ui.horizontal(|ui| {
-                for rt in vf_portal::delivery::RETURN_TYPES {
-                    let mut on = d.return_types.iter().any(|x| x == rt);
-                    if ui.checkbox(&mut on, rt).changed() {
-                        d.return_types.retain(|x| x != rt);
-                        if on {
-                            d.return_types.push(rt.to_string());
+            ui.set_width(inner);
+            {
+                let v = ui.visuals_mut();
+                v.text_cursor.stroke.color = INK;
+                v.selection.bg_fill = Color32::from_rgb(188, 212, 248);
+                v.selection.stroke.color = INK;
+                v.override_text_color = Some(INK);
+                v.extreme_bg_color = Color32::WHITE;
+                for w in [&mut v.widgets.inactive, &mut v.widgets.hovered] {
+                    w.weak_bg_fill = Color32::from_gray(236);
+                    w.bg_fill = Color32::from_gray(236);
+                    w.fg_stroke.color = INK;
+                }
+            }
+            if d.letterhead {
+                ui.label(
+                    RichText::new("The firm's letterhead prints here")
+                        .small()
+                        .color(FAINT),
+                );
+                ui.add_space(6.0);
+            }
+            for i in 0..d.blocks.len() {
+                let selected = page.at.is_some_and(|a| a.block == i);
+                let only = d.blocks[i].only_for().to_vec();
+                let r = ui
+                    .scope(|ui| {
+                        if !only.is_empty() {
+                            ui.label(
+                                RichText::new(format!("Only for {}", only.join(", ")))
+                                    .small()
+                                    .color(FAINT),
+                            );
                         }
-                    }
-                }
-                ui.label(widgets::caption("(none ticked: every return)"));
-            });
-            ui.end_row();
-            ui.label("Kind");
-            ui.horizontal(|ui| {
-                ui.radio_value(&mut d.kind, "letter".to_string(), "Letter");
-                ui.radio_value(&mut d.kind, "addendum".to_string(), "Package addendum for");
-                let mut pkg = d.package.clone().unwrap_or_default();
-                if ui
-                    .add_enabled(
-                        d.kind == "addendum",
-                        egui::TextEdit::singleline(&mut pkg).desired_width(140.0),
-                    )
-                    .changed()
-                {
-                    d.package = Some(pkg).filter(|p| !p.trim().is_empty());
-                }
-            });
-            ui.end_row();
-            ui.label("Filed as (doc type)");
-            ui.add(egui::TextEdit::singleline(&mut d.doc_type).desired_width(240.0));
-            ui.end_row();
-            ui.label("");
-            ui.horizontal(|ui| {
-                ui.checkbox(&mut d.letterhead, "On the firm's letterhead");
-                ui.checkbox(&mut d.default_ticked, "Ticked in a new delivery");
-            });
-            ui.end_row();
-        });
-    ui.separator();
-    // Insert field: into the block last edited.
-    ui.horizontal(|ui| {
-        ui.label("Insert field into the block last edited:");
-        egui::ComboBox::from_id_salt("letter-field")
-            .selected_text("Choose…")
-            .show_ui(ui, |ui| {
-                for f in FIELDS {
-                    if ui.selectable_label(false, f).clicked()
-                        && let Some(b) = d.blocks.get_mut(page.last_block)
-                    {
-                        let mut text = block_text(b);
-                        text.push_str(&format!("{{{f}}}"));
-                        set_block_text(b, &text);
-                    }
-                }
-            });
-    });
-    let mut act: Option<(usize, i32)> = None;
-    let n = d.blocks.len();
-    for (i, b) in d.blocks.iter_mut().enumerate() {
-        ui.group(|ui| {
-            ui.horizontal(|ui| {
-                ui.label(RichText::new(kind_words(b)).strong());
-                if let Block::Signature { role, .. } = b {
-                    egui::ComboBox::from_id_salt(("letter-role", i))
-                        .selected_text(role_words(role))
-                        .show_ui(ui, |ui| {
-                            for r in ROLES {
-                                ui.selectable_value(role, r.to_string(), role_words(r));
+                        match &mut d.blocks[i] {
+                            Block::Heading { text, .. } => {
+                                let at = At::block(i);
+                                if rich_edit(
+                                    ui,
+                                    page,
+                                    id(at),
+                                    at,
+                                    text,
+                                    18.0,
+                                    true,
+                                    inner,
+                                    false,
+                                    "Heading",
+                                    "Letter heading",
+                                ) {
+                                    op = Some(Op::Paragraph(i + 1));
+                                }
                             }
-                        });
+                            Block::Paragraph { text, .. } => {
+                                let at = At::block(i);
+                                if rich_edit(
+                                    ui,
+                                    page,
+                                    id(at),
+                                    at,
+                                    text,
+                                    BODY,
+                                    false,
+                                    inner,
+                                    true,
+                                    "Type here…",
+                                    "Letter paragraph",
+                                ) {
+                                    op = Some(Op::Split(i));
+                                }
+                            }
+                            Block::List { items, .. } => {
+                                if items.is_empty() {
+                                    items.push(String::new());
+                                }
+                                for (j, item) in items.iter_mut().enumerate() {
+                                    let at = At {
+                                        block: i,
+                                        row: j,
+                                        col: 0,
+                                    };
+                                    ui.horizontal(|ui| {
+                                        ui.label(RichText::new("•").size(BODY).color(INK));
+                                        let back = item.is_empty()
+                                            && ui.memory(|m| m.has_focus(id(at)))
+                                            && ui.input(|x| x.key_pressed(Key::Backspace));
+                                        if rich_edit(
+                                            ui,
+                                            page,
+                                            id(at),
+                                            at,
+                                            item,
+                                            BODY,
+                                            false,
+                                            inner - 24.0,
+                                            false,
+                                            "List item",
+                                            "Letter list item",
+                                        ) {
+                                            op = Some(Op::Item(i, j));
+                                        } else if back {
+                                            op = Some(Op::DropItem(i, j));
+                                        }
+                                    });
+                                }
+                            }
+                            Block::Table { rows, .. } => {
+                                if rows.is_empty() {
+                                    *rows = vec![vec![String::new(); 2]; 2];
+                                }
+                                let cols = rows.iter().map(Vec::len).max().unwrap_or(1).max(1);
+                                for r in rows.iter_mut() {
+                                    r.resize(cols, String::new());
+                                }
+                                let cw = ((inner - 4.0) / cols as f32 - 10.0).max(60.0);
+                                egui::Grid::new(("letter-table", tid.as_str(), i))
+                                    .spacing([0.0, 0.0])
+                                    .min_col_width(cw + 10.0)
+                                    .show(ui, |ui| {
+                                        for (r, row) in rows.iter_mut().enumerate() {
+                                            for (c, cell) in row.iter_mut().enumerate() {
+                                                let at = At {
+                                                    block: i,
+                                                    row: r,
+                                                    col: c,
+                                                };
+                                                egui::Frame::new()
+                                                    .stroke(Stroke::new(
+                                                        1.0,
+                                                        Color32::from_gray(190),
+                                                    ))
+                                                    .inner_margin(egui::Margin::same(4))
+                                                    .show(ui, |ui| {
+                                                        rich_edit(
+                                                            ui,
+                                                            page,
+                                                            id(at),
+                                                            at,
+                                                            cell,
+                                                            BODY - 1.0,
+                                                            r == 0,
+                                                            cw,
+                                                            false,
+                                                            "",
+                                                            "Letter table cell",
+                                                        );
+                                                    });
+                                            }
+                                            ui.end_row();
+                                        }
+                                    });
+                                if selected {
+                                    ui.horizontal(|ui| {
+                                        if ui.small_button("Add row").clicked() {
+                                            op = Some(Op::AddRow(i));
+                                        }
+                                        if ui.small_button("Add column").clicked() {
+                                            op = Some(Op::AddCol(i));
+                                        }
+                                        if ui.small_button("Remove row").clicked() {
+                                            op = Some(Op::DelRow(i));
+                                        }
+                                        if ui.small_button("Remove column").clicked() {
+                                            op = Some(Op::DelCol(i));
+                                        }
+                                    });
+                                }
+                            }
+                            Block::Signature { role, .. } => {
+                                let (rect, resp) = ui.allocate_exact_size(
+                                    egui::vec2(300.0, 62.0),
+                                    egui::Sense::click(),
+                                );
+                                let stroke = Stroke::new(
+                                    1.2,
+                                    if selected {
+                                        theme::accent()
+                                    } else {
+                                        Color32::from_gray(150)
+                                    },
+                                );
+                                let pts = [
+                                    rect.left_top(),
+                                    rect.right_top(),
+                                    rect.right_bottom(),
+                                    rect.left_bottom(),
+                                    rect.left_top(),
+                                ];
+                                ui.painter()
+                                    .extend(egui::Shape::dashed_line(&pts, stroke, 6.0, 4.0));
+                                ui.painter().text(
+                                    rect.left_top() + egui::vec2(10.0, 9.0),
+                                    egui::Align2::LEFT_TOP,
+                                    format!("Signature: {}", role_words(role)),
+                                    FontId::proportional(BODY - 1.0),
+                                    INK,
+                                );
+                                ui.painter().text(
+                                    rect.left_bottom() + egui::vec2(10.0, -9.0),
+                                    egui::Align2::LEFT_BOTTOM,
+                                    "Signed on the portal, with the name and date",
+                                    FontId::proportional(11.0),
+                                    FAINT,
+                                );
+                                if widgets::named(resp, "Signature block").clicked() {
+                                    page.at = Some(At::block(i));
+                                    page.sel = (0, 0);
+                                }
+                            }
+                        }
+                    })
+                    .response;
+                if selected {
+                    let x = r.rect.left() - 14.0;
+                    ui.painter().rect_filled(
+                        egui::Rect::from_min_max(
+                            egui::pos2(x, r.rect.top()),
+                            egui::pos2(x + 3.0, r.rect.bottom()),
+                        ),
+                        1.0,
+                        theme::accent(),
+                    );
                 }
-                let mut only = only_for_mut(b).join(", ");
-                ui.label("only for");
-                if ui
-                    .add(
-                        egui::TextEdit::singleline(&mut only)
-                            .desired_width(160.0)
-                            .hint_text("every return"),
-                    )
-                    .changed()
-                {
-                    *only_for_mut(b) = only
-                        .split(',')
-                        .map(str::trim)
-                        .filter(|s| !s.is_empty())
-                        .map(String::from)
-                        .collect();
+                ui.add_space(8.0);
+            }
+            if ui
+                .add(
+                    egui::Label::new(RichText::new("+ Paragraph").small().color(FAINT))
+                        .sense(egui::Sense::click()),
+                )
+                .clicked()
+            {
+                op = Some(Op::Paragraph(d.blocks.len()));
+            }
+        });
+    if let Some(op) = op {
+        apply(page, d, op);
+    }
+}
+
+/// The right pane: the letter's settings, the block the cursor is in, the fields, Preview,
+/// Copy, Save and Delete. Returns a letter to open instead (`Some(None)`: none, deleted).
+fn side(
+    ui: &mut egui::Ui,
+    page: &mut LetterTemplatesPage,
+    d: &mut Template,
+    env: &mut crate::ui::browse::Env,
+) -> Option<Option<Template>> {
+    ui.label(RichText::new("This letter").strong());
+    ui.label("Name the client sees");
+    widgets::named(
+        ui.add(egui::TextEdit::singleline(&mut d.name).desired_width(f32::INFINITY)),
+        "Letter name",
+    );
+    ui.label("Return types (none ticked: every return)");
+    ui.horizontal_wrapped(|ui| {
+        for rt in vf_portal::delivery::RETURN_TYPES {
+            let mut on = d.return_types.iter().any(|x| x == rt);
+            if ui.checkbox(&mut on, rt).changed() {
+                d.return_types.retain(|x| x != rt);
+                if on {
+                    d.return_types.push(rt.to_string());
                 }
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.small_button("Remove").clicked() {
-                        act = Some((i, 0));
-                    }
-                    if ui.add_enabled(i + 1 < n, egui::Button::new("↓").small()).clicked() {
-                        act = Some((i, 1));
-                    }
-                    if ui.add_enabled(i > 0, egui::Button::new("↑").small()).clicked() {
-                        act = Some((i, -1));
+            }
+        }
+    });
+    ui.horizontal(|ui| {
+        ui.radio_value(&mut d.kind, "letter".to_string(), "Letter");
+        ui.radio_value(&mut d.kind, "addendum".to_string(), "Package addendum");
+    });
+    if d.kind == "addendum" {
+        ui.horizontal(|ui| {
+            ui.label("for the package");
+            let mut pkg = d.package.clone().unwrap_or_default();
+            if ui
+                .add(egui::TextEdit::singleline(&mut pkg).desired_width(140.0))
+                .changed()
+            {
+                d.package = Some(pkg).filter(|p| !p.trim().is_empty());
+            }
+        });
+    }
+    ui.horizontal(|ui| {
+        ui.label("Filed as");
+        ui.add(
+            egui::TextEdit::singleline(&mut d.doc_type)
+                .desired_width(f32::INFINITY)
+                .hint_text("doc type"),
+        );
+    });
+    ui.checkbox(&mut d.letterhead, "On the firm's letterhead");
+    ui.checkbox(&mut d.default_ticked, "Ticked in a new delivery");
+    ui.separator();
+    // The block the cursor is in.
+    let n = d.blocks.len();
+    if let Some(at) = page.at.filter(|a| a.block < n) {
+        let i = at.block;
+        ui.label(RichText::new(format!("This block: {}", kind_words(&d.blocks[i]))).strong());
+        if let Block::Signature { role, .. } = &mut d.blocks[i] {
+            egui::ComboBox::from_id_salt("letter-role")
+                .selected_text(role_words(role))
+                .show_ui(ui, |ui| {
+                    for r in ROLES {
+                        ui.selectable_value(role, r.to_string(), role_words(r));
                     }
                 });
-            });
-            if !matches!(b, Block::Signature { .. }) {
-                let mut text = block_text(b);
-                let rows = if matches!(b, Block::Heading { .. }) { 1 } else { 3 };
-                let r = ui.add(
-                    egui::TextEdit::multiline(&mut text)
-                        .desired_rows(rows)
-                        .desired_width(f32::INFINITY),
-                );
-                if r.changed() {
-                    set_block_text(b, &text);
+        }
+        ui.label("Only for (none ticked: every return)");
+        let only = only_for_mut(&mut d.blocks[i]);
+        ui.horizontal_wrapped(|ui| {
+            for rt in vf_portal::delivery::RETURN_TYPES {
+                let mut on = only.iter().any(|x| x == rt);
+                if ui.checkbox(&mut on, rt).changed() {
+                    only.retain(|x| x != rt);
+                    if on {
+                        only.push(rt.to_string());
+                    }
                 }
-                if r.has_focus() || r.changed() {
-                    page.last_block = i;
-                }
-            } else {
-                ui.label(widgets::caption(
-                    "A signature line with the signer's name and a date (a spouse's is left out when there is none).",
-                ));
             }
         });
+        let mut pkgs = only
+            .iter()
+            .filter(|x| !vf_portal::delivery::RETURN_TYPES.contains(&x.as_str()))
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", ");
+        ui.horizontal(|ui| {
+            ui.label("or packages");
+            if ui
+                .add(
+                    egui::TextEdit::singleline(&mut pkgs)
+                        .desired_width(f32::INFINITY)
+                        .hint_text("Advantage, Concierge"),
+                )
+                .changed()
+            {
+                only.retain(|x| vf_portal::delivery::RETURN_TYPES.contains(&x.as_str()));
+                only.extend(
+                    pkgs.split(',')
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(String::from),
+                );
+            }
+        });
+        ui.horizontal(|ui| {
+            if ui
+                .add_enabled(i > 0, egui::Button::new("Move up"))
+                .clicked()
+            {
+                d.blocks.swap(i, i - 1);
+                page.at = Some(At::block(i - 1));
+            }
+            if ui
+                .add_enabled(i + 1 < n, egui::Button::new("Move down"))
+                .clicked()
+            {
+                d.blocks.swap(i, i + 1);
+                page.at = Some(At::block(i + 1));
+            }
+            if ui
+                .button(RichText::new("Remove").color(theme::error()))
+                .clicked()
+            {
+                d.blocks.remove(i);
+                page.at = None;
+                page.sel = (0, 0);
+            }
+        });
+    } else {
+        ui.label(widgets::caption(
+            "Click a block on the page to set who it is for, move it or remove it.",
+        ));
     }
-    match act {
-        Some((i, 0)) => {
-            d.blocks.remove(i);
-        }
-        Some((i, by)) => {
-            let j = (i as i32 + by) as usize;
-            d.blocks.swap(i, j);
-        }
-        None => {}
-    }
-    ui.horizontal(|ui| {
-        ui.label("Add:");
-        let empty = Vec::new;
-        for (label, b) in [
-            (
-                "Heading",
-                Block::Heading {
-                    text: String::new(),
-                    only_for: empty(),
-                },
-            ),
-            (
-                "Paragraph",
-                Block::Paragraph {
-                    text: String::new(),
-                    only_for: empty(),
-                },
-            ),
-            (
-                "List",
-                Block::List {
-                    items: vec![],
-                    only_for: empty(),
-                },
-            ),
-            (
-                "Table",
-                Block::Table {
-                    rows: vec![],
-                    only_for: empty(),
-                },
-            ),
-            (
-                "Signature",
-                Block::Signature {
-                    role: "taxpayer".into(),
-                    only_for: empty(),
-                },
-            ),
-        ] {
-            if ui.button(label).clicked() {
-                d.blocks.push(b);
-                page.last_block = d.blocks.len() - 1;
+    ui.separator();
+    ui.label(RichText::new("Fields").strong());
+    ui.label(widgets::caption("Click one to put it where the cursor is."));
+    ui.horizontal_wrapped(|ui| {
+        for f in FIELDS {
+            if ui.small_button(f).clicked() {
+                insert_field(page, d, f);
             }
         }
     });
     ui.separator();
+    // Preview, Copy, Save, Delete.
+    let offered: Vec<&str> = vf_portal::delivery::RETURN_TYPES
+        .into_iter()
+        .filter(|rt| d.offered_for(rt))
+        .collect();
+    if !offered.contains(&page.preview_type.as_str()) {
+        page.preview_type = offered.first().copied().unwrap_or("1040").to_string();
+    }
+    ui.horizontal(|ui| {
+        egui::ComboBox::from_id_salt("letter-preview-type")
+            .selected_text(format!("as a {}", page.preview_type))
+            .show_ui(ui, |ui| {
+                for rt in &offered {
+                    ui.selectable_value(&mut page.preview_type, rt.to_string(), *rt);
+                }
+            });
+        if ui.button("Preview…").clicked() {
+            let firm = vf_fs::cabinet::read(env.root)
+                .ok()
+                .and_then(|c| c.name)
+                .unwrap_or_else(|| "Your firm".into());
+            let year = chrono::Local::now()
+                .format("%Y")
+                .to_string()
+                .parse::<i32>()
+                .unwrap_or(2026)
+                - 1;
+            let rt = page.preview_type.clone();
+            if let Err(e) = preview(d, &sample_fields(&firm, year, &rt), &rt) {
+                page.err = Some(e);
+            }
+        }
+    });
+    let mut open: Option<Option<Template>> = None;
+    ui.horizontal(|ui| {
+        if page.copy_to.is_empty() {
+            page.copy_to = "1120-S".into();
+        }
+        egui::ComboBox::from_id_salt("letter-copy-to")
+            .selected_text(&page.copy_to)
+            .show_ui(ui, |ui| {
+                for rt in vf_portal::delivery::RETURN_TYPES {
+                    ui.selectable_value(&mut page.copy_to, rt.to_string(), rt);
+                }
+            });
+        if ui
+            .button("Copy to this return type")
+            .on_hover_text("A new letter with this one's text, for one return type")
+            .clicked()
+        {
+            let mut c = d.clone();
+            c.id = format!("letter-{}", &vf_core::new_id()[..8]);
+            c.version = 0;
+            c.sample = false;
+            c.return_types = vec![page.copy_to.clone()];
+            page.msg = Some(format!(
+                "Copied for the {}: press Save to keep it.",
+                page.copy_to
+            ));
+            open = Some(Some(c));
+        }
+    });
+    ui.add_space(6.0);
     let mut save = false;
     let mut delete = false;
     ui.horizontal(|ui| {
-        for rt in vf_portal::delivery::RETURN_TYPES
-            .into_iter()
-            .filter(|rt| d.offered_for(rt))
-        {
-            if ui.button(format!("Preview for a {rt}…")).clicked() {
-                let firm = vf_fs::cabinet::read(env.root)
-                    .ok()
-                    .and_then(|c| c.name)
-                    .unwrap_or_else(|| "Your firm".into());
-                let year = chrono::Local::now()
-                    .format("%Y")
-                    .to_string()
-                    .parse::<i32>()
-                    .unwrap_or(2026)
-                    - 1;
-                if let Err(e) = preview(d, &sample_fields(&firm, year, rt), rt) {
-                    page.err = Some(e);
-                }
-            }
+        if ui.add(widgets::primary_button("Save")).clicked() {
+            save = true;
         }
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if ui.add(widgets::primary_button("Save")).clicked() {
-                save = true;
-            }
-            if ui
-                .button(RichText::new("Delete…").color(theme::error()))
-                .clicked()
-            {
-                page.confirm_delete = true;
-            }
-        });
+        if ui
+            .button(RichText::new("Delete…").color(theme::error()))
+            .clicked()
+        {
+            page.confirm_delete = true;
+        }
     });
     if page.confirm_delete {
+        ui.label("Delete this letter? Deliveries already sent keep their copy.");
         ui.horizontal(|ui| {
-            ui.label("Delete this letter? Deliveries already sent keep their copy.");
             if ui.button("Delete").clicked() {
                 delete = true;
             }
@@ -483,11 +1351,25 @@ fn editor(ui: &mut egui::Ui, page: &mut LetterTemplatesPage, env: &mut crate::ui
             }
         });
     }
-    let copy = d.clone();
     if save {
-        // Saved by the firm: no longer the sample text.
-        let mut t = copy.clone();
+        // Saved by the firm: no longer the sample text. Empty list items and table rows are
+        // left out.
+        let mut t = d.clone();
         t.sample = false;
+        for b in &mut t.blocks {
+            match b {
+                Block::List { items, .. } => items.retain(|x| !x.trim().is_empty()),
+                Block::Table { rows, .. } => {
+                    rows.retain(|r| r.iter().any(|c| !c.trim().is_empty()))
+                }
+                _ => {}
+            }
+        }
+        t.blocks.retain(|b| match b {
+            Block::List { items, .. } => !items.is_empty(),
+            Block::Table { rows, .. } => !rows.is_empty(),
+            _ => true,
+        });
         match store::save(env.root, &t) {
             Ok(saved) => {
                 let unrecorded = crate::ui::portal::record(
@@ -504,16 +1386,19 @@ fn editor(ui: &mut egui::Ui, page: &mut LetterTemplatesPage, env: &mut crate::ui
                     )],
                 )
                 .unwrap_or_default();
-                page.msg = Some(format!("Saved as version {}.{unrecorded}", saved.version));
                 page.err = None;
-                page.draft = Some(saved);
                 page.loaded = false;
+                // Shown as saved at once (the list is read again next frame).
+                page.templates.retain(|x| x.id != saved.id);
+                page.templates.push(saved.clone());
+                *d = saved.clone();
+                page.msg = Some(format!("Saved as version {}.{unrecorded}", saved.version));
             }
             Err(e) => page.err = Some(e),
         }
     }
     if delete {
-        let id = copy.id.clone();
+        let id = d.id.clone();
         match store::delete(env.root, &id) {
             Ok(()) => {
                 let _ = crate::ui::portal::record(
@@ -526,13 +1411,14 @@ fn editor(ui: &mut egui::Ui, page: &mut LetterTemplatesPage, env: &mut crate::ui
                     )],
                 );
                 page.msg = Some("Deleted.".into());
-                page.draft = None;
                 page.confirm_delete = false;
                 page.loaded = false;
+                open = Some(None);
             }
             Err(e) => page.err = Some(e),
         }
     }
+    open
 }
 
 #[cfg(test)]
@@ -607,19 +1493,91 @@ mod tests {
         }
     }
 
+    /// The editor's runs cover every byte of the text (so the cursor maps one to one), read
+    /// bold, italic and fields as the layout does, and keep non-ASCII text whole.
     #[test]
-    fn lists_and_tables_edit_as_lines() {
-        let mut b = Block::Table {
-            rows: vec![],
-            only_for: vec![],
-        };
-        set_block_text(&mut b, "Service | Fee\nForm 1040 | {Fee}\n");
-        assert_eq!(block_text(&b), "Service | Fee\nForm 1040 | {Fee}");
-        let mut l = Block::List {
-            items: vec![],
-            only_for: vec![],
-        };
-        set_block_text(&mut l, "One\n\n Two ");
-        assert_eq!(block_text(&l), "One\nTwo");
+    fn runs_cover_the_text() {
+        let text = "We **will** prepare *your* {Tax year} return — {Fee} {not a field";
+        let rs = runs(text);
+        let mut at = 0;
+        for (r, _) in &rs {
+            assert_eq!(r.start, at);
+            at = r.end;
+        }
+        assert_eq!(at, text.len());
+        let look = |s: &str| rs.iter().find(|(r, _)| &text[r.clone()] == s).map(|x| x.1);
+        assert_eq!(
+            look("will"),
+            Some(Look::Text {
+                bold: true,
+                italic: false
+            })
+        );
+        assert_eq!(
+            look("your"),
+            Some(Look::Text {
+                bold: false,
+                italic: true
+            })
+        );
+        assert_eq!(look("{Tax year}"), Some(Look::Field));
+        assert_eq!(look("**"), Some(Look::Mark));
+        assert!(
+            rs.iter()
+                .all(|(r, l)| *l != Look::Field || !text[r.clone()].contains("not"))
+        );
+    }
+
+    /// B, I and Insert field act on char positions, also past non-ASCII text.
+    #[test]
+    fn marks_and_fields_at_the_cursor() {
+        let t = "Fee — due now";
+        // "due" is chars 6..9.
+        assert_eq!(wrap_text(t, 9, 6, "**"), ("Fee — **due** now".into(), 13));
+        assert_eq!(wrap_text(t, 6, 6, "*").1, 7);
+        assert_eq!(
+            insert_text(t, 4, 5, "{Fee}"),
+            ("Fee {Fee} due now".into(), 9)
+        );
+        assert_eq!(insert_text("", 3, 3, "{Date}"), ("{Date}".into(), 6));
+    }
+
+    /// Enter splits the paragraph at the cursor; Backspace in an empty last list item turns
+    /// the list into a paragraph.
+    #[test]
+    fn enter_and_backspace() {
+        let mut page = LetterTemplatesPage::default();
+        let mut d = vf_letters::store::samples().remove(0);
+        d.blocks = vec![
+            Block::Paragraph {
+                text: "Première ligne. Seconde.".into(),
+                only_for: vec!["1040".into()],
+            },
+            Block::List {
+                items: vec![String::new()],
+                only_for: vec![],
+            },
+        ];
+        page.sel = (15, 15);
+        apply(&mut page, &mut d, Op::Split(0));
+        assert_eq!(
+            d.blocks[..2],
+            [
+                Block::Paragraph {
+                    text: "Première ligne.".into(),
+                    only_for: vec!["1040".into()]
+                },
+                Block::Paragraph {
+                    text: " Seconde.".into(),
+                    only_for: vec!["1040".into()]
+                }
+            ]
+        );
+        assert_eq!(page.focus_next, Some((At::block(1), 0)));
+        apply(&mut page, &mut d, Op::DropItem(2, 0));
+        assert!(matches!(d.blocks[2], Block::Paragraph { .. }));
+        page.at = Some(At::block(0));
+        toggle_heading(&mut page, &mut d);
+        assert!(matches!(d.blocks[0], Block::Heading { .. }));
     }
 }

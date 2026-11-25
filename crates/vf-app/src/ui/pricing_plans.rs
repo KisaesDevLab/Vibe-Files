@@ -10,11 +10,22 @@ use vf_portal::pricing::{self, Plan, PlanAddon, PlanPackage, Service};
 
 use crate::ui::{theme, widgets};
 
+#[derive(Default, Clone, Copy, PartialEq, Eq)]
+enum Tab {
+    #[default]
+    Packages,
+    Addons,
+}
+
 #[derive(Default)]
 pub struct PricingPlansPage {
     loaded: bool,
     plans: Vec<Plan>,
     draft: Option<Plan>,
+    /// The grid's service rows (owner 2026-11-24, Q35): kept here so a row just added, with no
+    /// bullets yet, stays until Save.
+    rows: Vec<String>,
+    tab: Tab,
     /// A sample return fee for "As the client sees it".
     sample_fee: String,
     msg: Option<String>,
@@ -25,32 +36,74 @@ impl PricingPlansPage {
     pub fn reread(&mut self) {
         self.loaded = false;
     }
+
+    fn open(&mut self, plan: Plan) {
+        self.rows = grid_rows(&plan.packages);
+        self.draft = Some(plan);
+        self.msg = None;
+    }
 }
 
-/// A package's services as lines: `Group: bullet; bullet`.
-fn services_text(s: &[Service]) -> String {
-    s.iter()
-        .map(|x| format!("{}: {}", x.group, x.bullets.join("; ")))
+// ---- The packages grid: a column per package, a row per service (§15.6). A view over each
+// package's `services` (group + bullets); nothing in the stored plan changes shape.
+
+/// The grid's rows: every service group of the packages, in the order first met.
+fn grid_rows(pkgs: &[PlanPackage]) -> Vec<String> {
+    let mut rows: Vec<String> = Vec::new();
+    for p in pkgs {
+        for s in &p.services {
+            if !rows.contains(&s.group) {
+                rows.push(s.group.clone());
+            }
+        }
+    }
+    rows
+}
+
+/// A package's cell for a row: its bullets, one a line.
+fn cell(p: &PlanPackage, group: &str) -> String {
+    p.services
+        .iter()
+        .filter(|s| s.group == group)
+        .flat_map(|s| s.bullets.iter().cloned())
         .collect::<Vec<_>>()
         .join("\n")
 }
 
-fn services_of(text: &str) -> Vec<Service> {
-    text.lines()
-        .filter(|l| !l.trim().is_empty())
-        .map(|l| {
-            let (g, b) = l.split_once(':').unwrap_or((l, ""));
-            Service {
-                group: g.trim().to_string(),
-                bullets: b
-                    .split(';')
-                    .map(str::trim)
-                    .filter(|x| !x.is_empty())
-                    .map(String::from)
-                    .collect(),
-            }
-        })
-        .collect()
+/// Writes a cell back: an empty cell is no service for that package; the package's services
+/// follow the rows' order.
+fn set_cell(p: &mut PlanPackage, rows: &[String], group: &str, text: &str) {
+    let bullets: Vec<String> = text
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(String::from)
+        .collect();
+    p.services.retain(|s| s.group != group);
+    if !bullets.is_empty() {
+        p.services.push(Service {
+            group: group.to_string(),
+            bullets,
+        });
+    }
+    order(p, rows);
+}
+
+fn order(p: &mut PlanPackage, rows: &[String]) {
+    p.services.sort_by_key(|s| {
+        rows.iter()
+            .position(|r| *r == s.group)
+            .unwrap_or(usize::MAX)
+    });
+}
+
+/// A row renamed: every package's service of that group follows.
+fn rename_row(pkgs: &mut [PlanPackage], from: &str, to: &str) {
+    for p in pkgs {
+        for s in p.services.iter_mut().filter(|s| s.group == from) {
+            s.group = to.to_string();
+        }
+    }
 }
 
 fn this_year() -> i32 {
@@ -80,12 +133,12 @@ pub fn page(ui: &mut egui::Ui, page: &mut PricingPlansPage, env: &mut crate::ui:
     }
     ui.horizontal_top(|ui| {
         ui.vertical(|ui| {
-            ui.set_width(220.0);
+            ui.set_width(140.0);
             if ui.button("New plan…").clicked() {
-                page.draft = Some(pricing::sample("1040", this_year() - 1));
-                page.msg = None;
+                page.open(pricing::sample("1040", this_year() - 1));
             }
             ui.add_space(6.0);
+            let mut pick = None;
             for p in &page.plans {
                 let chosen = page
                     .draft
@@ -95,9 +148,11 @@ pub fn page(ui: &mut egui::Ui, page: &mut PricingPlansPage, env: &mut crate::ui:
                     .selectable_label(chosen, format!("{} {}", p.tax_year, p.return_type))
                     .clicked()
                 {
-                    page.draft = Some(p.clone());
-                    page.msg = None;
+                    pick = Some(p.clone());
                 }
+            }
+            if let Some(p) = pick {
+                page.open(p);
             }
         });
         ui.separator();
@@ -126,128 +181,60 @@ fn editor(ui: &mut egui::Ui, page: &mut PricingPlansPage, env: &mut crate::ui::b
         ui.label("Base fee name");
         ui.add(egui::TextEdit::singleline(&mut d.base_name).desired_width(200.0));
     });
-    ui.separator();
-    ui.label(RichText::new("PACKAGES").small().color(theme::ink_muted()));
-    let mut remove_pkg = None;
-    let mut rec: Option<usize> = d.packages.iter().position(|p| p.recommended);
-    for (i, p) in d.packages.iter_mut().enumerate() {
-        ui.group(|ui| {
-            ui.horizontal(|ui| {
-                widgets::named(
-                    ui.add(egui::TextEdit::singleline(&mut p.name).desired_width(160.0)),
-                    "Package name",
-                );
-                ui.label("over the return fee:");
-                let mut pct = f64::from(p.percent_bp) / 100.0;
-                if ui
-                    .add(
-                        egui::DragValue::new(&mut pct)
-                            .range(0.0..=500.0)
-                            .speed(0.5)
-                            .suffix(" %"),
-                    )
-                    .changed()
-                {
-                    p.percent_bp = (pct * 100.0).round() as u32;
-                }
-                ui.label("at least $");
-                let mut min = money(p.minimum_cents).trim_start_matches('$').to_string();
-                if ui
-                    .add(egui::TextEdit::singleline(&mut min).desired_width(80.0))
-                    .changed()
-                    && let Some(c) = parse_money(&min)
-                {
-                    p.minimum_cents = c;
-                }
-                ui.radio_value(&mut rec, Some(i), "Recommended");
-                if ui.small_button("Remove").clicked() {
-                    remove_pkg = Some(i);
-                }
-            });
-            let mut svc = services_text(&p.services);
-            if ui
-                .add(
-                    egui::TextEdit::multiline(&mut svc)
-                        .desired_rows(2)
-                        .desired_width(f32::INFINITY)
-                        .hint_text("Group: bullet; bullet (a group a line)"),
-                )
-                .changed()
-            {
-                p.services = services_of(&svc);
-            }
-        });
-    }
-    for (i, p) in d.packages.iter_mut().enumerate() {
-        p.recommended = rec == Some(i);
-    }
-    if let Some(i) = remove_pkg {
-        d.packages.remove(i);
-    }
-    if ui.button("Add package").clicked() {
-        d.packages.push(PlanPackage {
-            key: format!("pkg-{}", &vf_core::new_id()[..8]),
-            name: "New package".into(),
-            recommended: false,
-            percent_bp: 0,
-            minimum_cents: 0,
-            services: vec![],
-        });
-    }
-    ui.separator();
-    ui.label(RichText::new("ADD-ONS").small().color(theme::ink_muted()));
-    let mut remove_add = None;
-    for (i, a) in d.addons.iter_mut().enumerate() {
-        ui.horizontal(|ui| {
-            ui.add(egui::TextEdit::singleline(&mut a.name).desired_width(180.0));
-            ui.add(
-                egui::TextEdit::singleline(&mut a.text)
-                    .desired_width(260.0)
-                    .hint_text("What the client reads"),
-            );
-            ui.label("$");
-            let mut price = money(a.cents).trim_start_matches('$').to_string();
-            if ui
-                .add(egui::TextEdit::singleline(&mut price).desired_width(80.0))
-                .changed()
-                && let Some(c) = parse_money(&price)
-            {
-                a.cents = c;
-            }
-            ui.checkbox(&mut a.offered, "Offered unless unticked");
-            if ui.small_button("Remove").clicked() {
-                remove_add = Some(i);
-            }
-        });
-    }
-    if let Some(i) = remove_add {
-        d.addons.remove(i);
-    }
-    if ui.button("Add add-on").clicked() {
-        d.addons.push(PlanAddon {
-            key: format!("add-{}", &vf_core::new_id()[..8]),
-            name: "New add-on".into(),
-            text: String::new(),
-            cents: 0,
-            offered: true,
-        });
-    }
-    ui.separator();
     ui.horizontal(|ui| {
-        ui.label("As the client sees it, for a return fee of $");
-        ui.add(egui::TextEdit::singleline(&mut page.sample_fee).desired_width(90.0));
+        ui.selectable_value(&mut page.tab, Tab::Packages, "Packages");
+        ui.selectable_value(&mut page.tab, Tab::Addons, "Add-ons");
     });
-    if let Some(fee) = parse_money(&page.sample_fee) {
-        for p in &d.packages {
-            ui.label(format!(
-                "{}{}: {}  ({})",
-                p.name,
-                if p.recommended { " · Recommended" } else { "" },
-                money(pricing::package_price(fee, p)),
-                pricing::rule_words(p)
-            ));
-        }
-    }
+    ui.separator();
+    // The grid (or the add-ons table) beside "As the client sees it".
+    let side = 230.0;
+    let main = (ui.available_width() - side - 24.0).max(320.0);
+    ui.horizontal_top(|ui| {
+        ui.vertical(|ui| {
+            ui.set_width(main);
+            match page.tab {
+                Tab::Packages => packages_grid(ui, d, &mut page.rows),
+                Tab::Addons => addons_table(ui, d),
+            }
+        });
+        ui.separator();
+        ui.vertical(|ui| {
+            ui.set_width(side);
+            ui.label(RichText::new("As the client sees it").strong());
+            ui.horizontal(|ui| {
+                ui.label("For a return fee of $");
+                ui.add(egui::TextEdit::singleline(&mut page.sample_fee).desired_width(90.0));
+            });
+            if let Some(fee) = parse_money(&page.sample_fee) {
+                for p in &d.packages {
+                    ui.label(
+                        RichText::new(format!(
+                            "{}{}",
+                            p.name,
+                            if p.recommended { " · Recommended" } else { "" }
+                        ))
+                        .strong(),
+                    );
+                    ui.label(format!(
+                        "{}  ({})",
+                        money(pricing::package_price(fee, p)),
+                        pricing::rule_words(p)
+                    ));
+                }
+                let offered: Vec<&PlanAddon> = d.addons.iter().filter(|a| a.offered).collect();
+                if !offered.is_empty() {
+                    ui.add_space(4.0);
+                    ui.label(RichText::new("Add-ons").strong());
+                    for a in offered {
+                        ui.label(format!("{}: {}", a.name, money(a.cents)));
+                    }
+                }
+            } else {
+                ui.label(widgets::caption("Type an amount, e.g. 1,265.68."));
+            }
+        });
+    });
+    ui.separator();
     let mut save = false;
     let mut copy_next = false;
     let mut delete = false;
@@ -299,6 +286,7 @@ fn editor(ui: &mut egui::Ui, page: &mut PricingPlansPage, env: &mut crate::ui::b
     if copy_next {
         let mut next = plan.clone();
         next.tax_year += 1;
+        let next_year = next.tax_year;
         if pricing::load(env.root, &next.return_type, next.tax_year).is_some() {
             page.err = Some(format!(
                 "A {} {} plan exists already.",
@@ -308,8 +296,8 @@ fn editor(ui: &mut egui::Ui, page: &mut PricingPlansPage, env: &mut crate::ui::b
             match pricing::save(env.root, &next) {
                 Ok(()) => {
                     let u = audit(env, "pricing_plan_save", &next);
-                    page.msg = Some(format!("Copied to {}.{u}", next.tax_year));
-                    page.draft = Some(next);
+                    page.open(next);
+                    page.msg = Some(format!("Copied to {}.{u}", next_year));
                     page.loaded = false;
                 }
                 Err(e) => page.err = Some(e),
@@ -329,17 +317,294 @@ fn editor(ui: &mut egui::Ui, page: &mut PricingPlansPage, env: &mut crate::ui::b
     }
 }
 
+/// Packages: the first rows are the package's name, its price over the return fee and
+/// Recommended; then a row per service whose cells hold each package's bullets, one a line.
+fn packages_grid(ui: &mut egui::Ui, d: &mut Plan, rows: &mut Vec<String>) {
+    let mut rec: Option<usize> = d.packages.iter().position(|p| p.recommended);
+    let mut remove_pkg = None;
+    let mut remove_row = None;
+    let mut rename: Option<(usize, String)> = None;
+    let col = 160.0;
+    egui::ScrollArea::horizontal()
+        .id_salt("plan-grid-scroll")
+        .show(ui, |ui| {
+            egui::Grid::new("plan-grid")
+                .num_columns(d.packages.len() + 1)
+                .striped(true)
+                .spacing([10.0, 8.0])
+                .min_col_width(col)
+                .show(ui, |ui| {
+                    ui.label(RichText::new("Package").strong());
+                    for p in d.packages.iter_mut() {
+                        widgets::named(
+                            ui.add(egui::TextEdit::singleline(&mut p.name).desired_width(col)),
+                            "Package name",
+                        );
+                    }
+                    ui.end_row();
+                    ui.label("Price over the return fee");
+                    for (i, p) in d.packages.iter_mut().enumerate() {
+                        if i == 0 {
+                            ui.label(widgets::caption("the return fee itself"));
+                            continue;
+                        }
+                        ui.vertical(|ui| {
+                            let mut pct = f64::from(p.percent_bp) / 100.0;
+                            if ui
+                                .add(
+                                    egui::DragValue::new(&mut pct)
+                                        .range(0.0..=500.0)
+                                        .speed(0.5)
+                                        .suffix(" %"),
+                                )
+                                .changed()
+                            {
+                                p.percent_bp = (pct * 100.0).round() as u32;
+                            }
+                            ui.horizontal(|ui| {
+                                ui.label("at least $");
+                                let mut min =
+                                    money(p.minimum_cents).trim_start_matches('$').to_string();
+                                if ui
+                                    .add(egui::TextEdit::singleline(&mut min).desired_width(70.0))
+                                    .changed()
+                                    && let Some(c) = parse_money(&min)
+                                {
+                                    p.minimum_cents = c;
+                                }
+                            });
+                        });
+                    }
+                    ui.end_row();
+                    ui.label("Recommended");
+                    for i in 0..d.packages.len() {
+                        ui.radio_value(&mut rec, Some(i), "Recommended");
+                    }
+                    ui.end_row();
+                    for (r, row) in rows.iter().enumerate() {
+                        ui.horizontal(|ui| {
+                            let mut name = row.clone();
+                            if widgets::named(
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut name)
+                                        .desired_width(col - 60.0)
+                                        .hint_text("Service"),
+                                ),
+                                "Service",
+                            )
+                            .changed()
+                            {
+                                rename = Some((r, name));
+                            }
+                            if ui.small_button("Remove").clicked() {
+                                remove_row = Some(r);
+                            }
+                        });
+                        for p in d.packages.iter_mut() {
+                            let mut text = cell(p, row);
+                            if ui
+                                .add(
+                                    egui::TextEdit::multiline(&mut text)
+                                        .desired_rows(2)
+                                        .desired_width(col)
+                                        .hint_text("A bullet a line"),
+                                )
+                                .changed()
+                            {
+                                set_cell(p, rows, row, &text);
+                            }
+                        }
+                        ui.end_row();
+                    }
+                    ui.label("");
+                    for (i, _) in d.packages.iter().enumerate() {
+                        if ui
+                            .add_enabled(i > 0, egui::Button::new("Remove package").small())
+                            .clicked()
+                        {
+                            remove_pkg = Some(i);
+                        }
+                    }
+                    ui.end_row();
+                });
+        });
+    for (i, p) in d.packages.iter_mut().enumerate() {
+        p.recommended = rec == Some(i);
+    }
+    if let Some((r, to)) = rename {
+        let from = rows[r].clone();
+        // A name another row has would merge the two: kept apart until it differs.
+        if !rows.iter().enumerate().any(|(j, x)| j != r && *x == to) {
+            rename_row(&mut d.packages, &from, &to);
+            rows[r] = to;
+        }
+    }
+    if let Some(r) = remove_row {
+        let g = rows.remove(r);
+        for p in d.packages.iter_mut() {
+            p.services.retain(|s| s.group != g);
+        }
+    }
+    if let Some(i) = remove_pkg {
+        d.packages.remove(i);
+    }
+    ui.horizontal(|ui| {
+        if ui.button("Add package").clicked() {
+            d.packages.push(PlanPackage {
+                key: format!("pkg-{}", &vf_core::new_id()[..8]),
+                name: "New package".into(),
+                recommended: false,
+                percent_bp: 0,
+                minimum_cents: 0,
+                services: vec![],
+            });
+        }
+        if ui.button("Add service").clicked() {
+            let mut n = rows.len() + 1;
+            while rows.contains(&format!("Service {n}")) {
+                n += 1;
+            }
+            rows.push(format!("Service {n}"));
+        }
+    });
+    ui.label(widgets::caption(
+        "A cell holds the lines the client compares for that package, one a line; an empty cell \
+         is not shown for that package. The first package is the return fee itself.",
+    ));
+}
+
+/// Add-ons: Name, What the client reads, Price, Offered unless unticked.
+fn addons_table(ui: &mut egui::Ui, d: &mut Plan) {
+    let mut remove_add = None;
+    let mut up = None;
+    let n = d.addons.len();
+    egui::Grid::new("plan-addons")
+        .num_columns(6)
+        .striped(true)
+        .spacing([10.0, 6.0])
+        .show(ui, |ui| {
+            ui.label("");
+            ui.label(RichText::new("Name").strong());
+            ui.label(RichText::new("What the client reads").strong());
+            ui.label(RichText::new("Price").strong());
+            ui.label(RichText::new("Offered unless unticked").strong());
+            ui.label("");
+            ui.end_row();
+            for (i, a) in d.addons.iter_mut().enumerate() {
+                if ui
+                    .add_enabled(i > 0, egui::Button::new("↑").small())
+                    .clicked()
+                {
+                    up = Some(i);
+                }
+                ui.add(egui::TextEdit::singleline(&mut a.name).desired_width(160.0));
+                ui.add(
+                    egui::TextEdit::singleline(&mut a.text)
+                        .desired_width(260.0)
+                        .hint_text("What the client reads"),
+                );
+                ui.horizontal(|ui| {
+                    ui.label("$");
+                    let mut price = money(a.cents).trim_start_matches('$').to_string();
+                    if ui
+                        .add(egui::TextEdit::singleline(&mut price).desired_width(70.0))
+                        .changed()
+                        && let Some(c) = parse_money(&price)
+                    {
+                        a.cents = c;
+                    }
+                });
+                ui.checkbox(&mut a.offered, "");
+                if ui.small_button("Remove").clicked() {
+                    remove_add = Some(i);
+                }
+                ui.end_row();
+            }
+        });
+    if let Some(i) = up.filter(|&i| i > 0 && i < n) {
+        d.addons.swap(i - 1, i);
+    }
+    if let Some(i) = remove_add {
+        d.addons.remove(i);
+    }
+    if ui.button("Add add-on").clicked() {
+        d.addons.push(PlanAddon {
+            key: format!("add-{}", &vf_core::new_id()[..8]),
+            name: "New add-on".into(),
+            text: String::new(),
+            cents: 0,
+            offered: true,
+        });
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn pkg(services: &[(&str, &[&str])]) -> PlanPackage {
+        PlanPackage {
+            key: "k".into(),
+            name: "P".into(),
+            recommended: false,
+            percent_bp: 0,
+            minimum_cents: 0,
+            services: services
+                .iter()
+                .map(|(g, b)| Service {
+                    group: g.to_string(),
+                    bullets: b.iter().map(|x| x.to_string()).collect(),
+                })
+                .collect(),
+        }
+    }
+
+    /// The grid is a view: reading every cell and writing it back changes nothing, a service
+    /// one package lacks stays absent, and names with `:` or `;` survive.
     #[test]
-    fn services_edit_as_lines() {
-        let s = services_of("Return: Preparation; e-filing\n\nNotices: IRS letters");
-        assert_eq!(s.len(), 2);
+    fn the_grid_round_trips() {
+        let mut plan = pricing::sample("1040", 2025);
+        plan.packages[1].services.push(Service {
+            group: "Notices: IRS; state".into(),
+            bullets: vec!["Letters: answered; filed".into()],
+        });
+        let before = plan.packages.clone();
+        let rows = grid_rows(&plan.packages);
+        assert!(rows.contains(&"Notices: IRS; state".to_string()));
+        for p in plan.packages.iter_mut() {
+            for r in &rows {
+                let c = cell(p, r);
+                set_cell(p, &rows, r, &c);
+            }
+        }
+        assert_eq!(plan.packages, before);
+        assert_eq!(cell(&plan.packages[0], "Notices: IRS; state"), "");
+    }
+
+    #[test]
+    fn cells_rows_and_renames() {
+        let mut a = pkg(&[("Return", &["Preparation"])]);
+        let mut b = pkg(&[("Return", &["Preparation"]), ("Audit", &["Defense"])]);
+        let mut rows = grid_rows(&[a.clone(), b.clone()]);
+        assert_eq!(rows, ["Return", "Audit"]);
+        // A new row filled for one package lands in row order.
+        rows.insert(1, "Planning".into());
+        set_cell(&mut b, &rows, "Planning", "Meeting\n\n Projection ");
         assert_eq!(
-            services_text(&s),
-            "Return: Preparation; e-filing\nNotices: IRS letters"
+            b.services
+                .iter()
+                .map(|s| s.group.as_str())
+                .collect::<Vec<_>>(),
+            ["Return", "Planning", "Audit"]
         );
+        assert_eq!(cell(&b, "Planning"), "Meeting\nProjection");
+        // Emptied: no service.
+        set_cell(&mut b, &rows, "Audit", "  ");
+        assert!(b.services.iter().all(|s| s.group != "Audit"));
+        let mut both = [a.clone(), b.clone()];
+        rename_row(&mut both, "Return", "Tax return");
+        assert!(both.iter().all(|p| p.services[0].group == "Tax return"));
+        a = both[0].clone();
+        assert_eq!(cell(&a, "Tax return"), "Preparation");
     }
 }

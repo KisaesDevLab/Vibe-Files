@@ -88,6 +88,8 @@ struct Word {
     bold: bool,
     italic: bool,
     w: f32,
+    /// A line break (Shift+Enter in the editor) follows the word.
+    brk: bool,
 }
 
 struct Pages {
@@ -133,6 +135,16 @@ fn words_of(spans: &[Span], size: f32) -> Vec<Word> {
     for s in spans {
         let mut cur = String::new();
         for c in s.text.chars() {
+            if c == '\n' {
+                out.push(Word {
+                    w: width(&cur, size, s.bold),
+                    text: std::mem::take(&mut cur),
+                    bold: s.bold,
+                    italic: s.italic,
+                    brk: true,
+                });
+                continue;
+            }
             cur.push(c);
             if c == ' ' {
                 out.push(Word {
@@ -140,6 +152,7 @@ fn words_of(spans: &[Span], size: f32) -> Vec<Word> {
                     text: std::mem::take(&mut cur),
                     bold: s.bold,
                     italic: s.italic,
+                    brk: false,
                 });
             }
         }
@@ -149,6 +162,7 @@ fn words_of(spans: &[Span], size: f32) -> Vec<Word> {
                 text: cur,
                 bold: s.bold,
                 italic: s.italic,
+                brk: false,
             });
         }
     }
@@ -167,7 +181,12 @@ fn wrap(words: Vec<Word>, max: f32) -> Vec<Vec<Word>> {
             w = 0.0;
         }
         w += word.w;
+        let brk = word.brk;
         line.push(word);
+        if brk {
+            lines.push(std::mem::take(&mut line));
+            w = 0.0;
+        }
     }
     if !line.is_empty() {
         lines.push(line);
@@ -507,6 +526,21 @@ mod tests {
         f.remove("Spouse name");
         let single = layout(&sample(), &f, "1040", None);
         assert_eq!(single.blocks.len(), 1);
+    }
+
+    #[test]
+    fn a_line_break_in_a_paragraph_starts_a_new_line() {
+        let spans = vec![Span {
+            text: "First line\nSecond line".into(),
+            bold: false,
+            italic: false,
+        }];
+        let lines = wrap(words_of(&spans, SIZE), 1000.0);
+        let text = |l: &Vec<Word>| l.iter().map(|w| w.text.as_str()).collect::<String>();
+        assert_eq!(
+            lines.iter().map(text).collect::<Vec<_>>(),
+            ["First line", "Second line"]
+        );
     }
 
     #[test]
