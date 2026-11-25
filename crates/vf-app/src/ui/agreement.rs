@@ -190,6 +190,17 @@ impl Plan {
         {
             return Some("Add who signs in the client's Portal contacts.".into());
         }
+        if !self.letters.is_empty()
+            && self
+                .signers
+                .iter()
+                .skip(1)
+                .any(|s| s.email.is_none() && s.phone.is_none())
+        {
+            return Some(
+                "The spouse needs their own email or mobile (their code to sign goes there): add it here or in the client's Portal contacts.".into(),
+            );
+        }
         None
     }
 }
@@ -283,13 +294,39 @@ pub fn signers_for(root: &Path, client_id: &str, individual: bool) -> Vec<Delive
     v
 }
 
-/// The letters for these services: each letter template offered for one of them, ticked as
-/// the template says; letters for every service (the consents) unticked.
+/// The letters for these services: each letter template offered for one of them; letters for
+/// every service (the consents) offered unticked. Ticked, per service: the firm's own letters
+/// for it (saved, ticked in a new delivery), else the built-in kit or service letter, else a
+/// sample ticked in a new delivery. So one engagement letter is ticked for each service.
 pub fn letters_for(all: &[Template], services: &[String]) -> Vec<(Template, bool)> {
-    all.iter()
+    let offered: Vec<&Template> = all
+        .iter()
         .filter(|t| t.kind == vf_letters::LETTER)
         .filter(|t| t.return_types.is_empty() || services.iter().any(|s| t.offered_for(s)))
-        .map(|t| (t.clone(), t.default_ticked && !t.return_types.is_empty()))
+        .collect();
+    let built_in = |t: &Template| t.id.starts_with("aicpa-") || t.id.starts_with("service-");
+    let mut ticked: Vec<&str> = Vec::new();
+    for s in services {
+        let mine: Vec<&&Template> = offered
+            .iter()
+            .filter(|t| !t.return_types.is_empty() && t.offered_for(s))
+            .collect();
+        let pick: Vec<&&Template> = [
+            mine.iter()
+                .filter(|t| t.default_ticked && !t.sample)
+                .copied()
+                .collect::<Vec<_>>(),
+            mine.iter().filter(|t| built_in(t)).copied().collect(),
+            mine.iter().filter(|t| t.default_ticked).copied().collect(),
+        ]
+        .into_iter()
+        .find(|v| !v.is_empty())
+        .unwrap_or_default();
+        ticked.extend(pick.iter().map(|t| t.id.as_str()));
+    }
+    offered
+        .into_iter()
+        .map(|t| (t.clone(), ticked.contains(&t.id.as_str())))
         .collect()
 }
 
@@ -323,6 +360,43 @@ pub fn services_of(d: &Delivery) -> Vec<ServiceLine> {
         }
     }
     out
+}
+
+/// The last agreement's services with the monthly amount the client is charged now: when staff
+/// changed the charge since (Change from the next charge) and the agreement has one monthly
+/// line, that line takes the charged amount. Several monthly lines are kept as they were, with
+/// a note to check them.
+pub fn services_now(
+    last: &Delivery,
+    live: Option<&Subscription>,
+) -> (Vec<ServiceLine>, Option<String>) {
+    let mut lines = services_of(last);
+    let Some(live) = live.filter(|s| s.live()) else {
+        return (lines, None);
+    };
+    let (_, month) = vf_portal::agreement::totals(&lines);
+    if month == live.monthly_cents {
+        return (lines, None);
+    }
+    let monthly: Vec<usize> = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| l.month_cents > 0)
+        .map(|(i, _)| i)
+        .collect();
+    if let [i] = monthly[..] {
+        lines[i].month_cents = live.monthly_cents;
+        (lines, None)
+    } else {
+        (
+            lines,
+            Some(format!(
+                "The client is charged {} a month now, not the {} of the last agreement: check the monthly fees.",
+                money(live.monthly_cents),
+                money(month)
+            )),
+        )
+    }
 }
 
 fn dollars(cents: u64) -> String {
@@ -450,6 +524,13 @@ impl AgreementWindow {
         w
     }
 
+    /// The agreement's year (the walkthroughs).
+    #[cfg(test)]
+    pub fn set_year(&mut self, year: i32) {
+        self.year = year;
+        self.title = format!("Your {year} service agreement");
+    }
+
     fn load(&mut self, ctx: &egui::Context, s: &PortalSettings) {
         let s2 = s.clone();
         let id = self.client.id.clone();
@@ -525,7 +606,10 @@ impl AgreementWindow {
             self.err = Some("This client has no earlier agreement.".into());
             return;
         };
-        let lines = services_of(&last);
+        let (lines, note) = services_now(&last, self.live());
+        if note.is_some() {
+            self.err = note;
+        }
         for r in &mut self.rows {
             match lines.iter().find(|l| l.service == r.service) {
                 Some(l) => {
@@ -802,7 +886,13 @@ impl AgreementWindow {
                 });
                 ui.horizontal_wrapped(|ui| {
                     ui.label("New monthly amount $");
-                    ui.add_enabled(can, egui::TextEdit::singleline(&mut self.monthly).desired_width(90.0));
+                    widgets::named(
+                        ui.add_enabled(
+                            can,
+                            egui::TextEdit::singleline(&mut self.monthly).desired_width(90.0),
+                        ),
+                        "New monthly amount",
+                    );
                     if ui
                         .add_enabled(can, egui::Button::new("Change from the next charge"))
                         .on_hover_text("The client is told. A card's fee is added as the portal's Settings say.")
@@ -842,9 +932,12 @@ impl AgreementWindow {
         ui.horizontal_wrapped(|ui| {
             ui.label(RichText::new("Signed by").strong());
             for sg in &mut self.signers {
-                ui.add_enabled(
-                    can && !sent,
-                    egui::TextEdit::singleline(&mut sg.name).desired_width(150.0),
+                widgets::named(
+                    ui.add_enabled(
+                        can && !sent,
+                        egui::TextEdit::singleline(&mut sg.name).desired_width(150.0),
+                    ),
+                    &format!("{} name", vf_letters::role_words(&sg.role)),
                 );
                 if sg.role == "officer" {
                     ui.add_enabled(
@@ -853,6 +946,21 @@ impl AgreementWindow {
                             .hint_text("Title")
                             .desired_width(110.0),
                     );
+                }
+                // A second signer's code goes to their own email or mobile.
+                let mut email = sg.email.clone().unwrap_or_default();
+                if widgets::named(
+                    ui.add_enabled(
+                        can && !sent,
+                        egui::TextEdit::singleline(&mut email)
+                            .hint_text("Email")
+                            .desired_width(170.0),
+                    ),
+                    &format!("{} email", vf_letters::role_words(&sg.role)),
+                )
+                .changed()
+                {
+                    sg.email = Some(email.trim().to_string()).filter(|e| !e.is_empty());
                 }
             }
             ui.label(
@@ -1500,16 +1608,18 @@ struct Candidate {
     tick: bool,
     last: Option<Delivery>,
     this_year: Option<String>,
+    /// The client's live monthly charge (its amount carries into the renewal).
+    live: Option<Subscription>,
 }
 
 enum Bulk {
-    Read(Result<(Vec<Delivery>, String), String>),
+    Read(Result<(Vec<Delivery>, Vec<Subscription>, String), String>),
     Progress(String),
     Done(String),
 }
 
 pub struct AgreementsPage {
-    year: i32,
+    pub year: i32,
     candidates: Vec<Candidate>,
     search: String,
     show_all: bool,
@@ -1617,9 +1727,18 @@ pub fn show_page(
                 ui.end_row();
                 let mut remove = None;
                 for (i, p) in page.partners.iter_mut().enumerate() {
-                    ui.add(egui::TextEdit::singleline(&mut p.name).desired_width(180.0));
-                    ui.add(egui::TextEdit::singleline(&mut p.title).desired_width(140.0));
-                    ui.add(egui::TextEdit::singleline(&mut p.code).hint_text("initials").desired_width(90.0));
+                    widgets::named(
+                        ui.add_sized([180.0, 22.0], egui::TextEdit::singleline(&mut p.name)),
+                        "Partner name",
+                    );
+                    widgets::named(
+                        ui.add_sized([140.0, 22.0], egui::TextEdit::singleline(&mut p.title)),
+                        "Partner title",
+                    );
+                    ui.add_sized(
+                        [90.0, 22.0],
+                        egui::TextEdit::singleline(&mut p.code).hint_text("initials"),
+                    );
                     if ui.small_btn("Remove").clicked() {
                         remove = Some(i);
                     }
@@ -1665,7 +1784,7 @@ pub fn show_page(
     if let Some(rx) = &page.rx {
         while let Ok(m) = rx.try_recv() {
             match m {
-                Bulk::Read(Ok((all, firm))) => {
+                Bulk::Read(Ok((all, subs, firm))) => {
                     page.progress = None;
                     page.firm = firm;
                     for c in &mut page.candidates {
@@ -1677,6 +1796,10 @@ pub fn show_page(
                             .iter()
                             .find(|d| d.tax_year == page.year && d.status != "cancelled")
                             .map(|d| d.status.clone());
+                        c.live = subs
+                            .iter()
+                            .find(|s| s.client_id == c.client.id && s.live())
+                            .cloned();
                         c.last = mine
                             .iter()
                             .filter(|d| d.tax_year < page.year && d.status != "cancelled")
@@ -1707,6 +1830,7 @@ pub fn show_page(
                 tick: false,
                 last: None,
                 this_year: None,
+                live: None,
             })
             .collect();
         let s2 = s.clone();
@@ -1716,7 +1840,13 @@ pub fn show_page(
             let p = core::client(&s2);
             let r = p
                 .deliveries_all(None)
-                .map(|d| (d, p.status().map(|s| s.firm_name).unwrap_or_default()))
+                .map(|d| {
+                    (
+                        d,
+                        p.live_subscriptions().unwrap_or_default(),
+                        p.status().map(|s| s.firm_name).unwrap_or_default(),
+                    )
+                })
                 .map_err(|e| e.message());
             let _ = tx.send(Bulk::Read(r));
             ctx.request_repaint();
@@ -1780,20 +1910,13 @@ pub fn show_page(
     TableBuilder::new(ui)
         .striped(true)
         .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
-        .column(Column::exact(28.0))
-        .column(Column::initial(280.0).at_least(140.0).clip(true))
+        .column(Column::initial(300.0).at_least(160.0).clip(true))
         .column(Column::initial(260.0).at_least(120.0).clip(true))
         .column(Column::exact(100.0))
         .column(Column::remainder().at_least(90.0))
         .max_scroll_height(380.0)
         .header(22.0, |mut h| {
-            for n in [
-                "",
-                "Client",
-                "Services (last agreement)",
-                "One-time",
-                "Monthly",
-            ] {
+            for n in ["Client", "Services (last agreement)", "One-time", "Monthly"] {
                 h.col(|ui| {
                     ui.label(RichText::new(n).small().color(theme::ink_muted()));
                 });
@@ -1802,16 +1925,21 @@ pub fn show_page(
         .body(|body| {
             body.rows(24.0, shown.len(), |mut row| {
                 let c = &mut page.candidates[shown[row.index()]];
-                let lines = c.last.as_ref().map(services_of).unwrap_or_default();
+                let lines = c
+                    .last
+                    .as_ref()
+                    .map(|l| services_now(l, c.live.as_ref()).0)
+                    .unwrap_or_default();
                 let (o, m) = vf_portal::agreement::totals(&lines);
+                // The client's name is its tick (a larger target than a box alone).
                 row.col(|ui| {
                     ui.add_enabled(
                         !busy && c.last.is_some() && c.this_year.is_none(),
-                        egui::Checkbox::without_text(&mut c.tick),
+                        egui::Checkbox::new(
+                            &mut c.tick,
+                            format!("{} ({})", c.client.name, c.client.code),
+                        ),
                     );
-                });
-                row.col(|ui| {
-                    ui.label(format!("{} ({})", c.client.name, c.client.code));
                 });
                 row.col(|ui| {
                     let words = match (&c.this_year, &c.last) {
@@ -1908,7 +2036,11 @@ fn start_bulk(
     let mut plans: Vec<Result<Ready, String>> = Vec::new();
     for c in ticked {
         let Some(last) = &c.last else { continue };
-        let services = services_of(last);
+        let (services, note) = services_now(last, c.live.as_ref());
+        if let Some(n) = note {
+            plans.push(Err(format!("{} ({}): {n}", c.client.name, c.client.code)));
+            continue;
+        }
         let individual = !vf_fs::contacts::client_is_business(root, &c.client.id);
         let names: Vec<String> = services.iter().map(|s| s.service.clone()).collect();
         let mine = vf_fs::contacts::client_partner(root, &c.client.id);
@@ -2077,6 +2209,12 @@ mod tests {
         ];
         // The letters offered: the 1120-S's and bookkeeping's ticked, the consents not.
         let offered = letters_for(&all, &["1120-S".into(), "Bookkeeping".into()]);
+        // One engagement letter per service: the kit's 1120-S letter, not the old entity sample.
+        assert!(
+            offered
+                .iter()
+                .any(|(t, on)| t.id == "engagement-entity" && !on)
+        );
         let ticked: Vec<&str> = offered
             .iter()
             .filter(|(_, on)| *on)

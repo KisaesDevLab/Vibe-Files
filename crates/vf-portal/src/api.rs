@@ -104,6 +104,55 @@ impl PortalError {
             Some("check_invalid") => {
                 "The portal did not accept that way of checking: update Vibe Portal, or approve on the portal's staff page.".into()
             }
+            // Tax return delivery and annual agreements (Vibe Portal Addenda 02 and 03).
+            Some("deliveries_off") => {
+                "Tax return delivery is turned off on the portal: an admin turns it on in the portal's Settings.".into()
+            }
+            Some("client_not_found") => {
+                "This client is not on the portal yet: share a document or invite someone first.".into()
+            }
+            Some("delivery_exists") => {
+                "This client already has an open card for that year: open it (Read again), or cancel it first.".into()
+            }
+            Some("delivery_closed") => {
+                "That card is finished or cancelled: send a new one.".into()
+            }
+            Some("no_steps") => "Tick at least one step to send.".into(),
+            Some("agreement_steps") => {
+                "An agreement has no tax return or Form 8879 step.".into()
+            }
+            Some("step_done") => "A step the client finished cannot be taken away.".into(),
+            Some("letters_signed") => {
+                "Someone has signed, so the letters and who signs are fixed: cancel and send a new card to change them.".into()
+            }
+            Some("signer_has_no_contact") => {
+                "A second signer needs their own email or mobile number (their code goes there).".into()
+            }
+            Some("selection_signed") => {
+                "The client signed their selection, so the prices are fixed.".into()
+            }
+            Some("fee_paid") => "A payment has started or been made, so the fee is fixed.".into(),
+            Some("already_paid") => "It is paid already.".into(),
+            Some("fee_mode") | Some("service_lines") => {
+                "The portal did not accept these fee lines: update Vibe Portal to 0.5.5 or later.".into()
+            }
+            Some("one_amount") => "Give one amount for the fee.".into(),
+            Some("no_packages") => "Offer at least one package.".into(),
+            Some("one_recommended") => "Recommend one package at most.".into(),
+            Some("return_seen") => {
+                "The client has seen the return: send it as a revised return.".into()
+            }
+            Some("no_8879_step") => "This card has no Form 8879 step.".into(),
+            Some("already_confirmed") => "Form 8879 was confirmed already.".into(),
+            Some("invalid_url") => "The eSignature link must start with https://.".into(),
+            Some("not_a_pdf") => "The letter is not a PDF the portal can read.".into(),
+            Some("payments_off") => {
+                "Payments are not set up on the portal (its Settings › Payments).".into()
+            }
+            Some("stripe_refused") => "Stripe refused the request: see Settings › Payments › Test on the portal.".into(),
+            Some("subscription_ended") => "That monthly charge has ended.".into(),
+            Some("no_monthly_charge") => "This client has no monthly charge.".into(),
+            Some("not_found") => "The portal does not have it any more: press Read again.".into(),
             _ => self.to_string(),
         }
     }

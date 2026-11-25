@@ -186,7 +186,7 @@ pub fn refresh_samples(root: &Path) -> Result<usize, String> {
         if let Some(s) = fresh
             .iter()
             .find(|s| s.id == t.id)
-            .filter(|s| uses || s.blocks != t.blocks)
+            .filter(|s| uses || s.blocks != t.blocks || s.default_ticked != t.default_ticked)
         {
             save(
                 root,

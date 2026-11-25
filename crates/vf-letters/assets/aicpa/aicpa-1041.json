@@ -8,7 +8,7 @@
  "kind": "letter",
  "doc_type": "Engagement letter",
  "letterhead": true,
- "default_ticked": true,
+ "default_ticked": false,
  "sample": true,
  "blocks": [
   {

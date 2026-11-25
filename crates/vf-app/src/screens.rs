@@ -1644,6 +1644,409 @@ mod tests {
         std::fs::write(out.join("steps.txt"), steps.join("\n")).unwrap();
     }
 
+    /// Annual agreements, the second walk (2026-11-25): a joint couple (both sign, the spouse by
+    /// a code) paying monthly by bank account (started, then cleared); Deliver tax return… for
+    /// the return the agreement covers skips its letters (A11); staff change the monthly amount;
+    /// Admin › Portal › Agreements sends next year's agreement from the last one with the changed
+    /// amount carried over; the couple signs in again and signs it, paying only its one-time fee
+    /// while the monthly charge continues; staff stop the charge; a Sign only agreement is sent
+    /// and cancelled. Same environment as `agreement_walkthrough`.
+    #[test]
+    #[ignore = "needs a running portal"]
+    fn agreement_joint_walkthrough() {
+        let (Ok(url), Ok(key), Ok(log), Ok(client_js), Ok(stripe), Ok(out)) = (
+            std::env::var("VF_WALK_URL"),
+            std::env::var("VF_WALK_KEY"),
+            std::env::var("VF_WALK_LOG"),
+            std::env::var("VF_WALK_CLIENT"),
+            std::env::var("VF_WALK_STRIPE"),
+            std::env::var("VF_WALK_DIR"),
+        ) else {
+            return;
+        };
+        let out = std::path::PathBuf::from(out);
+        std::fs::create_dir_all(&out).unwrap();
+        let mut steps: Vec<String> = Vec::new();
+        let mut note = |s: String| {
+            eprintln!("{s}");
+            steps.push(s);
+        };
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path().join("Clients");
+        vf_fixtures::generate(&root, 3).unwrap();
+        crate::ui::test_util::pdfium_first();
+        let data = t.path().join("data");
+        drop(crate::session::open(&data, "dev", &root).unwrap());
+        let cab = vf_fs::cabinet::read(&root).unwrap().cabinet_id;
+        let s = vf_portal::PortalSettings::new(&cab, &url, &key, 0)
+            .unwrap()
+            .with_deliveries(true);
+        vf_portal::settings::save(&root, &s).unwrap();
+        crate::portal::register_inbox(&root).unwrap();
+        vf_letters::store::seed_if_missing(&root).unwrap();
+        // The firm fills in the kit's Form 1040 letter and its Terms and Conditions (A17).
+        for id in ["aicpa-1040", "aicpa-terms"] {
+            let mut tpl = vf_letters::store::load_all(&root)
+                .unwrap()
+                .into_iter()
+                .find(|t| t.id == id)
+                .unwrap();
+            let mut json = serde_json::to_string(&tpl.blocks).unwrap();
+            for (k, v) in [
+                ("[X]", "30"),
+                ("[Portal Name]", "Sample Portal"),
+                ("[State Name]", "Ohio"),
+                (
+                    "[Name of State or Federal Court Desired]",
+                    "Franklin County, Ohio",
+                ),
+                ("[Date]", "December 31, {Tax year}"),
+                ("[Frequency]", "quarterly"),
+                ("[Local]", "City of Columbus"),
+                ("[Number]", "1040"),
+                ("[State]", "Ohio"),
+                (
+                    "[If a large number of returns are included, consider listing the due dates in an appendix]",
+                    "April 15, {Next year}",
+                ),
+            ] {
+                json = json.replace(k, v);
+            }
+            tpl.blocks = serde_json::from_str(&json).unwrap();
+            tpl.sample = false;
+            vf_letters::store::save(&root, &tpl).unwrap();
+        }
+        vf_letters::partners::save(
+            &root,
+            &[vf_letters::partners::Partner {
+                name: "Morgan Example".into(),
+                title: "Partner".into(),
+                code: "ME".into(),
+            }],
+        )
+        .unwrap();
+        let d = data.clone();
+        let mut h = HarnessBuilder::default()
+            .with_max_steps(crate::ui::test_util::MAX_STEPS)
+            .with_theme(egui::Theme::Light)
+            .with_size([1440.0, 900.0])
+            .build_eframe(move |cc| VibeFilesApp::new(&cc.egui_ctx, d.clone()));
+        h.run_steps(8);
+        let shot = |h: &mut egui_kittest::Harness<'static, VibeFilesApp>, name: &str| {
+            for _ in 0..5 {
+                h.step();
+            }
+            match h.render() {
+                Ok(img) => img.save(out.join(format!("{name}.png"))).unwrap(),
+                Err(e) => eprintln!("{name}: {e}"),
+            }
+        };
+        let said = |h: &egui_kittest::Harness<'static, VibeFilesApp>, text: &str| {
+            h.query_all_by_label_contains(text).next().is_some()
+        };
+        let wait_long =
+            |h: &mut egui_kittest::Harness<'static, VibeFilesApp>,
+             what: &str,
+             ok: &dyn Fn(&egui_kittest::Harness<'static, VibeFilesApp>) -> bool| {
+                let start = std::time::Instant::now();
+                while !ok(h) {
+                    assert!(start.elapsed().as_secs() < 120, "{what}: never");
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                    h.step();
+                }
+            };
+        h.get_by_role_and_label(Role::Button, "Open existing")
+            .click();
+        h.run_steps(8);
+        h.get_by_label("Cabinet folder").click();
+        h.step();
+        h.get_by_label("Cabinet folder")
+            .type_text(&root.display().to_string());
+        h.step();
+        h.get_by_role_and_label(Role::Button, "Open cabinet")
+            .click();
+        assert!(wait_for(&mut h, |h| matches!(
+            h.state().screen,
+            crate::app::Screen::Open(_)
+        )));
+        h.run_steps(8);
+        let c = {
+            let o = open_mut(&mut h);
+            o.browse.set_scope(vf_core::browse::Scope::Client(1));
+            o.browse.portal.reread();
+            o.browse.snap.clients[1].clone()
+        };
+        for (k, v) in [
+            ("first", "Jordan"),
+            ("last", "Sample"),
+            ("email", "jordan.sample@example.com"),
+            ("spouse_first", "Casey"),
+            ("spouse_last", "Sample"),
+            ("spouse_email", "casey.sample@example.com"),
+        ] {
+            vf_fs::contacts::set_one_by_hand(&root, &c.id, k, v).unwrap();
+        }
+        let p = crate::portal::client(&s);
+        p.put_client(&c.id, &c.ext_id, &c.name, None).unwrap();
+        p.invite(
+            &c.id,
+            Some("jordan.sample@example.com"),
+            None,
+            "Jordan Sample",
+            "Taxpayer",
+        )
+        .unwrap();
+        note(format!(
+            "Setup: {} ({}), an individual: Jordan and Casey Sample; the 1040 letter and the Terms filled in",
+            c.name, c.ext_id
+        ));
+        let open_agreement = |h: &mut egui_kittest::Harness<'static, VibeFilesApp>,
+                              year: Option<i32>| {
+            open_mut(h).browse.portal.agreement = None;
+            h.run_steps(3);
+            h.get_by_role_and_label(Role::Button, "Service agreement…")
+                .click();
+            h.run_steps(2);
+            if let Some(y) = year {
+                open_mut(h)
+                    .browse
+                    .portal
+                    .agreement
+                    .as_mut()
+                    .unwrap()
+                    .set_year(y);
+            }
+            let start = std::time::Instant::now();
+            while !(h
+                .query_all_by_label_contains("SERVICES AND FEES")
+                .next()
+                .is_some()
+                && h.query_all_by_label_contains("Working…").next().is_none())
+            {
+                assert!(
+                    start.elapsed().as_secs() < 60,
+                    "the agreement window: never"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                h.step();
+            }
+            h.run_steps(4);
+        };
+        let type_into =
+            |h: &mut egui_kittest::Harness<'static, VibeFilesApp>, label: &str, v: &str| {
+                h.get_by_label(label).click();
+                h.step();
+                h.key_press(egui::Key::End);
+                for _ in 0..12 {
+                    h.key_press(egui::Key::Backspace);
+                }
+                h.step();
+                h.get_by_label(label).type_text(v);
+                h.run_steps(2);
+            };
+
+        // ---- Step 1: a 2026 agreement (it covers the 2025 return): 1040 once, bookkeeping monthly.
+        open_agreement(&mut h, Some(2026));
+        for (service, label, v) in [
+            ("1040", "1040 one-time fee", "640.00"),
+            ("Bookkeeping", "Bookkeeping monthly fee", "100.00"),
+        ] {
+            h.get_by_label(service).click();
+            h.run_steps(3);
+            type_into(&mut h, label, v);
+        }
+        h.run_steps(4);
+        assert!(
+            said(&h, "Total $640.00 one-time · $100.00 a month"),
+            "the totals"
+        );
+        assert!(said(&h, "(taxpayer and spouse)"));
+        shot(&mut h, "10-joint-agreement");
+        h.get_by_role_and_label(Role::Button, "Send to client")
+            .click();
+        wait_long(&mut h, "sent", &|h| said(h, "Sent to the client."));
+        let first = p.agreements(&c.id).unwrap()[0].clone();
+        let first = p.delivery(&first.id).unwrap();
+        assert_eq!(
+            first
+                .signers
+                .iter()
+                .map(|s| s.role.as_str())
+                .collect::<Vec<_>>(),
+            ["taxpayer", "spouse"]
+        );
+        assert_eq!(first.letters.len(), 2);
+        assert_eq!(first.return_year, Some(2025));
+        note(format!(
+            "Step 1: sent {}: the 1040 and bookkeeping letters, both spouses to sign; 1040 $640.00 once, bookkeeping $100.00 a month",
+            first.title
+        ));
+
+        // ---- Step 2: both sign; set up by bank account; started, then cleared.
+        let run_client = |phase: &str| {
+            std::process::Command::new("node")
+                .args([
+                    client_js.as_str(),
+                    url.as_str(),
+                    &out.display().to_string(),
+                    log.as_str(),
+                    "jordan.sample@example.com",
+                    phase,
+                    "casey.sample@example.com",
+                    stripe.as_str(),
+                ])
+                .status()
+                .is_ok_and(|s| s.success())
+        };
+        assert!(
+            run_client("agreement-joint"),
+            "see client-agreement-joint.json"
+        );
+        let now = p.delivery(&first.id).unwrap();
+        assert_eq!(now.status, "complete");
+        let sub = p.subscriptions(&c.id).unwrap()[0].clone();
+        assert_eq!((sub.method.as_str(), sub.monthly_cents), ("bank", 10_000));
+        note(format!(
+            "Step 2: both signed (Casey by a code); bank payment started, then cleared; {}",
+            sub.words()
+        ));
+
+        // ---- Step 3: Deliver tax return… for the 2025 1040 says the engagement is signed.
+        open_mut(&mut h).browse.portal.agreement = None;
+        h.run_steps(3);
+        h.get_by_role_and_label(Role::Button, "Deliver tax return…")
+            .click();
+        wait_long(&mut h, "the A11 note", &|h| {
+            said(h, "Engagement signed in the 2026 service agreement")
+        });
+        shot(&mut h, "11-deliver-skips-letters");
+        open_mut(&mut h).browse.portal.delivery = None;
+        note("Step 3: Deliver tax return… for the 2025 1040: \"Engagement signed in the 2026 service agreement\", letters unticked".into());
+
+        // ---- Step 4: staff change the monthly amount from the next charge.
+        open_agreement(&mut h, Some(2026));
+        assert!(said(&h, "$100.00 a month by bank account"));
+        type_into(&mut h, "New monthly amount", "120.00");
+        h.get_by_role_and_label(Role::Button, "Change from the next charge")
+            .click();
+        wait_long(&mut h, "changed", &|h| said(h, "Changed to $120.00"));
+        assert_eq!(p.subscriptions(&c.id).unwrap()[0].monthly_cents, 12_000);
+        note(
+            "Step 4: the monthly charge changed to $120.00 from the next charge; the client told"
+                .into(),
+        );
+
+        // ---- Step 5: Admin › Portal › Agreements sends the 2027 agreement from the last one.
+        open_mut(&mut h).browse.portal.agreement = None;
+        h.get_by_role_and_label(Role::Button, "Admin").click();
+        h.run_steps(6);
+        h.get_by_role_and_label(Role::Button, "Agreements").click();
+        h.run_steps(4);
+        {
+            let a = open_mut(&mut h).admin.as_mut().unwrap();
+            a.agreements.year = 2027;
+            a.agreements.reread();
+        }
+        let tick = format!("{} ({})", c.name, c.ext_id);
+        wait_long(&mut h, "the bulk list", &|h| {
+            h.query_by_label(&tick).is_some() && !said(h, "Reading the portal")
+        });
+        h.run_steps(4);
+        h.get_by_label(&tick).click();
+        h.run_steps(3);
+        assert!(
+            said(&h, "$120.00"),
+            "the changed monthly amount carried over"
+        );
+        shot(&mut h, "12-bulk-agreements");
+        h.get_by_role_and_label(Role::Button, "Send 1 agreements")
+            .click();
+        wait_long(&mut h, "bulk sent", &|h| said(h, "Sent 1 of 1 agreements."));
+        let second = p
+            .agreements(&c.id)
+            .unwrap()
+            .into_iter()
+            .find(|d| d.tax_year == 2027)
+            .unwrap();
+        let second = p.delivery(&second.id).unwrap();
+        let lines: Vec<(String, u64, String)> = second
+            .fee
+            .as_ref()
+            .unwrap()
+            .lines
+            .iter()
+            .map(|l| (l.name.clone(), l.cents, l.every.clone()))
+            .collect();
+        assert_eq!(
+            lines,
+            [
+                ("1040".to_string(), 64_000, "once".to_string()),
+                ("Bookkeeping".to_string(), 12_000, "month".to_string())
+            ]
+        );
+        note("Step 5: Admin › Portal › Agreements sent the 2027 agreement: 1040 $640.00 once, bookkeeping $120.00 a month (the changed amount)".into());
+
+        // ---- Step 6: the couple signs in again, signs, pays the one-time fee only.
+        assert!(run_client("renew"), "see client-renew.json");
+        let now = p.delivery(&second.id).unwrap();
+        assert_eq!(now.status, "complete");
+        let subs = p.subscriptions(&c.id).unwrap();
+        assert_eq!(subs.len(), 1, "the same monthly charge, not a second one");
+        assert_eq!(
+            (subs[0].monthly_cents, subs[0].delivery_id.as_str()),
+            (12_000, second.id.as_str())
+        );
+        note(format!(
+            "Step 6: the 2027 agreement signed; the one-time fee paid by card; the monthly charge continues ({})",
+            subs[0].words()
+        ));
+
+        // ---- Step 7: staff stop the monthly charge.
+        h.get_by_role_and_label(Role::Button, "Browse").click();
+        h.run_steps(6);
+        open_agreement(&mut h, Some(2027));
+        h.get_by_role_and_label(Role::Button, "Stop monthly charge…")
+            .click();
+        h.run_steps(3);
+        h.get_by_role_and_label(Role::Button, "Stop it").click();
+        wait_long(&mut h, "stopped", &|h| {
+            said(h, "The monthly charge was stopped")
+        });
+        assert!(p.subscriptions(&c.id).unwrap()[0].canceled_at.is_some());
+        note("Step 7: the monthly charge stopped from the window; the client told".into());
+
+        // ---- Step 8: a Sign only agreement, sent and cancelled.
+        open_agreement(&mut h, Some(2028));
+        h.get_by_label("Bookkeeping").click();
+        h.run_steps(3);
+        h.get_by_label("Sign only").click();
+        h.run_steps(3);
+        h.get_by_role_and_label(Role::Button, "Send to client")
+            .click();
+        wait_long(&mut h, "sign only sent", &|h| {
+            said(h, "Sent to the client.")
+        });
+        let third = p
+            .agreements(&c.id)
+            .unwrap()
+            .into_iter()
+            .find(|d| d.tax_year == 2028)
+            .unwrap();
+        assert!(third.step("fee").is_none_or(|s| !s.present));
+        h.get_by_role_and_label(Role::Button, "Cancel agreement…")
+            .click();
+        h.run_steps(3);
+        h.get_by_role_and_label(Role::Button, "Cancel agreement")
+            .click();
+        wait_long(&mut h, "cancelled", &|h| {
+            said(h, "The agreement was cancelled.")
+        });
+        assert_eq!(p.delivery(&third.id).unwrap().status, "cancelled");
+        shot(&mut h, "13-sign-only-cancelled");
+        note("Step 8: a Sign only 2028 agreement (no payment step) sent, then cancelled".into());
+        std::fs::write(out.join("steps.txt"), steps.join("\n")).unwrap();
+    }
+
     /// Presses the open window's Read again.
     fn click_read_again(h: &mut egui_kittest::Harness<'static, VibeFilesApp>) {
         h.query_all_by_role_and_label(Role::Button, "Read again")

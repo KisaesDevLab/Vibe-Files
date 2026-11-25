@@ -8,7 +8,7 @@ import { readFile, writeFile, mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-const [BASE, OUT, LOG, EMAIL, PHASE, SECOND] = process.argv.slice(2);
+const [BASE, OUT, LOG, EMAIL, PHASE, SECOND, THIRD] = process.argv.slice(2);
 const EDGE = 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe';
 const DPORT = 9346;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -89,7 +89,10 @@ const shot = async (name) => {
 };
 const click = async (text, sel = 'button') => {
   const ok = await js(`(() => { const b = __byText(${JSON.stringify(sel)}, ${JSON.stringify(text)}); if (!b) return false; b.click(); return true; })()`);
-  if (!ok) throw new Error(`no ${sel} "${text}"`);
+  if (!ok) {
+    await shot(`FAILED-no-${text.replace(/\W+/g, '-')}`);
+    throw new Error(`no ${sel} "${text}"`);
+  }
   await sleep(600);
 };
 /** The newest message to EMAIL in the portal's log whose text has `has`. */
@@ -128,6 +131,64 @@ const draw = async () => {
     ev('pointerup', 380, 80);
     return true;
   })()`);
+};
+
+/** Signs every letter on the Sign page; the second signer (SECOND) by the code sent to them. */
+const signAll = async (prefix) => {
+  for (let round = 0; round < 10; round++) {
+    await until(`document.body.innerText.includes('All letters signed') || !!document.querySelector('canvas')`, 'a letter to sign', 20000);
+    if (await js(`document.body.innerText.includes('All letters signed')`)) break;
+    const turn = await js(`[...document.querySelectorAll('strong')].map((e) => e.textContent).find((t) => t.startsWith('Sign as') || t.includes('your turn')) || ''`);
+    if (turn.includes('your turn') && (await js(`!!__byText('button', 'Send the code')`))) {
+      await click('Send the code');
+      await until(`document.body.innerText.includes('We sent a code')`, 'code sent');
+      const m = await mailTo(SECOND, 'your code to sign');
+      const code = /is (\d{6})/.exec(m.body)[1];
+      note(`${turn}: the code reached ${SECOND}`);
+      await js(`__type([...document.querySelectorAll('input')].find((i) => i.autocomplete === 'one-time-code'), ${JSON.stringify(code)})`);
+      await click('Check the code');
+      await until(`document.body.innerText.includes('Code accepted')`, 'code accepted');
+    }
+    await draw();
+    await js(`(() => { const c = [...document.querySelectorAll('input[type=checkbox]')].find((i) => i.parentElement.textContent.includes('agree to sign')); c.click(); return true; })()`);
+    await sleep(300);
+    if (round === 0) await shot(`${prefix}-sign`);
+    const btn = await js(`[...document.querySelectorAll('button')].map((b) => b.textContent.trim()).find((t) => t.startsWith('Sign as'))`);
+    await click(btn);
+    note(`Signed: ${btn}`);
+    // The page moves on (the next letter or signer) before the next round reads it.
+    await until(`!__byText('button', ${JSON.stringify(btn)}) || document.body.innerText.includes('All letters signed') || document.body.innerText.includes('your turn')`, 'the next letter', 20000);
+    await sleep(800);
+  }
+  await until(`document.body.innerText.includes('All letters signed')`, 'all letters signed', 20000);
+  note('All letters signed');
+};
+
+/** Pays the step shown (the button starting with `label`) on the stand-in: paid, or started. */
+const payOnStripe = async (STRIPE, label, paid) => {
+  await until(`[...document.querySelectorAll('button')].some((b) => b.textContent.trim().startsWith(${JSON.stringify(label)}))`, label);
+  const before = await (await fetch(`${STRIPE}/_last`)).json();
+  await js(`[...document.querySelectorAll('button')].find((b) => b.textContent.trim().startsWith(${JSON.stringify(label)})).click()`);
+  let session = null;
+  for (let i = 0; i < 40; i++) {
+    await sleep(250);
+    const s = await (await fetch(`${STRIPE}/_last`)).json();
+    if (s && s.id !== before?.id) {
+      session = s;
+      break;
+    }
+  }
+  if (!session) throw new Error('no Checkout Session');
+  const r = await (
+    await fetch(`${STRIPE}/_pay`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sessionId: session.id, paid }),
+    })
+  ).json();
+  note(`${label}: Checkout in ${session.mode} mode${session.mode === 'subscription' ? `, monthly ${session.monthly} cents` : ''}; ${paid ? 'paid' : 'started (bank)'}; webhook ${r.webhook}`);
+  await go(`${BASE}/?delivery=${session.metadata.delivery_id}&session_id=${session.id}`);
+  return session;
 };
 
 try {
@@ -330,6 +391,64 @@ try {
     await until(`document.body.innerText.includes('did not go through')`, 'the failed month');
     await shot('44-monthly-failed');
     note('The card says the last payment did not go through, with Update payment method');
+  } else if (PHASE === 'agreement-joint') {
+    // A joint couple: Jordan accepts, both sign (Casey by a code), Set up payment by bank
+    // account: Payment started, then the bank clears it. SECOND: Casey's email; THIRD: Stripe.
+    const STRIPE = THIRD;
+    const inv = await mailWith('/invite', 0);
+    await go(linkIn(inv.body, '/invite'));
+    await until(`!!__byText('button', 'Accept and sign in')`, 'invitation page');
+    await click('Accept and sign in');
+    await until(`location.pathname === '/'`, 'home after accepting');
+    await until(`document.body.innerText.includes('service agreement')`, 'the agreement card');
+    await shot('50-joint-card');
+    await js(`__byText('a', 'Sign').click()`);
+    await until(`location.pathname.endsWith('/sign')`, 'the sign page');
+    await signAll('51-joint');
+    await go(`${BASE}/`);
+    const s = await payOnStripe(STRIPE, 'Set up payment by bank account', false);
+    await until(`document.body.innerText.includes('Payment started')`, 'payment started');
+    await shot('52-joint-bank-started');
+    note('The card says Payment started (a bank payment takes days)');
+    const r = await (
+      await fetch(`${STRIPE}/_settle`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sessionId: s.id }),
+      })
+    ).json();
+    note(`The bank cleared it: webhook ${r.webhook}`);
+    await go(`${BASE}/`);
+    await until(`document.body.innerText.includes('Your monthly payment') && document.body.innerText.includes('by bank account')`, 'the monthly payment by bank');
+    await shot('53-joint-monthly-active');
+    note('Your monthly payment: by bank account, Active');
+  } else if (PHASE === 'renew') {
+    // Next year: Jordan signs in again (a sign-in link by email), both sign the renewal, and
+    // only the one-time fee is paid; the monthly payment continues. SECOND: Casey; THIRD: Stripe.
+    const STRIPE = THIRD;
+    const start = Date.now() / 1000;
+    await go(`${BASE}/login`);
+    await until(`!!document.querySelector('input')`, 'the sign-in page');
+    await js(`__type(document.querySelector('input'), ${JSON.stringify(EMAIL)})`);
+    await click('Continue');
+    const m = await mailWith('/auth/verify', start);
+    await go(linkIn(m.body, '/auth/verify'));
+    await until(`!!__byText('button', 'Sign in')`, 'the sign-in link');
+    await click('Sign in');
+    await until(`location.pathname === '/'`, 'home after signing in');
+    note('Signed in again by an emailed link');
+    await until(`!!__byText('a', 'Sign')`, 'the renewal letters');
+    await shot('60-renew-card');
+    await js(`__byText('a', 'Sign').click()`);
+    await until(`location.pathname.endsWith('/sign')`, 'the sign page');
+    await signAll('61-renew');
+    await go(`${BASE}/`);
+    const says = await js(`document.body.innerText.includes('Your monthly payment continues at the new amount')`);
+    note(`The fee step says the monthly payment continues: ${says}`);
+    await payOnStripe(STRIPE, 'Pay by card', true);
+    await until(`!!__byText('a', 'Receipt')`, 'the receipt link');
+    await shot('62-renew-paid');
+    note("The renewal's one-time fee is paid; its Receipt is shown");
   }
 } catch (e) {
   note(`ERROR: ${e.message}`);

@@ -286,7 +286,9 @@ def convert(path, stem):
         'kind': kind,
         'doc_type': {'terms': '', 'closure': 'Correspondence'}.get(kind, 'Engagement letter'),
         'letterhead': True,
-        'default_ticked': kind == 'letter',
+        # Not ticked in Deliver tax return… (a firm's own letter is); agreements choose them
+        # for their services (vf-app ui::agreement::letters_for).
+        'default_ticked': False,
         'sample': True,
         'blocks': blocks,
     }

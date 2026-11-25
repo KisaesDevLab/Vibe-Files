@@ -40,6 +40,14 @@ createServer((req, res) => {
       });
       return r.status;
     };
+    if (url.pathname === '/_settle') {
+      // A bank payment clears: checkout.session.async_payment_succeeded.
+      const { sessionId } = JSON.parse(raw || '{}');
+      const s = { ...sessions.get(sessionId), payment_status: 'paid' };
+      sessions.set(sessionId, s);
+      res.end(JSON.stringify({ webhook: await hook('checkout.session.async_payment_succeeded', s) }));
+      return;
+    }
     if (url.pathname === '/_month') {
       const { subscription, paid } = JSON.parse(raw || '{}');
       const sub = subs.get(subscription);
