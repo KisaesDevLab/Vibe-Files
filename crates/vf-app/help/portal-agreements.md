@@ -53,7 +53,7 @@ In the client's **Service agreement…**: **Change from the next charge** sets a
 
 ## Tax return delivery
 
-When the year's agreement covering a return is signed, **Deliver tax return…** for that return says so and leaves **Letters to sign** unticked. Tick it to send letters anyway.
+When the year's agreement covering a return is signed, **Deliver…** for that return says so and leaves **Letters to sign** unticked. Tick it to send letters anyway.
 
 ## Filed for you
 

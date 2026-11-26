@@ -28,7 +28,7 @@ The card says the tax year and the status and has **Open your organizer**, which
 
 The card goes away when:
 
-- you create the client's tax return delivery for that tax year (**Deliver tax return…**);
+- you create the client's tax return delivery for that tax year (**Deliver…**);
 - the export says the return was delivered through the organizer app; or
 - you turn it off.
 

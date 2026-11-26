@@ -48,7 +48,7 @@ pub struct PortalSettings {
     #[serde(default)]
     pub balances: bool,
     /// Tax return delivery in Vibe Files for every PC (ADDENDUM-tax-return-delivery.md §12):
-    /// the client panel's Deliver tax return… and Admin › Portal › Deliveries. Off unless the
+    /// the client panel's Deliver… and Admin › Portal › Deliveries. Off unless the
     /// firm ticks it; the portal has its own switch.
     #[serde(default)]
     pub deliveries: bool,

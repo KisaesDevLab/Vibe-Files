@@ -2685,7 +2685,7 @@ pub fn admin_settings(ui: &mut egui::Ui, a: &mut AdminPortal, env: &mut Env) {
         "Tax return delivery and annual agreements: cards of steps on the client's portal",
     );
     ui.label(widgets::caption(
-        "For every PC of this cabinet: a client's Deliver tax return… (in the client's details) \
+        "For every PC of this cabinet: a client's Deliver… (in the client's details) \
          and Admin › Portal › Deliveries. The client opens the return and signs Form 8879 on \
          UltraTax eSignature from a card on the portal; each finished step's PDF, with its log, \
          is filed in the client's Income Tax\\<year>\\Delivery folder (doc types Delivery — …, \
@@ -4851,15 +4851,9 @@ pub fn ensure_doc_types(
     if s.deliveries {
         let mut added = 0;
         // Annual agreements' step PDFs: Correspondence/{Year}/Engagement.
-        let all = vf_portal::delivery::STEP_DOC_TYPES
-            .iter()
-            .map(|(_, n)| (*n, vf_portal::delivery::DELIVERY_FOLDER))
-            .chain(
-                vf_portal::delivery::AGREEMENT_STEP_DOC_TYPES
-                    .iter()
-                    .map(|(_, n)| (*n, vf_portal::delivery::AGREEMENT_FOLDER)),
-            );
-        for (name, folder) in all {
+        // PA-114: financial statements' (Financials/{Year}/Delivery) and other documents'
+        // (Other/{Year}/Delivery) too.
+        for (name, folder) in vf_portal::delivery::all_step_doc_types() {
             match vf_fs::doctypes::ensure(root, name, folder, true) {
                 Ok(true) => added += 1,
                 Ok(false) => {}

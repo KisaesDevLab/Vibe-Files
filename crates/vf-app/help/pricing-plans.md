@@ -18,7 +18,7 @@ Press **New plan…** to start from the sample, or choose a plan on the left. Se
 
 ## In a delivery
 
-In **Deliver tax return…**, tick **Package and fee** and choose the mode:
+In **Deliver…**, tick **Package and fee** and choose the mode:
 
 - **One amount**: the fee, typed.
 - **Base fee and add-ons**: this client's return fee, and the add-ons to offer.

@@ -644,10 +644,9 @@ mod tests {
             c.name, c.ext_id
         ));
 
-        // ---- Step 1: Deliver tax return… sends the return and the 8879 link.
+        // ---- Step 1: Deliver… sends the return and the 8879 link.
         h.run_steps(4);
-        h.get_by_role_and_label(Role::Button, "Deliver tax return…")
-            .click();
+        h.get_by_role_and_label(Role::Button, "Deliver…").click();
         wait_long(&mut h, "the window read", &|h| {
             said(h, "2025 Form 1040 Return - Sample.pdf")
         });
@@ -921,10 +920,9 @@ mod tests {
             c.name, c.ext_id
         ));
 
-        // ---- Step 1: Deliver tax return… with the engagement letter, both spouses signing.
+        // ---- Step 1: Deliver… with the engagement letter, both spouses signing.
         h.run_steps(4);
-        h.get_by_role_and_label(Role::Button, "Deliver tax return…")
-            .click();
+        h.get_by_role_and_label(Role::Button, "Deliver…").click();
         wait_long(&mut h, "the window read", &|h| said(h, "WHAT HAS HAPPENED"));
         h.run_steps(6);
         for label in ["Tax return PDF", "Form 8879", "Letters to sign"] {
@@ -1165,10 +1163,9 @@ mod tests {
             c.name, c.ext_id
         ));
 
-        // ---- Step 1: Deliver tax return… with packages priced for the client.
+        // ---- Step 1: Deliver… with packages priced for the client.
         h.run_steps(4);
-        h.get_by_role_and_label(Role::Button, "Deliver tax return…")
-            .click();
+        h.get_by_role_and_label(Role::Button, "Deliver…").click();
         wait_long(&mut h, "the window read", &|h| said(h, "WHAT HAS HAPPENED"));
         h.run_steps(6);
         for label in ["Tax return PDF", "Form 8879", "Package and fee"] {
@@ -1662,7 +1659,7 @@ mod tests {
     }
 
     /// Annual agreements, the second walk (2026-11-25): a joint couple (both sign, the spouse by
-    /// a code) paying monthly by bank account (started, then cleared); Deliver tax return… for
+    /// a code) paying monthly by bank account (started, then cleared); Deliver… for
     /// the return the agreement covers skips its letters (A11); staff change the monthly amount;
     /// Admin › Portal › Agreements sends next year's agreement from the last one with the changed
     /// amount carried over; the couple signs in again and signs it, paying only its one-time fee
@@ -1928,17 +1925,16 @@ mod tests {
             sub.words()
         ));
 
-        // ---- Step 3: Deliver tax return… for the 2025 1040 says the engagement is signed.
+        // ---- Step 3: Deliver… for the 2025 1040 says the engagement is signed.
         open_mut(&mut h).browse.portal.agreement = None;
         h.run_steps(3);
-        h.get_by_role_and_label(Role::Button, "Deliver tax return…")
-            .click();
+        h.get_by_role_and_label(Role::Button, "Deliver…").click();
         wait_long(&mut h, "the A11 note", &|h| {
             said(h, "Engagement signed in the 2026 service agreement")
         });
         shot(&mut h, "11-deliver-skips-letters");
         open_mut(&mut h).browse.portal.delivery = None;
-        note("Step 3: Deliver tax return… for the 2025 1040: \"Engagement signed in the 2026 service agreement\", letters unticked".into());
+        note("Step 3: Deliver… for the 2025 1040: \"Engagement signed in the 2026 service agreement\", letters unticked".into());
 
         // ---- Step 4: staff change the monthly amount from the next charge.
         open_agreement(&mut h, Some(2026));

@@ -668,6 +668,34 @@ pub fn agreement_step_rule() -> filer_core::rules::Rule {
     r
 }
 
+/// PA-114: a financial statements card's step PDF, `<year> Statements <n> - <step>.pdf`, into
+/// the client's `Financials/{Year}/Delivery`.
+pub fn statements_step_rule() -> filer_core::rules::Rule {
+    let mut r = filer_core::rules::Rule::new(
+        "Statements step",
+        r"^\d{4} statements [1-5] - ",
+        "{Client}/Financials/{Year}/Delivery",
+        "{Rest}.{Ext}",
+        true,
+    );
+    r.id = format!("{MANAGED_PREFIX}portal-statements-step");
+    r
+}
+
+/// PA-114: another document's card step PDF, `<year> Document <n> - <step>.pdf`, into the
+/// client's `Other/{Year}/Delivery`.
+pub fn document_step_rule() -> filer_core::rules::Rule {
+    let mut r = filer_core::rules::Rule::new(
+        "Document step",
+        r"^\d{4} document [1-5] - ",
+        "{Client}/Other/{Year}/Delivery",
+        "{Rest}.{Ext}",
+        true,
+    );
+    r.id = format!("{MANAGED_PREFIX}portal-document-step");
+    r
+}
+
 /// What a rules sync did.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Synced {
@@ -788,6 +816,10 @@ fn plan_rules(
     if deliveries {
         active.insert(at, delivery_step_rule());
         active.insert(at + 1, agreement_step_rule());
+        // PA-114: financial statements into Financials\{Year}\Delivery, another document into
+        // Other\{Year}\Delivery.
+        active.insert(at + 2, statements_step_rule());
+        active.insert(at + 3, document_step_rule());
     }
     // One of Intake's own rules that says exactly what a print capture rule above it says
     // (same pattern, exception and folder) is a duplicate: said, for its owner to delete.

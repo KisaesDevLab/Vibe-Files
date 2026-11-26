@@ -126,7 +126,8 @@ pub fn rows<'a>(
     }
     let wanted = |d: &Delivery| match show {
         Show::Open | Show::Failed => true,
-        Show::Returns => !d.is_agreement(),
+        // PA-114: tax returns only (financial statements and other documents show in All open).
+        Show::Returns => d.is_return(),
         Show::Agreements => d.is_agreement(),
         Show::Step(k) => {
             if d.status == "open" {

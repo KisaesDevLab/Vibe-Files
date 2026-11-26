@@ -254,7 +254,8 @@ fn hint_for(root: &Path, u: &Upload, name: &str) -> Option<vf_fs::hints::Hint> {
         (None, _) if u.subscription.is_some() => (RECEIPT_DOC_TYPE, "portal_subscription", "firm"),
         // A delivery's step PDF (Addendum §12.5): its step's doc type; filed in
         // Income Tax\{Year}\Delivery by Intake's managed rule (an agreement's in
-        // Correspondence\{Year}\Engagement).
+        // Correspondence\{Year}\Engagement; PA-114: financial statements' in
+        // Financials\{Year}\Delivery, another document's in Other\{Year}\Delivery).
         (None, _) if u.delivery.is_some() => (
             u.delivery
                 .as_ref()

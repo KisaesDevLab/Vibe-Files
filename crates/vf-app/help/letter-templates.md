@@ -12,7 +12,7 @@ A `[…]` fill-in left from the kit, such as `[X]%` or `[State]`, is highlighted
 
 ## Editing a letter
 
-The letters are listed on the left by the return types they are for. Choose one, or press **New letter…**. **New return type…** under the list adds one of your own (a state return such as CA 540), signed by the taxpayer and spouse or by an officer or partner; letters, pricing plans and **Deliver tax return…** then offer it. Tick it on a letter to offer the letter for it. The middle shows the letter on a page as it prints; click in it and type.
+The letters are listed on the left by the return types they are for. Choose one, or press **New letter…**. **New return type…** under the list adds one of your own (a state return such as CA 540), signed by the taxpayer and spouse or by an officer or partner; letters, pricing plans and **Deliver…** then offer it. Tick it on a letter to offer the letter for it. The middle shows the letter on a page as it prints; click in it and type.
 
 - **Enter** starts a new paragraph (in a list, a new item); **Shift+Enter** breaks the line. Backspace in an empty list item removes it.
 - The toolbar: **Heading** turns the paragraph the cursor is in into a heading (or back); **B** and **I** make the selected words bold or italic (with nothing selected, what you type next); **List** turns the paragraph into a list, a line an item (or back); **Table** adds a table of cells, with **Add row**, **Add column**, **Remove row** and **Remove column** under it, the first row bold; **Insert field** puts a field such as `{Client name}`, `{Tax year}` or `{Fee}` where the cursor is; **Insert signature** adds a signature block (Taxpayer, Spouse, or Officer or partner). Right of the toolbar: **Saved** or **Not saved**.
@@ -30,7 +30,7 @@ Previews are written in the `cache\letters` folder of Vibe Files' data and empti
 
 ## In a delivery
 
-In **Deliver tax return…**, tick **Letters to sign**: the letters for the return type are listed, ticked as their template says. **Who signs** comes from the client's Portal contacts: the taxpayer and spouse on a 1040, one person with a title for an entity. A second signer needs their own email or mobile: their code goes there. **Preview letters…** shows the letters as the client will see them.
+In **Deliver…**, tick **Letters to sign**: the letters for the return type are listed, ticked as their template says. **Who signs** comes from the client's Portal contacts: the taxpayer and spouse on a 1040, one person with a title for an entity. A second signer needs their own email or mobile: their code goes there. **Preview letters…** shows the letters as the client will see them.
 
 On the portal the client reads each letter, draws a signature, ticks the agreement and signs; the spouse signs next on the same device after typing a code sent to them. When everyone has signed, the signed copies go to the client's files, and the step's PDF (the signed letters, then the log of who signed when, from where) is filed in the client's `Income Tax\<year>\Delivery` folder.
 

@@ -18,7 +18,7 @@ pub const RETURN_TYPES: [&str; 10] = [
 const INDIVIDUAL_TYPES: [&str; 2] = ["1040", "709"];
 
 /// Services an annual agreement can cover besides returns (ADDENDUM-annual-agreements.md §3.2,
-/// owner 2026-11-25): not offered by Deliver tax return…, signed by whoever the client is.
+/// owner 2026-11-25): not offered by Deliver…, signed by whoever the client is.
 pub const SERVICES: [&str; 8] = [
     "Bookkeeping",
     "Payroll",
@@ -80,7 +80,7 @@ pub fn return_types(root: &Path) -> Vec<ReturnType> {
     out
 }
 
-/// The returns (not the services): what Deliver tax return… and pricing plans offer.
+/// The returns (not the services): what Deliver… and pricing plans offer.
 pub fn return_type_names(root: &Path) -> Vec<String> {
     return_types(root)
         .into_iter()
@@ -194,16 +194,69 @@ pub const AGREEMENT_STEP_DOC_TYPES: [(&str, &str); 3] = [
 ];
 pub const AGREEMENT_FOLDER: &str = "Correspondence/{Year}/Engagement";
 
-/// The doc type of a step PDF of a delivery of this kind.
-pub fn doc_type_of(kind: Option<&str>, step: &str) -> Option<&'static str> {
-    if kind == Some("agreement") {
-        AGREEMENT_STEP_DOC_TYPES
-            .iter()
-            .find(|(k, _)| *k == step)
-            .map(|(_, n)| *n)
-    } else {
-        doc_type_of_step(step)
+/// PA-114 (ADDENDUM-deliver-more.md §4): what else a card can deliver besides a tax return.
+pub const KIND_RETURN: &str = "return";
+pub const KIND_AGREEMENT: &str = "agreement";
+pub const KIND_STATEMENTS: &str = "statements";
+pub const KIND_DOCUMENT: &str = "document";
+/// The most documents one card carries (the portal's limit).
+pub const MAX_FILES: usize = 10;
+/// A financial statements card's return type on the portal (it stores this, whatever is sent).
+pub const STATEMENTS_TYPE: &str = "Financial statements";
+
+/// Financial statements' step PDFs: their own doc types, filed in Financials\{Year}\Delivery.
+pub const STATEMENTS_STEP_DOC_TYPES: [(&str, &str); 3] = [
+    (LETTERS, "Statements delivery — letters"),
+    (RETURN, "Statements delivery — documents record"),
+    (FEE, "Statements delivery — fee receipt"),
+];
+pub const STATEMENTS_FOLDER: &str = "Financials/{Year}/Delivery";
+
+/// Another document's step PDFs (payroll reports, a compilation…), filed in Other\{Year}\Delivery.
+pub const DOCUMENT_STEP_DOC_TYPES: [(&str, &str); 3] = [
+    (LETTERS, "Document delivery — letters"),
+    (RETURN, "Document delivery — documents record"),
+    (FEE, "Document delivery — fee receipt"),
+];
+pub const DOCUMENT_FOLDER: &str = "Other/{Year}/Delivery";
+
+/// The step doc types of a kind of card, and the folder they are filed in.
+pub fn step_doc_types(kind: &str) -> (&'static [(&'static str, &'static str)], &'static str) {
+    match kind {
+        KIND_AGREEMENT => (&AGREEMENT_STEP_DOC_TYPES, AGREEMENT_FOLDER),
+        KIND_STATEMENTS => (&STATEMENTS_STEP_DOC_TYPES, STATEMENTS_FOLDER),
+        KIND_DOCUMENT => (&DOCUMENT_STEP_DOC_TYPES, DOCUMENT_FOLDER),
+        _ => (&STEP_DOC_TYPES, DELIVERY_FOLDER),
     }
+}
+
+/// Every step doc type with its folder: what turning deliveries on adds to the doc types.
+pub fn all_step_doc_types() -> Vec<(&'static str, &'static str)> {
+    [KIND_RETURN, KIND_AGREEMENT, KIND_STATEMENTS, KIND_DOCUMENT]
+        .iter()
+        .flat_map(|k| {
+            let (types, folder) = step_doc_types(k);
+            types.iter().map(move |(_, n)| (*n, folder))
+        })
+        .collect()
+}
+
+/// The doc type of a step PDF of a delivery of this kind (none: a tax return, as an older
+/// portal sends).
+pub fn doc_type_of(kind: Option<&str>, step: &str) -> Option<&'static str> {
+    step_doc_types(kind.unwrap_or(KIND_RETURN))
+        .0
+        .iter()
+        .find(|(k, _)| *k == step)
+        .map(|(_, n)| *n)
+}
+
+/// The folder a kind's step PDFs are filed in, as the window says it ("Financials\2025\Delivery").
+pub fn folder_words(kind: &str, year: i32) -> String {
+    step_doc_types(kind)
+        .1
+        .replace("{Year}", &year.to_string())
+        .replace('/', "\\")
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -212,6 +265,23 @@ pub struct Locks {
     pub return_after_letters: bool,
     pub esign_after_letters: bool,
     pub esign_after_fee: bool,
+    /// PA-114: the documents open only once the fee is paid (or a bank payment started). An
+    /// older portal neither takes nor answers it: `None` when read from one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub return_after_fee: Option<bool>,
+}
+
+/// One of a card's documents (PA-114): in order, the first is `return_file`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DeliveryFile {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub sha256: String,
+    /// When the client first opened or downloaded it.
+    #[serde(default)]
+    pub opened_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -417,7 +487,8 @@ pub struct Delivery {
     pub client_id: String,
     pub tax_year: i32,
     pub return_type: String,
-    /// `return`, or `agreement` (an annual service agreement: letters, package, fee).
+    /// `return`, `agreement` (an annual service agreement: letters, package, fee), and since
+    /// portal 0.5.6 `statements` or `document` (PA-114: letters, documents, fee).
     #[serde(default = "return_kind")]
     pub kind: String,
     /// An agreement's returns and services, and the tax year of the returns it covers.
@@ -436,6 +507,10 @@ pub struct Delivery {
     pub remind_days: u32,
     pub reminded_at: Option<String>,
     pub return_file: Option<ReturnFile>,
+    /// PA-114: every document of the card in order (an older portal: none; its return is
+    /// `return_file`).
+    #[serde(default)]
+    pub files: Vec<DeliveryFile>,
     pub esign_link: Option<String>,
     /// Step 1's letters (Addendum D3).
     #[serde(default)]
@@ -462,7 +537,32 @@ fn return_kind() -> String {
 
 impl Delivery {
     pub fn is_agreement(&self) -> bool {
-        self.kind == "agreement"
+        self.kind == KIND_AGREEMENT
+    }
+
+    /// A tax return delivery (the only kind with a package step and Form 8879).
+    pub fn is_return(&self) -> bool {
+        self.kind == KIND_RETURN
+    }
+
+    /// The documents' ids in order: `files`, else the one return file (an older portal).
+    pub fn file_ids(&self) -> Vec<String> {
+        if self.files.is_empty() {
+            self.return_file.iter().map(|f| f.id.clone()).collect()
+        } else {
+            self.files.iter().map(|f| f.id.clone()).collect()
+        }
+    }
+
+    /// The client panel's heading for this card: "Tax return delivery", "Financial statements",
+    /// the document's name, "Service agreement".
+    pub fn heading(&self) -> String {
+        match self.kind.as_str() {
+            KIND_AGREEMENT => "Service agreement".into(),
+            KIND_STATEMENTS => STATEMENTS_TYPE.into(),
+            KIND_DOCUMENT => self.return_type.clone(),
+            _ => "Tax return delivery".into(),
+        }
     }
 
     pub fn step(&self, kind: &str) -> Option<&DeliveryStep> {
@@ -538,7 +638,7 @@ pub struct NewDelivery {
     /// are attached (QA 2026-11-25; an older portal ignores it and tells at create).
     pub hold: bool,
     pub remind_days: u32,
-    /// An annual agreement (none: a tax return delivery).
+    /// `agreement`, `statements` or `document` (none: a tax return delivery).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -674,6 +774,17 @@ impl Portal {
             "PATCH",
             &format!("/deliveries/{id}"),
             &serde_json::to_value(c).expect("serializes"),
+        )
+        .map(|r| r.delivery)
+    }
+
+    /// PA-114: the card's documents in order (1 to 10 of the client's files on the portal).
+    /// An older portal has no such route (404): the caller says to update it.
+    pub fn set_delivery_files(&self, id: &str, file_ids: &[String]) -> Result<Delivery> {
+        self.send_json::<One>(
+            "PUT",
+            &format!("/deliveries/{id}/files"),
+            &serde_json::json!({ "fileIds": file_ids }),
         )
         .map(|r| r.delivery)
     }
@@ -1007,7 +1118,7 @@ mod tests {
         assert_eq!(return_type_names(root), want);
         assert!(is_individual(root, "CA 540") && !is_individual(root, "CA 100"));
         assert!(is_individual(root, "709") && !is_individual(root, "990"));
-        // Services are offered to agreements and letters, not to Deliver tax return….
+        // Services are offered to agreements and letters, not to Deliver….
         assert!(service_names(root).contains(&"Payroll".to_string()));
         assert!(!return_type_names(root).contains(&"Payroll".to_string()));
         assert_eq!(letter_context(root, "1040"), "1040|Individual");
@@ -1031,6 +1142,76 @@ mod tests {
         {"kind":"esign_8879","n":5,"name":"Form 8879","present":true,"state":"waiting","after":[],"saidAt":"2026-11-24T14:00:00.000Z","completedAt":null,"completedBy":null,"rounds":0}
       ],
       "events":[{"at":"2026-11-24T12:00:00.000Z","step":"","kind":"created","words":"Sent to the client","by":"PC1\\kurt"}]}"#;
+
+    #[test]
+    fn each_kind_files_its_step_pdfs_in_its_own_folder() {
+        assert_eq!(doc_type_of(None, FEE), Some("Delivery — fee receipt"));
+        assert_eq!(
+            doc_type_of(Some("return"), RETURN),
+            Some("Delivery — return record")
+        );
+        assert_eq!(
+            doc_type_of(Some("statements"), RETURN),
+            Some("Statements delivery — documents record")
+        );
+        assert_eq!(
+            doc_type_of(Some("document"), FEE),
+            Some("Document delivery — fee receipt")
+        );
+        // Neither has Form 8879 or a package step.
+        assert_eq!(doc_type_of(Some("statements"), ESIGN), None);
+        assert_eq!(doc_type_of(Some("document"), PACKAGE), None);
+        assert_eq!(
+            folder_words("statements", 2025),
+            "Financials\\2025\\Delivery"
+        );
+        assert_eq!(folder_words("document", 2025), "Other\\2025\\Delivery");
+        assert_eq!(folder_words("return", 2025), "Income Tax\\2025\\Delivery");
+        let all = all_step_doc_types();
+        assert_eq!(all.len(), 5 + 3 + 3 + 3);
+        assert!(all.contains(&("Statements delivery — fee receipt", STATEMENTS_FOLDER)));
+        // Every name once: a doc type is found by its name.
+        let mut names: Vec<&str> = all.iter().map(|x| x.0).collect();
+        names.sort();
+        names.dedup();
+        assert_eq!(names.len(), all.len());
+    }
+
+    #[test]
+    fn reads_a_statements_card_with_several_files_and_the_pay_first_lock() {
+        let mut v: serde_json::Value = serde_json::from_str(DELIVERY_JSON).unwrap();
+        v["kind"] = "statements".into();
+        v["returnType"] = "Financial statements".into();
+        v["locks"]["returnAfterFee"] = true.into();
+        v["files"] = serde_json::json!([
+            {"id":"f1","name":"Q4 statements.pdf","sha256":"ab","openedAt":"2026-11-26T10:00:00.000Z"},
+            {"id":"f2","name":"Cover letter.pdf","sha256":"cd","openedAt":null}
+        ]);
+        let d: Delivery = serde_json::from_value(v).unwrap();
+        assert!(!d.is_return() && !d.is_agreement());
+        assert_eq!(d.locks.return_after_fee, Some(true));
+        assert_eq!(d.file_ids(), ["f1", "f2"]);
+        assert_eq!(d.heading(), "Financial statements");
+        assert_eq!(d.what(), "Financial statements");
+        // An older portal: no files, no lock answered; the return file stands for the list.
+        let old: Delivery = serde_json::from_str(DELIVERY_JSON).unwrap();
+        assert_eq!(old.locks.return_after_fee, None);
+        assert_eq!(old.file_ids(), ["f1"]);
+        assert_eq!(old.heading(), "Tax return delivery");
+        // Not sent when not set (an older portal would refuse nothing, but say nothing either).
+        let l = Locks::default();
+        assert!(
+            serde_json::to_value(&l)
+                .unwrap()
+                .get("returnAfterFee")
+                .is_none()
+        );
+        let l = Locks {
+            return_after_fee: Some(true),
+            ..Default::default()
+        };
+        assert_eq!(serde_json::to_value(&l).unwrap()["returnAfterFee"], true);
+    }
 
     #[test]
     fn reads_a_delivery_and_says_where_it_is() {

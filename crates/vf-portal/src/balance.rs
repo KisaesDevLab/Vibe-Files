@@ -68,6 +68,10 @@ pub struct Balance {
     #[serde(default)]
     pub cleared_pending: bool,
     pub receipt_upload_id: Option<String>,
+    /// PA-114: while due, the client's shared files are listed but locked. An older portal
+    /// answers nothing: `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hold_files: Option<bool>,
     /// Only on one client's read (`GET /clients/:id/balance`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub events: Vec<BalanceEvent>,
@@ -138,12 +142,19 @@ impl Balance {
     pub fn line(&self) -> String {
         let amount = money(self.amount_cents);
         match self.state.as_str() {
-            DUE => match self.days_left {
-                Some(0) => format!("{amount} on the portal, leaves today"),
-                Some(1) => format!("{amount} on the portal, 1 day left"),
-                Some(n) => format!("{amount} on the portal, {n} days left"),
-                None => format!("{amount} on the portal"),
-            },
+            DUE => {
+                let held = if self.hold_files == Some(true) {
+                    ", files held"
+                } else {
+                    ""
+                };
+                match self.days_left {
+                    Some(0) => format!("{amount} on the portal{held}, leaves today"),
+                    Some(1) => format!("{amount} on the portal{held}, 1 day left"),
+                    Some(n) => format!("{amount} on the portal{held}, {n} days left"),
+                    None => format!("{amount} on the portal{held}"),
+                }
+            }
             STARTED => format!(
                 "{amount}: payment started {}",
                 day(self.started_at.as_deref().unwrap_or(""))
@@ -205,6 +216,18 @@ pub struct PostBalance {
     pub notify: bool,
     pub remind_days: u32,
     pub assigned_staff_id: Option<String>,
+    /// PA-114: hold the client's shared files until this is paid (an older portal ignores it
+    /// and answers no `holdFiles`).
+    pub hold_files: bool,
+}
+
+/// PA-114: what needs a newer portal, said once a balance is posted with its files held.
+pub const HOLD_NEEDS_PORTAL: &str = "Posted, but the client's files are not held: this needs Vibe Portal 0.5.6 or later. Update the portal first, then Save changes again.";
+
+/// The warning when the hold was asked for and the portal did not take it (an older portal
+/// answers no `holdFiles`).
+pub fn hold_not_taken(asked: bool, b: &Balance) -> Option<&'static str> {
+    (asked && b.hold_files != Some(true)).then_some(HOLD_NEEDS_PORTAL)
 }
 
 /// What a post did: the balance, and whether a payment of an earlier amount is pending (the
@@ -500,6 +523,34 @@ mod tests {
     }
 
     #[test]
+    fn a_hold_an_older_portal_did_not_take_is_said() {
+        let mut b: Balance = serde_json::from_value(serde_json::json!({
+            "id": "b1", "clientId": "c1", "amountCents": 125000, "state": "due",
+            "expiresAt": null, "remindedAt": null, "assignedStaffId": null,
+            "postedAt": "2026-11-26T10:00:00Z", "startedAt": null, "paidAt": null,
+            "method": null, "endedAt": null, "endedBy": null, "receiptUploadId": null
+        }))
+        .unwrap();
+        assert_eq!(b.hold_files, None, "an older portal says nothing");
+        assert_eq!(hold_not_taken(true, &b), Some(HOLD_NEEDS_PORTAL));
+        assert_eq!(hold_not_taken(false, &b), None);
+        assert_eq!(b.line(), "$1,250.00 on the portal");
+        b.hold_files = Some(true);
+        assert_eq!(hold_not_taken(true, &b), None);
+        assert_eq!(b.line(), "$1,250.00 on the portal, files held");
+        let p = PostBalance {
+            amount_cents: 125000,
+            memo: String::new(),
+            expire_days: None,
+            notify: true,
+            remind_days: 0,
+            assigned_staff_id: None,
+            hold_files: true,
+        };
+        assert_eq!(serde_json::to_value(&p).unwrap()["holdFiles"], true);
+    }
+
+    #[test]
     fn a_post_sends_null_for_no_limit() {
         let p = PostBalance {
             amount_cents: 24_000,
@@ -508,11 +559,13 @@ mod tests {
             notify: true,
             remind_days: 0,
             assigned_staff_id: None,
+            hold_files: false,
         };
         assert_eq!(
             serde_json::to_value(&p).unwrap(),
             serde_json::json!({ "amountCents": 24000, "memo": "x", "expireDays": null,
-                "notify": true, "remindDays": 0, "assignedStaffId": null })
+                "notify": true, "remindDays": 0, "assignedStaffId": null,
+                "holdFiles": false })
         );
     }
 }

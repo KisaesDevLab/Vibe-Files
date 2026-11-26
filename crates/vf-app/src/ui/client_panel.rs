@@ -233,8 +233,8 @@ pub fn show(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env, ci: usize) {
         // Addendum §12: the tax return delivered to this client as a card on the portal.
         if b.portal.settings(env.root).is_some_and(|s| s.deliveries)
             && ui
-                .small_btn("Deliver tax return…")
-                .on_hover_text("Send this client's return and Form 8879 link as a card on the portal")
+                .small_btn("Deliver…")
+                .on_hover_text("Send this client's tax return, financial statements or another document as a card on the portal")
                 .clicked()
             && let Some(s) = b.portal.settings(env.root).cloned()
         {

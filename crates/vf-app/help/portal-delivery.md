@@ -13,7 +13,7 @@ Two switches, both off until the firm ticks them:
 
 ## Sending a delivery
 
-1. Select the client in Browse and press **Deliver tax return…** in the client's details.
+1. Select the client in Browse and press **Deliver…** in the client's details. **Kind** stays *Tax return* (for [statements and other documents](help:portal-deliver-more)).
 2. Check the **Tax year**, **Return type** and **Card title**.
 3. Tick **Tax return PDF** and choose the return from the client's PDFs in the cabinet; the one for the year whose name names the return is chosen for you. Sending shares it on the portal with everyone of the client (B2 first, as **Share on portal…** does).
 4. Tick **Form 8879** and paste the client's **UltraTax eSignature link** (it starts with `https://`).

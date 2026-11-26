@@ -168,9 +168,15 @@ pub fn record_reads(
 
 // ---- The Balance owed window ------------------------------------------------------------------
 
+/// What the hold does, under its tick (PA-114, owner 2026-11-26).
+pub const HOLD_WORDS: &str = "They see their files listed, marked 'Opens when your balance is \
+     paid'; files shared meanwhile wait too. Paying, Clear balance or the balance's removal \
+     releases them.";
+
 enum Done {
     Loaded(Result<(Vec<Balance>, Vec<BalanceStaff>, Defaults), vf_portal::PortalError>),
-    Posted(Result<Box<balance::Posted>, String>, bool),
+    /// The post, whether it is a new balance, and whether the files' hold was asked for.
+    Posted(Result<Box<balance::Posted>, String>, bool, bool),
     Cleared(Result<balance::Cleared, String>),
     Reminded(Result<u32, String>),
 }
@@ -199,6 +205,8 @@ pub struct BalanceWindow {
     expire_days: u32,
     notify: bool,
     remind_days: u32,
+    /// PA-114: the client's shared files held until this is paid.
+    hold_files: bool,
     /// The form was filled from what was read (not again on every read).
     filled: bool,
     confirm_clear: bool,
@@ -235,6 +243,7 @@ impl BalanceWindow {
             expire_days: 14,
             notify: true,
             remind_days: 7,
+            hold_files: false,
             filled: false,
             confirm_clear: false,
             job: None,
@@ -282,6 +291,7 @@ impl BalanceWindow {
             self.assigned = b.assigned_staff_id.clone();
             self.notify = b.notify;
             self.remind_days = b.remind_days;
+            self.hold_files = b.hold_files == Some(true);
             self.expire_on = b.expires_at.is_some();
             if let Some(n) = b.days_left {
                 self.expire_days = n.max(1);
@@ -318,7 +328,7 @@ impl BalanceWindow {
                 }
                 self.err = Some(e.message());
             }
-            Done::Posted(Ok(p), is_new) => {
+            Done::Posted(Ok(p), is_new, hold) => {
                 let was = self.balances.iter().position(|b| b.id == p.balance.id);
                 let note = if p.pending {
                     let pending = self
@@ -345,7 +355,7 @@ impl BalanceWindow {
                     serde_json::json!({
                         "client_id": self.client.id,
                         "balance_id": p.balance.id,
-                        "fields": ["amount", "memo", "expires", "notify", "remind_days", "assigned"],
+                        "fields": ["amount", "memo", "expires", "notify", "remind_days", "assigned", "hold_files"],
                         "pending": p.pending,
                     }),
                 ));
@@ -355,8 +365,13 @@ impl BalanceWindow {
                     Some(i) => self.balances[i] = p.balance.clone(),
                     None => self.balances.insert(0, p.balance.clone()),
                 }
+                // PA-114: an older portal posts the balance and leaves the files open.
+                let (note, warn) = match balance::hold_not_taken(hold, &p.balance) {
+                    Some(w) => (w.to_string(), true),
+                    None => (note, p.pending),
+                };
                 self.reads.send(vec![p.balance]);
-                self.said = Some((note, p.pending));
+                self.said = Some((note, warn));
                 self.err = None;
             }
             Done::Cleared(Ok(c)) => {
@@ -394,7 +409,7 @@ impl BalanceWindow {
                 });
                 self.err = None;
             }
-            Done::Posted(Err(e), _) | Done::Cleared(Err(e)) | Done::Reminded(Err(e)) => {
+            Done::Posted(Err(e), _, _) | Done::Cleared(Err(e)) | Done::Reminded(Err(e)) => {
                 self.err = Some(e);
             }
         }
@@ -492,6 +507,18 @@ impl BalanceWindow {
                     ui.end_row();
                     ui.label("");
                     ui.checkbox(&mut self.notify, "Tell the client by email and text");
+                    ui.end_row();
+                    // PA-114 (owner 2026-11-26, M3-M6).
+                    ui.label("");
+                    ui.vertical(|ui| {
+                        ui.checkbox(
+                            &mut self.hold_files,
+                            "Hold the client's files until this is paid",
+                        );
+                        if self.hold_files {
+                            ui.label(widgets::caption(HOLD_WORDS));
+                        }
+                    });
                     ui.end_row();
                     ui.label("Remind");
                     egui::ComboBox::from_id_salt("balance-remind")
@@ -671,7 +698,9 @@ impl BalanceWindow {
                     notify: self.notify,
                     remind_days: self.remind_days,
                     assigned_staff_id: self.assigned.clone(),
+                    hold_files: self.hold_files,
                 };
+                let hold = self.hold_files;
                 // New unless it changes the due balance with the same amount.
                 let is_new = !self.open().is_some_and(|b| b.amount_cents == cents);
                 self.job = Some(spawn(ctx, move || {
@@ -681,6 +710,7 @@ impl BalanceWindow {
                             .map(Box::new)
                             .map_err(|e| e.message()),
                         is_new,
+                        hold,
                     )
                 }));
             }

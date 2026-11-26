@@ -576,7 +576,8 @@ pub struct UploadDelivery {
     pub id: String,
     pub step: String,
     pub year: Option<i32>,
-    /// `return` (a tax return delivery) or `agreement` (an annual agreement's step PDF).
+    /// `return` (a tax return delivery), `agreement` (an annual agreement's step PDF), or
+    /// (PA-114) `statements` or `document`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
 }

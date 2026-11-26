@@ -383,6 +383,30 @@ fn ultratax_prints_go_to_their_doc_types_folder() {
         rules.active_rules()[1].id,
         vf_ingest::parsers::delivery_step_rule().id
     );
+    // PA-114: a statements card's and another document's step PDFs, each to its own folder,
+    // and neither taken by the tax return's rule.
+    let ids: Vec<String> = rules.active_rules().iter().map(|r| r.id.clone()).collect();
+    for r in [
+        vf_ingest::parsers::statements_step_rule(),
+        vf_ingest::parsers::document_step_rule(),
+    ] {
+        assert!(ids.contains(&r.id), "{}", r.name);
+    }
+    let re = |r: filer_core::rules::Rule| regex::Regex::new(&format!("(?i){}", r.pattern)).unwrap();
+    let ret = re(vf_ingest::parsers::delivery_step_rule());
+    let fs = re(vf_ingest::parsers::statements_step_rule());
+    let doc = re(vf_ingest::parsers::document_step_rule());
+    assert!(ret.is_match("2025 Delivery 2 - Tax return.pdf"));
+    assert!(fs.is_match("2025 Statements 2 - Financial statements.pdf"));
+    assert!(!ret.is_match("2025 Statements 2 - Financial statements.pdf"));
+    assert!(doc.is_match("2025 Document 4 - Fee.pdf"));
+    assert!(
+        !ret.is_match("2025 Document 4 - Fee.pdf") && !fs.is_match("2025 Document 4 - Fee.pdf")
+    );
+    assert_eq!(
+        vf_ingest::parsers::statements_step_rule().dest_template,
+        "{Client}/Financials/{Year}/Delivery"
+    );
     std::fs::write(
         keys.join("portal.json"),
         r#"{"balances":false,"deliveries":false}"#,

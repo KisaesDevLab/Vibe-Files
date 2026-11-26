@@ -1,5 +1,5 @@
 //! Tax return delivery (ADDENDUM-tax-return-delivery.md §12, owner 2026-11-24; Vibe-Portal
-//! D1/D2): the client panel's Deliver tax return… window and Admin › Portal › Deliveries.
+//! D1/D2): the client panel's Deliver… window and Admin › Portal › Deliveries.
 //! Slice 2 builds the return step (a file already on the portal) and the Form 8879 step (the
 //! client's UltraTax eSignature link, Confirm signed); letters, package and fee come in later
 //! slices. Each delivery read is copied into the client's folder with an audit row when it
@@ -189,9 +189,17 @@ pub struct DeliverWindow {
     files: Vec<PortalFile>,
     offline: Option<String>,
     // The form.
+    /// PA-114: `return`, `statements` or `document`.
+    kind: String,
+    /// An Other document's name ("Payroll reports"): its return type on the portal.
+    doc_name: String,
     year: i32,
     return_type: String,
     title: String,
+    /// PA-114: the documents open only after the fee is paid.
+    pay_first: bool,
+    /// PA-114: the documents after the first (cabinet document ids; `None` not chosen yet).
+    extra_docs: Vec<Option<String>>,
     with_return: bool,
     with_8879: bool,
     /// Step 1 (Addendum D3): the letters offered for the return type, ticked or not.
@@ -268,9 +276,13 @@ impl DeliverWindow {
             deliveries: Vec::new(),
             files: Vec::new(),
             offline: None,
+            kind: delivery::KIND_RETURN.into(),
+            doc_name: String::new(),
             year,
             return_type: "1040".into(),
             title: format!("Your {year} tax return"),
+            pay_first: false,
+            extra_docs: Vec::new(),
             with_return: true,
             with_8879: true,
             with_letters: false,
@@ -310,6 +322,33 @@ impl DeliverWindow {
         w
     }
 
+    /// Shows an existing card (from the Deliveries page): its kind, year and return type.
+    pub fn focus(&mut self, kind: &str, year: i32, return_type: &str) {
+        self.kind = match kind {
+            delivery::KIND_STATEMENTS | delivery::KIND_DOCUMENT => kind.to_string(),
+            _ => delivery::KIND_RETURN.into(),
+        };
+        self.year = year;
+        match self.kind.as_str() {
+            delivery::KIND_RETURN => self.return_type = return_type.to_string(),
+            delivery::KIND_DOCUMENT => self.doc_name = return_type.to_string(),
+            _ => {}
+        }
+        if self.kind != delivery::KIND_RETURN {
+            self.with_8879 = false;
+        }
+        self.title = default_title(&self.kind, self.year, &self.rt());
+        self.offer_letters();
+        self.offer_fee();
+        self.fill();
+    }
+
+    /// The card's return type on the portal: the return's, "Financial statements", or the
+    /// document's name.
+    fn rt(&self) -> String {
+        rt_of(&self.kind, &self.return_type, &self.doc_name)
+    }
+
     /// The letters offered for the return type (ticked as the template says) and who signs,
     /// from the client's Portal contacts (PA-105): taxpayer and spouse on a 1040, one person
     /// with a title for an entity (T22).
@@ -318,7 +357,7 @@ impl DeliverWindow {
         self.letters = vf_letters::store::load_all(&self.root)
             .unwrap_or_default()
             .into_iter()
-            .filter(|t| t.kind == "letter" && t.offered_for(&self.return_type))
+            .filter(|t| t.kind == "letter" && t.offered_for(&self.rt()))
             .map(|t| {
                 let on = t.default_ticked;
                 (t, on)
@@ -329,7 +368,7 @@ impl DeliverWindow {
             .unwrap_or_default();
         let name = |a: &str, b: &str| format!("{} {}", a.trim(), b.trim()).trim().to_string();
         let opt = |s: &str| Some(s.trim().to_string()).filter(|s| !s.is_empty());
-        self.signers = if vf_portal::delivery::is_individual(&self.root, &self.return_type) {
+        self.signers = if vf_portal::delivery::is_individual(&self.root, &self.rt()) {
             let mut v = vec![DeliverySigner {
                 id: String::new(),
                 role: "taxpayer".into(),
@@ -363,7 +402,14 @@ impl DeliverWindow {
 
     /// The pricing plan for the return type and year, its packages priced for the return fee.
     fn offer_fee(&mut self) {
-        self.plan = vf_portal::pricing::load(&self.root, &self.return_type, self.year);
+        // PA-114: pricing plans (packages, add-ons) are for tax returns; another card's fee is
+        // one amount.
+        self.plan = if self.kind == delivery::KIND_RETURN {
+            vf_portal::pricing::load(&self.root, &self.return_type, self.year)
+        } else {
+            self.fee_mode = "amount".into();
+            None
+        };
         self.prices = self
             .plan
             .as_ref()
@@ -433,7 +479,7 @@ impl DeliverWindow {
             "amount" => out.push(line(
                 "fee",
                 "base",
-                &format!("{} Form {}", self.year, self.return_type),
+                &fee_name(&self.kind, self.year, &self.rt()),
                 "",
                 cents(&self.amount, "The fee")?,
                 false,
@@ -526,7 +572,7 @@ impl DeliverWindow {
             ),
             ("Tax year", self.year.to_string()),
             ("Next year", (self.year + 1).to_string()),
-            ("Return type", self.return_type.clone()),
+            ("Return type", self.rt()),
             ("Firm name", firm),
             (
                 "Date",
@@ -562,7 +608,7 @@ impl DeliverWindow {
     fn laid_letters(&self) -> Vec<(vf_letters::Template, vf_letters::Laid)> {
         let f = self.fields();
         let all = vf_letters::store::load_all(&self.root).unwrap_or_default();
-        let ctx = delivery::letter_context(&self.root, &self.return_type);
+        let ctx = delivery::letter_context(&self.root, &self.rt());
         self.letters
             .iter()
             .filter(|(_, on)| *on)
@@ -578,7 +624,7 @@ impl DeliverWindow {
     /// The fill-ins left in the ticked letters, as "letter: [X], [State]" (A17: Send refuses).
     fn fill_ins_left(&self) -> Option<String> {
         let all = vf_letters::store::load_all(&self.root).unwrap_or_default();
-        let ctx = delivery::letter_context(&self.root, &self.return_type);
+        let ctx = delivery::letter_context(&self.root, &self.rt());
         let left: Vec<String> = self
             .letters
             .iter()
@@ -603,18 +649,13 @@ impl DeliverWindow {
             let p = core::client(&s2);
             Done::Loaded((|| {
                 let mut ds = Vec::new();
-                for d in p.deliveries(Some(&id))? {
-                    // With its events (the list read leaves them out).
+                // Every kind (PA-114: statements and other documents too), with its events (the
+                // list read leaves them out). The client's annual agreements are among them: one
+                // signed for this return skips its letters (A11).
+                for d in p.deliveries_all(Some(&id))? {
                     ds.push(p.delivery(&d.id)?);
                 }
-                // The client's annual agreements, with their events: one signed for this
-                // return skips its letters (A11). None on a portal without agreements.
                 let status = p.status().ok();
-                if status.as_ref().is_some_and(|s| s.has_agreements()) {
-                    for a in p.agreements(&id).unwrap_or_default() {
-                        ds.push(p.delivery(&a.id)?);
-                    }
-                }
                 let files = p.files_for_client(&id)?;
                 let firm = status.map(|s| s.firm_name).unwrap_or_default();
                 let staff = p.delivery_staff(&id).unwrap_or_default();
@@ -625,8 +666,12 @@ impl DeliverWindow {
 
     /// The delivery this window is about: the open one for the year and return type chosen.
     fn current(&self) -> Option<&Delivery> {
+        let rt = self.rt();
         self.deliveries.iter().find(|d| {
-            d.status == "open" && d.tax_year == self.year && d.return_type == self.return_type
+            d.status == "open"
+                && d.kind == self.kind
+                && d.tax_year == self.year
+                && d.return_type.eq_ignore_ascii_case(&rt)
         })
     }
 
@@ -654,9 +699,22 @@ impl DeliverWindow {
                 .and_then(|id| self.files.iter().find(|f| f.file_id == id))
                 .map(|f| f.vf_document_id.clone())
                 .or(self.return_doc.clone());
+            // PA-114: the documents after the first, and the pay-first lock.
+            self.extra_docs = d
+                .file_ids()
+                .iter()
+                .skip(1)
+                .map(|id| {
+                    self.files
+                        .iter()
+                        .find(|f| &f.file_id == id)
+                        .map(|f| f.vf_document_id.clone())
+                })
+                .collect();
+            self.pay_first = d.locks.return_after_fee == Some(true);
             self.link = d.esign_link.clone().unwrap_or_default();
             self.notify = d.notify;
-        } else if self.return_doc.is_none() {
+        } else if self.return_doc.is_none() && self.kind == delivery::KIND_RETURN {
             // The client's PDF for the year whose name says it is the return, those under
             // Income Tax first.
             let ty = self.return_type.to_lowercase();
@@ -687,6 +745,9 @@ impl DeliverWindow {
     /// The client's agreement covering this return (its returns' year and type) whose letters
     /// are signed (ADDENDUM-annual-agreements.md A11).
     fn signed_agreement(&self) -> Option<&Delivery> {
+        if self.kind != delivery::KIND_RETURN {
+            return None;
+        }
         self.deliveries.iter().find(|d| {
             d.is_agreement()
                 && d.status != "cancelled"
@@ -778,7 +839,7 @@ impl DeliverWindow {
         let mut open_win = true;
         let mut act = None;
         egui::Window::new(format!(
-            "Deliver tax return — {} ({})",
+            "Deliver — {} ({})",
             self.client.name, self.client.code
         ))
         .id(egui::Id::unique("portal-delivery"))
@@ -813,30 +874,75 @@ impl DeliverWindow {
         let current = self.current().cloned();
         let sent = current.is_some();
         let can = !busy && self.offline.is_none();
-        // The strip: year, return type, title, status.
+        // The strip: kind, year, return type (or the document's name), title, status.
         ui.horizontal_wrapped(|ui| {
-            ui.label("Tax year");
-            let before = (self.year, self.return_type.clone());
-            ui.add_enabled(can, egui::DragValue::new(&mut self.year).range(1990..=2100));
-            ui.label("Return type");
+            let before = (self.kind.clone(), self.year, self.rt());
+            // PA-114 (owner 2026-11-26, M1): what the card delivers.
+            ui.label("Kind");
             ui.add_enabled_ui(can, |ui| {
-                egui::ComboBox::from_id_salt("delivery-type")
-                    .selected_text(&self.return_type)
+                let r = egui::ComboBox::from_id_salt("delivery-kind")
+                    .selected_text(kind_words(&self.kind))
                     .show_ui(ui, |ui| {
-                        for t in self.types.clone() {
-                            ui.selectable_value(&mut self.return_type, t.clone(), t);
+                        for k in [
+                            delivery::KIND_RETURN,
+                            delivery::KIND_STATEMENTS,
+                            delivery::KIND_DOCUMENT,
+                        ] {
+                            ui.selectable_value(&mut self.kind, k.to_string(), kind_words(k));
                         }
                     });
+                combo_named(&r.response, "Kind", kind_words(&self.kind));
             });
-            if before != (self.year, self.return_type.clone()) {
-                if before.1 != self.return_type {
+            let l = ui.label(if self.kind == delivery::KIND_RETURN {
+                "Tax year"
+            } else {
+                "Year"
+            });
+            ui.add_enabled(can, egui::DragValue::new(&mut self.year).range(1990..=2100))
+                .labelled_by(l.id);
+            match self.kind.as_str() {
+                delivery::KIND_RETURN => {
+                    ui.label("Return type");
+                    ui.add_enabled_ui(can, |ui| {
+                        let r = egui::ComboBox::from_id_salt("delivery-type")
+                            .selected_text(&self.return_type)
+                            .show_ui(ui, |ui| {
+                                for t in self.types.clone() {
+                                    ui.selectable_value(&mut self.return_type, t.clone(), t);
+                                }
+                            });
+                        combo_named(&r.response, "Return type", &self.return_type);
+                    });
+                }
+                delivery::KIND_DOCUMENT => {
+                    ui.label("What it is");
+                    widgets::named(
+                        ui.add_enabled(
+                            can && !sent,
+                            egui::TextEdit::singleline(&mut self.doc_name)
+                                .desired_width(180.0)
+                                .char_limit(24)
+                                .hint_text("Payroll reports"),
+                        ),
+                        "Document name",
+                    );
+                }
+                _ => {}
+            }
+            if before != (self.kind.clone(), self.year, self.rt()) {
+                if before.0 != self.kind || before.2 != self.rt() {
                     self.offer_letters();
                 }
                 self.offer_fee();
+                if self.kind != delivery::KIND_RETURN {
+                    self.with_8879 = false;
+                }
                 if self.current().is_none() {
-                    self.title = format!("Your {} tax return", self.year);
+                    self.title = default_title(&self.kind, self.year, &self.rt());
                     self.return_file = None;
                     self.return_doc = None;
+                    self.extra_docs.clear();
+                    self.pay_first = false;
                 }
                 self.fill();
             }
@@ -849,13 +955,14 @@ impl DeliverWindow {
             ui.label(RichText::new(word).strong().color(colour));
         });
         ui.horizontal(|ui| {
-            ui.label("Card title");
+            let l = ui.label("Card title");
             ui.add_enabled(
                 can,
                 egui::TextEdit::singleline(&mut self.title)
                     .desired_width(320.0)
                     .char_limit(120),
-            );
+            )
+            .labelled_by(l.id);
         });
         ui.add_space(6.0);
         let step_state = |kind: &str| -> String {
@@ -981,15 +1088,19 @@ impl DeliverWindow {
                 }
             }
         });
-        // Section: the tax return PDF.
+        // Section: the documents (a tax return's PDF, or PA-114's statements or documents).
         ui.group(|ui| {
+            let docs_done = current
+                .as_ref()
+                .and_then(|d| d.step(delivery::RETURN))
+                .is_some_and(|s| s.state == "done");
             ui.horizontal(|ui| {
                 ui.add_enabled(
-                    can && !current
-                        .as_ref()
-                        .and_then(|d| d.step(delivery::RETURN))
-                        .is_some_and(|s| s.state == "done"),
-                    egui::Checkbox::new(&mut self.with_return, RichText::new("Tax return PDF").strong()),
+                    can && !docs_done,
+                    egui::Checkbox::new(
+                        &mut self.with_return,
+                        RichText::new(documents_words(&self.kind)).strong(),
+                    ),
                 );
                 ui.label(RichText::new(step_state(delivery::RETURN)).color(theme::ink_muted()));
             });
@@ -999,9 +1110,15 @@ impl DeliverWindow {
                     .as_deref()
                     .and_then(|id| self.docs.iter().find(|d| d.id == id))
                     .map(|d| d.name.clone())
-                    .unwrap_or_else(|| "Choose the return…".into());
+                    .unwrap_or_else(|| {
+                        if self.kind == delivery::KIND_RETURN {
+                            "Choose the return…".into()
+                        } else {
+                            "Choose a PDF…".into()
+                        }
+                    });
                 ui.add_enabled_ui(can, |ui| {
-                    egui::ComboBox::from_id_salt("delivery-return")
+                    let r = egui::ComboBox::from_id_salt("delivery-return")
                         .selected_text(shown)
                         .width(420.0)
                         .show_ui(ui, |ui| {
@@ -1017,11 +1134,80 @@ impl DeliverWindow {
                                 );
                             }
                         });
+                    combo_named(
+                        &r.response,
+                        "The first PDF",
+                        &doc_words(&self.docs, self.return_doc.as_deref()),
+                    );
                 });
+                // PA-114 (M7): more PDFs on one card, each opened by the client.
+                let mut remove = None;
+                for (i, extra) in self.extra_docs.iter_mut().enumerate() {
+                    ui.horizontal(|ui| {
+                        let shown = extra
+                            .as_deref()
+                            .and_then(|id| self.docs.iter().find(|d| d.id == id))
+                            .map(|d| d.name.clone())
+                            .unwrap_or_else(|| "Choose a PDF…".into());
+                        ui.add_enabled_ui(can && !docs_done, |ui| {
+                            let r = egui::ComboBox::from_id_salt(("delivery-extra", i))
+                                .selected_text(shown)
+                                .width(420.0)
+                                .show_ui(ui, |ui| {
+                                    for d in &self.docs {
+                                        ui.selectable_value(
+                                            extra,
+                                            Some(d.id.clone()),
+                                            format!(
+                                                "{}{}",
+                                                d.name,
+                                                d.tax_year
+                                                    .map(|y| format!(" ({y})"))
+                                                    .unwrap_or_default()
+                                            ),
+                                        );
+                                    }
+                                });
+                            combo_named(
+                                &r.response,
+                                "Another PDF",
+                                &doc_words(&self.docs, extra.as_deref()),
+                            );
+                        });
+                        if ui
+                            .add_enabled(can && !docs_done, egui::Button::new("Remove"))
+                            .clicked()
+                        {
+                            remove = Some(i);
+                        }
+                    });
+                }
+                if let Some(i) = remove {
+                    self.extra_docs.remove(i);
+                }
+                if ui
+                    .add_enabled(
+                        can && !docs_done && self.extra_docs.len() + 1 < delivery::MAX_FILES,
+                        egui::Button::new("+ Add another PDF"),
+                    )
+                    .clicked()
+                {
+                    self.extra_docs.push(None);
+                }
+                if let Some(d) = &current {
+                    let opened = d.files.iter().filter(|f| f.opened_at.is_some()).count();
+                    if d.files.len() > 1 {
+                        ui.label(widgets::caption(format!(
+                            "{opened} of {} opened by the client.",
+                            d.files.len()
+                        )));
+                    }
+                }
                 ui.label(widgets::caption(
-                    "The client's PDFs in the cabinet. Sending shares the return on the portal with \
+                    "The client's PDFs in the cabinet. Sending shares them on the portal with \
                      everyone of the client (B2 first, as Share on portal does); the client opens \
-                     it when the card's earlier steps allow.",
+                     them when the card's earlier steps allow, and the step is done once each is \
+                     opened.",
                 ));
             }
         });
@@ -1043,7 +1229,12 @@ impl DeliverWindow {
                     can && sent_fee.is_none(),
                     egui::Checkbox::new(
                         &mut self.with_fee,
-                        RichText::new("Package and fee").strong(),
+                        RichText::new(if self.kind == delivery::KIND_RETURN {
+                            "Package and fee"
+                        } else {
+                            "Fee"
+                        })
+                        .strong(),
                     ),
                 );
                 ui.label(RichText::new(step_state(delivery::FEE)).color(theme::ink_muted()));
@@ -1051,6 +1242,19 @@ impl DeliverWindow {
             if !self.with_fee {
                 return;
             }
+            // PA-114 (owner 2026-11-26, M2): pay first, per card.
+            let docs_opened = current
+                .as_ref()
+                .and_then(|d| d.step(delivery::RETURN))
+                .is_some_and(|s| s.state == "done");
+            ui.add_enabled(
+                can && self.with_return && !paid && !docs_opened,
+                egui::Checkbox::new(&mut self.pay_first, PAY_FIRST_WORDS),
+            )
+            .on_hover_text(
+                "The client sees the documents listed, locked, until they pay (a bank payment \
+                 started is enough).",
+            );
             if let Some(f) = &sent_fee {
                 for l in f.lines.iter().filter(|l| {
                     f.mode.as_deref() != Some("packages")
@@ -1111,7 +1315,13 @@ impl DeliverWindow {
                 }
                 return;
             }
+            if self.kind != delivery::KIND_RETURN {
+                self.fee_mode = "amount".into();
+            }
             ui.horizontal(|ui| {
+                if self.kind != delivery::KIND_RETURN {
+                    return;
+                }
                 ui.radio_value(&mut self.fee_mode, "amount".to_string(), "One amount");
                 ui.radio_value(
                     &mut self.fee_mode,
@@ -1208,54 +1418,59 @@ impl DeliverWindow {
                 ui.colored_label(theme::warn(), e);
             }
         });
-        // Section: Form 8879.
-        ui.group(|ui| {
-            ui.horizontal(|ui| {
-                ui.add_enabled(
-                    can && !current
+        // Section: Form 8879 (a tax return's only, PA-114).
+        if self.kind == delivery::KIND_RETURN {
+            ui.group(|ui| {
+                ui.horizontal(|ui| {
+                    ui.add_enabled(
+                        can && !current
+                            .as_ref()
+                            .and_then(|d| d.step(delivery::ESIGN))
+                            .is_some_and(|s| s.state == "done"),
+                        egui::Checkbox::new(
+                            &mut self.with_8879,
+                            RichText::new("Form 8879").strong(),
+                        ),
+                    );
+                    ui.label(RichText::new(step_state(delivery::ESIGN)).color(theme::ink_muted()));
+                });
+                if self.with_8879 {
+                    ui.horizontal(|ui| {
+                        ui.label("UltraTax eSignature link");
+                        widgets::named(
+                            ui.add_enabled(
+                                can,
+                                egui::TextEdit::singleline(&mut self.link)
+                                    .desired_width(380.0)
+                                    .hint_text("https://…"),
+                            ),
+                            "eSignature link",
+                        );
+                    });
+                    let waiting = current
                         .as_ref()
                         .and_then(|d| d.step(delivery::ESIGN))
-                        .is_some_and(|s| s.state == "done"),
-                    egui::Checkbox::new(&mut self.with_8879, RichText::new("Form 8879").strong()),
-                );
-                ui.label(RichText::new(step_state(delivery::ESIGN)).color(theme::ink_muted()));
+                        .is_some_and(|s| s.state == "waiting");
+                    if waiting {
+                        ui.colored_label(theme::warn(), "The client says they signed it.");
+                    }
+                    if ui
+                        .add_enabled(can && waiting, egui::Button::new("Confirm signed"))
+                        .on_hover_text("You checked UltraTax: Form 8879 is signed")
+                        .clicked()
+                    {
+                        act = Some(Act::Confirm);
+                    }
+                }
             });
-            if self.with_8879 {
-                ui.horizontal(|ui| {
-                    ui.label("UltraTax eSignature link");
-                    widgets::named(
-                        ui.add_enabled(
-                            can,
-                            egui::TextEdit::singleline(&mut self.link)
-                                .desired_width(380.0)
-                                .hint_text("https://…"),
-                        ),
-                        "eSignature link",
-                    );
-                });
-                let waiting = current
-                    .as_ref()
-                    .and_then(|d| d.step(delivery::ESIGN))
-                    .is_some_and(|s| s.state == "waiting");
-                if waiting {
-                    ui.colored_label(theme::warn(), "The client says they signed it.");
-                }
-                if ui
-                    .add_enabled(can && waiting, egui::Button::new("Confirm signed"))
-                    .on_hover_text("You checked UltraTax: Form 8879 is signed")
-                    .clicked()
-                {
-                    act = Some(Act::Confirm);
-                }
-            }
-        });
+        }
         ui.checkbox(
             &mut self.notify,
             "Tell the client by email and text when it is sent",
         );
         ui.horizontal(|ui| {
             ui.label("Remind the client");
-            egui::ComboBox::from_id_salt("delivery-remind")
+            let r = egui::ComboBox::from_id_salt("delivery-remind")
                 .selected_text(match self.remind_days {
                     0 => "never".to_string(),
                     n => format!("every {n} days while a step waits"),
@@ -1270,6 +1485,11 @@ impl DeliverWindow {
                         ui.selectable_value(&mut self.remind_days, n, words);
                     }
                 });
+            combo_named(
+                &r.response,
+                "Remind the client",
+                &remind_choice_words(self.remind_days),
+            );
             ui.label("Assigned to");
             let shown = self
                 .assigned
@@ -1277,7 +1497,7 @@ impl DeliverWindow {
                 .and_then(|id| self.staff.iter().find(|s| s.id == id))
                 .map(|s| s.name.clone())
                 .unwrap_or_else(|| "Nobody (the admins)".into());
-            egui::ComboBox::from_id_salt("delivery-assigned")
+            let r = egui::ComboBox::from_id_salt("delivery-assigned")
                 .selected_text(shown)
                 .show_ui(ui, |ui| {
                     ui.selectable_value(&mut self.assigned, None, "Nobody (the admins)");
@@ -1285,7 +1505,23 @@ impl DeliverWindow {
                         ui.selectable_value(&mut self.assigned, Some(s.id.clone()), &s.name);
                     }
                 });
+            combo_named(
+                &r.response,
+                "Assigned to",
+                self.assigned
+                    .as_deref()
+                    .and_then(|id| self.staff.iter().find(|s| s.id == id))
+                    .map_or("Nobody (the admins)", |s| s.name.as_str()),
+            );
         });
+        let doc_name_ok = self.kind != delivery::KIND_DOCUMENT
+            || delivery::valid_return_type(&self.doc_name).is_ok();
+        if !doc_name_ok {
+            ui.colored_label(
+                theme::warn(),
+                "Say what the document is (up to 24 letters, digits or spaces), e.g. Payroll reports.",
+            );
+        }
         let link_ok = !self.with_8879
             || self.link.trim().is_empty()
             || self.link.trim().to_lowercase().starts_with("https://");
@@ -1311,6 +1547,7 @@ impl DeliverWindow {
                 if ui
                     .add_enabled(
                         can && link_ok
+                            && doc_name_ok
                             && (self.with_return
                                 || self.with_8879
                                 || self.with_letters
@@ -1410,8 +1647,8 @@ impl DeliverWindow {
             }
         }
         ui.label(widgets::caption(format!(
-            "Each finished step's PDF, with its log page, is filed in the client's Income Tax\\{}\\Delivery folder.",
-            self.year
+            "Each finished step's PDF, with its log page, is filed in the client's {} folder.",
+            delivery::folder_words(&self.kind, self.year)
         )));
         act
     }
@@ -1431,13 +1668,35 @@ impl DeliverWindow {
                     self.err = Some(e);
                     return;
                 }
+                let is_return = self.kind == delivery::KIND_RETURN;
                 let steps = StepsIn {
                     letters: self.with_letters,
                     return_: self.with_return,
-                    package: self.with_fee && self.fee_mode != "amount",
+                    // PA-114: a package and Form 8879 are a tax return's only.
+                    package: is_return && self.with_fee && self.fee_mode != "amount",
                     fee: self.with_fee,
-                    esign8879: self.with_8879,
+                    esign8879: is_return && self.with_8879,
                 };
+                // PA-114: the documents in order (the first, then the others chosen), once each.
+                let mut chosen: Vec<crate::ui::portal::DocRef> = Vec::new();
+                if self.with_return {
+                    for id in std::iter::once(self.return_doc.as_deref())
+                        .chain(self.extra_docs.iter().map(|x| x.as_deref()))
+                        .flatten()
+                    {
+                        if !chosen.iter().any(|d| d.id == id)
+                            && let Some(d) = self.docs.iter().find(|d| d.id == id)
+                        {
+                            chosen.push(d.clone());
+                        }
+                    }
+                    if !is_return && chosen.is_empty() {
+                        self.err = Some("Choose the PDF to deliver.".into());
+                        return;
+                    }
+                }
+                let pay_first = self.with_fee && self.with_return && self.pay_first;
+                let kind = self.kind.clone();
                 // The priced snapshot and each offered package's addendum (T20), while the
                 // selection is not signed.
                 let fee = if self.with_fee
@@ -1536,35 +1795,45 @@ impl DeliverWindow {
                 self.confirm_revise = false;
                 self.force_revise = false;
                 let title = self.title.trim().to_string();
-                let doc = self
-                    .return_doc
-                    .as_deref()
-                    .and_then(|id| self.docs.iter().find(|d| d.id == id))
-                    .cloned()
-                    .filter(|_| self.with_return);
+                // One tax return PDF: sent as the return (it can be revised, T27). Several, or
+                // another kind's: sent as the card's documents (PA-114).
+                let (doc, many) = if is_return && chosen.len() <= 1 {
+                    (chosen.into_iter().next(), Vec::new())
+                } else {
+                    (None, chosen)
+                };
                 let b2 = self.b2.clone();
                 let client = self.client.clone();
                 let share_audit = self.audit.clone();
                 let link = self.link.trim().to_string();
                 let link = (self.with_8879 && !link.is_empty()).then_some(link);
                 let notify = self.notify;
+                let locks = delivery::Locks {
+                    return_after_letters: true,
+                    esign_after_letters: true,
+                    esign_after_fee: true,
+                    // Sent only when ticked: an older portal ignores it, and is caught below.
+                    return_after_fee: pay_first.then_some(true),
+                };
+                // A change sends the card's locks as they are, with pay first as now ticked.
+                let change_locks = current.as_ref().map(|d| delivery::Locks {
+                    return_after_fee: (pay_first || d.locks.return_after_fee.is_some())
+                        .then_some(pay_first),
+                    ..d.locks.clone()
+                });
                 let new = NewDelivery {
                     client_id: self.client.id.clone(),
                     tax_year: self.year,
-                    return_type: self.return_type.clone(),
+                    return_type: self.rt(),
                     title: title.clone(),
                     steps: steps.clone(),
-                    locks: delivery::Locks {
-                        return_after_letters: true,
-                        esign_after_letters: true,
-                        esign_after_fee: true,
-                    },
+                    locks,
                     assigned_staff_id: self.assigned.clone(),
                     notify,
                     // QA 2026-11-25: told once the return, fee and letters are all on.
                     hold: true,
                     remind_days: self.remind_days,
-                    kind: None,
+                    kind: (!is_return).then(|| kind.clone()),
                     covers: Vec::new(),
                     return_year: None,
                 };
@@ -1575,9 +1844,21 @@ impl DeliverWindow {
                 };
                 self.job = Some(spawn(ctx, move || {
                     let p = core::client(&s2);
+                    let created = std::cell::Cell::new(None::<String>);
                     let r = (|| {
                         let mut d = match &current {
-                            None => p.create_delivery(&new)?,
+                            None => {
+                                let d = p.create_delivery(&new).map_err(|e| {
+                                    // PA-114: an older portal refuses a kind it does not know.
+                                    if !is_return && e.status() == Some(400) {
+                                        vf_portal::PortalError::Local(NEEDS_PORTAL.into())
+                                    } else {
+                                        e
+                                    }
+                                })?;
+                                created.set(Some(d.id.clone()));
+                                d
+                            }
                             Some(d) => p.change_delivery(
                                 &d.id,
                                 &DeliveryChange {
@@ -1586,14 +1867,48 @@ impl DeliverWindow {
                                     notify: Some(notify),
                                     assigned_staff_id: Some(assigned),
                                     remind_days: Some(remind_days),
-                                    ..Default::default()
+                                    locks: change_locks,
                                 },
                             )?,
                         };
+                        // PA-114: an older portal takes the card but not its kind or its lock.
+                        if let Some(why) = old_portal(&d, &kind, pay_first) {
+                            return Err(vf_portal::PortalError::Local(why.into()));
+                        }
                         // The return (Q15): put on the portal for nobody yet, set as the
                         // delivery's return (so it is locked), then shown to everyone of the
                         // client. A return already there with the same content is left as it
                         // is (staff may have limited who sees it).
+                        // PA-114: several documents, or another kind's: each put on the portal for
+                        // nobody, set as the card's documents (so they are locked), then shown.
+                        if !many.is_empty() {
+                            let done = d.step(delivery::RETURN).is_some_and(|s| s.state == "done");
+                            let mut ids = Vec::new();
+                            let mut shown_now = Vec::new();
+                            for doc in &many {
+                                let (id, added) =
+                                    put_document(&p, &b2, &client, doc, done, &share_audit)?;
+                                if added {
+                                    shown_now.push((id.clone(), doc.id.clone()));
+                                }
+                                ids.push(id);
+                            }
+                            if ids != d.file_ids() {
+                                if done {
+                                    return Err(vf_portal::PortalError::Local(FILES_SEEN.into()));
+                                }
+                                d = p.set_delivery_files(&d.id, &ids).map_err(|e| {
+                                    if e.status() == Some(404) {
+                                        vf_portal::PortalError::Local(NEEDS_PORTAL.into())
+                                    } else {
+                                        e
+                                    }
+                                })?;
+                            }
+                            for (file_id, doc_id) in &shown_now {
+                                show_to_everyone(&p, &client, file_id, doc_id, &share_audit)?;
+                            }
+                        }
                         if let Some(mut doc) = doc {
                             doc.hash =
                                 filer_intake::commit::sha256_file(&doc.path).map_err(|e| {
@@ -1668,31 +1983,7 @@ impl DeliverWindow {
                             // Shown to everyone of the client once it is the delivery's
                             // return (locked), for a file new on the portal or seen by no one.
                             if added {
-                                let people = p.users(&client.id)?;
-                                let all: std::collections::BTreeMap<String, bool> = people
-                                    .users
-                                    .iter()
-                                    .filter(|u| u.active)
-                                    .map(|u| (u.identity_id.clone(), true))
-                                    .collect();
-                                let held: std::collections::BTreeMap<String, bool> = people
-                                    .invitations
-                                    .iter()
-                                    .map(|i| (i.invitation_id.clone(), true))
-                                    .collect();
-                                if !all.is_empty() || !held.is_empty() {
-                                    p.set_visibility_with(&file_id, &all, &held)?;
-                                    share_audit.send(AuditEntry::new(
-                                        "portal_share",
-                                        Some(&doc.id),
-                                        serde_json::json!({
-                                            "client_id": client.id,
-                                            "shown_to": all.keys().collect::<Vec<_>>(),
-                                            "hidden_from": [],
-                                            "held_for_invitations": held.keys().collect::<Vec<_>>(),
-                                        }),
-                                    ));
-                                }
+                                show_to_everyone(&p, &client, &file_id, &doc.id, &share_audit)?;
                             }
                         }
                         if let Some(l) = link
@@ -1738,6 +2029,13 @@ impl DeliverWindow {
                         p.ready_delivery(&d.id)?;
                         p.delivery(&d.id)
                     })();
+                    // PA-114: a card made on an older portal that could not take it all is
+                    // cancelled (it would deliver the documents unlocked or as a tax return).
+                    if let (Err(vf_portal::PortalError::Local(m)), Some(id)) = (&r, created.take())
+                        && m == NEEDS_PORTAL
+                    {
+                        let _ = p.cancel_delivery(&id);
+                    }
                     Done::Saved(r.map(Box::new).map_err(|e| e.message()), what)
                 }));
             }
@@ -1843,6 +2141,188 @@ impl DeliverWindow {
 /// Said by the Send job when the return's content changed since the client opened it: the
 /// window then asks, as for another document.
 const REVISED_ASK: &str = "The return changed since the client opened it.";
+
+/// PA-114: said when the portal is older than the card needs (and the card is cancelled).
+pub const NEEDS_PORTAL: &str = "This needs Vibe Portal 0.5.6 or later: update the portal first.";
+/// PA-114: the client opened the documents; new ones go on a new card.
+const FILES_SEEN: &str =
+    "The client has opened these documents: send changed or added ones on a new card.";
+/// PA-114 (owner 2026-11-26, M2): the fee's tick.
+pub const PAY_FIRST_WORDS: &str = "Documents open only after the fee is paid";
+
+/// Names a combo box for a screen reader, keeping its role and what it shows.
+fn combo_named(r: &egui::Response, name: &str, value: &str) {
+    let enabled = r.enabled();
+    let (n, v) = (name.to_string(), value.to_string());
+    r.widget_info(move || {
+        let mut info = egui::WidgetInfo::labeled(egui::Role::ComboBox, enabled, &n);
+        info.current_text_value = Some(v.clone());
+        info
+    });
+}
+
+/// What a PDF picker shows: the document's name, or "Choose a PDF…".
+fn doc_words(docs: &[crate::ui::portal::DocRef], id: Option<&str>) -> String {
+    id.and_then(|id| docs.iter().find(|d| d.id == id))
+        .map(|d| d.name.clone())
+        .unwrap_or_else(|| "Choose a PDF…".into())
+}
+
+/// What the reminder picker shows.
+fn remind_choice_words(days: u32) -> String {
+    match days {
+        0 => "never".to_string(),
+        n => format!("every {n} days while a step waits"),
+    }
+}
+
+/// What the Kind picker says.
+pub fn kind_words(kind: &str) -> &'static str {
+    match kind {
+        delivery::KIND_STATEMENTS => "Financial statements",
+        delivery::KIND_DOCUMENT => "Other document",
+        _ => "Tax return",
+    }
+}
+
+/// The documents step's heading in the window.
+fn documents_words(kind: &str) -> &'static str {
+    match kind {
+        delivery::KIND_STATEMENTS => "Financial statements PDF",
+        delivery::KIND_DOCUMENT => "Documents",
+        _ => "Tax return PDF",
+    }
+}
+
+/// The card's return type on the portal for a kind: the return's, "Financial statements", or
+/// the document's name.
+pub fn rt_of(kind: &str, return_type: &str, doc_name: &str) -> String {
+    match kind {
+        delivery::KIND_STATEMENTS => delivery::STATEMENTS_TYPE.into(),
+        delivery::KIND_DOCUMENT => doc_name.trim().to_string(),
+        _ => return_type.to_string(),
+    }
+}
+
+/// A new card's title: "Your 2025 tax return", "Your 2025 financial statements", "Your 2025
+/// payroll reports".
+pub fn default_title(kind: &str, year: i32, rt: &str) -> String {
+    match kind {
+        delivery::KIND_STATEMENTS => format!("Your {year} financial statements"),
+        delivery::KIND_DOCUMENT if !rt.trim().is_empty() => {
+            format!("Your {year} {}", rt.trim().to_lowercase())
+        }
+        delivery::KIND_DOCUMENT => format!("Your {year} documents"),
+        _ => format!("Your {year} tax return"),
+    }
+}
+
+/// The one-amount fee line's name.
+fn fee_name(kind: &str, year: i32, rt: &str) -> String {
+    match kind {
+        delivery::KIND_STATEMENTS => format!("{year} financial statements"),
+        delivery::KIND_DOCUMENT => format!("{year} {rt}"),
+        _ => format!("{year} Form {rt}"),
+    }
+}
+
+/// PA-114: a portal older than 0.5.6 makes the card but answers another kind, or no pay-first
+/// lock: what to say (the caller cancels a card it just made).
+pub fn old_portal(d: &Delivery, kind: &str, pay_first: bool) -> Option<&'static str> {
+    let wrong_kind = kind != delivery::KIND_RETURN && d.kind != kind;
+    let no_lock = pay_first && d.locks.return_after_fee != Some(true);
+    (wrong_kind || no_lock).then_some(NEEDS_PORTAL)
+}
+
+/// Puts one of the card's documents on the portal (PA-114): the file already there with the
+/// same content as it is, new content replaced (refused once the client opened the documents),
+/// or added for nobody yet. Its file id, and whether nobody sees it yet (shown once set).
+fn put_document(
+    p: &vf_portal::api::Portal,
+    b2: &crate::ui::portal::B2First,
+    client: &ClientRef,
+    doc: &crate::ui::portal::DocRef,
+    opened: bool,
+    audit: &AuditOut,
+) -> Result<(String, bool), vf_portal::PortalError> {
+    use vf_portal::PortalError::Local;
+    let mut doc = doc.clone();
+    doc.hash = filer_intake::commit::sha256_file(&doc.path)
+        .map_err(|e| Local(format!("{}: {e}", doc.name)))?;
+    let unseen = |f: &PortalFile| f.invites.is_empty() && f.users.iter().all(|u| !u.visible);
+    match p.file_for_doc(&doc.id)? {
+        Some(f) if f.sha256 == doc.hash => {
+            let nobody = unseen(&f);
+            Ok((f.file_id, nobody))
+        }
+        Some(f) => {
+            if opened {
+                return Err(Local(FILES_SEEN.into()));
+            }
+            let nobody = unseen(&f);
+            let id = f.file_id.clone();
+            crate::ui::portal::share_docs(
+                p,
+                b2,
+                client,
+                vec![(doc.clone(), Some(f))],
+                &Default::default(),
+                &Default::default(),
+                true,
+                audit,
+            )
+            .map_err(Local)?;
+            Ok((id, nobody))
+        }
+        None => {
+            b2.push(std::slice::from_ref(&doc.id)).map_err(Local)?;
+            let a = p.add(&client.id, &doc.id, &doc.name, doc.tax_year, &doc.path)?;
+            audit.send(AuditEntry::new(
+                "portal_share",
+                Some(&doc.id),
+                serde_json::json!({ "client_id": client.id, "sent": true, "updated": false }),
+            ));
+            Ok((a.file_id().to_string(), true))
+        }
+    }
+}
+
+/// Shows a card's document to everyone of the client (and invitations not yet accepted), once
+/// it is set on the card (so it is locked while the card says).
+fn show_to_everyone(
+    p: &vf_portal::api::Portal,
+    client: &ClientRef,
+    file_id: &str,
+    doc_id: &str,
+    audit: &AuditOut,
+) -> Result<(), vf_portal::PortalError> {
+    let people = p.users(&client.id)?;
+    let all: std::collections::BTreeMap<String, bool> = people
+        .users
+        .iter()
+        .filter(|u| u.active)
+        .map(|u| (u.identity_id.clone(), true))
+        .collect();
+    let held: std::collections::BTreeMap<String, bool> = people
+        .invitations
+        .iter()
+        .map(|i| (i.invitation_id.clone(), true))
+        .collect();
+    if !all.is_empty() || !held.is_empty() {
+        p.set_visibility_with(file_id, &all, &held)?;
+        audit.send(AuditEntry::new(
+            "portal_share",
+            Some(doc_id),
+            serde_json::json!({
+                "client_id": client.id,
+                "shown_to": all.keys().collect::<Vec<_>>(),
+                "hidden_from": [],
+                "held_for_invitations": held.keys().collect::<Vec<_>>(),
+            }),
+        ));
+    }
+    Ok(())
+}
 
 /// The client's PDFs in the catalog, newest year first (the Deliver window's return).
 pub fn client_pdfs(
@@ -2117,7 +2597,8 @@ pub fn page(ui: &mut egui::Ui, page: &mut DeliveriesPage, env: &mut crate::ui::b
     if let Some(e) = &page.err {
         ui.colored_label(theme::error(), e);
     }
-    let mut open: Option<(String, bool)> = None;
+    // The client, whether it is an agreement, and (PA-114) the card's kind, year and type.
+    let mut open: Option<(String, bool, (String, i32, String))> = None;
     if let Some((list, subs)) = &page.data {
         let season = page.finished.then_some(page.season);
         let rows = worklist::rows(list, subs, page.show, season);
@@ -2209,7 +2690,11 @@ pub fn page(ui: &mut egui::Ui, page: &mut DeliveriesPage, env: &mut crate::ui::b
                             .map(|(c, _)| format!("{} ({})", c.name, c.code))
                             .unwrap_or_else(|| "(not in this cabinet)".into());
                         if ui.link(name).clicked() {
-                            open = Some((d.client_id.clone(), d.is_agreement()));
+                            open = Some((
+                                d.client_id.clone(),
+                                d.is_agreement(),
+                                (d.kind.clone(), d.tax_year, d.return_type.clone()),
+                            ));
                         }
                     });
                     row.col(|ui| {
@@ -2364,7 +2849,7 @@ pub fn page(ui: &mut egui::Ui, page: &mut DeliveriesPage, env: &mut crate::ui::b
             ui.label(widgets::caption(d));
         }
     }
-    if let Some((id, true)) = &open
+    if let Some((id, true, _)) = &open
         && let Some((c, _)) = page.clients.get(id).cloned()
         && let (Some(audit), Some(reads)) = (page.audit.clone(), page.reads.clone())
     {
@@ -2376,12 +2861,12 @@ pub fn page(ui: &mut egui::Ui, page: &mut DeliveriesPage, env: &mut crate::ui::b
             audit,
             reads,
         ));
-    } else if let Some((id, false)) = open
+    } else if let Some((id, false, (kind, year, return_type))) = open
         && let Some((c, folder)) = page.clients.get(&id).cloned()
         && let (Some(audit), Some(reads)) = (page.audit.clone(), page.reads.clone())
     {
         let docs = client_pdfs(env.conn, env.root, &c.id);
-        page.window = Some(DeliverWindow::new(
+        let mut w = DeliverWindow::new(
             &ctx,
             &s,
             env.root.to_path_buf(),
@@ -2391,7 +2876,10 @@ pub fn page(ui: &mut egui::Ui, page: &mut DeliveriesPage, env: &mut crate::ui::b
             reads,
             docs,
             page.b2.clone(),
-        ));
+        );
+        // The card clicked, whatever its kind (PA-114).
+        w.focus(&kind, year, &return_type);
+        page.window = Some(w);
     }
     if let Some(w) = &mut page.window {
         w.show(&ctx, &s);
@@ -2473,7 +2961,7 @@ pub fn panel_line(read: Option<&Vec<Delivery>>, client_id: &str) -> Option<Strin
         .iter()
         .filter(|d| d.client_id == client_id && d.status == "open" && !d.is_agreement())
         .max_by(|a, b| a.created_at.cmp(&b.created_at))?;
-    Some(format!("Tax return delivery: {}", d.line()))
+    Some(format!("{}: {}", d.heading(), d.line()))
 }
 
 /// The client panel's lines for annual agreements: the newest agreement, and the monthly
@@ -2499,6 +2987,136 @@ pub fn agreement_lines(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    /// PA-114 (owner 2026-11-26, M1/M2): a financial statements card has no Form 8879 and no
+    /// package; its fee is one amount with the pay-first tick; a tax return keeps both.
+    #[test]
+    fn the_kind_decides_the_window_steps() {
+        use egui_kittest::HarnessBuilder;
+        use egui_kittest::kittest::Queryable;
+
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path().to_path_buf();
+        std::fs::create_dir_all(root.join("_Vibe")).unwrap();
+        // Nothing listens here: the window's read fails, which this test does not need.
+        let s = vf_portal::PortalSettings::new(
+            "cab",
+            "http://127.0.0.1:9",
+            "vpk_abcdefghijklmnopqrstuvwxyz0123456789",
+            0,
+        )
+        .unwrap()
+        .with_deliveries(true);
+        let ctx = egui::Context::default();
+        let mut w = DeliverWindow::new(
+            &ctx,
+            &s,
+            root,
+            ClientRef {
+                id: "c1".into(),
+                code: "1001".into(),
+                name: "Sample Trades LLC".into(),
+            },
+            None,
+            crate::ui::portal::AuditOut::new(std::sync::mpsc::channel().0),
+            ReadOut(std::sync::mpsc::channel().0),
+            Vec::new(),
+            Default::default(),
+        );
+        w.focus(delivery::KIND_STATEMENTS, 2025, "");
+        w.with_fee = true;
+        w.with_return = true;
+        assert_eq!(w.title, "Your 2025 financial statements");
+        assert_eq!(w.rt(), "Financial statements");
+        assert_eq!(w.fee_mode, "amount", "no pricing plan for statements");
+        let mut h = HarnessBuilder::default()
+            .with_max_steps(crate::ui::test_util::MAX_STEPS)
+            .with_size([1000.0, 1400.0])
+            .build_ui_state(
+                |ui, w: &mut DeliverWindow| {
+                    w.job = None;
+                    let _ = w.body(ui, false);
+                },
+                w,
+            );
+        h.run();
+        assert!(
+            h.query_by_label("Form 8879").is_none(),
+            "no 8879 for statements"
+        );
+        assert!(h.query_by_label("Package and fee").is_none());
+        assert!(h.query_by_label("Packages and add-ons").is_none());
+        h.get_by_label("Fee");
+        h.get_by_label("Financial statements PDF");
+        h.get_by_label(PAY_FIRST_WORDS);
+        h.get_by_label("+ Add another PDF");
+        // Named for a screen reader, and still saying what it shows.
+        {
+            use egui_kittest::kittest::NodeT;
+            let kind = h
+                .query_all_by_role(egui::accesskit::Role::ComboBox)
+                .find(|n| n.accesskit_node().label().as_deref() == Some("Kind"))
+                .expect("the Kind picker");
+            assert_eq!(
+                kind.accesskit_node().value().as_deref(),
+                Some("Financial statements")
+            );
+        }
+        h.get_by_label_contains("Financials\\2025\\Delivery");
+
+        h.state_mut().focus(delivery::KIND_RETURN, 2025, "1040");
+        h.run();
+        h.get_by_label("Form 8879");
+        h.get_by_label("Package and fee");
+        h.get_by_label("Tax return PDF");
+        h.get_by_label_contains("Income Tax\\2025\\Delivery");
+    }
+
+    #[test]
+    fn titles_types_and_an_older_portal() {
+        assert_eq!(
+            default_title("statements", 2025, "Financial statements"),
+            "Your 2025 financial statements"
+        );
+        assert_eq!(
+            default_title("document", 2025, "Payroll reports"),
+            "Your 2025 payroll reports"
+        );
+        assert_eq!(default_title("document", 2025, " "), "Your 2025 documents");
+        assert_eq!(
+            default_title("return", 2025, "1040"),
+            "Your 2025 tax return"
+        );
+        assert_eq!(rt_of("statements", "1040", ""), "Financial statements");
+        assert_eq!(
+            rt_of("document", "1040", " Payroll reports "),
+            "Payroll reports"
+        );
+        assert_eq!(rt_of("return", "1065", "x"), "1065");
+        assert_eq!(
+            fee_name("statements", 2025, "Financial statements"),
+            "2025 financial statements"
+        );
+        assert_eq!(fee_name("return", 2025, "1040"), "2025 Form 1040");
+        // An older portal: a statements card comes back as a tax return, or the lock unanswered.
+        let mut d: Delivery = serde_json::from_value(serde_json::json!({
+            "id": "d1", "clientId": "c1", "taxYear": 2025, "returnType": "1040",
+            "title": "Your 2025 tax return", "status": "open",
+            "locks": {"returnAfterLetters": true, "esignAfterLetters": true, "esignAfterFee": true},
+            "assignedStaffId": null, "remindedAt": null, "returnFile": null, "esignLink": null,
+            "createdAt": "2026-11-26T12:00:00.000Z", "completedAt": null, "cancelledAt": null,
+            "steps": []
+        }))
+        .unwrap();
+        assert_eq!(old_portal(&d, "statements", false), Some(NEEDS_PORTAL));
+        assert_eq!(old_portal(&d, "return", true), Some(NEEDS_PORTAL));
+        assert_eq!(old_portal(&d, "return", false), None);
+        d.kind = "statements".into();
+        d.locks.return_after_fee = Some(true);
+        assert_eq!(old_portal(&d, "statements", true), None);
+    }
+
     /// Intake's receipt and step rules follow the switches as Admin › Portal saves them (Q11):
     /// the settings file Vibe Files writes is the one Intake reads.
     #[test]
