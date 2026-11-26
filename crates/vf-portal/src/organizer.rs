@@ -207,11 +207,17 @@ fn same_code(a: &str, b: &str) -> bool {
     !n(a).is_empty() && n(a) == n(b)
 }
 
-/// A close name counts as agreeing only from this score (QA 2026-11-25: any score did, so one
-/// shared word, "John Smith" and "Smith Plumbing LLC", ticked the row for the business).
+/// With only an email to go on, a close name counts as agreeing from this score (QA
+/// 2026-11-25: any score did, so one shared word, "John Smith" and "Smith Plumbing LLC", ticked
+/// the row for the business). The tax software's ID is surer: any closeness confirms it, so a
+/// joint return's row naming one spouse still goes to the couple.
 const NEAR_AGREES: f64 = 0.8;
 
 fn names_agree(a: &str, b: &str) -> Option<Tier> {
+    namematch::compare(&Name::of(a, None), &Name::of(b, None)).map(|(_, t)| t)
+}
+
+fn names_agree_closely(a: &str, b: &str) -> Option<Tier> {
     match namematch::compare(&Name::of(a, None), &Name::of(b, None)) {
         Some((_, t @ (Tier::Exact | Tier::Rule))) => Some(t),
         Some((score, Tier::Near)) if score >= NEAR_AGREES => Some(Tier::Near),
@@ -322,7 +328,10 @@ fn match_one(
 
     // 2. An email on file.
     if !on_email.is_empty() {
-        let agreeing: Vec<&&ClientContacts> = on_email.iter().filter(|c| agrees(c)).collect();
+        let agreeing: Vec<&&ClientContacts> = on_email
+            .iter()
+            .filter(|c| names_agree_closely(&row.client, &c.name).is_some())
+            .collect();
         if on_email.len() == 1 && agreeing.len() == 1 {
             let c = on_email[0];
             return Matched {
@@ -523,6 +532,25 @@ mod tests {
     use vf_fs::contacts::{Invitee, Planned};
 
     const LINK: &str = "https://clients.stanfordtax.com/aaa-bbb-ccccc-dd/organizer/0000";
+
+    #[test]
+    fn an_id_match_ticks_with_the_name_written_another_way() {
+        let dir = vec![
+            client("c1", "1001", "Sample, Jordan", &[]),
+            client("c2", "1002", "Smith, John & Jane", &[]),
+            client("c3", "1003", "Doe, Pat & Lee", &[]),
+        ];
+        let rows = [
+            row("Jordan Sample", &[], "1001"),
+            row("John and Jane Smith", &[], "1002"),
+            row("Pat Doe", &[], "1003"),
+        ];
+        let m = match_rows(&rows, &dir, 2025);
+        let got: Vec<(By, bool)> = m.iter().map(|x| (x.by, x.ticked)).collect();
+        assert_eq!(got[0], (By::Id, true));
+        assert_eq!(got[1], (By::Id, true));
+        assert_eq!(got[2], (By::Id, true));
+    }
 
     #[test]
     fn one_shared_word_does_not_tick_and_an_empty_id_matches_nothing() {

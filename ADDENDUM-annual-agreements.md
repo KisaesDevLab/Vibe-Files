@@ -22,7 +22,7 @@ ADDENDUM-tax-return-delivery.md (PA-107 to PA-111, Vibe-Portal Addendum 02).
 | A5 | Terms and Conditions Addendum | **Appended to each letter**, covered by that letter's signature |
 | A6 | Sending | **Per client and in bulk** |
 | A7 | Firm's signature | **Partner's name printed** with `/s/`; no firm signing step |
-| A8 | Portal | **Same card**, agreement steps only (letters, package, pay); no return, no 8879 |
+| A8 | Portal | **Same card**, agreement steps only (letters, package, pay); no return, no 8879. QA 2026-11-25: no package step either (an agreement's fee is service lines, so it could never open; Vibe Files never sent one); the portal refuses it |
 | A9 | Monthly charge runs | **Until cancelled** (by staff, or by closing the engagement) |
 | A10 | Several services | **One agreement, fee lines**: a letter per service, signed together; each line one-time or monthly; one payment setup |
 | A11 | Agreement already signed when the return is delivered | Deliver tax return… **skips the letters and says so**; staff can still tick them |

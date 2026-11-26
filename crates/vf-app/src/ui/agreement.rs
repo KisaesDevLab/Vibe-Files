@@ -1718,6 +1718,8 @@ enum Bulk {
     Read(Result<(Vec<Delivery>, Vec<Subscription>, String), String>),
     Progress(String),
     Done(String),
+    /// Nothing was sent: a fill-in left, or the templates could not be read (said as an error).
+    Stopped(String),
 }
 
 pub struct AgreementsPage {
@@ -1919,6 +1921,11 @@ pub fn show_page(
                     page.stop = None;
                     page.loaded = false;
                     page.done = Some(p);
+                }
+                Bulk::Stopped(e) => {
+                    page.stop = None;
+                    page.progress = None;
+                    page.err = Some(e);
                 }
             }
         }
@@ -2227,7 +2234,7 @@ fn start_bulk(
         let plans = match plans_for(&root, &firm, year, ticked) {
             Ok(plans) => plans,
             Err(e) => {
-                let _ = tx.send(Bulk::Done(e));
+                let _ = tx.send(Bulk::Stopped(e));
                 ctx.request_repaint();
                 return;
             }
