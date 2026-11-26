@@ -129,9 +129,20 @@ impl PortalError {
                 "A second signer needs their own email or mobile number (their code goes there).".into()
             }
             Some("selection_signed") => {
-                "The client signed their selection, so the prices are fixed.".into()
+                "The client signed their selection, so the prices and package letters are fixed.".into()
             }
-            Some("fee_paid") => "A payment has started or been made, so the fee is fixed.".into(),
+            Some("fee_paid") => {
+                "A payment has started or been made, so the fee and its package letters are fixed.".into()
+            }
+            Some("no_package_step") => {
+                "Packages are chosen on their own step: tick Package to choose to offer them.".into()
+            }
+            Some("fee_needs_package") => {
+                "The fee is chosen as a package: change the fee before taking Package to choose away.".into()
+            }
+            Some("balance_waits") => {
+                "A bank payment is still clearing, so the client cannot pay the new amount yet.".into()
+            }
             Some("already_paid") => "It is paid already.".into(),
             Some("fee_mode") | Some("service_lines") => {
                 "The portal did not accept these fee lines: update Vibe Portal to 0.5.5 or later.".into()

@@ -310,7 +310,7 @@ fn once() -> String {
 pub struct FeePayment {
     pub provider: String,
     pub method: Option<String>,
-    /// `open`, `started`, `paid`, `failed`, `expired`.
+    /// `open`, `started`, `paid`, `failed`, `expired`, `wrong_amount` (portal 0.5.5).
     pub state: String,
     pub amount_cents: u64,
     #[serde(default)]
@@ -361,6 +361,11 @@ impl DeliveryFee {
                     (_, Some("bank")) => "by bank account".into(),
                     _ => "by card".into(),
                 }
+            ),
+            // Portal 0.5.5: a Stripe payment of another amount than the fee is kept apart.
+            Some(p) if p.state == "wrong_amount" => format!(
+                "Paid {}, not the fee: check it in Stripe",
+                crate::balance::money(p.amount_cents + p.card_fee_cents)
             ),
             Some(p) if p.state == "started" => "Bank payment started".into(),
             Some(p) if p.state == "failed" => "Bank payment failed: not paid".into(),
@@ -938,6 +943,21 @@ pub fn read_copies(root: &Path, folder_rel: &str) -> Vec<CopyLine> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_payment_of_the_wrong_amount_is_said() {
+        let fee: DeliveryFee = serde_json::from_str(
+            r#"{"mode":"amount","totalCents":35000,"selectionSignedAt":null,
+                "selectionSignedBy":null,"payments":[{"provider":"stripe","method":"card",
+                "state":"wrong_amount","amountCents":30000,"cardFeeCents":900,
+                "paidAt":"2026-11-25T12:00:00Z","startedAt":null,"failedAt":null}]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            fee.payment_words(),
+            "Paid $309.00, not the fee: check it in Stripe"
+        );
+    }
 
     #[test]
     fn the_firms_own_return_types() {
