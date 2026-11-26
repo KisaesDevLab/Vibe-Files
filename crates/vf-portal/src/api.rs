@@ -157,6 +157,9 @@ impl PortalError {
             Some("already_confirmed") => "Form 8879 was confirmed already.".into(),
             Some("invalid_url") => "The eSignature link must start with https://.".into(),
             Some("not_a_pdf") => "The letter is not a PDF the portal can read.".into(),
+            Some("invalid_blocks") => {
+                "The letter's signature places could not be read: open the template and save it again.".into()
+            }
             Some("payments_off") => {
                 "Payments are not set up on the portal (its Settings › Payments).".into()
             }

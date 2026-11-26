@@ -340,12 +340,23 @@ pub struct DeliveryFee {
 impl DeliveryFee {
     /// "Paid $1,642.68 by card", "Bank payment started", "Bank payment failed", "Not paid".
     pub fn payment_words(&self) -> String {
-        match self
+        // QA 2026-11-25: money taken for the wrong amount is said until the fee is paid, even when
+        // a later try failed (staff have it to sort out).
+        let latest = self
             .payments
             .iter()
             .rev()
-            .find(|p| p.state != "open" && p.state != "expired")
-        {
+            .find(|p| p.state != "open" && p.state != "expired");
+        let wrong = self
+            .payments
+            .iter()
+            .rev()
+            .find(|p| p.state == "wrong_amount");
+        let pick = match latest {
+            Some(p) if p.state == "paid" => Some(p),
+            _ => wrong.or(latest),
+        };
+        match pick {
             Some(p) if p.state == "paid" => format!(
                 "Paid {} {}",
                 crate::balance::money(p.amount_cents + p.card_fee_cents),
@@ -523,6 +534,9 @@ pub struct NewDelivery {
     pub locks: Locks,
     pub assigned_staff_id: Option<String>,
     pub notify: bool,
+    /// Not told at create: [`Portal::ready_delivery`] tells the client once the fee and letters
+    /// are attached (QA 2026-11-25; an older portal ignores it and tells at create).
+    pub hold: bool,
     pub remind_days: u32,
     /// An annual agreement (none: a tax return delivery).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -815,6 +829,20 @@ impl Portal {
     pub fn cancel_delivery(&self, id: &str) -> Result<Delivery> {
         self.post_empty::<One>(&format!("/deliveries/{id}/cancel"))
             .map(|r| r.delivery)
+    }
+
+    /// Tells the client a card held at create is ready, once (a second call tells nobody); how
+    /// many messages went. An older portal has no such route and told them at create: 0.
+    pub fn ready_delivery(&self, id: &str) -> Result<u32> {
+        #[derive(Deserialize)]
+        struct R {
+            told: u32,
+        }
+        match self.post_empty::<R>(&format!("/deliveries/{id}/ready")) {
+            Ok(r) => Ok(r.told),
+            Err(e) if e.status() == Some(404) => Ok(0),
+            Err(e) => Err(e),
+        }
     }
 
     /// Tells the client again; how many messages went.

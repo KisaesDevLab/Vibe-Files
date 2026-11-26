@@ -1561,6 +1561,8 @@ impl DeliverWindow {
                     },
                     assigned_staff_id: self.assigned.clone(),
                     notify,
+                    // QA 2026-11-25: told once the return, fee and letters are all on.
+                    hold: true,
                     remind_days: self.remind_days,
                     kind: None,
                     covers: Vec::new(),
@@ -1732,6 +1734,8 @@ impl DeliverWindow {
                             }
                             d = p.set_signers(&d.id, &signers)?;
                         }
+                        // Told now (once: a Send again after a stop tells nobody twice).
+                        p.ready_delivery(&d.id)?;
                         p.delivery(&d.id)
                     })();
                     Done::Saved(r.map(Box::new).map_err(|e| e.message()), what)
@@ -1973,7 +1977,10 @@ pub fn page(ui: &mut egui::Ui, page: &mut DeliveriesPage, env: &mut crate::ui::b
             .ok()
             .and_then(|c| vf_portal::settings::load(env.root, &c.cabinet_id));
         page.settings = Some((std::time::Instant::now(), s));
-        page.overdue = worklist::overdue_days(env.root);
+        // QA 2026-11-25: not while staff are changing it (the value they type would be lost).
+        if !page.overdue_dirty {
+            page.overdue = worklist::overdue_days(env.root);
+        }
     }
     let settings = page.settings.as_ref().and_then(|(_, s)| s.clone());
     let Some(s) = settings.filter(|s| s.deliveries) else {

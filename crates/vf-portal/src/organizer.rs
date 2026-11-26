@@ -203,11 +203,20 @@ pub struct Matched {
 
 fn same_code(a: &str, b: &str) -> bool {
     let n = |s: &str| s.trim().trim_start_matches('0').to_lowercase();
-    !a.trim().is_empty() && n(a) == n(b)
+    // QA 2026-11-25: an ID of "0" (or none) on either side matches nothing.
+    !n(a).is_empty() && n(a) == n(b)
 }
 
+/// A close name counts as agreeing only from this score (QA 2026-11-25: any score did, so one
+/// shared word, "John Smith" and "Smith Plumbing LLC", ticked the row for the business).
+const NEAR_AGREES: f64 = 0.8;
+
 fn names_agree(a: &str, b: &str) -> Option<Tier> {
-    namematch::compare(&Name::of(a, None), &Name::of(b, None)).map(|(_, t)| t)
+    match namematch::compare(&Name::of(a, None), &Name::of(b, None)) {
+        Some((_, t @ (Tier::Exact | Tier::Rule))) => Some(t),
+        Some((score, Tier::Near)) if score >= NEAR_AGREES => Some(Tier::Near),
+        _ => None,
+    }
 }
 
 /// Matches each row to a client of `dir` for `tax_year`.
@@ -479,7 +488,9 @@ impl Portal {
                 serde_json::json!({
                     "clientId": client_id,
                     "url": r.url,
-                    "returnType": r.return_type,
+                    // The portal takes 20 characters (QA 2026-11-25: one longer value refused
+                    // the whole import).
+                    "returnType": r.return_type.trim().chars().take(20).collect::<String>(),
                     "status": r.status,
                     "delivered": r.delivered,
                 })
@@ -512,6 +523,20 @@ mod tests {
     use vf_fs::contacts::{Invitee, Planned};
 
     const LINK: &str = "https://clients.stanfordtax.com/aaa-bbb-ccccc-dd/organizer/0000";
+
+    #[test]
+    fn one_shared_word_does_not_tick_and_an_empty_id_matches_nothing() {
+        let dir = vec![
+            client("c1", "2001", "Smith Plumbing LLC", &["john@example.test"]),
+            client("c2", "", "Pat Example", &[]),
+        ];
+        let m = match_rows(&[row("John Smith", &["john@example.test"], "")], &dir, 2025);
+        assert!(!m[0].ticked, "{:?}", m[0].by);
+        assert_ne!(m[0].by, By::EmailAndName);
+        let m = match_rows(&[row("Jordan Sample", &[], "0")], &dir, 2025);
+        assert_ne!(m[0].by, By::Id);
+        assert!(m[0].client.is_none());
+    }
 
     fn client(id: &str, code: &str, name: &str, emails: &[&str]) -> ClientContacts {
         ClientContacts {

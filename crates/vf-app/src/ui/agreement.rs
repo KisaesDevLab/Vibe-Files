@@ -149,7 +149,17 @@ impl Plan {
         let ctx = self.context();
         let mut left = Vec::new();
         let mut out = Vec::new();
+        let no_terms = vf_letters::store::terms(all).is_none();
         for t in &self.letters {
+            // QA 2026-11-25: a letter that puts the Terms and Conditions before its signatures is
+            // not sent without them (the paragraph was dropped silently).
+            if no_terms && vf_letters::wants_terms(t) {
+                left.push(format!(
+                    "{}: there is no Terms and Conditions template",
+                    t.name
+                ));
+                continue;
+            }
             let sent = vf_letters::store::as_sent(t, all);
             let f = sent.fill_ins(&ctx, None);
             if !f.is_empty() {
@@ -205,7 +215,9 @@ impl Plan {
     }
 }
 
-/// Sends an agreement: the card, its fee lines, its letters and who signs them.
+/// Sends an agreement: the card, its fee lines, its letters and who signs them. QA 2026-11-25:
+/// the card is held (nobody told) until everything is attached; when a step fails it is cancelled,
+/// so the client never hears of a card with no letters or fee and Send can simply be tried again.
 pub fn send(
     p: &vf_portal::Portal,
     plan: &Plan,
@@ -228,34 +240,44 @@ pub fn send(
         locks: Locks::default(),
         assigned_staff_id: plan.assigned.clone(),
         notify: plan.notify,
+        hold: true,
         remind_days: plan.remind_days,
         kind: Some("agreement".into()),
         covers: plan.services.iter().map(|s| s.service.clone()).collect(),
         return_year: Some(plan.year - 1),
     })?;
-    if pay {
-        d = p.set_fee(
-            &d.id,
-            "lines",
-            &vf_portal::agreement::fee_lines(&plan.services),
-        )?;
+    let id = d.id.clone();
+    let rest = (|| {
+        if pay {
+            d = p.set_fee(
+                &d.id,
+                "lines",
+                &vf_portal::agreement::fee_lines(&plan.services),
+            )?;
+        }
+        for (t, l) in laid {
+            let blocks = serde_json::to_string(&l.blocks).expect("serializes");
+            d = p.add_letter(
+                &d.id,
+                &t.name,
+                &t.doc_type,
+                &t.id,
+                t.version,
+                &blocks,
+                &l.pdf,
+            )?;
+        }
+        if !laid.is_empty() {
+            d = p.set_signers(&d.id, &plan.signers)?;
+        }
+        p.ready_delivery(&d.id)?;
+        Ok(d)
+    })();
+    if rest.is_err() {
+        // Best effort: a card left behind says so on the Deliveries page and can be cancelled.
+        let _ = p.cancel_delivery(&id);
     }
-    for (t, l) in laid {
-        let blocks = serde_json::to_string(&l.blocks).expect("serializes");
-        d = p.add_letter(
-            &d.id,
-            &t.name,
-            &t.doc_type,
-            &t.id,
-            t.version,
-            &blocks,
-            &l.pdf,
-        )?;
-    }
-    if !laid.is_empty() {
-        d = p.set_signers(&d.id, &plan.signers)?;
-    }
-    Ok(d)
+    rest
 }
 
 /// Who signs for a client, from its Portal contacts: the taxpayer and spouse, or one person
@@ -467,6 +489,11 @@ pub struct AgreementWindow {
     err: Option<String>,
     audit: AuditOut,
     reads: ReadOut,
+    /// The letter templates, read when the window opens and on Read again (QA 2026-11-25: they
+    /// were read from the cabinet every frame; a read error was taken as no templates).
+    templates: Result<Vec<Template>, String>,
+    /// The client's agreements were read: Send waits for it, so this year's is never missed.
+    loaded: bool,
 }
 
 impl AgreementWindow {
@@ -525,10 +552,26 @@ impl AgreementWindow {
             err: None,
             audit,
             reads,
+            templates: Err(String::new()),
+            loaded: false,
         };
+        w.read_templates();
+        w.firm_name = vf_fs::cabinet::read(&w.root)
+            .ok()
+            .and_then(|c| c.name)
+            .unwrap_or_default();
         w.offer_letters();
         w.load(ctx, s);
         w
+    }
+
+    fn read_templates(&mut self) {
+        self.templates = vf_letters::store::load_all(&self.root);
+    }
+
+    /// The templates as read (none when they could not be read; Send says why).
+    fn all(&self) -> &[Template] {
+        self.templates.as_deref().unwrap_or(&[])
     }
 
     /// The agreement's year (the walkthroughs).
@@ -572,7 +615,7 @@ impl AgreementWindow {
 
     /// The letters for the services ticked (what was ticked before stays ticked).
     fn offer_letters(&mut self) {
-        let all = vf_letters::store::load_all(&self.root).unwrap_or_default();
+        let all = self.all().to_vec();
         let before: Vec<(String, bool)> = self
             .letters
             .iter()
@@ -666,14 +709,7 @@ impl AgreementWindow {
             pay: self.pay,
             signers: self.signers.clone(),
             partner: self.partners.get(self.partner).cloned().unwrap_or_default(),
-            firm: if self.firm_name.is_empty() {
-                vf_fs::cabinet::read(&self.root)
-                    .ok()
-                    .and_then(|c| c.name)
-                    .unwrap_or_default()
-            } else {
-                self.firm_name.clone()
-            },
+            firm: self.firm_name.clone(),
             notify: self.notify,
             remind_days: self.remind_days,
             assigned: self.assigned.clone(),
@@ -689,7 +725,10 @@ impl AgreementWindow {
                 self.reads.send(ds.clone());
                 self.agreements = ds;
                 self.subscriptions = subs;
-                self.firm_name = firm;
+                self.loaded = true;
+                if !firm.is_empty() {
+                    self.firm_name = firm;
+                }
                 self.staff = staff;
                 if let Some(s) = self.live() {
                     self.monthly = dollars(s.monthly_cents);
@@ -787,6 +826,14 @@ impl AgreementWindow {
         if !sent && let Some(p) = &problem {
             ui.label(RichText::new(p).color(theme::ink_muted()));
         }
+        if !busy && !self.loaded {
+            ui.label(
+                RichText::new(
+                    "Send waits until the client's agreements are read: press Read again.",
+                )
+                .color(theme::ink_muted()),
+            );
+        }
         ui.separator();
         ui.horizontal_wrapped(|ui| {
             if ui
@@ -825,7 +872,7 @@ impl AgreementWindow {
             }
             if ui
                 .add_enabled(
-                    can && !sent && problem.is_none(),
+                    can && self.loaded && !sent && problem.is_none(),
                     widgets::primary_button("Send to client"),
                 )
                 .clicked()
@@ -1097,12 +1144,12 @@ impl AgreementWindow {
                 .small()
                 .color(theme::ink_muted()),
         );
-        let all = vf_letters::store::load_all(&self.root).unwrap_or_default();
+        let all: &[Template] = self.templates.as_deref().unwrap_or(&[]);
         let lctx = plan.as_ref().map(|p| p.context()).unwrap_or_default();
         for (t, on) in &mut self.letters {
             ui.horizontal_wrapped(|ui| {
                 ui.add_enabled(can && !sent, egui::Checkbox::new(on, t.name.as_str()));
-                let left = vf_letters::store::as_sent(t, &all).fill_ins(&lctx, None);
+                let left = vf_letters::store::as_sent(t, all).fill_ins(&lctx, None);
                 if !left.is_empty() {
                     ui.label(
                         RichText::new(format!("fill in: {}", left.join(", ")))
@@ -1160,7 +1207,10 @@ impl AgreementWindow {
         self.said = None;
         let s2 = s.clone();
         match act {
-            "reload" => self.load(ctx, s),
+            "reload" => {
+                self.read_templates();
+                self.load(ctx, s);
+            }
             "preview" => {
                 // Said as Send says it (review 2026-11-25: Preview did nothing, silently).
                 let plan = match self.plan() {
@@ -1170,7 +1220,7 @@ impl AgreementWindow {
                         return;
                     }
                 };
-                let all = vf_letters::store::load_all(&self.root).unwrap_or_default();
+                let all = self.all().to_vec();
                 let ctxs = plan.context();
                 let dir = crate::ui::letter_templates::preview_dir();
                 let _ = std::fs::create_dir_all(&dir);
@@ -1209,7 +1259,13 @@ impl AgreementWindow {
                     self.err = Some(p);
                     return;
                 }
-                let all = vf_letters::store::load_all(&self.root).unwrap_or_default();
+                let all = match &self.templates {
+                    Ok(all) => all.clone(),
+                    Err(e) => {
+                        self.err = Some(format!("The letter templates cannot be read: {e}"));
+                        return;
+                    }
+                };
                 let laid = match plan.laid(&all) {
                     Ok(l) => l,
                     Err(e) => {
@@ -1455,7 +1511,7 @@ impl EndEngagementWindow {
                         ui.label("Working…");
                     });
                 }
-                ui.label("Sends the engagement closure letter to the client's portal (to read, not to sign) and files it in the client's folder through Intake. Then the client's open service agreements are cancelled and their monthly charge is stopped.");
+                ui.label("Ends the engagement on the portal (the client's open service agreements are cancelled and their monthly charge is stopped), then sends the engagement closure letter to the client's portal (to read, not to sign) and files it in the client's folder through Intake.");
                 ui.add_space(4.0);
                 if self.template.is_none() {
                     ui.colored_label(theme::warn(), "There is no closure letter template.");
@@ -1545,8 +1601,13 @@ impl EndEngagementWindow {
             let root = self.root.clone();
             let client = self.client.clone();
             let audit = self.audit.clone();
+            let doc_type = self
+                .template
+                .as_ref()
+                .map(|t| t.doc_type.clone())
+                .unwrap_or_default();
             self.job = Some(spawn(ctx, move || {
-                end_engagement(&s2, &root, &client, &laid.pdf, &audit)
+                end_engagement(&s2, &root, &client, &laid.pdf, &doc_type, &audit)
             }));
         }
     }
@@ -1559,6 +1620,7 @@ fn end_engagement(
     root: &Path,
     client: &ClientRef,
     pdf: &[u8],
+    doc_type: &str,
     audit: &AuditOut,
 ) -> Result<String, String> {
     let p = core::client(s);
@@ -1593,7 +1655,8 @@ fn end_engagement(
     let not_sent = |e: String| {
         record(None);
         format!(
-            "The engagement was ended on the portal ({ended}), but the closure letter was not              shared: {e}. Press End engagement… again to share it (nothing more is ended)."
+            "The engagement was ended on the portal ({ended}), but the closure letter was not \
+             shared: {e}. Press End engagement… again to share it (nothing more is ended)."
         )
     };
     let tmp = vf_portal::inbox::tmp_dir(root);
@@ -1623,7 +1686,8 @@ fn end_engagement(
     })();
     let _ = std::fs::remove_file(&local);
     let file_id = shared.map_err(|e| not_sent(e.message()))?;
-    let filed = vf_portal::agreement::file_in_inbox(root, &client.name, &client.code, &name, pdf);
+    let filed =
+        vf_portal::agreement::file_in_inbox(root, &client.name, &client.code, &name, pdf, doc_type);
     record(Some(&file_id));
     let mut said = format!("The closure letter is on the client's portal. {ended}.");
     match filed {
@@ -2052,28 +2116,24 @@ fn clients_of(conn: &vf_core::db::Connection) -> Vec<ClientRef> {
     .unwrap_or_default()
 }
 
-/// A plan with its letters laid out, ready to send.
-type Ready = (Plan, Vec<(Template, vf_letters::Laid)>);
-
-/// Builds each ticked client's plan from their last agreement and sends them on a worker, a
-/// group at a time with a pause between, stopping when asked.
-fn start_bulk(
-    ctx: &egui::Context,
-    page: &mut AgreementsPage,
+/// Each ticked client's plan from their last agreement, laid out (on the bulk worker). A fill-in
+/// left in a template, or templates that cannot be read, stop the whole run before anything is
+/// sent (A17).
+fn plans_for(
     root: &Path,
-    s: &PortalSettings,
-    audit: &AuditOut,
+    firm: &str,
+    year: i32,
     ticked: Vec<Candidate>,
-) {
-    let all = vf_letters::store::load_all(root).unwrap_or_default();
+) -> Result<Vec<Result<Ready, String>>, String> {
+    let all = vf_letters::store::load_all(root)?;
     let partners = vf_letters::partners::load(root);
-    let firm = if page.firm.is_empty() {
+    let firm = if firm.is_empty() {
         vf_fs::cabinet::read(root)
             .ok()
             .and_then(|c| c.name)
             .unwrap_or_default()
     } else {
-        page.firm.clone()
+        firm.to_string()
     };
     let mut plans: Vec<Result<Ready, String>> = Vec::new();
     for c in ticked {
@@ -2088,8 +2148,8 @@ fn start_bulk(
         let mine = vf_fs::contacts::client_partner(root, &c.client.id);
         let plan = Plan {
             client: c.client.clone(),
-            year: page.year,
-            title: format!("Your {} service agreement", page.year),
+            year,
+            title: format!("Your {year} service agreement"),
             individual,
             letters: letters_for(&all, &names)
                 .into_iter()
@@ -2107,6 +2167,15 @@ fn start_bulk(
             remind_days: last.remind_days,
             assigned: last.assigned_staff_id.clone(),
         };
+        // QA 2026-11-25: letters that came out empty where the last agreement had some (a
+        // template removed or renamed) are not sent as a fee-only agreement.
+        if plan.letters.is_empty() && !last.letters.is_empty() {
+            plans.push(Err(format!(
+                "{} ({}): no letter template for its services (its last agreement had letters)",
+                c.client.name, c.client.code
+            )));
+            continue;
+        }
         let r = match plan.problem() {
             Some(p) => Err(format!("{} ({}): {p}", c.client.name, c.client.code)),
             None => plan
@@ -2116,15 +2185,32 @@ fn start_bulk(
         };
         plans.push(r);
     }
-    // A fill-in left in a template stops the whole run before anything is sent (A17).
     if let Some(Err(e)) = plans
         .iter()
         .find(|p| p.as_ref().is_err_and(|e| e.contains("Fill in")))
     {
-        page.err = Some(e.clone());
-        return;
+        return Err(e.clone());
     }
+    Ok(plans)
+}
+
+/// A plan with its letters laid out, ready to send.
+type Ready = (Plan, Vec<(Template, vf_letters::Laid)>);
+
+/// Builds each ticked client's plan from their last agreement and sends them on a worker, a
+/// group at a time with a pause between, stopping when asked.
+fn start_bulk(
+    ctx: &egui::Context,
+    page: &mut AgreementsPage,
+    root: &Path,
+    s: &PortalSettings,
+    audit: &AuditOut,
+    ticked: Vec<Candidate>,
+) {
     page.err = None;
+    let firm = page.firm.clone();
+    let year = page.year;
+    let root = root.to_path_buf();
     let stop = Arc::new(AtomicBool::new(false));
     page.stop = Some(stop.clone());
     let (tx, rx) = std::sync::mpsc::channel();
@@ -2136,6 +2222,16 @@ fn start_bulk(
     let ctx = ctx.clone();
     std::thread::spawn(move || {
         let p = core::client(&s2);
+        // QA 2026-11-25: built here, not on the window's thread; templates that cannot be read
+        // stop the run (they were taken as none, and fee-only agreements went out).
+        let plans = match plans_for(&root, &firm, year, ticked) {
+            Ok(plans) => plans,
+            Err(e) => {
+                let _ = tx.send(Bulk::Done(e));
+                ctx.request_repaint();
+                return;
+            }
+        };
         let (mut sent, mut problems) = (0usize, Vec::new());
         let total = plans.len();
         for (i, r) in plans.into_iter().enumerate() {
@@ -2153,6 +2249,27 @@ fn start_bulk(
                     break;
                 }
             }
+            // QA 2026-11-25: asked of the portal for this client (the page's list holds the newest
+            // 500 cards only), so a client is never asked to sign and pay twice in a year.
+            let r = r.and_then(|(plan, laid)| match p.agreements(&plan.client.id) {
+                Ok(had)
+                    if had
+                        .iter()
+                        .any(|d| d.tax_year == plan.year && d.status != "cancelled") =>
+                {
+                    Err(format!(
+                        "{} ({}): already has a {} agreement",
+                        plan.client.name, plan.client.code, plan.year
+                    ))
+                }
+                Ok(_) => Ok((plan, laid)),
+                Err(e) => Err(format!(
+                    "{} ({}): {}",
+                    plan.client.name,
+                    plan.client.code,
+                    e.message()
+                )),
+            });
             match r {
                 Ok((plan, laid)) => match send(&p, &plan, &laid) {
                     Ok(d) => {
@@ -2228,6 +2345,28 @@ mod tests {
             remind_days: 7,
             assigned: None,
         }
+    }
+
+    #[test]
+    fn a_letter_asking_for_the_terms_is_not_sent_without_them() {
+        let d = tempfile::tempdir().unwrap();
+        let root = d.path();
+        std::fs::create_dir_all(root.join("_Vibe")).unwrap();
+        vf_letters::store::seed_if_missing(root).unwrap();
+        let services = vec![ServiceLine {
+            service: "Bookkeeping".into(),
+            once_cents: 0,
+            month_cents: 45_000,
+        }];
+        let p = plan(root, false, services, &["service-bookkeeping"]);
+        assert!(p.letters.iter().all(vf_letters::wants_terms));
+        let none: Vec<Template> = vf_letters::store::load_all(root)
+            .unwrap()
+            .into_iter()
+            .filter(|t| t.kind != vf_letters::TERMS)
+            .collect();
+        let e = p.laid(&none).unwrap_err();
+        assert!(e.contains("no Terms and Conditions template"), "{e}");
     }
 
     #[test]

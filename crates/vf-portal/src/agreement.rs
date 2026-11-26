@@ -136,8 +136,28 @@ pub fn file_in_inbox(
     client_code: &str,
     file_name: &str,
     pdf: &[u8],
+    doc_type: &str,
 ) -> std::result::Result<std::path::PathBuf, String> {
+    use sha2::{Digest, Sha256};
     use std::io::Write;
+    let name = crate::inbox::inbox_name(client_name, client_code, file_name);
+    // QA 2026-11-25: its doc type (the closure template's) noted for Intake before it lands, as
+    // the portal's own files are, so Intake files it rather than leaving it to be sorted.
+    if let Some(id) = vf_fs::doctypes::load(root)
+        .ok()
+        .flatten()
+        .and_then(|types| vf_fs::doctypes::id_by_name(&types, doc_type))
+    {
+        let sha: String = Sha256::digest(pdf)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        let mut h = vf_fs::hints::Hint::new(&sha, &name, "portal_closure", "portal");
+        h.source = Some("firm".into());
+        h.tax_year = file_name.get(..4).and_then(|y| y.parse().ok());
+        h.doc_type = Some(id);
+        vf_fs::hints::append(root, &h)?;
+    }
     let tmp = crate::inbox::tmp_dir(root);
     std::fs::create_dir_all(&tmp).map_err(|e| e.to_string())?;
     let part = tmp.join(format!("closure-{}.part", crate::inbox::random_tag()));
@@ -146,10 +166,7 @@ pub fn file_in_inbox(
         .create_new(true)
         .open(&part)
         .and_then(|mut f| f.write_all(pdf).and_then(|()| f.sync_all()))
-        .and_then(|()| {
-            let name = crate::inbox::inbox_name(client_name, client_code, file_name);
-            crate::inbox::move_into(&part, &crate::inbox::inbox(root), &name)
-        })
+        .and_then(|()| crate::inbox::move_into(&part, &crate::inbox::inbox(root), &name))
         .map_err(|e| {
             let _ = std::fs::remove_file(&part);
             e.to_string()

@@ -434,6 +434,25 @@ impl ImportWindow {
         self.find = vec![String::new(); self.rows.len()];
     }
 
+    /// Matched again for another tax year; a client staff chose and a tick they set stay where
+    /// the row could be sent before (QA 2026-11-25: changing the year lost them).
+    fn rematch_keeping_picks(&mut self) {
+        let before: Vec<(bool, Option<String>, bool)> = self
+            .rows
+            .iter()
+            .zip(&self.choice)
+            .map(|(m, c)| (m.refused, c.clone(), m.ticked))
+            .collect();
+        self.rematch();
+        for (i, (refused, choice, ticked)) in before.into_iter().enumerate() {
+            if refused || i >= self.rows.len() || self.rows[i].refused {
+                continue;
+            }
+            self.choice[i] = choice;
+            self.rows[i].ticked = ticked;
+        }
+    }
+
     fn show(
         &mut self,
         ctx: &egui::Context,
@@ -497,7 +516,7 @@ impl ImportWindow {
                     let before = self.year;
                     ui.add(egui::DragValue::new(&mut self.year).range(2000..=2100));
                     if self.year != before {
-                        self.rematch();
+                        self.rematch_keeping_picks();
                     }
                 });
                 let count = |b: By| self.rows.iter().filter(|m| m.by == b && !m.refused).count();

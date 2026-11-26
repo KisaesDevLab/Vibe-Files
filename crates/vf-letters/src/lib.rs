@@ -268,6 +268,14 @@ pub fn fill_ins_in(s: &str) -> Vec<String> {
     out
 }
 
+/// The letter has a `{Terms and Conditions}` paragraph (the firm's Terms go there).
+pub fn wants_terms(t: &Template) -> bool {
+    let marker = format!("{{{TERMS_FIELD}}}");
+    t.blocks
+        .iter()
+        .any(|b| matches!(b, Block::Paragraph { text, .. } if text.trim() == marker))
+}
+
 /// The letter with its `{Terms and Conditions}` paragraph replaced by the Terms and Conditions
 /// template's blocks (its signature blocks left out), or removed when there is none.
 pub fn with_terms(t: &Template, terms: Option<&Template>) -> Template {

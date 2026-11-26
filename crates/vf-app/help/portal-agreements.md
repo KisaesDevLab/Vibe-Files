@@ -15,7 +15,7 @@ Before the first agreement:
 
 Vibe Files comes with the AICPA Annual Tax Compliance Kit's engagement letters (Forms 1040, 1120, 1120-S, 1065, 1041, 990, 990-PF, 709, 706, 5500, FinCEN 114, amended returns, tax projections, tax consulting, examination representation), its Terms and Conditions Addendum and its engagement closure letter, and letters for bookkeeping, payroll and advisory services. All are marked **Sample** until you save your own text: have your attorney review them.
 
-Each letter says `{Terms and Conditions}` where the firm's Terms and Conditions go, so one signature covers both. Edit the Terms once and every letter uses them.
+Each letter says `{Terms and Conditions}` where the firm's Terms and Conditions go, so one signature covers both. Edit the Terms once and every letter uses them. A letter that asks for them is not sent while there is no Terms and Conditions template.
 
 The kit's fill-ins, such as `[X]%`, `[State]` or `[Frequency]`, are highlighted in yellow. **Vibe Files never sends a letter that still has one**: it names the letter and the fill-in. Fill them in the template (or turn a paragraph off with **Only for**).
 
@@ -39,9 +39,9 @@ The client's home page then shows **Your monthly payment** with **Update payment
 
 ## Next year
 
-Send next year's agreement as before. When the client signs it, their monthly payment changes to the new amount from the next charge; nothing is set up again. Only new one-time fees are paid on the card.
+Send next year's agreement as before. When the client signs it (or, with no letters, when it is sent), their monthly payment changes to the new amount from the next charge; nothing is set up again. Once a letter is signed, the agreement's fees cannot be changed. Only new one-time fees are paid on the card.
 
-**Admin › Portal › Agreements** sends next year's agreements to many clients at once, each from their last agreement. Tick the clients (**Search** narrows the list), choose the group size and pause, and press **Send**; **Stop** ends a run. A letter with a fill-in left stops the run before anything is sent.
+**Admin › Portal › Agreements** sends next year's agreements to many clients at once, each from their last agreement. Tick the clients (**Search** narrows the list), choose the group size and pause, and press **Send**; **Stop** ends a run. A letter with a fill-in left stops the run before anything is sent. A client who already has an agreement for the year, or whose services now have no letter template, is skipped and named in the message at the end.
 
 ## Changing or stopping the monthly payment
 
@@ -49,7 +49,7 @@ In the client's **Service agreement…**: **Change from the next charge** sets a
 
 ## Ending an engagement
 
-**End engagement…** in the client's details sends the engagement closure letter. Type the letter's fill-ins for this client (the engagement's name, dates, your phone), press **Preview…**, then **Send and end engagement…**. The letter is shared with the client's people on the portal, to read, and put in the Portal inbox for Intake to file. The client's open agreements are cancelled and the monthly payment stops.
+**End engagement…** in the client's details sends the engagement closure letter. Type the letter's fill-ins for this client (the engagement's name, dates, your phone), press **Preview…**, then **Send and end engagement…**. The client's open agreements are cancelled and the monthly payment stops first; then the letter is shared with the client's people on the portal, to read, and put in the Portal inbox for Intake to file.
 
 ## Tax return delivery
 
