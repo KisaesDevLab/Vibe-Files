@@ -134,6 +134,20 @@ createServer((req, res) => {
       res.end(JSON.stringify(s));
       return;
     }
+    // Expire (End engagement, Cancel, a new price): an open session can no longer be paid; a
+    // completed one is refused, as Stripe does.
+    const ex = /^\/v1\/checkout\/sessions\/(.+)\/expire$/.exec(url.pathname);
+    if (req.method === 'POST' && ex) {
+      const s = sessions.get(decodeURIComponent(ex[1]));
+      if (s && s.status === 'open') {
+        s.status = 'expired';
+        res.end(JSON.stringify(s));
+      } else {
+        res.statusCode = 400;
+        res.end(JSON.stringify({ error: { message: 'Only open sessions can be expired' } }));
+      }
+      return;
+    }
     const m = /^\/v1\/checkout\/sessions\/(.+)$/.exec(url.pathname);
     if (req.method === 'GET' && m) {
       const s = sessions.get(decodeURIComponent(m[1]));
