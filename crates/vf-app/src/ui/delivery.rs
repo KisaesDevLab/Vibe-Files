@@ -1899,6 +1899,19 @@ pub struct DeliveriesPage {
     pub b2: crate::ui::portal::B2First,
     /// The portal settings, read again every 30 s (not every frame; load test 2026-11-24).
     settings: Option<(std::time::Instant, Option<vf_portal::PortalSettings>)>,
+    /// Remind ticked (owner 2026-11-26): the ticked cards' ids, the confirm, the run.
+    ticked: std::collections::HashSet<String>,
+    confirm: bool,
+    remind: Option<Receiver<RemindMsg>>,
+    remind_stop: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    remind_progress: Option<String>,
+    remind_done: Option<String>,
+}
+
+/// From the Remind ticked worker.
+enum RemindMsg {
+    Progress(usize, usize),
+    Done(String),
 }
 
 impl DeliveriesPage {
@@ -2007,6 +2020,25 @@ pub fn page(ui: &mut egui::Ui, page: &mut DeliveriesPage, env: &mut crate::ui::b
             Err(e) => page.err = Some(e),
         }
     }
+    while let Some(rx) = &page.remind
+        && let Ok(m) = rx.try_recv()
+    {
+        match m {
+            RemindMsg::Progress(i, n) => {
+                page.remind_progress = Some(format!("Reminding {i} of {n}…"));
+            }
+            RemindMsg::Done(words) => {
+                page.remind = None;
+                page.remind_stop = None;
+                page.remind_progress = None;
+                page.remind_done = Some(words);
+                page.ticked.clear();
+                // Read again: each card's "reminded" time changed.
+                page.loaded = false;
+            }
+        }
+    }
+    let reminding = page.remind.is_some();
     if !page.loaded {
         page.loaded = true;
         page.clients = client_rows(env);
@@ -2097,9 +2129,17 @@ pub fn page(ui: &mut egui::Ui, page: &mut DeliveriesPage, env: &mut crate::ui::b
         // Only the rows on screen are drawn (500 open deliveries in a season: load test
         // 2026-11-24).
         use egui_extras::{Column, TableBuilder};
+        // The ticks kept are those still listed and still waiting on the client.
+        let listed: std::collections::HashSet<&str> = rows
+            .iter()
+            .filter(|r| worklist::not_remindable(r.d).is_none())
+            .map(|r| r.d.id.as_str())
+            .collect();
+        page.ticked.retain(|id| listed.contains(id.as_str()));
         TableBuilder::new(ui)
             .striped(true)
             .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
+            .column(Column::exact(24.0))
             .column(
                 Column::initial(300.0)
                     .at_least(160.0)
@@ -2113,6 +2153,7 @@ pub fn page(ui: &mut egui::Ui, page: &mut DeliveriesPage, env: &mut crate::ui::b
             .column(Column::remainder().at_least(120.0).clip(true))
             .max_scroll_height(f32::INFINITY)
             .header(22.0, |mut h| {
+                h.col(|_| {});
                 for name in [
                     "Client",
                     "Year",
@@ -2131,6 +2172,25 @@ pub fn page(ui: &mut egui::Ui, page: &mut DeliveriesPage, env: &mut crate::ui::b
                     let r = rows[row.index()];
                     let n = days[row.index()];
                     let d = r.d;
+                    row.col(|ui| {
+                        let why = worklist::not_remindable(d);
+                        let mut on = page.ticked.contains(&d.id);
+                        let resp = ui.add_enabled(
+                            why.is_none() && !reminding,
+                            egui::Checkbox::without_text(&mut on),
+                        );
+                        let resp = widgets::named(resp, "Tick to remind");
+                        if let Some(w) = why {
+                            resp.on_disabled_hover_text(format!("Can't remind: {w}"));
+                        } else if resp.changed() {
+                            if on {
+                                page.ticked.insert(d.id.clone());
+                            } else {
+                                page.ticked.remove(&d.id);
+                            }
+                            page.confirm = false;
+                        }
+                    });
                     row.col(|ui| {
                         let name = page
                             .clients
@@ -2195,6 +2255,103 @@ pub fn page(ui: &mut egui::Ui, page: &mut DeliveriesPage, env: &mut crate::ui::b
                     });
                 });
             });
+        // Remind ticked (owner 2026-11-26): the portal's own reminder for each, one at a time.
+        let names: HashMap<&str, String> = rows
+            .iter()
+            .map(|r| {
+                let who = page
+                    .clients
+                    .get(&r.d.client_id)
+                    .map(|(c, _)| format!("{} ({})", c.name, c.code))
+                    .unwrap_or_else(|| "(not in this cabinet)".into());
+                (r.d.id.as_str(), who)
+            })
+            .collect();
+        ui.horizontal_wrapped(|ui| {
+            if ui
+                .add_enabled(!reminding, egui::Button::new("Tick all shown"))
+                .on_hover_text("Every row listed whose step waits on the client")
+                .clicked()
+            {
+                page.ticked = listed.iter().map(|s| s.to_string()).collect();
+                page.confirm = false;
+            }
+            if ui
+                .add_enabled(!reminding, egui::Button::new("Tick waiting too long"))
+                .on_hover_text(format!(
+                    "Rows waiting over {} days on the client",
+                    page.overdue
+                ))
+                .clicked()
+            {
+                page.ticked = rows
+                    .iter()
+                    .zip(&days)
+                    .filter(|(r, n)| {
+                        r.overdue(**n, page.overdue) && worklist::not_remindable(r.d).is_none()
+                    })
+                    .map(|(r, _)| r.d.id.clone())
+                    .collect();
+                page.confirm = false;
+            }
+            if !page.ticked.is_empty()
+                && ui
+                    .add_enabled(!reminding, egui::Button::new("Clear"))
+                    .clicked()
+            {
+                page.ticked.clear();
+                page.confirm = false;
+            }
+            let n = page.ticked.len();
+            ui.label(format!("{n} ticked"));
+            if reminding {
+                if let Some(p) = &page.remind_progress {
+                    ui.spinner();
+                    ui.label(p);
+                }
+                if ui.button("Stop").clicked()
+                    && let Some(f) = &page.remind_stop
+                {
+                    f.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+            } else if page.confirm {
+                ui.label(format!(
+                    "Remind {n} client{} by email or text now?",
+                    if n == 1 { "" } else { "s" }
+                ));
+                if ui.add(widgets::primary_button("Remind")).clicked() {
+                    page.confirm = false;
+                    page.remind_done = None;
+                    let jobs: Vec<(String, String, String)> = list
+                        .iter()
+                        .filter(|d| page.ticked.contains(&d.id))
+                        .map(|d| {
+                            let who = names.get(d.id.as_str()).cloned().unwrap_or_default();
+                            (d.id.clone(), d.client_id.clone(), who)
+                        })
+                        .collect();
+                    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                    page.remind_stop = Some(stop.clone());
+                    page.remind_progress = Some(format!("Reminding 1 of {}…", jobs.len()));
+                    page.remind = Some(remind_ticked(&ctx, &s, page.audit.clone(), jobs, stop));
+                }
+                if ui.button("Cancel").clicked() {
+                    page.confirm = false;
+                }
+            } else if ui
+                .add_enabled(n > 0, widgets::primary_button("Remind ticked"))
+                .on_hover_text(
+                    "Each ticked client is told again by email or text, as Remind now does \
+                     (3 times a day at most for one card).",
+                )
+                .clicked()
+            {
+                page.confirm = true;
+            }
+        });
+        if let Some(d) = &page.remind_done {
+            ui.label(widgets::caption(d));
+        }
     }
     if let Some((id, true)) = &open
         && let Some((c, _)) = page.clients.get(id).cloned()
@@ -2239,6 +2396,52 @@ pub fn page(ui: &mut egui::Ui, page: &mut DeliveriesPage, env: &mut crate::ui::b
             page.loaded = false;
         }
     }
+}
+
+/// Remind ticked's worker: each card's reminder in turn (Stop ends the run), one audit row each.
+fn remind_ticked(
+    ctx: &egui::Context,
+    s: &vf_portal::PortalSettings,
+    audit: Option<AuditOut>,
+    jobs: Vec<(String, String, String)>,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+) -> Receiver<RemindMsg> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let ctx = ctx.clone();
+    let s = s.clone();
+    std::thread::spawn(move || {
+        let p = core::client(&s);
+        let n = jobs.len();
+        let mut results = Vec::new();
+        for (i, (id, client_id, who)) in jobs.into_iter().enumerate() {
+            if stop.load(std::sync::atomic::Ordering::Relaxed) {
+                break;
+            }
+            let _ = tx.send(RemindMsg::Progress(i + 1, n));
+            ctx.request_repaint();
+            let r = match p.remind_delivery(&id) {
+                Ok(0) => worklist::Reminded::Nobody,
+                Ok(told) => worklist::Reminded::Told(told),
+                Err(e) if e.code() == Some("too_many_requests") => worklist::Reminded::TooOften,
+                Err(e) => worklist::Reminded::Failed(e.message()),
+            };
+            if let (Some(a), worklist::Reminded::Told(told)) = (&audit, &r) {
+                a.send(AuditEntry::new(
+                    "portal_delivery_remind",
+                    None,
+                    serde_json::json!({ "client_id": client_id, "delivery_id": id, "told": told }),
+                ));
+            }
+            results.push((who, r));
+        }
+        let mut words = worklist::remind_words(&results);
+        if results.len() < n {
+            words.push_str(&format!(" Stopped: {} not tried.", n - results.len()));
+        }
+        let _ = tx.send(RemindMsg::Done(words));
+        ctx.request_repaint();
+    });
+    rx
 }
 
 /// The client panel's line for one client, from the deliveries last read on this PC.

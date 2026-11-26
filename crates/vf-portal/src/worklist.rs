@@ -146,9 +146,108 @@ pub fn rows<'a>(
         .collect()
 }
 
+/// Why a row cannot be reminded (Remind ticked, owner 2026-11-26), or `None` when it can: an
+/// open card whose waiting step is with the client.
+pub fn not_remindable(d: &Delivery) -> Option<&'static str> {
+    if d.status != "open" {
+        return Some("finished");
+    }
+    match d.waiting() {
+        Some(s) if s.state == "open" => None,
+        Some(s) if s.state == "waiting" => Some("waiting for you to confirm, not the client"),
+        _ => Some("nothing waits on the client"),
+    }
+}
+
+/// What came of reminding one client.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Reminded {
+    /// This many messages went.
+    Told(u32),
+    /// Nobody to tell: no one has a portal login for the client yet.
+    Nobody,
+    /// The portal refused: reminded 3 times today already.
+    TooOften,
+    /// Any other error, in words.
+    Failed(String),
+}
+
+/// The line after Remind ticked: "Reminded 2 clients (3 messages). Not reminded: …".
+pub fn remind_words(results: &[(String, Reminded)]) -> String {
+    let told: Vec<u32> = results
+        .iter()
+        .filter_map(|(_, r)| match r {
+            Reminded::Told(n) => Some(*n),
+            _ => None,
+        })
+        .collect();
+    let msgs: u32 = told.iter().sum();
+    let mut out = format!(
+        "Reminded {} client{} ({} message{}).",
+        told.len(),
+        if told.len() == 1 { "" } else { "s" },
+        msgs,
+        if msgs == 1 { "" } else { "s" },
+    );
+    let not: Vec<String> = results
+        .iter()
+        .filter_map(|(who, r)| match r {
+            Reminded::Told(_) => None,
+            Reminded::Nobody => Some(format!("{who} (nobody on the portal yet)")),
+            Reminded::TooOften => Some(format!("{who} (reminded 3 times today already)")),
+            Reminded::Failed(e) => Some(format!("{who} ({e})")),
+        })
+        .collect();
+    out.push_str(" Not reminded: ");
+    out.push_str(&if not.is_empty() {
+        "none.".to_string()
+    } else {
+        format!("{}.", not.join("; "))
+    });
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_card_waiting_on_the_client_is_reminded() {
+        assert_eq!(
+            not_remindable(&d("1", "c", "return", 2025, "open", "fee")),
+            None
+        );
+        assert_eq!(
+            not_remindable(&d("2", "c", "return", 2025, "complete", "")),
+            Some("finished")
+        );
+        let mut w = d("3", "c", "return", 2025, "open", "fee");
+        w.steps.iter_mut().find(|s| s.kind == "fee").unwrap().state = "waiting".into();
+        assert_eq!(
+            not_remindable(&w),
+            Some("waiting for you to confirm, not the client")
+        );
+    }
+
+    #[test]
+    fn remind_words_say_who_was_and_was_not_reminded() {
+        assert_eq!(
+            remind_words(&[
+                ("Sample, Jordan (1042)".into(), Reminded::Told(2)),
+                ("Doe, Pat (1077)".into(), Reminded::Told(1)),
+            ]),
+            "Reminded 2 clients (3 messages). Not reminded: none."
+        );
+        assert_eq!(
+            remind_words(&[
+                ("A (1)".into(), Reminded::Told(1)),
+                ("B (2)".into(), Reminded::Nobody),
+                ("C (3)".into(), Reminded::TooOften),
+            ]),
+            "Reminded 1 client (1 message). Not reminded: B (2) (nobody on the portal yet); \
+             C (3) (reminded 3 times today already)."
+        );
+    }
 
     fn d(id: &str, client: &str, kind: &str, year: i32, status: &str, waiting: &str) -> Delivery {
         let step = |k: &str, state: &str| {
