@@ -506,6 +506,53 @@ try {
     await sleep(600);
     await shot('73-statements-both-opened');
     note(`After both: ${(await js(`document.body.innerText`)).match(/\d of \d done/)?.[0] ?? 'no count shown'}`);
+  } else if (PHASE === 'revise-pay') {
+    // Owner 2026-11-26: the client views the return and pays the fee by card.
+    const STRIPE = SECOND;
+    const inv = await mailWith('/invite', 0);
+    await go(linkIn(inv.body, '/invite'));
+    await until(`!!__byText('button', 'Accept and sign in')`, 'invitation page');
+    await click('Accept and sign in');
+    await until(`location.pathname === '/'`, 'home after accepting');
+    await until(`document.body.innerText.includes('Your 2025 tax return')`, 'the tax return card');
+    await sleep(800);
+    await shot('90-revise-card');
+    const viewed = await js(`(async () => { const a = [...document.querySelectorAll('a')].find((e) => e.textContent.trim() === 'View'); if (!a) return 0; const r = await fetch(a.href); return r.status; })()`);
+    note(`View answered ${viewed}`);
+    if (viewed !== 200) throw new Error(`View answered ${viewed}`);
+    await go(`${BASE}/`);
+    await payOnStripe(STRIPE, 'Pay by card', true);
+    await until(`!!__byText('a', 'Receipt')`, 'the receipt link');
+    await sleep(600);
+    await shot('91-revise-paid');
+    const mine = await js(`fetch('/api/portal/deliveries').then((r) => r.json())`);
+    const d = mine.deliveries[0];
+    note(`Paid: steps ${d.steps.map((s) => `${s.kind} ${s.state}`).join(', ')}`);
+  } else if (PHASE === 'revise-view') {
+    // Signs in again: the card says Updated, the fee is still paid, the corrected return opens.
+    const start = Date.now() / 1000;
+    await go(`${BASE}/login`);
+    await until(`!!document.querySelector('input')`, 'the sign-in page');
+    await js(`__type(document.querySelector('input'), ${JSON.stringify(EMAIL)})`);
+    await click('Continue');
+    const m = await mailWith('/auth/verify', start);
+    await go(linkIn(m.body, '/auth/verify'));
+    await until(`!!__byText('button', 'Sign in')`, 'the sign-in link');
+    await click('Sign in');
+    await until(`location.pathname === '/'`, 'home after signing in');
+    await until(`document.body.innerText.includes('Updated')`, 'the Updated badge', 20000);
+    await sleep(800);
+    await shot('92-revise-updated');
+    const text = await js(`document.body.innerText`);
+    const pay = await js(`[...document.querySelectorAll('button')].some((b) => b.textContent.trim().startsWith('Pay '))`);
+    const mine = await js(`fetch('/api/portal/deliveries').then((r) => r.json())`);
+    const d = mine.deliveries[0];
+    const fee = d.steps.find((s) => s.kind === 'fee');
+    note(`Updated shown: ${text.includes('Updated')}; a Pay button: ${pay}; fee step ${fee?.state}; the return: ${d.returnFile?.name}`);
+    if (pay || fee?.state !== 'done') throw new Error('the fee is asked for again');
+    const viewed = await js(`(async () => { const a = [...document.querySelectorAll('a')].find((e) => e.textContent.trim() === 'View'); if (!a) return 0; const r = await fetch(a.href); return r.status; })()`);
+    note(`View of the corrected return answered ${viewed}`);
+    if (viewed !== 200) throw new Error(`View answered ${viewed}`);
   } else if (PHASE === 'held') {
     // A balance posted with Hold the client's files: listed, held, Pay now; paid, they open.
     const STRIPE = SECOND;

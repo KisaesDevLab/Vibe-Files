@@ -1289,6 +1289,395 @@ mod tests {
         std::fs::write(out.join("steps.txt"), steps.join("\n")).unwrap();
     }
 
+    /// Owner 2026-11-26 walkthrough against a real Vibe Portal and the stand-in Stripe: a tax
+    /// return delivered with a fee; the client views the return and pays; a change is found, so
+    /// a corrected return is sent as revised on the same card (the fee stays paid, the client
+    /// sees Updated and opens it); Form 8879 is signed on paper; the finished card shows
+    /// read-only, Send another starts with Fee unticked, and Revise the return… opens the
+    /// finished card again with its fee paid. Same variables as `fee_walkthrough`.
+    #[test]
+    #[ignore = "needs a running portal"]
+    fn revise_walkthrough() {
+        use egui_kittest::kittest::NodeT;
+        let (Ok(url), Ok(key), Ok(log), Ok(client_js), Ok(stripe), Ok(out)) = (
+            std::env::var("VF_WALK_URL"),
+            std::env::var("VF_WALK_KEY"),
+            std::env::var("VF_WALK_LOG"),
+            std::env::var("VF_WALK_CLIENT"),
+            std::env::var("VF_WALK_STRIPE"),
+            std::env::var("VF_WALK_DIR"),
+        ) else {
+            return;
+        };
+        let out = std::path::PathBuf::from(out);
+        std::fs::create_dir_all(&out).unwrap();
+        let mut steps: Vec<String> = Vec::new();
+        let mut note = |s: String| {
+            eprintln!("{s}");
+            steps.push(s);
+        };
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path().join("Clients");
+        vf_fixtures::generate(&root, 3).unwrap();
+        crate::ui::test_util::pdfium_first();
+        const FIRST: &str = "2025 Form 1040 Return - Sample.pdf";
+        const FIXED: &str = "2025 Form 1040 Return - Sample corrected.pdf";
+        const AGAIN: &str = "2025 Form 1040 Return - Sample second correction.pdf";
+        for e in std::fs::read_dir(&root).unwrap().flatten() {
+            let name = e.file_name().to_string_lossy().into_owned();
+            if e.path().is_dir() && !name.starts_with('_') {
+                let dir = e.path().join("Income Tax").join("2025");
+                std::fs::create_dir_all(&dir).unwrap();
+                crate::ui::test_util::write_lines_pdf(
+                    &dir.join(FIRST),
+                    crate::ui::test_util::SAMPLE_RETURN,
+                );
+                crate::ui::test_util::write_lines_pdf(
+                    &dir.join(FIXED),
+                    &[&["Sample client", "Form 1040 (corrected)", "2025"]],
+                );
+                crate::ui::test_util::write_lines_pdf(
+                    &dir.join(AGAIN),
+                    &[&["Sample client", "Form 1040 (second correction)", "2025"]],
+                );
+            }
+        }
+        let data = t.path().join("data");
+        drop(crate::session::open(&data, "dev", &root).unwrap());
+        let cab = vf_fs::cabinet::read(&root).unwrap().cabinet_id;
+        let s = vf_portal::PortalSettings::new(&cab, &url, &key, 0)
+            .unwrap()
+            .with_deliveries(true);
+        vf_portal::settings::save(&root, &s).unwrap();
+        crate::portal::register_inbox(&root).unwrap();
+        for (_, name) in vf_portal::delivery::STEP_DOC_TYPES {
+            vf_fs::doctypes::ensure(&root, name, vf_portal::delivery::DELIVERY_FOLDER, true)
+                .unwrap();
+        }
+        let d = data.clone();
+        let mut h = HarnessBuilder::default()
+            .with_max_steps(crate::ui::test_util::MAX_STEPS)
+            .with_theme(egui::Theme::Light)
+            .with_size([1440.0, 900.0])
+            .build_eframe(move |cc| VibeFilesApp::new(&cc.egui_ctx, d.clone()));
+        h.run_steps(8);
+        let shot = |h: &mut egui_kittest::Harness<'static, VibeFilesApp>, name: &str| {
+            for _ in 0..5 {
+                h.step();
+            }
+            match h.render() {
+                Ok(img) => img.save(out.join(format!("{name}.png"))).unwrap(),
+                Err(e) => eprintln!("{name}: {e}"),
+            }
+        };
+        let said = |h: &egui_kittest::Harness<'static, VibeFilesApp>, text: &str| {
+            h.query_all_by_label_contains(text).next().is_some()
+        };
+        let wait_long =
+            |h: &mut egui_kittest::Harness<'static, VibeFilesApp>,
+             what: &str,
+             ok: &dyn Fn(&egui_kittest::Harness<'static, VibeFilesApp>) -> bool| {
+                let start = std::time::Instant::now();
+                while !ok(h) {
+                    assert!(start.elapsed().as_secs() < 90, "{what}: never");
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                    h.step();
+                }
+            };
+        let pick = |h: &mut egui_kittest::Harness<'static, VibeFilesApp>, now: &str, pick: &str| {
+            let before: Vec<_> = h
+                .query_all_by_label_contains(pick)
+                .map(|n| n.accesskit_node().id())
+                .collect();
+            h.query_all_by_role(Role::ComboBox)
+                .rfind(|n| {
+                    let a = n.accesskit_node();
+                    a.value().as_deref() == Some(now) || a.label().as_deref() == Some(now)
+                })
+                .unwrap_or_else(|| panic!("no combo showing {now:?}"))
+                .click();
+            h.run_steps(4);
+            h.query_all_by_label_contains(pick)
+                .rfind(|n| !before.contains(&n.accesskit_node().id()))
+                .unwrap_or_else(|| panic!("no choice {pick:?}"))
+                .click();
+            h.run_steps(4);
+        };
+        let ticked = |h: &egui_kittest::Harness<'static, VibeFilesApp>, label: &str| {
+            h.query_all_by_label(label)
+                .find(|n| n.accesskit_node().role() == Role::CheckBox)
+                .map(|n| n.accesskit_node().toggled() == Some(egui::accesskit::Toggled::True))
+        };
+        let button = |h: &egui_kittest::Harness<'static, VibeFilesApp>, label: &str| {
+            h.query_all_by_label(label)
+                .any(|n| n.accesskit_node().role() == Role::Button)
+        };
+        let client = |phase: &str| {
+            std::process::Command::new("node")
+                .args([
+                    &client_js,
+                    &url,
+                    &out.display().to_string(),
+                    &log,
+                    "jordan.sample@example.com",
+                    phase,
+                    &stripe,
+                ])
+                .status()
+                .is_ok_and(|s| s.success())
+        };
+        h.get_by_role_and_label(Role::Button, "Open existing")
+            .click();
+        h.run_steps(8);
+        h.get_by_label("Cabinet folder").click();
+        h.step();
+        h.get_by_label("Cabinet folder")
+            .type_text(&root.display().to_string());
+        h.step();
+        h.get_by_role_and_label(Role::Button, "Open cabinet")
+            .click();
+        assert!(wait_for(&mut h, |h| matches!(
+            h.state().screen,
+            crate::app::Screen::Open(_)
+        )));
+        h.run_steps(8);
+        {
+            let o = open_mut(&mut h);
+            vf_fs::doctypes::sync(&mut o.opened.conn, &root, "dev", "doc_types_edit").unwrap();
+        }
+        let c = {
+            let o = open_mut(&mut h);
+            o.browse.set_scope(vf_core::browse::Scope::Client(0));
+            o.browse.portal.reread();
+            o.browse.snap.clients[0].clone()
+        };
+        let p = crate::portal::client(&s);
+        p.put_client(&c.id, &c.ext_id, &c.name, None).unwrap();
+        p.invite(
+            &c.id,
+            Some("jordan.sample@example.com"),
+            None,
+            "Jordan Sample",
+            "Owner",
+        )
+        .unwrap();
+        note(format!(
+            "Setup: {} ({}) on the portal, Jordan invited; {FIRST}, {FIXED} and {AGAIN} in Income Tax\\2025",
+            c.name, c.ext_id
+        ));
+        let open_window = |h: &mut egui_kittest::Harness<'static, VibeFilesApp>| {
+            open_mut(h).browse.portal.delivery = None;
+            h.run_steps(4);
+            h.get_by_role_and_label(Role::Button, "Deliver…").click();
+            let start = std::time::Instant::now();
+            while h
+                .query_all_by_label_contains("WHAT HAS HAPPENED")
+                .next()
+                .is_none()
+            {
+                assert!(start.elapsed().as_secs() < 90, "the window read: never");
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                h.step();
+            }
+            h.run_steps(6);
+        };
+
+        // ---- Step 1: Deliver… the return, Form 8879 and a $500 fee (one amount).
+        open_window(&mut h);
+        if ticked(&h, "Tax return PDF") != Some(true) {
+            h.get_by_label("Tax return PDF").click();
+            h.run_steps(4);
+        }
+        pick(&mut h, "The first PDF", FIRST);
+        h.get_by_label("eSignature link").click();
+        h.step();
+        h.get_by_label("eSignature link")
+            .type_text("https://esign.example-tax.test/s/revise");
+        h.run_steps(3);
+        if ticked(&h, "Package and fee") != Some(true) {
+            h.get_by_label("Package and fee").click();
+            h.run_steps(4);
+        }
+        h.get_by_label("One amount").click();
+        h.run_steps(3);
+        h.get_by_label("Delivery fee").click();
+        h.step();
+        h.get_by_label("Delivery fee").type_text("500");
+        h.run_steps(3);
+        shot(&mut h, "01-revise-deliver");
+        h.get_by_role_and_label(Role::Button, "Send to client")
+            .click();
+        wait_long(&mut h, "sent", &|h| {
+            said(h, "Sent to the client.") || said(h, "rror")
+        });
+        assert!(said(&h, "Sent to the client."), "see 01-revise-deliver.png");
+        let did = p.deliveries(Some(&c.id)).unwrap()[0].id.clone();
+        let d0 = p.delivery(&did).unwrap();
+        note(format!(
+            "Step 1: sent \"{}\" with {:?}, fee {}; {}",
+            d0.title,
+            d0.return_file.as_ref().map(|f| f.name.clone()),
+            d0.fee.as_ref().map(|f| f.total_cents).unwrap_or(0),
+            d0.line()
+        ));
+
+        // ---- Step 2: the client views the return and pays.
+        assert!(client("revise-pay"), "see client-revise-pay.json");
+        let paid = p.delivery(&did).unwrap();
+        let fee_words = paid
+            .fee
+            .as_ref()
+            .map(|f| f.payment_words())
+            .unwrap_or_default();
+        note(format!(
+            "Step 2: the client viewed and paid: {}; {fee_words}",
+            paid.line()
+        ));
+        assert_eq!(
+            paid.step(vf_portal::delivery::FEE)
+                .map(|s| s.state.as_str()),
+            Some("done")
+        );
+
+        // ---- Step 3: a change is found: the corrected return, sent as revised on this card.
+        open_window(&mut h);
+        pick(&mut h, "The first PDF", FIXED);
+        h.get_by_role_and_label(Role::Button, "Save changes")
+            .click();
+        wait_long(&mut h, "the revise question", &|h| {
+            said(h, "Send the revised return") || said(h, "rror")
+        });
+        shot(&mut h, "02-revise-ask");
+        h.get_by_role_and_label(Role::Button, "Send the revised return")
+            .click();
+        wait_long(&mut h, "saved", &|h| {
+            said(h, "Saved.") || said(h, "rror") || said(h, "said no")
+        });
+        shot(&mut h, "03-revise-saved");
+        assert!(said(&h, "Saved."), "see 03-revise-saved.png");
+        let rev = p.delivery(&did).unwrap();
+        let state = |d: &vf_portal::delivery::Delivery, k: &str| {
+            d.step(k).map(|s| s.state.clone()).unwrap_or_default()
+        };
+        let payments = rev.fee.as_ref().map(|f| f.payments.len()).unwrap_or(0);
+        note(format!(
+            "Step 3: revised: return {:?}; steps return {}, fee {}, 8879 {}; payments {payments}; {}",
+            rev.return_file.as_ref().map(|f| f.name.clone()),
+            state(&rev, vf_portal::delivery::RETURN),
+            state(&rev, vf_portal::delivery::FEE),
+            state(&rev, vf_portal::delivery::ESIGN),
+            rev.fee
+                .as_ref()
+                .map(|f| f.payment_words())
+                .unwrap_or_default()
+        ));
+        assert_eq!(
+            rev.return_file.as_ref().map(|f| f.name.as_str()),
+            Some(FIXED)
+        );
+        assert_eq!(state(&rev, vf_portal::delivery::RETURN), "open");
+        assert_eq!(state(&rev, vf_portal::delivery::FEE), "done");
+        assert_eq!(payments, 1);
+
+        // ---- Step 4: the client sees Updated, no new bill, and opens the corrected return.
+        assert!(client("revise-view"), "see client-revise-view.json");
+        note("Step 4: the client saw Updated with the fee still paid and opened the corrected return (client-revise-view.json)".into());
+
+        // ---- Step 5: Form 8879 signed on paper.
+        open_window(&mut h);
+        h.get_by_role_and_label(Role::Button, "Signed on paper…")
+            .click();
+        h.run_steps(4);
+        h.get_by_label("Signed on paper note").click();
+        h.step();
+        h.get_by_label("Signed on paper note")
+            .type_text("Signed at the office");
+        h.run_steps(3);
+        shot(&mut h, "04-paper-ask");
+        h.get_by_role_and_label(Role::Button, "Mark signed").click();
+        wait_long(&mut h, "marked", &|h| {
+            said(h, "Form 8879 marked signed on paper.") || said(h, "rror") || said(h, "said no")
+        });
+        shot(&mut h, "05-paper-marked");
+        let done = p.delivery(&did).unwrap();
+        let words: Vec<String> = done.events.iter().map(|e| e.words.clone()).collect();
+        note(format!(
+            "Step 5: Signed on paper: status {}; the log says {:?}",
+            done.status,
+            words.iter().find(|w| w.contains("paper"))
+        ));
+        assert_eq!(done.status, "complete");
+        assert!(
+            words
+                .iter()
+                .any(|w| w == "Signed on paper (marked by the firm): Signed at the office")
+        );
+
+        // ---- Step 6: the finished card read-only; Send another starts with Fee unticked.
+        open_window(&mut h);
+        shot(&mut h, "06-finished");
+        let shown = (
+            said(&h, "Nothing here can be changed."),
+            button(&h, "Revise the return…"),
+            button(&h, "Send another"),
+            button(&h, "Save changes"),
+        );
+        note(format!(
+            "Step 6: finished: read-only, Revise the return…, Send another, Save changes: {shown:?}"
+        ));
+        assert_eq!(shown, (true, true, true, false), "see 06-finished.png");
+        h.get_by_role_and_label(Role::Button, "Send another")
+            .click();
+        h.run_steps(6);
+        shot(&mut h, "07-send-another");
+        let fresh = (
+            ticked(&h, "Package and fee"),
+            said(&h, "card's fee was paid. Tick Fee to bill again."),
+        );
+        note(format!(
+            "Step 6: Send another: Package and fee ticked, the note: {fresh:?}"
+        ));
+        assert_eq!(fresh, (Some(false), true), "see 07-send-another.png");
+
+        // ---- Step 7: Revise the return… on the finished card: open again, fee still paid.
+        open_window(&mut h);
+        h.get_by_role_and_label(Role::Button, "Revise the return…")
+            .click();
+        h.run_steps(4);
+        pick(&mut h, "The first PDF", AGAIN);
+        h.get_by_role_and_label(Role::Button, "Save changes")
+            .click();
+        wait_long(&mut h, "the revise question", &|h| {
+            said(h, "Send the revised return") || said(h, "rror")
+        });
+        h.get_by_role_and_label(Role::Button, "Send the revised return")
+            .click();
+        wait_long(&mut h, "saved", &|h| {
+            said(h, "Saved.") || said(h, "rror") || said(h, "said no")
+        });
+        shot(&mut h, "08-finished-revised");
+        assert!(said(&h, "Saved."), "see 08-finished-revised.png");
+        let again = p.delivery(&did).unwrap();
+        note(format!(
+            "Step 7: the finished card revised: status {}; return {:?}; steps return {}, fee {}, 8879 {}; payments {}",
+            again.status,
+            again.return_file.as_ref().map(|f| f.name.clone()),
+            state(&again, vf_portal::delivery::RETURN),
+            state(&again, vf_portal::delivery::FEE),
+            state(&again, vf_portal::delivery::ESIGN),
+            again.fee.as_ref().map(|f| f.payments.len()).unwrap_or(0)
+        ));
+        assert_eq!(again.status, "open");
+        assert_eq!(
+            again.return_file.as_ref().map(|f| f.name.as_str()),
+            Some(AGAIN)
+        );
+        assert_eq!(state(&again, vf_portal::delivery::FEE), "done");
+        assert_eq!(state(&again, vf_portal::delivery::RETURN), "open");
+        assert_eq!(again.fee.as_ref().map(|f| f.payments.len()), Some(1));
+        std::fs::write(out.join("steps.txt"), steps.join("\n")).unwrap();
+    }
+
     /// PA-114 (ADDENDUM-deliver-more.md) walkthrough against a real Vibe Portal and the stand-in
     /// Stripe: Deliver… with Kind Financial statements, two PDFs and a fee the documents wait
     /// for; the client sees their names locked; Remind ticked on Admin › Portal › Deliveries

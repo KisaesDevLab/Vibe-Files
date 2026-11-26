@@ -80,3 +80,12 @@ Client side:
   open. Before, it opened as an empty "Not sent yet" form that could be sent again.
 - **A balance hold spares paid deliveries**: the documents of a card whose fee is paid stay open,
   downloadable and shareable while the balance holds the client's other files (Vibe Portal 0.5.8).
+- **Signed on paper** (owner 2026-11-26): **Signed on paper…** in the Letters to sign and Form 8879
+  sections marks the step done with a note (portal `POST /deliveries/:id/paper-signed`, 0.5.8);
+  the log and step PDF say so. Help `portal-delivery-changes`.
+- **A corrected return after payment** (owner 2026-11-26): Save changes no longer resends a fee
+  the client paid (the portal refused it, `409 fee_paid`, so a revision after payment failed);
+  a finished card has **Revise the return…** (it opens again, the fee stays paid); **Send
+  another** after a paid card starts with Fee unticked and says why. `revise_walkthrough` drives
+  the owner's sequence: send, view, pay, revise, Updated with no new bill, 8879 on paper, then the
+  finished card revised.

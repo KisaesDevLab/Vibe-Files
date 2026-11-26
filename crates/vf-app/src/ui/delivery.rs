@@ -172,6 +172,8 @@ enum Done {
 
 enum Act {
     Send,
+    /// Owner 2026-11-26: the client signed this step (letters or Form 8879) on paper.
+    Paper(&'static str),
     MarkPaid,
     Confirm,
     Remind,
@@ -244,6 +246,13 @@ pub struct DeliverWindow {
     confirm_cancel: bool,
     /// Send another was pressed on a finished card: the form is a new card's (owner 2026-11-26).
     fresh: bool,
+    /// Revise the return… on a finished card: the form is editable to send a revision.
+    revising: bool,
+    /// Send another after a card whose fee was paid: Fee starts unticked, and says why.
+    another_paid: bool,
+    /// Signed on paper…: the step asked about, and the note.
+    paper: Option<&'static str>,
+    paper_note: String,
     job: Option<Receiver<Done>>,
     said: Option<(String, bool)>,
     err: Option<String>,
@@ -317,6 +326,10 @@ impl DeliverWindow {
             notify: true,
             confirm_cancel: false,
             fresh: false,
+            revising: false,
+            another_paid: false,
+            paper: None,
+            paper_note: String::new(),
             job: None,
             said: None,
             err: None,
@@ -700,7 +713,12 @@ impl DeliverWindow {
 
     /// Send another: a new, empty card for the same kind and year.
     fn send_another(&mut self) {
+        let paid = self
+            .current()
+            .and_then(|d| d.fee.as_ref())
+            .is_some_and(|f| f.taken());
         self.fresh = true;
+        self.revising = false;
         self.title = default_title(&self.kind, self.year, &self.rt());
         self.return_file = None;
         self.return_doc = None;
@@ -710,6 +728,65 @@ impl DeliverWindow {
         self.offer_letters();
         self.offer_fee();
         self.fill();
+        // Owner 2026-11-26: the client paid for the last card; a second bill is ticked on purpose.
+        if paid {
+            self.with_fee = false;
+        }
+        self.another_paid = paid;
+    }
+
+    /// Owner 2026-11-26: "Signed on paper…" for the letters or Form 8879 step, and its question.
+    fn paper_ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        kind: &'static str,
+        can: bool,
+        current: Option<&Delivery>,
+    ) -> Option<Act> {
+        let waiting = current
+            .and_then(|d| d.step(kind))
+            .is_some_and(|s| s.present && s.state != "done");
+        if ui
+            .add_enabled(can && waiting, egui::Button::new("Signed on paper…"))
+            .on_hover_text("The client signed on paper: mark the step done")
+            .clicked()
+        {
+            self.paper = Some(kind);
+            self.paper_note.clear();
+        }
+        if self.paper != Some(kind) || !waiting {
+            return None;
+        }
+        let what = if kind == delivery::ESIGN {
+            "Form 8879"
+        } else {
+            "the letters"
+        };
+        let mut act = None;
+        ui.group(|ui| {
+            ui.label(format!(
+                "Mark {what} signed on paper? The step is done; the client is not asked to sign online. Put the signed copy in the client's folder as usual."
+            ));
+            ui.horizontal(|ui| {
+                ui.label("Note");
+                widgets::named(
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.paper_note)
+                            .desired_width(260.0)
+                            .char_limit(200)
+                            .hint_text("Signed at the office"),
+                    ),
+                    "Signed on paper note",
+                );
+                if ui.button("Mark signed").clicked() {
+                    act = Some(Act::Paper(kind));
+                }
+                if ui.button("Keep it").clicked() {
+                    self.paper = None;
+                }
+            });
+        });
+        act
     }
 
     /// Fills the form from the delivery shown (or a default return file for a new one).
@@ -859,6 +936,10 @@ impl DeliverWindow {
                     match what {
                         "portal_delivery_create" => "Sent to the client.".into(),
                         "portal_delivery_confirm_8879" => "Form 8879 confirmed.".into(),
+                        "portal_delivery_8879_paper" => "Form 8879 marked signed on paper.".into(),
+                        "portal_delivery_letters_paper" => {
+                            "The letters marked signed on paper.".into()
+                        }
                         "portal_delivery_cancel" => {
                             "Cancelled: the card has left the portal.".into()
                         }
@@ -867,6 +948,7 @@ impl DeliverWindow {
                     false,
                 ));
                 self.err = None;
+                self.revising = false;
                 self.reads.send(vec![d.clone()]);
                 match self.deliveries.iter().position(|x| x.id == d.id) {
                     Some(i) => self.deliveries[i] = d,
@@ -881,6 +963,10 @@ impl DeliverWindow {
                 // Asked in the window, as for another document (T27).
                 self.force_revise = true;
                 self.confirm_revise = true;
+            }
+            // Owner 2026-11-26: an older portal takes no revision of a finished card.
+            Done::Saved(Err(e), _) if self.revising && e.contains("delivery_closed") => {
+                self.err = Some(NEEDS_PORTAL_058.into());
             }
             Done::Saved(Err(e), _) | Done::Said(Err(e)) => self.err = Some(e),
         }
@@ -927,7 +1013,7 @@ impl DeliverWindow {
         let current = self.current().cloned();
         let sent = current.is_some();
         // Owner 2026-11-26: a finished card is shown read-only; only kind and year can change.
-        let finished = current.as_ref().is_some_and(|d| d.status == "complete");
+        let finished = current.as_ref().is_some_and(|d| d.status == "complete") && !self.revising;
         let pick = !busy && self.offline.is_none();
         let can = pick && !finished;
         // The strip: kind, year, return type (or the document's name), title, status.
@@ -990,6 +1076,8 @@ impl DeliverWindow {
             }
             if before != (self.kind.clone(), self.year, self.rt()) {
                 self.fresh = false;
+                self.revising = false;
+                self.another_paid = false;
                 if before.0 != self.kind || before.2 != self.rt() {
                     self.offer_letters();
                 }
@@ -1151,6 +1239,9 @@ impl DeliverWindow {
                         Err(e) => self.err = Some(e.to_string()),
                     }
                 }
+            }
+            if let Some(a) = self.paper_ui(ui, delivery::LETTERS, can, current.as_ref()) {
+                act = Some(a);
             }
         });
         // Section: the documents (a tax return's PDF, or PA-114's statements or documents).
@@ -1542,6 +1633,9 @@ impl DeliverWindow {
                     {
                         act = Some(Act::Confirm);
                     }
+                    if let Some(a) = self.paper_ui(ui, delivery::ESIGN, can, current.as_ref()) {
+                        act = Some(a);
+                    }
                 }
             });
         }
@@ -1614,8 +1708,30 @@ impl DeliverWindow {
         if !link_ok {
             ui.colored_label(theme::error(), "The eSignature link starts with https://.");
         }
-        ui.horizontal(|ui| {
-            if finished {
+        // Walkthrough 2026-11-26: a finished card's words and buttons on their own row, so the
+        // row of right-hand buttons never covers them.
+        ui.horizontal_wrapped(|ui| {
+            if self.another_paid && current.is_none() {
+                ui.colored_label(
+                    theme::warn(),
+                    format!(
+                        "The last {} card's fee was paid. Tick Fee to bill again.",
+                        self.year
+                    ),
+                );
+            }
+            if self.revising {
+                ui.label(
+                    RichText::new(
+                        "Revising a finished card: choose the corrected PDF, then Save changes. The card opens again; the fee stays paid.",
+                    )
+                    .color(theme::ink_secondary()),
+                );
+                if ui.add_enabled(pick, egui::Button::new("Stop revising")).clicked() {
+                    self.revising = false;
+                    self.fill();
+                }
+            } else if finished {
                 let when = current
                     .as_ref()
                     .and_then(|d| d.completed_at.as_deref())
@@ -1625,6 +1741,18 @@ impl DeliverWindow {
                     RichText::new(format!("{when} Nothing here can be changed."))
                         .color(theme::ink_secondary()),
                 );
+                let revise = if self.kind == delivery::KIND_RETURN {
+                    "Revise the return…"
+                } else {
+                    "Revise the documents…"
+                };
+                if ui
+                    .add_enabled(pick, egui::Button::new(revise))
+                    .on_hover_text("Send a corrected PDF on this card; the fee stays paid")
+                    .clicked()
+                {
+                    self.revising = true;
+                }
                 if ui
                     .add_enabled(pick, egui::Button::new("Send another"))
                     .on_hover_text("A new, empty card for the same kind and year")
@@ -1632,12 +1760,17 @@ impl DeliverWindow {
                 {
                     self.send_another();
                 }
-            } else if ui
-                .add_enabled(
-                    can && sent,
-                    egui::Button::new(RichText::new("Cancel delivery…").color(theme::error())),
-                )
-                .clicked()
+            }
+        });
+        ui.horizontal(|ui| {
+            if !finished
+                && !self.revising
+                && ui
+                    .add_enabled(
+                        can && sent,
+                        egui::Button::new(RichText::new("Cancel delivery…").color(theme::error())),
+                    )
+                    .clicked()
             {
                 self.confirm_cancel = true;
             }
@@ -1818,11 +1951,13 @@ impl DeliverWindow {
                 let kind = self.kind.clone();
                 // The priced snapshot and each offered package's addendum (T20), while the
                 // selection is not signed.
+                // Walkthrough 2026-11-26: a fee paid (or a bank payment started) is left as it is: the
+                // portal refuses a new one, and a revised return must not bill again.
                 let fee = if self.with_fee
                     && current.as_ref().is_none_or(|d| {
                         d.fee
                             .as_ref()
-                            .is_none_or(|f| f.selection_signed_at.is_none())
+                            .is_none_or(|f| f.selection_signed_at.is_none() && !f.taken())
                     }) {
                     match self.fee_lines() {
                         Ok(lines) => Some((self.fee_mode.clone(), lines)),
@@ -1983,6 +2118,9 @@ impl DeliverWindow {
                                 created.set(Some(d.id.clone()));
                                 d
                             }
+                            // Owner 2026-11-26: a finished card revised; the revision below
+                            // opens it again (nothing else of it changes).
+                            Some(d) if d.status == "complete" => d.clone(),
                             Some(d) => p.change_delivery(
                                 &d.id,
                                 &DeliveryChange {
@@ -2203,6 +2341,31 @@ impl DeliverWindow {
                     )
                 }));
             }
+            Act::Paper(kind) => {
+                let Some(d) = current else { return };
+                let note = self.paper_note.trim().to_string();
+                self.paper = None;
+                self.job = Some(spawn(ctx, move || {
+                    let p = core::client(&s2);
+                    let r = p
+                        .paper_signed(&d.id, kind, &note)
+                        .map_err(|e| match (e.status(), e.code()) {
+                            (Some(404), Some("not_found")) => {
+                                vf_portal::PortalError::Local(NEEDS_PORTAL_058.into())
+                            }
+                            _ => e,
+                        })
+                        .and_then(|x| p.delivery(&x.id));
+                    Done::Saved(
+                        r.map(Box::new).map_err(|e| e.message()),
+                        if kind == delivery::ESIGN {
+                            "portal_delivery_8879_paper"
+                        } else {
+                            "portal_delivery_letters_paper"
+                        },
+                    )
+                }));
+            }
             Act::Cancel => {
                 let Some(d) = current else { return };
                 self.job = Some(spawn(ctx, move || {
@@ -2285,6 +2448,9 @@ const REVISED_ASK: &str = "The return changed since the client opened it.";
 
 /// PA-114: said when the portal is older than the card needs (and the card is cancelled).
 pub const NEEDS_PORTAL: &str = "This needs Vibe Portal 0.5.6 or later: update the portal first.";
+/// Signed on paper and revising a finished card (owner 2026-11-26).
+pub const NEEDS_PORTAL_058: &str =
+    "This needs Vibe Portal 0.5.8 or later: update the portal first.";
 /// QA 2026-11-26: said by the Send job when documents the client opened would change: the
 /// window asks, as for a revised return, then sends them as revised.
 const FILES_REVISE_ASK: &str = "The client has opened these documents.";

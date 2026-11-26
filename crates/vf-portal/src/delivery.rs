@@ -408,6 +408,14 @@ pub struct DeliveryFee {
 }
 
 impl DeliveryFee {
+    /// Money taken or on its way (paid, or a bank payment started): the portal refuses a new fee
+    /// then (`409 fee_paid`), so a revision leaves it as it is (walkthrough 2026-11-26).
+    pub fn taken(&self) -> bool {
+        self.payments
+            .iter()
+            .any(|p| p.state == "paid" || p.state == "started")
+    }
+
     /// "Paid $1,642.68 by card", "Bank payment started", "Bank payment failed", "Not paid".
     pub fn payment_words(&self) -> String {
         // QA 2026-11-25: money taken for the wrong amount is said until the fee is paid, even when
@@ -939,6 +947,16 @@ impl Portal {
             "PUT",
             &format!("/deliveries/{id}/signers"),
             &serde_json::json!({ "signers": list }),
+        )
+        .map(|r| r.delivery)
+    }
+
+    /// Owner 2026-11-26: the client signed the letters or Form 8879 on paper (portal 0.5.8).
+    pub fn paper_signed(&self, id: &str, step: &str, note: &str) -> Result<Delivery> {
+        self.send_json::<One>(
+            "POST",
+            &format!("/deliveries/{id}/paper-signed"),
+            &serde_json::json!({ "step": step, "note": note }),
         )
         .map(|r| r.delivery)
     }

@@ -25,7 +25,7 @@ One delivery is open per client, tax year and return type. Opening the window ag
 
 ## A revised return
 
-Choose another return for a delivery whose client opened the first, and press **Save changes**: the window asks first. **Send the revised return** shows the card as Updated and reopens the return and Form 8879 steps; paste a new eSignature link if UltraTax made one. The letters, package and fee stand.
+Choose another return for a delivery whose client opened the first, and press **Save changes**: the window asks first. **Send the revised return** shows the card as Updated and reopens the return and Form 8879 steps; paste a new eSignature link if UltraTax made one. Letters, package and fee stand. See also [Paper signatures and corrected returns](help:portal-delivery-changes).
 
 ## What the client does
 
@@ -40,7 +40,7 @@ When the client says they signed, the assigned staff member (or the admins) gets
 
 ## The step PDFs
 
-Each finished step makes a PDF: a record page (for the return, its file name, size and SHA-256, not a second copy; for Form 8879, the e-signature service it was signed on) and a separate log page of everything that happened in that step, with times, internet addresses and browsers. They arrive in the Portal inbox like a client's upload, named `2025 Delivery 2 - Tax return.pdf` and `2025 Delivery 5 - Form 8879.pdf`, and Intake files them in the client's `Income Tax/2025/Delivery` folder with their doc types (client visible). Intake's rule for these files is there only while **Tax return delivery** is on in Admin › Portal. A step done again files ` (2)`.
+Each finished step makes a PDF: a record page (for the return, its name, size and SHA-256, not a copy; for Form 8879, the e-signature service used) and a log page of everything in that step, with times, internet addresses and browsers. They arrive in the Portal inbox like a client's upload, named `2025 Delivery 2 - Tax return.pdf` and `2025 Delivery 5 - Form 8879.pdf`, and Intake files them in the client's `Income Tax/2025/Delivery` folder with their doc types (client visible). Intake's rule for these files is there only while **Tax return delivery** is on in Admin › Portal. A step done again files ` (2)`.
 
 **Download report…** saves the whole delivery, every step and event, as one PDF outside the cabinet.
 
