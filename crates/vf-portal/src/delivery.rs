@@ -578,8 +578,14 @@ impl Delivery {
     }
 
     /// The step waiting on someone: the first included and not done, in card order.
+    /// The step the card waits on: the first not done that is not locked behind a later one
+    /// (documents locked until a pay-first fee is paid wait on the fee: walkthrough
+    /// 2026-11-26), else the first not done.
     pub fn waiting(&self) -> Option<&DeliveryStep> {
-        self.steps.iter().find(|s| s.present && s.state != "done")
+        let left = || self.steps.iter().filter(|s| s.present && s.state != "done");
+        left()
+            .find(|s| s.state != "locked")
+            .or_else(|| left().next())
     }
 
     /// What it is, in a list: "1040" or "Agreement".

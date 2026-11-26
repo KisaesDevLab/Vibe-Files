@@ -1289,6 +1289,472 @@ mod tests {
         std::fs::write(out.join("steps.txt"), steps.join("\n")).unwrap();
     }
 
+    /// PA-114 (ADDENDUM-deliver-more.md) walkthrough against a real Vibe Portal and the stand-in
+    /// Stripe: Deliver… with Kind Financial statements, two PDFs and a fee the documents wait
+    /// for; the client sees their names locked; Remind ticked on Admin › Portal › Deliveries
+    /// reaches them; they pay and open each (the step done only after both), Read again says
+    /// so, and the step PDFs are committed into `Financials\2025\Delivery`; then Balance owed…
+    /// with Hold the client's files: the client's files are held until they pay. Same variables
+    /// as `fee_walkthrough`.
+    #[test]
+    #[ignore = "needs a running portal"]
+    fn deliver_more_walkthrough() {
+        use egui_kittest::kittest::NodeT;
+        let (Ok(url), Ok(key), Ok(log), Ok(client_js), Ok(stripe), Ok(out)) = (
+            std::env::var("VF_WALK_URL"),
+            std::env::var("VF_WALK_KEY"),
+            std::env::var("VF_WALK_LOG"),
+            std::env::var("VF_WALK_CLIENT"),
+            std::env::var("VF_WALK_STRIPE"),
+            std::env::var("VF_WALK_DIR"),
+        ) else {
+            return;
+        };
+        let out = std::path::PathBuf::from(out);
+        std::fs::create_dir_all(&out).unwrap();
+        let mut steps: Vec<String> = Vec::new();
+        let mut note = |s: String| {
+            eprintln!("{s}");
+            steps.push(s);
+        };
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path().join("Clients");
+        vf_fixtures::generate(&root, 3).unwrap();
+        crate::ui::test_util::pdfium_first();
+        const SHEET: &str = "2025 Balance Sheet - Sample.pdf";
+        const INCOME: &str = "2025 Income Statement - Sample.pdf";
+        for e in std::fs::read_dir(&root).unwrap().flatten() {
+            let name = e.file_name().to_string_lossy().into_owned();
+            if e.path().is_dir() && !name.starts_with('_') {
+                let dir = e.path().join("Financials").join("2025");
+                std::fs::create_dir_all(&dir).unwrap();
+                crate::ui::test_util::write_lines_pdf(
+                    &dir.join(SHEET),
+                    &[&["Sample client", "Balance sheet", "December 31, 2025"]],
+                );
+                crate::ui::test_util::write_lines_pdf(
+                    &dir.join(INCOME),
+                    &[&[
+                        "Sample client",
+                        "Income statement",
+                        "Year ended December 31, 2025",
+                    ]],
+                );
+            }
+        }
+        let data = t.path().join("data");
+        drop(crate::session::open(&data, "dev", &root).unwrap());
+        let cab = vf_fs::cabinet::read(&root).unwrap().cabinet_id;
+        let s = vf_portal::PortalSettings::new(&cab, &url, &key, 0)
+            .unwrap()
+            .with_deliveries(true)
+            .with_balances(true);
+        vf_portal::settings::save(&root, &s).unwrap();
+        crate::portal::register_inbox(&root).unwrap();
+        // What Admin › Portal's Save does when deliveries and balances are ticked.
+        for (name, folder) in vf_portal::delivery::all_step_doc_types() {
+            vf_fs::doctypes::ensure(&root, name, folder, true).unwrap();
+        }
+        vf_fs::doctypes::ensure(
+            &root,
+            vf_portal::inbox::RECEIPT_DOC_TYPE,
+            "Billing/{Year}",
+            true,
+        )
+        .unwrap();
+        let d = data.clone();
+        let mut h = HarnessBuilder::default()
+            .with_max_steps(crate::ui::test_util::MAX_STEPS)
+            .with_theme(egui::Theme::Light)
+            .with_size([1440.0, 1000.0])
+            .build_eframe(move |cc| VibeFilesApp::new(&cc.egui_ctx, d.clone()));
+        h.run_steps(8);
+        let shot = |h: &mut egui_kittest::Harness<'static, VibeFilesApp>, name: &str| {
+            for _ in 0..5 {
+                h.step();
+            }
+            match h.render() {
+                Ok(img) => img.save(out.join(format!("{name}.png"))).unwrap(),
+                Err(e) => eprintln!("{name}: {e}"),
+            }
+        };
+        let said = |h: &egui_kittest::Harness<'static, VibeFilesApp>, text: &str| {
+            h.query_all_by_label_contains(text).next().is_some()
+        };
+        let wait_long =
+            |h: &mut egui_kittest::Harness<'static, VibeFilesApp>,
+             what: &str,
+             ok: &dyn Fn(&egui_kittest::Harness<'static, VibeFilesApp>) -> bool| {
+                let start = std::time::Instant::now();
+                while !ok(h) {
+                    if start.elapsed().as_secs() > 90 {
+                        let _ = h.render().map(|img| {
+                            img.save(out.join(format!(
+                                "FAILED-{}.png",
+                                what.replace(|c: char| !c.is_alphanumeric(), "-")
+                            )))
+                        });
+                        panic!("{what}: never");
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                    h.step();
+                }
+            };
+        // Opens the combo box named or showing `now` (the last such) and picks `pick`.
+        let pick = |h: &mut egui_kittest::Harness<'static, VibeFilesApp>, now: &str, pick: &str| {
+            let before: Vec<_> = h
+                .query_all_by_label_contains(pick)
+                .map(|n| n.accesskit_node().id())
+                .collect();
+            h.query_all_by_role(Role::ComboBox)
+                .rfind(|n| {
+                    let a = n.accesskit_node();
+                    a.value().as_deref() == Some(now) || a.label().as_deref() == Some(now)
+                })
+                .unwrap_or_else(|| panic!("no combo showing {now:?}"))
+                .click();
+            h.run_steps(4);
+            h.query_all_by_label_contains(pick)
+                .rfind(|n| !before.contains(&n.accesskit_node().id()))
+                .unwrap_or_else(|| panic!("no choice {pick:?}"))
+                .click();
+            h.run_steps(4);
+        };
+        let client = |phase: &str| {
+            std::process::Command::new("node")
+                .args([
+                    &client_js,
+                    &url,
+                    &out.display().to_string(),
+                    &log,
+                    "jordan.sample@example.com",
+                    phase,
+                    &stripe,
+                ])
+                .status()
+                .is_ok_and(|s| s.success())
+        };
+        h.get_by_role_and_label(Role::Button, "Open existing")
+            .click();
+        h.run_steps(8);
+        h.get_by_label("Cabinet folder").click();
+        h.step();
+        h.get_by_label("Cabinet folder")
+            .type_text(&root.display().to_string());
+        h.step();
+        h.get_by_role_and_label(Role::Button, "Open cabinet")
+            .click();
+        assert!(wait_for(&mut h, |h| matches!(
+            h.state().screen,
+            crate::app::Screen::Open(_)
+        )));
+        h.run_steps(8);
+        {
+            let o = open_mut(&mut h);
+            vf_fs::doctypes::sync(&mut o.opened.conn, &root, "dev", "doc_types_edit").unwrap();
+        }
+        let c = {
+            let o = open_mut(&mut h);
+            o.browse.set_scope(vf_core::browse::Scope::Client(0));
+            o.browse.portal.reread();
+            o.browse.snap.clients[0].clone()
+        };
+        let folder = c.folder_rel.clone().unwrap();
+        let p = crate::portal::client(&s);
+        p.put_client(&c.id, &c.ext_id, &c.name, None).unwrap();
+        p.invite(
+            &c.id,
+            Some("jordan.sample@example.com"),
+            None,
+            "Jordan Sample",
+            "Owner",
+        )
+        .unwrap();
+        note(format!(
+            "Setup: {} ({}) on the portal, Jordan invited; {SHEET} and {INCOME} in Financials\\2025",
+            c.name, c.ext_id
+        ));
+
+        // ---- Step 1: Deliver…, Kind Financial statements, two PDFs, a fee paid first.
+        h.run_steps(4);
+        h.get_by_role_and_label(Role::Button, "Deliver…").click();
+        wait_long(&mut h, "the window read", &|h| said(h, "WHAT HAS HAPPENED"));
+        h.run_steps(6);
+        shot(&mut h, "00-deliver-opened");
+        pick(&mut h, "Kind", "Financial statements");
+        h.run_steps(6);
+        shot(&mut h, "01-kind-statements");
+        let ticked = |h: &egui_kittest::Harness<'static, VibeFilesApp>, label: &str| {
+            h.query_all_by_label(label)
+                .find(|n| n.accesskit_node().role() == Role::CheckBox)
+                .map(|n| n.accesskit_node().toggled() == Some(egui::accesskit::Toggled::True))
+        };
+        note(format!(
+            "Step 1: Kind Financial statements; title box reads the default; ticks: PDF {:?}, Fee {:?}, letters {:?}",
+            ticked(&h, "Financial statements PDF"),
+            ticked(&h, "Fee"),
+            ticked(&h, "Letters to sign")
+        ));
+        if ticked(&h, "Financial statements PDF") != Some(true) {
+            h.get_by_label("Financial statements PDF").click();
+            h.run_steps(4);
+        }
+        // The first PDF: whatever the window offered, the balance sheet.
+        let first_now = h
+            .query_all_by_role(Role::ComboBox)
+            .find(|n| n.accesskit_node().label().as_deref() == Some("The first PDF"))
+            .and_then(|n| n.accesskit_node().value())
+            .unwrap_or_default();
+        note(format!("Step 1: the first PDF offered: {first_now:?}"));
+        pick(&mut h, "The first PDF", SHEET);
+        h.get_by_role_and_label(Role::Button, "+ Add another PDF")
+            .click();
+        h.run_steps(4);
+        pick(&mut h, "Another PDF", INCOME);
+        if ticked(&h, "Fee") != Some(true) {
+            h.get_by_label("Fee").click();
+            h.run_steps(4);
+        }
+        h.get_by_label("Delivery fee").click();
+        h.step();
+        h.get_by_label("Delivery fee").type_text("450");
+        h.run_steps(3);
+        h.get_by_label(crate::ui::delivery::PAY_FIRST_WORDS).click();
+        h.run_steps(4);
+        shot(&mut h, "02-deliver-statements-filled");
+        h.get_by_role_and_label(Role::Button, "Send to client")
+            .click();
+        wait_long(&mut h, "sent", &|h| {
+            said(h, "Sent to the client.") || said(h, "rror")
+        });
+        shot(&mut h, "03-deliver-statements-sent");
+        assert!(
+            said(&h, "Sent to the client."),
+            "see 03-deliver-statements-sent.png"
+        );
+        let sent = p.deliveries_all(Some(&c.id)).unwrap();
+        assert_eq!(sent.len(), 1);
+        let did = sent[0].id.clone();
+        let d0 = p.delivery(&did).unwrap();
+        assert_eq!(d0.kind, "statements");
+        assert_eq!(d0.return_type, "Financial statements");
+        let names: Vec<&str> = d0.files.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, [SHEET, INCOME]);
+        assert_eq!(d0.locks.return_after_fee, Some(true));
+        note(format!(
+            "Step 1: sent \"{}\": kind {}, documents {names:?}, fee {}, documents after the fee: {:?}; {}",
+            d0.title,
+            d0.kind,
+            d0.fee.as_ref().map(|f| f.total_cents).unwrap_or(0),
+            d0.locks.return_after_fee,
+            d0.line()
+        ));
+
+        // ---- Step 2: the client accepts and sees the documents' names, locked.
+        assert!(client("statements"), "see client-statements.json");
+        note(
+            "Step 2: the client signed in; see client-statements.json for what the card showed"
+                .into(),
+        );
+        // The client panel's line, while the card is open.
+        open_mut(&mut h).browse.portal.look_at_deliveries_now();
+        wait_long(&mut h, "the panel line", &|h| {
+            said(h, "2025 Financial statements: 0 of 2 done")
+        });
+        shot(&mut h, "03b-panel-line");
+        note(
+            "Step 2: the client panel shows the card: 2025 Financial statements: 0 of 2 done"
+                .into(),
+        );
+
+        // ---- Step 3: Remind ticked on Admin › Portal › Deliveries.
+        open_mut(&mut h).browse.portal.delivery = None;
+        h.run_steps(4);
+        let mails_before = std::fs::read_to_string(&log)
+            .unwrap_or_default()
+            .lines()
+            .filter(|l| l.contains("\"msg\":\"notify (") && l.contains("jordan.sample@example.com"))
+            .count();
+        h.get_by_role_and_label(Role::Button, "Admin").click();
+        h.run_steps(6);
+        h.get_by_role_and_label(Role::Button, "Portal").click();
+        h.run_steps(6);
+        h.get_by_role_and_label(Role::Button, "Deliveries").click();
+        wait_long(&mut h, "the card listed", &|h| said(h, &c.name));
+        h.run_steps(6);
+        shot(&mut h, "04-deliveries-page");
+        h.query_all_by_label("Tick to remind")
+            .next()
+            .expect("a row to tick")
+            .click();
+        h.run_steps(4);
+        h.get_by_role_and_label(Role::Button, "Remind ticked")
+            .click();
+        h.run_steps(4);
+        shot(&mut h, "05-remind-confirm");
+        h.get_by_role_and_label(Role::Button, "Remind").click();
+        wait_long(&mut h, "the run's words", &|h| {
+            said(h, "reminded")
+                || said(h, "Reminded")
+                || said(h, "nobody")
+                || said(h, "Nobody")
+                || said(h, "failed")
+                || said(h, "too often")
+        });
+        h.run_steps(6);
+        shot(&mut h, "06-remind-done");
+        let words: Vec<String> = h
+            .query_all_by_label_contains("emind")
+            .filter_map(|n| n.accesskit_node().label())
+            .collect();
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        let mails_after = std::fs::read_to_string(&log)
+            .unwrap_or_default()
+            .lines()
+            .filter(|l| l.contains("\"msg\":\"notify (") && l.contains("jordan.sample@example.com"))
+            .count();
+        note(format!(
+            "Step 3: Remind ticked, 1 row: the page says {words:?}; messages to Jordan in the log: {mails_before} before, {mails_after} after"
+        ));
+        h.get_by_role_and_label(Role::Button, "Browse").click();
+        h.run_steps(6);
+
+        // ---- Step 4: the client pays and opens each document.
+        assert!(client("statements-pay"), "see client-statements-pay.json");
+        let now = p.delivery(&did).unwrap();
+        let opened: Vec<bool> = now.files.iter().map(|f| f.opened_at.is_some()).collect();
+        note(format!(
+            "Step 4: paid; documents opened {opened:?}; steps {:?}; status {}",
+            now.steps
+                .iter()
+                .map(|s| format!("{} {}", s.kind, s.state))
+                .collect::<Vec<_>>(),
+            now.status
+        ));
+        assert_eq!(opened, [true, true]);
+        assert_eq!(now.status, "complete");
+
+        // ---- Step 6: the step PDFs are fetched and committed into Financials\2025\Delivery.
+        open_mut(&mut h).browse.portal.fetch_now = true;
+        let inbox = crate::portal::inbox(&root);
+        let names = |inbox: &std::path::Path| -> Vec<String> {
+            std::fs::read_dir(inbox)
+                .ok()
+                .into_iter()
+                .flatten()
+                .flatten()
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .filter(|n| n.contains(" Statements "))
+                .collect()
+        };
+        wait_long(&mut h, "the step PDFs fetched", &|_| {
+            names(&inbox).len() >= 2
+        });
+        h.run_steps(20);
+        let fetched = names(&inbox);
+        note(format!("Step 6: in the Portal inbox: {fetched:?}"));
+        h.state_mut().tab = crate::app::Tab::Intake;
+        h.run_steps(10);
+        if let Some(b) = h.query_by_label("Preview") {
+            b.click();
+        }
+        let want = format!("Commit {} files", fetched.len());
+        wait_long(&mut h, "the rows ready", &|h| said(h, &want));
+        shot(&mut h, "08-intake-statements");
+        h.query_all_by_role_and_label(Role::Button, &want)
+            .last()
+            .unwrap()
+            .click();
+        h.run_steps(6);
+        wait_long(&mut h, "the commit summary", &|h| {
+            h.query_all_by_label("Confirm commit").next().is_some()
+        });
+        h.query_all_by_label("Confirm commit")
+            .next()
+            .unwrap()
+            .click();
+        h.run_steps(6);
+        let dir = root
+            .join(&folder)
+            .join("Financials")
+            .join("2025")
+            .join("Delivery");
+        wait_long(&mut h, "filed in Financials\\2025\\Delivery", &|_| {
+            std::fs::read_dir(&dir).map(|r| r.count()).unwrap_or(0) >= fetched.len()
+        });
+        let start = std::time::Instant::now();
+        let types: Vec<(String, String)> = loop {
+            let got: Vec<(String, String)> = {
+                let o = open_mut(&mut h);
+                let mut st = o
+                    .opened
+                    .conn
+                    .prepare(
+                        "SELECT d.rel_path, t.name FROM document d JOIN doc_type t ON t.id = d.doc_type_id
+                         WHERE d.rel_path LIKE '%Financials/2025/Delivery/%' AND d.deleted_at IS NULL
+                         ORDER BY d.rel_path",
+                    )
+                    .unwrap();
+                st.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+                    .unwrap()
+                    .flatten()
+                    .collect()
+            };
+            if got.len() >= fetched.len() || start.elapsed().as_secs() > 60 {
+                break got;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            h.step();
+        };
+        note(format!("Step 6: committed: {types:?}"));
+        assert_eq!(types.len(), fetched.len());
+        assert!(
+            types
+                .iter()
+                .all(|(_, t)| t.starts_with("Statements delivery"))
+        );
+        h.state_mut().tab = crate::app::Tab::Browse;
+        h.run_steps(6);
+
+        // ---- Step 7: Balance owed… with Hold the client's files.
+        h.get_by_role_and_label(Role::Button, "Balance owed…")
+            .click();
+        wait_long(&mut h, "the balance window read", &|h| {
+            said(h, "No balance on the portal.")
+        });
+        h.get_by_label("Balance amount").click();
+        h.step();
+        h.get_by_label("Balance amount").type_text("300");
+        h.step();
+        h.get_by_label("Balance memo").click();
+        h.step();
+        h.get_by_label("Balance memo").type_text("2025 compilation");
+        h.run_steps(3);
+        h.get_by_label("Hold the client's files until this is paid")
+            .click();
+        h.run_steps(3);
+        shot(&mut h, "09-balance-hold");
+        h.get_by_role_and_label(Role::Button, "Post to portal")
+            .click();
+        wait_long(&mut h, "posted", &|h| said(h, "Posted to the portal."));
+        shot(&mut h, "10-balance-hold-posted");
+        let b = p.client_balances(&c.id).unwrap();
+        assert_eq!(b[0].hold_files, Some(true));
+        note(format!(
+            "Step 7: posted $300.00 \"2025 compilation\" with the hold; the portal has hold_files {:?}, state {}",
+            b[0].hold_files, b[0].state
+        ));
+        open_mut(&mut h).browse.portal.balance = None;
+        h.run_steps(4);
+
+        // ---- Step 8: the client's files are held; they pay; the files open.
+        assert!(client("held"), "see client-held.json");
+        let paid = p.client_balances(&c.id).unwrap();
+        assert_eq!(paid[0].state, "paid");
+        note("Step 8: the client saw the files held and paid; see client-held.json".into());
+        std::fs::write(out.join("steps.txt"), steps.join("\n")).unwrap();
+    }
+
     /// Annual agreements (ADDENDUM-annual-agreements.md, owner 2026-11-25) walkthrough against a
     /// real Vibe Portal and the stand-in Stripe: Service agreement… for a business with the
     /// bookkeeping, payroll and advisory letters (the Terms and Conditions filled in once), one

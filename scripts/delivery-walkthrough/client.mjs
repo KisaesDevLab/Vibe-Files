@@ -452,6 +452,123 @@ try {
     await until(`!!__byText('a', 'Receipt')`, 'the receipt link');
     await shot('62-renew-paid');
     note("The renewal's one-time fee is paid; its Receipt is shown");
+  } else if (PHASE === 'statements') {
+    // PA-114: a financial statements card of two PDFs that open only once the fee is paid.
+    // The client accepts the invitation and sees the documents' names, locked.
+    const inv = await mailWith('/invite', 0);
+    await go(linkIn(inv.body, '/invite'));
+    await until(`!!__byText('button', 'Accept and sign in')`, 'invitation page');
+    await click('Accept and sign in');
+    await until(`location.pathname === '/'`, 'home after accepting');
+    await until(`document.body.innerText.includes('financial statements')`, 'the statements card');
+    await sleep(800);
+    await shot('70-statements-locked');
+    const text = await js(`document.body.innerText`);
+    note(`Card says "Opens when you pay.": ${text.includes('Opens when you pay.')}`);
+    note(`Locked names listed: ${(text.match(/[^\n]*\(locked\)/g) || []).join(' | ') || 'none'}`);
+    note(`No View link yet: ${!(await js(`[...document.querySelectorAll('a')].some((a) => a.textContent.trim() === 'View')`))}`);
+    // The files list, and the content of each asked for directly (a link guessed or kept).
+    const files = await js(`fetch('/api/portal/files').then((r) => r.json())`);
+    for (const f of files.files) {
+      const st = await js(`fetch('/api/portal/files/${f.id}/content?mode=view').then((r) => r.status)`);
+      note(`Files list: ${f.name}${f.held ? ' (held)' : ''}; its content answers ${st}`);
+    }
+  } else if (PHASE === 'statements-pay') {
+    // Signs in again by an emailed link, pays by card, then opens both documents.
+    const STRIPE = SECOND;
+    const start = Date.now() / 1000;
+    await go(`${BASE}/login`);
+    await until(`!!document.querySelector('input')`, 'the sign-in page');
+    await js(`__type(document.querySelector('input'), ${JSON.stringify(EMAIL)})`);
+    await click('Continue');
+    const m = await mailWith('/auth/verify', start);
+    await go(linkIn(m.body, '/auth/verify'));
+    await until(`!!__byText('button', 'Sign in')`, 'the sign-in link');
+    await click('Sign in');
+    await until(`location.pathname === '/'`, 'home after signing in');
+    await payOnStripe(STRIPE, 'Pay by card', true);
+    await until(`[...document.querySelectorAll('a')].some((a) => a.textContent.trim() === 'View')`, 'the documents open', 20000);
+    await shot('71-statements-paid-open');
+    const views = await js(`[...document.querySelectorAll('a')].filter((a) => (a.getAttribute('aria-label') || '').startsWith('View ')).map((a) => [a.getAttribute('aria-label'), a.href])`);
+    note(`After paying: ${views.length} View links`);
+    for (const [label, href] of views) {
+      const st = await js(`fetch(${JSON.stringify(href)}).then((r) => r.status)`);
+      note(`${label}: ${st}`);
+      if (views.length > 1 && label === views[0][0]) {
+        await go(`${BASE}/`);
+        await until(`document.body.innerText.includes('Opened')`, 'one opened');
+        await shot('72-statements-one-opened');
+        note(`After the first: step still open: ${!(await js(`document.body.innerText.includes('2 of 2 done')`))}; ${(await js(`document.body.innerText`)).match(/\d of \d done/)?.[0] ?? '?'}`);
+      }
+    }
+    await go(`${BASE}/`);
+    await until(`(document.body.innerText.match(/Opened/g) || []).length >= 2 || document.body.innerText.includes('All done') || document.body.innerText.includes('Complete')`, 'both opened', 20000);
+    await sleep(600);
+    await shot('73-statements-both-opened');
+    note(`After both: ${(await js(`document.body.innerText`)).match(/\d of \d done/)?.[0] ?? 'no count shown'}`);
+  } else if (PHASE === 'held') {
+    // A balance posted with Hold the client's files: listed, held, Pay now; paid, they open.
+    const STRIPE = SECOND;
+    const start = Date.now() / 1000;
+    await go(`${BASE}/login`);
+    await until(`!!document.querySelector('input')`, 'the sign-in page');
+    await js(`__type(document.querySelector('input'), ${JSON.stringify(EMAIL)})`);
+    await click('Continue');
+    const m = await mailWith('/auth/verify', start);
+    await go(linkIn(m.body, '/auth/verify'));
+    await until(`!!__byText('button', 'Sign in')`, 'the sign-in link');
+    await click('Sign in');
+    await until(`location.pathname === '/'`, 'home after signing in');
+    await until(`document.body.innerText.includes('Balance due')`, 'the balance card');
+    await until(`document.body.innerText.includes('Your files open when your balance of')`, 'the held note', 20000);
+    await sleep(800);
+    await shot('80-files-held');
+    const text = await js(`document.body.innerText`);
+    note(`Held note: ${(text.match(/Your files open when your balance of[^\n]*/) || ['?'])[0]}`);
+    note(`Badges "Opens when your balance is paid": ${(text.match(/Opens when your balance is paid/g) || []).length}`);
+    note(`Open or Download buttons shown: ${await js(`[...document.querySelectorAll('a,button')].filter((e) => /^(Open|Download)$/.test(e.textContent.trim())).length`)}`);
+    const files = await js(`fetch('/api/portal/files').then((r) => r.json())`);
+    note(`Files list: ${files.files.length} files, ${files.files.filter((f) => f.held).length} held; held at the top: ${JSON.stringify(files.held)}`);
+    for (const f of files.files.slice(0, 2)) {
+      const r = await js(`fetch('/api/portal/files/${f.id}/content?mode=download').then(async (r) => [r.status, await r.text()])`);
+      note(`${f.name}: content answers ${r[0]} ${r[1].slice(0, 80)}`);
+    }
+    // Sharing a held file on (Send a file to someone outside) is refused too.
+    if (files.files[0]) {
+      const me = await js(`fetch('/api/portal/auth/me').then((r) => r.json())`);
+      const r = await js(`fetch('/api/portal/outside-shares', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ clientId: ${JSON.stringify(me.activeClientId)}, fileIds: [${JSON.stringify(files.files[0].id)}], email: 'outside.person@example.com', name: 'Outside Person', days: 7 }) }).then(async (r) => [r.status, await r.text()])`);
+      note(`Sending a held file outside answers ${r[0]} ${r[1].slice(0, 80)}`);
+    }
+    // Pay now goes to the balance card on the same page.
+    const anchor = await js(`(() => { const a = [...document.querySelectorAll('a')].find((x) => x.textContent.trim() === 'Pay now'); if (!a) return 'no Pay now link'; const t = document.querySelector(a.getAttribute('href')); return t ? 'Pay now goes to: ' + t.textContent.slice(0, 40) : 'Pay now goes nowhere (' + a.getAttribute('href') + ')'; })()`);
+    note(anchor);
+    await js(`(() => { const b = [...document.querySelectorAll('button')].find((e) => e.textContent.trim().startsWith('Pay by card')); b.click(); return true; })()`);
+    let session = null;
+    const before = Date.now();
+    for (let i = 0; i < 40 && !session; i++) {
+      await sleep(250);
+      const s = await (await fetch(`${STRIPE}/_last`)).json();
+      if (s?.metadata?.balance_id) session = s;
+    }
+    if (!session) throw new Error('no Checkout Session for the balance');
+    const paid = await (
+      await fetch(`${STRIPE}/_pay`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sessionId: session.id, balanceId: session.metadata.balance_id, paid: true }),
+      })
+    ).json();
+    note(`Balance paid by card (${Date.now() - before} ms); webhook ${paid.webhook}`);
+    await go(`${BASE}/?balance=${session.metadata.balance_id}&session_id=${session.id}`);
+    await until(`!document.body.innerText.includes('Your files open when your balance of')`, 'the hold lifted', 20000);
+    await sleep(800);
+    await shot('81-files-released');
+    const after = await js(`fetch('/api/portal/files').then((r) => r.json())`);
+    note(`After paying: ${after.files.filter((f) => f.held).length} held`);
+    if (after.files[0]) {
+      const st = await js(`fetch('/api/portal/files/${after.files[0].id}/content?mode=download').then((r) => r.status)`);
+      note(`${after.files[0].name}: content answers ${st}`);
+    }
   }
 } catch (e) {
   note(`ERROR: ${e.message}`);

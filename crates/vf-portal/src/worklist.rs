@@ -231,6 +231,26 @@ mod tests {
     }
 
     #[test]
+    fn documents_locked_until_paid_wait_on_the_fee() {
+        // Walkthrough 2026-11-26: a pay-first card waits on the fee, not on its locked documents.
+        let mut w = d("4", "c", "statements", 2025, "open", "fee");
+        w.steps
+            .iter_mut()
+            .find(|s| s.kind == "return")
+            .unwrap()
+            .state = "locked".into();
+        assert_eq!(w.waiting().map(|s| s.kind.as_str()), Some("fee"));
+        assert_eq!(not_remindable(&w), None);
+        assert_eq!(
+            ids(&rows(&[w.clone()], &[], Show::Step("fee"), None)),
+            ["4"]
+        );
+        // Only locked steps left: the first of them is still said.
+        w.steps.iter_mut().find(|s| s.kind == "fee").unwrap().state = "done".into();
+        assert_eq!(w.waiting().map(|s| s.kind.as_str()), Some("return"));
+    }
+
+    #[test]
     fn remind_words_say_who_was_and_was_not_reminded() {
         assert_eq!(
             remind_words(&[
