@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/*"]
 
 [workspace.package]
-version = "0.1.56"
+version = "0.1.57"
 edition = "2024"
 # VibeMyFirm Community License 1.0 from 0.1.52 (owner 2026-11-22, PA-101, Q-144); NOTICE.md.
 # 0.1.51 and earlier were AGPL-3.0-or-later.
