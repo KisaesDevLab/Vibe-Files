@@ -616,10 +616,13 @@ fn addons_table(ui: &mut egui::Ui, d: &mut Plan) {
         .spacing([10.0, 6.0])
         .show(ui, |ui| {
             ui.label("");
-            ui.label(RichText::new("Name").strong());
-            ui.label(RichText::new("What the client reads").strong());
-            ui.label(RichText::new("Price").strong());
-            ui.label(RichText::new("Offered unless unticked").strong());
+            // The headings name each row's boxes for a screen reader.
+            let name_h = ui.label(RichText::new("Name").strong()).id;
+            let text_h = ui.label(RichText::new("What the client reads").strong()).id;
+            let price_h = ui.label(RichText::new("Price").strong()).id;
+            let offered_h = ui
+                .label(RichText::new("Offered unless unticked").strong())
+                .id;
             ui.label("");
             ui.end_row();
             for (i, a) in d.addons.iter_mut().enumerate() {
@@ -643,24 +646,28 @@ fn addons_table(ui: &mut egui::Ui, d: &mut Plan) {
                     .response;
                 row_y.push(r.rect.center().y);
                 widgets::named(r.on_hover_text("Drag to move"), "Move add-on");
-                ui.add(egui::TextEdit::singleline(&mut a.name).desired_width(160.0));
-                ui.add(
-                    egui::TextEdit::singleline(&mut a.text)
-                        .desired_width(260.0)
-                        .hint_text("What the client reads"),
-                );
+                // Sized, not desired widths: a grid cell gives a text box only its column's
+                // width so far, which the heading set (the boxes were cut to "Mic", "Qu").
+                ui.add_sized([180.0, 22.0], egui::TextEdit::singleline(&mut a.name))
+                    .labelled_by(name_h);
+                ui.add_sized(
+                    [320.0, 22.0],
+                    egui::TextEdit::singleline(&mut a.text).hint_text("What the client reads"),
+                )
+                .labelled_by(text_h);
                 ui.horizontal(|ui| {
                     ui.label("$");
                     let mut price = money(a.cents).trim_start_matches('$').to_string();
                     if ui
-                        .add(egui::TextEdit::singleline(&mut price).desired_width(70.0))
+                        .add_sized([80.0, 22.0], egui::TextEdit::singleline(&mut price))
+                        .labelled_by(price_h)
                         .changed()
                         && let Some(c) = parse_money(&price)
                     {
                         a.cents = c;
                     }
                 });
-                ui.checkbox(&mut a.offered, "");
+                ui.checkbox(&mut a.offered, "").labelled_by(offered_h);
                 if ui.small_button("Remove").clicked() {
                     remove_add = Some(i);
                 }
@@ -699,6 +706,40 @@ fn addons_table(ui: &mut egui::Ui, d: &mut Plan) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn addon_boxes_are_wide_enough_to_read() {
+        use egui::accesskit::Role;
+        use egui_kittest::HarnessBuilder;
+        use egui_kittest::kittest::Queryable;
+
+        let plan = Plan {
+            return_type: "1040".into(),
+            tax_year: 2025,
+            base_name: "Tax return preparation".into(),
+            packages: vec![],
+            addons: vec![PlanAddon {
+                key: "a".into(),
+                name: "Mid-year planning meeting".into(),
+                text: "A meeting in the summer to plan the rest of the year".into(),
+                cents: 15_000,
+                offered: true,
+            }],
+        };
+        let mut h = HarnessBuilder::default()
+            .with_max_steps(crate::ui::test_util::MAX_STEPS)
+            .with_size([1000.0, 300.0])
+            .build_ui_state(|ui, d: &mut Plan| addons_table(ui, d), plan);
+        h.run();
+        let widths: Vec<f32> = h
+            .query_all_by_role(Role::TextInput)
+            .map(|n| n.rect().width())
+            .collect();
+        assert_eq!(widths.len(), 3, "name, text, price");
+        assert!(widths[0] >= 170.0, "name {widths:?}");
+        assert!(widths[1] >= 300.0, "text {widths:?}");
+        assert!(widths[2] >= 70.0, "price {widths:?}");
+    }
 
     fn pkg(services: &[(&str, &[&str])]) -> PlanPackage {
         PlanPackage {
