@@ -520,24 +520,34 @@ try {
     await click('Sign in');
     await until(`location.pathname === '/'`, 'home after signing in');
     await until(`document.body.innerText.includes('Balance due')`, 'the balance card');
-    await until(`document.body.innerText.includes('Your files open when your balance of')`, 'the held note', 20000);
+    await until(`/files open when your balance of/.test(document.body.innerText)`, 'the held note', 20000);
     await sleep(800);
     await shot('80-files-held');
     const text = await js(`document.body.innerText`);
-    note(`Held note: ${(text.match(/Your files open when your balance of[^\n]*/) || ['?'])[0]}`);
+    note(`Held note: ${(text.match(/[^\n]*files open when your balance of[^\n]*/) || ['?'])[0]}`);
     note(`Badges "Opens when your balance is paid": ${(text.match(/Opens when your balance is paid/g) || []).length}`);
     note(`Open or Download buttons shown: ${await js(`[...document.querySelectorAll('a,button')].filter((e) => /^(Open|Download)$/.test(e.textContent.trim())).length`)}`);
     const files = await js(`fetch('/api/portal/files').then((r) => r.json())`);
     note(`Files list: ${files.files.length} files, ${files.files.filter((f) => f.held).length} held; held at the top: ${JSON.stringify(files.held)}`);
-    for (const f of files.files.slice(0, 2)) {
+    // Owner 2026-11-26: the paid statements stay open; the organizer (on no paid card) is held.
+    for (const f of files.files) {
       const r = await js(`fetch('/api/portal/files/${f.id}/content?mode=download').then(async (r) => [r.status, await r.text()])`);
-      note(`${f.name}: content answers ${r[0]} ${r[1].slice(0, 80)}`);
+      note(`${f.name}: held ${f.held}; content answers ${r[0]} ${r[0] === 200 ? '' : r[1].slice(0, 80)}`);
+      const want = f.name.includes('Organizer') ? 423 : 200;
+      if (r[0] !== want || f.held !== (want === 423)) {
+        throw new Error(`${f.name}: content ${r[0]}, held ${f.held}; wanted ${want}`);
+      }
     }
     // Sharing a held file on (Send a file to someone outside) is refused too.
-    if (files.files[0]) {
+    const heldOne = files.files.find((f) => f.held);
+    if (heldOne) {
       const me = await js(`fetch('/api/portal/auth/me').then((r) => r.json())`);
-      const r = await js(`fetch('/api/portal/outside-shares', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ clientId: ${JSON.stringify(me.activeClientId)}, fileIds: [${JSON.stringify(files.files[0].id)}], email: 'outside.person@example.com', name: 'Outside Person', days: 7 }) }).then(async (r) => [r.status, await r.text()])`);
+      const r = await js(`fetch('/api/portal/outside-shares', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ clientId: ${JSON.stringify(me.activeClientId)}, fileIds: [${JSON.stringify(heldOne.id)}], email: 'outside.person@example.com', name: 'Outside Person', days: 7 }) }).then(async (r) => [r.status, await r.text()])`);
       note(`Sending a held file outside answers ${r[0]} ${r[1].slice(0, 80)}`);
+      // 403 client_links_off: the firm does not let clients send links (nothing to hold).
+      if (r[0] !== 423 && !(r[0] === 403 && r[1].includes('client_links_off'))) {
+        throw new Error(`sending a held file outside answered ${r[0]}`);
+      }
     }
     // Pay now goes to the balance card on the same page.
     const anchor = await js(`(() => { const a = [...document.querySelectorAll('a')].find((x) => x.textContent.trim() === 'Pay now'); if (!a) return 'no Pay now link'; const t = document.querySelector(a.getAttribute('href')); return t ? 'Pay now goes to: ' + t.textContent.slice(0, 40) : 'Pay now goes nowhere (' + a.getAttribute('href') + ')'; })()`);
@@ -560,14 +570,15 @@ try {
     ).json();
     note(`Balance paid by card (${Date.now() - before} ms); webhook ${paid.webhook}`);
     await go(`${BASE}/?balance=${session.metadata.balance_id}&session_id=${session.id}`);
-    await until(`!document.body.innerText.includes('Your files open when your balance of')`, 'the hold lifted', 20000);
+    await until(`!/files open when your balance of/.test(document.body.innerText)`, 'the hold lifted', 20000);
     await sleep(800);
     await shot('81-files-released');
     const after = await js(`fetch('/api/portal/files').then((r) => r.json())`);
     note(`After paying: ${after.files.filter((f) => f.held).length} held`);
-    if (after.files[0]) {
-      const st = await js(`fetch('/api/portal/files/${after.files[0].id}/content?mode=download').then((r) => r.status)`);
-      note(`${after.files[0].name}: content answers ${st}`);
+    for (const f of after.files) {
+      const st = await js(`fetch('/api/portal/files/${f.id}/content?mode=download').then((r) => r.status)`);
+      note(`${f.name}: content answers ${st}`);
+      if (st !== 200) throw new Error(`${f.name} after paying: ${st}`);
     }
   }
 } catch (e) {

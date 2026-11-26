@@ -19,13 +19,13 @@ Two switches, both off until the firm ticks them:
 4. Tick **Form 8879** and paste the client's **UltraTax eSignature link** (it starts with `https://`).
 5. Press **Send to client**. With **Tell the client** ticked, the client's people get an email and text naming the card, never its content.
 
-One delivery is open per client, tax year and return type. Opening the window again shows it; change it and press **Save changes**.
+One delivery is open per client, tax year and return type. Opening the window again shows it; change it, then **Save changes**. A finished one is read-only; **Send another** starts anew.
 
 **Remind the client** every few days while a step waits on them, and **Assigned to**: the staff member told when the client says they signed, when each step is done, and of every payment. Nobody assigned: the admins.
 
 ## A revised return
 
-Choose another return for a delivery whose client already opened the first, and press **Save changes**: the window asks first. **Send the revised return** shows the card as Updated and reopens the return and Form 8879 steps; paste a new eSignature link if UltraTax made one. The letters, package and fee stand.
+Choose another return for a delivery whose client opened the first, and press **Save changes**: the window asks first. **Send the revised return** shows the card as Updated and reopens the return and Form 8879 steps; paste a new eSignature link if UltraTax made one. The letters, package and fee stand.
 
 ## What the client does
 
@@ -36,7 +36,7 @@ A step can be locked until an earlier one is done (the portal's defaults: the re
 
 ## Confirming Form 8879
 
-When the client says they signed, the assigned staff member (or the admins) gets an email, and the window says **The client says they signed it**. Check UltraTax, then press **Confirm signed**. When every step is done the card says so and stays on the client's page for the days the firm set.
+When the client says they signed, the assigned staff member (or the admins) gets an email, and the window says **The client says they signed it**. Check UltraTax, then press **Confirm signed**. Finished, the card stays on the client's page for the days the firm set.
 
 ## The step PDFs
 

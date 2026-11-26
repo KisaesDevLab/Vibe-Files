@@ -71,3 +71,12 @@ Client side:
   filter is tax returns only.
 - Every PC must be updated: an older Vibe Files lists only tax return cards and would not file a
   statements card's PDFs in Financials.
+
+## 5. After the walkthrough (owner 2026-11-26)
+
+- **A finished card** opens in Deliver… read-only (Complete, its documents, fee and log; "Finished
+  <time>. Nothing here can be changed.") with **Send another** for a new card of the same kind
+  and year. The client panel keeps the newest finished card's line ("…: complete") when none is
+  open. Before, it opened as an empty "Not sent yet" form that could be sent again.
+- **A balance hold spares paid deliveries**: the documents of a card whose fee is paid stay open,
+  downloadable and shareable while the balance holds the client's other files (Vibe Portal 0.5.8).

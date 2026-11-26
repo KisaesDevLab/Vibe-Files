@@ -18,7 +18,7 @@ Select the client in Browse and press **Balance owed…** in the client's detail
 - **Assigned to**: the staff member told when it is paid, started, failed or expired. Nobody: the person named in the portal's Settings › Payments, else the admins.
 - **Remove from the portal after N days**: the card leaves by itself on that day if unpaid. Untick it for no limit.
 - **Tell the client by email and text**, and **Remind** every few days while it is due.
-- **Hold the client's files until this is paid**: while it is due, the client sees their shared files listed, marked *Opens when your balance is paid*, with the **Pay** button, but cannot open, download or share them; files shared meanwhile wait too. Paying (a bank payment started is enough), **Clear balance**, or the card leaving after its days releases them. Their uploads to you still work. Needs Vibe Portal 0.5.6 or later: an older portal posts the balance without the hold, and the window says so.
+- **Hold the client's files until this is paid**: while it is due, the client sees their shared files listed, marked *Opens when your balance is paid*, with the **Pay** button, but cannot open, download or share them; files shared meanwhile wait too. Documents of a delivery whose fee is paid stay open (Vibe Portal 0.5.8 or later). Paying (a bank payment started is enough), **Clear balance**, or the card leaving after its days releases them. Their uploads to you still work. Needs Vibe Portal 0.5.6 or later: an older portal posts the balance without the hold, and the window says so.
 
 Press **Post to portal**. The client's home page shows a **Balance due** card with one **Pay** button (two, bank account and card, when the firm charges a card fee, so the fee is seen first).
 

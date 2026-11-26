@@ -1634,6 +1634,49 @@ mod tests {
         assert_eq!(opened, [true, true]);
         assert_eq!(now.status, "complete");
 
+        // ---- Step 5 (owner 2026-11-26): the finished card stays on the panel and opens in
+        // Deliver… read-only, with Send another for a new card.
+        open_mut(&mut h).browse.portal.look_at_deliveries_now();
+        wait_long(&mut h, "the panel line, complete", &|h| {
+            said(h, "2025 Financial statements: complete")
+        });
+        h.run_steps(4);
+        h.get_by_role_and_label(Role::Button, "Deliver…").click();
+        wait_long(&mut h, "the window read", &|h| said(h, "WHAT HAS HAPPENED"));
+        h.run_steps(6);
+        pick(&mut h, "Kind", "Financial statements");
+        h.run_steps(6);
+        shot(&mut h, "06a-deliver-finished");
+        let button = |h: &egui_kittest::Harness<'static, VibeFilesApp>, label: &str| {
+            h.query_all_by_label(label)
+                .any(|n| n.accesskit_node().role() == Role::Button)
+        };
+        let shown = (
+            said(&h, "Nothing here can be changed."),
+            button(&h, "Send another"),
+            button(&h, "Save changes"),
+            button(&h, "Send to client"),
+        );
+        note(format!(
+            "Step 5: Deliver… on the finished card: read-only words, Send another, Save changes, Send to client: {shown:?}"
+        ));
+        assert_eq!(
+            shown,
+            (true, true, false, false),
+            "see 06a-deliver-finished.png"
+        );
+        h.get_by_role_and_label(Role::Button, "Send another")
+            .click();
+        h.run_steps(6);
+        shot(&mut h, "06b-send-another");
+        let fresh = (said(&h, "Not sent yet"), button(&h, "Send to client"));
+        note(format!(
+            "Step 5: Send another: Not sent yet, Send to client: {fresh:?}"
+        ));
+        assert_eq!(fresh, (true, true), "see 06b-send-another.png");
+        open_mut(&mut h).browse.portal.delivery = None;
+        h.run_steps(4);
+
         // ---- Step 6: the step PDFs are fetched and committed into Financials\2025\Delivery.
         open_mut(&mut h).browse.portal.fetch_now = true;
         let inbox = crate::portal::inbox(&root);
@@ -1716,7 +1759,30 @@ mod tests {
         h.state_mut().tab = crate::app::Tab::Browse;
         h.run_steps(6);
 
-        // ---- Step 7: Balance owed… with Hold the client's files.
+        // ---- Step 7: Balance owed… with Hold the client's files. Another file, not on the
+        // paid card, is shown to Jordan first: the hold holds it and spares the statements
+        // (owner 2026-11-26).
+        let other = t.path().join("2025 Organizer - Sample.pdf");
+        crate::ui::test_util::write_lines_pdf(&other, &[&["Sample client", "2025 organizer"]]);
+        let other_id = p
+            .add(
+                &c.id,
+                "walk-organizer",
+                "2025 Organizer - Sample.pdf",
+                Some(2025),
+                &other,
+            )
+            .unwrap()
+            .file_id()
+            .to_string();
+        let people: std::collections::BTreeMap<String, bool> = p
+            .users(&c.id)
+            .unwrap()
+            .users
+            .iter()
+            .map(|u| (u.identity_id.clone(), true))
+            .collect();
+        p.set_visibility(&other_id, &people).unwrap();
         h.get_by_role_and_label(Role::Button, "Balance owed…")
             .click();
         wait_long(&mut h, "the balance window read", &|h| {

@@ -242,6 +242,8 @@ pub struct DeliverWindow {
     link: String,
     notify: bool,
     confirm_cancel: bool,
+    /// Send another was pressed on a finished card: the form is a new card's (owner 2026-11-26).
+    fresh: bool,
     job: Option<Receiver<Done>>,
     said: Option<(String, bool)>,
     err: Option<String>,
@@ -314,6 +316,7 @@ impl DeliverWindow {
             link: String::new(),
             notify: true,
             confirm_cancel: false,
+            fresh: false,
             job: None,
             said: None,
             err: None,
@@ -672,15 +675,41 @@ impl DeliverWindow {
         }));
     }
 
-    /// The delivery this window is about: the open one for the year and return type chosen.
+    /// The delivery this window is about: the open one for the year and return type chosen,
+    /// else the newest finished one, shown read-only until Send another (owner 2026-11-26: a
+    /// finished card opened as an empty form could be sent again by mistake).
     fn current(&self) -> Option<&Delivery> {
         let rt = self.rt();
-        self.deliveries.iter().find(|d| {
-            d.status == "open"
-                && d.kind == self.kind
+        let fits = |d: &&Delivery| {
+            d.kind == self.kind
                 && d.tax_year == self.year
                 && d.return_type.eq_ignore_ascii_case(&rt)
-        })
+        };
+        self.deliveries
+            .iter()
+            .filter(fits)
+            .find(|d| d.status == "open")
+            .or_else(|| {
+                self.deliveries
+                    .iter()
+                    .filter(fits)
+                    .filter(|d| !self.fresh && d.status == "complete")
+                    .max_by(|a, b| a.created_at.cmp(&b.created_at))
+            })
+    }
+
+    /// Send another: a new, empty card for the same kind and year.
+    fn send_another(&mut self) {
+        self.fresh = true;
+        self.title = default_title(&self.kind, self.year, &self.rt());
+        self.return_file = None;
+        self.return_doc = None;
+        self.extra_docs.clear();
+        self.kept.clear();
+        self.pay_first = false;
+        self.offer_letters();
+        self.offer_fee();
+        self.fill();
     }
 
     /// Fills the form from the delivery shown (or a default return file for a new one).
@@ -897,13 +926,16 @@ impl DeliverWindow {
         }
         let current = self.current().cloned();
         let sent = current.is_some();
-        let can = !busy && self.offline.is_none();
+        // Owner 2026-11-26: a finished card is shown read-only; only kind and year can change.
+        let finished = current.as_ref().is_some_and(|d| d.status == "complete");
+        let pick = !busy && self.offline.is_none();
+        let can = pick && !finished;
         // The strip: kind, year, return type (or the document's name), title, status.
         ui.horizontal_wrapped(|ui| {
             let before = (self.kind.clone(), self.year, self.rt());
             // PA-114 (owner 2026-11-26, M1): what the card delivers.
             ui.label("Kind");
-            ui.add_enabled_ui(can, |ui| {
+            ui.add_enabled_ui(pick, |ui| {
                 let r = egui::ComboBox::from_id_salt("delivery-kind")
                     .selected_text(kind_words(&self.kind))
                     .show_ui(ui, |ui| {
@@ -922,12 +954,15 @@ impl DeliverWindow {
             } else {
                 "Year"
             });
-            ui.add_enabled(can, egui::DragValue::new(&mut self.year).range(1990..=2100))
-                .labelled_by(l.id);
+            ui.add_enabled(
+                pick,
+                egui::DragValue::new(&mut self.year).range(1990..=2100),
+            )
+            .labelled_by(l.id);
             match self.kind.as_str() {
                 delivery::KIND_RETURN => {
                     ui.label("Return type");
-                    ui.add_enabled_ui(can, |ui| {
+                    ui.add_enabled_ui(pick, |ui| {
                         let r = egui::ComboBox::from_id_salt("delivery-type")
                             .selected_text(&self.return_type)
                             .show_ui(ui, |ui| {
@@ -942,7 +977,7 @@ impl DeliverWindow {
                     ui.label("What it is");
                     widgets::named(
                         ui.add_enabled(
-                            can && !sent,
+                            pick && (!sent || finished),
                             egui::TextEdit::singleline(&mut self.doc_name)
                                 .desired_width(180.0)
                                 .char_limit(24)
@@ -954,6 +989,7 @@ impl DeliverWindow {
                 _ => {}
             }
             if before != (self.kind.clone(), self.year, self.rt()) {
+                self.fresh = false;
                 if before.0 != self.kind || before.2 != self.rt() {
                     self.offer_letters();
                 }
@@ -1509,55 +1545,60 @@ impl DeliverWindow {
                 }
             });
         }
-        ui.checkbox(
-            &mut self.notify,
-            "Tell the client by email and text when it is sent",
+        ui.add_enabled(
+            can,
+            egui::Checkbox::new(
+                &mut self.notify,
+                "Tell the client by email and text when it is sent",
+            ),
         );
-        ui.horizontal(|ui| {
-            ui.label("Remind the client");
-            let r = egui::ComboBox::from_id_salt("delivery-remind")
-                .selected_text(match self.remind_days {
-                    0 => "never".to_string(),
-                    n => format!("every {n} days while a step waits"),
-                })
-                .show_ui(ui, |ui| {
-                    for n in [0u32, 3, 7, 14] {
-                        let words = if n == 0 {
-                            "never".to_string()
-                        } else {
-                            format!("every {n} days while a step waits")
-                        };
-                        ui.selectable_value(&mut self.remind_days, n, words);
-                    }
-                });
-            combo_named(
-                &r.response,
-                "Remind the client",
-                &remind_choice_words(self.remind_days),
-            );
-            ui.label("Assigned to");
-            let shown = self
-                .assigned
-                .as_deref()
-                .and_then(|id| self.staff.iter().find(|s| s.id == id))
-                .map(|s| s.name.clone())
-                .unwrap_or_else(|| "Nobody (the admins)".into());
-            let r = egui::ComboBox::from_id_salt("delivery-assigned")
-                .selected_text(shown)
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut self.assigned, None, "Nobody (the admins)");
-                    for s in &self.staff {
-                        ui.selectable_value(&mut self.assigned, Some(s.id.clone()), &s.name);
-                    }
-                });
-            combo_named(
-                &r.response,
-                "Assigned to",
-                self.assigned
+        ui.add_enabled_ui(can, |ui| {
+            ui.horizontal(|ui| {
+                ui.label("Remind the client");
+                let r = egui::ComboBox::from_id_salt("delivery-remind")
+                    .selected_text(match self.remind_days {
+                        0 => "never".to_string(),
+                        n => format!("every {n} days while a step waits"),
+                    })
+                    .show_ui(ui, |ui| {
+                        for n in [0u32, 3, 7, 14] {
+                            let words = if n == 0 {
+                                "never".to_string()
+                            } else {
+                                format!("every {n} days while a step waits")
+                            };
+                            ui.selectable_value(&mut self.remind_days, n, words);
+                        }
+                    });
+                combo_named(
+                    &r.response,
+                    "Remind the client",
+                    &remind_choice_words(self.remind_days),
+                );
+                ui.label("Assigned to");
+                let shown = self
+                    .assigned
                     .as_deref()
                     .and_then(|id| self.staff.iter().find(|s| s.id == id))
-                    .map_or("Nobody (the admins)", |s| s.name.as_str()),
-            );
+                    .map(|s| s.name.clone())
+                    .unwrap_or_else(|| "Nobody (the admins)".into());
+                let r = egui::ComboBox::from_id_salt("delivery-assigned")
+                    .selected_text(shown)
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut self.assigned, None, "Nobody (the admins)");
+                        for s in &self.staff {
+                            ui.selectable_value(&mut self.assigned, Some(s.id.clone()), &s.name);
+                        }
+                    });
+                combo_named(
+                    &r.response,
+                    "Assigned to",
+                    self.assigned
+                        .as_deref()
+                        .and_then(|id| self.staff.iter().find(|s| s.id == id))
+                        .map_or("Nobody (the admins)", |s| s.name.as_str()),
+                );
+            })
         });
         let doc_name_ok = self.kind != delivery::KIND_DOCUMENT
             || delivery::valid_return_type(&self.doc_name).is_ok();
@@ -1574,7 +1615,24 @@ impl DeliverWindow {
             ui.colored_label(theme::error(), "The eSignature link starts with https://.");
         }
         ui.horizontal(|ui| {
-            if ui
+            if finished {
+                let when = current
+                    .as_ref()
+                    .and_then(|d| d.completed_at.as_deref())
+                    .map(|t| format!("Finished {}.", widgets::local_time(t)))
+                    .unwrap_or_else(|| "Finished.".into());
+                ui.label(
+                    RichText::new(format!("{when} Nothing here can be changed."))
+                        .color(theme::ink_secondary()),
+                );
+                if ui
+                    .add_enabled(pick, egui::Button::new("Send another"))
+                    .on_hover_text("A new, empty card for the same kind and year")
+                    .clicked()
+                {
+                    self.send_another();
+                }
+            } else if ui
                 .add_enabled(
                     can && sent,
                     egui::Button::new(RichText::new("Cancel delivery…").color(theme::error())),
@@ -1589,17 +1647,18 @@ impl DeliverWindow {
                 } else {
                     "Send to client"
                 };
-                if ui
-                    .add_enabled(
-                        can && link_ok
-                            && doc_name_ok
-                            && (self.with_return
-                                || self.with_8879
-                                || self.with_letters
-                                || self.with_fee),
-                        widgets::primary_button(label),
-                    )
-                    .clicked()
+                if !finished
+                    && ui
+                        .add_enabled(
+                            can && link_ok
+                                && doc_name_ok
+                                && (self.with_return
+                                    || self.with_8879
+                                    || self.with_letters
+                                    || self.with_fee),
+                            widgets::primary_button(label),
+                        )
+                        .clicked()
                 {
                     act = Some(Act::Send);
                 }
@@ -3152,12 +3211,16 @@ fn remind_ticked(
     rx
 }
 
-/// The client panel's line for one client, from the deliveries last read on this PC.
+/// The client panel's line for one client, from the deliveries last read on this PC: the newest
+/// open card, else the newest finished one (owner 2026-11-26).
 pub fn panel_line(read: Option<&Vec<Delivery>>, client_id: &str) -> Option<String> {
-    let d = read?
-        .iter()
-        .filter(|d| d.client_id == client_id && d.status == "open" && !d.is_agreement())
-        .max_by(|a, b| a.created_at.cmp(&b.created_at))?;
+    let newest = |status: &str| {
+        read?
+            .iter()
+            .filter(|d| d.client_id == client_id && d.status == status && !d.is_agreement())
+            .max_by(|a, b| a.created_at.cmp(&b.created_at))
+    };
+    let d = newest("open").or_else(|| newest("complete"))?;
     Some(format!("{}: {}", d.heading(), d.line()))
 }
 
