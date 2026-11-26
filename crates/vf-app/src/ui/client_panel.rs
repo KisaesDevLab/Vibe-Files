@@ -238,7 +238,7 @@ pub fn show(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env, ci: usize) {
                 .clicked()
             && let Some(s) = b.portal.settings(env.root).cloned()
         {
-            b.portal.delivery = Some(crate::ui::delivery::DeliverWindow::new(
+            let mut w = crate::ui::delivery::DeliverWindow::new(
                 ui.ctx(),
                 &s,
                 env.root.to_path_buf(),
@@ -252,7 +252,14 @@ pub fn show(ui: &mut egui::Ui, b: &mut Browse, env: &mut Env, ci: usize) {
                 b.portal.delivery_out(),
                 crate::ui::delivery::client_pdfs(env.conn, env.root, &c.id),
                 b.b2_first.clone(),
-            ));
+            );
+            // QA 2026-11-26: opens on the client's open card when all are of one kind.
+            if let Some((kind, year, return_type)) =
+                crate::ui::delivery::open_card_to_show(b.portal.deliveries.as_ref(), &c.id)
+            {
+                w.focus(&kind, year, &return_type);
+            }
+            b.portal.delivery = Some(w);
         }
         // Annual agreements (owner 2026-11-25): letters signed and fees set up on the portal.
         if b.portal.settings(env.root).is_some_and(|s| s.deliveries)

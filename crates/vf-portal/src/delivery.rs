@@ -554,14 +554,13 @@ impl Delivery {
         }
     }
 
-    /// The client panel's heading for this card: "Tax return delivery", "Financial statements",
-    /// the document's name, "Service agreement".
-    pub fn heading(&self) -> String {
+    /// The client panel's heading for this card: "Tax return delivery", "Delivery" (statements
+    /// or another document: its line names it), "Service agreement".
+    pub fn heading(&self) -> &'static str {
         match self.kind.as_str() {
-            KIND_AGREEMENT => "Service agreement".into(),
-            KIND_STATEMENTS => STATEMENTS_TYPE.into(),
-            KIND_DOCUMENT => self.return_type.clone(),
-            _ => "Tax return delivery".into(),
+            KIND_AGREEMENT => "Service agreement",
+            KIND_STATEMENTS | KIND_DOCUMENT => "Delivery",
+            _ => "Tax return delivery",
         }
     }
 
@@ -779,12 +778,18 @@ impl Portal {
     }
 
     /// PA-114: the card's documents in order (1 to 10 of the client's files on the portal).
-    /// An older portal has no such route (404): the caller says to update it.
-    pub fn set_delivery_files(&self, id: &str, file_ids: &[String]) -> Result<Delivery> {
+    /// `revised`: documents the client opened are changed (asked first): each is opened again.
+    /// An older portal has no such route (404 `not_found`): the caller says to update it.
+    pub fn set_delivery_files(
+        &self,
+        id: &str,
+        file_ids: &[String],
+        revised: bool,
+    ) -> Result<Delivery> {
         self.send_json::<One>(
             "PUT",
             &format!("/deliveries/{id}/files"),
-            &serde_json::json!({ "fileIds": file_ids }),
+            &serde_json::json!({ "fileIds": file_ids, "revised": revised }),
         )
         .map(|r| r.delivery)
     }
@@ -1191,7 +1196,11 @@ mod tests {
         assert!(!d.is_return() && !d.is_agreement());
         assert_eq!(d.locks.return_after_fee, Some(true));
         assert_eq!(d.file_ids(), ["f1", "f2"]);
-        assert_eq!(d.heading(), "Financial statements");
+        assert_eq!(d.heading(), "Delivery");
+        assert_eq!(
+            format!("{}: {}", d.heading(), d.line()),
+            "Delivery: 2025 Financial statements: 1 of 2 done · Form 8879 waiting for you to confirm"
+        );
         assert_eq!(d.what(), "Financial statements");
         // An older portal: no files, no lock answered; the return file stands for the list.
         let old: Delivery = serde_json::from_str(DELIVERY_JSON).unwrap();

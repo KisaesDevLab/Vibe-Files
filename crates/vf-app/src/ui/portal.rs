@@ -2688,9 +2688,11 @@ pub fn admin_settings(ui: &mut egui::Ui, a: &mut AdminPortal, env: &mut Env) {
         "For every PC of this cabinet: a client's Deliver… (in the client's details) \
          and Admin › Portal › Deliveries. The client opens the return and signs Form 8879 on \
          UltraTax eSignature from a card on the portal; each finished step's PDF, with its log, \
-         is filed in the client's Income Tax\\<year>\\Delivery folder (doc types Delivery — …, \
-         added when this is saved). The portal must have it turned on too (its Settings › Tax \
-         return delivery). Needs Vibe Portal 0.5.4 or later.",
+         is filed in the client's Income Tax\\<year>\\Delivery folder (financial statements' in \
+         Financials\\<year>\\Delivery, another document's in Other\\<year>\\Delivery; their doc \
+         types are added when this is saved). The portal must have it turned on too (its \
+         Settings › Tax return delivery). Needs Vibe Portal 0.5.4 or later (0.5.6 for \
+         statements, other documents and pay first).",
     ));
     ui.label(widgets::caption(
         "With it, annual service agreements: a client's Service agreement… and End engagement…, \

@@ -1102,6 +1102,16 @@ impl Portal {
         self.files_where(&[("clientId", client_id)])
     }
 
+    /// The portal copy of a cabinet document for this client (QA 2026-11-26: a document moved
+    /// to another client in the cabinet is not taken for this client's).
+    pub fn file_for_client_doc(&self, client_id: &str, doc_id: &str) -> Result<Option<PortalFile>> {
+        self.files_where(&[("clientId", client_id), ("vfDocumentId", doc_id)])
+            .map(|f| {
+                f.into_iter()
+                    .find(|f| f.client_id == client_id && f.vf_document_id == doc_id)
+            })
+    }
+
     /// The portal copy of a cabinet document, if it is on the portal.
     pub fn file_for_doc(&self, doc_id: &str) -> Result<Option<PortalFile>> {
         self.files_where(&[("vfDocumentId", doc_id)])

@@ -366,7 +366,9 @@ impl BalanceWindow {
                     None => self.balances.insert(0, p.balance.clone()),
                 }
                 // PA-114: an older portal posts the balance and leaves the files open.
+                // QA 2026-11-26: said beside the pending payment's note, not instead of it.
                 let (note, warn) = match balance::hold_not_taken(hold, &p.balance) {
+                    Some(w) if p.pending => (format!("{note} {w}"), true),
                     Some(w) => (w.to_string(), true),
                     None => (note, p.pending),
                 };

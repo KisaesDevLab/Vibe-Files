@@ -151,7 +151,7 @@ pub fn record_reads(
     Ok(())
 }
 
-// ---- The Deliver tax return window -------------------------------------------------------------
+// ---- The Deliver… window (tax return, financial statements, another document) ------------------
 
 enum Done {
     #[allow(clippy::type_complexity)]
@@ -200,6 +200,9 @@ pub struct DeliverWindow {
     pay_first: bool,
     /// PA-114: the documents after the first (cabinet document ids; `None` not chosen yet).
     extra_docs: Vec<Option<String>>,
+    /// QA 2026-11-26: the card's documents whose cabinet document is not found (trashed, moved
+    /// to another client): kept on the card as they are unless Removed, never dropped unsaid.
+    kept: Vec<(String, String)>,
     with_return: bool,
     with_8879: bool,
     /// Step 1 (Addendum D3): the letters offered for the return type, ticked or not.
@@ -283,6 +286,7 @@ impl DeliverWindow {
             title: format!("Your {year} tax return"),
             pay_first: false,
             extra_docs: Vec::new(),
+            kept: Vec::new(),
             with_return: true,
             with_8879: true,
             with_letters: false,
@@ -334,7 +338,11 @@ impl DeliverWindow {
             delivery::KIND_DOCUMENT => self.doc_name = return_type.to_string(),
             _ => {}
         }
-        if self.kind != delivery::KIND_RETURN {
+        if self.kind == delivery::KIND_RETURN {
+            // QA 2026-11-26: a tax return's defaults (a card read fills its own).
+            self.with_8879 = true;
+            self.fee_mode = "packages".into();
+        } else {
             self.with_8879 = false;
         }
         self.title = default_title(&self.kind, self.year, &self.rt());
@@ -699,18 +707,34 @@ impl DeliverWindow {
                 .and_then(|id| self.files.iter().find(|f| f.file_id == id))
                 .map(|f| f.vf_document_id.clone())
                 .or(self.return_doc.clone());
-            // PA-114: the documents after the first, and the pay-first lock.
-            self.extra_docs = d
-                .file_ids()
-                .iter()
-                .skip(1)
-                .map(|id| {
+            // PA-114: the documents (one tax return keeps the return's own handling, T27), and
+            // the pay-first lock. QA 2026-11-26: one not found in the cabinet is kept, said.
+            if d.kind != delivery::KIND_RETURN || d.files.len() > 1 {
+                let cards: Vec<(String, String)> = if d.files.is_empty() {
+                    d.return_file
+                        .iter()
+                        .map(|f| (f.id.clone(), f.name.clone()))
+                        .collect()
+                } else {
+                    d.files
+                        .iter()
+                        .map(|f| (f.id.clone(), f.name.clone()))
+                        .collect()
+                };
+                let (found, kept) = match_card_files(&cards, |file_id| {
                     self.files
                         .iter()
-                        .find(|f| &f.file_id == id)
+                        .find(|f| f.file_id == file_id)
                         .map(|f| f.vf_document_id.clone())
-                })
-                .collect();
+                        .filter(|doc| self.docs.iter().any(|x| &x.id == doc))
+                });
+                self.return_doc = found.first().cloned();
+                self.extra_docs = found.iter().skip(1).cloned().map(Some).collect();
+                self.kept = kept;
+            } else {
+                self.extra_docs.clear();
+                self.kept.clear();
+            }
             self.pay_first = d.locks.return_after_fee == Some(true);
             self.link = d.esign_link.clone().unwrap_or_default();
             self.notify = d.notify;
@@ -824,7 +848,7 @@ impl DeliverWindow {
                 self.said = Some((m, false));
                 self.err = None;
             }
-            Done::Saved(Err(e), _) if e == REVISED_ASK => {
+            Done::Saved(Err(e), _) if e == REVISED_ASK || e == FILES_REVISE_ASK => {
                 // Asked in the window, as for another document (T27).
                 self.force_revise = true;
                 self.confirm_revise = true;
@@ -932,6 +956,11 @@ impl DeliverWindow {
             if before != (self.kind.clone(), self.year, self.rt()) {
                 if before.0 != self.kind || before.2 != self.rt() {
                     self.offer_letters();
+                }
+                if before.0 != self.kind && self.kind == delivery::KIND_RETURN {
+                    // QA 2026-11-26: back to a tax return, its defaults come back.
+                    self.with_8879 = true;
+                    self.fee_mode = "packages".into();
                 }
                 self.offer_fee();
                 if self.kind != delivery::KIND_RETURN {
@@ -1185,9 +1214,25 @@ impl DeliverWindow {
                 if let Some(i) = remove {
                     self.extra_docs.remove(i);
                 }
+                let mut drop_kept = None;
+                for (i, (_, name)) in self.kept.iter().enumerate() {
+                    ui.horizontal(|ui| {
+                        ui.colored_label(
+                            theme::warn(),
+                            format!("{name}: on the card, but not found in the client's folder (trashed or moved). It stays on the card unless removed."),
+                        );
+                        if ui.add_enabled(can && !docs_done, egui::Button::new("Remove")).clicked() {
+                            drop_kept = Some(i);
+                        }
+                    });
+                }
+                if let Some(i) = drop_kept {
+                    self.kept.remove(i);
+                }
                 if ui
                     .add_enabled(
-                        can && !docs_done && self.extra_docs.len() + 1 < delivery::MAX_FILES,
+                        can && !docs_done
+                            && self.extra_docs.len() + 1 + self.kept.len() < delivery::MAX_FILES,
                         egui::Button::new("+ Add another PDF"),
                     )
                     .clicked()
@@ -1580,9 +1625,24 @@ impl DeliverWindow {
         });
         if self.confirm_revise {
             ui.group(|ui| {
-                ui.label("Tell the client the return was updated and reopen the Form 8879 step? The letters, package and fee stand; paste a new eSignature link if UltraTax made one.");
+                let documents = self.kind != delivery::KIND_RETURN
+                    || !self.extra_docs.is_empty()
+                    || !self.kept.is_empty()
+                    || current.as_ref().is_some_and(|d| d.files.len() > 1);
+                if documents {
+                    ui.label("The client has opened these documents. Send the changed ones as revised? The client is told, and each document is to be opened again; the letters and fee stand.");
+                } else {
+                    ui.label("Tell the client the return was updated and reopen the Form 8879 step? The letters, package and fee stand; paste a new eSignature link if UltraTax made one.");
+                }
                 ui.horizontal(|ui| {
-                    if ui.button("Send the revised return").clicked() {
+                    if ui
+                        .button(if documents {
+                            "Send the revised documents"
+                        } else {
+                            "Send the revised return"
+                        })
+                        .clicked()
+                    {
                         act = Some(Act::Send);
                     }
                     if ui.button("Keep the first").clicked() {
@@ -1797,11 +1857,21 @@ impl DeliverWindow {
                 let title = self.title.trim().to_string();
                 // One tax return PDF: sent as the return (it can be revised, T27). Several, or
                 // another kind's: sent as the card's documents (PA-114).
-                let (doc, many) = if is_return && chosen.len() <= 1 {
+                let kept: Vec<String> = if self.with_return {
+                    self.kept.iter().map(|(id, _)| id.clone()).collect()
+                } else {
+                    Vec::new()
+                };
+                let one_return = is_return
+                    && chosen.len() <= 1
+                    && kept.is_empty()
+                    && current.as_ref().is_none_or(|d| d.files.len() <= 1);
+                let (doc, many) = if one_return {
                     (chosen.into_iter().next(), Vec::new())
                 } else {
                     (None, chosen)
                 };
+                let confirmed = seen;
                 let b2 = self.b2.clone();
                 let client = self.client.clone();
                 let share_audit = self.audit.clone();
@@ -1848,14 +1918,9 @@ impl DeliverWindow {
                     let r = (|| {
                         let mut d = match &current {
                             None => {
-                                let d = p.create_delivery(&new).map_err(|e| {
-                                    // PA-114: an older portal refuses a kind it does not know.
-                                    if !is_return && e.status() == Some(400) {
-                                        vf_portal::PortalError::Local(NEEDS_PORTAL.into())
-                                    } else {
-                                        e
-                                    }
-                                })?;
+                                let d = p
+                                    .create_delivery(&new)
+                                    .map_err(|e| create_error(e, is_return))?;
                                 created.set(Some(d.id.clone()));
                                 d
                             }
@@ -1881,29 +1946,45 @@ impl DeliverWindow {
                         // is (staff may have limited who sees it).
                         // PA-114: several documents, or another kind's: each put on the portal for
                         // nobody, set as the card's documents (so they are locked), then shown.
-                        if !many.is_empty() {
-                            let done = d.step(delivery::RETURN).is_some_and(|s| s.state == "done");
+                        if !many.is_empty() || !kept.is_empty() {
+                            // QA 2026-11-26: first what each is on the portal (this client's),
+                            // nothing changed yet; a document the client opened is never
+                            // replaced unasked: asked, then sent as revised.
+                            let mut plan = Vec::new();
+                            for doc in &many {
+                                plan.push(look_up(&p, &client, doc)?);
+                            }
+                            let seen_plan: Vec<(Option<String>, bool)> = plan
+                                .iter()
+                                .map(|(doc, f)| {
+                                    (
+                                        f.as_ref().map(|f| f.file_id.clone()),
+                                        f.as_ref().is_some_and(|f| f.sha256 != doc.hash),
+                                    )
+                                })
+                                .collect();
+                            let change = files_change(&d, &seen_plan, &kept);
+                            if change.revise && !confirmed {
+                                return Err(vf_portal::PortalError::Local(FILES_REVISE_ASK.into()));
+                            }
                             let mut ids = Vec::new();
                             let mut shown_now = Vec::new();
-                            for doc in &many {
+                            for (doc, f) in plan {
                                 let (id, added) =
-                                    put_document(&p, &b2, &client, doc, done, &share_audit)?;
+                                    put_document(&p, &b2, &client, &doc, f, &share_audit)?;
                                 if added {
                                     shown_now.push((id.clone(), doc.id.clone()));
                                 }
                                 ids.push(id);
                             }
-                            if ids != d.file_ids() {
-                                if done {
-                                    return Err(vf_portal::PortalError::Local(FILES_SEEN.into()));
-                                }
-                                d = p.set_delivery_files(&d.id, &ids).map_err(|e| {
-                                    if e.status() == Some(404) {
-                                        vf_portal::PortalError::Local(NEEDS_PORTAL.into())
-                                    } else {
-                                        e
-                                    }
-                                })?;
+                            ids.extend(kept.iter().cloned());
+                            if change.revise
+                                || change.set_changes
+                                || (ids != d.file_ids() && !change.any_opened)
+                            {
+                                d = p
+                                    .set_delivery_files(&d.id, &ids, change.revise)
+                                    .map_err(files_error)?;
                             }
                             for (file_id, doc_id) in &shown_now {
                                 show_to_everyone(&p, &client, file_id, doc_id, &share_audit)?;
@@ -1923,56 +2004,57 @@ impl DeliverWindow {
                             let unseen = |f: &vf_portal::api::PortalFile| {
                                 f.invites.is_empty() && f.users.iter().all(|u| !u.visible)
                             };
-                            let (file_id, added, replaced) = match p.file_for_doc(&doc.id)? {
-                                Some(f) if f.sha256 == doc.hash => {
-                                    let nobody = unseen(&f);
-                                    (f.file_id, nobody, false)
-                                }
-                                Some(f) => {
-                                    let nobody = unseen(&f);
-                                    // New content for a return the client opened: only as a
-                                    // revised return, asked for in the window.
-                                    if done && is_return(&d, &f.file_id) && !seen {
-                                        return Err(vf_portal::PortalError::Local(
-                                            REVISED_ASK.into(),
-                                        ));
+                            let (file_id, added, replaced) =
+                                match p.file_for_client_doc(&client.id, &doc.id)? {
+                                    Some(f) if f.sha256 == doc.hash => {
+                                        let nobody = unseen(&f);
+                                        (f.file_id, nobody, false)
                                     }
-                                    let id = f.file_id.clone();
-                                    crate::ui::portal::share_docs(
-                                        &p,
-                                        &b2,
-                                        &client,
-                                        vec![(doc.clone(), Some(f))],
-                                        &Default::default(),
-                                        &Default::default(),
-                                        true,
-                                        &share_audit,
-                                    )
-                                    .map_err(vf_portal::PortalError::Local)?;
-                                    (id, nobody, true)
-                                }
-                                None => {
-                                    b2.push(std::slice::from_ref(&doc.id))
+                                    Some(f) => {
+                                        let nobody = unseen(&f);
+                                        // New content for a return the client opened: only as a
+                                        // revised return, asked for in the window.
+                                        if done && is_return(&d, &f.file_id) && !seen {
+                                            return Err(vf_portal::PortalError::Local(
+                                                REVISED_ASK.into(),
+                                            ));
+                                        }
+                                        let id = f.file_id.clone();
+                                        crate::ui::portal::share_docs(
+                                            &p,
+                                            &b2,
+                                            &client,
+                                            vec![(doc.clone(), Some(f))],
+                                            &Default::default(),
+                                            &Default::default(),
+                                            true,
+                                            &share_audit,
+                                        )
                                         .map_err(vf_portal::PortalError::Local)?;
-                                    let a = p.add(
-                                        &client.id,
-                                        &doc.id,
-                                        &doc.name,
-                                        doc.tax_year,
-                                        &doc.path,
-                                    )?;
-                                    share_audit.send(AuditEntry::new(
-                                        "portal_share",
-                                        Some(&doc.id),
-                                        serde_json::json!({
-                                            "client_id": client.id,
-                                            "sent": true,
-                                            "updated": false,
-                                        }),
-                                    ));
-                                    (a.file_id().to_string(), true, false)
-                                }
-                            };
+                                        (id, nobody, true)
+                                    }
+                                    None => {
+                                        b2.push(std::slice::from_ref(&doc.id))
+                                            .map_err(vf_portal::PortalError::Local)?;
+                                        let a = p.add(
+                                            &client.id,
+                                            &doc.id,
+                                            &doc.name,
+                                            doc.tax_year,
+                                            &doc.path,
+                                        )?;
+                                        share_audit.send(AuditEntry::new(
+                                            "portal_share",
+                                            Some(&doc.id),
+                                            serde_json::json!({
+                                                "client_id": client.id,
+                                                "sent": true,
+                                                "updated": false,
+                                            }),
+                                        ));
+                                        (a.file_id().to_string(), true, false)
+                                    }
+                                };
                             if !is_return(&d, &file_id) || (replaced && done) {
                                 d = if seen {
                                     p.revise_return(&d.id, &file_id)?
@@ -2144,9 +2226,116 @@ const REVISED_ASK: &str = "The return changed since the client opened it.";
 
 /// PA-114: said when the portal is older than the card needs (and the card is cancelled).
 pub const NEEDS_PORTAL: &str = "This needs Vibe Portal 0.5.6 or later: update the portal first.";
-/// PA-114: the client opened the documents; new ones go on a new card.
-const FILES_SEEN: &str =
-    "The client has opened these documents: send changed or added ones on a new card.";
+/// QA 2026-11-26: said by the Send job when documents the client opened would change: the
+/// window asks, as for a revised return, then sends them as revised.
+const FILES_REVISE_ASK: &str = "The client has opened these documents.";
+
+/// What sending a card's documents changes (QA 2026-11-26).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FilesChange {
+    /// Documents added or taken off (not only their order).
+    pub set_changes: bool,
+    /// The client opened one that would change, or the list changes after they opened any:
+    /// asked first, sent as revised.
+    pub revise: bool,
+    /// The client opened at least one.
+    pub any_opened: bool,
+}
+
+/// `plan`: each chosen document's portal file (none: new to the portal) and whether its content
+/// differs from the cabinet's; `kept`: the card's files kept as they are.
+pub fn files_change(
+    card: &Delivery,
+    plan: &[(Option<String>, bool)],
+    kept: &[String],
+) -> FilesChange {
+    let opened: Vec<&str> = card
+        .files
+        .iter()
+        .filter(|f| f.opened_at.is_some())
+        .map(|f| f.id.as_str())
+        .collect();
+    let done = card
+        .step(delivery::RETURN)
+        .is_some_and(|s| s.state == "done");
+    let any_opened = !opened.is_empty() || done;
+    let replaced_opened = plan
+        .iter()
+        .any(|(id, differs)| *differs && id.as_deref().is_some_and(|id| opened.contains(&id)));
+    let mut now: Vec<String> = plan.iter().filter_map(|(id, _)| id.clone()).collect();
+    now.extend(kept.iter().cloned());
+    now.sort();
+    let mut was = card.file_ids();
+    was.sort();
+    let set_changes = plan.iter().any(|(id, _)| id.is_none()) || now != was;
+    FilesChange {
+        set_changes,
+        revise: replaced_opened || (set_changes && any_opened),
+        any_opened,
+    }
+}
+
+/// The card's files matched to the cabinet: the documents found (in order), and the files
+/// whose document is not found, kept with their names (QA 2026-11-26: never dropped unsaid).
+pub fn match_card_files(
+    card: &[(String, String)],
+    doc_of: impl Fn(&str) -> Option<String>,
+) -> (Vec<String>, Vec<(String, String)>) {
+    let mut found = Vec::new();
+    let mut kept = Vec::new();
+    for (id, name) in card {
+        match doc_of(id) {
+            Some(doc) if !found.contains(&doc) => found.push(doc),
+            _ => kept.push((id.clone(), name.clone())),
+        }
+    }
+    (found, kept)
+}
+
+/// Create's error: only an older portal's refusal of a kind it does not know (`400 invalid`)
+/// says to update it; any other answer is the portal's own word.
+pub fn create_error(e: vf_portal::PortalError, is_return: bool) -> vf_portal::PortalError {
+    if !is_return && e.status() == Some(400) && e.code() == Some("invalid") {
+        vf_portal::PortalError::Local(NEEDS_PORTAL.into())
+    } else {
+        e
+    }
+}
+
+/// PUT /files' error: an older portal has no such route (`404 not_found`); a file the portal
+/// will not put on the card (`file_not_found`: not this client's, taken off, seen by nobody)
+/// is said in its own words.
+pub fn files_error(e: vf_portal::PortalError) -> vf_portal::PortalError {
+    match (e.status(), e.code()) {
+        (Some(404), Some("not_found")) => vf_portal::PortalError::Local(NEEDS_PORTAL.into()),
+        (_, Some("file_not_found")) => vf_portal::PortalError::Local(
+            "A document could not be put on the card: on the portal it is not this client's, \
+             was taken off, or nobody can see it. Press Read again and choose it again."
+                .into(),
+        ),
+        _ => e,
+    }
+}
+
+/// The client's open card to show when Deliver… opens: the newest open one when every open
+/// card (agreements aside) is of one kind; else none (a new tax return).
+pub fn open_card_to_show(
+    read: Option<&Vec<Delivery>>,
+    client_id: &str,
+) -> Option<(String, i32, String)> {
+    let open: Vec<&Delivery> = read?
+        .iter()
+        .filter(|d| d.client_id == client_id && d.status == "open" && !d.is_agreement())
+        .collect();
+    let first = open.iter().max_by(|a, b| a.created_at.cmp(&b.created_at))?;
+    open.iter().all(|d| d.kind == first.kind).then(|| {
+        (
+            first.kind.clone(),
+            first.tax_year,
+            first.return_type.clone(),
+        )
+    })
+}
 /// PA-114 (owner 2026-11-26, M2): the fee's tick.
 pub const PAY_FIRST_WORDS: &str = "Documents open only after the fee is paid";
 
@@ -2234,31 +2423,39 @@ pub fn old_portal(d: &Delivery, kind: &str, pay_first: bool) -> Option<&'static 
     (wrong_kind || no_lock).then_some(NEEDS_PORTAL)
 }
 
+/// One of the card's documents with its hash, and its portal file for this client (none: not on
+/// the portal yet). Nothing is changed.
+fn look_up(
+    p: &vf_portal::api::Portal,
+    client: &ClientRef,
+    doc: &crate::ui::portal::DocRef,
+) -> Result<(crate::ui::portal::DocRef, Option<PortalFile>), vf_portal::PortalError> {
+    let mut doc = doc.clone();
+    doc.hash = filer_intake::commit::sha256_file(&doc.path)
+        .map_err(|e| vf_portal::PortalError::Local(format!("{}: {e}", doc.name)))?;
+    let f = p.file_for_client_doc(&client.id, &doc.id)?;
+    Ok((doc, f))
+}
+
 /// Puts one of the card's documents on the portal (PA-114): the file already there with the
-/// same content as it is, new content replaced (refused once the client opened the documents),
-/// or added for nobody yet. Its file id, and whether nobody sees it yet (shown once set).
+/// same content as it is, new content replaced (the caller asked first when the client opened
+/// it), or added for nobody yet. Its file id, and whether nobody sees it yet (shown once set).
 fn put_document(
     p: &vf_portal::api::Portal,
     b2: &crate::ui::portal::B2First,
     client: &ClientRef,
     doc: &crate::ui::portal::DocRef,
-    opened: bool,
+    file: Option<PortalFile>,
     audit: &AuditOut,
 ) -> Result<(String, bool), vf_portal::PortalError> {
     use vf_portal::PortalError::Local;
-    let mut doc = doc.clone();
-    doc.hash = filer_intake::commit::sha256_file(&doc.path)
-        .map_err(|e| Local(format!("{}: {e}", doc.name)))?;
     let unseen = |f: &PortalFile| f.invites.is_empty() && f.users.iter().all(|u| !u.visible);
-    match p.file_for_doc(&doc.id)? {
+    match file {
         Some(f) if f.sha256 == doc.hash => {
             let nobody = unseen(&f);
             Ok((f.file_id, nobody))
         }
         Some(f) => {
-            if opened {
-                return Err(Local(FILES_SEEN.into()));
-            }
             let nobody = unseen(&f);
             let id = f.file_id.clone();
             crate::ui::portal::share_docs(
@@ -2455,7 +2652,7 @@ fn short_day(at: &str) -> String {
 /// The filters above the list (owner 2026-11-25: by step waiting, by kind, a failed month).
 const SHOWS: [(Show, &str); 9] = [
     (Show::Open, "All open"),
-    (Show::Step(delivery::RETURN), "Tax return"),
+    (Show::Step(delivery::RETURN), "Documents to open"),
     (Show::Step(delivery::ESIGN), "Form 8879"),
     (Show::Step(delivery::LETTERS), "Letters to sign"),
     (Show::Step(delivery::PACKAGE), "Package to choose"),
@@ -2553,7 +2750,7 @@ pub fn page(ui: &mut egui::Ui, page: &mut DeliveriesPage, env: &mut crate::ui::b
     });
     ui.horizontal(|ui| {
         ui.checkbox(&mut page.finished, "Show finished")
-            .on_hover_text("Also list those finished this season: tax returns of that tax year, and the agreements covering them.");
+            .on_hover_text("Also list those finished this season: tax returns, financial statements and other documents of that year, and the agreements covering them.");
         if page.finished {
             ui.label("Season (tax year)");
             ui.add(egui::DragValue::new(&mut page.season).range(2000..=2100));
@@ -3067,6 +3264,8 @@ mod tests {
 
         h.state_mut().focus(delivery::KIND_RETURN, 2025, "1040");
         h.run();
+        assert!(h.state().with_8879, "a tax return's 8879 comes back");
+        assert_eq!(h.state().fee_mode, "packages");
         h.get_by_label("Form 8879");
         h.get_by_label("Package and fee");
         h.get_by_label("Tax return PDF");
@@ -3115,6 +3314,162 @@ mod tests {
         d.kind = "statements".into();
         d.locks.return_after_fee = Some(true);
         assert_eq!(old_portal(&d, "statements", true), None);
+    }
+
+    /// A card as the portal answers it: `files` (id, opened), its documents step's state.
+    fn card(kind: &str, files: &[(&str, bool)], step: &str) -> Delivery {
+        serde_json::from_value(serde_json::json!({
+            "id": "d1", "clientId": "c1", "taxYear": 2025, "returnType": "Financial statements",
+            "kind": kind, "title": "t", "status": "open",
+            "locks": {"returnAfterLetters": true, "esignAfterLetters": true, "esignAfterFee": true},
+            "assignedStaffId": null, "remindedAt": null, "returnFile": null, "esignLink": null,
+            "createdAt": "2026-11-26T12:00:00.000Z", "completedAt": null, "cancelledAt": null,
+            "files": files.iter().map(|(id, opened)| serde_json::json!({
+                "id": id, "name": format!("{id}.pdf"), "sha256": "x",
+                "openedAt": opened.then_some("2026-11-26T13:00:00.000Z")
+            })).collect::<Vec<_>>(),
+            "steps": [{"kind": "return", "n": 2, "name": "Documents", "present": true,
+                "state": step, "after": [], "saidAt": null, "completedAt": null,
+                "completedBy": null, "rounds": 0}]
+        }))
+        .unwrap()
+    }
+
+    /// QA 2026-11-26 (1): a PDF the client opened is never replaced unasked, though the step is
+    /// not done (another PDF not opened yet); one not opened is replaced freely.
+    #[test]
+    fn an_opened_pdf_is_changed_only_as_revised() {
+        let d = card("statements", &[("f1", true), ("f2", false)], "open");
+        let same = [
+            (Some("f1".to_string()), false),
+            (Some("f2".to_string()), false),
+        ];
+        let c = files_change(&d, &same, &[]);
+        assert!(!c.revise && !c.set_changes && c.any_opened);
+        // New content for f1, which the client opened: asked, then sent as revised.
+        let f1_new = [
+            (Some("f1".to_string()), true),
+            (Some("f2".to_string()), false),
+        ];
+        assert!(files_change(&d, &f1_new, &[]).revise);
+        // New content for f2, not opened: replaced without asking.
+        let f2_new = [
+            (Some("f1".to_string()), false),
+            (Some("f2".to_string()), true),
+        ];
+        let c = files_change(&d, &f2_new, &[]);
+        assert!(!c.revise && !c.set_changes);
+        // A PDF added after one was opened: the list changes, asked first.
+        let added = [
+            (Some("f1".to_string()), false),
+            (Some("f2".to_string()), false),
+            (None, false),
+        ];
+        let c = files_change(&d, &added, &[]);
+        assert!(c.set_changes && c.revise);
+        // Nothing opened: added freely.
+        let fresh = card("statements", &[("f1", false)], "open");
+        let c = files_change(
+            &fresh,
+            &[(Some("f1".to_string()), false), (None, false)],
+            &[],
+        );
+        assert!(c.set_changes && !c.revise);
+        // Order only: no change of the set.
+        let swapped = [
+            (Some("f2".to_string()), false),
+            (Some("f1".to_string()), false),
+        ];
+        assert!(!files_change(&fresh_two(), &swapped, &[]).set_changes);
+    }
+
+    fn fresh_two() -> Delivery {
+        card("document", &[("f1", false), ("f2", false)], "open")
+    }
+
+    /// QA 2026-11-26 (2): a card document whose cabinet document is gone is kept, not dropped.
+    #[test]
+    fn a_card_file_not_in_the_cabinet_is_kept() {
+        let cards = vec![
+            ("f1".to_string(), "Q4 statements.pdf".to_string()),
+            ("f2".to_string(), "Cover letter.pdf".to_string()),
+            ("f3".to_string(), "Notes.pdf".to_string()),
+        ];
+        let (found, kept) = match_card_files(&cards, |id| match id {
+            "f1" => Some("doc1".into()),
+            "f3" => Some("doc3".into()),
+            _ => None,
+        });
+        assert_eq!(found, ["doc1", "doc3"]);
+        assert_eq!(kept, [("f2".to_string(), "Cover letter.pdf".to_string())]);
+        // Sent with the kept one: the set is unchanged, nothing to ask.
+        let d = card(
+            "statements",
+            &[("f1", true), ("f2", false), ("f3", false)],
+            "open",
+        );
+        let plan = [
+            (Some("f1".to_string()), false),
+            (Some("f3".to_string()), false),
+        ];
+        let c = files_change(&d, &plan, &["f2".to_string()]);
+        assert!(!c.set_changes && !c.revise);
+        // Without it (dropped), the set changes and, one being opened, it would be asked.
+        assert!(files_change(&d, &plan, &[]).revise);
+    }
+
+    /// QA 2026-11-26 (3): only an older portal's answers say to update it.
+    #[test]
+    fn only_an_older_portals_answers_say_update_it() {
+        use vf_portal::PortalError;
+        let http = |status: u16, code: &str| PortalError::Http {
+            status,
+            code: code.into(),
+        };
+        let words = |e: PortalError| e.message();
+        assert_eq!(
+            words(create_error(http(400, "invalid"), false)),
+            NEEDS_PORTAL
+        );
+        // A tax return refused as invalid is the portal's own word, as is kind_steps.
+        assert_ne!(
+            words(create_error(http(400, "invalid"), true)),
+            NEEDS_PORTAL
+        );
+        assert_ne!(
+            words(create_error(http(400, "kind_steps"), false)),
+            NEEDS_PORTAL
+        );
+        assert_eq!(words(files_error(http(404, "not_found"))), NEEDS_PORTAL);
+        let nf = words(files_error(http(404, "file_not_found")));
+        assert!(nf.contains("could not be put on the card"), "{nf}");
+        assert_ne!(words(files_error(http(409, "files_seen"))), NEEDS_PORTAL);
+    }
+
+    /// QA 2026-11-26: Deliver… opens on the client's open card when all are of one kind.
+    #[test]
+    fn deliver_opens_on_the_open_cards_kind() {
+        let mut s = card("statements", &[("f1", false)], "open");
+        s.created_at = "2026-11-26T12:00:00.000Z".into();
+        let mut r = card("return", &[], "open");
+        r.return_type = "1040".into();
+        r.created_at = "2026-11-20T12:00:00.000Z".into();
+        let mut a = card("agreement", &[], "open");
+        a.return_type = "Agreement".into();
+        assert_eq!(
+            open_card_to_show(Some(&vec![s.clone(), a.clone()]), "c1"),
+            Some(("statements".into(), 2025, "Financial statements".into()))
+        );
+        assert_eq!(
+            open_card_to_show(Some(&vec![s.clone(), r.clone()]), "c1"),
+            None
+        );
+        assert_eq!(
+            open_card_to_show(Some(&vec![r.clone()]), "c1"),
+            Some(("return".into(), 2025, "1040".into()))
+        );
+        assert_eq!(open_card_to_show(Some(&vec![s]), "c2"), None);
+        assert_eq!(open_card_to_show(None, "c1"), None);
     }
 
     /// Intake's receipt and step rules follow the switches as Admin › Portal saves them (Q11):

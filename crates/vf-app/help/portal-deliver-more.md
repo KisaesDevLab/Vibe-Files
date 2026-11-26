@@ -8,7 +8,7 @@
 
 Form 8879 and the package step are only for a tax return. The fee for statements or another document is one amount.
 
-This needs Vibe Portal 0.5.6 or later. On an older portal, **Send to client** says to update the portal first and nothing is left on the client's portal.
+This needs Vibe Portal 0.5.6 or later. On an older portal, **Send to client** says to update the portal first and cancels the card it started; PDFs already sent for it stay on the portal, shown to no one.
 
 ## Several PDFs on one card
 
