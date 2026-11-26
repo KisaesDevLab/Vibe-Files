@@ -51,7 +51,7 @@ Each finished step makes a PDF: a record page (for the return, its name, size an
 - **Show** narrows the list by the step waiting (Tax return, Form 8879, Letters to sign, Package to choose, Payment due), by kind (Tax returns, Agreements), or to **Monthly charge failed**.
 - **Show finished** adds those finished in the season you pick: that tax year's returns and the agreements covering them, with the day they were done.
 - **Waiting too long after** sets the days after which an open item's count turns amber; the number is kept for every PC. The line above the list counts them.
-- **Remind ticked** tells each ticked client again, as Remind now does. Tick rows by hand, or use **Tick all shown** or **Tick waiting too long**; only rows waiting on the client can be ticked. They go 20 at a time with a minute's pause; **Stop** ends the run. The line after it says who was reminded and who was not (nobody on the portal yet, or reminded 3 times that day already).
+- **Remind ticked** tells each ticked client again, as Remind now does. Tick rows, or **Tick all shown** or **Tick waiting too long**; rows not waiting on the client are skipped ([Mark ticked signed on paper](help:portal-delivery-changes)). They go 20 at a time with a minute's pause; **Stop** ends the run. The line after it says who was reminded and who was not (nobody on the portal yet, or reminded 3 times that day already).
 - **Monthly charge** shows an agreement's monthly amount, or the day its last charge failed.
 
 ## Where the record is kept

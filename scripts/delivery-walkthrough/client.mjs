@@ -553,6 +553,32 @@ try {
     const viewed = await js(`(async () => { const a = [...document.querySelectorAll('a')].find((e) => e.textContent.trim() === 'View'); if (!a) return 0; const r = await fetch(a.href); return r.status; })()`);
     note(`View of the corrected return answered ${viewed}`);
     if (viewed !== 200) throw new Error(`View answered ${viewed}`);
+  } else if (PHASE === 'office-mail') {
+    // Owner 2026-11-26: Form 8879 signed at the office (2024) and by mail (2023): the card says
+    // what to do; the mailed one has I've mailed it back.
+    const start = Date.now() / 1000;
+    await go(`${BASE}/login`);
+    await until(`!!document.querySelector('input')`, 'the sign-in page');
+    await js(`__type(document.querySelector('input'), ${JSON.stringify(EMAIL)})`);
+    await click('Continue');
+    const m = await mailWith('/auth/verify', start);
+    await go(linkIn(m.body, '/auth/verify'));
+    await until(`!!__byText('button', 'Sign in')`, 'the sign-in link');
+    await click('Sign in');
+    await until(`location.pathname === '/'`, 'home after signing in');
+    await until(`document.body.innerText.includes('Sign Form 8879 at our office')`, 'the office words', 20000);
+    await until(`document.body.innerText.includes('We mailed you your tax return')`, 'the mail words', 20000);
+    await sleep(800);
+    await shot('95-office-mail-cards');
+    const text = await js(`document.body.innerText`);
+    note(`Office: ${(text.match(/[^\n]*Sign Form 8879 at our office[^\n]*/) || ['?'])[0]}`);
+    note(`Mail: ${(text.match(/[^\n]*We mailed you your tax return[^\n]*/) || ['?'])[0]}`);
+    note(`Open eSignature shown: ${await js(`[...document.querySelectorAll('a')].some((a) => a.textContent.trim() === 'Open eSignature')`)}`);
+    await click("I've mailed it back");
+    await until(`document.body.innerText.includes('You said you mailed it back')`, 'mailed back', 20000);
+    await sleep(600);
+    await shot('96-mailed-back');
+    note('Pressed I\'ve mailed it back: the card says You said you mailed it back');
   } else if (PHASE === 'held') {
     // A balance posted with Hold the client's files: listed, held, Pay now; paid, they open.
     const STRIPE = SECOND;

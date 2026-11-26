@@ -250,6 +250,10 @@ pub struct DeliverWindow {
     revising: bool,
     /// Send another after a card whose fee was paid: Fee starts unticked, and says why.
     another_paid: bool,
+    /// Owner 2026-11-26: how Form 8879 is signed: `link`, `office`, `mail`.
+    esign_mode: String,
+    /// A question (revise, cancel) was on screen last frame: it is scrolled into view once.
+    ask_shown: bool,
     /// Signed on paper…: the step asked about, and the note.
     paper: Option<&'static str>,
     paper_note: String,
@@ -329,6 +333,8 @@ impl DeliverWindow {
             revising: false,
             another_paid: false,
             paper: None,
+            esign_mode: "link".into(),
+            ask_shown: false,
             paper_note: String::new(),
             job: None,
             said: None,
@@ -843,6 +849,7 @@ impl DeliverWindow {
             }
             self.pay_first = d.locks.return_after_fee == Some(true);
             self.link = d.esign_link.clone().unwrap_or_default();
+            self.esign_mode = d.esign_mode().to_string();
             self.notify = d.notify;
         } else if self.return_doc.is_none() && self.kind == delivery::KIND_RETURN {
             // The client's PDF for the year whose name says it is the return, those under
@@ -1607,16 +1614,35 @@ impl DeliverWindow {
                     ui.label(RichText::new(step_state(delivery::ESIGN)).color(theme::ink_muted()));
                 });
                 if self.with_8879 {
-                    ui.horizontal(|ui| {
-                        ui.label("UltraTax eSignature link");
-                        widgets::named(
-                            ui.add_enabled(
-                                can,
-                                egui::TextEdit::singleline(&mut self.link)
-                                    .desired_width(380.0)
-                                    .hint_text("https://…"),
-                            ),
-                            "eSignature link",
+                    // Owner 2026-11-26: how the client signs it.
+                    ui.add_enabled_ui(can, |ui| {
+                        ui.label("How it is signed");
+                        ui.horizontal(|ui| {
+                            ui.radio_value(
+                                &mut self.esign_mode,
+                                "link".to_string(),
+                                "UltraTax eSignature link",
+                            );
+                            if self.esign_mode == "link" {
+                                widgets::named(
+                                    ui.add(
+                                        egui::TextEdit::singleline(&mut self.link)
+                                            .desired_width(380.0)
+                                            .hint_text("https://…"),
+                                    ),
+                                    "eSignature link",
+                                );
+                            }
+                        });
+                        ui.radio_value(
+                            &mut self.esign_mode,
+                            "office".to_string(),
+                            "Pick up and sign at our office",
+                        );
+                        ui.radio_value(
+                            &mut self.esign_mode,
+                            "mail".to_string(),
+                            "We mailed the return: sign and mail Form 8879 back",
                         );
                     });
                     let waiting = current
@@ -1703,6 +1729,7 @@ impl DeliverWindow {
             );
         }
         let link_ok = !self.with_8879
+            || self.esign_mode != "link"
             || self.link.trim().is_empty()
             || self.link.trim().to_lowercase().starts_with("https://");
         if !link_ok {
@@ -1815,8 +1842,13 @@ impl DeliverWindow {
                 }
             });
         });
+        // Walkthrough 2026-11-26: a question below the window's fold is scrolled into view once,
+        // when it appears (the Form 8879 choices made the window taller).
+        let asking = self.confirm_revise || self.confirm_cancel;
+        let scroll = asking && !self.ask_shown;
+        self.ask_shown = asking;
         if self.confirm_revise {
-            ui.group(|ui| {
+            let g = ui.group(|ui| {
                 let documents = self.kind != delivery::KIND_RETURN
                     || !self.extra_docs.is_empty()
                     || !self.kept.is_empty()
@@ -1842,9 +1874,12 @@ impl DeliverWindow {
                     }
                 });
             });
+            if scroll {
+                g.response.scroll_to_me(Some(egui::Align::Center));
+            }
         }
         if self.confirm_cancel {
-            ui.group(|ui| {
+            let g = ui.group(|ui| {
                 ui.label("Cancel this delivery? The card leaves the client's portal. What was done stays in its log.");
                 ui.horizontal(|ui| {
                     if ui.button("Cancel delivery").clicked() {
@@ -1856,6 +1891,9 @@ impl DeliverWindow {
                     }
                 });
             });
+            if scroll {
+                g.response.scroll_to_me(Some(egui::Align::Center));
+            }
         }
         if let Some((m, warn)) = &self.said {
             ui.colored_label(
@@ -2070,7 +2108,9 @@ impl DeliverWindow {
                 let client = self.client.clone();
                 let share_audit = self.audit.clone();
                 let link = self.link.trim().to_string();
-                let link = (self.with_8879 && !link.is_empty()).then_some(link);
+                let link = (self.with_8879 && self.esign_mode == "link" && !link.is_empty())
+                    .then_some(link);
+                let esign_mode = (is_return && self.with_8879).then(|| self.esign_mode.clone());
                 let notify = self.notify;
                 let locks = delivery::Locks {
                     return_after_letters: true,
@@ -2100,6 +2140,7 @@ impl DeliverWindow {
                     kind: (!is_return).then(|| kind.clone()),
                     covers: Vec::new(),
                     return_year: None,
+                    esign_mode: esign_mode.clone().filter(|m| m != "link"),
                 };
                 let what = if current.is_none() {
                     "portal_delivery_create"
@@ -2130,12 +2171,22 @@ impl DeliverWindow {
                                     assigned_staff_id: Some(assigned),
                                     remind_days: Some(remind_days),
                                     locks: change_locks,
+                                    // Sent only when it changed (an older portal ignores it).
+                                    esign_mode: esign_mode
+                                        .clone()
+                                        .filter(|m| m.as_str() != d.esign_mode()),
                                 },
                             )?,
                         };
                         // PA-114: an older portal takes the card but not its kind or its lock.
                         if let Some(why) = old_portal(&d, &kind, pay_first) {
                             return Err(vf_portal::PortalError::Local(why.into()));
+                        }
+                        // Owner 2026-11-26: an older portal has no office or mail signing.
+                        if esign_mode.as_deref().is_some_and(|m| m != "link")
+                            && d.esign_mode.is_none()
+                        {
+                            return Err(vf_portal::PortalError::Local(NEEDS_PORTAL_058.into()));
                         }
                         // The return (Q15): put on the portal for nobody yet, set as the
                         // delivery's return (so it is locked), then shown to everyone of the
@@ -2808,6 +2859,10 @@ pub struct DeliveriesPage {
     remind_stop: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     remind_progress: Option<String>,
     remind_done: Option<String>,
+    /// Mark ticked signed on paper (owner 2026-11-26): the question, its note, the run.
+    confirm_sign: bool,
+    sign_note: String,
+    signing: Option<Receiver<String>>,
 }
 
 /// Remind ticked sends this many, then pauses (as bulk invitations do).
@@ -2951,7 +3006,16 @@ pub fn page(ui: &mut egui::Ui, page: &mut DeliveriesPage, env: &mut crate::ui::b
             }
         }
     }
-    let reminding = page.remind.is_some();
+    if let Some(rx) = &page.signing
+        && let Ok(words) = rx.try_recv()
+    {
+        page.signing = None;
+        page.remind_done = Some(words);
+        page.ticked.clear();
+        page.loaded = false;
+    }
+    // Busy: reminding or marking signed (the ticks and both buttons wait).
+    let reminding = page.remind.is_some() || page.signing.is_some();
     if !page.loaded {
         page.loaded = true;
         page.clients = client_rows(env);
@@ -3046,7 +3110,7 @@ pub fn page(ui: &mut egui::Ui, page: &mut DeliveriesPage, env: &mut crate::ui::b
         // The ticks kept are those still listed and still waiting on the client.
         let listed: std::collections::HashSet<&str> = rows
             .iter()
-            .filter(|r| worklist::not_remindable(r.d).is_none())
+            .filter(|r| worklist::tickable(r.d))
             .map(|r| r.d.id.as_str())
             .collect();
         page.ticked.retain(|id| listed.contains(id.as_str()));
@@ -3087,15 +3151,20 @@ pub fn page(ui: &mut egui::Ui, page: &mut DeliveriesPage, env: &mut crate::ui::b
                     let n = days[row.index()];
                     let d = r.d;
                     row.col(|ui| {
+                        // Owner 2026-11-26: ticked to remind, or to mark signed on paper.
                         let why = worklist::not_remindable(d);
+                        let can_tick = worklist::tickable(d);
                         let mut on = page.ticked.contains(&d.id);
                         let resp = ui.add_enabled(
-                            why.is_none() && !reminding,
+                            can_tick && !reminding,
                             egui::Checkbox::without_text(&mut on),
                         );
-                        let resp = widgets::named(resp, "Tick to remind");
-                        if let Some(w) = why {
-                            resp.on_disabled_hover_text(format!("Can't remind: {w}"));
+                        let resp = widgets::named(resp, "Tick row");
+                        if !can_tick {
+                            resp.on_disabled_hover_text(format!(
+                                "Can't remind or mark signed: {}",
+                                why.unwrap_or("nothing waits")
+                            ));
                         } else if resp.changed() {
                             if on {
                                 page.ticked.insert(d.id.clone());
@@ -3103,6 +3172,7 @@ pub fn page(ui: &mut egui::Ui, page: &mut DeliveriesPage, env: &mut crate::ui::b
                                 page.ticked.remove(&d.id);
                             }
                             page.confirm = false;
+                            page.confirm_sign = false;
                         }
                     });
                     row.col(|ui| {
@@ -3127,13 +3197,7 @@ pub fn page(ui: &mut egui::Ui, page: &mut DeliveriesPage, env: &mut crate::ui::b
                     });
                     row.col(|ui| {
                         if r.open() {
-                            ui.label(
-                                d.waiting()
-                                    .map(|s| {
-                                        format!("{} · {}", s.name, delivery::state_words(&s.state))
-                                    })
-                                    .unwrap_or_default(),
-                            );
+                            ui.label(d.waiting().map(|s| d.step_words(s)).unwrap_or_default());
                         } else {
                             ui.label(
                                 d.completed_at
@@ -3188,7 +3252,7 @@ pub fn page(ui: &mut egui::Ui, page: &mut DeliveriesPage, env: &mut crate::ui::b
         ui.horizontal_wrapped(|ui| {
             if ui
                 .add_enabled(!reminding, egui::Button::new("Tick all shown"))
-                .on_hover_text("Every row listed whose step waits on the client")
+                .on_hover_text("Every row listed that can be reminded or marked signed")
                 .clicked()
             {
                 page.ticked = listed.iter().map(|s| s.to_string()).collect();
@@ -3227,10 +3291,59 @@ pub fn page(ui: &mut egui::Ui, page: &mut DeliveriesPage, env: &mut crate::ui::b
                     ui.spinner();
                     ui.label(p);
                 }
-                if ui.button("Stop").clicked()
+                if page.signing.is_some() {
+                    ui.spinner();
+                    ui.label("Marking signed on paper…");
+                } else if ui.button("Stop").clicked()
                     && let Some(f) = &page.remind_stop
                 {
                     f.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+            } else if page.confirm_sign {
+                let signable: Vec<&Delivery> = list
+                    .iter()
+                    .filter(|d| page.ticked.contains(&d.id))
+                    .filter(|d| worklist::signable(d).is_some())
+                    .collect();
+                ui.label(format!(
+                    "Mark the step each ticked card waits on (letters or Form 8879) signed on paper? {} card{}.",
+                    signable.len(),
+                    if signable.len() == 1 { "" } else { "s" }
+                ));
+                ui.label("Note");
+                widgets::named(
+                    ui.add(
+                        egui::TextEdit::singleline(&mut page.sign_note)
+                            .desired_width(220.0)
+                            .char_limit(200)
+                            .hint_text("Signed at the office"),
+                    ),
+                    "Signed on paper note",
+                );
+                if ui
+                    .add(widgets::primary_button(format!("Mark {} signed", signable.len())))
+                    .clicked()
+                {
+                    page.confirm_sign = false;
+                    page.remind_done = None;
+                    let jobs: Vec<(Delivery, String)> = list
+                        .iter()
+                        .filter(|d| page.ticked.contains(&d.id))
+                        .map(|d| {
+                            let who = names.get(d.id.as_str()).cloned().unwrap_or_default();
+                            (d.clone(), who)
+                        })
+                        .collect();
+                    page.signing = Some(sign_ticked(
+                        &ctx,
+                        &s,
+                        page.audit.clone(),
+                        jobs,
+                        page.sign_note.trim().to_string(),
+                    ));
+                }
+                if ui.button("Keep them").clicked() {
+                    page.confirm_sign = false;
                 }
             } else if page.confirm {
                 ui.label(format!(
@@ -3240,9 +3353,11 @@ pub fn page(ui: &mut egui::Ui, page: &mut DeliveriesPage, env: &mut crate::ui::b
                 if ui.add(widgets::primary_button("Remind")).clicked() {
                     page.confirm = false;
                     page.remind_done = None;
+                    // Only the rows waiting on the client (a row ticked to mark signed is not).
                     let jobs: Vec<(String, String, String)> = list
                         .iter()
                         .filter(|d| page.ticked.contains(&d.id))
+                        .filter(|d| worklist::not_remindable(d).is_none())
                         .map(|d| {
                             let who = names.get(d.id.as_str()).cloned().unwrap_or_default();
                             (d.id.clone(), d.client_id.clone(), who)
@@ -3256,15 +3371,41 @@ pub fn page(ui: &mut egui::Ui, page: &mut DeliveriesPage, env: &mut crate::ui::b
                 if ui.button("Cancel").clicked() {
                     page.confirm = false;
                 }
-            } else if ui
-                .add_enabled(n > 0, widgets::primary_button("Remind ticked"))
-                .on_hover_text(
-                    "Each ticked client is told again by email or text, as Remind now does \
-                     (3 times a day at most for one card).",
-                )
-                .clicked()
-            {
-                page.confirm = true;
+            } else {
+                let remindable = list
+                    .iter()
+                    .filter(|d| page.ticked.contains(&d.id))
+                    .filter(|d| worklist::not_remindable(d).is_none())
+                    .count();
+                let signable = list
+                    .iter()
+                    .filter(|d| page.ticked.contains(&d.id))
+                    .filter(|d| worklist::signable(d).is_some())
+                    .count();
+                if ui
+                    .add_enabled(remindable > 0, widgets::primary_button("Remind ticked"))
+                    .on_hover_text(
+                        "Each ticked client is told again by email or text, as Remind now does \
+                         (3 times a day at most for one card).",
+                    )
+                    .clicked()
+                {
+                    page.confirm = true;
+                }
+                if ui
+                    .add_enabled(
+                        signable > 0,
+                        egui::Button::new(format!("Mark ticked signed on paper… ({signable})")),
+                    )
+                    .on_hover_text(
+                        "The ticked cards waiting on their letters or Form 8879: the client \
+                         signed on paper",
+                    )
+                    .clicked()
+                {
+                    page.confirm_sign = true;
+                    page.sign_note.clear();
+                }
             }
         });
         if let Some(d) = &page.remind_done {
@@ -3317,6 +3458,61 @@ pub fn page(ui: &mut egui::Ui, page: &mut DeliveriesPage, env: &mut crate::ui::b
             page.loaded = false;
         }
     }
+}
+
+/// Mark ticked signed on paper's worker (owner 2026-11-26): each ticked card's waiting step
+/// (letters or Form 8879) marked signed on paper, one audit row each; the rest said as skipped.
+fn sign_ticked(
+    ctx: &egui::Context,
+    s: &vf_portal::PortalSettings,
+    audit: Option<AuditOut>,
+    jobs: Vec<(Delivery, String)>,
+    note: String,
+) -> Receiver<String> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let ctx = ctx.clone();
+    let s = s.clone();
+    std::thread::spawn(move || {
+        let p = core::client(&s);
+        let mut marked = 0;
+        let mut skipped: Vec<(String, String)> = Vec::new();
+        for (d, who) in jobs {
+            let Some(kind) = worklist::signable(&d) else {
+                let why = d
+                    .waiting()
+                    .map(|w| format!("waits on {}", w.name.to_lowercase()))
+                    .unwrap_or_else(|| "nothing waits".into());
+                skipped.push((who, why));
+                continue;
+            };
+            match p.paper_signed(&d.id, kind, &note) {
+                Ok(_) => {
+                    marked += 1;
+                    if let Some(a) = &audit {
+                        a.send(AuditEntry::new(
+                            if kind == delivery::ESIGN {
+                                "portal_delivery_8879_paper"
+                            } else {
+                                "portal_delivery_letters_paper"
+                            },
+                            None,
+                            serde_json::json!({ "client_id": d.client_id, "delivery_id": d.id }),
+                        ));
+                    }
+                }
+                Err(e) => {
+                    let why = match (e.status(), e.code()) {
+                        (Some(404), Some("not_found")) => NEEDS_PORTAL_058.to_string(),
+                        _ => e.message(),
+                    };
+                    skipped.push((who, why));
+                }
+            }
+        }
+        let _ = tx.send(worklist::signed_words(marked, &skipped));
+        ctx.request_repaint();
+    });
+    rx
 }
 
 /// Remind ticked's worker: each card's reminder in turn (Stop ends the run), one audit row each.

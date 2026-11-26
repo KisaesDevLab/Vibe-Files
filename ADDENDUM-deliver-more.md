@@ -89,3 +89,8 @@ Client side:
   another** after a paid card starts with Fee unticked and says why. `revise_walkthrough` drives
   the owner's sequence: send, view, pay, revise, Updated with no new bill, 8879 on paper, then the
   finished card revised.
+- **Form 8879 at the office or by mail; bulk signed on paper** (owner 2026-11-26): Deliver…'s
+  Form 8879 has **How it is signed** (eSignature link, pick up and sign at our office, we mailed
+  the return; portal `esignMode`, 0.5.8). Admin › Portal › Deliveries ticks rows waiting on
+  their letters or Form 8879 too, and **Mark ticked signed on paper…** marks each one's waiting
+  step with one note (the others are skipped and named). `revise_walkthrough` steps 8-10.

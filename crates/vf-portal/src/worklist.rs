@@ -160,6 +160,41 @@ pub fn not_remindable(d: &Delivery) -> Option<&'static str> {
     }
 }
 
+/// Owner 2026-11-26: the step a card waits on that staff may mark signed on paper (the letters
+/// or Form 8879, waiting on the client or on staff), for Mark ticked signed on paper.
+pub fn signable(d: &Delivery) -> Option<&'static str> {
+    if d.status != "open" {
+        return None;
+    }
+    let s = d.waiting()?;
+    if !matches!(s.state.as_str(), "open" | "waiting" | "coming") {
+        return None;
+    }
+    match s.kind.as_str() {
+        crate::delivery::LETTERS => Some(crate::delivery::LETTERS),
+        crate::delivery::ESIGN => Some(crate::delivery::ESIGN),
+        _ => None,
+    }
+}
+
+/// A row can be ticked: to remind its client, or to mark its step signed on paper.
+pub fn tickable(d: &Delivery) -> bool {
+    not_remindable(d).is_none() || signable(d).is_some()
+}
+
+/// What came of marking ticked cards signed on paper, in words.
+pub fn signed_words(marked: usize, skipped: &[(String, String)]) -> String {
+    let mut out = format!("{marked} marked signed on paper.",);
+    if !skipped.is_empty() {
+        let list: Vec<String> = skipped
+            .iter()
+            .map(|(w, why)| format!("{w} ({why})"))
+            .collect();
+        out.push_str(&format!(" Skipped: {}.", list.join("; ")));
+    }
+    out
+}
+
 /// What came of reminding one client.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Reminded {
@@ -248,6 +283,31 @@ mod tests {
         // Only locked steps left: the first of them is still said.
         w.steps.iter_mut().find(|s| s.kind == "fee").unwrap().state = "done".into();
         assert_eq!(w.waiting().map(|s| s.kind.as_str()), Some("return"));
+    }
+
+    #[test]
+    fn letters_and_8879_can_be_marked_signed_on_paper() {
+        // Owner 2026-11-26: the letters or Form 8879 waiting (on the client or on staff).
+        let letters = d("1", "c", "return", 2025, "open", "letters");
+        assert_eq!(signable(&letters), Some("letters"));
+        let fee = d("2", "c", "return", 2025, "open", "fee");
+        assert_eq!(signable(&fee), None);
+        assert!(tickable(&fee), "the fee can still be reminded");
+        let mut esign = d("3", "c", "return", 2025, "open", "fee");
+        let mut step = esign.steps[2].clone();
+        step.kind = "esign_8879".into();
+        step.state = "waiting".into();
+        esign.steps[2] = step;
+        assert_eq!(signable(&esign), Some("esign_8879"));
+        assert!(not_remindable(&esign).is_some());
+        assert!(tickable(&esign), "waiting for staff: ticked to mark signed");
+        let done = d("4", "c", "return", 2025, "complete", "");
+        assert_eq!(signable(&done), None);
+        assert!(!tickable(&done));
+        assert_eq!(
+            signed_words(2, &[("Doe, Pat (1077)".into(), "waits on the fee".into())]),
+            "2 marked signed on paper. Skipped: Doe, Pat (1077) (waits on the fee)."
+        );
     }
 
     #[test]

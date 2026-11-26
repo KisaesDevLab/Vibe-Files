@@ -1547,6 +1547,8 @@ mod tests {
         wait_long(&mut h, "the revise question", &|h| {
             said(h, "Send the revised return") || said(h, "rror")
         });
+        // The window scrolls the question into view the frame it appears.
+        h.run_steps(4);
         shot(&mut h, "02-revise-ask");
         h.get_by_role_and_label(Role::Button, "Send the revised return")
             .click();
@@ -1650,6 +1652,8 @@ mod tests {
         wait_long(&mut h, "the revise question", &|h| {
             said(h, "Send the revised return") || said(h, "rror")
         });
+        // The window scrolls the question into view the frame it appears.
+        h.run_steps(4);
         h.get_by_role_and_label(Role::Button, "Send the revised return")
             .click();
         wait_long(&mut h, "saved", &|h| {
@@ -1675,6 +1679,144 @@ mod tests {
         assert_eq!(state(&again, vf_portal::delivery::FEE), "done");
         assert_eq!(state(&again, vf_portal::delivery::RETURN), "open");
         assert_eq!(again.fee.as_ref().map(|f| f.payments.len()), Some(1));
+
+        // ---- Step 8 (owner 2026-11-26): a 2024 card whose Form 8879 is signed at the office:
+        // no link, the step open at once.
+        open_window(&mut h);
+        // The year as the Deliveries page sets it (typing in the year box is the window's own).
+        open_mut(&mut h)
+            .browse
+            .portal
+            .delivery
+            .as_mut()
+            .unwrap()
+            .focus("return", 2024, "1040");
+        h.run_steps(6);
+        for label in ["Tax return PDF", "Package and fee"] {
+            if ticked(&h, label) == Some(true) {
+                h.get_by_label(label).click();
+                h.run_steps(3);
+            }
+        }
+        if ticked(&h, "Form 8879") != Some(true) {
+            h.get_by_label("Form 8879").click();
+            h.run_steps(3);
+        }
+        h.get_by_label("Pick up and sign at our office").click();
+        h.run_steps(4);
+        shot(&mut h, "09-office-8879");
+        let link_box = h.query_by_label("eSignature link").is_some();
+        h.get_by_role_and_label(Role::Button, "Send to client")
+            .click();
+        wait_long(&mut h, "sent", &|h| {
+            said(h, "Sent to the client.") || said(h, "rror") || said(h, "said no")
+        });
+        shot(&mut h, "10-office-sent");
+        assert!(said(&h, "Sent to the client."), "see 10-office-sent.png");
+        let all = p.deliveries(Some(&c.id)).unwrap();
+        let office = all.iter().find(|d| d.tax_year == 2024).unwrap().clone();
+        note(format!(
+            "Step 8: a 2024 card, Form 8879 at the office: link box shown {link_box}; esign_mode {:?}; {}",
+            office.esign_mode,
+            office.line()
+        ));
+        assert_eq!(office.esign_mode.as_deref(), Some("office"));
+        assert_eq!(state(&office, vf_portal::delivery::ESIGN), "open");
+        assert!(!link_box);
+
+        // ---- Step 9: a 2023 card by mail (made here as the window would); the client sees both
+        // cards' words and says the mailed one is mailed back.
+        let mail = p
+            .create_delivery(&vf_portal::delivery::NewDelivery {
+                client_id: c.id.clone(),
+                tax_year: 2023,
+                return_type: "1040".into(),
+                title: "Your 2023 tax return".into(),
+                steps: vf_portal::delivery::StepsIn {
+                    esign8879: true,
+                    ..Default::default()
+                },
+                locks: vf_portal::delivery::Locks::default(),
+                assigned_staff_id: None,
+                notify: false,
+                hold: false,
+                remind_days: 0,
+                kind: None,
+                covers: Vec::new(),
+                return_year: None,
+                esign_mode: Some("mail".into()),
+            })
+            .unwrap();
+        assert!(client("office-mail"), "see client-office-mail.json");
+        let mailed = p.delivery(&mail.id).unwrap();
+        note(format!(
+            "Step 9: the client saw the office and mail words and said the 2023 one is mailed back: {}",
+            mailed.line()
+        ));
+        assert_eq!(state(&mailed, vf_portal::delivery::ESIGN), "waiting");
+
+        // ---- Step 10: Admin › Portal › Deliveries: Tick all shown, Mark ticked signed on paper.
+        open_mut(&mut h).browse.portal.delivery = None;
+        h.run_steps(4);
+        h.get_by_role_and_label(Role::Button, "Admin").click();
+        h.run_steps(6);
+        h.get_by_role_and_label(Role::Button, "Portal").click();
+        h.run_steps(6);
+        h.get_by_role_and_label(Role::Button, "Deliveries").click();
+        wait_long(&mut h, "the cards listed", &|h| said(h, "at the office:"));
+        h.run_steps(6);
+        shot(&mut h, "11-deliveries-office-mail");
+        h.get_by_role_and_label(Role::Button, "Tick all shown")
+            .click();
+        h.run_steps(4);
+        h.query_all_by_role(Role::Button)
+            .find(|n| {
+                n.accesskit_node()
+                    .label()
+                    .is_some_and(|l| l.starts_with("Mark ticked signed on paper"))
+            })
+            .expect("the Mark ticked button")
+            .click();
+        h.run_steps(4);
+        h.get_by_label("Signed on paper note").click();
+        h.step();
+        h.get_by_label("Signed on paper note")
+            .type_text("Signed paper copies received");
+        h.run_steps(3);
+        shot(&mut h, "12-mark-ticked-ask");
+        h.query_all_by_role(Role::Button)
+            .find(|n| {
+                n.accesskit_node()
+                    .label()
+                    .is_some_and(|l| l.starts_with("Mark ") && l.ends_with(" signed"))
+            })
+            .expect("the Mark n signed button")
+            .click();
+        wait_long(&mut h, "marked", &|h| said(h, "marked signed on paper."));
+        h.run_steps(6);
+        shot(&mut h, "13-mark-ticked-done");
+        let words: Vec<String> = h
+            .query_all_by_label_contains("marked signed on paper.")
+            .filter_map(|n| n.accesskit_node().label())
+            .collect();
+        let after = p.deliveries(Some(&c.id)).unwrap();
+        let status = |y: i32| {
+            after
+                .iter()
+                .find(|d| d.tax_year == y)
+                .map(|d| d.status.clone())
+                .unwrap_or_default()
+        };
+        note(format!(
+            "Step 10: Mark ticked signed on paper: the page says {words:?}; 2025 {}, 2024 {}, 2023 {}",
+            status(2025),
+            status(2024),
+            status(2023)
+        ));
+        assert_eq!(
+            (status(2025), status(2024), status(2023)),
+            ("open".into(), "complete".into(), "complete".into())
+        );
         std::fs::write(out.join("steps.txt"), steps.join("\n")).unwrap();
     }
 
@@ -1972,7 +2114,7 @@ mod tests {
         wait_long(&mut h, "the card listed", &|h| said(h, &c.name));
         h.run_steps(6);
         shot(&mut h, "04-deliveries-page");
-        h.query_all_by_label("Tick to remind")
+        h.query_all_by_label("Tick row")
             .next()
             .expect("a row to tick")
             .click();

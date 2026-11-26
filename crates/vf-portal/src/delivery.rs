@@ -520,6 +520,10 @@ pub struct Delivery {
     #[serde(default)]
     pub files: Vec<DeliveryFile>,
     pub esign_link: Option<String>,
+    /// Owner 2026-11-26: how Form 8879 is signed: `link`, `office` or `mail` (portal 0.5.8; an
+    /// older portal sends none, the link).
+    #[serde(default)]
+    pub esign_mode: Option<String>,
     /// Step 1's letters (Addendum D3).
     #[serde(default)]
     pub letters: Vec<DeliveryLetter>,
@@ -616,10 +620,28 @@ impl Delivery {
                 self.tax_year,
                 self.what(),
                 self.waiting()
-                    .map(|s| format!(" · {} {}", s.name, state_words(&s.state)))
+                    .map(|s| format!(" · {}", self.step_words(s)))
                     .unwrap_or_default()
             ),
         }
+    }
+}
+
+impl Delivery {
+    /// How Form 8879 is signed: `link`, `office` or `mail`.
+    pub fn esign_mode(&self) -> &str {
+        self.esign_mode.as_deref().unwrap_or("link")
+    }
+
+    /// "Form 8879 with the client", "Form 8879 at the office: with the client" (owner
+    /// 2026-11-26: the Deliveries page says how it is signed).
+    pub fn step_words(&self, s: &DeliveryStep) -> String {
+        let how = match (s.kind.as_str(), self.esign_mode()) {
+            (ESIGN, "office") => " at the office:",
+            (ESIGN, "mail") => " by mail:",
+            _ => "",
+        };
+        format!("{}{how} {}", s.name, state_words(&s.state))
     }
 }
 
@@ -658,6 +680,9 @@ pub struct NewDelivery {
     pub covers: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub return_year: Option<i32>,
+    /// Owner 2026-11-26: `office` or `mail` (none: the eSignature link).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub esign_mode: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
@@ -687,6 +712,8 @@ pub struct DeliveryChange {
     pub notify: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub remind_days: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub esign_mode: Option<String>,
 }
 
 impl Status {

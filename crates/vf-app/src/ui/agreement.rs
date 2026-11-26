@@ -245,6 +245,7 @@ pub fn send(
         kind: Some("agreement".into()),
         covers: plan.services.iter().map(|s| s.service.clone()).collect(),
         return_year: Some(plan.year - 1),
+        esign_mode: None,
     })?;
     let id = d.id.clone();
     let rest = (|| {

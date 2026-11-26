@@ -10,6 +10,20 @@ Put the signed paper copy in the client's folder as you would any document; the 
 
 For Form 8879 you can still wait for the client to press **I've signed it** and then press **Confirm signed**. **Signed on paper…** is for when they never will.
 
+## Signing Form 8879 at the office or by mail
+
+Under **Form 8879**, **How it is signed** offers:
+
+- **UltraTax eSignature link**: as before; paste the link.
+- **Pick up and sign at our office**: no link. The client's card says "Your return is ready to pick up. Sign Form 8879 at our office."
+- **We mailed the return: sign and mail Form 8879 back**: no link. The card says "We mailed you your tax return. Sign Form 8879 and mail it back to us." with **I've mailed it back**; once pressed, the step waits for you.
+
+Either way, finish the step with **Signed on paper…** when the signed form is in hand.
+
+## Many at once
+
+On **Admin › Portal › Deliveries**, tick the rows (or **Tick all shown**), then press **Mark ticked signed on paper…**. Type a note and press **Mark … signed**: each ticked card's letters or Form 8879, whichever it waits on, is marked signed on paper. Rows waiting on something else (the fee, the return) are skipped and named in the line below the list. The **Step waiting** column says how Form 8879 is signed ("Form 8879 at the office", "by mail"), and **Show › Form 8879** lists every card waiting on Form 8879.
+
 ## A corrected return after the client paid
 
 While the card is open, choose the corrected return and press **Save changes**, then **Send the revised return**. The card shows **Updated**, the return and Form 8879 steps open again, and the fee stays paid: the client sees no new bill. Paste a new eSignature link if UltraTax made one.
