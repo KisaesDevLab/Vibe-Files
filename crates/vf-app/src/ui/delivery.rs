@@ -1908,9 +1908,15 @@ pub struct DeliveriesPage {
     remind_done: Option<String>,
 }
 
+/// Remind ticked sends this many, then pauses (as bulk invitations do).
+const REMIND_GROUP: usize = 20;
+const REMIND_PAUSE_S: u64 = 60;
+
 /// From the Remind ticked worker.
 enum RemindMsg {
     Progress(usize, usize),
+    /// This many done, pausing before the next group.
+    Pause(usize, usize),
     Done(String),
 }
 
@@ -2026,6 +2032,11 @@ pub fn page(ui: &mut egui::Ui, page: &mut DeliveriesPage, env: &mut crate::ui::b
         match m {
             RemindMsg::Progress(i, n) => {
                 page.remind_progress = Some(format!("Reminding {i} of {n}…"));
+            }
+            RemindMsg::Pause(i, n) => {
+                page.remind_progress = Some(format!(
+                    "{i} of {n} reminded; a {REMIND_PAUSE_S} s pause before the next {REMIND_GROUP}…"
+                ));
             }
             RemindMsg::Done(words) => {
                 page.remind = None;
@@ -2414,6 +2425,18 @@ fn remind_ticked(
         let n = jobs.len();
         let mut results = Vec::new();
         for (i, (id, client_id, who)) in jobs.into_iter().enumerate() {
+            // In groups with a pause, as bulk invitations go, so the email provider does not take
+            // a burst of reminders for spam.
+            if i > 0 && i % REMIND_GROUP == 0 {
+                let _ = tx.send(RemindMsg::Pause(i, n));
+                ctx.request_repaint();
+                for _ in 0..REMIND_PAUSE_S {
+                    if stop.load(std::sync::atomic::Ordering::Relaxed) {
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_secs(1));
+                }
+            }
             if stop.load(std::sync::atomic::Ordering::Relaxed) {
                 break;
             }
