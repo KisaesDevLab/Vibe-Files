@@ -2006,7 +2006,7 @@ pub fn show_page(
         .candidates
         .iter()
         .enumerate()
-        .filter(|(_, c)| page.show_all || c.this_year.is_none())
+        .filter(|(_, c)| listed(c.last.is_some(), c.this_year.is_some(), page.show_all))
         .filter(|(_, c)| {
             q.is_empty()
                 || c.client.name.to_lowercase().contains(&q)
@@ -2078,6 +2078,13 @@ pub fn show_page(
                 });
             });
         });
+    // Owner 2026-11-26: only clients with an agreement are listed; a first one is sent from the
+    // client's details.
+    if shown.is_empty() && page.progress.is_none() && q.is_empty() {
+        ui.label(widgets::caption(
+            "No client has an agreement to renew. Send a client's first one from their details              (Service agreement…).",
+        ));
+    }
     let ticked: Vec<Candidate> = page.candidates.iter().filter(|c| c.tick).cloned().collect();
     ui.horizontal_wrapped(|ui| {
         ui.label(format!("{} ticked", ticked.len()));
@@ -2104,6 +2111,12 @@ pub fn show_page(
             start_bulk(ui.ctx(), page, root, s, audit, ticked);
         }
     });
+}
+
+/// A client is listed when it has an agreement: an earlier one to renew, or this year's (shown
+/// only with "Show clients sent already"). A client with none is sent its first from its details.
+fn listed(has_last: bool, sent: bool, show_all: bool) -> bool {
+    if sent { show_all } else { has_last }
 }
 
 fn clients_of(conn: &vf_core::db::Connection) -> Vec<ClientRef> {
@@ -2316,6 +2329,19 @@ fn start_bulk(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bulk_lists_only_clients_with_an_agreement() {
+        // (has an earlier agreement, sent this year, Show clients sent already)
+        assert!(!listed(false, false, false), "no agreement: not listed");
+        assert!(
+            !listed(false, false, true),
+            "no agreement: not listed with Show either"
+        );
+        assert!(listed(true, false, false), "one to renew");
+        assert!(!listed(true, true, false), "sent this year: hidden");
+        assert!(listed(true, true, true), "sent this year: with Show");
+    }
 
     fn plan(root: &Path, individual: bool, services: Vec<ServiceLine>, ids: &[&str]) -> Plan {
         let all = vf_letters::store::load_all(root).unwrap();
