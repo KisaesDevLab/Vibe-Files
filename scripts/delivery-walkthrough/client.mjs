@@ -90,6 +90,20 @@ const shot = async (name) => {
   const { result } = await send('Page.captureScreenshot', { format: 'png', captureBeyondViewport: true });
   await writeFile(join(OUT, `${name}.png`), Buffer.from(result.data, 'base64'));
 };
+// Owner 2026-11-27, client-side training videos: VF_TRAIN=1 adds phone-screen captures
+// (train-*.png, the screen only, scrolled to what matters), named for the video's scenes.
+const TRAIN = process.env.VF_TRAIN === '1';
+// Light, as the staff videos are (headless Edge may ask for dark).
+if (TRAIN) await send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value: 'light' }] });
+const tshot = async (name, text = null) => {
+  if (!TRAIN) return;
+  await js(text
+    ? `(() => { const e = [...document.querySelectorAll('body *')].reverse().find((x) => x.children.length === 0 && x.textContent.includes(${JSON.stringify(text)})); if (e) e.scrollIntoView({ block: 'center' }); return true; })()`
+    : 'window.scrollTo(0, 0)');
+  await sleep(500);
+  const { result } = await send('Page.captureScreenshot', { format: 'png' });
+  await writeFile(join(OUT, `train-${name}.png`), Buffer.from(result.data, 'base64'));
+};
 const click = async (text, sel = 'button') => {
   const ok = await js(`(() => { const b = __byText(${JSON.stringify(sel)}, ${JSON.stringify(text)}); if (!b) return false; b.click(); return true; })()`);
   if (!ok) {
@@ -287,9 +301,12 @@ try {
     await until(`location.pathname === '/'`, 'home after accepting');
     await until(`!!__byText('a', 'Choose')`, 'the package step');
     await shot('30-client-card-package');
+    await tshot('f01-card', 'Choose your package');
     await js(`__byText('a', 'Choose').click()`);
     await until(`location.pathname.endsWith('/package')`, 'the package page');
     await until(`document.body.innerText.includes('Advantage')`, 'packages listed');
+    await tshot('f02-packages');
+    await tshot('f02b-packages-more', 'Concierge');
     const none = await js(`[...document.querySelectorAll('input[type=radio]')].every((r) => !r.checked)`);
     note(`Nothing chosen at first: ${none}`);
     await js(`(() => { const l = [...document.querySelectorAll('label')].find((x) => x.textContent.includes('Advantage') && x.querySelector('input[type=radio]')); l.querySelector('input').click(); return true; })()`);
@@ -298,16 +315,19 @@ try {
     await sleep(600);
     const total = await js(`(document.body.innerText.match(/Total due in the next step\\s*\\$([\\d,.]+)/) || [])[1] || ''`);
     note(`Advantage and the planning meeting: total $${total}`);
+    await tshot('f03-chosen', 'Total due in the next step');
     // Reading the addendum (it opens in a new tab; the click marks it read).
     await js(`(() => { const a = [...document.querySelectorAll('a')].find((x) => x.textContent.startsWith('Read the')); a.removeAttribute('target'); a.addEventListener('click', (e) => e.preventDefault()); a.click(); return true; })()`);
     await draw();
     await js(`(() => { const c = [...document.querySelectorAll('input[type=checkbox]')].find((i) => i.parentElement.textContent.includes('I choose this selection')); c.click(); return true; })()`);
     await sleep(400);
     await shot('31-package-signed-ready');
+    await tshot('f04-sign', 'I choose this selection');
     await click('Sign and continue to payment');
     await until(`location.pathname === '/'`, 'back to the card');
     await until(`[...document.querySelectorAll('button')].some((b) => b.textContent.trim().startsWith('Pay by card'))`, 'the fee step');
     await shot('32-card-fee');
+    await tshot('f05-pay', 'Pay by card');
     await js(`[...document.querySelectorAll('button')].find((b) => b.textContent.trim().startsWith('Pay by card')).click()`);
     let session = null;
     for (let i = 0; i < 40 && !session; i++) {
@@ -326,6 +346,7 @@ try {
     await go(`${BASE}/?delivery=${session.metadata.delivery_id}&session_id=${session.id}`);
     await until(`!!__byText('a', 'Receipt')`, 'the receipt link');
     await shot('33-card-paid');
+    await tshot('f06-paid', 'Receipt');
     note('The fee step shows its Receipt');
   } else if (PHASE === 'agreement') {
     // Annual agreement (2026-11-25): the client signs the bookkeeping letter, then sets up
@@ -335,14 +356,19 @@ try {
     const inv = await mailWith('/invite', 0);
     await go(linkIn(inv.body, '/invite'));
     await until(`!!__byText('button', 'Accept and sign in')`, 'invitation page');
+    await tshot('a01-invitation');
     await click('Accept and sign in');
     await until(`location.pathname === '/'`, 'home after accepting');
     await until(`document.body.innerText.includes('service agreement')`, 'the agreement card');
     await sleep(800);
     await shot('40-client-agreement-card');
+    await tshot('a02-card', 'service agreement');
     note(`Card: ${(await js(`document.body.innerText`)).includes('Set up payment') ? 'letters, then Set up payment' : '?'}`);
     await js(`__byText('a', 'Sign').click()`);
     await until(`location.pathname.endsWith('/sign')`, 'the sign page');
+    await until(`!!document.querySelector('canvas')`, 'the first letter', 20000);
+    await sleep(800);
+    await tshot('a03-letter');
     for (let round = 0; round < 8; round++) {
       await until(`document.body.innerText.includes('All letters signed') || !!document.querySelector('canvas')`, 'a letter to sign', 20000);
       if (await js(`document.body.innerText.includes('All letters signed')`)) break;
@@ -350,6 +376,7 @@ try {
       await js(`(() => { const c = [...document.querySelectorAll('input[type=checkbox]')].find((i) => i.parentElement.textContent.includes('agree to sign')); c.click(); return true; })()`);
       await sleep(300);
       if (round === 0) await shot('41-agreement-sign');
+      if (round === 0) await tshot('a04-signature', 'agree to sign');
       const btn = await js(`[...document.querySelectorAll('button')].map((b) => b.textContent.trim()).find((t) => t.startsWith('Sign as'))`);
       await click(btn);
       note(`Letter ${round + 1}: ${btn}`);
@@ -357,9 +384,11 @@ try {
     }
     await until(`document.body.innerText.includes('All letters signed')`, 'all letters signed', 20000);
     note('All letters signed');
+    await tshot('a05-all-signed', 'All letters signed');
     await go(`${BASE}/`);
     await until(`[...document.querySelectorAll('button')].some((b) => b.textContent.trim().startsWith('Set up payment by card'))`, 'the payment step');
     await shot('42-agreement-set-up-payment');
+    await tshot('a06-set-up', 'Set up payment by card');
     const today = await js(`(document.body.innerText.split(String.fromCharCode(10)).find((l) => l.startsWith('Today ')) || '')`);
     note(`The card says: ${today}`);
     await js(`[...document.querySelectorAll('button')].find((b) => b.textContent.trim().startsWith('Set up payment by card')).click()`);
@@ -380,6 +409,7 @@ try {
     await go(`${BASE}/?delivery=${session.metadata.delivery_id}&session_id=${session.id}`);
     await until(`document.body.innerText.includes('Your monthly payment')`, 'the monthly payment');
     await shot('43-monthly-active');
+    await tshot('a08-monthly', 'Your monthly payment');
     note(`Monthly payment: ${(await js(`document.body.innerText`)).includes('Active') ? 'Active' : '?'}`);
     const last = await (await fetch(`${STRIPE}/_last`)).json();
     const month = await (
@@ -401,6 +431,7 @@ try {
     await go(`${BASE}/`);
     await until(`document.body.innerText.includes('did not go through')`, 'the failed month');
     await shot('44-monthly-failed');
+    await tshot('a09-failed', 'did not go through');
     note('The card says the last payment did not go through, with Update payment method');
   } else if (PHASE === 'agreement-joint') {
     // A joint couple: Jordan accepts, both sign (Casey by a code), Set up payment by bank
