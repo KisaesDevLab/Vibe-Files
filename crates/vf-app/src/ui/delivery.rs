@@ -262,6 +262,10 @@ pub struct DeliverWindow {
     err: Option<String>,
     audit: AuditOut,
     reads: ReadOut,
+    /// Admin › Portal's "Assign new cards to" (owner 2026-11-26), put in Assigned to once, for
+    /// a new card.
+    default_staff: Option<vf_portal::settings::DefaultStaff>,
+    default_applied: bool,
 }
 
 /// Last calendar year: the tax year a return delivered now usually is.
@@ -341,6 +345,8 @@ impl DeliverWindow {
             err: None,
             audit,
             reads,
+            default_staff: s.default_staff.clone(),
+            default_applied: false,
         };
         w.offer_letters();
         w.offer_fee();
@@ -872,6 +878,17 @@ impl DeliverWindow {
                     .contains("income tax")
             });
             self.return_doc = fits.first().map(|d| d.id.clone());
+        }
+        if self.current().is_none() && !self.default_applied {
+            self.default_applied = true;
+            let (who, why) =
+                crate::ui::portal::new_card_assignee(self.default_staff.as_ref(), &self.staff);
+            if who.is_some() {
+                self.assigned = who;
+            }
+            if let Some(w) = why {
+                self.said = Some((w, true));
+            }
         }
         // A11: the engagement for this return was signed in the year's agreement.
         if self.current().is_none() && self.signed_agreement().is_some() {

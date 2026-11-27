@@ -2276,6 +2276,11 @@ pub struct AdminPortal {
     balances: bool,
     /// "Tax return delivery", as ticked until Save (Addendum §12).
     deliveries: bool,
+    /// "Assign new cards to", as chosen until Save (owner 2026-11-26), and the portal's staff
+    /// to choose from (read once per visit, on its thread).
+    default_staff: Option<settings::DefaultStaff>,
+    staff_job: Option<Receiver<Result<Vec<vf_portal::balance::BalanceStaff>, String>>>,
+    staff_list: Option<Result<Vec<vf_portal::balance::BalanceStaff>, String>>,
     /// Audit rows of request decisions when there is no app channel (tests).
     local_audit: Option<Receiver<AuditEntry>>,
     msg: Option<String>,
@@ -2345,6 +2350,9 @@ impl AdminPortal {
         if self.version_job.is_none() {
             self.version_seen = None;
         }
+        if self.staff_job.is_none() {
+            self.staff_list = None;
+        }
     }
 
     fn load(&mut self, root: &Path) {
@@ -2373,6 +2381,7 @@ impl AdminPortal {
         self.balances = s.is_some_and(|s| s.balances);
         self.deliveries = s.is_some_and(|s| s.deliveries);
         self.approve_share = s.map(|s| s.approve_share.clone()).unwrap_or_default();
+        self.default_staff = s.and_then(|s| s.default_staff.clone());
         self.adopt_old_columns(root);
     }
 
@@ -2715,6 +2724,10 @@ pub fn admin_settings(ui: &mut egui::Ui, a: &mut AdminPortal, env: &mut Env) {
          (_Vibe\\balance.jsonl), never sent to B2. The portal must have Stripe set up and \
          balance cards turned on (its Settings › Payments). Needs Vibe Portal 0.6 or later.",
     ));
+    if a.balances || a.deliveries {
+        ui.add_space(6.0);
+        default_staff_choice(ui, a);
+    }
     ui.add_space(6.0);
     ui.label(RichText::new("Checking access requests").strong());
     ui.label(widgets::caption(
@@ -3120,6 +3133,98 @@ fn stop(a: &mut AdminPortal, ctx: &egui::Context, env: &mut Env) {
     }
 }
 
+/// Admin › Portal's "Assign new cards to" (owner 2026-11-26): the portal's staff, read from its
+/// balances list (the only list of every staff member the firm key reads).
+fn default_staff_choice(ui: &mut egui::Ui, a: &mut AdminPortal) {
+    if let Some(rx) = &a.staff_job
+        && let Ok(r) = rx.try_recv()
+    {
+        a.staff_job = None;
+        a.staff_list = Some(r);
+    }
+    if a.staff_list.is_none()
+        && a.staff_job.is_none()
+        && let Some(s) = a.cached_settings.clone()
+    {
+        a.staff_job = Some(spawn(ui.ctx(), move || {
+            core::client(&s)
+                .balances()
+                .map(|b| b.staff)
+                .map_err(|e| e.message())
+        }));
+    }
+    let staff: &[vf_portal::balance::BalanceStaff] = match &a.staff_list {
+        Some(Ok(l)) => l,
+        _ => &[],
+    };
+    const NOBODY: &str = "Nobody (the admins)";
+    ui.horizontal_wrapped(|ui| {
+        let l = ui.label("Assign new cards to");
+        let shown = a
+            .default_staff
+            .as_ref()
+            .map(|d| d.name.clone())
+            .unwrap_or_else(|| NOBODY.into());
+        egui::ComboBox::from_id_salt("portal-default-staff")
+            .width(260.0)
+            .selected_text(shown)
+            .show_ui(ui, |ui| {
+                if ui
+                    .selectable_label(a.default_staff.is_none(), NOBODY)
+                    .clicked()
+                {
+                    a.default_staff = None;
+                }
+                for s in staff {
+                    let on = a.default_staff.as_ref().is_some_and(|d| d.id == s.id);
+                    if ui.selectable_label(on, &s.name).clicked() {
+                        a.default_staff = Some(settings::DefaultStaff {
+                            id: s.id.clone(),
+                            name: s.name.clone(),
+                        });
+                    }
+                }
+            })
+            .response
+            .labelled_by(l.id);
+        if a.staff_job.is_some() {
+            ui.spinner();
+        }
+    });
+    ui.label(widgets::caption(
+        "Balance owed…, Deliver… and Service agreement… start with this person in Assigned to;          change it on any card. A card already sent keeps whoever it has, and next year's          agreements sent from Admin › Portal › Agreements keep the last one's. A client this          person cannot see on the portal starts with Nobody, and the window says so. Nobody:          the admins (for a balance, Settings › Payments' person).",
+    ));
+    if let Some(Err(e)) = &a.staff_list {
+        ui.label(
+            RichText::new(format!(
+                "The portal's staff list could not be read: {e} It is read from the portal's                  balances (Settings › Payments), so the portal needs them turned on."
+            ))
+            .color(theme::warn()),
+        );
+    }
+}
+
+/// Owner 2026-11-26: who a new card starts assigned to (Admin › Portal's "Assign new cards
+/// to"), when this client's staff list has them; else Nobody, and why (none when the list is
+/// empty: it could not be read).
+pub(crate) fn new_card_assignee(
+    d: Option<&settings::DefaultStaff>,
+    staff: &[vf_portal::balance::BalanceStaff],
+) -> (Option<String>, Option<String>) {
+    match d {
+        None => (None, None),
+        Some(d) if staff.iter().any(|s| s.id == d.id) => (Some(d.id.clone()), None),
+        Some(_) if staff.is_empty() => (None, None),
+        Some(d) => (
+            None,
+            Some(format!(
+                "Assigned to starts with Nobody: {} (Admin › Portal's Assign new cards to) cannot see this client on the portal.",
+                d.name
+            )),
+        ),
+    }
+}
+
 /// What Save says when another PC changed the portal settings while this page was open.
 const STALE: &str = "Someone else changed the portal settings while this page was open. They are \
                      shown again now: make your change again.";
@@ -3149,7 +3254,8 @@ fn save(a: &mut AdminPortal, ctx: &egui::Context, env: &mut Env) {
             .with_todo_lists(a.todo_lists)
             .with_balances(a.balances)
             .with_deliveries(a.deliveries)
-            .with_approve_share(a.approve_share.clone()),
+            .with_approve_share(a.approve_share.clone())
+            .with_default_staff(a.default_staff.clone()),
         Err(e) => {
             a.err = Some(e);
             return;
@@ -4968,6 +5074,7 @@ mod tests {
                 balances: false,
                 deliveries: false,
                 approve_share: Default::default(),
+                default_staff: None,
             }),
             clients: vec![ClientRef {
                 id: "0199aaaa-0000-7000-8000-000000000001".into(),
@@ -5246,6 +5353,7 @@ mod tests {
                 balances: false,
                 deliveries: false,
                 approve_share: share,
+                default_staff: None,
             }),
             clients: dir
                 .iter()
@@ -5463,6 +5571,33 @@ mod tests {
 
     /// PA-106: the documents of the doc types Admin › Portal names are offered on Approve, the
     /// latest year ticked and older ones not; the ticked ones are shared with the person.
+    #[test]
+    fn a_new_card_starts_with_the_firms_default_when_they_see_the_client() {
+        use vf_portal::balance::BalanceStaff;
+        let d = settings::DefaultStaff {
+            id: "s2".into(),
+            name: "Pat Example".into(),
+        };
+        let staff = |ids: &[&str]| {
+            ids.iter()
+                .map(|i| BalanceStaff {
+                    id: (*i).into(),
+                    name: format!("Staff {i}"),
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(new_card_assignee(None, &staff(&["s1"])), (None, None));
+        assert_eq!(
+            new_card_assignee(Some(&d), &staff(&["s1", "s2"])),
+            (Some("s2".into()), None)
+        );
+        let (who, why) = new_card_assignee(Some(&d), &staff(&["s1"]));
+        assert_eq!(who, None);
+        assert!(why.unwrap().contains("Pat Example"));
+        // The list could not be read: Nobody, nothing said.
+        assert_eq!(new_card_assignee(Some(&d), &[]), (None, None));
+    }
+
     #[test]
     fn approve_shares_the_chosen_documents_with_the_person() {
         let root = tempfile::tempdir().unwrap();
@@ -5853,6 +5988,7 @@ mod tests {
             balances: false,
             deliveries: false,
             approve_share: Default::default(),
+            default_staff: None,
         };
         let (tx, _audit) = mpsc::channel();
         let w = ShareWindow::new(
@@ -6026,6 +6162,7 @@ mod tests {
             balances: false,
             deliveries: false,
             approve_share: Default::default(),
+            default_staff: None,
         };
         let item = |client: &str, name: &str| Item {
             client_id: client.into(),
@@ -6233,6 +6370,7 @@ mod tests {
             balances: false,
             deliveries: false,
             approve_share: Default::default(),
+            default_staff: None,
         };
         let items: Vec<Item> = (0..4)
             .map(|i| Item {
@@ -6354,6 +6492,7 @@ mod tests {
             balances: false,
             deliveries: false,
             approve_share: Default::default(),
+            default_staff: None,
         };
         let (tx, audit) = mpsc::channel();
         let w = PeopleWindow::new(
@@ -6455,6 +6594,7 @@ mod tests {
             balances: false,
             deliveries: false,
             approve_share: Default::default(),
+            default_staff: None,
         };
         let t = tempfile::tempdir().unwrap();
         let path = t.path().join("Return 2025.pdf");
@@ -6589,6 +6729,7 @@ mod tests {
                     balances: false,
                     deliveries: false,
                     approve_share: Default::default(),
+                    default_staff: None,
                 },
             )
             .unwrap();
@@ -6755,6 +6896,7 @@ mod tests {
                 balances: false,
                 deliveries: false,
                 approve_share: Default::default(),
+                default_staff: None,
             })
         };
         let (url, seen) = fake_portal(|method, path| match (method, path) {
@@ -7070,6 +7212,7 @@ mod tests {
                     balances: false,
                     deliveries: false,
                     approve_share: Default::default(),
+                    default_staff: None,
                 },
             )
             .unwrap();

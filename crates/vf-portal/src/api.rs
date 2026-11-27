@@ -1483,6 +1483,7 @@ mod tests {
             balances: false,
             deliveries: false,
             approve_share: Default::default(),
+            default_staff: None,
         };
         (Portal::new(&s, "PC1", "kurt"), seen)
     }

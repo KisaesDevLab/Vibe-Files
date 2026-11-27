@@ -55,6 +55,19 @@ pub struct PortalSettings {
     /// What Approve offers to share with someone given access (PA-106, owner 2026-11-24).
     #[serde(default, skip_serializing_if = "ApproveShare::is_empty")]
     pub approve_share: ApproveShare,
+    /// Admin › Portal's "Assign new cards to" (owner 2026-11-26): a new Balance owed…,
+    /// Deliver… or Service agreement… card starts assigned to this portal staff member, when
+    /// they can see the client. None: Nobody (the admins).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_staff: Option<DefaultStaff>,
+}
+
+/// A portal staff member chosen in Admin › Portal: the id, and the name as it was then (shown
+/// when the portal's list cannot be read).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DefaultStaff {
+    pub id: String,
+    pub name: String,
 }
 
 /// The documents Admin › Portal requests offers to share on Approve: those of these doc types
@@ -172,7 +185,14 @@ impl PortalSettings {
             balances: false,
             deliveries: false,
             approve_share: Default::default(),
+            default_staff: None,
         })
+    }
+
+    /// The same settings with who new cards are assigned to (owner 2026-11-26).
+    pub fn with_default_staff(mut self, staff: Option<DefaultStaff>) -> Self {
+        self.default_staff = staff;
+        self
     }
 
     /// The same settings with the list of documents in B2 sent to the portal, or not.
@@ -256,6 +276,22 @@ mod tests {
     use super::*;
 
     const KEY: &str = "vpk_abcdefghijklmnopqrstuvwxyz0123456789";
+
+    #[test]
+    fn the_default_staff_is_kept_and_older_files_have_none() {
+        let s = PortalSettings::new("c", "files.example.test", KEY, 5).unwrap();
+        let json = serde_json::to_string(&s).unwrap();
+        assert!(!json.contains("default_staff"), "{json}");
+        let back: PortalSettings = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.default_staff, None);
+        let s = s.with_default_staff(Some(DefaultStaff {
+            id: "s1".into(),
+            name: "Pat Example".into(),
+        }));
+        let back: PortalSettings =
+            serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
+        assert_eq!(back.default_staff.as_ref().unwrap().name, "Pat Example");
+    }
 
     #[test]
     fn addresses_are_tidied_and_checked() {

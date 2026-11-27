@@ -495,6 +495,8 @@ pub struct AgreementWindow {
     templates: Result<Vec<Template>, String>,
     /// The client's agreements were read: Send waits for it, so this year's is never missed.
     loaded: bool,
+    /// Admin › Portal's "Assign new cards to" (owner 2026-11-26).
+    default_staff: Option<vf_portal::settings::DefaultStaff>,
 }
 
 impl AgreementWindow {
@@ -555,6 +557,7 @@ impl AgreementWindow {
             reads,
             templates: Err(String::new()),
             loaded: false,
+            default_staff: s.default_staff.clone(),
         };
         w.read_templates();
         w.firm_name = vf_fs::cabinet::read(&w.root)
@@ -726,11 +729,22 @@ impl AgreementWindow {
                 self.reads.send(ds.clone());
                 self.agreements = ds;
                 self.subscriptions = subs;
+                let first = !self.loaded;
                 self.loaded = true;
                 if !firm.is_empty() {
                     self.firm_name = firm;
                 }
                 self.staff = staff;
+                if first && self.current().is_none() {
+                    let (who, why) = crate::ui::portal::new_card_assignee(
+                        self.default_staff.as_ref(),
+                        &self.staff,
+                    );
+                    self.assigned = who;
+                    if why.is_some() {
+                        self.said = why;
+                    }
+                }
                 if let Some(s) = self.live() {
                     self.monthly = dollars(s.monthly_cents);
                 }

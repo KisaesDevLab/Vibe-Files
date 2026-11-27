@@ -215,6 +215,8 @@ pub struct BalanceWindow {
     err: Option<String>,
     audit: AuditOut,
     reads: ReadOut,
+    /// Admin › Portal's "Assign new cards to" (owner 2026-11-26).
+    default_staff: Option<vf_portal::settings::DefaultStaff>,
 }
 
 impl BalanceWindow {
@@ -251,6 +253,7 @@ impl BalanceWindow {
             err: None,
             audit,
             reads,
+            default_staff: s.default_staff.clone(),
         };
         w.load(ctx, s);
         w
@@ -295,6 +298,13 @@ impl BalanceWindow {
             self.expire_on = b.expires_at.is_some();
             if let Some(n) = b.days_left {
                 self.expire_days = n.max(1);
+            }
+        } else {
+            let (who, why) =
+                crate::ui::portal::new_card_assignee(self.default_staff.as_ref(), &self.staff);
+            self.assigned = who;
+            if let Some(w) = why {
+                self.said = Some((w, true));
             }
         }
     }
