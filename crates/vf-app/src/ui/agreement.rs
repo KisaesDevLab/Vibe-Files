@@ -1729,7 +1729,9 @@ struct Candidate {
 enum Bulk {
     Read(Result<(Vec<Delivery>, Vec<Subscription>, String), String>),
     Progress(String),
-    Done(String),
+    /// The result line, and whether every ticked client was sent (owner 2026-11-27: green
+    /// only then; amber when any was skipped or the run stopped).
+    Done(String, bool),
     /// Nothing was sent: a fill-in left, or the templates could not be read (said as an error).
     Stopped(String),
 }
@@ -1748,7 +1750,7 @@ pub struct AgreementsPage {
     rx: Option<Receiver<Bulk>>,
     stop: Option<Arc<AtomicBool>>,
     progress: Option<String>,
-    done: Option<String>,
+    done: Option<(String, bool)>,
     err: Option<String>,
     settings: Option<(std::time::Instant, Option<PortalSettings>)>,
 }
@@ -1928,11 +1930,11 @@ pub fn show_page(
                     page.progress = None;
                 }
                 Bulk::Progress(p) => page.progress = Some(p),
-                Bulk::Done(p) => {
+                Bulk::Done(p, all) => {
                     // Read again next frame (what was sent shows as sent), keeping the result.
                     page.stop = None;
                     page.loaded = false;
-                    page.done = Some(p);
+                    page.done = Some((p, all));
                 }
                 Bulk::Stopped(e) => {
                     page.stop = None;
@@ -2007,8 +2009,15 @@ pub fn show_page(
             ui.label(p);
         });
     }
-    if let Some(d) = &page.done {
-        ui.colored_label(theme::health_ok(), d);
+    if let Some((d, all)) = &page.done {
+        ui.colored_label(
+            if *all {
+                theme::health_ok()
+            } else {
+                theme::warn()
+            },
+            d,
+        );
     }
     if let Some(e) = &page.err {
         ui.colored_label(theme::error(), e);
@@ -2327,13 +2336,15 @@ fn start_bulk(
             ctx.request_repaint();
         }
         let mut said = format!("Sent {sent} of {total} agreements.");
-        if stop.load(Ordering::Relaxed) {
+        let stopped = stop.load(Ordering::Relaxed);
+        let all = sent == total && problems.is_empty() && !stopped;
+        if stopped {
             said.push_str(" Stopped.");
         }
         if !problems.is_empty() {
             said.push_str(&format!(" Not sent: {}", problems.join("; ")));
         }
-        let _ = tx.send(Bulk::Done(said));
+        let _ = tx.send(Bulk::Done(said, all));
         ctx.request_repaint();
     });
 }

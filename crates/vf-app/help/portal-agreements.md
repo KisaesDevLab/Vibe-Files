@@ -4,7 +4,7 @@ Send a client their engagement for the year as a card on the portal, with no tax
 
 ## Turning it on
 
-Agreements come with tax return delivery: in **Admin › Portal**, tick **Tax return delivery and annual agreements** and press **Save** (the portal needs it on too, in its Settings, and must be Vibe Portal 0.5.5 or later). Saving adds the doc types **Agreement — signed letters**, **Agreement — package selection** and **Agreement — payment record** (filed in `Correspondence\<year>\Engagement`) and **Payment receipt** (`Billing\<year>`).
+Agreements come with tax return delivery: in **Admin › Portal**, tick **Tax return delivery and annual agreements** and press **Save** (also on in the portal's Settings; Vibe Portal 0.5.5 or later). Saving adds the doc types **Agreement — signed letters**, **Agreement — package selection** and **Agreement — payment record** (filed in `Correspondence\<year>\Engagement`) and **Payment receipt** (`Billing\<year>`).
 
 Before the first agreement:
 
@@ -41,7 +41,7 @@ The client's home page then shows **Your monthly payment** with **Update payment
 
 Send next year's agreement as before. When the client signs it (or, with no letters, when it is sent), their monthly payment changes to the new amount from the next charge; nothing is set up again. Once a letter is signed, the agreement's fees cannot be changed. Only new one-time fees are paid on the card.
 
-**Admin › Portal › Agreements** sends next year's agreements to many clients at once, each from their last agreement. Tick the clients (**Search** narrows the list), choose the group size and pause, and press **Send**; **Stop** ends a run. A letter with a fill-in left stops the run before anything is sent. A client who already has an agreement for the year, or whose services now have no letter template, is skipped and named in the message at the end.
+**Admin › Portal › Agreements** sends next year's agreements to many clients at once, each from their last agreement. Tick the clients, choose the group size and pause, and press **Send**; **Stop** ends a run. A letter with a fill-in left stops the run before anything is sent. A client who already has an agreement for the year, or whose services now have no letter template, is skipped and named in the message at the end. A monthly amount changed since then is carried over when there is one monthly fee; with more, the client is skipped and named: send theirs from the client.
 
 ## Changing or stopping the monthly payment
 
@@ -49,7 +49,7 @@ In the client's **Service agreement…**: **Change from the next charge** sets a
 
 ## Ending an engagement
 
-**End engagement…** in the client's details sends the engagement closure letter. Type the letter's fill-ins for this client (the engagement's name, dates, your phone), press **Preview…**, then **Send and end engagement…**. The client's open agreements are cancelled and the monthly payment stops first; then the letter is shared with the client's people on the portal, to read, and put in the Portal inbox for Intake to file.
+**End engagement…** in the client's details sends the engagement closure letter. Type the letter's fill-ins for this client, press **Preview…**, then **Send and end engagement…**. The client's open agreements are cancelled and the monthly payment stops first; then the letter is shared with the client's people on the portal, to read, and put in the Portal inbox for Intake to file.
 
 ## Tax return delivery
 
