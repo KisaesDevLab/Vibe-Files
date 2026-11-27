@@ -220,6 +220,7 @@ fn check_for_update(enabled: bool) -> Option<mpsc::Receiver<Option<vf_sync::upda
 impl VibeFilesApp {
     pub fn new(ctx: &egui::Context, data: PathBuf) -> Self {
         crate::ui::letter_templates::set_preview_dir(&data);
+        crate::ui::grid::set_data_dir(&data);
         let exe_dir = std::env::current_exe()
             .ok()
             .and_then(|e| e.parent().map(Path::to_path_buf));

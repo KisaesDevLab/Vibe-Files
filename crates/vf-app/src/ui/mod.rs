@@ -19,6 +19,7 @@ pub mod doc_render;
 pub mod explorer;
 pub mod filed_details;
 pub mod folder_dialogs;
+pub mod grid;
 pub mod help;
 pub mod import_csv;
 pub mod import_tree;

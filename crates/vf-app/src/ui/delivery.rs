@@ -2869,7 +2869,6 @@ pub fn client_pdfs(
 /// The deliveries and agreements as read, and the live monthly charges.
 type Worklist = (Vec<Delivery>, Vec<Subscription>);
 
-#[derive(Default)]
 pub struct DeliveriesPage {
     show: Show,
     /// Also list those finished in `season` (a tax year).
@@ -2903,7 +2902,53 @@ pub struct DeliveriesPage {
     confirm_sign: bool,
     sign_note: String,
     signing: Option<Receiver<String>>,
+    /// The list's widths, sort and Filter box (owner 2026-11-26).
+    grid: crate::ui::grid::Grid,
 }
+
+impl Default for DeliveriesPage {
+    fn default() -> Self {
+        Self {
+            show: Show::default(),
+            finished: false,
+            season: 0,
+            overdue: 0,
+            overdue_dirty: false,
+            data: None,
+            clients: HashMap::new(),
+            job: None,
+            loaded: false,
+            err: None,
+            window: None,
+            agreement: None,
+            audit: None,
+            reads: None,
+            b2: Default::default(),
+            settings: None,
+            ticked: Default::default(),
+            confirm: false,
+            remind: None,
+            remind_stop: None,
+            remind_progress: None,
+            remind_done: None,
+            confirm_sign: false,
+            sign_note: String::new(),
+            signing: None,
+            grid: crate::ui::grid::Grid::new("portal-deliveries"),
+        }
+    }
+}
+
+/// The Deliveries list's columns.
+const DELIVERY_COLS: [crate::ui::grid::Col; 7] = [
+    crate::ui::grid::Col::tick(),
+    crate::ui::grid::Col::new("Client", 300.0),
+    crate::ui::grid::Col::new("Year", 60.0),
+    crate::ui::grid::Col::new("Kind", 90.0),
+    crate::ui::grid::Col::new("Step waiting", 260.0),
+    crate::ui::grid::Col::new("Days", 60.0),
+    crate::ui::grid::Col::new("Monthly charge", 160.0),
+];
 
 /// Remind ticked sends this many, then pauses (as bulk invitations do).
 const REMIND_GROUP: usize = 20;
@@ -3129,7 +3174,69 @@ pub fn page(ui: &mut egui::Ui, page: &mut DeliveriesPage, env: &mut crate::ui::b
         let season = page.finished.then_some(page.season);
         let rows = worklist::rows(list, subs, page.show, season);
         let days: Vec<i64> = rows.iter().map(|r| days_since(&r.d.created_at)).collect();
-        if rows.is_empty() {
+        let name_of = |id: &str| {
+            page.clients
+                .get(id)
+                .map(|(c, _)| format!("{} ({})", c.name, c.code))
+                .unwrap_or_else(|| "(not in this cabinet)".into())
+        };
+        let step_of = |r: &worklist::Row| {
+            let d = r.d;
+            if r.open() {
+                d.waiting().map(|s| d.step_words(s)).unwrap_or_default()
+            } else {
+                d.completed_at
+                    .as_deref()
+                    .map(|at| format!("Done {}", short_day(at)))
+                    .unwrap_or_else(|| "Done".into())
+            }
+        };
+        let monthly_of = |r: &worklist::Row| match r.monthly {
+            Some(m) if m.failed_at.is_some() => format!(
+                "Failed {}",
+                m.failed_at.as_deref().map(short_day).unwrap_or_default()
+            ),
+            Some(m) => m.words(),
+            None => String::new(),
+        };
+        // Owner 2026-11-26: filtered and sorted in the grid; the ticks, Tick all shown, Remind
+        // and Mark signed act on the rows shown.
+        let order = {
+            use crate::ui::grid::Key;
+            page.grid.order(
+                rows.len(),
+                |i| {
+                    let r = &rows[i];
+                    format!(
+                        "{} {} {} {} {}",
+                        name_of(&r.d.client_id),
+                        r.d.tax_year,
+                        r.d.what(),
+                        step_of(r),
+                        monthly_of(r)
+                    )
+                },
+                |i, c| {
+                    let r = &rows[i];
+                    match c {
+                        1 => Key::Text(name_of(&r.d.client_id)),
+                        2 => Key::Num(r.d.tax_year as f64),
+                        3 => Key::Text(r.d.what().to_string()),
+                        4 => Key::Text(step_of(r)),
+                        5 if r.open() => Key::Num(days[i] as f64),
+                        6 => match monthly_of(r) {
+                            m if m.is_empty() => Key::None,
+                            m => Key::Text(m),
+                        },
+                        _ => Key::None,
+                    }
+                },
+            )
+        };
+        let total = rows.len();
+        let days: Vec<i64> = order.iter().map(|i| days[*i]).collect();
+        let rows: Vec<worklist::Row> = order.iter().map(|i| rows[*i]).collect();
+        if total == 0 {
             ui.label(widgets::caption("None."));
         } else {
             let open_n = rows.iter().filter(|r| r.open()).count();
@@ -3144,9 +3251,9 @@ pub fn page(ui: &mut egui::Ui, page: &mut DeliveriesPage, env: &mut crate::ui::b
                 page.overdue
             )));
         }
+        page.grid.filter_bar(ui, rows.len(), total);
         // Only the rows on screen are drawn (500 open deliveries in a season: load test
         // 2026-11-24).
-        use egui_extras::{Column, TableBuilder};
         // The ticks kept are those still listed and still waiting on the client.
         let listed: std::collections::HashSet<&str> = rows
             .iter()
@@ -3154,37 +3261,9 @@ pub fn page(ui: &mut egui::Ui, page: &mut DeliveriesPage, env: &mut crate::ui::b
             .map(|r| r.d.id.as_str())
             .collect();
         page.ticked.retain(|id| listed.contains(id.as_str()));
-        TableBuilder::new(ui)
-            .striped(true)
-            .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
-            .column(Column::exact(24.0))
-            .column(
-                Column::initial(300.0)
-                    .at_least(160.0)
-                    .clip(true)
-                    .resizable(true),
-            )
-            .column(Column::exact(50.0))
-            .column(Column::exact(80.0))
-            .column(Column::initial(260.0).at_least(140.0).clip(true))
-            .column(Column::exact(50.0))
-            .column(Column::remainder().at_least(120.0).clip(true))
-            .max_scroll_height(f32::INFINITY)
-            .header(22.0, |mut h| {
-                h.col(|_| {});
-                for name in [
-                    "Client",
-                    "Year",
-                    "Kind",
-                    "Step waiting",
-                    "Days",
-                    "Monthly charge",
-                ] {
-                    h.col(|ui| {
-                        ui.label(RichText::new(name).small().color(theme::ink_muted()));
-                    });
-                }
-            })
+        page.grid
+            .table(ui, &DELIVERY_COLS)
+            .header(22.0, |mut h| page.grid.header(&mut h, &DELIVERY_COLS))
             .body(|body| {
                 body.rows(24.0, rows.len(), |mut row| {
                     let r = rows[row.index()];
@@ -3216,12 +3295,7 @@ pub fn page(ui: &mut egui::Ui, page: &mut DeliveriesPage, env: &mut crate::ui::b
                         }
                     });
                     row.col(|ui| {
-                        let name = page
-                            .clients
-                            .get(&d.client_id)
-                            .map(|(c, _)| format!("{} ({})", c.name, c.code))
-                            .unwrap_or_else(|| "(not in this cabinet)".into());
-                        if ui.link(name).clicked() {
+                        if ui.link(name_of(&d.client_id)).clicked() {
                             open = Some((
                                 d.client_id.clone(),
                                 d.is_agreement(),
@@ -3236,16 +3310,7 @@ pub fn page(ui: &mut egui::Ui, page: &mut DeliveriesPage, env: &mut crate::ui::b
                         ui.label(d.what());
                     });
                     row.col(|ui| {
-                        if r.open() {
-                            ui.label(d.waiting().map(|s| d.step_words(s)).unwrap_or_default());
-                        } else {
-                            ui.label(
-                                d.completed_at
-                                    .as_deref()
-                                    .map(|at| format!("Done {}", short_day(at)))
-                                    .unwrap_or_else(|| "Done".into()),
-                            );
-                        }
+                        ui.label(step_of(&r));
                     });
                     row.col(|ui| {
                         if !r.open() {

@@ -16,6 +16,8 @@ Select the client in Browse and press **Balance owed…** in the client's detail
 - **Amount**, in dollars and cents (at least $0.50).
 - **Memo**: what it is for, such as "2025 bookkeeping, Oct–Dec". The client sees it, and the email and text about the balance say the amount and the memo.
 - **Assigned to**: the staff member told when it is paid, started, failed or expired. Nobody: the person named in the portal's Settings › Payments, else the admins. A new balance (and a new Deliver… or Service agreement… card) starts with the person chosen in Admin › Portal's **Assign new cards to**, when they can see the client.
+
+On **Admin › Portal › Balances** (and Deliveries, Organizers), drag a column's edge to widen it, click a heading to sort (again to reverse), and type in **Filter** to keep the rows with every word typed. Ticked actions act on the rows shown. Widths and sort are kept on this PC.
 - **Remove from the portal after N days**: the card leaves by itself on that day if unpaid. Untick it for no limit.
 - **Tell the client by email and text**, and **Remind** every few days while it is due.
 - **Hold the client's files until this is paid**: while it is due, the client sees their shared files listed, marked *Opens when your balance is paid*, with the **Pay** button, but cannot open, download or share them; files shared meanwhile wait too. Documents of a delivery whose fee is paid stay open (Vibe Portal 0.5.8 or later). Paying (a bank payment started is enough), **Clear balance**, or the card leaving after its days releases them. Their uploads to you still work. Needs Vibe Portal 0.5.6 or later: an older portal posts the balance without the hold, and the window says so.

@@ -17,6 +17,7 @@ use vf_portal::balance::{
 };
 
 use crate::portal as core;
+use crate::ui::grid::{Col, Grid, Key};
 use crate::ui::portal::{AuditOut, ClientRef, spawn};
 use crate::ui::{theme, widgets};
 
@@ -809,11 +810,25 @@ pub struct BalancesPage {
     window: Option<BalanceWindow>,
     audit: Option<AuditOut>,
     reads: Option<ReadOut>,
+    /// The list's widths, sort and Filter box (owner 2026-11-26).
+    grid: Grid,
 }
+
+/// The list's columns.
+const COLS: [Col; 7] = [
+    Col::new("Client", 220.0),
+    Col::new("Amount", 90.0),
+    Col::new("Memo", 200.0),
+    Col::new("Assigned", 120.0),
+    Col::new("Posted", 140.0),
+    Col::new("Days left", 80.0),
+    Col::new("State", 120.0),
+];
 
 impl Default for BalancesPage {
     fn default() -> Self {
         Self {
+            grid: Grid::new("portal-balances"),
             filter: Filter::Due,
             data: None,
             clients: HashMap::new(),
@@ -927,52 +942,92 @@ pub fn page(ui: &mut egui::Ui, page: &mut BalancesPage, env: &mut crate::ui::bro
     let month = chrono::Utc::now().format("%Y-%m").to_string();
     let mut open: Option<String> = None;
     if let Some(d) = &page.data {
-        let rows: Vec<&Balance> = d
+        let all: Vec<&Balance> = d
             .balances
             .iter()
             .filter(|b| page.filter.shows(b, &month))
             .collect();
-        if rows.is_empty() {
+        let name_of = |b: &Balance| {
+            page.clients
+                .get(&b.client_id)
+                .map(|(c, _)| format!("{} ({})", c.name, c.code))
+                .unwrap_or_else(|| "(not in this cabinet)".into())
+        };
+        let days_words = |b: &Balance| match (b.state.as_str(), b.days_left) {
+            (balance::DUE, Some(n)) => n.to_string(),
+            (balance::DUE, None) => "no limit".into(),
+            _ => String::new(),
+        };
+        let order = page.grid.order(
+            all.len(),
+            |i| {
+                let b = all[i];
+                format!(
+                    "{} {} {} {} {} {}",
+                    name_of(b),
+                    money(b.amount_cents),
+                    b.memo,
+                    d.staff_name(b.assigned_staff_id.as_deref()),
+                    widgets::local_time(&b.posted_at),
+                    b.state_words()
+                )
+            },
+            |i, c| {
+                let b = all[i];
+                match c {
+                    0 => Key::Text(name_of(b)),
+                    1 => Key::Num(b.amount_cents as f64),
+                    2 => Key::Text(b.memo.clone()),
+                    3 => match d.staff_name(b.assigned_staff_id.as_deref()) {
+                        "" => Key::None,
+                        n => Key::Text(n.into()),
+                    },
+                    4 => Key::Text(b.posted_at.clone()),
+                    5 => match (b.state.as_str(), b.days_left) {
+                        (balance::DUE, Some(n)) => Key::Num(n as f64),
+                        // No limit after every number.
+                        (balance::DUE, None) => Key::Num(f64::MAX),
+                        _ => Key::None,
+                    },
+                    _ => Key::Text(b.state_words().to_string()),
+                }
+            },
+        );
+        page.grid.filter_bar(ui, order.len(), all.len());
+        if order.is_empty() {
             ui.label(widgets::caption("None."));
         }
-        egui::Grid::new("balances-list")
-            .num_columns(7)
-            .striped(true)
-            .spacing([14.0, 6.0])
-            .show(ui, |ui| {
-                for h in [
-                    "Client",
-                    "Amount",
-                    "Memo",
-                    "Assigned",
-                    "Posted",
-                    "Days left",
-                    "State",
-                ] {
-                    ui.label(RichText::new(h).small().color(theme::ink_muted()));
-                }
-                ui.end_row();
-                for b in rows {
-                    let name = page
-                        .clients
-                        .get(&b.client_id)
-                        .map(|(c, _)| format!("{} ({})", c.name, c.code))
-                        .unwrap_or_else(|| "(not in this cabinet)".into());
-                    if ui.link(&name).clicked() {
-                        open = Some(b.client_id.clone());
-                    }
-                    ui.label(money(b.amount_cents));
-                    ui.label(&b.memo);
-                    ui.label(d.staff_name(b.assigned_staff_id.as_deref()));
-                    ui.label(widgets::local_time(&b.posted_at));
-                    ui.label(match (b.state.as_str(), b.days_left) {
-                        (balance::DUE, Some(n)) => n.to_string(),
-                        (balance::DUE, None) => "no limit".into(),
-                        _ => String::new(),
+        let rows: Vec<&Balance> = order.iter().map(|i| all[*i]).collect();
+        page.grid
+            .table(ui, &COLS)
+            .header(22.0, |mut h| page.grid.header(&mut h, &COLS))
+            .body(|body| {
+                body.rows(24.0, rows.len(), |mut row| {
+                    let b = rows[row.index()];
+                    row.col(|ui| {
+                        if ui.link(name_of(b)).clicked() {
+                            open = Some(b.client_id.clone());
+                        }
                     });
-                    ui.label(b.state_words());
-                    ui.end_row();
-                }
+                    row.col(|ui| {
+                        ui.label(money(b.amount_cents));
+                    });
+                    row.col(|ui| {
+                        ui.label(&b.memo);
+                    });
+                    row.col(|ui| {
+                        ui.label(d.staff_name(b.assigned_staff_id.as_deref()));
+                    });
+                    row.col(|ui| {
+                        ui.label(widgets::local_time(&b.posted_at));
+                    });
+                    row.col(|ui| {
+                        ui.label(days_words(b));
+                    });
+                    row.col(|ui| {
+                        ui.label(b.state_words());
+                    });
+                });
             });
     }
     if let Some(id) = open

@@ -15,6 +15,7 @@ use vf_portal::PortalSettings;
 use vf_portal::organizer::{self, By, Candidate, Matched, Organizer, Status};
 
 use crate::portal as core;
+use crate::ui::grid::{Col, Grid, Key};
 use crate::ui::portal::{AuditOut, ClientRef, spawn};
 use crate::ui::{theme, widgets};
 
@@ -46,7 +47,18 @@ pub struct OrganizersPage {
     err: Option<String>,
     import: Option<ImportWindow>,
     settings: Option<(std::time::Instant, Option<PortalSettings>)>,
+    /// The list's widths, sort and Filter box (owner 2026-11-26).
+    grid: Grid,
 }
+
+/// The list's columns.
+const COLS: [Col; 5] = [
+    Col::tick(),
+    Col::new("Client", 260.0),
+    Col::new("Type", 80.0),
+    Col::new("Organizer", 140.0),
+    Col::new("Card", 200.0),
+];
 
 impl Default for OrganizersPage {
     fn default() -> Self {
@@ -63,6 +75,7 @@ impl Default for OrganizersPage {
             err: None,
             import: None,
             settings: None,
+            grid: Grid::new("portal-organizers"),
         }
     }
 }
@@ -285,31 +298,67 @@ pub fn page(
                 .map(|(c, _)| format!("{} ({})", c.name, c.code))
                 .unwrap_or_else(|| "(not in this cabinet)".into())
         };
-        egui::Grid::new("organizers-list")
-            .num_columns(5)
-            .striped(true)
-            .spacing([14.0, 6.0])
-            .show(ui, |ui| {
-                ui.label("");
-                for h in ["Client", "Type", "Organizer", "Card"] {
-                    ui.label(RichText::new(h).small().color(theme::ink_muted()));
+        let order = page.grid.order(
+            rows.len(),
+            |i| {
+                let o = rows[i];
+                format!(
+                    "{} {} {} {}",
+                    name_of(&o.client_id),
+                    o.return_type,
+                    o.status.words(),
+                    o.card_words()
+                )
+            },
+            |i, c| {
+                let o = rows[i];
+                match c {
+                    1 => Key::Text(name_of(&o.client_id)),
+                    2 => Key::Text(o.return_type.clone()),
+                    3 => Key::Text(o.status.words().into()),
+                    4 => Key::Text(o.card_words()),
+                    _ => Key::None,
                 }
-                ui.end_row();
-                for o in rows {
-                    let mut t = page.ticked.contains(&o.id);
-                    if ui.checkbox(&mut t, "").changed() {
-                        if t {
-                            page.ticked.insert(o.id.clone());
-                        } else {
-                            page.ticked.remove(&o.id);
+            },
+        );
+        page.grid.filter_bar(ui, order.len(), rows.len());
+        let rows: Vec<&Organizer> = order.iter().map(|i| rows[*i]).collect();
+        // The ticks kept are those still shown (Turn off / on acts on what is in view).
+        let shown: BTreeSet<&str> = rows.iter().map(|o| o.id.as_str()).collect();
+        page.ticked.retain(|id| shown.contains(id.as_str()));
+        page.grid
+            .table(ui, &COLS)
+            .header(22.0, |mut h| page.grid.header(&mut h, &COLS))
+            .body(|body| {
+                body.rows(24.0, rows.len(), |mut row| {
+                    let o = rows[row.index()];
+                    row.col(|ui| {
+                        let mut t = page.ticked.contains(&o.id);
+                        let r = widgets::named(
+                            ui.add(egui::Checkbox::without_text(&mut t)),
+                            "Tick row",
+                        );
+                        if r.changed() {
+                            if t {
+                                page.ticked.insert(o.id.clone());
+                            } else {
+                                page.ticked.remove(&o.id);
+                            }
                         }
-                    }
-                    ui.label(name_of(&o.client_id));
-                    ui.label(&o.return_type);
-                    ui.label(o.status.words());
-                    ui.label(o.card_words());
-                    ui.end_row();
-                }
+                    });
+                    row.col(|ui| {
+                        ui.label(name_of(&o.client_id));
+                    });
+                    row.col(|ui| {
+                        ui.label(&o.return_type);
+                    });
+                    row.col(|ui| {
+                        ui.label(o.status.words());
+                    });
+                    row.col(|ui| {
+                        ui.label(o.card_words());
+                    });
+                });
             });
         ui.add_space(6.0);
         ui.horizontal(|ui| {

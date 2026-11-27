@@ -5950,6 +5950,122 @@ mod tests {
         }
     }
 
+    /// Owner 2026-11-26: Admin › Portal › Balances in the grid: the Filter box keeps the rows
+    /// with every word typed; a click on Amount sorts by the amount, again to reverse.
+    /// `VF_GRID_SHOTS=<dir>` saves pictures.
+    #[test]
+    fn the_balances_grid_filters_and_sorts() {
+        let root = tempfile::tempdir().unwrap();
+        vf_fs::cabinet::create(
+            root.path(),
+            &vf_fs::cabinet::CabinetFile {
+                cabinet_id: "cab-1".into(),
+                firm_id: "firm-1".into(),
+                schema_version: 1,
+                layout_version: 1,
+                created: "2026-11-24T00:00:00Z".into(),
+                name: None,
+            },
+        )
+        .unwrap();
+        let conn = vf_core::db::open(&root.path().join("catalog.db"), vf_core::db::Storage::Local)
+            .unwrap();
+        conn.execute_batch(
+            "INSERT INTO client (id, ext_id, name, device_id, updated_at) VALUES
+               ('c1', '104', 'Smith, Pat', 'd', 't'),
+               ('c2', '220', 'Smithe LLC', 'd', 't'),
+               ('c3', '31', 'Baker, Jo', 'd', 't');",
+        )
+        .unwrap();
+        let (url, _seen) = fake_portal(|_, path| {
+            if !path.starts_with("/api/firm/v1/balances") {
+                return (404, r#"{"error":"not_found"}"#.into());
+            }
+            let b = |id: &str, client: &str, cents: u32, memo: &str| {
+                format!(
+                    r#"{{"id":"{id}","clientId":"{client}","amountCents":{cents},"memo":"{memo}",
+                    "state":"due","expiresAt":null,"daysLeft":8,"notify":true,"remindDays":0,
+                    "remindedAt":null,"assignedStaffId":null,"postedBy":"x",
+                    "postedAt":"2026-11-24T12:00:00Z","startedAt":null,"paidAt":null,
+                    "method":null,"cardFeeCents":0,"endedAt":null}}"#
+                )
+            };
+            (
+                200,
+                format!(
+                    r#"{{"balances":[{},{},{}],"staff":[]}}"#,
+                    b("b1", "c1", 45000, "2025 bookkeeping"),
+                    b("b2", "c2", 12000, "Q3 payroll"),
+                    b("b3", "c3", 7500, "Amended 2024")
+                ),
+            )
+        });
+        let s = PortalSettings::new("cab-1", &url, "vpk_abcdefghijklmnopqrstuvwxyz0123456789", 0)
+            .unwrap()
+            .with_balances(true);
+        settings::save(root.path(), &s).unwrap();
+        struct St {
+            page: crate::ui::balance::BalancesPage,
+            conn: vf_core::db::Connection,
+            root: tempfile::TempDir,
+        }
+        let mut h = egui_kittest::Harness::builder()
+            .with_max_steps(crate::ui::test_util::MAX_STEPS)
+            .with_size([1000.0, 500.0])
+            .build_ui_state(
+                |ui, st: &mut St| {
+                    let mut env = Env {
+                        conn: &mut st.conn,
+                        root: st.root.path(),
+                        device_id: "dev-1",
+                    };
+                    crate::ui::balance::page(ui, &mut st.page, &mut env);
+                },
+                St {
+                    page: Default::default(),
+                    conn,
+                    root,
+                },
+            );
+        wait_for(&mut h, "Baker, Jo (31)");
+        let shots = std::env::var("VF_GRID_SHOTS")
+            .ok()
+            .map(std::path::PathBuf::from);
+        let shot = |h: &mut egui_kittest::Harness<'_, St>, name: &str| {
+            if let Some(d) = &shots {
+                h.run_steps(3);
+                if let Ok(img) = h.render() {
+                    img.save(d.join(format!("{name}.png"))).unwrap();
+                }
+            }
+        };
+        let top = |h: &egui_kittest::Harness<'_, St>, l: &str| h.get_by_label(l).rect().top();
+        shot(&mut h, "grid-1-balances");
+        // Amount, up: $75 first; again, down: $450 first.
+        h.get_by_label("Amount").click();
+        h.run_steps(3);
+        assert!(top(&h, "$75.00") < top(&h, "$120.00") && top(&h, "$120.00") < top(&h, "$450.00"));
+        h.get_by_label("Amount").click();
+        h.run_steps(3);
+        assert!(top(&h, "$450.00") < top(&h, "$120.00") && top(&h, "$120.00") < top(&h, "$75.00"));
+        shot(&mut h, "grid-2-sorted-amount-down");
+        // Filter: every word, any column, any case.
+        h.get_by_label("Filter").click();
+        h.get_by_label("Filter").type_text("SMITH");
+        h.run_steps(3);
+        assert!(h.query_by_label("Baker, Jo (31)").is_none());
+        assert!(h.query_by_label("Smith, Pat (104)").is_some());
+        assert!(h.query_by_label("2 of 3").is_some());
+        h.get_by_label("Filter").type_text(" payroll");
+        h.run_steps(3);
+        assert!(h.query_by_label("Smith, Pat (104)").is_none());
+        assert!(h.query_by_label("Smithe LLC (220)").is_some());
+        shot(&mut h, "grid-3-filtered");
+        h.get_by_label("Clear").click();
+        h.run_steps(3);
+        assert!(h.query_by_label("Baker, Jo (31)").is_some());
+    }
+
     const SHARE_CLIENT: &str = "0199aaaa-0000-7000-8000-000000000002";
 
     /// A portal with one document on it (`f1`, held for nobody) and one invitation to Jane
