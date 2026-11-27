@@ -971,6 +971,77 @@ mod tests {
             "Taxpayer",
         )
         .unwrap();
+        // Owner 2026-11-27: more cards for the bulk actions: the other clients' Form 8879 to
+        // sign at the office or by mail (the business has nobody on the portal yet).
+        let rest: Vec<(String, String, String)> = {
+            let o = open_mut(&mut h);
+            o.browse
+                .snap
+                .clients
+                .iter()
+                .filter(|x| x.id != c.id)
+                .take(3)
+                .map(|x| (x.id.clone(), x.ext_id.clone(), x.name.clone()))
+                .collect()
+        };
+        for (k, (id, ext, name)) in rest.iter().enumerate() {
+            p.put_client(id, ext, name, None).unwrap();
+            let person = name.contains(", ");
+            if person {
+                let f = name.split(", ").nth(1).unwrap_or("Pat");
+                let l = name.split(", ").next().unwrap_or("Sample");
+                p.invite(
+                    id,
+                    Some(&format!(
+                        "{}.{}@example.com",
+                        f.to_lowercase(),
+                        l.to_lowercase()
+                    )),
+                    None,
+                    &format!("{f} {l}"),
+                    "Taxpayer",
+                )
+                .unwrap();
+            }
+            p.create_delivery(&vf_portal::delivery::NewDelivery {
+                client_id: id.clone(),
+                tax_year: 2025,
+                return_type: if person { "1040" } else { "1065" }.into(),
+                title: "Your 2025 tax return".into(),
+                steps: vf_portal::delivery::StepsIn {
+                    esign8879: true,
+                    ..Default::default()
+                },
+                locks: Default::default(),
+                assigned_staff_id: None,
+                notify: false,
+                hold: false,
+                remind_days: 7,
+                kind: None,
+                covers: Vec::new(),
+                return_year: None,
+                esign_mode: Some(if k == 1 { "mail" } else { "office" }.into()),
+            })
+            .unwrap();
+            // The people accept their invitations (off camera), so Remind ticked reaches them;
+            // the business keeps nobody on the portal.
+            if person {
+                let f = name.split(", ").nth(1).unwrap_or("Pat");
+                let l = name.split(", ").next().unwrap_or("Sample");
+                let ok = std::process::Command::new("node")
+                    .args([
+                        &client_js,
+                        &url,
+                        &out.display().to_string(),
+                        &log,
+                        &format!("{}.{}@example.com", f.to_lowercase(), l.to_lowercase()),
+                        "accept",
+                    ])
+                    .status()
+                    .is_ok_and(|s| s.success());
+                assert!(ok, "{name} accepts the invitation");
+            }
+        }
         // The firm's Assign new cards to: Pat Preparer.
         let pat = p
             .delivery_staff(&c.id)
@@ -1138,13 +1209,13 @@ mod tests {
         h.get_by_role_and_label(Role::Button, "Portal").click();
         h.run_steps(6);
         h.get_by_role_and_label(Role::Button, "Deliveries").click();
-        wait_long(&mut h, "the list", &|h| said(h, "1 listed"));
+        wait_long(&mut h, "the list", &|h| said(h, "4 listed"));
         h.run_steps(8);
         shot(&mut h, "t10a-deliveries", &[]);
         let r = h.get_by_label("Filter").rect();
         h.get_by_label("Filter").click();
         h.step();
-        h.get_by_label("Filter").type_text(&last);
+        h.get_by_label("Filter").type_text(&first);
         h.run_steps(4);
         shot(&mut h, "t10b-filter", &[r]);
         h.get_by_label("Tick row").click();
@@ -1177,6 +1248,94 @@ mod tests {
         open_mut(&mut h).browse.portal.delivery = None;
         h.run_steps(4);
 
+        use egui_kittest::kittest::NodeT;
+        // ---- 12b. Many at once: Admin › Portal › Deliveries, Form 8879, Tick all shown,
+        // Remind ticked, then Mark ticked signed on paper.
+        h.get_by_role_and_label(Role::Button, "Admin").click();
+        h.run_steps(6);
+        h.get_by_role_and_label(Role::Button, "Portal").click();
+        h.run_steps(6);
+        h.get_by_role_and_label(Role::Button, "Deliveries").click();
+        h.run_steps(6);
+        if h.query_by_label("Clear").is_some() {
+            h.get_by_label("Clear").click();
+            h.run_steps(3);
+        }
+        click_read_again(&mut h);
+        wait_long(&mut h, "the other cards", &|h| said(h, "3 listed"));
+        h.get_by_label("Form 8879").click();
+        h.run_steps(6);
+        let r = button(&h, "Tick all shown");
+        h.get_by_role_and_label(Role::Button, "Tick all shown")
+            .click();
+        h.run_steps(4);
+        shot(&mut h, "t14a-tick-all", &[r]);
+        h.get_by_role_and_label(Role::Button, "Remind ticked")
+            .click();
+        h.run_steps(4);
+        let r = button(&h, "Remind");
+        shot(&mut h, "t14b-remind-ask", &[r]);
+        h.get_by_role_and_label(Role::Button, "Remind").click();
+        wait_long(&mut h, "reminded", &|h| {
+            said(h, "eminded") && !said(h, "Reminding")
+        });
+        h.run_steps(6);
+        let r = h
+            .query_all_by_label_contains("eminded")
+            .last()
+            .unwrap()
+            .rect();
+        shot(&mut h, "t14c-reminded", &[r]);
+        if h.query_all_by_role(Role::Button)
+            .find(|n| {
+                n.accesskit_node()
+                    .label()
+                    .is_some_and(|l| l == "Mark ticked signed on paper… (0)")
+            })
+            .is_some()
+        {
+            h.get_by_role_and_label(Role::Button, "Tick all shown")
+                .click();
+            h.run_steps(4);
+        }
+        h.query_all_by_role(Role::Button)
+            .find(|n| {
+                n.accesskit_node()
+                    .label()
+                    .is_some_and(|l| l.starts_with("Mark ticked signed on paper"))
+            })
+            .expect("the Mark ticked button")
+            .click();
+        h.run_steps(4);
+        h.get_by_label("Signed on paper note").click();
+        h.step();
+        h.get_by_label("Signed on paper note")
+            .type_text("Signed at the office");
+        h.run_steps(3);
+        let r = h
+            .query_all_by_role(Role::Button)
+            .find(|n| {
+                n.accesskit_node()
+                    .label()
+                    .is_some_and(|l| l.starts_with("Mark ") && l.ends_with(" signed"))
+            })
+            .expect("the Mark n signed button")
+            .rect();
+        shot(&mut h, "t15a-mark-ask", &[r]);
+        h.query_all_by_role(Role::Button)
+            .find(|n| {
+                n.accesskit_node()
+                    .label()
+                    .is_some_and(|l| l.starts_with("Mark ") && l.ends_with(" signed"))
+            })
+            .unwrap()
+            .click();
+        wait_long(&mut h, "marked", &|h| {
+            said(h, "marked signed on paper. ") || said(h, " marked signed on paper.")
+        });
+        h.run_steps(8);
+        shot(&mut h, "t15b-marked", &[]);
+
         // ---- 13. The step PDFs filed by Intake.
         open_mut(&mut h).browse.portal.fetch_now = true;
         let inbox = crate::portal::inbox(&root);
@@ -1191,7 +1350,8 @@ mod tests {
         };
         let start = std::time::Instant::now();
         let mut asked = std::time::Instant::now();
-        while count(&inbox) < 3 && start.elapsed().as_secs() < 120 {
+        // Casey's three, and the other clients' Form 8879 signed on paper in bulk.
+        while count(&inbox) < 6 && start.elapsed().as_secs() < 120 {
             if asked.elapsed().as_secs() >= 10 {
                 open_mut(&mut h).browse.portal.fetch_now = true;
                 asked = std::time::Instant::now();
@@ -1208,7 +1368,7 @@ mod tests {
             .unwrap_or_default();
         eprintln!("Portal inbox: {got:?}");
         let n = count(&inbox);
-        assert!(n >= 2, "the step PDFs fetched");
+        assert!(n >= 6, "the step PDFs fetched");
         h.state_mut().tab = crate::app::Tab::Intake;
         h.run_steps(10);
         if let Some(b) = h.query_by_label("Preview") {
@@ -1242,9 +1402,65 @@ mod tests {
             .join("Delivery");
         let path = dir.join("2025 Delivery 5 - Form 8879.pdf");
         wait_long(&mut h, "filed", &|_| path.exists());
+        // In the catalog too (Intake records them as it finishes, on its own tab).
+        let start = std::time::Instant::now();
+        loop {
+            let n: i64 = {
+                let o = open_mut(&mut h);
+                o.opened
+                    .conn
+                    .query_row(
+                        "SELECT count(*) FROM document WHERE rel_path LIKE '%Income Tax/2025/Delivery/%' AND deleted_at IS NULL",
+                        [],
+                        |r| r.get(0),
+                    )
+                    .unwrap_or(0)
+            };
+            if n >= 6 {
+                break;
+            }
+            assert!(
+                start.elapsed().as_secs() < 120,
+                "the catalog has the filed PDFs: {n}"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            h.step();
+        }
         h.state_mut().tab = crate::app::Tab::Browse;
         h.run_steps(10);
-        shot(&mut h, "t13b-filed", &[]);
+        {
+            let o = open_mut(&mut h);
+            o.browse.set_scope(vf_core::browse::Scope::Client(ci));
+        }
+        h.run_steps(6);
+        // Intake files the six on its thread; Refresh until this client's three are listed.
+        let start = std::time::Instant::now();
+        while !(said(&h, "2025 Delivery 1 - Letters.pdf")
+            && said(&h, "2025 Delivery 5 - Form 8879.pdf"))
+        {
+            assert!(
+                start.elapsed().as_secs() < 180,
+                "the filed PDFs listed: never"
+            );
+            h.get_by_role_and_label(Role::Button, "Refresh").click();
+            for _ in 0..50 {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                h.step();
+            }
+        }
+        h.run_steps(6);
+        let filed: Vec<egui::Rect> = [
+            "2025 Delivery 1 - Letters.pdf",
+            "2025 Delivery 2 - Tax return.pdf",
+            "2025 Delivery 5 - Form 8879.pdf",
+        ]
+        .iter()
+        .filter_map(|n| h.query_all_by_label_contains(n).next().map(|x| x.rect()))
+        .collect();
+        let r = filed.iter().copied().reduce(|a, b| a.union(b)).unwrap();
+        // The whole rows, not only their tick boxes.
+        let r = egui::Rect::from_min_max(r.min, egui::pos2(r.min.x + 740.0, r.max.y));
+        shot(&mut h, "t13b-filed", &[r]);
     }
 
     /// Addendum §12 slice 3 (letters) walkthrough against a real Vibe Portal: the Deliver window

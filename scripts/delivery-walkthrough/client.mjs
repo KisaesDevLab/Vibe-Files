@@ -195,7 +195,15 @@ const payOnStripe = async (STRIPE, label, paid) => {
 };
 
 try {
-  if (PHASE === 'deliver') {
+  if (PHASE === 'accept') {
+    // Training walkthrough 2026-11-27: the client accepts the firm's invitation, nothing else.
+    const inv = await mailWith('/invite', 0);
+    await go(linkIn(inv.body, '/invite'));
+    await until(`!!__byText('button', 'Accept and sign in')`, 'invitation page');
+    await click('Accept and sign in');
+    await until(`location.pathname === '/'`, 'home after accepting');
+    note('Invitation accepted');
+  } else if (PHASE === 'deliver') {
     // The client accepts the firm's portal invitation and lands on the home page.
     const inv = await mailWith('/invite', 0);
     await go(linkIn(inv.body, '/invite'));
