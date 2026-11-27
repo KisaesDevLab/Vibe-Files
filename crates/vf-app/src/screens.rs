@@ -2174,6 +2174,717 @@ mod tests {
         shot(&mut h, "a15b-filed", &marks);
     }
 
+    /// Owner 2026-11-27: the frames of the training videos "Filing documents with Intake" and
+    /// "Intake rules and setup" (staff): an inbox of made-up files, one for each case Intake
+    /// shows (ready, a name match, no client, two years, a form read with no client in its
+    /// name, two statements to combine), filed, set in Just filed, undone; then a rule built
+    /// from a file, the Rules screen and Setup. Frames at 1920×1080 in `VF_WALK_DIR`, what to
+    /// look at outlined in amber. Needs no portal.
+    #[test]
+    #[ignore = "makes training frames"]
+    fn training_intake_walkthrough() {
+        let Ok(out) = std::env::var("VF_WALK_DIR") else {
+            return;
+        };
+        let out = std::path::PathBuf::from(out);
+        std::fs::create_dir_all(&out).unwrap();
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path().join("Clients");
+        vf_fixtures::generate(&root, 3).unwrap();
+        crate::ui::test_util::pdfium_first();
+        let data = t.path().join("data");
+        drop(crate::session::open(&data, "dev", &root).unwrap());
+        // The firm's scanner inbox.
+        let inbox = t.path().join("Scans inbox");
+        std::fs::create_dir_all(&inbox).unwrap();
+        let master = vf_fs::clients::master_dir(&root);
+        let (mut fs, _) = filer_intake::config::Settings::load_or_default(&master);
+        fs.inboxes = vec![inbox.clone()];
+        fs.save(&master).unwrap();
+        // A W-2 from the made-up form set, given to one of this cabinet's people.
+        let w2 = vf_extract::synthetic::cases()
+            .into_iter()
+            .find(|c| c.name.starts_with("w2 2025 ORTI3300"))
+            .expect("a synthetic W-2")
+            .text
+            .replace("Ortiz, Sam", "Placeholt, Casey")
+            .replace("Sam Ortiz", "Casey Placeholt")
+            .replace("SAM ORTIZ", "CASEY PLACEHOLT");
+        let w2_lines: Vec<&str> = w2.lines().collect();
+        let page = |n: &str, lines: &[&str]| {
+            crate::ui::test_util::write_lines_pdf(&inbox.join(n), &[lines]);
+        };
+        page("Placeholt, Casey_1002_2025 W-2.pdf", &w2_lines);
+        page(
+            "Synthetic Orchards LLC_1004_2025 1099-INT.pdf",
+            &["Form 1099-INT Interest Income 2025", "Northwind Bank NA"],
+        );
+        page(
+            "Example Freight LLC_1005_2025 Bank Statement January.pdf",
+            &[
+                "Northwind Bank NA",
+                "Statement: January 2025",
+                "Example Freight LLC",
+            ],
+        );
+        page(
+            "Example Freight LLC_1005_2025 Bank Statement February.pdf",
+            &[
+                "Northwind Bank NA",
+                "Statement: February 2025",
+                "Example Freight LLC",
+            ],
+        );
+        page(
+            "Placeholt Morgan 2025 1098.pdf",
+            &[
+                "Form 1098 Mortgage Interest Statement 2025",
+                "Lakeside Mortgage Co",
+            ],
+        );
+        page(
+            "Newco LLC_NEWC2002_2025 W-2.pdf",
+            &["Form W-2 Wage and Tax Statement 2025"],
+        );
+        page(
+            "Placeholt, Jordan_1003_2020 Trust 2025 K-1.pdf",
+            &["Schedule K-1 (Form 1041) 2025", "The Placeholt 2020 Trust"],
+        );
+        page(
+            "Synthetic Orchards LLC_1004_2025 Property Tax Bill.pdf",
+            &[
+                "County Treasurer",
+                "2025 Property Tax Bill",
+                "Synthetic Orchards LLC",
+            ],
+        );
+        page("scan0001.pdf", &w2_lines);
+        let d = data.clone();
+        let mut h = HarnessBuilder::default()
+            .with_max_steps(crate::ui::test_util::MAX_STEPS)
+            .with_theme(egui::Theme::Light)
+            .with_size([1440.0, 810.0])
+            .with_pixels_per_point(1920.0 / 1440.0)
+            .build_eframe(move |cc| VibeFilesApp::new(&cc.egui_ctx, d.clone()));
+        h.run_steps(8);
+        let shot = |h: &mut egui_kittest::Harness<'static, VibeFilesApp>,
+                    name: &str,
+                    marks: &[egui::Rect]| {
+            for _ in 0..6 {
+                h.step();
+            }
+            let ppp = 1920.0 / 1440.0;
+            match h.render() {
+                Ok(mut img) => {
+                    let (w, ht) = (img.width() as i64, img.height() as i64);
+                    for r in marks {
+                        let r = r.expand(5.0);
+                        let (x0, y0) = ((r.min.x * ppp) as i64, (r.min.y * ppp) as i64);
+                        let (x1, y1) = ((r.max.x * ppp) as i64, (r.max.y * ppp) as i64);
+                        for t in 0..4 {
+                            for x in x0 - t..=x1 + t {
+                                for y in [y0 - t, y1 + t] {
+                                    if (0..w).contains(&x) && (0..ht).contains(&y) {
+                                        img.put_pixel(
+                                            x as u32,
+                                            y as u32,
+                                            image::Rgba([245, 158, 11, 255]),
+                                        );
+                                    }
+                                }
+                            }
+                            for y in y0 - t..=y1 + t {
+                                for x in [x0 - t, x1 + t] {
+                                    if (0..w).contains(&x) && (0..ht).contains(&y) {
+                                        img.put_pixel(
+                                            x as u32,
+                                            y as u32,
+                                            image::Rgba([245, 158, 11, 255]),
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    img.save(out.join(format!("{name}.png"))).unwrap();
+                }
+                Err(e) => eprintln!("{name}: {e}"),
+            }
+        };
+        let said = |h: &egui_kittest::Harness<'static, VibeFilesApp>, text: &str| {
+            h.query_all_by_label_contains(text).next().is_some()
+        };
+        let wait_long =
+            |h: &mut egui_kittest::Harness<'static, VibeFilesApp>,
+             what: &str,
+             ok: &dyn Fn(&egui_kittest::Harness<'static, VibeFilesApp>) -> bool| {
+                let start = std::time::Instant::now();
+                while !ok(h) {
+                    assert!(start.elapsed().as_secs() < 120, "{what}: never");
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                    h.step();
+                }
+            };
+        h.get_by_role_and_label(Role::Button, "Open existing")
+            .click();
+        h.run_steps(8);
+        h.get_by_label("Cabinet folder").click();
+        h.step();
+        h.get_by_label("Cabinet folder")
+            .type_text(&root.display().to_string());
+        h.step();
+        h.get_by_role_and_label(Role::Button, "Open cabinet")
+            .click();
+        assert!(wait_for(&mut h, |h| matches!(
+            h.state().screen,
+            crate::app::Screen::Open(_)
+        )));
+        h.run_steps(8);
+        {
+            let o = open_mut(&mut h);
+            vf_fs::doctypes::sync(&mut o.opened.conn, &root, "dev", "doc_types_edit").unwrap();
+        }
+        let names: Vec<String> = open_mut(&mut h)
+            .browse
+            .snap
+            .clients
+            .iter()
+            .map(|c| format!("{} ({})", c.name, c.ext_id))
+            .collect();
+        eprintln!("clients: {names:?}");
+
+        // ---- i01. The Intake tab and its count.
+        shot(&mut h, "i01-browse", &[]);
+        h.state_mut().tab = crate::app::Tab::Intake;
+        h.run_steps(10);
+        if let Some(b) = h.query_by_label("Preview") {
+            b.click();
+        }
+        wait_long(&mut h, "the rows planned", &|h| {
+            said(h, "scan0001.pdf")
+                && said(h, "Newco LLC_NEWC2002_2025 W-2.pdf")
+                && h.query_by_label("read").is_some()
+        });
+        h.run_steps(20);
+        let text_of = |h: &egui_kittest::Harness<'static, VibeFilesApp>, t: &str| {
+            h.query_all_by_label(t)
+                .next()
+                .or_else(|| h.query_all_by_label_contains(t).next())
+                .unwrap_or_else(|| panic!("{t}: not shown"))
+                .rect()
+        };
+        let button = |h: &egui_kittest::Harness<'static, VibeFilesApp>, l: &str| {
+            h.get_by_role_and_label(Role::Button, l).rect()
+        };
+        let type_into =
+            |h: &mut egui_kittest::Harness<'static, VibeFilesApp>, label: &str, v: &str| {
+                h.get_by_label(label).click();
+                h.step();
+                h.key_press(egui::Key::End);
+                for _ in 0..40 {
+                    h.key_press(egui::Key::Backspace);
+                }
+                h.step();
+                h.get_by_label(label).type_text(v);
+                h.run_steps(3);
+            };
+        let r = h
+            .query_all_by_label_contains("Intake (")
+            .next()
+            .unwrap()
+            .rect();
+        shot(&mut h, "i02-queue", &[r]);
+        // The scanning and inboxes panel hidden, so the queue has the room.
+        h.get_by_label("Hide").click();
+        h.run_steps(8);
+        let dump = |h: &egui_kittest::Harness<'static, VibeFilesApp>, at: &str| {
+            use egui_kittest::kittest::NodeT;
+            for n in h.root().children_recursive() {
+                let a = n.accesskit_node();
+                let l = a.label().unwrap_or_default();
+                if !l.is_empty() && !matches!(a.role(), Role::Label | Role::Unknown) {
+                    eprintln!("NODE[{at}] {:?} {l:?}", a.role());
+                }
+            }
+        };
+        let r = [
+            "File",
+            "Date",
+            "Client",
+            "Rule",
+            "Year",
+            "Destination",
+            "Status",
+        ]
+        .iter()
+        .map(|c| h.get_by_label(&format!("Sort by {c}")).rect())
+        .reduce(|a, b| a.union(b))
+        .unwrap();
+        shot(&mut h, "i03-columns", &[r]);
+
+        // ---- i04. The preview pane, beside the list.
+        h.get_by_label("Preview pane").click();
+        h.run_steps(6);
+        h.query_all_by_label_contains("Placeholt, Casey_1002_2025 W-2.pdf")
+            .find(|n| {
+                use egui_kittest::kittest::NodeT;
+                n.accesskit_node().role() == Role::Label
+            })
+            .unwrap()
+            .click();
+        h.run_steps(30);
+        let r = h.get_by_label("Preview pane").rect();
+        shot(&mut h, "i04-preview-pane", &[r]);
+        h.get_by_label("Preview pane").click();
+        h.run_steps(6);
+
+        // ---- i05. No client: New client….
+        let newco = "Newco LLC_NEWC2002_2025 W-2.pdf";
+        h.get_by_label(&format!("New client for {newco}"))
+            .scroll_to_me();
+        h.run_steps(4);
+        let r = h
+            .get_by_label(&format!("New client for {newco}"))
+            .rect()
+            .union(text_of(&h, "ID NEWC2002 not in the client list"));
+        shot(&mut h, "i05a-needs-client", &[r]);
+        h.get_by_label(&format!("New client for {newco}")).click();
+        wait_long(&mut h, "the New client dialog", &|h| {
+            h.query_by_label("Create client (one transaction)")
+                .is_some()
+        });
+        h.run_steps(4);
+        let r = button(&h, "Create client (one transaction)");
+        shot(&mut h, "i05b-new-client", &[r]);
+        h.get_by_label("Create client (one transaction)").click();
+        h.run_steps(4);
+        wait_long(&mut h, "Newco's row given its client", &|h| {
+            h.query_by_label(&format!("New client for {newco}"))
+                .is_none()
+        });
+        h.run_steps(10);
+
+        // ---- i06. A name match offered.
+        let morgan = "Placeholt Morgan 2025 1098.pdf";
+        h.get_by_label("Use Placeholt, Morgan (1001)")
+            .scroll_to_me();
+        h.run_steps(4);
+        let r = h
+            .get_by_label("Use Placeholt, Morgan (1001)")
+            .rect()
+            .union(text_of(&h, "No ID in filename"));
+        shot(&mut h, "i06a-suggested", &[r]);
+        h.get_by_label("Use Placeholt, Morgan (1001)").click();
+        h.run_steps(4);
+        wait_long(&mut h, "Morgan's row given its client", &|h| {
+            h.query_by_label("Use Placeholt, Morgan (1001)").is_none()
+        });
+        h.run_steps(10);
+        h.get_by_label(&format!("Rename {morgan}")).scroll_to_me();
+        h.run_steps(4);
+        let r = h.get_by_label(&format!("Rename {morgan}")).rect();
+        shot(&mut h, "i06b-matched", &[r]);
+
+        // ---- i07. Two years in the name: the row asks for the year.
+        let k1 = "Placeholt, Jordan_1003_2020 Trust 2025 K-1.pdf";
+        let year = format!("Year for {k1}");
+        h.get_by_label(&year).scroll_to_me();
+        h.run_steps(4);
+        dump(&h, "k1");
+        let r = h.get_by_label(&year).rect();
+        shot(&mut h, "i07a-needs-year", &[r]);
+        h.get_by_label(&year).click();
+        h.run_steps(4);
+        dump(&h, "k1-open");
+        if let Some(n) = h.query_all_by_role_and_label(Role::Button, "2025").last() {
+            n.click();
+        }
+        h.run_steps(10);
+        let r = h.get_by_label(&year).rect();
+        shot(&mut h, "i07b-year-set", &[r]);
+
+        // ---- i08. A form read for you: choose whose it is.
+        let scan = "scan0001.pdf";
+        h.get_by_label(&format!("Year for {scan}")).scroll_to_me();
+        h.run_steps(4);
+        let r = text_of(&h, "read").union(h.get_by_label(&format!("Year for {scan}")).rect());
+        shot(&mut h, "i08a-read", &[r]);
+        h.query_all_by_role_and_label(Role::Button, "Choose client…")
+            .last()
+            .unwrap()
+            .click();
+        h.run_steps(8);
+        h.get_by_label("Search by name or ID").click();
+        h.step();
+        // The box starts with the file's name in it.
+        h.key_press(egui::Key::End);
+        for _ in 0..24 {
+            h.key_press(egui::Key::Backspace);
+        }
+        h.step();
+        h.get_by_label("Search by name or ID").type_text("Casey");
+        h.run_steps(6);
+        let casey = h
+            .query_all_by_role(Role::Button)
+            .find(|n| {
+                use egui_kittest::kittest::NodeT;
+                n.accesskit_node()
+                    .label()
+                    .is_some_and(|l| l.starts_with("Placeholt, Casey (1002)"))
+            })
+            .expect("Casey in the picker")
+            .rect();
+        let search = h.get_by_label("Search by name or ID").rect();
+        shot(&mut h, "i08b-picker", &[search, casey]);
+        h.query_all_by_role(Role::Button)
+            .find(|n| {
+                use egui_kittest::kittest::NodeT;
+                n.accesskit_node()
+                    .label()
+                    .is_some_and(|l| l.starts_with("Placeholt, Casey (1002)"))
+            })
+            .unwrap()
+            .click();
+        h.run_steps(4);
+        wait_long(&mut h, "the scan's row given Casey", &|h| {
+            h.query_by_label(&format!("Rename {scan}")).is_some()
+        });
+        h.run_steps(10);
+        h.get_by_label(&format!("Rename {scan}")).scroll_to_me();
+        h.run_steps(4);
+        let r = h
+            .get_by_label(&format!("Rename {scan}"))
+            .rect()
+            .union(text_of(&h, "read"));
+        shot(&mut h, "i08c-read-filed", &[r]);
+
+        // ---- i09. The row menu.
+        let jan = "Example Freight LLC_1005_2025 Bank Statement January.pdf";
+        let feb = "Example Freight LLC_1005_2025 Bank Statement February.pdf";
+        h.get_by_label(&format!("Select {jan}")).scroll_to_me();
+        h.run_steps(4);
+        h.query_all_by_label(jan)
+            .find(|n| {
+                use egui_kittest::kittest::NodeT;
+                n.accesskit_node().role() == Role::Label
+            })
+            .unwrap()
+            .click_secondary();
+        h.run_steps(6);
+        dump(&h, "menu");
+        shot(&mut h, "i09-row-menu", &[]);
+        // Closed by a click on the queue's heading.
+        h.query_all_by_label("Queue").next().unwrap().click();
+        h.run_steps(6);
+        if let Some(b) = h.query_by_role_and_label(Role::Button, "Untick all") {
+            b.click();
+            h.run_steps(4);
+        }
+
+        // ---- i10. Two statements combined into one PDF.
+        h.get_by_label(&format!("Select {jan}")).click();
+        h.run_steps(6);
+        h.get_by_label(&format!("Select {feb}")).click();
+        h.run_steps(6);
+        let r = button(&h, "Combine")
+            .union(h.get_by_label(&format!("Select {jan}")).rect())
+            .union(h.get_by_label(&format!("Select {feb}")).rect());
+        shot(&mut h, "i10a-tick-two", &[r]);
+        h.get_by_role_and_label(Role::Button, "Combine").click();
+        h.run_steps(10);
+        let r = h
+            .get_by_label("OUTPUT NAME")
+            .rect()
+            .union(button(&h, "Combine · replaces 2 rows"));
+        shot(&mut h, "i10b-combine", &[r]);
+        h.get_by_role_and_label(Role::Button, "Combine · replaces 2 rows")
+            .click();
+        wait_long(&mut h, "combined", &|h| said(h, "Combined"));
+        h.run_steps(10);
+        if let Some(b) = h.query_by_role_and_label(Role::Button, "Untick all") {
+            b.click();
+            h.run_steps(4);
+        }
+        let r = text_of(&h, "Combined");
+        shot(&mut h, "i10c-combined", &[r]);
+
+        // ---- i11. Tick ready, Commit, the summary.
+        h.get_by_role_and_label(Role::Button, "Tick ready").click();
+        h.run_steps(6);
+        let commit = h
+            .query_all_by_role(Role::Button)
+            .find(|n| {
+                use egui_kittest::kittest::NodeT;
+                n.accesskit_node()
+                    .label()
+                    .is_some_and(|l| l.starts_with("Commit "))
+            })
+            .expect("the Commit button")
+            .rect();
+        let r = button(&h, "Tick ready");
+        shot(&mut h, "i11a-tick-ready", &[r, commit]);
+        h.query_all_by_role(Role::Button)
+            .find(|n| {
+                use egui_kittest::kittest::NodeT;
+                n.accesskit_node()
+                    .label()
+                    .is_some_and(|l| l.starts_with("Commit "))
+            })
+            .unwrap()
+            .click();
+        wait_long(&mut h, "the commit summary", &|h| {
+            h.query_all_by_label("Confirm commit").next().is_some()
+        });
+        h.run_steps(6);
+        dump(&h, "summary");
+        shot(&mut h, "i11b-summary", &[]);
+        h.query_all_by_label("Confirm commit")
+            .next()
+            .unwrap()
+            .click();
+        wait_long(&mut h, "Just filed", &|h| said(h, "Just filed"));
+        h.run_steps(20);
+        // Already in the cabinet: the scan was Casey's W-2 again. Keep both (a removed copy
+        // would make the batch's Undo unavailable).
+        let r = text_of(&h, "Already in the cabinet").union(button(&h, "Replace old"));
+        shot(&mut h, "i12a-already", &[r]);
+        h.get_by_role_and_label(Role::Button, "Keep both").click();
+        h.run_steps(10);
+        // Just filed: the statement's doc type.
+        let combos = |h: &egui_kittest::Harness<'static, VibeFilesApp>| -> Vec<egui::Rect> {
+            use egui_kittest::kittest::NodeT;
+            h.query_all_by_role(Role::ComboBox)
+                .filter(|n| {
+                    n.accesskit_node()
+                        .value()
+                        .is_some_and(|v| v == "Needs doc type")
+                })
+                .map(|n| n.rect())
+                .collect()
+        };
+        let cs = combos(&h);
+        eprintln!("doc type boxes: {}", cs.len());
+        let r = text_of(&h, "Just filed:");
+        shot(&mut h, "i12b-just-filed", &[r]);
+        {
+            use egui_kittest::kittest::NodeT;
+            h.query_all_by_role(Role::ComboBox)
+                .filter(|n| {
+                    n.accesskit_node()
+                        .value()
+                        .is_some_and(|v| v == "Needs doc type")
+                })
+                .nth(1)
+                .unwrap()
+                .click();
+        }
+        h.run_steps(6);
+        h.get_by_label("Type to search").click();
+        h.step();
+        h.get_by_label("Type to search").type_text("statement");
+        h.run_steps(6);
+        dump(&h, "doctypes");
+        let pick = {
+            use egui_kittest::kittest::NodeT;
+            h.query_all_by_role(Role::Button)
+                .find(|n| {
+                    n.accesskit_node()
+                        .label()
+                        .is_some_and(|l| l == "Bank statement")
+                })
+                .map(|n| n.rect())
+        };
+        let search = h.get_by_label("Type to search").rect();
+        shot(&mut h, "i12c-doc-type", &[search]);
+        if pick.is_some() {
+            use egui_kittest::kittest::NodeT;
+            h.query_all_by_role(Role::Button)
+                .find(|n| {
+                    n.accesskit_node()
+                        .label()
+                        .is_some_and(|l| l == "Bank statement")
+                })
+                .unwrap()
+                .click();
+        }
+        h.run_steps(8);
+        let apply = h
+            .query_all_by_role(Role::Button)
+            .find(|n| {
+                use egui_kittest::kittest::NodeT;
+                n.accesskit_node()
+                    .label()
+                    .is_some_and(|l| l.starts_with("Apply ("))
+            })
+            .unwrap()
+            .rect();
+        shot(&mut h, "i12d-apply", &[apply]);
+        h.query_all_by_role(Role::Button)
+            .find(|n| {
+                use egui_kittest::kittest::NodeT;
+                n.accesskit_node()
+                    .label()
+                    .is_some_and(|l| l.starts_with("Apply ("))
+            })
+            .unwrap()
+            .click();
+        h.run_steps(6);
+        wait_long(&mut h, "applied", &|h| {
+            h.query_by_role_and_label(Role::Button, "Apply (0)")
+                .is_some()
+        });
+        h.run_steps(6);
+        dump(&h, "applied");
+        shot(&mut h, "i12e-applied", &[]);
+
+        // ---- i13. Undo last batch, on History.
+        h.get_by_role_and_label(Role::Button, "History").click();
+        h.run_steps(10);
+        dump(&h, "history");
+        let r = button(&h, "Undo last batch…");
+        shot(&mut h, "i13a-history", &[r]);
+        h.get_by_role_and_label(Role::Button, "Undo last batch…")
+            .click();
+        h.run_steps(6);
+        let r = button(&h, "Confirm undo");
+        shot(&mut h, "i13b-confirm-undo", &[r]);
+        h.get_by_role_and_label(Role::Button, "Confirm undo")
+            .click();
+        wait_long(&mut h, "undone", &|_| {
+            inbox.join("Placeholt, Casey_1002_2025 W-2.pdf").exists()
+        });
+        h.run_steps(20);
+        shot(&mut h, "i13c-undone", &[]);
+        if let Some(b) = h.query_by_role_and_label(Role::Button, "Close") {
+            b.click();
+            h.run_steps(4);
+        }
+
+        // ==== The rules and setup video.
+        // ---- r01. Build a rule from a file the catch-all took.
+        h.get_by_role_and_label(Role::Button, "Preview").click();
+        let bill = "Synthetic Orchards LLC_1004_2025 Property Tax Bill.pdf";
+        wait_long(&mut h, "the bill back in the queue", &|h| {
+            h.query_by_label(&format!("Select {bill}")).is_some()
+        });
+        h.run_steps(10);
+        h.get_by_label(&format!("Select {bill}")).scroll_to_me();
+        h.run_steps(4);
+        let r = text_of(&h, "Catch-all");
+        shot(&mut h, "r01a-catch-all", &[r]);
+        h.query_all_by_label(bill)
+            .find(|n| {
+                use egui_kittest::kittest::NodeT;
+                n.accesskit_node().role() == Role::Label
+            })
+            .unwrap()
+            .click_secondary();
+        h.run_steps(6);
+        let r = button(&h, "Build a rule from this file…");
+        shot(&mut h, "r01b-build-menu", &[r]);
+        h.get_by_role_and_label(Role::Button, "Build a rule from this file…")
+            .click();
+        h.run_steps(12);
+        // ---- r02. The Rules screen: the test name, then Build a rule.
+        h.get_by_label("Test a filename").scroll_to_me();
+        h.run_steps(6);
+        let r = h
+            .get_by_label("Test a filename")
+            .rect()
+            .union(text_of(&h, "MATCHED RULE"));
+        shot(&mut h, "r02a-test-name", &[r]);
+        h.get_by_role_and_label(Role::Button, "All of").click();
+        h.run_steps(3);
+        for w in ["Property", "Tax", "Bill"] {
+            h.get_by_label(&format!("Word: {w}")).click();
+            h.run_steps(3);
+        }
+        h.get_by_label("RULE NAME").scroll_to_me();
+        h.run_steps(4);
+        type_into(&mut h, "RULE NAME", "Property tax bills");
+        h.get_by_label("FOLDER").click();
+        h.run_steps(6);
+        h.get_by_role_and_label(Role::Button, "Income Tax/{Year}")
+            .click();
+        h.run_steps(6);
+        h.get_by_label("Create rule").scroll_to_me();
+        h.run_steps(4);
+        let words = text_of(&h, "CONTAINS ALL OF");
+        let words =
+            egui::Rect::from_min_max(words.min, egui::pos2(words.min.x + 600.0, words.max.y));
+        let r = h
+            .get_by_label("RULE NAME")
+            .rect()
+            .union(h.get_by_label("FOLDER").rect())
+            .union(h.get_by_label("FILE NAME").rect())
+            .union(button(&h, "Create rule"));
+        shot(&mut h, "r02b-build", &[words, r]);
+        h.get_by_role_and_label(Role::Button, "Create rule").click();
+        h.run_steps(8);
+        h.get_by_role_and_label(Role::Button, "Save").scroll_to_me();
+        h.run_steps(4);
+        let r = h
+            .get_by_label("PRIMARY DESTINATION")
+            .rect()
+            .union(button(&h, "Save"));
+        let added = text_of(&h, "added above Catch-all");
+        shot(&mut h, "r03a-new-rule", &[r, added]);
+        h.get_by_role_and_label(Role::Button, "Save").click();
+        wait_long(&mut h, "rules saved", &|h| said(h, "Rules saved."));
+        h.run_steps(6);
+        h.get_by_label("Test a filename").scroll_to_me();
+        h.run_steps(4);
+        h.get_by_role_and_label(Role::Button, "Test").click();
+        h.run_steps(8);
+        let r = text_of(&h, "MATCHED RULE");
+        let r = egui::Rect::from_min_max(
+            egui::pos2(r.min.x, r.min.y - 4.0),
+            egui::pos2(r.min.x + 760.0, r.max.y + 34.0),
+        );
+        shot(&mut h, "r03b-tested", &[r]);
+        // The row in Preview now goes by the new rule.
+        h.get_by_role_and_label(Role::Button, "Preview").click();
+        wait_long(&mut h, "the bill by its new rule", &|h| {
+            h.query_by_role_and_label(Role::Button, "Property tax bills")
+                .is_some()
+        });
+        h.run_steps(10);
+        h.get_by_label(&format!("Rename {bill}")).scroll_to_me();
+        h.run_steps(4);
+        let r = button(&h, "Property tax bills")
+            .union(h.get_by_label(&format!("Rename {bill}")).rect());
+        shot(&mut h, "r04-row-new-rule", &[r]);
+
+        // ---- r05. Setup.
+        h.get_by_role_and_label(Role::Button, "Setup").click();
+        h.run_steps(12);
+        shot(&mut h, "r05a-setup", &[]);
+        h.get_by_label("Include sub-folders").scroll_to_me();
+        h.run_steps(6);
+        let r = text_of(&h, "Inboxes").union(h.get_by_label("Include sub-folders").rect());
+        let r = egui::Rect::from_min_max(r.min, egui::pos2(r.min.x + 900.0, r.max.y));
+        shot(&mut h, "r05b-inboxes", &[r]);
+        h.get_by_role_and_label(Role::Button, "Choose CSV…")
+            .scroll_to_me();
+        h.run_steps(6);
+        let r = text_of(&h, "Client master list").union(button(&h, "Choose CSV…"));
+        shot(&mut h, "r05c-client-list", &[r]);
+        h.get_by_label("ID PATTERN").scroll_to_me();
+        h.run_steps(6);
+        let r = h
+            .get_by_label("ID PATTERN")
+            .rect()
+            .union(h.get_by_label("SUGGEST AT").rect());
+        shot(&mut h, "r05d-id-pattern", &[r]);
+        h.get_by_role_and_label(Role::Button, "Reset to default")
+            .scroll_to_me();
+        h.run_steps(6);
+        let r = button(&h, "{Client} ({ID})")
+            .union(button(&h, "Not Yet Filed"))
+            .union(button(&h, "Reset to default"));
+        shot(&mut h, "r05e-template", &[r]);
+    }
+
     /// Addendum §12 slice 3 (letters) walkthrough against a real Vibe Portal: the Deliver window
     /// sends the engagement letter for a joint 1040 with both spouses as signers (from Portal
     /// contacts); in headless Edge the taxpayer signs, then the spouse on the same device after
