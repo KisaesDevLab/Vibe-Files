@@ -719,7 +719,10 @@ impl IntakeTab {
                     Ok(n) => {
                         jf.error = None;
                         self.catalog_changed = true;
-                        self.message = Some(format!("Details set on {n} documents."));
+                        self.message = Some(format!(
+                            "Details set on {n} document{}.",
+                            filer_intake::ui::theme::plural(n)
+                        ));
                     }
                     Err(e) => jf.error = Some(e),
                 },

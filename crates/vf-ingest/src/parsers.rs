@@ -498,7 +498,13 @@ pub fn table_rules(
             // The partner copy's folder has {Year} too.
             folder.contains("{Year}") || r.copy_to_partner,
         );
-        rule.id = format!("{MANAGED_PREFIX}{}", stable_id(&p.name, &r.default_name));
+        // Salted (owner 2026-11-27): a table row named as a doc type ("Organizer",
+        // "Extension") had the doc-type rule's ID, and the Rules list two rows with one handle.
+        // Managed rules are rebuilt on every sync, so nothing keeps the old ID.
+        rule.id = format!(
+            "{MANAGED_PREFIX}{}",
+            stable_id(&p.name, &format!("table\u{0}{}", r.default_name))
+        );
         if r.copy_to_partner {
             rule.copies = match like_k1.map(|k| k.copies.clone()).filter(|c| {
                 c.iter()

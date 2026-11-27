@@ -797,3 +797,41 @@ fn a_two_part_id_holding_another_clients_id_is_left_for_intake_to_ask() {
         "UltraTax CS · TaxSourceDocuments"
     );
 }
+
+/// Owner 2026-11-27 (the Intake training walkthrough): every rule print capture adds has an ID
+/// of its own. "UltraTax CS · Organizer" and "Organizer · UltraTax CS" (and Extension) had the
+/// same one, so the Rules screen's list gave two rows one drag handle (egui's ID clash).
+#[test]
+fn print_capture_rules_have_ids_of_their_own() {
+    let t = tempfile::tempdir().unwrap();
+    let root = t.path().join("cabinet");
+    vf_fs::cabinet::create(
+        &root,
+        &vf_fs::cabinet::CabinetFile {
+            cabinet_id: vf_core::new_id(),
+            firm_id: uuid::Uuid::new_v4().to_string(),
+            schema_version: vf_core::db::SCHEMA_VERSION,
+            layout_version: 1,
+            created: vf_core::now_rfc3339(),
+            name: None,
+        },
+    )
+    .unwrap();
+    vf_fs::doctypes::seed_if_missing(&root).unwrap();
+    vf_ingest::parsers::seed_if_missing(&root).unwrap();
+    vf_ingest::parsers::sync_filer_rules(&root).unwrap();
+    let (rules, _, _) = filer_core::rules::load_or_seed(&vf_fs::clients::master_dir(&root));
+    let mut seen = std::collections::HashMap::new();
+    let mut managed = 0;
+    for (_, list) in &rules.profiles {
+        for r in list {
+            if r.id.starts_with(vf_ingest::parsers::MANAGED_PREFIX) {
+                managed += 1;
+            }
+            if let Some(prev) = seen.insert(r.id.clone(), r.name.clone()) {
+                panic!("{} is the ID of both {prev:?} and {:?}", r.id, r.name);
+            }
+        }
+    }
+    assert!(managed > 10, "the print capture rules were added ({managed})");
+}
