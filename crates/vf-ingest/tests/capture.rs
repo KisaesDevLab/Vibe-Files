@@ -823,7 +823,7 @@ fn print_capture_rules_have_ids_of_their_own() {
     let (rules, _, _) = filer_core::rules::load_or_seed(&vf_fs::clients::master_dir(&root));
     let mut seen = std::collections::HashMap::new();
     let mut managed = 0;
-    for (_, list) in &rules.profiles {
+    for list in rules.profiles.values() {
         for r in list {
             if r.id.starts_with(vf_ingest::parsers::MANAGED_PREFIX) {
                 managed += 1;
