@@ -1672,7 +1672,8 @@ impl DeliverWindow {
                             ui.radio_value(
                                 &mut self.esign_mode,
                                 "link".to_string(),
-                                "UltraTax eSignature link",
+                                // Owner 2026-11-27: no product name.
+                                "eSignature link",
                             );
                             if self.esign_mode == "link" {
                                 widgets::named(
@@ -1681,7 +1682,7 @@ impl DeliverWindow {
                                             .desired_width(380.0)
                                             .hint_text("https://…"),
                                     ),
-                                    "eSignature link",
+                                    "eSignature link address",
                                 );
                             }
                         });
@@ -1705,7 +1706,7 @@ impl DeliverWindow {
                     }
                     if ui
                         .add_enabled(can && waiting, egui::Button::new("Confirm signed"))
-                        .on_hover_text("You checked UltraTax: Form 8879 is signed")
+                        .on_hover_text("You checked the e-signature service: Form 8879 is signed")
                         .clicked()
                     {
                         act = Some(Act::Confirm);
@@ -1907,7 +1908,7 @@ impl DeliverWindow {
                 if documents {
                     ui.label("The client has opened these documents. Send the changed ones as revised? The client is told, and each document is to be opened again; the letters and fee stand.");
                 } else {
-                    ui.label("Tell the client the return was updated and reopen the Form 8879 step? The letters, package and fee stand; paste a new eSignature link if UltraTax made one.");
+                    ui.label("Tell the client the return was updated and reopen the Form 8879 step? The letters, package and fee stand; paste a new eSignature link if one was made.");
                 }
                 ui.horizontal(|ui| {
                     if ui

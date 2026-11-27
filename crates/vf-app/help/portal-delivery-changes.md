@@ -14,7 +14,7 @@ For Form 8879 you can still wait for the client to press **I've signed it** and 
 
 Under **Form 8879**, **How it is signed** offers:
 
-- **UltraTax eSignature link**: as before; paste the link.
+- **eSignature link**: as before; paste the link.
 - **Pick up and sign at our office**: no link. The client's card says "Your return is ready to pick up. Sign Form 8879 at our office."
 - **We mailed the return: sign and mail Form 8879 back**: no link. The card says "We mailed you your tax return. Sign Form 8879 and mail it back to us." with **I've mailed it back**; once pressed, the step waits for you.
 

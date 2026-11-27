@@ -651,9 +651,9 @@ mod tests {
             said(h, "2025 Form 1040 Return - Sample.pdf")
         });
         shot(&mut h, "00-deliver-read");
-        h.get_by_label("eSignature link").click();
+        h.get_by_label("eSignature link address").click();
         h.step();
-        h.get_by_label("eSignature link")
+        h.get_by_label("eSignature link address")
             .type_text("https://esign.example-tax.test/s/walkthrough");
         h.run_steps(3);
         shot(&mut h, "01-deliver-window");
@@ -1043,14 +1043,14 @@ mod tests {
         shot(&mut h, "t05-return-pdf", &[r]);
 
         // ---- 6. Form 8879: the eSignature link.
-        h.get_by_label("eSignature link").scroll_to_me();
+        h.get_by_label("eSignature link address").scroll_to_me();
         h.run_steps(4);
-        h.get_by_label("eSignature link").click();
+        h.get_by_label("eSignature link address").click();
         h.step();
-        h.get_by_label("eSignature link")
+        h.get_by_label("eSignature link address")
             .type_text("https://esign.example-tax.test/s/training");
         h.run_steps(4);
-        let r = h.get_by_label("eSignature link").rect();
+        let r = h.get_by_label("eSignature link address").rect();
         shot(&mut h, "t06-esign-link", &[r]);
 
         // ---- 7. Package and fee: shown, then left off.
@@ -1942,9 +1942,9 @@ mod tests {
             h.run_steps(4);
         }
         pick(&mut h, "The first PDF", FIRST);
-        h.get_by_label("eSignature link").click();
+        h.get_by_label("eSignature link address").click();
         h.step();
-        h.get_by_label("eSignature link")
+        h.get_by_label("eSignature link address")
             .type_text("https://esign.example-tax.test/s/revise");
         h.run_steps(3);
         if ticked(&h, "Package and fee") != Some(true) {
@@ -2158,7 +2158,7 @@ mod tests {
         h.get_by_label("Pick up and sign at our office").click();
         h.run_steps(4);
         shot(&mut h, "09-office-8879");
-        let link_box = h.query_by_label("eSignature link").is_some();
+        let link_box = h.query_by_label("eSignature link address").is_some();
         h.get_by_role_and_label(Role::Button, "Send to client")
             .click();
         wait_long(&mut h, "sent", &|h| {
