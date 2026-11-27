@@ -212,6 +212,29 @@ impl Template {
         out
     }
 
+    /// The same letter with fill-ins replaced by what staff typed for one client (owner
+    /// 2026-11-26): `[Prior year]` → `2024`. A value left empty leaves its fill-in, so Send
+    /// still refuses it (A17).
+    pub fn filled(&self, values: &std::collections::BTreeMap<String, String>) -> Template {
+        let mut t = self.clone();
+        let fix = |s: &mut String| {
+            for (k, v) in values {
+                if !v.trim().is_empty() {
+                    *s = s.replace(k.as_str(), v.trim());
+                }
+            }
+        };
+        for b in &mut t.blocks {
+            match b {
+                Block::Heading { text, .. } | Block::Paragraph { text, .. } => fix(text),
+                Block::List { items, .. } => items.iter_mut().for_each(fix),
+                Block::Table { rows, .. } => rows.iter_mut().flatten().for_each(fix),
+                Block::Signature { .. } => {}
+            }
+        }
+        t
+    }
+
     /// Every fill-in in the template, whatever return type, signer or package a block is only
     /// for (the editor's warning; review 2026-11-25: blocks "only for" one were missed).
     pub fn all_fill_ins(&self) -> Vec<String> {
@@ -482,6 +505,24 @@ mod tests {
         assert!(t.fill_ins("1040|Individual", None).is_empty());
         // The editor sees it whatever the block is only for.
         assert_eq!(t.all_fill_ins(), ["[X]"]);
+        let mut one = t.clone();
+        one.blocks = vec![
+            Block::Paragraph {
+                text: "Prior year [Prior year], fee [Fee for amended].".into(),
+                only_for: vec![],
+            },
+            Block::Table {
+                rows: vec![vec!["[Prior year]".into()]],
+                only_for: vec![],
+            },
+        ];
+        let mut v = std::collections::BTreeMap::new();
+        v.insert("[Prior year]".to_string(), " 2024 ".to_string());
+        v.insert("[Fee for amended]".to_string(), "  ".to_string());
+        let f = one.filled(&v);
+        assert_eq!(f.all_fill_ins(), vec!["[Fee for amended]".to_string()]);
+        assert!(f.blocks[0].texts()[0].starts_with("Prior year 2024, fee"));
+        assert_eq!(f.blocks[1].texts(), vec!["2024"]);
         let mut terms = t.clone();
         terms.kind = TERMS.into();
         terms.blocks = vec![Block::Heading {

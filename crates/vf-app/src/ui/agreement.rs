@@ -177,7 +177,7 @@ impl Plan {
             Ok(out)
         } else {
             Err(format!(
-                "Fill in the letter templates before sending (Admin › Portal › Letter templates). {}",
+                "Fill in the letters before sending: type them under the letter, or change the template (Admin › Portal › Letter templates). {}",
                 left.join("; ")
             ))
         }
@@ -497,6 +497,8 @@ pub struct AgreementWindow {
     loaded: bool,
     /// Admin › Portal's "Assign new cards to" (owner 2026-11-26).
     default_staff: Option<vf_portal::settings::DefaultStaff>,
+    /// Owner 2026-11-26: the letters' fill-ins typed for this client, by template id.
+    fills: std::collections::HashMap<String, std::collections::BTreeMap<String, String>>,
 }
 
 impl AgreementWindow {
@@ -558,6 +560,7 @@ impl AgreementWindow {
             templates: Err(String::new()),
             loaded: false,
             default_staff: s.default_staff.clone(),
+            fills: Default::default(),
         };
         w.read_templates();
         w.firm_name = vf_fs::cabinet::read(&w.root)
@@ -708,7 +711,11 @@ impl AgreementWindow {
                 .letters
                 .iter()
                 .filter(|(_, on)| *on)
-                .map(|(t, _)| t.clone())
+                .map(|(t, _)| {
+                    self.fills
+                        .get(&t.id)
+                        .map_or_else(|| t.clone(), |v| t.filled(v))
+                })
                 .collect(),
             pay: self.pay,
             signers: self.signers.clone(),
@@ -1162,9 +1169,11 @@ impl AgreementWindow {
         let all: &[Template] = self.templates.as_deref().unwrap_or(&[]);
         let lctx = plan.as_ref().map(|p| p.context()).unwrap_or_default();
         for (t, on) in &mut self.letters {
+            let typed = self.fills.entry(t.id.clone()).or_default();
+            let filled = t.filled(typed);
             ui.horizontal_wrapped(|ui| {
                 ui.add_enabled(can && !sent, egui::Checkbox::new(on, t.name.as_str()));
-                let left = vf_letters::store::as_sent(t, all).fill_ins(&lctx, None);
+                let left = vf_letters::store::as_sent(&filled, all).fill_ins(&lctx, None);
                 if !left.is_empty() {
                     ui.label(
                         RichText::new(format!("fill in: {}", left.join(", ")))
@@ -1176,6 +1185,10 @@ impl AgreementWindow {
                     ui.label(RichText::new("Sample").small().color(theme::ink_muted()));
                 }
             });
+            if *on {
+                let names = t.fill_ins(&lctx, None);
+                crate::ui::letter_templates::fill_in_boxes(ui, can && !sent, &t.id, &names, typed);
+            }
         }
         if self.letters.is_empty() {
             ui.label(RichText::new("Tick a service to see its letters.").color(theme::ink_muted()));
@@ -1457,23 +1470,7 @@ impl EndEngagementWindow {
         let Some(t) = &self.template else {
             return Err("There is no closure letter template (Admin › Portal › Letter templates, kind Closure letter).".into());
         };
-        let mut t = t.clone();
-        for b in &mut t.blocks {
-            let fix = |s: &mut String| {
-                for (k, v) in &self.blanks {
-                    if !v.trim().is_empty() {
-                        *s = s.replace(k.as_str(), v.trim());
-                    }
-                }
-            };
-            match b {
-                vf_letters::Block::Heading { text, .. }
-                | vf_letters::Block::Paragraph { text, .. } => fix(text),
-                vf_letters::Block::List { items, .. } => items.iter_mut().for_each(fix),
-                vf_letters::Block::Table { rows, .. } => rows.iter_mut().flatten().for_each(fix),
-                vf_letters::Block::Signature { .. } => {}
-            }
-        }
+        let t = t.filled(&self.blanks.iter().cloned().collect());
         let class = vf_portal::delivery::signer_class(self.individual);
         let left = t.fill_ins(class, None);
         if !left.is_empty() {
@@ -2460,6 +2457,31 @@ mod tests {
         );
         let e = p.laid(&all).unwrap_err();
         assert!(e.contains("[X]") && e.contains("1120-S"), "{e}");
+        // Owner 2026-11-26: typed for this client in the window, the letter's own fill-ins
+        // are gone from it; the Terms' own still hold it.
+        let mut typed = p.clone();
+        let ctx = typed.context();
+        typed.letters = typed
+            .letters
+            .iter()
+            .map(|t| {
+                let v = t
+                    .fill_ins(&ctx, None)
+                    .into_iter()
+                    .map(|f| (f, "typed".to_string()))
+                    .collect();
+                t.filled(&v)
+            })
+            .collect();
+        assert!(
+            typed
+                .letters
+                .iter()
+                .all(|t| t.fill_ins(&ctx, None).is_empty())
+        );
+        assert!(p.letters.iter().any(|t| !t.fill_ins(&ctx, None).is_empty()));
+        let e = typed.laid(&all).unwrap_err();
+        assert!(e.contains("[Portal Name]"), "{e}");
         // The Terms and Conditions' own fill-ins hold back every letter they are part of.
         let p = plan(root, false, services.clone(), &["service-bookkeeping"]);
         let e = p.laid(&all).unwrap_err();

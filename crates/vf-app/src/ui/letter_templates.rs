@@ -736,6 +736,47 @@ pub fn set_preview_dir(data: &std::path::Path) {
     let _ = PREVIEW_DIR.set(dir);
 }
 
+/// Owner 2026-11-26: a letter's `[…]` fill-ins typed for one client in Deliver… or Service
+/// agreement… (the template is not changed). An empty box is marked; Send names it (A17).
+pub(crate) fn fill_in_boxes(
+    ui: &mut egui::Ui,
+    enabled: bool,
+    id: &str,
+    names: &[String],
+    values: &mut std::collections::BTreeMap<String, String>,
+) {
+    if names.is_empty() {
+        return;
+    }
+    ui.indent(("fill-ins", id), |ui| {
+        ui.label(
+            egui::RichText::new("Fill in for this client")
+                .small()
+                .color(crate::ui::theme::ink_muted()),
+        );
+        egui::Grid::new(("fill-in-grid", id))
+            .num_columns(3)
+            .show(ui, |ui| {
+                for n in names {
+                    let l = ui.label(n.as_str());
+                    let v = values.entry(n.clone()).or_default();
+                    ui.add_enabled(enabled, egui::TextEdit::singleline(v).desired_width(220.0))
+                        .labelled_by(l.id);
+                    if v.trim().is_empty() {
+                        ui.label(
+                            egui::RichText::new("left")
+                                .small()
+                                .color(crate::ui::theme::warn()),
+                        );
+                    } else {
+                        ui.label("");
+                    }
+                    ui.end_row();
+                }
+            });
+    });
+}
+
 pub fn preview_dir() -> std::path::PathBuf {
     PREVIEW_DIR
         .get()

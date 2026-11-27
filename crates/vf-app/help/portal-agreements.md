@@ -17,7 +17,7 @@ Vibe Files comes with the AICPA Annual Tax Compliance Kit's engagement letters (
 
 Each letter says `{Terms and Conditions}` where the firm's Terms and Conditions go, so one signature covers both. Edit the Terms once and every letter uses them. A letter that asks for them is not sent while there is no Terms and Conditions template.
 
-The kit's fill-ins, such as `[X]%`, `[State]` or `[Frequency]`, are highlighted in yellow. **Vibe Files never sends a letter that still has one**: it names the letter and the fill-in. Fill them in the template (or turn a paragraph off with **Only for**).
+The kit's fill-ins, such as `[X]%`, `[State]` or `[Frequency]`, are highlighted in yellow. **Vibe Files never sends a letter that still has one**: it names the letter and the fill-in. Fill them in the template (or turn a paragraph off with **Only for**), or, for one client, type them in the boxes under **Fill in for this client** below each ticked letter in Service agreement… or Deliver…: the template is not changed, and **Preview letters…** shows the letter with them. The Terms and Conditions' own fill-ins are filled in their template.
 
 ## Sending one
 

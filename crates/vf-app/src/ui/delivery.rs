@@ -266,6 +266,8 @@ pub struct DeliverWindow {
     /// a new card.
     default_staff: Option<vf_portal::settings::DefaultStaff>,
     default_applied: bool,
+    /// Owner 2026-11-26: the letters' fill-ins typed for this client, by template id.
+    fills: HashMap<String, std::collections::BTreeMap<String, String>>,
 }
 
 /// Last calendar year: the tax year a return delivered now usually is.
@@ -347,6 +349,7 @@ impl DeliverWindow {
             reads,
             default_staff: s.default_staff.clone(),
             default_applied: false,
+            fills: HashMap::new(),
         };
         w.offer_letters();
         w.offer_fee();
@@ -641,6 +644,13 @@ impl DeliverWindow {
 
     /// The ticked letters laid out for this client: (template, laid), each with the firm's
     /// Terms and Conditions where it says (ADDENDUM-annual-agreements.md A5).
+    /// A letter with the fill-ins typed for this client in place.
+    fn filled(&self, t: &vf_letters::Template) -> vf_letters::Template {
+        self.fills
+            .get(&t.id)
+            .map_or_else(|| t.clone(), |v| t.filled(v))
+    }
+
     fn laid_letters(&self) -> Vec<(vf_letters::Template, vf_letters::Laid)> {
         let f = self.fields();
         let all = vf_letters::store::load_all(&self.root).unwrap_or_default();
@@ -651,7 +661,12 @@ impl DeliverWindow {
             .map(|(t, _)| {
                 (
                     t.clone(),
-                    vf_letters::layout(&vf_letters::store::as_sent(t, &all), &f, &ctx, None),
+                    vf_letters::layout(
+                        &vf_letters::store::as_sent(&self.filled(t), &all),
+                        &f,
+                        &ctx,
+                        None,
+                    ),
                 )
             })
             .collect()
@@ -666,13 +681,13 @@ impl DeliverWindow {
             .iter()
             .filter(|(_, on)| *on)
             .filter_map(|(t, _)| {
-                let f = vf_letters::store::as_sent(t, &all).fill_ins(&ctx, None);
+                let f = vf_letters::store::as_sent(&self.filled(t), &all).fill_ins(&ctx, None);
                 (!f.is_empty()).then(|| format!("{}: {}", t.name, f.join(", ")))
             })
             .collect();
         (!left.is_empty()).then(|| {
             format!(
-                "Fill in the letter template before sending (Admin › Portal › Letter templates). {}",
+                "Fill in the letters before sending: type them under the letter, or change the template (Admin › Portal › Letter templates). {}",
                 left.join("; ")
             )
         })
@@ -1210,8 +1225,16 @@ impl DeliverWindow {
             if self.letters.is_empty() {
                 ui.label(widgets::caption("No letter templates for this return type: add them in Admin › Letter templates."));
             }
+            let lctx = delivery::letter_context(&self.root, &self.rt());
             for (tpl, on) in &mut self.letters {
                 ui.add_enabled(can, egui::Checkbox::new(on, format!("{}{}", tpl.name, if tpl.sample { " (sample text)" } else { "" })));
+                if *on {
+                    let names = tpl.fill_ins(&lctx, None);
+                    if !names.is_empty() {
+                        let v = self.fills.entry(tpl.id.clone()).or_default();
+                        crate::ui::letter_templates::fill_in_boxes(ui, can, &tpl.id, &names, v);
+                    }
+                }
             }
             ui.label(RichText::new("Who signs").small().color(theme::ink_muted()));
             for s in &mut self.signers {
