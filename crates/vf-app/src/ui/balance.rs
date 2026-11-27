@@ -221,6 +221,12 @@ pub struct BalanceWindow {
 }
 
 impl BalanceWindow {
+    /// Who Assigned to holds (the walkthrough reads it: a ComboBox's text is not in the tree).
+    #[cfg(test)]
+    pub fn assigned(&self) -> Option<&str> {
+        self.assigned.as_deref()
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         ctx: &egui::Context,

@@ -3009,7 +3009,7 @@ fn unfiled(ui: &mut egui::Ui, a: &mut AdminPortal, env: &mut Env) {
         return;
     }
     ui.label(widgets::caption(format!(
-        "The portal keeps each upload until Intake files it (or you dismiss it here), then {} days;          one never filed is cleared {} days after it was fetched. If the Portal inbox lost a file,          Fetch again puts it back.",
+        "The portal keeps each upload until Intake files it (or you dismiss it here), then {} days; one never filed is cleared {} days after it was fetched. If the Portal inbox lost a file, Fetch again puts it back.",
         f.keep_days, f.cap_days
     )));
     if f.pending.is_empty() {
@@ -3192,12 +3192,12 @@ fn default_staff_choice(ui: &mut egui::Ui, a: &mut AdminPortal) {
         }
     });
     ui.label(widgets::caption(
-        "Balance owed…, Deliver… and Service agreement… start with this person in Assigned to;          change it on any card. A card already sent keeps whoever it has, and next year's          agreements sent from Admin › Portal › Agreements keep the last one's. A client this          person cannot see on the portal starts with Nobody, and the window says so. Nobody:          the admins (for a balance, Settings › Payments' person).",
+        "Balance owed…, Deliver… and Service agreement… start with this person in Assigned to; change it on any card. A card already sent keeps whoever it has, and next year's agreements sent from Admin › Portal › Agreements keep the last one's. A client this person cannot see on the portal starts with Nobody, and the window says so. Nobody: the admins (for a balance, Settings › Payments' person).",
     ));
     if let Some(Err(e)) = &a.staff_list {
         ui.label(
             RichText::new(format!(
-                "The portal's staff list could not be read: {e} It is read from the portal's                  balances (Settings › Payments), so the portal needs them turned on."
+                "The portal's staff list could not be read: {e} It is read from the portal's balances (Settings › Payments), so the portal needs them turned on."
             ))
             .color(theme::warn()),
         );

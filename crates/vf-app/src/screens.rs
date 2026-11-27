@@ -3133,6 +3133,242 @@ mod tests {
         h.run_steps(4);
     }
 
+    /// Owner 2026-11-26 against a real Vibe Portal: Admin › Portal's Assign new cards to (Pat
+    /// Preparer, chosen and saved), Balance owed… and Deliver… starting with Pat; the 1040 kit
+    /// letter's fill-ins typed for one client; Admin › Portal › Balances sorted and filtered.
+    /// The same `VF_WALK_*` variables as `balance_walkthrough`.
+    #[test]
+    #[ignore = "needs a running portal"]
+    fn new_cards_walkthrough() {
+        let (Ok(url), Ok(key), Ok(out)) = (
+            std::env::var("VF_WALK_URL"),
+            std::env::var("VF_WALK_KEY"),
+            std::env::var("VF_WALK_DIR"),
+        ) else {
+            return;
+        };
+        let out = std::path::PathBuf::from(out);
+        std::fs::create_dir_all(&out).unwrap();
+        let mut steps: Vec<String> = Vec::new();
+        let mut note = |s: String| {
+            eprintln!("{s}");
+            steps.push(s);
+        };
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path().join("Clients");
+        vf_fixtures::generate(&root, 3).unwrap();
+        crate::ui::test_util::pdfium_first();
+        let data = t.path().join("data");
+        drop(crate::session::open(&data, "dev", &root).unwrap());
+        let cab = vf_fs::cabinet::read(&root).unwrap().cabinet_id;
+        let s = vf_portal::PortalSettings::new(&cab, &url, &key, 0)
+            .unwrap()
+            .with_balances(true)
+            .with_deliveries(true);
+        vf_portal::settings::save(&root, &s).unwrap();
+        crate::portal::register_inbox(&root).unwrap();
+        let d = data.clone();
+        let mut h = HarnessBuilder::default()
+            .with_max_steps(crate::ui::test_util::MAX_STEPS)
+            .with_theme(egui::Theme::Light)
+            .with_size([1440.0, 900.0])
+            .build_eframe(move |cc| VibeFilesApp::new(&cc.egui_ctx, d.clone()));
+        h.run_steps(8);
+        let shot = |h: &mut egui_kittest::Harness<'static, VibeFilesApp>, name: &str| {
+            for _ in 0..5 {
+                h.step();
+            }
+            match h.render() {
+                Ok(img) => img.save(out.join(format!("{name}.png"))).unwrap(),
+                Err(e) => eprintln!("{name}: {e}"),
+            }
+        };
+        let said = |h: &egui_kittest::Harness<'static, VibeFilesApp>, text: &str| {
+            h.query_all_by_label_contains(text).next().is_some()
+        };
+        let wait_long =
+            |h: &mut egui_kittest::Harness<'static, VibeFilesApp>,
+             what: &str,
+             ok: &dyn Fn(&egui_kittest::Harness<'static, VibeFilesApp>) -> bool| {
+                let start = std::time::Instant::now();
+                while !ok(h) {
+                    assert!(start.elapsed().as_secs() < 90, "{what}: never");
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                    h.step();
+                }
+            };
+        h.get_by_role_and_label(Role::Button, "Open existing")
+            .click();
+        h.run_steps(8);
+        h.get_by_label("Cabinet folder").click();
+        h.step();
+        h.get_by_label("Cabinet folder")
+            .type_text(&root.display().to_string());
+        h.step();
+        h.get_by_role_and_label(Role::Button, "Open cabinet")
+            .click();
+        assert!(wait_for(&mut h, |h| matches!(
+            h.state().screen,
+            crate::app::Screen::Open(_)
+        )));
+        h.run_steps(8);
+        let clients = open_mut(&mut h).browse.snap.clients.clone();
+        let p = crate::portal::client(&s);
+        for c in &clients {
+            p.put_client(&c.id, &c.ext_id, &c.name, None).unwrap();
+        }
+        // Two balances posted for the grid (by the API: the windows are step 2's).
+        for (c, cents, memo) in [
+            (&clients[1], 45_000u64, "2025 bookkeeping"),
+            (&clients[2], 7_500, "Amended 2024"),
+        ] {
+            p.post_balance(
+                &c.id,
+                &vf_portal::balance::PostBalance {
+                    amount_cents: cents,
+                    memo: memo.into(),
+                    expire_days: None,
+                    notify: false,
+                    remind_days: 0,
+                    assigned_staff_id: None,
+                    hold_files: false,
+                },
+            )
+            .unwrap();
+        }
+        note(format!(
+            "Setup: {} clients on the portal; balances for {} and {}",
+            clients.len(),
+            clients[1].name,
+            clients[2].name
+        ));
+
+        // ---- Step 1: Admin › Portal, Assign new cards to Pat Preparer, Save.
+        h.get_by_role_and_label(Role::Button, "Admin").click();
+        h.run_steps(6);
+        h.get_by_role_and_label(Role::Button, "Portal").click();
+        h.run_steps(6);
+        wait_long(&mut h, "the staff list", &|h| {
+            h.query_by_label("Assign new cards to").is_some()
+        });
+        h.run_steps(20);
+        h.get_by_label("Assign new cards to").click();
+        h.run_steps(3);
+        wait_long(&mut h, "Pat in the list", &|h| said(h, "Pat Preparer"));
+        h.get_by_label("Pat Preparer").click();
+        h.run_steps(3);
+        shot(&mut h, "01-assign-new-cards-to");
+        // Save is below the fold: scrolled into view, as a person would.
+        h.get_by_role_and_label(Role::Button, "Save").scroll_to_me();
+        h.run_steps(4);
+        h.get_by_role_and_label(Role::Button, "Save").click();
+        h.run_steps(6);
+        shot(&mut h, "01b-saved");
+        let saved = vf_portal::settings::load(&root, &cab).unwrap();
+        assert_eq!(
+            saved.default_staff.as_ref().map(|d| d.name.as_str()),
+            Some("Pat Preparer")
+        );
+        note("Step 1: Admin › Portal, Assign new cards to Pat Preparer, saved for every PC".into());
+
+        // ---- Step 2: Balance owed… and Deliver… start with Pat.
+        h.get_by_role_and_label(Role::Button, "Browse").click();
+        h.run_steps(6);
+        {
+            let o = open_mut(&mut h);
+            o.browse.set_scope(vf_core::browse::Scope::Client(0));
+            o.browse.portal.reread();
+        }
+        h.run_steps(8);
+        wait_long(&mut h, "the panel's buttons", &|h| {
+            h.query_by_role_and_label(Role::Button, "Balance owed…")
+                .is_some()
+        });
+        h.get_by_role_and_label(Role::Button, "Balance owed…")
+            .click();
+        wait_long(&mut h, "the window read", &|h| {
+            said(h, "No balance on the portal.")
+        });
+        let pat = saved.default_staff.as_ref().unwrap().id.clone();
+        wait_long(&mut h, "Pat assigned", &|h| {
+            let crate::app::Screen::Open(o) = &h.state().screen else {
+                return false;
+            };
+            o.browse.portal.balance.as_ref().and_then(|w| w.assigned()) == Some(pat.as_str())
+        });
+        shot(&mut h, "02-balance-window-pat");
+        open_mut(&mut h).browse.portal.balance = None;
+        h.run_steps(4);
+        h.get_by_role_and_label(Role::Button, "Deliver…").click();
+        wait_long(&mut h, "Pat assigned in Deliver", &|h| {
+            let crate::app::Screen::Open(o) = &h.state().screen else {
+                return false;
+            };
+            o.browse.portal.delivery.as_ref().and_then(|w| w.assigned()) == Some(pat.as_str())
+        });
+        shot(&mut h, "02b-deliver-window-pat");
+        note(
+            "Step 2: a new Balance owed… and a new Deliver… start with Assigned to Pat Preparer"
+                .into(),
+        );
+
+        // ---- Step 3: the 1040 kit letter's fill-ins typed for this client.
+        h.get_by_label("Letters to sign").click();
+        h.run_steps(4);
+        h.query_all_by_label_contains("individual income tax return (Form 1040)")
+            .next()
+            .expect("the kit's 1040 letter offered")
+            .click();
+        h.run_steps(4);
+        wait_long(&mut h, "the boxes", &|h| said(h, "Fill in for this client"));
+        let left_before = h.query_all_by_label("left").count();
+        assert!(left_before > 0, "the kit letter has fill-ins");
+        h.get_by_label("[State]").click();
+        h.step();
+        h.get_by_label("[State]").type_text("Kansas");
+        h.run_steps(4);
+        let left_after = h.query_all_by_label("left").count();
+        assert_eq!(
+            left_after + 1,
+            left_before,
+            "the typed one is no longer left"
+        );
+        shot(&mut h, "03-fill-ins-typed");
+        note(format!(
+            "Step 3: the 1040 kit letter ticked shows Fill in for this client with {left_before} boxes; [State] typed, {left_after} left"
+        ));
+        open_mut(&mut h).browse.portal.delivery = None;
+        h.run_steps(4);
+
+        // ---- Step 4: Admin › Portal › Balances: sorted by Amount both ways, filtered.
+        h.get_by_role_and_label(Role::Button, "Admin").click();
+        h.run_steps(6);
+        h.get_by_role_and_label(Role::Button, "Portal").click();
+        h.run_steps(6);
+        h.get_by_role_and_label(Role::Button, "Balances").click();
+        wait_long(&mut h, "the balances", &|h| said(h, "$75.00"));
+        h.run_steps(6);
+        let top = |h: &egui_kittest::Harness<'static, VibeFilesApp>, l: &str| {
+            h.get_by_label(l).rect().top()
+        };
+        h.get_by_label("Amount").click();
+        h.run_steps(4);
+        assert!(top(&h, "$75.00") < top(&h, "$450.00"));
+        h.get_by_label("Amount").click();
+        h.run_steps(4);
+        assert!(top(&h, "$450.00") < top(&h, "$75.00"));
+        shot(&mut h, "04-balances-sorted");
+        h.get_by_label("Filter").click();
+        h.step();
+        h.get_by_label("Filter").type_text("amended");
+        h.run_steps(4);
+        assert!(said(&h, "1 of 2"));
+        assert!(h.query_by_label("$450.00").is_none());
+        shot(&mut h, "05-balances-filtered");
+        note("Step 4: Admin › Portal › Balances sorted by Amount up and down; Filter amended: 1 of 2".into());
+        std::fs::write(out.join("steps.txt"), steps.join("\n")).unwrap();
+    }
+
     /// Addendum §16 (balance owed) walkthrough against a real Vibe Portal with a stand-in for
     /// Stripe: post from the Balance owed window, the payment completed by a signed webhook,
     /// the receipt fetched into the Portal inbox with its hint, the panel's line, the copy in

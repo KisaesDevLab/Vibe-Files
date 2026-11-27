@@ -277,6 +277,12 @@ fn default_year() -> i32 {
 }
 
 impl DeliverWindow {
+    /// Who Assigned to holds (the walkthrough reads it: a ComboBox's text is not in the tree).
+    #[cfg(test)]
+    pub fn assigned(&self) -> Option<&str> {
+        self.assigned.as_deref()
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         ctx: &egui::Context,
@@ -2944,8 +2950,8 @@ const DELIVERY_COLS: [crate::ui::grid::Col; 7] = [
     crate::ui::grid::Col::tick(),
     crate::ui::grid::Col::new("Client", 300.0),
     crate::ui::grid::Col::new("Year", 60.0),
-    crate::ui::grid::Col::new("Kind", 90.0),
-    crate::ui::grid::Col::new("Step waiting", 260.0),
+    crate::ui::grid::Col::new("Kind", 150.0),
+    crate::ui::grid::Col::new("Step waiting", 240.0),
     crate::ui::grid::Col::new("Days", 60.0),
     crate::ui::grid::Col::new("Monthly charge", 160.0),
 ];

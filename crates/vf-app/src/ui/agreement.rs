@@ -2094,7 +2094,7 @@ pub fn show_page(
     // client's details.
     if shown.is_empty() && page.progress.is_none() && q.is_empty() {
         ui.label(widgets::caption(
-            "No client has an agreement to renew. Send a client's first one from their details              (Service agreement…).",
+            "No client has an agreement to renew. Send a client's first one from their details (Service agreement…).",
         ));
     }
     let ticked: Vec<Candidate> = page.candidates.iter().filter(|c| c.tick).cloned().collect();

@@ -758,10 +758,19 @@ pub(crate) fn fill_in_boxes(
             .num_columns(3)
             .show(ui, |ui| {
                 for n in names {
-                    let l = ui.label(n.as_str());
+                    // A long kit note (`[If a large number of returns are included, …]`) is
+                    // shortened so the box keeps its width; the whole of it on hover.
+                    let short: String = if n.chars().count() > 40 {
+                        format!("{}…]", n.chars().take(38).collect::<String>())
+                    } else {
+                        n.clone()
+                    };
+                    let l = ui.label(short).on_hover_text(n.as_str());
                     let v = values.entry(n.clone()).or_default();
-                    ui.add_enabled(enabled, egui::TextEdit::singleline(v).desired_width(220.0))
-                        .labelled_by(l.id);
+                    ui.add_enabled_ui(enabled, |ui| {
+                        ui.add_sized([240.0, 22.0], egui::TextEdit::singleline(v))
+                            .labelled_by(l.id);
+                    });
                     if v.trim().is_empty() {
                         ui.label(
                             egui::RichText::new("left")
