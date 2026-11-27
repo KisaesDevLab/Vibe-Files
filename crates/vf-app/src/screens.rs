@@ -1463,6 +1463,717 @@ mod tests {
         shot(&mut h, "t13b-filed", &[r]);
     }
 
+    /// Owner 2026-11-27: the frames of the training video "Annual agreements and tiered pricing"
+    /// (staff side) against a real Vibe Portal and the stand-in Stripe: Admin › Portal › Pricing
+    /// plans (New plan…, the package grid, add-ons, As the client sees it, Save); Deliver… with
+    /// Packages and add-ons; the partners and letter templates; Service agreement… sent to a
+    /// business; the client signs and pays (off camera); Deliveries' Monthly charge failed; the
+    /// monthly amount changed; next year's agreement sent from Admin › Portal › Agreements; End
+    /// engagement…; the PDFs filed by Intake. Frames at 1920×1080 in `VF_WALK_DIR`, what to look
+    /// at outlined in amber. The same `VF_WALK_*` variables as `agreement_walkthrough`.
+    #[test]
+    #[ignore = "needs a running portal"]
+    fn training_agreements_walkthrough() {
+        let (Ok(url), Ok(key), Ok(log), Ok(client_js), Ok(stripe), Ok(out)) = (
+            std::env::var("VF_WALK_URL"),
+            std::env::var("VF_WALK_KEY"),
+            std::env::var("VF_WALK_LOG"),
+            std::env::var("VF_WALK_CLIENT"),
+            std::env::var("VF_WALK_STRIPE"),
+            std::env::var("VF_WALK_DIR"),
+        ) else {
+            return;
+        };
+        let out = std::path::PathBuf::from(out);
+        std::fs::create_dir_all(&out).unwrap();
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path().join("Clients");
+        vf_fixtures::generate(&root, 3).unwrap();
+        crate::ui::test_util::pdfium_first();
+        let data = t.path().join("data");
+        drop(crate::session::open(&data, "dev", &root).unwrap());
+        let cab = vf_fs::cabinet::read(&root).unwrap().cabinet_id;
+        let s = vf_portal::PortalSettings::new(&cab, &url, &key, 0)
+            .unwrap()
+            .with_deliveries(true);
+        vf_portal::settings::save(&root, &s).unwrap();
+        crate::portal::register_inbox(&root).unwrap();
+        for (_, name) in vf_portal::delivery::STEP_DOC_TYPES {
+            vf_fs::doctypes::ensure(&root, name, vf_portal::delivery::DELIVERY_FOLDER, true)
+                .unwrap();
+        }
+        for (_, name) in vf_portal::delivery::AGREEMENT_STEP_DOC_TYPES {
+            vf_fs::doctypes::ensure(&root, name, vf_portal::delivery::AGREEMENT_FOLDER, true)
+                .unwrap();
+        }
+        vf_fs::doctypes::ensure(
+            &root,
+            vf_portal::inbox::RECEIPT_DOC_TYPE,
+            "Billing/{Year}",
+            true,
+        )
+        .unwrap();
+        vf_ingest::parsers::sync_filer_rules_report(&root).unwrap();
+        vf_letters::store::seed_if_missing(&root).unwrap();
+        // The firm has filled in its Terms and Conditions once (A17).
+        let mut terms = vf_letters::store::load_all(&root)
+            .unwrap()
+            .into_iter()
+            .find(|t| t.kind == vf_letters::TERMS)
+            .unwrap();
+        let mut json = serde_json::to_string(&terms.blocks).unwrap();
+        for (k, v) in [
+            ("[X]", "30"),
+            ("[Portal Name]", "Sample Portal"),
+            ("[State Name]", "Ohio"),
+            (
+                "[Name of State or Federal Court Desired]",
+                "Franklin County, Ohio",
+            ),
+        ] {
+            json = json.replace(k, v);
+        }
+        terms.blocks = serde_json::from_str(&json).unwrap();
+        terms.sample = false;
+        vf_letters::store::save(&root, &terms).unwrap();
+        let d = data.clone();
+        let mut h = HarnessBuilder::default()
+            .with_max_steps(crate::ui::test_util::MAX_STEPS)
+            .with_theme(egui::Theme::Light)
+            .with_size([1440.0, 810.0])
+            .with_pixels_per_point(1920.0 / 1440.0)
+            .build_eframe(move |cc| VibeFilesApp::new(&cc.egui_ctx, d.clone()));
+        h.run_steps(8);
+        // A frame, with what to look at outlined in amber.
+        let shot = |h: &mut egui_kittest::Harness<'static, VibeFilesApp>,
+                    name: &str,
+                    marks: &[egui::Rect]| {
+            for _ in 0..6 {
+                h.step();
+            }
+            let ppp = 1920.0 / 1440.0;
+            match h.render() {
+                Ok(mut img) => {
+                    let (w, ht) = (img.width() as i64, img.height() as i64);
+                    for r in marks {
+                        let r = r.expand(5.0);
+                        let (x0, y0) = ((r.min.x * ppp) as i64, (r.min.y * ppp) as i64);
+                        let (x1, y1) = ((r.max.x * ppp) as i64, (r.max.y * ppp) as i64);
+                        for t in 0..4 {
+                            for x in x0 - t..=x1 + t {
+                                for y in [y0 - t, y1 + t] {
+                                    if (0..w).contains(&x) && (0..ht).contains(&y) {
+                                        img.put_pixel(
+                                            x as u32,
+                                            y as u32,
+                                            image::Rgba([245, 158, 11, 255]),
+                                        );
+                                    }
+                                }
+                            }
+                            for y in y0 - t..=y1 + t {
+                                for x in [x0 - t, x1 + t] {
+                                    if (0..w).contains(&x) && (0..ht).contains(&y) {
+                                        img.put_pixel(
+                                            x as u32,
+                                            y as u32,
+                                            image::Rgba([245, 158, 11, 255]),
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    img.save(out.join(format!("{name}.png"))).unwrap();
+                }
+                Err(e) => eprintln!("{name}: {e}"),
+            }
+        };
+        let said = |h: &egui_kittest::Harness<'static, VibeFilesApp>, text: &str| {
+            h.query_all_by_label_contains(text).next().is_some()
+        };
+        let wait_long =
+            |h: &mut egui_kittest::Harness<'static, VibeFilesApp>,
+             what: &str,
+             ok: &dyn Fn(&egui_kittest::Harness<'static, VibeFilesApp>) -> bool| {
+                let start = std::time::Instant::now();
+                while !ok(h) {
+                    assert!(start.elapsed().as_secs() < 120, "{what}: never");
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                    h.step();
+                }
+            };
+        let button = |h: &egui_kittest::Harness<'static, VibeFilesApp>, l: &str| {
+            h.get_by_role_and_label(Role::Button, l).rect()
+        };
+        let text_rect = |h: &egui_kittest::Harness<'static, VibeFilesApp>, l: &str| {
+            h.query_all_by_label_contains(l)
+                .next()
+                .unwrap_or_else(|| panic!("{l}: not shown"))
+                .rect()
+        };
+        let type_into =
+            |h: &mut egui_kittest::Harness<'static, VibeFilesApp>, label: &str, v: &str| {
+                h.get_by_label(label).click();
+                h.step();
+                h.key_press(egui::Key::End);
+                for _ in 0..12 {
+                    h.key_press(egui::Key::Backspace);
+                    h.step();
+                }
+                h.get_by_label(label).type_text(v);
+                h.run_steps(3);
+            };
+        let admin_page = |h: &mut egui_kittest::Harness<'static, VibeFilesApp>, page: &str| {
+            h.get_by_role_and_label(Role::Button, "Admin").click();
+            h.run_steps(6);
+            h.get_by_role_and_label(Role::Button, "Portal").click();
+            h.run_steps(6);
+            h.get_all_by_label(page).next().unwrap().scroll_to_me();
+            h.run_steps(4);
+            h.get_all_by_label(page).next().unwrap().click();
+            h.run_steps(8);
+        };
+        h.get_by_role_and_label(Role::Button, "Open existing")
+            .click();
+        h.run_steps(8);
+        h.get_by_label("Cabinet folder").click();
+        h.step();
+        h.get_by_label("Cabinet folder")
+            .type_text(&root.display().to_string());
+        h.step();
+        h.get_by_role_and_label(Role::Button, "Open cabinet")
+            .click();
+        assert!(wait_for(&mut h, |h| matches!(
+            h.state().screen,
+            crate::app::Screen::Open(_)
+        )));
+        h.run_steps(8);
+        {
+            let o = open_mut(&mut h);
+            vf_fs::doctypes::sync(&mut o.opened.conn, &root, "dev", "doc_types_edit").unwrap();
+        }
+        // A person (a 1040, priced from the plan) and a business (the agreement).
+        let clients = open_mut(&mut h).browse.snap.clients.clone();
+        let (pi, person) = clients
+            .iter()
+            .enumerate()
+            .find(|(_, c)| c.name.contains(", "))
+            .map(|(i, c)| (i, c.clone()))
+            .unwrap();
+        let (bi, biz) = clients
+            .iter()
+            .enumerate()
+            .find(|(i, _)| *i != pi)
+            .map(|(i, c)| (i, c.clone()))
+            .unwrap();
+        let folder = biz.folder_rel.clone().unwrap();
+        let first = person
+            .name
+            .split(", ")
+            .nth(1)
+            .unwrap_or("Jordan")
+            .to_string();
+        let last = person
+            .name
+            .split(", ")
+            .next()
+            .unwrap_or("Sample")
+            .to_string();
+        let p_email = format!(
+            "{}.{}@example.com",
+            first.to_lowercase(),
+            last.to_lowercase()
+        );
+        vf_fs::contacts::set_by_hand(
+            &root,
+            &person.id,
+            &vf_fs::contacts::Row {
+                first: first.clone(),
+                last: last.clone(),
+                email: p_email.clone(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        vf_fs::clients::set_entity_type(&root, &biz.id, Some("llc")).unwrap();
+        for (k, v) in [
+            ("first", "Pat"),
+            ("last", "Sample"),
+            ("email", "pat.sample@example.com"),
+        ] {
+            vf_fs::contacts::set_one_by_hand(&root, &biz.id, k, v).unwrap();
+        }
+        let p = crate::portal::client(&s);
+        p.put_client(&person.id, &person.ext_id, &person.name, None)
+            .unwrap();
+        p.invite(
+            &person.id,
+            Some(&p_email),
+            None,
+            &format!("{first} {last}"),
+            "Taxpayer",
+        )
+        .unwrap();
+        p.put_client(&biz.id, &biz.ext_id, &biz.name, None).unwrap();
+        p.invite(
+            &biz.id,
+            Some("pat.sample@example.com"),
+            None,
+            "Pat Sample",
+            "Owner",
+        )
+        .unwrap();
+
+        // ==== Part 1: tiered pricing.
+        // ---- p02. Admin › Portal › Pricing plans, New plan….
+        admin_page(&mut h, "Pricing plans");
+        let r = button(&h, "New plan…");
+        shot(&mut h, "p02a-pricing-plans", &[r]);
+        h.get_by_role_and_label(Role::Button, "New plan…").click();
+        h.run_steps(8);
+        let top = text_rect(&h, "Return type").union(text_rect(&h, "Base fee name"));
+        let top = egui::Rect::from_min_max(top.min, egui::pos2(top.max.x + 210.0, top.max.y));
+        shot(&mut h, "p02b-new-plan", &[top]);
+        // ---- p03. The package grid.
+        let rec = h
+            .query_all_by_label("Recommended")
+            .map(|n| n.rect())
+            .reduce(|a, b| a.union(b))
+            .unwrap();
+        let price = text_rect(&h, "Price over the return fee");
+        let price = egui::Rect::from_min_max(
+            egui::pos2(price.min.x, price.min.y - 30.0),
+            egui::pos2(rec.max.x, rec.max.y),
+        );
+        shot(&mut h, "p03a-grid", &[price]);
+        let r = button(&h, "Add package").union(button(&h, "Add service"));
+        shot(&mut h, "p03b-grid-add", &[r]);
+        // ---- p04. Add-ons.
+        h.get_all_by_label("Add-ons").next().unwrap().click();
+        h.run_steps(6);
+        let r = text_rect(&h, "Offered unless unticked");
+        shot(&mut h, "p04-addons", &[r]);
+        h.get_all_by_label("Packages").next().unwrap().click();
+        h.run_steps(6);
+        // ---- p05. As the client sees it; Save; Copy to next year….
+        let side = text_rect(&h, "As the client sees it");
+        let side =
+            egui::Rect::from_min_max(side.min, egui::pos2(side.min.x + 300.0, side.min.y + 350.0));
+        assert!(said(&h, "$1,708.68"), "the Concierge minimum applies");
+        shot(&mut h, "p05a-client-sees", &[side]);
+        h.get_by_role_and_label(Role::Button, "Save").scroll_to_me();
+        h.run_steps(4);
+        let r = button(&h, "Save").union(button(&h, "Copy to next year…"));
+        shot(&mut h, "p05b-save", &[r]);
+        h.get_by_role_and_label(Role::Button, "Save").click();
+        wait_long(&mut h, "saved", &|h| said(h, "Saved the 2025 1040 plan."));
+        h.query_all_by_label_contains("Saved the 2025 1040 plan.")
+            .next()
+            .unwrap()
+            .scroll_to_me();
+        h.run_steps(4);
+        let r = text_rect(&h, "Saved the 2025 1040 plan.");
+        shot(&mut h, "p05c-saved", &[r]);
+
+        // ---- p06. Deliver… with Packages and add-ons for the person.
+        h.get_by_role_and_label(Role::Button, "Browse").click();
+        h.run_steps(6);
+        {
+            let o = open_mut(&mut h);
+            o.browse.set_scope(vf_core::browse::Scope::Client(pi));
+            o.browse.portal.reread();
+        }
+        h.run_steps(10);
+        wait_long(&mut h, "the panel", &|h| {
+            h.query_by_role_and_label(Role::Button, "Deliver…")
+                .is_some()
+        });
+        h.get_by_role_and_label(Role::Button, "Deliver…").click();
+        wait_long(&mut h, "the window read", &|h| said(h, "WHAT HAS HAPPENED"));
+        h.run_steps(6);
+        h.get_by_label("Package and fee").scroll_to_me();
+        h.run_steps(3);
+        h.get_by_label("Package and fee").click();
+        h.run_steps(4);
+        h.get_by_label("Return fee").click();
+        h.step();
+        h.get_by_label("Return fee").type_text("1265.68");
+        h.run_steps(4);
+        h.get_by_label("Return fee").scroll_to_me();
+        h.run_steps(3);
+        let r = h.get_by_label("Return fee").rect();
+        shot(&mut h, "p06a-deliver-packages", &[r]);
+        type_into(&mut h, "Concierge price", "1700.00");
+        h.run_steps(4);
+        let r = h.get_by_label("Concierge price").rect();
+        shot(&mut h, "p06b-deliver-override", &[r]);
+        open_mut(&mut h).browse.portal.delivery = None;
+        h.run_steps(6);
+
+        // ==== Part 2: annual agreements.
+        // ---- a07. Partners; the letter templates.
+        admin_page(&mut h, "Agreements");
+        if h.query_by_role_and_label(Role::Button, "Add partner")
+            .is_none()
+        {
+            h.get_all_by_label("Partners (who signs for the firm)")
+                .next()
+                .unwrap()
+                .click();
+            h.run_steps(4);
+        }
+        h.get_by_role_and_label(Role::Button, "Add partner").click();
+        h.run_steps(4);
+        type_into(&mut h, "Partner name", "Morgan Example");
+        h.get_by_role_and_label(Role::Button, "Save partners")
+            .click();
+        wait_long(&mut h, "partners saved", &|h| {
+            said(h, "Saved for every PC.")
+        });
+        let r = h
+            .get_by_label("Partner name")
+            .rect()
+            .union(button(&h, "Save partners"));
+        let r = egui::Rect::from_min_max(r.min, egui::pos2(r.max.x + 260.0, r.max.y));
+        shot(&mut h, "a07a-partners", &[r]);
+        h.get_all_by_label("Letter templates")
+            .next()
+            .unwrap()
+            .click();
+        h.run_steps(8);
+        if let Some(n) = h
+            .query_all_by_label_contains("individual income tax return")
+            .next()
+        {
+            n.click();
+        }
+        h.run_steps(8);
+        shot(&mut h, "a07b-letter-templates", &[]);
+
+        // ---- a08. Service agreement… for the business.
+        h.get_by_role_and_label(Role::Button, "Browse").click();
+        h.run_steps(6);
+        {
+            let o = open_mut(&mut h);
+            o.browse.set_scope(vf_core::browse::Scope::Client(bi));
+            o.browse.portal.reread();
+        }
+        h.run_steps(10);
+        wait_long(&mut h, "the panel", &|h| {
+            h.query_by_role_and_label(Role::Button, "Service agreement…")
+                .is_some()
+        });
+        let r = button(&h, "Service agreement…");
+        shot(&mut h, "a08a-button", &[r]);
+        h.get_by_role_and_label(Role::Button, "Service agreement…")
+            .click();
+        wait_long(&mut h, "the window read", &|h| {
+            said(h, "SERVICES AND FEES") && !said(h, "Working…")
+        });
+        h.run_steps(4);
+        for (service, once, month) in [
+            ("Bookkeeping", "", "450.00"),
+            ("Payroll", "", "125.00"),
+            ("Advisory", "500.00", ""),
+        ] {
+            h.get_by_label(service).click();
+            h.run_steps(3);
+            for (label, v) in [("one-time", once), ("monthly", month)] {
+                if v.is_empty() {
+                    continue;
+                }
+                let name = format!("{service} {label} fee");
+                h.get_by_label(&name).click();
+                h.step();
+                h.get_by_label(&name).type_text(v);
+                h.run_steps(2);
+            }
+        }
+        h.run_steps(4);
+        assert!(said(&h, "Total $500.00 one-time · $575.00 a month"));
+        let year_r = text_rect(&h, "Agreement year");
+        let year_r =
+            egui::Rect::from_min_max(year_r.min, egui::pos2(year_r.max.x + 190.0, year_r.max.y));
+        shot(&mut h, "a08b-year", &[year_r]);
+        let fees = text_rect(&h, "SERVICES AND FEES").union(text_rect(&h, "Total $500.00"));
+        let fees = egui::Rect::from_min_max(fees.min, egui::pos2(fees.min.x + 520.0, fees.max.y));
+        shot(&mut h, "a08c-services", &[fees]);
+        // ---- a09. Letters to sign; Preview letters….
+        h.query_all_by_label_contains("LETTERS TO SIGN")
+            .next()
+            .unwrap()
+            .scroll_to_me();
+        h.run_steps(4);
+        let letters = text_rect(&h, "LETTERS TO SIGN").union(text_rect(
+            &h,
+            "The Terms and Conditions are part of each letter",
+        ));
+        let letters = egui::Rect::from_min_max(
+            letters.min,
+            egui::pos2(letters.min.x + 640.0, letters.max.y),
+        );
+        let r = button(&h, "Preview letters…");
+        shot(&mut h, "a09a-letters", &[letters, r]);
+        // ---- a10. Signed by, payment, Send.
+        let signed = text_rect(&h, "Signed by").union(text_rect(&h, "(for the business)"));
+        let pay = text_rect(&h, "Pay on the portal").union(text_rect(&h, "Sign only"));
+        let send = button(&h, "Send to client");
+        shot(&mut h, "a10a-signers", &[signed, pay, send]);
+        h.get_by_role_and_label(Role::Button, "Send to client")
+            .click();
+        wait_long(&mut h, "sent", &|h| said(h, "Sent to the client."));
+        let r = text_rect(&h, "Sent to the client.");
+        shot(&mut h, "a10b-sent", &[r]);
+        let a = p.agreements(&biz.id).unwrap();
+        assert_eq!(a.len(), 1);
+        let year = a[0].tax_year;
+        open_mut(&mut h).browse.portal.agreement = None;
+        h.run_steps(4);
+
+        // ---- The client signs, sets up payment; a month is paid, the next fails (off camera).
+        let ok = std::process::Command::new("node")
+            .args([
+                &client_js,
+                &url,
+                &out.display().to_string(),
+                &log,
+                "pat.sample@example.com",
+                "agreement",
+                &stripe,
+            ])
+            .status()
+            .is_ok_and(|s| s.success());
+        assert!(ok, "the client's side");
+        assert_eq!(p.delivery(&a[0].id).unwrap().status, "complete");
+
+        // ---- a11. Admin › Portal › Deliveries: Kind, Monthly charge, Monthly charge failed.
+        admin_page(&mut h, "Deliveries");
+        h.get_by_label("Monthly charge failed").click();
+        wait_long(&mut h, "the failed month", &|h| {
+            said(h, &biz.name) && said(h, "Failed ")
+        });
+        h.run_steps(4);
+        let r = text_rect(&h, "Failed ");
+        let row = text_rect(&h, &biz.name);
+        let row = egui::Rect::from_min_max(
+            egui::pos2(row.min.x, row.min.y),
+            egui::pos2(r.max.x, row.max.y.max(r.max.y)),
+        );
+        shot(&mut h, "a11b-failed", &[row]);
+
+        // ---- a13. Next year's agreements from Admin › Portal › Agreements.
+        admin_page(&mut h, "Agreements");
+        {
+            let a = open_mut(&mut h).admin.as_mut().unwrap();
+            a.agreements.year = year + 1;
+            a.agreements.reread();
+        }
+        let tick = format!("{} ({})", biz.name, biz.ext_id);
+        wait_long(&mut h, "the bulk list", &|h| {
+            h.query_by_label(&tick).is_some()
+                && !said(h, "Reading the portal")
+                && said(h, "Bookkeeping, Payroll, Advisory")
+        });
+        h.run_steps(4);
+        h.get_by_label(&tick).click();
+        h.run_steps(3);
+        assert!(said(&h, "1 ticked"));
+        let row = h.get_by_label(&tick).rect();
+        let row = egui::Rect::from_min_max(row.min, egui::pos2(row.min.x + 1000.0, row.max.y));
+        let go = text_rect(&h, "1 ticked").union(button(&h, "Send 1 agreement"));
+        shot(&mut h, "a13a-bulk", &[row, go]);
+        h.get_by_role_and_label(Role::Button, "Send 1 agreement")
+            .click();
+        h.run_steps(6);
+        wait_long(&mut h, "the run over", &|h| {
+            h.query_by_role_and_label(Role::Button, "Stop").is_none()
+        });
+        h.run_steps(6);
+        if !said(&h, "Sent 1 of 1 agreements.") {
+            shot(&mut h, "a13x-bulk-not-sent", &[]);
+            panic!("bulk not sent");
+        }
+        h.run_steps(30);
+        let r = text_rect(&h, "Sent 1 of 1 agreements.");
+        shot(&mut h, "a13b-bulk-sent", &[r]);
+
+        // ---- a12. The monthly amount changed from the next charge.
+        h.get_by_role_and_label(Role::Button, "Browse").click();
+        h.run_steps(6);
+        h.get_by_role_and_label(Role::Button, "Service agreement…")
+            .click();
+        wait_long(&mut h, "the window read", &|h| {
+            said(h, "Monthly charge") && !said(h, "Working…")
+        });
+        h.run_steps(4);
+        type_into(&mut h, "New monthly amount", "600.00");
+        let r = h
+            .get_by_label("New monthly amount")
+            .rect()
+            .union(button(&h, "Change from the next charge"))
+            .union(button(&h, "Stop monthly charge…"));
+        shot(&mut h, "a12a-change", &[r]);
+        h.get_by_role_and_label(Role::Button, "Change from the next charge")
+            .click();
+        wait_long(&mut h, "changed", &|h| said(h, "Changed to $600.00"));
+        let r = text_rect(&h, "Changed to $600.00");
+        shot(&mut h, "a12b-changed", &[r]);
+        open_mut(&mut h).browse.portal.agreement = None;
+        h.run_steps(4);
+
+        // ---- a14. End engagement….
+        h.get_by_role_and_label(Role::Button, "Browse").click();
+        h.run_steps(6);
+        let r = button(&h, "End engagement…");
+        h.get_by_role_and_label(Role::Button, "End engagement…")
+            .click();
+        h.run_steps(6);
+        let _ = r;
+        for (k, v) in [
+            ("[Date of Closure Letter]", "November 27, 2026"),
+            ("[Date]", "November 27, 2026"),
+            ("[Name of Engagement]", "Bookkeeping, payroll and advisory"),
+            ("[Telephone Number]", "555-0100"),
+            (
+                "[and Specified Parties, optional if applicable]",
+                "and its lender",
+            ),
+        ] {
+            let Some(field) = h.query_all_by_label(k).last() else {
+                continue;
+            };
+            field.click();
+            h.step();
+            h.query_all_by_label(k).last().unwrap().type_text(v);
+            h.run_steps(2);
+        }
+        h.run_steps(4);
+        let r = button(&h, "Send and end engagement…");
+        shot(&mut h, "a14a-end", &[r]);
+        h.get_by_role_and_label(Role::Button, "Send and end engagement…")
+            .click();
+        h.run_steps(3);
+        let r = button(&h, "End engagement");
+        shot(&mut h, "a14b-end-ask", &[r]);
+        h.get_by_role_and_label(Role::Button, "End engagement")
+            .click();
+        wait_long(&mut h, "ended", &|h| {
+            said(h, "closure letter is on the client's portal")
+        });
+        let r = text_rect(&h, "closure letter is on the client's portal");
+        shot(&mut h, "a14c-ended", &[r]);
+        assert!(p.subscriptions(&biz.id).unwrap()[0].canceled_at.is_some());
+
+        // ---- a15. The PDFs fetched and filed by Intake.
+        open_mut(&mut h).browse.portal.agreement = None;
+        open_mut(&mut h).browse.portal.fetch_now = true;
+        let inbox = crate::portal::inbox(&root);
+        let count = |inbox: &std::path::Path| {
+            std::fs::read_dir(inbox)
+                .ok()
+                .into_iter()
+                .flatten()
+                .flatten()
+                .filter(|e| {
+                    e.file_name()
+                        .to_string_lossy()
+                        .to_lowercase()
+                        .ends_with(".pdf")
+                })
+                .count()
+        };
+        let start = std::time::Instant::now();
+        let mut asked = std::time::Instant::now();
+        while count(&inbox) < 4 && start.elapsed().as_secs() < 90 {
+            if asked.elapsed().as_secs() >= 10 {
+                open_mut(&mut h).browse.portal.fetch_now = true;
+                asked = std::time::Instant::now();
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            h.step();
+        }
+        let got: Vec<String> = std::fs::read_dir(&inbox)
+            .map(|r| {
+                r.flatten()
+                    .map(|e| e.file_name().to_string_lossy().into_owned())
+                    .collect()
+            })
+            .unwrap_or_default();
+        eprintln!("Portal inbox: {got:?}");
+        let n = count(&inbox);
+        assert!(n >= 3, "the agreement PDFs fetched");
+        h.state_mut().tab = crate::app::Tab::Intake;
+        h.run_steps(10);
+        if let Some(b) = h.query_by_label("Preview") {
+            b.click();
+        }
+        let commit = format!("Commit {n} files");
+        wait_long(&mut h, "rows ready", &|h| said(h, &commit));
+        let r = h
+            .query_all_by_role_and_label(Role::Button, &commit)
+            .last()
+            .unwrap()
+            .rect();
+        shot(&mut h, "a15a-intake", &[r]);
+        h.query_all_by_role_and_label(Role::Button, &commit)
+            .last()
+            .unwrap()
+            .click();
+        h.run_steps(6);
+        wait_long(&mut h, "the commit summary", &|h| {
+            h.query_all_by_label("Confirm commit").next().is_some()
+        });
+        h.query_all_by_label("Confirm commit")
+            .next()
+            .unwrap()
+            .click();
+        h.run_steps(10);
+        let eng = root
+            .join(&folder)
+            .join("Correspondence")
+            .join(year.to_string())
+            .join("Engagement");
+        let letters_pdf = eng.join(format!("{year} Agreement 1 - Letters.pdf"));
+        wait_long(&mut h, "filed", &|_| letters_pdf.exists());
+        // The signed letters, for the video's look at a letter as the client reads it.
+        std::fs::copy(&letters_pdf, out.join("agreement-letters.pdf")).unwrap();
+        h.state_mut().tab = crate::app::Tab::Browse;
+        h.run_steps(10);
+        {
+            let o = open_mut(&mut h);
+            o.browse.set_scope(vf_core::browse::Scope::Client(bi));
+        }
+        h.run_steps(6);
+        let want = format!("{year} Agreement 1 - Letters.pdf");
+        let start = std::time::Instant::now();
+        while !(said(&h, &want) && said(&h, "Monthly services")) {
+            assert!(
+                start.elapsed().as_secs() < 180,
+                "the filed PDFs listed: never"
+            );
+            h.get_by_role_and_label(Role::Button, "Refresh").click();
+            for _ in 0..50 {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                h.step();
+            }
+        }
+        h.run_steps(6);
+        let filed: Vec<egui::Rect> = [
+            want.clone(),
+            format!("{year} Agreement 4 - Fee.pdf"),
+            "Monthly services".to_string(),
+        ]
+        .iter()
+        .filter_map(|n| h.query_all_by_label_contains(n).next().map(|x| x.rect()))
+        .collect();
+        let marks: Vec<egui::Rect> = filed
+            .iter()
+            .map(|r| egui::Rect::from_min_max(r.min, egui::pos2(r.min.x + 740.0, r.max.y)))
+            .collect();
+        shot(&mut h, "a15b-filed", &marks);
+    }
+
     /// Addendum §12 slice 3 (letters) walkthrough against a real Vibe Portal: the Deliver window
     /// sends the engagement letter for a joint 1040 with both spouses as signers (from Portal
     /// contacts); in headless Edge the taxpayer signs, then the spouse on the same device after
