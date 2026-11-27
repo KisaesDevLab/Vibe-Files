@@ -59,6 +59,12 @@ of its `src/` (QUESTIONS Q-16). Upstream `main.rs` is not vendored; `vf-app` is 
      between (`years_in`; never against an UltraTax tax year); a folder is bound on commit
      only by name (`name_score` at the auto threshold) and when it is the only one.
 
+   - `plan.rs` `sentinel_is` (owner 2026-11-27, found by the Intake training walkthrough): a
+     folder at the client's template name whose sentinel names the client is that client's
+     folder (`FolderAction::Exists`), for the row and for a copy. A folder the host made after
+     the batch's look at the folders (New client… on a row) showed "already exists but isn't
+     bound to this client" until Rescan root.
+
    - `filer-core/src/datafile.rs` `write_atomic` (marked `Vibe Files (PA-94)`, owner's report
      2026-11-17: "last_batch.json could not be written: Access is denied"): a temp file of
      its own name per save, and a refused rename tried again for under half a second.

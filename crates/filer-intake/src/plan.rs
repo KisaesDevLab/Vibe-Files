@@ -800,11 +800,16 @@ fn plan_row(
             };
             let path = root.join(&name);
             if b.fs.exists(&path) {
-                return RowStatus::Error(format!(
-                    "A folder named \"{name}\" already exists but isn't bound to this client. Bind it in Conflicts."
-                ));
+                if sentinel_is(&path, &client) {
+                    FolderAction::Exists(path)
+                } else {
+                    return RowStatus::Error(format!(
+                        "A folder named \"{name}\" already exists but isn't bound to this client. Bind it in Conflicts."
+                    ));
+                }
+            } else {
+                FolderAction::WillCreate(path)
             }
-            FolderAction::WillCreate(path)
         }
     };
     let dest_dir = match &edits.dest_rel {
@@ -1167,6 +1172,9 @@ fn plan_copy_paths(
                 continue;
             }
             None => match template::client_folder_name(&input.template, &cc) {
+                Ok(name) if sentinel_is(&root.join(&name), &cc) => {
+                    FolderAction::Exists(root.join(name))
+                }
                 Ok(name) if b.fs.exists(&root.join(&name)) => {
                     c.status = CopyStatus::Error(format!(
                         "A folder named \"{name}\" already exists but isn't bound to {}. Bind it in Conflicts.",
@@ -1285,6 +1293,17 @@ pub fn checked_rel(rel: &Path) -> Result<PathBuf, String> {
 }
 
 /// The client's bound folder, or an ID-named folder to bind. `None` if neither is known.
+/// Vibe Files (owner 2026-11-27): the folder at the client's template name already carries
+/// this client's sentinel: the host made it (New client… on a row, or in Browse) after the folder
+/// index was read. It is this client's folder, not "a folder that isn't bound" (the row showed
+/// that error until Rescan root).
+fn sentinel_is(path: &Path, client: &Client) -> bool {
+    crate::sentinel::read_sentinel(path)
+        .ok()
+        .flatten()
+        .is_some_and(|s| s.tax_software_id == client.id)
+}
+
 fn find_folder(build: &Build, client: &Client) -> Option<FolderAction> {
     let scan = build.input.folders.as_ref()?;
     let mine =
@@ -2257,6 +2276,32 @@ mod tests {
         assert!(
             matches!(row(&out, "Smith, John_1001_2025_1040.pdf").status, RowStatus::Error(ref e) if e.contains("Conflicts"))
         );
+    }
+
+    /// Owner 2026-11-27 (the Intake training walkthrough): a folder the host made for the client
+    /// after this batch's look at the folders (New client… on the row) carries the client's
+    /// sentinel: the row files into it, not "already exists but isn't bound".
+    #[test]
+    fn a_folder_with_the_clients_sentinel_is_the_clients() {
+        let f = fixture();
+        let inp = input(&f, &["Smith, John_1001_2025_1040.pdf"]);
+        let folder = f.root.join("Smith, John (1001)");
+        std::fs::create_dir_all(&folder).unwrap();
+        let mut smith = f
+            .clients
+            .clients
+            .iter()
+            .find(|c| c.id == "1001")
+            .unwrap()
+            .clone();
+        if smith.uuid.is_nil() {
+            smith.uuid = uuid::Uuid::new_v4();
+        }
+        crate::sentinel::write_sentinel(&f.root, &folder, &smith, uuid::Uuid::new_v4()).unwrap();
+        let out = build_plan(&inp);
+        let p = row(&out, "Smith, John_1001_2025_1040.pdf");
+        assert_eq!(p.folder, Some(FolderAction::Exists(folder)));
+        assert_eq!(p.status, RowStatus::Ready);
     }
 
     #[test]
