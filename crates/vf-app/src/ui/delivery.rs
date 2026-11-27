@@ -1226,6 +1226,11 @@ impl DeliverWindow {
                         if by.is_empty() { "not signed yet".to_string() } else { format!("signed by {}", by.join(", ")) }
                     ));
                 }
+                // Training walkthrough 2026-11-27: the letters' Signed on paper… was never drawn
+                // once they were sent (this returned first), the only time it can be used.
+                if let Some(a) = self.paper_ui(ui, delivery::LETTERS, can, current.as_ref()) {
+                    act = Some(a);
+                }
                 return;
             }
             if self.letters.is_empty() {

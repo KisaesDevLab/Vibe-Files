@@ -794,6 +794,459 @@ mod tests {
         std::fs::write(out.join("steps.txt"), steps.join("\n")).unwrap();
     }
 
+    /// Owner 2026-11-27: the frames of the staff training video and guide "Delivering a tax
+    /// return with Vibe Files", from the real app against a real portal (made-up clients only).
+    /// 1920×1080 frames, `tNN-*.png` in `VF_WALK_DIR`, what to look at outlined. Same variables
+    /// as `delivery_walkthrough`.
+    #[test]
+    #[ignore = "needs a running portal"]
+    fn training_deliver_walkthrough() {
+        let (Ok(url), Ok(key), Ok(log), Ok(client_js), Ok(out)) = (
+            std::env::var("VF_WALK_URL"),
+            std::env::var("VF_WALK_KEY"),
+            std::env::var("VF_WALK_LOG"),
+            std::env::var("VF_WALK_CLIENT"),
+            std::env::var("VF_WALK_DIR"),
+        ) else {
+            return;
+        };
+        let out = std::path::PathBuf::from(out);
+        std::fs::create_dir_all(&out).unwrap();
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path().join("Clients");
+        vf_fixtures::generate(&root, 3).unwrap();
+        crate::ui::test_util::pdfium_first();
+        let data = t.path().join("data");
+        for e in std::fs::read_dir(&root).unwrap().flatten() {
+            let name = e.file_name().to_string_lossy().into_owned();
+            if e.path().is_dir() && !name.starts_with('_') {
+                let dir = e.path().join("Income Tax").join("2025");
+                std::fs::create_dir_all(&dir).unwrap();
+                crate::ui::test_util::write_lines_pdf(
+                    &dir.join("2025 Form 1040 Return - Sample.pdf"),
+                    crate::ui::test_util::SAMPLE_RETURN,
+                );
+            }
+        }
+        drop(crate::session::open(&data, "dev", &root).unwrap());
+        let cab = vf_fs::cabinet::read(&root).unwrap().cabinet_id;
+        let mut s = vf_portal::PortalSettings::new(&cab, &url, &key, 0)
+            .unwrap()
+            .with_deliveries(true)
+            .with_balances(true);
+        vf_portal::settings::save(&root, &s).unwrap();
+        crate::portal::register_inbox(&root).unwrap();
+        for (_, name) in vf_portal::delivery::STEP_DOC_TYPES {
+            vf_fs::doctypes::ensure(&root, name, vf_portal::delivery::DELIVERY_FOLDER, true)
+                .unwrap();
+        }
+        let d = data.clone();
+        let mut h = HarnessBuilder::default()
+            .with_max_steps(crate::ui::test_util::MAX_STEPS)
+            .with_theme(egui::Theme::Light)
+            .with_size([1440.0, 810.0])
+            .with_pixels_per_point(1920.0 / 1440.0)
+            .build_eframe(move |cc| VibeFilesApp::new(&cc.egui_ctx, d.clone()));
+        h.run_steps(8);
+        // A frame, with what to look at outlined in amber.
+        let shot = |h: &mut egui_kittest::Harness<'static, VibeFilesApp>,
+                    name: &str,
+                    marks: &[egui::Rect]| {
+            for _ in 0..6 {
+                h.step();
+            }
+            let ppp = 1920.0 / 1440.0;
+            match h.render() {
+                Ok(mut img) => {
+                    let (w, ht) = (img.width() as i64, img.height() as i64);
+                    for r in marks {
+                        let r = r.expand(5.0);
+                        let (x0, y0) = ((r.min.x * ppp) as i64, (r.min.y * ppp) as i64);
+                        let (x1, y1) = ((r.max.x * ppp) as i64, (r.max.y * ppp) as i64);
+                        for t in 0..4 {
+                            for x in x0 - t..=x1 + t {
+                                for y in [y0 - t, y1 + t] {
+                                    if (0..w).contains(&x) && (0..ht).contains(&y) {
+                                        img.put_pixel(
+                                            x as u32,
+                                            y as u32,
+                                            image::Rgba([245, 158, 11, 255]),
+                                        );
+                                    }
+                                }
+                            }
+                            for y in y0 - t..=y1 + t {
+                                for x in [x0 - t, x1 + t] {
+                                    if (0..w).contains(&x) && (0..ht).contains(&y) {
+                                        img.put_pixel(
+                                            x as u32,
+                                            y as u32,
+                                            image::Rgba([245, 158, 11, 255]),
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    img.save(out.join(format!("{name}.png"))).unwrap();
+                }
+                Err(e) => eprintln!("{name}: {e}"),
+            }
+        };
+        let said = |h: &egui_kittest::Harness<'static, VibeFilesApp>, text: &str| {
+            h.query_all_by_label_contains(text).next().is_some()
+        };
+        let wait_long =
+            |h: &mut egui_kittest::Harness<'static, VibeFilesApp>,
+             what: &str,
+             ok: &dyn Fn(&egui_kittest::Harness<'static, VibeFilesApp>) -> bool| {
+                let start = std::time::Instant::now();
+                while !ok(h) {
+                    assert!(start.elapsed().as_secs() < 90, "{what}: never");
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                    h.step();
+                }
+            };
+        let button = |h: &egui_kittest::Harness<'static, VibeFilesApp>, l: &str| {
+            h.get_by_role_and_label(Role::Button, l).rect()
+        };
+        h.get_by_role_and_label(Role::Button, "Open existing")
+            .click();
+        h.run_steps(8);
+        h.get_by_label("Cabinet folder").click();
+        h.step();
+        h.get_by_label("Cabinet folder")
+            .type_text(&root.display().to_string());
+        h.step();
+        h.get_by_role_and_label(Role::Button, "Open cabinet")
+            .click();
+        assert!(wait_for(&mut h, |h| matches!(
+            h.state().screen,
+            crate::app::Screen::Open(_)
+        )));
+        h.run_steps(8);
+        {
+            let o = open_mut(&mut h);
+            vf_fs::doctypes::sync(&mut o.opened.conn, &root, "dev", "doc_types_edit").unwrap();
+        }
+        // A person, not a business: a 1040.
+        let (ci, c) = {
+            let o = open_mut(&mut h);
+            let (i, c) = o
+                .browse
+                .snap
+                .clients
+                .iter()
+                .enumerate()
+                .find(|(_, c)| c.name.contains(", "))
+                .map(|(i, c)| (i, c.clone()))
+                .unwrap();
+            (i, c)
+        };
+        let first = c.name.split(", ").nth(1).unwrap_or("Jordan").to_string();
+        let last = c.name.split(", ").next().unwrap_or("Sample").to_string();
+        let email = format!(
+            "{}.{}@example.com",
+            first.to_lowercase(),
+            last.to_lowercase()
+        );
+        vf_fs::contacts::set_by_hand(
+            &root,
+            &c.id,
+            &vf_fs::contacts::Row {
+                first: first.clone(),
+                last: last.clone(),
+                email: email.clone(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let p = crate::portal::client(&s);
+        p.put_client(&c.id, &c.ext_id, &c.name, None).unwrap();
+        p.invite(
+            &c.id,
+            Some(&email),
+            None,
+            &format!("{first} {last}"),
+            "Taxpayer",
+        )
+        .unwrap();
+        // The firm's Assign new cards to: Pat Preparer.
+        let pat = p
+            .delivery_staff(&c.id)
+            .unwrap()
+            .into_iter()
+            .find(|x| x.name == "Pat Preparer")
+            .unwrap();
+        s = s.with_default_staff(Some(vf_portal::settings::DefaultStaff {
+            id: pat.id.clone(),
+            name: pat.name.clone(),
+        }));
+        vf_portal::settings::save(&root, &s).unwrap();
+        {
+            let o = open_mut(&mut h);
+            o.browse.set_scope(vf_core::browse::Scope::Client(ci));
+            o.browse.portal.reread();
+        }
+        h.run_steps(10);
+        wait_long(&mut h, "the panel", &|h| {
+            h.query_by_role_and_label(Role::Button, "Deliver…")
+                .is_some()
+        });
+
+        // ---- 2. Browse: the client, Deliver….
+        shot(&mut h, "t02a-browse-client", &[]);
+        let r = button(&h, "Deliver…");
+        shot(&mut h, "t02b-deliver-button", &[r]);
+        h.get_by_role_and_label(Role::Button, "Deliver…").click();
+        wait_long(&mut h, "the window read", &|h| {
+            said(h, "2025 Form 1040 Return - Sample.pdf")
+        });
+        h.run_steps(10);
+
+        // ---- 3. Kind, year, return type, title.
+        let marks = [h.get_by_label("Card title").rect()];
+        shot(&mut h, "t03-deliver-top", &marks);
+
+        // ---- 4. Letters: the kit letter's fill-ins, then the firm's own letter; preview.
+        h.get_by_label("Letters to sign").click();
+        h.run_steps(4);
+        h.query_all_by_label_contains("individual income tax return (Form 1040)")
+            .next()
+            .expect("the kit's 1040 letter")
+            .click();
+        h.run_steps(4);
+        wait_long(&mut h, "the boxes", &|h| said(h, "Fill in for this client"));
+        h.get_by_label("[State]").click();
+        h.step();
+        h.get_by_label("[State]").type_text("Kansas");
+        h.get_by_label("[Frequency]").click();
+        h.step();
+        h.get_by_label("[Frequency]").type_text("quarterly");
+        h.run_steps(4);
+        let r = h.get_by_label("[State]").rect();
+        shot(&mut h, "t04a-fill-ins", &[r]);
+        h.query_all_by_label_contains("individual income tax return (Form 1040)")
+            .next()
+            .unwrap()
+            .click();
+        h.run_steps(4);
+        let r = button(&h, "Preview letters…");
+        shot(&mut h, "t04b-letters-preview", &[r]);
+
+        // ---- 5. The return PDF.
+        let r = h.get_by_label("Tax return PDF").rect();
+        h.get_by_label("Tax return PDF").scroll_to_me();
+        h.run_steps(4);
+        let _ = r;
+        let r = h.get_by_label("Tax return PDF").rect();
+        shot(&mut h, "t05-return-pdf", &[r]);
+
+        // ---- 6. Form 8879: the eSignature link.
+        h.get_by_label("eSignature link").scroll_to_me();
+        h.run_steps(4);
+        h.get_by_label("eSignature link").click();
+        h.step();
+        h.get_by_label("eSignature link")
+            .type_text("https://esign.example-tax.test/s/training");
+        h.run_steps(4);
+        let r = h.get_by_label("eSignature link").rect();
+        shot(&mut h, "t06-esign-link", &[r]);
+
+        // ---- 7. Package and fee: shown, then left off.
+        h.get_by_label("Package and fee").scroll_to_me();
+        h.run_steps(3);
+        h.get_by_label("Package and fee").click();
+        h.run_steps(4);
+        h.get_by_label("Return fee").click();
+        h.step();
+        h.get_by_label("Return fee").type_text("450");
+        h.run_steps(4);
+        let r = h.get_by_label("Return fee").rect();
+        shot(&mut h, "t07-fee", &[r]);
+        h.get_by_label("Package and fee").click();
+        h.run_steps(4);
+
+        // ---- 8. Assigned to, reminders, Send to client.
+        h.get_by_role_and_label(Role::Button, "Send to client")
+            .scroll_to_me();
+        h.run_steps(4);
+        let r = button(&h, "Send to client");
+        shot(&mut h, "t08a-send", &[r]);
+        h.get_by_role_and_label(Role::Button, "Send to client")
+            .click();
+        wait_long(&mut h, "sent", &|h| said(h, "Sent to the client."));
+        let r = h.get_by_label("Sent to the client.").rect();
+        shot(&mut h, "t08b-sent", &[r]);
+        let did = p.deliveries(Some(&c.id)).unwrap()[0].id.clone();
+
+        // ---- 12 (shown later). The letters signed on paper (the letters' button is the upper
+        // one; Form 8879 has its own).
+        h.get_by_label("Letters to sign").scroll_to_me();
+        h.run_steps(4);
+        h.query_all_by_role_and_label(Role::Button, "Signed on paper…")
+            .min_by(|a, b| a.rect().top().total_cmp(&b.rect().top()))
+            .unwrap()
+            .click();
+        h.run_steps(4);
+        h.get_by_label("Signed on paper note").click();
+        h.step();
+        h.get_by_label("Signed on paper note")
+            .type_text("Signed at the office");
+        h.run_steps(3);
+        let r = button(&h, "Mark signed");
+        shot(&mut h, "t12a-paper", &[r]);
+        h.get_by_role_and_label(Role::Button, "Mark signed").click();
+        wait_long(&mut h, "marked", &|h| said(h, "marked signed on paper"));
+        assert!(
+            said(&h, "The letters marked signed on paper"),
+            "the letters, not Form 8879"
+        );
+        shot(&mut h, "t12b-paper-done", &[]);
+        open_mut(&mut h).browse.portal.delivery = None;
+        h.run_steps(6);
+
+        // ---- 9. The client's details line.
+        open_mut(&mut h).browse.portal.look_at_deliveries_now();
+        wait_long(&mut h, "the panel line", &|h| {
+            said(h, "Tax return delivery")
+        });
+        let r = h
+            .query_all_by_label_contains("Tax return delivery")
+            .next()
+            .unwrap()
+            .rect();
+        shot(&mut h, "t09-panel-line", &[r]);
+
+        // ---- The client opens the return and says they signed Form 8879 (off camera).
+        let ok = std::process::Command::new("node")
+            .args([
+                &client_js,
+                &url,
+                &out.display().to_string(),
+                &log,
+                &email,
+                "deliver",
+            ])
+            .status()
+            .is_ok_and(|s| s.success());
+        assert!(ok, "the client's steps");
+
+        // ---- 10. Admin › Portal › Deliveries.
+        h.get_by_role_and_label(Role::Button, "Admin").click();
+        h.run_steps(6);
+        h.get_by_role_and_label(Role::Button, "Portal").click();
+        h.run_steps(6);
+        h.get_by_role_and_label(Role::Button, "Deliveries").click();
+        wait_long(&mut h, "the list", &|h| said(h, "1 listed"));
+        h.run_steps(8);
+        shot(&mut h, "t10a-deliveries", &[]);
+        let r = h.get_by_label("Filter").rect();
+        h.get_by_label("Filter").click();
+        h.step();
+        h.get_by_label("Filter").type_text(&last);
+        h.run_steps(4);
+        shot(&mut h, "t10b-filter", &[r]);
+        h.get_by_label("Tick row").click();
+        h.run_steps(4);
+        let r = button(&h, "Remind ticked");
+        shot(&mut h, "t10c-remind", &[r]);
+        h.get_by_label("Tick row").click();
+        h.run_steps(3);
+
+        // ---- 11. Confirm signed.
+        h.get_by_role_and_label(Role::Button, "Browse").click();
+        h.run_steps(6);
+        h.get_by_role_and_label(Role::Button, "Deliver…").click();
+        wait_long(&mut h, "signed", &|h| {
+            said(h, "The client says they signed it.")
+        });
+        h.get_by_role_and_label(Role::Button, "Confirm signed")
+            .scroll_to_me();
+        h.run_steps(4);
+        let marks = [
+            h.get_by_label("The client says they signed it.").rect(),
+            button(&h, "Confirm signed"),
+        ];
+        shot(&mut h, "t11a-client-signed", &marks);
+        h.get_by_role_and_label(Role::Button, "Confirm signed")
+            .click();
+        wait_long(&mut h, "confirmed", &|h| said(h, "Form 8879 confirmed."));
+        shot(&mut h, "t11b-confirmed", &[]);
+        assert_eq!(p.delivery(&did).unwrap().status, "complete");
+        open_mut(&mut h).browse.portal.delivery = None;
+        h.run_steps(4);
+
+        // ---- 13. The step PDFs filed by Intake.
+        open_mut(&mut h).browse.portal.fetch_now = true;
+        let inbox = crate::portal::inbox(&root);
+        let count = |inbox: &std::path::Path| {
+            std::fs::read_dir(inbox)
+                .ok()
+                .into_iter()
+                .flatten()
+                .flatten()
+                .filter(|e| e.file_name().to_string_lossy().contains(" Delivery "))
+                .count()
+        };
+        let start = std::time::Instant::now();
+        let mut asked = std::time::Instant::now();
+        while count(&inbox) < 3 && start.elapsed().as_secs() < 120 {
+            if asked.elapsed().as_secs() >= 10 {
+                open_mut(&mut h).browse.portal.fetch_now = true;
+                asked = std::time::Instant::now();
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            h.step();
+        }
+        let got: Vec<String> = std::fs::read_dir(&inbox)
+            .map(|r| {
+                r.flatten()
+                    .map(|e| e.file_name().to_string_lossy().into_owned())
+                    .collect()
+            })
+            .unwrap_or_default();
+        eprintln!("Portal inbox: {got:?}");
+        let n = count(&inbox);
+        assert!(n >= 2, "the step PDFs fetched");
+        h.state_mut().tab = crate::app::Tab::Intake;
+        h.run_steps(10);
+        if let Some(b) = h.query_by_label("Preview") {
+            b.click();
+        }
+        let commit = format!("Commit {n} files");
+        wait_long(&mut h, "rows ready", &|h| said(h, &commit));
+        let r = h
+            .query_all_by_role_and_label(Role::Button, &commit)
+            .last()
+            .unwrap()
+            .rect();
+        shot(&mut h, "t13a-intake", &[r]);
+        h.query_all_by_role_and_label(Role::Button, &commit)
+            .last()
+            .unwrap()
+            .click();
+        h.run_steps(6);
+        wait_long(&mut h, "the commit summary", &|h| {
+            h.query_all_by_label("Confirm commit").next().is_some()
+        });
+        h.query_all_by_label("Confirm commit")
+            .next()
+            .unwrap()
+            .click();
+        h.run_steps(10);
+        let dir = root
+            .join(c.folder_rel.as_ref().unwrap())
+            .join("Income Tax")
+            .join("2025")
+            .join("Delivery");
+        let path = dir.join("2025 Delivery 5 - Form 8879.pdf");
+        wait_long(&mut h, "filed", &|_| path.exists());
+        h.state_mut().tab = crate::app::Tab::Browse;
+        h.run_steps(10);
+        shot(&mut h, "t13b-filed", &[]);
+    }
+
     /// Addendum §12 slice 3 (letters) walkthrough against a real Vibe Portal: the Deliver window
     /// sends the engagement letter for a joint 1040 with both spouses as signers (from Portal
     /// contacts); in headless Edge the taxpayer signs, then the spouse on the same device after
