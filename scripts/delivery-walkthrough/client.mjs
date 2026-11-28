@@ -618,6 +618,95 @@ try {
     await sleep(600);
     await shot('96-mailed-back');
     note('Pressed I\'ve mailed it back: the card says You said you mailed it back');
+  } else if (PHASE === 'train-shared') {
+    // Training 2026-11-27 (sharing through the portal): the client accepts the invitation, sees
+    // the files the firm shared, opens one, and sends a file back (SECOND: its path).
+    const inv = await mailWith('/invite', 0);
+    await go(linkIn(inv.body, '/invite'));
+    await until(`!!__byText('button', 'Accept and sign in')`, 'invitation page');
+    await tshot('k01-invitation');
+    await click('Accept and sign in');
+    await until(`location.pathname === '/'`, 'home after accepting');
+    await until(`document.body.innerText.includes('Files from the firm')`, 'the files', 20000);
+    await sleep(1000);
+    await tshot('k02-home');
+    await tshot('k03-files', 'Files from the firm');
+    const first = await js(`fetch('/api/portal/files').then((r) => r.json()).then((f) => f.files[0].id)`);
+    await go(`${BASE}/files/${first}`);
+    await sleep(2500);
+    await tshot('k04-file');
+    await go(`${BASE}/`);
+    await until(`!!document.querySelector('input[type=file]')`, 'the upload box', 20000);
+    const root = (await send('DOM.getDocument', { depth: -1 })).result.root;
+    const { nodeId } = await send('DOM.querySelector', { nodeId: root.nodeId, selector: 'input[type=file]' }).then((r) => r.result);
+    await send('DOM.setFileInputFiles', { nodeId, files: [SECOND] });
+    await sleep(800);
+    await tshot('k05-chosen', 'Files to send');
+    await js(`(() => { const b = [...document.querySelectorAll('button')].find((e) => e.textContent.trim() === 'Send'); b.click(); return true; })()`);
+    await until(`!!document.querySelector('ul[aria-label="Sent"]')`, 'sent', 30000);
+    await sleep(800);
+    await tshot('k06-sent', 'Sent');
+    note('The client saw the shared files and sent one back');
+  } else if (PHASE === 'train-secure') {
+    // Training 2026-11-27 (a secure link to someone outside the client): EMAIL is the recipient.
+    const m = await mailWith('/shared#t=', 0);
+    await go(linkIn(m.body, '/shared#t='));
+    await until(`!!__byText('button', 'Send access code')`, 'the link page', 20000);
+    await sleep(600);
+    await tshot('l01-link');
+    const start = Date.now() / 1000;
+    await click('Send access code');
+    await until(`document.body.innerText.includes('Access code')`, 'the code box');
+    const c = await mailWith('code', start);
+    const code = /(\d{6})/.exec(c.body)[1];
+    await js(`__type([...document.querySelectorAll('input')].find((i) => i.autocomplete === 'one-time-code'), ${JSON.stringify(code)})`);
+    await sleep(400);
+    await tshot('l02-code', 'Access code');
+    await click('Verify code');
+    await until(`[...document.querySelectorAll('a,button')].some((e) => e.textContent.trim() === 'Download')`, 'the documents', 20000);
+    await sleep(1500);
+    await tshot('l03-documents');
+    note(`The recipient opened the link with the code (${m.body.length} character email)`);
+  } else if (PHASE === 'train-signin' || PHASE === 'train-balance') {
+    // Training 2026-11-27: the client signs in again by an emailed link; train-balance then pays
+    // the balance by card (SECOND: the Stripe stand-in) and sees the receipt.
+    const start = Date.now() / 1000;
+    await go(`${BASE}/login`);
+    await until(`!!document.querySelector('input')`, 'the sign-in page');
+    await js(`__type(document.querySelector('input'), ${JSON.stringify(EMAIL)})`);
+    await click('Continue');
+    const m = await mailWith('/auth/verify', start);
+    await go(linkIn(m.body, '/auth/verify'));
+    await until(`!!__byText('button', 'Sign in')`, 'the sign-in link');
+    await click('Sign in');
+    await until(`location.pathname === '/'`, 'home after signing in');
+    await sleep(1500);
+    if (PHASE === 'train-signin') {
+      await tshot('n01-home');
+      await tshot('n02-closure', THIRD || 'closure');
+    } else {
+      const STRIPE = SECOND;
+      await until(`document.body.innerText.includes('Balance due')`, 'the balance card', 20000);
+      await tshot('o01-balance', 'Balance due');
+      await js(`(() => { const b = [...document.querySelectorAll('button')].find((e) => e.textContent.trim().startsWith('Pay by card')); b.click(); return true; })()`);
+      let session = null;
+      for (let i = 0; i < 40 && !session; i++) {
+        await sleep(250);
+        const s = await (await fetch(`${STRIPE}/_last`)).json();
+        if (s?.metadata?.balance_id) session = s;
+      }
+      if (!session) throw new Error('no Checkout Session for the balance');
+      await fetch(`${STRIPE}/_pay`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sessionId: session.id, balanceId: session.metadata.balance_id, paid: true }),
+      });
+      await go(`${BASE}/?balance=${session.metadata.balance_id}&session_id=${session.id}`);
+      await until(`!document.body.innerText.includes('Pay by card')`, 'paid', 20000);
+      await sleep(1500);
+      await tshot('o02-paid', 'Receipt');
+      note('The balance was paid by card');
+    }
   } else if (PHASE === 'held') {
     // A balance posted with Hold the client's files: listed, held, Pay now; paid, they open.
     const STRIPE = SECOND;
