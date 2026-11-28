@@ -3337,8 +3337,9 @@ fn tree(ui: &mut egui::Ui, b: &mut Browse) {
                 Scope::Saved { name: cur, ids } if *cur == name => Some(ids.len()),
                 _ => None,
             };
-            let (sel, n) = (shown.is_some(), shown.unwrap_or(0));
-            let (_, resp) = tree_row(ui, 0, None, false, &name, n, sel);
+            // Owner Q&A 2026-11-27: no number until it is opened (it was 0): its count is
+            // worked out only when it runs.
+            let (_, resp) = tree_row_count(ui, 0, None, false, &name, shown, shown.is_some());
             if resp.clicked() {
                 b.saved_open = Some(i);
             }
@@ -3722,6 +3723,19 @@ fn tree_row(
     count: usize,
     sel: bool,
 ) -> (bool, egui::Response) {
+    tree_row_count(ui, depth, chevron, warn, label, Some(count), sel)
+}
+
+/// A tree row whose count may be unknown yet (`None`: no number shown).
+fn tree_row_count(
+    ui: &mut egui::Ui,
+    depth: usize,
+    chevron: Option<bool>,
+    warn: bool,
+    label: &str,
+    count: Option<usize>,
+    sel: bool,
+) -> (bool, egui::Response) {
     ui.horizontal(|ui| {
         ui.add_space(depth as f32 * 16.0);
         let (rect, chev) = ui.allocate_exact_size(egui::vec2(14.0, 14.0), Sense::click());
@@ -3734,14 +3748,16 @@ fn tree_row(
             paint_chevron(ui, rect, open);
         }
         let resp = ui.selectable_label(sel, label);
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            let c = if warn && count > 0 {
-                theme::warn()
-            } else {
-                theme::ink_muted()
-            };
-            ui.label(RichText::new(count.to_string()).small().color(c));
-        });
+        if let Some(count) = count {
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                let c = if warn && count > 0 {
+                    theme::warn()
+                } else {
+                    theme::ink_muted()
+                };
+                ui.label(RichText::new(count.to_string()).small().color(c));
+            });
+        }
         (chevron.is_some() && chev.clicked(), resp)
     })
     .inner
@@ -6604,8 +6620,16 @@ mod tests {
         .unwrap();
         h.state_mut().b.saved = vf_index::saved::load(&root);
         h.run();
+        // Owner Q&A 2026-11-27: no number beside it until it is opened (it showed 0).
+        let on_row = |h: &Harness<'_, State>, n: &str| {
+            let row = h.get_by_label("Everything 2025").rect();
+            h.query_all_by_label(n)
+                .any(|x| (x.rect().center().y - row.center().y).abs() < 4.0)
+        };
+        assert!(!on_row(&h, "0"), "no count before it runs");
         click(&mut h, "Everything 2025");
         h.run();
+        assert!(on_row(&h, "12"), "its count once open");
         let b = &h.state().b;
         assert!(matches!(&b.scope, Scope::Saved { name, .. } if name == "Everything 2025"));
         assert_eq!(b.visible.len(), 12, "half of 3 × 8 are 2025");
