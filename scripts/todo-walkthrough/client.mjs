@@ -6,6 +6,7 @@ import { spawn } from 'node:child_process';
 import { readFile, writeFile, mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { W, H, emulate } from '../walkthrough/mobile.mjs';
 
 const [BASE, OUT, LOG, EMAIL, PHASE, PDF] = process.argv.slice(2);
 const EDGE = 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe';
@@ -20,7 +21,7 @@ const note = (s) => {
 const profile = await mkdtemp(join(tmpdir(), 'edge-walk-'));
 const edge = spawn(
   EDGE,
-  ['--headless=new', `--remote-debugging-port=${DPORT}`, `--user-data-dir=${profile}`, '--hide-scrollbars', '--no-first-run', '--window-size=1280,900', 'about:blank'],
+  ['--headless=new', `--remote-debugging-port=${DPORT}`, `--user-data-dir=${profile}`, '--hide-scrollbars', '--no-first-run', `--window-size=${W},${H}`, 'about:blank'],
   { stdio: 'ignore' },
 );
 let target;
@@ -54,7 +55,11 @@ const js = async (expr) => {
 };
 await send('Page.enable');
 await send('DOM.enable');
-await send('Emulation.setDeviceMetricsOverride', { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false });
+await emulate(send);
+// Training 2026-11-27: VF_TRAIN=1 adds phone-screen captures (train-*.png, the visible screen
+// only, light), named for the video's scenes.
+const TRAIN = process.env.VF_TRAIN === '1';
+if (TRAIN) await send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value: 'light' }] });
 
 // Helpers that run in the page.
 await send('Page.addScriptToEvaluateOnNewDocument', {
@@ -86,6 +91,16 @@ const until = async (expr, what, ms = 15000) => {
 const shot = async (name) => {
   const { result } = await send('Page.captureScreenshot', { format: 'png', captureBeyondViewport: true });
   await writeFile(join(OUT, `${name}.png`), Buffer.from(result.data, 'base64'));
+};
+const tshot = async (name, text = null) => {
+  if (!TRAIN) return;
+  await js(text
+    ? `(() => { const e = [...document.querySelectorAll('body *')].reverse().find((x) => x.children.length === 0 && x.textContent.includes(${JSON.stringify(text)})); if (e) e.scrollIntoView({ block: 'center' }); return true; })()`
+    : 'window.scrollTo(0, 0)');
+  await sleep(500);
+  const v = await js('({ x: scrollX, y: scrollY, w: innerWidth, h: innerHeight })');
+  const { result } = await send('Page.captureScreenshot', { format: 'png', clip: { x: v.x, y: v.y, width: v.w, height: v.h, scale: 1 } });
+  await writeFile(join(OUT, `train-${name}.png`), Buffer.from(result.data, 'base64'));
 };
 const click = async (text, sel = 'button') => {
   const ok = await js(`(() => { const b = __byText(${JSON.stringify(sel)}, ${JSON.stringify(text)}); if (!b) return false; b.click(); return true; })()`);
@@ -145,12 +160,14 @@ try {
     // Step 5: signing in from the login page, by the emailed link.
     await signIn();
     await shot('06-client-home-to-do');
+    await tshot('t01-home', 'To do');
     note(`Home page: ${(await js(`document.body.innerText`)).split('\n').filter((l) => /to do|of \d+ done/i.test(l)).join(' | ')}`);
 
     // Open the list.
     await click('Open');
     await until(`document.querySelectorAll('li.p-todo-item').length > 0`, 'list items');
     await shot('07-client-list-open');
+    await tshot('t02-list');
     const items = await js(`[...document.querySelectorAll('li.p-todo-item')].map((li) => li.getAttribute('aria-label'))`);
     note(`Items shown to the client: ${items.length}`);
 
@@ -162,6 +179,7 @@ try {
     await send('DOM.setFileInputFiles', { files: [PDF], objectId: inputNode.result.objectId });
     await until(`!!__byText('button', 'Send another file', __item(${JSON.stringify(w2)}))`, 'upload done', 30000);
     await shot('08-client-uploaded');
+    await tshot('t03-uploaded', 'Send another file');
     note(`Uploaded ${PDF.split(/[\\/]/).pop()} for "${w2}"`);
 
     // Step 7: answer a question, and mark a document as not applying.
@@ -172,6 +190,7 @@ try {
     await js(`__byText('button', 'Send answer', __item(${JSON.stringify(q)})).click()`);
     await until(`!!__byText('button', 'Change answer', __item(${JSON.stringify(q)}))`, 'answer sent');
     note(`Answered "${q}"`);
+    await tshot('t04-answered', 'Change answer');
     const na = items.find((l) => l.startsWith('Form 1098'));
     await js(`__byText('button', 'Does not apply', __item(${JSON.stringify(na)})).click()`);
     await sleep(500);
@@ -181,6 +200,7 @@ try {
     note(`Marked "${na}" as not applying`);
     await sleep(800);
     await shot('09-client-answered');
+    await tshot('t05-not-apply', 'Form 1098');
     note(`Progress: ${await js(`[...document.querySelectorAll('[aria-label*=" done"]')].map((e) => e.getAttribute('aria-label')).join(' | ')`)}`);
   } else {
     // After the firm cancelled one list and deleted the other.
