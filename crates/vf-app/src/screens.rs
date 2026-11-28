@@ -4116,6 +4116,261 @@ mod tests {
         shot(&mut h, "y08b-pill-menu", &[]);
     }
 
+    /// Owner 2026-11-27: the frames of the training video "Admin basics" (admins): the admin
+    /// password, doc types, the folder template, retention classes, disposition, legal holds
+    /// and the audit trail. Frames at 1920×1080 in `VF_WALK_DIR`. Run as
+    /// `USERNAME=ppreparer COMPUTERNAME=FRONTDESK-PC` with TMP in a neutral folder.
+    #[test]
+    #[ignore = "makes training frames"]
+    fn training_admin_walkthrough() {
+        let Ok(out) = std::env::var("VF_WALK_DIR") else {
+            return;
+        };
+        let out = std::path::PathBuf::from(out);
+        std::fs::create_dir_all(&out).unwrap();
+        crate::ui::test_util::pdfium_first();
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path().join("Clients");
+        vf_fixtures::generate(&root, 3).unwrap();
+        let data = t.path().join("data");
+        drop(crate::session::open(&data, "dev", &root).unwrap());
+        let d = data.clone();
+        let mut h = HarnessBuilder::default()
+            .with_max_steps(crate::ui::test_util::MAX_STEPS)
+            .with_theme(egui::Theme::Light)
+            .with_size([1440.0, 810.0])
+            .with_pixels_per_point(1920.0 / 1440.0)
+            .build_eframe(move |cc| VibeFilesApp::new(&cc.egui_ctx, d.clone()));
+        h.run_steps(8);
+        let shot = |h: &mut egui_kittest::Harness<'static, VibeFilesApp>,
+                    name: &str,
+                    marks: &[egui::Rect]| {
+            if let Some(b) = h.query_by_role_and_label(Role::Button, "Dismiss") {
+                b.click();
+            }
+            for _ in 0..6 {
+                h.step();
+            }
+            let ppp = 1920.0 / 1440.0;
+            match h.render() {
+                Ok(mut img) => {
+                    let (w, ht) = (img.width() as i64, img.height() as i64);
+                    for r in marks {
+                        let r = r.expand(5.0);
+                        let (x0, y0) = ((r.min.x * ppp) as i64, (r.min.y * ppp) as i64);
+                        let (x1, y1) = ((r.max.x * ppp) as i64, (r.max.y * ppp) as i64);
+                        for t in 0..4 {
+                            for x in x0 - t..=x1 + t {
+                                for y in [y0 - t, y1 + t] {
+                                    if (0..w).contains(&x) && (0..ht).contains(&y) {
+                                        img.put_pixel(
+                                            x as u32,
+                                            y as u32,
+                                            image::Rgba([245, 158, 11, 255]),
+                                        );
+                                    }
+                                }
+                            }
+                            for y in y0 - t..=y1 + t {
+                                for x in [x0 - t, x1 + t] {
+                                    if (0..w).contains(&x) && (0..ht).contains(&y) {
+                                        img.put_pixel(
+                                            x as u32,
+                                            y as u32,
+                                            image::Rgba([245, 158, 11, 255]),
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    img.save(out.join(format!("{name}.png"))).unwrap();
+                }
+                Err(e) => eprintln!("{name}: {e}"),
+            }
+        };
+        let dump = |h: &egui_kittest::Harness<'static, VibeFilesApp>, at: &str| {
+            use egui_kittest::kittest::NodeT;
+            for n in h.root().children_recursive() {
+                let a = n.accesskit_node();
+                let l = a.label().unwrap_or_default();
+                if !l.is_empty() && !matches!(a.role(), Role::Label | Role::Unknown) {
+                    eprintln!("NODE[{at}] {:?} {l:?}", a.role());
+                }
+            }
+        };
+        h.get_by_role_and_label(Role::Button, "Open existing")
+            .click();
+        h.run_steps(8);
+        h.get_by_label("Cabinet folder").click();
+        h.step();
+        h.get_by_label("Cabinet folder")
+            .type_text(&root.display().to_string());
+        h.step();
+        h.get_by_role_and_label(Role::Button, "Open cabinet")
+            .click();
+        assert!(wait_for(&mut h, |h| matches!(
+            h.state().screen,
+            crate::app::Screen::Open(_)
+        )));
+        h.run_steps(12);
+        let button = |h: &egui_kittest::Harness<'static, VibeFilesApp>, l: &str| {
+            h.get_by_role_and_label(Role::Button, l).rect()
+        };
+        let go = |h: &mut egui_kittest::Harness<'static, VibeFilesApp>, page: &str| {
+            h.query_all_by_label(page)
+                .next()
+                .or_else(|| h.query_all_by_label_contains(page).next())
+                .unwrap()
+                .scroll_to_me();
+            h.run_steps(3);
+            h.query_all_by_label(page)
+                .next()
+                .or_else(|| h.query_all_by_label_contains(page).next())
+                .unwrap()
+                .click();
+            h.run_steps(10);
+        };
+
+        // ---- j07 first: a legal hold placed from Browse (so the Admin pages have one).
+        select_in(&mut h, 0, "Income Tax/2025", "W-2");
+        h.run_steps(10);
+        h.get_by_role_and_label(Role::Button, "Place legal hold on this document…")
+            .scroll_to_me();
+        h.run_steps(4);
+        let r = button(&h, "Place legal hold on this document…");
+        shot(&mut h, "j07a-hold-button", &[r]);
+        h.get_by_role_and_label(Role::Button, "Place legal hold on this document…")
+            .click();
+        h.run_steps(8);
+        h.get_by_label("Hold reason").click();
+        h.step();
+        h.get_by_label("Hold reason")
+            .type_text("IRS examination of the 2025 return");
+        h.run_steps(4);
+        h.get_by_role_and_label(Role::Button, "Place hold")
+            .scroll_to_me();
+        h.run_steps(4);
+        let r = h
+            .get_by_label("Hold reason")
+            .rect()
+            .union(button(&h, "Place hold"));
+        shot(&mut h, "j07b-hold-dialog", &[r]);
+        h.get_by_role_and_label(Role::Button, "Place hold").click();
+        h.run_steps(10);
+        assert!(
+            h.query_by_role_and_label(Role::Button, "Place hold")
+                .is_none(),
+            "the hold placed"
+        );
+
+        h.get_by_role_and_label(Role::Button, "Admin").click();
+        h.run_steps(10);
+        // ---- j02. The admin password.
+        go(&mut h, "No admin password: set one");
+        h.get_by_label("New password").click();
+        h.step();
+        h.get_by_label("New password")
+            .type_text("made-up admin password");
+        h.get_by_label("New password again").click();
+        h.step();
+        h.get_by_label("New password again")
+            .type_text("made-up admin password");
+        h.run_steps(4);
+        let r = h
+            .get_by_label("New password")
+            .rect()
+            .union(button(&h, "Set admin password"));
+        shot(&mut h, "j02a-password", &[r]);
+        h.get_by_role_and_label(Role::Button, "Set admin password")
+            .click();
+        h.run_steps(10);
+        let r = h
+            .get_by_label("Admin password")
+            .rect()
+            .union(button(&h, "Unlock"));
+        shot(&mut h, "j02b-locked", &[r]);
+        h.get_by_label("Admin password").click();
+        h.step();
+        h.get_by_label("Admin password")
+            .type_text("made-up admin password");
+        h.get_by_role_and_label(Role::Button, "Unlock").click();
+        h.run_steps(12);
+        dump(&h, "unlocked");
+        shot(&mut h, "j02c-unlocked", &[]);
+
+        // ---- j03. Doc types.
+        go(&mut h, "Doc types (");
+        let r = button(&h, "Add doc type");
+        shot(&mut h, "j03a-doctypes", &[r]);
+        h.get_by_role_and_label(Role::Button, "Add doc type")
+            .click();
+        h.run_steps(8);
+        h.get_by_label("Doc type name").click();
+        h.step();
+        h.get_by_label("Doc type name").type_text("Appraisal");
+        h.get_by_label("Default folder").click();
+        h.step();
+        h.get_by_label("Default folder").type_text("Permanent");
+        h.run_steps(4);
+        let r = h
+            .get_by_label("Doc type name")
+            .rect()
+            .union(h.get_by_role_and_label(Role::ComboBox, "Retention").rect())
+            .union(button(&h, "Add"));
+        shot(&mut h, "j03b-add", &[r]);
+        h.get_by_role_and_label(Role::Button, "Add").click();
+        h.run_steps(10);
+        dump(&h, "added");
+        shot(&mut h, "j03c-added", &[]);
+
+        // ---- j04. The folder template.
+        go(&mut h, "Folder templates");
+        h.get_by_role_and_label(Role::Button, "Correspondence")
+            .click();
+        h.run_steps(6);
+        let r = button(&h, "Add sub-folder").union(button(&h, "Add {Year} folder"));
+        shot(&mut h, "j04a-template", &[r]);
+        h.get_by_role_and_label(Role::Button, "Add sub-folder")
+            .click();
+        h.run_steps(8);
+        let r = button(&h, "Save template").union(button(&h, "Discard changes"));
+        shot(&mut h, "j04b-added", &[r]);
+        h.get_by_role_and_label(Role::Button, "Discard changes")
+            .click();
+        h.run_steps(6);
+
+        // ---- j05. Retention classes.
+        go(&mut h, "Retention classes");
+        let r = button(&h, "Edit Returns & workpapers");
+        shot(&mut h, "j05a-retention", &[r]);
+        h.get_by_role_and_label(Role::Button, "Edit Returns & workpapers")
+            .click();
+        h.run_steps(8);
+        dump(&h, "retedit");
+        shot(&mut h, "j05b-retention-edit", &[]);
+        if h.query_by_role_and_label(Role::Button, "Cancel").is_some() {
+            h.get_by_role_and_label(Role::Button, "Cancel").click();
+            h.run_steps(6);
+        }
+
+        // ---- j06. Disposition; j07. Legal holds.
+        go(&mut h, "Disposition");
+        shot(&mut h, "j06-disposition", &[]);
+        go(&mut h, "Legal holds");
+        dump(&h, "holds");
+        shot(&mut h, "j07c-holds", &[]);
+
+        // ---- j08. The audit trail.
+        go(&mut h, "Audit trail");
+        let r = button(&h, "Verify now");
+        let r2 = button(&h, "Export CSV…").union(button(&h, "Export PDF…"));
+        shot(&mut h, "j08a-audit", &[r, r2]);
+        h.get_by_role_and_label(Role::Button, "Verify now").click();
+        h.run_steps(10);
+        shot(&mut h, "j08b-verified", &[]);
+    }
+
     /// Addendum §12 slice 3 (letters) walkthrough against a real Vibe Portal: the Deliver window
     /// sends the engagement letter for a joint 1040 with both spouses as signers (from Portal
     /// contacts); in headless Edge the taxpayer signs, then the spouse on the same device after
