@@ -101,7 +101,10 @@ const tshot = async (name, text = null) => {
     ? `(() => { const e = [...document.querySelectorAll('body *')].reverse().find((x) => x.children.length === 0 && x.textContent.includes(${JSON.stringify(text)})); if (e) e.scrollIntoView({ block: 'center' }); return true; })()`
     : 'window.scrollTo(0, 0)');
   await sleep(500);
-  const { result } = await send('Page.captureScreenshot', { format: 'png' });
+  // The visible screen exactly: without a clip, headless Edge sometimes returns the screen
+  // tiled after a long page (training 2026-11-27).
+  const v = await js('({ x: scrollX, y: scrollY, w: innerWidth, h: innerHeight })');
+  const { result } = await send('Page.captureScreenshot', { format: 'png', clip: { x: v.x, y: v.y, width: v.w, height: v.h, scale: 1 } });
   await writeFile(join(OUT, `train-${name}.png`), Buffer.from(result.data, 'base64'));
 };
 const click = async (text, sel = 'button') => {
