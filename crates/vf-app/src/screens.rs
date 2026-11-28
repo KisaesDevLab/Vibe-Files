@@ -4250,20 +4250,6 @@ mod tests {
         let button = |h: &egui_kittest::Harness<'static, VibeFilesApp>, l: &str| {
             h.get_by_role_and_label(Role::Button, l).rect()
         };
-        let go = |h: &mut egui_kittest::Harness<'static, VibeFilesApp>, page: &str| {
-            h.query_all_by_label(page)
-                .next()
-                .or_else(|| h.query_all_by_label_contains(page).next())
-                .unwrap()
-                .scroll_to_me();
-            h.run_steps(3);
-            h.query_all_by_label(page)
-                .next()
-                .or_else(|| h.query_all_by_label_contains(page).next())
-                .unwrap()
-                .click();
-            h.run_steps(10);
-        };
 
         // ---- m02. Admin › Similar clients finds the pair.
         h.get_by_role_and_label(Role::Button, "Admin").click();
