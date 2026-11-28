@@ -4907,7 +4907,7 @@ mod tests {
                             .map(String::from)
                     })
                 })
-                .last()
+                .next_back()
         };
 
         // ---- q02. Admin › Portal: the address and key, Test, Save.
