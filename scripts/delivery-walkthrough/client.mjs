@@ -217,8 +217,11 @@ try {
     const inv = await mailWith('/invite', 0);
     await go(linkIn(inv.body, '/invite'));
     await until(`!!__byText('button', 'Accept and sign in')`, 'invitation page');
+    await tshot('q01-invitation');
     await click('Accept and sign in');
     await until(`location.pathname === '/'`, 'home after accepting');
+    await sleep(1200);
+    await tshot('q02-home');
     note('Invitation accepted');
   } else if (PHASE === 'deliver') {
     // The client accepts the firm's portal invitation and lands on the home page.
@@ -621,6 +624,11 @@ try {
     await sleep(600);
     await shot('96-mailed-back');
     note('Pressed I\'ve mailed it back: the card says You said you mailed it back');
+  } else if (PHASE === 'train-request') {
+    // Training 2026-11-27: the request form on the portal's sign-in page, as someone sees it.
+    await go(`${BASE}/request-access`);
+    await sleep(1500);
+    await tshot('q03-request');
   } else if (PHASE === 'train-shared') {
     // Training 2026-11-27 (sharing through the portal): the client accepts the invitation, sees
     // the files the firm shared, opens one, and sends a file back (SECOND: its path).

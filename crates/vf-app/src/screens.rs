@@ -4741,6 +4741,409 @@ mod tests {
         shot(&mut h, "y08b-pill-menu", &[]);
     }
 
+    /// Owner 2026-11-27: the frames of the training video "Portal set-up and users" (admins):
+    /// Admin › Portal filled in and saved, Portal users… inviting someone, the invitation on a
+    /// phone, Invite from client list, and a request for access approved. Set `VF_WALK_URL`,
+    /// `VF_WALK_KEY`, `VF_WALK_LOG`, `VF_WALK_CLIENT` (delivery-walkthrough/client.mjs) and
+    /// `VF_WALK_DIR`; `VF_TRAIN=1 VF_MOBILE=1` for the phone screens.
+    #[test]
+    #[ignore = "needs a running portal"]
+    fn training_portal_setup_walkthrough() {
+        let (Ok(url), Ok(key), Ok(log), Ok(client_js), Ok(out)) = (
+            std::env::var("VF_WALK_URL"),
+            std::env::var("VF_WALK_KEY"),
+            std::env::var("VF_WALK_LOG"),
+            std::env::var("VF_WALK_CLIENT"),
+            std::env::var("VF_WALK_DIR"),
+        ) else {
+            return;
+        };
+        let out = std::path::PathBuf::from(out);
+        std::fs::create_dir_all(&out).unwrap();
+        crate::ui::test_util::pdfium_first();
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path().join("Clients");
+        vf_fixtures::generate(&root, 3).unwrap();
+        let data = t.path().join("data");
+        drop(crate::session::open(&data, "dev", &root).unwrap());
+        let d = data.clone();
+        let mut h = HarnessBuilder::default()
+            .with_max_steps(crate::ui::test_util::MAX_STEPS)
+            .with_theme(egui::Theme::Light)
+            .with_size([1440.0, 810.0])
+            .with_pixels_per_point(1920.0 / 1440.0)
+            .build_eframe(move |cc| VibeFilesApp::new(&cc.egui_ctx, d.clone()));
+        h.run_steps(8);
+        let shot = |h: &mut egui_kittest::Harness<'static, VibeFilesApp>,
+                    name: &str,
+                    marks: &[egui::Rect]| {
+            if let Some(b) = h.query_by_role_and_label(Role::Button, "Dismiss") {
+                b.click();
+            }
+            for _ in 0..6 {
+                h.step();
+            }
+            let ppp = 1920.0 / 1440.0;
+            match h.render() {
+                Ok(mut img) => {
+                    let (w, ht) = (img.width() as i64, img.height() as i64);
+                    for r in marks {
+                        let r = r.expand(5.0);
+                        let (x0, y0) = ((r.min.x * ppp) as i64, (r.min.y * ppp) as i64);
+                        let (x1, y1) = ((r.max.x * ppp) as i64, (r.max.y * ppp) as i64);
+                        for t in 0..4 {
+                            for x in x0 - t..=x1 + t {
+                                for y in [y0 - t, y1 + t] {
+                                    if (0..w).contains(&x) && (0..ht).contains(&y) {
+                                        img.put_pixel(
+                                            x as u32,
+                                            y as u32,
+                                            image::Rgba([245, 158, 11, 255]),
+                                        );
+                                    }
+                                }
+                            }
+                            for y in y0 - t..=y1 + t {
+                                for x in [x0 - t, x1 + t] {
+                                    if (0..w).contains(&x) && (0..ht).contains(&y) {
+                                        img.put_pixel(
+                                            x as u32,
+                                            y as u32,
+                                            image::Rgba([245, 158, 11, 255]),
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    img.save(out.join(format!("{name}.png"))).unwrap();
+                }
+                Err(e) => eprintln!("{name}: {e}"),
+            }
+        };
+        let dump = |h: &egui_kittest::Harness<'static, VibeFilesApp>, at: &str| {
+            use egui_kittest::kittest::NodeT;
+            for n in h.root().children_recursive() {
+                let a = n.accesskit_node();
+                let l = a.label().unwrap_or_default();
+                if !l.is_empty() && !matches!(a.role(), Role::Label | Role::Unknown) {
+                    eprintln!("NODE[{at}] {:?} {l:?}", a.role());
+                }
+            }
+        };
+        h.get_by_role_and_label(Role::Button, "Open existing")
+            .click();
+        h.run_steps(8);
+        h.get_by_label("Cabinet folder").click();
+        h.step();
+        h.get_by_label("Cabinet folder")
+            .type_text(&root.display().to_string());
+        h.step();
+        h.get_by_role_and_label(Role::Button, "Open cabinet")
+            .click();
+        assert!(wait_for(&mut h, |h| matches!(
+            h.state().screen,
+            crate::app::Screen::Open(_)
+        )));
+        h.run_steps(12);
+        let button = |h: &egui_kittest::Harness<'static, VibeFilesApp>, l: &str| {
+            h.get_by_role_and_label(Role::Button, l).rect()
+        };
+
+        let said = |h: &egui_kittest::Harness<'static, VibeFilesApp>, text: &str| {
+            h.query_all_by_label_contains(text).next().is_some()
+        };
+        let type_in =
+            |h: &mut egui_kittest::Harness<'static, VibeFilesApp>, label: &str, text: &str| {
+                h.get_by_label(label).click();
+                h.step();
+                h.get_by_label(label).type_text(text);
+                h.run_steps(2);
+            };
+        let wait_long =
+            |h: &mut egui_kittest::Harness<'static, VibeFilesApp>,
+             what: &str,
+             ok: &dyn Fn(&egui_kittest::Harness<'static, VibeFilesApp>) -> bool| {
+                let start = std::time::Instant::now();
+                while !ok(h) {
+                    assert!(start.elapsed().as_secs() < 90, "{what}: never");
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                    h.step();
+                }
+            };
+        let node = |args: &[&str]| {
+            let mut all = vec![
+                client_js.as_str(),
+                url.as_str(),
+                out.to_str().unwrap(),
+                log.as_str(),
+            ];
+            all.extend_from_slice(args);
+            let ok = std::process::Command::new("node")
+                .args(&all)
+                .status()
+                .is_ok_and(|s| s.success());
+            assert!(ok, "the client's side: {args:?}");
+        };
+        let curl = |args: &[&str]| -> serde_json::Value {
+            let o = std::process::Command::new("curl")
+                .arg("-s")
+                .args(args)
+                .output()
+                .unwrap();
+            serde_json::from_slice(&o.stdout).unwrap_or(serde_json::Value::Null)
+        };
+        let mail_code = |to: &str| -> Option<String> {
+            std::fs::read_to_string(&log)
+                .unwrap_or_default()
+                .lines()
+                .filter(|l| l.contains("\"msg\":\"notify ("))
+                .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+                .filter(|m| m["to"] == to)
+                .filter_map(|m| {
+                    m["body"].as_str().and_then(|b| {
+                        b.split(|c: char| !c.is_ascii_digit())
+                            .find(|w| w.len() == 6)
+                            .map(String::from)
+                    })
+                })
+                .last()
+        };
+
+        // ---- q02. Admin › Portal: the address and key, Test, Save.
+        h.state_mut().tab = crate::app::Tab::Admin;
+        h.run_steps(8);
+        h.get_all_by_label("Portal").next().unwrap().click();
+        h.run_steps(8);
+        shot(&mut h, "q02a-empty", &[]);
+        type_in(&mut h, "Portal address", &url);
+        type_in(&mut h, "Portal key", &key);
+        h.run_steps(4);
+        let r = h
+            .get_by_label("Portal address")
+            .rect()
+            .union(h.get_by_label("Portal key").rect());
+        shot(&mut h, "q02b-filled", &[r]);
+        h.get_by_role_and_label(Role::Button, "Test").scroll_to_me();
+        h.run_steps(4);
+        h.get_by_role_and_label(Role::Button, "Test").click();
+        wait_long(&mut h, "tested", &|h| {
+            said(h, "Connected") || said(h, "Sample CPA Firm")
+        });
+        h.run_steps(6);
+        dump(&h, "tested");
+        shot(&mut h, "q02c-tested", &[]);
+        h.get_by_role_and_label(Role::Button, "Save").scroll_to_me();
+        h.run_steps(3);
+        h.get_by_role_and_label(Role::Button, "Save").click();
+        h.run_steps(20);
+        dump(&h, "saved");
+        shot(&mut h, "q02d-saved", &[]);
+
+        // ---- q03. Portal users… for one client: Invite someone….
+        h.state_mut().tab = crate::app::Tab::Browse;
+        h.run_steps(6);
+        let c0 = open_mut(&mut h).browse.snap.clients[1].clone();
+        {
+            let o = open_mut(&mut h);
+            o.browse.set_scope(vf_core::browse::Scope::Client(1));
+            o.browse.portal.reread();
+        }
+        h.run_steps(10);
+        wait_long(&mut h, "Portal users…", &|h| {
+            h.query_by_role_and_label(Role::Button, "Portal users…")
+                .is_some()
+        });
+        let r = button(&h, "Portal users…");
+        shot(&mut h, "q03a-button", &[r]);
+        h.get_by_role_and_label(Role::Button, "Portal users…")
+            .click();
+        h.run_steps(10);
+        h.get_by_label("Invite someone…").click();
+        h.run_steps(4);
+        let first = c0.name.split(", ").nth(1).unwrap_or("Casey").to_string();
+        let last = c0.name.split(", ").next().unwrap_or("Sample").to_string();
+        let email = format!(
+            "{}.{}@example.com",
+            first.to_lowercase(),
+            last.to_lowercase()
+        );
+        type_in(&mut h, "Email", &email);
+        type_in(&mut h, "Name", &format!("{first} {last}"));
+        type_in(&mut h, "Role (e.g. Spouse)", "Taxpayer");
+        h.run_steps(4);
+        dump(&h, "invite");
+        shot(&mut h, "q03b-invite", &[]);
+        let send = h
+            .query_all_by_role(Role::Button)
+            .filter_map(|n| {
+                use egui_kittest::kittest::NodeT;
+                n.accesskit_node()
+                    .label()
+                    .filter(|l| l.starts_with("Send invitation") || l == "Invite")
+            })
+            .next()
+            .expect("the invite button");
+        h.get_by_role_and_label(Role::Button, &send).click();
+        h.run_steps(20);
+        wait_long(&mut h, "invited", &|h| said(h, "nvit"));
+        h.run_steps(10);
+        dump(&h, "invited");
+        shot(&mut h, "q03c-invited", &[]);
+        while h
+            .query_by_role_and_label(Role::Button, "Close window")
+            .is_some()
+        {
+            h.get_by_role_and_label(Role::Button, "Close window")
+                .click();
+            h.run_steps(4);
+        }
+        node(&[&email, "accept"]);
+
+        // ---- q05. Invite from client list (contacts typed on two clients).
+        let clients = open_mut(&mut h).browse.snap.clients.clone();
+        let mut named = Vec::new();
+        for (i, c) in clients.iter().enumerate() {
+            if i == 1 || named.len() == 2 {
+                continue;
+            }
+            let (f, l) = match c.name.split_once(", ") {
+                Some((l, f)) => (f.to_string(), l.to_string()),
+                None => ("Pat".to_string(), "Owner".to_string()),
+            };
+            let e = format!("{}.{}@example.com", f.to_lowercase(), l.to_lowercase());
+            vf_fs::contacts::set_by_hand(
+                &root,
+                &c.id,
+                &vf_fs::contacts::Row {
+                    first: f,
+                    last: l,
+                    email: e,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            named.push(c.clone());
+        }
+        h.state_mut().tab = crate::app::Tab::Admin;
+        h.run_steps(6);
+        h.get_all_by_label("Invite from client list")
+            .next()
+            .unwrap()
+            .click();
+        wait_long(&mut h, "the invite list", &|h| {
+            said(h, "Invite ") && !said(h, "Reading")
+        });
+        h.run_steps(8);
+        dump(&h, "invitelist");
+        shot(&mut h, "q05a-list", &[]);
+        let go = h
+            .query_all_by_role(Role::Button)
+            .filter_map(|n| {
+                use egui_kittest::kittest::NodeT;
+                n.accesskit_node()
+                    .label()
+                    .filter(|l| l.starts_with("Invite ") && l.contains(" people at "))
+            })
+            .next();
+        if let Some(go) = go {
+            {
+                let a = open_mut(&mut h).admin.as_mut().unwrap();
+                a.invite_list.group = 1;
+                a.invite_list.pause_secs = 3;
+            }
+            h.run_steps(3);
+            h.get_by_role_and_label(Role::Button, &go).click();
+            wait_long(&mut h, "pausing", &|h| said(h, "next group in"));
+            shot(&mut h, "q05b-sending", &[]);
+            wait_long(&mut h, "done", &|h| said(h, " invited ("));
+            h.run_steps(6);
+            shot(&mut h, "q05c-done", &[]);
+        }
+
+        // ---- q06. Someone asks for access on the sign-in page; Approve.
+        node(&["nobody@example.com", "train-request"]);
+        let (spouse_client, spouse) = (
+            named.iter().find(|c| c.name.contains(", ")).unwrap(),
+            "lee.spouse@example.com",
+        );
+        vf_fs::contacts::set_one_by_hand(&root, &spouse_client.id, "spouse_first", "Lee").unwrap();
+        vf_fs::contacts::set_one_by_hand(&root, &spouse_client.id, "spouse_email", spouse).unwrap();
+        let made = curl(&[
+            "-X",
+            "POST",
+            "-H",
+            "Content-Type: application/json",
+            "-d",
+            &serde_json::json!({ "name": "Lee Spouse", "email": spouse, "clientAs": spouse_client.name })
+                .to_string(),
+            &format!("{url}/api/portal/access-requests"),
+        ]);
+        let rid = made["requestId"]
+            .as_str()
+            .expect("request made")
+            .to_string();
+        let png = std::env::var("VF_WALK_IDPNG").expect("VF_WALK_IDPNG: a made-up ID picture");
+        curl(&[
+            "-X",
+            "POST",
+            "-H",
+            "Content-Type: application/octet-stream",
+            "--data-binary",
+            &format!("@{png}"),
+            &format!("{url}/api/portal/access-requests/{rid}/id-photo?side=front"),
+        ]);
+        let mut code = None;
+        for _ in 0..40 {
+            code = mail_code(spouse);
+            if code.is_some() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(250));
+        }
+        let ok = curl(&[
+            "-X",
+            "POST",
+            "-H",
+            "Content-Type: application/json",
+            "-d",
+            &serde_json::json!({ "code": code.expect("a code"), "noBarcode": true }).to_string(),
+            &format!("{url}/api/portal/access-requests/{rid}/confirm"),
+        ]);
+        assert!(ok.get("error").is_none(), "confirmed: {ok}");
+        h.state_mut().tab = crate::app::Tab::Browse;
+        open_mut(&mut h).browse.portal.look_at_requests_now();
+        wait_long(&mut h, "the footer", &|h| {
+            said(h, "1 portal access request waiting")
+        });
+        h.run_steps(4);
+        let r = h
+            .query_all_by_label_contains("1 portal access request waiting")
+            .next()
+            .unwrap()
+            .rect();
+        shot(&mut h, "q06a-footer", &[r]);
+        h.get_by_label("1 portal access request waiting").click();
+        wait_long(&mut h, "the request", &|h| said(h, "Approve"));
+        h.run_steps(8);
+        dump(&h, "request");
+        shot(&mut h, "q06b-request", &[]);
+        let approve = h
+            .query_all_by_role(Role::Button)
+            .filter_map(|n| {
+                use egui_kittest::kittest::NodeT;
+                n.accesskit_node()
+                    .label()
+                    .filter(|l| l.starts_with("Approve"))
+            })
+            .next()
+            .unwrap();
+        h.get_by_role_and_label(Role::Button, &approve).click();
+        wait_long(&mut h, "approved", &|h| said(h, "Approved."));
+        h.run_steps(6);
+        shot(&mut h, "q06c-approved", &[]);
+    }
+
     /// Owner 2026-11-27: the frames of the training video "Merging clients" (staff): a client
     /// made twice found by Admin › Similar clients, then merged from its panel with Merge into…. Frames at 1920×1080 in `VF_WALK_DIR`. Run as
     /// `USERNAME=ppreparer COMPUTERNAME=FRONTDESK-PC` with TMP in a neutral folder.
