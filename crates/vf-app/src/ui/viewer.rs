@@ -1638,7 +1638,13 @@ fn toolbar(ui: &mut egui::Ui, v: &mut Viewer, env: &mut Env<'_>, doc: &Doc) {
                         v.goto_page(pages[v.find_at].0);
                     }
                     let total: usize = pages.iter().map(|p| p.1).sum();
-                    ui.label(widgets::caption(format!("{total} matches on {n} pages")));
+                    // "1 match on 1 page", not "1 matches on 1 pages" (training walkthrough
+                    // 2026-11-27).
+                    ui.label(widgets::caption(format!(
+                        "{total} match{} on {n} page{}",
+                        if total == 1 { "" } else { "es" },
+                        filer_intake::ui::theme::plural(n)
+                    )));
                 }
                 ui.separator();
                 let pages = v.pages();

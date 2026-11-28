@@ -2885,6 +2885,556 @@ mod tests {
         shot(&mut h, "r05e-template", &[r]);
     }
 
+    /// Owner 2026-11-27: the frames of the training videos "Finding your way in Browse" and
+    /// "Working in the Viewer" (staff): a made-up cabinet with doc types set as a firm that
+    /// has used it, the tree's views, the list, details, preview, Find documents…, the row
+    /// menu, a move with Undo; then a return in the Viewer: pages, find, annotations,
+    /// tickmarks, stamps, page tools, Save and Close. Frames at 1920×1080 in `VF_WALK_DIR`,
+    /// what to look at outlined in amber. Run it as a made-up login (`USERNAME=ppreparer`): the
+    /// Viewer's initials and their message come from the Windows login.
+    #[test]
+    #[ignore = "makes training frames"]
+    fn training_browse_viewer_walkthrough() {
+        let Ok(out) = std::env::var("VF_WALK_DIR") else {
+            return;
+        };
+        let out = std::path::PathBuf::from(out);
+        std::fs::create_dir_all(&out).unwrap();
+        crate::ui::test_util::pdfium_first();
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path().join("Clients");
+        vf_fixtures::generate(&root, 7).unwrap();
+        let data = t.path().join("data");
+        drop(crate::session::open(&data, "dev", &root).unwrap());
+        // Doc types from the file names, as in a firm that has been using it; one client is
+        // left to tag.
+        {
+            let conn = vf_core::db::Connection::open(data.join("catalog.db")).unwrap();
+            for (token, name) in [
+                ("W-2", "W-2"),
+                ("1099-INT", "1099-INT"),
+                ("1099-DIV", "1099-DIV"),
+                ("Organizer", "Organizer"),
+                ("1040 Return", "Return copy — federal"),
+                ("1065 Return", "Return copy — federal"),
+                ("Engagement Letter", "Engagement letter"),
+                ("Bank Statement", "Bank statement"),
+                ("941", "Payroll tax return"),
+                ("K-1", "K-1 (1065)"),
+                ("Trial Balance", "Workpaper"),
+            ] {
+                conn.execute(
+                    "UPDATE document SET doc_type_id = (SELECT id FROM doc_type WHERE name = ?2)
+                     WHERE rel_path LIKE '%!_' || ?1 || '!_%' ESCAPE '!'
+                       AND rel_path NOT LIKE 'Placeholt, Morgan (1002)%'",
+                    (token, name),
+                )
+                .unwrap();
+            }
+        }
+        // A return of several pages to view.
+        for e in std::fs::read_dir(&root).unwrap().flatten() {
+            let name = e.file_name().to_string_lossy().into_owned();
+            if e.path().is_dir() && !name.starts_with('_') && name.contains(", ") {
+                let dir = e.path().join("Income Tax").join("2025");
+                std::fs::create_dir_all(&dir).unwrap();
+                crate::ui::test_util::write_lines_pdf(
+                    &dir.join("2025 Form 1040 Return - Sample.pdf"),
+                    crate::ui::test_util::SAMPLE_RETURN,
+                );
+            }
+        }
+        let d = data.clone();
+        let mut h = HarnessBuilder::default()
+            .with_max_steps(crate::ui::test_util::MAX_STEPS)
+            .with_theme(egui::Theme::Light)
+            .with_size([1440.0, 810.0])
+            .with_pixels_per_point(1920.0 / 1440.0)
+            .build_eframe(move |cc| VibeFilesApp::new(&cc.egui_ctx, d.clone()));
+        h.run_steps(8);
+        let shot = |h: &mut egui_kittest::Harness<'static, VibeFilesApp>,
+                    name: &str,
+                    marks: &[egui::Rect]| {
+            if let Some(b) = h.query_by_role_and_label(Role::Button, "Dismiss") {
+                b.click();
+            }
+            for _ in 0..6 {
+                h.step();
+            }
+            let ppp = 1920.0 / 1440.0;
+            match h.render() {
+                Ok(mut img) => {
+                    let (w, ht) = (img.width() as i64, img.height() as i64);
+                    for r in marks {
+                        let r = r.expand(5.0);
+                        let (x0, y0) = ((r.min.x * ppp) as i64, (r.min.y * ppp) as i64);
+                        let (x1, y1) = ((r.max.x * ppp) as i64, (r.max.y * ppp) as i64);
+                        for t in 0..4 {
+                            for x in x0 - t..=x1 + t {
+                                for y in [y0 - t, y1 + t] {
+                                    if (0..w).contains(&x) && (0..ht).contains(&y) {
+                                        img.put_pixel(
+                                            x as u32,
+                                            y as u32,
+                                            image::Rgba([245, 158, 11, 255]),
+                                        );
+                                    }
+                                }
+                            }
+                            for y in y0 - t..=y1 + t {
+                                for x in [x0 - t, x1 + t] {
+                                    if (0..w).contains(&x) && (0..ht).contains(&y) {
+                                        img.put_pixel(
+                                            x as u32,
+                                            y as u32,
+                                            image::Rgba([245, 158, 11, 255]),
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    img.save(out.join(format!("{name}.png"))).unwrap();
+                }
+                Err(e) => eprintln!("{name}: {e}"),
+            }
+        };
+        let dump = |h: &egui_kittest::Harness<'static, VibeFilesApp>, at: &str| {
+            use egui_kittest::kittest::NodeT;
+            for n in h.root().children_recursive() {
+                let a = n.accesskit_node();
+                let l = a.label().unwrap_or_default();
+                if !l.is_empty() && !matches!(a.role(), Role::Label | Role::Unknown) {
+                    eprintln!("NODE[{at}] {:?} {l:?}", a.role());
+                }
+            }
+        };
+        h.get_by_role_and_label(Role::Button, "Open existing")
+            .click();
+        h.run_steps(8);
+        h.get_by_label("Cabinet folder").click();
+        h.step();
+        h.get_by_label("Cabinet folder")
+            .type_text(&root.display().to_string());
+        h.step();
+        h.get_by_role_and_label(Role::Button, "Open cabinet")
+            .click();
+        assert!(wait_for(&mut h, |h| matches!(
+            h.state().screen,
+            crate::app::Screen::Open(_)
+        )));
+        h.run_steps(12);
+
+        let text_of = |h: &egui_kittest::Harness<'static, VibeFilesApp>, t: &str| {
+            h.query_all_by_label(t)
+                .next()
+                .or_else(|| h.query_all_by_label_contains(t).next())
+                .unwrap_or_else(|| panic!("{t}: not shown"))
+                .rect()
+        };
+        let button = |h: &egui_kittest::Harness<'static, VibeFilesApp>, l: &str| {
+            h.get_by_role_and_label(Role::Button, l).rect()
+        };
+        let label_node_click =
+            |h: &mut egui_kittest::Harness<'static, VibeFilesApp>, text: &str, right: bool| {
+                use egui_kittest::kittest::NodeT;
+                let n = h
+                    .query_all_by_label_contains(text)
+                    .find(|n| n.accesskit_node().role() == Role::Label)
+                    .unwrap_or_else(|| panic!("{text}: no label"));
+                if right {
+                    n.click_secondary();
+                } else {
+                    n.click();
+                }
+            };
+        if let Some(b) = h.query_by_role_and_label(Role::Button, "Dismiss") {
+            b.click();
+            h.run_steps(4);
+        }
+
+        // ---- b02. The layout: the tree, the list, the details.
+        select_in(&mut h, 0, "Income Tax/2025", "W-2");
+        wait_for(&mut h, |h| h.query_by_label("Open in Viewer").is_some());
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        h.run_steps(10);
+        let r1 = button(&h, "Hide folders");
+        let r2 = button(&h, "Hide details");
+        shot(&mut h, "b02-layout", &[r1, r2]);
+
+        // ---- b03. The tree: views, then By year.
+        let views = button(&h, "Recent").union(button(&h, "Folders with no client ID"));
+        let views =
+            egui::Rect::from_min_max(views.min, egui::pos2(views.min.x + 300.0, views.max.y));
+        let mode = button(&h, "Folders").union(button(&h, "By year"));
+        shot(&mut h, "b03a-views", &[views, mode]);
+        h.get_by_role_and_label(Role::Button, "Needs doc type")
+            .click();
+        h.run_steps(12);
+        let r = button(&h, "Needs doc type");
+        shot(&mut h, "b03b-needs-doc-type", &[r]);
+        h.get_by_role_and_label(Role::Button, "By year").click();
+        h.run_steps(6);
+        h.get_by_role_and_label(Role::Button, "Expand Demoreaux, Avery  1003")
+            .click();
+        h.run_steps(8);
+        dump(&h, "byyear");
+        let r = button(&h, "By year");
+        shot(&mut h, "b03c-by-year", &[r]);
+        h.get_by_role_and_label(Role::Button, "Folders").click();
+        h.run_steps(6);
+
+        // ---- b04. The list: sort, columns.
+        select_in(&mut h, 0, "Income Tax/2025", "W-2");
+        h.run_steps(10);
+        h.get_by_role_and_label(Role::Button, "DOC TYPE").click();
+        h.run_steps(8);
+        let heads = ["NAME", "CLIENT", "DOC TYPE", "YEAR", "STATUS"]
+            .iter()
+            .filter_map(|c| h.query_by_role_and_label(Role::Button, c).map(|n| n.rect()))
+            .reduce(|a, b| a.union(b))
+            .unwrap();
+        let cols = button(&h, "Columns…");
+        shot(&mut h, "b04a-sorted", &[heads, cols]);
+
+        // ---- b05. One document's details: the return has no doc type yet.
+        select_in(&mut h, 0, "Income Tax/2025", "Sample");
+        h.run_steps(12);
+        h.get_by_role_and_label(Role::ComboBox, "DOC TYPE")
+            .scroll_to_me();
+        h.run_steps(4);
+        let r = h
+            .get_by_role_and_label(Role::ComboBox, "DOC TYPE")
+            .rect()
+            .union(h.get_by_label("TAGS").rect());
+        shot(&mut h, "b05a-details", &[r]);
+        {
+            use egui_kittest::kittest::NodeT;
+            h.query_all_by_role(Role::ComboBox)
+                .find(|n| n.accesskit_node().label().is_some_and(|l| l == "DOC TYPE"))
+                .unwrap()
+                .click();
+        }
+        h.run_steps(6);
+        h.get_by_label("Type to search").click();
+        h.step();
+        h.get_by_label("Type to search").type_text("return copy");
+        h.run_steps(6);
+        let r = h.get_by_label("Type to search").rect();
+        shot(&mut h, "b05b-doc-type-list", &[r]);
+        h.get_by_role_and_label(Role::Button, "Return copy — federal")
+            .click();
+        h.run_steps(10);
+        let r = h
+            .get_by_role_and_label(Role::ComboBox, "DOC TYPE")
+            .rect()
+            .union(h.get_by_role_and_label(Role::ComboBox, "STATUS").rect());
+        let apply = {
+            use egui_kittest::kittest::NodeT;
+            h.query_all_by_role(Role::Button)
+                .find(|n| {
+                    n.accesskit_node()
+                        .label()
+                        .is_some_and(|l| l.starts_with("Apply to "))
+                })
+                .expect("Apply to …")
+                .rect()
+        };
+        shot(&mut h, "b05c-doc-type-set", &[r, apply]);
+        {
+            use egui_kittest::kittest::NodeT;
+            h.query_all_by_role(Role::Button)
+                .find(|n| {
+                    n.accesskit_node()
+                        .label()
+                        .is_some_and(|l| l.starts_with("Apply to "))
+                })
+                .unwrap()
+                .click();
+        }
+        h.run_steps(12);
+        let r = text_of(&h, "Return copy — fed");
+        shot(&mut h, "b05d-applied", &[r]);
+
+        // ---- b06. The preview, and Open in Viewer.
+        let r = button(&h, "Open in Viewer").union(button(&h, "Open in program"));
+        shot(&mut h, "b06-preview", &[r]);
+
+        // ---- b07. Find documents….
+        h.get_by_role_and_label(Role::Button, "Find documents…")
+            .click();
+        h.run_steps(6);
+        dump(&h, "find");
+        h.get_by_label("Words").click();
+        h.step();
+        h.get_by_label("Words").type_text("1099");
+        h.run_steps(4);
+        let r = h.get_by_label("Words").rect();
+        shot(&mut h, "b07a-find", &[r]);
+        h.get_by_label("Find").click();
+        for _ in 0..3 {
+            std::thread::sleep(std::time::Duration::from_millis(400));
+            h.run_steps(10);
+        }
+        let r = text_of(&h, "documents · 0 selected");
+        shot(&mut h, "b07b-found", &[r]);
+        h.get_by_role_and_label(Role::Button, "Save search…")
+            .click();
+        h.run_steps(6);
+        h.get_by_label("Name").click();
+        h.step();
+        h.get_by_label("Name").type_text("1099s, all clients");
+        h.run_steps(4);
+        let r = h.get_by_label("Name").rect().union(button(&h, "Save"));
+        shot(&mut h, "b07c-save-search", &[r]);
+        h.get_by_role_and_label(Role::Button, "Save").click();
+        h.run_steps(8);
+        let r = text_of(&h, "1099s, all clients");
+        shot(&mut h, "b07d-saved", &[r]);
+        h.get_by_role_and_label(Role::Button, "Close").click();
+        h.run_steps(6);
+        // The saved search, opened from the tree.
+        h.get_by_role_and_label(Role::Button, "1099s, all clients")
+            .click();
+        for _ in 0..3 {
+            std::thread::sleep(std::time::Duration::from_millis(400));
+            h.run_steps(10);
+        }
+        dump(&h, "savedopen");
+        shot(&mut h, "b07e-saved-open", &[]);
+
+        // ---- b08. The selected document's actions; Pin.
+        select_in(&mut h, 0, "Income Tax/2025", "W-2");
+        h.run_steps(10);
+        let r = button(&h, "Pin")
+            .union(button(&h, "Open in Explorer"))
+            .union(button(&h, "Copy path"))
+            .union(button(&h, "Rename…"));
+        shot(&mut h, "b08a-actions", &[r]);
+        h.get_by_role_and_label(Role::Button, "Pin").click();
+        h.run_steps(10);
+        let r = button(&h, "Pinned");
+        shot(&mut h, "b08b-pinned", &[r]);
+        // ---- b09. Moving: a folder in the tree, and Undo last.
+        let r = button(&h, "Income Tax").union(button(&h, "Correspondence"));
+        let r2 = button(&h, "Undo last");
+        shot(&mut h, "b09-move", &[r, r2]);
+
+        // ---- b10. One document's details, further down.
+        h.get_by_label("TAGS").scroll_to_me();
+        h.run_steps(6);
+        dump(&h, "details");
+        if let Some(n) = h.query_all_by_label_contains("SHA-256").next() {
+            n.scroll_to_me();
+        }
+        h.run_steps(6);
+        shot(&mut h, "b10-more-details", &[]);
+
+        // ==== The Viewer.
+        // ---- v02. Opening: the return, from the preview.
+        select_in(&mut h, 0, "Income Tax/2025", "Sample");
+        wait_for(&mut h, |h| h.query_by_label("Open in Viewer").is_some());
+        h.run_steps(10);
+        h.get_by_role_and_label(Role::Button, "Open in Viewer")
+            .scroll_to_me();
+        h.run_steps(6);
+        let r = button(&h, "Open in Viewer");
+        shot(&mut h, "v02a-open", &[r]);
+        h.get_by_role_and_label(Role::Button, "Open in Viewer")
+            .click();
+        assert!(
+            wait_for(&mut h, |h| h.state().tab == crate::app::Tab::Viewer),
+            "the viewer never opened"
+        );
+        for _ in 0..3 {
+            std::thread::sleep(std::time::Duration::from_millis(400));
+            h.run_steps(10);
+        }
+        // The made-up staff member's initials (the box starts with this PC's login's).
+        h.get_by_label("Signed").click();
+        h.step();
+        h.key_press(egui::Key::End);
+        for _ in 0..8 {
+            h.key_press(egui::Key::Backspace);
+        }
+        h.step();
+        h.get_by_label("Signed").type_text("PP");
+        h.run_steps(4);
+        let r = button(&h, "Page 1 thumbnail").union(button(&h, "Page 4 thumbnail"));
+        shot(&mut h, "v02b-viewer", &[r]);
+
+        // ---- v03. Moving around.
+        h.get_by_role_and_label(Role::Button, "Next page").click();
+        h.run_steps(10);
+        let r = button(&h, "Previous page")
+            .union(h.get_by_label("Go to").rect())
+            .union(button(&h, "Next page"));
+        shot(&mut h, "v03a-pages", &[r]);
+        let r = button(&h, "−")
+            .union(button(&h, "+"))
+            .union(button(&h, "Fit width"))
+            .union(button(&h, "Rotate view"))
+            .union(h.get_by_label("Continuous").rect());
+        shot(&mut h, "v03b-view", &[r]);
+
+        // ---- v04. Finding words.
+        h.get_by_label("Find").click();
+        h.step();
+        h.get_by_label("Find").type_text("TOTAL");
+        h.key_press(egui::Key::Enter);
+        for _ in 0..3 {
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            h.run_steps(8);
+        }
+        dump(&h, "find");
+        let r = h.get_by_label("Find").rect();
+        shot(&mut h, "v04-find", &[r]);
+
+        // Page 2 alone, for the annotations.
+        h.get_by_label("Continuous").click();
+        h.run_steps(4);
+        h.get_by_label("Go to").click();
+        h.step();
+        h.key_press(egui::Key::End);
+        h.key_press(egui::Key::Backspace);
+        h.key_press(egui::Key::Backspace);
+        h.get_by_label("Go to").type_text("2");
+        h.key_press(egui::Key::Enter);
+        h.run_steps(12);
+        let drag = |h: &mut egui_kittest::Harness<'static, VibeFilesApp>,
+                    from: egui::Pos2,
+                    to: egui::Pos2| {
+            h.event(egui::Event::PointerMoved(from));
+            h.step();
+            h.event(egui::Event::PointerButton {
+                pos: from,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::NONE,
+            });
+            h.step();
+            for k in 1..=8 {
+                let t = k as f32 / 8.0;
+                h.event(egui::Event::PointerMoved(from.lerp(to, t)));
+                h.step();
+            }
+            h.event(egui::Event::PointerButton {
+                pos: to,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            });
+            h.run_steps(6);
+        };
+        // ---- v07. Page tools (before anything is unsaved: Pages… waits for a Save).
+        h.get_by_role_and_label(Role::Button, "Pages…").click();
+        h.run_steps(8);
+        let r = h
+            .get_by_role_and_label(Role::TextInput, "Pages")
+            .rect()
+            .union(button(&h, "Split into documents"));
+        shot(&mut h, "v07-pages", &[r]);
+        h.query_all_by_role_and_label(Role::Button, "Close")
+            .last()
+            .unwrap()
+            .click();
+        h.run_steps(6);
+        assert!(
+            h.query_by_label("Split into documents").is_none(),
+            "the Pages window closed"
+        );
+        let click_at = |h: &mut egui_kittest::Harness<'static, VibeFilesApp>, at: egui::Pos2| {
+            h.event(egui::Event::PointerMoved(at));
+            h.step();
+            h.event(egui::Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::NONE,
+            });
+            h.event(egui::Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            });
+            h.run_steps(6);
+        };
+        // ---- v05. Annotating: a highlight.
+        h.get_by_label("Highlight").click();
+        h.run_steps(3);
+        drag(&mut h, egui::pos2(188.0, 305.0), egui::pos2(486.0, 321.0));
+        let r = egui::Rect::from_min_max(egui::pos2(180.0, 298.0), egui::pos2(494.0, 328.0));
+        let r2 = h.get_by_label("Highlight").rect();
+        shot(&mut h, "v05a-highlight", &[r, r2]);
+        // A tickmark beside the wages.
+        h.get_by_role_and_label(Role::Button, "Check").click();
+        h.run_steps(3);
+        click_at(&mut h, egui::pos2(500.0, 313.0));
+        let r = egui::Rect::from_min_max(egui::pos2(486.0, 300.0), egui::pos2(520.0, 328.0));
+        let r2 = button(&h, "Check");
+        shot(&mut h, "v06a-tickmark", &[r, r2]);
+        // A note.
+        h.get_by_label("Note").click();
+        h.run_steps(3);
+        click_at(&mut h, egui::pos2(560.0, 340.0));
+        h.get_by_role_and_label(Role::MultilineTextInput, "Text")
+            .click();
+        h.step();
+        h.get_by_role_and_label(Role::MultilineTextInput, "Text")
+            .type_text("Agrees to the W-2 on file.");
+        h.run_steps(4);
+        let r = h
+            .get_by_role_and_label(Role::MultilineTextInput, "Text")
+            .rect()
+            .union(button(&h, "Add"));
+        shot(&mut h, "v05b-note", &[r]);
+        h.get_by_role_and_label(Role::Button, "Add").click();
+        h.run_steps(8);
+        shot(&mut h, "v05c-noted", &[]);
+        // ---- Stamps.
+        h.get_by_role_and_label(Role::Button, "Stamps").click();
+        h.run_steps(6);
+        h.get_by_label("Reviewed {initials} {date}").click();
+        h.run_steps(4);
+        let r = h
+            .get_by_label("Reviewed {initials} {date}")
+            .rect()
+            .union(button(&h, "Stamp this page"));
+        shot(&mut h, "v06b-stamps", &[r]);
+        h.get_by_role_and_label(Role::Button, "Stamp this page")
+            .click();
+        h.run_steps(10);
+        shot(&mut h, "v06c-stamped", &[]);
+
+        // ---- v08. Save: a new version, the old one kept.
+        let r = button(&h, "Save").union(button(&h, "Save as…"));
+        let unsaved = text_of(&h, "unsaved");
+        shot(&mut h, "v08a-save", &[r, unsaved]);
+        h.get_by_role_and_label(Role::Button, "Save").click();
+        for _ in 0..3 {
+            std::thread::sleep(std::time::Duration::from_millis(400));
+            h.run_steps(10);
+        }
+        dump(&h, "saved");
+        shot(&mut h, "v08b-saved", &[]);
+
+        // ---- v09. Close.
+        let r = h
+            .query_all_by_role_and_label(Role::Button, "Close")
+            .next()
+            .unwrap()
+            .rect();
+        shot(&mut h, "v09-close", &[r]);
+        h.query_all_by_role_and_label(Role::Button, "Close")
+            .next()
+            .unwrap()
+            .click();
+        h.run_steps(12);
+        dump(&h, "closed");
+        shot(&mut h, "v09b-closed", &[]);
+    }
+
     /// Addendum §12 slice 3 (letters) walkthrough against a real Vibe Portal: the Deliver window
     /// sends the engagement letter for a joint 1040 with both spouses as signers (from Portal
     /// contacts); in headless Edge the taxpayer signs, then the spouse on the same device after
