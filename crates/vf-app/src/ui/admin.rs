@@ -3004,7 +3004,7 @@ HALV1001,\"Halvorsen, Dana\"
                 .is_empty()
         );
         assert!(
-            h.query_by_label_contains("Approve 1 documents for destruction?")
+            h.query_by_label_contains("Approve 1 document for destruction?")
                 .is_some()
         );
         click(&mut h, "Yes, approve 1");
@@ -3033,10 +3033,7 @@ HALV1001,\"Halvorsen, Dana\"
             .unwrap();
         }
         click(&mut h, "Legal holds");
-        assert!(
-            h.query_by_label_contains("1 documents · subpoena")
-                .is_some()
-        );
+        assert!(h.query_by_label_contains("1 document · subpoena").is_some());
         click(&mut h, "Release");
         assert!(h.state().a.holds.notice.is_none(), "asked first");
         click(&mut h, "Yes, release");

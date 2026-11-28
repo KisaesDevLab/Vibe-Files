@@ -338,7 +338,8 @@ pub fn show(ui: &mut egui::Ui, p: &mut DispositionPage, env: &mut Env, catalog: 
                 // Approving is the decision to destroy: said in full before it is taken (QA P7).
                 ui.label(
                     RichText::new(format!(
-                        "Approve {n} documents for destruction? They are destroyed on or after {} unless a legal hold covers them; until then Admin › Disposition can still cancel.",
+                        "Approve {n} document{} for destruction? They are destroyed on or after {} unless a legal hold covers them; until then Admin › Disposition can still cancel.",
+                        filer_intake::ui::theme::plural(n),
                         widgets::local_time(&vf_core::rfc3339_days_ago(
                             -disposition::WAIT_DAYS
                         ))
@@ -512,9 +513,10 @@ pub fn show(ui: &mut egui::Ui, p: &mut DispositionPage, env: &mut Env, catalog: 
         for r in runs {
             ui.horizontal(|ui| {
                 ui.label(format!(
-                    "{} · {} documents · {}",
+                    "{} · {} document{} · {}",
                     widgets::local_time(&r.ts),
                     r.documents,
+                    filer_intake::ui::theme::plural(r.documents as usize),
                     r.by_user.as_deref().unwrap_or("—")
                 ));
                 if ui.small_btn("Open certificate").clicked() {
@@ -577,7 +579,11 @@ pub fn holds(ui: &mut egui::Ui, p: &mut HoldsPage, env: &mut Env) {
                     "Client {}",
                     names.get(c).cloned().unwrap_or_else(|| c.clone())
                 ),
-                None => format!("{} documents", h.docs.len()),
+                None => format!(
+                    "{} document{}",
+                    h.docs.len(),
+                    filer_intake::ui::theme::plural(h.docs.len())
+                ),
             };
             let line = format!(
                 "{what} · {} · since {} by {}",
