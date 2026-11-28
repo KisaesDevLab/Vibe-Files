@@ -3847,6 +3847,275 @@ mod tests {
         shot(&mut h, "s05f-printed", &[r]);
     }
 
+    /// Owner 2026-11-27: the frames of the training video "Backing up and syncing to B2"
+    /// (admins). The bucket is an in-memory stand-in for B2 (made-up endpoint, bucket and keys;
+    /// the real sync code): the set-up form, the locked tab and Unlock, a push, the per-client
+    /// pill in Browse, Pause, Conflicts and Restore. Frames at 1920×1080 in `VF_WALK_DIR`. Run as
+    /// `USERNAME=ppreparer COMPUTERNAME=FRONTDESK-PC` with TMP in a neutral folder.
+    #[test]
+    #[ignore = "makes training frames"]
+    fn training_sync_walkthrough() {
+        let Ok(out) = std::env::var("VF_WALK_DIR") else {
+            return;
+        };
+        let out = std::path::PathBuf::from(out);
+        std::fs::create_dir_all(&out).unwrap();
+        crate::ui::test_util::pdfium_first();
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path().join("Clients");
+        vf_fixtures::generate(&root, 3).unwrap();
+        let data = t.path().join("data");
+        drop(crate::session::open(&data, "dev", &root).unwrap());
+        let d = data.clone();
+        let mut h = HarnessBuilder::default()
+            .with_max_steps(crate::ui::test_util::MAX_STEPS)
+            .with_theme(egui::Theme::Light)
+            .with_size([1440.0, 810.0])
+            .with_pixels_per_point(1920.0 / 1440.0)
+            .build_eframe(move |cc| VibeFilesApp::new(&cc.egui_ctx, d.clone()));
+        h.run_steps(8);
+        let shot = |h: &mut egui_kittest::Harness<'static, VibeFilesApp>,
+                    name: &str,
+                    marks: &[egui::Rect]| {
+            if let Some(b) = h.query_by_role_and_label(Role::Button, "Dismiss") {
+                b.click();
+            }
+            for _ in 0..6 {
+                h.step();
+            }
+            let ppp = 1920.0 / 1440.0;
+            match h.render() {
+                Ok(mut img) => {
+                    let (w, ht) = (img.width() as i64, img.height() as i64);
+                    for r in marks {
+                        let r = r.expand(5.0);
+                        let (x0, y0) = ((r.min.x * ppp) as i64, (r.min.y * ppp) as i64);
+                        let (x1, y1) = ((r.max.x * ppp) as i64, (r.max.y * ppp) as i64);
+                        for t in 0..4 {
+                            for x in x0 - t..=x1 + t {
+                                for y in [y0 - t, y1 + t] {
+                                    if (0..w).contains(&x) && (0..ht).contains(&y) {
+                                        img.put_pixel(
+                                            x as u32,
+                                            y as u32,
+                                            image::Rgba([245, 158, 11, 255]),
+                                        );
+                                    }
+                                }
+                            }
+                            for y in y0 - t..=y1 + t {
+                                for x in [x0 - t, x1 + t] {
+                                    if (0..w).contains(&x) && (0..ht).contains(&y) {
+                                        img.put_pixel(
+                                            x as u32,
+                                            y as u32,
+                                            image::Rgba([245, 158, 11, 255]),
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    img.save(out.join(format!("{name}.png"))).unwrap();
+                }
+                Err(e) => eprintln!("{name}: {e}"),
+            }
+        };
+        let dump = |h: &egui_kittest::Harness<'static, VibeFilesApp>, at: &str| {
+            use egui_kittest::kittest::NodeT;
+            for n in h.root().children_recursive() {
+                let a = n.accesskit_node();
+                let l = a.label().unwrap_or_default();
+                if !l.is_empty() && !matches!(a.role(), Role::Label | Role::Unknown) {
+                    eprintln!("NODE[{at}] {:?} {l:?}", a.role());
+                }
+            }
+        };
+        h.get_by_role_and_label(Role::Button, "Open existing")
+            .click();
+        h.run_steps(8);
+        h.get_by_label("Cabinet folder").click();
+        h.step();
+        h.get_by_label("Cabinet folder")
+            .type_text(&root.display().to_string());
+        h.step();
+        h.get_by_role_and_label(Role::Button, "Open cabinet")
+            .click();
+        assert!(wait_for(&mut h, |h| matches!(
+            h.state().screen,
+            crate::app::Screen::Open(_)
+        )));
+        h.run_steps(12);
+
+        // ---- y02. The Sync tab before it is set up.
+        h.get_by_role_and_label(Role::Button, "Sync").click();
+        h.run_steps(10);
+        let type_into =
+            |h: &mut egui_kittest::Harness<'static, VibeFilesApp>, label: &str, v: &str| {
+                h.get_by_label(label).click();
+                h.step();
+                h.key_press(egui::Key::End);
+                for _ in 0..60 {
+                    h.key_press(egui::Key::Backspace);
+                }
+                h.step();
+                h.get_by_label(label).type_text(v);
+                h.run_steps(3);
+            };
+        let button = |h: &egui_kittest::Harness<'static, VibeFilesApp>, l: &str| {
+            h.get_by_role_and_label(Role::Button, l).rect()
+        };
+        let said = |h: &egui_kittest::Harness<'static, VibeFilesApp>, text: &str| {
+            h.query_all_by_label_contains(text).next().is_some()
+        };
+        shot(&mut h, "y02a-setup", &[]);
+        // Made-up values (Connect is not pressed: the stand-in bucket is given below).
+        type_into(
+            &mut h,
+            "S3 endpoint",
+            "https://s3.us-west-004.backblazeb2.com",
+        );
+        type_into(&mut h, "Region", "us-west-004");
+        type_into(&mut h, "Bucket", "example-firm-cabinet");
+        type_into(&mut h, "Key ID", "0040000000000000000000001");
+        let app_key_named = h.query_by_label("Application key").is_some()
+            && h.query_all_by_label("Application key").any(|n| {
+                use egui_kittest::kittest::NodeT;
+                matches!(
+                    n.accesskit_node().role(),
+                    Role::TextInput | Role::PasswordInput
+                )
+            });
+        eprintln!("APPKEY named: {app_key_named}");
+        if app_key_named {
+            h.query_all_by_label("Application key")
+                .find(|n| {
+                    use egui_kittest::kittest::NodeT;
+                    matches!(
+                        n.accesskit_node().role(),
+                        Role::TextInput | Role::PasswordInput
+                    )
+                })
+                .unwrap()
+                .click();
+            h.step();
+            h.event(egui::Event::Text("made-up-application-key".into()));
+            h.run_steps(3);
+        }
+        type_into(&mut h, "Sync passphrase", "made-up training passphrase");
+        type_into(&mut h, "Passphrase again", "made-up training passphrase");
+        dump(&h, "filled");
+        let r = h
+            .get_by_label("S3 endpoint")
+            .rect()
+            .union(h.get_by_label("Passphrase again").rect())
+            .union(button(&h, "Connect"));
+        shot(&mut h, "y02b-filled", &[r]);
+
+        // ---- y03. Set up on another PC: locked until the passphrase is typed.
+        let id = {
+            let o = open_mut(&mut h);
+            o.opened.cabinet.cabinet_id.clone()
+        };
+        let remote = vf_sync::Remote::new(vf_sync::Remote::memory(), &id);
+        let keys = vf_sync::setup::init(
+            &root,
+            &remote,
+            "made-up training passphrase",
+            vf_sync::setup::DEFAULT_KDF,
+        )
+        .unwrap();
+        {
+            let app = h.state_mut();
+            app.config.sync.endpoint = "https://s3.us-west-004.backblazeb2.com".into();
+            app.config.sync.region = "us-west-004".into();
+            app.config.sync.bucket = "example-firm-cabinet".into();
+            app.config.sync.key_id = "0040000000000000000000001".into();
+            app.config.sync.cabinet_id = id.clone();
+            app.config.sync.app_key_sealed = vf_sync::setup::seal_secret(&keys, "made-up-app-key");
+        }
+        h.run_steps(10);
+        dump(&h, "locked");
+        shot(&mut h, "y03-locked", &[]);
+
+        // ---- y04. Unlocked (the stand-in bucket), then Push now.
+        {
+            let o = open_mut(&mut h);
+            let device = o.opened.sync_device.clone();
+            o.sync.session = Some(vf_sync::Sync {
+                remote,
+                keys,
+                cabinet_id: id.clone(),
+                device_id: device,
+                device_name: "FRONTDESK-PC".into(),
+            });
+        }
+        h.run_steps(20);
+        dump(&h, "unlocked");
+        shot(&mut h, "y04a-unlocked", &[]);
+        if h.query_by_role_and_label(Role::Button, "Push now")
+            .is_some()
+        {
+            let r = button(&h, "Push now");
+            shot(&mut h, "y04b-push", &[r]);
+            h.get_by_role_and_label(Role::Button, "Push now").click();
+            let start = std::time::Instant::now();
+            while !said(&h, "Pushed") {
+                assert!(start.elapsed().as_secs() < 180, "pushed: never");
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                h.step();
+            }
+            h.run_steps(20);
+            let r = h
+                .query_all_by_label_contains("Pushed ")
+                .next()
+                .unwrap()
+                .rect();
+            shot(&mut h, "y04c-pushed", &[r]);
+        }
+        // ---- y05. What goes to B2, and the clients.
+        h.get_by_label("Find a client").scroll_to_me();
+        h.run_steps(6);
+        let r = h.get_by_label("Find a client").rect();
+        shot(&mut h, "y05-clients", &[r]);
+        // ---- y06. Pause, then Restore.
+        h.get_by_role_and_label(Role::Button, "Pause")
+            .scroll_to_me();
+        h.run_steps(4);
+        let r = button(&h, "Pause");
+        shot(&mut h, "y06a-pause", &[r]);
+        h.get_by_role_and_label(Role::Button, "Pause").click();
+        h.run_steps(8);
+        dump(&h, "paused");
+        shot(&mut h, "y06b-paused", &[]);
+        if let Some(b) = h.query_by_role_and_label(Role::Button, "Resume") {
+            b.click();
+            h.run_steps(6);
+        }
+        // Restore opens Windows' folder picker (a person picks the folder): shown, not pressed.
+        h.get_by_role_and_label(Role::Button, "Restore cabinet to a folder…")
+            .scroll_to_me();
+        h.run_steps(4);
+        let r = button(&h, "Restore cabinet to a folder…");
+        shot(&mut h, "y07-restore", &[r]);
+        // ---- y08. Browse: each client's sync pill.
+        h.get_by_role_and_label(Role::Button, "Browse").click();
+        h.run_steps(6);
+        select_in(&mut h, 0, "Income Tax/2025", "W-2");
+        h.run_steps(10);
+        let start = std::time::Instant::now();
+        while !said(&h, "in sync") && start.elapsed().as_secs() < 30 {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            h.step();
+        }
+        let r = button(&h, "Sync to B2");
+        shot(&mut h, "y08a-pill", &[r]);
+        h.get_by_role_and_label(Role::Button, "Sync to B2").click();
+        h.run_steps(8);
+        dump(&h, "pillmenu");
+        shot(&mut h, "y08b-pill-menu", &[]);
+    }
+
     /// Addendum §12 slice 3 (letters) walkthrough against a real Vibe Portal: the Deliver window
     /// sends the engagement letter for a joint 1040 with both spouses as signers (from Portal
     /// contacts); in headless Edge the taxpayer signs, then the spouse on the same device after
