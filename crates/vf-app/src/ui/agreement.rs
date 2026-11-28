@@ -1751,7 +1751,7 @@ pub struct AgreementsPage {
     stop: Option<Arc<AtomicBool>>,
     progress: Option<String>,
     done: Option<(String, bool)>,
-    err: Option<String>,
+    pub(crate) err: Option<String>,
     settings: Option<(std::time::Instant, Option<PortalSettings>)>,
 }
 
