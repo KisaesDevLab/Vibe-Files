@@ -3422,6 +3422,431 @@ mod tests {
         shot(&mut h, "v09b-closed", &[]);
     }
 
+    /// Owner 2026-11-27: the frames of the training video "Scanning, cover sheets and print
+    /// capture" (staff): the Scans folder and scanner settings on Intake, a cover sheet printed
+    /// from Browse, a stack of three documents with cover sheets landing in the Scans folder
+    /// (as a scanner delivers it; this PC has none) and split into three rows, and an UltraTax
+    /// print landing in the print capture folder. Frames at 1920×1080 in `VF_WALK_DIR`. Run
+    /// as a made-up login (`USERNAME=ppreparer`).
+    #[test]
+    #[ignore = "makes training frames"]
+    fn training_scan_capture_walkthrough() {
+        let Ok(out) = std::env::var("VF_WALK_DIR") else {
+            return;
+        };
+        let out = std::path::PathBuf::from(out);
+        std::fs::create_dir_all(&out).unwrap();
+        crate::ui::test_util::pdfium_first();
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path().join("Clients");
+        vf_fixtures::generate(&root, 3).unwrap();
+        let data = t.path().join("data");
+        drop(crate::session::open(&data, "dev", &root).unwrap());
+        let (scans, capture, inbox) = (
+            t.path().join("Scans"),
+            t.path().join("Print capture"),
+            t.path().join("Office inbox"),
+        );
+        for d in [&scans, &capture, &inbox] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let master = vf_fs::clients::master_dir(&root);
+        let (mut fs, _) = filer_intake::config::Settings::load_or_default(&master);
+        fs.inboxes = vec![inbox.clone()];
+        fs.save(&master).unwrap();
+        let d = data.clone();
+        let mut h = HarnessBuilder::default()
+            .with_max_steps(crate::ui::test_util::MAX_STEPS)
+            .with_theme(egui::Theme::Light)
+            .with_size([1440.0, 810.0])
+            .with_pixels_per_point(1920.0 / 1440.0)
+            .build_eframe(move |cc| VibeFilesApp::new(&cc.egui_ctx, d.clone()));
+        h.run_steps(8);
+        h.state_mut().config.ingest.scans = Some(scans.clone());
+        h.state_mut().config.ingest.print_capture = Some(capture.clone());
+        let shot = |h: &mut egui_kittest::Harness<'static, VibeFilesApp>,
+                    name: &str,
+                    marks: &[egui::Rect]| {
+            if let Some(b) = h.query_by_role_and_label(Role::Button, "Dismiss") {
+                b.click();
+            }
+            for _ in 0..6 {
+                h.step();
+            }
+            let ppp = 1920.0 / 1440.0;
+            match h.render() {
+                Ok(mut img) => {
+                    let (w, ht) = (img.width() as i64, img.height() as i64);
+                    for r in marks {
+                        let r = r.expand(5.0);
+                        let (x0, y0) = ((r.min.x * ppp) as i64, (r.min.y * ppp) as i64);
+                        let (x1, y1) = ((r.max.x * ppp) as i64, (r.max.y * ppp) as i64);
+                        for t in 0..4 {
+                            for x in x0 - t..=x1 + t {
+                                for y in [y0 - t, y1 + t] {
+                                    if (0..w).contains(&x) && (0..ht).contains(&y) {
+                                        img.put_pixel(
+                                            x as u32,
+                                            y as u32,
+                                            image::Rgba([245, 158, 11, 255]),
+                                        );
+                                    }
+                                }
+                            }
+                            for y in y0 - t..=y1 + t {
+                                for x in [x0 - t, x1 + t] {
+                                    if (0..w).contains(&x) && (0..ht).contains(&y) {
+                                        img.put_pixel(
+                                            x as u32,
+                                            y as u32,
+                                            image::Rgba([245, 158, 11, 255]),
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    img.save(out.join(format!("{name}.png"))).unwrap();
+                }
+                Err(e) => eprintln!("{name}: {e}"),
+            }
+        };
+        let dump = |h: &egui_kittest::Harness<'static, VibeFilesApp>, at: &str| {
+            use egui_kittest::kittest::NodeT;
+            for n in h.root().children_recursive() {
+                let a = n.accesskit_node();
+                let l = a.label().unwrap_or_default();
+                if !l.is_empty() && !matches!(a.role(), Role::Label | Role::Unknown) {
+                    eprintln!("NODE[{at}] {:?} {l:?}", a.role());
+                }
+            }
+        };
+        h.get_by_role_and_label(Role::Button, "Open existing")
+            .click();
+        h.run_steps(8);
+        h.get_by_label("Cabinet folder").click();
+        h.step();
+        h.get_by_label("Cabinet folder")
+            .type_text(&root.display().to_string());
+        h.step();
+        h.get_by_role_and_label(Role::Button, "Open cabinet")
+            .click();
+        assert!(wait_for(&mut h, |h| matches!(
+            h.state().screen,
+            crate::app::Screen::Open(_)
+        )));
+        h.run_steps(12);
+        let said = |h: &egui_kittest::Harness<'static, VibeFilesApp>, text: &str| {
+            h.query_all_by_label_contains(text).next().is_some()
+        };
+        let text_of = |h: &egui_kittest::Harness<'static, VibeFilesApp>, t: &str| {
+            h.query_all_by_label(t)
+                .next()
+                .or_else(|| h.query_all_by_label_contains(t).next())
+                .unwrap_or_else(|| panic!("{t}: not shown"))
+                .rect()
+        };
+        let button = |h: &egui_kittest::Harness<'static, VibeFilesApp>, l: &str| {
+            h.get_by_role_and_label(Role::Button, l).rect()
+        };
+
+        // ---- s02. Intake's scanning strip.
+        h.state_mut().tab = crate::app::Tab::Intake;
+        h.run_steps(10);
+        if let Some(b) = h.query_by_role_and_label(Role::Button, "Show scanning and inboxes") {
+            b.click();
+            h.run_steps(6);
+        }
+        let r = text_of(&h, "Scans folder").union(button(&h, "Choose…"));
+        let r2 =
+            button(&h, "Cover sheet for client…").union(button(&h, "Print 10 blank separators"));
+        shot(&mut h, "s02a-strip", &[r, r2]);
+        // Scanner details lists this PC's folders and software: not opened on camera.
+        let r = text_of(&h, "No scanner found");
+        shot(&mut h, "s02b-scanner", &[r]);
+
+        // ---- s03. Print cover sheet in Browse.
+        h.get_by_role_and_label(Role::Button, "Browse").click();
+        h.run_steps(6);
+        select_in(&mut h, 0, "Income Tax/2025", "W-2");
+        h.run_steps(10);
+        // Browse hands the sheet to Windows to print: recorded here instead.
+        let opened = std::rc::Rc::new(std::cell::RefCell::new(Vec::<std::path::PathBuf>::new()));
+        {
+            let o = opened.clone();
+            open_mut(&mut h).browse.shell = Box::new(move |a| {
+                if let crate::shell::ShellAction::Open(p) = a {
+                    o.borrow_mut().push(p.clone());
+                }
+                Ok(())
+            });
+        }
+        let r = button(&h, "Print cover sheet");
+        shot(&mut h, "s03a-button", &[r]);
+        h.get_by_role_and_label(Role::Button, "Print cover sheet")
+            .click();
+        h.run_steps(8);
+        h.get_by_role_and_label(Role::ComboBox, "Doc type").click();
+        h.run_steps(6);
+        if h.query_by_role_and_label(Role::Button, "Bank statement")
+            .is_none()
+            && h.query_by_label("Type to search").is_some()
+        {
+            h.get_by_label("Type to search").click();
+            h.step();
+            h.get_by_label("Type to search").type_text("bank");
+            h.run_steps(4);
+        }
+        dump(&h, "doctypes");
+        h.get_by_role_and_label(Role::Button, "Bank statement")
+            .click();
+        h.run_steps(6);
+        let r = h
+            .get_by_role_and_label(Role::ComboBox, "Client")
+            .rect()
+            .union(h.get_by_label("Sheets").rect())
+            .union(button(&h, "Create cover sheet"));
+        shot(&mut h, "s03b-cover", &[r]);
+        h.get_by_role_and_label(Role::Button, "Create cover sheet")
+            .click();
+        h.run_steps(8);
+        let sheet_pdf = opened.borrow().first().cloned().expect("the cover sheet");
+        std::fs::copy(&sheet_pdf, out.join("cover-sheet.pdf")).unwrap();
+        // Several clients.
+        h.get_by_role_and_label(Role::Button, "Print cover sheet")
+            .click();
+        h.run_steps(8);
+        h.get_by_role_and_label(Role::Button, "Several clients")
+            .click();
+        h.run_steps(8);
+        dump(&h, "several");
+        shot(&mut h, "s03c-several", &[]);
+        if h.query_by_role_and_label(Role::Button, "Cancel").is_some() {
+            h.get_by_role_and_label(Role::Button, "Cancel").click();
+            h.run_steps(4);
+        }
+
+        // ---- s04. A stack scanned into the Scans folder: three documents, each behind its sheet.
+        let type_id = |name: &str| {
+            vf_fs::doctypes::load(&root)
+                .unwrap()
+                .unwrap()
+                .into_iter()
+                .find(|t| t.name == name)
+                .unwrap()
+                .id
+        };
+        let body = |n: &str, lines: &[&str]| {
+            let p = t.path().join(n);
+            crate::ui::test_util::write_lines_pdf(&p, &[lines, lines]);
+            p
+        };
+        let mut parts: Vec<(std::path::PathBuf, String)> = vec![(sheet_pdf.clone(), String::new())];
+        parts.push((
+            body(
+                "b1.pdf",
+                &[
+                    "Northwind Bank NA",
+                    "Statement: December 2025",
+                    "Example Freight LLC",
+                ],
+            ),
+            String::new(),
+        ));
+        let more: [(&str, &str, &str, &[&str]); 2] = [
+            (
+                "1002",
+                "Placeholt, Casey",
+                "W-2",
+                &["Form W-2 Wage and Tax Statement 2025", "Placeholt, Casey"],
+            ),
+            (
+                "1004",
+                "Synthetic Orchards LLC",
+                "1099-INT",
+                &[
+                    "Form 1099-INT Interest Income 2025",
+                    "Synthetic Orchards LLC",
+                ],
+            ),
+        ];
+        for (k, (id, name, ty, lines)) in more.into_iter().enumerate() {
+            let cover = t.path().join(format!("cover{k}.pdf"));
+            vf_ingest::sheet::write_pdf(
+                &cover,
+                &[(
+                    vf_ingest::sheet::Sheet(Some(vf_ingest::sheet::Cover {
+                        client_id: id.into(),
+                        doc_type: Some(type_id(ty)),
+                        tax_year: Some(vf_ingest::sheet::TaxYear::Year(2025)),
+                    })),
+                    vf_ingest::sheet::Labels {
+                        client: format!("{name} ({id})"),
+                        doc_type: ty.into(),
+                        tax_year: "2025".into(),
+                        folder: String::new(),
+                    },
+                )],
+            )
+            .unwrap();
+            parts.push((cover, String::new()));
+            parts.push((body(&format!("b{}.pdf", k + 2), lines), String::new()));
+        }
+        let staged = t.path().join("scan0001.pdf");
+        filer_pdf::pdf::merge_pdfs(&parts, &staged).unwrap();
+        std::fs::copy(&staged, out.join("stack.pdf")).unwrap();
+        // The scanner saves the stack into the Scans folder.
+        std::fs::rename(&staged, scans.join("scan0001.pdf")).unwrap();
+        h.state_mut().tab = crate::app::Tab::Intake;
+        h.run_steps(10);
+        let start = std::time::Instant::now();
+        while !(said(&h, "Example Freight LLC_1005_2025 Bank statement")
+            && said(&h, "Placeholt, Casey_1002_2025 W-2")
+            && said(&h, "Synthetic Orchards LLC_1004_2025 1099-INT"))
+        {
+            assert!(start.elapsed().as_secs() < 120, "the stack split: never");
+            if let Some(b) = h.query_by_label("Preview") {
+                b.click();
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            h.step();
+        }
+        let r = text_of(&h, "barcode cover sheet");
+        shot(&mut h, "s04a-log", &[r]);
+        // The three rows in the queue.
+        h.get_by_role_and_label(Role::Button, "Hide").click();
+        h.run_steps(6);
+        let rows = [
+            "Example Freight LLC_1005_2025 Bank statement.pdf",
+            "Placeholt, Casey_1002_2025 W-2.pdf",
+            "Synthetic Orchards LLC_1004_2025 1099-INT.pdf",
+        ];
+        let start = std::time::Instant::now();
+        while !rows
+            .iter()
+            .all(|n| h.query_by_label(&format!("Select {n}")).is_some())
+        {
+            assert!(start.elapsed().as_secs() < 120, "the three rows: never");
+            if let Some(b) = h.query_by_label("Preview") {
+                b.click();
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            h.step();
+        }
+        h.run_steps(20);
+        let r = rows
+            .iter()
+            .map(|n| h.get_by_label(&format!("Select {n}")).rect())
+            .reduce(|a, b| a.union(b))
+            .unwrap();
+        let r = egui::Rect::from_min_max(r.min, egui::pos2(r.min.x + 1390.0, r.max.y + 40.0));
+        shot(&mut h, "s04b-split", &[r]);
+
+        // ---- s05. Print capture: Admin › Print capture & parsers, then an UltraTax print.
+        h.get_by_role_and_label(Role::Button, "Admin").click();
+        h.run_steps(8);
+        h.get_all_by_label("Print capture & parsers")
+            .next()
+            .unwrap()
+            .scroll_to_me();
+        h.run_steps(4);
+        h.get_all_by_label("Print capture & parsers")
+            .next()
+            .unwrap()
+            .click();
+        h.run_steps(10);
+        let r = text_of(&h, "Print capture folder").union(button(&h, "Stop capturing"));
+        let r = egui::Rect::from_min_max(r.min, egui::pos2(r.max.x + 10.0, r.max.y));
+        shot(&mut h, "s05a-capture-page", &[r]);
+        // Try a printed name.
+        h.get_by_label("Printed file name").click();
+        h.step();
+        h.get_by_label("Printed file name")
+            .type_text("Placeholt, Morgan_2025_1040_GovernmentCopyTaxReturn_1001.pdf");
+        h.get_by_role_and_label(Role::Button, "Try").click();
+        h.run_steps(8);
+        dump(&h, "try");
+        let r = h
+            .get_by_label("Printed file name")
+            .rect()
+            .union(button(&h, "Try"));
+        shot(&mut h, "s05b-try", &[r]);
+        h.get_by_role_and_label(Role::Button, "Options")
+            .scroll_to_me();
+        h.run_steps(4);
+        let r = button(&h, "Options").union(button(&h, "Document Names"));
+        shot(&mut h, "s05c-options", &[r]);
+        h.get_by_role_and_label(Role::Button, "Document Names")
+            .click();
+        h.run_steps(6);
+        let r = button(&h, "Document Names");
+        shot(&mut h, "s05d-document-names", &[r]);
+        // UltraTax prints a client's return to the capture folder.
+        let printed = capture.join("Placeholt, Morgan_2025_1040_GovernmentCopyTaxReturn_1001.pdf");
+        crate::ui::test_util::write_lines_pdf(
+            &printed.with_extension("tmp"),
+            crate::ui::test_util::SAMPLE_RETURN,
+        );
+        std::fs::rename(printed.with_extension("tmp"), &printed).unwrap();
+        h.state_mut().tab = crate::app::Tab::Intake;
+        h.run_steps(10);
+        let start = std::time::Instant::now();
+        while !h.query_all_by_role(Role::CheckBox).any(|n| {
+            use egui_kittest::kittest::NodeT;
+            n.accesskit_node()
+                .label()
+                .is_some_and(|l| l.starts_with("Select ") && l.contains("GovernmentCopyTaxReturn"))
+        }) {
+            if start.elapsed().as_secs() >= 60 {
+                dump(&h, "stuck");
+                shot(&mut h, "zz-stuck", &[]);
+                panic!("the print: never");
+            }
+            // Intake keeps the list still while you review: "1 new file arrived … Refresh".
+            if h.query_all_by_label_contains("arrived while you were reviewing")
+                .next()
+                .is_some()
+            {
+                if !out.join("s05e-arrived.png").exists() {
+                    let r = text_of(&h, "arrived while you were reviewing");
+                    let r = egui::Rect::from_min_max(
+                        egui::pos2(r.min.x - 100.0, r.min.y),
+                        egui::pos2(r.max.x + 80.0, r.max.y),
+                    );
+                    shot(&mut h, "s05e-arrived", &[r]);
+                }
+                use egui_kittest::kittest::NodeT;
+                if let Some(n) = h
+                    .query_all_by_label("Refresh")
+                    .find(|n| n.accesskit_node().role() != Role::Label)
+                {
+                    n.click();
+                } else if let Some(n) = h.query_all_by_label("Refresh").next() {
+                    n.click();
+                }
+            }
+            if let Some(b) = h.query_by_label("Preview") {
+                b.click();
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            h.step();
+        }
+        h.run_steps(20);
+        let r = {
+            use egui_kittest::kittest::NodeT;
+            h.query_all_by_role(Role::CheckBox)
+                .find(|n| {
+                    n.accesskit_node().label().is_some_and(|l| {
+                        l.starts_with("Select ") && l.contains("GovernmentCopyTaxReturn")
+                    })
+                })
+                .unwrap()
+                .rect()
+        };
+        let r = egui::Rect::from_min_max(r.min, egui::pos2(r.min.x + 1390.0, r.max.y + 40.0));
+        shot(&mut h, "s05f-printed", &[r]);
+    }
+
     /// Addendum §12 slice 3 (letters) walkthrough against a real Vibe Portal: the Deliver window
     /// sends the engagement letter for a joint 1040 with both spouses as signers (from Portal
     /// contacts); in headless Edge the taxpayer signs, then the spouse on the same device after
