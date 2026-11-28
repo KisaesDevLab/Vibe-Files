@@ -248,7 +248,7 @@ pub fn show(ctx: &egui::Context, d: &mut MergeDialog, env: &mut Env) -> DialogOu
                     "Last merge: {} into {} ({}).",
                     m.from.name,
                     m.into.name,
-                    m.when.get(..10).unwrap_or(&m.when)
+                    widgets::local_time(&m.when)
                 )));
                 if ui
                     .add_enabled(!busy, egui::Button::new("Undo last merge"))
