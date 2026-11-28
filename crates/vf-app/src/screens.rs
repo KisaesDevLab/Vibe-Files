@@ -4116,6 +4116,217 @@ mod tests {
         shot(&mut h, "y08b-pill-menu", &[]);
     }
 
+    /// Owner 2026-11-27: the frames of the training video "Merging clients" (staff): a client
+    /// made twice found by Admin › Similar clients, then merged from its panel with Merge into…. Frames at 1920×1080 in `VF_WALK_DIR`. Run as
+    /// `USERNAME=ppreparer COMPUTERNAME=FRONTDESK-PC` with TMP in a neutral folder.
+    #[test]
+    #[ignore = "makes training frames"]
+    fn training_merge_walkthrough() {
+        let Ok(out) = std::env::var("VF_WALK_DIR") else {
+            return;
+        };
+        let out = std::path::PathBuf::from(out);
+        std::fs::create_dir_all(&out).unwrap();
+        crate::ui::test_util::pdfium_first();
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path().join("Clients");
+        vf_fixtures::generate(&root, 3).unwrap();
+        // The same client made a second time, from a folder named with a stand-in ID.
+        {
+            let firm: uuid::Uuid = vf_fs::cabinet::read(&root)
+                .unwrap()
+                .firm_id
+                .parse()
+                .unwrap();
+            let src = root.join("Placeholt, Casey (1002)");
+            let dup = root.join("Placeholt, Casey (1092)");
+            std::fs::create_dir_all(dup.join("Income Tax/2025")).unwrap();
+            filer_intake::sentinel::write_sentinel(
+                &root,
+                &dup,
+                &filer_core::clients::Client {
+                    id: "1092".into(),
+                    uuid: uuid::Uuid::new_v4(),
+                    name: "Placeholt, Casey".into(),
+                    extra: Default::default(),
+                },
+                firm,
+            )
+            .unwrap();
+            let mut n = 0;
+            for e in std::fs::read_dir(src.join("Income Tax/2025"))
+                .unwrap()
+                .flatten()
+            {
+                if n < 3 && e.path().extension().is_some_and(|x| x == "pdf") {
+                    let name = e.file_name().to_string_lossy().replace("1002", "1092");
+                    std::fs::copy(e.path(), dup.join("Income Tax/2025").join(name)).unwrap();
+                    n += 1;
+                }
+            }
+        }
+        let data = t.path().join("data");
+        drop(crate::session::open(&data, "dev", &root).unwrap());
+        let d = data.clone();
+        let mut h = HarnessBuilder::default()
+            .with_max_steps(crate::ui::test_util::MAX_STEPS)
+            .with_theme(egui::Theme::Light)
+            .with_size([1440.0, 810.0])
+            .with_pixels_per_point(1920.0 / 1440.0)
+            .build_eframe(move |cc| VibeFilesApp::new(&cc.egui_ctx, d.clone()));
+        h.run_steps(8);
+        let shot = |h: &mut egui_kittest::Harness<'static, VibeFilesApp>,
+                    name: &str,
+                    marks: &[egui::Rect]| {
+            if let Some(b) = h.query_by_role_and_label(Role::Button, "Dismiss") {
+                b.click();
+            }
+            for _ in 0..6 {
+                h.step();
+            }
+            let ppp = 1920.0 / 1440.0;
+            match h.render() {
+                Ok(mut img) => {
+                    let (w, ht) = (img.width() as i64, img.height() as i64);
+                    for r in marks {
+                        let r = r.expand(5.0);
+                        let (x0, y0) = ((r.min.x * ppp) as i64, (r.min.y * ppp) as i64);
+                        let (x1, y1) = ((r.max.x * ppp) as i64, (r.max.y * ppp) as i64);
+                        for t in 0..4 {
+                            for x in x0 - t..=x1 + t {
+                                for y in [y0 - t, y1 + t] {
+                                    if (0..w).contains(&x) && (0..ht).contains(&y) {
+                                        img.put_pixel(
+                                            x as u32,
+                                            y as u32,
+                                            image::Rgba([245, 158, 11, 255]),
+                                        );
+                                    }
+                                }
+                            }
+                            for y in y0 - t..=y1 + t {
+                                for x in [x0 - t, x1 + t] {
+                                    if (0..w).contains(&x) && (0..ht).contains(&y) {
+                                        img.put_pixel(
+                                            x as u32,
+                                            y as u32,
+                                            image::Rgba([245, 158, 11, 255]),
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    img.save(out.join(format!("{name}.png"))).unwrap();
+                }
+                Err(e) => eprintln!("{name}: {e}"),
+            }
+        };
+        let dump = |h: &egui_kittest::Harness<'static, VibeFilesApp>, at: &str| {
+            use egui_kittest::kittest::NodeT;
+            for n in h.root().children_recursive() {
+                let a = n.accesskit_node();
+                let l = a.label().unwrap_or_default();
+                if !l.is_empty() && !matches!(a.role(), Role::Label | Role::Unknown) {
+                    eprintln!("NODE[{at}] {:?} {l:?}", a.role());
+                }
+            }
+        };
+        h.get_by_role_and_label(Role::Button, "Open existing")
+            .click();
+        h.run_steps(8);
+        h.get_by_label("Cabinet folder").click();
+        h.step();
+        h.get_by_label("Cabinet folder")
+            .type_text(&root.display().to_string());
+        h.step();
+        h.get_by_role_and_label(Role::Button, "Open cabinet")
+            .click();
+        assert!(wait_for(&mut h, |h| matches!(
+            h.state().screen,
+            crate::app::Screen::Open(_)
+        )));
+        h.run_steps(12);
+        let button = |h: &egui_kittest::Harness<'static, VibeFilesApp>, l: &str| {
+            h.get_by_role_and_label(Role::Button, l).rect()
+        };
+        let go = |h: &mut egui_kittest::Harness<'static, VibeFilesApp>, page: &str| {
+            h.query_all_by_label(page)
+                .next()
+                .or_else(|| h.query_all_by_label_contains(page).next())
+                .unwrap()
+                .scroll_to_me();
+            h.run_steps(3);
+            h.query_all_by_label(page)
+                .next()
+                .or_else(|| h.query_all_by_label_contains(page).next())
+                .unwrap()
+                .click();
+            h.run_steps(10);
+        };
+
+        // ---- m02. Admin › Similar clients finds the pair.
+        h.get_by_role_and_label(Role::Button, "Admin").click();
+        h.run_steps(10);
+        h.query_all_by_label("Similar clients")
+            .next()
+            .unwrap()
+            .click();
+        h.run_steps(8);
+        let r = button(&h, "Find similar clients");
+        shot(&mut h, "m02a-similar", &[r]);
+        h.get_by_role_and_label(Role::Button, "Find similar clients")
+            .click();
+        assert!(wait_for(&mut h, |h| h
+            .query_all_by_label_contains("pair among")
+            .next()
+            .is_some()));
+        h.run_steps(6);
+        dump(&h, "similar");
+        shot(&mut h, "m02b-pairs", &[]);
+
+        // ---- m03. Merge into… from the duplicate's panel.
+        h.get_by_role_and_label(Role::Button, "Browse").click();
+        h.run_steps(10);
+        h.get_by_role_and_label(Role::Button, "Placeholt, Casey  1092")
+            .click();
+        h.run_steps(10);
+        h.get_by_role_and_label(Role::Button, "Merge into…")
+            .scroll_to_me();
+        h.run_steps(4);
+        let r = button(&h, "Merge into…");
+        shot(&mut h, "m03a-panel", &[r]);
+        h.get_by_role_and_label(Role::Button, "Merge into…").click();
+        h.run_steps(8);
+        h.get_by_label("Merge into").click();
+        h.step();
+        h.get_by_label("Merge into").type_text("1002");
+        h.run_steps(8);
+        shot(&mut h, "m03b-typed", &[]);
+        h.get_all_by_label("Placeholt, Casey  1002")
+            .last()
+            .expect("offered")
+            .click();
+        h.run_steps(10);
+        dump(&h, "preview");
+        shot(&mut h, "m03c-preview", &[]);
+        h.get_by_role_and_label(Role::Button, "Merge").click();
+        h.run_steps(12);
+        assert!(
+            h.query_by_role_and_label(Role::Button, "Placeholt, Casey  1092")
+                .is_none(),
+            "merged"
+        );
+        shot(&mut h, "m04a-merged", &[]);
+        h.get_by_role_and_label(Role::Button, "Placeholt, Casey  1002")
+            .click();
+        h.run_steps(10);
+        h.get_by_role_and_label(Role::Button, "Merge into…").click();
+        h.run_steps(8);
+        let r = button(&h, "Undo last merge");
+        shot(&mut h, "m04b-undo", &[r]);
+    }
+
     /// Owner 2026-11-27: the frames of the training video "Admin basics" (admins): the admin
     /// password, doc types, the folder template, retention classes, disposition, legal holds
     /// and the audit trail. Frames at 1920×1080 in `VF_WALK_DIR`. Run as
