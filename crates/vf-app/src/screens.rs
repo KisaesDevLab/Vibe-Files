@@ -3035,19 +3035,6 @@ mod tests {
         let button = |h: &egui_kittest::Harness<'static, VibeFilesApp>, l: &str| {
             h.get_by_role_and_label(Role::Button, l).rect()
         };
-        let label_node_click =
-            |h: &mut egui_kittest::Harness<'static, VibeFilesApp>, text: &str, right: bool| {
-                use egui_kittest::kittest::NodeT;
-                let n = h
-                    .query_all_by_label_contains(text)
-                    .find(|n| n.accesskit_node().role() == Role::Label)
-                    .unwrap_or_else(|| panic!("{text}: no label"));
-                if right {
-                    n.click_secondary();
-                } else {
-                    n.click();
-                }
-            };
         if let Some(b) = h.query_by_role_and_label(Role::Button, "Dismiss") {
             b.click();
             h.run_steps(4);
