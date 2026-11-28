@@ -360,13 +360,15 @@ $zipHash = Hash $zip
 $w = Join-Path $out "winget\manifests\k\Kisaes\VibeFiles\$Version"
 New-Item -ItemType Directory -Force $w | Out-Null
 @"
+# yaml-language-server: `$schema=https://aka.ms/winget-manifest.version.1.9.0.schema.json
 PackageIdentifier: Kisaes.VibeFiles
 PackageVersion: $Version
 DefaultLocale: en-US
 ManifestType: version
-ManifestVersion: 1.6.0
+ManifestVersion: 1.9.0
 "@ | Set-Content -Encoding utf8 (Join-Path $w 'Kisaes.VibeFiles.yaml')
 @"
+# yaml-language-server: `$schema=https://aka.ms/winget-manifest.installer.1.9.0.schema.json
 PackageIdentifier: Kisaes.VibeFiles
 PackageVersion: $Version
 InstallerType: zip
@@ -382,9 +384,10 @@ Installers:
     InstallerUrl: https://github.com/$PubRepo/releases/download/$tag/$ZipName
     InstallerSha256: $($zipHash.ToUpper())
 ManifestType: installer
-ManifestVersion: 1.6.0
+ManifestVersion: 1.9.0
 "@ | Set-Content -Encoding utf8 (Join-Path $w 'Kisaes.VibeFiles.installer.yaml')
 @"
+# yaml-language-server: `$schema=https://aka.ms/winget-manifest.defaultLocale.1.9.0.schema.json
 PackageIdentifier: Kisaes.VibeFiles
 PackageVersion: $Version
 PackageLocale: en-US
@@ -402,7 +405,7 @@ Tags:
   - accounting
   - tax
 ManifestType: defaultLocale
-ManifestVersion: 1.6.0
+ManifestVersion: 1.9.0
 "@ | Set-Content -Encoding utf8 (Join-Path $w 'Kisaes.VibeFiles.locale.en-US.yaml')
 
 foreach ($a in $assetFiles) { "  {0,-30} {1,12:N0} bytes  {2}" -f $a.Name, $a.Length, (Hash $a.FullName) }
